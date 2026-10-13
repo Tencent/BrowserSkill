@@ -34,7 +34,8 @@
         "user_aborted",
         "version_too_old",
         "multiple_browsers_online",
-        "no_browser_connected"
+        "no_browser_connected",
+        "pairing_required"
       ]
     },
     "ReturnFailure": {

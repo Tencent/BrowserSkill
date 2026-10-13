@@ -31,6 +31,7 @@ pub enum ErrorCode {
     VersionTooOld,
     MultipleBrowsersOnline,
     NoBrowserConnected,
+    PairingRequired,
 }
 
 #[derive(Debug, Error)]
