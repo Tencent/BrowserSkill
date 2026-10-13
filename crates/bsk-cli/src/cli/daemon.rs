@@ -200,6 +200,7 @@ pub fn dispatch(cmd: DaemonCmd) -> anyhow::Result<()> {
             daemon::start::run_start(args)
         }
         DaemonCmd::Pair { replace } => {
+            super::ensure_daemon::ensure_daemon()?;
             let value = maintain(
                 bsk_protocol::Method::LocalAuthPair,
                 serde_json::json!({"replace":replace}),
