@@ -30,23 +30,13 @@ use tokio_tungstenite::tungstenite::protocol::{CloseFrame, Message};
 use tracing::{debug, info, warn};
 
 use super::browsers::{BrowserClient, BrowserId, BrowserSink, Pending};
+use super::peer_authorization::PeerAuthorization;
 use super::state::{
     DaemonState, LEGACY_MIN_COMPATIBLE_PEER, MIN_COMPATIBLE_PROTOCOL, PROTOCOL_VERSION, SERVER_NAME,
 };
 
-/// Result of the optional Origin allow-list check.
-///
-/// TODO(M10/M12): pair v0.1 GA with an actual extension-id allow-list
-/// (`DaemonConfig::allowed_extension_ids: HashSet<String>`) populated
-/// from a config file / pairing flow, rather than accepting any
-/// extension-shaped origin. Review M4/M5 I8 — acceptable defense-in-
-/// depth gap for now because pairing happens through the popup, but
-/// a side-loaded extension on the same machine currently passes the
-/// gate.
-pub(super) fn origin_allowed(origin: &str, allow_any: bool) -> bool {
-    if allow_any {
-        return true;
-    }
+/// Origin is a filtering layer; local identity is established by HMAC below.
+pub(super) fn origin_allowed(origin: &str) -> bool {
     // MV3 extension ids are 32 a–p characters per Chrome spec.
     let prefix = "chrome-extension://";
     if let Some(rest) = origin.strip_prefix(prefix) {
@@ -147,7 +137,6 @@ async fn handle_connection(
     stream: TcpStream,
     peer: SocketAddr,
 ) -> anyhow::Result<()> {
-    let allow_any = state.config.allow_any_origin;
     let captured_origin: std::sync::Arc<std::sync::Mutex<Option<String>>> =
         std::sync::Arc::new(std::sync::Mutex::new(None));
     let captured_origin_for_cb = std::sync::Arc::clone(&captured_origin);
@@ -159,7 +148,7 @@ async fn handle_connection(
             .and_then(|v| v.to_str().ok())
             .unwrap_or_default()
             .to_string();
-        if !origin_allowed(&origin, allow_any) {
+        if !origin_allowed(&origin) {
             warn!(?origin, "rejecting WS upgrade with disallowed origin");
             let mut err = ErrorResponse::new(Some(
                 "Origin not in chrome-extension allow-list".to_string(),
@@ -176,7 +165,8 @@ async fn handle_connection(
         Ok(resp)
     };
 
-    let ws = match tokio::time::timeout(
+    let (stream, read_limit) = super::local_auth::read_limit::AuthReadLimit::new(stream);
+    let mut ws = match tokio::time::timeout(
         WS_UPGRADE_TIMEOUT,
         tokio_tungstenite::accept_hdr_async(stream, callback),
     )
@@ -196,10 +186,23 @@ async fn handle_connection(
             return Ok(());
         }
     };
-
     let origin = captured_origin.lock().unwrap().clone().unwrap_or_default();
-    debug!(?peer, %origin, "ws connection upgraded");
-    drive_connection(state, ws, None).await
+    let authentication = tokio::time::timeout(
+        HANDSHAKE_FIRST_FRAME_TIMEOUT,
+        super::local_auth::handshake::accept(state.local_auth.clone(), &mut ws, &origin),
+    )
+    .await;
+    let (authorization, first) = match authentication {
+        Ok(Ok(value)) => value,
+        _ => {
+            // Do not log peer-controlled authentication frames or parser errors.
+            debug!(?peer, "local authentication ended before completion");
+            let _ = tokio::time::timeout(Duration::from_millis(100), ws.close(None)).await;
+            return Ok(());
+        }
+    };
+    read_limit.store(true, std::sync::atomic::Ordering::Release);
+    drive_connection(state, ws, authorization, first).await
 }
 
 /// Hard cap on how long the daemon will wait for a freshly-upgraded
@@ -212,19 +215,20 @@ const HANDSHAKE_FIRST_FRAME_TIMEOUT: Duration = Duration::from_secs(5);
 pub(super) async fn drive_connection<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>(
     state: Arc<DaemonState>,
     ws: WebSocketStream<S>,
-    authorization: Option<super::remote::ConnectionAuthorization>,
+    authorization: PeerAuthorization,
+    first_message: Option<Message>,
 ) -> anyhow::Result<()> {
     let (mut writer, mut reader) = ws.split();
 
     // The first frame MUST be `system.handshake` per §4.2. Bound the
     // wait so a stalled client cannot park resources forever.
-    let first = if let Some(auth) = authorization.as_ref() {
+    let first = if let Some(message) = first_message {
+        Ok(Some(Ok(message)))
+    } else {
         tokio::select! {
             first = tokio::time::timeout(HANDSHAKE_FIRST_FRAME_TIMEOUT, reader.next()) => first,
-            _ = auth.revoked() => return Err(anyhow!("device authorization ended before handshake")),
+            _ = authorization.revoked() => return Err(anyhow!("device authorization ended before handshake")),
         }
-    } else {
-        tokio::time::timeout(HANDSHAKE_FIRST_FRAME_TIMEOUT, reader.next()).await
     };
     let first = match first {
         Ok(Some(Ok(msg))) => msg,
@@ -338,15 +342,12 @@ pub(super) async fn drive_connection<S: tokio::io::AsyncRead + tokio::io::AsyncW
     // can be told apart from the previous BrowserClient — the old
     // socket's cleanup path uses `remove_if_generation_matches` to
     // avoid clobbering the newer entry (review M4/M5 round 2 #1).
-    if let Some(auth) = authorization.as_ref() {
-        if !auth.authorized().await {
-            return Err(anyhow!("device authorization ended during handshake"));
-        }
+    if !authorization.authorized().await || !authorization.matches_instance(&params.instance_id) {
+        return Err(anyhow!(
+            "device authorization ended or browser identity mismatch"
+        ));
     }
-    let browser_id = BrowserId(authorization.as_ref().map_or_else(
-        || params.instance_id.clone(),
-        |auth| auth.device.browser_id.clone(),
-    ));
+    let browser_id = BrowserId(authorization.browser_id(&params.instance_id).to_owned());
     // A fresh socket represents a fresh extension control plane. The
     // extension tears down its local sessions before reconnecting, so any
     // daemon-side sessions left under the same instance id are stale. Purge
@@ -418,7 +419,7 @@ pub(super) async fn drive_connection<S: tokio::io::AsyncRead + tokio::io::AsyncW
         loop {
             tokio::select! {
                 outbound = rx.recv() => {
-                    if authorization.as_ref().is_some_and(|auth| !auth.active()) { break; }
+                    if !authorization.active() { break; }
                     match outbound {
                         Some(frame) => {
                             let json = serde_json::to_string(&frame)?;
@@ -428,9 +429,13 @@ pub(super) async fn drive_connection<S: tokio::io::AsyncRead + tokio::io::AsyncW
                     }
                 }
                 msg = reader.next() => {
-                    if authorization.as_ref().is_some_and(|auth| !auth.active()) { break; }
+                    if !authorization.active() { break; }
                     match msg {
                         Some(Ok(Message::Text(t))) => {
+                            if serde_json::from_str::<serde_json::Value>(&t).ok()
+                                .and_then(|value|value.get("type").and_then(|v|v.as_str()).map(|s|s.starts_with("local.auth."))).unwrap_or(false) {
+                                break;
+                            }
                             // Any inbound frame — tool response, event, or the
                             // ~20s heartbeat — counts as proof of life.
                             pump_browser.touch();
@@ -462,10 +467,7 @@ pub(super) async fn drive_connection<S: tokio::io::AsyncRead + tokio::io::AsyncW
     // handler, not just an idle iteration of the message pump.
     let (result_outcome, revoked): (anyhow::Result<()>, bool) = tokio::select! {
         result = pump => (result, false),
-        _ = async {
-            if let Some(auth) = authorization.as_ref() { auth.revoked().await; }
-            else { std::future::pending::<()>().await; }
-        } => (Ok(()), true),
+        _ = authorization.revoked() => (Ok(()), true),
     };
     if revoked {
         let _ =
@@ -856,30 +858,30 @@ mod tests {
     #[test]
     fn origin_allowlist_accepts_valid_extension_id() {
         let id = "a".repeat(32);
-        assert!(origin_allowed(&format!("chrome-extension://{id}"), false));
+        assert!(origin_allowed(&format!("chrome-extension://{id}")));
     }
 
     #[test]
     fn origin_allowlist_rejects_uppercase() {
         let id = "A".repeat(32);
-        assert!(!origin_allowed(&format!("chrome-extension://{id}"), false));
+        assert!(!origin_allowed(&format!("chrome-extension://{id}")));
     }
 
     #[test]
     fn origin_allowlist_rejects_unknown_scheme() {
         let id = "a".repeat(32);
-        assert!(!origin_allowed(&format!("http://{id}.example"), false));
+        assert!(!origin_allowed(&format!("http://{id}.example")));
     }
 
     #[test]
     fn origin_allowlist_rejects_chars_outside_ap() {
         let id = "z".repeat(32); // 'z' > 'p'
-        assert!(!origin_allowed(&format!("chrome-extension://{id}"), false));
+        assert!(!origin_allowed(&format!("chrome-extension://{id}")));
     }
 
     #[test]
-    fn origin_allowlist_bypassed_when_allow_any() {
-        assert!(origin_allowed("http://localhost", true));
+    fn origin_allowlist_rejects_local_web_pages() {
+        assert!(!origin_allowed("http://localhost"));
     }
 }
 
