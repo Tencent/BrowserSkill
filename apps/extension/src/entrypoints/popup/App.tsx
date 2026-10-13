@@ -194,12 +194,49 @@ export function App() {
           >
             <div className="flex items-center justify-between gap-2" data-slot="popup-status">
               <div className="flex min-w-0 items-center gap-2">
-                <ConnectionStatusIndicator state={statusState} />
+                <ConnectionStatusIndicator
+                  state={statusState}
+                  className={
+                    statusState === "disabled"
+                      ? undefined
+                      : snapshot.localAuth?.state === "unverified_local"
+                        ? "bg-amber-500"
+                        : ["pairing_required", "server_unverified", "daemon_too_old"].includes(
+                              snapshot.localAuth?.state ?? "",
+                            )
+                          ? "bg-destructive"
+                          : undefined
+                  }
+                />
                 <span className="truncate text-sm font-medium" data-slot="popup-state-label">
-                  {t(STATE_LABEL_KEYS[statusState])}
+                  {t(
+                    statusState !== "disabled" && snapshot.localAuth?.state === "pairing_required"
+                      ? "popup.localAuth.required"
+                      : STATE_LABEL_KEYS[statusState],
+                  )}
                 </span>
               </div>
               <div className="flex shrink-0 items-center gap-2">
+                {connectionLive && snapshot.localAuth === null && (
+                  <Badge variant="outline" className="px-1.5 py-0 text-[10px]">
+                    {t("popup.connectionRemote")}
+                  </Badge>
+                )}
+                {connectionLive &&
+                  snapshot.localAuth &&
+                  ["verified", "unverified_local"].includes(snapshot.localAuth.state) && (
+                    <Badge
+                      variant="outline"
+                      className="px-1.5 py-0 text-[10px]"
+                      data-slot="local-auth-badge"
+                    >
+                      {t(
+                        snapshot.localAuth.state === "verified"
+                          ? "popup.localAuth.verified"
+                          : "popup.localAuth.unverified",
+                      )}
+                    </Badge>
+                  )}
                 {isSkewed && (
                   <Badge
                     variant="outline"
@@ -246,6 +283,8 @@ export function App() {
             <ConnectionSettings
               connectionEnabled={snapshot.connectionEnabled}
               disconnected={isDisconnected && !snapshot.lastError}
+              localAuth={snapshot.localAuth}
+              instanceId={snapshot.instanceId}
             />
           </section>
 
