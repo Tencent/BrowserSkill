@@ -467,11 +467,25 @@ fn acquire_daemon_lock(predecessor: Option<u32>) -> Result<lockfile::DaemonLock>
         Duration::from_secs(2)
     };
     let deadline = Instant::now() + wait;
+    let initial_info = daemon_info::read()?;
+    let mut contended = false;
     loop {
+        if predecessor.is_none() && contended && daemon_info::read()? != initial_info {
+            anyhow::bail!("another daemon won startup while waiting for the lifecycle lock");
+        }
         match lockfile::acquire() {
             Ok(lock) => return Ok(lock),
             Err(err) if err.is::<lockfile::AlreadyLocked>() && Instant::now() < deadline => {
-                std::thread::sleep(Duration::from_millis(50));
+                // Retry a short offline-maintenance lock, but stop as soon as
+                // another daemon is serving. A losing starter must not linger
+                // and take over when that daemon is explicitly stopped.
+                if predecessor.is_none()
+                    && matches!(probe::probe(PROBE_TIMEOUT), Ok(Probe::Ready(_)))
+                {
+                    return Err(err).context("another daemon is already serving");
+                }
+                contended = true;
+                std::thread::sleep(Duration::from_millis(10));
             }
             Err(err) => {
                 return Err(err.context("acquire daemon lifecycle lock"));

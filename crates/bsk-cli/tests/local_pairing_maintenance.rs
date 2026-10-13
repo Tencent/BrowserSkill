@@ -42,15 +42,15 @@ fn l11a_offline_revoke_and_startup_use_one_lifecycle_lock() {
     store.pair(52800, None).unwrap();
     let id = store.devices()[0].device_id.clone();
     let maintenance_log = home.path().join("test-maintenance.log");
-    let pairing_output = home.path().join("test-pairing.txt");
+    let maintenance_output = home.path().join("test-devices.json");
     // Observe the actual contention before releasing our lock. A fixed sleep
-    // can let a slowly scheduled CLI start only after release and pair offline
-    // using the default port, instead of waiting for the daemon's random port.
+    // can let a slowly scheduled CLI start only after release and read offline,
+    // instead of waiting for the daemon's IPC.
     let mut maintenance = Process(
         command(home.path())
-            .args(["-v", "daemon", "pair"])
+            .args(["-v", "daemon", "devices"])
             .env("RUST_LOG", "bsk=debug")
-            .stdout(fs::File::create(&pairing_output).unwrap())
+            .stdout(fs::File::create(&maintenance_output).unwrap())
             .stderr(fs::File::create(&maintenance_log).unwrap())
             .spawn()
             .unwrap(),
@@ -71,7 +71,7 @@ fn l11a_offline_revoke_and_startup_use_one_lifecycle_lock() {
         );
         std::thread::sleep(Duration::from_millis(10));
     }
-    assert!(fs::read(&pairing_output).unwrap().is_empty());
+    assert!(fs::read(&maintenance_output).unwrap().is_empty());
     // Start only after the CLI commits to IPC, so a slow CLI launch cannot
     // consume the daemon's shorter startup-lock retry window.
     let log_path = home.path().join("test-daemon.log");
@@ -119,12 +119,11 @@ fn l11a_offline_revoke_and_startup_use_one_lifecycle_lock() {
     let info: serde_json::Value =
         serde_json::from_slice(&fs::read(home.path().join("daemon.json")).unwrap()).unwrap();
     assert!(
-        fs::read_to_string(&pairing_output)
-            .unwrap()
+        output(home.path(), &["daemon", "pair"])
             .starts_with(&format!("ws://127.0.0.1:{}/#", info["ws_port"]))
     );
     let devices: serde_json::Value =
-        serde_json::from_str(&output(home.path(), &["daemon", "devices"])).unwrap();
+        serde_json::from_slice(&fs::read(&maintenance_output).unwrap()).unwrap();
     assert_eq!(
         devices
             .as_array()
@@ -143,7 +142,11 @@ fn l11a_offline_revoke_and_startup_use_one_lifecycle_lock() {
 #[test]
 fn l16_local_keys_are_not_remote_bearer_grants() {
     let home = tempfile::tempdir().unwrap();
-    let link = output(home.path(), &["daemon", "pair"]);
+    let lock = lockfile::acquire_at(home.path()).unwrap();
+    let store = PairingStore::open(&lock).unwrap();
+    let link = store.pair(52800, None).unwrap();
+    drop(store);
+    drop(lock);
     let key = link.trim().rsplit('.').next().unwrap();
     let remote = bsk::daemon::remote::authorization::AuthorizationStore::at_home(home.path());
     assert!(remote.authenticate(key).is_err());
