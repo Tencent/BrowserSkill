@@ -108,6 +108,28 @@ pub async fn handle(
     method: Method,
     params: Value,
 ) -> ResponseBody {
+    if method == Method::LocalAuthRevoke {
+        return match super::lifecycle::revoke_command(state, params).await {
+            Ok(value) => ResponseBody::Ok(value),
+            Err(error) => ResponseBody::Err(RpcError {
+                code: ErrorCode::InvalidParams,
+                message: error.to_string(),
+                data: None,
+            }),
+        };
+    }
+    // A rotation request cannot be lost behind an in-flight activation commit.
+    let _rotation_guard = if method == Method::LocalAuthRotate {
+        match serde_json::from_value::<RotateParams>(params.clone())
+            .ok()
+            .and_then(|args| state.local_auth.store.resolve(&args.device_id).ok())
+        {
+            Some(id) => Some(state.local_auth.device_gate(&id).lock_owned().await),
+            None => None, // The shared executor returns the validation error.
+        }
+    } else {
+        None
+    };
     let result = tokio::task::spawn_blocking(move || {
         execute(
             &state.local_auth,
