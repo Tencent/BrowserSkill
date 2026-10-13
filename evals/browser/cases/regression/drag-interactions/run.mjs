@@ -7,6 +7,11 @@ import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { promisify } from "node:util";
+import {
+  attachPairingBackground,
+  copyPairingExtension,
+  pairLocalBrowser,
+} from "../../../local-pairing.mjs";
 import { withChrome } from "../snapshot-coordinates/chrome.mjs";
 import { dragMarkup, dragScript } from "./drag-interactions.fixture.mjs";
 
@@ -134,7 +139,7 @@ try {
       executable: chrome,
       deviceScale: 1,
       zoom: 1,
-      extensionPath: extension,
+      extensionPath: await copyPairingExtension(extension, join(home, "extension"), port),
       headless: true,
       disableGpu: false,
       extensionViaCdp: true,
@@ -147,22 +152,9 @@ try {
       },
     },
     async (send) => {
-      const worker = await eventually(async () => {
-        const targets = (await send("Target.getTargets")).targetInfos;
-        const t = targets.find(
-          (t) =>
-            t.type === "service_worker" &&
-            t.url.startsWith("chrome-extension://") &&
-            t.url.endsWith("/background.js"),
-        );
-        assert(t);
-        return t;
-      });
-      const { sessionId: workerSession } = await send("Target.attachToTarget", {
-        targetId: worker.targetId,
-        flatten: true,
-      });
-      await send("Runtime.enable", {}, workerSession);
+      const worker = await attachPairingBackground(send, extension);
+      await send("Runtime.enable", {}, worker.sessionId);
+      await pairLocalBrowser(send, { executable: bsk, env, worker });
       transcript.push({ browser: await send("Browser.getVersion") });
       await eventually(async () => {
         const r = await cli(["browsers"]);
