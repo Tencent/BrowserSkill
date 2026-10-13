@@ -10,11 +10,13 @@ import { watchDaemonConnection } from "@/lib/daemon-connection-preference";
 import { startHeartbeat } from "@/lib/heartbeat";
 import {
   getConnectionEnabled,
+  getOrCreateInstanceId,
   setConnectionEnabled as persistConnectionEnabled,
   setLabel,
 } from "@/lib/instance-id";
 import { interactionPolicy, interactionPreferences } from "@/lib/interaction-preferences";
 import { startKeepalive } from "@/lib/keepalive";
+import { attachLocalPairing } from "@/lib/local-pairing-bridge";
 import {
   OVERLAY_AGENT_STATE,
   OVERLAY_AUTOMATION_BYPASS,
@@ -55,6 +57,7 @@ import {
 import { cdpBlockedUrlReason, chromeTabsApi } from "@/tools/shared";
 import { chromeTabMutationApi } from "@/tools/tabs";
 import { detectBrowserMeta } from "@/transport/handshake";
+import { createLocalAuthenticator } from "@/transport/local-auth";
 import { watchRemoteAuthorization } from "@/transport/remote-authorization";
 import { type RemoteEndpoint, remoteSocket } from "@/transport/remote-endpoint";
 import type { Transport } from "@/transport/transport";
@@ -69,8 +72,25 @@ export default defineBackground(() => {
   let remoteEndpoint: RemoteEndpoint | null = null;
   let connectionPreferenceValid = false;
   let requestedConnection: { key: string; remote: boolean } | null = null;
+  const authenticateLocal = createLocalAuthenticator({
+    instanceId: () => getOrCreateInstanceId(),
+    origin: chrome.runtime.getURL("").replace(/\/$/, ""),
+    status: (status) => controller.setLocalAuth(status),
+  });
   const transport = new WSTransport({
     url: __BSK_DAEMON_WS_URL__,
+    onAuthenticationError: () => {
+      const state = controller.snapshot().localAuth?.state;
+      if (!remoteEndpoint && (state === "verifying" || state === "verified"))
+        controller.setLocalAuth({ state: "server_unverified" });
+    },
+    authenticate: (socket, signal) => {
+      if (remoteEndpoint) {
+        controller.setLocalAuth(null);
+        return;
+      }
+      return authenticateLocal(socket, signal);
+    },
     webSocketFactory: (url) => {
       if (!connectionPreferenceValid) throw new Error("Connection settings are unavailable");
       const socket = remoteSocket(url, remoteEndpoint);
@@ -160,6 +180,7 @@ export default defineBackground(() => {
   const popupSnapshotRefreshers = new Set<() => void>();
   const controlModes = new Map<string, OverlayMode>();
 
+  attachLocalPairing(controller, transport);
   watchRemoteAuthorization();
   const daemonPort = watchDaemonConnection(
     (url, remote) => {

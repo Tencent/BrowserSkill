@@ -317,3 +317,59 @@ describe("WSTransport", () => {
     expect(t.state).toBe("connected");
   });
 });
+
+it("authenticates before connected, rejects early sends, and closes a second final frame", async () => {
+  let complete!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    complete = resolve;
+  });
+  const t = new WSTransport({
+    url: "ws://127.0.0.1:52800",
+    authenticate: () => gate,
+    webSocketFactory: (url) => new FakeSocket(url) as unknown as WebSocket,
+  });
+  const handler = vi.fn();
+  t.onMessage(handler);
+  const pending = t.connect();
+  lastSocket().open();
+  expect(t.state).toBe("connecting");
+  expect(() => t.send({ id: "early", method: "system.handshake" })).toThrow();
+  lastSocket().receive({ id: "early", result: {} });
+  expect(handler).not.toHaveBeenCalled();
+  complete();
+  await pending;
+  expect(t.state).toBe("connected");
+  lastSocket().receive({
+    type: "local.auth.ready",
+    v: 1,
+    rotation: null,
+    commit: null,
+  } as unknown as ProtocolFrame);
+  expect(handler).not.toHaveBeenCalled();
+  expect(t.state).toBe("disconnected");
+  await t.disconnect();
+});
+it("auth failures back off for 30 seconds and explicit retry resets the delay", async () => {
+  vi.useFakeTimers();
+  const authenticate = vi.fn().mockRejectedValue(new Error("server_unverified"));
+  const t = new WSTransport({
+    url: "ws://127.0.0.1:52800",
+    authenticate,
+    webSocketFactory: (url) => new FakeSocket(url) as unknown as WebSocket,
+  });
+  const pending = t.connect();
+  lastSocket().open();
+  await expect(pending).rejects.toThrow("server_unverified");
+  const count = FakeSocket.instances.length;
+  await vi.advanceTimersByTimeAsync(29_999);
+  expect(FakeSocket.instances).toHaveLength(count);
+  await expect(t.connect()).rejects.toThrow("backoff");
+  t.resetAuthenticationBackoff();
+  authenticate.mockResolvedValue(undefined);
+  const retried = t.connect();
+  lastSocket().open();
+  await retried;
+  expect(t.state).toBe("connected");
+  await t.disconnect();
+  vi.useRealTimers();
+});

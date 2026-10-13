@@ -1,3 +1,4 @@
+import { LegacyReconnect } from "./local-auth";
 import type { ConnectionStateHandler, Disposable, FrameHandler, Transport } from "./transport";
 import type { ConnectionState, ProtocolFrame } from "./types";
 
@@ -18,6 +19,8 @@ export interface WSTransportOptions {
    * Inject a fake WebSocket constructor in tests; defaults to `globalThis.WebSocket`.
    */
   webSocketFactory?: WebSocketFactory;
+  authenticate?: (socket: WebSocket, signal: AbortSignal) => Promise<void> | void;
+  onAuthenticationError?: () => void;
 }
 
 interface CloseLikeEvent {
@@ -33,15 +36,22 @@ interface MessageLikeEvent {
  * WebSocket-backed implementation of {@link Transport} (design §4.7).
  *
  * Lifecycle:
- *  - `connect()` opens a socket and resolves once it transitions to OPEN.
+ *  - `connect()` resolves after OPEN and the optional authentication prelude.
  *  - Inbound text frames are parsed as JSON and dispatched to message handlers.
- *  - Outbound frames are JSON-serialised and sent only when the socket is OPEN.
+ *  - Outbound frames are JSON-serialised and sent only after authentication succeeds.
  *  - Unexpected closes trigger an exponential-backoff reconnect loop
  *    (1s, 2s, 4s, …, capped at 5s) until `disconnect()` is called.
  */
 export class WSTransport implements Transport {
   private url: string;
   private readonly factory: WebSocketFactory;
+  private readonly authenticate?: WSTransportOptions["authenticate"];
+  private readonly onAuthenticationError?: () => void;
+  private authentication: AbortController | null = null;
+  private authenticationTimer: ReturnType<typeof setTimeout> | null = null;
+  private authFailures = 0;
+  private authBackoffUntil = 0;
+  private legacyReconnect = false;
   private readonly initialDelayMs: number;
   private readonly maxDelayMs: number;
 
@@ -60,6 +70,8 @@ export class WSTransport implements Transport {
 
   constructor(options: WSTransportOptions) {
     this.url = options.url;
+    this.authenticate = options.authenticate;
+    this.onAuthenticationError = options.onAuthenticationError;
     this.factory = options.webSocketFactory ?? ((url: string) => new WebSocket(url));
     this.initialDelayMs = options.reconnect?.initialDelayMs ?? DEFAULT_INITIAL_DELAY_MS;
     this.maxDelayMs = options.reconnect?.maxDelayMs ?? DEFAULT_MAX_DELAY_MS;
@@ -76,9 +88,15 @@ export class WSTransport implements Transport {
     return true;
   }
 
+  resetAuthenticationBackoff(): void {
+    this.authBackoffUntil = 0;
+    this.authFailures = 0;
+  }
+
   connect(): Promise<void> {
     if (this.currentState === "connected") return Promise.resolve();
 
+    if (Date.now() < this.authBackoffUntil) return Promise.reject(new Error("local_auth_backoff"));
     this.explicitlyClosed = false;
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer);
@@ -109,6 +127,7 @@ export class WSTransport implements Transport {
       this.reconnectTimer = null;
     }
     const socket = this.socket;
+    this.endAuthentication();
     this.socket = null;
     this.socketGeneration += 1;
     if (socket) {
@@ -132,7 +151,11 @@ export class WSTransport implements Transport {
   }
 
   send(msg: ProtocolFrame): void {
-    if (!this.socket || this.socket.readyState !== 1 /* OPEN */) {
+    if (
+      this.currentState !== "connected" ||
+      !this.socket ||
+      this.socket.readyState !== 1 /* OPEN */
+    ) {
       throw new Error("[WSTransport] cannot send while not connected");
     }
     this.socket.send(JSON.stringify(msg));
@@ -176,17 +199,56 @@ export class WSTransport implements Transport {
 
     socket.addEventListener("open", () => {
       if (!this.isCurrentSocket(socket, generation)) return;
-      this.reconnectAttempt = 0;
-      this.setState("connected");
-      const resolve = this.resolveConnect;
-      this.resolveConnect = null;
-      this.rejectConnect = null;
-      this.connectingPromise = null;
-      resolve?.();
+      const connected = () => {
+        if (!this.isCurrentSocket(socket, generation)) return;
+        if (socket.readyState !== 1) {
+          failed(new Error("Connection closed during authentication"));
+          return;
+        }
+        this.endAuthentication();
+        this.resetAuthenticationBackoff();
+        this.reconnectAttempt = 0;
+        this.setState("connected");
+        const resolve = this.resolveConnect;
+        this.resolveConnect = null;
+        this.rejectConnect = null;
+        this.connectingPromise = null;
+        resolve?.();
+      };
+      const failed = (error: unknown) => {
+        if (!this.isCurrentSocket(socket, generation)) return;
+        this.legacyReconnect = error instanceof LegacyReconnect;
+        if (!this.legacyReconnect) this.onAuthenticationError?.();
+        if (!this.legacyReconnect)
+          this.authBackoffUntil = Date.now() + Math.min(30_000 * 2 ** this.authFailures++, 300_000);
+        this.endAuthentication();
+        const reject = this.rejectConnect;
+        this.resolveConnect = null;
+        this.rejectConnect = null;
+        this.connectingPromise = null;
+        reject?.(error instanceof Error ? error : new Error("Local authentication failed"));
+        socket.close();
+        this.handleClose(socket, generation, {});
+      };
+      if (!this.authenticate) {
+        connected();
+        return;
+      }
+      const abort = new AbortController();
+      this.authentication = abort;
+      this.authenticationTimer = setTimeout(
+        () => failed(new Error("Local authentication timed out")),
+        5_000,
+      );
+      try {
+        Promise.resolve(this.authenticate(socket, abort.signal)).then(connected, failed);
+      } catch (error) {
+        failed(error);
+      }
     });
 
     socket.addEventListener("message", (ev: MessageEvent) => {
-      if (!this.isCurrentSocket(socket, generation)) return;
+      if (!this.isCurrentSocket(socket, generation) || this.currentState !== "connected") return;
       this.handleInbound((ev as unknown as MessageLikeEvent).data);
     });
 
@@ -208,6 +270,20 @@ export class WSTransport implements Transport {
     } catch {
       return;
     }
+    // No authentication frame is a business message, including a second final.
+    if (
+      parsed &&
+      typeof parsed === "object" &&
+      "type" in parsed &&
+      typeof parsed.type === "string" &&
+      parsed.type.startsWith("local.auth.")
+    ) {
+      this.onAuthenticationError?.();
+      this.authFailures += 1;
+      this.authBackoffUntil = Date.now() + 30_000;
+      this.socket?.close();
+      return;
+    }
     for (const h of this.messageHandlers) {
       try {
         h(parsed);
@@ -219,6 +295,10 @@ export class WSTransport implements Transport {
 
   private handleClose(socket: WebSocket, generation: number, _ev: CloseLikeEvent): void {
     if (!this.isCurrentSocket(socket, generation)) return;
+    // The authenticator must observe close before deciding whether persisted
+    // migration policy permits a new legacy socket. Its total timeout bounds it.
+    if (this.authentication) return;
+    this.endAuthentication();
     this.socket = null;
     if (this.explicitlyClosed) {
       this.setState("disconnected");
@@ -230,7 +310,13 @@ export class WSTransport implements Transport {
 
   private scheduleReconnect(): void {
     if (this.reconnectTimer) return;
-    const delay = Math.min(this.initialDelayMs * 2 ** this.reconnectAttempt, this.maxDelayMs);
+    const delay = this.legacyReconnect
+      ? 0
+      : Math.max(
+          this.authBackoffUntil - Date.now(),
+          Math.min(this.initialDelayMs * 2 ** this.reconnectAttempt, this.maxDelayMs),
+        );
+    this.legacyReconnect = false;
     this.reconnectAttempt += 1;
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = null;
@@ -239,6 +325,13 @@ export class WSTransport implements Transport {
         console.debug("[WSTransport] reconnect attempt failed", err);
       });
     }, delay);
+  }
+
+  private endAuthentication(): void {
+    this.authentication?.abort();
+    this.authentication = null;
+    if (this.authenticationTimer) clearTimeout(this.authenticationTimer);
+    this.authenticationTimer = null;
   }
 
   private isCurrentSocket(socket: WebSocket, generation: number): boolean {

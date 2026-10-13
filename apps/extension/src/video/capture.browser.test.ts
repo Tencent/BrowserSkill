@@ -9,8 +9,10 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 import { describe, expect, it } from "vitest";
+import { STORAGE_KEYS } from "@/lib/instance-id";
 import { attachVideoBackground, type BrowserSend as Send } from "./browser-fixture";
 import { createDshVideoFixture } from "./dsh-fixture";
+import { buildPairingFixture } from "./pairing-fixture";
 
 const run = promisify(execFile);
 
@@ -125,9 +127,12 @@ describe.skipIf(!process.env.BSK_VIDEO_CHROME || !process.env.BSK_VIDEO_BSK)(
         const backgroundPath = path.join(extension, "background.js");
         const background = await readFile(backgroundPath, "utf8");
         expect(background).toContain("ws://127.0.0.1:52800");
+        // Provision before the first connection attempt so this fixture never
+        // races automatic authentication or inherits its failure backoff.
         await writeFile(
           backgroundPath,
-          background.replaceAll("ws://127.0.0.1:52800", `ws://127.0.0.1:${port}`),
+          `chrome.storage.local.set(${JSON.stringify({ [STORAGE_KEYS.CONNECTION_ENABLED]: false })})
+            .then(() => { ${background.replaceAll("ws://127.0.0.1:52800", `ws://127.0.0.1:${port}`)}\n });`,
         );
         // Only the fixture delays production content startup. onCompleted can
         // resume capture before its listener exists, and the video query arrives
@@ -169,6 +174,7 @@ describe.skipIf(!process.env.BSK_VIDEO_CHROME || !process.env.BSK_VIDEO_BSK)(
             import.meta.url,
           ).href
         );
+        const pairingSource = await buildPairingFixture(directory, manifest.version);
         const attachedPages: { parent: string; session: string; prerender: boolean }[] = [];
         await withChrome(
           {
@@ -195,17 +201,6 @@ describe.skipIf(!process.env.BSK_VIDEO_CHROME || !process.env.BSK_VIDEO_BSK)(
             },
           },
           async (send: Send) => {
-            await expect
-              .poll(async () => (await cli("browsers")).length, { timeout: 15_000 })
-              .toBe(1);
-            const task = await cli("session", "start");
-            const session = task.session_id;
-            await cli("navigate", "--session", session, `http://127.0.0.1:${address.port}/red`);
-            const started = await cli("video", "start", "--session", session, "--duration", "30s");
-            const id = started.recording.recording_id;
-            expect(started.recording.state).toBe("recording");
-            await new Promise((resolve) => setTimeout(resolve, 1100));
-            await cli("navigate", "--session", session, `http://127.0.0.1:${address.port}/blue`);
             const workerSession = await attachVideoBackground(send, manifest.name);
             const origin = workerSession.origin;
             const evaluate = async <T>(sessionId: string, expression: string): Promise<T> => {
@@ -217,6 +212,58 @@ describe.skipIf(!process.env.BSK_VIDEO_CHROME || !process.env.BSK_VIDEO_BSK)(
               if (result.exceptionDetails) throw new Error(JSON.stringify(result.exceptionDetails));
               return result.result.value;
             };
+            // Use the normal connection controls after provisioning the profile.
+            const controls = await send<{ targetId: string }>("Target.createTarget", {
+              url: `${origin}/popup.html`,
+            });
+            const controlSession = await send<{ sessionId: string }>("Target.attachToTarget", {
+              targetId: controls.targetId,
+              flatten: true,
+            });
+            await expect
+              .poll(
+                () => evaluate(controlSession.sessionId, "Boolean(globalThis.chrome?.runtime?.id)"),
+                { timeout: 10_000 },
+              )
+              .toBe(true);
+            const setConnectionEnabled = (enabled: boolean) =>
+              evaluate(
+                controlSession.sessionId,
+                `new Promise(resolve => {
+                const port = chrome.runtime.connect({name:'popup'});
+                port.onMessage.addListener(message => {
+                  if(message.kind==='snapshot' && message.data.connectionEnabled===${enabled} &&
+                    message.data.state==='${enabled ? "connected" : "disconnected"}') {
+                    port.disconnect(); resolve(true);
+                  }
+                });
+                port.postMessage({kind:'set_connection_enabled',value:${enabled}});
+              })`,
+              );
+            const { stdout: pairingOutput } = await run(executable, ["daemon", "pair"], {
+              env,
+              timeout: 10_000,
+            });
+            // Run the production verifier in the isolated extension origin; the
+            // normal transport then reconnects using its committed credential.
+            const paired = await evaluate<{ state: string }>(
+              workerSession.sessionId,
+              `${pairingSource};PairingFixture.pair(${JSON.stringify(pairingOutput.trim())})`,
+            );
+            expect(paired.state).toBe("verified");
+            await setConnectionEnabled(true);
+            await send("Target.closeTarget", { targetId: controls.targetId });
+            await expect
+              .poll(async () => (await cli("browsers")).length, { timeout: 15_000 })
+              .toBe(1);
+            const task = await cli("session", "start");
+            const session = task.session_id;
+            await cli("navigate", "--session", session, `http://127.0.0.1:${address.port}/red`);
+            const started = await cli("video", "start", "--session", session, "--duration", "30s");
+            const id = started.recording.recording_id;
+            expect(started.recording.state).toBe("recording");
+            await new Promise((resolve) => setTimeout(resolve, 1100));
+            await cli("navigate", "--session", session, `http://127.0.0.1:${address.port}/blue`);
             await expect
               .poll(
                 () =>

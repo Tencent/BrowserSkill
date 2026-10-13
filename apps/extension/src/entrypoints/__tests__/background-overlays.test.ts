@@ -29,6 +29,7 @@ vi.mock("@/lib/heartbeat");
 vi.mock("@/lib/instance-id");
 vi.mock("@/lib/interaction-preferences");
 vi.mock("@/lib/keepalive");
+vi.mock("@/lib/local-pairing-bridge");
 vi.mock("@/lib/recording/frame-coordinator");
 vi.mock("@/lib/sessions-live-flag");
 vi.mock("@/long-screenshot/background");
@@ -85,7 +86,11 @@ async function fixture() {
     },
     debugger: { onDetach: event() },
     webNavigation: { onBeforeNavigate: event(), onCompleted: event(), onErrorOccurred: event() },
-    runtime: { onMessage: event(), onConnect: event() },
+    runtime: {
+      onMessage: event(),
+      onConnect: event(),
+      getURL: (path: string) => `chrome-extension://test/${path}`,
+    },
     notifications: { onClicked: event(), onButtonClicked: event() },
   });
   vi.mocked(watchDaemonConnection).mockReturnValue({ ready: Promise.resolve(), dispose() {} });

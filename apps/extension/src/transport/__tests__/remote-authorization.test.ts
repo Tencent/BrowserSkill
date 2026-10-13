@@ -175,3 +175,20 @@ it("only schedules renewal alarms while a remote connection is selected", async 
   await vi.waitFor(() => expect(chrome.alarms.clear).toHaveBeenCalledTimes(2));
   watcher.dispose();
 });
+
+it("L20: a renewal failure cannot switch a newly paired local connection back to remote", async () => {
+  let reject!: (reason: Error) => void;
+  vi.mocked(fetch).mockImplementationOnce(
+    () =>
+      new Promise((_resolve, fail) => {
+        reject = fail;
+      }),
+  );
+  const renewing = renewRemoteAuthorization();
+  const failed = expect(renewing).rejects.toThrow("offline");
+  await vi.waitFor(() => expect(fetch).toHaveBeenCalled());
+  values[REMOTE_ENDPOINT_KEY] = null;
+  reject(new Error("offline"));
+  await failed;
+  expect(values[REMOTE_ENDPOINT_KEY]).toBeNull();
+});

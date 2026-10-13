@@ -4,6 +4,7 @@ import {
   PROTOCOL_VERSION,
   performHandshake,
 } from "../transport/handshake";
+import type { LocalAuthStatus } from "../transport/local-auth";
 import type { Transport } from "../transport/transport";
 import type { ConnectionState, HandshakeResult } from "../transport/types";
 import { getLabel, getOrCreateInstanceId } from "./instance-id";
@@ -19,6 +20,7 @@ export interface SnapshotInfo {
   handshake: HandshakeResult | null;
   lastError: string | null;
   connectionEnabled: boolean;
+  localAuth?: LocalAuthStatus | null;
 }
 
 type Listener = (s: SnapshotInfo) => void;
@@ -48,6 +50,16 @@ export class ConnectionController {
     this.auditEnabled = enabled;
   }
   private lastError: string | null = null;
+  private localAuth: LocalAuthStatus | null = null;
+
+  setLocalAuth(status: LocalAuthStatus | null): void {
+    this.localAuth = status;
+    this.fire();
+  }
+
+  async retryConnection(): Promise<void> {
+    if (this.ready && this.connectionEnabled) await this.teardown(false);
+  }
   private connectionEnabled = true;
   private listeners = new Set<Listener>();
   private lifecycleHooks: ConnectionLifecycleHooks = {};
@@ -86,6 +98,7 @@ export class ConnectionController {
       handshake: this.handshake,
       lastError: this.lastError,
       connectionEnabled: this.connectionEnabled,
+      localAuth: this.localAuth,
     };
   }
 
