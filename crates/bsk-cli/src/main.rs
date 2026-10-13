@@ -15,8 +15,12 @@ fn main() -> ExitCode {
 
     // The daemon installs its own subscriber (with the rolling file
     // appender); CLI tracing would race with it and silently win, so
-    // only init the CLI-side stderr subscriber for client commands.
-    if !matches!(cli.command, Command::Daemon(_)) {
+    // only init the CLI-side stderr subscriber for client commands, including
+    // daemon maintenance. Start/restart own the daemon's logging setup.
+    if !matches!(
+        cli.command,
+        Command::Daemon(cli::daemon::DaemonCmd::Start(_) | cli::daemon::DaemonCmd::Restart(_))
+    ) {
         init_cli_tracing(&cli.flags);
     }
     cli::update::print_update_hint_from_cache(&cli.flags, &cli.command);
