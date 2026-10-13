@@ -162,8 +162,6 @@
         "already_paired": "这个浏览器已与这台 bsk 配对，无需重新配对。如需替换，运行 bsk daemon pair --replace {{browser}}，再粘贴新链接。",
         "replace_mismatch": "当前浏览器是 {{instance}}，替换目标是 {{browser}}，未做任何改动。新浏览器配置请使用 bsk daemon pair；不用的设备可用 bsk daemon revoke {{browser}} 单独撤销。",
         "skip": "已跳过本机验证：本机任何程序都可能冒充 bsk 控制此浏览器。",
-        "migration_old": "当前连接未验证，本机 bsk 版本还不支持配对。请运行 bsk update 升级，再完成配对。",
-        "migration_pair": "当前连接未验证。bsk 即将要求配对，建议现在完成，只需一次。",
         "server_unverified": "服务未通过验证。可能是其它程序占用了端口，也可能是这台 bsk 的配对已被重置。请运行 bsk doctor 检查。",
         "daemon_too_old": "本机 bsk 版本过旧，不支持安全连接。请运行 bsk update 后重试。",
         "busy": "另一个连接正在验证此设备，请稍后重试。"

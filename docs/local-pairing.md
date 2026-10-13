@@ -99,11 +99,18 @@ An explicitly persisted Warn setting still accepts legacy peers and now produces
 a doctor warning. Run `bsk daemon trust-local off` after pairing to require
 verification. Origin checks alone do not authenticate a native local program.
 
-Extension **0.4.0** enables temporary compatibility only for an update from a
-version before 0.4.0 that has never paired. New installations do not get it. The
-first successful pairing clears it permanently. A server reply, error message,
-connection close or `legacy_accepted` flag cannot enable compatibility. The
-planned exit version is **0.4.1**; see the release prerequisites below.
+Extension **0.4.1** retires migration compatibility. Startup and upgrade handling
+clear the previous flag, and the authentication path cannot fall back even if
+an old flag remains in storage. Without explicit skipping, an old daemon, a
+`legacy_accepted` hint, an unknown identity or a dropped connection cannot cause
+the extension to send a business handshake without verifying the server.
+Update an older CLI and pair the browser to restore the connection.
+
+Extension 0.4.0's temporary compatibility applied only to eligible, never-paired
+upgrades from earlier versions. Its migration-only popup hints are removed in
+0.4.1. Existing pairing keys, pending recovery transactions and the separate
+explicit skip preference survive the upgrade. Stage D must follow distribution
+of the Required-mode CLI, as detailed below.
 
 Local pairing protects the connection, not the OS account or websites. It does
 not defend against a process that can read the user's browser profile or bsk

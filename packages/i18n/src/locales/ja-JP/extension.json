@@ -162,8 +162,6 @@
         "already_paired": "このブラウザーはすでにペアリング済みです。置き換えるには bsk daemon pair --replace {{browser}} を実行し、新しいリンクを貼り付けてください。",
         "replace_mismatch": "現在のブラウザーは {{instance}}、置き換え対象は {{browser}} です。変更はありません。新しいプロファイルには bsk daemon pair を使い、不要なデバイスは bsk daemon revoke {{browser}} で解除してください。",
         "skip": "ローカル検証をスキップ中です。ローカルプログラムが bsk を装ってブラウザーを操作する可能性があります。",
-        "migration_old": "この接続は未検証で、bsk が古くペアリングに対応していません。bsk update で更新してからペアリングしてください。",
-        "migration_pair": "この接続は未検証です。bsk はまもなくペアリングを必須にします。一度だけ設定してください。",
         "server_unverified": "サービスの検証に失敗しました。別のプログラムがポートを使用しているか、ペアリングがリセットされた可能性があります。bsk doctor で確認してください。",
         "daemon_too_old": "bsk が古いため安全に接続できません。bsk update の実行後に再試行してください。",
         "busy": "別の接続がこのデバイスを検証中です。しばらくして再試行してください。"

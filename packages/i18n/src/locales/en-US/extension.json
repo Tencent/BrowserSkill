@@ -162,8 +162,6 @@
         "already_paired": "This browser is already paired with this bsk. To replace it, run bsk daemon pair --replace {{browser}} and paste the new link.",
         "replace_mismatch": "This browser is {{instance}}; the replacement targets {{browser}}. No changes were made. Use bsk daemon pair for a new browser profile; revoke an unused device separately with bsk daemon revoke {{browser}}.",
         "skip": "Local verification is skipped. Any local program could impersonate bsk and control this browser.",
-        "migration_old": "This connection is unverified and the local bsk is too old to pair. Run bsk update, then pair this browser.",
-        "migration_pair": "This connection is unverified. bsk will soon require pairing; complete it once now.",
         "server_unverified": "The service failed verification. Another program may be using the port, or this bsk’s pairing may have been reset. Run bsk doctor to check.",
         "daemon_too_old": "This bsk is too old for a secure connection. Run bsk update, then retry.",
         "busy": "Another connection is verifying this device. Please retry shortly."

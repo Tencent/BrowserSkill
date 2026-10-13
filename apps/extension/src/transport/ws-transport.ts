@@ -1,4 +1,3 @@
-import { LegacyReconnect } from "./local-auth";
 import type { ConnectionStateHandler, Disposable, FrameHandler, Transport } from "./transport";
 import type { ConnectionState, ProtocolFrame } from "./types";
 
@@ -51,7 +50,6 @@ export class WSTransport implements Transport {
   private authenticationTimer: ReturnType<typeof setTimeout> | null = null;
   private authFailures = 0;
   private authBackoffUntil = 0;
-  private legacyReconnect = false;
   private readonly initialDelayMs: number;
   private readonly maxDelayMs: number;
 
@@ -217,10 +215,8 @@ export class WSTransport implements Transport {
       };
       const failed = (error: unknown) => {
         if (!this.isCurrentSocket(socket, generation)) return;
-        this.legacyReconnect = error instanceof LegacyReconnect;
-        if (!this.legacyReconnect) this.onAuthenticationError?.();
-        if (!this.legacyReconnect)
-          this.authBackoffUntil = Date.now() + Math.min(30_000 * 2 ** this.authFailures++, 300_000);
+        this.onAuthenticationError?.();
+        this.authBackoffUntil = Date.now() + Math.min(30_000 * 2 ** this.authFailures++, 300_000);
         this.endAuthentication();
         const reject = this.rejectConnect;
         this.resolveConnect = null;
@@ -295,8 +291,8 @@ export class WSTransport implements Transport {
 
   private handleClose(socket: WebSocket, generation: number, _ev: CloseLikeEvent): void {
     if (!this.isCurrentSocket(socket, generation)) return;
-    // The authenticator must observe close before deciding whether persisted
-    // migration policy permits a new legacy socket. Its total timeout bounds it.
+    // Let the authenticator observe close and settle its failure before
+    // reconnecting. Its total timeout bounds an unresponsive hook.
     if (this.authentication) return;
     this.endAuthentication();
     this.socket = null;
@@ -310,13 +306,10 @@ export class WSTransport implements Transport {
 
   private scheduleReconnect(): void {
     if (this.reconnectTimer) return;
-    const delay = this.legacyReconnect
-      ? 0
-      : Math.max(
-          this.authBackoffUntil - Date.now(),
-          Math.min(this.initialDelayMs * 2 ** this.reconnectAttempt, this.maxDelayMs),
-        );
-    this.legacyReconnect = false;
+    const delay = Math.max(
+      this.authBackoffUntil - Date.now(),
+      Math.min(this.initialDelayMs * 2 ** this.reconnectAttempt, this.maxDelayMs),
+    );
     this.reconnectAttempt += 1;
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = null;

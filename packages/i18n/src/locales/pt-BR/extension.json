@@ -162,8 +162,6 @@
         "already_paired": "Este navegador já está pareado. Para substituí-lo, execute bsk daemon pair --replace {{browser}} e cole o novo link.",
         "replace_mismatch": "Este navegador é {{instance}}; o destino é {{browser}}. Nada foi alterado. Use bsk daemon pair para um novo perfil e bsk daemon revoke {{browser}} para revogar um dispositivo sem uso.",
         "skip": "A verificação local foi ignorada. Qualquer programa local pode se passar pelo bsk e controlar este navegador.",
-        "migration_old": "Esta conexão não foi verificada e o bsk é antigo demais para parear. Execute bsk update e depois faça o pareamento.",
-        "migration_pair": "Esta conexão não foi verificada. Em breve o bsk exigirá pareamento; conclua-o uma vez agora.",
         "server_unverified": "Falha na verificação do serviço. Outro programa pode estar usando a porta ou o pareamento foi redefinido. Verifique com bsk doctor.",
         "daemon_too_old": "O bsk é antigo demais para uma conexão segura. Execute bsk update e tente novamente.",
         "busy": "Outra conexão está verificando este dispositivo. Tente novamente em instantes."

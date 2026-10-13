@@ -399,8 +399,6 @@ it("skip: requires confirmation and keeps restore guidance visible outside colla
   expect(await screen.findByText(/bsk daemon trust-local off/)).toBeTruthy();
 });
 it.each([
-  [{ state: "unverified_local", reason: "migration_old" }, /bsk update 升级/],
-  [{ state: "unverified_local", reason: "migration_pair" }, /bsk 即将要求配对/],
   [{ state: "server_unverified" }, /服务未通过验证/],
   [{ state: "daemon_too_old" }, /本机 bsk 版本过旧/],
 ] satisfies [

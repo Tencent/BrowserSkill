@@ -22,13 +22,11 @@ export async function readLocalPairingInfo(): Promise<LocalPairingInfo> {
 export function LocalPairingNotice({
   status,
   instanceId = "",
-  onPair,
   onRetry,
   onRestore,
 }: {
   status?: LocalAuthStatus | null;
   instanceId?: string;
-  onPair: () => void;
   onRetry: () => void;
   onRestore: () => void;
 }) {
@@ -55,17 +53,6 @@ export function LocalPairingNotice({
           onClick={onRestore}
         >
           {t("popup.localAuth.restore")}
-        </Button>
-      )}
-      {["migration_old", "migration_pair"].includes(key) && (
-        <Button
-          type="button"
-          size="sm"
-          variant="ghost"
-          className="mt-1 h-7 px-1 text-xs"
-          onClick={onPair}
-        >
-          {t("popup.localAuth.pairAction")}
         </Button>
       )}
       {["server_unverified", "daemon_too_old", "busy"].includes(key) && (

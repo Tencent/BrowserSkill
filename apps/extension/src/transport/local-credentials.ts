@@ -3,7 +3,7 @@ import { decodeBytes } from "./local-auth-crypto";
 import type { Rotation } from "./local-auth-protocol";
 
 export const PAIRING_VERSION = "0.4.0";
-export const MIGRATION_EXIT_VERSION = "0.4.1";
+export const LEGACY_COMPAT_EXIT_VERSION = "0.4.1";
 const STAGED_TTL_MS = 10 * 60_000;
 export interface LocalCredential {
   daemonId: string;
@@ -205,7 +205,8 @@ export function initializeLocalMigration(
   version = __BSK_EXT_VERSION__,
 ): Promise<void> {
   return access(true, ({ policy }) => {
-    if (!before(version, MIGRATION_EXIT_VERSION) || policy.everPaired) policy.legacyCompat = false;
+    if (!before(version, LEGACY_COMPAT_EXIT_VERSION) || policy.everPaired)
+      policy.legacyCompat = false;
     else if (details?.reason === "install") policy.legacyCompat = false;
     else if (
       details?.reason === "update" &&

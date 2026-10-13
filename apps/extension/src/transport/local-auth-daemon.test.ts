@@ -9,7 +9,7 @@ import { promisify } from "node:util";
 import { IDBFactory } from "fake-indexeddb";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import WebSocket from "ws";
-import { authenticateLocal, createLocalAuthenticator, LegacyReconnect } from "./local-auth";
+import { authenticateLocal, createLocalAuthenticator, LocalAuthError } from "./local-auth";
 import {
   initializeLocalMigration,
   readLocalState,
@@ -170,7 +170,7 @@ it.skipIf(!current)(
   20_000,
 );
 it.skipIf(!old)(
-  "L19: a real pre-pairing daemon only receives a legacy handshake after local migration authorization",
+  "L19: extension 0.4.1 refuses legacy fallback from a real pre-pairing daemon",
   async () => {
     const url = await start(old!);
     const authenticate = createLocalAuthenticator({
@@ -178,18 +178,22 @@ it.skipIf(!old)(
       origin,
       status: vi.fn(),
     });
-    let ws = await opened(url);
-    await expect(
-      authenticate(browserSocket(ws), AbortSignal.timeout(5000)),
-    ).rejects.not.toBeInstanceOf(LegacyReconnect);
+    // Simulate an eligible 0.4.0 installation before its upgrade handler ran.
     await initializeLocalMigration({ reason: "update", previousVersion: "0.3.2" }, "0.4.0");
-    ws = await opened(url);
-    await expect(authenticate(browserSocket(ws), AbortSignal.timeout(5000))).rejects.toBeInstanceOf(
-      LegacyReconnect,
-    );
-    ws = await opened(url);
-    await authenticate(browserSocket(ws), AbortSignal.timeout(5000));
-    expect((await handshake(ws)).result).toBeDefined();
+    expect((await readLocalState()).policy.legacyCompat).toBe(true);
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const ws = await opened(url);
+      const send = vi.spyOn(ws, "send");
+      const response = once(ws, "message");
+      await expect(
+        authenticate(browserSocket(ws), AbortSignal.timeout(5000)),
+      ).rejects.toBeInstanceOf(LocalAuthError);
+      expect(JSON.parse(String((await response)[0])).error.code).toBe("protocol_error");
+      expect(send).toHaveBeenCalledOnce();
+      expect(JSON.parse(String(send.mock.calls[0][0])).method).toBe("system.ping");
+      await initializeLocalMigration();
+      expect((await readLocalState()).policy.legacyCompat).toBe(false);
+    }
   },
   20_000,
 );

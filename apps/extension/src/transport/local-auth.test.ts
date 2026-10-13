@@ -1,7 +1,7 @@
 import { IDBFactory } from "fake-indexeddb";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import v from "../../../../crates/bsk-protocol/tests/fixtures/local-auth-v1.json";
-import { authenticateLocal, createLocalAuthenticator, LegacyReconnect } from "./local-auth";
+import { authenticateLocal, createLocalAuthenticator, LocalAuthError } from "./local-auth";
 import { prove, transcript } from "./local-auth-crypto";
 import type { LocalCredential } from "./local-credentials";
 import * as credentials from "./local-credentials";
@@ -111,12 +111,22 @@ it("L03: never proves or sends a business handshake to an unverified server", as
   await expect(auth(socket, [record])).rejects.toThrow("server_unverified");
   expect(socket.sent).toHaveLength(1);
 });
-it.each([
-  "old",
-  "hint",
-  "unknown",
-  "close",
-])("L04: fresh profiles cannot downgrade on %s", async (kind) => {
+it.each(
+  ["fresh", "paired", "migrated"].flatMap((profile) =>
+    ["old", "hint", "unknown", "close"].map((kind) => ({ profile, kind })),
+  ),
+)("L04: $profile profiles cannot downgrade on $kind", async ({ profile, kind }) => {
+  if (profile === "paired") {
+    let record = credentials.parseLocalPairing(link);
+    await credentials.stageCredential(record);
+    record = await credentials.saveCandidate(record, { txn: v.txn, gen: 1, key: v.candidate });
+    await credentials.promoteCandidate(record, { txn: v.txn, gen: 1 });
+  } else if (profile === "migrated") {
+    await credentials.initializeLocalMigration(
+      { reason: "update", previousVersion: "0.3.2" },
+      "0.4.0",
+    );
+  }
   const socket = new Socket();
   socket.handler = (request) => {
     if (kind === "close") {
@@ -129,11 +139,21 @@ it.each([
         : {
             id: request.id,
             result: {
-              local_auth: {
-                type: "pairing_required",
-                daemon_id: kind === "unknown" ? v.txn : v.daemon_id,
-                legacy_accepted: true,
-              },
+              local_auth:
+                kind === "unknown"
+                  ? {
+                      type: "challenge",
+                      daemon_id: v.txn,
+                      device_id: v.device_id,
+                      gen: 1,
+                      server_nonce: v.server_nonce,
+                      server_proof: v.server,
+                    }
+                  : {
+                      type: "pairing_required",
+                      daemon_id: v.daemon_id,
+                      legacy_accepted: true,
+                    },
             },
           },
     );
@@ -143,29 +163,30 @@ it.each([
     origin,
     status: vi.fn(),
   });
-  await expect(authenticate(socket.ws(), new AbortController().signal)).rejects.not.toBeInstanceOf(
-    LegacyReconnect,
+  await expect(authenticate(socket.ws(), new AbortController().signal)).rejects.toBeInstanceOf(
+    LocalAuthError,
   );
   expect(socket.sent).toHaveLength(1);
 });
-it("L17/L18: only persisted migration can request one legacy reconnect; skip sends no hello", async () => {
+it("L17/L18: stale migration flags never downgrade; explicit skip still sends no hello", async () => {
   await credentials.initializeLocalMigration(
     { reason: "update", previousVersion: "0.3.2" },
     "0.4.0",
   );
+  expect((await credentials.readLocalState()).policy.legacyCompat).toBe(true);
   const authenticate = createLocalAuthenticator({
     instanceId: async () => instanceId,
     origin,
     status: vi.fn(),
   });
-  const socket = new Socket();
-  socket.handler = () => socket.close();
-  await expect(authenticate(socket.ws(), new AbortController().signal)).rejects.toBeInstanceOf(
-    LegacyReconnect,
-  );
-  const fallback = new Socket();
-  await authenticate(fallback.ws(), new AbortController().signal);
-  expect(fallback.sent).toHaveLength(0);
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const socket = new Socket();
+    socket.handler = () => socket.close();
+    await expect(authenticate(socket.ws(), new AbortController().signal)).rejects.toBeInstanceOf(
+      LocalAuthError,
+    );
+    expect(socket.sent.map((frame) => frame.method)).toEqual(["system.ping"]);
+  }
   await credentials.setSkipLocalVerification(true);
   const skipped = new Socket();
   await authenticate(skipped.ws(), new AbortController().signal);

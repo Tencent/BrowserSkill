@@ -18,8 +18,8 @@ protocol compatibility determines which versions can connect.
   and `daemon trust-local on|off`; status and doctor expose pairing guidance.
 - Extension 0.4.0 pairing settings, staged verification, ten-language guidance,
   explicit bypass confirmation and retained remote grants when using local mode.
-  Eligible existing installations receive temporary migration compatibility;
-  new installations do not. Pairing clears compatibility permanently.
+  Its temporary migration compatibility is retired by extension 0.4.1;
+  existing pairing and explicit skip preferences are preserved.
 
 ### Changed
 
@@ -27,7 +27,10 @@ protocol compatibility determines which versions can connect.
   `pairing_required`. Explicit TrustLocal and persisted Warn policies produce
   doctor warnings. This release requires pairing support in both extension stores;
   see the [local pairing rollout](docs/local-pairing.md#release-prerequisites).
-  Extension 0.4.1 migration retirement follows distribution of this CLI.
+- Extension 0.4.1 removes automatic legacy fallback and migration-only popup
+  messages. Stale migration flags, old-daemon replies and connection failures
+  cannot authorize a business handshake; only explicit skip permits bypass.
+  Release this extension only after the Required-mode CLI is distributed.
 
 ### Fixed
 

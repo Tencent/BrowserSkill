@@ -276,11 +276,6 @@ export function ConnectionSettings({
       <LocalPairingNotice
         status={notice}
         instanceId={instanceId}
-        onPair={() => {
-          setOpen(true);
-          setSelection("local");
-          setNewLink(true);
-        }}
         onRetry={() => void retry()}
         onRestore={() => void changeSkip(false).catch(() => setError("local"))}
       />

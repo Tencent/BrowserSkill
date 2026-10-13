@@ -83,12 +83,16 @@ it("L18: only eligible updates get migration compatibility; pairing never resurr
 it("L18: the exit version clears compatibility and never clears explicit skipping", async () => {
   await initializeLocalMigration({ reason: "update", previousVersion: "0.3.2" }, "0.4.0");
   await setSkipLocalVerification(true);
-  await initializeLocalMigration(undefined, "0.4.1");
+  expect((await readLocalState()).policy.legacyCompat).toBe(true);
+  // Use the bundled version to catch a release accidentally leaving migration enabled.
+  await initializeLocalMigration();
   expect((await readLocalState()).policy).toEqual({
     skip: true,
     everPaired: false,
     legacyCompat: false,
   });
+  await initializeLocalMigration({ reason: "update", previousVersion: "0.3.2" });
+  expect((await readLocalState()).policy.legacyCompat).toBe(false);
 });
 it("upgrades the shared database while keeping the existing remote grant", async () => {
   await new Promise<void>((resolve) => {

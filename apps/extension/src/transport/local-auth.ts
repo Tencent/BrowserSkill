@@ -22,15 +22,13 @@ export interface LocalAuthStatus {
   daemonId?: string;
   deviceId?: string;
   browserId?: string;
-  reason?: "skip" | "migration_old" | "migration_pair";
+  reason?: "skip";
 }
 export class LocalAuthError extends Error {
   constructor(readonly status: LocalAuthStatus) {
     super(status.state);
   }
 }
-/** Only a decision from persisted local policy can request an old handshake. */
-export class LegacyReconnect extends Error {}
 
 class AuthChannel {
   private queue: string[] = [];
@@ -64,7 +62,7 @@ class AuthChannel {
       this.waiting = undefined;
     } else this.queue.push(event.data);
   };
-  private closed = () => this.fail(new LocalAuthError({ state: "daemon_too_old" }));
+  private closed = () => this.fail(new LocalAuthError({ state: "server_unverified" }));
   private aborted = () => this.fail(new LocalAuthError({ state: "server_unverified" }));
   next(): Promise<string> {
     if (this.failure) return Promise.reject(this.failure);
@@ -200,19 +198,15 @@ export function createLocalAuthenticator(options: {
   origin: string;
   status: (status: LocalAuthStatus) => void;
 }) {
-  let legacyNext = false;
-  let legacyReason: "migration_old" | "migration_pair" = "migration_old";
   return async (socket: WebSocket, signal: AbortSignal): Promise<void> => {
     const { credentials, policy } = await readLocalState();
     if (signal.aborted) throw new LocalAuthError({ state: "server_unverified" });
-    const allowLegacy =
-      policy.legacyCompat && !policy.everPaired && !credentials.some((c) => c.role === "active");
-    if (policy.skip || (legacyNext && allowLegacy)) {
-      legacyNext = false;
-      options.status({ state: "unverified_local", reason: policy.skip ? "skip" : legacyReason });
+    // Migration ended in 0.4.1. Even a stale persisted flag cannot authorize
+    // downgrade; only the user's separate explicit skip setting may do so.
+    if (policy.skip) {
+      options.status({ state: "unverified_local", reason: "skip" });
       return;
     }
-    legacyNext = false;
     options.status({ state: "verifying" });
     try {
       const status = await authenticateLocal(
@@ -225,15 +219,6 @@ export function createLocalAuthenticator(options: {
       options.status(status);
     } catch (error) {
       if (signal.aborted) throw error;
-      // Neither a peer's error text nor its legacy_accepted flag grants fallback.
-      if (allowLegacy) {
-        legacyReason =
-          error instanceof LocalAuthError && error.status.state === "pairing_required"
-            ? "migration_pair"
-            : "migration_old";
-        legacyNext = true;
-        throw new LegacyReconnect();
-      }
       options.status(
         error instanceof LocalAuthError ? error.status : { state: "server_unverified" },
       );

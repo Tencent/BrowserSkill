@@ -162,8 +162,6 @@
         "already_paired": "Dieser Browser ist bereits gekoppelt. Zum Ersetzen bsk daemon pair --replace {{browser}} ausführen und den neuen Link einfügen.",
         "replace_mismatch": "Dieser Browser ist {{instance}}; das Ziel ist {{browser}}. Keine Änderungen. Für ein neues Profil bsk daemon pair verwenden; ungenutzte Geräte mit bsk daemon revoke {{browser}} widerrufen.",
         "skip": "Lokale Verifizierung wird übersprungen. Lokale Programme könnten sich als bsk ausgeben und diesen Browser steuern.",
-        "migration_old": "Diese Verbindung ist nicht verifiziert; bsk ist für die Kopplung zu alt. Mit bsk update aktualisieren, dann koppeln.",
-        "migration_pair": "Diese Verbindung ist nicht verifiziert. bsk wird bald eine Kopplung voraussetzen. Bitte jetzt einmalig koppeln.",
         "server_unverified": "Verifizierung fehlgeschlagen. Ein anderes Programm könnte den Port belegen oder die Kopplung wurde zurückgesetzt. Mit bsk doctor prüfen.",
         "daemon_too_old": "bsk ist für eine sichere Verbindung zu alt. Führen Sie bsk update aus und versuchen Sie es erneut.",
         "busy": "Eine andere Verbindung verifiziert dieses Gerät. Bitte kurz warten."

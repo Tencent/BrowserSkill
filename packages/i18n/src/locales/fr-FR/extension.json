@@ -162,8 +162,6 @@
         "already_paired": "Ce navigateur est déjà associé. Pour remplacer l’association, exécutez bsk daemon pair --replace {{browser}} et collez le nouveau lien.",
         "replace_mismatch": "Ce navigateur est {{instance}} ; la cible est {{browser}}. Aucune modification. Pour un nouveau profil, utilisez bsk daemon pair ; révoquez un appareil inutilisé avec bsk daemon revoke {{browser}}.",
         "skip": "La vérification locale est ignorée. Un programme local pourrait se faire passer pour bsk et contrôler ce navigateur.",
-        "migration_old": "Connexion non vérifiée : bsk est trop ancien pour l’association. Exécutez bsk update, puis associez le navigateur.",
-        "migration_pair": "Cette connexion n’est pas vérifiée. bsk exigera bientôt une association ; effectuez-la une fois maintenant.",
         "server_unverified": "Échec de la vérification. Un autre programme utilise peut-être le port ou l’association a été réinitialisée. Vérifiez avec bsk doctor.",
         "daemon_too_old": "bsk est trop ancien pour une connexion sécurisée. Exécutez bsk update et réessayez.",
         "busy": "Une autre connexion vérifie cet appareil. Réessayez dans un instant."
