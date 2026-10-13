@@ -46,8 +46,12 @@ pub struct AlreadyLocked {
 
 /// Acquire the lock exclusively, returning a guard.
 pub fn acquire() -> Result<DaemonLock> {
-    paths::ensure_bsk_home()?;
-    let path = paths::lock_path()?;
+    acquire_at(&paths::ensure_bsk_home()?)
+}
+
+/// Acquire the lifecycle lock in an already-created daemon home.
+pub fn acquire_at(home: &std::path::Path) -> Result<DaemonLock> {
+    let path = home.join("daemon.lock");
     let file = OpenOptions::new()
         .read(true)
         .write(true)

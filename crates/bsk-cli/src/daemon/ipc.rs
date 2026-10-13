@@ -237,6 +237,19 @@ pub fn full_handler(status: DaemonStatus, state: Arc<DaemonState>) -> RpcHandler
                 .unwrap_or(false)
                 .then(|| (method.clone(), params.clone()));
             let body = match method {
+                Method::LocalAuthPair
+                | Method::LocalAuthDevices
+                | Method::LocalAuthRevoke
+                | Method::LocalAuthRotate
+                | Method::LocalAuthSetMode => {
+                    super::local_auth::maintenance::handle(
+                        state.clone(),
+                        status.ws_port,
+                        method,
+                        params,
+                    )
+                    .await
+                }
                 Method::SystemPing => {
                     let result = PingResult { pong: true };
                     ResponseBody::Ok(serde_json::to_value(result).unwrap_or(Value::Null))
