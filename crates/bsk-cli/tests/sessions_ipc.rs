@@ -48,7 +48,9 @@ async fn spawn_daemon() -> (daemon::DaemonHandle, PathBuf) {
 async fn spawn_daemon_with_connect_wait(connect_wait: Duration) -> (daemon::DaemonHandle, PathBuf) {
     let port = 0;
 
-    let config = DaemonConfig::new(port).with_extension_connect_wait(connect_wait);
+    let config = DaemonConfig::new(port)
+        .with_local_auth(bsk::daemon::local_auth::LocalAuthMode::TrustLocal)
+        .with_extension_connect_wait(connect_wait);
     let sock = tempfile_path("bsk-test-ipc");
     let handle = daemon::run(config, Some(sock.clone())).await.unwrap();
     (handle, sock)
@@ -57,7 +59,8 @@ async fn spawn_daemon_with_connect_wait(connect_wait: Duration) -> (daemon::Daem
 async fn spawn_daemon_with_session_idle(session_idle: Duration) -> (daemon::DaemonHandle, PathBuf) {
     let port = 0;
 
-    let mut config = DaemonConfig::new(port);
+    let mut config =
+        DaemonConfig::new(port).with_local_auth(bsk::daemon::local_auth::LocalAuthMode::TrustLocal);
     config.session_idle = session_idle;
     let sock = tempfile_path("bsk-test-ipc");
     let handle = daemon::run(config, Some(sock.clone())).await.unwrap();

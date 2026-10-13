@@ -42,9 +42,12 @@ fn tempfile_path(prefix: &str) -> PathBuf {
 async fn spawn_daemon() -> (daemon::DaemonHandle, PathBuf) {
     let port = 0;
     let sock = tempfile_path("bsk-test-tools");
-    let handle = daemon::run(DaemonConfig::new(port), Some(sock.clone()))
-        .await
-        .unwrap();
+    let handle = daemon::run(
+        DaemonConfig::new(port).with_local_auth(bsk::daemon::local_auth::LocalAuthMode::TrustLocal),
+        Some(sock.clone()),
+    )
+    .await
+    .unwrap();
     (handle, sock)
 }
 

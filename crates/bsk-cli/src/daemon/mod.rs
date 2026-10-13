@@ -12,6 +12,7 @@ pub(crate) mod json_store;
 pub mod local_auth;
 pub mod lockfile;
 pub mod paths;
+pub(crate) mod peer_authorization;
 pub(crate) mod probe;
 pub mod queue;
 pub mod remote;

@@ -56,6 +56,7 @@ fn fake_session(session_id: &str, browser_id: &str) -> Session {
 async fn spawn_reaping_daemon() -> daemon::DaemonHandle {
     // Tiny window so the reaper acts within the test's lifetime.
     let config = DaemonConfig::new(0)
+        .with_local_auth(bsk::daemon::local_auth::LocalAuthMode::TrustLocal)
         .with_browser_liveness(Duration::from_millis(150), Duration::from_millis(25));
     daemon::run(config, None).await.unwrap()
 }

@@ -78,7 +78,7 @@ fn ok(body: ResponseBody) -> Value {
 async fn records_production_dispatch_and_isolates_browser_history() {
     tokio::time::timeout(Duration::from_secs(20), async {
         let temp = tempfile::tempdir().unwrap();
-        let mut state = DaemonState::new(DaemonConfig::new(0));
+        let mut state = DaemonState::new(DaemonConfig::new(0).with_local_auth(bsk::daemon::local_auth::LocalAuthMode::TrustLocal));
         state.audit = Arc::new(AuditStore::new(Some(temp.path().join("audit"))));
         state.sessions = Arc::new(SessionRegistry::with_audit(Arc::clone(&state.audit)));
         state.tool_queues = Arc::new(ToolQueueRegistry::new(

@@ -60,8 +60,6 @@ pub struct DaemonConfig {
     pub ws_port: u16,
     pub session_idle: Duration,
     pub daemon_idle: Duration,
-    /// Skip the Origin allow-list (tests / `--insecure-origin`).
-    pub allow_any_origin: bool,
     /// How long `session.start` polls for an extension handshake before
     /// returning `no_browser_connected`.
     pub extension_connect_wait: Duration,
@@ -91,13 +89,17 @@ impl DaemonConfig {
             ws_port: port,
             session_idle: Duration::from_secs(60 * 5),
             daemon_idle: Duration::from_secs(60 * 30),
-            allow_any_origin: false,
             extension_connect_wait: EXTENSION_CONNECT_WAIT,
             browser_liveness_timeout: BROWSER_LIVENESS_TIMEOUT,
             browser_liveness_tick: BROWSER_LIVENESS_TICK,
             detached: false,
             replaces: None,
         }
+    }
+
+    pub fn with_local_auth(mut self, mode: super::local_auth::LocalAuthMode) -> Self {
+        self.local_auth = mode;
+        self
     }
 
     pub fn with_extension_connect_wait(mut self, wait: Duration) -> Self {
@@ -129,7 +131,6 @@ impl From<&StartArgs> for DaemonConfig {
             ws_port: args.resolved_port(),
             session_idle: args.resolved_session_idle(),
             daemon_idle: args.resolved_daemon_idle(),
-            allow_any_origin: false,
             extension_connect_wait: EXTENSION_CONNECT_WAIT,
             browser_liveness_timeout: BROWSER_LIVENESS_TIMEOUT,
             browser_liveness_tick: BROWSER_LIVENESS_TICK,

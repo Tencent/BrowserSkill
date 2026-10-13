@@ -82,6 +82,7 @@ impl Default for State {
 pub struct PairingStore {
     path: Option<PathBuf>,
     state: Mutex<State>,
+    changed: tokio::sync::watch::Sender<()>,
 }
 impl std::fmt::Debug for PairingStore {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -129,12 +130,14 @@ impl PairingStore {
         Ok(Self {
             path: Some(path),
             state: Mutex::new(state),
+            changed: tokio::sync::watch::channel(()).0,
         })
     }
     pub fn memory() -> Self {
         Self {
             path: None,
             state: Mutex::new(State::default()),
+            changed: tokio::sync::watch::channel(()).0,
         }
     }
     fn update<T>(&self, work: impl FnOnce(&mut State) -> Result<T>) -> Result<T> {
@@ -152,7 +155,12 @@ impl PairingStore {
             })?;
         }
         *current = next;
+        drop(current);
+        self.changed.send_replace(());
         Ok(result)
+    }
+    pub(crate) fn changes(&self) -> tokio::sync::watch::Receiver<()> {
+        self.changed.subscribe()
     }
     pub fn daemon_id(&self) -> Bytes<16> {
         self.state.lock().unwrap().daemon_id
