@@ -1303,6 +1303,55 @@ export async function handleFill(
     }
     if (preparation.write === "value") {
       // Date-like inputs have no text caret; assign the sanitized value directly.
+      // Still flush deferred background focus first so a later tab switch cannot
+      // replay a pending focus handler over the value we are about to write.
+      if (params.value !== "" && (!clearBefore || ready === "background")) {
+        try {
+          await deps.cdp.send(target.tabId, "Input.dispatchKeyEvent", {
+            type: "rawKeyDown",
+            commands: ["moveToEndOfDocument"],
+          });
+        } finally {
+          await deps.cdp.send(target.tabId, "Input.dispatchKeyEvent", { type: "keyUp" });
+        }
+        if (throwIfAborted(deps.signal)) {
+          return { code: "cancelled", message: "fill aborted" };
+        }
+        // Value write overwrites the field next, so only recheck focus/editability
+        // after deferred focus handlers — not preparation.before equality.
+        const focusReply = await nodeCdp.send<FillScriptReply<FillReadiness>>(
+          target.tabId,
+          "Runtime.callFunctionOn",
+          {
+            objectId,
+            functionDeclaration: `function() {
+              if (!(${FILL_EDITABLE_FUNCTION}).call(this)) return 'fill_target_changed';
+              if (this.getRootNode().activeElement !== this) return 'fill_focus_lost';
+              return this.ownerDocument.hasFocus() ? 'ready' : 'background';
+            }`,
+            returnByValue: true,
+          },
+        );
+        ready = focusReply.result?.value as FillReadiness;
+        if (
+          focusReply.exceptionDetails ||
+          (ready !== "ready" &&
+            ready !== "background" &&
+            ready !== "fill_target_changed" &&
+            ready !== "fill_focus_lost")
+        ) {
+          return fillError(
+            "fill_failed",
+            "fill readiness script failed or returned an unexpected result",
+          );
+        }
+        if (throwIfAborted(deps.signal)) {
+          return { code: "cancelled", message: "fill aborted" };
+        }
+        if (ready !== "ready" && ready !== "background") {
+          return fillError(ready, "fill target changed or lost focus before assigning the value");
+        }
+      }
       if (preparation.expected !== "") {
         const assigned = await nodeCdp.send<FillScriptReply<unknown>>(
           target.tabId,
@@ -1377,8 +1426,8 @@ export async function handleFill(
       {
         objectId,
         functionDeclaration: `function() {
-          this.dispatchEvent(new Event('input', { bubbles: true }));
-          this.dispatchEvent(new Event('change', { bubbles: true }));
+          this.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
+          this.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
         }`,
         returnByValue: true,
       },

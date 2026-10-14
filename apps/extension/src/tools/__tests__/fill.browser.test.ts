@@ -57,6 +57,7 @@ async function withFillBrowser(
       ref?: string,
     ) => ReturnType<typeof handleFill>;
     afterCommand: (hook: (method: string, params?: object) => void | Promise<void>) => void;
+    activate: () => Promise<void>;
     calls: string[];
     observe: () => ReturnType<typeof handleObserve>;
   }) => Promise<void>,
@@ -145,6 +146,9 @@ async function withFillBrowser(
         handleObserve(manager, { session_id: "aa11" }, { ...deps, conditionalSurfaceProbe: false }),
       afterCommand: (hook) => {
         afterCommand = hook;
+      },
+      activate: async () => {
+        await send("Page.bringToFront", {}, sessionId);
       },
       ref: async (expression) => {
         const { result } = await send<{ result: { objectId: string } }>(
@@ -472,6 +476,60 @@ describe.skipIf(!process.env.BSK_FILL_CHROME)("fill focus changes", () => {
         expect(await h.fill("hello", false)).toMatchObject({ data: { reason: "fill_focus_lost" } });
         expect(await h.evaluate("document.querySelector('#guard').value")).toBe("untouched");
         expect(await h.evaluate("document.querySelector('#target').textContent")).toBe("old");
+        expect(h.calls).not.toContain("Input.insertText");
+      },
+    );
+  }, 30_000);
+});
+
+describe.skipIf(!process.env.BSK_FILL_CHROME)("date-like fill regressions", () => {
+  it("keeps a background date fill after the tab becomes active", async () => {
+    await withFillBrowser(
+      { background: true, markup: guard + '<input id="target" type="date">' },
+      async (h) => {
+        await h.ref("document.querySelector('#target')");
+        await h.evaluate(`document.querySelector('#target').addEventListener('focus', () => {
+          document.querySelector('#target').value = '2026-01-01';
+        })`);
+        expect(await h.fill("2026-10-14")).toMatchObject({ value_length: 10 });
+        expect(await h.evaluate("document.querySelector('#target').value")).toBe("2026-10-14");
+        await h.activate();
+        expect(await h.evaluate("document.hasFocus()")).toBe(true);
+        expect(await h.evaluate("document.querySelector('#target').value")).toBe("2026-10-14");
+        expect(h.calls).toContain("Input.dispatchKeyEvent");
+        expect(h.calls).not.toContain("Input.insertText");
+      },
+    );
+  }, 30_000);
+
+  it.each([
+    ["date", "2026-10-14"],
+    ["time", "14:30"],
+    ["datetime-local", "2026-10-14T14:30"],
+    ["month", "2026-10"],
+    ["week", "2026-W42"],
+  ] as const)("notifies a shadow host when filling %s", async (type, value) => {
+    await withFillBrowser(
+      { background: false, markup: guard + '<div id="host"></div>' },
+      async (h) => {
+        await h.evaluate(`(() => {
+          const host = document.querySelector('#host');
+          const root = host.attachShadow({ mode: 'open' });
+          root.innerHTML = '<input id="target" type="${type}">';
+          window.hostInputEvents = [];
+          host.addEventListener('input', (event) => {
+            window.hostInputEvents.push({
+              composed: event.composed,
+              value: root.querySelector('#target').value,
+            });
+          });
+        })()`);
+        await h.ref("document.querySelector('#host').shadowRoot.querySelector('#target')");
+        expect(await h.fill(value)).toMatchObject({ value_length: value.length });
+        expect(
+          await h.evaluate("document.querySelector('#host').shadowRoot.querySelector('#target').value"),
+        ).toBe(value);
+        expect(await h.evaluate("window.hostInputEvents")).toEqual([{ composed: true, value }]);
         expect(h.calls).not.toContain("Input.insertText");
       },
     );
