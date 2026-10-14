@@ -2080,6 +2080,51 @@ describe("handleSelect", () => {
     });
   });
 
+  it("delivers input to listeners outside a select's shadow root", async () => {
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = host.attachShadow({ mode: "open" });
+    root.innerHTML =
+      '<select><option value="us">US</option><option value="ca">Canada</option></select>';
+    const select = root.querySelector("select")!;
+    const listener = vi.fn();
+    host.addEventListener("input", listener);
+    const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
+    const ctx = await sm.start("aa11");
+    ctx.refStore.set("e1", 555, { tabId: 4 });
+    const fake = makeFakeCdp({
+      ...selectHandlers({ ok: true }),
+      "Runtime.callFunctionOn": (params) => {
+        const script = params as {
+          functionDeclaration: string;
+          arguments: Array<{ value: unknown }>;
+        };
+        const fn = new Function(`return (${script.functionDeclaration})`)();
+        return {
+          result: {
+            value: fn.apply(
+              select,
+              script.arguments.map((arg) => arg.value),
+            ),
+          },
+        };
+      },
+    });
+    try {
+      expect(
+        await handleSelect(
+          sm,
+          { session_id: "aa11", ref: "e1", values: ["ca"] },
+          { cdp: fake.cdp, tabsApi: fake.tabsApi },
+        ),
+      ).toMatchObject({ selected_values: ["ca"] });
+      expect(listener).toHaveBeenCalledOnce();
+      expect(select.value).toBe("ca");
+    } finally {
+      host.remove();
+    }
+  });
+
   it("rejects multiple values on a single-select <select>", async () => {
     const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
     const ctx = await sm.start("aa11");

@@ -307,6 +307,22 @@ describe.skipIf(!process.env.BSK_FILL_CHROME)("native controls and editing hosts
         expect(await h.evaluate("document.querySelector('#editor').textContent")).toBe("hello");
       });
     }, 30_000);
+
+    it("notifies the document when clearing a field in a shadow root", async () => {
+      await withFillBrowser({ background, markup: '<div id="host"></div>' }, async (h) => {
+        await h.evaluate(`
+          const root = document.querySelector('#host').attachShadow({ mode: 'open' });
+          root.innerHTML = '<input value="old">';
+          window.inputValues = [];
+          document.addEventListener('input', event => {
+            window.inputValues.push(event.composedPath()[0].value);
+          });
+        `);
+        await h.ref("document.querySelector('#host').shadowRoot.querySelector('input')");
+        expect(await h.fill("")).toMatchObject({ value_length: 0 });
+        expect(await h.evaluate("window.inputValues")).toEqual(["", ""]);
+      });
+    });
   });
 });
 

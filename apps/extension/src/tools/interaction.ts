@@ -1181,7 +1181,7 @@ export async function handleFill(
             } else {
               this.textContent = '';
             }
-            this.dispatchEvent(new Event('input', { bubbles: true }));
+            this.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
           }
           return preparation;
         }`,
@@ -1324,7 +1324,7 @@ export async function handleFill(
       {
         objectId,
         functionDeclaration: `function() {
-          this.dispatchEvent(new Event('input', { bubbles: true }));
+          this.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
           this.dispatchEvent(new Event('change', { bubbles: true }));
         }`,
         returnByValue: true,
@@ -1771,7 +1771,7 @@ export async function handleSelect(
         for (const opt of select.options) {
           opt.selected = want.has(opt.value);
         }
-        select.dispatchEvent(new Event('input', { bubbles: true }));
+        select.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
         select.dispatchEvent(new Event('change', { bubbles: true }));
         const selected = Array.from(select.selectedOptions);
         return {
