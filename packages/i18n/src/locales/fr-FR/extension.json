@@ -133,6 +133,11 @@
       "promptTemplate": "Pour cette tâche, utilise BrowserSkill dans le navigateur {{name}} (ID d’instance : {{instanceId}}). Démarre chaque nouvelle session de cette tâche avec l'interface appropriée :\nCLI : {{command}}\nDeepSeek Harness : {{toolCall}}\nDans DeepSeek Harness, appelle l'outil sans exécuter séparément la commande CLI.\nSi cette instance n'est pas connectée, arrête-toi et demande-moi de reconnecter ce profil. N'omets pas --browser / browser et ne passe pas à une autre instance.",
       "title": "Navigateur actuel",
       "unnamed": "Navigateur sans nom"
+    },
+    "bookmarks": {
+      "title": "Accès aux favoris",
+      "scope": "Autorise les agents à lire et modifier tous les favoris de ce profil Chrome. Désactivé par défaut.",
+      "failed": "Impossible de lire ou de modifier l’accès aux favoris. Rouvrez les paramètres et réessayez."
     }
   },
   "controlOverlay": {

@@ -133,6 +133,11 @@
       "promptTemplate": "Para esta tarea, usa BrowserSkill en el navegador {{name}} (ID de instancia: {{instanceId}}). Inicia cada nueva sesión de esta tarea con la interfaz correspondiente:\nCLI: {{command}}\nDeepSeek Harness: {{toolCall}}\nEn DeepSeek Harness, llama a la herramienta sin ejecutar el comando CLI por separado.\nSi esta instancia no está conectada, detente y pídeme que vuelva a conectar este perfil. No omitas --browser / browser ni cambies a otra instancia.",
       "title": "Navegador actual",
       "unnamed": "Navegador sin nombre"
+    },
+    "bookmarks": {
+      "title": "Acceso a marcadores",
+      "scope": "Permite a los agentes leer y editar todos los marcadores de este perfil de Chrome. Desactivado por defecto.",
+      "failed": "No se pudo consultar o cambiar el acceso a marcadores. Vuelve a abrir los ajustes e inténtalo de nuevo."
     }
   },
   "controlOverlay": {

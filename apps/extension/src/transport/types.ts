@@ -1105,3 +1105,30 @@ export interface RecordAwaitParams {
 export interface RecordAwaitResult {
   trace: RecordedTrace;
 }
+
+/** Optional-permission bookmarks API. IDs belong to the session's local profile. */
+export interface BookmarksParams {
+  session_id: string;
+  id?: string;
+  parent_id?: string;
+  index?: number;
+  title?: string;
+}
+export interface BookmarkNode {
+  id: string;
+  title: string;
+  parentId?: string;
+  index?: number;
+  url?: string;
+  children?: BookmarkNode[];
+  dateAdded?: number;
+  dateGroupModified?: number;
+  dateLastUsed?: number;
+  unmodifiable?: string;
+  folderType?: string;
+  syncing?: boolean;
+}
+export interface BookmarksResult {
+  nodes: BookmarkNode[];
+  removed_id?: string;
+}

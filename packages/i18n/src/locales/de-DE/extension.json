@@ -133,6 +133,11 @@
       "promptTemplate": "Nutze für diese Aufgabe BrowserSkill im Browser {{name}} (Instanz-ID: {{instanceId}}). Starte jede neue Sitzung für diese Aufgabe über die passende Schnittstelle:\nCLI: {{command}}\nDeepSeek Harness: {{toolCall}}\nNutze in DeepSeek Harness den Tool-Aufruf. Führe den CLI-Befehl nicht zusätzlich aus.\nWenn diese Instanz nicht verbunden ist, halte an und bitte mich, dieses Profil wieder zu verbinden. Lasse --browser / browser nicht weg und wechsle nicht zu einer anderen Instanz.",
       "title": "Aktueller Browser",
       "unnamed": "Unbenannter Browser"
+    },
+    "bookmarks": {
+      "title": "Lesezeichenzugriff",
+      "scope": "Agenten dürfen alle Lesezeichen in diesem Chrome-Profil lesen und bearbeiten. Standardmäßig deaktiviert.",
+      "failed": "Der Lesezeichenzugriff konnte nicht gelesen oder geändert werden. Öffnen Sie die Einstellungen erneut und versuchen Sie es noch einmal."
     }
   },
   "controlOverlay": {

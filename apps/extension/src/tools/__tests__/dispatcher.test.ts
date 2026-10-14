@@ -94,7 +94,11 @@ describe("ToolDispatcher", () => {
   it.each([
     "tool.upload",
     "tool.download",
-  ])("rejects %s for remote sessions before file handling", async (method) => {
+    "tool.bookmarks_tree",
+    "tool.bookmarks_move",
+    "tool.bookmarks_create_folder",
+    "tool.bookmarks_remove_empty_folder",
+  ])("rejects %s for remote sessions before profile data access", async (method) => {
     const { transport, sent, deliver } = fakeTransport();
     const sessions = new SessionManager({
       remote: () => true,

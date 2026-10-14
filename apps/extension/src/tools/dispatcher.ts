@@ -8,6 +8,7 @@ import { withTaskPopups } from "@/session-manager/task-popups";
 import type { Transport } from "@/transport/transport";
 import type {
   BlurParams,
+  BookmarksParams,
   ClickParams,
   ConsoleParams,
   DownloadParams,
@@ -51,6 +52,7 @@ import type { VideoManager } from "@/video/manager";
 import type { VideoParams } from "@/video/types";
 import { auditContext } from "./audit-context";
 import { prepareBackgroundExecution } from "./background-execution";
+import { handleBookmarks } from "./bookmarks";
 import { handleConsole } from "./console";
 import { handleDebug } from "./debug";
 import { handleDownload } from "./download";
@@ -434,6 +436,11 @@ export class ToolDispatcher {
     );
     if (preparationError) return preparationError;
     switch (req.method) {
+      case "tool.bookmarks_tree":
+      case "tool.bookmarks_move":
+      case "tool.bookmarks_create_folder":
+      case "tool.bookmarks_remove_empty_folder":
+        return handleBookmarks(this.sessions, req.method, req.params as BookmarksParams, signal);
       case "tool.video":
         if (!this.video)
           return {
@@ -483,6 +490,9 @@ export class ToolDispatcher {
       }
       case "tool.tab_list":
         return handleTabList(this.sessions, req.params as TabListParams, chromeTabsApi, signal);
+      case "tool.bookmarks_move":
+      case "tool.bookmarks_create_folder":
+      case "tool.bookmarks_remove_empty_folder":
       case "tool.tab_create": {
         const result = await handleTabCreate(this.sessions, req.params as TabCreateParams, {
           signal,

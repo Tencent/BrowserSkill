@@ -3,6 +3,7 @@
 use std::time::Duration;
 
 mod atomic_output;
+pub mod bookmarks;
 pub mod browser_wait;
 pub mod browsers;
 pub mod business_rpc;
@@ -181,6 +182,9 @@ pub enum Command {
 
     /// Click a snapshot ref or CSS selector.
     Click(ClickArgs),
+
+    /// Read or edit bookmarks in the selected local browser profile.
+    Bookmarks(bookmarks::BookmarksArgs),
 
     /// Hover a snapshot ref or CSS selector.
     Hover(HoverArgs),
