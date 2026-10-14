@@ -136,7 +136,6 @@ describe("fill result verification", () => {
     "checkbox",
     "radio",
     "range",
-    "date",
     "file",
   ])("rejects an unsupported %s input before clearing", async (type) => {
     const h = await setup(`<input type="${type}">`);
@@ -146,6 +145,43 @@ describe("fill result verification", () => {
       data: { reason: "target_not_fillable" },
     });
     expect(h.element.value).toBe(before);
+    expect(h.insert).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["date", "2026-10-14"],
+    ["time", "14:30"],
+    ["datetime-local", "2026-10-14T14:30"],
+    ["month", "2026-10"],
+    ["week", "2026-W42"],
+  ] as const)("fills a %s input via the value setter", async (type, value) => {
+    const h = await setup(`<input type="${type}" value="">`);
+    expect(await h.fill(value)).toMatchObject({ value_length: value.length });
+    expect(h.element.value).toBe(value);
+    expect(h.insert).not.toHaveBeenCalled();
+    expect(h.release).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    "date",
+    "time",
+    "datetime-local",
+    "month",
+    "week",
+  ])("rejects an invalid %s value before clearing", async (type) => {
+    const h = await setup(`<input type="${type}" value="">`);
+    expect(await h.fill("not-a-date")).toMatchObject({
+      code: "invalid_params",
+      data: { reason: "fill_value_invalid" },
+    });
+    expect(h.element.value).toBe("");
+    expect(h.insert).not.toHaveBeenCalled();
+  });
+
+  it("clears a date input without insertText", async () => {
+    const h = await setup('<input type="date" value="2026-01-01">');
+    expect(await h.fill("")).toMatchObject({ value_length: 0 });
+    expect(h.element.value).toBe("");
     expect(h.insert).not.toHaveBeenCalled();
   });
 

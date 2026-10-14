@@ -124,6 +124,21 @@ export const acceptedTargets = [
       ["!", false, "hello!"],
     ],
   },
+  ...[
+    ["date", "2026-10-14"],
+    ["time", "14:30"],
+    ["datetime-local", "2026-10-14T14:30"],
+    ["month", "2026-10"],
+    ["week", "2026-W42"],
+  ].map(([type, value]) => ({
+    name: `${type} input`,
+    markup: `<input id="target" type="${type}">`,
+    steps: [
+      [value, true, value],
+      ["", true, ""],
+      [value, false, value],
+    ],
+  })),
 ];
 
 export const rejectedTargets = [
@@ -147,7 +162,7 @@ export const rejectedTargets = [
     name: "disabled fieldset",
     markup: '<fieldset disabled><input id="target" value="old"></fieldset>',
   },
-  ...["checkbox", "radio", "range", "date", "file"].map((type) => ({
+  ...["checkbox", "radio", "range", "file"].map((type) => ({
     name: `${type} input`,
     markup: `<input id="target" type="${type}">`,
   })),
