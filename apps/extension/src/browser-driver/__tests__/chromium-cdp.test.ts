@@ -852,6 +852,29 @@ describe("ChromiumCdp", () => {
     ]);
   });
 
+  it.each([
+    [{ type: "string", value: "connection token expired" }, "connection token expired"],
+    [{ type: "string", value: "first line\nsecond line" }, "first line"],
+    [{ type: "number", value: 0, description: "0" }, "0"],
+    [{ type: "boolean", value: false }, "false"],
+    [{ type: "object", subtype: "null", value: null }, "null"],
+    [{ type: "undefined" }, "[undefined]"],
+  ])("records the thrown primitive %j in console entries", async (exception, text) => {
+    const { api, onEvent } = fakeApi();
+    const cdp = new ChromiumCdp(api);
+    try {
+      await cdp.ensureAttached(22);
+      onEvent.fire({ tabId: 22 }, "Runtime.exceptionThrown", {
+        exceptionDetails: { text: "Uncaught", exception },
+      });
+      expect(cdp.consoleEntriesSince(22, 0, 50, 1000, false).entries).toMatchObject([
+        { kind: "exception", level: "error", text },
+      ]);
+    } finally {
+      cdp.dispose();
+    }
+  });
+
   it("filters console entries by cursor and caps result size", async () => {
     const { api, onEvent } = fakeApi();
     const cdp = new ChromiumCdp(api);

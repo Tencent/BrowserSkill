@@ -75,19 +75,17 @@ function abortedError(signal: AbortSignal | undefined): RpcError | null {
 
 /**
  * Pull a human-readable error text out of CDP's exception payload.
- * Prefers `exception.description` (the full stack) and falls back to
- * `exceptionDetails.text` (the short header). Both are best-effort —
- * Chrome sometimes ships an empty string when the throw value is
- * `null` / `undefined` / a non-Error primitive.
+ * Prefers `exception.description` (the full stack), then a thrown
+ * primitive's value, before falling back to the generic short header.
  */
 function extractErrorText(details: CdpExceptionDetails): string {
   const desc = details.exception?.description?.trim();
   if (desc) return desc;
-  const text = details.text?.trim();
-  if (text) return text;
   if (details.exception?.value !== undefined) {
     return `Uncaught ${String(details.exception.value)}`;
   }
+  const text = details.text?.trim();
+  if (text) return text;
   return "Uncaught (unknown error)";
 }
 

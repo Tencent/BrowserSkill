@@ -1271,7 +1271,7 @@ export function parseExceptionThrown(params: unknown): ParsedConsoleEntry | null
   const details = (raw.exceptionDetails ?? {}) as Record<string, unknown>;
   const exception = (details.exception ?? {}) as Record<string, unknown>;
   const text =
-    firstLine(typeof exception.description === "string" ? exception.description : undefined) ||
+    firstLine(remoteObjectToText(exception)) ||
     firstLine(typeof details.text === "string" ? details.text : undefined) ||
     "Uncaught (unknown error)";
   return makeConsoleEntry({
