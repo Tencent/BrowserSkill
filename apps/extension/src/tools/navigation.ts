@@ -792,6 +792,10 @@ export async function handleNavigate(
   if (isRpcError(target)) return target;
   const denied = enforceAgentWindow(ctx, target, "navigate");
   if (denied) return denied;
+  // #420: remember the tab this session is operating so a multi-tab Agent
+  // Window never silently retargets an untargeted later call to a different
+  // document when the live active tab drifts away.
+  ctx.lastTabId = target.tabId;
   const dialogCursor = markDialogCursor(deps.cdp, target.tabId);
 
   const waitUntil: WaitUntil = params.wait_until ?? "load";

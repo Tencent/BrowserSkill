@@ -16,6 +16,13 @@ export interface SessionContext {
   agentCreatedTabs: Set<number>;
   /** Observed same-window popups: controllable, but preserved by session stop. */
   observedTabs?: Set<number>;
+  /**
+   * Tab this session last navigated / observed / read. When the Agent
+   * Window's current active tab is not session-controlled (a user-opened
+   * tab or extension popup became active), untargeted tool calls prefer
+   * this tab instead of silently retargeting a different document.
+   */
+  lastTabId?: number;
   createdAtMs: number;
 }
 

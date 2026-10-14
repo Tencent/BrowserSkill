@@ -1086,6 +1086,10 @@ async function handleVomObservation(
   if (signal?.aborted) return cancelled(toolName);
   const denied = enforceToolTargetScope(ctx, target, effect, toolName);
   if (denied) return denied;
+  // #420: remember the tab this session just observed so a multi-tab Agent
+  // Window never silently retargets an untargeted later call to a different
+  // document when the live active tab drifts away.
+  ctx.lastTabId = target.tabId;
   const dialogCursor = markDialogCursor(deps.cdp, target.tabId);
 
   try {

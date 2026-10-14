@@ -197,3 +197,84 @@ describe("remote tab ownership", () => {
     });
   });
 });
+
+describe("untargeted tab drift in a multi-tab Agent Window (#420)", () => {
+  it("stays anchored to the last navigated/observed tab when the active tab drifts", async () => {
+    const manager = new SessionManager({ agentWindow: fakeAgentWindow() });
+    const context = await manager.start("drift");
+    // The session last navigated tab 1; the Agent Window's live active tab
+    // has since drifted to a user-opened tab 9.
+    context.lastTabId = 1;
+    const tabs = {
+      get: vi.fn(
+        async (id: number) =>
+          ({ id, windowId: context.agentWindowId, active: id !== 9 }) as chrome.tabs.Tab,
+      ),
+      query: vi.fn(
+        async () =>
+          [{ id: 9, windowId: context.agentWindowId, active: true }] as chrome.tabs.Tab[],
+      ),
+    };
+    expect(await resolveTargetTab(manager, context, undefined, tabs)).toMatchObject({
+      tabId: 1,
+      windowId: context.agentWindowId,
+    });
+  });
+
+  it("falls back to the active tab when the anchored tab has closed", async () => {
+    const manager = new SessionManager({ agentWindow: fakeAgentWindow() });
+    const context = await manager.start("drift");
+    context.lastTabId = 1;
+    const tabs = {
+      get: vi.fn(async () => {
+        throw new Error("No tab with id: 1");
+      }),
+      query: vi.fn(
+        async () =>
+          [{ id: 9, windowId: context.agentWindowId, active: true }] as chrome.tabs.Tab[],
+      ),
+    };
+    expect(await resolveTargetTab(manager, context, undefined, tabs)).toMatchObject({
+      tabId: 9,
+      windowId: context.agentWindowId,
+    });
+  });
+
+  it("falls back to the active tab when the anchored tab left the Agent Window", async () => {
+    const manager = new SessionManager({ agentWindow: fakeAgentWindow() });
+    const context = await manager.start("drift");
+    context.lastTabId = 1;
+    const tabs = {
+      get: vi.fn(
+        async () =>
+          ({ id: 1, windowId: 999, active: false }) as chrome.tabs.Tab,
+      ),
+      query: vi.fn(
+        async () =>
+          [{ id: 9, windowId: context.agentWindowId, active: true }] as chrome.tabs.Tab[],
+      ),
+    };
+    expect(await resolveTargetTab(manager, context, undefined, tabs)).toMatchObject({
+      tabId: 9,
+      windowId: context.agentWindowId,
+    });
+  });
+
+  it("uses the active tab when no tab has been anchored yet", async () => {
+    const manager = new SessionManager({ agentWindow: fakeAgentWindow() });
+    const context = await manager.start("drift");
+    const tabs = {
+      get: vi.fn(async () => {
+        throw new Error("No tab with id: 1");
+      }),
+      query: vi.fn(
+        async () =>
+          [{ id: 9, windowId: context.agentWindowId, active: true }] as chrome.tabs.Tab[],
+      ),
+    };
+    expect(await resolveTargetTab(manager, context, undefined, tabs)).toMatchObject({
+      tabId: 9,
+      windowId: context.agentWindowId,
+    });
+  });
+});
