@@ -927,7 +927,7 @@ type SelectMutationResult =
     }
   | {
       ok: false;
-      reason: "option_not_found";
+      reason: "option_not_found" | "target_disabled";
       missing?: string;
     };
 
@@ -1760,6 +1760,9 @@ export async function handleSelect(
       objectId,
       functionDeclaration: `function(values) {
         const select = this;
+        if (select.matches(':disabled')) {
+          return { ok: false, reason: 'target_disabled' };
+        }
         const multiple = select.multiple;
         const known = new Set(Array.from(select.options).map((o) => o.value));
         for (const v of values) {
@@ -1786,6 +1789,9 @@ export async function handleSelect(
     });
     const mutation = evaluated.result?.value;
     if (!mutation?.ok) {
+      if (mutation?.reason === "target_disabled") {
+        return { code: "invalid_params", message: "select requires an enabled <select>" };
+      }
       if (mutation?.reason === "option_not_found") {
         return rpcError(
           "invalid_params",

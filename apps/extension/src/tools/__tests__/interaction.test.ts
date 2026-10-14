@@ -1923,6 +1923,64 @@ describe("handleSelect", () => {
     "Runtime.callFunctionOn": () => ({ result: { value: mutation } }),
   });
 
+  it.each([
+    { name: "disabled during focus", markup: "<select></select>", disabled: true },
+    { name: "enabled", markup: "<select></select>", disabled: false },
+  ])("respects the disabled state of a $name select", async ({ markup, disabled }) => {
+    const host = document.createElement("div");
+    host.innerHTML = markup;
+    const select = host.querySelector("select")!;
+    select.innerHTML =
+      '<option value="us">United States</option><option value="ca">Canada</option>';
+    const events: string[] = [];
+    select.addEventListener("input", () => events.push("input"));
+    select.addEventListener("change", () => events.push("change"));
+    const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
+    const ctx = await sm.start("aa11");
+    ctx.refStore.set("e1", 555, { tabId: 4 });
+    const fake = makeFakeCdp({
+      ...selectHandlers({ ok: true }),
+      "DOM.focus": () => {
+        select.disabled = disabled;
+        return {};
+      },
+      "Runtime.callFunctionOn": (params) => {
+        const script = params as {
+          functionDeclaration: string;
+          arguments: Array<{ value: unknown }>;
+        };
+        const fn = new Function(`return (${script.functionDeclaration})`)();
+        return {
+          result: {
+            value: fn.apply(
+              select,
+              script.arguments.map((arg) => arg.value),
+            ),
+          },
+        };
+      },
+    });
+
+    const res = await handleSelect(
+      sm,
+      { session_id: "aa11", ref: "e1", values: ["ca"] },
+      { cdp: fake.cdp, tabsApi: fake.tabsApi },
+    );
+
+    if (disabled) {
+      expect(res).toMatchObject({
+        code: "invalid_params",
+        message: "select requires an enabled <select>",
+      });
+      expect(select.value).toBe("us");
+      expect(events).toEqual([]);
+    } else {
+      expect(res).toMatchObject({ selected_values: ["ca"] });
+      expect(select.value).toBe("ca");
+      expect(events).toEqual(["input", "change"]);
+    }
+  });
+
   it("rejects non-select elements as target_not_select", async () => {
     const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
     const ctx = await sm.start("aa11");
