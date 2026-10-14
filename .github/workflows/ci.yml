@@ -94,7 +94,7 @@ jobs:
           cargo test -p bsk --test auto_update_policy --locked
 
       - name: Run Windows cancellation process tests
-        run: cargo test -p bsk --test windows_parent_cancel --locked
+        run: cargo test -p bsk --test parent_cancel --locked
 
       - name: Run installer tests (Windows PowerShell 5.1)
         shell: powershell
