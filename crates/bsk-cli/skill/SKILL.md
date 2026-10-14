@@ -93,7 +93,7 @@ Use a ref from the current observation:
 | Need | Command |
 | --- | --- |
 | Click | `bsk click @e3 --session <id>` |
-| Fill a field | `bsk fill @e3 --value "text" --session <id>` |
+| Fill a field | `bsk fill @e3 --value "text" --session <id>` (also `date`/`time`/`datetime-local`/`month`/`week`; use `bsk upload` for file) |
 | Select an option | `bsk select @e3 --value "option-value" --session <id>` |
 | Press a key | `bsk press Enter --ref @e3 --session <id>` |
 | Reveal a hover menu | `bsk hover @e3 --session <id>` |
