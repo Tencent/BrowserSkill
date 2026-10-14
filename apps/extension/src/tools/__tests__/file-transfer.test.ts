@@ -14,7 +14,7 @@ function sessions() {
     agentWindow: {
       create: vi.fn(async () => ({ windowId: 100, initialTabIds: [] })),
       remove: vi.fn(async () => {}),
-      ensureActiveTab: vi.fn(async () => 1),
+      ensureActiveTab: vi.fn(async () => 4),
     },
   });
 }

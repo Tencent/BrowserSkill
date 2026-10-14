@@ -39,6 +39,12 @@ import { attachSessionEventHandler } from "@/session-manager/event-handler";
 import { isAgentControlledTab, SessionManager } from "@/session-manager/manager";
 import { AgentWindowRouting } from "@/session-manager/window-routing";
 import {
+  attachAgentWindowTabGuard,
+  chromeTabGuardEvents,
+  chromeTabGuardTabsApi,
+  chromeTabGuardWindowsApi,
+} from "@/session-manager/tab-guard";
+import {
   attachBorrowNotificationButtonHandler,
   attachBorrowNotificationClickHandler,
   type BorrowNotificationCopy,
@@ -456,6 +462,12 @@ export default defineBackground(() => {
     transport,
     cdp,
     onSessionsChanged: onOverlaySessionStateChanged,
+  });
+  attachAgentWindowTabGuard({
+    manager: sessions,
+    tabs: chromeTabGuardTabsApi,
+    windows: chromeTabGuardWindowsApi,
+    events: chromeTabGuardEvents(),
   });
 
   // MV3 service worker keepalive + reconnect supervisor (review M4/M5

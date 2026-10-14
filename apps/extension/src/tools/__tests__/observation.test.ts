@@ -56,7 +56,7 @@ function fakeAgentWindow(ids: number[]) {
       return { windowId: id, initialTabIds: [] };
     }),
     remove: vi.fn(async () => {}),
-    ensureActiveTab: vi.fn(async () => 1),
+    ensureActiveTab: vi.fn(async () => 4),
   };
 }
 
@@ -129,27 +129,23 @@ describe("handleScreenshot", () => {
     throw new Error("tab not found");
   });
 
-  it("captures the Agent Window's active tab when tab_id is omitted", async () => {
+  it("refuses an omitted tab_id when the active tab is not the session's", async () => {
+    // A tab the OS routed into the Agent Window is active there until the guard
+    // moves it out. Capturing it would hand back a page nobody asked for, so
+    // the omitted target is refused rather than resolved to it.
     const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
     await sm.start("aa11");
-    const capture = vi.fn(async (_w: number) => `data:image/png;base64,${TINY_PNG}`);
-    const get = vi.fn();
+    const capture = vi.fn();
     const query = vi.fn(async (_q: chrome.tabs.QueryInfo) => [
       { id: 7, windowId: 100, active: true } as chrome.tabs.Tab,
     ]);
     const res = await handleScreenshot(
       sm,
       { session_id: "aa11" },
-      makeScreenshotDeps({ captureVisibleTab: capture, get, query }),
+      makeScreenshotDeps({ captureVisibleTab: capture, query }),
     );
-    if ("code" in res) throw new Error(`unexpected error: ${JSON.stringify(res)}`);
-    expect(res.tab_id).toBe(7);
-    expect(res.image_base64).toBe(TINY_PNG);
-    expect(res.format).toBe("png");
-    expect(res.width).toBe(1);
-    expect(res.height).toBe(1);
-    expect(capture).toHaveBeenCalledWith(100, { format: "png" });
-    expect(get).not.toHaveBeenCalled();
+    expect(res).toMatchObject({ code: "permission_denied" });
+    expect(capture).not.toHaveBeenCalled();
   });
 
   it("returns not_found when Agent Window has no active tab", async () => {
@@ -244,7 +240,7 @@ describe("handleScreenshot", () => {
     });
     const res = await handleScreenshot(
       sm,
-      { session_id: "aa11" },
+      { session_id: "aa11", tab_id: 7 },
       makeScreenshotDeps({ cdp, captureVisibleTab: capture }),
     );
     if ("code" in res) throw new Error(`unexpected error: ${JSON.stringify(res)}`);
@@ -269,7 +265,7 @@ describe("handleScreenshot", () => {
     });
     const res = await handleScreenshot(
       sm,
-      { session_id: "aa11" },
+      { session_id: "aa11", tab_id: 7 },
       makeScreenshotDeps({ cdp, captureVisibleTab: capture }),
     );
     expect(res).toMatchObject({
@@ -290,7 +286,7 @@ describe("handleScreenshot", () => {
     const { cdp, sent } = makeFakeCdp({});
     const res = await handleScreenshot(
       sm,
-      { session_id: "aa11" },
+      { session_id: "aa11", tab_id: 7 },
       makeScreenshotDeps({ cdp, captureVisibleTab: capture }),
     );
     if ("code" in res) throw new Error(`unexpected error: ${JSON.stringify(res)}`);
@@ -490,7 +486,7 @@ describe("handleScreenshot overlay suppression", () => {
     });
     const res = await handleScreenshot(
       sm,
-      { session_id: "aa11" },
+      { session_id: "aa11", tab_id: 7 },
       { ...makeScreenshotDeps({ captureVisibleTab: capture }), sendToTab: bridge.sendToTab },
     );
     if ("code" in res) throw new Error(`unexpected error: ${JSON.stringify(res)}`);
@@ -542,7 +538,7 @@ describe("handleScreenshot overlay suppression", () => {
     const capture = vi.fn(async (_w: number) => `data:image/png;base64,${TINY_PNG}`);
     const res = await handleScreenshot(
       sm,
-      { session_id: "aa11" },
+      { session_id: "aa11", tab_id: 7 },
       { ...makeScreenshotDeps({ captureVisibleTab: capture }), sendToTab },
     );
     if ("code" in res) throw new Error(`unexpected error: ${JSON.stringify(res)}`);

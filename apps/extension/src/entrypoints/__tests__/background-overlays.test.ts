@@ -82,8 +82,13 @@ async function fixture() {
       onActivated: event(),
       onUpdated: event(),
       onCreated: event(),
+      onAttached: event(),
       onRemoved: event(),
     },
+    // The Agent Window tab guard tracks which window the user last focused,
+    // because chrome.windows.getLastFocused answers with the Agent Window
+    // while the agent is working.
+    windows: { onFocusChanged: event() },
     debugger: { onDetach: event() },
     webNavigation: { onBeforeNavigate: event(), onCompleted: event(), onErrorOccurred: event() },
     runtime: { onMessage: event(), onConnect: event() },
