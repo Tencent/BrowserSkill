@@ -250,6 +250,25 @@ async function resolveVisibleTargetTab(
       pendingUrl: tab.pendingUrl,
     };
   }
+  // #420: once a session has navigated or observed a tab, an untargeted tool
+  // call stays anchored to that tab (the session's own tab, per the issue's
+  // Expected). The Agent Window can hold several tabs — a user-opened tab or an
+  // extension popup may become the *active* one — so preferring the live active
+  // tab would silently retarget a script or action to a different document.
+  // The anchor is released when the tab closes or leaves the window, at which
+  // point we fall back to the active tab.
+  if (ctx.lastTabId !== undefined) {
+    const last = await api.get(ctx.lastTabId).catch(() => undefined);
+    if (last && typeof last.id === "number" && last.windowId === ctx.agentWindowId) {
+      return {
+        tabId: last.id,
+        windowId: last.windowId,
+        active: last.active === true,
+        url: last.url,
+        pendingUrl: last.pendingUrl,
+      };
+    }
+  }
   const tabs = await api.query({ active: true, windowId: ctx.agentWindowId });
   const first = tabs.find((t) => typeof t.id === "number");
   if (!first || typeof first.id !== "number") {
