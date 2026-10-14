@@ -55,6 +55,8 @@ pub enum UpdateResult {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SkipReason {
+    /// A session started while the release was being downloaded.
+    ActiveSessions,
     /// The daemon belongs to a terminal or supervisor, which must restart it.
     HostManaged,
     /// The directory holding the executable does not accept new files.
@@ -144,6 +146,14 @@ impl UpdateRecord {
 
     pub(crate) fn enter(&mut self, stage: UpdateStage) {
         self.stage = Some(stage);
+        self.updated_at_epoch_secs = now_epoch_secs();
+        self.save();
+    }
+
+    pub(crate) fn postpone_for_sessions(&mut self) {
+        self.result = UpdateResult::Skipped;
+        self.skip_reason = Some(SkipReason::ActiveSessions);
+        self.retry_after_epoch_secs = None;
         self.updated_at_epoch_secs = now_epoch_secs();
         self.save();
     }
