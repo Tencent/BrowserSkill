@@ -9,6 +9,7 @@ pub mod business_rpc;
 pub mod console;
 pub mod daemon;
 pub mod debug;
+pub mod diagnostics;
 pub mod dialogs;
 pub mod doctor;
 pub mod download;
@@ -47,6 +48,7 @@ use clap::{Args, Parser, Subcommand};
 
 use crate::cli::console::ConsoleArgs;
 use crate::cli::daemon::DaemonCmd;
+use crate::cli::diagnostics::DiagnosticsCmd;
 use crate::cli::download::DownloadArgs;
 use crate::cli::emulate::EmulateArgs;
 use crate::cli::evaluate::EvaluateArgs;
@@ -118,6 +120,9 @@ pub enum Command {
 
     /// Run diagnostics + repair hints.
     Doctor,
+
+    /// Export a redacted local diagnostics bundle for issue reports.
+    Diagnostics(DiagnosticsCmd),
 
     /// Install the browser-skill agent skill into local agent harnesses.
     #[command(name = "install-skill")]
