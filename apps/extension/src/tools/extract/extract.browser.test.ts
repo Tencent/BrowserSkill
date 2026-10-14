@@ -53,6 +53,10 @@ const values = (outcome: Outcome) =>
   outcome.result!.rows.map((row) => outcome.result!.columns.map((column) => row[column.key]));
 
 const fixtures: Record<string, string> = {
+  contentVisibility: `<table id="t"><tr><td>Visible<div style="content-visibility: hidden"><span style="content-visibility: visible; visibility: visible">Hidden text</span></div></td><td><div style="content-visibility: auto; position: absolute; top: 100000px">Offscreen text</div></td></tr></table>
+    <div style="content-visibility: hidden"><table id="hiddenTable"><tr><td>Hidden table</td></tr></table><ul id="hiddenList"><li>Hidden item</li></ul></div>
+    <ul id="l"><li>Visible item<div style="content-visibility: hidden"><a href="/hidden">Hidden link</a></div></li></ul>`,
+  ignoredContentVisibility: `<table id="t" style="content-visibility: hidden"><caption style="content-visibility: hidden">Caption</caption><tbody style="content-visibility: hidden"><tr style="content-visibility: hidden"><td><span style="content-visibility: hidden">Inline text</span><div style="display: contents; content-visibility: hidden">Contents text</div></td><td><span style="display: inline list-item; content-visibility: hidden">Inline item</span></td><td style="content-visibility: hidden">Hidden cell</td></tr></tbody></table>`,
   rows1000: plainTable(1000, 3),
   wide: plainTable(600, 100),
   template: cells(`<td>
@@ -267,6 +271,35 @@ describe.skipIf(!process.env.BSK_CLICK_CHROME)("real browser structured extracti
     expect(
       values(await extract("controls", { action: "table", selector: "#t" }))[0].slice(0, 4),
     ).toEqual(["Shipped", "42", "edited", "x"]);
+  });
+
+  it("omits content-visibility hidden text without dropping auto offscreen content", async () => {
+    expect(values(await extract("contentVisibility", { action: "table", selector: "#t" }))).toEqual(
+      [["Visible", "Offscreen text"]],
+    );
+    const list = await extract("contentVisibility", { action: "list", selector: "#l" });
+    expect(list.result!.rows).toEqual([{ text: "Visible item", url: null }]);
+  });
+
+  it("does not discover or extract containers inside content-visibility hidden subtrees", async () => {
+    const discovery = await extract("contentVisibility", { action: "discover" });
+    expect(discovery.result!.targets!.map((target) => target.name)).toEqual(["t", "l"]);
+    for (const [action, selector] of [
+      ["table", "#hiddenTable"],
+      ["list", "#hiddenList"],
+    ] as const) {
+      expect((await extract("contentVisibility", { action, selector })).error).toMatch(
+        /^extract_target_hidden:/,
+      );
+    }
+  });
+
+  it("keeps text where content-visibility does not apply to the display type", async () => {
+    expect(
+      values(await extract("ignoredContentVisibility", { action: "table", selector: "#t" })),
+    ).toEqual([["Inline textContents text", "Inline item", null]]);
+    const discovery = await extract("ignoredContentVisibility", { action: "discover" });
+    expect(discovery.result!.targets!.map((target) => target.name)).toEqual(["Caption"]);
   });
 
   it("charges the byte budget for emitted text, not template indentation", async () => {

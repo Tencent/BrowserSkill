@@ -44,6 +44,13 @@ beforeEach(() => {
   document.body.innerHTML = "";
 });
 describe("structured extraction facts", () => {
+  it.each(["hidden", "auto", "visible"])("respects content-visibility: %s", (visibility) => {
+    document.body.innerHTML = `<table id="t"><tr><td>Visible<div style="content-visibility: ${visibility}"><span style="content-visibility: visible; visibility: visible">Extra</span></div></td></tr></table>`;
+    expect(extract("#t").rows).toEqual([
+      { c1: visibility === "hidden" ? "Visible" : "Visible\nExtra" },
+    ]);
+  });
+
   it("preserves identifiers, currency, multiline text, empty cells and row provenance", () => {
     document.body.innerHTML = orders;
     const result = extract("#orders");
