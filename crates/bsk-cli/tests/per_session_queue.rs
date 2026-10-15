@@ -1044,3 +1044,89 @@ async fn debug_activity_wait_and_busy_observe_without_dispatching_or_cancelling_
     );
     handle.shutdown().await;
 }
+
+#[tokio::test]
+async fn dialog_control_reaches_extension_while_original_tool_is_busy() {
+    let (handle, sock) = spawn_daemon().await;
+    let mut ws = connect_ext(handle.ws_addr()).await;
+    handshake_as_ext(&mut ws).await;
+    let (req_tx, mut req_rx) = mpsc::unbounded_channel();
+    let (reply_tx, reply_rx) = mpsc::unbounded_channel();
+    tokio::spawn(run_fake_extension(
+        ws,
+        Arc::new(Mutex::new(1)),
+        req_tx,
+        reply_rx,
+    ));
+    let session = ipc_session_start(&sock).await;
+    let first = {
+        let sock = sock.clone();
+        let session = session.clone();
+        tokio::spawn(async move {
+            bsk::ipc_client::IpcClient::connect(&sock).await.unwrap()
+                .call::<_, serde_json::Value>("original", Method::ToolEvaluate,
+                    Some(json!({"session_id":session,"expression":"confirm('Proceed?')","tag":"original"})), Duration::from_secs(5))
+                .await.unwrap().unwrap()
+        })
+    };
+    let (original, _) = tokio::time::timeout(Duration::from_secs(2), req_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    for action in ["status", "accept", "dismiss"] {
+        let request = {
+            let sock = sock.clone();
+            let session = session.clone();
+            tokio::spawn(async move {
+                bsk::ipc_client::IpcClient::connect(&sock)
+                    .await
+                    .unwrap()
+                    .call::<_, serde_json::Value>(
+                        "dialog",
+                        Method::ToolDialog,
+                        Some(json!({"session_id":session,"action":action,"tag":action})),
+                        Duration::from_secs(2),
+                    )
+                    .await
+                    .unwrap()
+                    .unwrap()
+            })
+        };
+        let (rpc, tag) = tokio::time::timeout(Duration::from_secs(1), req_rx.recv())
+            .await
+            .expect("dialog must not wait behind the blocked tool")
+            .unwrap();
+        assert_eq!(tag, action);
+        reply_tx
+            .send((
+                rpc,
+                json!({"tab_id":7,"pending":null,"execution_pending":false}),
+            ))
+            .unwrap();
+        request.await.unwrap();
+        assert!(
+            !first.is_finished(),
+            "dialog control must not cancel the original RPC"
+        );
+    }
+    reply_tx
+        .send((original, json!({"ok":true,"tab_id":7,"value":false})))
+        .unwrap();
+    assert_eq!(first.await.unwrap()["value"], false);
+    let sid = bsk::daemon::sessions::SessionId(session.clone());
+    handle.state().session_interrupts.mark(&sid);
+    let mut client = bsk::ipc_client::IpcClient::connect(&sock).await.unwrap();
+    let error = client
+        .call::<_, serde_json::Value>(
+            "interrupted",
+            Method::ToolDialog,
+            Some(json!({"session_id":session,"action":"accept"})),
+            Duration::from_secs(1),
+        )
+        .await
+        .unwrap()
+        .unwrap_err();
+    assert_eq!(error.code, ErrorCode::UserAborted);
+    assert!(req_rx.try_recv().is_err());
+    handle.shutdown().await;
+}

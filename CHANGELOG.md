@@ -5,6 +5,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 Starting from 0.2.0, CLI / Extension / DSH Plugin share the same version number.
 
+## [Unreleased]
+
+### Added
+
+- CLI/Extension/DSH: inspect, accept, dismiss and fill native JavaScript dialogs
+  ([#359](https://github.com/Tencent/BrowserSkill/issues/359)). Confirm/prompt now
+  wait for an explicit decision; `session start --no-auto-dialog` also leaves
+  alert/beforeunload pending. Blocked commands report the dialog without replaying
+  the original browser action. Requires protocol 1.4 support.
+
 ## [0.3.3] - 2026-10-14
 
 ### Changed

@@ -28,6 +28,13 @@
       "format": "uint32",
       "minimum": 0.0
     },
+    "no_auto_dialog": {
+      "description": "Disable automatic alert/beforeunload acceptance for this session.",
+      "type": [
+        "boolean",
+        "null"
+      ]
+    },
     "session_id": {
       "type": "string"
     },

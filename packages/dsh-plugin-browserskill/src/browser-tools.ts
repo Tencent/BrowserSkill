@@ -143,6 +143,10 @@ const BROWSER_TOOL_SPECS: BrowserToolSpec[] = [
         description:
           "Background by default. Set false to explicitly open the Agent Window in front.",
       },
+      noAutoDialog: {
+        type: "boolean",
+        description: "Also leave alert/beforeunload pending for an explicit decision.",
+      },
       browser: BROWSER_PARAM,
       device: { type: "string", enum: DEVICE_PRESETS, description: "Device preset for start." },
     },
@@ -151,10 +155,12 @@ const BROWSER_TOOL_SPECS: BrowserToolSpec[] = [
     name: toolNames.page,
     description:
       "Navigate and wait on the active Agent Window tab. Actions: navigate, back, forward, reload, " +
-      "wait, wait-for-element. navigate requires url; reload optionally accepts hard; navigation " +
-      "actions and wait accept waitUntil/timeoutMs. wait-for-element requires target and accepts " +
-      "state/pollMs; its timeoutMs defaults to 10000 (max 300000). Check satisfied: false means " +
-      "timeout, not success. Observe again after a meaningful page change before reusing refs.",
+      "wait, wait-for-element, dialog. navigate requires url; reload optionally accepts hard; " +
+      "navigation actions and wait accept waitUntil/timeoutMs. wait-for-element requires target " +
+      "and accepts state/pollMs; its timeoutMs defaults to 10000 (max 300000). Check satisfied: " +
+      "false means timeout, not success. dialog requires dialogAction (status/accept/dismiss), " +
+      "with optional prompt text and dialogId. Observe again after a meaningful page change " +
+      "before reusing refs.",
     actions: {
       navigate: "page.navigate",
       back: "page.back",
@@ -162,9 +168,17 @@ const BROWSER_TOOL_SPECS: BrowserToolSpec[] = [
       reload: "page.reload",
       wait: "page.wait",
       "wait-for-element": "page.wait-for-element",
+      dialog: "page.dialog",
     },
     parameters: {
       session: SESSION_PARAM,
+      dialogAction: {
+        type: "string",
+        enum: ["status", "accept", "dismiss"],
+        description: "Operation for action=dialog.",
+      },
+      text: { type: "string", description: "Prompt text for dialog accept, including empty text." },
+      dialogId: { type: "string", description: "Expected pending dialog ID." },
       tabId: TAB_ID_PARAM,
       url: { type: "string", description: "Destination URL; required for navigate." },
       waitUntil: WAIT_UNTIL_PARAM,

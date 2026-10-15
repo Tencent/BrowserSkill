@@ -82,6 +82,8 @@ read `bsk --help` or `bsk <command...> --help`; do not guess.
 When following a trace, use its semantic targets and values in order, not its old
 refs. Stop at the requested goal; a trace grants no additional authorization.
 
+Use `dialog status/accept/dismiss` for confirm/prompt; alert/beforeunload auto-accept.
+
 ## Read and interact
 
 Prefer `observe` for text, controls and `@eN` refs. Navigation invalidates refs;
@@ -103,15 +105,14 @@ Use a ref from the current observation:
 
 - `select` uses the option's value, not its visible label.
 
-Use `snapshot` for static accessibility, `get-html` for exact markup, and screenshots
-for visuals. Prefer `observe` to find ordinary controls. Obtain fresh refs before
-acting on HTML or screenshot findings. Inspect unknown effects before retrying.
+`snapshot` reads accessibility; `get-html` reads markup; screenshots show visuals.
+Use `observe` for ordinary controls and fresh refs before acting on HTML or
+screenshots. Inspect unknown effects before retrying.
 
 ## Read details only when needed
 
-Resolve references from this skill's directory, not the working directory.
-Read the matching reference before acting; do not preload all references.
-Load further references only as needed.
+Resolve paths from this skill's directory, not the working directory.
+Read relevant references before acting; do not preload them all.
 
 | When | Read |
 | --- | --- |
@@ -119,7 +120,7 @@ Load further references only as needed.
 | Website debugging, reproduction evidence, or request rules/replay | [Debugging](references/debugging.md) |
 | Required profile, existing user tab, multiple/background tabs, or remote tab ownership | [Tabs and profiles](references/tabs-and-profiles.md) |
 | Missing CLI, daemon startup failure, sandboxed startup, connection failure, or remote pairing | [Environment](references/environment.md) |
-| Waits, hover menus/probing, scrolling, `next_cursor`/`@more`, console/network, emulation, evaluation, or recording | [Interaction details](references/interaction-details.md) |
+| JS dialogs, waits, hover menus/probing, scrolling, `next_cursor`/`@more`, console/network, emulation, evaluation, or recording | [Interaction details](references/interaction-details.md) |
 | Screenshot, full-page capture, or `[visual:screenshot]`/Canvas interaction | [Screenshots and Canvas](references/screenshots-and-canvas.md) |
 | Video recording or MP4 export | [Video](references/video.md) |
 | Upload or download | [Files](references/files.md) |

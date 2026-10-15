@@ -1,0 +1,46 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "DialogParams",
+  "type": "object",
+  "required": [
+    "action",
+    "session_id"
+  ],
+  "properties": {
+    "action": {
+      "$ref": "#/definitions/DialogAction"
+    },
+    "dialog_id": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "prompt_text": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "session_id": {
+      "type": "string"
+    },
+    "tab_id": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "int64"
+    }
+  },
+  "definitions": {
+    "DialogAction": {
+      "type": "string",
+      "enum": [
+        "status",
+        "accept",
+        "dismiss"
+      ]
+    }
+  }
+}

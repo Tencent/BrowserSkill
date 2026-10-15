@@ -176,6 +176,14 @@ fn only_unsupported_operations_reject_a_legacy_daemon() {
     let original = daemon.metadata();
     for (args, required_protocol) in [
         (
+            vec!["dialog", "status", "--session", "abcd", "--json"],
+            "1.4",
+        ),
+        (
+            vec!["session", "start", "--no-auto-dialog", "--json"],
+            "1.4",
+        ),
+        (
             vec![
                 "tab",
                 "borrow",

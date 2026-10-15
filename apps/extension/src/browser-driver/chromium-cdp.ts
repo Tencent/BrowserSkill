@@ -17,8 +17,8 @@
 //   callers can decide whether to retry vs. surface an `cdp_failed`.
 // * Native JS dialogs (`alert` / `confirm` / `prompt` / `beforeunload`)
 //   block CDP until dismissed. We listen for `Page.javascriptDialogOpening`,
-//   record the payload for tool results, and auto-accept so automation
-//   can continue.
+//   expose pending decisions, and only auto-accept alert/beforeunload when
+//   the owning session permits it.
 
 import type {
   ConsoleEntry,
@@ -26,10 +26,10 @@ import type {
   ConsoleResult,
   ConsoleStackFrame,
   JavaScriptDialogInfo,
-  JavaScriptDialogType,
   NetworkEntry,
   NetworkEntryKind,
   NetworkResult,
+  PendingJavaScriptDialog,
 } from "@/transport/types";
 import { BackgroundExecution } from "./background-execution";
 import { CdpReadGate, CdpReadTimeoutError, READ_TIMEOUT_MS } from "./command-deadline";
@@ -41,6 +41,7 @@ import {
   type CdpTarget,
   omitFrameSubtrees,
 } from "./frame-graph";
+import { JavaScriptDialogs } from "./javascript-dialogs";
 
 export type CdpDebuggee = chrome.debugger.Debuggee & { sessionId?: string };
 
@@ -117,8 +118,6 @@ export interface UserAgentOverride {
   userAgentMetadata?: Record<string, unknown>;
 }
 
-const MAX_DIALOG_BUFFER = 32;
-const MAX_DIALOG_FIELD_LENGTH = 4096;
 const MAX_CONSOLE_BUFFER = 200;
 const MAX_CONSOLE_FIELD_LENGTH = 4096;
 const MAX_CONSOLE_STACK_FRAMES = 20;
@@ -127,14 +126,6 @@ const MAX_NETWORK_FIELD_LENGTH = 4096;
 const MAX_NETWORK_REQUEST_META = 1024;
 const FRAME_DISCOVERY_TIMEOUT_MS = 1000;
 const FRAME_DISCOVERY_QUIET_MS = 20;
-
-interface ParsedDialogOpening {
-  type: JavaScriptDialogType;
-  message: string;
-  url?: string;
-  defaultPrompt?: string;
-  hasBrowserHandler?: boolean;
-}
 
 interface ParsedConsoleEntry extends Omit<ConsoleEntry, "sequence"> {}
 
@@ -190,8 +181,7 @@ export class ChromiumCdp {
       this.api.sendCommand({ tabId }, "Emulation.setFocusEmulationEnabled", { enabled }),
   );
   private readonly tabOwners = new Map<number, Set<string>>();
-  private readonly dialogBuffers = new Map<number, JavaScriptDialogInfo[]>();
-  private readonly dialogSequences = new Map<number, number>();
+  private readonly dialogs: JavaScriptDialogs;
   private readonly consoleBuffers = new Map<number, ConsoleEntry[]>();
   private readonly consoleSequences = new Map<number, number>();
   private readonly consoleDomainsEnabledTabs = new Set<number>();
@@ -216,6 +206,10 @@ export class ChromiumCdp {
     } = {},
   ) {
     this.api = api;
+    this.dialogs = new JavaScriptDialogs(
+      (target, params) => this.api.sendCommand(target, "Page.handleJavaScriptDialog", params),
+      (tabId) => this.options.shouldAutoAcceptDialog?.(tabId) ?? true,
+    );
     this.bindAutoDetach();
     this.bindDialogHandler();
     this.bindConsoleHandler();
@@ -477,7 +471,7 @@ export class ChromiumCdp {
 
   /** Return a cursor marking the current dialog sequence for `tabId`. */
   dialogCursor(tabId: number): DialogCursor {
-    return this.dialogSequences.get(tabId) ?? 0;
+    return this.dialogs.cursor(tabId);
   }
 
   /** `Emulation.setDeviceMetricsOverride` — pin the tab's viewport metrics. */
@@ -509,8 +503,28 @@ export class ChromiumCdp {
 
   /** Dialogs observed on `tabId` with sequence strictly greater than `cursor`. */
   dialogsSince(tabId: number, cursor: DialogCursor): JavaScriptDialogInfo[] {
-    const buf = this.dialogBuffers.get(tabId) ?? [];
-    return buf.filter((entry) => entry.sequence > cursor);
+    return this.dialogs.since(tabId, cursor);
+  }
+
+  pendingDialog(tabId: number): PendingJavaScriptDialog | null {
+    return this.dialogs.pending(tabId);
+  }
+
+  dialogExecutionPending(tabId: number): boolean {
+    return this.dialogs.executionPending(tabId);
+  }
+
+  onPendingDialog(handler: (tabId: number) => void): { dispose(): void } {
+    return this.dialogs.onPending(handler);
+  }
+
+  handleDialog(
+    tabId: number,
+    id: string,
+    accept: boolean,
+    text?: string,
+  ): Promise<JavaScriptDialogInfo> {
+    return this.dialogs.handle(tabId, id, accept, text);
   }
 
   /** Ensure CDP domains for console capture are enabled for this tab. */
@@ -693,8 +707,7 @@ export class ChromiumCdp {
     this.attachedTabs.clear();
     this.attachmentIds.clear();
     for (const tabId of tabs) this.options.onDocumentChanged?.(tabId);
-    this.dialogBuffers.clear();
-    this.dialogSequences.clear();
+    this.dialogs.clearAll();
     this.consoleBuffers.clear();
     this.consoleSequences.clear();
     this.consoleDomainsEnabledTabs.clear();
@@ -722,13 +735,21 @@ export class ChromiumCdp {
     readTimeoutMs?: number,
     beforeDispatch?: () => void,
   ): Promise<unknown> {
+    const run = () => {
+      beforeDispatch?.();
+      return this.api.sendCommand(target, method, params);
+    };
+    // Setup and browser-side cleanup must remain available with a modal open.
+    const setup =
+      ["Page.enable", "Runtime.enable", "Log.enable", "Network.enable"].includes(method) ||
+      method.startsWith("Target.") ||
+      method.startsWith("Emulation.");
+    // The dialog fence must retain the actual native promise, not the read
+    // deadline wrapper: timing out does not finish execution inside Chrome.
     return this.readGate.run(
       target,
       method,
-      () => {
-        beforeDispatch?.();
-        return this.api.sendCommand(target, method, params);
-      },
+      () => (setup ? run() : this.dialogs.run(target, method, params, run)),
       readTimeoutMs,
     );
   }
@@ -946,10 +967,14 @@ export class ChromiumCdp {
   private bindDialogHandler(): void {
     if (this.dialogSubscription) return;
     const listener = (source: CdpDebuggee, method: string, params: unknown) => {
-      if (method !== "Page.javascriptDialogOpening") return;
       const tabId = source.tabId;
       if (typeof tabId !== "number") return;
-      void this.onJavaScriptDialogOpening(tabId, params);
+      if (!this.attachedTabs.has(tabId) && !this.attachInFlight.has(tabId)) return;
+      if (method === "Page.javascriptDialogOpening") {
+        void this.dialogs.opened({ ...source, tabId }, params);
+      } else if (method === "Page.javascriptDialogClosed") {
+        this.dialogs.closed(source, params);
+      }
     };
     this.api.onEvent.addListener(listener);
     this.dialogSubscription = {
@@ -957,53 +982,8 @@ export class ChromiumCdp {
     };
   }
 
-  private async onJavaScriptDialogOpening(tabId: number, params: unknown): Promise<void> {
-    if (!this.attachedTabs.has(tabId) && !this.attachInFlight.has(tabId)) return;
-    const parsed = parseDialogOpeningParams(params);
-    try {
-      if (
-        this.options.shouldAutoAcceptDialog &&
-        !(await this.options.shouldAutoAcceptDialog(tabId))
-      ) {
-        return;
-      }
-      // The tab may have been returned while its current scope was checked.
-      if (!this.attachedTabs.has(tabId) && !this.attachInFlight.has(tabId)) return;
-      const handleParams: { accept: boolean; promptText?: string } = { accept: true };
-      if (parsed.type === "prompt") {
-        handleParams.promptText = parsed.defaultPrompt ?? "";
-      }
-      await this.command({ tabId }, "Page.handleJavaScriptDialog", handleParams);
-      if (!this.attachedTabs.has(tabId) && !this.attachInFlight.has(tabId)) return;
-      const sequence = (this.dialogSequences.get(tabId) ?? 0) + 1;
-      this.dialogSequences.set(tabId, sequence);
-      this.appendDialog(tabId, {
-        tab_id: tabId,
-        type: parsed.type,
-        message: parsed.message,
-        url: parsed.url,
-        default_prompt: parsed.defaultPrompt,
-        has_browser_handler: parsed.hasBrowserHandler,
-        handled: "accepted",
-        sequence,
-      });
-    } catch (err) {
-      console.debug("[bsk cdp] Page.handleJavaScriptDialog failed", { tabId, err });
-    }
-  }
-
-  private appendDialog(tabId: number, entry: JavaScriptDialogInfo): void {
-    const buf = this.dialogBuffers.get(tabId) ?? [];
-    buf.push(entry);
-    while (buf.length > MAX_DIALOG_BUFFER) {
-      buf.shift();
-    }
-    this.dialogBuffers.set(tabId, buf);
-  }
-
   private clearDialogState(tabId: number): void {
-    this.dialogBuffers.delete(tabId);
-    this.dialogSequences.delete(tabId);
+    this.dialogs.clear(tabId);
   }
 
   private bindConsoleHandler(): void {
@@ -1217,35 +1197,6 @@ function readBufferedEntries<
       candidates.length > limited.length ||
       entries.some((entry) => entry.truncated),
   };
-}
-
-function parseDialogOpeningParams(params: unknown): ParsedDialogOpening {
-  const raw = (params ?? {}) as Record<string, unknown>;
-  const type = normalizeDialogType(raw.type);
-  const message = truncateDialogField(typeof raw.message === "string" ? raw.message : "");
-  const url = typeof raw.url === "string" ? truncateDialogField(raw.url) : undefined;
-  const defaultPrompt =
-    typeof raw.defaultPrompt === "string" ? truncateDialogField(raw.defaultPrompt) : undefined;
-  const hasBrowserHandler =
-    typeof raw.hasBrowserHandler === "boolean" ? raw.hasBrowserHandler : undefined;
-  return { type, message, url, defaultPrompt, hasBrowserHandler };
-}
-
-function normalizeDialogType(value: unknown): JavaScriptDialogType {
-  switch (value) {
-    case "alert":
-    case "confirm":
-    case "prompt":
-    case "beforeunload":
-      return value;
-    default:
-      return "alert";
-  }
-}
-
-function truncateDialogField(value: string): string {
-  if (value.length <= MAX_DIALOG_FIELD_LENGTH) return value;
-  return `${value.slice(0, MAX_DIALOG_FIELD_LENGTH)}... [truncated]`;
 }
 
 export function parseConsoleApiCalled(params: unknown): ParsedConsoleEntry | null {

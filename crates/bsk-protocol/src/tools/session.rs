@@ -40,6 +40,9 @@ pub struct InteractionPolicy {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct SessionStartParams {
+    /// Disable automatic alert/beforeunload acceptance for this session.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub no_auto_dialog: Option<bool>,
     pub session_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub browser_instance_id: Option<String>,
