@@ -1065,8 +1065,14 @@ mod m2_tests {
                 assert!(hint.contains("discard local changes (overwrites existing instructions)"));
                 let keep = hint.find("keep local changes").expect("keep");
                 let discard = hint.find("discard local changes").expect("discard");
-                assert!(keep < discard, "recommended keep must come before destructive discard");
-                assert!(hint.contains('\n'), "hint options must be on separate lines");
+                assert!(
+                    keep < discard,
+                    "recommended keep must come before destructive discard"
+                );
+                assert!(
+                    hint.contains('\n'),
+                    "hint options must be on separate lines"
+                );
                 // An I/O failure takes precedence without hiding paused installations.
                 report
                     .errors
