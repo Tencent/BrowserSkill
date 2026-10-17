@@ -1,5 +1,6 @@
 import { mkdir, realpath, stat, writeFile } from "node:fs/promises";
-import { join, relative, sep } from "node:path";
+import { isAbsolute, join, relative, sep } from "node:path";
+import { pathToFileURL } from "node:url";
 
 import { casesDirectory, evalDirectory } from "./paths.mjs";
 
@@ -16,9 +17,10 @@ async function exists(path) {
 }
 
 async function moduleSpecifier(fromDirectory, target) {
-  const path = relative(await realpath(fromDirectory), await realpath(target))
-    .split(sep)
-    .join("/");
+  const targetPath = await realpath(target);
+  const relativePath = relative(await realpath(fromDirectory), targetPath);
+  if (isAbsolute(relativePath)) return pathToFileURL(targetPath).href;
+  const path = relativePath.split(sep).join("/");
   return path.startsWith(".") ? path : `./${path}`;
 }
 
