@@ -56,12 +56,41 @@ pub struct Session {
 
 impl Session {
     pub fn status_entry(&self) -> SessionStatusEntry {
+        self.status_entry_with_lifecycle(None, None)
+    }
+
+    fn status_entry_with_lifecycle(
+        &self,
+        last_activity_at_ms: Option<i64>,
+        idle_timeout: Option<Duration>,
+    ) -> SessionStatusEntry {
         SessionStatusEntry {
             interaction: self.interaction,
             session_id: self.id.0.clone(),
             browser_instance_id: self.browser_id.0.clone(),
             agent_window_id: self.agent_window_id,
             created_at_ms: self.created_at_ms,
+            last_activity_at_ms,
+            idle_timeout_ms: idle_timeout
+                .map(|timeout| u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX)),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct SessionActivity {
+    instant: Instant,
+    epoch_ms: i64,
+}
+
+const IDLE_STOP_REASON_TTL: Duration = Duration::from_secs(10 * 60);
+const IDLE_STOP_REASON_CAPACITY: usize = 1_024;
+
+impl SessionActivity {
+    fn now() -> Self {
+        Self {
+            instant: Instant::now(),
+            epoch_ms: now_ms(),
         }
     }
 }
@@ -72,7 +101,11 @@ pub struct SessionRegistry {
     inner: Mutex<HashMap<SessionId, Session>>,
     /// Operational metadata kept outside the public `Session` wire/domain
     /// shape so idle enforcement does not break external struct users.
-    last_activity: Mutex<HashMap<SessionId, Instant>>,
+    last_activity: Mutex<HashMap<SessionId, SessionActivity>>,
+    /// Session ids stopped by the daemon idle reaper during this daemon's
+    /// lifetime. Kept separately from live sessions so a later tool request
+    /// can explain this specific, otherwise indistinguishable NotFound.
+    idle_stopped: Mutex<HashMap<SessionId, Instant>>,
     /// Managed creates whose original extension operation has not settled.
     starting: Mutex<HashSet<SessionId>>,
 }
@@ -121,7 +154,11 @@ impl SessionRegistry {
         self.last_activity
             .lock()
             .expect("session activity registry poisoned")
-            .insert(session_id, Instant::now());
+            .insert(session_id.clone(), SessionActivity::now());
+        self.idle_stopped
+            .lock()
+            .expect("idle-stop registry poisoned")
+            .remove(&session_id);
     }
 
     /// Reserve a fresh, collision-free [`SessionId`] under the registry
@@ -163,7 +200,11 @@ impl SessionRegistry {
             self.last_activity
                 .lock()
                 .expect("session activity registry poisoned")
-                .insert(candidate.clone(), Instant::now());
+                .insert(candidate.clone(), SessionActivity::now());
+            self.idle_stopped
+                .lock()
+                .expect("idle-stop registry poisoned")
+                .remove(&candidate);
             return Some(candidate);
         }
         None
@@ -257,7 +298,7 @@ impl SessionRegistry {
         self.last_activity
             .lock()
             .expect("session activity registry poisoned")
-            .insert(id.clone(), Instant::now());
+            .insert(id.clone(), SessionActivity::now());
         true
     }
 
@@ -276,10 +317,66 @@ impl SessionRegistry {
                 !starting.contains(&session.id)
                     && activity
                         .get(&session.id)
-                        .is_some_and(|last| now.saturating_duration_since(*last) >= idle_for)
+                        .is_some_and(|last| now.saturating_duration_since(last.instant) >= idle_for)
             })
             .map(|session| session.id.clone())
             .collect()
+    }
+
+    /// Snapshot live sessions with non-sensitive lifecycle metadata for
+    /// `session.list`.
+    pub fn status_entries(&self, idle_timeout: Duration) -> Vec<SessionStatusEntry> {
+        let sessions = self.inner.lock().expect("session registry poisoned");
+        let activity = self
+            .last_activity
+            .lock()
+            .expect("session activity registry poisoned");
+        sessions
+            .values()
+            .map(|session| {
+                session.status_entry_with_lifecycle(
+                    activity.get(&session.id).map(|last| last.epoch_ms),
+                    Some(idle_timeout),
+                )
+            })
+            .collect()
+    }
+
+    /// Remember that a session ended because the idle reaper confirmed its
+    /// stop. This is deliberately process-local and records no page data.
+    pub fn record_idle_stop(&self, id: &SessionId) {
+        self.record_idle_stop_at(id, Instant::now());
+    }
+
+    pub fn was_stopped_for_idle(&self, id: &SessionId) -> bool {
+        self.was_stopped_for_idle_at(id, Instant::now())
+    }
+
+    fn record_idle_stop_at(&self, id: &SessionId, now: Instant) {
+        let mut stopped = self
+            .idle_stopped
+            .lock()
+            .expect("idle-stop registry poisoned");
+        stopped.retain(|_, at| now.saturating_duration_since(*at) < IDLE_STOP_REASON_TTL);
+        if !stopped.contains_key(id) && stopped.len() >= IDLE_STOP_REASON_CAPACITY {
+            if let Some(oldest) = stopped
+                .iter()
+                .min_by_key(|(_, at)| **at)
+                .map(|(id, _)| id.clone())
+            {
+                stopped.remove(&oldest);
+            }
+        }
+        stopped.insert(id.clone(), now);
+    }
+
+    fn was_stopped_for_idle_at(&self, id: &SessionId, now: Instant) -> bool {
+        let mut stopped = self
+            .idle_stopped
+            .lock()
+            .expect("idle-stop registry poisoned");
+        stopped.retain(|_, at| now.saturating_duration_since(*at) < IDLE_STOP_REASON_TTL);
+        stopped.contains_key(id)
     }
 
     /// Drop all sessions owned by `browser_id` (e.g. on disconnect).
@@ -979,7 +1076,9 @@ pub async fn stop_session(
             queues.reopen(session_id);
             Err(StopSessionError::ExtensionError(err))
         }
-        Err(DispatchError::SessionNotFound) => Err(StopSessionError::NotFound),
+        Err(DispatchError::SessionNotFound | DispatchError::SessionIdleTimeout) => {
+            Err(StopSessionError::NotFound)
+        }
         Err(DispatchError::SessionStopping) => Err(StopSessionError::Stopping),
         Err(DispatchError::SessionBusy) => Err(StopSessionError::SessionBusy),
         Err(DispatchError::Timeout) => {
@@ -1024,6 +1123,57 @@ fn drop_session_local(
 ) {
     queues.remove(session_id);
     interrupts.drop_session(session_id);
+}
+
+#[cfg(test)]
+mod idle_stop_tests {
+    use super::*;
+
+    #[test]
+    fn idle_stop_reason_is_queryable_then_expires() {
+        let registry = SessionRegistry::new();
+        let id = SessionId("idle".into());
+        let stopped_at = Instant::now();
+
+        registry.record_idle_stop_at(&id, stopped_at);
+        assert!(registry.was_stopped_for_idle_at(&id, stopped_at));
+        assert!(!registry.was_stopped_for_idle_at(&id, stopped_at + IDLE_STOP_REASON_TTL));
+        assert!(registry.idle_stopped.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn idle_stop_reason_capacity_evicts_the_oldest_record() {
+        let registry = SessionRegistry::new();
+        let started_at = Instant::now();
+
+        for index in 0..=IDLE_STOP_REASON_CAPACITY {
+            registry.record_idle_stop_at(
+                &SessionId(format!("idle-{index}")),
+                started_at + Duration::from_millis(index as u64),
+            );
+        }
+
+        let stopped = registry.idle_stopped.lock().unwrap();
+        assert_eq!(stopped.len(), IDLE_STOP_REASON_CAPACITY);
+        assert!(!stopped.contains_key(&SessionId("idle-0".into())));
+        assert!(stopped.contains_key(&SessionId(format!("idle-{IDLE_STOP_REASON_CAPACITY}"))));
+    }
+
+    #[test]
+    fn recording_an_idle_stop_also_removes_expired_records() {
+        let registry = SessionRegistry::new();
+        let started_at = Instant::now();
+        registry.record_idle_stop_at(&SessionId("expired".into()), started_at);
+
+        registry.record_idle_stop_at(
+            &SessionId("current".into()),
+            started_at + IDLE_STOP_REASON_TTL,
+        );
+
+        let stopped = registry.idle_stopped.lock().unwrap();
+        assert_eq!(stopped.len(), 1);
+        assert!(stopped.contains_key(&SessionId("current".into())));
+    }
 }
 
 #[cfg(test)]

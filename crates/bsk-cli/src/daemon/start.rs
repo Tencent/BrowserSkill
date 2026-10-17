@@ -875,6 +875,7 @@ pub(crate) fn spawn_session_idle_reaper(state: Arc<DaemonState>) -> tokio::task:
                 .await
                 {
                     Ok(_) => {
+                        state.sessions.record_idle_stop(&session_id);
                         state.transfers.release_session(&session_id.0);
                         info!(session = %session_id, "idle session stopped");
                     }

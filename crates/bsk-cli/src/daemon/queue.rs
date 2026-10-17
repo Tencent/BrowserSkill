@@ -110,6 +110,10 @@ pub enum DispatchError {
     /// stopped concurrently with this dispatch).
     #[error("session not registered or already stopped")]
     SessionNotFound,
+    /// The daemon's idle reaper stopped this session during its current
+    /// lifetime. This preserves a specific reason without retaining page data.
+    #[error("session was stopped after its idle timeout")]
+    SessionIdleTimeout,
     /// Session is draining for `session.stop`; new tool calls must not
     /// enter behind the queued stop request.
     #[error("session is stopping")]
@@ -144,6 +148,13 @@ impl DispatchError {
                 code: ErrorCode::NotFound,
                 message: "session not registered or already stopped".into(),
                 data: None,
+            },
+            DispatchError::SessionIdleTimeout => RpcError {
+                code: ErrorCode::NotFound,
+                message: "session was stopped after its idle timeout".into(),
+                data: Some(serde_json::json!({
+                    "reason": crate::rpc_reason::SESSION_IDLE_TIMEOUT,
+                })),
             },
             DispatchError::SessionStopping => RpcError {
                 code: ErrorCode::Timeout,
@@ -314,7 +325,11 @@ impl ToolQueueRegistry {
         let (sender, state) = {
             let guard = self.queues.lock().expect("tool queue registry poisoned");
             let Some(entry) = guard.get(sid) else {
-                return Err(DispatchError::SessionNotFound);
+                return Err(if self.sessions.was_stopped_for_idle(sid) {
+                    DispatchError::SessionIdleTimeout
+                } else {
+                    DispatchError::SessionNotFound
+                });
             };
             if !entry.accepting {
                 return Err(DispatchError::SessionStopping);

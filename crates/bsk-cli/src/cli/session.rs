@@ -8,7 +8,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::Context;
 use bsk_protocol::system::{BrowserStatusEntry, SessionStatusEntry};
@@ -570,7 +570,7 @@ fn run_list(sock: PathBuf, format: Format) -> Result<(), CliError> {
                 println!("(no active sessions)");
                 return Ok(());
             }
-            let headers = ("SESSION", "BROWSER", "AGENT WINDOW");
+            let headers = ("SESSION", "BROWSER", "AGENT WINDOW", "IDLE IN");
             let session_w = reply
                 .sessions
                 .iter()
@@ -586,8 +586,8 @@ fn run_list(sock: PathBuf, format: Format) -> Result<(), CliError> {
                 .unwrap_or(0)
                 .max(headers.1.len());
             println!(
-                "{:<session_w$}  {:<browser_w$}  {}",
-                headers.0, headers.1, headers.2,
+                "{:<session_w$}  {:<browser_w$}  {:<14}  {}",
+                headers.0, headers.1, headers.2, headers.3,
             );
             for s in &reply.sessions {
                 let window = s
@@ -595,13 +595,36 @@ fn run_list(sock: PathBuf, format: Format) -> Result<(), CliError> {
                     .map(|w| w.to_string())
                     .unwrap_or_else(|| "-".into());
                 println!(
-                    "{:<session_w$}  {:<browser_w$}  {}",
-                    s.session_id, s.browser_instance_id, window,
+                    "{:<session_w$}  {:<browser_w$}  {:<14}  {}",
+                    s.session_id,
+                    s.browser_instance_id,
+                    window,
+                    idle_remaining_label(s),
                 );
             }
         }
     }
     Ok(())
+}
+
+fn idle_remaining_label(session: &SessionStatusEntry) -> String {
+    let (Some(last_activity_at_ms), Some(idle_timeout_ms)) =
+        (session.last_activity_at_ms, session.idle_timeout_ms)
+    else {
+        return "-".into();
+    };
+    let now_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as i64;
+    let deadline_ms =
+        last_activity_at_ms.saturating_add(i64::try_from(idle_timeout_ms).unwrap_or(i64::MAX));
+    let remaining_ms = deadline_ms.saturating_sub(now_ms);
+    if remaining_ms <= 0 {
+        "due".into()
+    } else {
+        format!("{}s", (remaining_ms + 999) / 1_000)
+    }
 }
 
 fn call<P, R>(
