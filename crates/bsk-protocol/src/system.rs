@@ -536,6 +536,14 @@ pub struct SessionStatusEntry {
     pub agent_window_id: Option<i64>,
     /// Unix epoch milliseconds.
     pub created_at_ms: i64,
+    /// Unix epoch milliseconds when BrowserSkill last accepted or completed a
+    /// tool call for this session. This contains no browser-page data.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_activity_at_ms: Option<i64>,
+    /// Configured daemon-wide idle timeout for this session, in milliseconds.
+    /// Absent when reading a reply from an older daemon.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idle_timeout_ms: Option<u64>,
 }
 
 /// `system.status` request payload.
@@ -607,6 +615,19 @@ pub struct StatusResult {
 #[cfg(test)]
 mod status_compat_tests {
     use super::*;
+
+    #[test]
+    fn session_status_entry_deserializes_without_lifecycle_fields() {
+        let session: SessionStatusEntry = serde_json::from_value(serde_json::json!({
+            "session_id": "abcd",
+            "browser_instance_id": "browser",
+            "created_at_ms": 1
+        }))
+        .expect("new CLI must tolerate an older daemon session payload");
+
+        assert_eq!(session.last_activity_at_ms, None);
+        assert_eq!(session.idle_timeout_ms, None);
+    }
 
     #[test]
     fn status_result_deserializes_legacy_version_skew_entries_without_protocol_fields() {

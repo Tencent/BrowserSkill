@@ -616,8 +616,8 @@ async fn timing_out_session_stop_cancels_extension_teardown_and_keeps_session() 
 }
 
 #[tokio::test]
-async fn session_idle_timeout_stops_and_unregisters_session() {
-    let (handle, _sock) = spawn_daemon_with_session_idle(Duration::from_millis(50)).await;
+async fn session_idle_timeout_stops_unregisters_and_explains_later_use() {
+    let (handle, sock) = spawn_daemon_with_session_idle(Duration::from_millis(50)).await;
     let mut ws = connect_ext(handle.ws_addr()).await;
     let _ = handshake_as_ext(&mut ws).await;
     let state = handle.state();
@@ -655,6 +655,139 @@ async fn session_idle_timeout_stops_and_unregisters_session() {
     .unwrap();
 
     wait_for_no_sessions(&state).await;
+
+    let mut ipc = IpcClient::connect(&sock).await.unwrap();
+    let after_idle: Result<serde_json::Value, RpcError> = ipc
+        .call(
+            "after-idle",
+            Method::ToolTabList,
+            Some(serde_json::json!({"session_id": "idle"})),
+            Duration::from_secs(1),
+        )
+        .await
+        .unwrap();
+    let err = after_idle.expect_err("idle-stopped session must not accept tools");
+    assert_eq!(err.code, ErrorCode::NotFound);
+    assert_eq!(err.message, "session was stopped after its idle timeout");
+    assert_eq!(err.data.unwrap()["reason"], "session_idle_timeout");
+
+    handle.shutdown().await;
+}
+
+#[tokio::test]
+async fn browser_skill_tool_activity_renews_the_idle_deadline() {
+    let (handle, _sock) = spawn_daemon_with_session_idle(Duration::from_millis(250)).await;
+    let mut ws = connect_ext(handle.ws_addr()).await;
+    let _ = handshake_as_ext(&mut ws).await;
+    let state = handle.state();
+    let session_id = bsk::daemon::sessions::SessionId("renew".into());
+    state.sessions.insert(bsk::daemon::sessions::Session {
+        interaction: None,
+        id: session_id.clone(),
+        browser_id: bsk::daemon::browsers::BrowserId(TEST_EXT_ID.into()),
+        agent_window_id: Some(7),
+        created_at_ms: 0,
+    });
+    state.tool_queues.spawn(session_id.clone());
+
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    let queues = Arc::clone(&state.tool_queues);
+    let dispatch_id = session_id.clone();
+    let dispatch = tokio::spawn(async move {
+        queues
+            .dispatch(
+                &dispatch_id,
+                Method::ToolTabList,
+                serde_json::json!({"session_id": "renew"}),
+                Duration::from_secs(1),
+                None,
+            )
+            .await
+    });
+    let request = tokio::time::timeout(Duration::from_secs(1), ws.next())
+        .await
+        .expect("tool activity did not reach extension")
+        .expect("extension socket closed")
+        .expect("extension socket failed");
+    let Message::Text(text) = request else {
+        panic!("expected text request");
+    };
+    let request: RequestFrame = serde_json::from_str(&text).unwrap();
+    assert_eq!(request.method, Method::ToolTabList);
+    ws.send(Message::Text(
+        serde_json::to_string(&ResponseFrame {
+            id: request.id,
+            body: ResponseBody::Ok(serde_json::json!({"tabs": []})),
+        })
+        .unwrap(),
+    ))
+    .await
+    .unwrap();
+    dispatch.await.unwrap().expect("tool activity failed");
+
+    // The original 250 ms deadline has elapsed, but the successful tool call
+    // refreshed the session's activity timestamp, so the reaper must not stop it.
+    tokio::time::sleep(Duration::from_millis(130)).await;
+    assert!(state.sessions.get(&session_id).is_some());
+
+    let request = tokio::time::timeout(Duration::from_secs(1), ws.next())
+        .await
+        .expect("renewed session was not reaped after its new deadline")
+        .expect("extension socket closed")
+        .expect("extension socket failed");
+    let Message::Text(text) = request else {
+        panic!("expected text request");
+    };
+    let request: RequestFrame = serde_json::from_str(&text).unwrap();
+    assert_eq!(request.method, Method::ToolSessionStop);
+    ws.send(Message::Text(
+        serde_json::to_string(&ResponseFrame {
+            id: request.id,
+            body: ResponseBody::Ok(
+                serde_json::to_value(bsk_protocol::tools::SessionStopResult::default()).unwrap(),
+            ),
+        })
+        .unwrap(),
+    ))
+    .await
+    .unwrap();
+    wait_for_no_sessions(&state).await;
+    handle.shutdown().await;
+}
+
+#[tokio::test]
+async fn session_list_reports_non_sensitive_idle_lifecycle_metadata() {
+    let (handle, sock) = spawn_daemon_with_session_idle(Duration::from_secs(123)).await;
+    let state = handle.state();
+    let session_id = bsk::daemon::sessions::SessionId("life".into());
+    state.sessions.insert(bsk::daemon::sessions::Session {
+        interaction: None,
+        id: session_id.clone(),
+        browser_id: bsk::daemon::browsers::BrowserId(TEST_EXT_ID.into()),
+        agent_window_id: Some(7),
+        created_at_ms: 0,
+    });
+
+    let mut ipc = IpcClient::connect(&sock).await.unwrap();
+    let listed: serde_json::Value = ipc
+        .call(
+            "list-lifecycle",
+            Method::SessionList,
+            None::<()>,
+            Duration::from_secs(1),
+        )
+        .await
+        .unwrap()
+        .expect("session list returned error");
+    let session = &listed["sessions"][0];
+    assert_eq!(session["session_id"], "life");
+    assert!(session["last_activity_at_ms"].as_i64().is_some());
+    assert_eq!(session["idle_timeout_ms"], 123_000);
+    let text = serde_json::to_string(session).unwrap();
+    assert!(!text.contains("url"));
+    assert!(!text.contains("title"));
+    assert!(!text.contains("content"));
+
     handle.shutdown().await;
 }
 

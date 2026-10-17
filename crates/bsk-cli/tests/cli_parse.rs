@@ -142,6 +142,7 @@ fn parses_daemon_start_with_defaults() {
     assert!(!args.foreground);
     assert_eq!(args.resolved_port(), 52800);
     assert_eq!(args.resolved_daemon_idle(), Duration::from_secs(600));
+    assert_eq!(args.resolved_session_idle(), Duration::from_secs(5 * 60));
 }
 
 #[test]
