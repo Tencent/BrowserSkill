@@ -65,7 +65,7 @@ function event<T extends unknown[] = []>() {
   };
 }
 
-async function fixture() {
+async function fixture(diagnosticGet = vi.fn(async () => ({}))) {
   const overlay = new OverlayController();
   const onDetached = event<[number]>();
   const sendMessage = vi.fn(
@@ -75,6 +75,9 @@ async function fixture() {
     },
   );
   vi.stubGlobal("chrome", {
+    storage: {
+      local: { get: diagnosticGet, set: vi.fn(async () => {}), remove: vi.fn(async () => {}) },
+    },
     tabs: {
       sendMessage,
       get: vi.fn(async () => ({ url: "https://example.test" })),
@@ -124,6 +127,14 @@ it.each([false, true])("hides an observed tab after detachment, remote=%s", asyn
   expect(released.generation).toBeGreaterThan(claimed.generation);
   expect(shouldShowAgentControlOverlay(f.overlay.snapshot())).toBe(false);
   expect(f.deps.cdp?.releaseSessionTab).toHaveBeenCalledWith("one", 20);
+});
+
+it("continues normal background startup while the diagnostic preference read is pending", async () => {
+  const diagnosticGet = vi.fn(() => new Promise<Record<string, unknown>>(() => {}));
+  const f = await fixture(diagnosticGet);
+  expect(diagnosticGet).toHaveBeenCalledOnce();
+  expect(f.task.sessionId).toBe("one");
+  expect(f.deps.sessions.get("one")).toBe(f.task);
 });
 
 it("still releases control and CDP when the content script cannot receive hidden", async () => {
