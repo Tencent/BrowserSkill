@@ -132,8 +132,42 @@ fn parses_upload_modes() {
     );
 }
 
+static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+struct EnvGuard {
+    key: &'static str,
+    original: Option<String>,
+}
+
+impl EnvGuard {
+    fn set(key: &'static str, value: &str) -> Self {
+        let original = std::env::var(key).ok();
+        unsafe { std::env::set_var(key, value) };
+        Self { key, original }
+    }
+
+    fn remove(key: &'static str) -> Self {
+        let original = std::env::var(key).ok();
+        unsafe { std::env::remove_var(key) };
+        Self { key, original }
+    }
+}
+
+impl Drop for EnvGuard {
+    fn drop(&mut self) {
+        match &self.original {
+            Some(v) => unsafe { std::env::set_var(self.key, v) },
+            None => unsafe { std::env::remove_var(self.key) },
+        }
+    }
+}
+
 #[test]
 fn parses_daemon_start_with_defaults() {
+    let _lock = ENV_LOCK.lock().unwrap();
+    let _g1 = EnvGuard::remove("BSK_SESSION_IDLE");
+    let _g2 = EnvGuard::remove("BSK_DAEMON_IDLE");
+
     let cli = parse(&["bsk", "daemon", "start"]);
     let Command::Daemon(DaemonCmd::Start(args)) = cli.command else {
         panic!("expected daemon start subcommand");
@@ -142,10 +176,15 @@ fn parses_daemon_start_with_defaults() {
     assert!(!args.foreground);
     assert_eq!(args.resolved_port(), 52800);
     assert_eq!(args.resolved_daemon_idle(), Duration::from_secs(600));
+    assert_eq!(args.resolved_session_idle(), Duration::from_secs(300));
 }
 
 #[test]
 fn parses_daemon_start_with_flags() {
+    let _lock = ENV_LOCK.lock().unwrap();
+    let _g1 = EnvGuard::remove("BSK_SESSION_IDLE");
+    let _g2 = EnvGuard::remove("BSK_DAEMON_IDLE");
+
     let cli = parse(&[
         "bsk",
         "daemon",
@@ -165,6 +204,59 @@ fn parses_daemon_start_with_flags() {
     assert_eq!(args.resolved_port(), 52900);
     assert_eq!(args.resolved_daemon_idle(), Duration::from_secs(2));
     assert_eq!(args.resolved_session_idle(), Duration::from_secs(30));
+}
+
+#[test]
+fn parses_daemon_start_with_env_idle() {
+    let _lock = ENV_LOCK.lock().unwrap();
+    let _g1 = EnvGuard::set("BSK_SESSION_IDLE", "15m");
+    let _g2 = EnvGuard::set("BSK_DAEMON_IDLE", "45m");
+
+    let cli = parse(&["bsk", "daemon", "start"]);
+    let Command::Daemon(DaemonCmd::Start(args)) = cli.command else {
+        panic!("expected daemon start subcommand");
+    };
+    assert_eq!(args.session_idle, None);
+    assert_eq!(args.daemon_idle, None);
+    assert_eq!(args.resolved_session_idle(), Duration::from_secs(15 * 60));
+    assert_eq!(args.resolved_daemon_idle(), Duration::from_secs(45 * 60));
+}
+
+#[test]
+fn cli_flags_override_env_idle() {
+    let _lock = ENV_LOCK.lock().unwrap();
+    let _g1 = EnvGuard::set("BSK_SESSION_IDLE", "15m");
+    let _g2 = EnvGuard::set("BSK_DAEMON_IDLE", "45m");
+
+    let cli = parse(&[
+        "bsk",
+        "daemon",
+        "start",
+        "--session-idle",
+        "2m",
+        "--daemon-idle",
+        "5m",
+    ]);
+    let Command::Daemon(DaemonCmd::Start(args)) = cli.command else {
+        panic!("expected daemon start subcommand");
+    };
+    assert_eq!(args.session_idle, Some(Duration::from_secs(2 * 60)));
+    assert_eq!(args.daemon_idle, Some(Duration::from_secs(5 * 60)));
+    assert_eq!(args.resolved_session_idle(), Duration::from_secs(2 * 60));
+    assert_eq!(args.resolved_daemon_idle(), Duration::from_secs(5 * 60));
+}
+
+#[test]
+fn resolved_idle_falls_back_to_env_when_unpopulated() {
+    let _lock = ENV_LOCK.lock().unwrap();
+    let _g1 = EnvGuard::set("BSK_SESSION_IDLE", "20m");
+    let _g2 = EnvGuard::set("BSK_DAEMON_IDLE", "50m");
+
+    let args = bsk::cli::daemon::StartArgs::default();
+    assert_eq!(args.session_idle, None);
+    assert_eq!(args.daemon_idle, None);
+    assert_eq!(args.resolved_session_idle(), Duration::from_secs(20 * 60));
+    assert_eq!(args.resolved_daemon_idle(), Duration::from_secs(50 * 60));
 }
 
 #[test]
