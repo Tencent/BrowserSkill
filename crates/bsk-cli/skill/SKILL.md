@@ -75,6 +75,11 @@ induced to do is done with their sessions.
    session open is part of the user's request. This also returns borrowed tabs.
    Returned tabs stay open in the user's window. Do not rely on idle cleanup
    or stop/restart the shared daemon to finish a task.
+5. When the user must interact with a page, run `bsk request-help` before asking
+   them to do so. A chat message alone does not hand over page control.
+   `request-help` pauses automation for that in-page step; it does not return a
+   borrowed tab. Resume only after `continued` or `completed`, then observe again
+   with fresh refs.
 
 Use actual IDs, refs and task inputs. Session commands need `--session <id>`;
 `session stop` takes the ID positionally. For unfamiliar commands or flags,

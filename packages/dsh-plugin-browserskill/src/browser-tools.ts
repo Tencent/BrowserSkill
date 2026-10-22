@@ -305,7 +305,9 @@ const BROWSER_TOOL_SPECS: BrowserToolSpec[] = [
     description:
       "Display and human-assistance operations. Actions: resize, emulate, request-help. resize " +
       "requires width/height; emulate accepts device or width/height/mobile, or off alone; " +
-      "request-help requires prompt and can wait for explicit completion criteria.",
+      "request-help pauses browser automation so the user can perform a required in-page step; " +
+      "a chat request alone does not hand over page control. It requires prompt and can wait for " +
+      "explicit completion criteria. It is separate from returning a borrowed tab.",
     actions: {
       resize: "assist.resize",
       emulate: "assist.emulate",

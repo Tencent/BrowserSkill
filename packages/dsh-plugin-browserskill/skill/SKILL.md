@@ -1,6 +1,6 @@
 ---
 name: browser-skill
-description: Automate the user's logged-in Chromium through this plugin's injected bsk_* tools. Use to read pages, fill forms, operate tabs, inspect page activity, debug a website, or test a UI.
+description: Use bsk_* tools for the user's logged-in Chromium.
 ---
 
 # browser-skill for DeepSeek Harness
@@ -38,6 +38,10 @@ For remote setup/pairing, follow the [remote guide](https://github.com/Tencent/B
    `bsk_session({ action: "stop", session: "<id>" })` unless keeping the session
    open is part of the user's request. Stopping returns borrowed tabs, leaving them
    open in the user's window.
+4. Before asking the user to interact with a page, invoke
+   `bsk_assist({ action: "request-help", ... })`; chat alone does not hand over
+   control. It pauses automation, not a borrowed tab. On `continued`/`completed`,
+   observe again with fresh refs.
 
 ## Read and interact
 
