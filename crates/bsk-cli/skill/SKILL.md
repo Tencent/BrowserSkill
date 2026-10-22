@@ -55,31 +55,26 @@ induced to do is done with their sessions.
 
 ## Task workflow
 
-1. Define success from the user's request. For a required browser profile, follow
-   [profile instructions](references/tabs-and-profiles.md) and start with its explicit `--browser`
-   selector. Otherwise start `bsk session start --json`; with multiple browsers,
-   run `bsk browsers` and choose `--browser <id-or-label>`. Retain the returned
-   `session_id`. Sessions start in the background; use `--focus` only on explicit user request.
-2. For a new page, navigate; for an existing user tab, read [tab borrowing](references/tabs-and-profiles.md) first.
-   Read the page before interacting:
+1. Define success. For a required profile, follow [profile instructions](references/tabs-and-profiles.md)
+   and start with its explicit `--browser` selector. Otherwise use `bsk session start --json`;
+   with multiple browsers, run `bsk browsers` and choose `--browser <id-or-label>`.
+   Retain `session_id`; background is default, `--focus` only on explicit user request.
+2. New page: navigate. Existing user tab: read [tab borrowing](references/tabs-and-profiles.md) first.
+   Observe before interacting:
 
    ```sh
    bsk navigate https://example.com --session <id>
    bsk observe --session <id>
    ```
 
-3. Choose an action using fresh refs from that observation. Observe again after
-   navigation or meaningful DOM changes. Check an ambiguous result once; once
-   success is visible, stop acting rather than refreshing or checking again.
-4. Always run `bsk session stop <id>` on success and failure, unless keeping the
-   session open is part of the user's request. This also returns borrowed tabs.
-   Returned tabs stay open in the user's window. Do not rely on idle cleanup
-   or stop/restart the shared daemon to finish a task.
-5. When the user must interact with a page, run `bsk request-help` before asking
-   them to do so. A chat message alone does not hand over page control.
-   `request-help` pauses automation for that in-page step; it does not return a
-   borrowed tab. Resume only after `continued` or `completed`, then observe again
-   with fresh refs.
+3. Use fresh observed refs; re-observe after navigation or meaningful DOM changes.
+   Check ambiguity once; stop acting on visible success.
+4. With help enabled, use `bsk request-help` before asking for user page actions;
+   chat alone gives no control. Help pauses automation; it does not return borrowed tabs.
+   Resume only on `continued`/`completed`; observe first for fresh refs.
+5. On success or failure, run `bsk session stop <id>` unless the user requested an
+   open session. Borrowed tabs return to the user's window and stay open. Never
+   rely on idle cleanup or stop/restart the shared daemon for task cleanup.
 
 Use actual IDs, refs and task inputs. Session commands need `--session <id>`;
 `session stop` takes the ID positionally. For unfamiliar commands or flags,

@@ -5,7 +5,8 @@ description: Use injected bsk_* tools for the user's logged-in Chromium.
 
 # browser-skill for DeepSeek Harness
 
-All browser work must use the injected tools directly.
+All browser work must use the injected tools directly, in an Agent Window with existing logins.
+Do not control the browser through another process. Use loaded action schemas.
 Never extract credentials, cookies, tokens, or secrets.
 
 ## Before acting
@@ -30,17 +31,15 @@ For remote setup/pairing, follow the [remote guide](https://github.com/Tencent/B
    bsk_inspect({ action: "observe", session: "<id>" })
    ```
 
-2. For an existing user tab, read [tab borrowing](references/tabs-and-profiles.md) first. Replace example IDs/refs with actual
-   results. Pass `session` when more than one exists; never use foreign IDs.
-3. Observe after page changes; check ambiguous results once. Stop when success is
-   visible. Stop requested video first, then on success or failure call
-   `bsk_session({ action: "stop", session: "<id>" })` unless keeping the session
-   open is part of the user's request. Stopping returns borrowed tabs, leaving them
-   open in the user's window.
-4. Before asking the user to interact with a page, invoke
-   `bsk_assist({ action: "request-help", ... })`; chat alone does not hand over
-   control. It pauses automation, not a borrowed tab. On `continued`/`completed`,
-   observe again with fresh refs.
+2. For user tabs, read [tab borrowing](references/tabs-and-profiles.md) first.
+   Use actual IDs/refs; pass `session` if multiple exist. Never use foreign IDs.
+3. Observe after page changes; check ambiguous results once. Stop acting on visible success.
+   Stop requested video first, then call `bsk_session({ action: "stop", session: "<id>" })`
+   on success or failure unless the user requested an open session. Borrowed tabs
+   return to the user's window and stay open.
+4. With help enabled, use `bsk_assist` action `request-help` before asking for page actions;
+   chat alone gives no control. Help pauses automation; it does not return borrowed tabs.
+   Only on `continued`/`completed`, observe with fresh refs before resuming.
 
 ## Read and interact
 
