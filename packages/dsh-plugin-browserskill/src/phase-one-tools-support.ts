@@ -150,7 +150,9 @@ export function registerPhaseOneSupportTools(
       name: "assist.request-help",
       description:
         "Pause browser automation and ask the user to complete an in-page step such as login, " +
-        "captcha, OTP, or confirmation. After continued/completed, observe again before using refs.",
+        "captcha, OTP, or confirmation. Use this before asking the user to act: a chat request " +
+        "alone does not hand over page control. This is not tab return. After continued/completed, " +
+        "observe again before using refs.",
       parameters: {
         prompt: {
           type: "string",

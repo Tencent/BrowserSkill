@@ -307,6 +307,14 @@ describe("tool registration", () => {
     }
   });
 
+  it("makes request-help handoff semantics explicit in public tool descriptions", () => {
+    const { tools } = setup({});
+    const assist = tools.get("bsk_assist")!;
+    expect(assist.description).toMatch(/pauses browser automation/i);
+    expect(assist.description).toMatch(/chat request alone does not hand over page control/i);
+    expect(assist.description).toMatch(/separate from returning a borrowed tab/i);
+  });
+
   it("validates model args through defineTool (missing required param)", async () => {
     const { tools } = setup({});
     const navigate = tools.get("page.navigate");

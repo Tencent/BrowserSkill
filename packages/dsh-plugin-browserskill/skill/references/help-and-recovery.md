@@ -1,8 +1,11 @@
 # Human help and recovery
 
-With help enabled, use `bsk_assist` action `request-help` for login, CAPTCHA,
-OTP, payment confirmation, consent, or after two attempts without progress. Supply
-a precise prompt and fresh targets; completion criteria need a stable success signal.
+With help enabled, use `bsk_assist` action `request-help` whenever the user must
+interact with the page, including login, CAPTCHA, OTP, payment confirmation, consent,
+or after two attempts without progress. A chat request alone does not release page
+control. `request-help` pauses automation for the in-page step; it does not return a
+borrowed tab. Supply a precise prompt and fresh targets; completion criteria need a
+stable success signal.
 `all` and `any` support at most eight conditions in total. `urlMatches` accepts
 RE2-compatible regular expressions of at most 128 characters. A compiled pattern
 may contain at most 4096 instructions, and all URL-regex conditions together at most
