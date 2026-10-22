@@ -1,13 +1,12 @@
 ---
 name: browser-skill
-description: Use bsk_* tools for the user's logged-in Chromium.
+description: Use injected bsk_* tools for the user's logged-in Chromium.
 ---
 
 # browser-skill for DeepSeek Harness
 
-All browser work must use the injected tools directly, in an Agent Window with existing logins.
-Do not control the browser through another process. Use the loaded action schemas for parameters.
-Never extract credentials, cookies, tokens, or other secrets.
+All browser work must use the injected tools directly.
+Never extract credentials, cookies, tokens, or secrets.
 
 ## Before acting
 
