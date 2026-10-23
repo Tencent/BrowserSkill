@@ -7,6 +7,10 @@ import { DebugManager } from "@/debug/manager";
 import { getAuditEnabled } from "@/lib/audit";
 import { attachAuditBridge } from "@/lib/audit-bridge";
 import { ConnectionController } from "@/lib/connection-controller";
+import {
+  handleDiagnosticMessage,
+  startConnectionDiagnostics,
+} from "@/lib/connection-diagnostics-runtime";
 import { watchDaemonConnection } from "@/lib/daemon-connection-preference";
 import { startHeartbeat } from "@/lib/heartbeat";
 import {
@@ -68,7 +72,16 @@ import { BrowserVideoHost } from "@/video/host";
 import { VideoManager } from "@/video/manager";
 import { VIDEO_OVERLAY } from "@/video/overlay";
 
+declare const __BSK_EXT_BUILD__: string;
+
 export default defineBackground(() => {
+  const diagnostics = startConnectionDiagnostics(chrome.storage.local, {
+    bootId: crypto.randomUUID(),
+    build: `${__BSK_EXT_VERSION__}@${typeof __BSK_EXT_BUILD__ === "string" ? __BSK_EXT_BUILD__ : "unknown"}`,
+  });
+  chrome.runtime.onMessage.addListener((message, sender, reply) =>
+    handleDiagnosticMessage(diagnostics, message, sender.id, chrome.runtime.id, reply),
+  );
   const controller = new ConnectionController();
   let remoteEndpoint: RemoteEndpoint | null = null;
   let connectionPreferenceValid = false;
