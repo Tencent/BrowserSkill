@@ -122,6 +122,12 @@ async fn query(
     let mut client = match Client::connect_path(info.sock_path.clone()).await {
         Ok(client) => client,
         Err(err) if endpoint_absent(&err) => return Ok(None),
+        #[cfg(any(windows, test))]
+        Err(err) if ipc_access_denied(&err) => {
+            return Err(err
+                .context(super::start_error::DaemonStartFailure::ExistingIpcAccessDenied)
+                .context("connect to existing daemon"));
+        }
         Err(err) => return Err(err.context("connect to existing daemon")),
     };
     let status = client
@@ -145,6 +151,12 @@ fn endpoint_absent(err: &anyhow::Error) -> bool {
             ErrorKind::NotFound | ErrorKind::ConnectionRefused
         )
     })
+}
+
+#[cfg(any(windows, test))]
+fn ipc_access_denied(err: &anyhow::Error) -> bool {
+    err.downcast_ref::<std::io::Error>()
+        .is_some_and(|err| err.kind() == ErrorKind::PermissionDenied)
 }
 
 /// After spawning, tolerate timeouts and discovery races until the caller's
@@ -204,6 +216,16 @@ mod tests {
             let err = anyhow::Error::new(std::io::Error::from(kind)).context("connect IPC");
             assert!(endpoint_absent(&err));
         }
+    }
+
+    #[cfg(any(windows, test))]
+    #[test]
+    fn permission_denied_is_classified_for_windows_recovery() {
+        let denied = anyhow::Error::new(std::io::Error::from(ErrorKind::PermissionDenied));
+        assert!(ipc_access_denied(&denied));
+
+        let timeout = anyhow::Error::new(std::io::Error::from(ErrorKind::TimedOut));
+        assert!(!ipc_access_denied(&timeout));
     }
 
     #[test]

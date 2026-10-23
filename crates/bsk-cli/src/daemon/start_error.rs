@@ -11,6 +11,11 @@ pub(crate) enum DaemonStartFailure {
         "cannot start an independent Windows daemon; the host may prohibit Job Object breakaway; use `bsk daemon start --foreground` in a persistent host task or start from an independent terminal"
     )]
     IndependentStartFailed,
+    #[cfg(any(windows, test))]
+    #[error(
+        "cannot access the existing Windows daemon IPC pipe; do not start or delete another daemon; run the CLI from the same Windows user and integrity level as the daemon"
+    )]
+    ExistingIpcAccessDenied,
 }
 
 impl DaemonStartFailure {
@@ -30,6 +35,13 @@ impl DaemonStartFailure {
                  from an independent terminal. Use the same BSK_HOME and OS user as the clients. \
                  Then set BSK_AUTO_START=0 for client commands and verify `bsk status --json` \
                  in a separate invocation."
+            }
+            #[cfg(any(windows, test))]
+            Self::ExistingIpcAccessDenied => {
+                "Do not start or delete another daemon. Run the CLI from the same Windows user and \
+                 integrity level as the daemon. For a sandboxed agent, keep `bsk daemon start --foreground` \
+                 in a persistent host task, use the same BSK_HOME in every client call, set BSK_AUTO_START=0, \
+                 and verify `bsk status --json` from that client environment."
             }
         }
     }
