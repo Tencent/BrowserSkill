@@ -558,3 +558,175 @@ async fn native_tls_serves_the_same_authorization_and_websocket_protocol() {
     server.command(&["daemon", "revoke", "--all"]);
     closed(&mut ws).await;
 }
+
+// The gateway is the only network-facing surface in server mode, so the
+// validation, routing and authentication refusals above it deserve their
+// own assertions. Each test below pins one layer and deliberately avoids
+// the rate-limit budget, which has its own test.
+#[tokio::test]
+async fn authorize_endpoint_separates_validation_failures_from_rate_limits() {
+    let server = Server::with_args(false, &["--authorize-rate-limit", "60"]).await;
+    let link = server.command(&["daemon", "pair"]);
+    let pairing = link.rsplit_once('#').unwrap().1.to_owned();
+    let client = server.client();
+    let endpoint = server.http_url();
+
+    // A body that is not JSON, an empty object and an unknown field are all
+    // client errors, not rate-limit responses, and none of them may consume
+    // the single-use pairing credential.
+    for body in [
+        "this is not json".to_owned(),
+        json!({}).to_string(),
+        json!({"action": "pair", "next_token": "a".repeat(43), "extra": true}).to_string(),
+    ] {
+        let response = client
+            .post(endpoint.as_str())
+            .bearer_auth(&pairing)
+            .header("content-type", "application/json")
+            .body(body)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 400);
+        assert_eq!(response.headers()["content-type"], "application/json");
+        assert_eq!(response.headers()["cache-control"], "no-store");
+        let error: Value = serde_json::from_slice(&response.bytes().await.unwrap()).unwrap();
+        assert_eq!(error, json!({"error": "invalid_request"}));
+    }
+
+    // Missing, malformed and duplicated credentials are unauthorized. The
+    // malformed token keeps a character outside the accepted alphabet, so it
+    // cannot be rescued by header whitespace trimming.
+    let malformed = format!("{}*{}", "a".repeat(21), "a".repeat(21));
+    for request in [
+        client.post(endpoint.as_str()),
+        client.post(endpoint.as_str()).bearer_auth(&malformed),
+        client
+            .post(endpoint.as_str())
+            .bearer_auth(&pairing)
+            .header("authorization", format!("Bearer {pairing}")),
+    ] {
+        let response = request.body("{}").send().await.unwrap();
+        assert_eq!(response.status(), 401);
+    }
+
+    // Query strings never reach the exchange handler.
+    assert_eq!(
+        client
+            .post(format!("{endpoint}?credential=leak"))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        401
+    );
+
+    // Everything above failed before the store was touched, so the pairing
+    // credential still exchanges for a device.
+    assert_eq!(
+        server
+            .exchange(&pairing, "pair", &"m".repeat(43))
+            .await
+            .status(),
+        200
+    );
+}
+
+#[tokio::test]
+async fn browser_path_rejects_wrong_methods_paths_and_incomplete_handshakes() {
+    let server = Server::start(false).await;
+    let client = server.client();
+    let endpoint = server.http_url();
+    let browser = endpoint.strip_suffix("/authorize").unwrap().to_owned();
+
+    // Only GET on the public browser path is an upgrade attempt.
+    for (method, url) in [
+        ("GET", format!("{browser}/other")),
+        ("POST", browser.clone()),
+        ("DELETE", browser.clone()),
+    ] {
+        let response = client
+            .request(reqwest::Method::from_bytes(method.as_bytes()).unwrap(), url)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 404);
+        assert_eq!(response.headers()["content-type"], "application/json");
+    }
+
+    // Query strings are refused before the Origin check runs.
+    assert_eq!(
+        client
+            .get(format!("{browser}?device=1"))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        401
+    );
+
+    // A missing, foreign or non-extension Origin fails closed.
+    for origin in [
+        None,
+        Some("https://untrusted.example"),
+        Some("chrome-extension://zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"),
+    ] {
+        let mut request = client.get(browser.as_str());
+        if let Some(origin) = origin {
+            request = request.header("origin", origin);
+        }
+        assert_eq!(request.send().await.unwrap().status(), 401);
+    }
+
+    // A well-formed extension Origin is not enough on its own: the
+    // authentication subprotocol must be present and must name a device the
+    // store has authorized.
+    let unknown = format!("bsk-auth.{}", "u".repeat(43));
+    for protocol in ["other", "bsk-auth", unknown.as_str()] {
+        let response = client
+            .get(browser.as_str())
+            .header("origin", ORIGIN)
+            .header("sec-websocket-protocol", protocol)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 401);
+    }
+}
+
+#[tokio::test]
+async fn authorize_response_describes_the_persisted_device_and_the_next_token_authenticates_it() {
+    let server = Server::start(false).await;
+    let link = server.command(&["daemon", "pair"]);
+    let pairing = link.rsplit_once('#').unwrap().1.to_owned();
+    let next = "n".repeat(43);
+    let response = server.exchange(&pairing, "pair", &next).await;
+    assert_eq!(response.status(), 200);
+    let grant: AuthorizationResponse =
+        serde_json::from_slice(&response.bytes().await.unwrap()).unwrap();
+    assert!(!grant.device_id.is_empty());
+    assert_eq!(grant.service_name, "BrowserSkill");
+    for stamp in [&grant.expires_at, &grant.renew_after] {
+        assert!(
+            stamp.ends_with('Z'),
+            "expected an RFC 3339 UTC timestamp, got {stamp}"
+        );
+    }
+
+    // The response must describe the device that was actually persisted, and
+    // the credential the client submitted must authenticate that same device.
+    let store = AuthorizationStore::at_home(server.home.path());
+    assert_eq!(
+        store.authenticate(&next).unwrap().device_id,
+        grant.device_id
+    );
+
+    // The pairing credential is single use.
+    assert_eq!(
+        server
+            .exchange(&pairing, "pair", &"o".repeat(43))
+            .await
+            .status(),
+        401
+    );
+}
