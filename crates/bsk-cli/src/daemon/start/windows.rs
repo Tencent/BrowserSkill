@@ -3,10 +3,12 @@
 
 use std::ffi::{OsStr, OsString};
 use std::fs::File;
+use std::io;
 use std::os::windows::ffi::{OsStrExt, OsStringExt};
 use std::path::Path;
 
 use anyhow::{Context, Result};
+use windows_sys::Win32::Foundation::ERROR_ACCESS_DENIED;
 use windows_sys::Win32::System::Threading::{
     CREATE_BREAKAWAY_FROM_JOB, CREATE_NEW_PROCESS_GROUP, CREATE_SUSPENDED, DETACHED_PROCESS,
 };
@@ -42,14 +44,42 @@ pub(super) fn spawn(exe: &Path, args: &StartArgs, predecessor_pid: Option<u32>) 
         [&input, &output, &output],
         DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_BREAKAWAY_FROM_JOB | CREATE_SUSPENDED,
     )
-    .context(DaemonStartFailure::IndependentStartFailed)?;
-    if let Err(err) = child.resume_outside_job() {
-        // A suspended child must never be left behind if validation/resume fails.
-        let _ = child.kill();
-        let _ = child.wait();
-        return Err(err).context(DaemonStartFailure::IndependentStartFailed);
+    .map_err(|err| spawn_failure(err, exe))?;
+    // A nested Job may allow only partial breakaway, so a successful
+    // CreateProcessW is not sufficient.
+    let failure = match child.outside_job() {
+        Ok(true) => match child.resume() {
+            Ok(()) => return Ok(child),
+            Err(err) => anyhow::Error::new(err).context(DaemonStartFailure::ResumeFailed),
+        },
+        Ok(false) => {
+            anyhow::anyhow!("daemon is still associated with a host Job Object after breakaway")
+                .context(DaemonStartFailure::PartialBreakaway)
+        }
+        Err(err) => anyhow::Error::new(err).context("check the daemon's Job membership"),
+    };
+    // A suspended child must never be left behind if validation/resume fails.
+    let _ = child.kill();
+    let _ = child.wait();
+    Err(failure)
+}
+
+fn spawn_failure(err: io::Error, exe: &Path) -> anyhow::Error {
+    let in_job = windows_process::current_process_in_job().unwrap_or(false);
+    classify_spawn_failure(err, in_job, exe)
+}
+
+/// With CREATE_BREAKAWAY_FROM_JOB, CreateProcessW fails with access denied
+/// when the immediate Job forbids breakaway. Any other error, or one raised
+/// outside every Job, has a different cause.
+fn classify_spawn_failure(err: io::Error, in_job: bool, exe: &Path) -> anyhow::Error {
+    let refused = in_job && err.raw_os_error() == Some(ERROR_ACCESS_DENIED as i32);
+    let err = anyhow::Error::new(err);
+    if refused {
+        err.context(DaemonStartFailure::IndependentStartFailed)
+    } else {
+        err.context(format!("create daemon process {}", exe.display()))
     }
-    Ok(child)
 }
 
 /// Whether [`spawn`] can start a daemon outside this process's Jobs. Creates
@@ -70,15 +100,15 @@ pub(super) fn check_breakaway(exe: &Path) -> Result<()> {
         [&input, &output, &output],
         DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_BREAKAWAY_FROM_JOB | CREATE_SUSPENDED,
     )
-    .context(DaemonStartFailure::IndependentStartFailed)?;
+    .map_err(|err| spawn_failure(err, exe))?;
     let outside = probe.outside_job();
     let _ = probe.kill();
     let _ = probe.wait();
     if !outside.context("check the probe's Job membership")? {
         return Err(anyhow::anyhow!(
-            "breakaway from an outer Job is not allowed"
+            "daemon probe is still associated with a host Job Object after breakaway"
         ))
-        .context(DaemonStartFailure::IndependentStartFailed);
+        .context(DaemonStartFailure::PartialBreakaway);
     }
     Ok(())
 }
@@ -111,4 +141,39 @@ pub(super) fn command_line<'a>(args: impl Iterator<Item = &'a OsStr>) -> OsStrin
         result.push(b'"' as u16);
     }
     OsString::from_wide(&result)
+}
+
+#[cfg(test)]
+mod tests {
+    use windows_sys::Win32::Foundation::ERROR_FILE_NOT_FOUND;
+
+    use super::*;
+
+    fn classified(code: u32, in_job: bool) -> anyhow::Error {
+        classify_spawn_failure(
+            io::Error::from_raw_os_error(code as i32),
+            in_job,
+            Path::new(r"C:\bsk\bsk.exe"),
+        )
+    }
+
+    #[test]
+    fn only_access_denied_inside_a_job_is_a_breakaway_refusal() {
+        assert!(matches!(
+            classified(ERROR_ACCESS_DENIED, true).downcast_ref::<DaemonStartFailure>(),
+            Some(DaemonStartFailure::IndependentStartFailed)
+        ));
+        for error in [
+            classified(ERROR_ACCESS_DENIED, false),
+            classified(ERROR_FILE_NOT_FOUND, true),
+        ] {
+            assert!(error.downcast_ref::<DaemonStartFailure>().is_none());
+            let message = format!("{error:#}");
+            assert!(
+                message.contains(r"create daemon process C:\bsk\bsk.exe"),
+                "{message}"
+            );
+            assert!(!message.contains("Job Object"), "{message}");
+        }
+    }
 }

@@ -739,6 +739,8 @@ mod m2_tests {
         for failure in [
             DaemonStartFailure::AutoStartDisabled,
             DaemonStartFailure::IndependentStartFailed,
+            DaemonStartFailure::PartialBreakaway,
+            DaemonStartFailure::ResumeFailed,
         ] {
             let error = anyhow::anyhow!("startup fixture cause")
                 .context(failure)
