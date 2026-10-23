@@ -430,6 +430,43 @@ describe("renderVom single-layer page", () => {
     expect(coreRefs(out.refs)).toEqual([{ ref: "e1", backendNodeId: 2 }]);
   });
 
+  it.each([
+    { tag: "div", role: "generic" },
+    { tag: "span", role: "generic" },
+    { tag: "li", role: "listitem" },
+  ])("recovers browser-reported clickable $tag nodes without HTML handlers", ({ tag, role }) => {
+    const out = renderVom(
+      scene([node({ id: 1, tag, role, text: "Open settings", clickable: true })]),
+    );
+    expect(out.text).toContain('@e1 button "Open settings"');
+    expect(coreRefs(out.refs)).toEqual([{ ref: "e1", backendNodeId: 1 }]);
+  });
+
+  it.each<Partial<VomNode>>([
+    { disabled: true },
+    { inert: true },
+    { pointerEvents: "none" },
+    { insideNative: true },
+    { hasNativeDescendant: true },
+    { rect: { x: 0, y: 0, w: 1000, h: 800 } },
+    { tag: "svg" },
+    { text: undefined },
+  ])("keeps recovery guards for browser-reported clickability: %j", (guard) => {
+    const out = renderVom(
+      scene([node({ id: 1, role: "generic", text: "Open settings", clickable: true, ...guard })]),
+    );
+    expect(out.refs).toEqual([]);
+  });
+
+  it("does not infer clickable list items from a pointer cursor alone", () => {
+    const out = renderVom(
+      scene([
+        node({ id: 1, tag: "li", role: "listitem", text: "Section label", cursor: "pointer" }),
+      ]),
+    );
+    expect(out.refs).toEqual([]);
+  });
+
   it("does not treat implementation CSS classes as control names", () => {
     const out = renderVom(
       scene([

@@ -46,6 +46,8 @@ export interface VomNode {
   position: string;
   pointerEvents: string;
   cursor?: string;
+  /** Browser-reported clickability, independent of role and inline attributes. */
+  clickable?: boolean;
   attrs?: Record<string, string>;
   domParentId?: number | null;
   domAncestorIds?: number[];

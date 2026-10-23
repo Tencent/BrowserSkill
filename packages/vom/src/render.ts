@@ -210,6 +210,7 @@ export function isVomReferenceNode(node: VomNode): boolean {
 }
 
 function hasRecoveryHandler(node: VomNode): boolean {
+  if (node.clickable) return true;
   const attrs = node.attrs ?? {};
   return RECOVERY_HANDLER_ATTRS.some((key) => Object.prototype.hasOwnProperty.call(attrs, key));
 }

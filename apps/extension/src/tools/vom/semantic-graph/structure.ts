@@ -53,16 +53,36 @@ function hasUsableAxSemantics(node: ResolvedSemanticNode): boolean {
   return node.ax !== undefined && node.ax.ignored !== true;
 }
 
-function isRenderedDomFallback(node: ResolvedSemanticNode): boolean {
-  if (!node.dom) return false;
-  const attrs = node.dom.attrs;
-  if (
-    Object.prototype.hasOwnProperty.call(attrs, "hidden") ||
-    Object.prototype.hasOwnProperty.call(attrs, "inert") ||
-    (attrs["aria-hidden"] ?? "").toLowerCase() === "true"
-  ) {
-    return false;
+function blockedDomFallbacks(
+  nodes: ResolvedSemanticNode[],
+  domChildren: ReadonlyMap<SemanticNodeId, SemanticNodeId[]>,
+): Set<SemanticNodeId> {
+  const blocked = new Set<SemanticNodeId>();
+  for (const node of nodes) {
+    const attrs = node.dom?.attrs ?? {};
+    if (
+      Object.prototype.hasOwnProperty.call(attrs, "hidden") ||
+      Object.prototype.hasOwnProperty.call(attrs, "inert") ||
+      (attrs["aria-hidden"] ?? "").toLowerCase() === "true"
+    )
+      blocked.add(node.id);
   }
+  const queue = [...blocked];
+  for (let index = 0; index < queue.length; index++) {
+    for (const childId of domChildren.get(queue[index]) ?? []) {
+      if (blocked.has(childId)) continue;
+      blocked.add(childId);
+      queue.push(childId);
+    }
+  }
+  return blocked;
+}
+
+function isRenderedDomFallback(
+  node: ResolvedSemanticNode,
+  blocked: ReadonlySet<SemanticNodeId>,
+): boolean {
+  if (!node.dom || blocked.has(node.id)) return false;
   return node.dom.rendered ?? (node.dom.localRect != null || node.dom.rect != null);
 }
 
@@ -156,10 +176,12 @@ function baseDecision(
   output: VomNode,
   frameOwnerIds: ReadonlySet<SemanticNodeId>,
   redundant: ReadonlySet<SemanticNodeId>,
+  blockedFallbacks: ReadonlySet<SemanticNodeId>,
 ): StructureDecision {
   if (node.excluded) return { kind: "excluded", reason: "excluded" };
   if (redundant.has(node.id)) return { kind: "excluded", reason: "redundant-source" };
-  if (!hasUsableAxSemantics(node) && !isRenderedDomFallback(node)) {
+  // Live AX semantics remain authoritative, including modal dialogs escaping inert ancestors.
+  if (!hasUsableAxSemantics(node) && !isRenderedDomFallback(node, blockedFallbacks)) {
     return { kind: "excluded", reason: "non-rendered-dom-fallback" };
   }
   if (frameOwnerIds.has(node.id)) return { kind: "keep", reason: "frame-owner" };
@@ -403,15 +425,23 @@ export function normalizeSemanticStructure(graph: ResolvedSemanticGraph): Struct
   const frameOwnerIds = new Set(
     [...graph.frames.values()].flatMap((frame) => frame.ownerNodeId ?? []),
   );
+  const domChildren = buildChildren(nodes, "domParentId");
+  const blockedFallbacks = blockedDomFallbacks(nodes, domChildren);
   const decisions = new Map<SemanticNodeId, StructureDecision>();
   for (const node of nodes) {
     decisions.set(
       node.id,
-      baseDecision(graph, node, recovered.get(node.id) as VomNode, frameOwnerIds, redundant),
+      baseDecision(
+        graph,
+        node,
+        recovered.get(node.id) as VomNode,
+        frameOwnerIds,
+        redundant,
+        blockedFallbacks,
+      ),
     );
   }
 
-  const domChildren = buildChildren(nodes, "domParentId");
   const candidates = reliableGroupCandidates(graph, nodes, recovered, decisions, domChildren);
   for (const nodeId of leafCandidates(nodes, candidates, domChildren)) {
     decisions.set(nodeId, {

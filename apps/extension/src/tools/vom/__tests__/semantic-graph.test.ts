@@ -41,6 +41,30 @@ function document(
 }
 
 describe("semantic VOM graph", () => {
+  it.each<Record<string, string>>([
+    { hidden: "" },
+    { inert: "" },
+    { "aria-hidden": "true" },
+  ])("does not recover clickable DOM fallbacks inside excluded subtrees: %j", (attrs) => {
+    const scene = buildSemanticVomScene({
+      viewport: { width: 800, height: 600 },
+      rootFrameId: "main",
+      documents: [
+        document(
+          "main",
+          [],
+          [
+            { ...dom(3, 2, "div", {}, "Blocked action"), clickable: true },
+            dom(2, 1, "div"),
+            dom(1, null, "div", attrs),
+            { ...dom(4, null, "div", {}, "Available action"), clickable: true },
+          ],
+        ),
+      ],
+    });
+    expect(renderVom(scene).refs.map((ref) => ref.backendNodeId)).toEqual([4]);
+  });
+
   it.each([
     { tag: "dialog", role: "dialog", axModal: true, expected: true },
     { tag: "dialog", role: "dialog", axModal: false, expected: false },
