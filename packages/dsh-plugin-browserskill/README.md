@@ -88,7 +88,7 @@ capabilities. Updating the npm package does not update either component.
 | Tool | Actions | Purpose |
 | --- | --- | --- |
 | `bsk_session` | `start`, `stop`, `list`, `share`, `sync`, `wait-user`, `cooperation-status` | Manage owned sessions and shared-tab control. |
-| `bsk_page` | `navigate`, `back`, `forward`, `reload`, `wait`, `wait-for-element` | Navigate the active tab; wait for page lifecycle events or one element condition. |
+| `bsk_page` | `navigate`, `back`, `forward`, `reload`, `wait`, `wait-for-element`, `dialog` | Navigate the active tab; wait for page lifecycle events or one element condition; answer native JavaScript dialogs. |
 | `bsk_inspect` | `observe`, `snapshot`, `html`, `screenshot`, `console`, `network`, `debug`, `video`, `extract` | Inspect page state, debug websites, capture screenshots or requested task videos, and export structured tables/lists. |
 | `bsk_interact` | `click`, `hover`, `wheel`, `scroll-to`, `focus`, `blur`, `fill`, `select`, `press`, `evaluate`, `upload`, `download` | Interact with controls using fresh refs or selectors. |
 | `bsk_tabs` | `list`, `create`, `select`, `close`, `borrow`, `return` | Manage Agent Window tabs and temporarily borrow user tabs. |

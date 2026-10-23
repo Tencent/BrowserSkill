@@ -52,6 +52,9 @@ pub enum SessionSub {
 
 #[derive(Debug, Clone, Args)]
 pub struct SessionStartArgs {
+    /// Leave alert/beforeunload pending outside shared control; shared tabs always do so.
+    #[arg(long)]
+    pub no_auto_dialog: bool,
     /// Deprecated compatibility flag. Automation settings in the extension take precedence.
     #[arg(long)]
     pub unattended: bool,
@@ -129,6 +132,8 @@ pub struct SessionRequestArgs {
 struct StartParams {
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     incognito: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    no_auto_dialog: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     request_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -256,6 +261,7 @@ fn run_start(sock: PathBuf, args: SessionStartArgs, format: Format) -> Result<()
             width: args.width,
             height: args.height,
             focused: Some(args.focus),
+            no_auto_dialog: args.no_auto_dialog.then_some(true),
         },
     );
     waited.store(true, Ordering::SeqCst);
@@ -287,6 +293,7 @@ fn run_start(sock: PathBuf, args: SessionStartArgs, format: Format) -> Result<()
 /// (background window, browser-chosen size).
 #[derive(Debug, Default, Clone)]
 pub struct SessionStartOptions {
+    pub no_auto_dialog: Option<bool>,
     pub incognito: bool,
     pub request_id: Option<String>,
     pub name: Option<String>,
@@ -298,6 +305,9 @@ pub struct SessionStartOptions {
 
 /// Start a session and open the Agent Window. Used by `session start` and `record start`.
 pub fn start_session(sock: PathBuf, opts: SessionStartOptions) -> Result<StartReply, CliError> {
+    if opts.no_auto_dialog == Some(true) {
+        super::interaction_policy::require_dialog_support(&sock)?;
+    }
     if opts.incognito {
         crate::cli::protocol::require_daemon_support(
             &sock,
@@ -321,6 +331,7 @@ pub fn start_session(sock: PathBuf, opts: SessionStartOptions) -> Result<StartRe
             width: opts.width,
             height: opts.height,
             focused: Some(opts.focused.unwrap_or(false)),
+            no_auto_dialog: opts.no_auto_dialog,
         }),
         SESSION_START_IPC_TIMEOUT,
     )
@@ -694,6 +705,7 @@ mod start_params_tests {
     fn start_params_send_task_name_without_policy_overrides() {
         for task_name in [None, Some("Check settings".to_string())] {
             let params = StartParams {
+                no_auto_dialog: None,
                 incognito: false,
                 request_id: None,
                 task_name: task_name.clone(),

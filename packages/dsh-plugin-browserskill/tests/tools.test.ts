@@ -131,6 +131,7 @@ const ACTION_ROUTES: Record<string, readonly [string, string]> = {
   "page.reload": ["bsk_page", "reload"],
   "page.wait": ["bsk_page", "wait"],
   "page.wait-for-element": ["bsk_page", "wait-for-element"],
+  "page.dialog": ["bsk_page", "dialog"],
   "inspect.observe": ["bsk_inspect", "observe"],
   "inspect.snapshot": ["bsk_inspect", "snapshot"],
   "inspect.html": ["bsk_inspect", "html"],
@@ -275,7 +276,7 @@ it("forwards only the context explicitly supplied by the caller, never a cached 
 
 const EXPECTED_ACTIONS = {
   bsk_session: ["start", "stop", "list", "share", "sync", "wait-user", "cooperation-status"],
-  bsk_page: ["navigate", "back", "forward", "reload", "wait", "wait-for-element"],
+  bsk_page: ["navigate", "back", "forward", "reload", "wait", "wait-for-element", "dialog"],
   bsk_inspect: [
     "observe",
     "snapshot",
@@ -2426,6 +2427,39 @@ describe("website debug", () => {
       ).rejects.toThrow();
     expect(calls).toHaveLength(0);
   });
+});
+
+it("routes dialog control and preserves empty or hyphen-prefixed prompt text", async () => {
+  const { tools, calls } = setup({
+    "session start": START_REPLY("s1"),
+    dialog: { tab_id: 7, pending: null, execution_pending: false },
+  });
+  await tools.get("session.start")!.execute({ noAutoDialog: true }, makeExec());
+  expect(calls[0].args).toContain("--no-auto-dialog");
+  const beforeInvalid = calls.length;
+  await expect(tools.get("page.dialog")!.execute({}, makeExec())).rejects.toThrow("dialogAction");
+  await expect(
+    tools.get("page.dialog")!.execute({ dialogAction: "dismiss", text: "invalid" }, makeExec()),
+  ).rejects.toThrow("text requires");
+  expect(calls).toHaveLength(beforeInvalid);
+  for (const text of ["", "--literal", "a b\n中文"]) {
+    await tools
+      .get("page.dialog")!
+      .execute({ dialogAction: "accept", text, dialogId: "d1", tabId: 7 }, makeExec());
+    expect(calls.at(-1)?.args).toEqual([
+      "dialog",
+      "accept",
+      "--session",
+      "s1",
+      "--tab-id",
+      "7",
+      "--dialog-id",
+      "d1",
+      `--text=${text}`,
+    ]);
+  }
+  await tools.get("page.dialog")!.execute({ dialogAction: "status" }, makeExec());
+  expect(calls.at(-1)?.args).toEqual(["dialog", "status", "--session", "s1"]);
 });
 
 describe("script and file actions share the existing runtime", () => {

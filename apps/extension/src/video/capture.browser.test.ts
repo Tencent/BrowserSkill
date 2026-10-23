@@ -14,6 +14,14 @@ import { createDshVideoFixture } from "./dsh-fixture";
 
 const run = promisify(execFile);
 
+// Seeking can finish before the compositor presents the new frame. Wait for
+// both, but bound the presentation wait: a seek that stays on the displayed
+// frame presents nothing new.
+const SEEK_FRAME =
+  "const seekFrame=(v,t)=>{const seeked=new Promise(r=>v.addEventListener('seeked',r,{once:true}));" +
+  "const presented=new Promise(r=>v.requestVideoFrameCallback(()=>r()));v.currentTime=t;" +
+  "return seeked.then(()=>Promise.race([presented,new Promise(r=>setTimeout(r,2000))]))};";
+
 function bluePdf(): Buffer {
   let pdf = "%PDF-1.4\n";
   const offsets = [0];
@@ -276,7 +284,7 @@ describe.skipIf(!process.env.BSK_VIDEO_CHROME || !process.env.BSK_VIDEO_BSK)(
               .toBe(true);
             const pixels = await evaluate<number[][]>(
               preview.sessionId,
-              `(async()=>{const v=document.querySelector('video'),c=document.createElement('canvas');c.width=v.videoWidth;c.height=v.videoHeight;const ctx=c.getContext('2d'),pixels=[];for(const time of [.2,v.duration-.3]){v.currentTime=time;await new Promise(r=>v.onseeked=r);ctx.drawImage(v,0,0);pixels.push(Array.from(ctx.getImageData(c.width/2,c.height/2,1,1).data));}return pixels})()`,
+              `(async()=>{${SEEK_FRAME}const v=document.querySelector('video'),c=document.createElement('canvas');c.width=v.videoWidth;c.height=v.videoHeight;const ctx=c.getContext('2d'),pixels=[];for(const time of [.2,v.duration-.3]){await seekFrame(v,time);ctx.drawImage(v,0,0);pixels.push(Array.from(ctx.getImageData(c.width/2,c.height/2,1,1).data));}return pixels})()`,
             );
             expect(pixels[0][0]).toBeGreaterThan(240);
             expect(pixels[1][1]).toBeGreaterThan(240);
@@ -822,7 +830,7 @@ describe.skipIf(!process.env.BSK_VIDEO_CHROME || !process.env.BSK_VIDEO_BSK)(
               // request and verify a decoded frame from the completed task.
               const pixel = await evaluate<number[]>(
                 preview.sessionId,
-                `(async()=>{const v=document.querySelector('video'),c=document.createElement('canvas');c.width=v.videoWidth;c.height=v.videoHeight;v.currentTime=v.duration-.2;await new Promise(r=>v.onseeked=r);const ctx=c.getContext('2d');ctx.drawImage(v,0,0);return Array.from(ctx.getImageData(c.width/2,c.height/2,1,1).data)})()`,
+                `(async()=>{${SEEK_FRAME}const v=document.querySelector('video'),c=document.createElement('canvas');c.width=v.videoWidth;c.height=v.videoHeight;await seekFrame(v,v.duration-.2);const ctx=c.getContext('2d');ctx.drawImage(v,0,0);return Array.from(ctx.getImageData(c.width/2,c.height/2,1,1).data)})()`,
               );
               expect(pixel[0]).toBeGreaterThan(240);
               expect(pixel[1]).toBeLessThan(15);

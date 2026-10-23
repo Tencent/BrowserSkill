@@ -2,6 +2,7 @@ import { AGENT_WINDOW_HOME, type AgentWindowApi, chromeAgentWindowApi } from "./
 import { RefStore } from "./ref-store";
 
 export interface SessionContext {
+  noAutoDialog?: boolean;
   /** Incognito sessions cannot borrow user tabs. Absent means a normal window. */
   incognito?: boolean;
   /** Remote connections retain dedicated windows, with explicit page ownership. */
@@ -51,6 +52,7 @@ export interface SessionManagerOptions {
 
 /** Options for starting a session's Agent Window. */
 export interface SessionStartOptions {
+  noAutoDialog?: boolean;
   /** Use Chrome's shared incognito browsing session. */
   incognito?: boolean;
   /** Optional Agent Window outer size in CSS pixels. */
@@ -279,6 +281,7 @@ export class SessionManager {
       throwIfSessionStartAborted(opts.signal);
 
       const ctx: SessionContext = {
+        noAutoDialog: opts.noAutoDialog,
         incognito: created.incognito ?? false,
         ...(this.remote() ? { remote: true } : {}),
         sessionId,

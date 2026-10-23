@@ -2,11 +2,13 @@ import type { VomScene } from "@browser-skill/vom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ChromiumCdp } from "@/browser-driver/chromium-cdp";
 import { SessionManager } from "@/session-manager/manager";
+import { handleDialog } from "@/tools/dialogs";
 import { handleEmulate } from "@/tools/emulate";
 import { resolveActionTarget } from "@/tools/interaction";
 import { captureVomObservation, handleSnapshot } from "@/tools/observation";
 import type { CdpRunner } from "@/tools/shared";
 import { handleTabBorrow, handleTabCreate, handleTabReturn, handleTabSelect } from "@/tools/tabs";
+import type { DialogParams, PendingJavaScriptDialog } from "@/transport/types";
 import { CooperationController } from "./controller";
 import type { FrameState } from "./types";
 
@@ -1664,5 +1666,122 @@ describe("default collaboration preserves the original unattended lifetime", () 
     expect(f.controller.enabled(8)).toBe(true);
     expect(f.ctx.agentCreatedTabs.has(8)).toBe(true);
     expect(f.sessionActivity).toHaveBeenLastCalledWith("shared", false);
+  });
+});
+
+async function dialogFixture() {
+  const f = await fixture();
+  await f.act(); // The triggering operation has consumed its DOM context.
+  let pending: PendingJavaScriptDialog | null = {
+    id: "dialog-1",
+    tab_id: 7,
+    type: "prompt",
+    message: "Name?",
+    sequence: 1,
+  };
+  f.cdp.pendingDialog = () => pending;
+  const answer = vi.fn(async () => {
+    pending = null;
+    return {
+      tab_id: 7,
+      type: "prompt" as const,
+      message: "Name?",
+      sequence: 1,
+      handled: "accepted" as const,
+    };
+  });
+  f.cdp.handleDialog = answer;
+  f.readFrames.mockClear();
+  f.readFrames.mockImplementation(() => new Promise(() => {}));
+  vi.mocked(handleSnapshot).mockClear();
+  const decide = (params: Partial<DialogParams>, before?: () => Promise<void>) => {
+    const req = {
+      id: "dialog",
+      method: "tool.dialog",
+      params: { session_id: "shared", action: "accept", dialog_id: "dialog-1", ...params },
+    };
+    return f.controller.run(req, f.cdp, f.abort.signal, async (runner, signal) => {
+      await before?.();
+      return handleDialog(f.sessions, req.params as DialogParams, runner, chrome.tabs, signal);
+    });
+  };
+  return { ...f, answer, decide };
+}
+
+describe("native dialogs under shared control", () => {
+  it("reads and answers the identified modal after context consumption without renderer calls", async () => {
+    const f = await dialogFixture();
+    expect(await f.decide({ action: "status", dialog_id: undefined })).toMatchObject({
+      pending: { id: "dialog-1" },
+    });
+    expect(await f.decide({ prompt_text: "" })).toMatchObject({
+      pending: null,
+      handled: { handled: "accepted" },
+    });
+    expect(f.answer).toHaveBeenCalledWith(7, "dialog-1", true, "");
+    expect(f.readFrames).not.toHaveBeenCalled();
+    expect(handleSnapshot).not.toHaveBeenCalled();
+    expect(f.controller.view(7)?.mode).toBe("syncing");
+  });
+
+  it("rejects missing or stale dialog identity without answering a different prompt", async () => {
+    const f = await dialogFixture();
+    expect(await f.decide({ dialog_id: undefined })).toMatchObject({ code: "invalid_params" });
+    expect(await f.decide({ dialog_id: "stale" })).toMatchObject({ code: "not_found" });
+    expect(f.answer).not.toHaveBeenCalled();
+    expect(f.readFrames).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    "hold",
+    "editing",
+    "stop",
+  ])("respects %s while keeping status available", async (control) => {
+    const f = await dialogFixture();
+    if (control === "hold") await f.controller.control(7, f.controller.view(7)!.revision, "hold");
+    else if (control === "editing") f.change({ human: 1, editing: true });
+    else f.controller.stopSession("shared");
+    expect(await f.decide({ action: "status", dialog_id: undefined })).toMatchObject({
+      pending: { id: "dialog-1" },
+    });
+    expect(await f.decide({})).toMatchObject({
+      code: control === "stop" ? "user_aborted" : "permission_denied",
+    });
+    expect(f.answer).not.toHaveBeenCalled();
+    expect(f.readFrames).not.toHaveBeenCalled();
+  });
+
+  it("rechecks control immediately before the native decision after an async lookup", async () => {
+    const f = await dialogFixture();
+    const entered = deferred(),
+      release = deferred();
+    const result = f.decide({}, async () => {
+      entered.resolve();
+      await release.promise;
+    });
+    await entered.promise;
+    await f.controller.control(7, f.controller.view(7)!.revision, "hold");
+    release.resolve();
+    expect(await result).toMatchObject({
+      code: "permission_denied",
+      data: { effect_state: "none" },
+    });
+    expect(f.answer).not.toHaveBeenCalled();
+  });
+
+  it("pins status to the task tab when another browser tab is active", async () => {
+    const f = await dialogFixture();
+    vi.stubGlobal("chrome", {
+      tabs: {
+        get: async (id: number) => ({ ...f.tab, id }),
+        query: async () => [{ ...f.tab, id: 99 }],
+      },
+    });
+    expect(f.controller.taskTab("shared")).toBe(7);
+    expect(await f.decide({ action: "status", dialog_id: undefined })).toMatchObject({
+      tab_id: 7,
+      pending: { id: "dialog-1" },
+    });
+    expect(f.readFrames).not.toHaveBeenCalled();
   });
 });

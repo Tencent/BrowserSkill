@@ -8,6 +8,7 @@ import { join, resolve } from "node:path";
 import { promisify } from "node:util";
 import { withChrome } from "../snapshot-coordinates/chrome.mjs";
 import { attachExtensionWorker, runCompatibilityScenarios } from "./compatibility.mjs";
+import { runDialogScenarios } from "./dialogs.mjs";
 import { runDefaultDshScenario } from "./dsh-client.mjs";
 import { runLifetimeScenario } from "./lifetime.mjs";
 import { runGenericScenarios } from "./scenarios.mjs";
@@ -71,7 +72,11 @@ const bsk = async (args, failure = false) => {
       throw error;
     }
     const result = JSON.parse(error.stdout);
-    assert.equal(result.data?.reason, "cooperation_sync_required", JSON.stringify(result));
+    assert.equal(
+      result.data?.reason,
+      typeof failure === "string" ? failure : "cooperation_sync_required",
+      JSON.stringify(result),
+    );
     return result;
   }
 };
@@ -85,9 +90,13 @@ const poll = async (read, label = "setup") => {
   throw new Error(`Timed out: ${label}`);
 };
 const html = await readFile(new URL("fixture.html", import.meta.url));
+const dialogHtml = await readFile(new URL("dialogs.html", import.meta.url));
 const submissions = [];
 const server = createServer(async (req, res) => {
-  if (req.url === "/submit") {
+  if (req.url.startsWith("/dialogs")) {
+    res.setHeader("content-type", "text/html; charset=utf-8");
+    res.end(dialogHtml);
+  } else if (req.url === "/submit") {
     let body = "";
     for await (const chunk of req) body += chunk;
     const submission = JSON.parse(body);
@@ -103,6 +112,7 @@ const server = createServer(async (req, res) => {
 });
 let browserVersion;
 let compatibility;
+let dialogs;
 let daemon;
 let daemonOutput = "";
 const evidence = [];
@@ -169,6 +179,7 @@ try {
     async (send) => {
       browserVersion = (await send("Browser.getVersion")).product;
       await poll(async () => (await bsk(["browsers"])).length, "extension connection");
+      dialogs = await runDialogScenarios({ send, bsk, base });
       for (const seed of compatibilityOnly ? [] : [4, 7, 14]) {
         const { session_id: session } = await bsk(["session", "start"]);
         const scope = ["--session", session];
@@ -784,6 +795,7 @@ try {
     headful,
     closedTaskTabFailsClosed: true,
     compatibility,
+    dialogs,
     submissions,
     evidence,
   };

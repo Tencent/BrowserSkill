@@ -159,7 +159,7 @@ async fn handshake_skew_when_protocol_minor_differs() {
         "1.3",
         env!("CARGO_PKG_VERSION"),
         Some("0.0.0"),
-        Some("1.3"),
+        Some("1.4"),
     )
     .await;
     match resp.body {
@@ -217,7 +217,7 @@ async fn handshake_legacy_ext_without_protocol_floor_still_ok() {
     let mut ws = open_ws(handle.ws_addr()).await;
     let resp = send_handshake_with_floors(
         &mut ws,
-        "1.3",
+        "1.4",
         env!("CARGO_PKG_VERSION"),
         Some("0.1.0"),
         None,
@@ -287,7 +287,7 @@ async fn handshake_rejects_when_local_below_peer_min_compatible_protocol() {
     let mut ws = open_ws(handle.ws_addr()).await;
     let resp = send_handshake_with_floors(
         &mut ws,
-        "1.3",
+        "1.4",
         env!("CARGO_PKG_VERSION"),
         Some("0.0.0"),
         Some("99.0.0"),

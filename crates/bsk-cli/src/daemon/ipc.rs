@@ -303,6 +303,7 @@ pub fn full_handler(status: DaemonStatus, state: Arc<DaemonState>) -> RpcHandler
                 | Method::ToolSelect
                 | Method::ToolUpload
                 | Method::ToolDownload
+                | Method::ToolDialog
                 | Method::ToolEvaluate
                 | Method::ToolWaitForNavigation
                 | Method::ToolWaitForElement
@@ -583,21 +584,22 @@ async fn handle_tool_dispatch(
         }
     }
     let entry = inflight_guard.entry();
-    // `record_stop` must reach the extension while `record_await` holds the
-    // serial busy lock — finishing the recording unblocks await.
+    // Dialog decisions, recording stop and cooperation reads must reach the
+    // extension while the ordinary operation they unblock holds the busy lock.
     let independent_control = method == Method::ToolCooperate
         && params.get("action").and_then(Value::as_str) != Some("enable");
-    let outcome = if method == Method::ToolRecordStop || independent_control {
-        state
-            .tool_queues
-            .dispatch_unlocked(&session_id, method.clone(), params, timeout, Some(entry))
-            .await
-    } else {
-        state
-            .tool_queues
-            .dispatch(&session_id, method.clone(), params, timeout, Some(entry))
-            .await
-    };
+    let outcome =
+        if matches!(method, Method::ToolRecordStop | Method::ToolDialog) || independent_control {
+            state
+                .tool_queues
+                .dispatch_unlocked(&session_id, method.clone(), params, timeout, Some(entry))
+                .await
+        } else {
+            state
+                .tool_queues
+                .dispatch(&session_id, method.clone(), params, timeout, Some(entry))
+                .await
+        };
     drop(inflight_guard);
     match outcome {
         Ok(v) if method == Method::ToolDownload => {
@@ -966,6 +968,8 @@ fn tool_dispatch_transport_timeout(method: &Method, params: &Value) -> Result<Du
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct CliSessionStartParams {
     #[serde(default)]
+    pub no_auto_dialog: Option<bool>,
+    #[serde(default)]
     pub incognito: bool,
     #[serde(default)]
     pub browser_instance_id: Option<String>,
@@ -1090,6 +1094,7 @@ pub(super) async fn handle_session_start(
             width: None,
             height: None,
             focused: None,
+            no_auto_dialog: None,
         }
     } else {
         serde_json::from_value(params).map_err(|err| RpcError {
@@ -1120,6 +1125,7 @@ pub(super) async fn handle_session_start(
             incognito: params.incognito,
             size: window_size,
             focused: params.focused,
+            no_auto_dialog: params.no_auto_dialog,
         },
         state.config.extension_connect_wait,
         DEFAULT_RPC_TIMEOUT,

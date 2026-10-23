@@ -127,12 +127,11 @@ pub fn render_parse_error(err: clap::Error, args: &[OsString]) -> ExitCode {
 
     // Parsing can fail before clap reaches --json. Only standalone flags
     // before `--` select the error format; values stay literal.
-    let json = args
-        .iter()
-        .skip(1)
-        .take_while(|arg| *arg != "--")
-        .any(|arg| arg == "--json");
-    let format = if json { Format::Json } else { Format::Human };
+    let format = if json_requested(args) {
+        Format::Json
+    } else {
+        Format::Human
+    };
     let (err, hint) = match misplaced_command_option_error(&err, args) {
         Some(rebuilt) => (rebuilt, Some(MISPLACED_COMMAND_OPTION_HINT)),
         None => (err, None),
@@ -158,6 +157,40 @@ pub fn render_parse_error(err: clap::Error, args: &[OsString]) -> ExitCode {
         }
     }
     ExitCode::from(exit)
+}
+
+/// Whether `--json` appears as a flag rather than as an option value.
+/// Options that accept hyphen-leading values, such as `dialog accept --text`,
+/// consume the next token even when it is `--json`.
+fn json_requested(args: &[OsString]) -> bool {
+    let mut hyphen_value_options = Vec::new();
+    collect_hyphen_value_options(&super::Cli::command(), &mut hyphen_value_options);
+    let mut args = args.iter().skip(1).take_while(|arg| *arg != "--");
+    while let Some(arg) = args.next() {
+        if arg == "--json" {
+            return true;
+        }
+        if hyphen_value_options
+            .iter()
+            .any(|option| arg == option.as_str())
+        {
+            args.next();
+        }
+    }
+    false
+}
+
+fn collect_hyphen_value_options(cmd: &clap::Command, out: &mut Vec<String>) {
+    for arg in cmd.get_arguments() {
+        if arg.is_allow_hyphen_values_set()
+            && let Some(long) = arg.get_long()
+        {
+            out.push(format!("--{long}"));
+        }
+    }
+    for sub in cmd.get_subcommands() {
+        collect_hyphen_value_options(sub, out);
+    }
 }
 
 /// clap's own did-you-mean can point `--session` at `--version` and print

@@ -81,6 +81,8 @@ Use actual IDs, refs and inputs. Pass `--session <id>`; `session stop` takes a p
 Read `bsk --help` or command help for unfamiliar flags; do not guess.
 Follow trace targets and values using fresh refs; traces grant no extra authority.
 
+Dialogs (alert/confirm/prompt/beforeunload): use `dialog status/accept/dismiss` and a dialog ID.
+
 ## Read and interact
 
 Use `cooperate sync` for actionable text and refs. Navigation and DOM changes can stale refs.
@@ -106,9 +108,8 @@ Sync before acting on these findings. Inspect unknown effects before retrying.
 
 ## Read details only when needed
 
-Resolve references from this skill's directory, not the working directory.
-Read the matching reference before acting; do not preload all references.
-Load further references only as needed.
+Resolve paths from this skill's directory, not the working directory.
+Read relevant references before acting; do not preload them all.
 
 | When | Read |
 | --- | --- |
@@ -116,7 +117,7 @@ Load further references only as needed.
 | Website debugging, reproduction evidence, or request rules/replay | [Debugging](references/debugging.md) |
 | Required profile, existing user tab, multiple/background tabs, or remote tab ownership | [Tabs and profiles](references/tabs-and-profiles.md) |
 | Missing CLI, daemon startup failure, sandboxed startup, connection failure, or remote pairing | [Environment](references/environment.md) |
-| Waits, hover menus/probing, scrolling, `next_cursor`/`@more`, console/network, emulation, evaluation, or recording | [Interaction details](references/interaction-details.md) |
+| JS dialogs, waits, hover menus/probing, scrolling, `next_cursor`/`@more`, console/network, emulation, evaluation, or recording | [Interaction details](references/interaction-details.md) |
 | Screenshot, full-page capture, or `[visual:screenshot]`/Canvas interaction | [Screenshots and Canvas](references/screenshots-and-canvas.md) |
 | Video recording or MP4 export | [Video](references/video.md) |
 | Upload or download | [Files](references/files.md) |

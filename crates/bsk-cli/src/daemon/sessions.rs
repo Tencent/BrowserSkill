@@ -495,6 +495,7 @@ const SESSION_ID_MAX_RESERVE_ATTEMPTS: u32 = 64;
 /// (background window, browser-chosen size).
 #[derive(Debug, Default, Clone, Copy)]
 pub struct AgentWindowOptions {
+    pub no_auto_dialog: Option<bool>,
     /// Opt in to Chrome's shared incognito browsing session.
     pub incognito: bool,
     /// Optional outer size as `(width, height)` CSS pixels.
@@ -583,6 +584,18 @@ pub(crate) async fn start_session_recoverable(
     if client.is_unresponsive() {
         return Err(StartSessionError::ExtensionUnresponsive);
     }
+    if window.no_auto_dialog == Some(true)
+        && !bsk_protocol::tools::supports_dialog_control(&client.extension_protocol_version)
+    {
+        return Err(StartSessionError::ExtensionError(RpcError {
+            code: bsk_protocol::ErrorCode::Unsupported,
+            message: format!(
+                "--no-auto-dialog requires extension protocol {}; update the browser extension",
+                bsk_protocol::tools::DIALOG_CONTROL_PROTOCOL,
+            ),
+            data: None,
+        }));
+    }
     if window.incognito
         && !bsk_protocol::tools::supports_incognito_sessions(&client.extension_protocol_version)
     {
@@ -614,6 +627,7 @@ pub(crate) async fn start_session_recoverable(
         width: window.size.map(|(width, _)| width),
         height: window.size.map(|(_, height)| height),
         focused: window.focused,
+        no_auto_dialog: window.no_auto_dialog,
         unattended: false,
     };
     let rpc_id = next_rpc_id("sess-start");
@@ -1154,6 +1168,7 @@ mod link_tests {
                     &queues,
                     None,
                     AgentWindowOptions {
+                        no_auto_dialog: None,
                         size: None,
                         focused: Some(false),
                         ..Default::default()

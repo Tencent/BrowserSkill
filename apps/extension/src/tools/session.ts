@@ -53,6 +53,7 @@ export function validateWindowSize(
 }
 
 export interface SessionStartParams {
+  no_auto_dialog?: boolean;
   session_id: string;
   /** Opt in to Chrome's shared incognito browsing session. */
   incognito?: boolean;
@@ -135,6 +136,9 @@ export async function handleSessionStart(
   if (params.unattended !== undefined && typeof params.unattended !== "boolean") {
     return { code: "invalid_params", message: "unattended must be a boolean" };
   }
+  if (params.no_auto_dialog !== undefined && typeof params.no_auto_dialog !== "boolean") {
+    return { code: "invalid_params", message: "no_auto_dialog must be a boolean" };
+  }
   if (params.incognito !== undefined && typeof params.incognito !== "boolean") {
     return { code: "invalid_params", message: "incognito must be a boolean" };
   }
@@ -145,6 +149,7 @@ export async function handleSessionStart(
     const ctx = await manager.start(params.session_id, {
       incognito: params.incognito,
       size: sizeOrErr,
+      noAutoDialog: params.no_auto_dialog,
       focused: params.focused,
       signal: deps.signal,
     });

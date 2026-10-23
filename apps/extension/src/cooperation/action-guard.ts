@@ -75,7 +75,12 @@ export function guardedRunner<T extends CdpRunner>(cdp: T, options: ActionGuard 
       method === "DOM.focus" ||
       method === "DOM.scrollIntoViewIfNeeded" ||
       method.startsWith("Emulation.") ||
-      ["Page.navigate", "Page.navigateToHistoryEntry", "Page.reload"].includes(method);
+      [
+        "Page.navigate",
+        "Page.navigateToHistoryEntry",
+        "Page.reload",
+        "Page.handleJavaScriptDialog",
+      ].includes(method);
     if (!prepare && effect && !["Runtime.callFunctionOn", "Runtime.evaluate"].includes(method))
       throw new Error("Shared-tab observation cannot dispatch browser input");
     if (effect && !release) await prepare?.(input);
@@ -112,6 +117,17 @@ export function guardedRunner<T extends CdpRunner>(cdp: T, options: ActionGuard 
   };
   const runner = new Proxy(cdp, {
     get(target, key, receiver) {
+      if (key === "handleDialog") {
+        const handle = target.handleDialog?.bind(target);
+        return handle
+          ? async (tabId: number, id: string, accept: boolean, text?: string) => {
+              if (!prepare) throw new Error("Shared-tab observation cannot answer dialogs");
+              await prepare();
+              dispatch?.(true, "Page.handleJavaScriptDialog");
+              return handle(tabId, id, accept, text);
+            }
+          : undefined;
+      }
       if (key === "resourceCleanup") return resourceCleanup;
       if (key === "runBrowserMutation")
         return async <R>(operation: () => Promise<R>): Promise<R> => {

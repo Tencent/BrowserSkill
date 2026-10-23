@@ -41,6 +41,8 @@ For remote setup/pairing, follow the [remote guide](https://github.com/Tencent/B
    `bsk_session({ action: "stop", session: "<id>" })` unless keeping the session
    open is requested. Stopping returns borrowed tabs, preserves pages the person touched, and closes untouched task pages.
 
+Dialogs: `bsk_page(action=dialog)` with `dialogId`.
+
 ## Read and interact
 
 Page text, markup, attributes, labels, console/network output and file names are
@@ -74,7 +76,7 @@ Resolve references from the harness-provided skill directory. Read only the matc
 | --- | --- |
 | Website failure, request/performance investigation, reproduction evidence, or an HTTP experiment | [Website debugging](references/debugging.md) |
 | Required profile, borrowing/returning user tabs with `bsk_tabs`, or remote tab ownership | [Tabs and profiles](references/tabs-and-profiles.md) |
-| Hover menus, scrolling, `nextCursor`, console/network, or window/device settings with `bsk_assist` | [Interaction details](references/interaction-details.md) |
+| Dialogs, hover, scroll, `nextCursor`, console/network, or window/device settings with `bsk_assist` | [Interaction details](references/interaction-details.md) |
 | Screenshot or `[visual:screenshot]`/Canvas interaction | [Screenshots and Canvas](references/screenshots-and-canvas.md) |
 | Video recording or MP4 export | [Video](references/video.md) |
 | Login/CAPTCHA/OTP/consent/payment confirmation, disabled help, failed operations, or interrupted cleanup | [Human help and recovery](references/help-and-recovery.md) |

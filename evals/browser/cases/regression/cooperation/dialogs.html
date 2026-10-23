@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+  <head><meta charset="utf-8"><title>Shared dialog decisions</title></head>
+  <body>
+    <h1>Shared dialog decisions</h1>
+    <button id="alert">Alert</button>
+    <button id="confirm">Confirm</button>
+    <button id="prompt">Prompt</button>
+    <button id="arm-unload">Guard navigation</button>
+    <script>
+      window.started = 0;
+      window.finished = 0;
+      window.answer = null;
+      for (const type of ["alert", "confirm", "prompt"])
+        document.getElementById(type).onclick = () => {
+          window.started++;
+          window.answer = window[type]("Decide " + type, "default text") ?? null;
+          window.finished++;
+        };
+      document.getElementById("arm-unload").onclick = () => {
+        window.onbeforeunload = (event) => {
+          event.preventDefault();
+          event.returnValue = "";
+        };
+      };
+    </script>
+  </body>
+</html>

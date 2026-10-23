@@ -7,7 +7,7 @@ import {
 import { resolveActionTarget } from "@/tools/interaction";
 import { captureVomObservation, handleSnapshot } from "@/tools/observation";
 import { type CdpRunner, chromeTabsApi, isRpcError, resolveTargetTab } from "@/tools/shared";
-import type { RequestFrame, RpcError } from "@/transport/types";
+import type { DialogParams, RequestFrame, RpcError } from "@/transport/types";
 import { guardedRunner } from "./action-guard";
 import {
   type ObservationEvidence,
@@ -156,6 +156,19 @@ export class CooperationController {
   }
   hasSession(sessionId: string): boolean {
     return this.defaultTabs.has(sessionId);
+  }
+
+  /** Resolve modal reporting from the task binding, without consulting the renderer. */
+  taskTab(sessionId: string, contextId?: string): number | undefined {
+    if (contextId) {
+      const observed = [...this.tabs.values()].find(
+        (state) =>
+          state.sessionId === sessionId &&
+          (state.context?.id === contextId || state.baseline?.id === contextId),
+      );
+      if (observed) return observed.tabId;
+    }
+    return this.defaultTabs.get(sessionId);
   }
   /** Called by the common dispatcher before returning a successful session start. */
   startSession(sessionId: string) {
@@ -751,6 +764,92 @@ export class CooperationController {
     }
   }
 
+  /** A modal prevents fresh DOM collection. Its observed ID authorizes only
+   * that decision; cached human-control fences still apply at native dispatch. */
+  private async dialog<T extends CdpRunner>(
+    req: RequestFrame,
+    session: SessionContext,
+    cdp: T,
+    signal: AbortSignal,
+    invoke: (cdp: T, signal?: AbortSignal) => Promise<unknown>,
+  ): Promise<unknown> {
+    const params = req.params as DialogParams;
+    if (!["status", "accept", "dismiss"].includes(params.action))
+      return { code: "invalid_params", message: "Unknown dialog action" };
+    const target = await resolveTargetTab(
+      this.deps.sessions,
+      session,
+      params.tab_id ?? this.defaultTabs.get(session.sessionId),
+      chromeTabsApi,
+    );
+    if (isRpcError(target)) return target;
+    if (target.windowId !== session.agentWindowId || !isAgentControlledTab(session, target.tabId))
+      return failure("Dialog control requires an owned task tab");
+    req.params = { ...params, tab_id: target.tabId };
+    const state = this.track(session, target.tabId);
+    if (state.sessionId !== session.sessionId)
+      return failure("This tab belongs to another session");
+    if (params.action === "status") return invoke(guardedRunner(cdp), signal);
+    if ([...this.tabs.values()].some((s) => s.sessionId === session.sessionId && s.stopped))
+      return stopped();
+    if (typeof params.dialog_id !== "string" || !params.dialog_id)
+      return {
+        code: "invalid_params",
+        message: "Shared dialog decisions require dialog_id from dialog status",
+      };
+    const epoch = state.epoch;
+    let sent = false;
+    let revoked: string | undefined;
+    const assert = () => {
+      signal.throwIfAborted();
+      if (
+        this.deps.sessions.get(session.sessionId) !== session ||
+        this.tabs.get(state.tabId) !== state ||
+        !isAgentControlledTab(session, state.tabId) ||
+        state.stopped ||
+        state.held ||
+        this.humanActive(state) ||
+        state.epoch !== epoch
+      )
+        throw new Error(
+          (revoked =
+            "Shared-tab control changed; the user must finish or release control before a dialog decision"),
+        );
+    };
+    try {
+      assert();
+      const result = await invoke(
+        guardedRunner(cdp, {
+          prepare: async () => assert(),
+          dispatch: () => {
+            assert();
+            sent = true;
+            state.context = undefined;
+            // The old observation cannot authorize input after the page resumes.
+            state.epoch++;
+            this.changed(state);
+          },
+        }),
+        signal,
+      );
+      if (state.stopped) return stopped(sent ? "unknown" : "none");
+      signal.throwIfAborted();
+      return revoked ? failure(revoked, sent ? "unknown" : "none") : result;
+    } catch (error) {
+      if (state.stopped) return stopped(sent ? "unknown" : "none");
+      if (signal.aborted)
+        return {
+          code: "cancelled",
+          message: "Dialog decision cancelled",
+          data: { effect_state: sent ? "unknown" : "none" },
+        };
+      return failure(
+        error instanceof Error ? error.message : String(error),
+        sent ? "unknown" : "none",
+      );
+    }
+  }
+
   async run<T extends CdpRunner>(
     req: RequestFrame,
     cdp: T,
@@ -779,6 +878,7 @@ export class CooperationController {
     const session = this.deps.sessions.get(params.session_id);
     if (!session) return invoke(cdp);
     this.startSession(session.sessionId);
+    if (req.method === "tool.dialog") return this.dialog(req, session, cdp, signal, invoke);
     if (
       !READS.has(req.method) &&
       [...this.tabs.values()].some((s) => s.sessionId === params.session_id && s.stopped)

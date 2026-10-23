@@ -48,7 +48,12 @@ globalThis.inspectVideo=async(id)=>{
   const pixels=[];
   const canvas=document.createElement('canvas');canvas.width=320;canvas.height=180;const ctx=canvas.getContext('2d');
   for(const time of [.2,video.duration-.2]){
-    video.currentTime=time;await new Promise(resolve=>video.onseeked=resolve);
+    // Seeking can finish before the compositor presents the new frame. Arm both
+    // listeners first so sampling cannot read the previously displayed frame.
+    const seeked=new Promise(resolve=>video.addEventListener('seeked',resolve,{once:true}));
+    const presented=new Promise(resolve=>video.requestVideoFrameCallback(resolve));
+    video.currentTime=time;
+    await Promise.all([seeked,presented]);
     ctx.drawImage(video,0,0);pixels.push(Array.from(ctx.getImageData(160,90,1,1).data));
   }
   const result={duration:video.duration,width:video.videoWidth,height:video.videoHeight,pixels};

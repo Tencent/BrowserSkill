@@ -126,7 +126,11 @@ export default defineBackground(() => {
       if (cooperation.enabled(tabId)) return false;
       const tab = await chrome.tabs.get(tabId);
       const session = sessions.findByWindowId(tab.windowId);
-      return session !== null && (!session.remote || isAgentControlledTab(session, tabId));
+      return (
+        session !== null &&
+        !session.noAutoDialog &&
+        (!session.remote || isAgentControlledTab(session, tabId))
+      );
     },
   });
   const debug = new DebugManager(sessions, cdp, chrome.tabs, Date.now, new LocalDebugArchive());

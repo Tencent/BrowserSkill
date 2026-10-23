@@ -305,6 +305,8 @@ fn json_inside_a_value_or_after_double_dash_does_not_select_json_output() {
         vec!["click", "--", "--json"],
         vec!["click", "--selector=--json"],
         vec!["click", "--selector=#submit --json"],
+        // --text accepts hyphen-leading prompt text, so this --json is a value.
+        vec!["dialog", "accept", "--text", "--json"],
     ] {
         let output = bsk(&args);
         assert_eq!(output.status.code(), Some(1));
@@ -312,6 +314,7 @@ fn json_inside_a_value_or_after_double_dash_does_not_select_json_output() {
         assert!(!output.stderr.is_empty());
     }
     json_usage_error(&bsk(&["--json", "click", "--", "--json"]));
+    json_usage_error(&bsk(&["dialog", "accept", "--text", "--json", "--json"]));
 }
 
 #[test]

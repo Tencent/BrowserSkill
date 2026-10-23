@@ -32,6 +32,13 @@
       "description": "Use Chrome's shared incognito browsing session. Omitted means normal.",
       "type": "boolean"
     },
+    "no_auto_dialog": {
+      "description": "Disable automatic alert/beforeunload acceptance for this session.",
+      "type": [
+        "boolean",
+        "null"
+      ]
+    },
     "session_id": {
       "type": "string"
     },
