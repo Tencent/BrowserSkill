@@ -9,6 +9,7 @@ import { captureVomObservation, handleSnapshot } from "@/tools/observation";
 import { type CdpRunner, chromeTabsApi, isRpcError, resolveTargetTab } from "@/tools/shared";
 import type { RequestFrame, RpcError } from "@/transport/types";
 import { guardedRunner } from "./action-guard";
+import { type ControlAuthority, ControlAuthorityError } from "./control-authority";
 import {
   type ObservationEvidence,
   observationEvidence,
@@ -57,6 +58,8 @@ interface TabState {
   activitySeen: Map<string, number>;
   historyGap: boolean;
   controlRevision: number;
+  /** Revokes permission guards on human intervention, independently of page revisions. */
+  authorityRevision: number;
 }
 export interface CooperationDeps {
   sessions: SessionManager;
@@ -141,8 +144,21 @@ function stopped(effect: "none" | "unknown" = "none"): RpcError {
   };
 }
 
+function authorityDenied(message: string): RpcError {
+  return {
+    code: "permission_denied",
+    message,
+    data: {
+      reason: "control_authority_required",
+      effect_state: "none",
+      recovery:
+        "Wait for the user to return control, then inspect the current operation or dialog before deciding again. Status and cancellation remain available; do not replay the original action.",
+    },
+  };
+}
+
 /** One authority for per-tab ownership, immutable observations, and dispatch fences. */
-export class CooperationController {
+export class CooperationController implements ControlAuthority {
   private readonly tabs = new Map<number, TabState>();
   /** Keep a lost task target until explicit replacement; never fall back to the active tab. */
   private readonly defaultTabs = new Map<string, number>();
@@ -156,6 +172,40 @@ export class CooperationController {
   }
   hasSession(sessionId: string): boolean {
     return this.defaultTabs.has(sessionId);
+  }
+
+  private controlError(session: SessionContext, state: TabState): RpcError | undefined {
+    if (
+      this.deps.sessions.get(session.sessionId) !== session ||
+      this.tabs.get(state.tabId) !== state ||
+      state.sessionId !== session.sessionId ||
+      !isAgentControlledTab(session, state.tabId)
+    )
+      return authorityDenied("Shared-tab control has ended");
+    if ([...this.tabs.values()].some((s) => s.sessionId === session.sessionId && s.stopped))
+      return stopped();
+    if (state.held) return authorityDenied("The user is holding control of this tab");
+    if (this.humanActive(state)) return authorityDenied("User activity revoked this action");
+  }
+
+  controlGuard(sessionId: string, tabId: number): () => void {
+    const session = this.deps.sessions.get(sessionId);
+    if (!session || !isAgentControlledTab(session, tabId))
+      throw new ControlAuthorityError(authorityDenied("Actions require an owned task tab"));
+    const state = this.track(session, tabId);
+    const revision = state.authorityRevision;
+    const check = () => {
+      const error =
+        this.controlError(session, state) ??
+        (revision !== state.authorityRevision
+          ? authorityDenied(
+              "Control changed before dispatch; inspect the current state before deciding again",
+            )
+          : undefined);
+      if (error) throw new ControlAuthorityError(error);
+    };
+    check();
+    return check;
   }
   /** Called by the common dispatcher before returning a successful session start. */
   startSession(sessionId: string) {
@@ -188,6 +238,7 @@ export class CooperationController {
       activitySeen: new Map(),
       historyGap: false,
       controlRevision: 0,
+      authorityRevision: 0,
     };
     this.tabs.set(tabId, state);
     this.changed(state);
@@ -305,6 +356,7 @@ export class CooperationController {
     if (frame.human !== old.human) {
       if (frame.human > old.human) this.preserve(state);
       state.interruption?.abort(new Error("User activity revoked this action"));
+      state.authorityRevision++;
       state.epoch++;
       state.context = undefined;
     }
@@ -351,6 +403,7 @@ export class CooperationController {
     state.held = action === "hold";
     if (state.held) state.interruption?.abort(new Error("The user is holding control"));
     state.controlRevision++;
+    state.authorityRevision++;
     if (action === "resume") state.stopped = false;
     this.sessionActivity(state.sessionId);
     const epoch = state.epoch;
@@ -371,6 +424,7 @@ export class CooperationController {
         this.preserve(state);
         state.held = true;
         state.stopped = true;
+        state.authorityRevision++;
         const reason = new Error("The user stopped this task");
         state.interruption?.abort(reason);
         state.completion?.abort(reason);
@@ -403,7 +457,10 @@ export class CooperationController {
       const next = frames.get(id);
       if (next?.document === old.document) {
         if (next.revision < old.revision) frames.set(id, old);
-        else if (next.human > old.human) this.preserve(state);
+        else if (next.human !== old.human) {
+          state.authorityRevision++;
+          if (next.human > old.human) this.preserve(state);
+        }
       }
     }
     if (state.frames.size && !sameFrames(state.frames, frames, "human")) {
@@ -916,11 +973,10 @@ export class CooperationController {
     const interruption = (settledNavigation = false): string | undefined => {
       if (finished) return "The action has already settled";
       if (intervention.signal.aborted) return String(intervention.signal.reason.message);
-      if (this.tabs.get(state.tabId) !== state) return "Shared-tab control has ended";
+      const denied = this.controlError(session, state);
+      if (denied) return denied.message;
       if (!settledNavigation && state.unavailable)
         return "Page interaction coverage changed; wait and synchronize";
-      if (state.held) return "The user is holding control of this tab";
-      if (this.humanActive(state)) return "User activity revoked this action";
       if (!settledNavigation && state.epoch !== epoch)
         return "The observed page or control state changed; synchronize";
     };

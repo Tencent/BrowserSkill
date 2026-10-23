@@ -36,7 +36,7 @@ describe("computeConnectedState (protocol-based compat)", () => {
   });
 
   it("returns version_skew when daemon protocol minor is newer", () => {
-    expect(computeConnectedState(handshake("1.5", PROTOCOL_VERSION))).toEqual({
+    expect(computeConnectedState(handshake("1.6", PROTOCOL_VERSION))).toEqual({
       kind: "version_skew",
     });
   });
@@ -56,11 +56,11 @@ describe("computeConnectedState (protocol-based compat)", () => {
   });
 
   it("rejects when extension is below daemon min_compatible_protocol", () => {
-    const result = computeConnectedState(handshake("1.3", "1.5"));
+    const result = computeConnectedState(handshake("1.5", "1.6"));
     expect(result.kind).toBe("rejected");
     if (result.kind === "rejected") {
       expect(result.reason).toContain("min_compatible_protocol");
-      expect(result.reason).toContain("1.5");
+      expect(result.reason).toContain("1.6");
     }
   });
 
@@ -79,14 +79,18 @@ describe("computeConnectedState (protocol-based compat)", () => {
     "1.1",
     "1.2",
     "1.3",
-  ])("keeps a legacy daemon %s connected with compatibility guidance", (protocol) => {
+    "1.4",
+  ])("rejects a daemon %s without the out-of-band dialog control protocol", (protocol) => {
     for (const floor of [undefined, "1.0"]) {
-      expect(computeConnectedState(handshake(protocol, floor))).toEqual({ kind: "version_skew" });
+      expect(computeConnectedState(handshake(protocol, floor))).toMatchObject({
+        kind: "rejected",
+        reason: expect.stringContaining("extension min_compatible_protocol 1.5"),
+      });
     }
   });
 
   it("rejects malformed daemon min_compatible_protocol with a daemon-floor reason", () => {
-    const result = computeConnectedState(handshake("1.3", "not-a-protocol"));
+    const result = computeConnectedState(handshake("1.5", "not-a-protocol"));
     expect(result.kind).toBe("rejected");
     if (result.kind === "rejected") {
       expect(result.reason).toContain("daemon min_compatible_protocol");
@@ -149,7 +153,9 @@ describe("ConnectionController connectionEnabled", () => {
     "1.0",
     "1.1",
     "1.2",
-  ])("keeps the live transport and sessions after a %s handshake", async (protocol) => {
+    "1.3",
+    "1.4",
+  ])("disconnects a daemon %s that cannot release a blocked dialog", async (protocol) => {
     const controller = new ConnectionController();
     const transport = makeMockTransport();
     const onDisconnected = vi.fn();
@@ -158,10 +164,10 @@ describe("ConnectionController connectionEnabled", () => {
     });
     const request = transport.send.mock.calls[0]?.[0] as { id: string };
     transport.emitMessage({ id: request.id, result: handshake(protocol, "1.0") });
-    await vi.waitFor(() => expect(controller.snapshot().state).toBe("version_skew"));
-    expect(controller.snapshot().handshake?.protocol_version).toBe(protocol);
-    expect(controller.snapshot().lastError).toBeNull();
-    expect(transport.disconnect).not.toHaveBeenCalled();
+    await vi.waitFor(() => expect(transport.disconnect).toHaveBeenCalledOnce());
+    expect(controller.snapshot().state).toBe("disconnected");
+    expect(controller.snapshot().handshake).toBeNull();
+    expect(controller.snapshot().lastError).toContain("version_too_old");
     expect(onDisconnected).not.toHaveBeenCalled();
   });
 

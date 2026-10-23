@@ -17,7 +17,8 @@
 //!   * `2` — protocol or transport error (incl. `cancelled`),
 //!   * `3` — browser / CDP failure,
 //!   * `4` — timeout,
-//!   * `5` — version mismatch.
+//!   * `5` — version mismatch,
+//!   * `6` — pending dialog; decide explicitly, then retrieve the original result.
 //!
 //! Strings are in English: the CLI is consumed by agents and other
 //! automated tooling, so all user-facing copy uses English. Command
@@ -92,6 +93,13 @@ pub struct RenderInfo {
 /// Look up the rendering info for a given error code.
 pub fn info_for(code: ErrorCode) -> RenderInfo {
     match code {
+        ErrorCode::DialogPending => RenderInfo {
+            summary: "operation is waiting for an agent dialog decision",
+            hint: Some(
+                "inspect `bsk dialog status --session <id> --json`; decide with dialog accept/dismiss, then retrieve the ORIGINAL result with `bsk operation await <operation-id> --session <id> --json`. Do not repeat the original action.",
+            ),
+            exit_code: 6,
+        },
         ErrorCode::UnknownMethod => RenderInfo {
             summary: "daemon does not recognise this RPC method",
             hint: Some(
@@ -272,6 +280,13 @@ pub fn info_for_error(code: ErrorCode, data: Option<&serde_json::Value>) -> Rend
             summary: "shared page control or observation changed",
             hint: Some(
                 "use `bsk cooperate wait --session SID`, then `bsk cooperate sync --session SID`; replan toward the assigned goal and check existing effects before another action",
+            ),
+            ..base
+        },
+        (_, "control_authority_required") => RenderInfo {
+            summary: "the agent does not currently have control",
+            hint: Some(
+                "wait for the user to return control, then inspect the current operation or dialog before deciding again; status and cancellation remain available; do not replay the original action",
             ),
             ..base
         },
@@ -790,6 +805,17 @@ mod tests {
         );
         // Still the browser/CDP failure bucket.
         assert_eq!(info.exit_code, 3);
+    }
+
+    #[test]
+    fn control_authority_denial_does_not_request_a_blocked_renderer_sync() {
+        let data = serde_json::json!({ "reason": "control_authority_required" });
+        let info = info_for_error(ErrorCode::PermissionDenied, Some(&data));
+        assert_eq!(info.exit_code, 1);
+        let hint = info.hint.unwrap();
+        assert!(hint.contains("return control"));
+        assert!(hint.contains("do not replay"));
+        assert!(!hint.contains("cooperate sync"));
     }
 
     #[test]

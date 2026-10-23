@@ -257,6 +257,41 @@ describe("shouldTrustReadyStateProbe", () => {
 });
 
 describe("handleNavigate", () => {
+  it("waits for the beforeunload decision when Page.navigate reports ERR_ABORTED before the close event", async () => {
+    const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
+    await sm.start("aa11");
+    const fake = makeFakeCdp();
+    const original = fake.cdp.send;
+    fake.cdp.send = vi.fn(async (tabId, method, params) => {
+      if (method === "Page.navigate") {
+        for (const listener of [...fake.listeners])
+          listener({ tabId }, "Page.javascriptDialogOpening", { type: "beforeunload" });
+        return { frameId: "frame-1", errorText: "net::ERR_ABORTED" };
+      }
+      return original(tabId, method, params);
+    }) as CdpRunner["send"];
+    let finished = false;
+    const navigation = handleNavigate(
+      sm,
+      { session_id: "aa11", url: "https://example.com/leave" },
+      { cdp: fake.cdp, tabsApi: fake.tabsApi },
+    ).then((result) => {
+      finished = true;
+      return result;
+    });
+    await vi.waitFor(() =>
+      expect(fake.cdp.send).toHaveBeenCalledWith(4, "Page.navigate", expect.anything()),
+    );
+    expect(finished).toBe(false);
+    for (const listener of [...fake.listeners])
+      listener({ tabId: 4 }, "Page.javascriptDialogClosed", { result: false });
+    expect(await navigation).toMatchObject({
+      code: "cancelled",
+      message: expect.stringContaining("page was kept"),
+    });
+    expect(fake.listeners).toHaveLength(0);
+  });
+
   it("defaults wait_until to load and resolves on the load lifecycle", async () => {
     const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
     await sm.start("aa11");

@@ -6,6 +6,7 @@ import type { ConnectionStateHandler, FrameHandler, Transport } from "@/transpor
 import type {
   ConnectionState,
   ConsoleResult,
+  PendingJavaScriptDialog,
   ProtocolFrame,
   RequestFrame,
 } from "@/transport/types";
@@ -46,6 +47,126 @@ function makeRequest(method: string, params: unknown): RequestFrame {
 }
 
 describe("ToolDispatcher", () => {
+  it.each([
+    false,
+    true,
+  ])("handles modal control without renderer preparation, held=%s", async (held) => {
+    const { transport, sent, deliver } = fakeTransport();
+    const sessions = new SessionManager({
+      agentWindow: {
+        create: vi.fn(async () => ({ windowId: 42, initialTabIds: [7] })),
+        remove: vi.fn(),
+        ensureActiveTab: vi.fn(),
+      },
+    });
+    await sessions.start("owner");
+    vi.stubGlobal("chrome", { tabs: { get: vi.fn(async () => ({ id: 7, windowId: 42 })) } });
+    const dialog: PendingJavaScriptDialog = {
+      id: "dlg",
+      tab_id: 7,
+      type: "prompt",
+      message: "Name",
+      sequence: 1,
+      decision_deadline: 60000,
+    };
+    const cdp = {
+      send: vi.fn(() => {
+        throw new Error("Renderer blocked");
+      }),
+      pendingDialogs: () => [dialog],
+      resolveDialog: vi.fn(async () => ({ ...dialog, handled: "accepted" })),
+    } as unknown as TestDispatcherCdp;
+    const debug = {
+      before: vi.fn(() => {
+        throw new Error("Screenshot blocked");
+      }),
+      after: vi.fn(),
+      dispose: vi.fn(),
+    };
+    const cooperation = new CooperationController({
+      sessions,
+      changed: () => {},
+      readFrames: async () => {
+        throw new Error("Renderer blocked");
+      },
+      resumeFrames: async () => {},
+    });
+    cooperation.startSession("owner");
+    if (held) await cooperation.control(7, cooperation.view(7)!.revision, "hold");
+    const dispatcher = new ToolDispatcher({
+      transport,
+      sessions,
+      cdp,
+      cooperation,
+      debug: debug as never,
+    });
+    dispatcher.start();
+    deliver(
+      makeRequest("tool.dialog_accept", {
+        session_id: "owner",
+        dialog_id: "dlg",
+        text: "Agent input",
+      }),
+    );
+    await vi.waitFor(() =>
+      expect(sent.some((frame) => "id" in frame && frame.id === "r-1")).toBe(true),
+    );
+    if (held) {
+      expect(sent).toContainEqual(
+        expect.objectContaining({
+          error: expect.objectContaining({
+            code: "permission_denied",
+            data: expect.objectContaining({ reason: "control_authority_required" }),
+          }),
+        }),
+      );
+      expect(cdp.resolveDialog).not.toHaveBeenCalled();
+    } else {
+      expect(sent).toContainEqual(
+        expect.objectContaining({
+          result: expect.objectContaining({
+            dialog: expect.objectContaining({ handled: "accepted" }),
+          }),
+        }),
+      );
+      expect(cdp.resolveDialog).toHaveBeenCalledWith("dlg", true, "Agent input", {
+        signal: expect.any(AbortSignal),
+        onDispatch: expect.any(Function),
+      });
+    }
+    expect(cdp.send).not.toHaveBeenCalled();
+    expect(debug.before).not.toHaveBeenCalled();
+    dispatcher.stop();
+  });
+
+  it("reports an asynchronous modal before dispatching an ordinary renderer action", async () => {
+    const { transport, sent, deliver } = fakeTransport();
+    const sessions = new SessionManager({
+      agentWindow: {
+        create: vi.fn(async () => ({ windowId: 42, initialTabIds: [7] })),
+        remove: vi.fn(),
+        ensureActiveTab: vi.fn(),
+      },
+    });
+    await sessions.start("owner");
+    const cdp = {
+      send: vi.fn(),
+      pendingDialogs: () => [{ id: "async-dialog", tab_id: 7 }],
+    } as unknown as TestDispatcherCdp;
+    const dispatcher = new ToolDispatcher({ transport, sessions, cdp });
+    dispatcher.start();
+    deliver(makeRequest("tool.evaluate", { session_id: "owner", expression: "dangerousAction()" }));
+    await vi.waitFor(() => expect(sent).toHaveLength(1));
+    expect(sent[0]).toMatchObject({
+      error: {
+        code: "dialog_pending",
+        data: { dispatched: false, dialog: { id: "async-dialog" } },
+      },
+    });
+    expect(cdp.send).not.toHaveBeenCalled();
+    dispatcher.stop();
+  });
+
   afterEach(() => {
     resetBrowserObservationForTests();
     vi.unstubAllGlobals();

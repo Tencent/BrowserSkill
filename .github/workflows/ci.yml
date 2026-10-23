@@ -307,6 +307,26 @@ jobs:
           BSK_VIDEO_BSK: ../../target/debug/bsk
         run: pnpm exec vitest run src/video/*.browser.test.ts
 
+      - name: Build extension for the isolated native-dialog daemon
+        env:
+          BSK_DAEMON_WS_URL: ws://127.0.0.1:52837
+        run: pnpm --filter @browser-skill/extension build
+
+      - name: Validate native dialogs, held control, download recovery and teardown
+        env:
+          BSK_DIALOG_CHROME: ${{ env.BSK_VIDEO_CHROME }}
+          BSK_DIALOG_TEST_TIMEOUT: "1"
+          BSK_DIALOG_REVISION: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: xvfb-run -a node evals/browser/cases/regression/js-dialog-control/run.mjs
+
+      - name: Upload native-dialog regression evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: native-dialog-regression
+          path: evals/browser/results/js-dialog-control/
+          if-no-files-found: ignore
+
   node-scripts:
     name: Node script tests
     runs-on: ubuntu-latest

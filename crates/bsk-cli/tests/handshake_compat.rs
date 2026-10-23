@@ -156,10 +156,10 @@ async fn handshake_skew_when_protocol_minor_differs() {
     let mut ws = open_ws(handle.ws_addr()).await;
     let resp = send_handshake_with_floors(
         &mut ws,
-        "1.3",
+        "1.6",
         env!("CARGO_PKG_VERSION"),
         Some("0.0.0"),
-        Some("1.3"),
+        Some("1.5"),
     )
     .await;
     match resp.body {
@@ -217,7 +217,7 @@ async fn handshake_legacy_ext_without_protocol_floor_still_ok() {
     let mut ws = open_ws(handle.ws_addr()).await;
     let resp = send_handshake_with_floors(
         &mut ws,
-        "1.3",
+        "1.5",
         env!("CARGO_PKG_VERSION"),
         Some("0.1.0"),
         None,
@@ -242,7 +242,7 @@ async fn status_surfaces_version_skew_for_skewed_browser() {
         browser_name: "chrome".into(),
         browser_version: "131.0".into(),
         extension_version: "9.9.9".into(),
-        extension_protocol_version: "1.3".into(),
+        extension_protocol_version: "1.6".into(),
         label: "Older".into(),
         sink: bsk::daemon::browsers::BrowserSink { tx },
         pending: Mutex::new(bsk::daemon::browsers::Pending::default()),
@@ -269,7 +269,7 @@ async fn status_surfaces_version_skew_for_skewed_browser() {
         .iter()
         .find(|s| s.instance_id == "skew-only-test")
         .expect("status must list our skew client");
-    assert_eq!(skew.client_protocol_version, "1.3");
+    assert_eq!(skew.client_protocol_version, "1.6");
     assert_eq!(skew.server_protocol_version, PROTOCOL_VERSION);
     assert_eq!(skew.client_version, "9.9.9");
     let entry = status
@@ -287,7 +287,7 @@ async fn handshake_rejects_when_local_below_peer_min_compatible_protocol() {
     let mut ws = open_ws(handle.ws_addr()).await;
     let resp = send_handshake_with_floors(
         &mut ws,
-        "1.3",
+        "1.5",
         env!("CARGO_PKG_VERSION"),
         Some("0.0.0"),
         Some("99.0.0"),

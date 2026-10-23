@@ -153,6 +153,67 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
+describe("renderer-independent control authority", () => {
+  it("does not require an observation or query an unavailable renderer", async () => {
+    const f = await fixture({ sync: false });
+    f.readFrames.mockClear();
+    const check = f.controller.controlGuard("shared", 7);
+    f.controller.invalidate(7);
+    expect(check).not.toThrow();
+    expect(f.readFrames).not.toHaveBeenCalled();
+    expect(f.native).not.toHaveBeenCalled();
+  });
+
+  it("keeps an old decision revoked after hold and resume", async () => {
+    const f = await fixture();
+    const check = f.controller.controlGuard("shared", 7);
+    await f.controller.control(7, f.controller.view(7)!.revision, "hold");
+    expect(check).toThrow("holding control");
+    await f.controller.control(7, f.controller.view(7)!.revision, "resume");
+    expect(check).toThrow("Control changed");
+    expect(() => f.controller.controlGuard("shared", 7)()).not.toThrow();
+  });
+
+  it.each([true, false])("revokes a decision after human input, notified=%s", async (notify) => {
+    const f = await fixture();
+    const check = f.controller.controlGuard("shared", 7);
+    f.change({ human: 1, lastInput: 10000 }, notify);
+    if (!notify) await f.command("status");
+    f.advance();
+    expect(check).toThrow("Control changed");
+    expect(() => f.controller.controlGuard("shared", 7)()).not.toThrow();
+  });
+
+  it("separates document freshness from control permission", async () => {
+    const f = await fixture();
+    const check = f.controller.controlGuard("shared", 7);
+    f.change({ document: "replacement-document" }, false);
+    await f.command("status");
+    expect(check).not.toThrow();
+    expect(await f.act()).toMatchObject({ code: "permission_denied" });
+  });
+
+  it("rejects stopped sessions and a replaced tab lease", async () => {
+    const f = await fixture();
+    const check = f.controller.controlGuard("shared", 7);
+    f.controller.releaseTab(7);
+    const replacement = f.controller.controlGuard("shared", 7);
+    expect(check).toThrow("control has ended");
+    expect(replacement).not.toThrow();
+    f.controller.stopSession("shared");
+    expect(replacement).toThrow("stopped this task");
+    expect(() => f.controller.controlGuard("shared", 7)).toThrow("stopped this task");
+  });
+
+  it("does not transfer a guard to another session or a returned tab", async () => {
+    const f = await fixture();
+    expect(() => f.controller.controlGuard("another-session", 7)).toThrow("owned task tab");
+    const check = f.controller.controlGuard("shared", 7);
+    f.ctx.agentCreatedTabs.delete(7);
+    expect(check).toThrow("control has ended");
+  });
+});
+
 describe("shared-tab dispatch fences", () => {
   it("rejects a stale plan after a mistaken edit, then exposes the current field without recapturing the page", async () => {
     const f = await fixture();

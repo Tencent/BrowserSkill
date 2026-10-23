@@ -1,10 +1,48 @@
 //! Shared JavaScript dialog observability types.
 //!
 //! Mirrors CDP `Page.javascriptDialogOpening` / `Page.handleJavaScriptDialog`.
-//! Dialogs are surfaced as in-band data on tool results — not RPC errors.
+//! Pending dialogs use `dialog_pending` receipts; handled dialogs remain in tool results.
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct PendingJavaScriptDialog {
+    pub id: String,
+    pub tab_id: i64,
+    #[serde(rename = "type")]
+    pub dialog_type: JavaScriptDialogType,
+    pub message: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_prompt: Option<String>,
+    pub sequence: u64,
+    pub decision_deadline: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct DialogStatusParams {
+    pub session_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tab_id: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct DialogHandleParams {
+    pub session_id: String,
+    pub dialog_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct OperationParams {
+    pub session_id: String,
+    pub operation_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wait_ms: Option<u32>,
+}
 
 /// Native JS dialog kind reported by CDP.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

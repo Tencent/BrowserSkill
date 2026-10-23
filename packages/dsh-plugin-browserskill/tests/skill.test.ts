@@ -62,6 +62,7 @@ describe("registerBskSkill", () => {
       "references/debugging.md",
       "references/help-and-recovery.md",
       "references/interaction-details.md",
+      "references/native-dialogs.md",
       "references/screenshots-and-canvas.md",
       "references/tabs-and-profiles.md",
       "references/video.md",

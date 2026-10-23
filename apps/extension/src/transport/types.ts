@@ -13,6 +13,7 @@ export type ErrorCode =
   | "not_found"
   | "permission_denied"
   | "timeout"
+  | "dialog_pending"
   | "cdp_failed"
   | "protocol_error"
   | "cancelled"
@@ -24,6 +25,7 @@ export type ErrorCode =
 /** Stable `RpcError.data.reason` values for CLI hint selection. */
 export type RpcErrorReason =
   | "cooperation_sync_required"
+  | "control_authority_required"
   | "extract_params_invalid"
   | "extract_target_stale"
   | "extract_target_ambiguous"
@@ -195,6 +197,28 @@ export type ConnectionState = "disconnected" | "connecting" | "connected" | "ver
 
 export type JavaScriptDialogType = "alert" | "confirm" | "prompt" | "beforeunload";
 export type JavaScriptDialogHandledAction = "accepted" | "dismissed";
+
+export interface PendingJavaScriptDialog {
+  id: string;
+  tab_id: number;
+  type: JavaScriptDialogType;
+  message: string;
+  url?: string;
+  default_prompt?: string;
+  sequence: number;
+  decision_deadline: number;
+}
+
+export interface DialogStatusParams {
+  session_id: string;
+  tab_id?: number;
+}
+
+export interface DialogHandleParams {
+  session_id: string;
+  dialog_id: string;
+  text?: string;
+}
 
 export interface JavaScriptDialogInfo {
   tab_id: number;
