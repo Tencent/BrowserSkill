@@ -493,6 +493,20 @@ async fn handle_inbound_text(state: &Arc<DaemonState>, client: &Arc<BrowserClien
                 client.mark_heartbeat_seen();
                 debug!(id = %client.id, "heartbeat");
             }
+            bsk_protocol::EventKind::SessionActivity => {
+                #[derive(serde::Deserialize)]
+                struct Activity {
+                    session_id: String,
+                    idle_protected: bool,
+                }
+                if let Ok(activity) = serde_json::from_value::<Activity>(ev.payload) {
+                    state.sessions.update_activity(
+                        &super::sessions::SessionId(activity.session_id),
+                        &client.id,
+                        activity.idle_protected,
+                    );
+                }
+            }
             bsk_protocol::EventKind::SessionInteractionChanged => {
                 #[derive(serde::Deserialize)]
                 struct Change {

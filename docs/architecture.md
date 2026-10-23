@@ -111,8 +111,9 @@ attachment and frame document. See [structured extraction](structured-extraction
 - **Session stop is mandatory** in agent workflows (`bsk session stop`); idle timeout
   (default 5 min) is a safety net only. The timeout is daemon-global and can be
   changed on restart with `bsk daemon restart --session-idle 30m`.
-- `bsk session list` shows when each live session is due to become idle; `--json`
-  exposes optional `last_activity_at_ms` and `idle_timeout_ms` lifecycle fields.
+- `bsk session list` shows when each live session is due to become idle, or
+  `paused` while active browser cooperation protects it; `--json` exposes optional
+  `last_activity_at_ms`, `idle_timeout_ms`, and `idle_protected` lifecycle fields.
   Neither form reports page URLs, titles, or page contents. Long non-browser work
   does not refresh the timer; stop the session explicitly when done or choose an
   appropriate daemon-global timeout before starting.

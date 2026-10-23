@@ -153,6 +153,7 @@ export async function handleEvaluate(
   const dialogCursor = markDialogCursor(deps.cdp, target.tabId);
   deps.cdp.trackSessionTab?.(ctx.sessionId, target.tabId);
   try {
+    await deps.cdp.beginDomMutation?.();
     const reply = await deps.cdp.send<RuntimeEvaluateReply>(target.tabId, "Runtime.evaluate", {
       expression: params.expression,
       awaitPromise: params.await_promise ?? true,

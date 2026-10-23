@@ -863,6 +863,13 @@ pub(crate) fn spawn_session_idle_reaper(state: Arc<DaemonState>) -> tokio::task:
             super::session_requests::reap(&state);
             let idle_ids = state.sessions.idle_ids_at(session_idle, Instant::now());
             for session_id in idle_ids {
+                if !state
+                    .sessions
+                    .idle_ids_at(session_idle, Instant::now())
+                    .contains(&session_id)
+                {
+                    continue;
+                }
                 match stop_session(
                     &state.browsers,
                     &state.sessions,

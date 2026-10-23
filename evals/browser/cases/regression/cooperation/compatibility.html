@@ -1,0 +1,25 @@
+<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Capability compatibility</title>
+<style>body{font:18px sans-serif;padding:30px}button,a,input{margin:10px;padding:12px}#drop{width:300px;height:90px;background:#def;padding:20px}#wrong{position:fixed;right:20px;top:20px}</style>
+<h1>Capability compatibility</h1><button id="wrong">Human edit</button>
+<label>Goal <input id="note" value="goal"></label>
+<label for="file" id="choose">Choose file</label><input type="file" id="file" hidden>
+<button id="waiting" onclick="window.uploadWaiting=true">Wait for chooser</button>
+<div id="drop" role="button" tabindex="0">Drop file</div>
+<a id="download" href="/download" download>Download</a>
+<a id="human-download" href="/human" download style="position:fixed;right:20px;top:80px">Human download</a>
+<a id="delayed" href="/delayed" download>Delayed download</a>
+<a id="redirect" href="/redirect" download>Redirected download</a>
+<a id="slow" href="/slow" download>Slow download</a>
+<output id="result"></output><output id="viewport"></output><div style="height:1400px">Long page</div>
+<script>
+window.scriptCounter=0;
+window.nativeInputs=[];
+for(const type of ['pointerdown','pointerup','click'])document.addEventListener(type,e=>window.nativeInputs.push({type,target:e.target.id}),true);
+const resize=()=>{const state=document.querySelector('#viewport'),value=matchMedia('(max-width:400px)').matches?'Narrow layout':'Wide layout';if(state.textContent!==value)state.textContent=value;};
+window.addEventListener('resize',resize);resize();
+wrong.onclick=()=>{note.value='mistake';note.dispatchEvent(new Event('input',{bubbles:true}));};
+async function uploaded(files,kind){for(const f of files){await fetch('/upload?kind='+kind,{method:'POST',body:await f.arrayBuffer()});}document.querySelector('#result').textContent=kind+' complete';}
+file.onchange=()=>uploaded(file.files,'input');
+drop.ondragover=e=>e.preventDefault();
+drop.ondrop=e=>{e.preventDefault();uploaded(e.dataTransfer.files,'drop');};
+</script>

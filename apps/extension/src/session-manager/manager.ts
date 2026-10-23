@@ -2,6 +2,8 @@ import { AGENT_WINDOW_HOME, type AgentWindowApi, chromeAgentWindowApi } from "./
 import { RefStore } from "./ref-store";
 
 export interface SessionContext {
+  /** Incognito sessions cannot borrow user tabs. Absent means a normal window. */
+  incognito?: boolean;
   /** Remote connections retain dedicated windows, with explicit page ownership. */
   remote?: boolean;
   sessionId: string;
@@ -49,6 +51,8 @@ export interface SessionManagerOptions {
 
 /** Options for starting a session's Agent Window. */
 export interface SessionStartOptions {
+  /** Use Chrome's shared incognito browsing session. */
+  incognito?: boolean;
   /** Optional Agent Window outer size in CSS pixels. */
   size?: { width: number; height: number };
   /** Background by default; true explicitly opens the window in front. */
@@ -260,6 +264,11 @@ export class SessionManager {
       const created = await this.agentWindow.create(AGENT_WINDOW_HOME, createOptions);
       windowId = created.windowId;
       for (const tabId of created.initialTabIds) agentCreatedTabs.add(tabId);
+      if (opts.incognito && !created.incognito) {
+        throw new Error(
+          "The browser did not create an incognito Agent Window; session start refused.",
+        );
+      }
       throwIfSessionStartAborted(opts.signal);
       const homeTabId = await this.agentWindow.ensureActiveTab(
         windowId,
@@ -270,6 +279,7 @@ export class SessionManager {
       throwIfSessionStartAborted(opts.signal);
 
       const ctx: SessionContext = {
+        incognito: created.incognito ?? false,
         ...(this.remote() ? { remote: true } : {}),
         sessionId,
         agentWindowId: windowId,
@@ -292,6 +302,7 @@ export class SessionManager {
           // The daemon may retry stop after a failed startup rollback. Retain
           // the exact window handle until closure is confirmed.
           const pending: SessionContext = {
+            incognito: opts.incognito ?? false,
             ...(this.remote() ? { remote: true } : {}),
             sessionId,
             agentWindowId: windowId,

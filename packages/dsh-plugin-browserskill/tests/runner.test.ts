@@ -66,6 +66,30 @@ afterEach(() => {
 });
 
 describe("createBskRunner", () => {
+  it("preserves UTF-8 characters split across output buffers", async () => {
+    const child = new FakeChild();
+    const runner = createBskRunner("bsk", fakeSpawn([child]));
+    const promise = runner.run(["snapshot"]);
+    const stdout = JSON.stringify({ text: "中文🙂" });
+    const stderr = "错误🚫";
+    for (const byte of Buffer.from(stdout)) child.stdout.emit("data", Buffer.from([byte]));
+    for (const byte of Buffer.from(stderr)) child.stderr.emit("data", Buffer.from([byte]));
+    child.finish(0);
+
+    expect(await promise).toMatchObject({ stdout, stderr });
+  });
+
+  it("flushes an incomplete final UTF-8 sequence when output collection ends", async () => {
+    const child = new FakeChild();
+    const runner = createBskRunner("bsk", fakeSpawn([child]));
+    const promise = runner.run(["snapshot"]);
+    child.stdout.emit("data", Buffer.from([0xe4, 0xb8]));
+    child.stderr.emit("data", Buffer.from([0xf0, 0x9f]));
+    child.finish(0);
+
+    expect(await promise).toMatchObject({ stdout: "�", stderr: "�" });
+  });
+
   it("appends --json and collects stdout", async () => {
     const child = new FakeChild();
     const seen: string[][] = [];

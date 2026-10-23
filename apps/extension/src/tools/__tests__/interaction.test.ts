@@ -288,6 +288,7 @@ describe("handleClick", () => {
     expect(res).toMatchObject({ x: 324, y: 386 });
     expect(targetCalls).toEqual([
       { sessionId: "child-session", method: "DOM.scrollIntoViewIfNeeded" },
+      { sessionId: "child-session", method: "DOM.getBoxModel" },
       { sessionId: "child-session", method: "DOM.getContentQuads" },
       { sessionId: "child-session", method: "Page.getLayoutMetrics" },
       { sessionId: "child-session", method: "Runtime.evaluate" },
@@ -1045,7 +1046,7 @@ describe("click input readiness", () => {
     expect(f.focusCommands().map((c) => c.params)).toEqual([{ enabled: true }, { enabled: false }]);
   });
 
-  it("cancels a pending surface read and consumes its late reply without clicking", async () => {
+  it("cancels a pending renderer frame and consumes its late reply without clicking", async () => {
     const controller = new AbortController();
     let complete!: (value: boolean) => void;
     const f = await fixture({

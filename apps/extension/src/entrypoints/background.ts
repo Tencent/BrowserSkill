@@ -1,5 +1,6 @@
 import { i18n } from "@browser-skill/i18n";
 import { ChromiumCdp } from "@/browser-driver/chromium-cdp";
+import { attachCooperation } from "@/cooperation/browser-bridge";
 import { LocalDebugArchive } from "@/debug/archive";
 import { attachDebugBridge } from "@/debug/bridge";
 import { DebugManager } from "@/debug/manager";
@@ -88,18 +89,41 @@ export default defineBackground(() => {
     },
   });
   const sessions = new SessionManager({ remote: () => remoteEndpoint !== null });
+  const cooperation = attachCooperation(
+    sessions,
+    (tabId) => {
+      void chrome.tabs
+        .get(tabId)
+        .then((tab) => pushOverlayStateForTab(tabId, tab.windowId))
+        .catch(() => {});
+    },
+    (sessionId, idleProtected) => {
+      try {
+        transport.send({
+          event: "session.activity",
+          payload: { session_id: sessionId, idle_protected: idleProtected },
+        });
+      } catch {
+        /* Disconnect cleanup ends the owning sessions. */
+      }
+    },
+  );
   const windowRouting = new AgentWindowRouting(
     sessions,
     chrome,
-    (id) => hasActiveHelp(id) || hasActiveRecording(id),
+    (id) => hasActiveHelp(id) || hasActiveRecording(id) || cooperation.hasSession(id),
   );
   attachLongScreenshot({
     isTabBusy: (tabId) => sessions.list().some((session) => isAgentControlledTab(session, tabId)),
   });
   attachAuditBridge(controller, transport);
   const cdp = new ChromiumCdp(undefined, {
-    onDocumentChanged: (tabId) => sessions.invalidateTabRefs(tabId),
+    onDocumentChanged: (tabId) => {
+      sessions.invalidateTabRefs(tabId);
+      cooperation.invalidate(tabId);
+    },
     shouldAutoAcceptDialog: async (tabId) => {
+      if (cooperation.enabled(tabId)) return false;
       const tab = await chrome.tabs.get(tabId);
       const session = sessions.findByWindowId(tab.windowId);
       return session !== null && (!session.remote || isAgentControlledTab(session, tabId));
@@ -236,7 +260,11 @@ export default defineBackground(() => {
   function overlayStateForTab(tabId?: number, windowId?: number): OverlayAgentStateMessage {
     if (typeof tabId === "number" && typeof windowId === "number") {
       const ctx = sessions.findByWindowId(windowId);
-      if (ctx && isAgentControlledTab(ctx, tabId)) return overlayStateForWindow(windowId);
+      if (ctx && isAgentControlledTab(ctx, tabId))
+        return {
+          ...overlayStateForWindow(windowId),
+          cooperation: cooperation.view(tabId),
+        };
     }
     return {
       type: OVERLAY_AGENT_STATE,
@@ -280,6 +308,7 @@ export default defineBackground(() => {
   }
 
   function onOverlaySessionStateChanged(): void {
+    cooperation.syncSessions();
     windowRouting.sync();
     debug.sync();
     video.sync();
@@ -388,6 +417,7 @@ export default defineBackground(() => {
   });
   void interactionPreferences.readyOrFallback();
   const dispatcher = new ToolDispatcher({
+    cooperation,
     debug,
     video,
     interactionPreferences,
@@ -398,6 +428,7 @@ export default defineBackground(() => {
     onSessionsChanged: onOverlaySessionStateChanged,
     onBrowserControlResumed,
     onAgentTabClaimed: (tabId, windowId) => {
+      void cooperation.observeTab(tabId).catch(() => {});
       void pushOverlayStateForTab(tabId, windowId);
     },
     approveBorrow: async (ctx) => {
@@ -552,6 +583,7 @@ export default defineBackground(() => {
     if (msg.kind === OVERLAY_MSG_INTERRUPT) {
       const req = msg as OverlayInterruptRequest;
       const ctx = sessions.get(req.sessionId);
+      if (ctx) cooperation.stopSession(ctx.sessionId);
       if (ctx) setControlMode(req.sessionId, "interrupting");
       void handleOverlayInterrupt(transport, req.sessionId).then((reply) => {
         if (reply.ok && sessions.get(req.sessionId)) {

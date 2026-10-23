@@ -206,7 +206,10 @@ export async function handleFullPageScreenshot(
         await capturePage({
           page: (command) => {
             if (command.action !== "finish") phase = `page ${command.action}`;
-            return client.page(command);
+            const run = () => client.page(command);
+            return command.action !== "finish" && deps.cdp.runBrowserMutation
+              ? deps.cdp.runBrowserMutation(run)
+              : run();
           },
           signal: controller.signal,
           screenshot: async () => {

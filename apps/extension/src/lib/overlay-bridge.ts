@@ -79,6 +79,7 @@ export interface OverlayVersion {
 }
 
 export interface OverlayAgentStateMessage extends OverlayVersion {
+  cooperation?: import("@/cooperation/types").CooperationView;
   type: typeof OVERLAY_AGENT_STATE;
   sessionId: string | null;
   mode: OverlayMode;

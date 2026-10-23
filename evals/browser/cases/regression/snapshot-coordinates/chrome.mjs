@@ -11,6 +11,7 @@ export async function withChrome(
     deviceScale,
     zoom,
     extensionPath,
+    extensionViaCdp = false,
     headless = true,
     softwareRendering = false,
     disableGpu = true,
@@ -47,8 +48,12 @@ export async function withChrome(
                 : disableGpu
                   ? ["--disable-gpu"]
                   : []),
-              `--disable-extensions-except=${extensionPath}`,
-              `--load-extension=${extensionPath}`,
+              ...(extensionViaCdp
+                ? ["--enable-unsafe-extension-debugging"]
+                : [
+                    `--disable-extensions-except=${extensionPath}`,
+                    `--load-extension=${extensionPath}`,
+                  ]),
             ]
           : ["--disable-extensions"]),
         "--site-per-process",
@@ -111,6 +116,8 @@ export async function withChrome(
         pending.set(id, { resolve, reject, timeout });
         socket.send(JSON.stringify({ id, method, params, sessionId }));
       });
+    if (extensionPath && extensionViaCdp)
+      await send("Extensions.loadUnpacked", { path: extensionPath });
     await run(send, { profile });
   } finally {
     for (const request of pending.values()) {

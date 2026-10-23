@@ -91,6 +91,17 @@ async function resolveVisibleContentRegion(
   tabId: number,
   backendNodeId: number,
 ): Promise<Region | RpcError> {
+  // getContentQuads can retain pre-mutation layout in a background renderer.
+  // getBoxModel flushes layout; keep its content as the existing fallback.
+  let content: number[] | undefined;
+  try {
+    const box = await cdp.send<{ model?: { content?: number[] } }>(tabId, "DOM.getBoxModel", {
+      backendNodeId,
+    });
+    content = box.model?.content;
+  } catch (err) {
+    console.debug("[bsk element-geometry] getBoxModel failed", err);
+  }
   try {
     const quads = await cdp.send<{ quads?: number[][] }>(tabId, "DOM.getContentQuads", {
       backendNodeId,
@@ -100,16 +111,8 @@ async function resolveVisibleContentRegion(
   } catch (err) {
     console.debug("[bsk element-geometry] getContentQuads failed", err);
   }
-  try {
-    const box = await cdp.send<{ model?: { content?: number[] } }>(tabId, "DOM.getBoxModel", {
-      backendNodeId,
-    });
-    const content = box.model?.content;
-    const fallback = validCdpRegion(content ? [content] : undefined);
-    if (fallback.length > 0) return fallback;
-  } catch (err) {
-    console.debug("[bsk element-geometry] getBoxModel failed", err);
-  }
+  const fallback = validCdpRegion(content ? [content] : undefined);
+  if (fallback.length > 0) return fallback;
   const descendantRect = await descendantBoundingRect(cdp, tabId, backendNodeId);
   if (descendantRect) {
     return [

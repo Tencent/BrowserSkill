@@ -514,7 +514,20 @@ export async function clickResolvedTarget(
     return { code: "invalid_params", message: "click_count must be a positive integer" };
   }
   const error = await withClickOverlay(target.tabId, centre, deps, (verifyOverlay) =>
-    dispatchClickAtPoint(target.tabId, centre, params, deps, verifyOverlay, undefined, markSent),
+    dispatchClickAtPoint(
+      target.tabId,
+      centre,
+      params,
+      deps,
+      verifyOverlay,
+      deps.cdp.verifyPointerTarget
+        ? async () => {
+            await deps.cdp.verifyPointerTarget!({ ...resolved, tabId: target.tabId }, centre);
+            return null;
+          }
+        : undefined,
+      markSent,
+    ),
   );
   if (error) return error;
 
@@ -1164,6 +1177,7 @@ export async function handleFill(
     }
     // Check editability before clearing. Keep the expected result tied to
     // this object, including the existing value on the append path.
+    await deps.cdp.beginDomMutation?.();
     const prepared = await nodeCdp.send<FillScriptReply<FillPreparation>>(
       target.tabId,
       "Runtime.callFunctionOn",
@@ -1754,6 +1768,7 @@ export async function handleSelect(
   const objectId = objectIdOrErr;
 
   try {
+    await deps.cdp.beginDomMutation?.();
     const evaluated = await nodeCdp.send<{
       result?: { value?: SelectMutationResult | null };
     }>(target.tabId, "Runtime.callFunctionOn", {

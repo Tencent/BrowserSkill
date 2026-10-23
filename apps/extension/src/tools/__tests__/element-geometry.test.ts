@@ -77,8 +77,8 @@ describe("nodeContentRegion", () => {
       ],
     ]);
     expect(calls.map((c) => c.method)).toEqual([
-      "DOM.getContentQuads",
       "DOM.getBoxModel",
+      "DOM.getContentQuads",
       "DOM.resolveNode",
       "Runtime.callFunctionOn",
     ]);

@@ -78,6 +78,8 @@ export function collectExtractDom(this: Element, options: CollectorOptions): Raw
       }
       chain.push(current);
       const style = styleOf(current);
+      // Chromium ignores content-visibility on ordinary inline, boxless and
+      // non-cell table boxes. Keep their rendered contents extractable.
       if (
         current.hasAttribute("hidden") ||
         current.hasAttribute("data-bsk-overlay") ||
@@ -85,6 +87,10 @@ export function collectExtractDom(this: Element, options: CollectorOptions): Raw
         current.tagName.toLowerCase() === "browser-skill-overlay" ||
         closedDetailsContent(current) ||
         style.display === "none" ||
+        (style.contentVisibility === "hidden" &&
+          !/^(inline( list-item)?|contents|(?:inline-)?table|table-(caption|row|row-group|header-group|footer-group|column|column-group)|ruby(-.*)?)$/.test(
+            style.display,
+          )) ||
         (style.visibility === "collapse" &&
           /^table-(row|row-group|header-group|footer-group|column|column-group)$/.test(
             style.display,

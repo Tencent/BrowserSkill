@@ -736,6 +736,7 @@ function attachCapturedSceneAnnotations(
 }
 
 export interface SnapshotDeps {
+  onScene?: (scene: VomScene) => void;
   cdp: CdpRunner;
   tabsApi: {
     get(tabId: number): Promise<chrome.tabs.Tab>;
@@ -933,6 +934,7 @@ async function runHoverProbes(
 }
 
 export interface CaptureVomObservationOptions extends VomOptions {
+  onScene?: (scene: VomScene) => void;
   includeVisualFacts?: boolean;
   conditionalSurfaceProbe?: boolean;
   hoverProbeBypassOverlay?: (tabId: number, enabled: boolean) => Promise<void>;
@@ -979,6 +981,7 @@ export async function captureVomObservation(
     captured,
     hoverProbes.surfaceProbes,
   );
+  options.onScene?.(decoratedScene);
   // Reserve space using the renderer's character-based token estimate. Like VOM
   // headers, this integrity notice remains visible even under a tiny token budget.
   const notices: string[] = [];
@@ -1116,6 +1119,7 @@ async function handleVomObservation(
     clearObservationContinuation(ctx.refStore);
     const documentRevision = ctx.refStore.documentRevision(target.tabId);
     const observation = await captureVomObservation(deps.cdp, target.tabId, target.url, {
+      onScene: deps.onScene,
       includeVisualFacts: toolName === "observe",
       maxDepth: params.max_depth,
       maxTokens: params.max_tokens,

@@ -1,4 +1,28 @@
 {
+  "cooperation": {
+    "yielding": "Agent が待機中",
+    "label": "ブラウザーの共同操作",
+    "ready": "Agent は準備完了",
+    "acting": "Agent が操作中",
+    "human": "あなたが操作中",
+    "editing": "編集中",
+    "held": "Agent は一時停止中",
+    "syncing": "Agent が同期中",
+    "unavailable": "ページを確認できません",
+    "hold": "Agent を一時停止",
+    "resume": "Agent に戻す",
+    "stop": "タスクを停止",
+    "hints": {
+      "ready": "いつでも操作を引き継げます",
+      "acting": "いつでも操作を引き継げます",
+      "human": "操作が止まると Agent が再開します",
+      "editing": "完了したら Agent に戻してください",
+      "held": "準備ができたら Agent に戻してください",
+      "yielding": "現在の操作が終わるのを待っています",
+      "syncing": "最新のページ状態を確認しています",
+      "unavailable": "Agent は操作を停止しています"
+    }
+  },
   "popup": {
     "interactionCompatibilityWarning": "古いバージョンのデーモンに接続しています(プロトコル v{{cliProtocol}})。自動化設定を完全にサポートするには、CLI とデーモンを更新してください。",
     "brandCategory": "ブラウザ自動化",

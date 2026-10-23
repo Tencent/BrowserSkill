@@ -28,6 +28,7 @@ macro_rules! dump {
 }
 
 fn main() {
+    dump!(CooperateParams, "tool_cooperate_params");
     dump!(VideoParams, "tool_video_params");
     dump!(VideoRecording, "video_recording");
     dump!(VideoGrant, "video_grant");

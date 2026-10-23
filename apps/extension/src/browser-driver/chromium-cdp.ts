@@ -263,6 +263,12 @@ export class ChromiumCdp {
     return this.backgroundExecution.has(sessionId, tabId);
   }
 
+  /** Shared tabs retain debugger ownership but relinquish persistent focus emulation. */
+  async releaseBackgroundExecution(sessionId: string, tabId: number): Promise<void> {
+    this.backgroundExecution.release(sessionId, tabId);
+    await this.backgroundExecution.synchronize(tabId);
+  }
+
   /** Resend this session's override when Chrome lost it without clearing the applied-state cache. */
   async restoreBackgroundExecution(sessionId: string, tabId: number): Promise<void> {
     if (!this.backgroundExecution.has(sessionId, tabId))

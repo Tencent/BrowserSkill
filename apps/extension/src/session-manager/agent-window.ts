@@ -25,6 +25,7 @@ export interface AgentWindowApi {
 export interface AgentWindowCreation {
   windowId: number;
   initialTabIds: number[];
+  incognito?: boolean;
 }
 
 /** Creation hints for a new Agent Window. */
@@ -33,6 +34,8 @@ export interface AgentWindowCreateOptions {
   size?: { width: number; height: number };
   /** Background by default; explicit viewing and human help may take focus. */
   focused?: boolean;
+  /** Use Chrome's shared incognito browsing session. */
+  incognito?: boolean;
 }
 
 /** Initial tab URL for every new session's Agent Window. */
@@ -40,9 +43,15 @@ export const AGENT_WINDOW_HOME = "about:blank";
 
 export const chromeAgentWindowApi: AgentWindowApi = {
   async create(url: string, opts: AgentWindowCreateOptions = {}): Promise<AgentWindowCreation> {
+    if (opts.incognito && !(await chrome.extension.isAllowedIncognitoAccess())) {
+      throw new Error(
+        "Incognito access is disabled. Open chrome://extensions → BrowserSkill → Details → Allow in incognito, then retry.",
+      );
+    }
     const win = await chrome.windows.create({
       type: "normal",
       focused: opts.focused ?? false,
+      incognito: opts.incognito ?? false,
       url,
       ...(opts.size ? { width: opts.size.width, height: opts.size.height } : {}),
     });
@@ -51,6 +60,7 @@ export const chromeAgentWindowApi: AgentWindowApi = {
     }
     return {
       windowId: win.id,
+      incognito: win.incognito,
       initialTabIds: (win.tabs ?? []).flatMap((tab) =>
         typeof tab.id === "number" ? [tab.id] : [],
       ),

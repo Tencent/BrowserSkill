@@ -5,6 +5,7 @@ import { flushSync } from "react-dom";
 import ReactDOM from "react-dom/client";
 import { BorrowConfirmationOverlay } from "@/content/BorrowConfirmationOverlay";
 import { ControlOverlay } from "@/content/ControlOverlay";
+import { CooperationOverlay } from "@/content/CooperationOverlay";
 import { createCaptureSuppressController } from "@/content/capture-suppress";
 import { HelpRequestOverlay } from "@/content/HelpRequestOverlay";
 import { createHelpRequestData } from "@/content/help-request";
@@ -189,8 +190,9 @@ export default defineContentScript({
 
     function renderReactOverlays(): void {
       const overlayState = overlays.snapshot();
-      const controlOverlayVisible =
+      const controlVisible =
         videoOverlay.canRenderControl() && shouldShowAgentControlOverlay(overlayState);
+      const controlOverlayVisible = controlVisible && !activeAgentState?.cooperation;
       // Leaving control (including help/record UI) must not retain click leases.
       if (!controlOverlayVisible) inputPassthrough.reset();
       const interactiveOverlayVisible =
@@ -198,7 +200,9 @@ export default defineContentScript({
         overlayState.activeHelp !== null ||
         overlayState.activeRecord !== null;
       const showInteractive = videoOverlay.canRenderInteractive(interactiveOverlayVisible);
-      setOverlayHostHiddenFromAccessibility(!interactiveOverlayVisible);
+      const cooperationState =
+        controlVisible && !interactiveOverlayVisible ? activeAgentState?.cooperation : undefined;
+      setOverlayHostHiddenFromAccessibility(!interactiveOverlayVisible && !cooperationState);
       setOverlaySurfaceState(
         controlOverlayVisible,
         controlOverlayVisible && overlayState.automationBypassCount === 0,
@@ -227,6 +231,10 @@ export default defineContentScript({
                 interrupting: overlayState.interrupting,
                 automationBypass: overlayState.automationBypassCount > 0,
                 onInterrupt: handleInterrupt,
+              }),
+              React.createElement(CooperationOverlay, {
+                state: cooperationState,
+                onStop: handleInterrupt,
               }),
             ),
           ),

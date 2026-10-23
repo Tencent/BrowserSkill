@@ -28,6 +28,10 @@
       "format": "uint32",
       "minimum": 0.0
     },
+    "incognito": {
+      "description": "Use Chrome's shared incognito browsing session. Omitted means normal.",
+      "type": "boolean"
+    },
     "session_id": {
       "type": "string"
     },

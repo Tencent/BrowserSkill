@@ -121,6 +121,10 @@ const ACTION_ROUTES: Record<string, readonly [string, string]> = {
   "session.start": ["bsk_session", "start"],
   "session.stop": ["bsk_session", "stop"],
   "session.list": ["bsk_session", "list"],
+  "session.cooperate.enable": ["bsk_session", "share"],
+  "session.cooperate.sync": ["bsk_session", "sync"],
+  "session.cooperate.wait": ["bsk_session", "wait-user"],
+  "session.cooperate.status": ["bsk_session", "cooperation-status"],
   "page.navigate": ["bsk_page", "navigate"],
   "page.back": ["bsk_page", "back"],
   "page.forward": ["bsk_page", "forward"],
@@ -242,8 +246,35 @@ async function startSession(tools: Map<string, ToolDefinition>, sessionId = "s1"
 
 const START_REPLY = (id: string) => ({ session_id: id, browser_instance_id: "chrome-1" });
 
+it("forwards only the context explicitly supplied by the caller, never a cached sync context", async () => {
+  const { tools, calls } = setup({
+    "session start": START_REPLY("s1"),
+    "cooperate sync": { context_id: "new-context", kind: "delta", changes: [] },
+    click: { tab_id: 7, x: 10, y: 20 },
+  });
+  await startSession(tools);
+  await tools.get("session.cooperate.sync")!.execute({}, makeExec());
+  await tools
+    .get("interact.click")!
+    .execute(
+      { target: "@e1", contextId: "observed-context", dependsOn: ["@e1", "@e2"] },
+      makeExec(),
+    );
+  await tools.get("interact.click")!.execute({ target: "@e1" }, makeExec());
+  const actions = calls.filter((call) => call.args[0] === "click");
+  expect(actions[0].args.slice(-6)).toEqual([
+    "--context",
+    "observed-context",
+    "--depends-on",
+    "@e1",
+    "--depends-on",
+    "@e2",
+  ]);
+  expect(actions[1].args).not.toContain("--context");
+});
+
 const EXPECTED_ACTIONS = {
-  bsk_session: ["start", "stop", "list"],
+  bsk_session: ["start", "stop", "list", "share", "sync", "wait-user", "cooperation-status"],
   bsk_page: ["navigate", "back", "forward", "reload", "wait", "wait-for-element"],
   bsk_inspect: [
     "observe",
@@ -266,6 +297,9 @@ const EXPECTED_ACTIONS = {
     "fill",
     "select",
     "press",
+    "evaluate",
+    "upload",
+    "download",
   ],
   bsk_tabs: ["list", "create", "select", "close", "borrow", "return"],
   bsk_assist: ["resize", "emulate", "request-help"],
@@ -298,6 +332,17 @@ describe("tool registration", () => {
     expect(tool.parameters.required).toEqual(["action"]);
     expect(tool.description).toMatch(/session or requestId/);
     expect(tool.description).toMatch(/unacknowledged stop/);
+  });
+
+  it("exposes opt-in incognito Agent Windows in the public session schema", () => {
+    const { tools } = setup({});
+    const tool = tools.get("bsk_session")!;
+    const properties = tool.parameters.properties as Record<string, unknown> | undefined;
+    expect(properties?.incognito).toMatchObject({
+      type: "boolean",
+      description: expect.stringMatching(/Allow in incognito/),
+    });
+    expect(tool.description).toMatch(/incognito/);
   });
 
   it("requires an action on every public tool", async () => {
@@ -379,6 +424,81 @@ describe("session.start", () => {
     expect(calls[0].args.filter((arg) => arg === "--focus" || arg === "--no-focus")).toEqual(
       flag ? [flag] : [],
     );
+  });
+
+  it.each([
+    [undefined, false],
+    [false, false],
+    [true, true],
+  ])("maps incognito=%s to --incognito (expected %s)", async (incognito, expected) => {
+    const { tools, calls } = setup({ "session start": START_REPLY("s1") });
+    const tool = tools.get("bsk_session");
+    if (!tool) throw new Error("bsk_session not registered");
+    await tool.execute(
+      { action: "start", ...(incognito === undefined ? {} : { incognito }) },
+      makeExec(),
+    );
+    expect(calls[0].args.includes("--incognito")).toBe(expected);
+  });
+
+  it.each([
+    {
+      case: "missing Allow in incognito",
+      code: "protocol_error",
+      message:
+        "Incognito access is disabled. Open chrome://extensions → BrowserSkill → Details → Allow in incognito, then retry.",
+    },
+    {
+      case: "unsupported protocol",
+      code: "unsupported",
+      message:
+        "Incognito sessions require extension protocol 1.4 (connected: 1.3); update the BrowserSkill extension and retry",
+    },
+  ])("surfaces an incognito start failure for $case without fallback", async ({
+    code,
+    message,
+  }) => {
+    const failure = {
+      __result: {
+        code: 3,
+        stdout: JSON.stringify({ code, message }),
+        stderr: "",
+        timedOut: false,
+        aborted: false,
+      },
+    };
+    const { tools, calls, registry } = setup({ "session start": failure });
+    const tool = tools.get("bsk_session");
+    if (!tool) throw new Error("bsk_session not registered");
+    const escaped = message.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+    await expect(
+      tool.execute(
+        {
+          action: "start",
+          incognito: true,
+          browser: "chrome-1",
+          url: "https://example.com",
+          device: "iphone-14",
+        },
+        makeExec(),
+      ),
+    ).rejects.toThrow(new RegExp(escaped));
+
+    const starts = calls.filter((call) => call.args[0] === "session" && call.args[1] === "start");
+    expect(starts).toHaveLength(1);
+    expect(starts[0].args).toContain("--incognito");
+    expect(calls.some((call) => call.args[0] === "navigate")).toBe(false);
+    expect(calls.some((call) => call.args[0] === "emulate")).toBe(false);
+    expect(registry.current()).toBeUndefined();
+    expect(
+      calls.some(
+        (call) =>
+          call.args[0] === "session" &&
+          call.args[1] === "request" &&
+          call.args.includes("--cancel"),
+      ),
+    ).toBe(true);
   });
 
   it("maps the start reply and tracks the session as current", async () => {
@@ -493,6 +613,45 @@ describe("session.start", () => {
     };
     expect(observed).toMatchObject({ session: "s1", refCount: 1 });
     expect(calls.some((c) => c.args[0] === "observe" && c.args.includes("s1"))).toBe(true);
+  });
+
+  it.each([
+    "none",
+    "unknown",
+  ])("preserves startup human progress with effect state %s", async (effect) => {
+    const { tools, calls, registry } = setup({
+      "session start": START_REPLY("s1"),
+      navigate: {
+        __result: {
+          code: 5,
+          stdout: JSON.stringify({
+            code: "permission_denied",
+            message: "Page changed",
+            data: { reason: "cooperation_sync_required", effect_state: effect },
+          }),
+          stderr: "",
+          timedOut: false,
+          aborted: false,
+        },
+      },
+      "cooperate sync": { context_id: "after-human", kind: "baseline" },
+    });
+    const result = await tools
+      .get("session.start")!
+      .execute({ url: "https://example.test" }, makeExec());
+    expect(result).toMatchObject({
+      sessionId: "s1",
+      warning: expect.stringContaining("wait-user"),
+    });
+    expect(result).not.toHaveProperty("url");
+    expect(registry.current()).toBe("s1");
+    expect(calls.some((call) => call.args.includes("--cancel"))).toBe(false);
+    expect(calls.some((call) => call.args[0] === "cooperate" && call.args[1] === "enable")).toBe(
+      false,
+    );
+    expect(await tools.get("session.cooperate.sync")!.execute({}, makeExec())).toMatchObject({
+      context_id: "after-human",
+    });
   });
 
   it("still cleans up when exit 4 lacks reached: timeout on combined start", async () => {
@@ -2266,5 +2425,142 @@ describe("website debug", () => {
         tools.get("bsk_inspect")!.execute({ action: "debug", ...args }, makeExec()),
       ).rejects.toThrow();
     expect(calls).toHaveLength(0);
+  });
+});
+
+describe("script and file actions share the existing runtime", () => {
+  it.each([
+    {
+      action: "evaluate",
+      args: { expression: "'$(literal); `text`'", awaitPromise: false, returnByValue: false },
+      expected: [
+        "evaluate",
+        "'$(literal); `text`'",
+        "--session",
+        "s1",
+        "--tab-id",
+        "7",
+        "--await-promise",
+        "false",
+        "--return-by-value",
+        "false",
+      ],
+    },
+    {
+      action: "upload",
+      args: {
+        target: "#drop",
+        files: ["/tmp/one file.bin", "/tmp/$(literal).bin"],
+        mode: "drop",
+        timeoutMs: 6000,
+      },
+      expected: [
+        "upload",
+        "#drop",
+        "--session",
+        "s1",
+        "--tab-id",
+        "7",
+        "--file",
+        "/tmp/one file.bin",
+        "--file",
+        "/tmp/$(literal).bin",
+        "--mode",
+        "drop",
+        "--timeout",
+        "6000ms",
+      ],
+    },
+    {
+      action: "download",
+      args: {
+        target: "#download",
+        output: "/tmp/local result.bin",
+        overwrite: true,
+        timeoutMs: 6000,
+      },
+      expected: [
+        "download",
+        "#download",
+        "--session",
+        "s1",
+        "--out",
+        "/tmp/local result.bin",
+        "--tab-id",
+        "7",
+        "--overwrite",
+        "--timeout",
+        "6000ms",
+      ],
+    },
+  ])("forwards literal arguments and the observed context for $action", async ({
+    action,
+    args,
+    expected,
+  }) => {
+    const { tools, calls } = setup({ "session start": START_REPLY("s1"), [action]: { ok: true } });
+    await startSession(tools);
+    await tools
+      .get("bsk_interact")!
+      .execute(
+        { action, ...args, tabId: 7, contextId: "observed", dependsOn: ["@e1"] },
+        makeExec(),
+      );
+    expect(calls.at(-1)?.args).toEqual([
+      ...expected,
+      "--context",
+      "observed",
+      "--depends-on",
+      "@e1",
+    ]);
+  });
+  it.each([
+    { action: "evaluate", expression: "1+1" },
+    { action: "upload", target: "#file", files: ["/tmp/input.bin"] },
+    { action: "download", target: "#file", output: "/tmp/result.bin" },
+  ])("rejects an unowned session before invoking $action", async (args) => {
+    const { tools, calls } = setup({});
+    await expect(
+      tools.get("bsk_interact")!.execute({ ...args, session: "unknown" }, makeExec()),
+    ).rejects.toThrow();
+    expect(calls).toHaveLength(0);
+  });
+  it.each([
+    { action: "evaluate", expression: " " },
+    { action: "upload", target: "#file", files: [] },
+    { action: "upload", target: "#file", files: [""] },
+    { action: "download", target: "#file", output: " " },
+  ])("rejects incomplete $action arguments without launching a command", async (args) => {
+    const { tools, calls } = setup({ "session start": START_REPLY("s1") });
+    await startSession(tools);
+    const before = calls.length;
+    await expect(tools.get("bsk_interact")!.execute(args, makeExec())).rejects.toThrow();
+    expect(calls).toHaveLength(before);
+  });
+  it("preserves intervention metadata instead of retrying an uncertain script", async () => {
+    const result = {
+      code: "permission_denied",
+      message: "User intervened",
+      data: { reason: "cooperation_sync_required", effect_state: "unknown" },
+    };
+    const { tools, calls } = setup({
+      "session start": START_REPLY("s1"),
+      evaluate: {
+        __result: {
+          code: 1,
+          stdout: JSON.stringify(result),
+          stderr: "",
+          timedOut: false,
+          aborted: false,
+        },
+      },
+    });
+    await startSession(tools);
+    await expect(
+      tools
+        .get("bsk_interact")!
+        .execute({ action: "evaluate", expression: "submit()", contextId: "observed" }, makeExec()),
+    ).rejects.toMatchObject({ data: result.data });
+    expect(calls.filter((call) => call.args[0] === "evaluate")).toHaveLength(1);
   });
 });

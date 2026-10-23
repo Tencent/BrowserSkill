@@ -544,6 +544,10 @@ pub struct SessionStatusEntry {
     /// Absent when reading a reply from an older daemon.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub idle_timeout_ms: Option<u64>,
+    /// Whether an active browser cooperation currently pauses idle reaping.
+    /// Absent when reading a reply from an older daemon.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idle_protected: Option<bool>,
 }
 
 /// `system.status` request payload.
@@ -627,6 +631,7 @@ mod status_compat_tests {
 
         assert_eq!(session.last_activity_at_ms, None);
         assert_eq!(session.idle_timeout_ms, None);
+        assert_eq!(session.idle_protected, None);
     }
 
     #[test]

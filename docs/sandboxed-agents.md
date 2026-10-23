@@ -120,6 +120,21 @@ If using the existing default directory, omit only the `BSK_HOME` assignment.
 Use the verified executable path if `bsk` is not on PATH. PowerShell's `&` call
 operator for a quoted executable path is distinct from a Unix trailing `&`.
 
+### Windows GUI hosts
+
+`bsk daemon start --foreground` runs the daemon in that same `bsk` process, so
+BrowserSkill cannot apply Windows child-process creation flags after the host has
+launched it. A GUI host's managed background-task implementation must therefore
+start this console executable without allocating a visible console window (for
+example, Node's `child_process.spawn` with `windowsHide: true`, or its equivalent
+in the host runtime), while keeping the process and its `BSK_HOME` persistent.
+
+Do not replace the managed task with `Start-Process` merely to hide a window: that
+changes the ownership/lifetime contract this guide relies on. If the host cannot
+keep a hidden persistent console task, the host needs to add that capability; no
+`bsk daemon start --foreground` flag can hide a console that the host already
+created.
+
 Keep the returned task ID and leave the task running. Inspect status/output with
 `TaskOutput` or its equivalent without waiting for daemon completion. Do not use
 `nohup`, `setsid`, `Start-Process`, trailing `&`, or a long sleep as a substitute

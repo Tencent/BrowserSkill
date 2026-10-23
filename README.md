@@ -217,6 +217,11 @@ bsk session start --browser "Work profile" --no-focus --json
 
 The name is set in BrowserSkill; it is not automatically taken from Chrome's profile name. Each session stays bound to the selected instance. [Profile selection guide](docs/browser-profiles.md)
 
+Add `--incognito` to isolate a task from the profile's ordinary website login state.
+Enable the extension's **Allow in incognito** setting first. Incognito tasks cannot
+borrow tabs, and all incognito windows in a profile share login state with each other.
+[Incognito guide](docs/browser-profiles.md#incognito-agent-windows)
+
 ### Run the agent on a server
 
 Keep the browser and its logins on your computer while the agent, CLI, and daemon run on a server. Pair the extension with that server over authenticated WSS; the browser initiates the connection, so your computer needs no inbound port.
@@ -225,7 +230,7 @@ The built-in server supports device pairing, renewal, and revocation. The `bsk u
 
 ## Browser control and privacy
 
-An Agent Window shares the selected profile's login state; **it is not a separate account or security sandbox**. Agents can act with the permissions of the signed-in websites, so choose the tasks and agent you trust.
+By default, an Agent Window shares the selected profile's login state; **it is not a separate account or security sandbox**. Agents can act with the permissions of the signed-in websites, so choose the tasks and agent you trust.
 
 The extension has two independent **Automation settings**, both enabled by default:
 

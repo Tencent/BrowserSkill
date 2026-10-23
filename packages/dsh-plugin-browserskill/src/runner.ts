@@ -6,6 +6,7 @@
  */
 
 import { type ChildProcess, type SpawnOptionsWithoutStdio, spawn } from "node:child_process";
+import { StringDecoder } from "node:string_decoder";
 
 /** Shape of the JSON error envelope `bsk --json` prints on failure. */
 export interface BskErrorBody {
@@ -22,10 +23,17 @@ export class BskError extends Error {
   readonly hint?: string;
   readonly exitCode?: number | null;
   readonly timedOut: boolean;
+  readonly data?: unknown;
 
   constructor(
     message: string,
-    options: { code?: string; hint?: string; exitCode?: number | null; timedOut?: boolean } = {},
+    options: {
+      code?: string;
+      hint?: string;
+      exitCode?: number | null;
+      timedOut?: boolean;
+      data?: unknown;
+    } = {},
   ) {
     super(message);
     this.name = "BskError";
@@ -33,6 +41,7 @@ export class BskError extends Error {
     this.hint = options.hint;
     this.exitCode = options.exitCode;
     this.timedOut = options.timedOut ?? false;
+    this.data = options.data;
   }
 }
 
@@ -154,14 +163,16 @@ export function createBskRunner(bskPath: string, spawnImpl: SpawnImpl = spawn): 
 
         let stdout = "";
         let stderr = "";
+        const stdoutDecoder = new StringDecoder("utf8");
+        const stderrDecoder = new StringDecoder("utf8");
         let timedOut = false;
         let aborted = false;
         const onStdout = (chunk: Buffer | string) => {
-          stdout += chunk;
+          stdout += stdoutDecoder.write(typeof chunk === "string" ? Buffer.from(chunk) : chunk);
           extendDrain();
         };
         const onStderr = (chunk: Buffer | string) => {
-          stderr += chunk;
+          stderr += stderrDecoder.write(typeof chunk === "string" ? Buffer.from(chunk) : chunk);
           extendDrain();
         };
         child.stdout?.on("data", onStdout);
@@ -187,6 +198,8 @@ export function createBskRunner(bskPath: string, spawnImpl: SpawnImpl = spawn): 
         const finish = (code: number | null) => {
           if (settled) return;
           settled = true;
+          stdout += stdoutDecoder.end();
+          stderr += stderrDecoder.end();
           settle();
           release();
           resolve({ code, stdout, stderr, timedOut, aborted });
@@ -446,6 +459,7 @@ export function parseBskJson(
     const withHint = parsed?.hint !== undefined ? `${message} (hint: ${parsed.hint})` : message;
     throw new BskError(`bsk ${commandLabel} failed: ${withHint}`, {
       code: parsed?.code,
+      data: parsed?.data,
       hint: parsed?.hint,
       exitCode: result.code,
     });

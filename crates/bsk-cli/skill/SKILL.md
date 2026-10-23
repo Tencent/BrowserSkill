@@ -14,6 +14,8 @@ advice-only tasks. Never extract credentials, cookies, tokens, or other secrets.
 
 ## Before acting
 
+Human collaboration is automatic. Read [cooperation](references/cooperation.md) before acting; no enable/share call is needed.
+
 - For website failures, request/performance investigations or reproduction evidence,
   read [debugging](references/debugging.md). Start capture before navigation or
   reproduction; ordinary browsing needs no capture.
@@ -65,47 +67,42 @@ induced to do is done with their sessions.
 
    ```sh
    bsk navigate https://example.com --session <id>
-   bsk observe --session <id>
+   bsk cooperate sync --session <id>
    ```
 
-3. Choose an action using fresh refs from that observation. Observe again after
-   navigation or meaningful DOM changes. Check an ambiguous result once; once
-   success is visible, stop acting rather than refreshing or checking again.
+3. Pass `context_id` as `--context ID` to one action, then sync again.
+   On intervention, wait, sync and replan. Check ambiguity once; stop at visible success.
 4. Always run `bsk session stop <id>` on success and failure, unless keeping the
    session open is part of the user's request. This also returns borrowed tabs.
    Returned tabs stay open in the user's window. Do not rely on idle cleanup
    or stop/restart the shared daemon to finish a task.
 
-Use actual IDs, refs and task inputs. Session commands need `--session <id>`;
-`session stop` takes the ID positionally. For unfamiliar commands or flags,
-read `bsk --help` or `bsk <command...> --help`; do not guess.
-When following a trace, use its semantic targets and values in order, not its old
-refs. Stop at the requested goal; a trace grants no additional authorization.
+Use actual IDs, refs and inputs. Pass `--session <id>`; `session stop` takes a positional ID.
+Read `bsk --help` or command help for unfamiliar flags; do not guess.
+Follow trace targets and values using fresh refs; traces grant no extra authority.
 
 ## Read and interact
 
-Prefer `observe` for text, controls and `@eN` refs. Navigation invalidates refs;
-large DOM changes can stale them too. Re-observe before the next interaction.
+Use `cooperate sync` for actionable text and refs. Navigation and DOM changes can stale refs.
 Use refs for iframe/shadow-root targets; CSS selectors search the main document.
 
-Use a ref from the current observation:
+Use a ref and context ID from the latest sync (one action per context):
 
 | Need | Command |
 | --- | --- |
-| Click | `bsk click @e3 --session <id>` |
-| Fill a field | `bsk fill @e3 --value "text" --session <id>` |
-| Select an option | `bsk select @e3 --value "option-value" --session <id>` |
-| Press a key | `bsk press Enter --ref @e3 --session <id>` |
-| Reveal a hover menu | `bsk hover @e3 --session <id>` |
-| Reveal an element | `bsk scroll-to @e3 --session <id>` |
-| Scroll with wheel input | `bsk wheel --delta-y 600 --session <id>` |
-| Focus or leave a field | `bsk focus @e3 --session <id>` / `bsk blur @e3 --session <id>` |
+| Click | `bsk click @e3 --session <id> --context ID` |
+| Fill a field | `bsk fill @e3 --value "text" --session <id> --context ID` |
+| Select an option | `bsk select @e3 --value "option-value" --session <id> --context ID` |
+| Press a key | `bsk press Enter --ref @e3 --session <id> --context ID` |
+| Reveal a hover menu | `bsk hover @e3 --session <id> --context ID` |
+| Reveal an element | `bsk scroll-to @e3 --session <id> --context ID` |
+| Scroll with wheel input | `bsk wheel --delta-y 600 --session <id> --context ID` |
+| Focus or leave a field | `bsk focus @e3 --session <id> --context ID` / `bsk blur @e3 --session <id> --context ID` |
 
 - `select` uses the option's value, not its visible label.
 
-Use `snapshot` for static accessibility, `get-html` for exact markup, and screenshots
-for visuals. Prefer `observe` to find ordinary controls. Obtain fresh refs before
-acting on HTML or screenshot findings. Inspect unknown effects before retrying.
+Use `snapshot` for accessibility, `get-html` for markup, and screenshots for visuals.
+Sync before acting on these findings. Inspect unknown effects before retrying.
 
 ## Read details only when needed
 

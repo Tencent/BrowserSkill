@@ -1,4 +1,28 @@
 {
+  "cooperation": {
+    "yielding": "Agent 正在停手",
+    "label": "人机协作",
+    "ready": "Agent 已就绪",
+    "acting": "Agent 正在操作",
+    "human": "现在由你操作",
+    "editing": "你正在编辑",
+    "held": "Agent 已暂停",
+    "syncing": "Agent 正在同步",
+    "unavailable": "页面暂不可观察",
+    "hold": "暂停 Agent",
+    "resume": "交给 Agent",
+    "stop": "停止任务",
+    "hints": {
+      "ready": "你可以随时接手",
+      "acting": "你可以随时接手",
+      "human": "停止操作后，Agent 会继续",
+      "editing": "完成编辑后交给 Agent",
+      "held": "准备好后交给 Agent",
+      "yielding": "等待当前操作结束",
+      "syncing": "正在读取最新页面状态",
+      "unavailable": "Agent 已停手"
+    }
+  },
   "popup": {
     "interactionCompatibilityWarning": "已连接到旧版 Daemon（协议 v{{cliProtocol}}）。部分自动化设置需要更新 CLI 和 Daemon 才能完整生效。",
     "brandCategory": "Browser Automation",

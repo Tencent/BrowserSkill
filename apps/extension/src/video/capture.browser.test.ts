@@ -205,7 +205,15 @@ describe.skipIf(!process.env.BSK_VIDEO_CHROME || !process.env.BSK_VIDEO_BSK)(
             const id = started.recording.recording_id;
             expect(started.recording.state).toBe("recording");
             await new Promise((resolve) => setTimeout(resolve, 1100));
-            await cli("navigate", "--session", session, `http://127.0.0.1:${address.port}/blue`);
+            const context = await cli("cooperate", "sync", "--session", session);
+            await cli(
+              "navigate",
+              "--session",
+              session,
+              "--context",
+              context.context_id,
+              `http://127.0.0.1:${address.port}/blue`,
+            );
             const workerSession = await attachVideoBackground(send, manifest.name);
             const origin = workerSession.origin;
             const evaluate = async <T>(sessionId: string, expression: string): Promise<T> => {

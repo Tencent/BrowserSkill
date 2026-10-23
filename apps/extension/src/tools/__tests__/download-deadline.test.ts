@@ -73,7 +73,18 @@ function fixture() {
     });
     onDeterminingFilename.emit(item, vi.fn());
   };
-  return { downloads, cdp, dispose, item, offer, onCreated, onChanged, onDeterminingFilename };
+  return {
+    downloads,
+    cdp,
+    dispose,
+    item,
+    offer,
+    onCreated,
+    onChanged,
+    onDeterminingFilename,
+    intent: (url: string, filename: string) =>
+      listener({ tabId: 7 }, "Page.downloadWillBegin", { url, suggestedFilename: filename }),
+  };
 }
 
 afterEach(() => vi.useRealTimers());
@@ -251,7 +262,15 @@ describe("download deadlines", () => {
     const input = deferred<object>();
     const inputs: string[] = [];
     f.cdp.send = (async (_tabId, method, params) => {
-      if (method === "Runtime.evaluate") return { result: { value: "absent" } };
+      if (method === "Runtime.evaluate")
+        return {
+          result: {
+            value:
+              (params as { expression?: string })?.expression === "document.visibilityState"
+                ? "visible"
+                : "absent",
+          },
+        };
       if (method === "Page.getLayoutMetrics")
         return { cssLayoutViewport: { clientWidth: 1280, clientHeight: 720 } };
       if (method === "DOM.getContentQuads") return { quads: [[0, 0, 20, 0, 20, 20, 0, 20]] };
@@ -310,5 +329,94 @@ describe("download deadlines", () => {
       input.resolve({});
       await pending;
     }
+  });
+});
+
+describe("human intervention and download ownership", () => {
+  it.each([
+    "complete",
+    "cancel",
+  ])("keeps only an already attributed receipt until %s", async (ending) => {
+    vi.useFakeTimers();
+    const f = fixture();
+    const input = new AbortController();
+    const operation = new AbortController();
+    let settled = false;
+    const pending = captureBrowserDownload({
+      ...f,
+      target: { tabId: 7 },
+      browserRelativeDir: "BrowserSkill/deadline",
+      timeoutMs: 10_000,
+      signal: operation.signal,
+      inputSignal: input.signal,
+      trigger: async (mark) => {
+        mark();
+        f.offer();
+        return { tab_id: 7, x: 10, y: 10 };
+      },
+    }).then((result) => {
+      settled = true;
+      return result;
+    });
+    await vi.advanceTimersByTimeAsync(100);
+    input.abort();
+    const human = {
+      ...f.item,
+      id: 88,
+      url: "https://example.test/human",
+      finalUrl: "https://example.test/human",
+      filename: "human.bin",
+    };
+    f.intent(human.url, human.filename);
+    const suggest = vi.fn();
+    f.onDeterminingFilename.emit(human, suggest);
+    expect(suggest).toHaveBeenCalledWith();
+    f.onCreated.emit({ ...human, state: "complete" });
+    await vi.advanceTimersByTimeAsync(100);
+    expect(settled).toBe(false);
+    if (ending === "cancel") {
+      vi.mocked(f.downloads.search).mockResolvedValue([f.item]);
+      operation.abort();
+    } else
+      f.onCreated.emit({
+        ...f.item,
+        state: "complete",
+        fileSize: 4,
+        filename: "/downloads/BrowserSkill/deadline/report.csv",
+      });
+    await vi.advanceTimersByTimeAsync(100);
+    if (ending === "cancel") {
+      expect(await pending).toHaveProperty("code");
+      expect(f.downloads.cancel).toHaveBeenCalledWith(9);
+    } else expect(await pending).toHaveProperty("item.id", 9);
+    expect(f.downloads.cancel).not.toHaveBeenCalledWith(88);
+    expect(f.downloads.removeFile).not.toHaveBeenCalledWith(88);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("does not claim or cancel a later human download when input arrives before attribution", async () => {
+    vi.useFakeTimers();
+    const f = fixture();
+    const input = new AbortController();
+    const pending = captureBrowserDownload({
+      ...f,
+      target: { tabId: 7 },
+      browserRelativeDir: "BrowserSkill/deadline",
+      timeoutMs: 10_000,
+      inputSignal: input.signal,
+      trigger: async (mark) => {
+        mark();
+        return { tab_id: 7, x: 10, y: 10 };
+      },
+    });
+    await vi.advanceTimersByTimeAsync(100);
+    input.abort();
+    expect(await pending).toMatchObject({ data: { effect_state: "unknown" } });
+    f.offer();
+    f.onCreated.emit({ ...f.item, state: "complete" });
+    await vi.advanceTimersByTimeAsync(100);
+    expect(f.downloads.cancel).not.toHaveBeenCalled();
+    expect(f.downloads.removeFile).not.toHaveBeenCalled();
+    expect(vi.getTimerCount()).toBe(0);
   });
 });

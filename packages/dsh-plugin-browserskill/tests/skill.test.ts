@@ -48,7 +48,7 @@ describe("registerBskSkill", () => {
     expect(content).toMatch(/All browser work\s+must use the injected tools directly/);
     expect(content).toContain("Mandatory workflow");
     expect(content).toContain("Refs invalidate after navigation");
-    expect(content).toContain("evaluation and interaction recording are intentionally unsupported");
+    expect(content).toContain("Interaction recording is not exposed");
     // Keep the lazily injected instructions inside a bounded prompt budget,
     // while the lower bound catches accidental truncation of the guidance.
     expect(content.length).toBeGreaterThan(3_000);
@@ -58,6 +58,7 @@ describe("registerBskSkill", () => {
     expect(isAbsolute(base.path)).toBe(true);
     const references = [...content.matchAll(/\]\((references\/[^)]+)\)/g)].map((match) => match[1]);
     expect([...new Set(references)].sort()).toEqual([
+      "references/cooperation.md",
       "references/debugging.md",
       "references/help-and-recovery.md",
       "references/interaction-details.md",

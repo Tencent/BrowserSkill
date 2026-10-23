@@ -56,13 +56,14 @@ pub struct Session {
 
 impl Session {
     pub fn status_entry(&self) -> SessionStatusEntry {
-        self.status_entry_with_lifecycle(None, None)
+        self.status_entry_with_lifecycle(None, None, None)
     }
 
     fn status_entry_with_lifecycle(
         &self,
         last_activity_at_ms: Option<i64>,
         idle_timeout: Option<Duration>,
+        idle_protected: Option<bool>,
     ) -> SessionStatusEntry {
         SessionStatusEntry {
             interaction: self.interaction,
@@ -73,14 +74,16 @@ impl Session {
             last_activity_at_ms,
             idle_timeout_ms: idle_timeout
                 .map(|timeout| u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX)),
+            idle_protected,
         }
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug)]
 struct SessionActivity {
-    instant: Instant,
+    last_seen: Instant,
     epoch_ms: i64,
+    idle_protected: bool,
 }
 
 const IDLE_STOP_REASON_TTL: Duration = Duration::from_secs(10 * 60);
@@ -89,9 +92,16 @@ const IDLE_STOP_REASON_CAPACITY: usize = 1_024;
 impl SessionActivity {
     fn now() -> Self {
         Self {
-            instant: Instant::now(),
+            last_seen: Instant::now(),
             epoch_ms: now_ms(),
+            idle_protected: false,
         }
+    }
+}
+
+impl Default for SessionActivity {
+    fn default() -> Self {
+        Self::now()
     }
 }
 
@@ -287,12 +297,8 @@ impl SessionRegistry {
 
     /// Record accepted or completed tool activity for a live session.
     pub fn touch(&self, id: &SessionId) -> bool {
-        if !self
-            .inner
-            .lock()
-            .expect("session registry poisoned")
-            .contains_key(id)
-        {
+        let sessions = self.inner.lock().expect("session registry poisoned");
+        if !sessions.contains_key(id) {
             return false;
         }
         self.last_activity
@@ -300,6 +306,23 @@ impl SessionRegistry {
             .expect("session activity registry poisoned")
             .insert(id.clone(), SessionActivity::now());
         true
+    }
+
+    /// Only the owning browser can retain a session while a shared page is live.
+    /// Ending collaboration starts a fresh idle interval; normal teardown still applies.
+    pub fn update_activity(&self, id: &SessionId, browser: &BrowserId, idle_protected: bool) {
+        let sessions = self.inner.lock().expect("session registry poisoned");
+        if !sessions.get(id).is_some_and(|s| &s.browser_id == browser) {
+            return;
+        }
+        let mut activity = self
+            .last_activity
+            .lock()
+            .expect("session activity registry poisoned");
+        let entry = activity.entry(id.clone()).or_default();
+        entry.idle_protected = idle_protected;
+        entry.last_seen = Instant::now();
+        entry.epoch_ms = now_ms();
     }
 
     /// Return sessions whose last tool activity is at least `idle_for`
@@ -315,9 +338,10 @@ impl SessionRegistry {
             .values()
             .filter(|session| {
                 !starting.contains(&session.id)
-                    && activity
-                        .get(&session.id)
-                        .is_some_and(|last| now.saturating_duration_since(last.instant) >= idle_for)
+                    && activity.get(&session.id).is_some_and(|last| {
+                        !last.idle_protected
+                            && now.saturating_duration_since(last.last_seen) >= idle_for
+                    })
             })
             .map(|session| session.id.clone())
             .collect()
@@ -337,6 +361,7 @@ impl SessionRegistry {
                 session.status_entry_with_lifecycle(
                     activity.get(&session.id).map(|last| last.epoch_ms),
                     Some(idle_timeout),
+                    activity.get(&session.id).map(|last| last.idle_protected),
                 )
             })
             .collect()
@@ -563,6 +588,8 @@ const SESSION_ID_MAX_RESERVE_ATTEMPTS: u32 = 64;
 /// (background window, browser-chosen size).
 #[derive(Debug, Default, Clone, Copy)]
 pub struct AgentWindowOptions {
+    /// Opt in to Chrome's shared incognito browsing session.
+    pub incognito: bool,
     /// Optional outer size as `(width, height)` CSS pixels.
     pub size: Option<(u32, u32)>,
     /// Optional focus hint (`None` = extension default: background).
@@ -649,6 +676,24 @@ pub(crate) async fn start_session_recoverable(
     if client.is_unresponsive() {
         return Err(StartSessionError::ExtensionUnresponsive);
     }
+    if window.incognito
+        && !bsk_protocol::tools::supports_incognito_sessions(&client.extension_protocol_version)
+    {
+        return Err(StartSessionError::ExtensionError(RpcError {
+            code: ErrorCode::Unsupported,
+            message: format!(
+                "Incognito sessions require extension protocol {} (connected: {}); update the BrowserSkill extension and retry",
+                bsk_protocol::tools::INCOGNITO_SESSION_PROTOCOL,
+                client.extension_protocol_version,
+            ),
+            data: Some(serde_json::json!({
+                "reason": "unsupported_feature", "operation": "session start --incognito",
+                "component": "extension",
+                "required_protocol": bsk_protocol::tools::INCOGNITO_SESSION_PROTOCOL,
+                "actual_protocol": client.extension_protocol_version,
+            })),
+        }));
+    }
     let session_id = sessions
         .reserve_id(client.id.clone(), SESSION_ID_MAX_RESERVE_ATTEMPTS, now_ms)
         .ok_or(StartSessionError::IdExhausted)?;
@@ -656,6 +701,7 @@ pub(crate) async fn start_session_recoverable(
         sessions.starting.lock().unwrap().insert(session_id.clone());
     }
     let params = SessionStartParams {
+        incognito: window.incognito,
         session_id: session_id.0.clone(),
         browser_instance_id: Some(client.id.0.clone()),
         width: window.size.map(|(width, _)| width),
@@ -1174,6 +1220,26 @@ mod idle_stop_tests {
         assert_eq!(stopped.len(), 1);
         assert!(stopped.contains_key(&SessionId("current".into())));
     }
+
+    #[test]
+    fn lifecycle_status_reports_idle_protection() {
+        let registry = SessionRegistry::new();
+        let id = SessionId("protected".into());
+        let browser = BrowserId("browser".into());
+        registry.insert(Session {
+            interaction: None,
+            id: id.clone(),
+            browser_id: browser.clone(),
+            agent_window_id: None,
+            created_at_ms: 0,
+        });
+
+        registry.update_activity(&id, &browser, true);
+
+        let entries = registry.status_entries(Duration::from_secs(300));
+        assert_eq!(entries[0].idle_protected, Some(true));
+        assert_eq!(entries[0].idle_timeout_ms, Some(300_000));
+    }
 }
 
 #[cfg(test)]
@@ -1256,6 +1322,7 @@ mod link_tests {
                     AgentWindowOptions {
                         size: None,
                         focused: Some(false),
+                        ..Default::default()
                     },
                     Duration::ZERO,
                     timeout,

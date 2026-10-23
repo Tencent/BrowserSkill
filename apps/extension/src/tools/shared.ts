@@ -56,6 +56,17 @@ export type { DialogCursor };
  * teardown.
  */
 export interface CdpRunner {
+  /** Fence a browser API effect at invocation, after asynchronous ownership checks. */
+  runBrowserMutation?<T>(operation: () => Promise<T>): Promise<T>;
+  /** Only release resources acquired by this request; never restore page/user state. */
+  resourceCleanup?: CdpRunner;
+  /** Validate the observed decision before a tool's own scripted form mutation. */
+  beginDomMutation?(): Promise<void>;
+  /** Shared control validates the live pointer target again after hover. */
+  verifyPointerTarget?(
+    target: { tabId: number; cdpTarget: CdpTarget; backendNodeId: number; frameId?: string },
+    point: { x: number; y: number },
+  ): Promise<void>;
   send<T = unknown>(tabId: number, method: string, params?: object): Promise<T>;
   sendToTarget?<T = unknown>(target: CdpTarget, method: string, params?: object): Promise<T>;
   /** Production dispatch boundary; optional for lightweight test runners. */
@@ -72,6 +83,7 @@ export interface CdpRunner {
   acquireBackgroundExecution?(sessionId: string, tabId: number): Promise<void>;
   /** Whether this session requests the persistent override, regardless of applied CDP state. */
   ownsBackgroundExecution?(sessionId: string, tabId: number): boolean;
+  releaseBackgroundExecution?(sessionId: string, tabId: number): Promise<void>;
   /** Resend this session's owned override, even when the applied-state cache reports it active. */
   restoreBackgroundExecution?(sessionId: string, tabId: number): Promise<void>;
   trackSessionTab?(sessionId: string, tabId: number): void;

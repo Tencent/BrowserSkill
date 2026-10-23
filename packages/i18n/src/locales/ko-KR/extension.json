@@ -1,4 +1,28 @@
 {
+  "cooperation": {
+    "yielding": "Agent가 대기 중",
+    "label": "브라우저 공동 제어",
+    "ready": "Agent 준비 완료",
+    "acting": "Agent 작업 중",
+    "human": "직접 조작 중",
+    "editing": "편집 중",
+    "held": "Agent 일시 중지됨",
+    "syncing": "Agent 동기화 중",
+    "unavailable": "페이지를 확인할 수 없음",
+    "hold": "Agent 일시 중지",
+    "resume": "Agent에 넘기기",
+    "stop": "작업 중지",
+    "hints": {
+      "ready": "언제든 직접 조작할 수 있습니다",
+      "acting": "언제든 직접 조작할 수 있습니다",
+      "human": "조작을 멈추면 Agent가 계속합니다",
+      "editing": "완료되면 Agent에게 넘겨주세요",
+      "held": "준비되면 Agent에게 넘겨주세요",
+      "yielding": "현재 작업이 끝나기를 기다립니다",
+      "syncing": "최신 페이지 상태를 읽고 있습니다",
+      "unavailable": "Agent가 조작을 멈췄습니다"
+    }
+  },
   "popup": {
     "interactionCompatibilityWarning": "이전 Daemon에 연결되었습니다(프로토콜 v{{cliProtocol}}). 자동화 설정을 완전히 지원하려면 CLI와 Daemon을 업데이트하세요.",
     "brandCategory": "브라우저 자동화",

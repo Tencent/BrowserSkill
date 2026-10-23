@@ -50,6 +50,36 @@ the instance ID; verify the mapping again instead of substituting another browse
 Copying a whole profile can also copy its extension storage, so instance IDs are
 routing identifiers, not independent proof of a filesystem path.
 
+## Incognito Agent Windows
+
+To isolate a task from the selected profile's ordinary website login state, enable
+**chrome://extensions → BrowserSkill → Details → Allow in incognito**, then run:
+
+```sh
+bsk session start --browser <instance-id> --incognito --json
+```
+
+Without `--incognito`, sessions continue to use normal windows. Incognito starts
+require daemon and extension protocol 1.4 or later. Missing permission, an older
+peer, or a browser refusal returns an error; BrowserSkill never retries the start
+as a normal window. Direct extension callers can pass `incognito: true` to
+`tool.session_start`.
+
+Incognito sessions create their own tabs and cannot borrow user tabs. Normal
+sessions also cannot borrow incognito tabs. Navigation, input and screenshots use
+the same tools as normal sessions.
+
+All incognito windows in the same profile share one incognito cookie jar, including
+windows opened by the user and other tasks. Closing one Agent Window does not clear
+that shared state while another incognito window remains open. Chrome clears the
+incognito website data when the last incognito window closes. This is isolation
+from normal browsing, not a separate cookie jar per task.
+
+Stopping a session still closes its agent-created tabs and preserves user-created
+tabs and protected popups. Such tabs may keep the incognito window and its browsing
+session alive. Downloads and BrowserSkill's own operation history follow their
+existing retention rules.
+
 ## DeepSeek Harness
 
 Use the verified popup instance ID in the plugin's session tool:
@@ -57,6 +87,11 @@ Use the verified popup instance ID in the plugin's session tool:
 ```text
 bsk_session({ action: "start", browser: "<verified-instance-id>" })
 ```
+
+For an incognito Agent Window, add `incognito: true` to that call. The extension
+must have **Allow in incognito** enabled, and the plugin, CLI, daemon and extension
+must support protocol 1.4 or later; a missing permission or an older peer returns an
+error instead of retrying as a normal window.
 
 **Copy instructions** includes this tool call alongside the CLI command.
 Use the DeepSeek Harness call instead of running a separate CLI session. The plugin

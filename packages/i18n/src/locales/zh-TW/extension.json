@@ -1,4 +1,28 @@
 {
+  "cooperation": {
+    "yielding": "Agent 正在停手",
+    "label": "人機協作",
+    "ready": "Agent 已就緒",
+    "acting": "Agent 正在操作",
+    "human": "現在由你操作",
+    "editing": "你正在編輯",
+    "held": "Agent 已暫停",
+    "syncing": "Agent 正在同步",
+    "unavailable": "暫時無法觀察頁面",
+    "hold": "暫停 Agent",
+    "resume": "交給 Agent",
+    "stop": "停止任務",
+    "hints": {
+      "ready": "你可以隨時接手",
+      "acting": "你可以隨時接手",
+      "human": "停止操作後，Agent 會繼續",
+      "editing": "完成編輯後交給 Agent",
+      "held": "準備好後交給 Agent",
+      "yielding": "等待目前操作結束",
+      "syncing": "正在讀取最新頁面狀態",
+      "unavailable": "Agent 已停手"
+    }
+  },
   "popup": {
     "interactionCompatibilityWarning": "已連線至舊版 Daemon（通訊協定 v{{cliProtocol}}）。部分自動化設定需要更新 CLI 和 Daemon 才能完整生效。",
     "brandCategory": "Browser Automation",

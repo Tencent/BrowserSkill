@@ -19,6 +19,24 @@ or extension ID is not an instance ID. If the mapping is unclear/ambiguous or th
 target unavailable, stop and ask the user to confirm/reconnect. Never omit
 `browser` or substitute another instance to recover.
 
+## Incognito tasks
+
+When temporary login isolation from ordinary browsing is required, start with:
+
+```text
+bsk_session({ action: "start", incognito: true, browser: "<verified-instance-id>" })
+```
+
+The extension must have **Allow in incognito** enabled, and the CLI, daemon and
+extension must support protocol 1.4 or later. Report a permission or
+compatibility error instead of retrying in normal mode.
+
+Incognito sessions cannot borrow tabs, and normal sessions cannot borrow incognito
+tabs. Create tabs in the task window. All incognito windows in one profile share
+login state with each other; they are separate from the profile's ordinary windows.
+Website data persists until every incognito window closes, so stopping the session
+does not guarantee immediate data removal.
+
 ## Borrowing and settings
 
 Use `bsk_tabs` to list IDs before acting. Borrow for the immediate step and

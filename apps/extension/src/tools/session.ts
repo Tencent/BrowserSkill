@@ -54,6 +54,8 @@ export function validateWindowSize(
 
 export interface SessionStartParams {
   session_id: string;
+  /** Opt in to Chrome's shared incognito browsing session. */
+  incognito?: boolean;
   browser_instance_id?: string;
   /** Optional Agent Window outer width in CSS pixels (100..=7680). */
   width?: number;
@@ -133,11 +135,15 @@ export async function handleSessionStart(
   if (params.unattended !== undefined && typeof params.unattended !== "boolean") {
     return { code: "invalid_params", message: "unattended must be a boolean" };
   }
+  if (params.incognito !== undefined && typeof params.incognito !== "boolean") {
+    return { code: "invalid_params", message: "incognito must be a boolean" };
+  }
   const sizeOrErr = validateWindowSize(params.width, params.height);
   if (isRpcError(sizeOrErr)) return sizeOrErr;
   try {
     await deps.preferences?.readyOrFallback();
     const ctx = await manager.start(params.session_id, {
+      incognito: params.incognito,
       size: sizeOrErr,
       focused: params.focused,
       signal: deps.signal,

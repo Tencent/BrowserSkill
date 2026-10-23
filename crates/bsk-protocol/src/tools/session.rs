@@ -8,6 +8,17 @@ use crate::ErrorCode;
 /// Protocol 1.3 makes browser Automation settings authoritative.
 pub const INTERACTION_POLICY_PROTOCOL: &str = "1.3";
 
+/// Protocol 1.4 supports explicitly requested incognito Agent Windows.
+pub const INCOGNITO_SESSION_PROTOCOL: &str = "1.4";
+
+pub fn supports_incognito_sessions(protocol: &str) -> bool {
+    crate::system::compare_protocol(protocol, "2.0") == Some(std::cmp::Ordering::Less)
+        && matches!(
+            crate::system::compare_protocol(protocol, INCOGNITO_SESSION_PROTOCOL),
+            Some(std::cmp::Ordering::Equal | std::cmp::Ordering::Greater)
+        )
+}
+
 /// Stay within protocol major 1, matching handshake compatibility. A future
 /// major version must explicitly establish support rather than inherit it.
 pub fn supports_interaction_policy(protocol: &str) -> bool {
@@ -41,6 +52,9 @@ pub struct InteractionPolicy {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct SessionStartParams {
     pub session_id: String,
+    /// Use Chrome's shared incognito browsing session. Omitted means normal.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub incognito: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub browser_instance_id: Option<String>,
     /// Optional Agent Window outer width in CSS pixels (100..=7680).
@@ -91,6 +105,39 @@ pub struct SessionStopResult {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn incognito_is_opt_in_and_requires_protocol_1_4() {
+        let legacy: SessionStartParams =
+            serde_json::from_value(json!({"session_id":"aa11"})).unwrap();
+        assert!(!legacy.incognito);
+        for incognito in [false, true] {
+            let params: SessionStartParams = serde_json::from_value(json!({
+                "session_id":"aa11", "incognito":incognito,
+            }))
+            .unwrap();
+            assert_eq!(params.incognito, incognito);
+            let encoded = serde_json::to_value(params).unwrap();
+            assert_eq!(
+                encoded
+                    .get("incognito")
+                    .and_then(serde_json::Value::as_bool),
+                incognito.then_some(true)
+            );
+        }
+        assert!(
+            serde_json::from_value::<SessionStartParams>(
+                json!({"session_id":"aa11","incognito":null})
+            )
+            .is_err()
+        );
+        for protocol in ["1.0", "1.3", "2.0", "invalid"] {
+            assert!(!supports_incognito_sessions(protocol), "{protocol}");
+        }
+        for protocol in ["1.4", "1.5"] {
+            assert!(supports_incognito_sessions(protocol), "{protocol}");
+        }
+    }
 
     #[test]
     fn legacy_unattended_is_accepted_but_never_forwarded() {

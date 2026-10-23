@@ -151,6 +151,11 @@ function uploadCdp(
   const calls: Array<{ method: string; params?: object }> = [];
   let cdpEvent: Parameters<NonNullable<CdpRunner["onEvent"]>>[0] | undefined;
   const send = vi.fn(async (_tabId: number, method: string, params?: object) => {
+    if (
+      method === "Runtime.evaluate" &&
+      (params as { expression?: string })?.expression === "document.visibilityState"
+    )
+      return { result: { value: "visible" } };
     calls.push({ method, params });
     if (
       method === "Runtime.evaluate" &&
@@ -706,6 +711,11 @@ describe("file transfer tools", () => {
     const send = vi.fn(async (_tabId: number, method: string, params?: object) => {
       if (
         method === "Runtime.evaluate" &&
+        (params as { expression?: string })?.expression === "document.visibilityState"
+      )
+        return { result: { value: "visible" } };
+      if (
+        method === "Runtime.evaluate" &&
         String((params as { expression?: string })?.expression).includes('return "absent"')
       )
         return { result: { value: covered && !passthrough ? "covered" : "clear" } };
@@ -1122,6 +1132,11 @@ describe("file transfer tools", () => {
     const download = fakes.item(50, "https://example.test/export?id=50");
     let suggested: Promise<chrome.downloads.DownloadFilenameSuggestion | undefined> | undefined;
     const send = vi.fn(async (_tabId: number, method: string, params?: object) => {
+      if (
+        method === "Runtime.evaluate" &&
+        (params as { expression?: string })?.expression === "document.visibilityState"
+      )
+        return { result: { value: "visible" } };
       if (method === "Page.getLayoutMetrics")
         return { cssLayoutViewport: { clientWidth: 1280, clientHeight: 720 } };
       if (method === "DOM.getContentQuads") return { quads: [[0, 0, 20, 0, 20, 20, 0, 20]] };

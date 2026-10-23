@@ -1,0 +1,51 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "CooperateParams",
+  "type": "object",
+  "required": [
+    "action",
+    "session_id"
+  ],
+  "properties": {
+    "action": {
+      "$ref": "#/definitions/CooperateAction"
+    },
+    "max_tokens": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint32",
+      "minimum": 0.0
+    },
+    "session_id": {
+      "type": "string"
+    },
+    "tab_id": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "int64"
+    },
+    "timeout_ms": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint64",
+      "minimum": 0.0
+    }
+  },
+  "definitions": {
+    "CooperateAction": {
+      "type": "string",
+      "enum": [
+        "enable",
+        "status",
+        "sync",
+        "wait"
+      ]
+    }
+  }
+}

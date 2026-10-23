@@ -433,7 +433,7 @@ describe("measurement geometry context", () => {
     ).toMatchObject({ topBounds: { x: 60, y: 620, width: 40, height: 20 } });
     expect(cdp.getFrameGraph).toHaveBeenCalledTimes(1);
     expect(cdp.calls.mock.calls.filter(([, method]) => method === "DOM.getBoxModel")).toHaveLength(
-      1,
+      2, // Target layout flush plus the iframe owner, both measured after scrolling.
     );
   });
 
