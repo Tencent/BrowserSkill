@@ -508,11 +508,13 @@ describe.skipIf(!process.env.BSK_FILL_CHROME)("date-like fill regressions", () =
     ["datetime-local", "2026-10-14T14:30"],
     ["month", "2026-10"],
     ["week", "2026-W42"],
-  ] as const)("notifies a shadow host when filling %s", async (type, value) => {
-    await withFillBrowser(
-      { background: false, markup: guard + '<div id="host"></div>' },
-      async (h) => {
-        await h.evaluate(`(() => {
+  ] as const)(
+    "notifies a shadow host when filling %s",
+    async (type, value) => {
+      await withFillBrowser(
+        { background: false, markup: guard + '<div id="host"></div>' },
+        async (h) => {
+          await h.evaluate(`(() => {
           const host = document.querySelector('#host');
           const root = host.attachShadow({ mode: 'open' });
           root.innerHTML = '<input id="target" type="${type}">';
@@ -524,16 +526,20 @@ describe.skipIf(!process.env.BSK_FILL_CHROME)("date-like fill regressions", () =
             });
           });
         })()`);
-        await h.ref("document.querySelector('#host').shadowRoot.querySelector('#target')");
-        expect(await h.fill(value)).toMatchObject({ value_length: value.length });
-        expect(
-          await h.evaluate("document.querySelector('#host').shadowRoot.querySelector('#target').value"),
-        ).toBe(value);
-        expect(await h.evaluate("window.hostInputEvents")).toEqual([{ composed: true, value }]);
-        expect(h.calls).not.toContain("Input.insertText");
-      },
-    );
-  }, 30_000);
+          await h.ref("document.querySelector('#host').shadowRoot.querySelector('#target')");
+          expect(await h.fill(value)).toMatchObject({ value_length: value.length });
+          expect(
+            await h.evaluate(
+              "document.querySelector('#host').shadowRoot.querySelector('#target').value",
+            ),
+          ).toBe(value);
+          expect(await h.evaluate("window.hostInputEvents")).toEqual([{ composed: true, value }]);
+          expect(h.calls).not.toContain("Input.insertText");
+        },
+      );
+    },
+    30_000,
+  );
 });
 
 describe.skipIf(!process.env.BSK_FILL_CHROME)("fill caret validation", () => {
