@@ -1,27 +1,25 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "title": "VideoParams",
+  "definitions": {
+    "VideoQuality": {
+      "enum": [
+        "standard",
+        "clear"
+      ],
+      "type": "string"
+    }
+  },
   "oneOf": [
     {
-      "type": "object",
-      "required": [
-        "action",
-        "max_duration_ms",
-        "quality",
-        "request_id",
-        "session_id"
-      ],
       "properties": {
         "action": {
-          "type": "string",
-          "enum": [
-            "start"
-          ]
+          "const": "start",
+          "type": "string"
         },
         "max_duration_ms": {
-          "type": "integer",
           "format": "uint32",
-          "minimum": 0.0
+          "minimum": 0,
+          "type": "integer"
         },
         "quality": {
           "$ref": "#/definitions/VideoQuality"
@@ -33,25 +31,27 @@
           "type": "string"
         },
         "tab_id": {
+          "format": "int64",
           "type": [
             "integer",
             "null"
-          ],
-          "format": "int64"
+          ]
         }
-      }
+      },
+      "required": [
+        "action",
+        "session_id",
+        "max_duration_ms",
+        "quality",
+        "request_id"
+      ],
+      "type": "object"
     },
     {
-      "type": "object",
-      "required": [
-        "action"
-      ],
       "properties": {
         "action": {
-          "type": "string",
-          "enum": [
-            "capabilities"
-          ]
+          "const": "capabilities",
+          "type": "string"
         },
         "browser": {
           "type": [
@@ -65,19 +65,17 @@
             "null"
           ]
         }
-      }
-    },
-    {
-      "type": "object",
+      },
       "required": [
         "action"
       ],
+      "type": "object"
+    },
+    {
       "properties": {
         "action": {
-          "type": "string",
-          "enum": [
-            "list"
-          ]
+          "const": "list",
+          "type": "string"
         },
         "browser": {
           "type": [
@@ -85,22 +83,17 @@
             "null"
           ]
         }
-      }
+      },
+      "required": [
+        "action"
+      ],
+      "type": "object"
     },
     {
-      "type": "object",
-      "required": [
-        "action",
-        "browser",
-        "capability",
-        "recording_id"
-      ],
       "properties": {
         "action": {
-          "type": "string",
-          "enum": [
-            "status"
-          ]
+          "const": "status",
+          "type": "string"
         },
         "browser": {
           "type": "string"
@@ -111,22 +104,20 @@
         "recording_id": {
           "type": "string"
         }
-      }
-    },
-    {
-      "type": "object",
+      },
       "required": [
         "action",
         "browser",
-        "capability",
-        "recording_id"
+        "recording_id",
+        "capability"
       ],
+      "type": "object"
+    },
+    {
       "properties": {
         "action": {
-          "type": "string",
-          "enum": [
-            "stop"
-          ]
+          "const": "stop",
+          "type": "string"
         },
         "browser": {
           "type": "string"
@@ -137,23 +128,20 @@
         "recording_id": {
           "type": "string"
         }
-      }
-    },
-    {
-      "type": "object",
+      },
       "required": [
         "action",
         "browser",
-        "capability",
-        "offset",
-        "recording_id"
+        "recording_id",
+        "capability"
       ],
+      "type": "object"
+    },
+    {
       "properties": {
         "action": {
-          "type": "string",
-          "enum": [
-            "read"
-          ]
+          "const": "read",
+          "type": "string"
         },
         "browser": {
           "type": "string"
@@ -162,29 +150,28 @@
           "type": "string"
         },
         "offset": {
-          "type": "integer",
           "format": "uint64",
-          "minimum": 0.0
+          "minimum": 0,
+          "type": "integer"
         },
         "recording_id": {
           "type": "string"
         }
-      }
-    },
-    {
-      "type": "object",
+      },
       "required": [
         "action",
         "browser",
+        "recording_id",
         "capability",
-        "recording_id"
+        "offset"
       ],
+      "type": "object"
+    },
+    {
       "properties": {
         "action": {
-          "type": "string",
-          "enum": [
-            "discard"
-          ]
+          "const": "discard",
+          "type": "string"
         },
         "browser": {
           "type": "string"
@@ -195,22 +182,20 @@
         "recording_id": {
           "type": "string"
         }
-      }
-    },
-    {
-      "type": "object",
+      },
       "required": [
         "action",
         "browser",
-        "capability",
-        "recording_id"
+        "recording_id",
+        "capability"
       ],
+      "type": "object"
+    },
+    {
       "properties": {
         "action": {
-          "type": "string",
-          "enum": [
-            "exported"
-          ]
+          "const": "exported",
+          "type": "string"
         },
         "browser": {
           "type": "string"
@@ -221,16 +206,15 @@
         "recording_id": {
           "type": "string"
         }
-      }
+      },
+      "required": [
+        "action",
+        "browser",
+        "recording_id",
+        "capability"
+      ],
+      "type": "object"
     }
   ],
-  "definitions": {
-    "VideoQuality": {
-      "type": "string",
-      "enum": [
-        "standard",
-        "clear"
-      ]
-    }
-  }
+  "title": "VideoParams"
 }

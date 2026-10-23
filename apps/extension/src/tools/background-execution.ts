@@ -1,6 +1,7 @@
 import { isAgentControlledTab, type SessionManager } from "@/session-manager/manager";
 import type { RequestFrame, RpcError } from "@/transport/types";
 import { extractTargetTab } from "./extract";
+import { toolPolicy } from "./policy";
 import {
   type CdpRunner,
   type ChromeTabsApi,
@@ -9,39 +10,6 @@ import {
   resolveCdpAccessibleTargetTab,
   resolveTargetTab,
 } from "./shared";
-
-const reads = new Set([
-  "tool.snapshot",
-  "tool.observe",
-  "tool.screenshot",
-  "tool.get_html",
-  "tool.extract",
-  "tool.evaluate",
-  "tool.console",
-  "tool.network",
-]);
-const pageTools = new Set([
-  ...reads,
-  "tool.navigate",
-  "tool.navigate_back",
-  "tool.navigate_forward",
-  "tool.reload",
-  "tool.click",
-  "tool.hover",
-  "tool.wheel",
-  "tool.scroll_to",
-  "tool.focus",
-  "tool.blur",
-  "tool.fill",
-  "tool.press",
-  "tool.select",
-  "tool.upload",
-  "tool.download",
-  "tool.emulate",
-  "tool.wait_for_navigation",
-  "tool.wait_for_element",
-  "tool.screenshot_full_page",
-]);
 
 /** Prepare only explicitly controlled targets, before page reads or readiness waits.
  * Resolve once and pin the request to that tab; UI activation is never targeting. */
@@ -52,7 +20,8 @@ export async function prepareBackgroundExecution(
   tabs: ChromeTabsApi,
   signal: AbortSignal,
 ): Promise<RpcError | undefined> {
-  if (!cdp?.acquireBackgroundExecution || !pageTools.has(request.method)) return;
+  const policy = toolPolicy(request.method);
+  if (!cdp?.acquireBackgroundExecution || !policy || policy.background === "none") return;
   const params = request.params as
     | { session_id?: string; tab_id?: number; target_id?: string }
     | undefined;
@@ -63,22 +32,16 @@ export async function prepareBackgroundExecution(
     request.method === "tool.extract" && typeof params.target_id === "string";
   const tabId =
     params.tab_id ?? (extractionHandle ? extractTargetTab(ctx, params.target_id!) : undefined);
-  // Let the extraction handler report an expired/foreign handle, without first
-  // preparing an unrelated default tab.
+  // Let extraction report an expired/foreign handle before preparing a default tab.
   if (extractionHandle && tabId === undefined) return;
-  const target = await (reads.has(request.method)
+  const target = await (policy.background === "accessible"
     ? resolveCdpAccessibleTargetTab(manager, ctx, tabId, tabs, request.method)
     : resolveTargetTab(manager, ctx, tabId, tabs));
   if (isRpcError(target)) return target;
   request.params = { ...params, tab_id: target.tabId };
   // Navigation owns preparation: an inaccessible source document must still
   // be able to leave through browser navigation before CDP becomes available.
-  if (
-    ["tool.navigate", "tool.reload", "tool.navigate_back", "tool.navigate_forward"].includes(
-      request.method,
-    )
-  )
-    return;
+  if (policy.background === "navigation") return;
   if (!isAgentControlledTab(ctx, target.tabId) || target.windowId !== ctx.agentWindowId) return;
   // Other page tools cannot establish execution on browser-internal documents.
   if (cdpBlockedUrlReason(target.url)) return;

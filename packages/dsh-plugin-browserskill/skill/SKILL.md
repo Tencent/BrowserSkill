@@ -18,6 +18,7 @@ before starting. Verify its instance mapping and bind every new session explicit
 Never omit `browser` or substitute another instance to recover.
 Borrow confirmation and human help follow the extension's Automation settings;
 never change them or switch backends to bypass a prompt.
+On `unsupported_feature`, keep options; use `recovery`.
 For remote setup/pairing, follow the [remote guide](https://github.com/Tencent/BrowserSkill/blob/main/docs/remote-extension-connection.md).
 
 ## Mandatory workflow

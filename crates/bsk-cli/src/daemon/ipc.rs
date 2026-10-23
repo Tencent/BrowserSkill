@@ -369,7 +369,9 @@ async fn handle_video(state: &Arc<DaemonState>, rpc_id: RpcId, params: Value) ->
             params: Some(params),
         }) {
             Ok(receiver) => receiver,
-            Err(SendError::Terminated(error)) => return ResponseBody::Err(error),
+            Err(SendError::Terminated(error) | SendError::UnsupportedFeature(error)) => {
+                return ResponseBody::Err(error);
+            }
             Err(SendError::SinkClosed) => {
                 return ResponseBody::Err(invalid_params("Recording browser disconnected"));
             }
@@ -521,25 +523,6 @@ async fn handle_tool_dispatch(
         }
         if let Some(object) = params.as_object_mut() {
             object.remove("confirm");
-        }
-        if params
-            .get("confirmation_timeout_ms")
-            .is_some_and(|v| !v.is_null())
-            && let Some(session) = state.sessions.get(&session_id)
-            && let Some(browser) = state.browsers.get(&session.browser_id)
-            && !bsk_protocol::tools::supports_borrow_confirmation_timeout(
-                &browser.extension_protocol_version,
-            )
-        {
-            return ResponseBody::Err(RpcError {
-                code: ErrorCode::Unsupported,
-                message: "Custom tab-borrow confirmation waits require extension protocol 1.2; update the extension or omit --timeout to use its default wait".into(),
-                data: Some(serde_json::json!({
-                    "reason": "unsupported_feature", "operation": "tab borrow --timeout",
-                    "component": "extension", "required_protocol": bsk_protocol::tools::BORROW_CONFIRMATION_TIMEOUT_PROTOCOL,
-                    "actual_protocol": browser.extension_protocol_version,
-                })),
-            });
         }
     }
     let mut download_transfer_id: Option<String> = None;
@@ -921,7 +904,8 @@ fn tool_dispatch_transport_timeout(method: &Method, params: &Value) -> Result<Du
         // including the zero-duration status check; sync uses the ordinary read budget.
         return Ok(DEFAULT_TOOL_TIMEOUT);
     }
-    if *method == Method::ToolTabBorrow {
+    let policy = super::tool_policy::execution_policy(method);
+    if policy.deadline == super::tool_policy::Deadline::BorrowConfirmation {
         let ms = params
             .get("confirmation_timeout_ms")
             .map_or(Some(60_000), Value::as_u64)
@@ -932,25 +916,15 @@ fn tool_dispatch_transport_timeout(method: &Method, params: &Value) -> Result<Du
         // Include the UI countdown/fade and Chrome move before deadline cancellation.
         return Ok(Duration::from_millis(ms).saturating_add(Duration::from_secs(15)));
     }
-    let timeout = if *method == Method::ToolScreenshotFullPage && params.get("timeout_ms").is_none()
+    let timeout = if policy.deadline == super::tool_policy::Deadline::FullPage
+        && params.get("timeout_ms").is_none()
     {
         Ok(Duration::from_secs(120))
     } else {
         tool_dispatch_timeout(params)
     };
     timeout.map(|timeout| {
-        if matches!(
-            method,
-            Method::ToolUpload
-                | Method::ToolDownload
-                | Method::ToolRequestHelp
-                | Method::ToolNavigate
-                | Method::ToolNavigateBack
-                | Method::ToolNavigateForward
-                | Method::ToolReload
-                | Method::ToolWaitForNavigation
-                | Method::ToolWaitForElement
-        ) {
+        if policy.response_grace {
             timeout.saturating_add(EXTENSION_RESPONSE_GRACE)
         } else {
             timeout

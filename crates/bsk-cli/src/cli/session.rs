@@ -298,14 +298,6 @@ pub struct SessionStartOptions {
 
 /// Start a session and open the Agent Window. Used by `session start` and `record start`.
 pub fn start_session(sock: PathBuf, opts: SessionStartOptions) -> Result<StartReply, CliError> {
-    if opts.incognito {
-        crate::cli::protocol::require_daemon_support(
-            &sock,
-            "session start --incognito",
-            bsk_protocol::tools::INCOGNITO_SESSION_PROTOCOL,
-            bsk_protocol::tools::supports_incognito_sessions,
-        )?;
-    }
     call(
         sock,
         if opts.request_id.is_some() {

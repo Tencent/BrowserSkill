@@ -1,11 +1,21 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "title": "NetworkEntry",
-  "type": "object",
-  "required": [
-    "kind",
-    "sequence"
-  ],
+  "definitions": {
+    "NetworkEntryKind": {
+      "oneOf": [
+        {
+          "const": "response",
+          "description": "A response was received (`Network.responseReceived`).",
+          "type": "string"
+        },
+        {
+          "const": "failure",
+          "description": "The request failed before completing (`Network.loadingFailed`).",
+          "type": "string"
+        }
+      ]
+    }
+  },
   "properties": {
     "error_text": {
       "description": "CDP failure reason (`failure` entries only).",
@@ -36,18 +46,18 @@
       ]
     },
     "sequence": {
-      "type": "integer",
       "format": "uint64",
-      "minimum": 0.0
+      "minimum": 0,
+      "type": "integer"
     },
     "status": {
       "description": "HTTP status code (`response` entries only).",
+      "format": "uint32",
+      "minimum": 0,
       "type": [
         "integer",
         "null"
-      ],
-      "format": "uint32",
-      "minimum": 0.0
+      ]
     },
     "status_text": {
       "type": [
@@ -56,11 +66,11 @@
       ]
     },
     "timestamp": {
+      "format": "double",
       "type": [
         "number",
         "null"
-      ],
-      "format": "double"
+      ]
     },
     "truncated": {
       "default": false,
@@ -73,24 +83,10 @@
       ]
     }
   },
-  "definitions": {
-    "NetworkEntryKind": {
-      "oneOf": [
-        {
-          "description": "A response was received (`Network.responseReceived`).",
-          "type": "string",
-          "enum": [
-            "response"
-          ]
-        },
-        {
-          "description": "The request failed before completing (`Network.loadingFailed`).",
-          "type": "string",
-          "enum": [
-            "failure"
-          ]
-        }
-      ]
-    }
-  }
+  "required": [
+    "sequence",
+    "kind"
+  ],
+  "title": "NetworkEntry",
+  "type": "object"
 }

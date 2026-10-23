@@ -717,7 +717,7 @@ describe("handleRequestHelp", () => {
       fakeManager("abcd", 99, 5),
       baseParams({
         completion_criteria: {
-          any: [{ url_matches: urlMatches, url_contains: "/done" }],
+          any: [{ url_matches: urlMatches as string | undefined, url_contains: "/done" }],
           stable_for_ms: 0,
         },
       }),

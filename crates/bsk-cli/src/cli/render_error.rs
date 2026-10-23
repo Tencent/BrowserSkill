@@ -223,6 +223,22 @@ pub fn info_for_error(code: ErrorCode, data: Option<&serde_json::Value>) -> Rend
         return base;
     };
     match (code, reason) {
+        (ErrorCode::Unsupported, "unsupported_feature") => RenderInfo {
+            summary: "a connected component does not support the requested feature",
+            hint: match data
+                .and_then(|data| data.get("component"))
+                .and_then(|value| value.as_str())
+            {
+                Some("daemon") => Some(bsk_protocol::compatibility::Peer::Daemon.upgrade_hint()),
+                Some("extension") => {
+                    Some(bsk_protocol::compatibility::Peer::Extension.upgrade_hint())
+                }
+                _ => Some(
+                    "Run `bsk status --json` for feature availability; update the component named in this error before retrying this feature",
+                ),
+            },
+            ..base
+        },
         (_, "user_denied") => RenderInfo {
             summary: "the user denied the tab borrow",
             hint: Some("do not repeat the same authorization request"),

@@ -6,6 +6,7 @@ mod atomic_output;
 pub mod browser_wait;
 pub mod browsers;
 pub mod business_rpc;
+pub(crate) mod compatibility;
 pub mod console;
 pub mod cooperate;
 pub mod daemon;

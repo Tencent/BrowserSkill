@@ -1426,8 +1426,7 @@ mod tests {
         let barrier = std::sync::Arc::new(std::sync::Barrier::new(4));
         let binaries: Vec<Vec<u8>> = (0..4).map(|i| format!("new binary {i}").into()).collect();
         let attempts: Vec<_> = binaries
-            .iter()
-            .cloned()
+            .into_iter()
             .map(|binary| {
                 let target = target.clone();
                 let barrier = std::sync::Arc::clone(&barrier);

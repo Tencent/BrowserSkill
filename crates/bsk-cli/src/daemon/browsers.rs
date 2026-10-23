@@ -175,6 +175,8 @@ impl Pending {
 /// Either way the frame never left the daemon.
 #[derive(Debug)]
 pub enum SendError {
+    /// This connection does not support an explicitly requested feature.
+    UnsupportedFeature(RpcError),
     /// The daemon abandoned this socket; the inner error names the cause.
     Terminated(RpcError),
     /// The socket's writer is gone.
@@ -353,6 +355,18 @@ impl BrowserClient {
         &self,
         request: RequestFrame,
     ) -> Result<oneshot::Receiver<bsk_protocol::ResponseFrame>, SendError> {
+        bsk_protocol::compatibility::check_request(
+            &request.method,
+            request.params.as_ref().unwrap_or(&serde_json::Value::Null),
+            bsk_protocol::compatibility::Peer::Extension,
+            &self.extension_protocol_version,
+        )
+        .map_err(|mut error| {
+            if let Some(data) = error.data.as_mut() {
+                data["browser_instance_id"] = serde_json::Value::String(self.id.0.clone());
+            }
+            SendError::UnsupportedFeature(error)
+        })?;
         let id = request.id.clone();
         let mut pending = self.pending.lock().expect("browser pending poisoned");
         let waiter = pending.register(id.clone())?;

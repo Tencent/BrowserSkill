@@ -65,7 +65,7 @@ fn render_human(s: &StatusResult) {
         let bold = "\x1b[1m";
         let reset = "\x1b[0m";
         eprintln!(
-            "{bold}{yellow}note:{reset} {} browser(s) report a different protocol version; still usable — continue, and run `bsk update` soon{reset}",
+            "{bold}{yellow}note:{reset} {} browser(s) report a different protocol version; base communication is compatible. See feature availability below or run `bsk doctor`{reset}",
             s.version_skew_browsers.len()
         );
         for skew in &s.version_skew_browsers {
@@ -75,7 +75,7 @@ fn render_human(s: &StatusResult) {
                 skew.label.clone()
             };
             eprintln!(
-                "  {} ({}) — protocol ext {} vs CLI {} (app ext v{}, CLI v{}) — still usable; please upgrade",
+                "  {} ({}) — protocol ext {} vs daemon {} (app ext v{}, daemon v{})",
                 skew.instance_id,
                 label,
                 display_protocol(&skew.client_protocol_version),
@@ -99,10 +99,24 @@ fn render_human(s: &StatusResult) {
     for (key, value) in &rows {
         println!("{key:<label_width$}  {value}");
     }
+    let report = super::compatibility::report(s);
+    let limitations = super::compatibility::limitations(&report);
+    if !limitations.is_empty() {
+        println!("unavailable features (other supported operations remain usable):");
+        for limitation in limitations {
+            println!("  {limitation}");
+        }
+        println!(
+            "Run `bsk status --json` for the required versions and component-specific update instructions."
+        );
+    }
 }
 
 fn render_json(s: &StatusResult) -> anyhow::Result<()> {
-    let json = serde_json::to_string_pretty(s).context("encode status as JSON")?;
+    // Preserve every existing top-level field for older agents and plugins.
+    let mut value = serde_json::to_value(s).context("encode status as JSON")?;
+    value["compatibility"] = serde_json::to_value(super::compatibility::report(s))?;
+    let json = serde_json::to_string_pretty(&value).context("encode compatibility as JSON")?;
     println!("{json}");
     Ok(())
 }

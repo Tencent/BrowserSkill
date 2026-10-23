@@ -583,23 +583,13 @@ pub(crate) async fn start_session_recoverable(
     if client.is_unresponsive() {
         return Err(StartSessionError::ExtensionUnresponsive);
     }
-    if window.incognito
-        && !bsk_protocol::tools::supports_incognito_sessions(&client.extension_protocol_version)
-    {
-        return Err(StartSessionError::ExtensionError(RpcError {
-            code: ErrorCode::Unsupported,
-            message: format!(
-                "Incognito sessions require extension protocol {} (connected: {}); update the BrowserSkill extension and retry",
-                bsk_protocol::tools::INCOGNITO_SESSION_PROTOCOL,
-                client.extension_protocol_version,
-            ),
-            data: Some(serde_json::json!({
-                "reason": "unsupported_feature", "operation": "session start --incognito",
-                "component": "extension",
-                "required_protocol": bsk_protocol::tools::INCOGNITO_SESSION_PROTOCOL,
-                "actual_protocol": client.extension_protocol_version,
-            })),
-        }));
+    if window.incognito {
+        bsk_protocol::compatibility::Feature::IncognitoSessions
+            .require(
+                bsk_protocol::compatibility::Peer::Extension,
+                &client.extension_protocol_version,
+            )
+            .map_err(StartSessionError::ExtensionError)?;
     }
     let session_id = sessions
         .reserve_id(client.id.clone(), SESSION_ID_MAX_RESERVE_ATTEMPTS, now_ms)
@@ -635,7 +625,8 @@ pub(crate) async fn start_session_recoverable(
         Err(err) => {
             sessions.cancel_reservation(&session_id);
             return Err(match err {
-                super::browsers::SendError::Terminated(cause) => {
+                super::browsers::SendError::Terminated(cause)
+                | super::browsers::SendError::UnsupportedFeature(cause) => {
                     StartSessionError::ExtensionError(cause)
                 }
                 super::browsers::SendError::SinkClosed => StartSessionError::TransportClosed,
@@ -915,7 +906,10 @@ async fn rollback_extension_session(
     };
     let waiter = match client.dispatch(request) {
         Ok(waiter) => waiter,
-        Err(super::browsers::SendError::Terminated(cause)) => {
+        Err(
+            super::browsers::SendError::Terminated(cause)
+            | super::browsers::SendError::UnsupportedFeature(cause),
+        ) => {
             return Err(format!("rollback was not queued: {}", cause.message));
         }
         Err(super::browsers::SendError::SinkClosed) => {

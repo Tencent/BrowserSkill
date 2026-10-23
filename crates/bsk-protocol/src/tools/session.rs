@@ -6,27 +6,21 @@ use serde::{Deserialize, Serialize};
 use crate::ErrorCode;
 
 /// Protocol 1.3 makes browser Automation settings authoritative.
-pub const INTERACTION_POLICY_PROTOCOL: &str = "1.3";
-
-/// Protocol 1.4 supports explicitly requested incognito Agent Windows.
-pub const INCOGNITO_SESSION_PROTOCOL: &str = "1.4";
+pub const INTERACTION_POLICY_PROTOCOL: &str = crate::compatibility::Feature::InteractionPolicy
+    .requirement()
+    .daemon;
+pub const INCOGNITO_SESSION_PROTOCOL: &str = crate::compatibility::Feature::IncognitoSessions
+    .requirement()
+    .daemon;
 
 pub fn supports_incognito_sessions(protocol: &str) -> bool {
-    crate::system::compare_protocol(protocol, "2.0") == Some(std::cmp::Ordering::Less)
-        && matches!(
-            crate::system::compare_protocol(protocol, INCOGNITO_SESSION_PROTOCOL),
-            Some(std::cmp::Ordering::Equal | std::cmp::Ordering::Greater)
-        )
+    crate::compatibility::Feature::IncognitoSessions
+        .supports(crate::compatibility::Peer::Daemon, protocol)
 }
 
-/// Stay within protocol major 1, matching handshake compatibility. A future
-/// major version must explicitly establish support rather than inherit it.
 pub fn supports_interaction_policy(protocol: &str) -> bool {
-    crate::system::compare_protocol(protocol, "2.0") == Some(std::cmp::Ordering::Less)
-        && matches!(
-            crate::system::compare_protocol(protocol, INTERACTION_POLICY_PROTOCOL),
-            Some(std::cmp::Ordering::Equal | std::cmp::Ordering::Greater)
-        )
+    crate::compatibility::Feature::InteractionPolicy
+        .supports(crate::compatibility::Peer::Daemon, protocol)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -101,6 +95,15 @@ pub struct SessionStopResult {
     pub return_failures: Vec<ReturnFailure>,
 }
 
+/// Full extension response, including whether a window was left with the user.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct SessionStopOutcome {
+    #[serde(flatten)]
+    pub returned: SessionStopResult,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window_released: Option<bool>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -141,8 +144,8 @@ mod tests {
 
     #[test]
     fn legacy_unattended_is_accepted_but_never_forwarded() {
-        let schema = schemars::schema_for!(SessionStartParams);
-        let object = schema.schema.object.unwrap();
+        let schema = crate::catalog::schema_for::<SessionStartParams>();
+        let object = schema.as_object().unwrap();
         for unattended in [false, true] {
             let params: SessionStartParams = serde_json::from_value(json!({
                 "session_id": "abcd", "unattended": unattended
@@ -150,14 +153,20 @@ mod tests {
             .unwrap();
             let encoded = serde_json::to_value(params).unwrap();
             assert_eq!(encoded, json!({"session_id": "abcd"}));
-            for required in &object.required {
+            for required in object["required"].as_array().unwrap() {
+                let required = required.as_str().unwrap();
                 assert!(
                     encoded.get(required).is_some(),
                     "schema requires omitted field {required}"
                 );
             }
         }
-        assert!(!object.properties.contains_key("unattended"));
+        assert!(
+            !object["properties"]
+                .as_object()
+                .unwrap()
+                .contains_key("unattended")
+        );
     }
 
     #[test]

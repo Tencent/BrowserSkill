@@ -3,33 +3,50 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum DebugAction {
-    Performance,
-    Aggregate,
-    Duplicates,
-    Capabilities,
-    Activity,
-    Wait,
-    Pin,
-    Unpin,
-    Start,
-    Stop,
-    Status,
-    Requests,
-    Request,
-    Operations,
-    Operation,
-    Console,
-    Pages,
-    Export,
-    Rules,
-    RuleAdd,
-    RuleEnable,
-    RuleDisable,
-    RuleRemove,
-    Replay,
+macro_rules! debug_actions {
+    ($($action:ident => ($wire:literal, $effect:ident, $owner:ident)),* $(,)?) => {
+        #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+        pub enum DebugAction { $(#[serde(rename = $wire)] $action,)* }
+        impl DebugAction {
+            pub const ALL: &'static [Self] = &[$(Self::$action,)*];
+            pub const fn wire_name(&self) -> &'static str {
+                match self { $(Self::$action => $wire,)* }
+            }
+            pub const fn effect(&self) -> crate::method::MethodEffect {
+                match self { $(Self::$action => crate::method::MethodEffect::$effect,)* }
+            }
+            pub const fn owner(&self) -> crate::catalog::MethodOwner {
+                match self { $(Self::$action => crate::catalog::MethodOwner::$owner,)* }
+            }
+        }
+    };
+}
+
+debug_actions! {
+    Performance => ("performance", ControlPlane, Extension),
+    Aggregate => ("aggregate", ControlPlane, Extension),
+    Duplicates => ("duplicates", ControlPlane, Extension),
+    Capabilities => ("capabilities", ControlPlane, Extension),
+    Activity => ("activity", ControlPlane, Daemon),
+    Wait => ("wait", ControlPlane, Daemon),
+    Pin => ("pin", ControlPlane, Extension),
+    Unpin => ("unpin", ControlPlane, Extension),
+    Start => ("start", ControlPlane, Extension),
+    Stop => ("stop", ControlPlane, Extension),
+    Status => ("status", ControlPlane, Extension),
+    Requests => ("requests", ControlPlane, Extension),
+    Request => ("request", ControlPlane, Extension),
+    Operations => ("operations", ControlPlane, Extension),
+    Operation => ("operation", ControlPlane, Extension),
+    Console => ("console", ControlPlane, Extension),
+    Pages => ("pages", ControlPlane, Extension),
+    Export => ("export", ControlPlane, Extension),
+    Rules => ("rules", ControlPlane, Extension),
+    RuleAdd => ("rule_add", BrowserMutation, Extension),
+    RuleEnable => ("rule_enable", BrowserMutation, Extension),
+    RuleDisable => ("rule_disable", ControlPlane, Extension),
+    RuleRemove => ("rule_remove", ControlPlane, Extension),
+    Replay => ("replay", BrowserMutation, Extension),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -243,7 +260,7 @@ pub struct DebugOperation {
     pub finished_at: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub window_end: Option<f64>,
-    pub state: String,
+    pub state: DebugOperationState,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -260,6 +277,13 @@ pub struct DebugOperation {
     pub console_ids: Vec<String>,
     pub truncated: bool,
 }
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum DebugRunState {
+    Capturing,
+    Stopped,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct DebugRun {
     pub id: String,
@@ -270,7 +294,7 @@ pub struct DebugRun {
     pub started_at: f64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stopped_at: Option<f64>,
-    pub state: String,
+    pub state: DebugRunState,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stop_reason: Option<String>,
     pub requests: u64,
@@ -288,7 +312,7 @@ pub struct DebugRun {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub storage_error: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub storage: Option<serde_json::Value>,
+    pub storage: Option<DebugStorage>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub environment: Option<BTreeMap<String, String>>,
 }
@@ -403,9 +427,19 @@ pub struct DebugResult {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub capabilities: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub output: Option<serde_json::Value>,
+    pub output: Option<DebugOutput>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub activity: Option<DebugActivity>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum DebugRuleState {
+    Enabled,
+    Disabled,
+    Exhausted,
+    Removed,
+    Stopped,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -467,7 +501,7 @@ pub struct DebugRule {
     #[serde(flatten)]
     pub spec: DebugRuleSpec,
     pub id: String,
-    pub state: String,
+    pub state: DebugRuleState,
     pub hits: u32,
     pub failures: u32,
     pub created_at: f64,
@@ -498,11 +532,19 @@ pub struct DebugReplay {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum DebugInterventionKind {
+    Block,
+    Modify,
+    Mock,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct DebugIntervention {
     pub rule_id: String,
     #[serde(rename = "type")]
-    pub kind: String,
+    pub kind: DebugInterventionKind,
     pub state: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
@@ -529,7 +571,8 @@ pub struct DebugActivity {
 }
 
 pub fn debug_parameter_schema() -> serde_json::Value {
-    serde_json::to_value(schemars::schema_for!(DebugParams)).expect("debug schema serializes")
+    serde_json::to_value(crate::catalog::schema_for::<DebugParams>())
+        .expect("debug schema serializes")
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -675,4 +718,30 @@ mod fidelity_tests {
         assert!(legacy.request_body.replay_safe.is_none());
         assert_eq!(to_value(legacy).unwrap(), value);
     }
+}
+
+/// Bounded local retention statistics included in debug run metadata.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct DebugStorage {
+    pub requests: u64,
+    pub bytes: u64,
+    pub dropped: u64,
+    pub pins: u64,
+}
+
+/// Reports how the requested output budget affected a debug response.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct DebugOutput {
+    pub budget: u64,
+    pub truncated: bool,
+    pub omitted: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum DebugOperationState {
+    Running,
+    Completed,
+    Error,
+    Interrupted,
 }

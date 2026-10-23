@@ -205,6 +205,7 @@ fn collect_checks(state: DaemonState) -> Vec<CheckResult> {
         check_auto_update(state.status(), state.host_managed()),
         check_extension_connected(state.status()),
         check_browsers_protocol_compatible(state.status()),
+        check_feature_availability(state.status()),
     ]
 }
 
@@ -481,6 +482,9 @@ fn skill_check_from_report(report: &crate::skill_install::sync::SyncReport) -> C
     if !details.is_empty() {
         details.insert(0, format!("bundled bsk v{}", env!("CARGO_PKG_VERSION")));
     }
+    if !report.updated.is_empty() {
+        details.push("reload the updated BrowserSkill skill in the agent, or start a new agent conversation; an existing conversation may retain old instructions".into());
+    }
     let detail = details.join("; ");
 
     if !report.errors.is_empty() {
@@ -565,25 +569,82 @@ fn check_version_compatible(status: Option<&StatusResult>) -> CheckResult {
     let Some(status) = status else {
         return CheckResult::fail(name, "daemon status unavailable", "start the daemon first");
     };
-    let ok = status.protocol_version == PROTOCOL_VERSION;
-    if ok {
-        CheckResult::ok(
+    match bsk_protocol::evaluate_handshake_compat(
+        &status.protocol_version,
+        None,
+        PROTOCOL_VERSION,
+        bsk_protocol::catalog::MIN_COMPATIBLE_PROTOCOL,
+    ) {
+        bsk_protocol::HandshakeCompat::Ok => CheckResult::ok(
             name,
             format!(
                 "daemon protocol {} (app {})",
                 status.protocol_version, status.daemon_version
             ),
-        )
-    } else {
-        CheckResult::fail(
+        ),
+        bsk_protocol::HandshakeCompat::Skew => CheckResult::warn(
+            name,
+            format!(
+                "daemon protocol {} and CLI protocol {} are base-compatible; individual features are checked before use",
+                status.protocol_version, PROTOCOL_VERSION
+            ),
+            "see feature availability below; a different version alone does not require stopping ordinary browsing",
+        ),
+        bsk_protocol::HandshakeCompat::Reject { reason } => CheckResult::fail(
             name,
             format!(
                 "daemon protocol {} (expected {}), app {}",
                 status.protocol_version, PROTOCOL_VERSION, status.daemon_version
             ),
-            "upgrade or restart bsk so CLI and daemon speak the same protocol version",
-        )
+            format!(
+                "{reason}; {}",
+                bsk_protocol::compatibility::Peer::Daemon.upgrade_hint()
+            ),
+        ),
     }
+}
+
+fn check_feature_availability(status: Option<&StatusResult>) -> CheckResult {
+    let name = "feature availability";
+    let Some(status) = status else {
+        return CheckResult::na(name, "daemon status unavailable");
+    };
+    let report = super::compatibility::report(status);
+    let limitations = super::compatibility::limitations(&report);
+    if limitations.is_empty() {
+        return if status.browsers.is_empty() {
+            CheckResult::na(
+                name,
+                "daemon supports the catalogued features; no connected browser to check",
+            )
+        } else {
+            CheckResult::ok(
+                name,
+                "daemon and connected browsers support the catalogued features",
+            )
+        };
+    }
+    let mut hints = Vec::new();
+    if report.daemon.iter().any(|feature| !feature.available) {
+        hints.push(bsk_protocol::compatibility::Peer::Daemon.upgrade_hint());
+    }
+    if report
+        .browsers
+        .iter()
+        .flat_map(|browser| &browser.features)
+        .flat_map(|feature| &feature.blocked_by)
+        .any(|blocker| blocker.component == bsk_protocol::compatibility::Peer::Extension)
+    {
+        hints.push(bsk_protocol::compatibility::Peer::Extension.upgrade_hint());
+    }
+    CheckResult::warn(
+        name,
+        format!(
+            "unavailable: {}; other supported operations remain usable",
+            limitations.join("; ")
+        ),
+        hints.join(" "),
+    )
 }
 
 /// `bsk doctor` check: connected browsers should speak a protocol the

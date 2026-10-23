@@ -1,17 +1,41 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "title": "UploadParams",
-  "type": "object",
-  "required": [
-    "files",
-    "session_id"
-  ],
+  "definitions": {
+    "UploadFile": {
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "staged_path": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "transfer_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "transfer_id",
+        "name"
+      ],
+      "type": "object"
+    },
+    "UploadMode": {
+      "enum": [
+        "input",
+        "drop"
+      ],
+      "type": "string"
+    }
+  },
   "properties": {
     "files": {
-      "type": "array",
       "items": {
         "$ref": "#/definitions/UploadFile"
-      }
+      },
+      "type": "array"
     },
     "mode": {
       "$ref": "#/definitions/UploadMode"
@@ -32,49 +56,25 @@
       "type": "string"
     },
     "tab_id": {
+      "format": "int64",
       "type": [
         "integer",
         "null"
-      ],
-      "format": "int64"
+      ]
     },
     "timeout_ms": {
+      "format": "uint32",
+      "minimum": 0,
       "type": [
         "integer",
         "null"
-      ],
-      "format": "uint32",
-      "minimum": 0.0
-    }
-  },
-  "definitions": {
-    "UploadFile": {
-      "type": "object",
-      "required": [
-        "name",
-        "transfer_id"
-      ],
-      "properties": {
-        "name": {
-          "type": "string"
-        },
-        "staged_path": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "transfer_id": {
-          "type": "string"
-        }
-      }
-    },
-    "UploadMode": {
-      "type": "string",
-      "enum": [
-        "input",
-        "drop"
       ]
     }
-  }
+  },
+  "required": [
+    "session_id",
+    "files"
+  ],
+  "title": "UploadParams",
+  "type": "object"
 }
