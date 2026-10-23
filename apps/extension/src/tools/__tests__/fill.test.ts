@@ -572,3 +572,67 @@ describe("fill result verification", () => {
     expect(await h.fill()).toMatchObject({ value_length: 5 });
   });
 });
+
+describe("fill OOPIF session routing", () => {
+  it("routes Input.insertText through the OOPIF session, not the root tab", async () => {
+    const h = await setup();
+    const manager = new SessionManager({
+      agentWindow: {
+        create: async () => ({ windowId: 100, initialTabIds: [] }),
+        remove: async () => {},
+        ensureActiveTab: async () => 4,
+      },
+    });
+    const ctx = await manager.start("bb22");
+    ctx.refStore.set("e1", 12, {
+      tabId: 4,
+      frameId: "child-frame",
+      cdpSessionId: "child-session",
+    });
+    const rootInput: string[] = [];
+    const childInput: string[] = [];
+    const send = vi.fn(async (_tabId: number, method: string, params?: object) => {
+      if (method.startsWith("Input.")) rootInput.push(method);
+      return h.send(4, method, params);
+    });
+    const sendToTarget = vi.fn(async (target: { sessionId?: string }, method: string, params?: object) => {
+      if (method.startsWith("Input.")) {
+        childInput.push(`${target.sessionId}:${method}`);
+      }
+      return h.send(4, method, params);
+    });
+    const result = await handleFill(
+      manager,
+      { session_id: "bb22", ref: "e1", value: "hello", clear_before: true },
+      {
+        cdp: {
+          send: send as CdpRunner["send"],
+          sendToTarget: sendToTarget as CdpRunner["sendToTarget"],
+          getFrameGraph: async () => ({
+            frames: [
+              {
+                frameId: "root",
+                parentFrameId: undefined,
+                target: { tabId: 4 },
+              },
+              {
+                frameId: "child-frame",
+                parentFrameId: "root",
+                ownerBackendNodeId: 99,
+                target: { tabId: 4, sessionId: "child-session" },
+              },
+            ],
+          }),
+        },
+        tabsApi: {
+          get: async (id) => ({ id, windowId: 100, active: true }) as chrome.tabs.Tab,
+          query: async () => [{ id: 4, windowId: 100, active: true } as chrome.tabs.Tab],
+        },
+      },
+    );
+    expect(result).toMatchObject({ value_length: 5, used_ref: "e1" });
+    expect(childInput).toContain("child-session:Input.insertText");
+    expect(rootInput.filter((m) => m === "Input.insertText")).toHaveLength(0);
+    expect(h.element.value).toBe("hello");
+  });
+});

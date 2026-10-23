@@ -1292,12 +1292,14 @@ export async function handleFill(
       // end command can escape a nested editing host. Place its range below.
       // Neither event carries an End key that could invoke a page shortcut.
       try {
-        await deps.cdp.send(target.tabId, "Input.dispatchKeyEvent", {
+        // Route through nodeCdp so OOPIF targets receive the caret command
+        // on their child session (deps.cdp.send is always the root target).
+        await nodeCdp.send(target.tabId, "Input.dispatchKeyEvent", {
           type: "rawKeyDown",
           commands: native ? ["moveToEndOfDocument"] : [],
         });
       } finally {
-        await deps.cdp.send(target.tabId, "Input.dispatchKeyEvent", { type: "keyUp" });
+        await nodeCdp.send(target.tabId, "Input.dispatchKeyEvent", { type: "keyUp" });
       }
       if (throwIfAborted(deps.signal)) {
         return { code: "cancelled", message: "fill aborted" };
@@ -1323,7 +1325,7 @@ export async function handleFill(
     if (params.value !== "") {
       // Normalize the actual input as well as the expected value: older Chrome
       // versions retain CR in editors or turn CRLF into two textarea breaks.
-      await deps.cdp.send(target.tabId, "Input.insertText", {
+      await nodeCdp.send(target.tabId, "Input.insertText", {
         text: params.value.replace(/\r\n?/g, "\n"),
       });
     }
@@ -1616,12 +1618,17 @@ export async function handlePress(
     // Suppress `text` when any non-shift modifier is held — `Ctrl+a`
     // should not also type the character "a" into the focused field.
     const suppressText = mods.some((m) => m === "ctrl" || m === "meta" || m === "alt");
+    // When a ref was focused in an OOPIF, key events must share that child
+    // session. Without a ref, keep the root-session dispatch.
+    const inputCdp = node
+      ? cdpRunnerForTarget(deps.cdp, node.cdpTarget)
+      : deps.cdp;
     try {
       let cancelled = false;
       deps.cdp.trackSessionTab?.(ctx.sessionId, target.tabId);
       deps.onInputSent?.(target.tabId);
       input.markSent();
-      await deps.cdp.send(target.tabId, "Input.dispatchKeyEvent", {
+      await inputCdp.send(target.tabId, "Input.dispatchKeyEvent", {
         type: "rawKeyDown",
         key: descriptor.key,
         code: descriptor.code,
@@ -1635,7 +1642,7 @@ export async function handlePress(
         typeof descriptor.text === "string" &&
         descriptor.text.length > 0
       ) {
-        await deps.cdp.send(target.tabId, "Input.dispatchKeyEvent", {
+        await inputCdp.send(target.tabId, "Input.dispatchKeyEvent", {
           type: "char",
           key: descriptor.key,
           code: descriptor.code,
@@ -1653,7 +1660,7 @@ export async function handlePress(
         }
       }
       deps.onInputSent?.(target.tabId);
-      await deps.cdp.send(target.tabId, "Input.dispatchKeyEvent", {
+      await inputCdp.send(target.tabId, "Input.dispatchKeyEvent", {
         type: "keyUp",
         key: descriptor.key,
         code: descriptor.code,
