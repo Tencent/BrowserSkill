@@ -73,15 +73,8 @@ impl Process {
         Ok(!process_in_job(self.handle.as_raw_handle())?)
     }
 
-    /// Called only for a child created suspended. A nested Job may allow only
-    /// partial breakaway, so successful CreateProcessW is not sufficient.
-    pub(crate) fn resume_outside_job(&self) -> io::Result<()> {
-        if process_in_job(self.handle.as_raw_handle())? {
-            return Err(io::Error::new(
-                io::ErrorKind::PermissionDenied,
-                "daemon is still associated with a host Job Object after breakaway",
-            ));
-        }
+    /// Called only for a child created suspended.
+    pub(crate) fn resume(&self) -> io::Result<()> {
         // SAFETY: this is the primary thread returned by CreateProcessW.
         if unsafe { ResumeThread(self.thread.as_raw_handle()) } == u32::MAX {
             return Err(io::Error::last_os_error());
