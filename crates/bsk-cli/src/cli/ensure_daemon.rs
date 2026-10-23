@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, ensure};
 
-use crate::cli::daemon::StartArgs;
+use crate::cli::daemon::{StartArgs, parse_duration};
 use crate::daemon::info::DaemonInfo;
 use crate::daemon::probe::{self, PROBE_TIMEOUT, Probe};
 use crate::daemon::start::start_background;
@@ -36,5 +36,16 @@ pub fn ensure_daemon() -> Result<DaemonInfo> {
         return Ok(daemon.info);
     }
     ensure!(auto_start_enabled(), DaemonStartFailure::AutoStartDisabled);
-    start_background(&StartArgs::default(), deadline).context("automatic daemon startup failed")
+    let mut args = StartArgs::default();
+    if let Ok(val) = std::env::var("BSK_SESSION_IDLE") {
+        args.session_idle = Some(
+            parse_duration(&val).map_err(|e| anyhow::anyhow!("invalid BSK_SESSION_IDLE: {e}"))?,
+        );
+    }
+    if let Ok(val) = std::env::var("BSK_DAEMON_IDLE") {
+        args.daemon_idle = Some(
+            parse_duration(&val).map_err(|e| anyhow::anyhow!("invalid BSK_DAEMON_IDLE: {e}"))?,
+        );
+    }
+    start_background(&args, deadline).context("automatic daemon startup failed")
 }
