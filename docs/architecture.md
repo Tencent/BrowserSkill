@@ -109,7 +109,14 @@ attachment and frame document. See [structured extraction](structured-extraction
 - **Sandbox-only**: write tools require tabs inside the Agent Window unless the tab
   was **borrowed** from the user profile.
 - **Session stop is mandatory** in agent workflows (`bsk session stop`); idle timeout
-  (default 5 min) is a safety net only.
+  (default 5 min) is a safety net only. The timeout is daemon-global and can be
+  changed on restart with `bsk daemon restart --session-idle 30m`.
+- `bsk session list` shows when each live session is due to become idle, or
+  `paused` while active browser cooperation protects it; `--json` exposes optional
+  `last_activity_at_ms`, `idle_timeout_ms`, and `idle_protected` lifecycle fields.
+  Neither form reports page URLs, titles, or page contents. Long non-browser work
+  does not refresh the timer; stop the session explicitly when done or choose an
+  appropriate daemon-global timeout before starting.
 - Multiple sessions on one browser → multiple Agent Windows, fully isolated.
 - Remote content reads and actions require task-created or explicitly borrowed tabs.
   A page-opened popup or a user tab moved into the Agent Window does not become

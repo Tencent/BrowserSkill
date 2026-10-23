@@ -5,6 +5,7 @@ pub mod daemon;
 pub mod ipc_client;
 pub mod rpc_reason {
     pub const SESSION_BUSY: &str = "session_busy";
+    pub const SESSION_IDLE_TIMEOUT: &str = "session_idle_timeout";
 }
 pub mod skill_install;
 
