@@ -19,8 +19,8 @@ use bsk_protocol::{Frame, RequestFrame, ResponseBody, ResponseFrame, RpcError};
 use futures_util::{SinkExt, StreamExt};
 use semver::Version;
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::Notify;
 use tokio::sync::mpsc;
+use tokio::sync::{Notify, Semaphore};
 use tokio::task::JoinHandle;
 use tokio_tungstenite::WebSocketStream;
 use tokio_tungstenite::tungstenite::handshake::server::{ErrorResponse, Request, Response};
@@ -91,8 +91,14 @@ pub struct WsHandle {
     pub task: JoinHandle<()>,
 }
 
+/// Bound all accepted local connections, including clients that have not
+/// supplied HTTP headers yet. Keep the permit until the socket task exits.
+const LOCAL_CONNECTION_LIMIT: usize = 64;
+const HTTP_UPGRADE_TIMEOUT: Duration = Duration::from_secs(5);
+
 async fn run_accept_loop(state: Arc<DaemonState>, listener: TcpListener, shutdown: Arc<Notify>) {
     info!(addr = %listener.local_addr().unwrap(), "ws server listening");
+    let connections = Arc::new(Semaphore::new(LOCAL_CONNECTION_LIMIT));
     loop {
         tokio::select! {
             _ = shutdown.notified() => {
@@ -102,8 +108,13 @@ async fn run_accept_loop(state: Arc<DaemonState>, listener: TcpListener, shutdow
             accept = listener.accept() => {
                 match accept {
                     Ok((stream, peer)) => {
+                        let Ok(permit) = Arc::clone(&connections).try_acquire_owned() else {
+                            debug!(?peer, "local WS connection capacity reached; dropping connection");
+                            continue;
+                        };
                         let state = Arc::clone(&state);
                         tokio::spawn(async move {
+                            let _permit = permit;
                             if let Err(err) = handle_connection(state, stream, peer).await {
                                 warn!(error = %err, "ws connection error");
                             }
@@ -152,10 +163,19 @@ async fn handle_connection(
         Ok(resp)
     };
 
-    let ws = match tokio_tungstenite::accept_hdr_async(stream, callback).await {
-        Ok(ws) => ws,
-        Err(err) => {
+    let ws = match tokio::time::timeout(
+        HTTP_UPGRADE_TIMEOUT,
+        tokio_tungstenite::accept_hdr_async(stream, callback),
+    )
+    .await
+    {
+        Ok(Ok(ws)) => ws,
+        Ok(Err(err)) => {
             debug!(?peer, %err, "ws handshake rejected");
+            return Ok(());
+        }
+        Err(_) => {
+            debug!(?peer, "HTTP Upgrade timed out; dropping connection");
             return Ok(());
         }
     };
