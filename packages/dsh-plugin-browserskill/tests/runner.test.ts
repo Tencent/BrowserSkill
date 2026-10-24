@@ -15,6 +15,12 @@ import {
   runWithSessionBusyRetry,
 } from "../src/runner";
 
+// Mirrors KILL_GRACE_MS / WINDOWS_KILL_GRACE_MS in src/runner.ts: the forced
+// kill lands after a platform-specific grace, and the caller is released one
+// second after that. Fake timers have to advance past both.
+const KILL_GRACE_MS = process.platform === "win32" ? 15_000 : 3_000;
+const SETTLE_AFTER_KILL_MS = KILL_GRACE_MS + 1_000;
+
 /** Minimal fake stdio pipe recording whether the runner closed its end. */
 class FakeStream extends EventEmitter {
   destroyed = false;
@@ -189,7 +195,7 @@ describe("createBskRunner", () => {
     });
     await vi.advanceTimersByTimeAsync(100); // timeout fires -> SIGINT
     expect(result).toBeUndefined();
-    await vi.advanceTimersByTimeAsync(4_000); // SIGKILL at +3s, settle at +4s
+    await vi.advanceTimersByTimeAsync(SETTLE_AFTER_KILL_MS); // SIGKILL at +grace, settle after
     expect(result).toMatchObject({ code: null, timedOut: true });
     expect(child.killedWith).toEqual(["SIGINT", "SIGKILL"]);
     // Settling is not enough: our ends of the pipes have to go too, or a process
@@ -340,7 +346,7 @@ describe("createBskRunner", () => {
     });
     expect(runner.killFor("s1")).toBe(1);
     runner.killAll();
-    await vi.advanceTimersByTimeAsync(4_000); // SIGKILL at +3s, settle at +4s
+    await vi.advanceTimersByTimeAsync(SETTLE_AFTER_KILL_MS); // SIGKILL at +grace, settle after
     expect(results[0]).toMatchObject({ code: null });
     expect(results[1]).toMatchObject({ code: null });
     expect(children.map((c) => c.stdout.destroyed)).toEqual([true, true]);
