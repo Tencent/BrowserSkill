@@ -9,6 +9,7 @@ pub mod business_rpc;
 pub mod console;
 pub mod cooperate;
 pub mod daemon;
+mod daemon_autostart;
 pub mod debug;
 pub mod dialogs;
 pub mod doctor;
