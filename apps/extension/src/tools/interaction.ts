@@ -1278,12 +1278,12 @@ export async function handleFill(
       // end command can escape a nested editing host. Place its range below.
       // Neither event carries an End key that could invoke a page shortcut.
       try {
-        await deps.cdp.send(target.tabId, "Input.dispatchKeyEvent", {
+        await nodeCdp.send(target.tabId, "Input.dispatchKeyEvent", {
           type: "rawKeyDown",
           commands: native ? ["moveToEndOfDocument"] : [],
         });
       } finally {
-        await deps.cdp.send(target.tabId, "Input.dispatchKeyEvent", { type: "keyUp" });
+        await nodeCdp.send(target.tabId, "Input.dispatchKeyEvent", { type: "keyUp" });
       }
       if (throwIfAborted(deps.signal)) {
         return { code: "cancelled", message: "fill aborted" };
@@ -1309,7 +1309,7 @@ export async function handleFill(
     if (params.value !== "") {
       // Normalize the actual input as well as the expected value: older Chrome
       // versions retain CR in editors or turn CRLF into two textarea breaks.
-      await deps.cdp.send(target.tabId, "Input.insertText", {
+      await nodeCdp.send(target.tabId, "Input.insertText", {
         text: params.value.replace(/\r\n?/g, "\n"),
       });
     }
@@ -1568,6 +1568,12 @@ export async function handlePress(
       ? await resolveBackendNode(deps.cdp, ctx, target, params, "press")
       : undefined;
   if (node && isRpcError(node)) return node;
+  // Key events must reach the focused element's session: for a ref inside
+  // an OOPIF that is the child session, not the root one the tab-level
+  // send would hit (issue #438). Without a ref the root session is correct.
+  const keyCdp = node
+    ? cdpRunnerForTarget(deps.cdp, node.cdpTarget)
+    : deps.cdp;
   return withInputReady(ctx, target.tabId, { ...deps, deadline }, async (input) => {
     // Optional focus before key dispatch.
     if (node) {
@@ -1607,7 +1613,7 @@ export async function handlePress(
       deps.cdp.trackSessionTab?.(ctx.sessionId, target.tabId);
       deps.onInputSent?.(target.tabId);
       input.markSent();
-      await deps.cdp.send(target.tabId, "Input.dispatchKeyEvent", {
+      await keyCdp.send(target.tabId, "Input.dispatchKeyEvent", {
         type: "rawKeyDown",
         key: descriptor.key,
         code: descriptor.code,
@@ -1621,7 +1627,7 @@ export async function handlePress(
         typeof descriptor.text === "string" &&
         descriptor.text.length > 0
       ) {
-        await deps.cdp.send(target.tabId, "Input.dispatchKeyEvent", {
+        await keyCdp.send(target.tabId, "Input.dispatchKeyEvent", {
           type: "char",
           key: descriptor.key,
           code: descriptor.code,
@@ -1639,7 +1645,7 @@ export async function handlePress(
         }
       }
       deps.onInputSent?.(target.tabId);
-      await deps.cdp.send(target.tabId, "Input.dispatchKeyEvent", {
+      await keyCdp.send(target.tabId, "Input.dispatchKeyEvent", {
         type: "keyUp",
         key: descriptor.key,
         code: descriptor.code,
