@@ -69,7 +69,7 @@ describe("ToolDispatcher", () => {
       agentWindow: {
         create: vi.fn(async () => ({ windowId: 4242, initialTabIds: [] })),
         remove: vi.fn(),
-        ensureActiveTab: vi.fn(),
+        ensureActiveTab: vi.fn(async () => tab.id),
       },
     });
     await sessions.start("test");
@@ -102,7 +102,7 @@ describe("ToolDispatcher", () => {
       agentWindow: {
         create: vi.fn(async () => ({ windowId: 4242, initialTabIds: [] })),
         remove: vi.fn(),
-        ensureActiveTab: vi.fn(async () => 1),
+        ensureActiveTab: vi.fn(async () => 7),
       },
     });
     await sessions.start("remote");
@@ -122,7 +122,7 @@ describe("ToolDispatcher", () => {
       agentWindow: {
         create: vi.fn(async () => ({ windowId: 4242, initialTabIds: [] })),
         remove: vi.fn(),
-        ensureActiveTab: vi.fn(async () => 1),
+        ensureActiveTab: vi.fn(async () => 7),
       },
     });
     await sessions.start("aa11");
@@ -184,7 +184,7 @@ describe("ToolDispatcher", () => {
       agentWindow: {
         create: vi.fn(async () => ({ windowId: 4242, initialTabIds: [] })),
         remove: vi.fn(),
-        ensureActiveTab: vi.fn(async () => 1),
+        ensureActiveTab: vi.fn(async () => 7),
       },
     });
     const dispatcher = new ToolDispatcher({ transport, sessions });
@@ -210,7 +210,7 @@ describe("ToolDispatcher", () => {
       agentWindow: {
         create,
         remove: vi.fn(),
-        ensureActiveTab: vi.fn(async () => 1),
+        ensureActiveTab: vi.fn(async () => 7),
       },
     });
     const dispatcher = new ToolDispatcher({ transport, sessions });
@@ -576,7 +576,7 @@ describe("ToolDispatcher", () => {
       agentWindow: {
         create: vi.fn(async () => ({ windowId: 4242, initialTabIds: [] })),
         remove: closeWindow,
-        ensureActiveTab: vi.fn(async () => 1),
+        ensureActiveTab: vi.fn(async () => 7),
       },
     });
     await sessions.start("aa11");
@@ -608,7 +608,7 @@ describe("ToolDispatcher", () => {
       agentWindow: {
         create: vi.fn(async () => ({ windowId: 4242, initialTabIds: [] })),
         remove: vi.fn(async () => {}),
-        ensureActiveTab: vi.fn(async () => 1),
+        ensureActiveTab: vi.fn(async () => 7),
       },
     });
     await sessions.start("aa11");
@@ -671,7 +671,7 @@ describe("ToolDispatcher", () => {
       agentWindow: {
         create: vi.fn(async () => ({ windowId: 4242, initialTabIds: [] })),
         remove: vi.fn(async () => {}),
-        ensureActiveTab: vi.fn(async () => 1),
+        ensureActiveTab: vi.fn(async () => 7),
       },
     });
     const ctx = await sessions.start("aa11");
@@ -751,7 +751,7 @@ describe("ToolDispatcher", () => {
       agentWindow: {
         create: vi.fn(async () => ({ windowId: 4242, initialTabIds: [] })),
         remove: vi.fn(async () => {}),
-        ensureActiveTab: vi.fn(async () => 1),
+        ensureActiveTab: vi.fn(async () => 7),
       },
     });
     await sessions.start("aa11");
@@ -787,7 +787,7 @@ describe("ToolDispatcher", () => {
       agentWindow: {
         create: vi.fn(async () => ({ windowId: 4242, initialTabIds: [7] })),
         remove,
-        ensureActiveTab: vi.fn(async () => 1),
+        ensureActiveTab: vi.fn(async () => 7),
       },
     });
     await sessions.start("aa11");
@@ -851,7 +851,7 @@ describe("ToolDispatcher", () => {
       agentWindow: {
         create: vi.fn(async () => ({ windowId: 1, initialTabIds: [] })),
         remove: vi.fn(),
-        ensureActiveTab: vi.fn(async () => 1),
+        ensureActiveTab: vi.fn(async () => 7),
       },
     });
     const dispatcher = new ToolDispatcher({ transport, sessions });
@@ -871,7 +871,7 @@ describe("ToolDispatcher", () => {
       agentWindow: {
         create: vi.fn(async () => ({ windowId: 1, initialTabIds: [] })),
         remove: vi.fn(),
-        ensureActiveTab: vi.fn(async () => 1),
+        ensureActiveTab: vi.fn(async () => 7),
       },
     });
     const dispatcher = new ToolDispatcher({ transport, sessions });
@@ -895,7 +895,7 @@ describe("ToolDispatcher", () => {
       agentWindow: {
         create: vi.fn(async () => ({ windowId: 1, initialTabIds: [] })),
         remove: vi.fn(),
-        ensureActiveTab: vi.fn(async () => 1),
+        ensureActiveTab: vi.fn(async () => 7),
       },
     });
     const dispatcher = new ToolDispatcher({ transport, sessions });
@@ -912,7 +912,7 @@ describe("ToolDispatcher", () => {
       agentWindow: {
         create: vi.fn(async () => ({ windowId: 1, initialTabIds: [] })),
         remove: vi.fn(),
-        ensureActiveTab: vi.fn(async () => 1),
+        ensureActiveTab: vi.fn(async () => 7),
       },
     });
     const dispatcher = new ToolDispatcher({ transport, sessions });
@@ -929,7 +929,7 @@ describe("ToolDispatcher", () => {
       agentWindow: {
         create: vi.fn(async () => ({ windowId: 1, initialTabIds: [] })),
         remove: vi.fn(async () => {}),
-        ensureActiveTab: vi.fn(async () => 1),
+        ensureActiveTab: vi.fn(async () => 7),
       },
     });
     const onSessionsChanged = vi.fn();
@@ -1057,7 +1057,7 @@ describe("ToolDispatcher", () => {
       agentWindow: {
         create: vi.fn(async () => ({ windowId: 1, initialTabIds: [] })),
         remove: vi.fn(async () => {}),
-        ensureActiveTab: vi.fn(async () => 1),
+        ensureActiveTab: vi.fn(async () => 7),
       },
     });
     const onBrowserControlResumed = vi.fn();
@@ -1098,7 +1098,7 @@ describe("ToolDispatcher", () => {
       agentWindow: {
         create: vi.fn(async () => ({ windowId: 1, initialTabIds: [] })),
         remove: vi.fn(async () => {}),
-        ensureActiveTab: vi.fn(async () => 1),
+        ensureActiveTab: vi.fn(async () => 7),
       },
     });
     const order: string[] = [];
@@ -1180,7 +1180,7 @@ describe("ToolDispatcher", () => {
       agentWindow: {
         create: vi.fn(async () => ({ windowId: 1, initialTabIds: [] })),
         remove: vi.fn(async () => {}),
-        ensureActiveTab: vi.fn(async () => 1),
+        ensureActiveTab: vi.fn(async () => 7),
       },
     });
     const cdp = {
@@ -1247,7 +1247,7 @@ describe("ToolDispatcher", () => {
       agentWindow: {
         create: vi.fn(async () => ({ windowId: 100, initialTabIds: [] })),
         remove: vi.fn(async () => {}),
-        ensureActiveTab: vi.fn(async () => 1),
+        ensureActiveTab: vi.fn(async () => 7),
       },
     });
     await sessions.start("aa11");
@@ -1302,7 +1302,7 @@ describe("ToolDispatcher", () => {
       agentWindow: {
         create: vi.fn(async () => ({ windowId: 100, initialTabIds: [] })),
         remove: vi.fn(async () => {}),
-        ensureActiveTab: vi.fn(async () => 1),
+        ensureActiveTab: vi.fn(async () => 7),
       },
     });
     const ctx = await sessions.start("aa11");
@@ -1370,7 +1370,7 @@ describe("ToolDispatcher", () => {
       agentWindow: {
         create: vi.fn(async () => ({ windowId: 1, initialTabIds: [] })),
         remove: vi.fn(async () => {}),
-        ensureActiveTab: vi.fn(async () => 1),
+        ensureActiveTab: vi.fn(async () => 7),
       },
     });
     const dispatcher = new ToolDispatcher({ transport, sessions });
@@ -1407,10 +1407,13 @@ describe("ToolDispatcher", () => {
       agentWindow: {
         create: vi.fn(async () => ({ windowId: 4242, initialTabIds: [] })),
         remove: vi.fn(async () => {}),
-        ensureActiveTab: vi.fn(async () => 1),
+        ensureActiveTab: vi.fn(async () => 7),
       },
     });
     await sessions.start("aa11");
+    // The agent opened 9 and left it active; the default target is that tab,
+    // not the home tab it was opened from.
+    sessions.get("aa11")!.agentCreatedTabs.add(9);
     const cdp = {
       send: vi.fn(async <T>() => ({}) as T),
       detachSession: vi.fn(async () => {}),
@@ -1459,7 +1462,7 @@ describe("ToolDispatcher", () => {
       agentWindow: {
         create: vi.fn(async () => ({ windowId: 1, initialTabIds: [] })),
         remove: vi.fn(async () => {}),
-        ensureActiveTab: vi.fn(async () => 1),
+        ensureActiveTab: vi.fn(async () => 7),
       },
     });
     const dispatcher = new ToolDispatcher({ transport, sessions });
@@ -1493,7 +1496,7 @@ describe("ToolDispatcher", () => {
       agentWindow: {
         create: vi.fn(async () => ({ windowId: 4242, initialTabIds: [] })),
         remove: vi.fn(),
-        ensureActiveTab: vi.fn(async () => 1),
+        ensureActiveTab: vi.fn(async () => 7),
       },
     });
     transport.send = () => {
@@ -1515,7 +1518,7 @@ describe("ToolDispatcher", () => {
       agentWindow: {
         create: vi.fn(async () => ({ windowId: 5555, initialTabIds: [] })),
         remove,
-        ensureActiveTab: vi.fn(async () => 1),
+        ensureActiveTab: vi.fn(async () => 7),
       },
     });
     transport.send = () => {
@@ -1543,7 +1546,7 @@ describe("ToolDispatcher", () => {
       agentWindow: {
         create: vi.fn(async () => ({ windowId: await createPromise, initialTabIds: [] })),
         remove: vi.fn(async () => {}),
-        ensureActiveTab: vi.fn(async () => 1),
+        ensureActiveTab: vi.fn(async () => 7),
       },
     });
     const dispatcher = new ToolDispatcher({ transport, sessions });
@@ -1594,7 +1597,7 @@ describe("ToolDispatcher", () => {
       agentWindow: {
         create: vi.fn(async () => ({ windowId: 1, initialTabIds: [] })),
         remove: vi.fn(),
-        ensureActiveTab: vi.fn(async () => 1),
+        ensureActiveTab: vi.fn(async () => 7),
       },
     });
     const dispatcher = new ToolDispatcher({ transport, sessions });
@@ -1615,7 +1618,7 @@ describe("ToolDispatcher", () => {
       agentWindow: {
         create: vi.fn(async () => ({ windowId: await createPromise, initialTabIds: [] })),
         remove: vi.fn(),
-        ensureActiveTab: vi.fn(async () => 1),
+        ensureActiveTab: vi.fn(async () => 7),
       },
     });
     const dispatcher = new ToolDispatcher({ transport, sessions });

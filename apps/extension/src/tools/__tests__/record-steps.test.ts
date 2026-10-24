@@ -84,6 +84,9 @@ function fakeManager() {
             agentWindowId: AGENT_WINDOW_ID,
             refStore: { resolve: () => null, replace: () => {} },
             borrowedTabs: new Map(),
+            // Every real session registers the tab it opened; without it the
+            // recorder drives a tab the session does not control.
+            agentCreatedTabs: new Set([TAB_ID]),
           }
         : null,
     findByWindowId: (windowId: number) =>
