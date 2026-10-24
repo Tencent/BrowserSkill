@@ -145,7 +145,11 @@ fn resolve_daemon_state(output: Output) -> DaemonState {
     };
 
     if wait > Duration::ZERO && output == Output::Human {
-        eprintln!("waiting for browser extension to connect…");
+        // Issue #465 §5: name the two possible causes up front so an
+        // installed-but-disconnected extension is not read as "missing".
+        eprintln!(
+            "waiting for browser extension to connect… (if it is installed: check that a window with the extension enabled is open in the expected profile and that it targets this daemon; reinstall from the store if missing)"
+        );
     }
 
     if wait.is_zero() {
@@ -671,12 +675,21 @@ fn check_extension_connected(status: Option<&StatusResult>) -> CheckResult {
     if browsers > 0 {
         CheckResult::ok(name, format!("{} browser(s) connected", browsers))
     } else {
+        // Issue #465 §5: "0 browsers connected" is true for both "not
+        // installed" and "installed but not connected" (another or no
+        // browser window, wrong profile, a different daemon or port, a
+        // stale extension service worker). Spell both out so the fix
+        // does not require guessing which one applies.
         CheckResult::fail(
             name,
             "0 browsers connected",
             format!(
-                "install the extension from {EXTENSION_STORE_URL} (Chrome) \
-                 or {EXTENSION_STORE_URL_EDGE} (Edge) and load it in the browser"
+                "if the extension is not installed, install it from {EXTENSION_STORE_URL} (Chrome) \
+                 or {EXTENSION_STORE_URL_EDGE} (Edge); \
+                 if it is already installed, it is not connected to this daemon — keep a window \
+                 of that browser open with the extension enabled in the profile you are using \
+                 (the extension is per-profile), point the extension at this daemon's \
+                 address/port, and reload the extension if it was just updated"
             ),
         )
     }
@@ -1143,6 +1156,13 @@ mod m2_tests {
         assert!(
             hint.contains(EXTENSION_STORE_URL_EDGE),
             "hint should include Edge Add-ons URL: {hint}"
+        );
+        // Issue #465 §5: the hint must not imply "not installed" is the
+        // only possibility — an installed-but-disconnected extension is
+        // the harder case to diagnose.
+        assert!(
+            hint.contains("already installed"),
+            "hint should name the installed-but-disconnected case: {hint}"
         );
     }
 

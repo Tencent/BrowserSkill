@@ -836,6 +836,9 @@ pub(crate) fn spawn_browser_liveness_reaper(
                         state.tool_queues.remove(&s.id);
                         state.session_interrupts.drop_session(&s.id);
                         state.transfers.release_session(&s.id.0);
+                        state
+                            .sessions
+                            .remember_end(&s.id, crate::rpc_reason::BROWSER_DISCONNECTED);
                         debug!(session = %s.id, "purged session on browser liveness timeout");
                     }
                 }
@@ -883,6 +886,9 @@ pub(crate) fn spawn_session_idle_reaper(state: Arc<DaemonState>) -> tokio::task:
                 {
                     Ok(_) => {
                         state.transfers.release_session(&session_id.0);
+                        state
+                            .sessions
+                            .remember_end(&session_id, crate::rpc_reason::SESSION_IDLE_TIMEOUT);
                         info!(session = %session_id, "idle session stopped");
                     }
                     Err(StopSessionError::SessionBusy | StopSessionError::Stopping) => {
@@ -894,6 +900,7 @@ pub(crate) fn spawn_session_idle_reaper(state: Arc<DaemonState>) -> tokio::task:
                             &state.tool_queues,
                             &state.session_interrupts,
                             &session_id,
+                            None,
                         );
                         state.transfers.release_session(&session_id.0);
                     }

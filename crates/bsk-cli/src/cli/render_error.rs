@@ -76,6 +76,11 @@ pub mod reason {
     pub const TRANSFER_OUTCOME_UNKNOWN: &str = "transfer_outcome_unknown";
     pub const TRANSFER_TIMEOUT: &str = "transfer_timeout";
     pub const SESSION_BUSY: &str = crate::rpc_reason::SESSION_BUSY;
+    pub const SESSION_IDLE_TIMEOUT: &str = crate::rpc_reason::SESSION_IDLE_TIMEOUT;
+    pub const SESSION_WINDOW_CLOSED: &str = crate::rpc_reason::SESSION_WINDOW_CLOSED;
+    pub const BROWSER_DISCONNECTED: &str = crate::rpc_reason::BROWSER_DISCONNECTED;
+    pub const OBSERVE_IDENTITY_RELOAD_LOOP: &str = crate::rpc_reason::OBSERVE_IDENTITY_RELOAD_LOOP;
+    pub const BORROW_AGENT_WINDOW_TAB: &str = crate::rpc_reason::BORROW_AGENT_WINDOW_TAB;
     pub const RECORD_START_PAGE_UNREACHABLE: &str = "record_start_page_unreachable";
 }
 
@@ -267,6 +272,41 @@ pub fn info_for_error(code: ErrorCode, data: Option<&serde_json::Value>) -> Rend
                 "no click, key press or wheel input was sent; observe the page again before retrying",
             ),
             ..base
+        },
+        (ErrorCode::CdpFailed, reason::OBSERVE_IDENTITY_RELOAD_LOOP) => RenderInfo {
+            summary: "the page kept losing observation identity — the site is likely reloading itself while the debugger is attached (anti-debugging)",
+            hint: Some(
+                "do not observe again and do not reload this tab; the site rejects the debugger attach itself (see GitHub issues #454 and #465); continue on another page or hand the task back to the user",
+            ),
+            exit_code: base.exit_code,
+        },
+        (ErrorCode::InvalidParams, reason::BORROW_AGENT_WINDOW_TAB) => RenderInfo {
+            summary: "the borrow target already lives inside an Agent Window",
+            hint: Some(
+                "a tab the session did not open needs a user move to a user window first; a tab this session opened is already controlled and needs no borrow",
+            ),
+            exit_code: base.exit_code,
+        },
+        (ErrorCode::NotFound, reason::SESSION_IDLE_TIMEOUT) => RenderInfo {
+            summary: "the session stopped after its idle timeout",
+            hint: Some(
+                "start a new session with `bsk session start`; run the daemon with a larger `--session-idle` (default 5m) for longer tasks; the Agent Window and any tab it opened were closed with the session",
+            ),
+            exit_code: base.exit_code,
+        },
+        (ErrorCode::NotFound, reason::SESSION_WINDOW_CLOSED) => RenderInfo {
+            summary: "the session ended because the user closed the Agent Window",
+            hint: Some(
+                "start a new session; closing the Agent Window ends the session, while the window's stop button only cancels the running action",
+            ),
+            exit_code: base.exit_code,
+        },
+        (ErrorCode::NotFound, reason::BROWSER_DISCONNECTED) => RenderInfo {
+            summary: "the browser was disconnected from the daemon",
+            hint: Some(
+                "wait for the extension to reconnect, then start a new session; the session and its Agent Window are gone",
+            ),
+            exit_code: base.exit_code,
         },
         (_, "cooperation_sync_required") => RenderInfo {
             summary: "shared page control or observation changed",
@@ -1021,5 +1061,60 @@ mod tests {
         assert_eq!(disconnected.summary, "extension disconnected");
         assert_eq!(disconnected.exit_code, 2);
         assert!(!disconnected.hint.unwrap().contains("protocol version"));
+    }
+
+    /// Issue #465: a dead session surfaces *why* it stopped instead of
+    /// a generic not-found, and the anti-debugging / borrow-target
+    /// reasons get non-retry copy instead of the `cdp_failed` /
+    /// `invalid_params` defaults.
+    #[test]
+    fn ended_sessions_and_recurring_failures_get_reasoned_copy() {
+        let idle = info_for_error(
+            ErrorCode::NotFound,
+            Some(&serde_json::json!({"reason": crate::rpc_reason::SESSION_IDLE_TIMEOUT})),
+        );
+        assert_eq!(idle.summary, "the session stopped after its idle timeout");
+        assert!(idle.hint.unwrap().contains("--session-idle"));
+        assert_eq!(idle.exit_code, info_for(ErrorCode::NotFound).exit_code);
+
+        let closed = info_for_error(
+            ErrorCode::NotFound,
+            Some(&serde_json::json!({"reason": crate::rpc_reason::SESSION_WINDOW_CLOSED})),
+        );
+        assert_eq!(
+            closed.summary,
+            "the session ended because the user closed the Agent Window"
+        );
+
+        let browser_gone = info_for_error(
+            ErrorCode::NotFound,
+            Some(&serde_json::json!({"reason": crate::rpc_reason::BROWSER_DISCONNECTED})),
+        );
+        assert_eq!(
+            browser_gone.summary,
+            "the browser was disconnected from the daemon"
+        );
+
+        let anti_debug = info_for_error(
+            ErrorCode::CdpFailed,
+            Some(&serde_json::json!({"reason": crate::rpc_reason::OBSERVE_IDENTITY_RELOAD_LOOP})),
+        );
+        assert!(anti_debug.summary.contains("anti-debugging"));
+        // The reporter explicitly asked that this failure must not
+        // propose reloading the tab; the hint forbids it instead.
+        let anti_debug_hint = anti_debug.hint.unwrap();
+        assert!(anti_debug_hint.contains("do not reload"));
+        assert!(anti_debug_hint.contains("hand the task back"));
+        assert_eq!(
+            anti_debug.exit_code,
+            info_for(ErrorCode::CdpFailed).exit_code
+        );
+
+        let borrow = info_for_error(
+            ErrorCode::InvalidParams,
+            Some(&serde_json::json!({"reason": crate::rpc_reason::BORROW_AGENT_WINDOW_TAB})),
+        );
+        assert!(borrow.summary.contains("Agent Window"));
+        assert!(borrow.hint.unwrap().contains("needs a user move"));
     }
 }

@@ -756,13 +756,20 @@ async function validateBorrowTarget(
       `tab_borrow: tab ${tabId} is already controlled by session ${owner}`,
     );
   if (tab.windowId === ctx.agentWindowId) {
-    return {
-      code: "invalid_params",
-      message:
-        ctx.remote && !isAgentControlledTab(ctx, tabId)
-          ? `tab_borrow: tab ${tabId} is not authorized and already lives in the Agent Window; move it to a regular browser window, then borrow it`
-          : `tab_borrow: tab ${tabId} already lives in the Agent Window`,
-    };
+    // Issue #465 §6: both branches mean "already inside an Agent Window",
+    // which the reference docs describe as needing a user move to a user
+    // window before borrowing; a tab the session itself opened is already
+    // controlled, so no borrow is needed at all. The stable reason lets
+    // the CLI render this instead of the generic invalid-parameters copy.
+    const lives =
+      ctx.remote && !isAgentControlledTab(ctx, tabId)
+        ? "not authorized and already lives in the Agent Window; a user must move it to a regular browser window, then borrow it"
+        : "already lives in the Agent Window — an unowned tab needs a user move to a user window before borrowing; a tab this session opened is already controlled and needs no borrow";
+    return rpcError(
+      "invalid_params",
+      "borrow_agent_window_tab",
+      `tab_borrow: tab ${tabId} ${lives}`,
+    );
   }
   for (const s of manager.list()) {
     if (s.sessionId !== ctx.sessionId && s.agentWindowId === tab.windowId) {

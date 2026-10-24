@@ -829,7 +829,14 @@ describe("handleTabBorrow", () => {
       { session_id: "aa11", tab_id: 7 },
       { tabs: api, approveBorrow: async () => true },
     );
-    expect(res).toMatchObject({ code: "invalid_params" });
+    // Issue #465 §6: the borrow rejection carries a stable reason so the
+    // CLI explains that a user must move the tab out of the Agent Window
+    // first, instead of falling back to generic invalid-parameters copy.
+    expect(res).toMatchObject({
+      code: "invalid_params",
+      data: { reason: "borrow_agent_window_tab" },
+    });
+    expect((res as { message?: unknown }).message).toContain("already lives in the Agent Window");
   });
 
   it("refuses to borrow a tab already held by another session", async () => {

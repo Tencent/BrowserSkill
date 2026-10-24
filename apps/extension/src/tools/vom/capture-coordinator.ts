@@ -42,6 +42,15 @@ interface TargetBatch<T extends FrameOwnedAxNode> {
   rootFrameId?: string;
 }
 
+/**
+ * Stable message for an observation whose root document identity could
+ * not be (re)verified. `observation.ts` matches on this marker to detect
+ * the anti-debugging reload loop, where a site reloads itself as soon
+ * as the debugger attaches (GitHub issues #454 and #465).
+ */
+export const OBSERVE_IDENTITY_CHANGED =
+  "observation document identity changed or could not be verified; observe again";
+
 /** A fixed worker pool scoped to one capture; each worker issues at most one
  * collection request at a time. Geometry has its own measurement-phase bound. */
 async function collectTasks<T>(
@@ -533,7 +542,7 @@ async function collectObservationFacts<T extends FrameOwnedAxNode>(
     throw new Error(
       ownershipInvalid.has(rootFrameId)
         ? "observation root document ownership is ambiguous"
-        : "observation document identity changed or could not be verified; observe again",
+        : OBSERVE_IDENTITY_CHANGED,
     );
   const frames = currentFrames.filter((frame) => !invalid.has(frame.frameId));
   const frameById = new Map(frames.map((frame) => [frame.frameId, frame]));
