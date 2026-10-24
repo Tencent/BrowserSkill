@@ -64,6 +64,8 @@ export type RpcErrorReason =
   | "tab_not_active"
   | "restricted_tab_url"
   | "cdp_extension_access_denied"
+  | "observe_identity_reload_loop"
+  | "borrow_agent_window_tab"
   | "borrow_conflict"
   | "incognito_borrow_disabled"
   | "borrow_in_progress"

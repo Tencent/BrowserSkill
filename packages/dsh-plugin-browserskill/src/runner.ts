@@ -378,7 +378,9 @@ export function bskInstallMessage(bskPath: string): string {
   return (
     `the bsk CLI ("${bskPath}") was not found. BrowserSkill must be installed and on PATH ` +
     "for browser tools to work — install it from https://github.com/Tencent/BrowserSkill " +
-    "(see the README install script or `cargo install`), then retry."
+    "(see the README install script or `cargo install`), then retry. " +
+    `If bsk is installed at a custom location, set the plugin's \`bskPath\` option ` +
+    `(currently "${bskPath}") instead of relying on PATH.`
   );
 }
 

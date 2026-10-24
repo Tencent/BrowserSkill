@@ -683,11 +683,11 @@ async fn dispatch_returns_session_not_found_for_unknown_session() {
         )
         .await;
     match result {
-        Err(DispatchError::SessionNotFound) => {}
+        Err(DispatchError::SessionNotFound { .. }) => {}
         other => panic!("expected SessionNotFound, got {other:?}"),
     }
     // And the surfaced RpcError carries `not_found`.
-    let rpc = DispatchError::SessionNotFound.into_rpc();
+    let rpc = DispatchError::SessionNotFound { ended: None }.into_rpc();
     assert_eq!(rpc.code, ErrorCode::NotFound);
     handle.shutdown().await;
 }

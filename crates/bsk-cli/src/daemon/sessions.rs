@@ -75,6 +75,25 @@ pub struct SessionRegistry {
     last_activity: Mutex<HashMap<SessionId, SessionActivity>>,
     /// Managed creates whose original extension operation has not settled.
     starting: Mutex<HashSet<SessionId>>,
+    /// Tombstones for recently ended session ids: why they stopped.
+    /// Read by [`super::queue::ToolQueueRegistry`] when a dispatch hits a
+    /// dead id, so the CLI can say "idle timeout" / "Agent Window closed"
+    /// instead of a bare not-found (issue #465 §7).
+    ended: Mutex<HashMap<SessionId, SessionEnd>>,
+}
+
+/// Upper bound for the [`SessionRegistry::ended`] tombstone map. Session
+/// ids are drawn from the small `26^4` space; the cap plus expiry-on-reuse
+/// keeps a long-lived daemon from growing it without limit.
+const SESSION_END_TOMBSTONE_CAP: usize = 256;
+
+/// Why a session id was removed. `reason` is a stable wire string
+/// (`RpcError.data.reason`); unknown values fall back to code-based
+/// copy on older peers.
+#[derive(Debug, Clone)]
+pub struct SessionEnd {
+    pub reason: &'static str,
+    pub ended_unix_ms: i64,
 }
 
 #[derive(Debug)]
@@ -132,6 +151,12 @@ impl SessionRegistry {
         let session_id = session.id.clone();
         let mut sessions = self.inner.lock().expect("session registry poisoned");
         sessions.insert(session_id.clone(), session);
+        // The id is alive again: any tombstone from an earlier same-id
+        // session must stop influencing later dispatch errors.
+        self.ended
+            .lock()
+            .expect("session end registry poisoned")
+            .remove(&session_id);
         self.last_activity
             .lock()
             .expect("session activity registry poisoned")
@@ -161,7 +186,16 @@ impl SessionRegistry {
         let mut guard = self.inner.lock().expect("session registry poisoned");
         for _ in 0..max_attempts {
             let candidate = SessionId::random();
-            if guard.contains_key(&candidate) {
+            // A tombstoned id still means "recently ended": reusing it
+            // would immediately look like a crash/stop to clients that
+            // dispatch against the old id (see `SessionEnd`).
+            if guard.contains_key(&candidate)
+                || self
+                    .ended
+                    .lock()
+                    .expect("session end registry poisoned")
+                    .contains_key(&candidate)
+            {
                 continue;
             }
             guard.insert(
@@ -235,6 +269,49 @@ impl SessionRegistry {
             audit.session_ended(&id.0, "ended");
         }
         removed
+    }
+
+    /// Record why `id` is no longer registered. Read by the dispatch
+    /// queue when a later tool call hits the dead id (see
+    /// [`super::queue::ToolQueueRegistry`]) and rendered by the CLI as
+    /// a distinct "session ended (why)" error instead of a generic
+    /// not-found. Also removed automatically when the id is reused via
+    /// [`Self::insert`] or [`Self::reserve_id`].
+    pub fn remember_end(&self, id: &SessionId, reason: &'static str) {
+        let mut guard = self.ended.lock().expect("session end registry poisoned");
+        if guard.len() >= SESSION_END_TOMBSTONE_CAP && !guard.contains_key(id) {
+            // Evict the oldest tombstone so the map stays bounded;
+            // losing the oldest entry only weakens a very stale hint.
+            if let Some(oldest) = guard
+                .iter()
+                .min_by_key(|(_, end)| end.ended_unix_ms)
+                .map(|(id, _)| id.clone())
+            {
+                guard.remove(&oldest);
+            }
+        }
+        guard.insert(
+            id.clone(),
+            SessionEnd {
+                reason,
+                ended_unix_ms: now_ms(),
+            },
+        );
+    }
+
+    /// [`Self::remove`] plus [`Self::remember_end`].
+    pub fn remove_with_end_reason(&self, id: &SessionId, reason: &'static str) -> Option<Session> {
+        self.remember_end(id, reason);
+        self.remove(id)
+    }
+
+    /// The recorded end for `id`, when one still exists.
+    pub fn end_info(&self, id: &SessionId) -> Option<SessionEnd> {
+        self.ended
+            .lock()
+            .expect("session end registry poisoned")
+            .get(id)
+            .cloned()
     }
 
     /// Accept preference updates only from the browser owning the session.
@@ -1029,7 +1106,7 @@ pub async fn stop_session(
             queues.reopen(session_id);
             Err(StopSessionError::ExtensionError(err))
         }
-        Err(DispatchError::SessionNotFound) => Err(StopSessionError::NotFound),
+        Err(DispatchError::SessionNotFound { .. }) => Err(StopSessionError::NotFound),
         Err(DispatchError::SessionStopping) => Err(StopSessionError::Stopping),
         Err(DispatchError::SessionBusy) => Err(StopSessionError::SessionBusy),
         Err(DispatchError::Timeout) => {
@@ -1045,17 +1122,24 @@ pub async fn stop_session(
 
 /// Drop a session locally (no round-trip) — used when the extension has
 /// already torn down its side (e.g. window closed by user). Also drops
-/// the queue so the worker exits.
+/// the queue so the worker exits. `end_reason` tombstones why the id is
+/// gone so later dispatches say so (issue #465 §7).
 pub fn forget_session(
     sessions: &Arc<SessionRegistry>,
     queues: &Arc<ToolQueueRegistry>,
     interrupts: &Arc<SessionInterruptRegistry>,
     session_id: &SessionId,
+    end_reason: Option<&'static str>,
 ) -> bool {
     if let Some(audit) = &sessions.audit {
         audit.session_ended(&session_id.0, "interrupted");
     }
-    let removed = sessions.remove(session_id).is_some();
+    let removed = match end_reason {
+        Some(reason) => sessions
+            .remove_with_end_reason(session_id, reason)
+            .is_some(),
+        None => sessions.remove(session_id).is_some(),
+    };
     if removed {
         drop_session_local(queues, interrupts, session_id);
     }
@@ -1346,5 +1430,83 @@ mod link_tests {
             }
             other => panic!("the cleanup failure must not be restated, got {other:?}"),
         }
+    }
+}
+
+/// Issue #465 §7: when a session stops, dispatches against the dead id
+/// must say why it stopped — until the id is reused by a new session.
+#[cfg(test)]
+mod ended_tombstone_tests {
+    use super::{super::browsers::BrowserId, Session, SessionId, SessionRegistry};
+    use crate::rpc_reason;
+
+    fn live_session(id: &str) -> Session {
+        Session {
+            interaction: None,
+            id: SessionId(id.into()),
+            browser_id: BrowserId("browser".into()),
+            agent_window_id: Some(7),
+            created_at_ms: 1,
+        }
+    }
+
+    #[test]
+    fn tombstone_records_the_stop_reason_until_the_id_is_reused() {
+        let registry = SessionRegistry::new();
+        registry.insert(live_session("abcd"));
+
+        let removed = registry
+            .remove_with_end_reason(&SessionId("abcd".into()), rpc_reason::SESSION_IDLE_TIMEOUT);
+        assert!(removed.is_some());
+        let end = registry
+            .end_info(&SessionId("abcd".into()))
+            .expect("ended session must keep a tombstone");
+        assert_eq!(end.reason, rpc_reason::SESSION_IDLE_TIMEOUT);
+        assert!(end.ended_unix_ms > 0);
+
+        // A new session reusing the id clears the tombstone: later
+        // dispatch errors must describe the *current* session.
+        registry.insert(live_session("abcd"));
+        assert!(registry.end_info(&SessionId("abcd".into())).is_none());
+        registry
+            .remove(&SessionId("abcd".into()))
+            .expect("live session removed");
+        assert!(
+            registry.end_info(&SessionId("abcd".into())).is_none(),
+            "remove without a reason must not invent a tombstone"
+        );
+    }
+
+    #[test]
+    fn remember_end_only_tombstones_stop_paths_that_opt_in() {
+        let registry = SessionRegistry::new();
+        registry.insert(live_session("woff"));
+        registry.remember_end(&SessionId("woff".into()), rpc_reason::SESSION_WINDOW_CLOSED);
+        assert_eq!(
+            registry
+                .end_info(&SessionId("woff".into()))
+                .expect("tombstone recorded")
+                .reason,
+            rpc_reason::SESSION_WINDOW_CLOSED
+        );
+        registry.remove(&SessionId("woff".into()));
+    }
+
+    #[test]
+    fn tombstones_stay_bounded() {
+        let registry = SessionRegistry::new();
+        for i in 0..(256 + 32) {
+            let id = SessionId(format!("a{i:0>3}"));
+            registry.remember_end(&id, rpc_reason::BROWSER_DISCONNECTED);
+        }
+        let guarded = registry
+            .ended
+            .lock()
+            .expect("session end registry poisoned");
+        assert!(
+            guarded.len() <= 256,
+            "tombstone map must stay bounded, got {}",
+            guarded.len()
+        );
     }
 }
