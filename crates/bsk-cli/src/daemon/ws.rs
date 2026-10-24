@@ -20,6 +20,7 @@ use futures_util::{SinkExt, StreamExt};
 use semver::Version;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Notify;
+use tokio::sync::Semaphore;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio_tungstenite::WebSocketStream;
@@ -93,6 +94,7 @@ pub struct WsHandle {
 
 async fn run_accept_loop(state: Arc<DaemonState>, listener: TcpListener, shutdown: Arc<Notify>) {
     info!(addr = %listener.local_addr().unwrap(), "ws server listening");
+    let connections = Arc::new(Semaphore::new(MAX_LOCAL_WS_CONNECTIONS));
     loop {
         tokio::select! {
             _ = shutdown.notified() => {
@@ -102,8 +104,18 @@ async fn run_accept_loop(state: Arc<DaemonState>, listener: TcpListener, shutdow
             accept = listener.accept() => {
                 match accept {
                     Ok((stream, peer)) => {
+                        // Each spawned task pins a slot until the connection
+                        // closes — including a client that never completes
+                        // the HTTP Upgrade. At the cap, close the fresh TCP
+                        // stream right away instead of queueing another
+                        // task (#421).
+                        let Ok(permit) = Arc::clone(&connections).try_acquire_owned() else {
+                            warn!(%peer, "ws connection limit reached; rejecting connection");
+                            continue;
+                        };
                         let state = Arc::clone(&state);
                         tokio::spawn(async move {
+                            let _permit = permit;
                             if let Err(err) = handle_connection(state, stream, peer).await {
                                 warn!(error = %err, "ws connection error");
                             }
@@ -117,6 +129,18 @@ async fn run_accept_loop(state: Arc<DaemonState>, listener: TcpListener, shutdow
         }
     }
 }
+
+/// Cap on concurrently alive local WebSocket connections, TCP accept
+/// through full close. Each one holds a tokio task and a socket FD; a
+/// local client that keeps opening connections must not exhaust them
+/// (#421). The extension and concurrent CLI clients need only a handful.
+const MAX_LOCAL_WS_CONNECTIONS: usize = 64;
+
+/// Bound on the HTTP Upgrade phase: a client that opens a TCP connection
+/// but stalls before finishing the upgrade must release its task and FD
+/// like any other dead connection (#421). Aligned with the post-upgrade
+/// first-frame timeout below.
+const WS_UPGRADE_TIMEOUT: Duration = Duration::from_secs(5);
 
 async fn handle_connection(
     state: Arc<DaemonState>,
@@ -152,10 +176,23 @@ async fn handle_connection(
         Ok(resp)
     };
 
-    let ws = match tokio_tungstenite::accept_hdr_async(stream, callback).await {
-        Ok(ws) => ws,
-        Err(err) => {
+    let ws = match tokio::time::timeout(
+        WS_UPGRADE_TIMEOUT,
+        tokio_tungstenite::accept_hdr_async(stream, callback),
+    )
+    .await
+    {
+        Ok(Ok(ws)) => ws,
+        Ok(Err(err)) => {
             debug!(?peer, %err, "ws handshake rejected");
+            return Ok(());
+        }
+        Err(_) => {
+            debug!(
+                ?peer,
+                timeout_secs = WS_UPGRADE_TIMEOUT.as_secs(),
+                "ws upgrade timed out; dropping connection"
+            );
             return Ok(());
         }
     };
@@ -924,5 +961,124 @@ mod session_user_interrupt_tests {
     fn test_only_daemon_state() -> std::sync::Arc<DaemonState> {
         use crate::daemon::start::DaemonConfig;
         std::sync::Arc::new(DaemonState::new(DaemonConfig::new(0)))
+    }
+}
+
+#[cfg(test)]
+mod ws_connection_limit_tests {
+    use super::*;
+    use crate::daemon::start::DaemonConfig;
+    use futures_util::SinkExt as _;
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+    use tokio_tungstenite::tungstenite::http::header::{HeaderName, HeaderValue};
+
+    fn extension_origin_request(url: &str) -> impl IntoClientRequest {
+        let mut request = url
+            .into_client_request()
+            .expect("valid ws url");
+        request.headers_mut().insert(
+            HeaderName::from_static("origin"),
+            // MV3 extension ids are 32 a-p characters (see origin_allowed).
+            HeaderValue::from_static("chrome-extension://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaap"),
+        );
+        request
+    }
+
+    async fn bind_test_server() -> (WsHandle, std::sync::Arc<DaemonState>) {
+        let state = std::sync::Arc::new(DaemonState::new(DaemonConfig::new(0)));
+        let handle = WsServer::new(std::sync::Arc::clone(&state))
+            .bind("127.0.0.1:0".parse().expect("loopback addr"))
+            .await
+            .expect("bound test ws server");
+        (handle, state)
+    }
+
+    #[tokio::test]
+    async fn ws_upgrade_times_out_for_silent_clients() {
+        let (handle, _state) = bind_test_server().await;
+        let url = format!("ws://{}/", handle.local_addr);
+
+        // A client that connects but never starts the HTTP Upgrade pins a
+        // task + socket only until WS_UPGRADE_TIMEOUT, then the daemon
+        // drops it (#421).
+        let mut silent = tokio::net::TcpStream::connect(handle.local_addr)
+            .await
+            .expect("tcp connected");
+        let dropped = tokio::time::timeout(
+            WS_UPGRADE_TIMEOUT + Duration::from_secs(5),
+            {
+                let read_half = &mut silent;
+                async move {
+                    let mut buf = [0u8; 64];
+                    loop {
+                        match tokio::io::AsyncReadExt::read(read_half, &mut buf).await {
+                            Ok(0) => break true,
+                            Ok(_) => continue,
+                            Err(_) => break true,
+                        }
+                    }
+                }
+            },
+        )
+        .await
+        .expect("connection dropped within upgrade timeout + slack");
+        assert!(dropped, "silent TCP client must eventually be dropped");
+        handle.shutdown.notify_one();
+    }
+
+    #[tokio::test]
+    async fn ws_connection_limit_rejects_then_releases_slots() {
+        let (handle, _state) = bind_test_server().await;
+        let url = format!("ws://{}/", handle.local_addr);
+
+        // Fill every slot with an upgraded client that stays silent after
+        // connecting (each sits in the 5s first-frame wait, holding its
+        // slot). Opened concurrently so the whole batch upgrades well
+        // within that first-frame window.
+        let mut held = Vec::new();
+        let mut pending = Vec::new();
+        for _ in 0..MAX_LOCAL_WS_CONNECTIONS {
+            pending.push(tokio_tungstenite::connect_async(extension_origin_request(
+                &url,
+            )));
+        }
+        for result in futures_util::future::join_all(pending).await {
+            let (ws, _resp) = result.expect("upgraded within the connection cap");
+            held.push(ws);
+        }
+
+        // The next connection must be closed by the daemon right away.
+        let mut rejected = tokio::net::TcpStream::connect(handle.local_addr)
+            .await
+            .expect("tcp connected");
+        let mut buf = [0u8; 64];
+        let rejected_closed = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                match tokio::io::AsyncReadExt::read(&mut rejected, &mut buf).await {
+                    Ok(0) => break true,
+                    Ok(_) => continue,
+                    Err(_) => break true,
+                }
+            }
+        })
+        .await
+        .expect("over-cap connection closed promptly");
+        assert!(rejected_closed, "connection beyond the cap must be rejected");
+
+        // Release every slot; a fresh client must get in again.
+        for mut ws in held {
+            ws.close(None).await.ok();
+        }
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                match tokio_tungstenite::connect_async(extension_origin_request(&url)).await {
+                    Ok(_) => break,
+                    Err(_) => tokio::time::sleep(Duration::from_millis(100)).await,
+                }
+            }
+        })
+        .await
+        .expect("slot released after clients closed");
+        handle.shutdown.notify_one();
     }
 }
