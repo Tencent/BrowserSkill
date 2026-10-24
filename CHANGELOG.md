@@ -15,6 +15,12 @@ Starting from 0.2.0, CLI / Extension / DSH Plugin share the same version number.
   explains that it belongs after a supporting subcommand, replacing the
   misleading `--version` suggestion and usage line
   ([#387](https://github.com/Tencent/BrowserSkill/issues/387)).
+- DSH Plugin: the right-sidebar observation tab auto-opens again on DSH
+  0.2.0+, which removed `current` from the `sessions.list` snapshot. The
+  auto-open target now falls back to the `uiSession` main binding (exposed by
+  DSH 0.1.5 and 0.2.x alike), and conversation switches on 0.2.x hosts keep
+  re-triggering it
+  ([#484](https://github.com/Tencent/BrowserSkill/issues/484)).
 
 ## [0.3.3] - 2026-10-14
 
