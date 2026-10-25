@@ -1525,7 +1525,9 @@ describe("handleFill", () => {
     const fake = makeFakeCdp({
       "DOM.scrollIntoViewIfNeeded": () => ({}),
       "Runtime.evaluate": () => ({ result: { value: { width: 200, height: 100 } } }),
-      "Page.getLayoutMetrics": () => ({ cssLayoutViewport: { clientWidth: 200, clientHeight: 100 } }),
+      "Page.getLayoutMetrics": () => ({
+        cssLayoutViewport: { clientWidth: 200, clientHeight: 100 },
+      }),
     });
     fake.cdp.getFrameGraph = vi.fn(async () => ({
       rootFrameId: "main",
@@ -1850,7 +1852,9 @@ describe("handlePress", () => {
       "Input.dispatchKeyEvent": () => ({}),
       "DOM.scrollIntoViewIfNeeded": () => ({}),
       "Runtime.evaluate": () => ({ result: { value: { width: 200, height: 100 } } }),
-      "Page.getLayoutMetrics": () => ({ cssLayoutViewport: { clientWidth: 200, clientHeight: 100 } }),
+      "Page.getLayoutMetrics": () => ({
+        cssLayoutViewport: { clientWidth: 200, clientHeight: 100 },
+      }),
     });
     fake.cdp.getFrameGraph = vi.fn(async () => ({
       rootFrameId: "main",

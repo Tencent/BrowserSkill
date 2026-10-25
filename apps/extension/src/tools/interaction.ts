@@ -1571,9 +1571,7 @@ export async function handlePress(
   // Key events must reach the focused element's session: for a ref inside
   // an OOPIF that is the child session, not the root one the tab-level
   // send would hit (issue #438). Without a ref the root session is correct.
-  const keyCdp = node
-    ? cdpRunnerForTarget(deps.cdp, node.cdpTarget)
-    : deps.cdp;
+  const keyCdp = node ? cdpRunnerForTarget(deps.cdp, node.cdpTarget) : deps.cdp;
   return withInputReady(ctx, target.tabId, { ...deps, deadline }, async (input) => {
     // Optional focus before key dispatch.
     if (node) {
