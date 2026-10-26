@@ -1426,6 +1426,9 @@ async fn handle_session_stop(
             };
             Ok(serde_json::to_value(result).unwrap_or(Value::Null))
         }
+        Err(StopSessionError::NotFound) if state.sessions.was_stopped_for_idle(&session_id) => {
+            Err(DispatchError::SessionIdleTimeout.into_rpc())
+        }
         Err(err) => Err(map_stop_error(err)),
     }
 }
@@ -1555,12 +1558,7 @@ async fn handle_session_stop_all(
 }
 
 fn handle_session_list(state: &Arc<DaemonState>) -> ResponseBody {
-    let sessions: Vec<_> = state
-        .sessions
-        .snapshot()
-        .into_iter()
-        .map(|s| s.status_entry())
-        .collect();
+    let sessions = state.sessions.status_entries(state.config.session_idle);
     ResponseBody::Ok(serde_json::to_value(SessionListResult { sessions }).unwrap_or(Value::Null))
 }
 
