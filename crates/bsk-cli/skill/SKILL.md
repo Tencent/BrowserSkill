@@ -89,7 +89,7 @@ Use a ref and context ID from the latest sync (one action per context):
 | Need | Command |
 | --- | --- |
 | Click | `bsk click @e3 --session <id> --context ID` |
-| Fill a field | `bsk fill @e3 --value "text" --session <id> --context ID` |
+| Fill a field | `bsk fill @e3 --value "text" --session <id> --context ID` (also `date`/`time`/`datetime-local`/`month`/`week`; use `bsk upload` for file) |
 | Select an option | `bsk select @e3 --value "option-value" --session <id> --context ID` |
 | Press a key | `bsk press Enter --ref @e3 --session <id> --context ID` |
 | Reveal a hover menu | `bsk hover @e3 --session <id> --context ID` |
