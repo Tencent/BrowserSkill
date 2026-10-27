@@ -161,7 +161,7 @@ describe("visual observation output", () => {
     expect(f.send).not.toHaveBeenCalled();
   });
   it("continues all candidates, replaces refs and retries the latest cursor without skipping", async () => {
-    const f = fixture(35, 100);
+    const f = fixture(35, 130);
     let r = success(await publishObservationPage(f.store, f.cdp, 4, { output: f.output }));
     const seen = new Set<string>();
     let pages = 0;
@@ -196,7 +196,7 @@ describe("visual observation output", () => {
     ).toBe(true);
   });
   it.each(["DOM", "replace", "clear", "tab"])("rejects a cursor after %s changes", async (kind) => {
-    const f = fixture(20, 100);
+    const f = fixture(20, 130);
     const first = success(await publishObservationPage(f.store, f.cdp, 4, { output: f.output }));
     if (kind === "DOM") f.change();
     if (kind === "replace") f.store.replace([]);
@@ -208,19 +208,20 @@ describe("visual observation output", () => {
     ).toHaveProperty("code");
   });
   it("does not consume an entry when a continuation budget is too small", async () => {
-    const f = fixture(20, 100);
+    const f = fixture(20, 130);
     const first = success(await publishObservationPage(f.store, f.cdp, 4, { output: f.output }));
     const cursor = first.next_cursor!;
     expect(
       await publishObservationPage(f.store, f.cdp, 4, { cursor, maxTokens: 1 }),
     ).toHaveProperty("code");
     const next = success(
-      await publishObservationPage(f.store, f.cdp, 4, { cursor, maxTokens: 100 }),
+      await publishObservationPage(f.store, f.cdp, 4, { cursor, maxTokens: 130 }),
     );
     expect(next.ref_count).toBeGreaterThan(0);
   });
   it("shrinks a long visual label, preserving its complete capability marker", async () => {
-    const f = fixture(1, 45);
+    // Far below the ~500-token full label, so the row must shrink to its minimal form.
+    const f = fixture(1, 90);
     f.scene.visuals![0].label = 'bad\n" ' + "x".repeat(1000);
     f.output.render = prepareObservationRender(f.scene);
     const r = success(await publishObservationPage(f.store, f.cdp, 4, { output: f.output }));
@@ -701,7 +702,7 @@ it.each([
   "Runtime.evaluate",
   "Runtime.releaseObjectGroup",
 ])("retains a cancelled page through handleObserve during %s", async (method) => {
-  const f = fixture(35, 100);
+  const f = fixture(35, 130);
   const manager = new SessionManager({
     agentWindow: {
       create: async () => ({ windowId: 100, initialTabIds: [] }),
@@ -771,7 +772,7 @@ it("preserves a Canvas containing an active region rather than treating it as ba
 });
 
 it("an old cancelled validation cannot clear a newer observation", async () => {
-  const f = fixture(20, 100);
+  const f = fixture(20, 130);
   const first = success(await publishObservationPage(f.store, f.cdp, 4, { output: f.output }));
   const controller = new AbortController();
   const original = f.send.getMockImplementation()!;
@@ -779,7 +780,7 @@ it("an old cancelled validation cannot clear a newer observation", async () => {
   f.send.mockImplementation(async (tab, method) => {
     if (method === "Runtime.evaluate") {
       newer = success(
-        await publishObservationPage(f.store, f.cdp, 4, { output: fixture(25, 100).output }),
+        await publishObservationPage(f.store, f.cdp, 4, { output: fixture(25, 130).output }),
       );
       controller.abort();
     }
@@ -796,7 +797,7 @@ it("an old cancelled validation cannot clear a newer observation", async () => {
 });
 
 it("keeps excluded Canvas out of every continuation page", async () => {
-  const f = fixture(36, 100);
+  const f = fixture(36, 130); // Room for the modal context header plus one row per page.
   f.scene.rootFrameId = "top";
   f.scene.nodes.push({
     ...node(10, 1, "dialog", "Login"),
@@ -825,7 +826,7 @@ it("keeps excluded Canvas out of every continuation page", async () => {
 });
 
 it("can retry a cancelled final page with a smaller budget without losing buffered rows", async () => {
-  const f = fixture(20, 100);
+  const f = fixture(20, 130);
   const first = success(await publishObservationPage(f.store, f.cdp, 4, { output: f.output }));
   const seen = new Set([...f.store.entries()].map(([ref]) => ref));
   const controller = new AbortController();
@@ -847,7 +848,7 @@ it("can retry a cancelled final page with a smaller budget without losing buffer
   let cursor = first.next_cursor;
   while (cursor) {
     const result = success(
-      await publishObservationPage(f.store, f.cdp, 4, { cursor, maxTokens: 100 }),
+      await publishObservationPage(f.store, f.cdp, 4, { cursor, maxTokens: 130 }),
     );
     for (const [ref] of f.store.entries()) {
       expect(seen.has(ref)).toBe(false);
@@ -937,4 +938,30 @@ it("preserves DOM labels for audit on the first and continuation pages", async (
   } finally {
     vi.stubGlobal("chrome", originalChrome);
   }
+});
+
+it.each([
+  // Real o200k cost of one `@eN button "<label> N"` row, newline included.
+  { name: "emoji with a variation selector", label: `${"😀".repeat(80)}❤️`, rowTokens: 90 },
+  {
+    name: "a short opaque id",
+    label: "Click here to download the qwertyuiopasdfghjklzxcvbnm file",
+    rowTokens: 29,
+  },
+])("keeps a budgeted page within its real token cost for labels with $name", async ({
+  label,
+  rowTokens,
+}) => {
+  const f = fixture(0, 1000);
+  f.scene.nodes.push(
+    ...Array.from({ length: 300 }, (_, i) => ({
+      ...node(i + 2, 1, "button", `${label} ${i}`),
+      rect: { x: 0, y: i * 35, w: 100, h: 30 },
+    })),
+  );
+  f.output.render = prepareObservationRender(f.scene);
+  const r = success(await publishObservationPage(f.store, f.cdp, 4, { output: f.output }));
+  expect(r.ref_count).toBeGreaterThan(0);
+  expect(r.next_cursor).toBeDefined();
+  expect(r.ref_count * rowTokens).toBeLessThanOrEqual(1000);
 });

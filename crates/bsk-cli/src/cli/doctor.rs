@@ -10,7 +10,7 @@ use serde::Serialize;
 use crate::cli::browser_wait::{
     browser_query_ipc_timeout, doctor_browser_connect_wait, wait_for_browser_ms,
 };
-use crate::cli::ensure_daemon::{AUTO_START_DISABLED_HINT, auto_start_enabled, ensure_daemon};
+use crate::cli::ensure_daemon::{auto_start_enabled, ensure_daemon};
 use crate::cli::status::Output;
 use crate::cli::update::{
     self,
@@ -19,6 +19,7 @@ use crate::cli::update::{
 use crate::daemon::info::DaemonInfo;
 use crate::daemon::paths;
 use crate::daemon::probe::{self, Probe};
+use crate::daemon::start_error::{DaemonStartFailure, recovery_hint};
 use crate::daemon::state::PROTOCOL_VERSION;
 
 /// Chrome Web Store listing for the browser-skill extension.
@@ -132,7 +133,7 @@ fn resolve_daemon_state(output: Output) -> DaemonState {
 
     if matches!(state, DaemonState::Missing | DaemonState::NoListener(_)) && auto_start_enabled() {
         if let Err(err) = ensure_daemon() {
-            return DaemonState::ProbeError(format!("{err:#}"));
+            return DaemonState::ProbeError(err);
         }
         state = current_state(Duration::ZERO);
     }
@@ -144,7 +145,11 @@ fn resolve_daemon_state(output: Output) -> DaemonState {
     };
 
     if wait > Duration::ZERO && output == Output::Human {
-        eprintln!("waiting for browser extension to connect…");
+        // Issue #465 §5: name the two possible causes up front so an
+        // installed-but-disconnected extension is not read as "missing".
+        eprintln!(
+            "waiting for browser extension to connect… (if it is installed: check that a window with the extension enabled is open in the expected profile and that it targets this daemon; reinstall from the store if missing)"
+        );
     }
 
     if wait.is_zero() {
@@ -166,7 +171,7 @@ fn needs_browser_wait(state: &DaemonState) -> bool {
 enum DaemonState {
     Missing,
     NoListener(DaemonInfo),
-    ProbeError(String),
+    ProbeError(anyhow::Error),
     Verified {
         status: StatusResult,
         local_identity_error: Option<String>,
@@ -406,7 +411,7 @@ fn current_state(browser_wait: Duration) -> DaemonState {
         },
         Ok(Probe::Absent(Some(info))) => DaemonState::NoListener(info),
         Ok(Probe::Absent(None)) => DaemonState::Missing,
-        Err(err) => DaemonState::ProbeError(format!("{err:#}")),
+        Err(err) => DaemonState::ProbeError(err),
     }
 }
 
@@ -515,7 +520,7 @@ fn check_daemon_running(state: &DaemonState) -> CheckResult {
             if auto_start_enabled() {
                 "run `bsk daemon start` or any `bsk` command (daemon is auto-spawned)"
             } else {
-                AUTO_START_DISABLED_HINT
+                DaemonStartFailure::AutoStartDisabled.hint()
             },
         ),
         DaemonState::NoListener(info) => CheckResult::fail(
@@ -528,13 +533,15 @@ fn check_daemon_running(state: &DaemonState) -> CheckResult {
             if auto_start_enabled() {
                 "run `bsk daemon start`; check `bsk logs` if startup fails"
             } else {
-                AUTO_START_DISABLED_HINT
+                DaemonStartFailure::AutoStartDisabled.hint()
             },
         ),
         DaemonState::ProbeError(err) => CheckResult::fail(
             name,
-            err.clone(),
-            "check daemon IPC permissions and `bsk logs`; keep existing runtime files",
+            format!("{err:#}"),
+            recovery_hint(err).unwrap_or(
+                "check daemon IPC permissions and `bsk logs`; keep existing runtime files",
+            ),
         ),
     }
 }
@@ -668,12 +675,21 @@ fn check_extension_connected(status: Option<&StatusResult>) -> CheckResult {
     if browsers > 0 {
         CheckResult::ok(name, format!("{} browser(s) connected", browsers))
     } else {
+        // Issue #465 §5: "0 browsers connected" is true for both "not
+        // installed" and "installed but not connected" (another or no
+        // browser window, wrong profile, a different daemon or port, a
+        // stale extension service worker). Spell both out so the fix
+        // does not require guessing which one applies.
         CheckResult::fail(
             name,
             "0 browsers connected",
             format!(
-                "install the extension from {EXTENSION_STORE_URL} (Chrome) \
-                 or {EXTENSION_STORE_URL_EDGE} (Edge) and load it in the browser"
+                "if the extension is not installed, install it from {EXTENSION_STORE_URL} (Chrome) \
+                 or {EXTENSION_STORE_URL_EDGE} (Edge); \
+                 if it is already installed, it is not connected to this daemon — keep a window \
+                 of that browser open with the extension enabled in the profile you are using \
+                 (the extension is per-profile), point the extension at this daemon's \
+                 address/port, and reload the extension if it was just updated"
             ),
         )
     }
@@ -730,6 +746,37 @@ mod m2_tests {
     use super::*;
     use bsk_protocol::StatusResult;
     use bsk_protocol::system::{BrowserStatusEntry, VersionSkewEntry};
+
+    #[test]
+    fn startup_probe_errors_preserve_recovery_and_cause() {
+        for failure in [
+            DaemonStartFailure::AutoStartDisabled,
+            DaemonStartFailure::IndependentStartFailed,
+        ] {
+            let error = anyhow::anyhow!("startup fixture cause")
+                .context(failure)
+                .context("automatic daemon startup failed");
+            let check = check_daemon_running(&DaemonState::ProbeError(error));
+            assert_eq!(check.status, CheckStatus::Fail);
+            assert_eq!(check.hint.as_deref(), Some(failure.hint()));
+            assert!(check.detail.contains("startup fixture cause"));
+            let json = serde_json::to_value(check).unwrap();
+            assert_eq!(json["hint"], failure.hint());
+            assert_eq!(json["ok"], false);
+        }
+    }
+
+    #[test]
+    fn ordinary_probe_errors_keep_ipc_guidance() {
+        let error = anyhow::anyhow!("IPC fixture failure").context("query daemon status");
+        let check = check_daemon_running(&DaemonState::ProbeError(error));
+        assert_eq!(check.status, CheckStatus::Fail);
+        assert_eq!(check.detail, "query daemon status: IPC fixture failure");
+        assert_eq!(
+            check.hint.as_deref(),
+            Some("check daemon IPC permissions and `bsk logs`; keep existing runtime files")
+        );
+    }
 
     fn fake_status(browsers: Vec<BrowserStatusEntry>, skew: Vec<VersionSkewEntry>) -> StatusResult {
         StatusResult {
@@ -1109,6 +1156,13 @@ mod m2_tests {
         assert!(
             hint.contains(EXTENSION_STORE_URL_EDGE),
             "hint should include Edge Add-ons URL: {hint}"
+        );
+        // Issue #465 §5: the hint must not imply "not installed" is the
+        // only possibility — an installed-but-disconnected extension is
+        // the harder case to diagnose.
+        assert!(
+            hint.contains("already installed"),
+            "hint should name the installed-but-disconnected case: {hint}"
         );
     }
 

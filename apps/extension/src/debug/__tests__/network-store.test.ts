@@ -5,6 +5,7 @@ import { BODY_CHARS, redactBody, redactHeaders, redactText, redactUrl } from "..
 
 function fixture(
   send = vi.fn(async () => ({ body: '{"ok":false,"token":"secret","data":{"name":"Alice"}}' })),
+  retain?: ConstructorParameters<typeof DebugNetworkStore>[4],
 ) {
   let sequence = 0;
   let now = 1000;
@@ -13,6 +14,7 @@ function fixture(
     { send: send as never },
     () => ++sequence,
     () => now++,
+    retain,
   );
   const event = (method: string, data: object, sessionId?: string) =>
     store.onEvent({ tabId: 7, ...(sessionId ? { sessionId } : {}) }, `Network.${method}`, {
@@ -60,6 +62,46 @@ const settle = async () => {
 };
 
 describe("debug network evidence", () => {
+  it.each([
+    "network",
+    "annotation",
+  ])("redacts encoded HTML inputs before retaining request and response bodies: %s", async (path) => {
+    const secret = "BSK_SYNTHETIC_SECRET_7264";
+    const html = `<input type="pass&#x77;ord" value="${secret}"><input name="user&lowbar;password" value="${secret}">`;
+    const snapshots: string[] = [];
+    const f = fixture(
+      vi.fn(async () => ({ body: html })),
+      (entry) => snapshots.push(JSON.stringify(entry)),
+    );
+    const request = {
+      url: "https://site.test/form",
+      method: "POST",
+      headers: { "content-type": "text/html" },
+    };
+    if (path === "annotation")
+      f.store.annotate({ tabId: 7 }, "raw", {
+        effective: { ...request, postData: html },
+        mock: { status: 200, headers: request.headers, body: html },
+      });
+    f.request({ request: { ...request, ...(path === "network" ? { postData: html } : {}) } });
+    if (path === "network") {
+      f.response({ response: { status: 200, mimeType: "text/html", headers: request.headers } });
+      f.finish();
+      await settle();
+    }
+    const entry = f.store.list()[0];
+    for (const body of [entry.request_body, entry.response_body]) {
+      expect(body).toMatchObject({
+        state: "available",
+        text: '<input data-bsk-redacted="true"><input data-bsk-redacted="true">',
+        redacted: true,
+        replay_safe: false,
+      });
+    }
+    expect(snapshots.length).toBeGreaterThan(0);
+    expect(snapshots.join("\n")).not.toContain(secret);
+  });
+
   it.each([
     "response",
     "extra-first",

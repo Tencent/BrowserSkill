@@ -105,6 +105,10 @@ function isRecordingFinishing(recording: ActiveRecording): boolean {
 
 const recordings = new Map<string, ActiveRecording>();
 
+export function hasActiveRecording(sessionId: string): boolean {
+  return recordings.has(sessionId);
+}
+
 const RECORD_START_RETRIES = 3;
 const RECORD_START_RETRY_DELAY_MS = 500;
 const RECORD_REARM_DEBOUNCE_MS = 150;

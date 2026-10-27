@@ -37,6 +37,7 @@ const methodKeys = {
   "tool.snapshot": "read",
   "tool.observe": "read",
   "tool.get_html": "read",
+  "tool.extract": "read",
   "tool.screenshot": "screenshot",
   "tool.console": "console",
   "tool.network": "network",

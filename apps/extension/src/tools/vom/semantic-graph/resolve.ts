@@ -493,6 +493,7 @@ export function resolveSemanticGraph(
       position: node.dom?.position || "static",
       pointerEvents: node.dom?.pointerEvents || "auto",
       ...(node.dom?.cursor ? { cursor: node.dom.cursor } : {}),
+      ...(node.dom?.clickable ? { clickable: true } : {}),
       ...(role ? { role } : {}),
       ...(name ? { name } : {}),
       ...(value !== undefined ? { value } : {}),

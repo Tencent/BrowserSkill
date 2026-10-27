@@ -1,6 +1,6 @@
 # Human help and recovery
 
-With help enabled, use `browser_assist` action `request-help` for login, CAPTCHA,
+With help enabled, use `bsk_assist` action `request-help` for login, CAPTCHA,
 OTP, payment confirmation, consent, or after two attempts without progress. Supply
 a precise prompt and fresh targets; completion criteria need a stable success signal.
 `all` and `any` support at most eight conditions in total. `urlMatches` accepts

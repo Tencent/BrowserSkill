@@ -13,7 +13,7 @@
       ]
     },
     "focused": {
-      "description": "Whether the new Agent Window should take focus. Omitted means the extension's default (`true`) for compatibility with older clients.",
+      "description": "Whether the new Agent Window should take focus. Omitted means the extension's default (`false`).",
       "type": [
         "boolean",
         "null"
@@ -27,6 +27,10 @@
       ],
       "format": "uint32",
       "minimum": 0.0
+    },
+    "incognito": {
+      "description": "Use Chrome's shared incognito browsing session. Omitted means normal.",
+      "type": "boolean"
     },
     "session_id": {
       "type": "string"

@@ -462,6 +462,41 @@ fn foreground_stays_owned_by_the_host_job() {
 }
 
 #[test]
+fn foreground_in_a_persistent_job_survives_client_job_cleanup() {
+    let mut fixture = Fixture::new();
+    fixture.auto_start = false;
+    let owner = Job::new(0);
+    let mut launcher = fixture.launch(
+        &["daemon", "start", "--foreground", "--port", "0"],
+        &[&owner],
+    );
+    let original = fixture.wait_for_info();
+    let process = open_process(original.pid);
+    assert!(original.host_managed);
+    assert!(in_job(process.as_raw_handle(), owner.0.as_raw_handle()));
+
+    for _ in 0..2 {
+        let client_job = Job::new(0);
+        success(fixture.run(&["status", "--json"], &[&client_job]));
+        assert!(!in_job(
+            process.as_raw_handle(),
+            client_job.0.as_raw_handle()
+        ));
+        drop(client_job);
+        assert_alive(&process);
+        success(fixture.run(&["status", "--json"], &[]));
+        assert_eq!(fixture.info(), original);
+    }
+
+    drop(owner);
+    assert_eq!(
+        unsafe { WaitForSingleObject(process.as_raw_handle(), 5000) },
+        WAIT_OBJECT_0
+    );
+    let _ = launcher.finish();
+}
+
+#[test]
 fn failed_start_is_bounded_and_releases_the_daemon_lock() {
     let fixture = Fixture::new();
     let occupied = TcpListener::bind("127.0.0.1:0").unwrap();

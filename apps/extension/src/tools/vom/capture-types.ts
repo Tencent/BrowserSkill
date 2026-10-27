@@ -23,6 +23,8 @@ export interface CapturedNode {
    * `textContent`: the live parser always sets it, hand-built fixtures may not.
    */
   cursor?: string;
+  /** Browser-reported clickability, including JavaScript event listeners. */
+  clickable?: boolean;
   /**
    * Whether the live DOM snapshot provides a painted, non-hidden box for this
    * node. Semantic resolution uses this only for DOM fallback nodes; AX-backed

@@ -34,6 +34,9 @@ Cursor、Claude Code、Codex、OpenClaw、CodeBuddy、WorkBuddy、Pi、Hermes Ag
 | **带着证据调试网站** | 把操作与请求、响应正文、控制台和页面变化关联起来，检查性能、慢接口与疑似重复请求，用明确配置的 HTTP 规则或请求重放验证问题。 |
 | **选对浏览器和账号** | 为浏览器实例命名，让任务绑定指定 Profile；也可以让服务器上的 Agent 连接你电脑上的浏览器。 |
 | **回看任务过程** | 重新打开浏览器本地的调试历史、导出 JSON，或单独开启操作审计，查看任务执行记录。 |
+| **提取结构化数据** | 将已加载的表格和列表导出为 JSON/CSV，保留列名、页面/frame 来源、合并单元格信息和完整性标记。见[结构化提取说明](docs/structured-extraction.md)。 |
+| **录制任务视频** | 让 Agent 将一个已授权标签页录制为无声 MP4，再从扩展中预览、保存或删除视频。见[任务视频录制](docs/video-recording.md)。 |
+| **等待页面条件** | 设置明确的超时，等待目标元素满足指定条件后再继续操作。见[元素等待](docs/wait-for-element.md)。 |
 
 看看 Agent 如何完成一次浏览器任务：
 
@@ -125,7 +128,9 @@ bsk doctor
 使用 browser-skill 打开 https://example.com，总结页面内容，完成后结束浏览器会话。
 ```
 
-Agent 应打开代理窗口、读取页面、返回总结，并结束任务。支持 skill 斜杠命令的 Agent，也可以通过 `/browser-skill` 调用。
+Agent 默认在后台打开独立代理窗口、读取页面、返回总结，并结束任务。误入代理窗口的外部链接或手动新建标签会移回最近使用的普通用户窗口；没有用户窗口时会新建一个。分流发生在标签创建之后，可能短暂显示在代理窗口中。页面打开的子标签、人类协助和录制流程会保留。支持 skill 斜杠命令的 Agent，也可以通过 `/browser-skill` 调用。
+
+网页打开原生弹窗时，Chrome 仍可能激活窗口。对于观察到的任务弹窗，若用户没有切换窗口，扩展会恢复之前的 Chrome 用户窗口或最小化状态。Chrome 公开扩展 API 无法保证完全没有瞬时激活，也无法恢复其他应用的焦点。
 
 <details>
 <summary><b>直接试用 CLI</b></summary>
@@ -133,10 +138,10 @@ Agent 应打开代理窗口、读取页面、返回总结，并结束任务。�
 先创建会话，记下返回的 `session_id`：
 
 ```sh
-bsk session start --no-focus --json
+bsk session start --json
 ```
 
-将下面每条命令中的 `<id>` 替换为该值。有多个浏览器连接时，在创建会话时用 `--browser <实例 ID 或名称>` 选择目标。
+将下面每条命令中的 `<id>` 替换为该值。有多个浏览器连接时，在创建会话时用 `--browser <实例 ID 或名称>` 选择目标。默认后台创建，仍兼容 `--no-focus`；显式使用 `--focus` 可将新窗口置于前台。请求人类帮助和交互录制仍会将相关窗口置于前台。
 
 ```sh
 bsk navigate https://example.com --session <id>
@@ -149,11 +154,13 @@ bsk session stop <id>
 
 </details>
 
-如果 Agent 沙盒会在每条命令后回收后台进程，请使用[沙盒配置指南](docs/sandboxed-agents.md)：在宿主环境保持 daemon 运行，Agent 通过共享的 `BSK_HOME` 和 `BSK_AUTO_START=0` 连接。
+在 WorkBuddy/CodeBuddy 或会回收命令子进程的宿主中，Agent 应先复用已有 daemon；需要启动时，在宿主管理的后台任务中运行 `bsk daemon start --foreground`，并在另一条工具调用中验证连接。[宿主配置指南](docs/sandboxed-agents.md)说明了如何共用 `BSK_HOME`、设置 `BSK_AUTO_START=0`，以及宿主无法维持任务时的独立终端兜底方式。
 
 ## DeepSeek Harness 插件
 
-[DSH 插件](packages/dsh-plugin-browserskill/README.md) 在 DeepSeek Harness Web UI 中提供原生 `browser_*` 工具、浏览器任务预览和截图结果。它使用同一套 `bsk` CLI 与扩展，并自带 BrowserSkill skill。
+[DSH 插件](packages/dsh-plugin-browserskill/README.md) 在 DeepSeek Harness Web UI 中提供原生 `bsk_*` 工具、浏览器任务预览和截图结果。它使用同一套 `bsk` CLI 与扩展，并自带 BrowserSkill skill。
+
+**升级到 0.3.3：**先更新 CLI 和扩展，再更新插件。六个 `browser_*` 工具已改名为 `bsk_*`，不保留旧名称别名。请更新自定义工具调用和策略，重启 DSH profile，并在已有对话中重新调用 `/browser-skill`。详见[迁移指南](packages/dsh-plugin-browserskill/README.md#breaking-tool-api-migration-033)。
 
 安装好 DeepSeek Harness、pnpm 和 `bsk`，连接扩展后，将插件加入你的 profile：
 
@@ -214,7 +221,7 @@ bsk session start --browser "工作账号" --no-focus --json
 
 保留本机浏览器和登录态，让 Agent、CLI 与 daemon 在服务器运行。扩展通过经过鉴权的 WSS 与服务器配对，由浏览器主动建立连接，本机无需开放入站端口。
 
-内置服务端支持设备配对、续期和撤销授权。远程模式目前不支持文件上传和下载。详见[远程连接指南](docs/remote-extension-connection.md)。
+内置服务端支持设备配对、续期和撤销授权。`bsk upload` 和 `bsk download` 文件传输命令仍仅支持本地模式。经过授权的视频导出可以写入 CLI 所在计算机，包括远程服务器；扩展中的“另存为 MP4”写入浏览器所在计算机。详见[远程连接指南](docs/remote-extension-connection.md)。
 
 ## 浏览器控制与隐私
 
@@ -231,12 +238,13 @@ bsk session start --browser "工作账号" --no-focus --json
 
 BrowserSkill 没有必须使用的云服务，也不收集产品遥测。自动化结果交给你选定的 daemon 或网关，以及使用它的 Agent；对应 Agent 或服务可能按自身政策处理或保留数据。扩展不会自行调用 AI 提供商。
 
-| 可选历史记录 | 保存位置 | 需要知道的事 |
+| 可选历史与视频记录 | 保存位置 | 需要知道的事 |
 | --- | --- | --- |
 | **网站调试** | 当前浏览器配置中，远程模式也一样 | 保存采集到的数据，包括可获取的正文和字段值。已停止记录 30 天后过期，保留预算为 50 条／50 MiB，达到限制时可能提前清理。删除记录前需先停止采集。 |
 | **操作审计** | daemon 所在主机的 `BSK_HOME/audit` | 默认关闭。记录任务与操作元数据，不记录输入值、页面正文、截图或文件内容。已结束任务 30 天后过期。 |
+| **任务视频** | 当前浏览器配置；导出副本保存在指定位置 | 主动开启后，录制一个已授权标签页的无声视频；单个视频上限为 10 分钟／256 MiB，创建 24 小时后过期，临时视频预算为 1 GiB。视频库支持预览、导出和删除。 |
 
-两者均可导出和删除。结束任务或断开连接不会删除已保存的历史，过期记录会在访问历史或执行清理时处理。导出的文件、Agent 或网关已经收到的副本需要另行管理。调试数据会过滤已知敏感信息，但不能保证完全脱敏。
+这些功能均支持导出和删除。结束任务或断开连接不会删除保留的历史或视频，过期数据会在访问或清理时处理。导出的文件、Agent 或网关已经收到的副本需要另行管理。调试数据会过滤已知敏感信息，但不能保证完全脱敏。视频画面不会自动脱敏，分享前请检查可见内容。
 
 [隐私政策](apps/extension/PRIVACY.zh-CN.md) · [操作审计](docs/operation-audit.md) · [调试历史与保留限制](docs/website-debugging.md#history-and-export)
 
@@ -278,6 +286,9 @@ dsh plugin --profile web update @wxg-prc-cpg/browser-skill-dsh-plugin --latest
 | 让 Agent 安装并验证连接 | [安装指南](AGENT_INSTALL.md) |
 | 排查网站或接口问题 | [网站调试](docs/website-debugging.md) |
 | 截取长页面 | [长截图](docs/long-screenshot.md) |
+| 录制并保存任务视频 | [任务视频录制](docs/video-recording.md) |
+| 导出表格或列表 | [结构化提取](docs/structured-extraction.md) |
+| 等待元素条件 | [元素等待](docs/wait-for-element.md) |
 | 使用指定账号或 Profile | [浏览器 Profile](docs/browser-profiles.md) |
 | 连接服务器上的 Agent | [远程浏览器连接](docs/remote-extension-connection.md) |
 | 在沙盒中使用 | [沙盒环境配置](docs/sandboxed-agents.md) |

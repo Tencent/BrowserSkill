@@ -38,6 +38,38 @@ pub const CANCEL_RESPONSE_GRACE: Duration = Duration::from_secs(2);
 /// the original call's timeout because cancel must answer promptly.
 const CANCEL_FRAME_TIMEOUT: Duration = Duration::from_secs(2);
 
+static OBSERVATION_DEPENDENCIES: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+
+static OBSERVATION_CONTEXT: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+
+/// A CLI process represents one explicit caller operation. Never fill this from cached state.
+pub fn set_context(context: Option<String>) {
+    let _ = OBSERVATION_CONTEXT.set(context);
+}
+
+pub fn set_dependencies(dependencies: Vec<String>) {
+    let _ = OBSERVATION_DEPENDENCIES.set(dependencies);
+}
+
+fn with_context<P: Serialize>(
+    params: Option<P>,
+    context: Option<&str>,
+    dependencies: &[String],
+) -> anyhow::Result<Option<serde_json::Value>> {
+    params
+        .map(|p| {
+            let mut value = serde_json::to_value(p)?;
+            if let (Some(context), Some(object)) = (context, value.as_object_mut()) {
+                object.insert("context_id".into(), context.into());
+                if !dependencies.is_empty() {
+                    object.insert("depends_on".into(), serde_json::to_value(dependencies)?);
+                }
+            }
+            Ok(value)
+        })
+        .transpose()
+}
+
 /// Issue a business RPC against the daemon with SIGINT-driven
 /// cancellation.
 pub fn call<P, R>(
@@ -82,13 +114,21 @@ where
         }));
     }
     let rpc_id: RpcId = format!("{}-{}", rpc_id_prefix, random_short_id());
+    let params = with_context(
+        params,
+        OBSERVATION_CONTEXT.get().and_then(|c| c.as_deref()),
+        OBSERVATION_DEPENDENCIES
+            .get()
+            .map(Vec::as_slice)
+            .unwrap_or_default(),
+    )?;
     let mut client = IpcClient::connect(sock.clone()).await?;
     let rpc_id_for_call = rpc_id.clone();
     let rpc_id_for_cancel = rpc_id.clone();
 
     let main_fut = async move {
         client
-            .call_with_id::<P, R>(rpc_id_for_call, method, params, call_timeout)
+            .call_with_id::<serde_json::Value, R>(rpc_id_for_call, method, params, call_timeout)
             .await
     };
     tokio::pin!(main_fut);
@@ -248,4 +288,26 @@ async fn wait_for_cancel(
 async fn wait_for_sigint() -> anyhow::Result<()> {
     tokio::signal::ctrl_c().await.context("listen for SIGINT")?;
     Ok(())
+}
+
+#[cfg(test)]
+mod context_tests {
+    use super::with_context;
+    use serde_json::json;
+
+    #[test]
+    fn context_is_explicit_and_does_not_change_action_parameters() {
+        let params = json!({"session_id":"s1", "ref":"e1", "value":"Shanghai"});
+        assert_eq!(
+            with_context(Some(&params), None, &[]).unwrap(),
+            Some(params.clone())
+        );
+        let framed = with_context(Some(&params), Some("observed-context"), &["@e2".into()])
+            .unwrap()
+            .unwrap();
+        assert_eq!(framed["context_id"], "observed-context");
+        assert_eq!(framed["depends_on"], json!(["@e2"]));
+        assert_eq!(framed["value"], "Shanghai");
+        assert!(params.get("context_id").is_none());
+    }
 }

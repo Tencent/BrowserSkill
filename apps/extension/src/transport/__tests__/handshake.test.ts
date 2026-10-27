@@ -66,8 +66,8 @@ function deferredFakeTransport(): { transport: Transport; emit: (frame: Protocol
 
 describe("performHandshake", () => {
   it("advertises the protocol compatibility boundary", () => {
-    expect(PROTOCOL_VERSION).toBe("1.3");
-    expect(MIN_COMPATIBLE_PROTOCOL).toBe("1.0");
+    expect(PROTOCOL_VERSION).toBe("1.5");
+    expect(MIN_COMPATIBLE_PROTOCOL).toBe("1.5");
   });
 
   it("sends system.handshake with identity and both compat fields", async () => {
@@ -225,6 +225,11 @@ describe("performHandshake", () => {
 });
 
 describe("detectBrowserMeta", () => {
+  it("identifies Yandex before its compatibility Chrome token", () => {
+    expect(
+      detectBrowserMeta("Mozilla/5.0 Chrome/150.0.0.0 YaBrowser/26.8.0.0 Safari/537.36"),
+    ).toEqual({ name: "yandex", version: "26.8.0.0" });
+  });
   it("recognises Chrome", () => {
     const meta = detectBrowserMeta(
       "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.6778.86 Safari/537.36",

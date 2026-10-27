@@ -1,0 +1,8 @@
+{
+  "session": "bsk_session",
+  "page": "bsk_page",
+  "inspect": "bsk_inspect",
+  "interact": "bsk_interact",
+  "tabs": "bsk_tabs",
+  "assist": "bsk_assist"
+}

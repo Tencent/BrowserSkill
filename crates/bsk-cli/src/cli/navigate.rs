@@ -295,6 +295,13 @@ fn render_navigate(reply: &NavigateResult, format: Format) -> Result<(), CliErro
             print_dialog_summaries(&reply.dialogs);
         }
     }
+    // `--timeout` is documented as a hard timeout; treat lifecycle wait
+    // expiry as exit 4 (design §3.1) while still printing the payload so
+    // agents can inspect `final_url` / `error_text`. Distinct from
+    // `wait-for-element` / `wait-for-navigation`, which intentionally stay 0.
+    if reply.reached == "timeout" {
+        return Err(CliError::RenderedExit { exit_code: 4 });
+    }
     Ok(())
 }
 
@@ -324,6 +331,9 @@ fn render_history(
             }
             print_dialog_summaries(&view.dialogs);
         }
+    }
+    if view.reached == "timeout" {
+        return Err(CliError::RenderedExit { exit_code: 4 });
     }
     Ok(())
 }
@@ -413,5 +423,64 @@ mod tests {
             navigate_ipc_timeout(60_000),
             Duration::from_secs(60) + Duration::from_secs(15)
         );
+    }
+
+    fn sample_navigate(reached: &str) -> NavigateResult {
+        NavigateResult {
+            tab_id: 1,
+            url: "https://example.com/".into(),
+            final_url: Some("https://example.com/".into()),
+            reached: reached.into(),
+            error_text: if reached == "timeout" {
+                Some("timed out waiting for load".into())
+            } else {
+                None
+            },
+            dialogs: vec![],
+        }
+    }
+
+    #[test]
+    fn render_navigate_exits_4_on_timeout_after_printing() {
+        let err = render_navigate(&sample_navigate("timeout"), Format::Json).unwrap_err();
+        match err {
+            CliError::RenderedExit { exit_code } => assert_eq!(exit_code, 4),
+            other => panic!("expected RenderedExit(4), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn render_navigate_ok_when_lifecycle_reached() {
+        assert!(render_navigate(&sample_navigate("load"), Format::Json).is_ok());
+    }
+
+    #[test]
+    fn render_history_exits_4_on_timeout() {
+        let view = OwnedHistoryView {
+            tab_id: 2,
+            previous_url: Some("https://a.example/".into()),
+            final_url: Some("https://b.example/".into()),
+            reached: "timeout".into(),
+            error_text: Some("timed out waiting for load".into()),
+            dialogs: vec![],
+        };
+        let err = render_history(&view, "reload", Format::Json).unwrap_err();
+        match err {
+            CliError::RenderedExit { exit_code } => assert_eq!(exit_code, 4),
+            other => panic!("expected RenderedExit(4), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn render_history_ok_when_lifecycle_reached() {
+        let view = OwnedHistoryView {
+            tab_id: 2,
+            previous_url: None,
+            final_url: Some("https://example.com/".into()),
+            reached: "load".into(),
+            error_text: None,
+            dialogs: vec![],
+        };
+        assert!(render_history(&view, "reload", Format::Json).is_ok());
     }
 }

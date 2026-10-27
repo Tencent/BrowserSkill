@@ -60,14 +60,23 @@ function observation(initial: SessionObservation[] = []) {
 
 /** Native contracts: keyed slots use implementation id, navigation uses kind and explicit session. */
 function nativeHost(
-  options: { ready?: boolean; declared?: boolean; betterSidebar?: boolean } = {},
+  options: {
+    ready?: boolean;
+    declared?: boolean;
+    betterSidebar?: boolean;
+    listCurrent?: boolean;
+  } = {},
 ) {
   let current: string | undefined = "conv-1";
   let ready = options.ready ?? true;
+  // DSH 0.2.0+ removed `current` from the session list; mirror that shape when
+  // listCurrent is false and expose the uiSession main binding instead.
+  const listCarriesCurrent = options.listCurrent ?? true;
   const declared = new Set(options.declared === false ? [] : [BODY, TITLE]);
   const watchers = new Set<{ name: string; start: () => () => void; stop?: () => void }>();
   const components = new Map<string, (props: NativeTabProps) => ReactNode>();
   const listeners = new Set<() => void>();
+  const bindingListeners = new Set<() => void>();
   const roots = new Map<string, ReturnType<typeof render>>();
   let definition: NativeTabDefinition | undefined;
   const register = vi.fn((value: NativeTabDefinition) => {
@@ -97,13 +106,28 @@ function nativeHost(
     sidebarRightTabs: { register },
     sessions: {
       list: {
-        getSnapshot: () => ({ current }),
+        getSnapshot: () => (listCarriesCurrent ? { current } : { ids: [], byId: {} }),
         subscribe(listener: () => void) {
           listeners.add(listener);
           return () => listeners.delete(listener);
         },
       },
     },
+    ...(listCarriesCurrent
+      ? {}
+      : {
+          uiSession: {
+            adapter: {
+              current: {
+                getSnapshot: () => ({ key: current }),
+                subscribe(listener: () => void) {
+                  bindingListeners.add(listener);
+                  return () => bindingListeners.delete(listener);
+                },
+              },
+            },
+          },
+        }),
     ...(options.betterSidebar ? { betterSidebar } : {}),
   };
   const host: NativeSidebarHost = {
@@ -140,7 +164,11 @@ function nativeHost(
     },
     switchSession(id: string | undefined) {
       current = id;
-      for (const listener of [...listeners]) listener();
+      if (listCarriesCurrent) {
+        for (const listener of [...listeners]) listener();
+      } else {
+        for (const listener of [...bindingListeners]) listener();
+      }
     },
     close(sessionId: string) {
       roots.get(sessionId)?.unmount();
@@ -272,6 +300,43 @@ describe("automatic presentation", () => {
     expect(n.openTabIn).toHaveBeenLastCalledWith("conv-2", OBSERVATION_TAB_KIND);
     await act(async () => n.switchSession("conv-1"));
     expect(n.openTabIn).toHaveBeenCalledTimes(2);
+  });
+
+  it("auto-opens through the uiSession main binding when the session list has no current (DSH 0.2.0+)", async () => {
+    const h = observation([BUSY, FOREIGN]);
+    const n = nativeHost({ listCurrent: false });
+    install(n.host, h.store);
+    await waitFor(() =>
+      expect(n.openTabIn).toHaveBeenCalledExactlyOnceWith("conv-1", OBSERVATION_TAB_KIND),
+    );
+    await act(async () => n.switchSession("conv-2"));
+    expect(n.openTabIn).toHaveBeenLastCalledWith("conv-2", OBSERVATION_TAB_KIND);
+    await act(async () => n.switchSession("conv-1"));
+    expect(n.openTabIn).toHaveBeenCalledTimes(2);
+  });
+
+  it("waits for a selected main binding conversation before opening on DSH 0.2.0+", async () => {
+    const h = observation([FOREIGN]);
+    const n = nativeHost({ listCurrent: false });
+    n.switchSession(undefined);
+    install(n.host, h.store);
+    await act(async () => {});
+    expect(n.openTabIn).not.toHaveBeenCalled();
+    await act(async () => n.switchSession("conv-1"));
+    expect(n.openTabIn).not.toHaveBeenCalled();
+    await act(async () => h.push([BUSY]));
+    expect(n.openTabIn).toHaveBeenCalledTimes(1);
+  });
+
+  it("registers without any current-session source but never auto-opens", async () => {
+    const h = observation([BUSY]);
+    const n = nativeHost({ listCurrent: false });
+    delete n.values.uiSession;
+    install(n.host, h.store);
+    await act(async () => {});
+    expect(n.register).toHaveBeenCalled();
+    expect(n.openTabIn).not.toHaveBeenCalled();
+    expect(h.store.presentation.getSnapshot().sidebarAvailable).toBe(true);
   });
 
   it("waits for a selected conversation with its own browser and opens again for a new task", async () => {

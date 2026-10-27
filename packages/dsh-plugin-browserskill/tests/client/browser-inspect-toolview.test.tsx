@@ -1,5 +1,5 @@
 // @vitest-environment happy-dom
-// browser_inspect keyed toolview: view-model derivation from frozen blocks,
+// bsk_inspect keyed toolview: view-model derivation from frozen blocks,
 // image/path-only/running/error rendering, the registration key, and the
 // session-bound attachment loader.
 
@@ -25,7 +25,7 @@ const ATTACHMENT = {
 function runningBlock(argsRaw: string): RunningToolCall {
   return {
     callId: "c1",
-    name: "browser_inspect",
+    name: "bsk_inspect",
     argsRaw,
     turn: 1,
     step: 1,
@@ -41,7 +41,7 @@ function settledBlock(argsRaw: string, content: unknown[], isError = false): Too
     seq: 1,
     time: 0,
     callId: "c1",
-    call: { name: "browser_inspect", argsRaw },
+    call: { name: "bsk_inspect", argsRaw },
     callTime: 0,
     content,
     isError,
@@ -58,9 +58,9 @@ afterEach(cleanup);
 
 describe("viewModelOf", () => {
   it("keeps a DSH 0.2 preparing call renderable before arguments exist", () => {
-    const model = viewModelOf({ callId: "c1", name: "browser_inspect" } as never);
+    const model = viewModelOf({ callId: "c1", name: "bsk_inspect" } as never);
     expect(model.state).toBe("running");
-    expect(model.command).toBe("browser_inspect (c1)");
+    expect(model.command).toBe("bsk_inspect (c1)");
     expect(model.image).toBeNull();
     expect(model.output).toBeNull();
   });
@@ -124,7 +124,7 @@ describe("viewModelOf", () => {
 });
 
 describe("BrowserInspectToolView", () => {
-  const baseProps = { callId: "c1", toolName: "browser_inspect", openFile: () => {} };
+  const baseProps = { callId: "c1", toolName: "bsk_inspect", openFile: () => {} };
   const renderView = (
     block: BrowserInspectToolViewProps["block"],
     loadImage: BrowserInspectToolViewProps["loadImage"],
@@ -167,7 +167,7 @@ describe("BrowserInspectToolView", () => {
 });
 
 describe("client plugin registration", () => {
-  it("registers the browser_inspect toolview and the shell observation overlay", () => {
+  it("registers the bsk_inspect toolview and the shell observation overlay", () => {
     const registrations: { name: string; key?: string; id?: string }[] = [];
     const sessions = { binding: () => undefined };
     const ctx = {
@@ -185,7 +185,7 @@ describe("client plugin registration", () => {
     };
     apply(ctx as never);
     expect(registrations).toEqual([
-      { name: "tool.call.toolview", key: "browser_inspect" },
+      { name: "tool.call.toolview", key: "bsk_inspect" },
       { name: "shell.overlay", id: "bsk-observation" },
     ]);
   });

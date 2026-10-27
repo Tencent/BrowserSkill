@@ -5,8 +5,8 @@ Canvas names/controls from nearby labels. If images cannot be understood, ask fo
 an image-capable model and continue with available semantics.
 
 ```text
-browser_inspect({ action: "screenshot", session: "<id>", ref: "@e3" })
-browser_interact({ action: "click", session: "<id>", target: "@e3", captureId: "<capture-id>", imageX: 100, imageY: 50 })
+bsk_inspect({ action: "screenshot", session: "<id>", ref: "@e3" })
+bsk_interact({ action: "click", session: "<id>", target: "@e3", captureId: "<capture-id>", imageX: 100, imageY: 50 })
 ```
 
 Use the returned captureId with observed ORIGINAL PNG pixels, not resized

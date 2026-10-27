@@ -7,7 +7,7 @@ import {
   omitFrameSubtrees,
 } from "@/browser-driver/frame-graph";
 import { cssViewport, GeometryContext } from "../geometry/frame-context";
-import { type CdpRunner, cdpRunnerForTarget } from "../shared";
+import { type CdpRunner, cdpRunnerForTarget, sendToCdpTarget } from "../shared";
 import { collectOverlayExcludedBackendIds } from "./capture";
 import {
   isCaptureTerminalError as isCaptureAbort,
@@ -42,6 +42,15 @@ interface TargetBatch<T extends FrameOwnedAxNode> {
   rootFrameId?: string;
 }
 
+/**
+ * Stable message for an observation whose root document identity could
+ * not be (re)verified. `observation.ts` matches on this marker to detect
+ * the anti-debugging reload loop, where a site reloads itself as soon
+ * as the debugger attaches (GitHub issues #454 and #465).
+ */
+export const OBSERVE_IDENTITY_CHANGED =
+  "observation document identity changed or could not be verified; observe again";
+
 /** A fixed worker pool scoped to one capture; each worker issues at most one
  * collection request at a time. Geometry has its own measurement-phase bound. */
 async function collectTasks<T>(
@@ -71,12 +80,91 @@ async function collectTasks<T>(
   if (failed) throw failure;
 }
 
-export async function captureObservationFacts<T extends FrameOwnedAxNode>(
+/** `Accessibility.enable` keeps the renderer's accessibility tree live, updated
+ * and reported on every page change, until the domain is disabled again. A
+ * capture needs it only for its own reads, so each target that enabled it
+ * disables it again under the same worker bound. Like other cleanup, this
+ * never reconnects a replaced attachment, and nothing is queued behind a read
+ * still running past its deadline. The driver's cleanup deadline also bounds
+ * a disable command if the renderer stops responding after the AX reads. */
+async function releaseAccessibility(
+  cdp: CdpRunner,
+  tabId: number,
+  enabled: ReadonlyMap<CdpTarget, string | undefined>,
+): Promise<void> {
+  await collectTasks([...enabled], async ([target, attachmentId]) => {
+    // A detach already disabled every domain of that attachment.
+    if (cdp.getAttachmentId?.(tabId) !== attachmentId) return;
+    const disabled =
+      cdp.sendGuarded && attachmentId !== undefined
+        ? cdp.sendGuarded(target, "Accessibility.disable", {}, { attachmentId })
+        : sendToCdpTarget(cdp, target, "Accessibility.disable", {});
+    await disabled.catch(() => {});
+  });
+}
+
+/** Never queue cleanup behind a timed-out read. A pending root command gates
+ * every frame on the tab; a child command gates only its original target. */
+function forgetPendingAccessibility(
+  enabled: Map<CdpTarget, string | undefined>,
+  error: unknown,
+): void {
+  if (!(error instanceof CdpReadTimeoutError)) return;
+  for (const target of enabled.keys())
+    if (!error.sessionId || target.sessionId === error.sessionId) enabled.delete(target);
+}
+
+export function captureObservationFacts<T extends FrameOwnedAxNode>(
   cdp: CdpRunner,
   tabId: number,
   signal?: AbortSignal,
   pageUrl?: string,
   options: { includeVisualFacts?: boolean } = {},
+): Promise<ObservationFacts<T>> {
+  return withObservationFacts(
+    cdp,
+    tabId,
+    (facts: ObservationFacts<T>) => facts,
+    signal,
+    pageUrl,
+    options,
+  );
+}
+
+/** Keep Accessibility enabled through the consumer's remaining reads, including
+ * hover probes. Cleanup can close the read gate until Chrome replies, so it
+ * must follow the entire observation, even when the consumer fails or aborts. */
+export async function withObservationFacts<T extends FrameOwnedAxNode, R>(
+  cdp: CdpRunner,
+  tabId: number,
+  consume: (facts: ObservationFacts<T>) => R | Promise<R>,
+  signal?: AbortSignal,
+  pageUrl?: string,
+  options: { includeVisualFacts?: boolean } = {},
+): Promise<R> {
+  const axEnabled = new Map<CdpTarget, string | undefined>();
+  let result: R;
+  try {
+    const facts = await collectObservationFacts<T>(cdp, tabId, axEnabled, signal, pageUrl, options);
+    throwCaptureAborted(signal);
+    result = await consume(facts);
+  } catch (error) {
+    forgetPendingAccessibility(axEnabled, error);
+    throw error;
+  } finally {
+    await releaseAccessibility(cdp, tabId, axEnabled);
+  }
+  throwCaptureAborted(signal);
+  return result;
+}
+
+async function collectObservationFacts<T extends FrameOwnedAxNode>(
+  cdp: CdpRunner,
+  tabId: number,
+  axEnabled: Map<CdpTarget, string | undefined>,
+  signal: AbortSignal | undefined,
+  pageUrl: string | undefined,
+  options: { includeVisualFacts?: boolean },
 ): Promise<ObservationFacts<T>> {
   const profile = options.includeVisualFacts ? VISUAL_SNAPSHOT : BASIC_SNAPSHOT;
   const startedAt = Date.now();
@@ -85,6 +173,7 @@ export async function captureObservationFacts<T extends FrameOwnedAxNode>(
   try {
     graph = await cdp.getFrameGraph?.(tabId);
   } catch (error) {
+    forgetPendingAccessibility(axEnabled, error);
     if (isCaptureAbort(error)) throw error;
   }
   throwCaptureAborted(signal);
@@ -129,7 +218,6 @@ export async function captureObservationFacts<T extends FrameOwnedAxNode>(
   const unavailable = (batch: TargetBatch<T>, stage: CaptureIssue["stage"], frameId?: string) =>
     issues.push({ target: batch.target, frameId, stage, reason: "capture-unavailable" });
   let firstFailure: unknown;
-  const axReady = new Set<TargetBatch<T>>();
   const stopped = new Set<TargetBatch<T>>();
   const isolateChildTimeout = (error: unknown, batch: TargetBatch<T>): boolean => {
     if (
@@ -203,6 +291,7 @@ export async function captureObservationFacts<T extends FrameOwnedAxNode>(
         for (const frame of batch.frames)
           if (!present.has(frame.frameId)) unavailable(batch, "dom", frame.frameId);
       } catch (error) {
+        forgetPendingAccessibility(axEnabled, error);
         throwCaptureAborted(signal);
         if (isolateChildTimeout(error, batch)) return;
         if (isCaptureAbort(error)) throw error;
@@ -223,6 +312,7 @@ export async function captureObservationFacts<T extends FrameOwnedAxNode>(
         throwCaptureAborted(signal);
         await scoped.send(tabId, "Accessibility.enable", {});
       } catch (error) {
+        forgetPendingAccessibility(axEnabled, error);
         throwCaptureAborted(signal);
         if (isolateChildTimeout(error, batch)) return;
         if (isCaptureAbort(error)) throw error;
@@ -230,7 +320,7 @@ export async function captureObservationFacts<T extends FrameOwnedAxNode>(
         unavailable(batch, "ax");
         return;
       }
-      axReady.add(batch);
+      axEnabled.set(batch.target, cdp.getAttachmentId?.(tabId));
     },
     signal,
   );
@@ -239,7 +329,7 @@ export async function captureObservationFacts<T extends FrameOwnedAxNode>(
   // Keep result slots in source order even when CDP replies arrive out of order.
   const axTasks: { batch: TargetBatch<T>; frame: CdpFrame; result?: FrameAxBatch<T> }[] =
     batches.flatMap((batch) =>
-      axReady.has(batch) ? batch.frames.map((frame) => ({ batch, frame })) : [],
+      axEnabled.has(batch.target) ? batch.frames.map((frame) => ({ batch, frame })) : [],
     );
   await collectTasks(
     axTasks,
@@ -256,6 +346,8 @@ export async function captureObservationFacts<T extends FrameOwnedAxNode>(
         throwCaptureAborted(signal);
         task.result = { frame, nodes: result.nodes ?? [] };
       } catch (error) {
+        forgetPendingAccessibility(axEnabled, error);
+        // Chrome may still be running this read; queue no cleanup behind it.
         throwCaptureAborted(signal);
         if (isolateChildTimeout(error, batch)) return;
         if (isCaptureAbort(error)) throw error;
@@ -333,6 +425,7 @@ export async function captureObservationFacts<T extends FrameOwnedAxNode>(
         try {
           verified = await verifyDocumentIdentity(cdp, identity, signal);
         } catch (error) {
+          forgetPendingAccessibility(axEnabled, error);
           throwCaptureAborted(signal);
           if (!isolateChildTimeout(error, batch)) throw error;
           for (const id of unavailableFrameIds) invalid.add(id);
@@ -361,6 +454,7 @@ export async function captureObservationFacts<T extends FrameOwnedAxNode>(
       const measured = cssViewport(await geometry.layoutMetrics({ tabId }));
       viewport = { width: measured.width, height: measured.height };
     } catch (error) {
+      forgetPendingAccessibility(axEnabled, error);
       throwCaptureAborted(signal);
       if (error instanceof CdpReadTimeoutError) layoutTimedOut = true;
       else if (isCaptureAbort(error)) throw error;
@@ -393,6 +487,7 @@ export async function captureObservationFacts<T extends FrameOwnedAxNode>(
               profile,
             );
           } catch (error) {
+            forgetPendingAccessibility(axEnabled, error);
             throwCaptureAborted(signal);
             if (!isolateChildTimeout(error, batch)) throw error;
           }
@@ -447,7 +542,7 @@ export async function captureObservationFacts<T extends FrameOwnedAxNode>(
     throw new Error(
       ownershipInvalid.has(rootFrameId)
         ? "observation root document ownership is ambiguous"
-        : "observation document identity changed or could not be verified; observe again",
+        : OBSERVE_IDENTITY_CHANGED,
     );
   const frames = currentFrames.filter((frame) => !invalid.has(frame.frameId));
   const frameById = new Map(frames.map((frame) => [frame.frameId, frame]));

@@ -153,12 +153,19 @@ export async function handleEvaluate(
   const dialogCursor = markDialogCursor(deps.cdp, target.tabId);
   deps.cdp.trackSessionTab?.(ctx.sessionId, target.tabId);
   try {
+    await deps.cdp.beginDomMutation?.();
     const reply = await deps.cdp.send<RuntimeEvaluateReply>(target.tabId, "Runtime.evaluate", {
       expression: params.expression,
       awaitPromise: params.await_promise ?? true,
       returnByValue: params.return_by_value ?? true,
       throwOnSideEffect: false,
     });
+    if (deps.signal?.aborted)
+      return {
+        code: "cancelled",
+        message: "evaluate cancelled after dispatch; page effects may have occurred",
+        data: { effect_state: "unknown" },
+      };
     if (reply.exceptionDetails) {
       return attachDialogs(deps.cdp, target.tabId, dialogCursor, {
         ok: false,

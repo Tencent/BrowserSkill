@@ -6,6 +6,7 @@
  */
 
 import { type ChildProcess, type SpawnOptionsWithoutStdio, spawn } from "node:child_process";
+import { StringDecoder } from "node:string_decoder";
 
 /** Shape of the JSON error envelope `bsk --json` prints on failure. */
 export interface BskErrorBody {
@@ -22,10 +23,17 @@ export class BskError extends Error {
   readonly hint?: string;
   readonly exitCode?: number | null;
   readonly timedOut: boolean;
+  readonly data?: unknown;
 
   constructor(
     message: string,
-    options: { code?: string; hint?: string; exitCode?: number | null; timedOut?: boolean } = {},
+    options: {
+      code?: string;
+      hint?: string;
+      exitCode?: number | null;
+      timedOut?: boolean;
+      data?: unknown;
+    } = {},
   ) {
     super(message);
     this.name = "BskError";
@@ -33,6 +41,7 @@ export class BskError extends Error {
     this.hint = options.hint;
     this.exitCode = options.exitCode;
     this.timedOut = options.timedOut ?? false;
+    this.data = options.data;
   }
 }
 
@@ -71,13 +80,13 @@ export interface BskRunner {
 
 // Business RPCs translate Ctrl-C / opt-in stdin EOF into cancel(rpc_id).
 // Allow reconciliation before hard-killing an old or unresponsive CLI.
-const KILL_GRACE_MS = 3000;
+export const KILL_GRACE_MS = 3000;
 // Windows IPC may spend 5s connecting, 2s cancelling, 2s settling,
 // and up to 5s releasing the entire batch of caller-owned transfers.
-const WINDOWS_KILL_GRACE_MS = 15_000;
+export const WINDOWS_KILL_GRACE_MS = 15_000;
 // A killed child that never reports `exit` at all must still release the caller
 // once the forced kill has had its chance.
-const SETTLE_AFTER_KILL_SLACK_MS = 1000;
+export const SETTLE_AFTER_KILL_SLACK_MS = 1000;
 // `close` fires only once every stdio pipe has reached EOF, which needs every
 // process holding a copy of the pipe handles to be gone, not just `bsk`. When
 // `bsk` auto-spawns the daemon, the daemon can end up holding those handles
@@ -154,14 +163,16 @@ export function createBskRunner(bskPath: string, spawnImpl: SpawnImpl = spawn): 
 
         let stdout = "";
         let stderr = "";
+        const stdoutDecoder = new StringDecoder("utf8");
+        const stderrDecoder = new StringDecoder("utf8");
         let timedOut = false;
         let aborted = false;
         const onStdout = (chunk: Buffer | string) => {
-          stdout += chunk;
+          stdout += stdoutDecoder.write(typeof chunk === "string" ? Buffer.from(chunk) : chunk);
           extendDrain();
         };
         const onStderr = (chunk: Buffer | string) => {
-          stderr += chunk;
+          stderr += stderrDecoder.write(typeof chunk === "string" ? Buffer.from(chunk) : chunk);
           extendDrain();
         };
         child.stdout?.on("data", onStdout);
@@ -187,6 +198,8 @@ export function createBskRunner(bskPath: string, spawnImpl: SpawnImpl = spawn): 
         const finish = (code: number | null) => {
           if (settled) return;
           settled = true;
+          stdout += stdoutDecoder.end();
+          stderr += stderrDecoder.end();
           settle();
           release();
           resolve({ code, stdout, stderr, timedOut, aborted });
@@ -365,7 +378,39 @@ export function bskInstallMessage(bskPath: string): string {
   return (
     `the bsk CLI ("${bskPath}") was not found. BrowserSkill must be installed and on PATH ` +
     "for browser tools to work — install it from https://github.com/Tencent/BrowserSkill " +
-    "(see the README install script or `cargo install`), then retry."
+    "(see the README install script or `cargo install`), then retry. " +
+    `If bsk is installed at a custom location, set the plugin's \`bskPath\` option ` +
+    `(currently "${bskPath}") instead of relying on PATH.`
+  );
+}
+
+/**
+ * Options for interpreting a finished `bsk` run.
+ *
+ * `allowNavigationTimeout`: when the CLI prints a success-shaped navigation
+ * payload with `reached: "timeout"` and then exits 4 (RenderedExit), return
+ * that payload instead of throwing. Exit 4 alone is not enough — session-busy
+ * and other failures also use 4 — so the payload must explicitly say
+ * `reached: "timeout"`.
+ */
+export interface ParseBskJsonOptions {
+  allowNavigationTimeout?: boolean;
+}
+
+/**
+ * True when stdout is a navigation/history payload whose lifecycle wait
+ * expired (`reached: "timeout"`). Used to distinguish that soft timeout from
+ * other exit-4 failures (e.g. session_busy).
+ */
+export function isNavigationLifecycleTimeoutPayload(value: unknown): value is {
+  reached: "timeout";
+  [key: string]: unknown;
+} {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    !Array.isArray(value) &&
+    (value as { reached?: unknown }).reached === "timeout"
   );
 }
 
@@ -374,7 +419,11 @@ export function bskInstallMessage(bskPath: string): string {
  * (parsing the CLI's JSON error envelope when present), otherwise parse and
  * return the stdout JSON payload.
  */
-export function parseBskJson(result: BskRunResult, commandLabel: string): unknown {
+export function parseBskJson(
+  result: BskRunResult,
+  commandLabel: string,
+  options: ParseBskJsonOptions = {},
+): unknown {
   if (result.timedOut) {
     throw new BskError(`bsk ${commandLabel} timed out`, { timedOut: true });
   }
@@ -385,6 +434,20 @@ export function parseBskJson(result: BskRunResult, commandLabel: string): unknow
     throw new BskError(`bsk ${commandLabel} was interrupted (process killed)`);
   }
   if (result.code !== 0) {
+    // Navigate / back / forward / reload print the success-shaped body then
+    // exit 4 on lifecycle wait expiry. Callers that opt in (combined session
+    // start-with-URL) can keep the session and surface the timeout instead of
+    // treating it as a hard failure.
+    if (options.allowNavigationTimeout === true && result.code === 4) {
+      try {
+        const payload: unknown = JSON.parse(body);
+        if (isNavigationLifecycleTimeoutPayload(payload)) {
+          return payload;
+        }
+      } catch {
+        // Fall through to the normal error path.
+      }
+    }
     let parsed: BskErrorBody | undefined;
     try {
       parsed = JSON.parse(body) as BskErrorBody;
@@ -395,9 +458,12 @@ export function parseBskJson(result: BskRunResult, commandLabel: string): unknow
       parsed?.message ?? (result.stderr.trim() || body || `bsk ${commandLabel} failed`);
     // Surface the envelope's actionable hint in the model-facing message; a
     // hint the model cannot see cannot be followed.
-    const withHint = parsed?.hint !== undefined ? `${message} (hint: ${parsed.hint})` : message;
+    let withHint = parsed?.hint !== undefined ? `${message} (hint: ${parsed.hint})` : message;
+    if (parsed?.code === "dialog_pending" && parsed.data !== undefined)
+      withHint += `\nPending dialog and original operation: ${JSON.stringify(parsed.data)}`;
     throw new BskError(`bsk ${commandLabel} failed: ${withHint}`, {
       code: parsed?.code,
+      data: parsed?.data,
       hint: parsed?.hint,
       exitCode: result.code,
     });

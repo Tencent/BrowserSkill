@@ -1,4 +1,5 @@
 import { coverage, detectBlockingLayer, spansViewport } from "./layers";
+import { estimateLineTokens, estimateTokens } from "./tokens";
 import type {
   ActiveScopeBlock,
   BlockingLayer,
@@ -122,10 +123,6 @@ const WEAK_ACTION_LABELS = new Set([
 
 const ACTIVE_REGION_POSITIONS = new Set(["fixed", "absolute", "sticky"]);
 
-function estimateTokens(text: string): number {
-  return Math.ceil(text.length / 4);
-}
-
 function cleaned(value: string | undefined): string | undefined {
   const trimmed = value?.replace(/\s+/g, " ").trim();
   return trimmed ? trimmed : undefined;
@@ -210,6 +207,7 @@ export function isVomReferenceNode(node: VomNode): boolean {
 }
 
 function hasRecoveryHandler(node: VomNode): boolean {
+  if (node.clickable) return true;
   const attrs = node.attrs ?? {};
   return RECOVERY_HANDLER_ATTRS.some((key) => Object.prototype.hasOwnProperty.call(attrs, key));
 }
@@ -223,7 +221,9 @@ function isFocusable(node: VomNode): boolean {
 
 function isContentEditable(node: VomNode): boolean {
   const contentEditable = node.attrs?.contenteditable?.toLowerCase();
-  return contentEditable === "true" || contentEditable === "plaintext-only";
+  return (
+    contentEditable === "" || contentEditable === "true" || contentEditable === "plaintext-only"
+  );
 }
 
 const ICON_REFERENCE_MARKERS = new Set(["glyph", "icon", "icons", "symbol"]);
@@ -977,7 +977,7 @@ function renderNodes(
   const state = createRenderState(nodes, options, initialLines, surfaces, activeScopeBlocks);
   const children = state.children;
   for (const row of renderTreeRows(children, state)) {
-    const cost = estimateTokens(row.text);
+    const cost = estimateLineTokens(row.text);
     if (state.tokens + cost > state.maxTokens) {
       state.truncated = true;
       break;

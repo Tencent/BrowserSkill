@@ -30,16 +30,16 @@ describe("registerBskSkill", () => {
     const skill = registrations[0].skill;
     expect(skill.name).toBe("browser-skill");
     expect(typeof skill.description).toBe("string");
-    expect(String(skill.description)).toContain("browser_*");
+    expect(String(skill.description)).toContain("bsk_*");
     const content = String(skill.content);
-    const mentionedTools = [...new Set(content.match(/\bbrowser_[a-z][a-z_]*\b/g) ?? [])].sort();
+    const mentionedTools = [...new Set(content.match(/\bbsk_[a-z][a-z_]*\b/g) ?? [])].sort();
     expect(mentionedTools).toEqual([
-      "browser_assist",
-      "browser_inspect",
-      "browser_interact",
-      "browser_page",
-      "browser_session",
-      "browser_tabs",
+      "bsk_assist",
+      "bsk_inspect",
+      "bsk_interact",
+      "bsk_page",
+      "bsk_session",
+      "bsk_tabs",
     ]);
     expect(String(skill.description)).not.toMatch(/\bbsk\b/i);
     expect(content).not.toMatch(/\bbsk\b/i);
@@ -48,7 +48,7 @@ describe("registerBskSkill", () => {
     expect(content).toMatch(/All browser work\s+must use the injected tools directly/);
     expect(content).toContain("Mandatory workflow");
     expect(content).toContain("Refs invalidate after navigation");
-    expect(content).toContain("evaluation and interaction recording are intentionally unsupported");
+    expect(content).toContain("Interaction recording is not exposed");
     // Keep the lazily injected instructions inside a bounded prompt budget,
     // while the lower bound catches accidental truncation of the guidance.
     expect(content.length).toBeGreaterThan(3_000);
@@ -58,11 +58,14 @@ describe("registerBskSkill", () => {
     expect(isAbsolute(base.path)).toBe(true);
     const references = [...content.matchAll(/\]\((references\/[^)]+)\)/g)].map((match) => match[1]);
     expect([...new Set(references)].sort()).toEqual([
+      "references/cooperation.md",
       "references/debugging.md",
       "references/help-and-recovery.md",
       "references/interaction-details.md",
+      "references/native-dialogs.md",
       "references/screenshots-and-canvas.md",
       "references/tabs-and-profiles.md",
+      "references/video.md",
     ]);
     for (const path of references) {
       const reference = readFileSync(join(base.path, path), "utf8");
@@ -70,7 +73,7 @@ describe("registerBskSkill", () => {
       expect(content).not.toContain(reference.trim());
     }
     expect(readFileSync(join(base.path, "references/tabs-and-profiles.md"), "utf8")).toContain(
-      'browser_session({ action: "start", browser: "<verified-instance-id>" })',
+      'bsk_session({ action: "start", browser: "<verified-instance-id>" })',
     );
     expect(content).toMatch(/Never omit\s+`browser` or substitute another instance/);
     expect(content).toContain("[visual:screenshot]");

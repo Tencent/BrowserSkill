@@ -40,7 +40,7 @@ pub struct SessionCmd {
 
 #[derive(Debug, Clone, Subcommand)]
 pub enum SessionSub {
-    /// Start a new session against the (single) connected browser.
+    /// Start a browser session with automatic human collaboration.
     Start(SessionStartArgs),
     /// Stop a single session, or all sessions with `--all`.
     Stop(SessionStopArgs),
@@ -66,6 +66,10 @@ pub struct SessionStartArgs {
     #[arg(long)]
     pub browser: Option<String>,
 
+    /// Open an incognito Agent Window (requires the extension's Allow in incognito setting).
+    #[arg(long)]
+    pub incognito: bool,
+
     /// Agent Window outer width in CSS pixels (100..=7680). Both
     /// `--width` and `--height` must be given to take effect.
     #[arg(long, value_parser = window_size)]
@@ -76,9 +80,13 @@ pub struct SessionStartArgs {
     #[arg(long, value_parser = window_size)]
     pub height: Option<u32>,
 
-    /// Open the Agent Window in the background without stealing focus.
-    #[arg(long)]
+    /// Keep the Agent Window in the background (the default).
+    #[arg(long, conflicts_with = "focus")]
     pub no_focus: bool,
+
+    /// Bring the new Agent Window to the foreground.
+    #[arg(long)]
+    pub focus: bool,
 }
 
 /// Parse a `--width` / `--height` Agent Window dimension (CSS pixels).
@@ -119,6 +127,8 @@ pub struct SessionRequestArgs {
 
 #[derive(Debug, Serialize)]
 struct StartParams {
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    incognito: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     request_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -239,12 +249,13 @@ fn run_start(sock: PathBuf, args: SessionStartArgs, format: Format) -> Result<()
     let result = start_session(
         sock,
         SessionStartOptions {
+            incognito: args.incognito,
             name: args.name,
             request_id: args.request_id,
             browser: args.browser,
             width: args.width,
             height: args.height,
-            focused: args.no_focus.then_some(false),
+            focused: Some(args.focus),
         },
     );
     waited.store(true, Ordering::SeqCst);
@@ -273,9 +284,10 @@ fn run_start(sock: PathBuf, args: SessionStartArgs, format: Format) -> Result<()
 
 /// Options for [`start_session`]: browser selection plus Agent Window
 /// creation hints. `None` fields keep the extension-side defaults
-/// (focused window, browser-chosen size).
+/// (background window, browser-chosen size).
 #[derive(Debug, Default, Clone)]
 pub struct SessionStartOptions {
+    pub incognito: bool,
     pub request_id: Option<String>,
     pub name: Option<String>,
     pub browser: Option<String>,
@@ -286,6 +298,14 @@ pub struct SessionStartOptions {
 
 /// Start a session and open the Agent Window. Used by `session start` and `record start`.
 pub fn start_session(sock: PathBuf, opts: SessionStartOptions) -> Result<StartReply, CliError> {
+    if opts.incognito {
+        crate::cli::protocol::require_daemon_support(
+            &sock,
+            "session start --incognito",
+            bsk_protocol::tools::INCOGNITO_SESSION_PROTOCOL,
+            bsk_protocol::tools::supports_incognito_sessions,
+        )?;
+    }
     call(
         sock,
         if opts.request_id.is_some() {
@@ -294,12 +314,13 @@ pub fn start_session(sock: PathBuf, opts: SessionStartOptions) -> Result<StartRe
             Method::SessionStart
         },
         Some(StartParams {
+            incognito: opts.incognito,
             request_id: opts.request_id,
             task_name: opts.name,
             browser_instance_id: opts.browser,
             width: opts.width,
             height: opts.height,
-            focused: opts.focused,
+            focused: Some(opts.focused.unwrap_or(false)),
         }),
         SESSION_START_IPC_TIMEOUT,
     )
@@ -392,6 +413,30 @@ impl RenderExtras for StartExtras<'_> {
                     writeln!(out, "  - {id}")?;
                 }
                 Ok(())
+            }
+            ErrorCode::NotFound => {
+                // Same table as `multiple_browsers_online`, but for a
+                // selector that matched nothing. Absent / empty
+                // `browsers` data (an older daemon, or a miss against an
+                // empty registry) renders nothing, so unrelated
+                // `not_found` errors keep their current output.
+                let browsers = parse_browsers_data(data.as_ref());
+                if browsers.is_empty() {
+                    return Ok(());
+                }
+                writeln!(
+                    out,
+                    "no online browser matches the requested selector; connected browsers:"
+                )?;
+                write_browser_table(out, &browsers)?;
+                // The table answers "what is connected", not "what did you
+                // mean": a mistyped selector and an offline browser look
+                // identical here, so name the question it cannot answer
+                // rather than let the caller switch instances by accident.
+                writeln!(
+                    out,
+                    "the list shows what is connected now; it cannot tell a mistyped selector from an offline browser, so check or reconnect the intended browser before starting on another instance"
+                )
             }
             _ => Ok(()),
         }
@@ -628,9 +673,28 @@ mod start_params_tests {
     use super::*;
 
     #[test]
+    fn incognito_flag_is_opt_in() {
+        use clap::Parser;
+        for (flags, expected) in [
+            (vec!["bsk", "session", "start"], false),
+            (vec!["bsk", "session", "start", "--incognito"], true),
+        ] {
+            let cli = crate::cli::Cli::try_parse_from(flags).unwrap();
+            let crate::cli::Command::Session(SessionCmd {
+                sub: SessionSub::Start(args),
+            }) = cli.command
+            else {
+                panic!("expected session start")
+            };
+            assert_eq!(args.incognito, expected);
+        }
+    }
+
+    #[test]
     fn start_params_send_task_name_without_policy_overrides() {
         for task_name in [None, Some("Check settings".to_string())] {
             let params = StartParams {
+                incognito: false,
                 request_id: None,
                 task_name: task_name.clone(),
                 browser_instance_id: None,
@@ -765,6 +829,89 @@ mod i3_tests {
         assert!(!stderr.contains("connected browsers:"));
         assert!(!stderr.contains("matches multiple online browsers"));
         assert!(stderr.contains("hint:"));
+        assert!(stderr.contains("details: requested browser is not connected"));
+    }
+
+    /// A selector that matches nothing renders the connected-browser
+    /// table, so the user (or agent) can pick a real instance id or
+    /// label in one round trip instead of cycling through every
+    /// connected browser until one starts.
+    #[test]
+    fn selector_miss_extras_render_candidate_table() {
+        let data = serde_json::json!({
+            "browsers": [
+                {
+                    "instance_id": "alpha",
+                    "browser_name": "chrome",
+                    "browser_version": "131",
+                    "extension_version": "0.1.0-dev.0",
+                    "label": "Personal",
+                    "session_count": 0_u32,
+                    "connected_at_ms": 1_i64,
+                    "version_skew": false,
+                },
+                {
+                    "instance_id": "beta",
+                    "browser_name": "edge",
+                    "browser_version": "130",
+                    "extension_version": "0.1.0-dev.0",
+                    "label": "",
+                    "session_count": 1_u32,
+                    "connected_at_ms": 2_i64,
+                    "version_skew": false,
+                },
+            ]
+        });
+        let cli = CliError::from_rpc(RpcError {
+            code: ErrorCode::NotFound,
+            message: "requested browser is not connected".into(),
+            data: Some(data),
+        });
+        let extras = StartExtras::new(&cli);
+        let stderr = render_human_to_string(&cli, Some(&extras));
+        assert!(stderr.contains("error: requested resource does not exist"));
+        assert!(
+            stderr.contains("no online browser matches the requested selector"),
+            "extras must explain the miss: {stderr}"
+        );
+        assert!(stderr.contains("INSTANCE"));
+        assert!(stderr.contains("alpha"));
+        assert!(stderr.contains("beta"));
+        assert!(stderr.contains("Personal"));
+        // The table must not read as "pick another instance": it cannot
+        // distinguish a mistyped selector from an offline browser.
+        assert!(
+            stderr.contains("cannot tell a mistyped selector from an offline browser"),
+            "extras must state what the list cannot tell: {stderr}"
+        );
+        // Ordering contract unchanged: summary → extras → hint.
+        let summary_idx = stderr.find("error:").expect("summary line missing");
+        let table_idx = stderr
+            .find("connected browsers:")
+            .expect("candidate table missing");
+        let caveat_idx = stderr
+            .find("cannot tell a mistyped selector")
+            .expect("scope caveat missing");
+        let hint_idx = stderr.find("hint:").expect("hint line missing");
+        assert!(
+            summary_idx < table_idx && table_idx < caveat_idx && caveat_idx < hint_idx,
+            "stderr order must be summary → table → caveat → hint, got:\n{stderr}"
+        );
+        assert!(stderr.contains("details: requested browser is not connected"));
+    }
+
+    /// An empty candidate list (miss against an empty registry) renders
+    /// no extras, so the change is additive for existing output.
+    #[test]
+    fn selector_miss_with_empty_candidates_renders_no_extras() {
+        let cli = CliError::from_rpc(RpcError {
+            code: ErrorCode::NotFound,
+            message: "requested browser is not connected".into(),
+            data: Some(serde_json::json!({ "browsers": [] })),
+        });
+        let extras = StartExtras::new(&cli);
+        let stderr = render_human_to_string(&cli, Some(&extras));
+        assert!(!stderr.contains("connected browsers:"));
         assert!(stderr.contains("details: requested browser is not connected"));
     }
 }

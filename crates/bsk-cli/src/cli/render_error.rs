@@ -17,7 +17,8 @@
 //!   * `2` — protocol or transport error (incl. `cancelled`),
 //!   * `3` — browser / CDP failure,
 //!   * `4` — timeout,
-//!   * `5` — version mismatch.
+//!   * `5` — version mismatch,
+//!   * `6` — pending dialog; decide explicitly, then retrieve the original result.
 //!
 //! Strings are in English: the CLI is consumed by agents and other
 //! automated tooling, so all user-facing copy uses English. Command
@@ -57,6 +58,7 @@ pub mod reason {
     pub const TAB_NOT_ACTIVE: &str = "tab_not_active";
     pub const CDP_EXTENSION_ACCESS_DENIED: &str = "cdp_extension_access_denied";
     pub const BORROW_CONFLICT: &str = "borrow_conflict";
+    pub const INCOGNITO_BORROW_DISABLED: &str = "incognito_borrow_disabled";
     pub const SCREENSHOT_CAPTURE_FAILED: &str = "screenshot_capture_failed";
     pub const SCREENSHOT_USER_CANCELLED: &str = "user_cancelled";
     pub const SCREENSHOT_PAGE_HIDDEN: &str = "page_hidden";
@@ -71,9 +73,15 @@ pub mod reason {
     pub const FILE_DROP_TARGET_UNAVAILABLE: &str = "file_drop_target_unavailable";
     pub const FILE_DROP_FAILED: &str = "file_drop_failed";
     pub const DOWNLOAD_CAPTURE_FAILED: &str = "download_capture_failed";
+    pub const DOWNLOAD_PATH_MISMATCH: &str = "download_path_mismatch";
     pub const TRANSFER_OUTCOME_UNKNOWN: &str = "transfer_outcome_unknown";
     pub const TRANSFER_TIMEOUT: &str = "transfer_timeout";
     pub const SESSION_BUSY: &str = crate::rpc_reason::SESSION_BUSY;
+    pub const SESSION_IDLE_TIMEOUT: &str = crate::rpc_reason::SESSION_IDLE_TIMEOUT;
+    pub const SESSION_WINDOW_CLOSED: &str = crate::rpc_reason::SESSION_WINDOW_CLOSED;
+    pub const BROWSER_DISCONNECTED: &str = crate::rpc_reason::BROWSER_DISCONNECTED;
+    pub const OBSERVE_IDENTITY_RELOAD_LOOP: &str = crate::rpc_reason::OBSERVE_IDENTITY_RELOAD_LOOP;
+    pub const BORROW_AGENT_WINDOW_TAB: &str = crate::rpc_reason::BORROW_AGENT_WINDOW_TAB;
     pub const RECORD_START_PAGE_UNREACHABLE: &str = "record_start_page_unreachable";
 }
 
@@ -90,6 +98,13 @@ pub struct RenderInfo {
 /// Look up the rendering info for a given error code.
 pub fn info_for(code: ErrorCode) -> RenderInfo {
     match code {
+        ErrorCode::DialogPending => RenderInfo {
+            summary: "operation is waiting for an agent dialog decision",
+            hint: Some(
+                "inspect `bsk dialog status --session <id> --json`; decide with dialog accept/dismiss, then retrieve the ORIGINAL result with `bsk operation await <operation-id> --session <id> --json`. Do not repeat the original action.",
+            ),
+            exit_code: 6,
+        },
         ErrorCode::UnknownMethod => RenderInfo {
             summary: "daemon does not recognise this RPC method",
             hint: Some(
@@ -266,6 +281,55 @@ pub fn info_for_error(code: ErrorCode, data: Option<&serde_json::Value>) -> Rend
             ),
             ..base
         },
+        (ErrorCode::CdpFailed, reason::OBSERVE_IDENTITY_RELOAD_LOOP) => RenderInfo {
+            summary: "the page kept losing observation identity — the site is likely reloading itself while the debugger is attached (anti-debugging)",
+            hint: Some(
+                "do not observe again and do not reload this tab; the site rejects the debugger attach itself (see GitHub issues #454 and #465); continue on another page or hand the task back to the user",
+            ),
+            exit_code: base.exit_code,
+        },
+        (ErrorCode::InvalidParams, reason::BORROW_AGENT_WINDOW_TAB) => RenderInfo {
+            summary: "the borrow target already lives inside an Agent Window",
+            hint: Some(
+                "a tab the session did not open needs a user move to a user window first; a tab this session opened is already controlled and needs no borrow",
+            ),
+            exit_code: base.exit_code,
+        },
+        (ErrorCode::NotFound, reason::SESSION_IDLE_TIMEOUT) => RenderInfo {
+            summary: "the session stopped after its idle timeout",
+            hint: Some(
+                "start a new session with `bsk session start`; run the daemon with a larger `--session-idle` (default 5m) for longer tasks; the Agent Window and any tab it opened were closed with the session",
+            ),
+            exit_code: base.exit_code,
+        },
+        (ErrorCode::NotFound, reason::SESSION_WINDOW_CLOSED) => RenderInfo {
+            summary: "the session ended because the user closed the Agent Window",
+            hint: Some(
+                "start a new session; closing the Agent Window ends the session, while the window's stop button only cancels the running action",
+            ),
+            exit_code: base.exit_code,
+        },
+        (ErrorCode::NotFound, reason::BROWSER_DISCONNECTED) => RenderInfo {
+            summary: "the browser was disconnected from the daemon",
+            hint: Some(
+                "wait for the extension to reconnect, then start a new session; the session and its Agent Window are gone",
+            ),
+            exit_code: base.exit_code,
+        },
+        (_, "cooperation_sync_required") => RenderInfo {
+            summary: "shared page control or observation changed",
+            hint: Some(
+                "use `bsk cooperate wait --session SID`, then `bsk cooperate sync --session SID`; replan toward the assigned goal and check existing effects before another action",
+            ),
+            ..base
+        },
+        (_, "control_authority_required") => RenderInfo {
+            summary: "the agent does not currently have control",
+            hint: Some(
+                "wait for the user to return control, then inspect the current operation or dialog before deciding again; status and cancellation remain available; do not replay the original action",
+            ),
+            ..base
+        },
         (_, "input_cleanup_failed") => RenderInfo {
             summary: "input completed but temporary browser state could not be restored",
             hint: Some(
@@ -336,6 +400,11 @@ pub fn info_for_error(code: ErrorCode, data: Option<&serde_json::Value>) -> Rend
             ),
             exit_code: base.exit_code,
         },
+        (ErrorCode::PermissionDenied, reason::INCOGNITO_BORROW_DISABLED) => RenderInfo {
+            summary: "tab borrowing is unavailable for incognito sessions and tabs",
+            hint: Some("create a new task tab with `bsk tab create <url> --session <id>`"),
+            exit_code: base.exit_code,
+        },
         (ErrorCode::PermissionDenied, reason::BORROW_CONFLICT) => RenderInfo {
             summary: "tab is borrowed by another session",
             hint: Some(
@@ -391,7 +460,7 @@ pub fn info_for_error(code: ErrorCode, data: Option<&serde_json::Value>) -> Rend
         (ErrorCode::InvalidParams, reason::TARGET_NOT_FILLABLE) => RenderInfo {
             summary: "target element is not fillable",
             hint: Some(
-                "observe the page and choose an enabled, editable text input, textarea, or contenteditable; use the appropriate interaction for other control types",
+                "observe the page and choose an enabled, editable text input, textarea, or contenteditable editor root; internal paragraphs and spans are not fill targets",
             ),
             exit_code: base.exit_code,
         },
@@ -567,6 +636,13 @@ pub fn info_for_error(code: ErrorCode, data: Option<&serde_json::Value>) -> Rend
             summary: "the browser download could not be attributed or completed",
             hint: Some(
                 "do not retry blindly; the target browser may not expose a reliable download intent signal",
+            ),
+            exit_code: base.exit_code,
+        },
+        (ErrorCode::CdpFailed, reason::DOWNLOAD_PATH_MISMATCH) => RenderInfo {
+            summary: "the browser did not use the requested download directory",
+            hint: Some(
+                "find the saved file in the browser's Downloads list; check for a competing rename, a browser-rejected filename, or a different save location before retrying",
             ),
             exit_code: base.exit_code,
         },
@@ -772,6 +848,17 @@ mod tests {
     }
 
     #[test]
+    fn control_authority_denial_does_not_request_a_blocked_renderer_sync() {
+        let data = serde_json::json!({ "reason": "control_authority_required" });
+        let info = info_for_error(ErrorCode::PermissionDenied, Some(&data));
+        assert_eq!(info.exit_code, 1);
+        let hint = info.hint.unwrap();
+        assert!(hint.contains("return control"));
+        assert!(hint.contains("do not replay"));
+        assert!(!hint.contains("cooperate sync"));
+    }
+
+    #[test]
     fn full_page_recovery_distinguishes_stalled_loading_from_user_input() {
         let stalled = serde_json::json!({ "reason": reason::SCREENSHOT_LOADING_STALLED });
         let info = info_for_error(ErrorCode::Timeout, Some(&stalled));
@@ -837,6 +924,15 @@ mod tests {
         let download = serde_json::json!({ "reason": reason::DOWNLOAD_CAPTURE_FAILED });
         let info = info_for_error(ErrorCode::CdpFailed, Some(&download));
         assert!(info.summary.contains("download could not be attributed"));
+
+        let path_mismatch = serde_json::json!({
+            "reason": reason::DOWNLOAD_PATH_MISMATCH,
+            "effect_state": "committed",
+            "phase": "download"
+        });
+        let info = info_for_error(ErrorCode::CdpFailed, Some(&path_mismatch));
+        assert!(info.summary.contains("requested download directory"));
+        assert!(info.hint.unwrap().contains("browser-rejected filename"));
 
         let unknown = serde_json::json!({ "reason": reason::TRANSFER_OUTCOME_UNKNOWN });
         let info = info_for_error(ErrorCode::ProtocolError, Some(&unknown));
@@ -991,5 +1087,60 @@ mod tests {
         assert_eq!(disconnected.summary, "extension disconnected");
         assert_eq!(disconnected.exit_code, 2);
         assert!(!disconnected.hint.unwrap().contains("protocol version"));
+    }
+
+    /// Issue #465: a dead session surfaces *why* it stopped instead of
+    /// a generic not-found, and the anti-debugging / borrow-target
+    /// reasons get non-retry copy instead of the `cdp_failed` /
+    /// `invalid_params` defaults.
+    #[test]
+    fn ended_sessions_and_recurring_failures_get_reasoned_copy() {
+        let idle = info_for_error(
+            ErrorCode::NotFound,
+            Some(&serde_json::json!({"reason": crate::rpc_reason::SESSION_IDLE_TIMEOUT})),
+        );
+        assert_eq!(idle.summary, "the session stopped after its idle timeout");
+        assert!(idle.hint.unwrap().contains("--session-idle"));
+        assert_eq!(idle.exit_code, info_for(ErrorCode::NotFound).exit_code);
+
+        let closed = info_for_error(
+            ErrorCode::NotFound,
+            Some(&serde_json::json!({"reason": crate::rpc_reason::SESSION_WINDOW_CLOSED})),
+        );
+        assert_eq!(
+            closed.summary,
+            "the session ended because the user closed the Agent Window"
+        );
+
+        let browser_gone = info_for_error(
+            ErrorCode::NotFound,
+            Some(&serde_json::json!({"reason": crate::rpc_reason::BROWSER_DISCONNECTED})),
+        );
+        assert_eq!(
+            browser_gone.summary,
+            "the browser was disconnected from the daemon"
+        );
+
+        let anti_debug = info_for_error(
+            ErrorCode::CdpFailed,
+            Some(&serde_json::json!({"reason": crate::rpc_reason::OBSERVE_IDENTITY_RELOAD_LOOP})),
+        );
+        assert!(anti_debug.summary.contains("anti-debugging"));
+        // The reporter explicitly asked that this failure must not
+        // propose reloading the tab; the hint forbids it instead.
+        let anti_debug_hint = anti_debug.hint.unwrap();
+        assert!(anti_debug_hint.contains("do not reload"));
+        assert!(anti_debug_hint.contains("hand the task back"));
+        assert_eq!(
+            anti_debug.exit_code,
+            info_for(ErrorCode::CdpFailed).exit_code
+        );
+
+        let borrow = info_for_error(
+            ErrorCode::InvalidParams,
+            Some(&serde_json::json!({"reason": crate::rpc_reason::BORROW_AGENT_WINDOW_TAB})),
+        );
+        assert!(borrow.summary.contains("Agent Window"));
+        assert!(borrow.hint.unwrap().contains("needs a user move"));
     }
 }

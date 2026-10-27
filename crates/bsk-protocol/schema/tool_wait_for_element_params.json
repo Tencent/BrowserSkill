@@ -1,0 +1,75 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "WaitForElementParams",
+  "type": "object",
+  "required": [
+    "session_id",
+    "state"
+  ],
+  "properties": {
+    "poll_ms": {
+      "description": "Polling interval, shortened near the deadline to allow a final probe. Defaults to 100ms; values outside 16..=2000ms are rejected.",
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint32",
+      "maximum": 2000.0,
+      "minimum": 16.0
+    },
+    "ref": {
+      "description": "Optional `@e<N>` ref from the latest snapshot or observe. Mutually exclusive with `selector`.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "selector": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "session_id": {
+      "type": "string"
+    },
+    "state": {
+      "description": "State to wait for.",
+      "allOf": [
+        {
+          "$ref": "#/definitions/ElementState"
+        }
+      ]
+    },
+    "tab_id": {
+      "description": "Target tab. Defaults to the Agent Window's active tab.",
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "int64"
+    },
+    "timeout_ms": {
+      "description": "Element inspection budget, including probes. Defaults to 10s (1..=300000ms).",
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint32",
+      "maximum": 300000.0,
+      "minimum": 1.0
+    }
+  },
+  "definitions": {
+    "ElementState": {
+      "description": "Which state the caller is waiting for.\n\n`Visible` / `Hidden` ask about **visibility**; `Attached` / `Detached` ask about **presence in the DOM**.\n\n`Hidden` is the opposite of `Visible`: absent or attached but not visible, including an element absent at the first probe. `Detached` requires absence. The result's `attached` field distinguishes removal from a hidden node. Invalid refs and inspection failures remain errors for every state.",
+      "type": "string",
+      "enum": [
+        "visible",
+        "hidden",
+        "attached",
+        "detached"
+      ]
+    }
+  }
+}

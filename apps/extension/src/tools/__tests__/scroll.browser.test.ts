@@ -2,10 +2,14 @@
 // Opt in with BSK_SCROLL_CHROME=/path/to/chrome. Uses an isolated browser/profile.
 import { describe, expect, it } from "vitest";
 import type { CdpFrame, CdpFrameGraph, CdpTarget } from "@/browser-driver/frame-graph";
+import { pointerTargetValidator } from "@/cooperation/pointer-target";
 import { SessionManager } from "@/session-manager/manager";
+import { resolveNodeGeometry } from "../frame-geometry";
 import type { ViewportRect } from "../geometry";
 import { handleScrollTo } from "../scroll";
 import type { CdpRunner } from "../shared";
+import { isRpcError } from "../shared";
+import { pointBelongsToTarget } from "../target-hit";
 
 type Send = <T = Record<string, unknown>>(
   method: string,
@@ -17,6 +21,7 @@ type Tree = { frame: { id: string; parentId?: string; name?: string }; childFram
 async function withBrowser(
   run: (h: Awaited<ReturnType<typeof harness>>) => Promise<void>,
   zoom = 1,
+  deviceScale = 1,
 ) {
   const { withChrome } = await import(
     new URL(
@@ -25,7 +30,7 @@ async function withBrowser(
     ).href
   );
   await withChrome(
-    { executable: process.env.BSK_SCROLL_CHROME, deviceScale: 1, zoom },
+    { executable: process.env.BSK_SCROLL_CHROME, deviceScale, zoom },
     async (send: Send) => run(await harness(send)),
   );
 }
@@ -115,6 +120,7 @@ async function harness(send: Send) {
     );
     await send("Runtime.releaseObject", { objectId: result.objectId }, sessionFor(frame.target));
     rememberRef(frame, node.backendNodeId);
+    return node.backendNodeId;
   };
   const scroll = (target: { selector: string } | { ref: string }, signal?: AbortSignal) =>
     handleScrollTo(
@@ -165,7 +171,7 @@ async function harness(send: Send) {
     cdp.getFrameGraph = async () => graph;
     return frames;
   };
-  return { send, rootSession, evaluate, ref, rememberRef, scroll, loadFrames, calls, after };
+  return { cdp, send, rootSession, evaluate, ref, rememberRef, scroll, loadFrames, calls, after };
 }
 
 function intersection(a: ViewportRect, b: ViewportRect): ViewportRect | null {
@@ -183,6 +189,27 @@ function expectRect(actual: unknown, expected: ViewportRect) {
 }
 
 describe.skipIf(!process.env.BSK_SCROLL_CHROME)("real browser scroll-to", () => {
+  it("measures scroll visibility in a background task without activating it", async () => {
+    await withBrowser(async (h) => {
+      await h.evaluate(
+        "document.body.innerHTML='<div style=height:2200px></div><button id=target>Target</button>'",
+      );
+      const { targetId } = await h.send<{ targetId: string }>("Target.createTarget", {
+        url: "about:blank",
+      });
+      await h.send("Target.activateTarget", { targetId });
+      try {
+        expect(await h.evaluate("document.visibilityState")).toBe("hidden");
+        const result = await h.scroll({ selector: "#target" });
+        expect(result).not.toHaveProperty("code");
+        expect(await h.evaluate("document.visibilityState")).toBe("hidden");
+        expect(await h.evaluate("window.scrollY")).toBeGreaterThan(0);
+      } finally {
+        await h.send("Target.closeTarget", { targetId });
+      }
+    });
+  });
+
   it("scrolls ordinary elements and reports the clipped portion of nested scrollers", async () => {
     await withBrowser(async (h) => {
       for (const html of [
@@ -297,8 +324,31 @@ describe.skipIf(!process.env.BSK_SCROLL_CHROME)("real browser scroll-to", () => 
         const frames = await h.loadFrames();
         expect(frames.length).toBe(fixture === "snapshot-coordinates" ? 5 : 3);
         for (const frame of frames) {
-          await h.ref(frame);
+          const backendNodeId = await h.ref(frame);
           const result = await h.scroll({ ref: "e1" });
+          const geometry = await resolveNodeGeometry(h.cdp, 4, {
+            target: frame.target,
+            backendNodeId,
+            frameId: frame.frameId,
+          });
+          expect(isRpcError(geometry)).toBe(false);
+          if (isRpcError(geometry)) throw new Error(geometry.message);
+          await pointerTargetValidator(h.cdp)(
+            { tabId: 4, cdpTarget: frame.target, backendNodeId, frameId: frame.frameId },
+            geometry.actionPoint,
+          );
+          if (frame.target.sessionId) {
+            await h.evaluate(
+              "window.frameCover=document.createElement('div');frameCover.style='position:fixed;inset:0;z-index:99999;background:white';document.body.append(frameCover)",
+            );
+            await expect(
+              pointerTargetValidator(h.cdp)(
+                { tabId: 4, cdpTarget: frame.target, frameId: frame.frameId, backendNodeId },
+                geometry.actionPoint,
+              ),
+            ).rejects.toThrow(/covered/);
+            await h.evaluate("frameCover.remove()");
+          }
           // Independent DOM oracle: CSS border boxes plus this fixture's known
           // axis-aligned iframe scales. Re-read after each scroll changes layout.
           let rect = await h.evaluate<ViewportRect>(
@@ -345,4 +395,154 @@ describe.skipIf(!process.env.BSK_SCROLL_CHROME)("real browser scroll-to", () => 
       await server.stop();
     }
   }, 30_000);
+});
+
+describe.skipIf(!process.env.BSK_SCROLL_CHROME)("native target hit testing", () => {
+  it.each([
+    { zoom: 1, dpr: 1 },
+    { zoom: 1.25, dpr: 2 },
+  ])("maps hover pseudo-elements to their owner without accepting an unrelated cover at $zoom zoom, DPR $dpr", async ({
+    zoom,
+    dpr,
+  }) => {
+    await withBrowser(
+      async (h) => {
+        for (const child of [false, true]) {
+          const pseudo = child ? "after" : "before";
+          const owner = child ? "#probe span" : "#probe";
+          await h.evaluate(`document.body.innerHTML = ${JSON.stringify(`
+          <style>
+            body { width: 2400px; height: 2400px }
+            #probe { position: absolute; left: 900px; top: 1200px; width: 180px; height: 60px }
+            #probe span { position: absolute; inset: 0 }
+            #probe:hover${child ? " span" : ""}::${pseudo} { content: ""; position: absolute; inset: 0; z-index: 1 }
+            #cover { position: fixed; inset: 0; z-index: 999; pointer-events: none }
+            #cover::before { content: ""; position: absolute; inset: 0; pointer-events: auto }
+          </style><button id="probe"><span>Continue</span></button>`)};
+          window.hits=0; document.querySelector('#probe').onclick=()=>window.hits++;
+          scrollTo(600,900)`);
+          const [frame] = await h.loadFrames();
+          const backendNodeId = await h.ref(frame);
+          const target = {
+            tabId: 4,
+            cdpTarget: frame.target,
+            frameId: frame.frameId,
+            backendNodeId,
+          };
+          const verify = pointerTargetValidator(h.cdp);
+          const point = await h.evaluate<{ x: number; y: number }>(
+            "(()=>{const r=document.querySelector('#probe').getBoundingClientRect();return {x:r.x+r.width/2,y:r.y+r.height/2}})()",
+          );
+          await h.send("Input.dispatchMouseEvent", { type: "mouseMoved", ...point }, h.rootSession);
+          expect(
+            await h.evaluate(
+              `getComputedStyle(document.querySelector(${JSON.stringify(owner)}), '::${pseudo}').content`,
+            ),
+          ).toBe('""');
+          const scroll = await h.evaluate<{ x: number; y: number }>("({x:scrollX,y:scrollY})");
+          const hit = await h.send<{ backendNodeId: number }>(
+            "DOM.getNodeForLocation",
+            {
+              x: Math.round(point.x + scroll.x),
+              y: Math.round(point.y + scroll.y),
+              includeUserAgentShadowDOM: false,
+            },
+            h.rootSession,
+          );
+          const { node } = await h.send<{ node: { pseudoType?: string } }>(
+            "DOM.describeNode",
+            {
+              backendNodeId: hit.backendNodeId,
+            },
+            h.rootSession,
+          );
+          expect(node.pseudoType).toBe(pseudo);
+          expect(await pointBelongsToTarget(h.cdp, target, point.x, point.y, "hit-oracle")).toBe(
+            true,
+          );
+          await verify(target, point);
+          for (const type of ["mousePressed", "mouseReleased"])
+            await h.send(
+              "Input.dispatchMouseEvent",
+              { type, ...point, button: "left", clickCount: 1 },
+              h.rootSession,
+            );
+          expect(await h.evaluate("window.hits")).toBe(1);
+          await h.evaluate("document.body.insertAdjacentHTML('beforeend','<div id=cover></div>')");
+          expect(await pointBelongsToTarget(h.cdp, target, point.x, point.y, "hit-oracle")).toBe(
+            false,
+          );
+          await expect(verify(target, point)).rejects.toThrow(/no longer hits/);
+          expect(await h.evaluate("window.hits")).toBe(1);
+        }
+      },
+      zoom,
+      dpr,
+    );
+  }, 30000);
+
+  it.each([
+    { zoom: 1, dpr: 1 },
+    { zoom: 1, dpr: 2 },
+    { zoom: 1.25, dpr: 2 },
+    { zoom: 0.8, dpr: 2 },
+  ])("hits the same node after scrolling in foreground/background at $zoom zoom, DPR $dpr", async ({
+    zoom,
+    dpr,
+  }) => {
+    await withBrowser(
+      async (h) => {
+        await h.evaluate(
+          `document.body.innerHTML = '<style>body{width:3200px;height:3200px}#probe{position:absolute;left:900px;top:1200px;width:160px;height:60px}</style><button id="probe">Target<span> child</span></button>'; window.hits=0; document.querySelector('#probe').onclick=()=>window.hits++`,
+        );
+        const [frame] = await h.loadFrames();
+        const backendNodeId = await h.ref(frame);
+        const target = { tabId: 4, cdpTarget: frame.target, frameId: frame.frameId, backendNodeId };
+        const verify = pointerTargetValidator(h.cdp);
+        await h.evaluate("scrollTo(600,900)");
+        const point = await h.evaluate<{ x: number; y: number }>(
+          "(()=>{const r=document.querySelector('#probe').getBoundingClientRect();return {x:r.x+r.width/2,y:r.y+r.height/2}})()",
+        );
+        for (const background of [false, true]) {
+          let other: string | undefined;
+          if (background) {
+            other = (
+              await h.send<{ targetId: string }>("Target.createTarget", { url: "about:blank" })
+            ).targetId;
+            await h.send("Target.activateTarget", { targetId: other });
+          }
+          try {
+            expect(await pointBelongsToTarget(h.cdp, target, point.x, point.y, "hit-oracle")).toBe(
+              true,
+            );
+            await verify(target, point);
+            for (const type of ["mousePressed", "mouseReleased"])
+              await h.send(
+                "Input.dispatchMouseEvent",
+                { type, ...point, button: "left", clickCount: 1 },
+                h.rootSession,
+              );
+            expect(await h.evaluate("window.hits")).toBe(background ? 2 : 1);
+            if (background) expect(await h.evaluate("document.visibilityState")).toBe("hidden");
+            await h.evaluate(
+              `window.cover=document.createElement('div'); cover.style='position:fixed;inset:0;background:white;z-index:99999';document.body.append(cover)`,
+            );
+            expect(await pointBelongsToTarget(h.cdp, target, point.x, point.y, "hit-oracle")).toBe(
+              false,
+            );
+            await expect(verify(target, point)).rejects.toThrow(/covered|no longer hits/);
+            expect(await h.evaluate("window.hits")).toBe(background ? 2 : 1);
+            await h.evaluate("cover.remove()");
+          } finally {
+            if (other) await h.send("Target.closeTarget", { targetId: other });
+          }
+        }
+        await h.evaluate("document.querySelector('#probe').style.left='950px'");
+        await expect(verify(target, point)).rejects.toThrow(/moved/);
+        expect(await h.evaluate("window.hits")).toBe(2);
+      },
+      zoom,
+      dpr,
+    );
+  }, 30000);
 });

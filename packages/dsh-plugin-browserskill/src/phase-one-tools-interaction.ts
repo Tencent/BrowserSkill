@@ -69,7 +69,7 @@ export function registerPhaseOneInteractionTools(
           throw new Error("wheel deltas must be finite numbers");
         if (deltaX === 0 && deltaY === 0)
           throw new Error("at least one wheel delta must be non-zero");
-        const sessionId = registry.resolve(args.session, "browser_interact(action=wheel)");
+        const sessionId = registry.resolve(args.session, "bsk_interact(action=wheel)");
         const cmdArgs = [
           "wheel",
           "--session",
@@ -126,7 +126,7 @@ export function registerPhaseOneInteractionTools(
       name: "interact.hover",
       description:
         "Move the mouse over a snapshot ref or CSS selector to reveal hover-triggered UI. " +
-        "Run browser_inspect action=observe or snapshot afterwards to discover newly visible refs.",
+        "Run bsk_inspect action=observe or snapshot afterwards to discover newly visible refs.",
       parameters: {
         target: {
           type: "string",
@@ -168,7 +168,7 @@ export function registerPhaseOneInteractionTools(
         requireNonEmpty(args.target, "target");
         requirePositive(args.timeoutMs, "timeoutMs");
         requirePositive(args.settleMs, "settleMs");
-        const sessionId = registry.resolve(args.session, "browser_interact(action=hover)");
+        const sessionId = registry.resolve(args.session, "bsk_interact(action=hover)");
         const cmdArgs = ["hover", "--session", sessionId];
         appendTabId(cmdArgs, args.tabId);
         if (args.modifiers !== undefined && args.modifiers.length > 0) {
@@ -242,7 +242,7 @@ export function registerPhaseOneInteractionTools(
       async execute(args, exec) {
         requireNonEmpty(args.target, "target");
         requirePositive(args.timeoutMs, "timeoutMs");
-        const sessionId = registry.resolve(args.session, "browser_interact(action=scroll-to)");
+        const sessionId = registry.resolve(args.session, "bsk_interact(action=scroll-to)");
         const cmdArgs = ["scroll-to", "--session", sessionId];
         appendTabId(cmdArgs, args.tabId);
         if (args.timeoutMs !== undefined) cmdArgs.push("--timeout", `${args.timeoutMs}ms`);
@@ -327,7 +327,7 @@ export function registerPhaseOneInteractionTools(
         async execute(args, exec) {
           requireNonEmpty(args.target, "target");
           requirePositive(args.timeoutMs, "timeoutMs");
-          const sessionId = registry.resolve(args.session, `browser_interact(action=${action})`);
+          const sessionId = registry.resolve(args.session, `bsk_interact(action=${action})`);
           const cmdArgs = [action, "--session", sessionId];
           appendTabId(cmdArgs, args.tabId);
           if (args.timeoutMs !== undefined) cmdArgs.push("--timeout", `${args.timeoutMs}ms`);
@@ -420,7 +420,7 @@ export function registerPhaseOneInteractionTools(
         requireNonEmpty(args.target, "target");
         requirePositive(args.timeoutMs, "timeoutMs");
         if (args.values.length === 0) throw new Error("values must contain at least one option");
-        const sessionId = registry.resolve(args.session, "browser_interact(action=select)");
+        const sessionId = registry.resolve(args.session, "bsk_interact(action=select)");
         const cmdArgs = ["select", "--session", sessionId];
         appendTabId(cmdArgs, args.tabId);
         for (const value of args.values) cmdArgs.push("--value", value);

@@ -3,14 +3,15 @@ import type { InteractionDeps } from "./interaction";
 import { type CdpRunner, sendToCdpTarget } from "./shared";
 import { waitBounded } from "./transfer-transaction";
 
-/** A retired download click must never resume input when a CDP reply arrives late. */
-export function downloadTriggerDeps(deps: InteractionDeps, signal: AbortSignal) {
+/** A retired file-transfer click must never resume input when a CDP reply arrives late. */
+export function fileTransferTriggerDeps(deps: InteractionDeps, signal?: AbortSignal) {
   let retired = false;
   let release: { tabId: number; params: object; attachmentId?: string } | undefined;
   let releasing = false;
   const clickCleanups = new Set<() => Promise<void>>();
   const check = () => {
-    if (retired || signal.aborted) throw new DOMException("download trigger aborted", "AbortError");
+    if (retired || signal?.aborted)
+      throw new DOMException("file-transfer trigger aborted", "AbortError");
   };
   const send = async <T>(target: CdpTarget, method: string, params?: object): Promise<T> => {
     check();
@@ -52,6 +53,7 @@ export function downloadTriggerDeps(deps: InteractionDeps, signal: AbortSignal) 
     send: (tabId, method, params) => send({ tabId }, method, params),
     sendToTarget: send,
     trackSessionTab: deps.cdp.trackSessionTab?.bind(deps.cdp),
+    verifyPointerTarget: deps.cdp.verifyPointerTarget?.bind(deps.cdp),
     dialogCursor: deps.cdp.dialogCursor?.bind(deps.cdp),
     dialogsSince: deps.cdp.dialogsSince?.bind(deps.cdp),
     getAttachmentId: deps.cdp.getAttachmentId?.bind(deps.cdp),
@@ -90,8 +92,8 @@ export function downloadTriggerDeps(deps: InteractionDeps, signal: AbortSignal) 
               },
             )
           : deps.cdp.send(pending.tabId, "Input.dispatchMouseEvent", pending.params);
-      if (!cleanup) throw new Error("download input cleanup unavailable");
-      await waitBounded(cleanup, deadline, undefined, "download input cleanup timed out");
+      if (!cleanup) throw new Error("file-transfer input cleanup unavailable");
+      await waitBounded(cleanup, deadline, undefined, "file-transfer input cleanup timed out");
     } catch (error) {
       // Replacement may happen while release is pending. Recheck ownership,
       // and have the driver enforce it again when executing the fallback.
@@ -120,11 +122,12 @@ export function downloadTriggerDeps(deps: InteractionDeps, signal: AbortSignal) 
     async cleanup(deadline: number): Promise<void> {
       retired = true;
       const cleanups = [cleanupInput(deadline), ...[...clickCleanups].map((cleanup) => cleanup())];
+      clickCleanups.clear();
       const results = await waitBounded(
         Promise.allSettled(cleanups),
         deadline,
         undefined,
-        "download trigger cleanup timed out",
+        "file-transfer trigger cleanup timed out",
       );
       for (const result of results) if (result.status === "rejected") throw result.reason;
     },

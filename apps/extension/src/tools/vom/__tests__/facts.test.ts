@@ -91,6 +91,26 @@ describe("document facts", () => {
     expect(nodes[0]).not.toHaveProperty("excluded");
   });
 
+  it.each([
+    undefined,
+    { index: [1] },
+  ])("decodes sparse clickability by node index: %j", async (isClickable) => {
+    const { nodes } = await decodeDocument(
+      {
+        nodes: {
+          backendNodeId: [41, 72, 103],
+          parentIndex: [-1, 0, 0],
+          nodeName: [0, 1, 1],
+          isClickable,
+        },
+      },
+      ["ul", "li"],
+    );
+    expect(nodes.filter((node) => node.clickable).map((node) => node.backendNodeId)).toEqual(
+      isClickable ? [72] : [],
+    );
+  });
+
   it("keeps short blocks synchronous and checks cancellation after yielding", async () => {
     const clock = vi.spyOn(performance, "now").mockReturnValue(0);
     try {

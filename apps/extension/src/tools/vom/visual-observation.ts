@@ -1,4 +1,5 @@
 import {
+  estimateLineTokens,
   prepareObservationRender,
   type RenderedRef,
   type RenderRow,
@@ -187,7 +188,7 @@ const continuations = new WeakMap<RefStore, Continuation>();
 export function clearObservationContinuation(store: RefStore): void {
   continuations.delete(store);
 }
-const cost = (line: string) => Math.ceil(line.length / 4);
+const cost = estimateLineTokens;
 const failure = (message: string): RpcError => ({ code: "invalid_params", message });
 
 function page(

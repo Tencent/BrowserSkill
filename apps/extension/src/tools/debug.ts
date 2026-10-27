@@ -6,6 +6,7 @@ import type { DebugParams, DebugResult } from "@/debug/types";
 import { isAgentControlledTab, type SessionManager } from "@/session-manager/manager";
 import type { RpcError } from "@/transport/types";
 import {
+  type CdpRunner,
   type ChromeTabsApi,
   chromeTabsApi,
   enforceAgentWindow,
@@ -140,6 +141,7 @@ export async function handleDebug(
   debug: DebugManager,
   tabs: ChromeTabsApi = chromeTabsApi,
   signal?: AbortSignal,
+  mutate?: CdpRunner["runBrowserMutation"],
 ): Promise<DebugResult | RpcError> {
   const invalid = validateDebugParams(params);
   if (invalid) return { code: "invalid_params", message: invalid };
@@ -166,7 +168,7 @@ export async function handleDebug(
       }
       return budgetResult({ session_id: context.sessionId, run }, params);
     }
-    return budgetResult(await debug.read(params, signal), params);
+    return budgetResult(await debug.read(params, signal, mutate), params);
   } catch (error) {
     return {
       code: signal?.aborted ? "cancelled" : "invalid_params",

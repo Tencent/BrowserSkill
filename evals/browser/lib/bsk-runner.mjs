@@ -74,6 +74,7 @@ export async function runBskSmokeTask({
   runId,
   seed = task.seed,
   timeoutMs = 60_000,
+  executeProcess = runProcess,
 }) {
   const steps = [];
   const evidence = {};
@@ -87,14 +88,32 @@ export async function runBskSmokeTask({
   let executionError;
   await mkdir(outputDirectory, { recursive: true });
 
-  async function bsk(args, { timeout = timeoutMs } = {}) {
-    const execution = await runProcess(bskCommand, [...args, "--json"], { timeoutMs: timeout });
+  async function bsk(args, { timeout = timeoutMs, expectError } = {}) {
+    const execution = await executeProcess(bskCommand, [...args, "--json"], { timeoutMs: timeout });
     steps.push(execution);
+    if (expectError && !execution.timedOut && !execution.error && execution.exitCode > 0) {
+      let failure;
+      try {
+        failure = JSON.parse(execution.stderr.trim() || execution.stdout.trim());
+      } catch {
+        throw new Error(
+          `bsk did not return the expected JSON error: ${renderStepError(execution)}`,
+        );
+      }
+      if (failure.code !== expectError.code || failure.data?.reason !== expectError.reason) {
+        throw new Error(
+          `expected ${expectError.code}/${expectError.reason}, received ${failure.code}/${failure.data?.reason}`,
+        );
+      }
+      return failure;
+    }
     if (execution.exitCode !== 0 || execution.timedOut || execution.error) {
       throw new Error(
         `bsk ${args.join(" ")} failed: ${execution.error ?? renderStepError(execution)}`,
       );
     }
+    if (expectError)
+      throw new Error(`expected ${expectError.code}/${expectError.reason}, but bsk succeeded`);
     return parseJsonOutput(execution);
   }
 
@@ -169,14 +188,18 @@ export async function runBskSmokeTask({
         ]);
         break;
       case "fill":
-        result = await bsk([
-          "fill",
-          ...targetArgs(step, variables),
-          "--value",
-          String(resolveValue(step.value, variables)),
-          ...session,
-          ...tabArgs(step, variables),
-        ]);
+        result = await bsk(
+          [
+            "fill",
+            ...targetArgs(step, variables),
+            "--value",
+            String(resolveValue(step.value, variables)),
+            ...(step.noClear ? ["--no-clear"] : []),
+            ...session,
+            ...tabArgs(step, variables),
+          ],
+          { expectError: step.expectError },
+        );
         break;
       case "select":
         result = await bsk([

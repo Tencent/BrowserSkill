@@ -50,6 +50,11 @@ function makeFakeCdp(
     if (method === "Page.captureScreenshot") return { data: (await rendered()) ? "pixel" : "" };
     if (
       method === "Runtime.evaluate" &&
+      String((params as { expression?: string })?.expression).includes("requestAnimationFrame")
+    )
+      return { result: { value: await rendered() } };
+    if (
+      method === "Runtime.evaluate" &&
       String((params as { expression?: string })?.expression).includes('return "absent"')
     )
       return overlayHit();
@@ -283,6 +288,7 @@ describe("handleClick", () => {
     expect(res).toMatchObject({ x: 324, y: 386 });
     expect(targetCalls).toEqual([
       { sessionId: "child-session", method: "DOM.scrollIntoViewIfNeeded" },
+      { sessionId: "child-session", method: "DOM.getBoxModel" },
       { sessionId: "child-session", method: "DOM.getContentQuads" },
       { sessionId: "child-session", method: "Page.getLayoutMetrics" },
       { sessionId: "child-session", method: "Runtime.evaluate" },
@@ -733,6 +739,7 @@ describe("click input readiness", () => {
       defaultTimeoutMs?: number;
       onCommand?: (method: string, params: Record<string, unknown>) => void;
       ownsBackgroundExecution?: boolean;
+      restoreBackgroundExecution?: () => void | Promise<void>;
     } = {},
   ) {
     const manager = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
@@ -757,6 +764,13 @@ describe("click input readiness", () => {
     fake.cdp.getAttachmentId = () => attachmentId;
     if (options.ownsBackgroundExecution !== undefined) {
       fake.cdp.ownsBackgroundExecution = vi.fn(() => options.ownsBackgroundExecution as boolean);
+    }
+    const restore = options.restoreBackgroundExecution;
+    if (restore) {
+      fake.cdp.restoreBackgroundExecution = vi.fn(async () => {
+        fake.sent.push({ tabId: 4, method: "restoreBackgroundExecution" });
+        await restore();
+      });
     }
     return {
       ...fake,
@@ -816,6 +830,103 @@ describe("click input readiness", () => {
     });
     expect(f.focusCommands()).toEqual([]);
     expect(f.sent.some((c) => c.method === "Page.captureScreenshot")).toBe(false);
+    expect(f.mouseCommands()).toEqual([]);
+  });
+
+  it("restores a hidden leased target through its owner and waits for a frame", async () => {
+    let visibility = "hidden";
+    const f = await fixture({
+      ownsBackgroundExecution: true,
+      visibility: () => visibility,
+      restoreBackgroundExecution: () => {
+        visibility = "visible";
+      },
+    });
+    expect(await f.click()).not.toHaveProperty("code");
+    expect(f.cdp.restoreBackgroundExecution).toHaveBeenCalledWith("aa11", 4);
+    expect(f.focusCommands()).toEqual([]);
+    const expression = (c: { params?: object }) =>
+      String((c.params as { expression?: string } | undefined)?.expression);
+    const steps = f.sent.map((c) =>
+      c.method === "Runtime.evaluate" && expression(c) === "document.visibilityState"
+        ? "visibility"
+        : c.method === "Runtime.evaluate" && expression(c).includes("requestAnimationFrame")
+          ? "frames"
+          : c.method,
+    );
+    const restored = steps.indexOf("restoreBackgroundExecution");
+    expect(steps.slice(0, restored)).toEqual(["visibility"]);
+    expect(steps.slice(restored, restored + 3)).toEqual([
+      "restoreBackgroundExecution",
+      "visibility",
+      "frames",
+    ]);
+    expect(steps.indexOf("Input.dispatchMouseEvent")).toBeGreaterThan(restored + 2);
+    expect(steps).not.toContain("Page.captureScreenshot");
+    expect(steps).not.toContain("Page.bringToFront");
+    expect(f.mouseCommands()).toHaveLength(3);
+  });
+
+  it.each([
+    ["stays hidden", () => {}, "not visible"],
+    [
+      "fails",
+      () => {
+        throw new Error("resend failed");
+      },
+      "resend failed",
+    ],
+  ])("reports input_not_ready before dispatch when a restored lease %s", async (_case, restore, message) => {
+    const f = await fixture({
+      ownsBackgroundExecution: true,
+      visibility: () => "hidden",
+      restoreBackgroundExecution: restore,
+    });
+    const result = await f.click();
+    expect(result).toMatchObject({
+      code: "cdp_failed",
+      data: { reason: "input_not_ready", effect_state: "none" },
+    });
+    expect((result as { message: string }).message).toContain(message);
+    expect(f.cdp.restoreBackgroundExecution).toHaveBeenCalledOnce();
+    expect(f.focusCommands()).toEqual([]);
+    expect(f.mouseCommands()).toEqual([]);
+  });
+
+  it("reports input_not_ready when a restored lease produces no frame", async () => {
+    let visibility = "hidden";
+    const f = await fixture({
+      ownsBackgroundExecution: true,
+      visibility: () => visibility,
+      rendered: () => false,
+      restoreBackgroundExecution: () => {
+        visibility = "visible";
+      },
+    });
+    const result = await f.click();
+    expect(result).toMatchObject({
+      code: "cdp_failed",
+      data: { reason: "input_not_ready", effect_state: "none" },
+    });
+    expect((result as { message: string }).message).toContain("did not produce a frame");
+    expect(f.focusCommands()).toEqual([]);
+    expect(f.mouseCommands()).toEqual([]);
+  });
+
+  it("cancels a pending lease restore without dispatching input", async () => {
+    const controller = new AbortController();
+    const f = await fixture({
+      ownsBackgroundExecution: true,
+      visibility: () => "hidden",
+      restoreBackgroundExecution: () => {
+        controller.abort();
+        return new Promise<void>(() => {});
+      },
+    });
+    const result = await f.click(controller.signal);
+    expect(result).toMatchObject({ code: "cancelled", data: { effect_state: "none" } });
+    expect(result).not.toHaveProperty("data.reason");
+    expect(f.focusCommands()).toEqual([]);
     expect(f.mouseCommands()).toEqual([]);
   });
 
@@ -935,7 +1046,7 @@ describe("click input readiness", () => {
     expect(f.focusCommands().map((c) => c.params)).toEqual([{ enabled: true }, { enabled: false }]);
   });
 
-  it("cancels a pending surface read and consumes its late reply without clicking", async () => {
+  it("cancels a pending renderer frame and consumes its late reply without clicking", async () => {
     const controller = new AbortController();
     let complete!: (value: boolean) => void;
     const f = await fixture({
@@ -1326,12 +1437,11 @@ function successfulFillScript(params: unknown) {
   const args = script.arguments ?? [];
   return {
     result: {
-      value:
-        args.length === 2
-          ? { before: "", expected: args[0].value }
-          : script.functionDeclaration.startsWith("function(expected)")
-            ? { connected: true, matches: true, valueLength: String(args[0].value).length }
-            : "ready",
+      value: script.functionDeclaration.startsWith("function(value, clearBefore")
+        ? { before: "", expected: args[0].value }
+        : script.functionDeclaration.startsWith("function(expected)")
+          ? { connected: true, matches: true, valueLength: String(args[0].value).length }
+          : "ready",
     },
   };
 }
@@ -1356,7 +1466,7 @@ describe("handleFill", () => {
     ctx.refStore.set("e1", 100, { tabId: 4 });
     const fake = makeFakeCdp({
       "DOM.describeNode": () => ({
-        node: { backendNodeId: 100, nodeName: "DIV", attributes: [] },
+        node: { backendNodeId: 100, nodeName: "BUTTON", attributes: [] },
       }),
     });
     const res = await handleFill(
@@ -1399,7 +1509,7 @@ describe("handleFill", () => {
     expect(insert?.params).toEqual({ text: "hello" });
     // Foreground replacement needs no extra caret-positioning round trip.
     const callFns = fake.sent.filter((c) => c.method === "Runtime.callFunctionOn");
-    expect(callFns).toHaveLength(4);
+    expect(callFns).toHaveLength(5);
   });
 
   it("passes clear_before=false to preparation and verifies the result", async () => {
@@ -1414,8 +1524,10 @@ describe("handleFill", () => {
       "DOM.focus": () => ({}),
       "DOM.resolveNode": () => ({ object: { objectId: "obj-2" } }),
       "Runtime.callFunctionOn": (p) => {
-        const args = (p as { arguments?: Array<{ value: unknown }> }).arguments ?? [];
-        if (args.length === 2) expect(args[1].value).toBe(false);
+        const script = p as { arguments?: Array<{ value: unknown }>; functionDeclaration: string };
+        if (script.functionDeclaration.startsWith("function(value, clearBefore")) {
+          expect(script.arguments?.[1].value).toBe(false);
+        }
         return successfulFillScript(p);
       },
       "Input.dispatchKeyEvent": () => ({}),
@@ -1501,6 +1613,9 @@ describe("handleFill", () => {
         return {};
       },
       "DOM.focus": () => ({}),
+      "DOM.resolveNode": () => ({ object: { objectId: "fill-target" } }),
+      "Runtime.callFunctionOn": successfulFillScript,
+      "Runtime.releaseObject": () => ({}),
     });
 
     const res = await handleFill(
@@ -1807,6 +1922,64 @@ describe("handleSelect", () => {
     "DOM.focus": () => ({}),
     "DOM.resolveNode": () => ({ object: { objectId: "obj-sel" } }),
     "Runtime.callFunctionOn": () => ({ result: { value: mutation } }),
+  });
+
+  it.each([
+    { name: "disabled during focus", markup: "<select></select>", disabled: true },
+    { name: "enabled", markup: "<select></select>", disabled: false },
+  ])("respects the disabled state of a $name select", async ({ markup, disabled }) => {
+    const host = document.createElement("div");
+    host.innerHTML = markup;
+    const select = host.querySelector("select")!;
+    select.innerHTML =
+      '<option value="us">United States</option><option value="ca">Canada</option>';
+    const events: string[] = [];
+    select.addEventListener("input", () => events.push("input"));
+    select.addEventListener("change", () => events.push("change"));
+    const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
+    const ctx = await sm.start("aa11");
+    ctx.refStore.set("e1", 555, { tabId: 4 });
+    const fake = makeFakeCdp({
+      ...selectHandlers({ ok: true }),
+      "DOM.focus": () => {
+        select.disabled = disabled;
+        return {};
+      },
+      "Runtime.callFunctionOn": (params) => {
+        const script = params as {
+          functionDeclaration: string;
+          arguments: Array<{ value: unknown }>;
+        };
+        const fn = new Function(`return (${script.functionDeclaration})`)();
+        return {
+          result: {
+            value: fn.apply(
+              select,
+              script.arguments.map((arg) => arg.value),
+            ),
+          },
+        };
+      },
+    });
+
+    const res = await handleSelect(
+      sm,
+      { session_id: "aa11", ref: "e1", values: ["ca"] },
+      { cdp: fake.cdp, tabsApi: fake.tabsApi },
+    );
+
+    if (disabled) {
+      expect(res).toMatchObject({
+        code: "invalid_params",
+        message: "select requires an enabled <select>",
+      });
+      expect(select.value).toBe("us");
+      expect(events).toEqual([]);
+    } else {
+      expect(res).toMatchObject({ selected_values: ["ca"] });
+      expect(select.value).toBe("ca");
+      expect(events).toEqual(["input", "change"]);
+    }
   });
 
   it("rejects non-select elements as target_not_select", async () => {

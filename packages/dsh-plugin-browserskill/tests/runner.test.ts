@@ -9,10 +9,19 @@ import {
   type BskRunResult,
   createBskRunner,
   isCommandNotFound,
+  isNavigationLifecycleTimeoutPayload,
   isSessionBusyResult,
+  KILL_GRACE_MS,
   parseBskJson,
   runWithSessionBusyRetry,
+  SETTLE_AFTER_KILL_SLACK_MS,
+  WINDOWS_KILL_GRACE_MS,
 } from "../src/runner";
+
+// Wait for both the platform-specific forced kill and the settlement fallback.
+const SETTLE_AFTER_KILL_MS =
+  (process.platform === "win32" ? WINDOWS_KILL_GRACE_MS : KILL_GRACE_MS) +
+  SETTLE_AFTER_KILL_SLACK_MS;
 
 /** Minimal fake stdio pipe recording whether the runner closed its end. */
 class FakeStream extends EventEmitter {
@@ -65,6 +74,30 @@ afterEach(() => {
 });
 
 describe("createBskRunner", () => {
+  it("preserves UTF-8 characters split across output buffers", async () => {
+    const child = new FakeChild();
+    const runner = createBskRunner("bsk", fakeSpawn([child]));
+    const promise = runner.run(["snapshot"]);
+    const stdout = JSON.stringify({ text: "中文🙂" });
+    const stderr = "错误🚫";
+    for (const byte of Buffer.from(stdout)) child.stdout.emit("data", Buffer.from([byte]));
+    for (const byte of Buffer.from(stderr)) child.stderr.emit("data", Buffer.from([byte]));
+    child.finish(0);
+
+    expect(await promise).toMatchObject({ stdout, stderr });
+  });
+
+  it("flushes an incomplete final UTF-8 sequence when output collection ends", async () => {
+    const child = new FakeChild();
+    const runner = createBskRunner("bsk", fakeSpawn([child]));
+    const promise = runner.run(["snapshot"]);
+    child.stdout.emit("data", Buffer.from([0xe4, 0xb8]));
+    child.stderr.emit("data", Buffer.from([0xf0, 0x9f]));
+    child.finish(0);
+
+    expect(await promise).toMatchObject({ stdout: "�", stderr: "�" });
+  });
+
   it("appends --json and collects stdout", async () => {
     const child = new FakeChild();
     const seen: string[][] = [];
@@ -164,7 +197,7 @@ describe("createBskRunner", () => {
     });
     await vi.advanceTimersByTimeAsync(100); // timeout fires -> SIGINT
     expect(result).toBeUndefined();
-    await vi.advanceTimersByTimeAsync(4_000); // SIGKILL at +3s, settle at +4s
+    await vi.advanceTimersByTimeAsync(SETTLE_AFTER_KILL_MS); // SIGKILL at +grace, settle after
     expect(result).toMatchObject({ code: null, timedOut: true });
     expect(child.killedWith).toEqual(["SIGINT", "SIGKILL"]);
     // Settling is not enough: our ends of the pipes have to go too, or a process
@@ -315,7 +348,7 @@ describe("createBskRunner", () => {
     });
     expect(runner.killFor("s1")).toBe(1);
     runner.killAll();
-    await vi.advanceTimersByTimeAsync(4_000); // SIGKILL at +3s, settle at +4s
+    await vi.advanceTimersByTimeAsync(SETTLE_AFTER_KILL_MS); // SIGKILL at +grace, settle after
     expect(results[0]).toMatchObject({ code: null });
     expect(results[1]).toMatchObject({ code: null });
     expect(children.map((c) => c.stdout.destroyed)).toEqual([true, true]);
@@ -500,6 +533,26 @@ describe("parseBskJson", () => {
     expect(() => parseBskJson({ ...base, code: 1, stderr: "boom" }, "x")).toThrow(/boom/);
   });
 
+  it("keeps dialog and operation identities in the model-visible error and never retries the action", async () => {
+    const reply = {
+      ...base,
+      code: 6,
+      stdout: JSON.stringify({
+        code: "dialog_pending",
+        message: "Choose an answer; do not repeat the action",
+        data: {
+          operation_id: "op-original",
+          dialog: { id: "dlg", type: "prompt", message: "Name", default_prompt: "anonymous" },
+        },
+      }),
+    };
+    const run = vi.fn(async () => reply);
+    const result = await runWithSessionBusyRetry(run);
+    expect(run).toHaveBeenCalledOnce();
+    expect(() => parseBskJson(result, "click")).toThrow("op-original");
+    expect(() => parseBskJson(result, "click")).toThrow('"default_prompt":"anonymous"');
+  });
+
   it("surfaces fill recovery guidance to the model without retrying", async () => {
     const hint =
       "observe the field before retrying; the page may have formatted the value. Continue if the visible result satisfies the user's intent";
@@ -534,6 +587,41 @@ describe("parseBskJson", () => {
     expect(() => parseBskJson({ ...base, stdout: "not json" }, "x")).toThrow(
       /did not produce JSON/,
     );
+  });
+
+  it("returns navigation lifecycle timeout payloads when opted in", () => {
+    const payload = {
+      tab_id: 1,
+      url: "https://slow.example/",
+      final_url: "https://slow.example/",
+      reached: "timeout",
+      error_text: "timed out waiting for load",
+    };
+    const result = parseBskJson({ ...base, code: 4, stdout: JSON.stringify(payload) }, "navigate", {
+      allowNavigationTimeout: true,
+    });
+    expect(result).toEqual(payload);
+    expect(isNavigationLifecycleTimeoutPayload(result)).toBe(true);
+  });
+
+  it("still throws exit 4 without reached: timeout even when opted in", () => {
+    const busy = {
+      code: "timeout",
+      message: "session already has an unfinished command",
+      data: { reason: "session_busy" },
+    };
+    expect(() =>
+      parseBskJson({ ...base, code: 4, stdout: JSON.stringify(busy) }, "navigate", {
+        allowNavigationTimeout: true,
+      }),
+    ).toThrow(/session already has an unfinished command/);
+  });
+
+  it("throws navigation timeout payloads by default (no opt-in)", () => {
+    const payload = { tab_id: 1, url: "https://x/", reached: "timeout" };
+    expect(() =>
+      parseBskJson({ ...base, code: 4, stdout: JSON.stringify(payload) }, "navigate"),
+    ).toThrow(/failed/);
   });
 });
 

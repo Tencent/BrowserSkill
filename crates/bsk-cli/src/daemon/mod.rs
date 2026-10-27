@@ -4,6 +4,7 @@ pub mod abort;
 pub mod audit;
 pub mod browsers;
 mod cancel_forward;
+pub mod dialog_operations;
 pub mod file_transfer;
 pub mod inflight;
 pub mod info;
@@ -17,6 +18,7 @@ pub mod session_interrupt;
 pub mod session_requests;
 pub mod sessions;
 pub mod start;
+pub(crate) mod start_error;
 pub mod state;
 pub mod ws;
 

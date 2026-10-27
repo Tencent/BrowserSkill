@@ -1,0 +1,99 @@
+name: Publish CLI
+
+on:
+  workflow_run:
+    workflows: [Release CLI]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: Successful Release CLI build run ID (run on a cli-v tag)
+        required: true
+        type: string
+
+permissions:
+  actions: read
+  contents: write # Reading draft releases also requires write access.
+
+concurrency:
+  group: publish-cli
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
+    runs-on: windows-latest
+    timeout-minutes: 40
+    outputs:
+      version: ${{ steps.collect.outputs.version }}
+      tag: ${{ steps.collect.outputs.tag }}
+    steps:
+      # The privileged publishing code always comes from the default branch.
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+
+      - name: Validate build identity and wait for signed Windows executable
+        id: collect
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_RUN_ID: ${{ github.event.workflow_run.id || inputs.run_id }}
+          SOURCE_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
+        run: |
+          $arguments = @('scripts/windows-release.py', 'collect', '--run-id', $env:SOURCE_RUN_ID, '--timeout', '1800')
+          if ($env:SOURCE_ATTEMPT) { $arguments += @('--attempt', $env:SOURCE_ATTEMPT) }
+          python @arguments
+          if ($LASTEXITCODE -ne 0) { throw 'Release provenance validation failed' }
+
+      - name: Verify Windows publisher, certificate chain and timestamp
+        shell: pwsh
+        env:
+          EXPECTED_SHA256: ${{ steps.collect.outputs.signed_sha256 }}
+        run: ./scripts/verify-windows-signature.ps1 -Path signed/bsk.exe -ExpectedSha256 $env:EXPECTED_SHA256
+
+      - name: Package the verified Windows executable
+        shell: pwsh
+        env:
+          VERSION: ${{ steps.collect.outputs.version }}
+        run: Compress-Archive -Path signed/bsk.exe -DestinationPath "dist/bsk-v$env:VERSION-x86_64-pc-windows-msvc.zip"
+
+      - name: Upload verified release files
+        uses: actions/upload-artifact@v7
+        with:
+          name: verified-cli-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            dist/*
+            release-state.json
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    needs: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: verified-cli-${{ github.run_id }}-${{ github.run_attempt }}
+
+      - name: Generate checksums from the final signed archives
+        env:
+          VERSION: ${{ needs.verify.outputs.version }}
+        run: |
+          node scripts/render-version-json.mjs \
+            --version "$VERSION" --repo "$GITHUB_REPOSITORY" \
+            --server-url "$GITHUB_SERVER_URL" \
+            --branch "${{ github.event.repository.default_branch }}" \
+            --dist dist --out dist/version.json
+
+      - name: Publish the complete verified release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/windows-release.py publish

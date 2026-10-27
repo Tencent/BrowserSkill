@@ -76,7 +76,14 @@ async function fixture(frame: "top" | "same-target" | "oopif" = "top") {
       },
       "Runtime.releaseObject": {},
       "Runtime.releaseObjectGroup": {},
-      "Runtime.evaluate": { result: { value: { width: 200, height: 100 } } },
+      "Runtime.evaluate": {
+        result: {
+          value:
+            args.expression === "document.visibilityState"
+              ? "visible"
+              : { width: 200, height: 100 },
+        },
+      },
       "Page.getLayoutMetrics": {
         cssLayoutViewport: {
           clientWidth: target.sessionId ? 185 : 1280,
@@ -123,7 +130,7 @@ describe("handleScrollTo", () => {
       width: 100,
       height: 40,
     });
-    expect(f.calls[0]).toMatchObject({
+    expect(f.calls.find((call) => call.method === "DOM.scrollIntoViewIfNeeded")).toMatchObject({
       method: "DOM.scrollIntoViewIfNeeded",
       params: { backendNodeId: 1234 },
     });
@@ -265,7 +272,10 @@ describe("handleScrollTo", () => {
       return undefined;
     };
     expect(await f.run()).toMatchObject({ code: "cancelled" });
-    expect(f.calls.map((call) => call.method)).toEqual(["DOM.scrollIntoViewIfNeeded"]);
+    expect(f.calls.map((call) => call.method)).toEqual([
+      "Runtime.evaluate",
+      "DOM.scrollIntoViewIfNeeded",
+    ]);
   });
 
   it("stops target scrolling after a deadline expires while scrolling its owner", async () => {

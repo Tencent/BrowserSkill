@@ -17,5 +17,7 @@ Use agent-local paths, not browser-internal staging paths.
   A successful drop proves dispatch, not site acceptance; observe the attachment.
 - Download refuses overwrite by default; add `--overwrite` only when replacement
   is intended. Consult each command's help for other flags.
+- For download directory conflicts with other extensions, see
+  [human steps and recovery](help-and-recovery.md).
 
 Remote upload/download are unsupported.

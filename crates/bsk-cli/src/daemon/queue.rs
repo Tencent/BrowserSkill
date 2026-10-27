@@ -107,9 +107,14 @@ pub struct ToolJob {
 #[derive(Debug, thiserror::Error)]
 pub enum DispatchError {
     /// Session id does not have a queue (either never started or was
-    /// stopped concurrently with this dispatch).
+    /// stopped concurrently with this dispatch). `ended` carries the
+    /// registry's tombstone for why the session stopped (idle timeout,
+    /// Agent Window closed, browser disconnect), surfaced through
+    /// [`RpcError.data.reason`]; `None` for ids without a recorded end.
     #[error("session not registered or already stopped")]
-    SessionNotFound,
+    SessionNotFound {
+        ended: Option<super::sessions::SessionEnd>,
+    },
     /// Session is draining for `session.stop`; new tool calls must not
     /// enter behind the queued stop request.
     #[error("session is stopping")]
@@ -140,11 +145,19 @@ impl DispatchError {
     /// suitable for sending back over the IPC line.
     pub fn into_rpc(self) -> RpcError {
         match self {
-            DispatchError::SessionNotFound => RpcError {
-                code: ErrorCode::NotFound,
-                message: "session not registered or already stopped".into(),
-                data: None,
-            },
+            DispatchError::SessionNotFound { ended } => {
+                let data = ended.map(|end| {
+                    serde_json::json!({
+                        "reason": end.reason,
+                        "ended_unix_ms": end.ended_unix_ms,
+                    })
+                });
+                RpcError {
+                    code: ErrorCode::NotFound,
+                    message: "session not registered or already stopped".into(),
+                    data,
+                }
+            }
             DispatchError::SessionStopping => RpcError {
                 code: ErrorCode::Timeout,
                 message: "session is stopping".into(),
@@ -240,6 +253,17 @@ impl ToolQueueRegistry {
         guard.get(sid).is_some_and(|entry| entry.accepting)
     }
 
+    /// The session-missing [`DispatchError`] for `sid`, enriched with
+    /// the registry's tombstone when the id recently stopped with a
+    /// known reason (issue #465: idle timeout / window close / browser
+    /// disconnect). Without a tombstone this is the same generic
+    /// not-found as before.
+    fn session_missing(&self, sid: &SessionId) -> DispatchError {
+        DispatchError::SessionNotFound {
+            ended: self.sessions.end_info(sid),
+        }
+    }
+
     #[cfg(test)]
     fn force_busy_for_tests(&self, sid: &SessionId, busy: bool) {
         let guard = self.queues.lock().expect("tool queue registry poisoned");
@@ -314,7 +338,7 @@ impl ToolQueueRegistry {
         let (sender, state) = {
             let guard = self.queues.lock().expect("tool queue registry poisoned");
             let Some(entry) = guard.get(sid) else {
-                return Err(DispatchError::SessionNotFound);
+                return Err(self.session_missing(sid));
             };
             if !entry.accepting {
                 return Err(DispatchError::SessionStopping);
@@ -361,7 +385,7 @@ impl ToolQueueRegistry {
 
     pub fn activity(&self, sid: &SessionId) -> Result<DebugActivity, DispatchError> {
         let queues = self.queues.lock().expect("tool queue registry poisoned");
-        let entry = queues.get(sid).ok_or(DispatchError::SessionNotFound)?;
+        let entry = queues.get(sid).ok_or_else(|| self.session_missing(sid))?;
         let state = entry.state.lock().expect("queue state poisoned");
         let mut activity = state.active.clone().unwrap_or(DebugActivity {
             state: if state.busy { "running" } else { "idle" }.into(),
@@ -421,7 +445,7 @@ impl ToolQueueRegistry {
         {
             let guard = self.queues.lock().expect("tool queue registry poisoned");
             let Some(entry) = guard.get(sid) else {
-                return Err(DispatchError::SessionNotFound);
+                return Err(self.session_missing(sid));
             };
             if !entry.accepting {
                 return Err(DispatchError::SessionStopping);
@@ -459,7 +483,7 @@ impl ToolQueueRegistry {
         let (sender, state) = {
             let mut guard = self.queues.lock().expect("tool queue registry poisoned");
             let Some(entry) = guard.get_mut(sid) else {
-                return Err(DispatchError::SessionNotFound);
+                return Err(self.session_missing(sid));
             };
             if !entry.accepting {
                 return Err(DispatchError::SessionStopping);
@@ -514,6 +538,10 @@ async fn dispatch_with_sender(
         session_id,
     };
     let lifecycle_cancellable = job.lifecycle_cancel.is_some();
+    let dialog_changes = job
+        .inflight
+        .as_ref()
+        .map(|entry| entry.dialog_pending.subscribe());
     if wait_for_capacity {
         let waited = tokio::time::timeout(
             timeout.saturating_add(Duration::from_secs(1)),
@@ -546,13 +574,17 @@ async fn dispatch_with_sender(
     } else {
         Duration::ZERO
     };
-    let waited = tokio::time::timeout(
+    let deadline = dialog_deadline(
         timeout
             .saturating_add(response_grace)
             .saturating_add(Duration::from_secs(1)),
-        respond_rx,
-    )
-    .await;
+        dialog_changes,
+    );
+    tokio::pin!(deadline);
+    let waited = tokio::select! {
+        value = respond_rx => Ok(value),
+        _ = &mut deadline => Err(()),
+    };
     match waited {
         Ok(Ok(Ok(v))) => Ok(v),
         Ok(Ok(Err(rpc))) => Err(DispatchError::Rpc(rpc)),
@@ -718,13 +750,16 @@ async fn forward_one(
     };
     let deadline_cancel: Option<&(dyn Fn() -> bool + Sync)> =
         waits_for_deadline_cleanup(&job.method).then_some(&send_deadline_cancel);
-    let waited = await_with_optional_cancel(
+    let waited = await_with_dialog_cancel(
         job.timeout,
         job.cancel_cleanup_timeout,
         waiter,
         cancel_token.as_ref(),
         on_abort,
         deadline_cancel,
+        job.inflight
+            .as_ref()
+            .map(|entry| entry.dialog_pending.subscribe()),
     )
     .await;
     // Record what this call implies about the control plane before shaping
@@ -870,6 +905,23 @@ async fn forward_one(
         }
         WaitOutcome::TimeoutCleanupFailed => {
             client.pending.lock().unwrap().cancel(&rpc_id);
+            if matches!(
+                job.method,
+                Method::ToolEvaluate
+                    | Method::ToolNavigate
+                    | Method::ToolNavigateBack
+                    | Method::ToolNavigateForward
+                    | Method::ToolReload
+            ) {
+                return Err(RpcError {
+                    code: ErrorCode::Timeout,
+                    message: "page operation timed out and extension cleanup could not be confirmed; page effects may have occurred".into(),
+                    data: Some(serde_json::json!({
+                        "reason": "cancel_cleanup_timeout",
+                        "effect_state": "unknown",
+                    })),
+                });
+            }
             if job.method == Method::ToolTabBorrow {
                 return Err(unknown_borrow_error(ErrorCode::Timeout));
             }
@@ -1051,7 +1103,14 @@ fn input_effect_data(response: Option<&ResponseBody>) -> Value {
 fn waits_for_deadline_cleanup(method: &Method) -> bool {
     matches!(
         method,
-        Method::ToolScreenshotFullPage | Method::ToolTabBorrow | Method::ToolRequestHelp
+        Method::ToolScreenshotFullPage
+            | Method::ToolTabBorrow
+            | Method::ToolRequestHelp
+            | Method::ToolEvaluate
+            | Method::ToolNavigate
+            | Method::ToolNavigateBack
+            | Method::ToolNavigateForward
+            | Method::ToolReload
     ) || is_native_input(method)
         || is_effect_aware_transfer(method)
 }
@@ -1131,17 +1190,69 @@ enum WaitOutcome {
     Timeout,
 }
 
+/// A dialog adds one bounded 60s decision budget to the original RPC deadline.
+/// Ordinary requests retain their original timeout; repeated dialogs cannot reset it forever.
+async fn dialog_deadline(
+    timeout: Duration,
+    mut changes: Option<tokio::sync::watch::Receiver<bool>>,
+) {
+    let start = tokio::time::Instant::now();
+    let deadline = tokio::time::sleep_until(start + timeout);
+    tokio::pin!(deadline);
+    let mut extended = false;
+    loop {
+        if !extended && changes.as_ref().is_some_and(|rx| *rx.borrow()) {
+            extended = true;
+            deadline
+                .as_mut()
+                .reset(start + timeout + Duration::from_secs(60));
+        }
+        tokio::select! {
+            _ = &mut deadline => return,
+            _ = async {
+                match changes.as_mut() {
+                    Some(rx) => { if rx.changed().await.is_err() { std::future::pending::<()>().await; } },
+                    None => std::future::pending::<()>().await,
+                }
+            } => {},
+        }
+    }
+}
+
+#[cfg(test)]
 async fn await_with_optional_cancel(
+    timeout: Duration,
+    cleanup_timeout: Duration,
+    waiter: oneshot::Receiver<bsk_protocol::ResponseFrame>,
+    cancel: Option<&super::abort::AbortToken>,
+    on_abort: Option<&(dyn Fn() + Sync)>,
+    on_deadline: Option<&(dyn Fn() -> bool + Sync)>,
+) -> WaitOutcome {
+    await_with_dialog_cancel(
+        timeout,
+        cleanup_timeout,
+        waiter,
+        cancel,
+        on_abort,
+        on_deadline,
+        None,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn await_with_dialog_cancel(
     timeout: Duration,
     cleanup_timeout: Duration,
     mut waiter: oneshot::Receiver<bsk_protocol::ResponseFrame>,
     cancel: Option<&super::abort::AbortToken>,
     on_abort: Option<&(dyn Fn() + Sync)>,
     on_deadline: Option<&(dyn Fn() -> bool + Sync)>,
+    dialog_changes: Option<tokio::sync::watch::Receiver<bool>>,
 ) -> WaitOutcome {
     match cancel {
         Some(token) => {
-            let deadline = tokio::time::sleep(timeout);
+            let deadline = dialog_deadline(timeout, dialog_changes);
             tokio::pin!(deadline);
             tokio::select! {
                 // Cancel keeps same-tick priority, but it no longer drops the
@@ -1620,6 +1731,37 @@ mod link_error_tests {
             }) => assert_eq!(err.data.unwrap()["reason"], "navigation_timeout"),
             _ => panic!("extension errors must pass through unchanged"),
         }
+    }
+}
+
+/// Issue #465 §7: a dispatch against an ended session id turns into a
+/// `not_found` RpcError carrying the tombstoned stop reason.
+#[cfg(test)]
+mod ended_session_dispatch_tests {
+    use super::{super::sessions::SessionEnd, DispatchError};
+    use crate::rpc_reason;
+    use bsk_protocol::ErrorCode;
+
+    #[test]
+    fn ended_session_surfaces_reason_and_timestamp() {
+        let rpc = DispatchError::SessionNotFound {
+            ended: Some(SessionEnd {
+                reason: rpc_reason::SESSION_IDLE_TIMEOUT,
+                ended_unix_ms: 1_760_000_000_000,
+            }),
+        }
+        .into_rpc();
+        assert_eq!(rpc.code, ErrorCode::NotFound);
+        let data = rpc.data.expect("ended session must carry data");
+        assert_eq!(data["reason"], rpc_reason::SESSION_IDLE_TIMEOUT);
+        assert_eq!(data["ended_unix_ms"], 1_760_000_000_000i64);
+    }
+
+    #[test]
+    fn unknown_session_defaults_to_the_plain_not_found() {
+        let rpc = DispatchError::SessionNotFound { ended: None }.into_rpc();
+        assert_eq!(rpc.code, ErrorCode::NotFound);
+        assert_eq!(rpc.data, None);
     }
 }
 

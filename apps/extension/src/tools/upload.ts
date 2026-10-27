@@ -10,6 +10,8 @@ import type { SessionManager } from "@/session-manager/manager";
 import type { RpcError, UploadParams, UploadResult } from "@/transport/types";
 import { uploadThroughFileDrop } from "./file-drop-transaction";
 import { uploadThroughActivatedFileInput } from "./file-input-transaction";
+import { fileTransferTriggerDeps } from "./file-transfer-trigger";
+import { withInputReady } from "./input-readiness";
 import { clickResolvedTarget, type InteractionDeps, resolveActionTarget } from "./interaction";
 import {
   type CdpRunner,
@@ -47,6 +49,7 @@ export async function handleUpload(
   const address = await resolveActionTarget(deps.cdp, ctx, target, params, "upload");
   if (isRpcError(address)) return address;
   const timeoutMs = params.timeout_ms ?? DEFAULT_TIMEOUT_MS;
+  const deadline = Date.now() + timeoutMs;
   const files = params.files.map((file) => file.staged_path as string);
   const mode = params.mode ?? "input";
   let usedRef = address.usedRef;
@@ -64,13 +67,26 @@ export async function handleUpload(
     });
     if (isRpcError(transaction)) return transaction;
   } else {
+    const trigger = fileTransferTriggerDeps(deps, deps.signal);
     const transaction = await uploadThroughActivatedFileInput({
       cdp: deps.cdp,
       actionTarget: address,
       files,
       timeoutMs,
       signal: deps.signal,
-      trigger: () => clickResolvedTarget(ctx, address, {}, deps),
+      trigger: () =>
+        withInputReady(
+          ctx,
+          target.tabId,
+          {
+            cdp: deps.cdp,
+            signal: deps.signal,
+            deadline,
+            registerCleanup: trigger.deps.registerClickCleanup,
+          },
+          (input) => clickResolvedTarget(ctx, address, {}, trigger.deps, input.markSent),
+        ),
+      cleanupTrigger: (deadline) => trigger.cleanup(deadline),
     });
     if (isRpcError(transaction)) return transaction;
     usedRef = transaction.click.used_ref;

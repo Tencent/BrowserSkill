@@ -21,6 +21,19 @@ report it; never omit the selector or substitute another instance to recover.
 Opening another Chrome profile does not retarget an existing session. After an
 extension reinstall or storage reset, obtain the instance mapping again.
 
+## Incognito tasks
+
+When temporary login isolation from ordinary browsing is required, use
+`bsk session start --incognito --browser <instance-id> --json`. The extension must
+have **Allow in incognito** enabled; daemon and extension protocol 1.4+ are required.
+Report a permission or compatibility error instead of retrying in normal mode.
+
+Incognito sessions cannot borrow tabs, and normal sessions cannot borrow incognito
+tabs. Create tabs in the task window. All incognito windows in one profile share
+login state with each other; they are separate from the profile's ordinary windows.
+Website data persists until every incognito window closes. Session stop preserves
+user tabs and protected popups, so it does not guarantee immediate data removal.
+
 ## Borrowing and browser settings
 
 List before borrowing, and return the tab as soon as the relevant step ends:
@@ -68,7 +81,7 @@ are unsupported; screenshots work.
 This guidance applies to the `bsk` CLI skill; the DSH plugin is a separate
 skill with plugin-owned session visibility.
 
-Sessions started in the same browser profile share one cookie jar and one set
+Normal sessions started in the same browser profile share one cookie jar and one set
 of site state. Two tasks operating on the same logged-in site - or switching
 accounts/tenants there - can overwrite each other's login state with no error
 and no obvious trace. Treat a domain overlap as a signal to assess that risk;

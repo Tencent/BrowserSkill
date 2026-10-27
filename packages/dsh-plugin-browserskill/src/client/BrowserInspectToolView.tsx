@@ -1,4 +1,4 @@
-// browser_inspect keyed toolview: all inspect actions retain a terminal card;
+// bsk_inspect keyed toolview: all inspect actions retain a terminal card;
 // screenshot results additionally render the image attachment. Pure function
 // of the frozen call/result slice, so live and replay paths stay identical.
 
@@ -12,6 +12,7 @@ import {
 } from "@deepseek-ai/dsh-client-ui-primitives";
 import type { ToolCallViewProps } from "@deepseek-ai/dsh-client-ui-tool/client";
 import { useState } from "react";
+import toolNames from "../tool-names.json";
 import css from "./BrowserInspectToolView.module.css";
 import { ScreenshotImage } from "./ScreenshotImage";
 
@@ -120,7 +121,9 @@ function commandOf(argsRaw: string, callId: string): { command: string; title: s
     // Streaming can expose a truncated JSON prefix; it is still the best label.
     return {
       command:
-        argsRaw === "" ? `browser_inspect (${callId})` : `browser_inspect ${firstLine(argsRaw)}`,
+        argsRaw === ""
+          ? `${toolNames.inspect} (${callId})`
+          : `${toolNames.inspect} ${firstLine(argsRaw)}`,
       title: "Inspect",
     };
   }
@@ -157,7 +160,7 @@ function dotState(state: ViewState): StateDotState {
 }
 
 /**
- * Render one browser_inspect call: a disclosure row over a terminal block,
+ * Render one bsk_inspect call: a disclosure row over a terminal block,
  * plus the screenshot image when that action returns an image attachment.
  */
 export function BrowserInspectToolView({
@@ -171,7 +174,7 @@ export function BrowserInspectToolView({
   const expandable = model.state === "running" || model.output !== null || model.image !== null;
   const open = expanded && expandable;
   return (
-    <div className={css.card} data-tool="browser_inspect" data-state={model.state}>
+    <div className={css.card} data-tool={toolNames.inspect} data-state={model.state}>
       <DisclosureRow
         icon={<StateDot state={dotState(model.state)} />}
         title={model.title}

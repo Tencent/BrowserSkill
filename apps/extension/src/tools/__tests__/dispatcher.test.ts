@@ -1,9 +1,12 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { type CdpDebuggerApi, ChromiumCdp } from "@/browser-driver/chromium-cdp";
+import { CooperationController } from "@/cooperation/controller";
 import { SessionManager } from "@/session-manager/manager";
 import type { ConnectionStateHandler, FrameHandler, Transport } from "@/transport/transport";
 import type {
   ConnectionState,
   ConsoleResult,
+  PendingJavaScriptDialog,
   ProtocolFrame,
   RequestFrame,
 } from "@/transport/types";
@@ -44,6 +47,126 @@ function makeRequest(method: string, params: unknown): RequestFrame {
 }
 
 describe("ToolDispatcher", () => {
+  it.each([
+    false,
+    true,
+  ])("handles modal control without renderer preparation, held=%s", async (held) => {
+    const { transport, sent, deliver } = fakeTransport();
+    const sessions = new SessionManager({
+      agentWindow: {
+        create: vi.fn(async () => ({ windowId: 42, initialTabIds: [7] })),
+        remove: vi.fn(),
+        ensureActiveTab: vi.fn(),
+      },
+    });
+    await sessions.start("owner");
+    vi.stubGlobal("chrome", { tabs: { get: vi.fn(async () => ({ id: 7, windowId: 42 })) } });
+    const dialog: PendingJavaScriptDialog = {
+      id: "dlg",
+      tab_id: 7,
+      type: "prompt",
+      message: "Name",
+      sequence: 1,
+      decision_deadline: 60000,
+    };
+    const cdp = {
+      send: vi.fn(() => {
+        throw new Error("Renderer blocked");
+      }),
+      pendingDialogs: () => [dialog],
+      resolveDialog: vi.fn(async () => ({ ...dialog, handled: "accepted" })),
+    } as unknown as TestDispatcherCdp;
+    const debug = {
+      before: vi.fn(() => {
+        throw new Error("Screenshot blocked");
+      }),
+      after: vi.fn(),
+      dispose: vi.fn(),
+    };
+    const cooperation = new CooperationController({
+      sessions,
+      changed: () => {},
+      readFrames: async () => {
+        throw new Error("Renderer blocked");
+      },
+      resumeFrames: async () => {},
+    });
+    cooperation.startSession("owner");
+    if (held) await cooperation.control(7, cooperation.view(7)!.revision, "hold");
+    const dispatcher = new ToolDispatcher({
+      transport,
+      sessions,
+      cdp,
+      cooperation,
+      debug: debug as never,
+    });
+    dispatcher.start();
+    deliver(
+      makeRequest("tool.dialog_accept", {
+        session_id: "owner",
+        dialog_id: "dlg",
+        text: "Agent input",
+      }),
+    );
+    await vi.waitFor(() =>
+      expect(sent.some((frame) => "id" in frame && frame.id === "r-1")).toBe(true),
+    );
+    if (held) {
+      expect(sent).toContainEqual(
+        expect.objectContaining({
+          error: expect.objectContaining({
+            code: "permission_denied",
+            data: expect.objectContaining({ reason: "control_authority_required" }),
+          }),
+        }),
+      );
+      expect(cdp.resolveDialog).not.toHaveBeenCalled();
+    } else {
+      expect(sent).toContainEqual(
+        expect.objectContaining({
+          result: expect.objectContaining({
+            dialog: expect.objectContaining({ handled: "accepted" }),
+          }),
+        }),
+      );
+      expect(cdp.resolveDialog).toHaveBeenCalledWith("dlg", true, "Agent input", {
+        signal: expect.any(AbortSignal),
+        onDispatch: expect.any(Function),
+      });
+    }
+    expect(cdp.send).not.toHaveBeenCalled();
+    expect(debug.before).not.toHaveBeenCalled();
+    dispatcher.stop();
+  });
+
+  it("reports an asynchronous modal before dispatching an ordinary renderer action", async () => {
+    const { transport, sent, deliver } = fakeTransport();
+    const sessions = new SessionManager({
+      agentWindow: {
+        create: vi.fn(async () => ({ windowId: 42, initialTabIds: [7] })),
+        remove: vi.fn(),
+        ensureActiveTab: vi.fn(),
+      },
+    });
+    await sessions.start("owner");
+    const cdp = {
+      send: vi.fn(),
+      pendingDialogs: () => [{ id: "async-dialog", tab_id: 7 }],
+    } as unknown as TestDispatcherCdp;
+    const dispatcher = new ToolDispatcher({ transport, sessions, cdp });
+    dispatcher.start();
+    deliver(makeRequest("tool.evaluate", { session_id: "owner", expression: "dangerousAction()" }));
+    await vi.waitFor(() => expect(sent).toHaveLength(1));
+    expect(sent[0]).toMatchObject({
+      error: {
+        code: "dialog_pending",
+        data: { dispatched: false, dialog: { id: "async-dialog" } },
+      },
+    });
+    expect(cdp.send).not.toHaveBeenCalled();
+    dispatcher.stop();
+  });
+
   afterEach(() => {
     resetBrowserObservationForTests();
     vi.unstubAllGlobals();
@@ -220,7 +343,113 @@ describe("ToolDispatcher", () => {
     expect(create).toHaveBeenCalledWith("about:blank", { focused: false });
   });
 
-  it("routes tool.session_stop and replies with empty result", async () => {
+  it("starts an incognito session through the normal dispatcher", async () => {
+    const { transport, sent, deliver } = fakeTransport();
+    const create = vi.fn(async () => ({ windowId: 4242, initialTabIds: [1], incognito: true }));
+    const sessions = new SessionManager({
+      agentWindow: { create, remove: vi.fn(), ensureActiveTab: vi.fn(async () => 1) },
+    });
+    const dispatcher = new ToolDispatcher({ transport, sessions });
+    dispatcher.start();
+    deliver(makeRequest("tool.session_start", { session_id: "private", incognito: true }));
+    await flushMicrotasks();
+    expect(create).toHaveBeenCalledWith("about:blank", { incognito: true });
+    expect(sessions.get("private")?.incognito).toBe(true);
+    expect(sent[0]).toMatchObject({ result: { agent_window_id: 4242 } });
+    dispatcher.stop();
+  });
+
+  it.each([
+    "true",
+    1,
+    null,
+  ])("rejects invalid incognito input %s before creating a window", async (incognito) => {
+    const { transport, sent, deliver } = fakeTransport();
+    const create = vi.fn();
+    const sessions = new SessionManager({
+      agentWindow: { create, remove: vi.fn(), ensureActiveTab: vi.fn() },
+    });
+    const dispatcher = new ToolDispatcher({ transport, sessions });
+    dispatcher.start();
+    deliver(makeRequest("tool.session_start", { session_id: "private", incognito }));
+    await flushMicrotasks();
+    expect(sent[0]).toMatchObject({
+      error: { code: "invalid_params", message: "incognito must be a boolean" },
+    });
+    expect(create).not.toHaveBeenCalled();
+    dispatcher.stop();
+  });
+
+  it.each([
+    false,
+    true,
+  ])("stops the session and releases cooperation with Chrome available: %s", async (chromeAvailable) => {
+    vi.stubGlobal(
+      "chrome",
+      chromeAvailable
+        ? { tabs: { remove: vi.fn(async () => {}), query: vi.fn(async () => []) } }
+        : undefined,
+    );
+    const { transport, sent, deliver } = fakeTransport();
+    const sessions = new SessionManager({
+      agentWindow: {
+        create: vi.fn(async () => ({ windowId: 4242, initialTabIds: [7] })),
+        remove: vi.fn(async () => {}),
+        ensureActiveTab: vi.fn(async () => 7),
+      },
+    });
+    await sessions.start("aa11");
+    const cooperation = new CooperationController({
+      sessions,
+      readFrames: async () => new Map(),
+      resumeFrames: async () => {},
+      changed: vi.fn(),
+    });
+    cooperation.startSession("aa11");
+    expect(cooperation.hasSession("aa11")).toBe(true);
+    const release = vi.spyOn(cooperation, "release");
+    const dispatcher = new ToolDispatcher({ transport, sessions, cooperation });
+    dispatcher.start();
+
+    deliver(makeRequest("tool.session_stop", { session_id: "aa11" }));
+    await flushMicrotasks();
+    expect(sessions.has("aa11")).toBe(false);
+    expect(release).toHaveBeenCalledExactlyOnceWith("aa11");
+    expect(cooperation.hasSession("aa11")).toBe(false);
+    expect(cooperation.enabled(7)).toBe(false);
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).toEqual({ id: "r-1", result: {} });
+    dispatcher.stop();
+  });
+
+  it.each([
+    "not_found",
+    "permission_denied",
+    "timeout",
+    "unsupported",
+    "cdp_failed",
+  ] as const)("preserves video %s errors and their diagnostic data", async (code) => {
+    const { transport, sent, deliver } = fakeTransport();
+    const error = { code, message: "original failure", data: { phase: "video" } };
+    const video = {
+      rpc: vi.fn(async () => {
+        throw error;
+      }),
+    } as unknown as NonNullable<ConstructorParameters<typeof ToolDispatcher>[0]["video"]>;
+    const dispatcher = new ToolDispatcher({ transport, sessions: new SessionManager(), video });
+    dispatcher.start();
+    try {
+      deliver(
+        makeRequest("tool.video", { action: "status", recording_id: "video", capability: "test" }),
+      );
+      await vi.waitFor(() => expect(sent).toHaveLength(1));
+      expect(sent[0]).toEqual({ id: "r-1", error });
+    } finally {
+      dispatcher.stop();
+    }
+  });
+
+  it("still cleans up a task when video finalization fails", async () => {
     const { transport, sent, deliver } = fakeTransport();
     const sessions = new SessionManager({
       agentWindow: {
@@ -229,15 +458,22 @@ describe("ToolDispatcher", () => {
         ensureActiveTab: vi.fn(async () => 1),
       },
     });
-    await sessions.start("aa11");
-    const dispatcher = new ToolDispatcher({ transport, sessions });
+    await sessions.start("video-task");
+    const video = {
+      stopSession: vi.fn(async () => {
+        throw new Error("encoder unavailable");
+      }),
+    } as unknown as NonNullable<ConstructorParameters<typeof ToolDispatcher>[0]["video"]>;
+    const dispatcher = new ToolDispatcher({ transport, sessions, video });
     dispatcher.start();
-
-    deliver(makeRequest("tool.session_stop", { session_id: "aa11" }));
-    await flushMicrotasks();
-    expect(sessions.has("aa11")).toBe(false);
-    expect(sent).toHaveLength(1);
-    expect(sent[0]).toEqual({ id: "r-1", result: {} });
+    try {
+      deliver(makeRequest("tool.session_stop", { session_id: "video-task" }));
+      await vi.waitFor(() => expect(sent).toHaveLength(1));
+      expect(sessions.has("video-task")).toBe(false);
+      expect(sent[0]).toEqual({ id: "r-1", result: {} });
+    } finally {
+      dispatcher.stop();
+    }
   });
 
   it("uses the persistent background lease before dispatching a click", async () => {
@@ -343,6 +579,102 @@ describe("ToolDispatcher", () => {
       vi.mocked(cdp.send).mock.calls.filter(([, method]) => method === "Input.dispatchMouseEvent"),
     ).toHaveLength(6);
     dispatcher.stop();
+  });
+
+  it("recovers a leased click after Chrome drops the applied focus override", async () => {
+    const tab = { id: 7, windowId: 4242, active: false, url: "https://example.test" };
+    vi.stubGlobal("chrome", {
+      tabs: {
+        get: vi.fn(async () => tab),
+        query: vi.fn(async () => [tab]),
+        sendMessage: vi.fn(async () => undefined),
+      },
+    });
+    const sessions = new SessionManager({
+      agentWindow: {
+        create: vi.fn(async () => ({ windowId: 4242, initialTabIds: [7] })),
+        remove: vi.fn(async () => {}),
+        ensureActiveTab: vi.fn(async () => 7),
+      },
+    });
+    const ctx = await sessions.start("aa11");
+    ctx.refStore.set("e1", 12, { tabId: 7 });
+    // Chrome's actual override, independent of BackgroundExecution's applied-state cache.
+    let emulated = false;
+    const toggles: boolean[] = [];
+    let pointerEvents = 0;
+    const chromeEvent = {
+      addListener: () => {},
+      removeListener: () => {},
+    } as unknown as CdpDebuggerApi["onEvent"];
+    const api: CdpDebuggerApi = {
+      attach: vi.fn(async () => {}),
+      detach: vi.fn(async () => {}),
+      sendCommand: vi.fn(async (_target, method, params) => {
+        const p = (params ?? {}) as { enabled?: boolean; expression?: string };
+        if (method === "Emulation.setFocusEmulationEnabled") {
+          emulated = p.enabled === true;
+          toggles.push(emulated);
+          return {};
+        }
+        if (method === "Runtime.evaluate" && p.expression === "document.visibilityState")
+          return { result: { value: emulated ? "visible" : "hidden" } };
+        // Animation frames run only while the page is visible.
+        if (method === "Runtime.evaluate" && p.expression?.includes("requestAnimationFrame"))
+          return { result: { value: emulated } };
+        if (method === "DOM.getContentQuads") return { quads: [[0, 0, 40, 0, 40, 20, 0, 20]] };
+        if (method === "DOM.getBoxModel")
+          return { model: { content: [0, 0, 40, 0, 40, 20, 0, 20] } };
+        if (method === "Page.getLayoutMetrics")
+          return { cssLayoutViewport: { clientWidth: 1280, clientHeight: 720 } };
+        if (method === "Runtime.evaluate")
+          return {
+            result: { value: { overlayHostPresent: false, overlayHostConnected: false } },
+          };
+        if (method === "Input.dispatchMouseEvent") {
+          if (!emulated) throw new Error("input sent to a hidden page");
+          pointerEvents++;
+        }
+        return {};
+      }),
+      onEvent: chromeEvent,
+      onDetach: chromeEvent as unknown as CdpDebuggerApi["onDetach"],
+    };
+    const cdp = new ChromiumCdp(api);
+    const { transport, sent, deliver } = fakeTransport();
+    const dispatcher = new ToolDispatcher({ transport, sessions, cdp });
+    dispatcher.start();
+    const click = async (count: number) => {
+      deliver(makeRequest("tool.click", { session_id: "aa11", ref: "e1" }));
+      await vi.waitFor(() => expect(sent).toHaveLength(count));
+      return sent[count - 1];
+    };
+    try {
+      expect(await click(1)).toMatchObject({ result: { tab_id: 7, used_ref: "e1" } });
+      expect(toggles).toEqual([true]);
+      expect(pointerEvents).toBe(3);
+
+      // Turned off outside the cache, e.g. from the service worker.
+      emulated = false;
+      expect(await click(2)).toMatchObject({ result: { tab_id: 7, used_ref: "e1" } });
+      expect(toggles).toEqual([true, true]);
+      expect(pointerEvents).toBe(6);
+      expect(emulated).toBe(true);
+      expect(cdp.ownsBackgroundExecution("aa11", 7)).toBe(true);
+      expect(
+        vi
+          .mocked(api.sendCommand)
+          .mock.calls.some(([, method]) => method === "Page.captureScreenshot"),
+      ).toBe(false);
+
+      // The restored override stays with the lease for the next tool.
+      expect(await click(3)).toMatchObject({ result: { tab_id: 7, used_ref: "e1" } });
+      expect(toggles).toEqual([true, true]);
+      expect(pointerEvents).toBe(9);
+    } finally {
+      dispatcher.stop();
+      cdp.dispose();
+    }
   });
 
   it("wires the production tab APIs into tool.session_stop so a surviving user tab releases the window", async () => {
@@ -488,6 +820,7 @@ describe("ToolDispatcher", () => {
       }
       if (method === "Runtime.evaluate") {
         const expression = (params as { expression?: string }).expression ?? "";
+        if (expression === "document.visibilityState") return { result: { value: "visible" } } as T;
         if (expression.includes('return "absent"')) {
           return { result: { value: "clear" } } as T;
         }
@@ -573,7 +906,7 @@ describe("ToolDispatcher", () => {
     const remove = vi.fn(async () => {});
     const sessions = new SessionManager({
       agentWindow: {
-        create: vi.fn(async () => ({ windowId: 4242, initialTabIds: [] })),
+        create: vi.fn(async () => ({ windowId: 4242, initialTabIds: [7] })),
         remove,
         ensureActiveTab: vi.fn(async () => 1),
       },
@@ -598,7 +931,20 @@ describe("ToolDispatcher", () => {
       setUserAgentOverride: vi.fn(async () => {}),
       setTouchEmulationEnabled: vi.fn(async () => {}),
     };
-    const dispatcher = new ToolDispatcher({ transport, sessions, cdp: cdp as TestDispatcherCdp });
+    const cooperation = new CooperationController({
+      sessions,
+      readFrames: async () => new Map(),
+      resumeFrames: async () => {},
+      changed: vi.fn(),
+    });
+    cooperation.startSession("aa11");
+    const release = vi.spyOn(cooperation, "release");
+    const dispatcher = new ToolDispatcher({
+      transport,
+      sessions,
+      cdp: cdp as TestDispatcherCdp,
+      cooperation,
+    });
     dispatcher.start();
 
     deliver(makeRequest("tool.session_stop", { session_id: "aa11" }));
@@ -615,6 +961,9 @@ describe("ToolDispatcher", () => {
     });
     expect(sessions.has("aa11")).toBe(true);
     expect(remove).not.toHaveBeenCalled();
+    expect(release).not.toHaveBeenCalled();
+    expect(cooperation.hasSession("aa11")).toBe(true);
+    expect(cooperation.enabled(7)).toBe(true);
   });
 
   it("returns not_found when stopping an unknown session", async () => {

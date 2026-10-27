@@ -198,7 +198,7 @@ export function registerDebugTool(
             if (value.length > 81920) throw new Error("control options exceed 80 KiB");
             JSON.parse(value);
           }
-        const session = deps.registry.resolve(args.session, "browser_inspect(action=debug)");
+        const session = deps.registry.resolve(args.session, "bsk_inspect(action=debug)");
         const command = ["debug", args.debugAction];
         if (args.id !== undefined) command.push(args.id);
         command.push("--session", session);

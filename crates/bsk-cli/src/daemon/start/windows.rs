@@ -12,12 +12,8 @@ use windows_sys::Win32::System::Threading::{
 };
 
 use super::{DAEMON_REPLACEMENT_WAIT_ENV, DAEMONIZED_ENV, StartArgs, apply_start_args};
+use crate::daemon::start_error::DaemonStartFailure;
 use crate::windows_process::{self, Process};
-
-const DETACH_HINT: &str = "cannot start an independent Windows daemon; the host may prohibit Job Object breakaway. \
-    Run `bsk daemon start --foreground` in a persistent host task outside the per-command Job, \
-    or start the daemon from an independent terminal, using the same BSK_HOME and OS user. \
-    Then use BSK_AUTO_START=0 in the agent";
 
 pub(super) fn spawn(exe: &Path, args: &StartArgs, predecessor_pid: Option<u32>) -> Result<Process> {
     let mut command = std::process::Command::new(exe);
@@ -46,12 +42,12 @@ pub(super) fn spawn(exe: &Path, args: &StartArgs, predecessor_pid: Option<u32>) 
         [&input, &output, &output],
         DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_BREAKAWAY_FROM_JOB | CREATE_SUSPENDED,
     )
-    .context(DETACH_HINT)?;
+    .context(DaemonStartFailure::IndependentStartFailed)?;
     if let Err(err) = child.resume_outside_job() {
         // A suspended child must never be left behind if validation/resume fails.
         let _ = child.kill();
         let _ = child.wait();
-        return Err(err).context(DETACH_HINT);
+        return Err(err).context(DaemonStartFailure::IndependentStartFailed);
     }
     Ok(child)
 }
@@ -74,14 +70,16 @@ pub(super) fn check_breakaway(exe: &Path) -> Result<()> {
         [&input, &output, &output],
         DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_BREAKAWAY_FROM_JOB | CREATE_SUSPENDED,
     )
-    .context(DETACH_HINT)?;
+    .context(DaemonStartFailure::IndependentStartFailed)?;
     let outside = probe.outside_job();
     let _ = probe.kill();
     let _ = probe.wait();
-    anyhow::ensure!(
-        outside.context("check the probe's Job membership")?,
-        "{DETACH_HINT}: breakaway from an outer Job is not allowed"
-    );
+    if !outside.context("check the probe's Job membership")? {
+        return Err(anyhow::anyhow!(
+            "breakaway from an outer Job is not allowed"
+        ))
+        .context(DaemonStartFailure::IndependentStartFailed);
+    }
     Ok(())
 }
 

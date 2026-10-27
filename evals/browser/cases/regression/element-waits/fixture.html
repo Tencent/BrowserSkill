@@ -1,0 +1,19 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Element wait fixture</title>
+<button id="start">Start loading</button>
+<div id="content"></div>
+<script>
+  window.startedAt = null;
+  window.readyAt = null;
+  document.querySelector('#start').onclick = () => {
+    const content = document.querySelector('#content');
+    content.innerHTML = '<div id="mask" style="position:fixed;inset:50px 0 0;background:#ddd">Loading</div>';
+    window.startedAt = performance.now();
+    window.readyAt = null;
+    setTimeout(() => {
+      content.innerHTML = '<button id="result">Result ready</button>';
+      window.readyAt = performance.now();
+    }, 350);
+  };
+</script>

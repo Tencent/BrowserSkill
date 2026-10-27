@@ -3,7 +3,7 @@ import { type CdpDebuggee, type CdpDebuggerApi, ChromiumCdp } from "@/browser-dr
 import type { InputPassthroughMessage } from "@/lib/input-passthrough-bridge";
 import { SessionManager } from "@/session-manager/manager";
 import { handleDownload } from "../download";
-import { downloadTriggerDeps } from "../download-trigger";
+import { fileTransferTriggerDeps } from "../file-transfer-trigger";
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -33,7 +33,15 @@ async function fixture() {
     attach: vi.fn(async () => {}),
     detach: vi.fn(async () => {}),
     sendCommand: vi.fn(async (_target, method, params) => {
-      if (method === "Runtime.evaluate") return { result: { value: "absent" } };
+      if (method === "Runtime.evaluate")
+        return {
+          result: {
+            value:
+              (params as { expression?: string })?.expression === "document.visibilityState"
+                ? "visible"
+                : "absent",
+          },
+        };
       if (method === "Page.getFrameTree") return { frameTree: { frame: { id: "root" } } };
       if (method === "Page.getLayoutMetrics")
         return { cssLayoutViewport: { clientWidth: 1280, clientHeight: 720 } };
@@ -99,7 +107,7 @@ it("does not detach the replacement attachment when an old cleanup release times
   vi.useFakeTimers();
   const f = await fixture();
   const abort = new AbortController();
-  const scope = downloadTriggerDeps(f.deps, abort.signal);
+  const scope = fileTransferTriggerDeps(f.deps, abort.signal);
   const release = deferred<object>();
   const releasing = deferred<void>();
   const send = vi.mocked(f.api.sendCommand).getMockImplementation()!;
@@ -153,7 +161,11 @@ it.each([
   const send = vi.mocked(f.api.sendCommand).getMockImplementation()!;
   vi.spyOn(f.api, "sendCommand").mockImplementation(async (target, method, params) => {
     const reply = await send(target, method, params);
-    if (method === "Runtime.evaluate" && ++probes === (type === "mouseMoved" ? 1 : 2)) {
+    if (
+      method === "Runtime.evaluate" &&
+      (params as { expression?: string })?.expression !== "document.visibilityState" &&
+      ++probes === (type === "mouseMoved" ? 1 : 2)
+    ) {
       f.onDetach.fire({ tabId: 7 }, "connection_lost");
       vi.mocked(f.api.attach).mockImplementationOnce(() => {
         attaching.resolve();
@@ -198,7 +210,7 @@ it.each([
     attaching.resolve();
     return attach.promise;
   });
-  const scope = downloadTriggerDeps(f.deps, abort.signal);
+  const scope = fileTransferTriggerDeps(f.deps, abort.signal);
   const pending = scope.deps.cdp.sendToTarget!(
     { tabId: 7, sessionId },
     "Input.dispatchMouseEvent",
@@ -279,7 +291,10 @@ it.each([
   });
   const send = vi.mocked(f.api.sendCommand).getMockImplementation()!;
   vi.spyOn(f.api, "sendCommand").mockImplementation(async (target, method, params) => {
-    if (method === "Runtime.evaluate")
+    if (
+      method === "Runtime.evaluate" &&
+      (params as { expression?: string })?.expression !== "document.visibilityState"
+    )
       return { result: { value: leases.size ? "clear" : "covered" } };
     const reply = await send(target, method, params);
     if (

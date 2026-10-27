@@ -1,6 +1,6 @@
 # Website debugging
 
-Use `browser_inspect` with `action: "debug"` to record and investigate a website
+Use `bsk_inspect` with `action: "debug"` to record and investigate a website
 problem. Keep ordinary browsing capture-free. All examples use the owning
 `session`; use returned IDs and the owned `tabId` when targeting a specific tab.
 Read loaded schemas for parameters; `debugAction: "capabilities"` reports supported
@@ -13,9 +13,9 @@ actions, limits, filters and build information.
    navigating or reproducing; earlier traffic cannot be recovered.
 
    ```text
-   browser_inspect({ action: "debug", debugAction: "start", session: "<id>", name: "Nickname does not persist" })
-   browser_page({ action: "navigate", session: "<id>", url: "https://example.com/profile" })
-   browser_inspect({ action: "observe", session: "<id>" })
+   bsk_inspect({ action: "debug", debugAction: "start", session: "<id>", name: "Nickname does not persist" })
+   bsk_page({ action: "navigate", session: "<id>", url: "https://example.com/profile" })
+   bsk_inspect({ action: "observe", session: "<id>" })
    ```
 
 2. Retain the returned run ID; pass it as `runId` for subsequent reads. Reproduce
@@ -28,9 +28,9 @@ actions, limits, filters and build information.
 4. Use `stop` to save the final record, then export before stopping the session:
 
    ```text
-   browser_inspect({ action: "debug", debugAction: "stop", session: "<id>" })
-   browser_inspect({ action: "debug", debugAction: "export", session: "<id>", runId: "<run-id>", output: "<new-file.json>" })
-   browser_session({ action: "stop", session: "<id>" })
+   bsk_inspect({ action: "debug", debugAction: "stop", session: "<id>" })
+   bsk_inspect({ action: "debug", debugAction: "export", session: "<id>", runId: "<run-id>", output: "<new-file.json>" })
+   bsk_session({ action: "stop", session: "<id>" })
    ```
 
 `export` writes a new file without overwriting and returns its path/size. Exporting

@@ -1,0 +1,148 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "VideoRecording",
+  "type": "object",
+  "required": [
+    "byte_size",
+    "created_at",
+    "dropped_frames",
+    "duration_ms",
+    "expires_at",
+    "exported",
+    "frames",
+    "height",
+    "max_duration_ms",
+    "quality",
+    "recording_id",
+    "session_id",
+    "state",
+    "tab_id",
+    "title",
+    "width"
+  ],
+  "properties": {
+    "byte_size": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "completeness": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/VideoCompleteness"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "created_at": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "dropped_frames": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "duration_ms": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "error": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "expires_at": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "exported": {
+      "type": "boolean"
+    },
+    "frames": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "height": {
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0.0
+    },
+    "max_duration_ms": {
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0.0
+    },
+    "quality": {
+      "$ref": "#/definitions/VideoQuality"
+    },
+    "recording_id": {
+      "type": "string"
+    },
+    "session_id": {
+      "type": "string"
+    },
+    "started_at": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "state": {
+      "$ref": "#/definitions/VideoState"
+    },
+    "stop_reason": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "tab_id": {
+      "type": "integer",
+      "format": "int64"
+    },
+    "title": {
+      "type": "string"
+    },
+    "width": {
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0.0
+    }
+  },
+  "definitions": {
+    "VideoCompleteness": {
+      "type": "string",
+      "enum": [
+        "complete",
+        "partial"
+      ]
+    },
+    "VideoQuality": {
+      "type": "string",
+      "enum": [
+        "standard",
+        "clear"
+      ]
+    },
+    "VideoState": {
+      "type": "string",
+      "enum": [
+        "starting",
+        "recording",
+        "finalizing",
+        "ready",
+        "failed"
+      ]
+    }
+  }
+}

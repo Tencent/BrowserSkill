@@ -41,7 +41,7 @@ describe("recoverable plugin starts", () => {
       });
       const before = h.calls.length;
       await expect(
-        h.tools.get("browser_page")!.execute(
+        h.tools.get("bsk_page")!.execute(
           {
             action: "navigate",
             session: "starting",
@@ -109,7 +109,7 @@ describe("recoverable plugin starts", () => {
         }),
     );
     await vi.waitFor(() => expect(release).toBeTypeOf("function"));
-    const queued = h.tools.get("browser_page")!.execute(
+    const queued = h.tools.get("bsk_page")!.execute(
       {
         action: "navigate",
         session: "created",
@@ -180,7 +180,7 @@ describe("recoverable plugin starts", () => {
     expect(h.registry.ownedIds()).toEqual(["working", "broken"]);
     expect(h.registry.size()).toBe(2);
     expect(h.starts.pendingCleanup()).toBe(1);
-    const page = h.tools.get("browser_page")!;
+    const page = h.tools.get("bsk_page")!;
     await page.execute({ action: "navigate", url: "https://example.com" }, exec());
     expect(h.calls.at(-1)?.args).toContain("working");
     const before = h.calls.length;

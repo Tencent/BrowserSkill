@@ -178,6 +178,9 @@ async fn browser_capacity_does_not_block_renewal_or_replacement() {
     let (mut ws, _) = tokio_tungstenite::connect_async(server.request(&first, ORIGIN))
         .await
         .unwrap();
+    // HTTP upgrade completes before the server records the authenticated device.
+    // Establish the first owner before testing replacement at capacity.
+    handshake(&mut ws, "initial").await;
     // An authenticated socket stalled before the native handshake must also
     // be replaceable, without retaining a second device capacity slot.
     let (mut stalled, _) = tokio_tungstenite::connect_async(server.request(&first, ORIGIN))

@@ -334,6 +334,34 @@ describe.skipIf(!process.env.BSK_CLICK_CHROME)("real browser click readiness", (
             ).toBe(false);
             expect(documentChanges).toBe(0);
             expect(ctx.refStore.resolve(ref!, { tabId: 4 })).not.toBeNull();
+
+            // Drop the override on the same debugger session, bypassing the applied-state
+            // cache as a service-worker command would. The lease owner must restore it.
+            await send("Emulation.setFocusEmulationEnabled", { enabled: false }, target.sessionId);
+            expect(await target.evaluate("document.visibilityState")).toBe("hidden");
+            expect(await prepare("tool.click")).toBeUndefined();
+            cdpCommands.length = 0;
+            const recovered = await handleClick(
+              manager,
+              { session_id: ctx.sessionId, tab_id: 4, ref: ref! },
+              { cdp, tabsApi },
+            );
+            expect(
+              recovered,
+              JSON.stringify({ recovered, commands: cdpCommands }),
+            ).not.toHaveProperty("code");
+            expect(await target.evaluate("window.clicks")).toEqual([true, true]);
+            expect(
+              cdpCommands.filter(
+                (command) => command.method === "Emulation.setFocusEmulationEnabled",
+              ),
+            ).toHaveLength(1);
+            expect(cdpCommands.some((command) => command.method === "Page.captureScreenshot")).toBe(
+              false,
+            );
+            expect(await target.evaluate("document.visibilityState")).toBe("visible");
+            expect(cdp.ownsBackgroundExecution(ctx.sessionId, 4)).toBe(true);
+            expect(await foreground.evaluate("document.visibilityState")).toBe("visible");
             await cdp.send(4, "Page.navigate", { url: `${url}/next` });
             await vi.waitFor(() => expect(documentUpdates).toBeGreaterThan(0), { timeout: 5000 });
             expect(documentChanges).toBeGreaterThan(0);

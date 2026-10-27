@@ -1,6 +1,6 @@
 {
   "name": "@browser-skill/extension",
-  "version": "0.3.1",
+  "version": "0.3.3",
   "private": true,
   "type": "module",
   "scripts": {
@@ -16,6 +16,7 @@
     "@browser-skill/ui": "workspace:*",
     "@browser-skill/vom": "workspace:*",
     "@remixicon/react": "^4.9.0",
+    "mediabunny": "1.61.3",
     "re2js": "2.8.6",
     "react": "^19.0.0",
     "react-dom": "^19.0.0"

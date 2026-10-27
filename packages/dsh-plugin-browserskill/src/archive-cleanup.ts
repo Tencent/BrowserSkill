@@ -7,7 +7,7 @@
  * are hidden from every surface, so their Agent Windows would otherwise
  * linger with no way back to them.
  *
- * Ownership lineage: browser_session action=start records the calling agent's
+ * Ownership lineage: bsk_session action=start records the calling agent's
  * session id PLUS every ancestor along `header.parentSession` (a subagent's
  * browsers are reaped when any ancestor is archived, the root conversation
  * included). Lineage is resolved through the host session store; an
@@ -39,7 +39,7 @@ const MAX_LINEAGE_DEPTH = 16;
 
 /**
  * The DSH session ids that own a tool call's browser sessions: the calling
- * agent's own session plus every ancestor along the seed lineage. Empty
+ * agent's own session first, followed by ancestors along the seed lineage. Empty
  * when the call carried no agent identity (those sessions outlive any
  * archive cleanup by design — nothing can name their owner).
  */

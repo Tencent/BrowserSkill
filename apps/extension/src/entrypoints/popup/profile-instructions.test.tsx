@@ -23,7 +23,7 @@ describe("profile instructions", () => {
     const text = vi.mocked(navigator.clipboard.writeText).mock.calls[0]?.[0];
     expect(text).toContain('browser "Work" (instance ID: a1234567)');
     expect(text).toContain("bsk session start --browser a1234567 --json");
-    expect(text).toContain('browser_session({ action: "start", browser: "a1234567" })');
+    expect(text).toContain('bsk_session({ action: "start", browser: "a1234567" })');
     expect(text).toContain("use the tool call instead of running the CLI command separately");
     expect(text).toContain("every new session for this task");
     expect(text).toContain("Do not omit --browser / browser or switch to another instance");
@@ -70,7 +70,7 @@ describe("profile instructions", () => {
       "bsk session start --browser b1234567 --json",
     );
     expect(vi.mocked(navigator.clipboard.writeText).mock.calls[1]?.[0]).toContain(
-      'browser_session({ action: "start", browser: "b1234567" })',
+      'bsk_session({ action: "start", browser: "b1234567" })',
     );
   });
   it("reports clipboard failure and allows retry without claiming success", async () => {
@@ -90,7 +90,7 @@ describe("profile instructions", () => {
     const text = vi.mocked(navigator.clipboard.writeText).mock.calls[0]?.[0];
     expect(text).toContain(JSON.stringify(label));
     expect(text).toContain("CLI: bsk session start --browser a1234567 --json");
-    expect(text).toContain('browser_session({ action: "start", browser: "a1234567" })');
+    expect(text).toContain('bsk_session({ action: "start", browser: "a1234567" })');
     expect(await screen.findByRole("button", { name: "Copied" })).toBeTruthy();
   });
   it("discards pending feedback when the saved name changes and copies the new name", async () => {
@@ -153,7 +153,7 @@ describe("profile instructions", () => {
       "bsk session start --browser a1234567 --json",
     );
     expect(vi.mocked(navigator.clipboard.writeText).mock.calls[0]?.[0]).toContain(
-      'browser_session({ action: "start", browser: "a1234567" })',
+      'bsk_session({ action: "start", browser: "a1234567" })',
     );
     expect(vi.mocked(navigator.clipboard.writeText).mock.calls[0]?.[0]).toContain(
       "--browser / browser",

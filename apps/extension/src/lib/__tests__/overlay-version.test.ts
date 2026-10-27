@@ -26,3 +26,10 @@ it("versions a reset like a state, so the page can order the two", async () => {
     generation: before.generation + 1,
   });
 });
+
+it("is a best-effort no-op outside the extension runtime", async () => {
+  vi.stubGlobal("chrome", undefined);
+  await expect(chromeAgentOverlayResetApi.resetAgentOverlays(3, "sess-1")).resolves.toBeUndefined();
+  vi.stubGlobal("chrome", { tabs: {} });
+  await expect(chromeAgentOverlayResetApi.resetAgentOverlays(3, "sess-1")).resolves.toBeUndefined();
+});

@@ -172,6 +172,7 @@ pub enum PromoteOutcome {
 #[derive(Debug)]
 pub struct ToolInflightEntry {
     pub cli_rpc_id: RpcId,
+    pub dialog_pending: tokio::sync::watch::Sender<bool>,
     cancel: AbortToken,
     inner: Mutex<InflightInner>,
 }
@@ -180,6 +181,7 @@ impl ToolInflightEntry {
     fn new(session_id: SessionId, cli_rpc_id: RpcId) -> Arc<Self> {
         Arc::new(Self {
             cli_rpc_id,
+            dialog_pending: tokio::sync::watch::channel(false).0,
             cancel: AbortToken::new(),
             inner: Mutex::new(InflightInner::new(session_id)),
         })

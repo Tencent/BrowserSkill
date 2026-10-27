@@ -30,3 +30,249 @@
 :host([data-bsk-capture-hidden]) {
   display: none !important;
 }
+
+/* Shared tabs keep native input available; only the card itself receives pointer input. */
+.bsk-cooperation,
+.bsk-cooperation-target {
+  --bsk-coop-orange: #f97316;
+  --bsk-coop-ink: #a63e0c;
+  --bsk-coop-soft: #fff0e3;
+  --bsk-coop-action: #c2410c;
+  --bsk-coop-action-text: #fff;
+  --bsk-coop-surface: #fffdfa;
+  --bsk-coop-text: #302820;
+  --bsk-coop-muted: #7b7168;
+  --bsk-coop-line: #e9e4de;
+  --bsk-coop-warm-line: #f4d6bc;
+  --bsk-coop-hover: #f7eee5;
+  --bsk-coop-shadow: rgb(101 56 24 / 12%);
+}
+
+.bsk-cooperation {
+  position: fixed;
+  right: 20px;
+  bottom: 20px;
+  z-index: 2147483647;
+  box-sizing: border-box;
+  width: 300px;
+  max-width: calc(100vw - 32px);
+  max-height: calc(100dvh - 32px);
+  overflow: auto;
+  pointer-events: auto;
+  padding: 16px;
+  border: 1px solid var(--bsk-coop-warm-line);
+  border-radius: 20px;
+  background: var(--bsk-coop-surface);
+  color: var(--bsk-coop-text);
+  box-shadow:
+    0 14px 38px -12px var(--bsk-coop-shadow),
+    0 3px 8px -3px var(--bsk-coop-shadow);
+  font:
+    13px / 1.5 system-ui,
+    sans-serif;
+}
+
+.bsk-cooperation-header,
+.bsk-cooperation-brand,
+.bsk-cooperation-body,
+.bsk-cooperation-status,
+.bsk-cooperation-actions {
+  display: flex;
+  align-items: center;
+}
+
+.bsk-cooperation-header {
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 14px;
+  font-size: 11px;
+}
+
+.bsk-cooperation-brand {
+  gap: 7px;
+  flex-shrink: 0;
+  color: var(--bsk-coop-muted);
+  font-weight: 500;
+}
+
+.bsk-cooperation-brand img {
+  width: 16px;
+  height: 16px;
+  border-radius: 4px;
+}
+
+.bsk-cooperation-badge {
+  padding: 2px 6px;
+  border-radius: 5px;
+  background: var(--bsk-coop-soft);
+  color: var(--bsk-coop-ink);
+  text-align: center;
+  overflow-wrap: anywhere;
+}
+
+.bsk-cooperation-body {
+  gap: 11px;
+}
+
+.bsk-cooperation-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 38px;
+  height: 38px;
+  border: 1px solid var(--bsk-coop-warm-line);
+  border-radius: 13px;
+  background: var(--bsk-coop-soft);
+  color: var(--bsk-coop-ink);
+}
+
+.bsk-cooperation-copy {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.bsk-cooperation-status {
+  gap: 7px;
+  font-size: 14px;
+  font-weight: 500;
+}
+
+.bsk-cooperation-dot {
+  width: 5px;
+  height: 5px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  background: var(--bsk-coop-orange);
+}
+
+.bsk-cooperation-hint {
+  display: block;
+  margin-top: 2px;
+  color: var(--bsk-coop-muted);
+  font-size: 11px;
+}
+
+.bsk-cooperation-actions {
+  gap: 8px;
+  margin-top: 16px;
+  padding-top: 13px;
+  border-top: 1px solid var(--bsk-coop-line);
+}
+
+.bsk-cooperation button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-width: 0;
+  min-height: 36px;
+  padding: 8px 10px;
+  border: 0;
+  border-radius: 12px;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 500;
+  overflow-wrap: anywhere;
+  cursor: pointer;
+}
+
+.bsk-cooperation button svg {
+  flex-shrink: 0;
+}
+
+.bsk-cooperation-primary {
+  flex: 1;
+  background: var(--bsk-coop-soft);
+  color: var(--bsk-coop-ink);
+}
+
+.bsk-cooperation-stop {
+  flex: 0 1 auto;
+  background: transparent;
+  color: var(--bsk-coop-muted);
+}
+
+.bsk-cooperation-stop:hover {
+  background: var(--bsk-coop-hover);
+  color: var(--bsk-coop-text);
+}
+
+.bsk-cooperation button:focus-visible {
+  outline: 2px solid var(--bsk-coop-orange);
+  outline-offset: 2px;
+}
+
+.bsk-cooperation button:disabled {
+  cursor: default;
+  opacity: 0.55;
+}
+
+.bsk-cooperation button:hover:not(:disabled) {
+  box-shadow: inset 0 0 0 1px var(--bsk-coop-warm-line);
+}
+
+.bsk-cooperation[data-mode="human"] .bsk-cooperation-primary,
+.bsk-cooperation[data-mode="held"] .bsk-cooperation-primary {
+  background: var(--bsk-coop-action);
+  color: var(--bsk-coop-action-text);
+}
+
+.bsk-cooperation[data-mode="human"] .bsk-cooperation-icon {
+  background: transparent;
+}
+
+.bsk-cooperation[data-mode="held"] .bsk-cooperation-dot {
+  background: var(--bsk-coop-muted);
+}
+
+.bsk-cooperation-target {
+  position: fixed;
+  transform: translate(-50%, -50%);
+  z-index: 2147483646;
+  pointer-events: none;
+  border: 2px solid var(--bsk-coop-orange);
+  border-radius: 50%;
+  width: 22px;
+  height: 22px;
+  box-shadow: 0 0 0 5px rgb(249 115 22 / 13%);
+  font:
+    11px / 1.5 system-ui,
+    sans-serif;
+}
+
+.bsk-cooperation-target span {
+  position: absolute;
+  top: 22px;
+  left: 14px;
+  padding: 2px 7px;
+  border-radius: 5px 9px 9px;
+  background: var(--bsk-coop-soft);
+  color: var(--bsk-coop-ink);
+}
+@media (prefers-color-scheme: dark) {
+  .bsk-cooperation,
+  .bsk-cooperation-target {
+    --bsk-coop-ink: #ffad73;
+    --bsk-coop-soft: #382619;
+    --bsk-coop-action: #fb923c;
+    --bsk-coop-action-text: #351803;
+    --bsk-coop-surface: #24211e;
+    --bsk-coop-text: #f4ece5;
+    --bsk-coop-muted: #b9aca0;
+    --bsk-coop-line: #403932;
+    --bsk-coop-warm-line: #67442b;
+    --bsk-coop-hover: #352c24;
+    --bsk-coop-shadow: rgb(0 0 0 / 36%);
+  }
+}
+@media (width <= 360px) {
+  .bsk-cooperation {
+    right: 16px;
+    bottom: 16px;
+  }
+}
+@media (pointer: coarse) {
+  .bsk-cooperation button {
+    min-height: 44px;
+  }
+}

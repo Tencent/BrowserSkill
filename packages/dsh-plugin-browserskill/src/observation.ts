@@ -196,7 +196,7 @@ export class ObservationService {
     this.emit({ type: "upsert", session: { ...entry } });
   }
 
-  /** Register a fresh owned session (called from browser_session action=start). */
+  /** Register a fresh owned session (called from bsk_session action=start). */
   addSession(sessionId: string, url?: string): void {
     if (!this.deps.options.enabled || this.disposed) return;
     const dshSessionIds = this.deps.registry.dshOwnersOf(sessionId);
@@ -211,7 +211,7 @@ export class ObservationService {
     this.scheduleCapture(sessionId, 0);
   }
 
-  /** Drop a session (called from browser_session action=stop). */
+  /** Drop a session (called from bsk_session action=stop). */
   removeSession(sessionId: string): void {
     this.cancelCapture(sessionId);
     this.foregroundDepth.delete(sessionId);

@@ -33,6 +33,9 @@ fn daemon_self_exits_after_idle_timeout() {
 
     let out = Command::new(bsk_bin())
         .env("BSK_HOME", &home)
+        // Release checks and daemon replacement are outside this idle-lifecycle test.
+        .env("BSK_AUTO_UPDATE", "off")
+        .env("BSK_UPDATE_MANIFEST_URL", "http://127.0.0.1:1/disabled")
         .env("RUST_LOG", "warn")
         .args(["daemon", "start", "--port", "0", "--daemon-idle", "2s"])
         .output()
@@ -67,6 +70,9 @@ fn daemon_stays_alive_while_ipc_connection_is_open() {
 
     let out = Command::new(bsk_bin())
         .env("BSK_HOME", &home)
+        // Release checks and daemon replacement are outside this idle-lifecycle test.
+        .env("BSK_AUTO_UPDATE", "off")
+        .env("BSK_UPDATE_MANIFEST_URL", "http://127.0.0.1:1/disabled")
         .env("RUST_LOG", "warn")
         .args(["daemon", "start", "--port", "0", "--daemon-idle", "2s"])
         .output()

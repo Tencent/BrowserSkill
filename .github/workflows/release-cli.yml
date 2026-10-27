@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: release-cli-${{ github.ref }}
@@ -27,12 +27,11 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            VERSION="$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')"
-          else
-            VERSION="${GITHUB_REF_NAME#cli-v}"
+          if [[ "$GITHUB_REPOSITORY" != "Tencent/BrowserSkill" || "$GITHUB_REF" != refs/tags/cli-v* ]]; then
+            echo "Run this workflow on an existing cli-v<version> tag."
+            exit 1
           fi
-          VERSION="${VERSION#v}"
+          VERSION="${GITHUB_REF_NAME#cli-v}"
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
           echo "tag=cli-v${VERSION}" >> "$GITHUB_OUTPUT"
 
@@ -102,54 +101,27 @@ jobs:
           tar -czf "$ARCHIVE" -C "target/${{ matrix.target }}/release" bsk
           echo "ARCHIVE=$ARCHIVE" >> "$GITHUB_ENV"
 
-      - name: Package archive (Windows)
+      - name: Prepare Windows signing request
         if: matrix.archive == 'zip'
         shell: pwsh
         run: |
-          $version = "${{ needs.resolve.outputs.version }}"
-          $archive = "bsk-v${version}-${{ matrix.target }}.zip"
-          Compress-Archive -Path "target/${{ matrix.target }}/release/bsk.exe" -DestinationPath $archive -Force
-          "ARCHIVE=$archive" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          New-Item -ItemType Directory -Path unsigned | Out-Null
+          Copy-Item "target/${{ matrix.target }}/release/bsk.exe" unsigned/bsk.exe
+          python scripts/windows-release.py request
 
-      - name: Upload artifact
+      - name: Upload unsigned Windows artifact for internal signing
+        if: matrix.archive == 'zip'
         uses: actions/upload-artifact@v7
         with:
-          name: bsk-${{ matrix.target }}
+          name: bsk-windows-unsigned-${{ github.run_id }}-${{ github.run_attempt }}
+          path: unsigned/*
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Upload Unix artifact
+        if: matrix.archive == 'tar.gz'
+        uses: actions/upload-artifact@v7
+        with:
+          name: bsk-${{ matrix.target }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ env.ARCHIVE }}
           if-no-files-found: error
-
-  release:
-    needs: [resolve, build-cli]
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-
-      - name: Download build artifacts
-        uses: actions/download-artifact@v8
-        with:
-          path: dist
-          merge-multiple: true
-
-      - name: Render version.json
-        shell: bash
-        run: |
-          set -euo pipefail
-          node scripts/render-version-json.mjs \
-            --version "${{ needs.resolve.outputs.version }}" \
-            --repo "${{ github.repository }}" \
-            --server-url "${{ github.server_url }}" \
-            --branch "${{ github.event.repository.default_branch }}" \
-            --dist dist \
-            --out dist/version.json
-
-      - name: Publish GitHub Release
-        uses: softprops/action-gh-release@v3
-        with:
-          tag_name: ${{ needs.resolve.outputs.tag }}
-          name: bsk CLI ${{ needs.resolve.outputs.version }}
-          make_latest: true
-          generate_release_notes: true
-          files: |
-            dist/*.tar.gz
-            dist/*.zip
-            dist/version.json

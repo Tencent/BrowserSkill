@@ -103,6 +103,7 @@ fn dispatch_start(args: RecordStartArgs, format: Format) -> Result<(), CliError>
         info.sock_path.clone(),
         SessionStartOptions {
             browser: args.browser,
+            focused: Some(true),
             ..SessionStartOptions::default()
         },
     )?;

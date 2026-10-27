@@ -4,7 +4,9 @@
 
 import { describe, expect, it, vi } from "vitest";
 import { armArchiveCleanup, ownerSessionIds } from "../src/archive-cleanup";
+import type { BskRunResult } from "../src/runner";
 import { SessionRegistry } from "../src/sessions";
+import { cleanups, exec, harness as lifecycleHarness, ok } from "./session-lifecycle-harness";
 
 /** A ctx stub carrying a session store with the given lineage headers. */
 function ctxWithSessions(headers: Record<string, { parentSession?: string }>) {
@@ -146,5 +148,112 @@ describe("armArchiveCleanup", () => {
     h.emit({ domain: "workspace", table: "", value: { archivedSessionIds: [] } });
     h.emit({ domain: "workspace", table: "", value: { archivedSessionIds: ["conv-a"] } });
     expect(h.archive).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("browser starts with archived lineage", () => {
+  function harness(
+    archivedSessionIds: string[],
+    start = async () => ok({ session_id: "created", browser_instance_id: "browser" }),
+  ) {
+    const h = lifecycleHarness(async (args) => {
+      if (args[1] === "start") return start();
+      if (args.includes("--claim")) return ok({ state: "active" });
+      if (args.includes("--cancel")) return ok({ state: "closed" });
+      throw new Error(`unexpected command: ${args.join(" ")}`);
+    });
+    const workspace = { archivedSessionIds };
+    const sessions = new Map<string, { header: { parentSession?: string } }>([
+      ["parent", { header: { parentSession: "root" } }],
+      ["root", { header: {} }],
+    ]);
+    h.ctx.get.mockImplementation((key) => {
+      if (key === "workspaceRegistry") return workspace;
+      if (key === "sessions") return sessions;
+    });
+    let onChange!: (change: unknown) => void;
+    const ctx = {
+      ...h.ctx,
+      on: (_event: string, listener: typeof onChange) => {
+        onChange = listener;
+        return () => {};
+      },
+    };
+    cleanups.push(armArchiveCleanup(ctx as never, h.starts));
+    // The fork is created after the watcher has observed the archived ancestors.
+    sessions.set("conversation", { header: { parentSession: "parent" } });
+    const archive = (ids: string[]) => {
+      workspace.archivedSessionIds = ids;
+      onChange({ domain: "workspace", table: "", value: workspace });
+    };
+    return { ...h, archive };
+  }
+
+  it.each([
+    "parent",
+    "root",
+  ])("allows a new fork of an archived %s and retains its cleanup lineage", async (ancestor) => {
+    const h = harness([ancestor]);
+    await expect(h.session({ action: "start" })).resolves.toMatchObject({ sessionId: "created" });
+    expect(h.registry.dshOwnersOf("created")).toEqual(["conversation", "parent", "root"]);
+    h.archive([ancestor]);
+    expect(h.registry.current()).toBe("created");
+    expect(h.calls.some(({ args }) => args.includes("--cancel"))).toBe(false);
+
+    // Unarchive and re-archive: only the fresh event should reap the browser.
+    h.archive([]);
+    h.archive([ancestor]);
+    await h.starts.reconcile();
+    expect(h.registry.ownedIds()).toEqual([]);
+    expect(h.calls.filter(({ args }) => args.includes("--cancel"))).toHaveLength(1);
+  });
+
+  it("refuses an archived caller before reserving capacity or invoking bsk", async () => {
+    const h = harness(["conversation"]);
+    await expect(h.session({ action: "start" })).rejects.toThrow(
+      "browser conversation is archived",
+    );
+    expect(h.calls).toHaveLength(0);
+    expect(h.journal.records.size).toBe(0);
+    expect(h.registry.size()).toBe(0);
+
+    h.archive([]);
+    await expect(h.session({ action: "start" })).resolves.toMatchObject({ sessionId: "created" });
+  });
+
+  it("allows starts without a caller identity when conversations are archived", async () => {
+    const h = harness(["conversation", "parent", "root"]);
+    await expect(
+      h.session({ action: "start" }, { ...exec(), agent: undefined }),
+    ).resolves.toMatchObject({ sessionId: "created" });
+    expect(h.registry.dshOwnersOf("created")).toEqual([]);
+  });
+
+  it.each([
+    "parent",
+    "root",
+  ])("cancels an in-flight start when its %s is newly archived and allows a later start", async (ancestor) => {
+    let resolveStart!: (reply: BskRunResult) => void;
+    const start = vi.fn(async () => ok({ session_id: "later", browser_instance_id: "browser" }));
+    start.mockImplementationOnce(
+      () =>
+        new Promise<BskRunResult>((resolve) => {
+          resolveStart = resolve;
+        }),
+    );
+    const h = harness([], start);
+    const pending = h.session({ action: "start" });
+    const rejected = expect(pending).rejects.toThrow(/cancelled/);
+    await vi.waitFor(() => expect(resolveStart).toBeTypeOf("function"));
+    h.archive([ancestor]);
+    await h.starts.reconcile();
+    resolveStart(ok({ session_id: "late", browser_instance_id: "browser" }));
+    await rejected;
+    expect(h.registry.ownedIds()).toEqual([]);
+    expect(h.journal.records.size).toBe(0);
+    expect(h.calls.filter(({ args }) => args.includes("--cancel"))).toHaveLength(1);
+    expect(h.calls.some(({ args }) => args.includes("--claim"))).toBe(false);
+
+    await expect(h.session({ action: "start" })).resolves.toMatchObject({ sessionId: "later" });
   });
 });

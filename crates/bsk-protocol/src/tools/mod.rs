@@ -1,9 +1,11 @@
 //! Typed params/results for the `tool.*` RPC methods (§7).
 
 pub mod console;
+pub mod cooperate;
 pub mod debug;
 pub mod dialog;
 pub mod emulate;
+pub mod extract;
 pub mod file_transfer;
 pub mod human_loop;
 pub mod interaction;
@@ -18,14 +20,17 @@ pub mod script;
 pub mod scroll;
 pub mod session;
 pub mod tabs;
+pub mod video;
 pub mod waits;
 pub mod wheel;
 pub mod window;
 
 pub use console::*;
+pub use cooperate::*;
 pub use debug::*;
 pub use dialog::*;
 pub use emulate::*;
+pub use extract::*;
 pub use file_transfer::*;
 pub use human_loop::*;
 pub use interaction::*;
@@ -37,6 +42,7 @@ pub use script::*;
 pub use scroll::*;
 pub use session::*;
 pub use tabs::*;
+pub use video::*;
 pub use waits::*;
 pub use wheel::*;
 pub use window::*;

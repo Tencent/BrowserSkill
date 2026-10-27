@@ -34,7 +34,7 @@ export const failed = (message: string): BskRunResult => ({
 export const exec = (signal = new AbortController().signal) =>
   ({
     callId: "call",
-    name: "browser_session",
+    name: "bsk_session",
     signal,
     agent: { id: "conversation" },
   }) as ToolRunContext;
@@ -52,7 +52,7 @@ export function harness(
         return () => {};
       },
     },
-    get: () => undefined,
+    get: vi.fn((_key: string): unknown => undefined),
   };
   const prepare = vi.fn(async () => ok({ state: "prepared" }));
   const runner = {
@@ -92,10 +92,22 @@ export function harness(
   const starts = (deps.starts = new SessionStarts(deps, journal));
   registerBrowserTools(deps);
   const session = (args: Record<string, unknown>, context = exec()) =>
-    tools.get("browser_session")!.execute(args, context);
+    tools.get("bsk_session")!.execute(args, context);
   cleanups.push(async () => {
     await starts.dispose();
     observation.dispose();
   });
-  return { starts, registry, journal, calls, session, runner, prepare, tools, observation, queue };
+  return {
+    ctx,
+    starts,
+    registry,
+    journal,
+    calls,
+    session,
+    runner,
+    prepare,
+    tools,
+    observation,
+    queue,
+  };
 }

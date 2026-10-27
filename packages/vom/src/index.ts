@@ -6,6 +6,7 @@ export {
   type RenderRow,
   renderVom,
 } from "./render";
+export { estimateLineTokens, estimateTokens, TOKEN_ESTIMATOR } from "./tokens";
 export type {
   ActiveScopeBlock,
   BlockingLayer,

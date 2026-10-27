@@ -11,7 +11,7 @@ export const BROWSER_PARAM = {
 export const SESSION_PARAM = {
   type: "string",
   description:
-    "bsk session id to act on; must be one created by browser_session with action=start. " +
+    "bsk session id to act on; must be one created by bsk_session with action=start. " +
     "Omit to use the current session (the one most recently started or used).",
 } as const;
 
@@ -39,6 +39,24 @@ export const WAIT_UNTIL_PARAM = {
   type: "string",
   enum: ["load", "domcontentloaded", "networkidle", "commit"],
   description: "Page lifecycle phase to wait for (default: load).",
+} as const;
+
+export const ELEMENT_WAIT_PARAMS = {
+  target: {
+    type: "string",
+    description:
+      "wait-for-element: fresh @eN ref or observed main-document CSS selector; no text=, XPath or Playwright locators.",
+  },
+  state: {
+    type: "string",
+    enum: ["visible", "hidden", "attached", "detached"],
+    description:
+      "wait-for-element (default: visible). hidden includes absence; visible does not mean enabled.",
+  },
+  pollMs: {
+    type: "integer",
+    description: "wait-for-element poll interval, 16..2000 ms (default: 100).",
+  },
 } as const;
 
 export const TIMEOUT_MS_PARAM = {

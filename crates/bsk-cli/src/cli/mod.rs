@@ -7,8 +7,10 @@ pub mod browser_wait;
 pub mod browsers;
 pub mod business_rpc;
 pub mod console;
+pub mod cooperate;
 pub mod daemon;
 pub mod debug;
+pub mod dialog_control;
 pub mod dialogs;
 pub mod doctor;
 pub mod download;
@@ -16,6 +18,7 @@ pub mod emulate;
 pub mod ensure_daemon;
 pub mod error;
 pub mod evaluate;
+pub mod extract;
 pub mod get_html;
 pub mod human_loop;
 pub mod install_skill;
@@ -25,6 +28,7 @@ pub mod logs;
 pub mod navigate;
 pub mod network;
 pub mod observe;
+pub(crate) mod protocol;
 pub mod record;
 pub mod record_recovery;
 pub mod record_state;
@@ -37,6 +41,7 @@ pub mod status;
 pub mod tab;
 pub mod update;
 pub mod upload;
+pub mod video;
 pub mod waits;
 pub mod wheel;
 pub mod window;
@@ -65,7 +70,7 @@ use crate::cli::snapshot::SnapshotArgs;
 use crate::cli::tab::TabCmd;
 use crate::cli::update::UpdateArgs;
 use crate::cli::upload::UploadArgs;
-use crate::cli::waits::{WaitForNavigationArgs, WaitMsArgs};
+use crate::cli::waits::{WaitForElementArgs, WaitForNavigationArgs, WaitMsArgs};
 use crate::cli::wheel::WheelArgs;
 use crate::cli::window::WindowCmd;
 
@@ -77,6 +82,12 @@ pub const TOOL_IPC_TIMEOUT: Duration = Duration::from_secs(35);
 /// Global flags shared by every subcommand.
 #[derive(Debug, Clone, Args, Default)]
 pub struct GlobalFlags {
+    /// Observation context returned by cooperate sync. Required for shared-tab actions.
+    #[arg(long, global = true)]
+    pub context: Option<String>,
+    /// Observed refs/selectors covering this decision. Repeat for other regions; omit to validate the whole page.
+    #[arg(long, global = true)]
+    pub depends_on: Vec<String>,
     /// Emit machine-readable JSON output (when meaningful).
     #[arg(long, global = true)]
     pub json: bool,
@@ -107,6 +118,12 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
+    /// Decide native JavaScript dialogs (alert, confirm, prompt, beforeunload).
+    Dialog(dialog_control::DialogCmd),
+    /// Retrieve or cancel the original operation suspended by a native dialog.
+    Operation(dialog_control::OperationCmd),
+    /// Cooperate with a person on the same browser tab.
+    Cooperate(cooperate::CooperateArgs),
     /// Manage the local `bsk` daemon process.
     #[command(subcommand)]
     Daemon(DaemonCmd),
@@ -163,6 +180,8 @@ pub enum Command {
     /// Dump raw HTML for a tab or a snapshot ref.
     #[command(name = "get-html")]
     GetHtml(GetHtmlArgs),
+    /// Extract loaded tables/lists with column definitions and source metadata.
+    Extract(extract::ExtractArgs),
 
     /// Navigate the Agent Window's tab to a URL.
     Navigate(NavigateCommand),
@@ -197,7 +216,7 @@ pub enum Command {
     /// Remove focus from a snapshot ref or CSS selector.
     Blur(BlurArgs),
 
-    /// Fill an input / textarea / contenteditable.
+    /// Fill a text input, textarea, or contenteditable editor root.
     Fill(FillArgs),
 
     /// Dispatch a keyboard key combo.
@@ -219,6 +238,10 @@ pub enum Command {
     #[command(name = "wait-for-navigation")]
     WaitForNavigation(WaitForNavigationArgs),
 
+    /// Wait until an element becomes visible / hidden / attached / detached.
+    #[command(name = "wait-for-element")]
+    WaitForElement(WaitForElementArgs),
+
     /// Sleep for a duration on the daemon side.
     #[command(name = "wait-ms")]
     WaitMs(WaitMsArgs),
@@ -229,6 +252,8 @@ pub enum Command {
 
     /// Record user actions into a semantic `trace.json` textbook for LLMs.
     Record(RecordCmd),
+    /// Record a task tab to MP4 and save it to an explicit destination.
+    Video(video::VideoCmd),
 }
 
 #[derive(Debug, Clone, Args, Default)]

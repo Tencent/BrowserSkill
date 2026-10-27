@@ -41,6 +41,7 @@ function fakeEvent<T extends (...args: never[]) => unknown>() {
 
 function popupDownloadFakes() {
   const onCreated = fakeEvent<(item: chrome.downloads.DownloadItem) => void>();
+  const onChanged = fakeEvent<(delta: chrome.downloads.DownloadDelta) => void>();
   const onDeterminingFilename =
     fakeEvent<
       (
@@ -53,7 +54,7 @@ function popupDownloadFakes() {
   const completed = new Map<number, chrome.downloads.DownloadItem>();
   const downloads: DownloadsApi = {
     onCreated,
-    onChanged: fakeEvent<(delta: chrome.downloads.DownloadDelta) => void>(),
+    onChanged,
     onDeterminingFilename,
     search: vi.fn(async ({ id }: chrome.downloads.DownloadQuery) => {
       const item = id === undefined ? undefined : completed.get(id);
@@ -80,15 +81,30 @@ function popupDownloadFakes() {
       new Promise<chrome.downloads.DownloadFilenameSuggestion | undefined>((resolve) => {
         onDeterminingFilename.emit(item, resolve);
       }),
-    finish: (item: chrome.downloads.DownloadItem) => {
+    finish: (
+      item: chrome.downloads.DownloadItem,
+      filename = `/profile/Downloads/BrowserSkill/tr_${item.id}/${item.filename}`,
+    ) => {
       const done = {
         ...item,
-        filename: `/profile/Downloads/${item.filename}`,
+        filename,
         state: "complete",
         fileSize: 4,
       } as chrome.downloads.DownloadItem;
       completed.set(item.id, done);
       onCreated.emit(done);
+    },
+    finishChanged: (item: chrome.downloads.DownloadItem, filename: string) => {
+      completed.set(item.id, {
+        ...item,
+        filename,
+        state: "complete",
+        fileSize: 4,
+      } as chrome.downloads.DownloadItem);
+      onChanged.emit({
+        id: item.id,
+        state: { current: "complete" },
+      } as chrome.downloads.DownloadDelta);
     },
     popup: (sourceTabId: number, url: string) =>
       onCreatedNavigationTarget.emit({
@@ -135,6 +151,11 @@ function uploadCdp(
   const calls: Array<{ method: string; params?: object }> = [];
   let cdpEvent: Parameters<NonNullable<CdpRunner["onEvent"]>>[0] | undefined;
   const send = vi.fn(async (_tabId: number, method: string, params?: object) => {
+    if (
+      method === "Runtime.evaluate" &&
+      (params as { expression?: string })?.expression === "document.visibilityState"
+    )
+      return { result: { value: "visible" } };
     calls.push({ method, params });
     if (
       method === "Runtime.evaluate" &&
@@ -669,7 +690,7 @@ describe("file transfer tools", () => {
     } as chrome.downloads.DownloadItem;
     const completed = {
       ...initial,
-      filename: "/profile/Downloads/BrowserSkill/tr_1/result.zip",
+      filename: "C:\\Users\\tester\\Downloads\\BrowserSkill\\tr_1\\result.zip",
       state: "complete",
       fileSize: 12,
     } as chrome.downloads.DownloadItem;
@@ -688,6 +709,11 @@ describe("file transfer tools", () => {
       passthrough = message.phase === "begin";
     });
     const send = vi.fn(async (_tabId: number, method: string, params?: object) => {
+      if (
+        method === "Runtime.evaluate" &&
+        (params as { expression?: string })?.expression === "document.visibilityState"
+      )
+        return { result: { value: "visible" } };
       if (
         method === "Runtime.evaluate" &&
         String((params as { expression?: string })?.expression).includes('return "absent"')
@@ -833,6 +859,7 @@ describe("file transfer tools", () => {
     } as chrome.downloads.DownloadItem;
     const complete = {
       ...initial,
+      filename: "/profile/Downloads/BrowserSkill/tr_21/candidate-first.bin",
       state: "complete",
       fileSize: 4,
     } as chrome.downloads.DownloadItem;
@@ -1105,6 +1132,11 @@ describe("file transfer tools", () => {
     const download = fakes.item(50, "https://example.test/export?id=50");
     let suggested: Promise<chrome.downloads.DownloadFilenameSuggestion | undefined> | undefined;
     const send = vi.fn(async (_tabId: number, method: string, params?: object) => {
+      if (
+        method === "Runtime.evaluate" &&
+        (params as { expression?: string })?.expression === "document.visibilityState"
+      )
+        return { result: { value: "visible" } };
       if (method === "Page.getLayoutMetrics")
         return { cssLayoutViewport: { clientWidth: 1280, clientHeight: 720 } };
       if (method === "DOM.getContentQuads") return { quads: [[0, 0, 20, 0, 20, 20, 0, 20]] };
@@ -1142,8 +1174,40 @@ describe("file transfer tools", () => {
     expect(result).toMatchObject({
       tab_id: 4,
       suggested_filename: "report-50.csv",
-      browser_path: "/profile/Downloads/report-50.csv",
+      browser_path: "/profile/Downloads/BrowserSkill/tr_50/report-50.csv",
     });
+  });
+
+  it.each([
+    "C:\\Users\\tester\\Downloads\\report-60.csv",
+    "C:\\Users\\tester\\Documents\\report-60.csv",
+  ])("rejects a download outside its transfer directory without deleting %s", async (filename) => {
+    const fakes = popupDownloadFakes();
+    const download = fakes.item(60, "https://example.test/export?id=60");
+
+    const result = await captureBrowserDownload({
+      cdp: silentCdp(),
+      target: { tabId: 4 },
+      downloads: fakes.downloads,
+      navigationTargets: fakes.navigationTargets,
+      browserRelativeDir: "BrowserSkill/tr_60",
+      timeoutMs: 1_000,
+      trigger: async (markDispatched) => {
+        markDispatched();
+        fakes.popup(4, download.url);
+        await fakes.offer(download);
+        fakes.finishChanged(download, filename);
+        return { tab_id: 4, x: 10, y: 10 };
+      },
+    });
+
+    expect(result).toMatchObject({
+      code: "cdp_failed",
+      data: { reason: "download_path_mismatch", effect_state: "committed" },
+    });
+    expect(fakes.downloads.removeFile).not.toHaveBeenCalled();
+    expect(fakes.downloads.cancel).not.toHaveBeenCalled();
+    expect(result).not.toMatchObject({ data: { cleanup_state: "failed" } });
   });
 
   it.each([

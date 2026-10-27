@@ -1,0 +1,129 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "WaitForElementResult",
+  "description": "Outcome of a `wait_for_element`. A timeout returns `satisfied: false` and CLI exit code 0; callers must inspect the result before continuing. `attached` / `visible` describe the last probe completed before the deadline, not a new observation at return time. Both are null if no probe completed.",
+  "type": "object",
+  "required": [
+    "elapsed_ms",
+    "satisfied",
+    "tab_id"
+  ],
+  "properties": {
+    "attached": {
+      "description": "DOM attachment at the last completed probe; null if unobserved.",
+      "type": [
+        "boolean",
+        "null"
+      ]
+    },
+    "dialogs": {
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/JavaScriptDialogInfo"
+      }
+    },
+    "elapsed_ms": {
+      "description": "Monotonic elapsed time spent inspecting and waiting, including probes.",
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "satisfied": {
+      "description": "Whether the requested state was reached before the deadline.",
+      "type": "boolean"
+    },
+    "tab_id": {
+      "type": "integer",
+      "format": "int64"
+    },
+    "used_ref": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "used_selector": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "visible": {
+      "description": "Visibility at the last completed probe; false if detached, null if unobserved.",
+      "type": [
+        "boolean",
+        "null"
+      ]
+    }
+  },
+  "definitions": {
+    "JavaScriptDialogHandledAction": {
+      "description": "How the extension resolved the dialog so CDP could continue.",
+      "type": "string",
+      "enum": [
+        "accepted",
+        "dismissed"
+      ]
+    },
+    "JavaScriptDialogInfo": {
+      "description": "One observed + handled JavaScript dialog during a tool call.",
+      "type": "object",
+      "required": [
+        "handled",
+        "message",
+        "sequence",
+        "tab_id",
+        "type"
+      ],
+      "properties": {
+        "default_prompt": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "handled": {
+          "$ref": "#/definitions/JavaScriptDialogHandledAction"
+        },
+        "has_browser_handler": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "message": {
+          "type": "string"
+        },
+        "sequence": {
+          "description": "Monotonic per-tab sequence for ordering within a session.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "tab_id": {
+          "type": "integer",
+          "format": "int64"
+        },
+        "type": {
+          "$ref": "#/definitions/JavaScriptDialogType"
+        },
+        "url": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "JavaScriptDialogType": {
+      "description": "Native JS dialog kind reported by CDP.",
+      "type": "string",
+      "enum": [
+        "alert",
+        "confirm",
+        "prompt",
+        "beforeunload"
+      ]
+    }
+  }
+}

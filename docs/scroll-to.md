@@ -9,7 +9,7 @@ distance or scroll direction. Use [wheel](wheel.md) for native directional wheel
 | --- | --- |
 | CLI | `bsk scroll-to` |
 | Wire protocol | `tool.scroll_to` |
-| DeepSeek Harness | `browser_interact` with `action: "scroll-to"` |
+| DeepSeek Harness | `bsk_interact` with `action: "scroll-to"` |
 
 ## CLI
 
@@ -97,7 +97,7 @@ The plugin exposes the same action with its usual camelCase parameters:
 }
 ```
 
-Call this through `browser_interact` using a plugin-owned session. Its result
+Call this through `bsk_interact` using a plugin-owned session. Its result
 contains `session`, `tabId`, `x`, `y`, `width` and `height` with the same bounds
 semantics. Omitted `session` uses the plugin's current session.
 

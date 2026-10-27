@@ -1243,7 +1243,11 @@ export class DebugManager {
     this.runs.delete(id);
   }
 
-  async read(params: DebugParams, signal?: AbortSignal): Promise<DebugResult> {
+  async read(
+    params: DebugParams,
+    signal?: AbortSignal,
+    mutate: <T>(operation: () => Promise<T>) => Promise<T> = (operation) => operation(),
+  ): Promise<DebugResult> {
     this.sync();
     const context = this.sessions.get(params.session_id);
     if (!context) throw new Error("session not found");
@@ -1357,21 +1361,28 @@ export class DebugManager {
         tab.windowId !== this.sessions.get(params.session_id)?.agentWindowId
       )
         throw new Error("debug tab must remain in its Agent Window");
+      if (params.tab_id !== undefined && params.tab_id !== state.run.tab_id)
+        throw new Error("Network controls must target the observed debug tab");
       if (signal?.aborted) throw new Error("debug action cancelled");
-      if (params.action === "rule_add") await state.controls.add(params.rule!, signal);
+      if (params.action === "rule_add")
+        await mutate(() => state.controls!.add(params.rule!, signal));
       else if (params.action === "replay") {
         await state.journal?.flush();
         const saved = await this.archive?.request?.(state.run.id, params.id!);
         const current = state.network.get(params.id!);
         const source = current ? mergeRequest(saved, current) : saved;
         if (!source) throw new Error("request not found or evicted");
-        const replay = await state.controls.replay(source, params.replay!, tab.url ?? "", signal);
+        const replay = await mutate(() =>
+          state.controls!.replay(source, params.replay!, tab.url ?? "", signal),
+        );
         return { ...result, run: this.summary(state), replay };
       } else
-        await state.controls.update(
-          params.id!,
-          params.action as "rule_enable" | "rule_disable" | "rule_remove",
-          signal,
+        await mutate(() =>
+          state.controls!.update(
+            params.id!,
+            params.action as "rule_enable" | "rule_disable" | "rule_remove",
+            signal,
+          ),
         );
       return { ...result, run: this.summary(state), rules: state.controls.list() };
     }

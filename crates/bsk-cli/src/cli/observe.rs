@@ -29,7 +29,7 @@ pub struct ObserveArgs {
     #[arg(long = "max-depth")]
     pub max_depth: Option<u32>,
 
-    /// Soft cap on rendered tokens (~4 chars/token).
+    /// Soft cap on rendered tokens (estimated; CJK-aware).
     #[arg(long = "max-tokens")]
     pub max_tokens: Option<u32>,
 

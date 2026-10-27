@@ -67,7 +67,7 @@ Follow `next_offset` while present. Offsets count UTF-16 code units, matching th
 extension. RFC 6901 `--pointer` works only on a complete retained JSON body and is
 applied after redaction. No network request is repeated by these reads.
 
-DSH uses `browser_inspect` with `action: "debug"`, `debugAction` matching the CLI
+DSH uses `bsk_inspect` with `action: "debug"`, `debugAction` matching the CLI
 subcommand, and camelCase options (`runId`, `tabId`, `maxChars`). The six public
 tools, existing session ownership, cancellation and queue remain unchanged.
 The wire endpoint is `tool.debug`; schemas are in `crates/bsk-protocol/schema`.
@@ -420,7 +420,7 @@ bsk debug replay <request-id> --session <id> --replay-file replay.json
 ```
 
 `--rule` and `--replay` also accept inline JSON. DSH exposes these as JSON-string
-`rule` / `replay` parameters on `browser_inspect(action: "debug")`, with the same
+`rule` / `replay` parameters on `bsk_inspect(action: "debug")`, with the same
 `debugAction` values. File input avoids putting large bodies in command arguments.
 
 Replay sends a **new** request and may change server data. It uses a dedicated

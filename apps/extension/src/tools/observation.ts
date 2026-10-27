@@ -12,7 +12,7 @@ import {
 
 export { parsePngDimensions } from "./png";
 
-import type { CapturedSceneInput } from "./vom/facts";
+import type { CapturedSceneInput, ObservationFacts } from "./vom/facts";
 // Observation handlers — `tool.snapshot`, `tool.get_html`, `tool.screenshot`,
 // and semantic `tool.observe` (design §7). Each handler resolves the target
 // tab (defaulting to the Agent Window's active tab when omitted) and
@@ -22,6 +22,7 @@ import {
   type ActiveScopeBlock,
   applyVomInteractionRecovery,
   type CondSurface,
+  estimateLineTokens,
   isVomReferenceNode,
   renderVom,
   type VomNode,
@@ -70,7 +71,11 @@ import {
 import { lookupRefTarget, resolveSnapshotRef } from "./snapshot-ref";
 import { captureControlledViewport } from "./viewport-screenshot";
 import { type CapturedNode, type CapturedSurfaceProbe, probeHoverSurfaces } from "./vom/capture";
-import { captureObservationFacts, semanticCapture } from "./vom/capture-coordinator";
+import {
+  OBSERVE_IDENTITY_CHANGED,
+  semanticCapture,
+  withObservationFacts,
+} from "./vom/capture-coordinator";
 import type { FrameDocument as CapturedFrameDocument } from "./vom/frame-document";
 import { withOverlayBypass } from "./vom/hover-perception";
 import { probeTooltipNames } from "./vom/name-enrichment";
@@ -736,6 +741,7 @@ function attachCapturedSceneAnnotations(
 }
 
 export interface SnapshotDeps {
+  onScene?: (scene: VomScene) => void;
   cdp: CdpRunner;
   tabsApi: {
     get(tabId: number): Promise<chrome.tabs.Tab>;
@@ -933,6 +939,7 @@ async function runHoverProbes(
 }
 
 export interface CaptureVomObservationOptions extends VomOptions {
+  onScene?: (scene: VomScene) => void;
   includeVisualFacts?: boolean;
   conditionalSurfaceProbe?: boolean;
   hoverProbeBypassOverlay?: (tabId: number, enabled: boolean) => Promise<void>;
@@ -948,9 +955,22 @@ export async function captureVomObservation(
   throwIfAborted(options.signal, "observation");
   await cdp.ensureAttachedToUrl?.(tabId, url);
   throwIfAborted(options.signal, "observation");
-  const facts = await captureObservationFacts<CdpAxNode>(cdp, tabId, options.signal, url, {
-    includeVisualFacts: options.includeVisualFacts,
-  });
+  return withObservationFacts(
+    cdp,
+    tabId,
+    (facts: ObservationFacts<CdpAxNode>) => buildVomObservation(cdp, tabId, facts, options),
+    options.signal,
+    url,
+    { includeVisualFacts: options.includeVisualFacts },
+  );
+}
+
+async function buildVomObservation(
+  cdp: CdpRunner,
+  tabId: number,
+  facts: ObservationFacts<CdpAxNode>,
+  options: CaptureVomObservationOptions,
+): Promise<CaptureVomObservationResult & { visualOutput?: ObservationOutput }> {
   const { captured, documents: normalizedDocuments } = semanticCapture(facts);
   throwIfAborted(options.signal, "observation");
   const semanticGraph = buildSemanticGraph({
@@ -979,7 +999,8 @@ export async function captureVomObservation(
     captured,
     hoverProbes.surfaceProbes,
   );
-  // Reserve space using the renderer's character-based token estimate. Like VOM
+  options.onScene?.(decoratedScene);
+  // Reserve space using the renderer's token estimate. Like VOM
   // headers, this integrity notice remains visible even under a tiny token budget.
   const notices: string[] = [];
   if (facts.issues.some((issue) => issue.stage === "geometry"))
@@ -1044,7 +1065,7 @@ export async function captureVomObservation(
     maxTokens:
       !captureNotice || options.maxTokens === undefined
         ? options.maxTokens
-        : Math.max(0, options.maxTokens - Math.ceil((captureNotice.length + 1) / 4)),
+        : Math.max(0, options.maxTokens - estimateLineTokens(captureNotice)),
     redactValues: options.redactValues,
     activeRegionPolicy: options.activeRegionPolicy,
   });
@@ -1060,6 +1081,92 @@ export async function captureVomObservation(
       revealedContent: hoverProbes.revealedContent,
     },
   });
+}
+
+// ---------------------------------------------------------------------------
+// Anti-debugging reload-loop detection (issues #454 / #465). Sites that
+// detect the debugger attach reload themselves, so every repeated read
+// fails with the same identity error while the page keeps churning.
+// After consecutive identity failures on the same tab inside a short
+// window we name the condition with a stable reason instead of letting
+// the agent retry (and never point it at a reload).
+// ---------------------------------------------------------------------------
+
+interface ObserveIdentityStreak {
+  url: string;
+  count: number;
+  firstAt: number;
+  lastAt: number;
+}
+
+const observeIdentityStreaks = new Map<string, ObserveIdentityStreak>();
+
+/** Identity failures spread wider than this never count as a reload loop. */
+export const OBSERVE_IDENTITY_LOOP_WINDOW_MS = 120_000;
+
+/** Consecutive identity failures before the failure is named anti-debugging. */
+export const OBSERVE_IDENTITY_LOOP_FAILURES = 3;
+
+/** Identity-failure bookkeeping key for one session's tab. */
+function observeIdentityKey(sessionId: string, tabId: number): string {
+  return `${sessionId}:${tabId}`;
+}
+
+/**
+ * Pure rule so the streak logic is testable without a browser: a failure
+ * joins the previous streak only when it is on the **same page** (identical
+ * URL) and happens within `windowMs` of the streak's first failure; a
+ * navigation to another site or an expired window restarts the counter
+ * (maintainer review of issue #465: one transient failure each on three
+ * different sites must not falsely diagnose the third site).
+ */
+export function nextObserveIdentityStreak(
+  previous: ObserveIdentityStreak | undefined,
+  url: string,
+  failureAt: number,
+  windowMs: number = OBSERVE_IDENTITY_LOOP_WINDOW_MS,
+): { streak: ObserveIdentityStreak; isReloadLoop: boolean } {
+  const continues =
+    previous !== undefined && previous.url === url && failureAt - previous.firstAt <= windowMs;
+  const streak: ObserveIdentityStreak = continues
+    ? {
+        url,
+        count: previous!.count + 1,
+        firstAt: previous!.firstAt,
+        lastAt: failureAt,
+      }
+    : { url, count: 1, firstAt: failureAt, lastAt: failureAt };
+  return { streak, isReloadLoop: streak.count >= OBSERVE_IDENTITY_LOOP_FAILURES };
+}
+
+/**
+ * Turn a repeated observation identity failure into the distinct
+ * anti-debugging error; returns null while the failure still looks
+ * transient so the normal `cdp_failed` path applies.
+ *
+ * The streak is page-scoped, so an observation whose target could not
+ * be resolved to a URL never counts toward one — that failure keeps
+ * the plain identity-changed error (maintainer review of issue #465,
+ * P1: `ResolvedTargetTab.url` is optional). Exported for tests.
+ */
+export function observeIdentityReloadLoopError(
+  ctx: SessionContext,
+  tabId: number,
+  tabUrl: string | undefined,
+  err: unknown,
+): RpcError | null {
+  const message = err instanceof Error ? err.message : String(err);
+  if (!message.includes(OBSERVE_IDENTITY_CHANGED)) return null;
+  if (!tabUrl) return null;
+  const key = observeIdentityKey(ctx.sessionId, tabId);
+  const next = nextObserveIdentityStreak(observeIdentityStreaks.get(key), tabUrl, Date.now());
+  observeIdentityStreaks.set(key, next.streak);
+  if (!next.isReloadLoop) return null;
+  return rpcError(
+    "cdp_failed",
+    "observe_identity_reload_loop",
+    `${OBSERVE_IDENTITY_CHANGED} — the page lost observation identity on ${next.streak.count} consecutive reads (the site is likely reloading itself when the debugger attaches; anti-debugging)`,
+  );
 }
 
 async function handleVomObservation(
@@ -1088,6 +1195,11 @@ async function handleVomObservation(
   if (denied) return denied;
   const dialogCursor = markDialogCursor(deps.cdp, target.tabId);
 
+  // Anti-debugging reload-loop bookkeeping: the streak is cleared the
+  // moment any read of this tab succeeds (see the helper above).
+  const identityKey = observeIdentityKey(ctx.sessionId, target.tabId);
+  let readSucceeded = false;
+
   try {
     throwIfAborted(signal, toolName);
     deps.cdp.trackSessionTab?.(ctx.sessionId, target.tabId);
@@ -1111,11 +1223,14 @@ async function handleVomObservation(
         { cursor, maxTokens: params.max_tokens },
         signal,
       );
-      return isRpcError(page) ? page : attachDialogs(deps.cdp, target.tabId, dialogCursor, page);
+      if (isRpcError(page)) return page;
+      readSucceeded = true;
+      return attachDialogs(deps.cdp, target.tabId, dialogCursor, page);
     }
     clearObservationContinuation(ctx.refStore);
     const documentRevision = ctx.refStore.documentRevision(target.tabId);
     const observation = await captureVomObservation(deps.cdp, target.tabId, target.url, {
+      onScene: deps.onScene,
       includeVisualFacts: toolName === "observe",
       maxDepth: params.max_depth,
       maxTokens: params.max_tokens,
@@ -1141,6 +1256,7 @@ async function handleVomObservation(
         signal,
       );
       if (isRpcError(page)) return page;
+      readSucceeded = true;
       return attachDialogs(deps.cdp, target.tabId, dialogCursor, {
         ...page,
         ...(observation.hoverProbe?.performed
@@ -1184,6 +1300,7 @@ async function handleVomObservation(
         ] as const;
       }),
     );
+    readSucceeded = true;
     return attachDialogs(deps.cdp, target.tabId, dialogCursor, {
       text: observation.text,
       ref_count: observation.refs.length,
@@ -1215,11 +1332,17 @@ async function handleVomObservation(
     // Fresh observations clear their predecessor before capture. Continuation owns
     // invalidation; cancellation must preserve its unpublished page for retry.
     if (isAbortError(err)) return cancelled(toolName);
+    const identityLoopError = observeIdentityReloadLoopError(ctx, target.tabId, target.url, err);
+    if (identityLoopError) return identityLoopError;
     return {
       code: "cdp_failed",
       message: err instanceof Error ? err.message : String(err),
       ...readTimeoutDetails(err),
     };
+  } finally {
+    if (readSucceeded) {
+      observeIdentityStreaks.delete(identityKey);
+    }
   }
 }
 

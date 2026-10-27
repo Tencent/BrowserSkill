@@ -72,6 +72,8 @@ export interface DownloadCaptureOptions {
   maxByteSize?: number;
   timeoutMs: number;
   signal?: AbortSignal;
+  /** Input revocation may keep a download whose id was already attributed. */
+  inputSignal?: AbortSignal;
   /** `markDispatched` must be called immediately before the mouse press is sent. */
   trigger(markDispatched: () => void, signal: AbortSignal): Promise<ClickResult | RpcError>;
   /** Retire the trigger and release any held input within this cleanup deadline. */
@@ -100,6 +102,12 @@ interface DownloadCandidate {
 function safeBasename(filename: string): string {
   const basename = filename.split(/[\\/]/).pop()?.trim();
   return basename && basename !== "." && basename !== ".." ? basename : "download";
+}
+
+function isInBrowserRelativeDir(filename: string, browserRelativeDir: string): boolean {
+  const parent = filename.split(/[\\/]/).slice(0, -1);
+  const expected = browserRelativeDir.split("/");
+  return parent.slice(-expected.length).join("/") === browserRelativeDir;
 }
 
 function sameTarget(source: { tabId?: number; sessionId?: string }, target: CdpTarget): boolean {
@@ -171,6 +179,7 @@ export async function captureBrowserDownload(
   let capturedId: number | undefined;
   let settled = false;
   let succeeded = false;
+  let preserveOutsideDownload = false;
   let failureResult: RpcError | undefined;
   let uniquenessTimer: ReturnType<typeof setTimeout> | undefined;
   let operationTimer: ReturnType<typeof setTimeout> | undefined;
@@ -263,7 +272,7 @@ export async function captureBrowserDownload(
   };
 
   const determiningListener: DeterminingFilenameListener = (item, suggest) => {
-    if (settled) {
+    if (settled || capturedId !== undefined) {
       suggest();
       return;
     }
@@ -311,6 +320,12 @@ export async function captureBrowserDownload(
     }
   };
   const onAbort = () => fail(new DOMException("aborted", "AbortError"));
+  const onInputAbort = () => {
+    triggerController.abort();
+    // Before attribution, a later download might belong to the person instead.
+    // Never capture or cancel it using the retired click's observation.
+    if (capturedId === undefined) onAbort();
+  };
   const navigationTargetListener = (
     details: chrome.webNavigation.WebNavigationSourceCallbackDetails,
   ) => {
@@ -321,6 +336,7 @@ export async function captureBrowserDownload(
   const cdpSubscription = options.cdp.onEvent?.((source, method, raw) => {
     if (settled || method !== "Page.downloadWillBegin" || !sameTarget(source, options.target))
       return;
+    if (capturedId !== undefined && options.inputSignal?.aborted) return;
     const event = raw as { url?: unknown; suggestedFilename?: unknown; frameId?: unknown };
     if (typeof event.url !== "string" || typeof event.suggestedFilename !== "string") return;
     if (options.expectedFrameId && event.frameId !== options.expectedFrameId) {
@@ -347,6 +363,7 @@ export async function captureBrowserDownload(
   options.downloads.onChanged.addListener(changedListener);
   options.navigationTargets?.onCreatedNavigationTarget.addListener(navigationTargetListener);
   options.signal?.addEventListener("abort", onAbort, { once: true });
+  options.inputSignal?.addEventListener("abort", onInputAbort, { once: true });
   operationTimer = setTimeout(
     () => fail(new Error("download did not complete before timeout")),
     options.timeoutMs,
@@ -365,7 +382,8 @@ export async function captureBrowserDownload(
   }, SIZE_POLL_MS);
 
   try {
-    if (options.signal?.aborted) throw new DOMException("aborted", "AbortError");
+    if (options.signal?.aborted || options.inputSignal?.aborted)
+      throw new DOMException("aborted", "AbortError");
     // A failed completion can stop a pending trigger, while successful file
     // completion still needs a click acknowledgement within the same deadline.
     const captureFailure = completion.then(() => new Promise<never>(() => {}));
@@ -398,6 +416,18 @@ export async function captureBrowserDownload(
     }
     click = triggered;
     const item = await completion;
+    // Another extension can override our suggestion, so validate the completed path.
+    if (!isInBrowserRelativeDir(item.filename, options.browserRelativeDir)) {
+      // The final location may be user-selected, so leave the file in place.
+      preserveOutsideDownload = true;
+      failureResult = transferError(
+        "cdp_failed",
+        "download_path_mismatch",
+        "the browser did not use the requested download directory",
+        { effectState: "committed", phase: "download" },
+      );
+      return failureResult;
+    }
     succeeded = true;
     return { click, item };
   } catch (err) {
@@ -420,6 +450,7 @@ export async function captureBrowserDownload(
     if (uniquenessTimer) clearTimeout(uniquenessTimer);
     if (sizePoll) clearInterval(sizePoll);
     options.signal?.removeEventListener("abort", onAbort);
+    options.inputSignal?.removeEventListener("abort", onInputAbort);
     options.downloads.onDeterminingFilename.removeListener(determiningListener);
     options.downloads.onCreated.removeListener(createdListener);
     options.downloads.onChanged.removeListener(changedListener);
@@ -432,7 +463,7 @@ export async function captureBrowserDownload(
     const cleanupDeadline = Date.now() + CLEANUP_TIMEOUT_MS;
     const cleanups: Promise<void>[] = [];
     if (options.cleanupTrigger) cleanups.push(options.cleanupTrigger(cleanupDeadline));
-    if (!succeeded && capturedId !== undefined) {
+    if (!succeeded && !preserveOutsideDownload && capturedId !== undefined) {
       cleanups.push(cleanupClaimedDownload(options.downloads, capturedId));
     }
     try {

@@ -1,0 +1,164 @@
+{
+  "$schema": "../../../schemas/case.schema.json",
+  "schemaVersion": 1,
+  "id": "fill-editor-roots",
+  "title": "Fill native fields and editor roots; reject descendants",
+  "suite": "regression",
+  "tags": ["fill", "contenteditable", "regression"],
+  "source": {
+    "pr": "https://github.com/Tencent/BrowserSkill/pull/301"
+  },
+  "fixture": {
+    "startPath": "/fill-editor-roots"
+  },
+  "prompts": {
+    "en": "Open {url}. Attempt to fill #paragraph with \"wrong\" and confirm target_not_fillable. Fill Notes with \"notes\". Replace Message editor with \"hello\", append \" world\", then clear it with an empty value. Fill it with \"done\". Click Check values after the rejected attempt and after each editor operation; confirm FILL-ROOTS-OK. Leave Unrelated field and outside text unchanged. Close the session.",
+    "zh-CN": "打开 {url}。尝试把 #paragraph 填成 wrong，确认被 target_not_fillable 拒绝。将 Notes 填为 notes。把 Message editor 替换成 hello，追加 world（前面带一个空格），再用空字符串清空，最后填为 done。每次被拒绝或编辑器操作后都点击 Check values，确认 FILL-ROOTS-OK。不要改变 Unrelated field 或 outside text，最后关闭会话。"
+  },
+  "coverage": ["session.start", "session.stop", "page.navigate", "interact.fill", "interact.click"],
+  "assertions": {
+    "site": [
+      {
+        "label": "final fields and unrelated content match",
+        "type": "fill.checked",
+        "where": {
+          "data.notes": "notes",
+          "data.editor": "done",
+          "data.guard": "untouched",
+          "data.outside": "outside text"
+        },
+        "minCount": 1
+      },
+      {
+        "label": "rejected descendant preserved editor",
+        "type": "fill.checked",
+        "where": {
+          "data.notes": "old notes",
+          "data.editor": "old paragraph\n\nsecond paragraph",
+          "data.guard": "untouched",
+          "data.outside": "outside text"
+        },
+        "minCount": 1
+      },
+      {
+        "label": "replacement",
+        "type": "fill.checked",
+        "where": {
+          "data.notes": "notes",
+          "data.editor": "hello",
+          "data.guard": "untouched",
+          "data.outside": "outside text"
+        },
+        "minCount": 1
+      },
+      {
+        "label": "append",
+        "type": "fill.checked",
+        "where": {
+          "data.notes": "notes",
+          "data.editor": "hello world",
+          "data.guard": "untouched",
+          "data.outside": "outside text"
+        },
+        "minCount": 1
+      },
+      {
+        "label": "clear",
+        "type": "fill.checked",
+        "where": {
+          "data.notes": "notes",
+          "data.editor": "",
+          "data.guard": "untouched",
+          "data.outside": "outside text"
+        },
+        "minCount": 1
+      }
+    ],
+    "response": [
+      {
+        "label": "confirmed fixture result",
+        "includes": "FILL-ROOTS-OK"
+      }
+    ],
+    "adapter": [
+      {
+        "label": "descendant rejected with the expected error",
+        "key": "descendantRejected"
+      },
+      {
+        "label": "browser session was closed",
+        "key": "sessionStopped"
+      }
+    ]
+  },
+  "smoke": {
+    "steps": [
+      {
+        "action": "navigate"
+      },
+      {
+        "action": "fill",
+        "selector": "#paragraph",
+        "value": "wrong",
+        "expectError": {
+          "code": "invalid_params",
+          "reason": "target_not_fillable"
+        },
+        "evidence": "descendantRejected"
+      },
+      {
+        "action": "click",
+        "selector": "#check"
+      },
+      {
+        "action": "fill",
+        "selector": "#notes",
+        "value": "notes"
+      },
+      {
+        "action": "fill",
+        "selector": "#editor",
+        "value": "hello"
+      },
+      {
+        "action": "click",
+        "selector": "#check"
+      },
+      {
+        "action": "fill",
+        "selector": "#editor",
+        "value": " world",
+        "noClear": true
+      },
+      {
+        "action": "click",
+        "selector": "#check"
+      },
+      {
+        "action": "fill",
+        "selector": "#editor",
+        "value": ""
+      },
+      {
+        "action": "click",
+        "selector": "#check"
+      },
+      {
+        "action": "fill",
+        "selector": "#editor",
+        "value": "done"
+      },
+      {
+        "action": "click",
+        "selector": "#check"
+      },
+      {
+        "action": "wait-site-event",
+        "type": "fill.checked"
+      },
+      {
+        "action": "observe"
+      }
+    ]
+  }
+}

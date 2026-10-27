@@ -16,6 +16,34 @@ use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
 use super::ServerConfig;
 
+/// A durable write could not take the store lock before the deadline.
+///
+/// This is a service condition, not a credential problem: the caller's grant
+/// is still valid and the same request succeeds once the lock is released.
+/// Callers must report it as retryable rather than as an authorization
+/// failure, otherwise a valid pairing is discarded over a transient write.
+#[derive(Debug)]
+pub(crate) struct StoreBusy;
+
+impl std::fmt::Display for StoreBusy {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("authorization store is busy")
+    }
+}
+
+impl std::error::Error for StoreBusy {}
+
+/// Whether a failed lock attempt means "held by someone else".
+///
+/// `try_lock_exclusive` reports contention as `WouldBlock` on Unix, but on
+/// Windows it surfaces `ERROR_LOCK_VIOLATION` (33), which std classifies as
+/// `Uncategorized`. Matching only on the kind silently turned contention into
+/// an immediate failure there. A lock attempt never returns `EDOM`, so the raw
+/// code is unambiguous on Unix as well.
+fn contention(error: &std::io::Error) -> bool {
+    error.kind() == std::io::ErrorKind::WouldBlock || error.raw_os_error() == Some(33)
+}
+
 #[derive(Debug, Clone)]
 pub struct AuthorizationStore {
     path: PathBuf,
@@ -131,9 +159,9 @@ impl AuthorizationStore {
         loop {
             match FileExt::try_lock_exclusive(&lock) {
                 Ok(()) => break,
-                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                Err(error) if contention(&error) => {
                     if Instant::now() >= deadline {
-                        return Err(error).context("authorization store is busy");
+                        return Err(anyhow::Error::new(StoreBusy));
                     }
                     std::thread::sleep(Duration::from_millis(10));
                 }
@@ -507,5 +535,45 @@ mod tests {
         fs::write(&store.path, b"not json").unwrap();
         assert!(!store.is_authorized(&grant.device_id));
         assert!(store.authenticate(&credential).is_err());
+    }
+
+    #[test]
+    fn lock_contention_is_recognised_on_every_platform() {
+        assert!(contention(&std::io::Error::from(
+            std::io::ErrorKind::WouldBlock
+        )));
+        // Windows surfaces a held lock as ERROR_LOCK_VIOLATION, which std keeps
+        // as `Uncategorized`; this assertion is what keeps the mapping honest on
+        // the Linux job, where the Windows branch would otherwise never run.
+        assert!(contention(&std::io::Error::from_raw_os_error(33)));
+        assert!(!contention(&std::io::Error::from(
+            std::io::ErrorKind::PermissionDenied
+        )));
+        assert!(!contention(&std::io::Error::from(
+            std::io::ErrorKind::NotFound
+        )));
+    }
+
+    #[test]
+    fn a_held_lock_is_reported_as_busy_rather_than_as_a_bad_credential() {
+        let (_home, store) = setup();
+        let lock = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(store.path.with_extension("lock"))
+            .unwrap();
+        lock.lock_exclusive().unwrap();
+        let started = Instant::now();
+        let error = store.pair().unwrap_err();
+        assert!(
+            error.chain().any(|cause| cause.is::<StoreBusy>()),
+            "a held lock must surface as StoreBusy, got: {error:#}"
+        );
+        // Contention is retried up to the deadline instead of failing at once.
+        assert!(started.elapsed() >= Duration::from_millis(400));
+        drop(lock);
+        assert!(store.pair().is_ok());
     }
 }

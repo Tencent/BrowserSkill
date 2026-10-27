@@ -1,10 +1,13 @@
 import { registerDebugTool } from "./debug-tool";
+import { registerExtractTool } from "./extract-tool";
 import type { PhaseOneRuntime, ToolRegistrar } from "./phase-one-runtime";
 import { registerPhaseOneInteractionTools } from "./phase-one-tools-interaction";
 import { registerPhaseOneNavigationTools } from "./phase-one-tools-navigation";
 import { registerPhaseOneSupportTools } from "./phase-one-tools-support";
 import { registerPhaseOneTabTools } from "./phase-one-tools-tabs";
+import { registerScriptFileTools } from "./script-file-tools";
 import type { ToolDeps } from "./tools";
+import { registerVideoTool } from "./video-tool";
 
 /** Register the first DSH capability-parity tranche on the existing runtime. */
 export function registerPhaseOneTools(
@@ -17,4 +20,7 @@ export function registerPhaseOneTools(
   registerPhaseOneNavigationTools(deps, register, runtime);
   registerPhaseOneSupportTools(deps, register, runtime);
   registerDebugTool(deps, register, runtime);
+  registerVideoTool(deps, register, runtime);
+  registerExtractTool(deps, register, runtime);
+  registerScriptFileTools(deps, register, runtime);
 }

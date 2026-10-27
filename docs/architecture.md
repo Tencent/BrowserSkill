@@ -97,6 +97,11 @@ including its CLI/plugin mappings, visible-bounds contract and cancellation
 behavior. It follows the same routing path and is classified as a browser
 mutation for session queueing and user-interruption gating.
 
+Structured extraction follows the same routing path as a passive read. The
+extension gathers bounded DOM facts and normalizes tables/lists; the CLI owns
+CSV encoding and file output. Discovery handles are scoped to session, tab,
+attachment and frame document. See [structured extraction](structured-extraction.md).
+
 ## Session and sandbox model
 
 - **Session** = opaque ID (4 lowercase letters in v0.1) + dedicated **Agent Window**

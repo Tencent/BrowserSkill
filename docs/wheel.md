@@ -8,7 +8,7 @@ when the goal is simply to bring an existing element into view.
 | --- | --- |
 | CLI | `bsk wheel` |
 | Wire protocol | `tool.wheel` |
-| DeepSeek Harness | `browser_interact` with `action: "wheel"` |
+| DeepSeek Harness | `bsk_interact` with `action: "wheel"` |
 
 ## Usage
 
