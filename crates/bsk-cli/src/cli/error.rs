@@ -564,6 +564,10 @@ mod tests {
             DaemonStartFailure::AutoStartDisabled.hint(),
             DaemonStartFailure::IndependentStartFailed.hint()
         );
+        assert_ne!(
+            DaemonStartFailure::IndependentStartFailed.hint(),
+            DaemonStartFailure::ExistingIpcAccessDenied.hint()
+        );
         for (failure, recovery_action) in [
             (
                 DaemonStartFailure::AutoStartDisabled,
@@ -572,6 +576,10 @@ mod tests {
             (
                 DaemonStartFailure::IndependentStartFailed,
                 "use `bsk daemon start --foreground` in a persistent host task",
+            ),
+            (
+                DaemonStartFailure::ExistingIpcAccessDenied,
+                "Do not start or delete another daemon",
             ),
         ] {
             let error = anyhow::Error::new(std::io::Error::new(
