@@ -13,6 +13,11 @@ Environment overrides:
   $env:BSK_REPO         GitHub owner/repo (default: Tencent/BrowserSkill)
   $env:BSK_VERSION      Pin CLI version (default: latest from version.json)
   $env:BSK_INSTALL_DIR  Install directory (default: $HOME\.local\bin)
+  $env:BSK_INSTALL_ALLOW_UNVERIFIED
+                        Set to 1 to install even when the release's
+                        integrity cannot be verified (version.json
+                        unreachable, or no checksum published for this
+                        platform). Default: refuse.
 #>
 
 #Requires -Version 5.1
@@ -187,12 +192,13 @@ function Main {
     $archiveName = "bsk-v${version}-$($platform.TargetTriple).zip"
     $downloadUrl = "${GitHub}/releases/download/${tag}/${archiveName}"
     $expectedSha = if ($asset) { $asset.sha256 } else { $null }
+    $checksumVerified = $false
     if (-not $expectedSha) {
         if (-not $manifest) {
-            Write-Log "warning: could not fetch version.json; skipping checksum verification"
+            Write-Log "warning: could not fetch version.json; cannot verify checksum"
         }
         else {
-            Write-Log "warning: no checksum published for $($platform.PlatformKey); skipping checksum verification"
+            Write-Log "warning: no checksum published for $($platform.PlatformKey); cannot verify checksum"
         }
     }
 
@@ -214,10 +220,15 @@ function Main {
             $actualSha = (Get-FileHash -Algorithm SHA256 -LiteralPath $archivePath).Hash
             if ($actualSha -ieq $expectedSha) {
                 Write-Log "checksum OK"
+                $checksumVerified = $true
             }
             else {
                 Write-Die "checksum mismatch: expected $expectedSha, got $actualSha"
             }
+        }
+
+        if (-not $checksumVerified -and $env:BSK_INSTALL_ALLOW_UNVERIFIED -ne "1") {
+            Write-Die "refusing to install an unverified release (set `$env:BSK_INSTALL_ALLOW_UNVERIFIED=1 to override)"
         }
 
         Write-Log "extracting ${archiveName}"
