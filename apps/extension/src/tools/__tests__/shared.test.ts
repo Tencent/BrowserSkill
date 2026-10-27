@@ -110,6 +110,10 @@ describe("CDP target URL guard", () => {
   it("falls back from a restricted default active tab to an accessible agent tab", async () => {
     const sm = new SessionManager({ agentWindow: fakeAgentWindow() });
     const ctx = await sm.start("aa11");
+    // Both are the session's own tabs; the fallback here is about the active
+    // one's URL being closed to CDP, not about who owns it.
+    ctx.agentCreatedTabs.add(7);
+    ctx.agentCreatedTabs.add(8);
     const tabsApi = {
       get: vi.fn(),
       query: vi.fn(async (query: chrome.tabs.QueryInfo) => {

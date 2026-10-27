@@ -60,7 +60,16 @@ function fakeManager(sessionId: string, agentWindowId: number, tabId: number, un
   const mgr = {
     get: (id: string) =>
       id === sessionId
-        ? { sessionId, agentWindowId, refStore, borrowedTabs: new Map(), unattended }
+        ? {
+            sessionId,
+            agentWindowId,
+            refStore,
+            borrowedTabs: new Map(),
+            // A real session registers the tab it opened; the default target
+            // resolves to a tab the session controls.
+            agentCreatedTabs: new Set([tabId]),
+            unattended,
+          }
         : null,
     findByWindowId: (wid: number) => (wid === agentWindowId ? { sessionId } : null),
   } as unknown as SessionManager;
