@@ -328,7 +328,13 @@ async fn handle(
             serde_json::json!({"error": "not_found"}),
         ));
     }
-    if !one_header(&request, "origin").is_some_and(|origin| origin_allowed(origin, false)) {
+    if !one_header(&request, "origin").is_some_and(|origin| {
+        origin_allowed(
+            origin,
+            false,
+            gateway.state.config.allowed_extension_ids.as_ref(),
+        )
+    }) {
         return Ok(denied());
     }
     let Some(protocol) = one_header(&request, "sec-websocket-protocol").map(str::to_owned) else {
