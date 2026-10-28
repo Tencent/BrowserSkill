@@ -36,7 +36,10 @@ BSK_DRAG_CHROME=/path/to/chrome node evals/browser/cases/regression/drag-interac
 This runner owns its daemon home, browser/profile and session; it stops the
 session even on failure. Results go to ignored `evals/browser/results/drag-interactions`.
 It validates shared-control checks, timeout recovery and cross-origin iframe refs
-as well as page outcomes. To use another
+as well as page outcomes. It also checks precise source/destination offsets through
+the production pointer validator, preserves fill/click behavior on draggable cards,
+and rejects drops covered by the top page or an intermediate iframe before pressing.
+To use another
 port, match the extension build URL with `BSK_DRAG_PORT`.
 
 The corpus also supports the existing smoke runner against a connected test

@@ -1289,9 +1289,9 @@ export class CooperationController implements ControlAuthority {
             sent = true;
             nativeInputStarted ||= startsInput;
           },
-          verifyPointerTarget: async (node, point) => {
+          verifyPointerTarget: async (node, point, offset) => {
             try {
-              await pointerTargetValidator(cdp)(node, point);
+              await pointerTargetValidator(cdp)(node, point, offset);
             } catch (error) {
               revoked = error instanceof Error ? error.message : String(error);
               throw error;

@@ -5,6 +5,7 @@ import { createRequire } from "node:module";
 import { build } from "esbuild";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { CdpFrame, CdpTarget } from "@/browser-driver/frame-graph";
+import { pointerTargetValidator } from "@/cooperation/pointer-target";
 import { SessionManager } from "@/session-manager/manager";
 import type { DragParams } from "@/transport/types";
 import { handleDrag } from "../drag";
@@ -127,6 +128,7 @@ async function harness(targetId: string, background: boolean) {
     return { rootFrameId: frameTree.frame.id, frames: result };
   };
   cdp.getFrameGraph = frames;
+  cdp.verifyPointerTarget = pointerTargetValidator(cdp);
   const deps = {
     cdp,
     tabsApi: {
@@ -303,6 +305,50 @@ describe.skipIf(!process.env.BSK_DRAG_CHROME)("real browser drag", () => {
         "100",
         "30",
       ]);
+    }));
+  it.each([-100, 100])("preserves a source offset of %s with the production validator", async (x) =>
+    withPage(async (h) => {
+      ok(
+        await h.drag({
+          source: { selector: "#canvas", offset: { x, y: 20 } },
+          delta: { x: 20, y: 10 },
+        }),
+      );
+      const expected = await h.evaluate<{ x: number; y: number }>(
+        `(()=>{const r=canvas.getBoundingClientRect();return {x:r.x+r.width/2+${x},y:r.y+r.height/2+20}})()`,
+      );
+      const down = await h.evaluate<{ x: number; y: number }>(
+        "events.find(e=>e.id==='canvas'&&e.type==='pointerdown')",
+      );
+      expect(down.x).toBeCloseTo(expected.x, 0);
+      expect(down.y).toBeCloseTo(expected.y, 0);
+      expect(await h.evaluate("window.moved.canvas")).toEqual({ dx: 20, dy: 10 });
+    }));
+  it.each([
+    "covered",
+    "moved",
+    "outside",
+  ])("rejects an offset point that is %s before pressing", async (kind) =>
+    withPage(async (h) => {
+      if (kind === "covered")
+        await h.evaluate(
+          `canvas.scrollIntoView({block:'center'});const r=canvas.getBoundingClientRect();const cover=document.createElement('div');cover.style='position:fixed;z-index:1000;width:30px;height:30px;background:red;left:'+(r.x+r.width/2-115)+'px;top:'+(r.y+r.height/2-15)+'px';document.body.append(cover)`,
+        );
+      if (kind === "moved")
+        h.setHook(async (method, p) => {
+          if (method === "Input.dispatchMouseEvent" && p?.type === "mouseMoved") {
+            h.setHook(() => {});
+            await h.evaluate("canvas.style.transform='translateX(20px)'");
+          }
+        });
+      const result = await h.drag({
+        source: { selector: "#canvas", offset: { x: kind === "outside" ? 300 : -100, y: 0 } },
+        delta: { x: 20, y: 0 },
+      });
+      expect(result).toMatchObject({ code: expect.any(String), data: { effect_state: "none" } });
+      if (kind === "moved")
+        expect(result).toHaveProperty("message", expect.stringMatching(/moved/));
+      expect(h.calls.some((call) => call.params?.type === "mousePressed")).toBe(false);
     }));
   it("uses VOM refs for native source and an empty drop area", async () =>
     withPage(async (h) => {

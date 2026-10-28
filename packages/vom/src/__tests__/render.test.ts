@@ -1212,6 +1212,102 @@ describe("disabled form state", () => {
 
 describe("drag affordances", () => {
   it.each([
+    "",
+    "true",
+    "plaintext-only",
+  ])("preserves contenteditable=%s semantics on draggable cards", (contenteditable) => {
+    const out = renderVom(
+      scene([
+        node({
+          id: 1,
+          backendNodeId: 42,
+          role: "group",
+          attrs: { contenteditable, draggable: "true", "aria-label": "Message editor" },
+          value: "Draft message",
+          rect: { x: 0, y: 0, w: 200, h: 80 },
+        }),
+      ]),
+    );
+    expect(out.text).toContain(
+      '@e1 textbox [draggable] "Message editor" [filled] ="Draft message"',
+    );
+    expect(out.refs).toEqual([
+      expect.objectContaining({ backendNodeId: 42, role: "textbox", name: "Message editor" }),
+    ]);
+  });
+  it.each<Partial<VomNode> & { hint: string }>([
+    { attrs: { draggable: "true" }, hint: "draggable" },
+    { attrs: { ondrop: "accept(event)" }, hint: "drop-target" },
+    { cursor: "grab", hint: "drag-handle" },
+  ])("recovers clickable semantics alongside $hint", ({ hint, attrs, ...props }) => {
+    const out = renderVom(
+      scene([
+        node({
+          id: 1,
+          role: "group",
+          text: "Open settings",
+          attrs: { onclick: "handleOpen()", ...attrs },
+          ...props,
+        }),
+      ]),
+    );
+    expect(out.text).toContain(`@e1 button [${hint}] "Open settings"`);
+    expect(out.refs).toEqual([
+      expect.objectContaining({ backendNodeId: 1, role: "button", name: "Open settings" }),
+    ]);
+  });
+  it("preserves native roles and state when adding a drag hint", () => {
+    const out = renderVom(
+      scene([
+        node({
+          id: 1,
+          tag: "input",
+          role: "checkbox",
+          name: "Select card",
+          checked: true,
+          value: "card-1",
+          attrs: { draggable: "true", onclick: "selectCard()" },
+        }),
+      ]),
+    );
+    expect(out.text).toContain('@e1 checkbox [draggable] "Select card" [checked] ="card-1"');
+    expect(out.refs[0].role).toBe("checkbox");
+  });
+  it.each(["combobox", "switch"])("recovers an explicit %s role on a draggable card", (role) => {
+    const out = renderVom(
+      scene([
+        node({
+          id: 1,
+          role: "group",
+          attrs: { draggable: "true", role, tabindex: "0", "aria-label": "Card setting" },
+        }),
+      ]),
+    );
+    expect(out.text).toContain(`@e1 ${role} [draggable] "Card setting"`);
+    expect(out.refs[0].role).toBe(role);
+  });
+  it("keeps clickable children when their inherited drag hint is suppressed", () => {
+    const out = renderVom(
+      scene([
+        node({ id: 1, role: "generic", name: "Card", cursor: "grab" }),
+        node({
+          id: 2,
+          parentId: 1,
+          role: "generic",
+          text: "Edit card",
+          clickable: true,
+          cursor: "grab",
+        }),
+      ]),
+    );
+    expect(out.text).toContain('@e1 generic [drag-handle] "Card"');
+    expect(out.text).toContain('@e2 button "Edit card"');
+    expect(coreRefs(out.refs)).toEqual([
+      { ref: "e1", backendNodeId: 1 },
+      { ref: "e2", backendNodeId: 2 },
+    ]);
+  });
+  it.each<Partial<VomNode> & { hint: string }>([
     { attrs: { draggable: "true" }, hint: "draggable" },
     { cursor: "grab", hint: "drag-handle" },
     { cursor: "col-resize", hint: "drag-handle" },

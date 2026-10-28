@@ -3,11 +3,7 @@ import type { SessionManager } from "@/session-manager/manager";
 import type { DragParams, DragPoint, DragResult, DragTarget, RpcError } from "@/transport/types";
 import { withClickOverlay } from "./click-overlay";
 import { attachDialogs, markDialogCursor } from "./dialogs";
-import {
-  type ResolvedNodeGeometry,
-  resolveNodeGeometry,
-  scrollElementAndFramesIntoView,
-} from "./frame-geometry";
+import { resolveNodeGeometry, scrollElementAndFramesIntoView } from "./frame-geometry";
 import { withInputReady } from "./input-readiness";
 import { type InteractionDeps, modifiersBitfield, resolveActionTarget } from "./interaction";
 import { pointerTransactionDeps } from "./pointer-transaction";
@@ -20,7 +16,7 @@ import {
   resolveTargetTab,
   sendToCdpTarget,
 } from "./shared";
-import { pointBelongsToTarget } from "./target-hit";
+import { pointReachesTarget } from "./target-hit";
 import { BoundedWaitError, waitBounded } from "./transfer-transaction";
 
 const validPoint = (p: DragPoint | undefined) =>
@@ -102,6 +98,7 @@ export async function handleDrag(
   // late CDP continuations after the outer time boundary has retired the operation.
   const cdp = new Proxy(inputDeps.cdp, {
     get(target, key) {
+      if (key === "resourceCleanup") return deps.cdp.resourceCleanup ?? deps.cdp;
       const value = Reflect.get(target, key);
       return typeof value === "function"
         ? (...args: unknown[]) => {
@@ -232,16 +229,10 @@ export async function handleDrag(
                       code: "permission_denied",
                       message: "drag source is detached, disabled or inert",
                     };
-                  const endpoints: [typeof source, ResolvedNodeGeometry, DragPoint][] = [
-                    [source, startGeometry, start],
-                  ];
-                  if (target && endGeometry) endpoints.push([target, endGeometry, end]);
-                  for (const [node, geometry, point] of endpoints) {
-                    const local = {
-                      x: geometry.targetActionPoint.x + point.x - geometry.actionPoint.x,
-                      y: geometry.targetActionPoint.y + point.y - geometry.actionPoint.y,
-                    };
-                    if (!(await pointBelongsToTarget(cdp, node, local.x, local.y, group, false)))
+                  const endpoints: [typeof source, DragPoint][] = [[source, start]];
+                  if (target) endpoints.push([target, end]);
+                  for (const [node, point] of endpoints) {
+                    if (!(await pointReachesTarget(cdp, { ...node, tabId: tab.tabId }, point)))
                       return {
                         code: "permission_denied",
                         message:
@@ -255,7 +246,11 @@ export async function handleDrag(
                       objectGroup: group,
                     }).catch(() => {});
                 }
-                await cdp.verifyPointerTarget?.({ ...source, tabId: tab.tabId }, start);
+                await cdp.verifyPointerTarget?.(
+                  { ...source, tabId: tab.tabId },
+                  start,
+                  params.source.offset,
+                );
                 input.markSent();
                 attempted = true;
                 deps.onInputSent?.(tab.tabId);

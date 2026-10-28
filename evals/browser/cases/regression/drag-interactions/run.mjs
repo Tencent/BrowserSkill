@@ -49,6 +49,56 @@ async function eventually(fn) {
   throw error;
 }
 const server = createServer((req, res) => {
+  const url = new URL(req.url, "http://127.0.0.1");
+  if (url.pathname === "/precision") {
+    res.setHeader("Content-Type", "text/html; charset=utf-8");
+    res.end(`<title>Precision drag and card semantics</title><style>
+      body{margin:40px} canvas{touch-action:none;background:#def}
+      #cover{position:absolute;left:110px;top:70px;width:20px;height:20px;background:#789}
+    </style><canvas id="precision" width="360" height="120"></canvas><div id="cover" hidden></div>
+    <div role="group" contenteditable="true" draggable="true" aria-label="Editable card">Draft</div>
+    <div role="group" onclick="window.cardClicks++" draggable="true" aria-label="Clickable card">Open card</div>
+    <script>
+      window.points=[];window.cardClicks=0;
+      precision.onpointerdown=e=>{const r=precision.getBoundingClientRect();points.push([e.clientX-r.left,e.clientY-r.top]);precision.setPointerCapture(e.pointerId)};
+      precision.onpointermove=e=>{if(e.buttons){const r=precision.getBoundingClientRect();const x=e.clientX-r.left,y=e.clientY-r.top;points.push([x,y]);precision.getContext('2d').fillRect(x,y,4,4)}};
+    </script>`);
+    return;
+  }
+  if (url.pathname === "/frame-drops") {
+    res.setHeader("Content-Type", "text/html; charset=utf-8");
+    res.end(`<title>Nested frame drop</title><style>
+      body{margin:0} #source{position:absolute;left:20px;top:80px;width:100px;height:80px;background:#def}
+      iframe,#cover{position:absolute;left:210px;top:80px;width:400px;height:300px;border:0}
+      #cover{background:#789}
+    </style><div id="source" draggable="true" aria-label="Frame source">Frame source</div>
+    <iframe id="middle" src="/frame-middle"></iframe><div id="cover" hidden></div><script>
+      window.counts={presses:0,starts:0,intended:0,wrong:0};
+      source.onmousedown=()=>counts.presses++;
+      source.ondragstart=e=>{counts.starts++;e.dataTransfer.setData('text/plain','frame-card')};
+      cover.ondragover=e=>e.preventDefault();cover.ondrop=e=>{e.preventDefault();counts.wrong++};
+      onmessage=e=>{if(e.data==='intended')counts.intended++;if(e.data==='wrong')counts.wrong++};
+      source.onmouseenter=()=>{const mode=${JSON.stringify(url.searchParams.get("cover"))};
+        if(mode==='top')cover.hidden=false;
+        if(mode==='middle')middle.contentDocument.getElementById('cover').hidden=false;
+      };
+    </script>`);
+    return;
+  }
+  if (url.pathname === "/frame-middle") {
+    res.setHeader("Content-Type", "text/html; charset=utf-8");
+    res.end(`<style>body{margin:0}iframe,#cover{position:absolute;left:20px;top:40px;width:300px;height:200px;border:0}#cover{background:#789}</style>
+      <iframe src="http://localhost:${server.address().port}/drop-child"></iframe><div id="cover" hidden></div><script>
+      cover.ondragover=e=>e.preventDefault();cover.ondrop=e=>{e.preventDefault();parent.postMessage('wrong','*')};
+      onmessage=e=>parent.postMessage(e.data,'*');</script>`);
+    return;
+  }
+  if (url.pathname === "/drop-child") {
+    res.setHeader("Content-Type", "text/html; charset=utf-8");
+    res.end(`<div id="drop" aria-label="Nested destination" style="position:absolute;left:30px;top:20px;width:200px;height:100px;background:#def"
+      ondragover="event.preventDefault()" ondrop="event.preventDefault();if(event.dataTransfer.getData('text/plain')==='frame-card')parent.postMessage('intended','*')">Nested destination</div>`);
+    return;
+  }
   if (req.url === "/frames") {
     res.setHeader("Content-Type", "text/html; charset=utf-8");
     res.end(
@@ -122,11 +172,14 @@ try {
       const sessionArgs = ["--session", session];
       try {
         await cli(["navigate", `http://127.0.0.1:${server.address().port}/`, ...sessionArgs]);
+        let observation;
         const action = async (args) => {
           const c = await cli(["cooperate", "sync", ...sessionArgs]);
           assert(c.context_id);
+          // Unchanged/delta replies retain the preceding observation's refs.
+          observation = c.observation ?? observation;
           return cli([
-            ...(typeof args === "function" ? args(c) : args),
+            ...(typeof args === "function" ? args({ ...c, observation }) : args),
             ...sessionArgs,
             "--context",
             c.context_id,
@@ -136,6 +189,16 @@ try {
           const r = await action(["evaluate", expression]);
           assert.equal(r.ok, true);
           return r.value;
+        };
+        const observedRef = (context, label, role) => {
+          const line = context.observation.text
+            .split("\n")
+            .find((line) => line.includes(`"${label}"`));
+          assert(line, context.observation.text);
+          if (role) assert.match(line, new RegExp(`\\b${role}\\b`));
+          const ref = line.match(/@e\d+/)?.[0];
+          assert(ref, line);
+          return ref;
         };
         await action(["drag", "#mouse", "--dx", "120"]);
         assert.equal(await verify("window.moved.mouse.dx"), 120);
@@ -181,8 +244,105 @@ try {
           ];
         });
         assert.deepEqual(await verify("window.frameMove"), [60, 20]);
+        await action(["navigate", `http://127.0.0.1:${server.address().port}/precision`]);
+        await action([
+          "drag",
+          "#precision",
+          "--dx",
+          "60",
+          "--dy",
+          "10",
+          "--from-offset-x",
+          "-100",
+          "--from-offset-y",
+          "-20",
+        ]);
+        assert.deepEqual(await verify("[points[0],points.at(-1)]"), [
+          [80, 40],
+          [140, 50],
+        ]);
+        assert.equal(
+          await verify("precision.getContext('2d').getImageData(140,50,1,1).data[3]"),
+          255,
+        );
+        await action(["evaluate", "points=[]"]);
+        await action([
+          "drag",
+          "#precision",
+          "--to",
+          "#precision",
+          "--from-offset-x",
+          "-100",
+          "--to-offset-x",
+          "100",
+        ]);
+        assert.deepEqual(await verify("[points[0],points.at(-1)]"), [
+          [80, 60],
+          [280, 60],
+        ]);
+        await action(["evaluate", "points=[];cover.hidden=false"]);
+        await assert.rejects(
+          action([
+            "drag",
+            "#precision",
+            "--dx",
+            "60",
+            "--from-offset-x",
+            "-100",
+            "--from-offset-y",
+            "-20",
+          ]),
+          (error) => JSON.parse(error.stdout).data?.effect_state === "none",
+        );
+        assert.equal(await verify("points.length"), 0);
+        await action(["evaluate", "cover.hidden=true"]);
+        await action((c) => [
+          "fill",
+          observedRef(c, "Editable card", "textbox"),
+          "--value",
+          "Updated draft",
+        ]);
+        assert.equal(
+          await verify("document.querySelector('[contenteditable]').textContent"),
+          "Updated draft",
+        );
+        await action((c) => ["click", observedRef(c, "Clickable card", "button")]);
+        assert.equal(await verify("cardClicks"), 1);
+        for (const cover of ["top", "middle", "none"]) {
+          await action([
+            "navigate",
+            `http://127.0.0.1:${server.address().port}/frame-drops?cover=${cover}`,
+          ]);
+          const gesture = () =>
+            action((c) => [
+              "drag",
+              observedRef(c, "Frame source"),
+              "--to",
+              observedRef(c, "Nested destination"),
+            ]);
+          if (cover === "none") {
+            await gesture();
+            assert.deepEqual(await verify("counts"), {
+              presses: 1,
+              starts: 1,
+              intended: 1,
+              wrong: 0,
+            });
+          } else {
+            await assert.rejects(
+              gesture(),
+              (error) => JSON.parse(error.stdout).data?.effect_state === "none",
+            );
+            assert.deepEqual(await verify("counts"), {
+              presses: 0,
+              starts: 0,
+              intended: 0,
+              wrong: 0,
+            });
+          }
+        }
         console.log(
-          "PASS installed extension: mouse, hold, native drop, range, resize, sort, timeout recovery, cross-origin frame ref",
+          "PASS installed extension: mouse, hold, native drop, range, resize, sort, timeout recovery, cross-origin frame ref, precise offsets, card semantics, nested frame occlusion",
         );
       } finally {
         await cli(["session", "stop", session]);

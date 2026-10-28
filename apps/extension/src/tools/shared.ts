@@ -71,6 +71,8 @@ export interface CdpRunner {
   verifyPointerTarget?(
     target: { tabId: number; cdpTarget: CdpTarget; backendNodeId: number; frameId?: string },
     point: { x: number; y: number },
+    /** Intentional displacement from the observed action point, in viewport CSS pixels. */
+    offset?: { x: number; y: number },
   ): Promise<void>;
   send<T = unknown>(tabId: number, method: string, params?: object): Promise<T>;
   sendToTarget?<T = unknown>(target: CdpTarget, method: string, params?: object): Promise<T>;

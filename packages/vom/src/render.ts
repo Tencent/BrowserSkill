@@ -218,12 +218,16 @@ function shouldRender(node: VomNode): boolean {
   return cleaned(node.name) !== undefined;
 }
 
-export function isVomReferenceNode(node: VomNode): boolean {
+function isSemanticReferenceNode(node: VomNode): boolean {
   return (
     node.referenceable !== false &&
-    (INTERACTIVE_ROLES.has(normalizedRole(node)) ||
-      isUrlBearingStructuralAction(node) ||
-      dragHint(node) !== undefined)
+    (INTERACTIVE_ROLES.has(normalizedRole(node)) || isUrlBearingStructuralAction(node))
+  );
+}
+
+export function isVomReferenceNode(node: VomNode): boolean {
+  return (
+    isSemanticReferenceNode(node) || (node.referenceable !== false && dragHint(node) !== undefined)
   );
 }
 
@@ -411,7 +415,8 @@ export function applyVomInteractionRecovery(nodes: VomNode[]): VomNode[] {
   const recoveredNameById = new Map<number, string>();
 
   for (const node of nodes) {
-    if (isVomReferenceNode(node)) continue;
+    // Drag evidence adds a capability; it must not suppress existing role/name recovery.
+    if (isSemanticReferenceNode(node)) continue;
     const role = recoveredRole(node, children);
     if (!role || !passesRecoveryGuards(node, children)) continue;
     recoveredIds.add(node.id);

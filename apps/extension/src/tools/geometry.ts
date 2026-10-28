@@ -54,8 +54,9 @@ export function viewportPolygon(viewport: Size): Quad {
   return rectPolygon({ x: 0, y: 0, w: viewport.width, h: viewport.height });
 }
 
-/** Project a normalized unit-square point into an arbitrary content quad. */
-export function projectUnitPoint(point: Point, quad: Quad): Point {
+function quadProjection(
+  quad: Quad,
+): [number, number, number, number, number, number, number, number] {
   const [p0, p1, p2, p3] = quad;
   const dx1 = p1.x - p2.x;
   const dx2 = p3.x - p2.x;
@@ -83,10 +84,7 @@ export function projectUnitPoint(point: Point, quad: Quad): Point {
   } else {
     const denominator = dx1 * dy2 - dx2 * dy1;
     if (Math.abs(denominator) < 1e-9) {
-      return {
-        x: p0.x + (p1.x - p0.x) * point.x + (p3.x - p0.x) * point.y,
-        y: p0.y + (p1.y - p0.y) * point.x + (p3.y - p0.y) * point.y,
-      };
+      return [p1.x - p0.x, p3.x - p0.x, p0.x, p1.y - p0.y, p3.y - p0.y, p0.y, 0, 0];
     }
     g = (dx3 * dy2 - dx2 * dy3) / denominator;
     h = (dx1 * dy3 - dx3 * dy1) / denominator;
@@ -98,11 +96,37 @@ export function projectUnitPoint(point: Point, quad: Quad): Point {
     f = p0.y;
   }
 
+  return [a, b, c, d, e, f, g, h];
+}
+
+/** Project a normalized unit-square point into an arbitrary content quad. */
+export function projectUnitPoint(point: Point, quad: Quad): Point {
+  const [a, b, c, d, e, f, g, h] = quadProjection(quad);
   const scale = g * point.x + h * point.y + 1;
   return {
     x: (a * point.x + b * point.y + c) / scale,
     y: (d * point.x + e * point.y + f) / scale,
   };
+}
+
+/** Map the actual parent input point back into a child target's viewport. */
+export function unprojectPoint(point: Point, edge: ProjectiveEdge): Point | null {
+  const { width, height } = edge.sourceViewport;
+  if (width <= 0 || height <= 0) return null;
+  const [a, b, c, d, e, f, g, h] = quadProjection(edge.destinationQuad);
+  const ax = a - point.x * g;
+  const bx = b - point.x * h;
+  const ay = d - point.y * g;
+  const by = e - point.y * h;
+  const determinant = ax * by - bx * ay;
+  if (Math.abs(determinant) < 1e-9) return null;
+  const x = point.x - c;
+  const y = point.y - f;
+  const local = {
+    x: ((x * by - bx * y) / determinant) * width,
+    y: ((ax * y - x * ay) / determinant) * height,
+  };
+  return Number.isFinite(local.x) && Number.isFinite(local.y) ? local : null;
 }
 
 export function projectPolygon(polygon: Polygon, edge: ProjectiveEdge): Polygon {
