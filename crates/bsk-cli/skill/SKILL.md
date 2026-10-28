@@ -92,7 +92,7 @@ Use a ref and context ID from the latest sync (one action per context):
 | Fill a field | `bsk fill @e3 --value "text" --session <id> --context ID` |
 | Select an option | `bsk select @e3 --value "option-value" --session <id> --context ID` |
 | Press a key | `bsk press Enter --ref @e3 --session <id> --context ID` |
-| Drag or hold and drag | `bsk drag @e3 --to @e8 --hold 300ms --session <id> --context ID` |
+| Drag | `bsk drag @e3 --to @e8 --session <id> --context ID` |
 | Reveal a hover menu | `bsk hover @e3 --session <id> --context ID` |
 | Reveal an element | `bsk scroll-to @e3 --session <id> --context ID` |
 | Scroll with wheel input | `bsk wheel --delta-y 600 --session <id> --context ID` |
@@ -110,9 +110,8 @@ The agent decides. On `dialog_pending`,
 
 ## Read details only when needed
 
-Resolve references from this skill's directory, not the working directory.
-Read the matching reference before acting; do not preload all references.
-Load further references only as needed.
+Resolve references relative to this skill. Read the matching reference before
+acting; load others only as needed.
 
 | When | Read |
 | --- | --- |
