@@ -33,3 +33,59 @@ test("process output flushes an incomplete final UTF-8 sequence", async () => {
   assert.equal(result.stdout, "�");
   assert.equal(result.stderr, "�");
 });
+
+for (const parentExits of [false, true]) {
+  test(
+    `process timeout closes inherited pipes when the launcher ${parentExits ? "has exited" : "is running"}`,
+    { skip: process.platform === "win32" },
+    async () => {
+      const descendant = `
+        process.on("SIGTERM", () => {
+          process.stdout.write("descendant terminated\\n");
+          process.exit(0);
+        });
+        process.stdout.write("descendant ready\\n");
+        setTimeout(() => process.exit(0), 5_000);
+      `;
+      const source = `
+        const { spawn } = require("node:child_process");
+        const child = spawn(process.execPath, ["-e", ${JSON.stringify(descendant)}], {
+          stdio: ["ignore", "inherit", "inherit"],
+        });
+        ${parentExits ? "child.unref();" : ""}
+      `;
+      const result = await runProcess(process.execPath, ["-e", source], { timeoutMs: 500 });
+
+      assert.equal(result.timedOut, true);
+      assert.match(result.stdout, /descendant ready/);
+      assert.match(result.stdout, /descendant terminated/);
+      assert.ok(result.durationMs < 3_000, `timeout took ${result.durationMs} ms`);
+      assert.equal(result.exitCode, parentExits ? 0 : null);
+      assert.equal(result.signal, parentExits ? null : "SIGTERM");
+    },
+  );
+}
+
+test(
+  "process timeout escalates for descendants that ignore SIGTERM",
+  { skip: process.platform === "win32" },
+  async () => {
+    const descendant = `
+      process.on("SIGTERM", () => {});
+      process.stdout.write("descendant ready\\n");
+      setTimeout(() => process.exit(0), 6_000);
+    `;
+    const source = `
+      const { spawn } = require("node:child_process");
+      spawn(process.execPath, ["-e", ${JSON.stringify(descendant)}], {
+        stdio: ["ignore", "inherit", "inherit"],
+      });
+    `;
+    const result = await runProcess(process.execPath, ["-e", source], { timeoutMs: 500 });
+
+    assert.equal(result.timedOut, true);
+    assert.match(result.stdout, /descendant ready/);
+    assert.ok(result.durationMs < 4_500, `timeout took ${result.durationMs} ms`);
+    assert.equal(result.signal, "SIGTERM");
+  },
+);

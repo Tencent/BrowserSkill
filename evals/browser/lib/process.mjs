@@ -14,10 +14,13 @@ export function runProcess(command, args, { cwd, env, timeoutMs = 300_000 } = {}
     let stderr = "";
     let timedOut = false;
     let settled = false;
+    let forceKillTimeout;
+    const useProcessGroup = process.platform !== "win32";
     const child = spawn(command, args, {
       cwd,
       env: { ...process.env, ...env },
       shell: false,
+      detached: useProcessGroup,
       stdio: ["ignore", "pipe", "pipe"],
     });
 
@@ -28,16 +31,31 @@ export function runProcess(command, args, { cwd, env, timeoutMs = 300_000 } = {}
       stderr = appendCaptured(stderr, chunk);
     });
 
+    function terminate(signal) {
+      if (!useProcessGroup || !child.pid) {
+        child.kill(signal);
+        return;
+      }
+      try {
+        // Descendants may keep the pipes open even after the launcher exits.
+        process.kill(-child.pid, signal);
+      } catch (error) {
+        if (error.code !== "ESRCH") child.kill(signal);
+      }
+    }
+
     const timeout = setTimeout(() => {
       timedOut = true;
-      child.kill("SIGTERM");
-      setTimeout(() => child.kill("SIGKILL"), 2_000).unref();
+      terminate("SIGTERM");
+      forceKillTimeout = setTimeout(() => terminate("SIGKILL"), 2_000);
+      forceKillTimeout.unref();
     }, timeoutMs);
 
     const finish = (result) => {
       if (settled) return;
       settled = true;
       clearTimeout(timeout);
+      clearTimeout(forceKillTimeout);
       resolve({
         command,
         args,
