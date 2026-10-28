@@ -31,6 +31,7 @@ const methodKeys = {
   "tool.focus": "focus",
   "tool.blur": "blur",
   "tool.wheel": "scroll",
+  "tool.drag": "drag",
   "tool.scroll_to": "scroll",
   "tool.upload": "upload",
   "tool.download": "download",

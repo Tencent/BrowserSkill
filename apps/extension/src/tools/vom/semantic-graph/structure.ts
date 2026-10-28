@@ -194,6 +194,7 @@ function baseDecision(
   const role = output.role?.toLowerCase() ?? "";
   if (!TRANSPARENT_ROLES.has(role)) return { kind: "keep", reason: "semantic" };
   if (
+    isVomReferenceNode(output) ||
     output.name ||
     output.text ||
     output.value ||

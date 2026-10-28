@@ -329,6 +329,7 @@
       "press": "Appuyer sur une touche",
       "select": "Sélectionner une option",
       "hover": "Survoler",
+      "drag": "Glisser",
       "focus": "Mettre le focus",
       "blur": "Retirer le focus",
       "scroll": "Faire défiler",

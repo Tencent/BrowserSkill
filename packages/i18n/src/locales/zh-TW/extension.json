@@ -329,6 +329,7 @@
       "press": "按鍵",
       "select": "選擇選項",
       "hover": "懸停",
+      "drag": "拖曳",
       "focus": "聚焦",
       "blur": "移開焦點",
       "scroll": "捲動",

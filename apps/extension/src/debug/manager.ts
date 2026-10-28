@@ -51,6 +51,7 @@ const ACTIONS = new Set([
   "tool.hover",
   "tool.evaluate",
   "tool.wheel",
+  "tool.drag",
   "tool.scroll_to",
   "tool.focus",
   "tool.blur",

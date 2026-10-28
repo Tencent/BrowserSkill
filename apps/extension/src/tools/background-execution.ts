@@ -29,6 +29,7 @@ const pageTools = new Set([
   "tool.click",
   "tool.hover",
   "tool.wheel",
+  "tool.drag",
   "tool.scroll_to",
   "tool.focus",
   "tool.blur",

@@ -10,9 +10,9 @@ import type { SessionManager } from "@/session-manager/manager";
 import type { RpcError, UploadParams, UploadResult } from "@/transport/types";
 import { uploadThroughFileDrop } from "./file-drop-transaction";
 import { uploadThroughActivatedFileInput } from "./file-input-transaction";
-import { fileTransferTriggerDeps } from "./file-transfer-trigger";
 import { withInputReady } from "./input-readiness";
 import { clickResolvedTarget, type InteractionDeps, resolveActionTarget } from "./interaction";
+import { pointerTransactionDeps } from "./pointer-transaction";
 import {
   type CdpRunner,
   enforceAgentWindow,
@@ -67,7 +67,7 @@ export async function handleUpload(
     });
     if (isRpcError(transaction)) return transaction;
   } else {
-    const trigger = fileTransferTriggerDeps(deps, deps.signal);
+    const trigger = pointerTransactionDeps(deps, deps.signal);
     const transaction = await uploadThroughActivatedFileInput({
       cdp: deps.cdp,
       actionTarget: address,

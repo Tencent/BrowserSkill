@@ -92,6 +92,7 @@ Use a ref and context ID from the latest sync (one action per context):
 | Fill a field | `bsk fill @e3 --value "text" --session <id> --context ID` |
 | Select an option | `bsk select @e3 --value "option-value" --session <id> --context ID` |
 | Press a key | `bsk press Enter --ref @e3 --session <id> --context ID` |
+| Drag or hold and drag | `bsk drag @e3 --to @e8 --hold 300ms --session <id> --context ID` |
 | Reveal a hover menu | `bsk hover @e3 --session <id> --context ID` |
 | Reveal an element | `bsk scroll-to @e3 --session <id> --context ID` |
 | Scroll with wheel input | `bsk wheel --delta-y 600 --session <id> --context ID` |
@@ -119,7 +120,7 @@ Load further references only as needed.
 | Website debugging, reproduction evidence, or request rules/replay | [Debugging](references/debugging.md) |
 | Required profile, existing user tab, multiple/background tabs, or remote tab ownership | [Tabs and profiles](references/tabs-and-profiles.md) |
 | Missing CLI, daemon startup failure, sandboxed startup, connection failure, or remote pairing | [Environment](references/environment.md) |
-| Waits, hover menus/probing, scrolling, `next_cursor`/`@more`, console/network, emulation, evaluation, or recording | [Interaction details](references/interaction-details.md) |
+| Dragging, waits, hover menus/probing, scrolling, `next_cursor`/`@more`, console/network, emulation, evaluation, or recording | [Interaction details](references/interaction-details.md) |
 | Screenshot, full-page capture, or `[visual:screenshot]`/Canvas interaction | [Screenshots and Canvas](references/screenshots-and-canvas.md) |
 | Video recording or MP4 export | [Video](references/video.md) |
 | Upload or download | [Files](references/files.md) |

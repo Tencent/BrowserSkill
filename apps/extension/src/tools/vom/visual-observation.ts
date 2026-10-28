@@ -332,6 +332,7 @@ export async function publishObservationPage(
   state.token = nextToken;
   state.revision = store.revision;
   const result: ObserveResult = {
+    observation_id: store.observationId,
     text: rendered!.text,
     ref_count: refs.length,
     tab_id: tabId,

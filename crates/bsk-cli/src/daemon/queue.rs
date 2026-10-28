@@ -1098,7 +1098,7 @@ fn not_dispatched_error(
 fn is_native_input(method: &Method) -> bool {
     matches!(
         method,
-        Method::ToolClick | Method::ToolPress | Method::ToolWheel
+        Method::ToolClick | Method::ToolPress | Method::ToolWheel | Method::ToolDrag
     )
 }
 
@@ -1744,8 +1744,10 @@ mod link_error_tests {
             WaitOutcome::TimedOutAfterResponse,
         ];
         for stage in stages {
-            let click = settled(Method::ToolClick, stage);
-            assert_eq!(click.data.unwrap()["reason"], "input_outcome_unknown");
+            for method in [Method::ToolClick, Method::ToolDrag] {
+                let input = settled(method, stage);
+                assert_eq!(input.data.unwrap()["reason"], "input_outcome_unknown");
+            }
 
             let upload = settled(Method::ToolUpload, stage);
             let upload = upload.data.unwrap();

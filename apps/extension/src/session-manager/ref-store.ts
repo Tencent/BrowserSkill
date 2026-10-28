@@ -35,6 +35,11 @@ export type RefInput =
 export class RefStore {
   private map = new Map<string, RefEntry>();
   private generation = 0;
+  private observationToken = crypto.randomUUID();
+
+  get observationId(): string {
+    return this.observationToken;
+  }
   private readonly documents = new Map<number, number>();
 
   get revision(): number {
@@ -70,6 +75,7 @@ export class RefStore {
     for (const [ref, input] of entries) next.set(normaliseRef(ref), this.entry(input, generation));
     this.map = next;
     this.generation = generation;
+    this.observationToken = crypto.randomUUID();
   }
 
   set(
@@ -106,12 +112,16 @@ export class RefStore {
         changed = true;
       }
     }
-    if (changed) this.generation++;
+    if (changed) {
+      this.generation++;
+      this.observationToken = crypto.randomUUID();
+    }
   }
 
   clear(): void {
     this.generation++;
     this.map.clear();
+    this.observationToken = crypto.randomUUID();
   }
 
   entries(): IterableIterator<[string, RefEntry]> {

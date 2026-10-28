@@ -187,6 +187,18 @@ export async function runBskSmokeTask({
           ...tabArgs(step, variables),
         ]);
         break;
+      case "drag":
+        result = await bsk([
+          "drag",
+          String(resolveValue(step.ref ?? step.selector, variables)),
+          ...(step.to !== undefined ? ["--to", String(resolveValue(step.to, variables))] : []),
+          ...["dx", "dy", "hold", "duration"].flatMap((key) =>
+            step[key] === undefined ? [] : [`--${key}`, String(step[key])],
+          ),
+          ...session,
+          ...tabArgs(step, variables),
+        ]);
+        break;
       case "fill":
         result = await bsk(
           [

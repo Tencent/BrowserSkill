@@ -14,6 +14,7 @@ pub mod dialog_control;
 pub mod dialogs;
 pub mod doctor;
 pub mod download;
+pub mod drag;
 pub mod emulate;
 pub mod ensure_daemon;
 pub mod error;
@@ -205,6 +206,9 @@ pub enum Command {
 
     /// Dispatch a native mouse-wheel event at the viewport centre or an element.
     Wheel(WheelArgs),
+
+    /// Drag an element to another element or by a relative offset.
+    Drag(drag::DragArgs),
 
     /// Scroll a snapshot ref or CSS selector into the visible viewport.
     #[command(name = "scroll-to")]

@@ -452,6 +452,7 @@ export interface SnapshotParams {
 }
 
 export interface SnapshotResult {
+  observation_id?: string;
   text: string;
   ref_count: number;
   tab_id: number;
@@ -594,6 +595,35 @@ export interface HoverResult {
   used_selector?: string;
   x: number;
   y: number;
+  dialogs?: JavaScriptDialogInfo[];
+}
+
+export interface DragPoint {
+  x: number;
+  y: number;
+}
+export interface DragTarget {
+  ref?: string;
+  selector?: string;
+  offset?: DragPoint;
+}
+export interface DragParams {
+  session_id: string;
+  tab_id?: number;
+  source: DragTarget;
+  target?: DragTarget;
+  delta?: DragPoint;
+  button?: MouseButton;
+  modifiers?: KeyModifier[];
+  hold_ms?: number;
+  duration_ms?: number;
+  timeout_ms?: number;
+  observation_id?: string;
+}
+export interface DragResult {
+  tab_id: number;
+  source: DragPoint;
+  target: DragPoint;
   dialogs?: JavaScriptDialogInfo[];
 }
 

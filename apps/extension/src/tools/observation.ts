@@ -1302,6 +1302,7 @@ async function handleVomObservation(
     );
     readSucceeded = true;
     return attachDialogs(deps.cdp, target.tabId, dialogCursor, {
+      observation_id: ctx.refStore.observationId,
       text: observation.text,
       ref_count: observation.refs.length,
       tab_id: target.tabId,

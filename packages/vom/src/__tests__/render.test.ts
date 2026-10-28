@@ -1209,3 +1209,82 @@ describe("disabled form state", () => {
     expect(out.text).not.toContain('button "Cancel" [disabled]');
   });
 });
+
+describe("drag affordances", () => {
+  it.each([
+    { attrs: { draggable: "true" }, hint: "draggable" },
+    { cursor: "grab", hint: "drag-handle" },
+    { cursor: "col-resize", hint: "drag-handle" },
+    { attrs: { ondrop: "accept(event)" }, hint: "drop-target" },
+  ])("keeps an addressable drag candidate without inventing a button: %j", ({ hint, ...props }) => {
+    const out = renderVom(
+      scene([
+        node({
+          id: 1,
+          backendNodeId: 42,
+          role: "generic",
+          name: "Item",
+          rect: { x: 0, y: 0, w: 100, h: 50 },
+          ...props,
+        }),
+      ]),
+    );
+    expect(out.refs).toHaveLength(1);
+    expect(out.text).toContain(`[${hint}]`);
+    expect(out.text).not.toContain("button");
+  });
+  it.each([
+    { attrs: { draggable: "false" } },
+    { cursor: "default" },
+    { cursor: "grab", inert: true },
+    { cursor: "grab", pointerEvents: "none" },
+  ])("does not manufacture drag refs from %j", (props) => {
+    const out = renderVom(
+      scene([
+        node({
+          id: 1,
+          backendNodeId: 42,
+          role: "generic",
+          rect: { x: 0, y: 0, w: 100, h: 50 },
+          ...props,
+        }),
+      ]),
+    );
+    expect(out.refs).toHaveLength(0);
+  });
+});
+
+it("does not turn inherited drag cursors into duplicate handles", () => {
+  const out = renderVom(
+    scene([
+      node({
+        id: 1,
+        backendNodeId: 10,
+        role: "generic",
+        name: "Card",
+        cursor: "grab",
+        rect: { x: 0, y: 0, w: 100, h: 80 },
+      }),
+      node({
+        id: 2,
+        parentId: 1,
+        backendNodeId: 20,
+        role: "generic",
+        name: "Title",
+        cursor: "grab",
+        rect: { x: 0, y: 0, w: 100, h: 20 },
+      }),
+      node({
+        id: 3,
+        parentId: 1,
+        backendNodeId: 30,
+        role: "generic",
+        name: "Resize",
+        cursor: "ew-resize",
+        rect: { x: 90, y: 20, w: 10, h: 60 },
+      }),
+    ]),
+  );
+  expect(out.refs.map((ref) => ref.backendNodeId)).toEqual([10, 30]);
+  expect(out.text).not.toContain('[drag-handle] "Title"');
+});

@@ -12,6 +12,36 @@
   scroll distance. An optional target is scrolled into view first; without one,
   input lands at the viewport centre. Observe to check the page's response.
 
+### Dragging
+
+Use `bsk drag <source-ref-or-selector> --to <target-ref-or-selector> --session <id>`,
+or replace `--to` with `--dx <pixels> --dy <pixels>` for sliders, resize handles,
+and panning. Prefer refs from the latest VOM observation. Selectors must match
+exactly one element in the main document; frame/shadow targets require refs.
+
+`--hold 500ms` waits after pressing, before moving; `--duration 800ms` controls
+travel pacing. Both are bounded at 5s each. `--button` and `--modifiers` work as
+for click. `--from-offset-x/y` and `--to-offset-x/y` adjust the endpoints from
+their visible action points in top-level viewport CSS pixels. Offsets inside
+out-of-process frames are unsupported. Use the actual thumb/handle when present.
+
+Observation JSON includes `observation_id`; supplying `--observation-id <id>`
+rejects a superseded ref map before input. New observe/snapshot/continuation
+replaces refs. Keep the matching token and refs together; the token does not
+replace `--context` when shared-control coordination requires it.
+
+Both endpoints must be visible after preparation. Drag does not auto-scroll
+while held, cross tabs, or synthesize touch gestures. Canvas screenshot-bound
+visual refs are not DOM targets; canvas selectors can receive mouse drags.
+VOM `[draggable]`, `[drag-handle]` and `[drop-target]` are evidence-based hints,
+not promises that an application will accept a gesture. Some custom targets
+have no detectable hint and need a known selector.
+
+Success means the input sequence was delivered, not that a drop was accepted.
+Observe afterwards and verify the value, order or destination. Cancellation
+releases owned input at its last position; it cannot roll back page handlers.
+After `effect_state=unknown`, observe before deciding whether to retry.
+
 ### Filling text
 
 `fill` supports enabled, editable text inputs, textareas, and contenteditable

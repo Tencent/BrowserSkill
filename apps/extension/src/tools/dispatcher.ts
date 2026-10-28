@@ -12,6 +12,7 @@ import type {
   ClickParams,
   ConsoleParams,
   DownloadParams,
+  DragParams,
   EmulateParams,
   EvaluateParams,
   ExtractParams,
@@ -57,6 +58,7 @@ import { handleConsole } from "./console";
 import { handleDebug } from "./debug";
 import { handleDialog } from "./dialog-control";
 import { handleDownload } from "./download";
+import { handleDrag } from "./drag";
 import { type EmulateCdpRunner, handleEmulate } from "./emulate";
 import { classifyCdpError } from "./errors";
 import { handleEvaluate } from "./evaluate";
@@ -168,7 +170,7 @@ export interface DispatcherDeps {
 }
 
 /** Tools whose page input can make the page open another tab or window. */
-const OPENS_TABS = new Set(["tool.click", "tool.press"]);
+const OPENS_TABS = new Set(["tool.click", "tool.press", "tool.drag"]);
 
 /**
  * Routes RPC requests pushed by the daemon over the Transport to the
@@ -898,6 +900,18 @@ export class ToolDispatcher {
         );
         return this.rememberHover((req.params as HoverParams).session_id, result);
       }
+      case "tool.drag":
+        return this.withHoverReassert(
+          req.params as DragParams,
+          () =>
+            handleDrag(
+              this.sessions,
+              req.params as DragParams,
+              cdp ? { cdp, tabsApi: chromeTabsApi, signal, bypassOverlay, onInputSent } : undefined,
+            ),
+          { releaseAfter: true },
+          signal,
+        );
       case "tool.wheel":
         return this.withHoverReassert(
           req.params as WheelParams,
@@ -1238,6 +1252,7 @@ function sessionIdForBrowserControlMethod(req: RequestFrame): string | null {
     case "tool.reload":
     case "tool.click":
     case "tool.hover":
+    case "tool.drag":
     case "tool.wheel":
     case "tool.scroll_to":
     case "tool.focus":
