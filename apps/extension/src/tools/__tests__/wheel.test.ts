@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+﻿import { afterEach, describe, expect, it, vi } from "vitest";
 import type { CdpFrameGraph, CdpTarget } from "@/browser-driver/frame-graph";
 import { SessionManager } from "@/session-manager/manager";
 import type { JavaScriptDialogInfo, WheelParams } from "@/transport/types";
@@ -521,5 +521,120 @@ describe("handleWheel", () => {
     f.cdp.dialogsSince = vi.fn(() => dialogs);
     expect(await f.run()).toHaveProperty("dialogs", dialogs);
     expect(f.cdp.dialogsSince).toHaveBeenCalledWith(4, 5);
+  });
+});
+
+describe("handleWheel bursts", () => {
+  const wheels = (f: Awaited<ReturnType<typeof fixture>>) =>
+    f.calls.filter((call) => call.params?.type === "mouseWheel");
+
+  it("dispatches every event once and sums to the requested total", async () => {
+    const f = await fixture();
+    const result = await f.run({ delta_y: 900, events: 4, interval_ms: 0 });
+
+    expect(wheels(f)).toHaveLength(4);
+    expect(f.calls.filter((call) => call.params?.type === "mouseMoved")).toHaveLength(1);
+    const total = wheels(f).reduce((sum, call) => sum + Number(call.params?.deltaY ?? 0), 0);
+    expect(total).toBeCloseTo(900, 9);
+    expect(result).toMatchObject({ tab_id: 4, events: 4, total_delta_y: 900 });
+    expect((result as { stopped?: string }).stopped).toBeUndefined();
+  });
+
+  it("splits evenly for linear and front-loads for ease_out", async () => {
+    const linear = await fixture();
+    await linear.run({ delta_y: 400, events: 4, interval_ms: 0 });
+    for (const call of wheels(linear)) expect(Number(call.params?.deltaY)).toBeCloseTo(100, 9);
+
+    const eased = await fixture();
+    await eased.run({ delta_y: 500, events: 5, interval_ms: 0, easing: "ease_out" });
+    const deltas = wheels(eased).map((call) => Number(call.params?.deltaY));
+    expect(deltas).toHaveLength(5);
+    expect(deltas[0]).toBeGreaterThan(100);
+    for (let index = 1; index < deltas.length; index += 1) {
+      expect(deltas[index - 1]).toBeGreaterThanOrEqual(deltas[index]);
+    }
+    expect(deltas.reduce((sum, delta) => sum + delta, 0)).toBeCloseTo(500, 9);
+  });
+
+  it("returns the events already dispatched when the caller aborts mid-burst", async () => {
+    const f = await fixture();
+    let sent = 0;
+    f.hooks.after = (call) => {
+      if (call.params?.type === "mouseWheel" && ++sent === 2) f.abort.abort();
+    };
+
+    const result = await f.run({ delta_y: 900, events: 5, interval_ms: 20 });
+
+    expect(wheels(f)).toHaveLength(2);
+    expect(result).toMatchObject({ events: 2, stopped: "cancelled" });
+    expect((result as { total_delta_y: number }).total_delta_y).toBeCloseTo(360, 6);
+  });
+
+  it("stops at the operation deadline instead of waiting out the interval", async () => {
+    const f = await fixture();
+    const started = Date.now();
+
+    const result = await f.run({ delta_y: 900, events: 5, interval_ms: 1_000, timeout_ms: 30 });
+
+    expect(Date.now() - started).toBeLessThan(1_000);
+    expect(wheels(f)).toHaveLength(1);
+    expect(result).toMatchObject({ events: 1, stopped: "timeout" });
+    expect((result as { total_delta_y: number }).total_delta_y).toBeCloseTo(180, 6);
+  });
+
+  it("reports the underlying error when no event reached the page", async () => {
+    const f = await fixture();
+    f.hooks.reply = (call) => {
+      if (call.params?.type === "mouseWheel") throw new Error("injected failure");
+      return undefined;
+    };
+
+    const result = await f.run({ delta_y: 900, events: 3 });
+
+    expect(wheels(f)).toHaveLength(1);
+    expect(result).toMatchObject({
+      code: "cdp_failed",
+      data: { effect_state: "unknown", reason: "input_outcome_unknown" },
+    });
+  });
+
+  it("keeps a single event on the exact requested delta", async () => {
+    const f = await fixture();
+    const result = await f.run({ delta_y: 120 });
+
+    expect(wheels(f)).toHaveLength(1);
+    expect(Number(wheels(f)[0].params?.deltaY)).toBe(120);
+    expect(result).toMatchObject({ events: 1, total_delta_y: 120 });
+  });
+
+  it("rejects an out-of-range burst before touching the browser", async () => {
+    for (const params of [
+      { events: 0 },
+      { events: 201 },
+      { events: 3, interval_ms: 5_001 },
+      { events: 3, easing: "spring" },
+    ]) {
+      const f = await fixture();
+      expect(await f.run(params as never)).toMatchObject({ code: "invalid_params" });
+      expect(wheels(f)).toHaveLength(0);
+    }
+  });
+  it("keeps progress and the failing cause when a later event fails", async () => {
+    const f = await fixture();
+    let seen = 0;
+    f.hooks.reply = (call) => {
+      if (call.params?.type === "mouseWheel" && ++seen === 2) throw new Error("injected failure");
+      return undefined;
+    };
+
+    const result = await f.run({ delta_y: 900, events: 4, interval_ms: 0 });
+
+    expect(wheels(f)).toHaveLength(2);
+    expect(result).toMatchObject({
+      events: 1,
+      stopped: "error",
+      total_delta_y: 225,
+      stop_error: { code: "cdp_failed" },
+    });
   });
 });

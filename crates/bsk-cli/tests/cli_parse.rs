@@ -7,6 +7,7 @@ use bsk::cli::navigate::NavigateCmd;
 use bsk::cli::record::{RecordCmd, RecordSub};
 use bsk::cli::session::{SessionCmd, SessionSub};
 use bsk::cli::upload::UploadModeArg;
+use bsk::cli::wheel::BurstEasing;
 use bsk::{Cli, Command};
 use clap::Parser;
 
@@ -389,6 +390,89 @@ fn parses_wheel_with_target_and_deltas() {
     assert_eq!(args.target.as_deref(), Some("#panel"));
     assert_eq!(args.delta_x, 12.5);
     assert_eq!(args.delta_y, 600.0);
+}
+
+#[test]
+fn parses_wheel_burst_options() {
+    let cli = parse(&[
+        "bsk",
+        "wheel",
+        "--session",
+        "s1",
+        "--delta-y",
+        "900",
+        "--repeat",
+        "15",
+        "--interval-ms",
+        "24",
+        "--ease",
+        "ease-out",
+    ]);
+    let Command::Wheel(args) = cli.command else {
+        panic!("expected wheel command");
+    };
+    assert_eq!(args.repeat, 15);
+    assert_eq!(args.interval_ms, 24);
+    assert_eq!(args.ease, BurstEasing::EaseOut);
+    assert_eq!(args.delta_y, 900.0);
+}
+
+#[test]
+fn wheel_defaults_to_a_single_event() {
+    let cli = parse(&["bsk", "wheel", "--session", "s1", "--delta-y", "600"]);
+    let Command::Wheel(args) = cli.command else {
+        panic!("expected wheel command");
+    };
+    assert_eq!(args.repeat, 1);
+    assert_eq!(args.interval_ms, 16);
+}
+
+#[test]
+fn rejects_out_of_range_wheel_burst() {
+    for argv in [
+        vec![
+            "bsk",
+            "wheel",
+            "--session",
+            "s1",
+            "--delta-y",
+            "600",
+            "--repeat",
+            "0",
+        ],
+        vec![
+            "bsk",
+            "wheel",
+            "--session",
+            "s1",
+            "--delta-y",
+            "600",
+            "--repeat",
+            "201",
+        ],
+        vec![
+            "bsk",
+            "wheel",
+            "--session",
+            "s1",
+            "--delta-y",
+            "600",
+            "--interval-ms",
+            "5001",
+        ],
+        vec![
+            "bsk",
+            "wheel",
+            "--session",
+            "s1",
+            "--delta-y",
+            "600",
+            "--ease",
+            "spring",
+        ],
+    ] {
+        assert!(Cli::try_parse_from(argv).is_err());
+    }
 }
 
 #[test]

@@ -833,6 +833,11 @@ async fn wheel_round_trips_native_deltas_and_point() {
                 y: 240.0,
                 delta_x: 10.0,
                 delta_y: 600.0,
+                events: 1,
+                total_delta_x: 10.0,
+                total_delta_y: 600.0,
+                stopped: None,
+                stop_error: None,
                 dialogs: vec![],
             })
             .unwrap(),
@@ -852,11 +857,16 @@ async fn wheel_round_trips_native_deltas_and_point() {
             delta_y: 600.0,
             modifiers: None,
             timeout_ms: Some(5_000),
+            events: 1,
+            interval_ms: 0,
+            easing: bsk_protocol::tools::WheelEasing::Linear,
         },
     )
     .await
     .expect("wheel ok");
     assert_eq!(result.used_selector.as_deref(), Some("#panel"));
     assert_eq!((result.delta_x, result.delta_y), (10.0, 600.0));
+    assert_eq!(result.events, 1);
+    assert_eq!(result.stopped, None);
     handle.shutdown().await;
 }

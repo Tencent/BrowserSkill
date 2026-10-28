@@ -1,17 +1,26 @@
-//! `bsk wheel` — dispatch a native Chromium mouse-wheel event.
+//! `bsk wheel` — dispatch native Chromium mouse-wheel events.
 
 use std::time::Duration;
 
 use anyhow::Context;
 use bsk_protocol::Method;
-use bsk_protocol::tools::{WheelParams, WheelResult};
-use clap::Args;
+use bsk_protocol::tools::{WheelEasing, WheelParams, WheelResult};
+use clap::{Args, ValueEnum};
 
 use crate::cli::dialogs::print_dialog_summaries;
 use crate::cli::ensure_daemon::ensure_daemon;
 use crate::cli::error::{CliError, Format};
 use crate::cli::interaction::{parse_modifiers, split_target};
 use crate::cli::navigate::parse_timeout_ms;
+
+/// Per-event weighting profile for a burst (`--repeat` > 1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum BurstEasing {
+    /// Split the requested delta evenly across the burst.
+    Linear,
+    /// Front-load the requested delta and decay the tail (a flick that settles).
+    EaseOut,
+}
 
 #[derive(Debug, Clone, Args)]
 pub struct WheelArgs {
@@ -31,10 +40,14 @@ pub struct WheelArgs {
     pub tab_id: Option<i64>,
 
     /// Horizontal wheel input in CSS pixels (positive is right).
+    ///
+    /// With `--repeat` > 1 this is the total horizontal delta for the operation.
     #[arg(long = "delta-x", default_value = "0", allow_negative_numbers = true, value_parser = parse_finite_delta)]
     pub delta_x: f64,
 
     /// Vertical wheel input in CSS pixels (positive is down).
+    ///
+    /// With `--repeat` > 1 this is the total vertical delta for the operation.
     #[arg(long = "delta-y", default_value = "0", allow_negative_numbers = true, value_parser = parse_finite_delta)]
     pub delta_y: f64,
 
@@ -42,6 +55,22 @@ pub struct WheelArgs {
     #[arg(long, default_value = "")]
     pub modifiers: String,
 
+    /// Wheel events dispatched by this operation (1–200).
+    ///
+    /// The browser performs the whole gesture inside one operation, so every
+    /// event shares one cooperation context and one deadline.
+    #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u32).range(1..=200))]
+    pub repeat: u32,
+
+    /// Milliseconds between dispatches, measured from the previous event (0–5000).
+    #[arg(long = "interval-ms", default_value_t = 16, value_parser = clap::value_parser!(u64).range(0..=5000))]
+    pub interval_ms: u64,
+
+    /// How a burst splits the requested delta across its events.
+    #[arg(long = "ease", value_enum, default_value = "linear")]
+    pub ease: BurstEasing,
+
+    /// Deadline for the entire operation, including inter-event waits.
     #[arg(long, default_value = "30s", value_parser = parse_timeout_ms)]
     pub timeout: u32,
 }
@@ -65,6 +94,12 @@ pub fn dispatch(args: WheelArgs, format: Format) -> Result<(), CliError> {
             Some(modifiers)
         },
         timeout_ms: Some(args.timeout),
+        events: args.repeat,
+        interval_ms: args.interval_ms,
+        easing: match args.ease {
+            BurstEasing::Linear => WheelEasing::Linear,
+            BurstEasing::EaseOut => WheelEasing::EaseOut,
+        },
     };
     let reply: WheelResult = crate::cli::business_rpc::call(
         info.sock_path,
@@ -82,10 +117,23 @@ pub fn dispatch(args: WheelArgs, format: Format) -> Result<(), CliError> {
         Format::Human => {
             let target =
                 format_used_target(reply.used_ref.as_deref(), reply.used_selector.as_deref());
-            println!(
-                "wheel ok tab={} target={target} at=({}, {}) delta=({}, {})",
-                reply.tab_id, reply.x, reply.y, reply.delta_x, reply.delta_y
-            );
+            if reply.events <= 1 && reply.stopped.is_none() {
+                println!(
+                    "wheel ok tab={} target={target} at=({}, {}) delta=({}, {})",
+                    reply.tab_id, reply.x, reply.y, reply.delta_x, reply.delta_y
+                );
+            } else {
+                let state = reply.stopped.as_deref().unwrap_or("complete");
+                let cause = reply
+                    .stop_error
+                    .as_ref()
+                    .map(|error| format!(" error={}", error.code))
+                    .unwrap_or_default();
+                println!(
+                    "wheel burst events={} state={state} total=({}, {}){cause} tab={} target={target}",
+                    reply.events, reply.total_delta_x, reply.total_delta_y, reply.tab_id
+                );
+            }
             print_dialog_summaries(&reply.dialogs);
         }
     }
@@ -176,6 +224,7 @@ mod tests {
         assert!(validate_deltas(0.0, 0.0).is_err());
         assert!(validate_deltas(0.0, -120.0).is_ok());
     }
+
     #[test]
     fn rejects_empty_conflicting_targets_and_nonfinite_deltas() {
         for target in ["", " "] {
@@ -209,5 +258,15 @@ mod tests {
                 Err(CliError::Local(_))
             ));
         }
+    }
+
+    #[test]
+    fn maps_the_cli_easing_onto_the_protocol_enum() {
+        let map = |easing: BurstEasing| match easing {
+            BurstEasing::Linear => WheelEasing::Linear,
+            BurstEasing::EaseOut => WheelEasing::EaseOut,
+        };
+        assert_eq!(map(BurstEasing::Linear), WheelEasing::Linear);
+        assert_eq!(map(BurstEasing::EaseOut), WheelEasing::EaseOut);
     }
 }

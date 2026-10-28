@@ -595,6 +595,12 @@ export interface WheelParams {
   delta_y?: number;
   modifiers?: KeyModifier[];
   timeout_ms?: number;
+  /** Events dispatched by this operation (1–200). The deltas are the total when > 1. */
+  events?: number;
+  /** Milliseconds between dispatches, measured from the previous event. */
+  interval_ms?: number;
+  /** How the requested delta is split across the operation's events. */
+  easing?: "linear" | "ease_out";
 }
 
 export interface WheelResult {
@@ -605,6 +611,14 @@ export interface WheelResult {
   y: number;
   delta_x: number;
   delta_y: number;
+  /** Events actually dispatched. Equals the request unless `stopped` is set. */
+  events: number;
+  total_delta_x: number;
+  total_delta_y: number;
+  /** Why the operation stopped before its last event: timeout, cancelled or error. */
+  stopped?: string;
+  /** The underlying failure when `stopped` is `error`, kept separate from progress. */
+  stop_error?: { code: string; message: string };
   dialogs?: JavaScriptDialogInfo[];
 }
 

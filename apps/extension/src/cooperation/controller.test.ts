@@ -1100,6 +1100,31 @@ describe("shared-tab dispatch fences", () => {
     const fresh = await f.command("sync");
     expect(await f.act(fresh.context_id)).toEqual({});
   });
+  it("dispatches a multi-event wheel operation under one cooperation context", async () => {
+    const f = await fixture();
+    const deltas: number[] = [];
+    const result = await f.act(
+      f.first.context_id,
+      async (runner) => {
+        for (const deltaY of [300, 240, 192]) {
+          await runner.send(7, "Input.dispatchMouseEvent", {
+            type: "mouseWheel",
+            x: 4,
+            y: 5,
+            deltaY,
+          });
+          deltas.push(deltaY);
+        }
+        return { events: deltas.length, total: deltas.reduce((sum, delta) => sum + delta, 0) };
+      },
+      "tool.wheel",
+    );
+
+    expect(result).toMatchObject({ events: 3, total: 732 });
+    expect(f.native).toHaveBeenCalledTimes(3);
+    // The single operation consumed its context, so a second run needs a new sync.
+    expect(await f.act(f.first.context_id)).toMatchObject({ code: "permission_denied" });
+  });
   it("still blocks input after a navigation invalidates the action's document", async () => {
     const f = await fixture();
     const result = await f.act(

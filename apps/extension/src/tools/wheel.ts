@@ -19,6 +19,7 @@ import {
   resolveTargetTab,
   sendToCdpTarget,
 } from "./shared";
+import { waitWithinInterval, wheelSchedule } from "./wheel-schedule";
 
 export interface WheelDeps {
   cdp: CdpRunner;
@@ -75,6 +76,18 @@ export async function handleWheel(
       params.modifiers.some((value) => !["alt", "ctrl", "meta", "shift"].includes(value)))
   ) {
     return { code: "invalid_params", message: "invalid wheel modifiers" };
+  }
+  const events = params.events === undefined ? 1 : params.events;
+  if (!Number.isInteger(events) || events < 1 || events > 200) {
+    return { code: "invalid_params", message: "events must be an integer between 1 and 200" };
+  }
+  const intervalMs = params.interval_ms === undefined ? 0 : params.interval_ms;
+  if (!Number.isInteger(intervalMs) || intervalMs < 0 || intervalMs > 5000) {
+    return { code: "invalid_params", message: "interval_ms must be an integer between 0 and 5000" };
+  }
+  const easing = params.easing === undefined ? "linear" : params.easing;
+  if (easing !== "linear" && easing !== "ease_out") {
+    return { code: "invalid_params", message: "easing must be linear or ease_out" };
   }
 
   const deadline = Date.now() + timeout;
@@ -145,21 +158,63 @@ export async function handleWheel(
         y: point.y,
         modifiers,
       });
+      const schedule = wheelSchedule(deltaX, deltaY, events, easing);
       // markSent checks cancellation/deadline. Dispatch directly so a second
       // guard cannot reject between recording the attempt and sending the wheel.
       input.markSent();
-      await deps.cdp.send(target.tabId, "Input.dispatchMouseEvent", {
-        type: "mouseWheel",
-        x: point.x,
-        y: point.y,
-        deltaX,
-        deltaY,
-        modifiers,
-      });
-      // Wheel acknowledgement precedes compositor scrolling. Keep the hidden renderer
-      // awake until its resulting frame is available, then restore focus.
-      if (input.hidden) await waitForInputPaint(cdp, target.tabId, deps.signal, deadline);
-      checkActive();
+      let dispatched = 0;
+      let totalX = 0;
+      let totalY = 0;
+      let stopped: string | undefined;
+      let stopError: { code: string; message: string } | undefined;
+      for (let index = 0; index < schedule.length; index += 1) {
+        if (index > 0 && intervalMs > 0) {
+          const elapsed = await waitWithinInterval(intervalMs, deadline, deps.signal);
+          if (!elapsed) {
+            stopped = deps.signal?.aborted ? "cancelled" : "timeout";
+            break;
+          }
+        }
+        const [stepX, stepY] = schedule[index];
+        try {
+          checkActive();
+          await deps.cdp.send(target.tabId, "Input.dispatchMouseEvent", {
+            type: "mouseWheel",
+            x: point.x,
+            y: point.y,
+            deltaX: stepX,
+            deltaY: stepY,
+            modifiers,
+          });
+        } catch (error) {
+          // Nothing reached the page yet: report the underlying cause instead of a
+          // partial success that claims zero events.
+          if (dispatched === 0) throw error;
+          stopped = deps.signal?.aborted
+            ? "cancelled"
+            : Date.now() >= deadline
+              ? "timeout"
+              : "error";
+          // Keep the cause beside the progress so a caller never mistakes this
+          // event's failure for the outcome of the whole operation.
+          if (stopped === "error") {
+            const detail = isRpcError(error) ? error : cdpError(error);
+            stopError = { code: detail.code, message: detail.message };
+          }
+          break;
+        }
+        dispatched += 1;
+        totalX += stepX;
+        totalY += stepY;
+        // Wheel acknowledgement precedes compositor scrolling. Keep the hidden renderer
+        // awake until its resulting frame is available, then restore focus. A paint that
+        // cannot be confirmed propagates: the event was sent, so its outcome is unknown
+        // and the operation must not continue as if it were complete.
+        if (input.hidden) await waitForInputPaint(cdp, target.tabId, deps.signal, deadline);
+      }
+      // A stopped operation reports its progress instead of a late abort error;
+      // only a fully dispatched operation re-checks cancellation here.
+      if (stopped === undefined) checkActive();
       return attachDialogs(deps.cdp, target.tabId, dialogCursor, {
         tab_id: target.tabId,
         used_ref: point.usedRef,
@@ -168,6 +223,11 @@ export async function handleWheel(
         y: point.y,
         delta_x: deltaX,
         delta_y: deltaY,
+        events: dispatched,
+        total_delta_x: totalX,
+        total_delta_y: totalY,
+        ...(stopped === undefined ? {} : { stopped }),
+        ...(stopError === undefined ? {} : { stop_error: stopError }),
       });
     });
   } catch (error) {
