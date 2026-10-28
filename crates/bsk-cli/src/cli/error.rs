@@ -565,6 +565,14 @@ mod tests {
                 "use `bsk daemon start --foreground` in a persistent host task",
             ),
             (
+                DaemonStartFailure::BreakawayUnverified,
+                "check access to the bsk executable",
+            ),
+            (
+                DaemonStartFailure::ProcessCreationDenied,
+                "check access to the bsk executable",
+            ),
+            (
                 DaemonStartFailure::PartialBreakaway,
                 "use `bsk daemon start --foreground` in a persistent host task",
             ),

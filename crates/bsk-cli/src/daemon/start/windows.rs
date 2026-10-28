@@ -15,7 +15,7 @@ use windows_sys::Win32::System::Threading::{
 
 use super::{DAEMON_REPLACEMENT_WAIT_ENV, DAEMONIZED_ENV, StartArgs, apply_start_args};
 use crate::daemon::start_error::DaemonStartFailure;
-use crate::windows_process::{self, Process};
+use crate::windows_process::{self, JobBreakaway, Process};
 
 pub(super) fn spawn(exe: &Path, args: &StartArgs, predecessor_pid: Option<u32>) -> Result<Process> {
     let mut command = std::process::Command::new(exe);
@@ -53,7 +53,7 @@ pub(super) fn spawn(exe: &Path, args: &StartArgs, predecessor_pid: Option<u32>) 
             Err(err) => anyhow::Error::new(err).context(DaemonStartFailure::ResumeFailed),
         },
         Ok(false) => {
-            anyhow::anyhow!("daemon is still associated with a host Job Object after breakaway")
+            anyhow::anyhow!("daemon process still belongs to a Job Object after breakaway")
                 .context(DaemonStartFailure::PartialBreakaway)
         }
         Err(err) => anyhow::Error::new(err).context("check the daemon's Job membership"),
@@ -65,21 +65,27 @@ pub(super) fn spawn(exe: &Path, args: &StartArgs, predecessor_pid: Option<u32>) 
 }
 
 fn spawn_failure(err: io::Error, exe: &Path) -> anyhow::Error {
-    let in_job = windows_process::current_process_in_job().unwrap_or(false);
-    classify_spawn_failure(err, in_job, exe)
+    classify_spawn_failure(err, windows_process::current_job_breakaway().ok(), exe)
 }
 
 /// With CREATE_BREAKAWAY_FROM_JOB, CreateProcessW fails with access denied
-/// when the immediate Job forbids breakaway. Any other error, or one raised
-/// outside every Job, has a different cause.
-fn classify_spawn_failure(err: io::Error, in_job: bool, exe: &Path) -> anyhow::Error {
-    let refused = in_job && err.raw_os_error() == Some(ERROR_ACCESS_DENIED as i32);
-    let err = anyhow::Error::new(err);
-    if refused {
-        err.context(DaemonStartFailure::IndependentStartFailed)
-    } else {
-        err.context(format!("create daemon process {}", exe.display()))
+/// when the immediate Job forbids breakaway, but access to the executable or
+/// process can be denied for other reasons. Only a Job policy that was read
+/// as forbidding breakaway is reported as a Job refusal; `job` is `None` when
+/// the policy could not be read.
+fn classify_spawn_failure(err: io::Error, job: Option<JobBreakaway>, exe: &Path) -> anyhow::Error {
+    let denied = err.raw_os_error() == Some(ERROR_ACCESS_DENIED as i32);
+    let err = anyhow::Error::new(err).context(format!("create daemon process {}", exe.display()));
+    if !denied {
+        return err;
     }
+    err.context(match job {
+        Some(JobBreakaway::Forbidden) => DaemonStartFailure::IndependentStartFailed,
+        Some(JobBreakaway::Allowed | JobBreakaway::NotInJob) => {
+            DaemonStartFailure::ProcessCreationDenied
+        }
+        None => DaemonStartFailure::BreakawayUnverified,
+    })
 }
 
 /// Whether [`spawn`] can start a daemon outside this process's Jobs. Creates
@@ -106,7 +112,7 @@ pub(super) fn check_breakaway(exe: &Path) -> Result<()> {
     let _ = probe.wait();
     if !outside.context("check the probe's Job membership")? {
         return Err(anyhow::anyhow!(
-            "daemon probe is still associated with a host Job Object after breakaway"
+            "daemon probe still belongs to a Job Object after breakaway"
         ))
         .context(DaemonStartFailure::PartialBreakaway);
     }
@@ -149,31 +155,64 @@ mod tests {
 
     use super::*;
 
-    fn classified(code: u32, in_job: bool) -> anyhow::Error {
+    const POLICIES: [Option<JobBreakaway>; 4] = [
+        Some(JobBreakaway::NotInJob),
+        Some(JobBreakaway::Allowed),
+        Some(JobBreakaway::Forbidden),
+        None,
+    ];
+
+    fn classified(code: u32, job: Option<JobBreakaway>) -> anyhow::Error {
         classify_spawn_failure(
             io::Error::from_raw_os_error(code as i32),
-            in_job,
+            job,
             Path::new(r"C:\bsk\bsk.exe"),
         )
     }
 
+    fn assert_keeps_cause(error: &anyhow::Error, code: u32) {
+        let message = format!("{error:#}");
+        assert!(
+            message.contains(r"create daemon process C:\bsk\bsk.exe"),
+            "{message}"
+        );
+        assert!(message.contains(&format!("(os error {code})")), "{message}");
+    }
+
     #[test]
-    fn only_access_denied_inside_a_job_is_a_breakaway_refusal() {
-        assert!(matches!(
-            classified(ERROR_ACCESS_DENIED, true).downcast_ref::<DaemonStartFailure>(),
-            Some(DaemonStartFailure::IndependentStartFailed)
-        ));
-        for error in [
-            classified(ERROR_ACCESS_DENIED, false),
-            classified(ERROR_FILE_NOT_FOUND, true),
+    fn access_denied_is_a_job_refusal_only_when_the_job_forbids_breakaway() {
+        for (job, expected) in [
+            (
+                Some(JobBreakaway::Forbidden),
+                DaemonStartFailure::IndependentStartFailed,
+            ),
+            (
+                Some(JobBreakaway::Allowed),
+                DaemonStartFailure::ProcessCreationDenied,
+            ),
+            (
+                Some(JobBreakaway::NotInJob),
+                DaemonStartFailure::ProcessCreationDenied,
+            ),
+            (None, DaemonStartFailure::BreakawayUnverified),
         ] {
-            assert!(error.downcast_ref::<DaemonStartFailure>().is_none());
-            let message = format!("{error:#}");
-            assert!(
-                message.contains(r"create daemon process C:\bsk\bsk.exe"),
-                "{message}"
+            let error = classified(ERROR_ACCESS_DENIED, job);
+            assert_eq!(
+                error.downcast_ref::<DaemonStartFailure>(),
+                Some(&expected),
+                "{job:?}"
             );
-            assert!(!message.contains("Job Object"), "{message}");
+            assert_keeps_cause(&error, ERROR_ACCESS_DENIED);
+        }
+    }
+
+    #[test]
+    fn other_spawn_errors_keep_their_cause_without_job_guidance() {
+        for job in POLICIES {
+            let error = classified(ERROR_FILE_NOT_FOUND, job);
+            assert!(error.downcast_ref::<DaemonStartFailure>().is_none());
+            assert_keeps_cause(&error, ERROR_FILE_NOT_FOUND);
+            assert!(!format!("{error:#}").contains("Job Object"), "{job:?}");
         }
     }
 }
