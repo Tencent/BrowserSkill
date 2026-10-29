@@ -256,14 +256,20 @@ export function createBskRunner(bskPath: string, spawnImpl: SpawnImpl = spawn): 
           // Explicit cancellation also stops waiting for an exited child's output.
           if (!requestKill()) finish(child.exitCode);
         };
-        const settle = () => {
-          if (timer !== undefined) clearTimeout(timer);
-          if (deadline !== undefined) clearTimeout(deadline);
-          if (drainWindow !== undefined) clearTimeout(drainWindow);
-          if (drainCap !== undefined) clearTimeout(drainCap);
+        const clearCancellationTimers = () => {
+          if (deadline !== undefined) {
+            clearTimeout(deadline);
+            deadline = undefined;
+          }
           const force = cancelling.get(child);
           if (force !== undefined) clearTimeout(force);
           cancelling.delete(child);
+        };
+        const settle = () => {
+          if (timer !== undefined) clearTimeout(timer);
+          clearCancellationTimers();
+          if (drainWindow !== undefined) clearTimeout(drainWindow);
+          if (drainCap !== undefined) clearTimeout(drainCap);
           options.signal?.removeEventListener("abort", onAbort);
           child.off("exit", onExit);
           child.off("close", finish);
@@ -272,7 +278,9 @@ export function createBskRunner(bskPath: string, spawnImpl: SpawnImpl = spawn): 
 
         const onExit = (code: number | null, signal: NodeJS.Signals | null) => {
           // Execution is over; output collection has its own bounded deadline.
+          // Retire forced-kill settlement so it cannot truncate the drain window.
           if (timer !== undefined) clearTimeout(timer);
+          clearCancellationTimers();
           if (signal !== null || timedOut || (aborted && args[0] !== "step")) {
             finish(code);
             return;

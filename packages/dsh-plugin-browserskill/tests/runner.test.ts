@@ -495,6 +495,89 @@ describe("createBskRunner against real processes", () => {
   }, 20_000);
 });
 
+describe.each([
+  { platform: "darwin", killGraceMs: KILL_GRACE_MS },
+  { platform: "win32", killGraceMs: WINDOWS_KILL_GRACE_MS },
+])("cancellation timer hand-off on $platform", ({ platform, killGraceMs }) => {
+  const originalPlatform = Object.getOwnPropertyDescriptor(process, "platform")!;
+  beforeEach(() => {
+    Object.defineProperty(process, "platform", { value: platform });
+    vi.useFakeTimers();
+  });
+  afterEach(() => Object.defineProperty(process, "platform", originalPlatform));
+
+  function cancellingStep() {
+    const child = Object.assign(new FakeChild(), { stdin: new PassThrough() });
+    child.kill = (signal: string) => {
+      child.killedWith.push(signal);
+      return true;
+    };
+    const runner = createBskRunner("bsk", fakeSpawn([child]));
+    const controller = new AbortController();
+    let result: BskRunResult | undefined;
+    const promise = runner.run(["step"], { signal: controller.signal, timeoutMs: 120_000 });
+    void promise.then((value) => {
+      result = value;
+    });
+    controller.abort();
+    return { child, promise, result: () => result };
+  }
+
+  it("allows the full output drain after a slow graceful cancellation", async () => {
+    const { child, promise } = cancellingStep();
+    const payload = { ...successfulStep, ok: false, phase: "cancelled", cancelled: true };
+    const stdout = JSON.stringify(payload);
+    const first = Math.floor(stdout.length / 2);
+    const second = Math.floor((stdout.length * 3) / 4);
+    // Exit just before forced kill, then deliver the tail beyond the old
+    // cancellation fallback but inside the new 2s post-exit drain cap.
+    await vi.advanceTimersByTimeAsync(killGraceMs - 100);
+    child.stdout.emit("data", stdout.slice(0, first));
+    child.exitCode = 2;
+    child.emit("exit", 2, null);
+    await vi.advanceTimersByTimeAsync(700);
+    child.stdout.emit("data", stdout.slice(first, second));
+    await vi.advanceTimersByTimeAsync(600);
+    child.stdout.emit("data", stdout.slice(second));
+    child.emit("close", 2);
+    const result = await promise;
+    expect(result).toMatchObject({ code: 2, aborted: true, stdout });
+    expect(parseBskJson(result, "step", { allowStepResult: true })).toEqual(payload);
+    expect(child.killedWith).not.toContain("SIGKILL");
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("still caps post-exit draining when inherited pipes keep producing output", async () => {
+    const { child, result } = cancellingStep();
+    await vi.advanceTimersByTimeAsync(killGraceMs - 100);
+    child.exitCode = 2;
+    child.emit("exit", 2, null);
+    for (let elapsed = 0; elapsed < 2_000; elapsed += 200) {
+      expect(result()).toBeUndefined();
+      child.stdout.emit("data", "x");
+      await vi.advanceTimersByTimeAsync(200);
+    }
+    expect(result()).toMatchObject({ code: 2, aborted: true, stdout: "x".repeat(10) });
+    child.stdout.emit("data", "later");
+    expect(result()?.stdout).toBe("x".repeat(10));
+    expect([child.stdout.destroyed, child.stderr.destroyed]).toEqual([true, true]);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("retains forced settlement when the cancelled child never exits", async () => {
+    const { child, promise, result } = cancellingStep();
+    await vi.advanceTimersByTimeAsync(killGraceMs);
+    expect(child.killedWith).toContain("SIGKILL");
+    expect(result()).toBeUndefined();
+    await vi.advanceTimersByTimeAsync(SETTLE_AFTER_KILL_SLACK_MS - 1);
+    expect(result()).toBeUndefined();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(await promise).toMatchObject({ code: null, aborted: true, timedOut: false });
+    expect([child.stdout.destroyed, child.stderr.destroyed]).toEqual([true, true]);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+});
+
 describe("Windows parent cancellation", () => {
   const originalPlatform = Object.getOwnPropertyDescriptor(process, "platform")!;
   beforeEach(() => Object.defineProperty(process, "platform", { value: "win32" }));

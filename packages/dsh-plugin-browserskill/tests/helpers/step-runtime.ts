@@ -48,10 +48,14 @@ export function stepReply(
 }
 
 /** Actual SDK runtime, public BrowserSkill dispatch and parsing; only CLI I/O is a fixture. */
-export async function createStepRuntime(run: BskRunner["run"]) {
+export async function createStepRuntime(run: BskRunner["run"], mode: "native" | "ptc" = "native") {
   const root = new Context();
-  root.provide("systemPrompt", { tools: () => () => {} });
-  const runtime = root.plugin(ToolRuntime);
+  root.provide("systemPrompt", {
+    tools: () => () => {},
+    section: () => () => {},
+    getSectionOrder: () => 0,
+  });
+  const runtime = root.plugin(ToolRuntime, { mode });
   await runtime;
   const runner: BskRunner = { run, killAll() {}, killFor: () => 0 };
   const registry = new SessionRegistry(5);
