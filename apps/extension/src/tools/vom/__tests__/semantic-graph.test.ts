@@ -1012,3 +1012,26 @@ it.each([
   expect(scene.nodes.some((n) => n.tag === "form")).toBe(false);
   expect(scene.nodes.find((n) => n.backendNodeId === 3)?.inForm).toBe(true);
 });
+
+it.each([true, false])("retains AX selected=%s over styling hints", (selected) => {
+  const scene = buildSemanticVomScene({
+    viewport: { width: 800, height: 600 },
+    rootFrameId: "main",
+    documents: [
+      document(
+        "main",
+        [
+          {
+            nodeId: "1",
+            backendDOMNodeId: 1,
+            role: { type: "role", value: "option" },
+            name: { type: "computedString", value: "Choice" },
+            properties: [{ name: "selected", value: { value: selected } }],
+          },
+        ],
+        [dom(1, null, "div", { class: "selected" })],
+      ),
+    ],
+  });
+  expect(renderVom(scene).text).toContain(selected ? "[selected]" : "[unselected]");
+});

@@ -192,7 +192,7 @@ export async function runBskSmokeTask({
           "drag",
           String(resolveValue(step.ref ?? step.selector, variables)),
           ...(step.to !== undefined ? ["--to", String(resolveValue(step.to, variables))] : []),
-          ...["dx", "dy", "hold", "duration"].flatMap((key) =>
+          ...["dx", "dy", "hold", "duration", "mode"].flatMap((key) =>
             step[key] === undefined ? [] : [`--${key}`, String(step[key])],
           ),
           ...session,

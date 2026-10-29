@@ -9,6 +9,7 @@ import { pointerTargetValidator } from "@/cooperation/pointer-target";
 import { SessionManager } from "@/session-manager/manager";
 import type { DragParams } from "@/transport/types";
 import { handleDrag } from "../drag";
+import { handleClick, handleHover } from "../interaction";
 import { handleObserve } from "../observation";
 import type { CdpRunner } from "../shared";
 
@@ -20,6 +21,12 @@ type Send = <T = Record<string, unknown>>(
 const { dragMarkup, dragScript } = await import(
   new URL(
     "../../../../../evals/browser/cases/regression/drag-interactions/drag-interactions.fixture.mjs",
+    import.meta.url,
+  ).href
+);
+const { rangeMarkup, rangeScript } = await import(
+  new URL(
+    "../../../../../evals/browser/cases/regression/drag-interactions/range-selection.fixture.mjs",
     import.meta.url,
   ).href
 );
@@ -157,6 +164,8 @@ async function harness(targetId: string, background: boolean) {
         },
         { ...deps, signal },
       ),
+    click: (selector: string) => handleClick(manager, { session_id: "aa11", selector }, deps),
+    hover: (selector: string) => handleHover(manager, { session_id: "aa11", selector }, deps),
     observe: () =>
       handleObserve(manager, { session_id: "aa11" }, { ...deps, conditionalSurfaceProbe: false }),
     ref: async (expression: string, ref = "e1", frameId?: string) => {
@@ -593,4 +602,179 @@ describe.skipIf(!process.env.BSK_DRAG_CHROME)("real browser drag", () => {
         ),
       ).toBe(true);
     }, true));
+});
+
+describe.skipIf(!process.env.BSK_DRAG_CHROME)("click-move-click range selection", () => {
+  const setup = (h: Awaited<ReturnType<typeof harness>>) =>
+    h.evaluate(`document.body.innerHTML=${JSON.stringify(rangeMarkup)};${rangeScript}`);
+  const params = {
+    source: { selector: "#slot-14" },
+    target: { selector: "#slot-16" },
+    delta: undefined,
+    mode: "click-move-click" as const,
+  };
+  it.each([
+    [14, 16],
+    [16, 14],
+    [15, 15],
+  ])("selects %s to %s with trusted released moves", async (start, end) =>
+    withPage(async (h) => {
+      await setup(h);
+      ok(
+        await h.drag({
+          ...params,
+          source: { selector: `#slot-${start}` },
+          target: { selector: `#slot-${end}` },
+        }),
+      );
+      expect(await h.evaluate("rangeState")).toMatchObject({
+        start,
+        end,
+        completed: true,
+        preview: Array.from(
+          { length: Math.abs(end - start) + 1 },
+          (_, i) => Math.min(start, end) + i,
+        ),
+      });
+      const events =
+        await h.evaluate<{ type: string; index?: string; buttons: number; trusted: boolean }[]>(
+          "rangeEvents",
+        );
+      expect(events.filter((e) => e.type === "click").map((e) => e.index)).toEqual([
+        String(start),
+        String(end),
+      ]);
+      expect(
+        events.filter((e) => e.type === "mousemove").every((e) => e.buttons === 0 && e.trusted),
+      ).toBe(true);
+      expect(events.every((e) => e.trusted)).toBe(true);
+    }));
+  it("selects using fresh VOM refs for unnamed cells", async () =>
+    withPage(async (h) => {
+      await setup(h);
+      const observation = await h.observe();
+      if ("code" in observation) throw new Error(observation.message);
+      const ref = (index: number) => {
+        const value = observation.text
+          .split("\n")
+          .find((line) => line.includes(`"item ${index}"`))
+          ?.match(/@e\d+/)?.[0];
+        expect(value).toBeTruthy();
+        return value!;
+      };
+      ok(
+        await h.drag({
+          ...params,
+          source: { ref: ref(14) },
+          target: { ref: ref(16) },
+          observation_id: observation.observation_id,
+        }),
+      );
+      expect(await h.evaluate("rangeState")).toMatchObject({
+        completed: true,
+        preview: [14, 15, 16],
+      });
+    }));
+  it("retains held-drag behavior and distinguishes intermediate VOM progress", async () =>
+    withPage(async (h) => {
+      await setup(h);
+      ok(await h.drag({ ...params, mode: undefined }));
+      expect(await h.evaluate("rangeState.completed")).toBe(false);
+      ok(await h.click("#slot-14"));
+      let observation = await h.observe();
+      if ("code" in observation) throw new Error(observation.message);
+      expect(observation.text).toContain('"item 14" [selected:class]');
+      expect(await h.evaluate("rangeState.completed")).toBe(false);
+      ok(await h.hover("#slot-16"));
+      observation = await h.observe();
+      if ("code" in observation) throw new Error(observation.message);
+      for (const index of [14, 15, 16])
+        expect(observation.text).toContain(`"item ${index}" [selected:class]`);
+      ok(await h.click("#slot-16"));
+      expect(await h.evaluate("rangeState.completed")).toBe(true);
+    }));
+  it.each([
+    "aria-disabled",
+    "inert",
+  ])("rejects a destination initially %s before either click", async (attr) =>
+    withPage(async (h) => {
+      await setup(h);
+      await h.evaluate(`document.querySelector('#slot-16').setAttribute('${attr}','true')`);
+      expect(await h.drag(params)).toMatchObject({
+        code: "permission_denied",
+        data: { effect_state: "none" },
+      });
+      expect(h.calls.filter((c) => c.params?.type === "mousePressed")).toHaveLength(0);
+    }));
+  it.each([
+    "moved",
+    "covered",
+    "detached",
+    "disabled",
+    "inert",
+  ])("does not click a destination %s by the first click", async (kind) =>
+    withPage(async (h) => {
+      await setup(h);
+      h.setHook(async (method, p) => {
+        if (method === "Input.dispatchMouseEvent" && p?.type === "mouseReleased") {
+          h.setHook(() => {});
+          const action = {
+            moved: "el.style.transform='translateX(20px)'",
+            covered:
+              "const cover=document.createElement('div');cover.style='position:fixed;inset:0;z-index:100;background:white';document.body.append(cover)",
+            detached: "el.replaceWith(el.cloneNode(true))",
+            disabled: "el.setAttribute('aria-disabled','true')",
+            inert: "el.inert=true",
+          }[kind]!;
+          await h.evaluate(`{const el=document.querySelector('#slot-16');${action}}`);
+        }
+      });
+      expect(await h.drag(params)).toMatchObject({
+        code: expect.any(String),
+        data: { effect_state: "unknown" },
+      });
+      expect(h.calls.filter((c) => c.params?.type === "mousePressed")).toHaveLength(1);
+      expect(await h.evaluate("rangeState.completed")).toBe(false);
+    }));
+  it.each([
+    "released",
+    "moving",
+    "final-press",
+  ])("stops on interruption at %s without replay", async (stage) =>
+    withPage(async (h) => {
+      await setup(h);
+      const abort = new AbortController();
+      let presses = 0,
+        released = false;
+      h.setHook((method, p) => {
+        if (method !== "Input.dispatchMouseEvent") return;
+        if (p?.type === "mousePressed") presses++;
+        if (p?.type === "mouseReleased") released = true;
+        if (
+          (stage === "released" && released) ||
+          (stage === "moving" && released && p?.type === "mouseMoved") ||
+          (stage === "final-press" && presses === 2)
+        )
+          abort.abort();
+      });
+      expect(await h.drag(params, abort.signal)).toMatchObject({
+        code: "cancelled",
+        data: { effect_state: "unknown" },
+      });
+      const count = h.calls.filter((c) => c.method === "Input.dispatchMouseEvent").length;
+      await new Promise((r) => setTimeout(r, 150));
+      expect(h.calls.filter((c) => c.method === "Input.dispatchMouseEvent")).toHaveLength(count);
+      expect(await h.evaluate("rangeEvents.filter(e=>e.type==='mouseup').at(-1).buttons")).toBe(0);
+      if (stage !== "final-press") expect(await h.evaluate("rangeState.completed")).toBe(false);
+    }));
+  it("times out between clicks without sending a final click", async () =>
+    withPage(async (h) => {
+      await setup(h);
+      expect(await h.drag({ ...params, duration_ms: 500, timeout_ms: 180 })).toMatchObject({
+        code: "timeout",
+        data: { effect_state: "unknown" },
+      });
+      expect(await h.evaluate("rangeState.completed")).toBe(false);
+      expect(h.calls.filter((c) => c.params?.type === "mousePressed")).toHaveLength(1);
+    }));
 });

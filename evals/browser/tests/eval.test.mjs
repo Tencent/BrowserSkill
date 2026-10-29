@@ -45,22 +45,23 @@ test("case manifests are discovered, ordered, and grouped into suites", () => {
       "drag-interactions",
       "fill-editor-roots",
       "oopif-scrollbars",
+      "range-selection",
       "snapshot-coordinates",
     ],
   );
   assert.deepEqual(repositorySummary(cases, fixtureRegistry).suites, {
     core: 6,
     matrix: 1,
-    regression: 4,
+    regression: 5,
   });
 });
 
 test("repository validation links every case to a fixture and valid workflow evidence", () => {
   assert.deepEqual(validateRepositoryCases(cases, fixtureRegistry), []);
   const summary = repositorySummary(cases, fixtureRegistry);
-  assert.equal(summary.cases, 11);
-  assert.equal(summary.fixtureModules, 12);
-  assert.equal(summary.fixtureRoutes, 20);
+  assert.equal(summary.cases, 12);
+  assert.equal(summary.fixtureModules, 13);
+  assert.equal(summary.fixtureRoutes, 21);
 });
 
 test("manifest validation rejects unknown operations and incomplete workflow steps", () => {

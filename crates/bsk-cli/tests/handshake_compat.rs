@@ -154,9 +154,11 @@ async fn handshake_ok_when_app_versions_differ_but_protocol_matches() {
 async fn handshake_skew_when_protocol_minor_differs() {
     let (handle, _sock) = spawn_daemon().await;
     let mut ws = open_ws(handle.ws_addr()).await;
+    let (major, minor) = PROTOCOL_VERSION.split_once('.').unwrap();
+    let newer_protocol = format!("{major}.{}", minor.parse::<u32>().unwrap() + 1);
     let resp = send_handshake_with_floors(
         &mut ws,
-        "1.7",
+        &newer_protocol,
         env!("CARGO_PKG_VERSION"),
         Some("0.0.0"),
         Some("1.5"),

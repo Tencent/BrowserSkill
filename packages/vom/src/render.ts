@@ -52,6 +52,7 @@ const STRUCTURAL_ROLES = new Set([
   "figure",
   "form",
   "grid",
+  "gridcell",
   "group",
   "heading",
   "iframe",
@@ -206,6 +207,28 @@ function dragHint(node: VomNode): string | undefined {
   return undefined;
 }
 
+function selectionMarker(node: VomNode): string | undefined {
+  const attrs = node.attrs ?? {};
+  const aria = attrs["aria-selected"]?.toLowerCase();
+  if (aria === "true" || aria === "false") return aria === "true" ? "selected" : "unselected";
+  // Custom styling is only a hint on controls, never semantic proof on wrappers.
+  if (!isSemanticReferenceNode(node) && !hasRecoveryHandler(node)) return undefined;
+  if (attrs["data-selected"] === "true" || attrs["data-state"] === "selected")
+    return "selected:data";
+  if (attrs["data-selected"] === "false" || attrs["data-state"] === "unselected")
+    return "unselected:data";
+  if (attrs.class?.split(/\s+/).some((token) => token === "selected" || token === "is-selected"))
+    return "selected:class";
+  return undefined;
+}
+
+function indexedItemName(node: VomNode): string | undefined {
+  const index = node.attrs?.["data-index"];
+  return hasRecoveryHandler(node) && index !== undefined && /^\d{1,9}$/.test(index)
+    ? `item ${index}`
+    : undefined;
+}
+
 function shouldRender(node: VomNode): boolean {
   if (dragHint(node)) return true;
   if (!node.role) return false;
@@ -309,7 +332,8 @@ function recoveryCandidateName(
     cleaned(node.name) ??
     cleaned(node.text) ??
     cleaned(node.nearbyText) ??
-    (children ? iconHintFromSubtree(node, children) : undefined)
+    (children ? iconHintFromSubtree(node, children) : undefined) ??
+    indexedItemName(node)
   );
 }
 
@@ -776,6 +800,8 @@ function renderNodeLine(
   const role = normalizedRole(node);
   const fillable = ["textbox", "searchbox"].includes(role);
   if (node.disabled) line += " [disabled]";
+  const selection = selectionMarker(node);
+  if (selection) line += ` [${selection}]`;
   if (node.checked !== undefined) {
     line += ` [${node.checked === "mixed" ? "mixed" : node.checked ? "checked" : "unchecked"}]`;
   }

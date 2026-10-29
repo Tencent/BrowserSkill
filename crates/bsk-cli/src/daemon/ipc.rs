@@ -673,6 +673,22 @@ async fn handle_tool_dispatch(
             });
         }
     }
+    if method == Method::ToolDrag
+        && params.get("mode").and_then(Value::as_str) == Some("click-move-click")
+        && let Some(session) = state.sessions.get(&session_id)
+        && let Some(browser) = state.browsers.get(&session.browser_id)
+        && !bsk_protocol::tools::supports_click_move_click(&browser.extension_protocol_version)
+    {
+        return ResponseBody::Err(RpcError {
+            code: ErrorCode::Unsupported,
+            message: "click-move-click requires extension protocol 1.7; update the extension"
+                .into(),
+            data: Some(serde_json::json!({
+                "effect_state": "none", "required_protocol": bsk_protocol::tools::CLICK_MOVE_CLICK_PROTOCOL,
+                "actual_protocol": browser.extension_protocol_version,
+            })),
+        });
+    }
     let mut download_transfer_id: Option<String> = None;
     if method == Method::ToolUpload {
         let mut upload: UploadParams = match serde_json::from_value(params) {

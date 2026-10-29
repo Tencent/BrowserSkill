@@ -14,7 +14,7 @@ const manifest = JSON.parse(
 );
 test("drag manifests validate a unique destination or finite nonzero displacement", () => {
   for (const step of [
-    { action: "drag", ref: "@e1", to: "@e2" },
+    { action: "drag", ref: "@e1", to: "@e2", mode: "click-move-click" },
     { action: "drag", selector: "#handle", dx: -100, hold: "300ms", duration: "1s" },
   ]) {
     const copy = structuredClone(manifest);
@@ -22,6 +22,9 @@ test("drag manifests validate a unique destination or finite nonzero displacemen
     assert.deepEqual(validateCaseManifest(copy), []);
   }
   for (const step of [
+    { action: "drag", selector: "#start", to: "#end", mode: "auto" },
+    { action: "drag", selector: "#start", dx: 20, mode: "click-move-click" },
+    { action: "drag", selector: "#start", to: "#end", hold: "1s", mode: "click-move-click" },
     { action: "drag", to: "#end" },
     { action: "drag", selector: "#start" },
     { action: "drag", selector: "#start", to: "#end", dx: 10 },
@@ -54,7 +57,7 @@ test("drag smoke routes refs, destination, hold and signed displacement, then st
         responseAssertions: [],
         adapterAssertions: [],
         smokeSteps: [
-          { action: "drag", ref: "@e1", to: "@e2" },
+          { action: "drag", ref: "@e1", to: "@e2", mode: "click-move-click" },
           { action: "drag", selector: "#handle", dx: -100, dy: 20, hold: "300ms", duration: "1s" },
         ],
       },
@@ -69,6 +72,7 @@ test("drag smoke routes refs, destination, hold and signed displacement, then st
     assert.equal(report.executionError, undefined);
     const drags = calls.filter((args) => args[0] === "drag");
     assert.deepEqual(drags[0].slice(0, 4), ["drag", "@e1", "--to", "@e2"]);
+    assert.deepEqual(drags[0].slice(4, 6), ["--mode", "click-move-click"]);
     assert.deepEqual(drags[1].slice(0, 10), [
       "drag",
       "#handle",

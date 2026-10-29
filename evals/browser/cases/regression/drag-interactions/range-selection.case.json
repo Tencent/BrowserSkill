@@ -1,0 +1,51 @@
+{
+  "$schema": "../../../schemas/case.schema.json",
+  "schemaVersion": 1,
+  "id": "range-selection",
+  "title": "Click–move–click range with observable selection",
+  "suite": "regression",
+  "tags": ["drag", "range", "vom"],
+  "fixture": {
+    "startPath": "/range-selection"
+  },
+  "prompts": {
+    "en": "Open {url}. Select the range from item 14 to item 16 by clicking the start, moving without holding a button, then clicking the end. Verify Selected 14,15,16 and close the session.",
+    "zh-CN": "打开 {url}。点选起点 item 14，松开鼠标移动到 item 16，再点选终点。确认 Selected 14,15,16 并关闭会话。"
+  },
+  "coverage": [
+    "session.start",
+    "session.stop",
+    "page.navigate",
+    "inspect.observe",
+    "interact.drag"
+  ],
+  "assertions": {
+    "site": [],
+    "response": [
+      {
+        "label": "selected complete range",
+        "includes": "Selected 14,15,16"
+      }
+    ],
+    "adapter": []
+  },
+  "smoke": {
+    "steps": [
+      {
+        "action": "navigate"
+      },
+      {
+        "action": "observe"
+      },
+      {
+        "action": "drag",
+        "selector": "#slot-14",
+        "to": "#slot-16",
+        "mode": "click-move-click"
+      },
+      {
+        "action": "observe"
+      }
+    ]
+  }
+}

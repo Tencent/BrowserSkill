@@ -49,3 +49,39 @@ Scope: desktop mouse input, same-tab visible endpoints, element references or
 strict main-document selectors. No automatic scrolling during a held gesture,
 touch gestures or screenshot-bound Canvas endpoints. A cancelled gesture may
 already have changed application state; input cleanup is not rollback.
+
+## Click–move–click ranges
+
+`range-selection.fixture.mjs` reduces a calendar grid to three empty indexed cells.
+Click/release starts the selection; a move with no buttons previews it; a second
+click/release commits it. It contains synthetic DOM and state only, with no
+production site code, account data, or booking endpoints.
+
+The real-browser drag suite covers forward/reverse/single-cell selection, trusted
+released movement, VOM markers after separate steps, changed/disabled destinations,
+cancellation and timeouts. Held drag still delivers input without selecting this
+widget. Protocol 1.7 is required for the new mode so older peers cannot silently
+interpret it as a held drag.
+
+Run the real browser regression with an isolated Chrome profile:
+
+```sh
+BSK_DRAG_CHROME=/path/to/chrome pnpm --filter @browser-skill/extension exec vitest run src/tools/__tests__/drag.browser.test.ts
+```
+
+To measure actual CLI/daemon/extension round trips (including initial and final
+`cooperate sync`, excluding setup, navigation and model latency):
+
+```sh
+cargo build -p bsk --locked
+BSK_DAEMON_WS_URL=ws://127.0.0.1:52943 pnpm ext:build
+BSK_DRAG_CHROME=/path/to/chrome BSK_RANGE_REPORT=/tmp/range-benchmark.json \
+  node evals/browser/cases/regression/drag-interactions/range-selection.bench.mjs
+```
+
+The script owns and cleans up its daemon/profile/session and alternates five trials
+of each method. Separate uses the existing click/hover/click defaults; combined
+uses the default 500ms movement. It checks actual selected cells and final VOM
+output for every trial; command success alone is insufficient. It never accesses
+a user's logged-in browser. These small-fixture timings are not predictions for
+an entire production reservation workflow.

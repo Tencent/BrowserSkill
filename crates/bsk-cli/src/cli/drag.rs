@@ -1,4 +1,4 @@
-//! `bsk drag`: an entire press, optional hold, move and release in one request.
+//! `bsk drag`: a bounded held drag or click-move-click gesture in one request.
 use super::{
     dialogs::print_dialog_summaries,
     ensure_daemon::ensure_daemon,
@@ -9,15 +9,24 @@ use super::{
 use anyhow::Context;
 use bsk_protocol::{
     Method,
-    tools::{DragParams, DragPoint, DragResult, DragTarget},
+    tools::{DragMode, DragParams, DragPoint, DragResult, DragTarget, supports_click_move_click},
 };
-use clap::Args;
+use clap::{Args, ValueEnum};
 use std::time::Duration;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum CliDragMode {
+    PressMoveRelease,
+    ClickMoveClick,
+}
 
 #[derive(Debug, Clone, Args)]
 pub struct DragArgs {
     /// Source ref or CSS selector (selectors must match exactly one element).
     pub source: String,
+    /// Mouse gesture. Click-move-click releases before moving, then clicks the destination.
+    #[arg(long, value_enum, default_value_t = CliDragMode::PressMoveRelease)]
+    pub mode: CliDragMode,
     /// Destination ref or CSS selector; mutually exclusive with --dx/--dy.
     #[arg(long, conflicts_with_all = ["dx", "dy"], required_unless_present_any = ["dx", "dy"])]
     pub to: Option<String>,
@@ -71,6 +80,11 @@ fn target(value: String, x: f64, y: f64) -> Result<DragTarget, CliError> {
 }
 
 pub fn dispatch(args: DragArgs, format: Format) -> Result<(), CliError> {
+    if args.mode == CliDragMode::ClickMoveClick && (args.to.is_none() || args.hold != 0) {
+        return Err(CliError::Local(anyhow::anyhow!(
+            "click-move-click requires --to and --hold 0ms"
+        )));
+    }
     let source = target(args.source, args.from_offset_x, args.from_offset_y)?;
     let destination = args
         .to
@@ -107,6 +121,10 @@ pub fn dispatch(args: DragArgs, format: Format) -> Result<(), CliError> {
         session_id: args.session,
         tab_id: args.tab_id,
         source,
+        mode: match args.mode {
+            CliDragMode::PressMoveRelease => None,
+            CliDragMode::ClickMoveClick => Some(DragMode::ClickMoveClick),
+        },
         target: destination,
         delta,
         button: Some(args.button.into()),
@@ -117,6 +135,14 @@ pub fn dispatch(args: DragArgs, format: Format) -> Result<(), CliError> {
         observation_id: args.observation_id,
     };
     let info = ensure_daemon().context("ensure daemon is running")?;
+    if args.mode == CliDragMode::ClickMoveClick {
+        let status = super::status::query_sock_with_wait(info.sock_path.clone(), Duration::ZERO)?;
+        if !supports_click_move_click(&status.protocol_version) {
+            return Err(CliError::Local(anyhow::anyhow!(
+                "click-move-click requires daemon protocol 1.7; use the matching daemon"
+            )));
+        }
+    }
     let reply: DragResult = super::business_rpc::call(
         info.sock_path,
         "drag-1",
@@ -165,6 +191,7 @@ mod tests {
             };
             assert_eq!(args.source, "@e3");
             assert_eq!(args.duration, 500);
+            assert_eq!(args.mode, CliDragMode::PressMoveRelease);
         }
         assert!(
             Cli::try_parse_from([
@@ -183,8 +210,44 @@ mod tests {
         assert!(Cli::try_parse_from(["bsk", "drag", "e3", "--session", "test"]).is_err());
     }
     #[test]
+    fn parses_click_move_click_and_rejects_unknown_modes() {
+        let Command::Drag(args) = Cli::try_parse_from([
+            "bsk",
+            "drag",
+            "@e3",
+            "--to",
+            "@e8",
+            "--session",
+            "test",
+            "--mode",
+            "click-move-click",
+        ])
+        .unwrap()
+        .command
+        else {
+            panic!("drag")
+        };
+        assert_eq!(args.mode, CliDragMode::ClickMoveClick);
+        assert!(
+            Cli::try_parse_from([
+                "bsk",
+                "drag",
+                "@e3",
+                "--to",
+                "@e8",
+                "--session",
+                "test",
+                "--mode",
+                "auto"
+            ])
+            .is_err()
+        );
+    }
+    #[test]
     fn invalid_drag_is_rejected_before_starting_daemon() {
         for tail in [
+            vec!["--dx", "1", "--mode", "click-move-click"],
+            vec!["--to", "e8", "--mode", "click-move-click", "--hold", "1ms"],
             vec!["--dx", "0"],
             vec!["--dx", "NaN"],
             vec!["--to", ""],
