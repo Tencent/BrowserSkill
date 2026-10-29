@@ -3,7 +3,7 @@ import { type CdpDebuggee, type CdpDebuggerApi, ChromiumCdp } from "@/browser-dr
 import type { InputPassthroughMessage } from "@/lib/input-passthrough-bridge";
 import { SessionManager } from "@/session-manager/manager";
 import { handleDownload } from "../download";
-import { fileTransferTriggerDeps } from "../file-transfer-trigger";
+import { pointerTransactionDeps } from "../pointer-transaction";
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -107,7 +107,7 @@ it("does not detach the replacement attachment when an old cleanup release times
   vi.useFakeTimers();
   const f = await fixture();
   const abort = new AbortController();
-  const scope = fileTransferTriggerDeps(f.deps, abort.signal);
+  const scope = pointerTransactionDeps(f.deps, abort.signal);
   const release = deferred<object>();
   const releasing = deferred<void>();
   const send = vi.mocked(f.api.sendCommand).getMockImplementation()!;
@@ -210,7 +210,7 @@ it.each([
     attaching.resolve();
     return attach.promise;
   });
-  const scope = fileTransferTriggerDeps(f.deps, abort.signal);
+  const scope = pointerTransactionDeps(f.deps, abort.signal);
   const pending = scope.deps.cdp.sendToTarget!(
     { tabId: 7, sessionId },
     "Input.dispatchMouseEvent",

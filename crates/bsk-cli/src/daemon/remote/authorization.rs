@@ -147,7 +147,8 @@ impl AuthorizationStore {
             .truncate(false)
             .read(true)
             .write(true)
-            .open(self.path.with_extension("lock"))?;
+            .open(self.path.with_extension("lock"))
+            .context("open authorization write lock")?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -165,17 +166,24 @@ impl AuthorizationStore {
                     }
                     std::thread::sleep(Duration::from_millis(10));
                 }
-                Err(error) => return Err(error.into()),
+                Err(error) => return Err(error).context("acquire authorization write lock"),
             }
         }
         let mut state = self.read_state()?;
         let result = work(&mut state)?;
         state.version = 1;
-        let mut file = tempfile::NamedTempFile::new_in(parent)?;
+        let mut file = tempfile::NamedTempFile::new_in(parent)
+            .context("create temporary authorization snapshot")?;
         serde_json::to_writer(file.as_file_mut(), &state)?;
-        file.as_file_mut().flush()?;
-        file.as_file().sync_all()?;
-        file.persist(&self.path).map_err(|err| err.error)?;
+        file.as_file_mut()
+            .flush()
+            .context("flush authorization snapshot")?;
+        file.as_file()
+            .sync_all()
+            .context("sync authorization snapshot")?;
+        file.persist(&self.path)
+            .map_err(|err| err.error)
+            .context("replace authorization snapshot")?;
         if let Ok(directory) = fs::File::open(parent) {
             let _ = directory.sync_all();
         }
@@ -186,7 +194,7 @@ impl AuthorizationStore {
         let state: State = match fs::read(&self.path) {
             Ok(bytes) => serde_json::from_slice(&bytes).context("invalid authorization store")?,
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => State::default(),
-            Err(err) => return Err(err.into()),
+            Err(err) => return Err(err).context("read authorization snapshot"),
         };
         ensure!(
             state.version <= 1,

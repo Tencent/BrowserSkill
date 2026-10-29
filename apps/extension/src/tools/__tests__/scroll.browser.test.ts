@@ -472,7 +472,7 @@ describe.skipIf(!process.env.BSK_SCROLL_CHROME)("native target hit testing", () 
           expect(await pointBelongsToTarget(h.cdp, target, point.x, point.y, "hit-oracle")).toBe(
             false,
           );
-          await expect(verify(target, point)).rejects.toThrow(/no longer hits/);
+          await expect(verify(target, point)).rejects.toThrow(/covered/);
           expect(await h.evaluate("window.hits")).toBe(1);
         }
       },
@@ -530,7 +530,7 @@ describe.skipIf(!process.env.BSK_SCROLL_CHROME)("native target hit testing", () 
             expect(await pointBelongsToTarget(h.cdp, target, point.x, point.y, "hit-oracle")).toBe(
               false,
             );
-            await expect(verify(target, point)).rejects.toThrow(/covered|no longer hits/);
+            await expect(verify(target, point)).rejects.toThrow(/covered/);
             expect(await h.evaluate("window.hits")).toBe(background ? 2 : 1);
             await h.evaluate("cover.remove()");
           } finally {

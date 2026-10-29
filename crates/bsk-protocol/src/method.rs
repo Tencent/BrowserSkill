@@ -84,6 +84,8 @@ pub enum Method {
     ToolClick,
     #[serde(rename = "tool.hover")]
     ToolHover,
+    #[serde(rename = "tool.drag")]
+    ToolDrag,
     #[serde(rename = "tool.wheel")]
     ToolWheel,
     #[serde(rename = "tool.scroll_to")]
@@ -210,6 +212,7 @@ impl Method {
             | Method::ToolNavigateForward
             | Method::ToolReload
             | Method::ToolClick
+            | Method::ToolDrag
             | Method::ToolWheel
             | Method::ToolScrollTo
             | Method::ToolFocus
@@ -487,6 +490,7 @@ mod tests {
         assert_eq!(Method::ToolHover.effect(), MethodEffect::TransientInput);
         assert_eq!(Method::ToolObserve.effect(), MethodEffect::TransientInput);
         assert_eq!(Method::ToolClick.effect(), MethodEffect::BrowserMutation);
+        assert_eq!(Method::ToolDrag.effect(), MethodEffect::BrowserMutation);
         assert_eq!(Method::ToolWheel.effect(), MethodEffect::BrowserMutation);
         assert_eq!(Method::ToolScrollTo.effect(), MethodEffect::BrowserMutation);
         assert_eq!(Method::ToolFocus.effect(), MethodEffect::BrowserMutation);

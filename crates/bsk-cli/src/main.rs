@@ -93,6 +93,7 @@ fn dispatch(cli: Cli, format: Format) -> Result<(), CliError> {
         Command::Reload(args) => cli::navigate::dispatch_reload(args, format),
         Command::Click(args) => cli::interaction::dispatch_click(args, format),
         Command::Hover(args) => cli::interaction::dispatch_hover(args, format),
+        Command::Drag(args) => cli::drag::dispatch(args, format),
         Command::Wheel(args) => cli::wheel::dispatch(args, format),
         Command::ScrollTo(args) => cli::scroll::dispatch(args, format),
         Command::Focus(args) => cli::interaction::dispatch_focus(args, format),

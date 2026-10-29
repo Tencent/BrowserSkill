@@ -1,5 +1,5 @@
 import { afterEach, expect, it, vi } from "vitest";
-import { fileTransferTriggerDeps } from "../file-transfer-trigger";
+import { pointerTransactionDeps } from "../pointer-transaction";
 import type { CdpRunner } from "../shared";
 
 afterEach(() => vi.useRealTimers());
@@ -11,7 +11,7 @@ it("does not send cleanup input to a replacement attachment", async () => {
     send: vi.fn(async () => ({})) as CdpRunner["send"],
     getAttachmentId: () => attachment,
   };
-  const scope = fileTransferTriggerDeps(
+  const scope = pointerTransactionDeps(
     { cdp, tabsApi: { get: vi.fn(), query: vi.fn() } },
     abort.signal,
   );
@@ -35,7 +35,7 @@ it("bounds a lost button-release reply and detaches without replaying input", as
     send: vi.fn(async () => ({})) as CdpRunner["send"],
     detach: vi.fn(async () => {}),
   };
-  const scope = fileTransferTriggerDeps(
+  const scope = pointerTransactionDeps(
     { cdp, tabsApi: { get: vi.fn(), query: vi.fn() } },
     abort.signal,
   );
@@ -56,7 +56,7 @@ it("fences an already pending release rather than sending another one", async ()
     send: vi.fn(async () => ({})) as CdpRunner["send"],
     detach: vi.fn(async () => {}),
   };
-  const scope = fileTransferTriggerDeps(
+  const scope = pointerTransactionDeps(
     { cdp, tabsApi: { get: vi.fn(), query: vi.fn() } },
     abort.signal,
   );

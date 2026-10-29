@@ -7,7 +7,7 @@ import {
 import { resolveActionTarget } from "@/tools/interaction";
 import { captureVomObservation, handleSnapshot } from "@/tools/observation";
 import { type CdpRunner, chromeTabsApi, isRpcError, resolveTargetTab } from "@/tools/shared";
-import type { RequestFrame, RpcError } from "@/transport/types";
+import type { DragTarget, RequestFrame, RpcError } from "@/transport/types";
 import { guardedRunner } from "./action-guard";
 import { type ControlAuthority, ControlAuthorityError } from "./control-authority";
 import {
@@ -888,6 +888,8 @@ export class CooperationController implements ControlAuthority {
           ref?: string;
           selector?: string;
           depends_on?: string[];
+          source?: DragTarget;
+          target?: DragTarget;
         }
       | undefined;
     if (req.method === "tool.session_start") {
@@ -1029,6 +1031,7 @@ export class CooperationController implements ControlAuthority {
     let verifiedFrames = context?.frames;
     let evidenceTargets: { backendNodeId: number; frameId?: string }[] | undefined;
     let actionTarget: { backendNodeId: number; frameId?: string } | undefined;
+    let destinationTarget: typeof actionTarget;
     state.working = true;
     const intervention = new AbortController();
     state.interruption = intervention;
@@ -1137,6 +1140,13 @@ export class CooperationController implements ControlAuthority {
         return sameObservationEvidence(context.evidence!, evidence!);
       };
       const matches = (keys?: ReadonlySet<string>) => {
+        // A drag decision also depends on its destination. Explicit dependencies
+        // or learned live text must never relax the destination's own region.
+        if (
+          destinationTarget &&
+          !sameObservationEvidence(context.evidence!, evidence!, destinationTarget, keys)
+        )
+          return false;
         if (evidenceTargets) {
           return (
             keyboardRegionMatches() &&
@@ -1201,16 +1211,30 @@ export class CooperationController implements ControlAuthority {
         context.refs !== session.refStore.revision
       )
         return failure("This action requires the context returned by the latest cooperate sync");
-      if (params.ref || params.selector) {
+      const primaryTarget = req.method === "tool.drag" ? params.source : params;
+      if (primaryTarget?.ref || primaryTarget?.selector) {
         const resolved = await resolveActionTarget(
           guardedRunner(cdp),
           session,
           target,
-          params,
+          primaryTarget,
           "shared action",
+          req.method === "tool.drag",
         );
         if (isRpcError(resolved)) return resolved;
         actionTarget = resolved;
+      }
+      if (req.method === "tool.drag" && (params.target?.ref || params.target?.selector)) {
+        const resolved = await resolveActionTarget(
+          guardedRunner(cdp),
+          session,
+          target,
+          params.target,
+          "drag destination",
+          true,
+        );
+        if (isRpcError(resolved)) return resolved;
+        destinationTarget = resolved;
       }
       if (params.depends_on !== undefined) {
         if (
@@ -1265,9 +1289,9 @@ export class CooperationController implements ControlAuthority {
             sent = true;
             nativeInputStarted ||= startsInput;
           },
-          verifyPointerTarget: async (node, point) => {
+          verifyPointerTarget: async (node, point, offset) => {
             try {
-              await pointerTargetValidator(cdp)(node, point);
+              await pointerTargetValidator(cdp)(node, point, offset);
             } catch (error) {
               revoked = error instanceof Error ? error.message : String(error);
               throw error;

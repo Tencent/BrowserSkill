@@ -1,5 +1,5 @@
-// Shared time boundary for browser-side file-transfer transactions. Concrete
-// upload/download mechanisms own their state machines and effect semantics.
+// Shared time boundary for browser-side transactions. Concrete operations
+// own their state machines and effect semantics.
 
 export class BoundedWaitError extends Error {
   constructor(
@@ -21,15 +21,21 @@ export async function waitBounded<T>(
   timeoutMessage: string,
 ): Promise<T> {
   const remaining = remainingMs(deadline);
-  if (signal?.aborted) throw new BoundedWaitError("aborted", "file transfer aborted");
-  if (remaining === 0) throw new BoundedWaitError("timeout", timeoutMessage);
+  if (signal?.aborted || remaining === 0) {
+    // Work may already be in flight when its caller retires it. Consume a late
+    // rejection even though this boundary no longer waits for the result.
+    void promise.catch(() => {});
+    throw signal?.aborted
+      ? new BoundedWaitError("aborted", "operation aborted")
+      : new BoundedWaitError("timeout", timeoutMessage);
+  }
 
   let timer: ReturnType<typeof setTimeout> | undefined;
   let onAbort: (() => void) | undefined;
   const boundary = new Promise<never>((_resolve, reject) => {
     timer = setTimeout(() => reject(new BoundedWaitError("timeout", timeoutMessage)), remaining);
     if (signal) {
-      onAbort = () => reject(new BoundedWaitError("aborted", "file transfer aborted"));
+      onAbort = () => reject(new BoundedWaitError("aborted", "operation aborted"));
       signal.addEventListener("abort", onAbort, { once: true });
     }
   });

@@ -1,0 +1,164 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "DragParams",
+  "type": "object",
+  "required": [
+    "session_id",
+    "source"
+  ],
+  "properties": {
+    "button": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/MouseButton"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "delta": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/DragPoint"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "duration_ms": {
+      "description": "Travel duration, excluding hold. Defaults to 500 ms.",
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint32",
+      "maximum": 5000.0,
+      "minimum": 1.0
+    },
+    "hold_ms": {
+      "description": "Delay after pressing and before moving. Defaults to zero.",
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint32",
+      "maximum": 5000.0,
+      "minimum": 0.0
+    },
+    "modifiers": {
+      "type": [
+        "array",
+        "null"
+      ],
+      "items": {
+        "$ref": "#/definitions/KeyModifier"
+      }
+    },
+    "observation_id": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "session_id": {
+      "type": "string"
+    },
+    "source": {
+      "$ref": "#/definitions/DragTarget"
+    },
+    "tab_id": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "int64"
+    },
+    "target": {
+      "description": "Exactly one of target or delta is required.",
+      "anyOf": [
+        {
+          "$ref": "#/definitions/DragTarget"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "timeout_ms": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint32",
+      "minimum": 1.0
+    }
+  },
+  "definitions": {
+    "DragPoint": {
+      "type": "object",
+      "required": [
+        "x",
+        "y"
+      ],
+      "properties": {
+        "x": {
+          "type": "number",
+          "format": "double"
+        },
+        "y": {
+          "type": "number",
+          "format": "double"
+        }
+      }
+    },
+    "DragTarget": {
+      "type": "object",
+      "properties": {
+        "offset": {
+          "description": "Offset from the visible action point, in top-level viewport CSS pixels.",
+          "anyOf": [
+            {
+              "$ref": "#/definitions/DragPoint"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "ref": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "selector": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "KeyModifier": {
+      "description": "Keyboard modifier flags. Multiple flags may be combined; the extension folds them into CDP's bitfield (`alt=1, ctrl=2, meta=4, shift=8`).",
+      "type": "string",
+      "enum": [
+        "alt",
+        "ctrl",
+        "meta",
+        "shift"
+      ]
+    },
+    "MouseButton": {
+      "description": "Mouse button selector for `tool.click`.",
+      "type": "string",
+      "enum": [
+        "left",
+        "middle",
+        "right"
+      ]
+    }
+  }
+}

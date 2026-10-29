@@ -1,0 +1,70 @@
+{
+  "$schema": "../../../schemas/case.schema.json",
+  "schemaVersion": 1,
+  "id": "drag-interactions",
+  "title": "Native drag and pointer movement",
+  "suite": "regression",
+  "tags": ["drag", "pointer", "regression"],
+  "fixture": {
+    "startPath": "/drag-interactions"
+  },
+  "prompts": {
+    "en": "Open {url}. Drag Mouse box right by 120 pixels and drag Native card into Done. Click Check drag results and confirm DRAG-OK. Close the session.",
+    "zh-CN": "打开 {url}，把 Mouse box 向右拖动120像素，把 Native card 拖入 Done。点击 Check drag results 并确认 DRAG-OK，最后关闭会话。"
+  },
+  "coverage": [
+    "session.start",
+    "session.stop",
+    "page.navigate",
+    "inspect.observe",
+    "interact.drag",
+    "interact.click"
+  ],
+  "assertions": {
+    "site": [
+      {
+        "label": "both drag mechanisms changed the page",
+        "type": "drag.checked",
+        "where": {
+          "data.drops": 1,
+          "data.mouse": 120
+        },
+        "minCount": 1
+      }
+    ],
+    "response": [
+      {
+        "label": "verified drag outcome",
+        "includes": "DRAG-OK"
+      }
+    ],
+    "adapter": []
+  },
+  "smoke": {
+    "steps": [
+      {
+        "action": "navigate"
+      },
+      {
+        "action": "observe"
+      },
+      {
+        "action": "drag",
+        "selector": "#mouse",
+        "dx": 120
+      },
+      {
+        "action": "drag",
+        "selector": "#native",
+        "to": "#drop"
+      },
+      {
+        "action": "click",
+        "selector": "#check"
+      },
+      {
+        "action": "observe"
+      }
+    ]
+  }
+}

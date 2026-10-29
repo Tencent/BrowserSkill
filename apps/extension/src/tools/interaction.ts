@@ -149,6 +149,7 @@ export async function resolveBackendNode(
   target: { tabId: number },
   params: { ref?: string; selector?: string },
   toolName: string,
+  strictSelector = false,
 ): Promise<
   | {
       backendNodeId: number;
@@ -200,11 +201,25 @@ export async function resolveBackendNode(
         message: "DOM.getDocument returned no root nodeId",
       };
     }
-    const found = await cdp.send<{ nodeId?: number }>(target.tabId, "DOM.querySelector", {
-      nodeId: rootNodeId,
-      selector: params.selector,
-    });
-    if (typeof found.nodeId !== "number" || found.nodeId === 0) {
+    const query = { nodeId: rootNodeId, selector: params.selector };
+    let nodeId: number | undefined;
+    if (strictSelector) {
+      const found = await cdp.send<{ nodeIds: number[] }>(
+        target.tabId,
+        "DOM.querySelectorAll",
+        query,
+      );
+      if (found.nodeIds.length > 1)
+        return {
+          code: "invalid_params",
+          message: `${toolName}: selector matched ${found.nodeIds.length} elements; use a VOM ref or a narrower selector`,
+        };
+      nodeId = found.nodeIds[0];
+    } else {
+      nodeId = (await cdp.send<{ nodeId?: number }>(target.tabId, "DOM.querySelector", query))
+        .nodeId;
+    }
+    if (typeof nodeId !== "number" || nodeId === 0) {
       return rpcError(
         "not_found",
         "selector_not_found",
@@ -214,7 +229,7 @@ export async function resolveBackendNode(
     const described = await cdp.send<{ node?: { backendNodeId?: number } }>(
       target.tabId,
       "DOM.describeNode",
-      { nodeId: found.nodeId },
+      { nodeId },
     );
     const backendNodeId = described.node?.backendNodeId;
     if (typeof backendNodeId !== "number") {
@@ -439,8 +454,9 @@ export async function resolveActionTarget(
   target: ResolvedTargetTab,
   params: { ref?: string; selector?: string },
   toolName: string,
+  strictSelector = false,
 ): Promise<ResolvedActionTarget | RpcError> {
-  const node = await resolveBackendNode(cdp, ctx, target, params, toolName);
+  const node = await resolveBackendNode(cdp, ctx, target, params, toolName, strictSelector);
   return isRpcError(node) ? node : { tab: target, ...node };
 }
 

@@ -329,6 +329,7 @@
       "press": "Premi tasto",
       "select": "Seleziona opzione",
       "hover": "Passa sopra",
+      "drag": "Trascinare",
       "focus": "Attiva focus",
       "blur": "Rimuovi focus",
       "scroll": "Scorri",

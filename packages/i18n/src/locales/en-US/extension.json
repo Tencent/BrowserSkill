@@ -329,6 +329,7 @@
       "press": "Press key",
       "select": "Select option",
       "hover": "Hover",
+      "drag": "Drag",
       "focus": "Focus",
       "blur": "Blur",
       "scroll": "Scroll",

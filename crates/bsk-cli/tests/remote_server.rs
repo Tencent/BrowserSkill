@@ -217,9 +217,31 @@ async fn browser_capacity_does_not_block_renewal_or_replacement() {
         &store.authenticate(&renewed).unwrap().device_id,
     ]);
     closed(&mut replacement).await;
-    let (mut ws, _) = tokio_tungstenite::connect_async(server.request(&second, ORIGIN))
-        .await
-        .unwrap();
+    // The close frame precedes server cleanup and release of its capacity slot.
+    // Wait for that release, but do not hide authorization or transport errors.
+    let (mut ws, _) = tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            match tokio_tungstenite::connect_async(server.request(&second, ORIGIN)).await {
+                Ok(connection) => break connection,
+                Err(tokio_tungstenite::tungstenite::Error::Http(response))
+                    if response.status() == 503 =>
+                {
+                    assert_eq!(response.headers()["retry-after"], "5");
+                    assert_eq!(
+                        serde_json::from_slice::<Value>(
+                            response.body().as_deref().unwrap_or_default()
+                        )
+                        .unwrap(),
+                        json!({"error": "connection_capacity_reached"})
+                    );
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+                Err(error) => panic!("second browser connection failed: {error}"),
+            }
+        }
+    })
+    .await
+    .expect("revoked connection must release browser capacity");
     handshake(&mut ws, "second").await;
 }
 

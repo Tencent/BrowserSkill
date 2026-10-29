@@ -51,6 +51,8 @@ export interface VomNode {
   position: string;
   pointerEvents: string;
   cursor?: string;
+  /** Derived interaction hint; false suppresses an inherited cursor hint. */
+  dragHint?: "draggable" | "drag-handle" | "drop-target" | false;
   /** Browser-reported clickability, independent of role and inline attributes. */
   clickable?: boolean;
   attrs?: Record<string, string>;

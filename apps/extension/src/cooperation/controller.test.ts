@@ -595,18 +595,22 @@ describe("shared-tab dispatch fences", () => {
     const run = (
       f: Awaited<ReturnType<typeof fixture>>,
       context: string,
-      action: { ref?: string; dependsOn?: string[]; key?: string },
+      action: { ref?: string; dependsOn?: string[]; key?: string; to?: string },
     ) => {
       f.change({ structure: f.controller.view(7)!.revision + 100 });
       return f.controller.run(
         {
           id: "live",
-          method: action.key ? "tool.press" : "tool.click",
+          method: action.to ? "tool.drag" : action.key ? "tool.press" : "tool.click",
           params: {
             session_id: "shared",
             tab_id: 7,
             context_id: context,
-            ...(action.ref ? { ref: action.ref } : {}),
+            ...(action.to
+              ? { source: { ref: action.ref }, target: { ref: action.to } }
+              : action.ref
+                ? { ref: action.ref }
+                : {}),
             ...(action.key ? { key: action.key } : {}),
             ...(action.dependsOn ? { depends_on: action.dependsOn } : {}),
           },
@@ -620,7 +624,7 @@ describe("shared-tab dispatch fences", () => {
     /** One learning refusal, then `attempts` fresh-sync actions all succeed. */
     const learnsThenActs = async (
       build: (tick: number) => VomScene,
-      action: { ref?: string; dependsOn?: string[] },
+      action: { ref?: string; dependsOn?: string[]; to?: string },
       attempts = 2,
     ) => {
       live(build);
@@ -634,7 +638,7 @@ describe("shared-tab dispatch fences", () => {
     /** Every fresh-sync action keeps being refused without dispatching input. */
     const keepsRefusing = async (
       build: (tick: number) => VomScene,
-      action: { ref?: string; dependsOn?: string[]; key?: string },
+      action: { ref?: string; dependsOn?: string[]; key?: string; to?: string },
     ) => {
       live(build);
       refs();
@@ -648,6 +652,31 @@ describe("shared-tab dispatch fences", () => {
       expect(f.native).not.toHaveBeenCalled();
     };
     const clock = (tick: number) => `10:00:0${tick}`;
+
+    it("learns unrelated live text for a drag while protecting both endpoints", () =>
+      learnsThenActs(
+        page((tick) => [
+          [1, null, "main"],
+          [2, 1, "region", { name: "Source" }],
+          [3, 2, "button", { name: "Card" }],
+          [5, 1, "region", { name: "Destination" }],
+          [6, 5, "button", { name: "Drop here" }],
+          [4, 1, "span", { text: clock(tick) }],
+        ]),
+        { ref: "e3", to: "e6" },
+      ));
+    it("keeps a drag destination exact when dependencies mention only its source", () =>
+      keepsRefusing(
+        page((tick) => [
+          [1, null, "main"],
+          [2, 1, "region", { name: "Source" }],
+          [3, 2, "button", { name: "Card" }],
+          [5, 1, "region", { name: "Destination" }],
+          [6, 5, "button", { name: "Drop here" }],
+          [7, 5, "span", { text: clock(tick) }],
+        ]),
+        { ref: "e3", to: "e6", dependsOn: ["e3"] },
+      ));
 
     it("tolerates a clock beside a button directly inside <main>", () =>
       learnsThenActs(

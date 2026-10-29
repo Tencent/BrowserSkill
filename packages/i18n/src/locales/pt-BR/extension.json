@@ -329,6 +329,7 @@
       "press": "Pressionar tecla",
       "select": "Selecionar opção",
       "hover": "Passar o mouse",
+      "drag": "Arrastar",
       "focus": "Focar",
       "blur": "Remover foco",
       "scroll": "Rolar",
