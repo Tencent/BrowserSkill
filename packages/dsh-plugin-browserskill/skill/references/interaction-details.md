@@ -41,6 +41,33 @@ unsupported wait. If blocked, follow [help and recovery](help-and-recovery.md).
 - `wheel` uses signed `deltaX`/`deltaY`, at least one nonzero. Optional `target` is
   scrolled into view first; otherwise it uses the viewport centre. It reports input,
   not scrolling success: observe afterwards. Focus/blur change focus states.
+- `drag` uses `target` as the source and either `to` or nonzero `deltaX`/`deltaY`.
+  Default mode holds the mouse button while moving. `dragMode: "click-move-click"`
+  requires `to` and zero `holdMs`; it clicks, moves with the button released, then
+  clicks the destination. Pass the observed `contextId` and verify the resulting
+  state. Input delivery does not prove application success.
+
+## Steps and saved observations
+
+`bsk_interact` with `action: "step"` executes one already-decided action, optionally
+waits for `untilVisible`, then synchronizes. Pass `stepAction` and a `params` JSON
+string using protocol fields, for example `params: "{\"ref\":\"e3\"}"` for a click.
+Session, tab, context and dependencies use the outer tool fields. Use only observed
+refs/selectors; the example ref is a placeholder. `waitTimeoutMs` is 1..25000.
+
+Read `ok`, `action`, `readiness` and `post` separately. A later wait, sync or save
+failure does not undo input. Never blindly replay a partial or cancelled step.
+Read `post.context_id` with its observation before planning the next action; if
+absent, wait-user or sync as indicated, then replan.
+
+Use `saveFull` on `bsk_session action: "sync"` or `step` to save a complete reply to
+a new local JSON path. `baseline` may reuse an exact unchanged predecessor.
+Optional `matchText` only folds plain stateless numbered `button "item N"` lines;
+business text, named/stateful controls and complete forms/dialogs remain visible.
+It may not shorten ordinary pages. Use `bsk_inspect action: "view"` with `file` and
+`find` for case-sensitive literal search, or `startLine`/`lineCount` for a bounded
+window. `view` is offline and accepts no session/tab/context/dependencies. Its
+historical refs and context never refresh or authorize a live action.
 
 ## Observation continuation
 

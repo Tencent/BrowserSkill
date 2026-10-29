@@ -89,8 +89,8 @@ capabilities. Updating the npm package does not update either component.
 | --- | --- | --- |
 | `bsk_session` | `start`, `stop`, `list`, `share`, `sync`, `wait-user`, `cooperation-status` | Manage owned sessions and shared-tab control. |
 | `bsk_page` | `navigate`, `back`, `forward`, `reload`, `wait`, `wait-for-element` | Navigate the active tab; wait for page lifecycle events or one element condition. |
-| `bsk_inspect` | `observe`, `snapshot`, `html`, `screenshot`, `console`, `network`, `debug`, `video`, `extract` | Inspect page state, debug websites, capture screenshots or requested task videos, and export structured tables/lists. |
-| `bsk_interact` | `click`, `hover`, `wheel`, `scroll-to`, `focus`, `blur`, `fill`, `select`, `press`, `evaluate`, `upload`, `download` | Interact with controls using fresh refs or selectors. |
+| `bsk_inspect` | `observe`, `snapshot`, `view`, `html`, `screenshot`, `console`, `network`, `debug`, `video`, `extract` | Inspect page state, read saved observations, debug websites, capture screenshots or requested task videos, and export structured tables/lists. |
+| `bsk_interact` | `click`, `hover`, `drag`, `step`, `wheel`, `scroll-to`, `focus`, `blur`, `fill`, `select`, `press`, `evaluate`, `upload`, `download` | Interact with controls using fresh refs or selectors. |
 | `bsk_tabs` | `list`, `create`, `select`, `close`, `borrow`, `return` | Manage Agent Window tabs and temporarily borrow user tabs. |
 | `bsk_assist` | `resize`, `emulate`, `request-help` | Resize or emulate the browser and pause for human-only steps. |
 
@@ -104,6 +104,23 @@ for signed deltas, optional targets, result semantics and interruption.
 For `bsk_interact` with `action: "scroll-to"`, see the
 [scroll-to reference](../../docs/scroll-to.md) for parameters, visible bounds and errors.
 
+For `bsk_interact` with `action: "drag"`, pass the source as `target` and either a
+destination `to` or relative `deltaX`/`deltaY`. The default holds the mouse button
+while moving; `dragMode: "click-move-click"` selects ranges using two clicks and
+requires a destination. Use current observed refs/selectors and inspect the result.
+
+Use `action: "step"` for one decided interaction, with `stepAction` and a `params`
+JSON string using that action's CLI protocol fields. It executes once, optionally
+waits for `untilVisible`, then synchronizes. Read action, readiness and sync outcomes
+separately; a failed follow-up does not mean the action should be repeated.
+
+Save complete observations with `saveFull` on `bsk_session action: "sync"` or
+`bsk_interact action: "step"`. Use `bsk_inspect action: "view"` with `file` and
+optional `find`, `startLine` or `lineCount` to inspect the saved file locally, even
+after the browser session ends. The view is historical, makes no browser calls,
+and needs no `session` or `contextId`. It never refreshes refs or authorizes an
+action. See [steps and saved observations](skill/references/interaction-details.md#steps-and-saved-observations).
+
 For `bsk_inspect` with `action: "extract"`, see
 [structured extraction](../../docs/structured-extraction.md) for discovery, list
 fields, JSON/CSV output and loaded-DOM completeness.
@@ -114,7 +131,8 @@ is not exposed by this plugin.
 
 Human/agent collaboration is enabled automatically for new sessions and owned task tabs.
 No `share` call is required. See [cooperation](skill/references/cooperation.md).
-Actions on shared tabs require the `contextId` returned by `sync`; each context is used once.
+Actions on shared tabs require the `contextId` returned by `sync` or a step's
+`post.context_id`; each context is used once.
 
 ### Activation failures
 
@@ -137,9 +155,9 @@ after fixing it.
 One agent conversation can drive several browser sessions at once:
 
 - `bsk_session` with `action: start` returns the session id and makes it the **current session**.
-- Every operation tool accepts an optional `session` argument. When omitted, the call acts on the
+- Browser operations accept an optional `session` argument. When omitted, the call acts on the
   current session (the one most recently started or used); when given, that session becomes current.
-- Every tool result echoes the session it actually acted on, so the model never has to guess.
+- Browser operation results echo the session they acted on; offline `view` reads only its local file.
 - The number of concurrent sessions started through the plugin is capped (`maxSessions`, default 5).
 - Unloading the plugin stops every session it started and kills in-flight bsk processes.
 
