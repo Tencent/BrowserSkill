@@ -35,8 +35,8 @@ For remote setup/pairing, follow the [remote guide](https://github.com/Tencent/B
 
 2. For existing tabs, read [tab borrowing](references/tabs-and-profiles.md). Use actual IDs/refs.
    Pass `session` when several exist; never use foreign IDs.
-3. Pass the returned `context_id` as `contextId` to one action, then sync again
-   (or inspect a `step` result's `post`, which already synchronizes).
+3. Pass the returned `context_id` as `contextId` to one action. Then sync, or read
+   the step's `post` result.
    On intervention, wait-user, sync and replan. Check ambiguous results once. Stop when success is
    visible. Stop requested video first, then on success or failure call
    `bsk_session({ action: "stop", session: "<id>" })` unless keeping the session
