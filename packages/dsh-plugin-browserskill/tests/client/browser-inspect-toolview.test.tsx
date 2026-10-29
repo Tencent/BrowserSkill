@@ -121,6 +121,47 @@ describe("viewModelOf", () => {
       "bsk console --session s1 --tab-id 7 --since 4 --limit 20 --max-text-chars 500 --include-stack",
     );
   });
+
+  it("shows saved views as local file reads without browser authority", () => {
+    const model = viewModelOf(
+      runningBlock(
+        JSON.stringify({
+          action: "view",
+          file: "/tmp/saved observation.json",
+          find: "Today's price",
+          startLine: 20,
+          lineCount: 5,
+          session: "stale-session",
+          contextId: "stale-context",
+          tabId: 7,
+        }),
+      ),
+    );
+    expect(model.title).toBe("Saved observation");
+    expect(model.command).toBe(
+      "bsk view --find='Today'\\''s price' --start-line 20 --line-count 5 -- '/tmp/saved observation.json'",
+    );
+    expect(model.command).not.toMatch(/--session|--context|--tab-id/);
+    expect(model.state).toBe("running");
+  });
+
+  it.each(["-pending", "--help"])("preserves %s as literal saved-view search text", (find) => {
+    const model = viewModelOf(
+      runningBlock(JSON.stringify({ action: "view", file: "/tmp/saved.json", find })),
+    );
+    expect(model.command).toBe(`bsk view --find=${find} -- /tmp/saved.json`);
+  });
+
+  it("keeps a leading-dash saved filename positional in replayed cards", () => {
+    const output = "Historical observation; browser_calls: 0";
+    const model = viewModelOf(
+      settledBlock('{"action":"view","file":"--saved.json"}', [{ type: "text", text: output }]),
+    );
+    expect(model.command).toBe("bsk view -- --saved.json");
+    expect(model.title).toBe("Saved observation");
+    expect(model.output).toBe(output);
+    expect(model.image).toBeNull();
+  });
 });
 
 describe("BrowserInspectToolView", () => {
@@ -162,6 +203,19 @@ describe("BrowserInspectToolView", () => {
     const loadImage = vi.fn();
     renderView(runningBlock('{"action":"screenshot"}'), loadImage);
     expect(screen.getByText("bsk screenshot --session (current)")).toBeTruthy();
+    expect(loadImage).not.toHaveBeenCalled();
+  });
+
+  it("renders saved observation output without loading an attachment", async () => {
+    const loadImage = vi.fn();
+    const output = "Historical observation; browser_calls: 0\n@e3 button Save";
+    renderView(
+      settledBlock('{"action":"view","file":"/tmp/saved.json"}', [{ type: "text", text: output }]),
+      loadImage,
+    );
+    screen.getByRole("button", { name: /saved observation/i }).click();
+    await screen.findByText("bsk view -- /tmp/saved.json");
+    expect(screen.getByText(/@e3 button Save/)).toBeTruthy();
     expect(loadImage).not.toHaveBeenCalled();
   });
 });

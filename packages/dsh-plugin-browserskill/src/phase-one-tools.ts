@@ -1,5 +1,6 @@
 import { registerDebugTool } from "./debug-tool";
 import { registerExtractTool } from "./extract-tool";
+import { registerGestureObservationTools } from "./gesture-observation-tools";
 import type { PhaseOneRuntime, ToolRegistrar } from "./phase-one-runtime";
 import { registerPhaseOneInteractionTools } from "./phase-one-tools-interaction";
 import { registerPhaseOneNavigationTools } from "./phase-one-tools-navigation";
@@ -23,4 +24,5 @@ export function registerPhaseOneTools(
   registerVideoTool(deps, register, runtime);
   registerExtractTool(deps, register, runtime);
   registerScriptFileTools(deps, register, runtime);
+  registerGestureObservationTools(deps, register, runtime);
 }

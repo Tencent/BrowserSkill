@@ -69,6 +69,17 @@ function fakeSpawn(children: FakeChild[]) {
   };
 }
 
+const successfulStep = {
+  ok: true,
+  phase: "observed",
+  action: { result: { tab_id: 42, used_ref: "e1", x: 10, y: 20 } },
+  readiness: { requested: false },
+  post: { tab_id: 42, context_id: "fresh", observation: { text: "@vom 1\nDone" } },
+  action_replayed: false,
+  rpc_calls: 2,
+  timing_ms: { action: 10, readiness: 0, sync: 20, total: 30 },
+};
+
 afterEach(() => {
   vi.useRealTimers();
 });
@@ -177,6 +188,60 @@ describe("createBskRunner", () => {
       ),
     ]);
     expect(result).toMatchObject({ code: null, aborted: true });
+  });
+
+  it("drains a gracefully cancelled step receipt after exit", async () => {
+    vi.useFakeTimers();
+    const child = new FakeChild();
+    child.kill = (signal: string) => {
+      child.killedWith.push(signal);
+      return true;
+    };
+    const runner = createBskRunner("bsk", fakeSpawn([child]));
+    const controller = new AbortController();
+    const promise = runner.run(["step"], { signal: controller.signal });
+    controller.abort();
+    const payload = { ...successfulStep, ok: false, phase: "cancelled", cancelled: true };
+    const stdout = JSON.stringify(payload);
+    const middle = Math.floor(stdout.length / 2);
+    child.stdout.emit("data", stdout.slice(0, middle));
+    child.exitCode = 2;
+    child.emit("exit", 2, null);
+    await vi.advanceTimersByTimeAsync(50);
+    child.stdout.emit("data", stdout.slice(middle));
+    child.emit("close", 2);
+    const result = await promise;
+    expect(result).toMatchObject({ code: 2, aborted: true, stdout });
+    expect(parseBskJson(result, "step", { allowStepResult: true })).toEqual(payload);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it.each([
+    0, 2,
+  ])("keeps draining an exited step when abort arrives late (exit %s)", async (code) => {
+    vi.useFakeTimers();
+    const child = new FakeChild();
+    const runner = createBskRunner("bsk", fakeSpawn([child]));
+    const controller = new AbortController();
+    const promise = runner.run(["step"], { signal: controller.signal });
+    const payload =
+      code === 0
+        ? successfulStep
+        : { ...successfulStep, ok: false, phase: "cancelled", cancelled: true };
+    const stdout = JSON.stringify(payload);
+    const middle = Math.floor(stdout.length / 2);
+    child.stdout.emit("data", stdout.slice(0, middle));
+    child.exitCode = code;
+    child.emit("exit", code, null);
+    controller.abort();
+    await vi.advanceTimersByTimeAsync(50);
+    child.stdout.emit("data", stdout.slice(middle));
+    child.emit("close", code);
+    const result = await promise;
+    expect(result).toMatchObject({ code, aborted: false, stdout });
+    expect(child.killedWith).toEqual([]);
+    expect(parseBskJson(result, "step", { allowStepResult: true })).toEqual(payload);
+    expect(vi.getTimerCount()).toBe(0);
   });
 
   it("settles after the kill grace when neither exit nor close ever fires", async () => {
@@ -430,6 +495,89 @@ describe("createBskRunner against real processes", () => {
   }, 20_000);
 });
 
+describe.each([
+  { platform: "darwin", killGraceMs: KILL_GRACE_MS },
+  { platform: "win32", killGraceMs: WINDOWS_KILL_GRACE_MS },
+])("cancellation timer hand-off on $platform", ({ platform, killGraceMs }) => {
+  const originalPlatform = Object.getOwnPropertyDescriptor(process, "platform")!;
+  beforeEach(() => {
+    Object.defineProperty(process, "platform", { value: platform });
+    vi.useFakeTimers();
+  });
+  afterEach(() => Object.defineProperty(process, "platform", originalPlatform));
+
+  function cancellingStep() {
+    const child = Object.assign(new FakeChild(), { stdin: new PassThrough() });
+    child.kill = (signal: string) => {
+      child.killedWith.push(signal);
+      return true;
+    };
+    const runner = createBskRunner("bsk", fakeSpawn([child]));
+    const controller = new AbortController();
+    let result: BskRunResult | undefined;
+    const promise = runner.run(["step"], { signal: controller.signal, timeoutMs: 120_000 });
+    void promise.then((value) => {
+      result = value;
+    });
+    controller.abort();
+    return { child, promise, result: () => result };
+  }
+
+  it("allows the full output drain after a slow graceful cancellation", async () => {
+    const { child, promise } = cancellingStep();
+    const payload = { ...successfulStep, ok: false, phase: "cancelled", cancelled: true };
+    const stdout = JSON.stringify(payload);
+    const first = Math.floor(stdout.length / 2);
+    const second = Math.floor((stdout.length * 3) / 4);
+    // Exit just before forced kill, then deliver the tail beyond the old
+    // cancellation fallback but inside the new 2s post-exit drain cap.
+    await vi.advanceTimersByTimeAsync(killGraceMs - 100);
+    child.stdout.emit("data", stdout.slice(0, first));
+    child.exitCode = 2;
+    child.emit("exit", 2, null);
+    await vi.advanceTimersByTimeAsync(700);
+    child.stdout.emit("data", stdout.slice(first, second));
+    await vi.advanceTimersByTimeAsync(600);
+    child.stdout.emit("data", stdout.slice(second));
+    child.emit("close", 2);
+    const result = await promise;
+    expect(result).toMatchObject({ code: 2, aborted: true, stdout });
+    expect(parseBskJson(result, "step", { allowStepResult: true })).toEqual(payload);
+    expect(child.killedWith).not.toContain("SIGKILL");
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("still caps post-exit draining when inherited pipes keep producing output", async () => {
+    const { child, result } = cancellingStep();
+    await vi.advanceTimersByTimeAsync(killGraceMs - 100);
+    child.exitCode = 2;
+    child.emit("exit", 2, null);
+    for (let elapsed = 0; elapsed < 2_000; elapsed += 200) {
+      expect(result()).toBeUndefined();
+      child.stdout.emit("data", "x");
+      await vi.advanceTimersByTimeAsync(200);
+    }
+    expect(result()).toMatchObject({ code: 2, aborted: true, stdout: "x".repeat(10) });
+    child.stdout.emit("data", "later");
+    expect(result()?.stdout).toBe("x".repeat(10));
+    expect([child.stdout.destroyed, child.stderr.destroyed]).toEqual([true, true]);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("retains forced settlement when the cancelled child never exits", async () => {
+    const { child, promise, result } = cancellingStep();
+    await vi.advanceTimersByTimeAsync(killGraceMs);
+    expect(child.killedWith).toContain("SIGKILL");
+    expect(result()).toBeUndefined();
+    await vi.advanceTimersByTimeAsync(SETTLE_AFTER_KILL_SLACK_MS - 1);
+    expect(result()).toBeUndefined();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(await promise).toMatchObject({ code: null, aborted: true, timedOut: false });
+    expect([child.stdout.destroyed, child.stderr.destroyed]).toEqual([true, true]);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+});
+
 describe("Windows parent cancellation", () => {
   const originalPlatform = Object.getOwnPropertyDescriptor(process, "platform")!;
   beforeEach(() => Object.defineProperty(process, "platform", { value: "win32" }));
@@ -622,6 +770,163 @@ describe("parseBskJson", () => {
     expect(() =>
       parseBskJson({ ...base, code: 4, stdout: JSON.stringify(payload) }, "navigate"),
     ).toThrow(/failed/);
+  });
+
+  describe("step receipts", () => {
+    const failure = {
+      message: "sync refused",
+      code: "permission_denied",
+      data: { reason: "cooperation_sync_required", effect_state: "none" },
+      exit_code: 3,
+    };
+    const parse = (payload: unknown, code: number, overrides: Partial<BskRunResult> = {}) =>
+      parseBskJson({ ...base, code, stdout: JSON.stringify(payload), ...overrides }, "step", {
+        allowStepResult: true,
+      });
+
+    it.each([
+      ["success", successfulStep, 0],
+      [
+        "post-sync failure",
+        {
+          ...successfulStep,
+          ok: false,
+          phase: "needs_attention",
+          post: undefined,
+          post_error: failure,
+        },
+        3,
+      ],
+      [
+        "readiness timeout",
+        {
+          ...successfulStep,
+          ok: false,
+          phase: "needs_attention",
+          readiness: { tab_id: 42, satisfied: false, attached: false, visible: false },
+          rpc_calls: 3,
+        },
+        1,
+      ],
+      [
+        "navigation timeout",
+        {
+          ...successfulStep,
+          ok: false,
+          phase: "needs_attention",
+          action: { result: { tab_id: 42, reached: "timeout", final_url: "https://example.com" } },
+        },
+        4,
+      ],
+      [
+        "human hold",
+        {
+          ...successfulStep,
+          ok: false,
+          phase: "needs_attention",
+          post: { tab_id: 42, ready: false, settle: { outcome: "not_ready" } },
+          rpc_calls: 3,
+        },
+        1,
+      ],
+      [
+        "output conflict after successful action and sync",
+        { ...successfulStep, ok: false, storage_error: "publish without overwriting" },
+        2,
+      ],
+      [
+        "action failure with uncertain effects",
+        {
+          ok: false,
+          phase: "action",
+          action: { error: { ...failure, data: { effect_state: "unknown" } } },
+          action_replayed: false,
+          rpc_calls: 1,
+          elapsed_ms: 10,
+        },
+        3,
+      ],
+      [
+        "readiness cancellation",
+        {
+          ok: false,
+          phase: "readiness",
+          action: successfulStep.action,
+          readiness: { error: { ...failure, code: "cancelled", exit_code: 2 } },
+          action_replayed: false,
+          rpc_calls: 2,
+          elapsed_ms: 10,
+        },
+        2,
+      ],
+    ])("preserves the complete %s receipt", (_name, payload, code) => {
+      expect(parse(payload, code as number)).toEqual(JSON.parse(JSON.stringify(payload)));
+    });
+
+    it("preserves explicit cancellation evidence when the runner was aborted", () => {
+      const payload = { ...successfulStep, ok: false, phase: "cancelled", cancelled: true };
+      expect(parse(payload, 2, { aborted: true })).toEqual(payload);
+    });
+
+    it.each([
+      "",
+      '{"ok":false',
+      JSON.stringify(successfulStep),
+      '{"code":"cancelled"}',
+    ])("keeps AbortError without a complete acknowledged cancellation receipt: %s", (stdout) => {
+      expect(() => parse(null, 2, { aborted: true, stdout })).toThrow(
+        expect.objectContaining({ name: "AbortError" }),
+      );
+    });
+
+    it("does not bypass execution timeouts or signal termination with a receipt", () => {
+      const payload = { ...successfulStep, ok: false, phase: "cancelled", cancelled: true };
+      expect(() => parse(payload, 2, { timedOut: true })).toThrow(/timed out/);
+      expect(() => parse(payload, 2, { code: null })).toThrow(/interrupted/);
+      expect(() => parse(payload, 2, { code: null, aborted: true })).toThrow(
+        expect.objectContaining({ name: "AbortError" }),
+      );
+    });
+
+    it.each([
+      [{ ...successfulStep, ok: false }, 3],
+      [{ ...successfulStep, action_replayed: true }, 0],
+      [{ ...successfulStep, action: {} }, 0],
+      [{ ...successfulStep, action: { result: [] } }, 0],
+      [{ ...successfulStep, readiness: {} }, 0],
+      [{ ...successfulStep, post: {} }, 0],
+      [{ ...successfulStep, post_error: failure }, 0],
+      [{ ...successfulStep, timing_ms: undefined }, 0],
+      [{ ...successfulStep, rpc_calls: 1 }, 0],
+      [{ ...successfulStep, phase: "action" }, 0],
+      [{ ...successfulStep, cancelled: true }, 2],
+      [{ ...successfulStep, ok: false, phase: "cancelled", cancelled: true }, 3],
+      [
+        { ok: false, action: {}, phase: "needs_attention", action_replayed: false, rpc_calls: 2 },
+        2,
+      ],
+      [{ code: "permission_denied", message: "refused before running" }, 3],
+    ])("rejects malformed receipts or inconsistent exit status (%j, %s)", (payload, code) => {
+      expect(() => parse(payload, code as number)).toThrow();
+    });
+
+    it("requires opt-in and never retries a step with a nested session_busy error", async () => {
+      const payload = {
+        ...successfulStep,
+        ok: false,
+        phase: "needs_attention",
+        post: undefined,
+        post_error: { ...failure, code: "timeout", data: { reason: "session_busy" }, exit_code: 4 },
+      };
+      const reply = { ...base, code: 4, stdout: JSON.stringify(payload) };
+      const run = vi.fn(async () => reply);
+      const result = await runWithSessionBusyRetry(run);
+      expect(run).toHaveBeenCalledOnce();
+      expect(() => parseBskJson(result, "step")).toThrow(/failed/);
+      expect(parseBskJson(result, "step", { allowStepResult: true })).toEqual(
+        JSON.parse(JSON.stringify(payload)),
+      );
+    });
   });
 });
 

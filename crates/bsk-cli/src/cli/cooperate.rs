@@ -38,11 +38,14 @@ pub struct CooperateArgs {
     pub timeout_ms: Option<u64>,
     #[arg(long)]
     pub max_tokens: Option<u32>,
-    /// Show literal text matches with surrounding VOM lines (repeatable, sync only).
-    /// Filters CLI output only; refs and the full observation guard are unchanged.
+    /// Fold only plain numbered fallback buttons outside literal-match windows (repeatable, sync only).
+    ///
+    /// Only stateless `button "item N"` lines may be omitted. Keeps business text,
+    /// named/stateful controls and complete forms/dialogs. Use `bsk view <saved.json>
+    /// --find <text>` for text search. Changes CLI presentation only; refs and guards are unchanged.
     #[arg(long, value_parser = nonempty_text)]
     pub match_text: Vec<String>,
-    /// Lines before/after each match. Omitted VOM lines are explicitly marked.
+    /// Keep numbered fallback buttons within this many lines before/after each match.
     #[arg(long, requires = "match_text", value_parser = clap::value_parser!(u32).range(0..=200))]
     pub context_lines: Option<u32>,
     /// Save the unfiltered reply to a new local JSON file before presenting it (sync only).

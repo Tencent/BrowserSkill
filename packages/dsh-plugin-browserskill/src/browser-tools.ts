@@ -9,6 +9,12 @@ import { defineTool, type ParameterSchemaSpec, type ToolDefinition } from "@deep
 import { DEBUG_PARAMETERS } from "./debug-tool";
 import { disposeAll } from "./disposables";
 import { EXTRACT_PARAMETERS } from "./extract-tool";
+import {
+  DRAG_PARAMETERS,
+  SAVED_OBSERVATION_PARAMETERS,
+  STEP_PARAMETERS,
+  VIEW_PARAMETERS,
+} from "./gesture-observation-tools";
 import toolNames from "./tool-names.json";
 import {
   BROWSER_PARAM,
@@ -98,7 +104,7 @@ function defineBrowserTool(
       contextId: {
         type: "string",
         description:
-          "Shared-tab actions require the context_id you actually received from bsk_session sync. One context authorizes one action; never substitute a newer context into an old plan.",
+          "Shared-tab actions require the context_id you actually received from bsk_session sync or a step's post result. One context authorizes one action; never substitute a newer context into an old plan.",
       },
     },
     output: {
@@ -120,6 +126,18 @@ function defineBrowserTool(
         observationDependencies: args.dependsOn,
       } as typeof exec)) as never;
     },
+    finalizeContent(exec, result) {
+      // The host also finalizes calls rejected before argument validation.
+      const args = exec.arguments;
+      if (typeof args !== "object" || args === null || Array.isArray(args)) return undefined;
+      const action = (args as Record<string, unknown>).action;
+      if (typeof action !== "string") return undefined;
+      const operation = spec.actions[action];
+      if (typeof operation !== "string") return undefined;
+      return definitions
+        .get(operation)
+        ?.finalizeContent?.({ ...exec, arguments: operationArgs(args) }, result);
+    },
     presentCall(args) {
       const definition = definitionFor(definitions, spec.actions, args.action);
       return definition.presentCall?.(operationArgs(args));
@@ -137,6 +155,7 @@ const BROWSER_TOOL_SPECS: BrowserToolSpec[] = [
     description:
       "Manage plugin-owned browser sessions. Human collaboration is automatic; share is an optional compatibility alias for sync/rebinding. " +
       "sync returns current state and context_id; wait-user waits for hand-back; cooperation-status reads ownership. " +
+      "sync can saveFull to a new JSON file for offline bsk_inspect view; matchText only folds plain numbered fallback buttons, not general text. " +
       "For shared tabs, pass the observed contextId to one action, sync again, and replan toward the assigned goal. " +
       "Actions: start opens an Agent Window; stop closes an " +
       "owned session; list returns owned sessions. For start, url/device/width/height/noFocus/incognito are " +
@@ -161,6 +180,13 @@ const BROWSER_TOOL_SPECS: BrowserToolSpec[] = [
       ...SESSION_STOP_PARAMS,
       tabId: TAB_ID_PARAM,
       timeoutMs: TIMEOUT_MS_PARAM,
+      ...SAVED_OBSERVATION_PARAMETERS,
+      settle: {
+        type: "boolean",
+        description:
+          "Sync: bounded read-only recovery from transient refusals; never repeats an action.",
+      },
+      maxTokens: { type: "integer", description: "Sync observation token cap." },
       url: { type: "string", description: "Initial URL for start." },
       width: { type: "integer", description: "Agent Window width; start requires height too." },
       height: { type: "integer", description: "Agent Window height; start requires width too." },
@@ -209,7 +235,7 @@ const BROWSER_TOOL_SPECS: BrowserToolSpec[] = [
     name: toolNames.inspect,
     description:
       "Inspect page state and explicitly control task-scoped debugging. Actions: observe, snapshot, html, " +
-      "screenshot, console, network, video, extract. video with videoAction starts/stops a requested recording, checks status, lists, saves or discards MP4 artifacts. Start video before task operations and stop before session teardown. " +
+      "screenshot, console, network, video, extract, view. view reads a saved sync/step file offline, with find for literal text search; historical refs/context never authorize a live action. video with videoAction starts/stops a requested recording, checks status, lists, saves or discards MP4 artifacts. Start video before task operations and stop before session teardown. " +
       "extract reads loaded table/list rows with columns and sources, without scrolling or paging: discover first, then pass extractTarget; " +
       "check coverage and warnings before calling the data complete. Prefer observe, then snapshot, then bounded html; use screenshot " +
       "for visual evidence. console/network support cursor fields since/limit/maxTextChars. " +
@@ -225,6 +251,7 @@ const BROWSER_TOOL_SPECS: BrowserToolSpec[] = [
       debug: "inspect.debug",
       video: "inspect.video",
       extract: "inspect.extract",
+      view: "inspect.view",
     },
     parameters: {
       session: SESSION_PARAM,
@@ -232,6 +259,7 @@ const BROWSER_TOOL_SPECS: BrowserToolSpec[] = [
       ...debugParameters,
       ...videoParameters,
       ...extractParameters,
+      ...VIEW_PARAMETERS,
       output: INSPECT_OUTPUT,
       maxDepth: { type: "integer", description: "Tree depth cap for observe/snapshot." },
       maxTokens: { type: "integer", description: "Token cap for observe/snapshot." },
@@ -253,13 +281,16 @@ const BROWSER_TOOL_SPECS: BrowserToolSpec[] = [
   {
     name: toolNames.interact,
     description:
-      "Interact with the active Agent Window tab. Actions: click, hover, wheel, scroll-to, focus, blur, fill, select, " +
+      "Interact with the active Agent Window tab. Actions: click, hover, wheel, drag, step, scroll-to, focus, blur, fill, select, " +
+      "drag requires target plus to or a nonzero deltaX/deltaY. step runs one stepAction using params JSON, then optional untilVisible readiness and read-only sync; inspect ok/action/readiness/post before deciding what to do next and never blindly replay an action. " +
       "press, evaluate, upload, download. evaluate requires expression; upload requires target/files; download requires target/output. click/hover/scroll-to/focus/blur/fill/select require target; fill also requires value; select requires " +
       "values; press requires key and may optionally focus target first. wheel requires a nonzero deltaX or deltaY and optionally accepts target; observe afterwards to check the response.",
     actions: {
       click: "interact.click",
       hover: "interact.hover",
       wheel: "interact.wheel",
+      drag: "interact.drag",
+      step: "interact.step",
       "scroll-to": "interact.scroll-to",
       focus: "interact.focus",
       blur: "interact.blur",
@@ -273,8 +304,14 @@ const BROWSER_TOOL_SPECS: BrowserToolSpec[] = [
     parameters: {
       session: SESSION_PARAM,
       tabId: TAB_ID_PARAM,
+      ...DRAG_PARAMETERS,
+      ...STEP_PARAMETERS,
       target: TARGET_PARAM,
-      button: { type: "string", enum: ["left", "middle", "right"], description: "Click button." },
+      button: {
+        type: "string",
+        enum: ["left", "middle", "right"],
+        description: "Click or drag mouse button.",
+      },
       clickCount: { type: "integer", description: "Click count; Canvas accepts 1 or 2." },
       captureId: { type: "string", description: "Single-use Canvas screenshot capture for click." },
       imageX: {
@@ -290,14 +327,17 @@ const BROWSER_TOOL_SPECS: BrowserToolSpec[] = [
       modifiers: {
         type: "array",
         items: { type: "string", enum: ["alt", "ctrl", "meta", "shift"] },
-        description: "Modifiers held during hover or wheel input.",
+        description: "Modifiers held during hover, wheel, or drag input.",
       },
       settleMs: { type: "integer", description: "Hover settle delay." },
       deltaX: {
         type: "number",
-        description: "Horizontal wheel input in CSS pixels; defaults to 0.",
+        description: "Horizontal wheel input or drag displacement in CSS pixels; defaults to 0.",
       },
-      deltaY: { type: "number", description: "Vertical wheel input in CSS pixels; defaults to 0." },
+      deltaY: {
+        type: "number",
+        description: "Vertical wheel input or drag displacement in CSS pixels; defaults to 0.",
+      },
       timeoutMs: TIMEOUT_MS_PARAM,
       values: {
         type: "array",
@@ -316,7 +356,10 @@ const BROWSER_TOOL_SPECS: BrowserToolSpec[] = [
       output: { type: "string", description: "Download destination file." },
       overwrite: { type: "boolean", description: "Allow replacing the download destination." },
       key: { type: "string", description: "Key or combo for press." },
-      holdMs: { type: "integer", description: "Key hold duration for press." },
+      holdMs: {
+        type: "integer",
+        description: "Key hold for press or initial mouse hold for drag, in milliseconds.",
+      },
     },
   },
   {
