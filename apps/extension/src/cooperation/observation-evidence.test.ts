@@ -33,6 +33,52 @@ it("allows unrelated updates and cosmetic hover changes while retaining form evi
   expect(sameObservationEvidence({ nodes: before }, { nodes: after }, target)).toBe(true);
 });
 
+describe("selection evidence", () => {
+  it.each([
+    { role: "button" },
+    { role: "generic", clickable: true },
+    { role: "generic", attrs: { onclick: "selectCell()" } },
+  ])("protects semantic and custom controls: %j", (control) => {
+    const before = scene();
+    before[3] = { ...before[3], ...control };
+    const after = structuredClone(before);
+    after[3].attrs = { ...after[3].attrs, class: "selected" };
+    expect(sameObservationEvidence({ nodes: before }, { nodes: after }, target)).toBe(false);
+  });
+
+  it("ignores selection-like attributes on decorative wrappers", () => {
+    const before = scene();
+    const after = structuredClone(before);
+    after[1].attrs = { class: "selected", "data-selected": "true", "data-state": "selected" };
+    expect(sameObservationEvidence({ nodes: before }, { nodes: after }, target)).toBe(true);
+    expect(sameObservationEvidence({ nodes: before }, { nodes: after })).toBe(true);
+  });
+
+  it("keeps unrelated selection changes outside an explicit dependency region", () => {
+    const before = scene();
+    before.push({ ...node(6, 5, "button", "Other choice"), attrs: { "data-selected": "false" } });
+    const after = structuredClone(before);
+    after[5].attrs = { "data-selected": "true" };
+    expect(sameObservationEvidence({ nodes: before }, { nodes: after }, target)).toBe(true);
+    expect(sameObservationEvidence({ nodes: before }, { nodes: after })).toBe(false);
+    expect(sameObservationEvidence({ nodes: before }, { nodes: after }, { backendNodeId: 6 })).toBe(
+      false,
+    );
+  });
+
+  it("never learns selection changes as volatile text", () => {
+    const before = scene();
+    before[3].text = "16:00";
+    const after = structuredClone(before);
+    after[3].text = "16:01";
+    after[3].attrs = { "data-state": "selected" };
+    expect(contentChanges({ nodes: before }, { nodes: after })).toBeUndefined();
+    expect(
+      sameObservationEvidence({ nodes: before }, { nodes: after }, undefined, new Set(["frame:4"])),
+    ).toBe(false);
+  });
+});
+
 it.each([
   "value",
   "identity",

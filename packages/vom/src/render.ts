@@ -207,7 +207,8 @@ function dragHint(node: VomNode): string | undefined {
   return undefined;
 }
 
-function selectionMarker(node: VomNode): string | undefined {
+/** Selection evidence shared by rendered hints and observation freshness checks. */
+export function selectionMarker(node: VomNode): string | undefined {
   const attrs = node.attrs ?? {};
   const aria = attrs["aria-selected"]?.toLowerCase();
   if (aria === "true" || aria === "false") return aria === "true" ? "selected" : "unselected";

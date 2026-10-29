@@ -1,8 +1,9 @@
-import type { VomNode, VomScene } from "@browser-skill/vom";
+import { selectionMarker, type VomNode, type VomScene } from "@browser-skill/vom";
 import { playbackProgressMedia } from "./media-progress";
 
-/** Reuse the observation's semantic nodes. CSS classes and pixel positions are
- * deliberately absent; the interaction layer rechecks the live hit target. */
+/** Reuse the observation's semantic nodes. Only normalized selection hints from
+ * CSS/data attributes participate; cosmetic classes and pixel positions do not.
+ * The interaction layer rechecks the live hit target. */
 export interface ObservationEvidence {
   nodes: readonly VomNode[];
 }
@@ -294,6 +295,7 @@ function signature(
       ignoredProgress.has(node) ? undefined : node.value,
       node.inForm,
       node.checked,
+      selectionMarker(node),
       node.disabled,
       node.inert,
       node.modal,
