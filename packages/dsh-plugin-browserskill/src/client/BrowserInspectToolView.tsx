@@ -105,7 +105,7 @@ function commandOf(argsRaw: string, callId: string): { command: string; title: s
     if (action === "view") {
       // A saved view reads a local file; do not imply a live browser/session call.
       const parts = ["bsk", command];
-      if (typeof args.find === "string") parts.push("--find", displayArgument(args.find));
+      if (typeof args.find === "string") parts.push(`--find=${displayArgument(args.find)}`);
       appendNumber(parts, "--start-line", args.startLine);
       appendNumber(parts, "--line-count", args.lineCount);
       parts.push("--", typeof args.file === "string" ? displayArgument(args.file) : "(file)");

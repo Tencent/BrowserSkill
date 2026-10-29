@@ -401,7 +401,7 @@ describe("gesture and saved observation actions", () => {
     timing_ms: { action: 1, readiness: 5000, sync: 1, total: 5002 },
   };
 
-  it("retains completed action evidence after readiness failure without repeating input", async () => {
+  it("reports readiness failure without repeating the completed action", async () => {
     const { tools, calls } = setup({
       "session start": START_REPLY("s1"),
       step: {
@@ -425,8 +425,9 @@ describe("gesture and saved observation actions", () => {
       dependsOn: ["@e1"],
     };
     const tool = tools.get("interact.step")!;
-    const result = await tool.execute(args, makeExec());
-    expect(result).toEqual(partialStep);
+    await expect(tool.execute(args, makeExec())).rejects.toMatchObject({
+      code: "BSK_STEP_NEEDS_ATTENTION",
+    });
     const callsForStep = calls.filter((c) => c.args[0] === "step");
     expect(callsForStep).toHaveLength(1);
     expect(callsForStep[0].args).toEqual(
@@ -446,8 +447,6 @@ describe("gesture and saved observation actions", () => {
       ]),
     );
     expect(callsForStep[0].options.timeoutMs).toBeGreaterThan(120000);
-    const content = tool.output.render(args, result as typeof partialStep);
-    expect(tool.presentResult?.(args, { content, isError: false })).toMatchObject({ exitCode: 1 });
   });
 
   it.each([
@@ -489,7 +488,7 @@ describe("gesture and saved observation actions", () => {
     expect(calls.filter((c) => c.args[0] === "step")).toHaveLength(1);
   });
 
-  it("preserves an acknowledged cancellation receipt with the already-completed action", async () => {
+  it("reports an acknowledged cancellation as a host error", async () => {
     const receipt = { ...partialStep, phase: "cancelled", cancelled: true };
     const { tools } = setup({
       "session start": START_REPLY("s1"),
@@ -504,11 +503,11 @@ describe("gesture and saved observation actions", () => {
       },
     });
     await startSession(tools);
-    expect(
-      await tools
+    await expect(
+      tools
         .get("interact.step")!
         .execute({ stepAction: "click", params: '{"ref":"e1"}' }, makeExec()),
-    ).toEqual(receipt);
+    ).rejects.toMatchObject({ code: "ABORTED" });
   });
 
   it("forwards saving and conservative folding on sync", async () => {
@@ -542,7 +541,57 @@ describe("gesture and saved observation actions", () => {
         "2000",
       ]),
     );
-    expect(command.filter((arg) => arg === "--match-text")).toHaveLength(2);
+    expect(command.filter((arg) => arg.startsWith("--match-text="))).toEqual([
+      "--match-text=item 20",
+      "--match-text=Buy",
+    ]);
+  });
+
+  it.each([
+    { operation: "session.cooperate.sync", command: "cooperate", args: {} },
+    {
+      operation: "interact.step",
+      command: "step",
+      args: { stepAction: "click", params: '{"ref":"e1"}' },
+    },
+  ])("preserves option-like matchText literals through $operation", async ({
+    operation,
+    command,
+    args,
+  }) => {
+    const literals = ["- warning", "--help", "--session=foreign", "item -3"];
+    const { tools, calls } = setup({
+      "session start": START_REPLY("s1"),
+      "cooperate sync": { context_id: "ctx" },
+      step: {
+        ...partialStep,
+        ok: true,
+        phase: "observed",
+        readiness: { requested: false },
+        rpc_calls: 2,
+      },
+    });
+    await startSession(tools);
+    await tools.get(operation)!.execute({ ...args, matchText: literals }, makeExec());
+    const argv = calls.find((call) => call.args[0] === command)!.args;
+    expect(argv.filter((arg) => arg.startsWith("--match-text="))).toEqual(
+      literals.map((literal) => `--match-text=${literal}`),
+    );
+    for (const literal of literals) expect(argv).not.toContain(literal);
+    expect(argv.filter((arg) => arg === "--session")).toHaveLength(1);
+    expect(argv[argv.indexOf("--session") + 1]).toBe("s1");
+  });
+
+  it.each([
+    "- warning",
+    "--help",
+    "--session=foreign",
+  ])("preserves option-like find literal %s in an offline view", async (find) => {
+    const { tools, calls } = setup({ view: { historical: true } });
+    await tools.get("inspect.view")!.execute({ file: "/tmp/saved.json", find }, makeExec());
+    expect(calls).toHaveLength(1);
+    expect(calls[0].args).toEqual(["view", "/tmp/saved.json", `--find=${find}`]);
+    expect(calls[0].options.tag).toBeUndefined();
   });
 
   it("reads historical files without any owned session or browser context", async () => {
@@ -557,8 +606,7 @@ describe("gesture and saved observation actions", () => {
       expect.arrayContaining([
         "view",
         "/tmp/saved.json",
-        "--find",
-        "Buy",
+        "--find=Buy",
         "--start-line",
         "2",
         "--line-count",

@@ -62,7 +62,7 @@ selectors search the main document. Sync before acting on visual or HTML finding
 Select options by value, not visible label.
 
 Inspect unknown effects before retrying. On an error or two attempts without progress,
-read [human help and recovery](references/help-and-recovery.md).
+read [human help and recovery](references/help-and-recovery.md) for `bsk_assist`.
 For scripts and files, see [cooperation](references/cooperation.md).
 Interaction recording is not exposed.
 

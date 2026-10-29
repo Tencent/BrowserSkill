@@ -139,10 +139,17 @@ describe("viewModelOf", () => {
     );
     expect(model.title).toBe("Saved observation");
     expect(model.command).toBe(
-      "bsk view --find 'Today'\\''s price' --start-line 20 --line-count 5 -- '/tmp/saved observation.json'",
+      "bsk view --find='Today'\\''s price' --start-line 20 --line-count 5 -- '/tmp/saved observation.json'",
     );
     expect(model.command).not.toMatch(/--session|--context|--tab-id/);
     expect(model.state).toBe("running");
+  });
+
+  it.each(["-pending", "--help"])("preserves %s as literal saved-view search text", (find) => {
+    const model = viewModelOf(
+      runningBlock(JSON.stringify({ action: "view", file: "/tmp/saved.json", find })),
+    );
+    expect(model.command).toBe(`bsk view --find=${find} -- /tmp/saved.json`);
   });
 
   it("keeps a leading-dash saved filename positional in replayed cards", () => {

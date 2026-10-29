@@ -126,6 +126,18 @@ function defineBrowserTool(
         observationDependencies: args.dependsOn,
       } as typeof exec)) as never;
     },
+    finalizeContent(exec, result) {
+      // The host also finalizes calls rejected before argument validation.
+      const args = exec.arguments;
+      if (typeof args !== "object" || args === null || Array.isArray(args)) return undefined;
+      const action = (args as Record<string, unknown>).action;
+      if (typeof action !== "string") return undefined;
+      const operation = spec.actions[action];
+      if (typeof operation !== "string") return undefined;
+      return definitions
+        .get(operation)
+        ?.finalizeContent?.({ ...exec, arguments: operationArgs(args) }, result);
+    },
     presentCall(args) {
       const definition = definitionFor(definitions, spec.actions, args.action);
       return definition.presentCall?.(operationArgs(args));

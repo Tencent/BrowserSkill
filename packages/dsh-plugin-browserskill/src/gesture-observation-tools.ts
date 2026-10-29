@@ -7,6 +7,7 @@ import {
   runnerTimeout,
   type ToolRegistrar,
 } from "./phase-one-runtime";
+import { createStepReceiptHandler } from "./step-receipt";
 import { SESSION_PARAM, TAB_ID_PARAM, TIMEOUT_MS_PARAM } from "./tool-params";
 import type { ToolDeps } from "./tools";
 
@@ -139,7 +140,7 @@ export function appendSavedObservationOptions(command: string[], args: SavedObse
   for (const text of args.matchText ?? []) {
     requireNonEmpty(text, "matchText");
     if (/[\r\n]/.test(text)) throw new Error("matchText must contain single-line literals");
-    command.push("--match-text", text);
+    command.push(`--match-text=${text}`);
   }
   if (args.contextLines !== undefined) command.push("--context-lines", String(args.contextLines));
 }
@@ -162,6 +163,7 @@ export function registerGestureObservationTools(
   register: ToolRegistrar,
   runtime: PhaseOneRuntime,
 ): void {
+  const stepReceipt = createStepReceiptHandler();
   const output = {
     schema: { type: "json" as const },
     render: (_args: unknown, value: unknown) => [
@@ -304,10 +306,19 @@ export function registerGestureObservationTools(
           35_000 +
           (args.untilVisible !== undefined ? (args.waitTimeoutMs ?? 5000) + 5000 : 0) +
           5 * 35_000;
-        return (await runtime.run(exec, command, "step", session, runnerTimeout(deps, budget), {
-          allowStepResult: true,
-        })) as never;
+        const receipt = await runtime.run(
+          exec,
+          command,
+          "step",
+          session,
+          runnerTimeout(deps, budget),
+          {
+            allowStepResult: true,
+          },
+        );
+        return stepReceipt.complete(exec, receipt) as never;
       },
+      finalizeContent: stepReceipt.finalizeContent,
       presentCall: (args) => ({
         card: "terminal",
         title: runtime.commandLine([
@@ -358,7 +369,7 @@ export function registerGestureObservationTools(
         integerInRange(args.startLine, "startLine", 1, 4_294_967_295);
         integerInRange(args.lineCount, "lineCount", 1, 2000);
         const command = ["view", resolve(args.file)];
-        if (args.find !== undefined) command.push("--find", args.find);
+        if (args.find !== undefined) command.push(`--find=${args.find}`);
         if (args.startLine !== undefined) command.push("--start-line", String(args.startLine));
         if (args.lineCount !== undefined) command.push("--line-count", String(args.lineCount));
         return (await runtime.run(exec, command, "view")) as never;
