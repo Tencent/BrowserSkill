@@ -68,12 +68,13 @@ These and other agents that can run shell commands use the same **`bsk` CLI**. *
 | Your goal | What BrowserSkill provides |
 | --- | --- |
 | **Work where you are already signed in** | Read documents, search internal sites, and complete web workflows with the browser's existing login state. |
-| **Turn instructions into browser actions** | Read page text and controls, click, type, fill forms, and manage tabs. Capture viewport or full-page screenshots; upload and download files in local mode. |
-| **Stay in control of the task** | Follow the agent in its own window, explicitly borrow an existing tab, or take over for login, verification, and other steps that need you. |
+| **Turn instructions into browser actions** | Read page text and controls, click, type, fill forms, drag items, select ranges, and manage tabs. Capture viewport or full-page screenshots; upload and download files in local mode. |
+| **Stay in control of the task** | Work alongside the agent with shared control, pause it while you edit, and let it reconcile your changes before continuing. Tasks remain visible in their own window; existing tabs can be explicitly borrowed. |
 | **Take web data with you** | Export loaded tables and lists as JSON/CSV, with column names, page/frame sources, merged-cell metadata, and explicit coverage. [Structured extraction](docs/structured-extraction.md) |
 | **Find the evidence behind a failure** | Connect actions to requests, response bodies, console messages, and page changes. Inspect performance, slow APIs, and suspected duplicate requests; test a hypothesis with explicit HTTP rules or request replay. [Website debugging](docs/website-debugging.md) |
 | **Keep a replay of the work** | Record one authorized task tab as a silent MP4, then preview, save, or delete it from the extension. [Task video recording](docs/video-recording.md) |
 | **Continue when the page is ready** | Wait for a requested element condition with an explicit timeout before the next step. [Element waits](docs/wait-for-element.md) |
+| **Reuse what you already observed** | Execute one chosen action and synchronize with `step`; explicitly save the full observation, then search or read it with `view` without another browser capture. [Steps and saved observations](crates/bsk-cli/skill/references/step-and-cache.md) |
 | **Use the right browser for the job** | Name browser instances, bind a task to a specific profile, or pair a server-side agent with the browser on your computer. [Browser profiles](docs/browser-profiles.md) |
 | **Review what happened** | Reopen browser-local debugging history, export evidence as JSON, or enable a separate operation audit to review task activity. [Operation audit](docs/operation-audit.md) |
 
@@ -197,7 +198,7 @@ In WorkBuddy/CodeBuddy, or hosts that reap command children, the agent should re
 
 The [DSH plugin](packages/dsh-plugin-browserskill/README.md) adds native `bsk_*` tools, browser task previews, and screenshot results to the DeepSeek Harness Web UI. It uses the same `bsk` CLI and extension and includes its own BrowserSkill skill.
 
-**Upgrading to 0.3.3:** update the CLI and extension before the plugin. The six `browser_*` tools have been renamed to `bsk_*`, without aliases for the old names. Update custom tool calls and policies, restart the DSH profile, and invoke `/browser-skill` again in existing conversations. See the [migration guide](packages/dsh-plugin-browserskill/README.md#breaking-tool-api-migration-033).
+**Upgrading to 0.4.0:** update the CLI and running daemon first, then the extension and plugin. Restart the DSH profile and invoke `/browser-skill` again so existing conversations load the shared-control instructions and new drag, step and saved-observation tools. See the [0.4.0 upgrade guide](packages/dsh-plugin-browserskill/README.md#upgrading-to-040); installations older than 0.3.3 also need the [tool-name migration](packages/dsh-plugin-browserskill/README.md#breaking-tool-api-migration-033).
 
 With DeepSeek Harness, pnpm, and `bsk` installed and the extension connected, add the plugin to your profile:
 
@@ -269,6 +270,8 @@ The built-in server supports device pairing, renewal, and revocation. The `bsk u
 
 By default, an Agent Window shares the selected profile's login state; **it is not a separate account or security sandbox**. Agents can act with the permissions of the signed-in websites, so choose the tasks and agent you trust.
 
+New tasks enable shared control automatically. BrowserSkill observes page changes and supported manual activity in controlled tabs so the agent can yield while you edit and synchronize before acting again. This coordination works even when debugging, audit and video recording are off. Use the task's manual hold and resume controls to keep control while you work. [Shared-control guide](crates/bsk-cli/skill/references/cooperation.md)
+
 The extension has two independent **Automation settings**, both enabled by default:
 
 | Setting | What it controls |
@@ -285,12 +288,17 @@ BrowserSkill does not operate a mandatory cloud service or collect product telem
 | **Website debugging** | The current browser profile, including in remote mode | Retains captured evidence, including available bodies and field values. Stopped records expire after 30 days, with a 50-record / 50 MiB retention budget and earlier eviction when necessary. Stop capture before deleting a record. |
 | **Operation audit** | The daemon's host, under `BSK_HOME/audit` | Off by default. Records task and operation metadata, excluding input values, page bodies, screenshots, and file contents. Ended tasks expire after 30 days. |
 | **Task video** | The current browser profile; exported copies at the chosen destination | Opt-in, silent capture of one authorized tab, limited to 10 minutes / 256 MiB per video. Recordings expire 24 hours after creation; the temporary video budget is 1 GiB. The library supports preview, export and deletion. |
+| **Saved observations and step results** | An explicitly chosen JSON path on the CLI machine, including a remote server | `--save-full` / DSH `saveFull` saves the complete reply before display filtering. Files have no automatic expiry; delete them on that machine. `view` reads historical evidence without refreshing the browser state. |
 
 These features offer export and deletion. Stopping a task or disconnecting does not delete retained history or videos; expiration is applied during access or cleanup. Exported copies and copies already received by an agent or gateway must be managed separately. Known secrets are filtered from debugging evidence, but redaction cannot guarantee that all sensitive data is removed. Video frames are not automatically redacted; review visible content before sharing.
 
 [Privacy policy](apps/extension/PRIVACY.md) · [Operation audit](docs/operation-audit.md) · [Debugging retention and limits](docs/website-debugging.md#history-and-export)
 
 ## Updating
+
+**For 0.4.0, update the CLI and restart its running daemon before updating the extension; update DSH last.** The new extension requires daemon protocol 1.6 or later, while CLI/daemon 0.3.3 uses 1.3. Updating only the binary leaves a foreground or externally managed daemon on its old version until its host restarts it. Use matching 0.4.0 components for the new features.
+
+Existing scripts must follow the [shared-control workflow](crates/bsk-cli/skill/references/cooperation.md): after initial navigation, synchronize with `bsk cooperate sync`, pass its `--context` to one action, then synchronize again. Reload the updated skill instead of continuing with old instructions.
 
 Finish active browser tasks, then update the CLI:
 
