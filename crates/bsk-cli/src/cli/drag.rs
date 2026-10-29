@@ -12,6 +12,7 @@ use bsk_protocol::{
     tools::{DragMode, DragParams, DragPoint, DragResult, DragTarget, supports_click_move_click},
 };
 use clap::{Args, ValueEnum};
+use std::path::PathBuf;
 use std::time::Duration;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -79,6 +80,16 @@ fn target(value: String, x: f64, y: f64) -> Result<DragTarget, CliError> {
     })
 }
 
+pub(super) fn require_click_move_click_daemon(sock: PathBuf) -> Result<(), CliError> {
+    let status = super::status::query_sock_with_wait(sock, Duration::ZERO)?;
+    if !supports_click_move_click(&status.protocol_version) {
+        return Err(CliError::Local(anyhow::anyhow!(
+            "click-move-click requires daemon protocol 1.7; use the matching daemon"
+        )));
+    }
+    Ok(())
+}
+
 pub fn dispatch(args: DragArgs, format: Format) -> Result<(), CliError> {
     if args.mode == CliDragMode::ClickMoveClick && (args.to.is_none() || args.hold != 0) {
         return Err(CliError::Local(anyhow::anyhow!(
@@ -136,12 +147,7 @@ pub fn dispatch(args: DragArgs, format: Format) -> Result<(), CliError> {
     };
     let info = ensure_daemon().context("ensure daemon is running")?;
     if args.mode == CliDragMode::ClickMoveClick {
-        let status = super::status::query_sock_with_wait(info.sock_path.clone(), Duration::ZERO)?;
-        if !supports_click_move_click(&status.protocol_version) {
-            return Err(CliError::Local(anyhow::anyhow!(
-                "click-move-click requires daemon protocol 1.7; use the matching daemon"
-            )));
-        }
+        require_click_move_click_daemon(info.sock_path.clone())?;
     }
     let reply: DragResult = super::business_rpc::call(
         info.sock_path,

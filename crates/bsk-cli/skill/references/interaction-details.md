@@ -118,16 +118,17 @@ In an existing session, after observing and identifying the trigger and readines
 selector, this Bash example triggers, waits, checks the result, then observes:
 
 ```bash
-# Replace the session and selectors with values from the task's page.
+# Replace session, context and selectors with values from the latest sync.
 session=abcd
-bsk click '#run-search' --session "$session" || exit 1
+context=current-context-id
+bsk click '#run-search' --session "$session" --context "$context" || exit 1
 result=$(bsk wait-for-element '#search-results' --state visible \
   --timeout 20s --session "$session" --json) || exit 1
 if ! jq -e '.satisfied == true' <<<"$result" >/dev/null; then
   printf 'Results not ready: %s\n' "$result" >&2
   exit 1
 fi
-bsk observe --session "$session"
+bsk cooperate sync --session "$session"
 ```
 
 Use `--state hidden` for an already visible loading mask, whether it will be hidden
@@ -137,7 +138,77 @@ on success and error as required by the task workflow. This API reduces caller
 round trips and standardizes state checks; it promises neither lower latency nor
 an escape from browser background throttling.
 
-### Large observations
+### Efficient observation workflow
+
+For one decided action and its resulting state, use [step and cached views](step-and-cache.md).
+
+The expensive part of a multi-step task can be caller round trips and repeated
+page interpretation, even when individual CLI calls are fast. After deciding
+one action from current evidence, run that action and its following sync in one
+tool invocation. Check action failure before proceeding; do not pre-plan several
+mutations or reuse one context across them. A known readiness selector can be
+waited on between that action and sync; check `satisfied`, without fixed sleeps
+or repeatedly returning a loading page to the model.
+
+For a known target on a large page, filter the **CLI presentation**, using literal
+text from a previous observation and enough surrounding lines for the decision:
+
+```sh
+bsk cooperate sync --session <id> --match-text 'known row label' \
+  --context-lines 40 --save-full /absolute/new-observation.json
+```
+
+`--match-text` is repeatable, literal and case-sensitive. This is a conservative
+presentation fold, not a semantic search or a row selector. Only plain numbered
+fallback controls (`button "item N"`) outside the matching windows may be omitted.
+All business text, named controls, state/value/context hints, ancestors and the
+view/layer outline stay visible. Complete forms, dialogs, alerts and statuses
+are retained, including their numbered controls. This avoids guessing which
+language-specific wording expresses a restriction, fee or warning.
+
+Every query must match; otherwise the full returned view is shown with
+`fallback_reason: no_match`. Duplicate matches remain visible and are counted in
+`matches_per_query`; do not pick the first by assumption. Unknown formats and
+views that would grow also fall back to the original text. This may produce less
+compression on some pages, including flight results with meaningful named controls.
+
+When any lines are omitted, `observation.truncated` is true for legacy readers.
+`observation.capture_truncated` reports the original capture truncation, while
+`presentation.filtered` identifies local omissions. `presentation.complete` is
+true only when neither occurred. A backend `next_cursor` belongs to capture
+pagination, not presentation filtering. Inspect the saved full reply or sync
+without `--match-text` for omitted controls; never infer absence, availability,
+a time range or a business value from an omitted numbered item. The original
+refs, observation/context IDs, activity and whole-page guard are unchanged.
+The guard detects page changes, not errors caused by overlooking existing rules.
+Use a full view for final business decisions and verification.
+
+`--save-full` stages the complete returned reply before filtering, then publishes
+it atomically to a new local JSON file (Unix permissions 0600). Failed calls leave
+no destination file; existing files, including concurrent writers, are never
+overwritten. `--max-tokens` still limits the original capture, so a saved reply
+can be capture-truncated. Read another section locally instead of taking a new
+snapshot just to change the display. Saved refs are historical: use them only
+while their context is current; sync after an action, intervention or page change.
+
+For an action followed by a transient synchronization refusal, use
+`bsk cooperate sync --settle --session <id>`. It performs at most three read-only
+sync attempts, each retry preceded by `cooperate wait` (default 1s per wait;
+`--timeout-ms` overrides it). It retries only `cooperation_sync_required` with
+`effect_state: none`. Unknown effects, cancellation, user stop and other errors
+are returned without retries. A wait that is not ready returns `settle.outcome:
+not_ready` and no action context; continue the cooperation hand-back workflow.
+Inspect `settle`, ownership and context, not just exit code. This does not prove
+application readiness: use an observed loading-complete signal where available.
+Never replay the preceding click, drag or submission because sync was refused.
+
+Use the ordinary full view for discovery when you do not yet know a useful
+label. Keep enough evidence to choose the next action; do not dump all markup
+when a targeted observation suffices. Stop at verified success. When measuring
+speed, report both end-to-end wall time and CLI execution time; a smaller
+observation alone does not establish an end-to-end speedup.
+
+### Paginated observations
 
 There is no default token cap. With `observe --max-tokens <n>`, follow a returned
 `next_cursor`/`@more` when relevant content remains:
