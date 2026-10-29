@@ -54,9 +54,14 @@ pub struct StepArgs {
     /// Exact saved predecessor for an unchanged post-action sync.
     #[arg(long)]
     pub baseline: Option<PathBuf>,
-    /// Conservative presentation folding, applied only after saving the full reply.
+    /// Fold only plain numbered fallback buttons outside literal-match windows (repeatable).
+    ///
+    /// Only stateless `button "item N"` lines may be omitted. Keeps business text,
+    /// named/stateful controls and complete forms/dialogs. Use `bsk view <saved.json>
+    /// --find <text>` for text search. A requested full reply is saved before folding.
     #[arg(long)]
     pub match_text: Vec<String>,
+    /// Keep numbered fallback buttons within this many lines before/after each match.
     #[arg(long, default_value_t = 12, value_parser = clap::value_parser!(u32).range(0..=200))]
     pub context_lines: u32,
 }

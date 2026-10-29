@@ -44,8 +44,11 @@ action result, never as evidence that the action did not occur.
 
 ## View existing evidence locally
 
-Save the complete reply before display filtering. Use `view` to read a different
-portion without another browser capture or a new ref map:
+Save the complete reply before display folding. The optional `--match-text` on
+`step` or `cooperate sync` only folds plain stateless numbered fallback buttons
+outside matching windows; business text, named/stateful controls and complete
+forms/dialogs remain visible. Use `view --find` for general literal text search,
+or read a different portion without another browser capture or a new ref map:
 
 ```sh
 bsk view /absolute/new-step.json --find 'known label' --line-count 80

@@ -150,8 +150,9 @@ mutations or reuse one context across them. A known readiness selector can be
 waited on between that action and sync; check `satisfied`, without fixed sleeps
 or repeatedly returning a loading page to the model.
 
-For a known target on a large page, filter the **CLI presentation**, using literal
-text from a previous observation and enough surrounding lines for the decision:
+On pages with repeated numbered fallback buttons, fold controls outside a known
+target's surrounding lines in the **CLI presentation**. Use literal text from a
+previous observation and retain enough surrounding lines for the decision:
 
 ```sh
 bsk cooperate sync --session <id> --match-text 'known row label' \
@@ -159,8 +160,9 @@ bsk cooperate sync --session <id> --match-text 'known row label' \
 ```
 
 `--match-text` is repeatable, literal and case-sensitive. This is a conservative
-presentation fold, not a semantic search or a row selector. Only plain numbered
-fallback controls (`button "item N"`) outside the matching windows may be omitted.
+presentation fold, not general text filtering, search or a row selector. Only
+plain stateless numbered fallback controls (`button "item N"`) outside the
+matching windows may be omitted.
 All business text, named controls, state/value/context hints, ancestors and the
 view/layer outline stay visible. Complete forms, dialogs, alerts and statuses
 are retained, including their numbered controls. This avoids guessing which
@@ -171,6 +173,12 @@ Every query must match; otherwise the full returned view is shown with
 `matches_per_query`; do not pick the first by assumption. Unknown formats and
 views that would grow also fall back to the original text. This may produce less
 compression on some pages, including flight results with meaningful named controls.
+
+For general literal text search, inspect the saved observation locally:
+
+```sh
+bsk view /absolute/new-observation.json --find 'known row label' --line-count 80
+```
 
 When any lines are omitted, `observation.truncated` is true for legacy readers.
 `observation.capture_truncated` reports the original capture truncation, while
