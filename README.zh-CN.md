@@ -68,12 +68,13 @@ https://github.com/user-attachments/assets/959cb520-80ba-4b9e-b6d8-d94523b03693
 | 你想完成的事 | BrowserSkill 如何帮忙 |
 | --- | --- |
 | **用已有账号，做网站任务** | 复用浏览器登录态，读取文档、搜索内部网站，完成需要登录的网页流程。 |
-| **一句指令，落实到操作** | 读取页面文本和控件，点击、输入、填写表单、管理标签页；截取可见区域或完整页面，在本地模式上传和下载文件。 |
-| **Agent 操作，你来掌控** | 任务在独立窗口中可见运行，也可显式借用已有标签页；登录、验证等需要人工参与的步骤，由你接手。 |
+| **一句指令，落实到操作** | 读取页面文本和控件，点击、输入、填写表单、拖拽元素、选择范围、管理标签页；截取可见区域或完整页面，在本地模式上传和下载文件。 |
+| **Agent 操作，你来掌控** | 共享控制让你与 Agent 协作；编辑时暂停 Agent，让它核对你的改动后继续。任务在独立窗口中可见运行，也可显式借用已有标签页。 |
 | **网页表格，导出即用** | 将已加载的表格和列表导出为 JSON/CSV，保留列名、页面/frame 来源、合并单元格信息和完整性标记。[结构化提取](docs/structured-extraction.md) |
 | **操作出错，找到线索** | 关联操作、请求、响应正文、控制台和页面变化，检查性能、慢接口与疑似重复请求；用明确配置的 HTTP 规则或请求重放验证判断。[网站调试](docs/website-debugging.md) |
 | **录下过程，随时回看** | 将一个已授权的任务标签页录制为无声 MP4，在扩展中预览、保存或删除。[任务视频录制](docs/video-recording.md) |
 | **页面就绪，再做下一步** | 设置明确的超时，等待目标元素满足指定条件后再继续操作。[元素等待](docs/wait-for-element.md) |
+| **已经观察，按需复用** | 用 `step` 执行一个已决定的动作并同步状态；明确保存完整观察结果，再用 `view` 搜索或分段阅读，无需重新采集页面。[步骤与观察结果保存](crates/bsk-cli/skill/references/step-and-cache.md) |
 | **浏览器与账号，选对再开工** | 为浏览器实例命名，让任务绑定指定 Profile；也可以让服务器上的 Agent 连接你电脑上的浏览器。[浏览器 Profile](docs/browser-profiles.md) |
 | **任务结束，记录可查** | 重新打开浏览器本地的调试历史、导出 JSON，或单独开启操作审计，查看任务执行记录。[操作审计](docs/operation-audit.md) |
 
@@ -197,7 +198,7 @@ bsk session stop <id>
 
 [DSH 插件](packages/dsh-plugin-browserskill/README.md) 在 DeepSeek Harness Web UI 中提供原生 `bsk_*` 工具、浏览器任务预览和截图结果。它使用同一套 `bsk` CLI 与扩展，并自带 BrowserSkill skill。
 
-**升级到 0.3.3：**先更新 CLI 和扩展，再更新插件。六个 `browser_*` 工具已改名为 `bsk_*`，不保留旧名称别名。请更新自定义工具调用和策略，重启 DSH profile，并在已有对话中重新调用 `/browser-skill`。详见[迁移指南](packages/dsh-plugin-browserskill/README.md#breaking-tool-api-migration-033)。
+**升级到 0.4.0：**先更新 CLI 和正在运行的 daemon，再更新扩展和插件。重启 DSH profile，并重新调用 `/browser-skill`，让已有对话加载共享控制指引及新增的拖拽、step 和观察结果读取工具。详见 [0.4.0 升级指南](packages/dsh-plugin-browserskill/README.md#upgrading-to-040)；从 0.3.3 以前的版本升级时，还需要完成[工具名称迁移](packages/dsh-plugin-browserskill/README.md#breaking-tool-api-migration-033)。
 
 安装好 DeepSeek Harness、pnpm 和 `bsk`，连接扩展后，将插件加入你的 profile：
 
@@ -262,6 +263,8 @@ bsk session start --browser "工作账号" --no-focus --json
 
 ## 浏览器控制与隐私
 
+新任务默认启用共享控制。BrowserSkill 会观察受控标签页中的页面变化和受支持的手动活动，让 Agent 在你编辑时让出控制权，并在再次操作前同步状态。即使调试、审计和视频录制均关闭，这种协调仍会进行。你可以通过任务的手动接管与恢复功能决定何时继续。[共享控制指南](crates/bsk-cli/skill/references/cooperation.md)
+
 代理窗口共享所选 Profile 的登录态，**它不是独立账号，也不是安全沙盒**。Agent 可以使用已登录网站授予的权限执行操作，请选择你信任的 Agent 和任务。
 
 扩展提供两个默认开启、相互独立的**自动化设置**：
@@ -280,12 +283,17 @@ BrowserSkill 没有必须使用的云服务，也不收集产品遥测。自动�
 | **网站调试** | 当前浏览器配置中，远程模式也一样 | 保存采集到的数据，包括可获取的正文和字段值。已停止记录 30 天后过期，保留预算为 50 条／50 MiB，达到限制时可能提前清理。删除记录前需先停止采集。 |
 | **操作审计** | daemon 所在主机的 `BSK_HOME/audit` | 默认关闭。记录任务与操作元数据，不记录输入值、页面正文、截图或文件内容。已结束任务 30 天后过期。 |
 | **任务视频** | 当前浏览器配置；导出副本保存在指定位置 | 主动开启后，录制一个已授权标签页的无声视频；单个视频上限为 10 分钟／256 MiB，创建 24 小时后过期，临时视频预算为 1 GiB。视频库支持预览、导出和删除。 |
+| **观察结果及 step 响应** | CLI 所在计算机上明确指定的 JSON 路径，也可能是远程服务器 | `--save-full`／DSH `saveFull` 会在显示过滤前保存完整响应。文件不会自动过期，需要在该计算机上删除；`view` 读取历史数据，不会刷新浏览器状态。 |
 
 这些功能均支持导出和删除。结束任务或断开连接不会删除保留的历史或视频，过期数据会在访问或清理时处理。导出的文件、Agent 或网关已经收到的副本需要另行管理。调试数据会过滤已知敏感信息，但不能保证完全脱敏。视频画面不会自动脱敏，分享前请检查可见内容。
 
 [隐私政策](apps/extension/PRIVACY.zh-CN.md) · [操作审计](docs/operation-audit.md) · [调试历史与保留限制](docs/website-debugging.md#history-and-export)
 
 ## 升级
+
+**升级到 0.4.0 时，先更新 CLI 并重启正在运行的 daemon，再更新扩展，最后更新 DSH。** 新扩展要求 daemon 协议至少为 1.6，而 CLI/daemon 0.3.3 使用 1.3。仅替换二进制不会更新通过前台或外部进程管理器运行的旧 daemon，仍需在所属宿主中重启。使用新功能时请配套使用 0.4.0 组件。
+
+已有脚本需要遵循[共享控制流程](crates/bsk-cli/skill/references/cooperation.md)：首次导航后执行 `bsk cooperate sync`，将返回的 `--context` 用于一次操作，然后重新同步。请加载新版 skill，避免继续使用旧指令。
 
 先结束正在执行的浏览器任务，再更新 CLI：
 

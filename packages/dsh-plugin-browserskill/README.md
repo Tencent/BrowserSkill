@@ -54,6 +54,28 @@ dsh plugin --profile web update @wxg-prc-cpg/browser-skill-dsh-plugin --latest
 Restart that dsh profile after upgrading. This command updates the plugin; update
 the `bsk` CLI and browser extension separately when a release requires it.
 
+### Upgrading to 0.4.0
+
+Update the CLI and restart the running daemon first, then update the browser
+extension, and finally update this plugin. The 0.4.0 extension requires daemon
+protocol 1.6 or later; CLI/daemon 0.3.3 uses 1.3 and cannot connect. Updating the npm
+package does not update the CLI, daemon or extension. Use matching 0.4.0 components
+for drag, step and saved-observation workflows.
+
+Restart the DSH profile and invoke `/browser-skill` again in existing conversations.
+The six `bsk_*` tool names remain unchanged. Shared control is now enabled for new
+tasks: after initial navigation, call `bsk_session action:sync`, pass its returned
+context identifier as `contextId` for one action, then synchronize again. Human
+edits and changed page evidence can revoke a pending action; synchronize and replan
+instead of repeating the old call.
+Custom tool policies and integrations must allow the new actions they intend to use.
+
+Explicit `saveFull` results remain as JSON files on the CLI machine until deleted;
+closing a browser task or clearing extension storage does not remove them.
+See [cooperation](skill/references/cooperation.md) and
+[steps and saved observations](skill/references/interaction-details.md#steps-and-saved-observations).
+If upgrading from before 0.3.3, also apply the tool-name migration below.
+
 ### Breaking tool API migration (0.3.3)
 
 The coordinated 0.3.3 release replaces all six `browser_*` tool names with stable
@@ -285,20 +307,22 @@ The [Release dsh plugin workflow](https://github.com/Tencent/BrowserSkill/blob/m
 publishes the package and this README to npm. Pushing a `dsh-plugin-vX.Y.Z` tag
 triggers it; ordinary commits to `main` do not.
 
-Before publishing the 0.3.3 plugin, publish the coordinated 0.3.3 CLI and extension.
-Element waits require the implementation introduced in [#407](https://github.com/Tencent/BrowserSkill/pull/407).
-The `cli-v0.3.0`, `cli-v0.3.1`, and `cli-v0.3.2` releases do not include this
-command. Confirm the compatible CLI and extension release artifacts are available
-before pushing the plugin tag; publishing the npm package alone does not upgrade
-either component on users' machines. Older installations can still use the
-[single-action recovery path](skill/references/interaction-details.md#element-waits).
+Before publishing the 0.4.0 plugin, publish the coordinated 0.4.0 CLI and extension.
+The extension's raised daemon protocol floor requires the CLI release to be
+downloadable before the extension goes live. Confirm that the new CLI still
+supports the intended basic workflows with the previous extension during rollout;
+new shared-control, drag and step workflows require the matching components.
+Publishing the npm package alone does not upgrade either component on users' machines.
 
 1. Prepare a release PR that updates the shared CLI, extension and plugin version,
    local Cargo lock entries, changelog and relevant documentation. Merge it after
    validation and record the merge commit.
-2. Tag that commit as `ext-v<version>` and wait for the browser extension to become
-   available. Then tag the same commit as `cli-v<version>` and wait for the complete
-   CLI release, including [Windows signing](../../docs/windows-signing.md).
+2. Tag that commit as `cli-v<version>` and wait for the complete public CLI release,
+   including [Windows signing](../../docs/windows-signing.md) and
+   [macOS signing and notarization](../../docs/macos-signing.md). `Release CLI`
+   builds alone are not publication; both `Publish CLI` verification jobs and its
+   final publish job must succeed. Synchronize store permission/privacy disclosures,
+   then tag the same commit as `ext-v<version>` and wait for store availability.
 3. Create `dsh-plugin-v<version>` on that same merge commit and push only that tag:
 
    ```sh

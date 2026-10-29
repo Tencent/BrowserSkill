@@ -5,10 +5,66 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 Starting from 0.2.0, CLI / Extension / DSH Plugin share the same version number.
 
-## [Unreleased]
+## [0.4.0] - 2026-10-30
+
+### Changed
+
+- **Breaking — extension compatibility:** the extension now requires daemon
+  protocol 1.6 or later; CLI/daemon 0.3.3 uses protocol 1.3 and cannot connect.
+  Update the CLI and restart the running daemon before updating the extension,
+  then update the DSH plugin. CLI/daemon and extension 0.4.0 use protocol 1.7.
+- **Breaking — shared browser control:** new sessions and their task tabs enable
+  human/agent collaboration automatically. After initial navigation, synchronize
+  with `bsk cooperate sync` and pass its single-use `--context` to each action;
+  DSH uses `bsk_session action:sync` and `contextId`. Human input or changed page
+  evidence can revoke a pending action; synchronize and reconsider the result
+  instead of replaying it. Reload the updated skill in existing conversations.
+- Moving any controlled tab out of its original Agent Window ends the whole
+  session, preserves pages in place and removes control indicators. Moving the
+  tab back does not restart the task. Normal session stop preserves pages with
+  human participation and cleans up untouched task-created pages.
+- macOS CLI releases require Developer ID signing and Apple notarization for
+  both architectures, alongside the existing Windows EV signature checks.
+  `Publish CLI` verifies both platforms before publishing the complete release;
+  archive names and installation commands remain unchanged.
+- English and Chinese privacy policies cover shared-control observations,
+  explicitly saved observation files, incognito tasks and `tabGroups`. Upgrade
+  and publishing instructions use CLI-first rollout for this compatibility change.
+
+### Added
+
+- Human/agent collaboration with visible control indicators, manual hold and
+  resume, bounded activity evidence, page-change guards and explicit decision
+  regions. Native JavaScript dialogs participate in control and recovery.
+- Native drag interactions, including cross-origin frame targets, and a
+  click–move–click mode for selecting ranges. CLI and DSH expose the new actions.
+- `bsk step` executes one chosen action, optionally waits for an element and then
+  synchronizes, preserving the action receipt if a later stage fails. Explicit
+  observation saving, baseline reuse and `bsk view` let agents read and search
+  historical evidence locally without another browser call. DSH exposes these
+  through `step`, `view`, `saveFull` and baseline options.
+- Incognito Agent Windows through `session start --incognito`, with explicit
+  browser incognito permission and no borrowing of ordinary tabs. Incognito
+  windows in one profile share their incognito login state.
+- Orange BrowserSkill tab groups mark controlled Agent Window tabs using the
+  new `tabGroups` permission; grouping is removed when the task ends.
 
 ### Fixed
 
+- Browser interactions retain current element references for dynamic menus,
+  dispatch shadow-DOM input events correctly, handle plus-key chords, and reject
+  select controls that become disabled during focus. Extraction respects
+  `content-visibility`, and observation token estimates and evidence scope are
+  more consistent.
+- Website debugging preserves failed request-body metadata and primitive console
+  exceptions. Video capture respects human control, and playback regressions wait
+  for decoded frames before checking colors.
+- Windows DSH child-process cancellation preserves its termination grace period;
+  remote authorization handles a busy store, and WebSocket connection limits
+  bound incoming peers. Foreground daemon consoles remain visible.
+- Browser evaluation scaffolding handles Windows cross-drive paths, relative
+  import URLs and long run IDs; child output preserves UTF-8. Extension types are
+  prepared during dependency installation.
 - Extension: explain when the running bsk daemon is too old to connect, with
   its version, a copyable update command and restart guidance in the popup.
   A toolbar warning and a notification make the problem visible before opening
