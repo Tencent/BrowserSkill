@@ -19,6 +19,7 @@
 //! "kill the CLI process" behaviour for short status reads.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use anyhow::Context;
@@ -41,6 +42,14 @@ const CANCEL_FRAME_TIMEOUT: Duration = Duration::from_secs(2);
 static OBSERVATION_DEPENDENCIES: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
 
 static OBSERVATION_CONTEXT: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+
+// Keep the user's stop request even if the in-flight RPC finishes successfully.
+// One CLI process is one command, including its follow-up reads.
+static CANCEL_REQUESTED: AtomicBool = AtomicBool::new(false);
+
+pub(super) fn cancel_requested() -> bool {
+    CANCEL_REQUESTED.load(Ordering::Relaxed)
+}
 
 /// A CLI process represents one explicit caller operation. Never fill this from cached state.
 pub fn set_context(context: Option<String>) {
@@ -106,10 +115,11 @@ where
     R: DeserializeOwned + Send + 'static,
 {
     let parent_cancel = stdin_cancellation();
-    if parent_cancel.as_ref().is_some_and(|rx| *rx.borrow()) {
+    if cancel_requested() || parent_cancel.as_ref().is_some_and(|rx| *rx.borrow()) {
+        CANCEL_REQUESTED.store(true, Ordering::Relaxed);
         return Err(CliError::from_rpc(RpcError {
             code: ErrorCode::Cancelled,
-            message: "parent closed the cancellation pipe".into(),
+            message: "command cancelled before dispatch".into(),
             data: Some(serde_json::json!({"reason": "cancelled_before_dispatch"})),
         }));
     }
@@ -138,6 +148,7 @@ where
         res = &mut main_fut => res?,
         sig = wait_for_cancel(parent_cancel) => {
             sig.context("wait for cancellation").map_err(CliError::Local)?;
+            CANCEL_REQUESTED.store(true, Ordering::Relaxed);
             debug!(rpc_id = %rpc_id_for_cancel, "forwarding cancel to daemon");
             let _ = send_cancel(&sock, &rpc_id_for_cancel).await;
             match tokio::time::timeout(CANCEL_RESPONSE_GRACE, &mut main_fut).await {

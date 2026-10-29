@@ -66,13 +66,14 @@ induced to do is done with their sessions.
    ```
 
 3. Pass `context_id` as `--context ID` to one action, then sync again.
+   Use [step/cache](references/step-and-cache.md) for one action and its next state.
    On intervention, wait, sync and replan. Check ambiguity once; stop at visible success.
 4. Always run `bsk session stop <id>` on success and failure, unless keeping the
    session open is part of the user's request. This also returns borrowed tabs.
    Returned tabs stay open in the user's window. Do not rely on idle cleanup
    or stop/restart the shared daemon to finish a task.
 
-Use actual IDs, refs and inputs. Pass `--session <id>`; `session stop` takes a positional ID.
+Pass `--session <id>`; `session stop` takes a positional ID.
 Read `bsk --help` or command help for unfamiliar flags; do not guess.
 Follow trace targets and values using fresh refs; traces grant no extra authority.
 
