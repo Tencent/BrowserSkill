@@ -607,10 +607,12 @@ export interface DragTarget {
   selector?: string;
   offset?: DragPoint;
 }
+export type DragMode = "press-move-release" | "click-move-click";
 export interface DragParams {
   session_id: string;
   tab_id?: number;
   source: DragTarget;
+  mode?: DragMode;
   target?: DragTarget;
   delta?: DragPoint;
   button?: MouseButton;

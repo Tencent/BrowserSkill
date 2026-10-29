@@ -47,6 +47,17 @@
       "maximum": 5000.0,
       "minimum": 0.0
     },
+    "mode": {
+      "description": "Defaults to press-move-release. Click-move-click requires target and zero hold.",
+      "anyOf": [
+        {
+          "$ref": "#/definitions/DragMode"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "modifiers": {
       "type": [
         "array",
@@ -96,6 +107,13 @@
     }
   },
   "definitions": {
+    "DragMode": {
+      "type": "string",
+      "enum": [
+        "press-move-release",
+        "click-move-click"
+      ]
+    },
     "DragPoint": {
       "type": "object",
       "required": [

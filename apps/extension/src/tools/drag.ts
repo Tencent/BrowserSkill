@@ -41,6 +41,14 @@ export function validateDrag(p: DragParams): RpcError | null {
       code: "invalid_params",
       message: "drag requires a source and exactly one target or finite nonzero delta",
     };
+  if (
+    (p.mode !== undefined && !["press-move-release", "click-move-click"].includes(p.mode)) ||
+    (p.mode === "click-move-click" && (!p.target || (p.hold_ms ?? 0) !== 0))
+  )
+    return {
+      code: "invalid_params",
+      message: "click-move-click requires a target and zero hold; unknown modes are unsupported",
+    };
   for (const [value, min, max] of [
     [p.hold_ms ?? 0, 0, 5000],
     [p.duration_ms ?? 500, 1, 5000],
@@ -81,6 +89,7 @@ export async function handleDrag(
       message: "observation expired; observe again before dragging",
       data: { effect_state: "none" },
     };
+  const clickMoveClick = params.mode === "click-move-click";
   const deadline = Date.now() + (params.timeout_ms ?? 30000);
   const transaction = pointerTransactionDeps(deps, deps.signal, true);
   const inputDeps = transaction.deps;
@@ -182,7 +191,7 @@ export async function handleDrag(
                   p.x >= viewport.width ||
                   p.y >= viewport.height,
               ) ||
-              (start.x === end.x && start.y === end.y)
+              (!clickMoveClick && start.x === end.x && start.y === end.y)
             )
               return {
                 code: "invalid_params",
@@ -206,29 +215,31 @@ export async function handleDrag(
                 if (blocked) return blocked;
                 const group = `drag-hit-${crypto.randomUUID()}`;
                 try {
-                  const { object } = await sendToCdpTarget<{ object?: { objectId?: string } }>(
-                    cdp,
-                    source.cdpTarget,
-                    "DOM.resolveNode",
-                    { backendNodeId: source.backendNodeId, objectGroup: group },
-                  );
-                  if (!object?.objectId)
-                    return { code: "not_found", message: "drag source is detached" };
-                  const state = await sendToCdpTarget<{ result?: { value?: boolean } }>(
-                    cdp,
-                    source.cdpTarget,
-                    "Runtime.callFunctionOn",
-                    {
-                      objectId: object.objectId,
-                      returnByValue: true,
-                      functionDeclaration: `function() { return this.isConnected && !this.matches(':disabled,[aria-disabled="true"]') && !this.closest('[inert]'); }`,
-                    },
-                  );
-                  if (state.result?.value !== true)
-                    return {
-                      code: "permission_denied",
-                      message: "drag source is detached, disabled or inert",
-                    };
+                  for (const node of clickMoveClick && target ? [source, target] : [source]) {
+                    const { object } = await sendToCdpTarget<{ object?: { objectId?: string } }>(
+                      cdp,
+                      node.cdpTarget,
+                      "DOM.resolveNode",
+                      { backendNodeId: node.backendNodeId, objectGroup: group },
+                    );
+                    if (!object?.objectId)
+                      return { code: "not_found", message: "drag endpoint is detached" };
+                    const state = await sendToCdpTarget<{ result?: { value?: boolean } }>(
+                      cdp,
+                      node.cdpTarget,
+                      "Runtime.callFunctionOn",
+                      {
+                        objectId: object.objectId,
+                        returnByValue: true,
+                        functionDeclaration: `function() { return this.isConnected && !this.matches(':disabled,[aria-disabled="true"]') && !this.closest('[inert]'); }`,
+                      },
+                    );
+                    if (state.result?.value !== true)
+                      return {
+                        code: "permission_denied",
+                        message: "drag endpoint is detached, disabled or inert",
+                      };
+                  }
                   const endpoints: [typeof source, DragPoint][] = [[source, start]];
                   if (target) endpoints.push([target, end]);
                   for (const [node, point] of endpoints) {
@@ -262,6 +273,16 @@ export async function handleDrag(
                   modifiers,
                   clickCount: 1,
                 });
+                if (clickMoveClick) {
+                  await cdp.send(tab.tabId, "Input.dispatchMouseEvent", {
+                    type: "mouseReleased",
+                    ...start,
+                    button,
+                    buttons: 0,
+                    modifiers,
+                    clickCount: 1,
+                  });
+                }
                 const pause = async (ms: number) => {
                   check();
                   if (ms <= 0) return;
@@ -288,6 +309,8 @@ export async function handleDrag(
                   check();
                 };
                 await pause(params.hold_ms ?? 0);
+                const moveButton = clickMoveClick ? "none" : button;
+                const moveButtons = clickMoveClick ? 0 : buttons;
                 const duration = params.duration_ms ?? 500;
                 const steps = Math.max(2, Math.ceil(duration / 16));
                 const started = Date.now();
@@ -298,8 +321,8 @@ export async function handleDrag(
                     type: "mouseMoved",
                     x: start.x + (end.x - start.x) * ratio,
                     y: start.y + (end.y - start.y) * ratio,
-                    button,
-                    buttons,
+                    button: moveButton,
+                    buttons: moveButtons,
                     modifiers,
                   });
                 }
@@ -307,10 +330,76 @@ export async function handleDrag(
                 await cdp.send(tab.tabId, "Input.dispatchMouseEvent", {
                   type: "mouseMoved",
                   ...end,
-                  button,
-                  buttons,
+                  button: moveButton,
+                  buttons: moveButtons,
                   modifiers,
                 });
+                if (clickMoveClick && target) {
+                  // The first click/preview may move, replace, disable or cover the
+                  // destination. Never retarget or click stale coordinates silently.
+                  const geometry = await resolveNodeGeometry(cdp, tab.tabId, address(target));
+                  if (isRpcError(geometry)) return geometry;
+                  const current = offset(geometry.actionPoint, params.target?.offset);
+                  if (
+                    Math.abs(current.x - end.x) > 2 ||
+                    Math.abs(current.y - end.y) > 2 ||
+                    !(await pointReachesTarget(cdp, { ...target, tabId: tab.tabId }, end))
+                  )
+                    return {
+                      code: "permission_denied",
+                      message:
+                        "click-move-click destination moved or is covered; observe before further input",
+                    };
+                  const group = `range-end-${crypto.randomUUID()}`;
+                  try {
+                    const { object } = await sendToCdpTarget<{ object?: { objectId?: string } }>(
+                      cdp,
+                      target.cdpTarget,
+                      "DOM.resolveNode",
+                      { backendNodeId: target.backendNodeId, objectGroup: group },
+                    );
+                    if (!object?.objectId)
+                      return {
+                        code: "not_found",
+                        message: "click-move-click destination detached",
+                      };
+                    const state = await sendToCdpTarget<{ result?: { value?: boolean } }>(
+                      cdp,
+                      target.cdpTarget,
+                      "Runtime.callFunctionOn",
+                      {
+                        objectId: object.objectId,
+                        returnByValue: true,
+                        functionDeclaration: `function() { return this.isConnected && !this.matches(':disabled,[aria-disabled="true"]') && !this.closest('[inert]'); }`,
+                      },
+                    );
+                    if (state.result?.value !== true)
+                      return {
+                        code: "permission_denied",
+                        message: "click-move-click destination is disabled or inert",
+                      };
+                  } finally {
+                    await sendToCdpTarget(
+                      deps.cdp.resourceCleanup ?? deps.cdp,
+                      target.cdpTarget,
+                      "Runtime.releaseObjectGroup",
+                      { objectGroup: group },
+                    ).catch(() => {});
+                  }
+                  await cdp.verifyPointerTarget?.(
+                    { ...target, tabId: tab.tabId },
+                    end,
+                    params.target?.offset,
+                  );
+                  await cdp.send(tab.tabId, "Input.dispatchMouseEvent", {
+                    type: "mousePressed",
+                    ...end,
+                    button,
+                    buttons,
+                    modifiers,
+                    clickCount: 1,
+                  });
+                }
                 await cdp.send(tab.tabId, "Input.dispatchMouseEvent", {
                   type: "mouseReleased",
                   ...end,

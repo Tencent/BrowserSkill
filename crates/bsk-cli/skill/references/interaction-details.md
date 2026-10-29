@@ -42,6 +42,46 @@ Observe afterwards and verify the value, order or destination. Cancellation
 releases owned input at its last position; it cannot roll back page handlers.
 After `effect_state=unknown`, observe before deciding whether to retry.
 
+### Click–move–click selection
+
+Some calendars and range grids select by clicking and releasing the start,
+then moving **with no button held**, then clicking the end. A held drag is a
+separate interaction; it can deliver input successfully without selecting cells.
+Use page instructions, observed behavior or known handlers to identify the mode.
+Do not automatically retry a failed held drag as two clicks.
+
+For a known click–move–click control with both endpoints identified, use one
+bounded action (daemon and extension protocol 1.7 or newer):
+
+```sh
+bsk drag @e3 --to @e8 --mode click-move-click --session <id> --context ID
+bsk cooperate sync --session <id>
+```
+
+This clicks/releases the start, moves with `buttons=0`, rechecks the destination,
+and clicks/releases the end. `--duration` controls movement (default 500ms).
+It requires `--to` and zero `--hold`; `--mode press-move-release` is the default
+held drag. Both clicks share one context and operation; interruption stops the
+remaining sequence. The first click may remain applied after an error. Sync and
+inspect before another action; never assume rollback or start the gesture again
+from an already active selection.
+
+When learning an unfamiliar grid, use `click start → sync → hover end → sync →
+click end → sync`, with a fresh context/ref for each action. The first click may
+only mark a start cell; a growing highlight after moving is progress, even if
+no dialog opens yet. Do not request human help just because the first click
+has not opened a form.
+
+VOM reports `[selected]`/`[unselected]` for explicit accessibility selection.
+`[selected:class]` and `[selected:data]` report exact styling/data hints on
+controls, not proof of a committed reservation or a particular gesture type.
+Compare the highlighted cells before/after movement. Unnamed clickable items
+with numeric `data-index` may appear as `"item 14"`; the index is raw DOM evidence,
+not a time or an endpoint label. Identify its row and time headers before acting.
+Do not infer the first-selected cell or range direction from a static highlight.
+Verify the final displayed range/form and, when requested, the eventual business
+success message separately.
+
 ### Filling text
 
 `fill` supports enabled, editable text inputs, textareas, and contenteditable

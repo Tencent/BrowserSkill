@@ -1384,3 +1384,79 @@ it("does not turn inherited drag cursors into duplicate handles", () => {
   expect(out.refs.map((ref) => ref.backendNodeId)).toEqual([10, 30]);
   expect(out.text).not.toContain('[drag-handle] "Title"');
 });
+
+describe("selection evidence", () => {
+  it.each([
+    [{ "aria-selected": "true" }, "selected"],
+    [{ "aria-selected": "false", class: "selected" }, "unselected"],
+    [{ "data-selected": "true" }, "selected:data"],
+    [{ "data-state": "selected" }, "selected:data"],
+    [{ "data-selected": "false", class: "selected" }, "unselected:data"],
+    [{ class: "grid-item selected" }, "selected:class"],
+    [{ class: "is-selected" }, "selected:class"],
+  ])("exposes %j without conflating styling and semantic state", (attrs, marker) => {
+    const out = renderVom(
+      scene([
+        node({
+          id: 1,
+          backendNodeId: 1,
+          role: "button",
+          name: "16:00",
+          attrs: attrs as Record<string, string>,
+          rect: { x: 10, y: 10, w: 50, h: 30 },
+        }),
+      ]),
+    );
+    expect(out.text).toContain(`[${marker}]`);
+  });
+  it.each([
+    "active",
+    "unselected",
+    "selected-item",
+    "not-selected",
+  ])("does not guess selection from %s", (value) => {
+    const out = renderVom(
+      scene([
+        node({
+          id: 1,
+          backendNodeId: 1,
+          role: "button",
+          name: "Cell",
+          attrs: { class: value },
+          rect: { x: 10, y: 10, w: 50, h: 30 },
+        }),
+      ]),
+    );
+    expect(out.text).not.toContain("[selected");
+  });
+  it("recovers unnamed indexed clickable cells and preserves their selected styling", () => {
+    const out = renderVom(
+      scene([
+        node({
+          id: 1,
+          backendNodeId: 1,
+          clickable: true,
+          attrs: { "data-index": "14", class: "grid-item selected" },
+          rect: { x: 10, y: 10, w: 23, h: 30 },
+        }),
+      ]),
+    );
+    expect(out.text).toContain('@e1 button "item 14" [selected:class]');
+  });
+  it("does not create actions or selection hints for decorative indexed wrappers", () => {
+    const out = renderVom(
+      scene([
+        node({
+          id: 1,
+          backendNodeId: 1,
+          role: "group",
+          name: "Decoration",
+          attrs: { "data-index": "14", class: "selected" },
+          rect: { x: 10, y: 10, w: 23, h: 30 },
+        }),
+      ]),
+    );
+    expect(out.refs).toHaveLength(0);
+    expect(out.text).not.toContain("[selected");
+  });
+});

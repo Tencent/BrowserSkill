@@ -538,8 +538,8 @@ export function resolveSemanticGraph(
     const selected = node.ax?.ignored === true ? undefined : axProperty(node.ax, "selected");
     const expanded = node.ax?.ignored === true ? undefined : axProperty(node.ax, "expanded");
     const controls = node.ax?.ignored === true ? undefined : axProperty(node.ax, "controls");
-    if (selected === "true" && !vom.attrs?.["aria-selected"]) {
-      vom.attrs = { ...(vom.attrs ?? {}), "aria-selected": "true" };
+    if ((selected === "true" || selected === "false") && !vom.attrs?.["aria-selected"]) {
+      vom.attrs = { ...(vom.attrs ?? {}), "aria-selected": selected };
     }
     if (expanded === "true" && !vom.attrs?.["aria-expanded"]) {
       vom.attrs = { ...(vom.attrs ?? {}), "aria-expanded": "true" };

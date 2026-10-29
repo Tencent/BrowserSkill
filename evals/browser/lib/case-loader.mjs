@@ -74,6 +74,14 @@ function validateWorkflowStep(errors, step, path) {
     errors.push(`${path} requires selector or ref`);
   }
   if (step.action === "drag") {
+    if (step.mode !== undefined && !["press-move-release", "click-move-click"].includes(step.mode))
+      errors.push(`${path}.mode is unsupported`);
+    if (
+      step.mode === "click-move-click" &&
+      (step.to === undefined ||
+        (step.hold !== undefined && !["0", "0s", "0ms"].includes(step.hold)))
+    )
+      errors.push(`${path} click-move-click requires to and zero hold`);
     const hasDelta = step.dx !== undefined || step.dy !== undefined;
     if ((step.to !== undefined) === hasDelta) errors.push(`${path} requires either to or dx/dy`);
     if (step.to !== undefined) checkString(errors, step.to, `${path}.to`);

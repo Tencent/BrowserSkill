@@ -2312,6 +2312,95 @@ describe("default collaboration preserves the original unattended lifetime", () 
   });
 });
 
+describe.each([false, true])("selection action guards, explicit dependency=%s", (scoped) => {
+  const scene = (attrs: Record<string, string>): VomScene => ({
+    viewport: { width: 800, height: 600 },
+    nodes: [
+      { id: 1, parentId: null, tag: "main", role: "main", name: "" },
+      { id: 4, parentId: 1, tag: "button", role: "button", name: "16:00", attrs },
+    ].map((node) => ({
+      ...node,
+      backendNodeId: node.id,
+      frameId: "frame",
+      rect: { x: 0, y: 0, w: 20, h: 20 },
+      paintOrder: 1,
+      position: "static",
+      pointerEvents: "auto",
+    })),
+  });
+  const check = async (
+    before: Record<string, string>,
+    after: Record<string, string>,
+    allowed: boolean,
+  ) => {
+    vi.mocked(handleSnapshot).mockImplementationOnce(async (_m, _p, options) => {
+      options!.onScene?.(scene(before));
+      return { text: "16:00", ref_count: 1, tab_id: 7, truncated: false };
+    });
+    vi.mocked(captureVomObservation).mockImplementation(async (_c, _t, _u, options) => {
+      options?.onScene?.(scene(after));
+      return {} as Awaited<ReturnType<typeof captureVomObservation>>;
+    });
+    vi.mocked(resolveActionTarget).mockResolvedValue({
+      backendNodeId: 4,
+      frameId: "frame",
+      cdpTarget: { tabId: 7 },
+      tab: { tabId: 7, windowId: 100, active: true },
+    });
+    const f = await fixture();
+    // Only attributes change: identity, text, structure and human input stay fixed.
+    f.change({});
+    const result = await f.controller.run(
+      {
+        id: "selection",
+        method: "tool.click",
+        params: {
+          session_id: "shared",
+          tab_id: 7,
+          context_id: f.first.context_id,
+          ref: "e4",
+          ...(scoped ? { depends_on: ["e4"] } : {}),
+        },
+      },
+      f.cdp,
+      f.abort.signal,
+      (runner) => runner.send(7, "Input.dispatchMouseEvent", { type: "mousePressed" }),
+    );
+    if (allowed) {
+      expect(result).toEqual({});
+      expect(f.native).toHaveBeenCalledOnce();
+    } else {
+      expect(result).toMatchObject({
+        data: { reason: "cooperation_sync_required", effect_state: "none" },
+      });
+      expect(f.native).not.toHaveBeenCalled();
+    }
+  };
+
+  it.each([
+    ["class", "cell", "cell selected"],
+    ["class", "cell", "cell is-selected"],
+    ["data-selected", "false", "true"],
+    ["data-state", "unselected", "selected"],
+    ["aria-selected", "false", "true"],
+  ])("rejects selection changes in %s (%s to %s and back)", async (key, before, after) => {
+    await check({ [key]: before }, { [key]: after }, false);
+    await check({ [key]: after }, { [key]: before }, false);
+  });
+
+  it.each([
+    [{ class: "cell" }, { class: "cell hovered active" }],
+    [{ class: "cell selected" }, { class: "hovered is-selected cell" }],
+    [{ "data-selected": "true" }, { "data-state": "selected", class: "hovered" }],
+    [
+      { "aria-selected": "false", class: "selected" },
+      { "aria-selected": "false", "data-selected": "true", class: "hovered" },
+    ],
+  ])("allows unchanged selection evidence: %j to %j", async (before, after) => {
+    await check(before as Record<string, string>, after as Record<string, string>, true);
+  });
+});
+
 describe("looping preview action guards", () => {
   type PreviewNode = Pick<
     VomNode,
