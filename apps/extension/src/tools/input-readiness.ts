@@ -30,7 +30,7 @@ class InputPaintUnconfirmedError extends Error {
 }
 
 /** CDP commands cannot be cancelled; consume late replies without delaying cleanup. */
-function waitForInputReply<T>(
+export function waitForInputReply<T>(
   pending: Promise<T>,
   signal?: AbortSignal,
   timeout = 5000,

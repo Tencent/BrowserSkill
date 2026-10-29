@@ -317,4 +317,94 @@ describe("handleScrollTo", () => {
     expect(await f.run()).toHaveProperty("dialogs", dialogs);
     expect(f.cdp.dialogsSince).toHaveBeenCalledWith(4, 5);
   });
+  it("bounds an unresolved geometry reply and ignores its late result", async () => {
+    vi.useFakeTimers();
+    const f = await fixture();
+    let resolve: (value: object) => void = () => {};
+    const pending = new Promise<object>((done) => {
+      resolve = done;
+    });
+    f.hooks.reply = ({ method }) => (method === "DOM.resolveNode" ? pending : undefined);
+    let result: unknown;
+    const task = f.run({ ref: "@e3", timeout_ms: 50 }).then((value) => {
+      result = value;
+    });
+    try {
+      await vi.advanceTimersByTimeAsync(51);
+      expect(result).toMatchObject({ code: "timeout" });
+      const calls = f.calls.filter((call) => call.method !== "Runtime.releaseObjectGroup").length;
+      resolve({ object: { objectId: "late-node" } });
+      await task;
+      await vi.advanceTimersByTimeAsync(0);
+      expect(f.calls.filter((call) => call.method !== "Runtime.releaseObjectGroup")).toHaveLength(
+        calls,
+      );
+      expect(
+        f.calls.filter((call) => call.method === "Runtime.releaseObjectGroup").length,
+      ).toBeGreaterThanOrEqual(2);
+    } finally {
+      resolve({ object: { objectId: "late-node" } });
+      await task;
+      vi.useRealTimers();
+    }
+  });
+
+  it("cancels while a geometry reply is still pending", async () => {
+    vi.useFakeTimers();
+    const f = await fixture();
+    let resolve: (value: object) => void = () => {};
+    const pending = new Promise<object>((done) => {
+      resolve = done;
+    });
+    f.hooks.reply = ({ method }) => (method === "DOM.resolveNode" ? pending : undefined);
+    let result: unknown;
+    const task = f.run({ ref: "@e3" }).then((value) => {
+      result = value;
+    });
+    try {
+      await vi.advanceTimersByTimeAsync(1);
+      f.abort.abort();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(result).toMatchObject({ code: "cancelled" });
+    } finally {
+      resolve({ object: { objectId: "late-node" } });
+      await task;
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not wait for object cleanup replies", async () => {
+    vi.useFakeTimers();
+    const f = await fixture();
+    let resolve: (value: object) => void = () => {};
+    const pending = new Promise<object>((done) => {
+      resolve = done;
+    });
+    f.hooks.reply = ({ method }) => (method === "Runtime.releaseObjectGroup" ? pending : undefined);
+    let result: unknown;
+    const task = f.run({ ref: "@e3", timeout_ms: 50 }).then((value) => {
+      result = value;
+    });
+    try {
+      await vi.advanceTimersByTimeAsync(1);
+      expect(result).toHaveProperty("tab_id", 4);
+      expect(f.calls.some((call) => call.method === "Runtime.releaseObjectGroup")).toBe(true);
+    } finally {
+      resolve({});
+      await task;
+      vi.useRealTimers();
+    }
+  });
+
+  it("rejects a queued geometry dispatch after cancellation", async () => {
+    const f = await fixture();
+    f.cdp.sendGuarded = async (target, method, params, guard) => {
+      f.abort.abort();
+      guard.onDispatch?.();
+      return f.cdp.sendToTarget!(target, method, params);
+    };
+    expect(await f.run({ ref: "@e3" })).toMatchObject({ code: "cancelled" });
+    expect(f.calls.some((call) => call.method === "DOM.resolveNode")).toBe(false);
+    expect(f.calls.some((call) => call.method === "DOM.scrollIntoViewIfNeeded")).toBe(false);
+  });
 });
