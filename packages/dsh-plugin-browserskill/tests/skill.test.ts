@@ -47,7 +47,7 @@ describe("registerBskSkill", () => {
     expect(content).not.toMatch(/--[a-z]/);
     expect(content).toMatch(/All browser work\s+must use the injected tools directly/);
     expect(content).toContain("Mandatory workflow");
-    expect(content).toContain("Refs invalidate after navigation");
+    expect(content).toContain("DOM refs survive reads; navigation invalidates them");
     expect(content).toContain("Interaction recording is not exposed");
     // Keep the lazily injected instructions inside a bounded prompt budget,
     // while the lower bound catches accidental truncation of the guidance.
