@@ -54,6 +54,8 @@ export function validateWindowSize(
 
 export interface SessionStartParams {
   session_id: string;
+  /** Optional task name displayed in the Agent Window's tab group. */
+  task_name?: string;
   /** Opt in to Chrome's shared incognito browsing session. */
   incognito?: boolean;
   browser_instance_id?: string;
@@ -138,11 +140,15 @@ export async function handleSessionStart(
   if (params.incognito !== undefined && typeof params.incognito !== "boolean") {
     return { code: "invalid_params", message: "incognito must be a boolean" };
   }
+  if (params.task_name !== undefined && typeof params.task_name !== "string") {
+    return { code: "invalid_params", message: "task_name must be a string" };
+  }
   const sizeOrErr = validateWindowSize(params.width, params.height);
   if (isRpcError(sizeOrErr)) return sizeOrErr;
   try {
     await deps.preferences?.readyOrFallback();
     const ctx = await manager.start(params.session_id, {
+      taskName: params.task_name,
       incognito: params.incognito,
       size: sizeOrErr,
       focused: params.focused,

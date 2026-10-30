@@ -570,8 +570,10 @@ const SESSION_ID_MAX_RESERVE_ATTEMPTS: u32 = 64;
 /// Agent Window creation hints forwarded to the extension on
 /// `tool.session_start`. `None` fields keep the extension-side defaults
 /// (background window, browser-chosen size).
-#[derive(Debug, Default, Clone, Copy)]
+#[derive(Debug, Default, Clone)]
 pub struct AgentWindowOptions {
+    /// Optional task name for the Agent Window's tab group.
+    pub task_name: Option<String>,
     /// Opt in to Chrome's shared incognito browsing session.
     pub incognito: bool,
     /// Optional outer size as `(width, height)` CSS pixels.
@@ -685,6 +687,7 @@ pub(crate) async fn start_session_recoverable(
         sessions.starting.lock().unwrap().insert(session_id.clone());
     }
     let params = SessionStartParams {
+        task_name: window.task_name,
         incognito: window.incognito,
         session_id: session_id.0.clone(),
         browser_instance_id: Some(client.id.0.clone()),

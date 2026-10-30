@@ -148,10 +148,11 @@ export class AgentWindowTabGroups {
         return;
       }
     }
-    if (groupId !== undefined && (group?.title !== "BrowserSkill" || group.color !== "orange")) {
+    const title = task.taskName?.trim() || "BrowserSkill";
+    if (groupId !== undefined && (group?.title !== title || group.color !== "orange")) {
       // Do not continually expand the group after the user has collapsed it.
       await this.api.tabGroups.update(groupId, {
-        title: "BrowserSkill",
+        title,
         color: "orange",
         ...(!group ? { collapsed: false } : {}),
       });
