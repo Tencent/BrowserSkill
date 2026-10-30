@@ -19,7 +19,7 @@ vi.mock("./action-checks", async (original) => ({
   checkExpectations: vi.fn(async () => undefined),
 }));
 
-async function fixture() {
+async function fixture(policy: "strict" | "target" = "target") {
   let now = 10_000;
   let frame: FrameState = {
     document: "doc",
@@ -59,14 +59,15 @@ async function fixture() {
     changed: () => {},
     now: () => now,
   });
-  const signal = new AbortController().signal;
+  const abort = new AbortController();
+  const signal = abort.signal;
   const sync = (policy?: "auto" | "strict" | "target") =>
     controller.command(
       { session_id: "s", tab_id: 7, action: "sync", control_policy: policy },
       cdp,
       signal,
     ) as Promise<Record<string, any>>;
-  const first = await sync("target");
+  const first = await sync(policy);
   const run = (
     params: Record<string, unknown> = {},
     method = "tool.click",
@@ -106,6 +107,7 @@ async function fixture() {
     cdp,
     send,
     signal,
+    abort,
     readFrames,
     change(patch: Partial<FrameState>, notify = true) {
       frame = { ...frame, revision: frame.revision + 1, ...patch };
@@ -122,6 +124,162 @@ beforeEach(() => {
 });
 afterEach(() => {
   vi.unstubAllGlobals();
+});
+
+describe.each(["strict", "target"] as const)("completed action receipts (%s)", (policy) => {
+  it.each([
+    "click",
+    "press",
+    "evaluate",
+  ])("keeps a completed %s receipt after document replacement and revokes its old context", async (action) => {
+    const f = await fixture(policy);
+    const receipt = action === "evaluate" ? { ok: true, tab_id: 7, value: false } : { tab_id: 7 };
+    const result = await f.run(
+      { ref: "e1", observation_id: f.first.observation_id },
+      `tool.${action}`,
+      async (runner) => {
+        if (action === "evaluate") {
+          await runner.beginDomMutation?.();
+          await runner.send(7, "Runtime.evaluate", { expression: "replaceFrame(); false" });
+        } else if (action === "press") {
+          await runner.send(7, "Input.dispatchKeyEvent", { type: "keyDown", key: "Enter" });
+        } else {
+          await runner.send(7, "Input.dispatchMouseEvent", {
+            type: "mousePressed",
+            button: "left",
+          });
+        }
+        f.controller.invalidate(7);
+        f.change({ document: "next" }, false);
+        if (action === "press")
+          await runner.send(7, "Input.dispatchKeyEvent", { type: "keyUp", key: "Enter" });
+        if (action === "click")
+          await runner.send(7, "Input.dispatchMouseEvent", {
+            type: "mouseReleased",
+            button: "left",
+          });
+        return receipt;
+      },
+    );
+    expect(result).toEqual(receipt);
+    expect(await f.run()).toMatchObject({ code: "permission_denied" });
+    expect(f.send).toHaveBeenCalledTimes(action === "evaluate" ? 1 : 2);
+    const next = await f.sync();
+    expect(next.context_id).not.toBe(f.first.context_id);
+    expect(await f.run({ context_id: next.context_id })).toEqual({});
+  });
+
+  it.each([
+    "loading",
+    "empty",
+  ])("keeps a successful script receipt when its post-action collector is %s", async (coverage) => {
+    const f = await fixture(policy);
+    const receipt = { ok: true, tab_id: 7, value: "saved" };
+    expect(
+      await f.run({ observation_id: f.first.observation_id }, "tool.evaluate", async (runner) => {
+        await runner.send(7, "Runtime.evaluate", { expression: "save()" });
+        if (coverage === "loading")
+          f.readFrames.mockRejectedValueOnce(new Error("frame is loading"));
+        else f.readFrames.mockResolvedValueOnce(new Map());
+        return receipt;
+      }),
+    ).toEqual(receipt);
+    expect(f.controller.view(7)).toMatchObject({ mode: "unavailable" });
+    const oldScript = vi.fn(async () => ({ ok: true, tab_id: 7 }));
+    expect(
+      await f.run({ observation_id: f.first.observation_id }, "tool.evaluate", oldScript),
+    ).toMatchObject({ code: "permission_denied" });
+    expect(oldScript).not.toHaveBeenCalled();
+    expect(await f.run()).toMatchObject({ code: "permission_denied" });
+    expect(f.send).toHaveBeenCalledOnce();
+    const next = await f.sync();
+    expect(next.context_id).not.toBe(f.first.context_id);
+    if (policy === "target")
+      expect(
+        await f.run(
+          { context_id: next.context_id, observation_id: f.first.observation_id },
+          "tool.evaluate",
+          oldScript,
+        ),
+      ).toMatchObject({ data: { reason: "observation_required" } });
+    expect(oldScript).not.toHaveBeenCalled();
+    expect(await f.run({ context_id: next.context_id })).toEqual({});
+  });
+
+  it.each([
+    "human",
+    "hold",
+    "hold-resume",
+    "stop",
+    "cancel",
+  ])("keeps %s intervention authoritative after a script completes", async (intervention) => {
+    const f = await fixture(policy);
+    const result = await f.run(
+      { observation_id: f.first.observation_id },
+      "tool.evaluate",
+      async (runner) => {
+        await runner.send(7, "Runtime.evaluate", { expression: "save()" });
+        if (intervention === "human") {
+          // Polling can discover input after its short quiet window has elapsed.
+          // Its authority revision still revokes the completed action's decision.
+          f.change({ human: 1, lastInput: 0 }, false);
+        }
+        if (intervention === "hold" || intervention === "hold-resume") {
+          await f.controller.control(7, f.controller.view(7)!.revision, "hold");
+          if (intervention === "hold-resume")
+            await f.controller.control(7, f.controller.view(7)!.revision, "resume");
+          f.controller.invalidate(7);
+        }
+        if (intervention === "stop") f.controller.stopSession("s");
+        if (intervention === "cancel") f.abort.abort();
+        return { ok: true, tab_id: 7, value: "saved" };
+      },
+    );
+    expect(result).toMatchObject({
+      code:
+        intervention === "stop"
+          ? "user_aborted"
+          : intervention === "cancel"
+            ? "cancelled"
+            : "permission_denied",
+      data: { effect_state: "unknown" },
+    });
+    expect(await f.run()).toHaveProperty("code");
+    expect(f.send).toHaveBeenCalledOnce();
+  });
+
+  it("blocks additional input after a frame changes even if a handler swallows the error", async () => {
+    const f = await fixture(policy);
+    expect(
+      await f.run({}, "tool.click", async (runner) => {
+        await runner.send(7, "Input.dispatchMouseEvent", { type: "mousePressed", button: "left" });
+        f.controller.invalidate(7);
+        await expect(runner.send(7, "Input.insertText", { text: "stale" })).rejects.toThrow();
+        return { tab_id: 7 };
+      }),
+    ).toMatchObject({ code: "permission_denied", data: { effect_state: "unknown" } });
+    expect(f.send).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    ["timeout", { code: "timeout", message: "script did not complete" }],
+    [
+      "exception",
+      { ok: false, tab_id: 7, error: { text: "script threw after changing the frame" } },
+    ],
+  ])("keeps a script %s during document replacement uncertain", async (_failure, receipt) => {
+    const f = await fixture(policy);
+    expect(
+      await f.run({ observation_id: f.first.observation_id }, "tool.evaluate", async (runner) => {
+        await runner.send(7, "Runtime.evaluate", { expression: "save()" });
+        f.controller.invalidate(7);
+        f.change({ document: "next" }, false);
+        return receipt;
+      }),
+    ).toMatchObject({ code: "permission_denied", data: { effect_state: "unknown" } });
+    expect(await f.run()).toHaveProperty("code");
+    expect(f.send).toHaveBeenCalledOnce();
+  });
 });
 
 describe("negotiated target control", () => {

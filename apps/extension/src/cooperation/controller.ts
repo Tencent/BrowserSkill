@@ -1119,6 +1119,7 @@ export class CooperationController implements ControlAuthority {
     let nativeInputStarted = false;
     const context = targetPolicy && !targeted ? state.baseline : state.context;
     const epoch = state.epoch;
+    const authorityRevision = state.authorityRevision;
     let verifiedFrames = context?.frames;
     let evidenceTargets: { backendNodeId: number; frameId?: string }[] | undefined;
     let actionTarget: ResolvedActionTarget | undefined;
@@ -1164,12 +1165,13 @@ export class CooperationController implements ControlAuthority {
     state.completion = completion;
     const completionSignal = AbortSignal.any([signal, completion.signal]);
     const operationSignal = AbortSignal.any([completionSignal, intervention.signal]);
-    const interruption = (settledNavigation = false): string | undefined => {
+    const interruption = (completed = false): string | undefined => {
       if (finished) return "The action has already settled";
       if (intervention.signal.aborted) return String(intervention.signal.reason.message);
       const denied = this.controlError(session, state);
       if (denied) return denied.message;
-      if (!settledNavigation && state.unavailable)
+      if (state.authorityRevision !== authorityRevision) return "User activity revoked this action";
+      if (!completed && state.unavailable)
         return "Page interaction coverage changed; wait and synchronize";
       if (
         req.method === "tool.press" &&
@@ -1181,14 +1183,14 @@ export class CooperationController implements ControlAuthority {
       )
         return "The keyboard focus changed; synchronize before pressing a key";
       if (
-        !settledNavigation &&
+        !completed &&
         !targeted &&
         !nativeInputStarted &&
         context &&
         !sameMedia(context.frames, state.frames)
       )
         return "The media source changed; synchronize and replan";
-      if (!settledNavigation && state.epoch !== epoch)
+      if (!completed && state.epoch !== epoch)
         return "The observed page or control state changed; synchronize";
     };
     const assert = () => {
@@ -1536,6 +1538,23 @@ export class CooperationController implements ControlAuthority {
       // orphan the file. The consumed context still requires a fresh next step.
       if (["tool.tab_close", "tool.download"].includes(req.method) && !isRpcError(result))
         return result;
+      // A handler receipt describes completed input, independently of whether its
+      // document can authorize the next action. evaluate reports script exceptions
+      // in-band; a successfully evaluated false value is still a completed script.
+      const completed =
+        sent &&
+        !isRpcError(result) &&
+        (req.method !== "tool.evaluate" || (result as { ok?: boolean })?.ok === true);
+      if (["tool.evaluate", "tool.upload"].includes(req.method)) {
+        try {
+          await this.refresh(state);
+        } catch (error) {
+          if (!completed) throw error;
+          // A new frame may not yet expose its collector. Retain the completed
+          // receipt, but require a fresh sync before any further page action.
+          this.invalidate(state.tabId);
+        }
+      }
       // Even a successful CDP reply does not authorize a stale next step.
       if (state.stopped) return stopped(sent ? "unknown" : "none");
       if (signal.aborted) {
@@ -1546,17 +1565,7 @@ export class CooperationController implements ControlAuthority {
           data: { effect_state: sent ? "unknown" : "none" },
         };
       }
-      if (["tool.evaluate", "tool.upload"].includes(req.method)) await this.refresh(state);
-      // Navigation replaces its observed document. Return the handler's completed
-      // receipt without restoring that context or allowing any further input.
-      // Human intervention, cancellation and failed dispatch still take priority.
-      const settledNavigation =
-        sent &&
-        !isRpcError(result) &&
-        ["tool.navigate", "tool.navigate_back", "tool.navigate_forward", "tool.reload"].includes(
-          req.method,
-        );
-      const reason = revoked ?? interruption(settledNavigation);
+      const reason = revoked ?? interruption(completed);
       if (checkFailure || reason)
         return reportFailure(checkFailure?.message ?? reason!, sent ? "unknown" : "none");
       if (targetPolicy && isRpcError(result)) {

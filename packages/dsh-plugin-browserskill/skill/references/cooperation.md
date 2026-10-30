@@ -72,6 +72,10 @@ checking page records for an existing submission before retrying. Tools never re
 because a new context or observation is available.
 Sensitive input values are redacted in mismatch diagnostics, including the expected value.
 
+A completed tool result survives ordinary page/frame changes. If the action navigated or replaced
+frames, sync before the next action because the old context is revoked. Completion confirms the
+tool operation; verify business success from the application before deciding what to do next.
+
 After hand-back, skip completed steps, incorporate helpful progress and correct recoverable mistakes.
 Missing history does not block progress when application state proves the result. Request help
 only for an actual human requirement; never repeat completed help because an old action was revoked.

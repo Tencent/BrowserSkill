@@ -8,6 +8,7 @@ import { createServer } from "node:http";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { CdpFrame, CdpFrameGraph } from "@/browser-driver/frame-graph";
 import { SessionManager } from "@/session-manager/manager";
+import { handleEvaluate } from "@/tools/evaluate";
 import { handleClick, handleFill, handlePress } from "@/tools/interaction";
 import { handleObserve, handleScreenshot, handleSnapshot } from "@/tools/observation";
 import type { CdpRunner } from "@/tools/shared";
@@ -29,8 +30,11 @@ const collector = `<script>
     subtree: true, childList: true, attributes: true, characterData: true });
   window.clicks = [];
   window.keys = [];
+  window.releases = [];
   addEventListener("click", (e) => clicks.push(e.target.id + ":" + e.isTrusted), true);
   addEventListener("keydown", (e) => keys.push(e.key + ":" + e.isTrusted), true);
+  addEventListener("mouseup", (e) => releases.push("mouse:" + e.isTrusted), true);
+  addEventListener("keyup", (e) => releases.push(e.key + ":" + e.isTrusted), true);
 </script>`;
 
 const pages: Record<string, string> = {
@@ -69,6 +73,11 @@ const pages: Record<string, string> = {
     </form></main>`,
   redirect: `<label>Requested <input id="requested" onfocus="document.querySelector('#other').focus()"></label>
     <label>Other <input id="other"></label>`,
+  "frame-navigation": `<button id="open" onclick="document.querySelector('iframe').src='/frame-next'">Open detail</button>
+    <form action="/frame-next" target="detail"><label>Query <input id="query" name="query"></label></form>
+    <iframe name="detail" src="/frame-initial"></iframe>`,
+  "frame-initial": "<p>Initial detail</p>",
+  "frame-next": "<p>Saved detail</p>",
   canvas: `<canvas id="canvas" width="200" height="100"></canvas>
     <script>const context = document.querySelector('canvas').getContext('2d');
       context.fillStyle = 'blue'; context.fillRect(0, 0, 200, 100);</script>`,
@@ -90,10 +99,10 @@ async function withCooperation(
     captures(): { dom: number; accessibility: number };
     read<T>(expression: string): Promise<T>;
   }) => Promise<void>,
-  options: { policy?: "target" } = {},
+  options: { policy?: "strict" | "target" } = {},
 ) {
   const server = createServer((request, response) => {
-    const name = decodeURIComponent((request.url ?? "/").slice(1));
+    const name = decodeURIComponent((request.url ?? "/").slice(1).split("?")[0]);
     response.setHeader("Content-Type", "text/html");
     response.end(`<!doctype html><title>${name}</title><body>${pages[name] ?? ""}${collector}`);
   });
@@ -105,9 +114,18 @@ async function withCooperation(
       import.meta.url,
     ).href
   );
+  let onNavigation: ((sessionId: string) => void) | undefined;
   try {
     await withChrome(
-      { executable: process.env.BSK_CLICK_CHROME, deviceScale: 1, zoom: 1, startupTimeout: 30_000 },
+      {
+        executable: process.env.BSK_CLICK_CHROME,
+        deviceScale: 1,
+        zoom: 1,
+        startupTimeout: 30_000,
+        onEvent: (event: { method: string; sessionId: string }) => {
+          if (event.method === "Page.frameNavigated") onNavigation?.(event.sessionId);
+        },
+      },
       async (send: Send) => {
         const { targetId } = await send<{ targetId: string }>("Target.createTarget", {
           url: "about:blank",
@@ -128,11 +146,18 @@ async function withCooperation(
         await local("Page.enable");
         await local("Page.bringToFront");
         const graph = async (): Promise<CdpFrameGraph> => {
-          const { frameTree } = await local<{ frameTree: { frame: { id: string } } }>(
-            "Page.getFrameTree",
-          );
-          const root: CdpFrame = { frameId: frameTree.frame.id, target: { tabId: 4 } };
-          return { rootFrameId: frameTree.frame.id, frames: [root] };
+          interface Tree {
+            frame: { id: string };
+            childFrames?: Tree[];
+          }
+          const { frameTree } = await local<{ frameTree: Tree }>("Page.getFrameTree");
+          const frames: CdpFrame[] = [];
+          const visit = (tree: Tree, parentFrameId?: string) => {
+            frames.push({ frameId: tree.frame.id, parentFrameId, target: { tabId: 4 } });
+            for (const child of tree.childFrames ?? []) visit(child, tree.frame.id);
+          };
+          visit(frameTree);
+          return { rootFrameId: frameTree.frame.id, frames };
         };
         const captures = { dom: 0, accessibility: 0 };
         const instrumented: Send = (method, params) => {
@@ -157,27 +182,37 @@ async function withCooperation(
         const tab = { id: 4, windowId: 100, active: true, url: origin } as chrome.tabs.Tab;
         const tabsApi = { get: async () => tab, query: async () => [tab] };
         vi.stubGlobal("chrome", { tabs: tabsApi });
-        const frame = async (): Promise<FrameState> => {
-          const state = await evaluate<{ document: string; revision: number }>("window.coop");
-          return {
-            document: state.document,
-            revision: state.revision,
-            structure: state.revision,
-            human: 0,
-            busy: false,
-            editing: false,
-            lastInput: 0,
-            fields: [],
-            fieldsComplete: true,
-            events: [],
-          };
-        };
+        const frameState = (state: { document: string; revision: number }): FrameState => ({
+          document: state.document,
+          revision: state.revision,
+          structure: state.revision,
+          human: 0,
+          busy: false,
+          editing: false,
+          lastInput: 0,
+          fields: [],
+          fieldsComplete: true,
+          events: [],
+        });
+        const frame = async () =>
+          frameState(await evaluate<{ document: string; revision: number }>("window.coop"));
         const controller = new CooperationController({
           sessions,
-          readFrames: async () => new Map([[0, await frame()]]),
+          readFrames: async () => {
+            const states = await evaluate<Array<{ document: string; revision: number }>>(
+              "[window, ...Array.from(document.querySelectorAll('iframe'), f => f.contentWindow)].map(w => w.coop)",
+            );
+            return new Map(states.map((state, id) => [id, frameState(state)]));
+          },
           resumeFrames: async () => {},
           changed: () => {},
         });
+        onNavigation = (eventSession) => {
+          if (eventSession === sessionId) {
+            sessions.invalidateTabRefs(4);
+            controller.invalidate(4);
+          }
+        };
         const signal = new AbortController().signal;
         await controller.run(
           { id: "start", method: "tool.session_start", params: { session_id: "shared" } },
@@ -189,6 +224,7 @@ async function withCooperation(
           "tool.click": handleClick,
           "tool.press": handlePress as never,
           "tool.fill": handleFill as never,
+          "tool.evaluate": handleEvaluate as never,
         };
         const act = (method: string, params: object) => {
           const request: RequestFrame = {
@@ -212,7 +248,11 @@ async function withCooperation(
             await local("Page.navigate", { url: tab.url });
             await expect
               .poll(() =>
-                evaluate("document.title === " + JSON.stringify(name) + " && !!window.coop"),
+                evaluate(
+                  "document.title === " +
+                    JSON.stringify(name) +
+                    " && !!window.coop && Array.from(document.querySelectorAll('iframe')).every(f => !!f.contentWindow.coop)",
+                ),
               )
               .toBe(true);
           },
@@ -302,6 +342,71 @@ async function withCooperation(
 const learned = expect.stringContaining("changed by itself");
 const changed = "The action's observed content changed; synchronize and replan";
 const refused = { data: { reason: "cooperation_sync_required", effect_state: "none" } };
+
+describe.skipIf(!process.env.BSK_CLICK_CHROME)("completed input during frame navigation", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  describe.each(["strict", "target"] as const)("%s policy", (policy) => {
+    it.each([
+      "click",
+      "press",
+      "evaluate",
+    ])("retains a completed %s receipt and rejects its old context", async (action) => {
+      await withCooperation(
+        async (page) => {
+          await page.open("frame-navigation");
+          const synced = await page.sync();
+          expect(synced.context_id, JSON.stringify(synced)).toEqual(expect.any(String));
+          const params = {
+            context_id: synced.context_id,
+            ...(policy === "target" ? { observation_id: synced.observation_id } : {}),
+          };
+          const result = await page.act(`tool.${action}`, {
+            ...params,
+            ...(action === "click"
+              ? { selector: "#open" }
+              : action === "press"
+                ? { selector: "#query", key: "Enter" }
+                : {
+                    expression: `(async () => {
+              const frame = document.querySelector('iframe');
+              await new Promise(resolve => { frame.onload = resolve; frame.src = '/frame-next'; });
+              return false;
+            })()`,
+                  }),
+          });
+          if (action === "evaluate") expect(result).toMatchObject({ ok: true, value: false });
+          else if (action === "press")
+            expect(result).toMatchObject({ tab_id: 4, key: "Enter", code: "Enter" });
+          else
+            expect(result).toMatchObject({
+              tab_id: 4,
+              x: expect.any(Number),
+              y: expect.any(Number),
+            });
+          await expect
+            .poll(() => page.read("document.querySelector('iframe').contentDocument.title"))
+            .toBe("frame-next");
+          expect(
+            await page.read("document.querySelector('iframe').contentDocument.body.textContent"),
+          ).toContain("Saved detail");
+          if (action !== "evaluate")
+            expect(await page.read("window.releases")).toContain(
+              action === "press" ? "Enter:true" : "mouse:true",
+            );
+          const inputs = await page.inputs();
+          expect(await page.click(synced.context_id, "#open")).toMatchObject({
+            code: "permission_denied",
+          });
+          expect(await page.inputs()).toEqual(inputs);
+          const next = await page.sync();
+          expect(next.context_id).not.toBe(synced.context_id);
+        },
+        { policy },
+      );
+    }, 120_000);
+  });
+});
 
 describe.skipIf(!process.env.BSK_CLICK_CHROME)("shared control with self-updating text", () => {
   afterEach(() => {
@@ -471,6 +576,35 @@ describe.skipIf(!process.env.BSK_CLICK_CHROME)("target policy in a real browser"
   afterEach(() => {
     vi.unstubAllGlobals();
   });
+
+  it("compares both policies when a counter changes inside the target's form", async () => {
+    for (const policy of ["strict", "target"] as const) {
+      await withCooperation(
+        async (page) => {
+          await page.open("live");
+          let synced = await page.sync();
+          const before = page.captures();
+          for (let tick = 1; tick <= 4; tick++) {
+            if (policy === "strict" && tick > 1) synced = await page.sync();
+            await page.set("#clock", `Tick ${tick}`);
+            const result = await page.click(synced.context_id, "#pay");
+            if (policy === "strict") expect(result).toMatchObject(refused);
+            else expect(result, JSON.stringify(result)).not.toHaveProperty("code");
+          }
+          const after = page.captures();
+          expect((await page.inputs()).clicks).toEqual(
+            policy === "target" ? Array(4).fill("pay:true") : [],
+          );
+          if (policy === "target") expect(after).toEqual(before);
+          else {
+            expect(after.dom).toBeGreaterThan(before.dom);
+            expect(after.accessibility).toBeGreaterThan(before.accessibility);
+          }
+        },
+        { policy },
+      );
+    }
+  }, 120_000);
 
   it("reuses one context beside a continuously changing clock without capturing the page again", async () => {
     await withCooperation(

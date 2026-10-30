@@ -113,6 +113,10 @@ Conditions are browser-side preconditions, not an atomic transaction with the ap
 Action failures preserve `reason`, `phase`, `effect_state` and recovery guidance; failed conditions
 include target, field, expected and actual values. Unknown outcomes require application reconciliation.
 The daemon and plugin never replace caller receipts or automatically replay a business action.
+Completed tool results survive ordinary page/frame changes and unavailable post-action collection.
+Document or coverage changes still revoke the old context; subsequent actions require a fresh sync.
+In-flight input guards, human intervention, stop and cancellation remain enforced. A completed
+tool result does not by itself prove that the application committed a business transaction.
 See [shared browser control](shared-browser-control.zh-CN.md) for lifecycle details and regressions.
 
 ## Typical tool call
