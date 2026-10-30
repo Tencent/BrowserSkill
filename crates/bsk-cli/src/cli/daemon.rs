@@ -85,11 +85,11 @@ pub struct StartArgs {
     #[arg(long)]
     pub foreground: bool,
 
-    /// Session idle timeout, e.g. `5m`, `30s`. Default 5 minutes.
+    /// Session idle timeout, e.g. `5m`, `30s`. Default 5 minutes. Configurable via `BSK_SESSION_IDLE`.
     #[arg(long, value_name = "DURATION", value_parser = parse_duration)]
     pub session_idle: Option<Duration>,
 
-    /// Daemon idle timeout, e.g. `10m`, `2s`. Default 10 minutes.
+    /// Daemon idle timeout, e.g. `10m`, `2s`. Default 10 minutes. Configurable via `BSK_DAEMON_IDLE`.
     #[arg(long, value_name = "DURATION", value_parser = parse_duration)]
     pub daemon_idle: Option<Duration>,
 }
@@ -138,11 +138,23 @@ impl StartArgs {
     }
 
     pub fn resolved_session_idle(&self) -> Duration {
-        self.session_idle.unwrap_or(DEFAULT_SESSION_IDLE)
+        self.session_idle
+            .or_else(|| {
+                std::env::var("BSK_SESSION_IDLE")
+                    .ok()
+                    .and_then(|v| parse_duration(&v).ok())
+            })
+            .unwrap_or(DEFAULT_SESSION_IDLE)
     }
 
     pub fn resolved_daemon_idle(&self) -> Duration {
-        self.daemon_idle.unwrap_or(DEFAULT_DAEMON_IDLE)
+        self.daemon_idle
+            .or_else(|| {
+                std::env::var("BSK_DAEMON_IDLE")
+                    .ok()
+                    .and_then(|v| parse_duration(&v).ok())
+            })
+            .unwrap_or(DEFAULT_DAEMON_IDLE)
     }
 }
 

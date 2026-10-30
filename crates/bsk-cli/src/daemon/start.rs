@@ -21,7 +21,7 @@ use anyhow::{Context, Result};
 use bsk_protocol::StatusResult;
 use tracing::{debug, error, info, warn};
 
-use crate::cli::daemon::StartArgs;
+use crate::cli::daemon::{StartArgs, parse_duration};
 use crate::cli::ensure_daemon::SPAWN_DEADLINE;
 use crate::cli::update::state::UpdateRecord;
 use crate::daemon::{
@@ -137,7 +137,23 @@ impl From<&StartArgs> for DaemonConfig {
 }
 
 /// `bsk daemon start` entrypoint.
-pub fn run_start(args: StartArgs) -> Result<()> {
+pub fn run_start(mut args: StartArgs) -> Result<()> {
+    if args.session_idle.is_none() {
+        if let Ok(val) = std::env::var("BSK_SESSION_IDLE") {
+            args.session_idle = Some(
+                parse_duration(&val)
+                    .map_err(|e| anyhow::anyhow!("invalid BSK_SESSION_IDLE: {e}"))?,
+            );
+        }
+    }
+    if args.daemon_idle.is_none() {
+        if let Ok(val) = std::env::var("BSK_DAEMON_IDLE") {
+            args.daemon_idle = Some(
+                parse_duration(&val)
+                    .map_err(|e| anyhow::anyhow!("invalid BSK_DAEMON_IDLE: {e}"))?,
+            );
+        }
+    }
     let mut cfg = DaemonConfig::from(&args);
     cfg.server = args.server_config()?;
 
