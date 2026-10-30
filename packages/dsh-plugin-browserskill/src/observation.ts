@@ -352,6 +352,7 @@ export class ObservationService {
     for (const sessionId of [...this.captureTimers.keys()]) this.cancelCapture(sessionId);
     this.captureTimers.clear();
     this.captureInFlight.clear();
+    this.activeCaptures.clear();
     this.capturePreempted.clear();
     this.foregroundDepth.clear();
     this.captureFailures.clear();

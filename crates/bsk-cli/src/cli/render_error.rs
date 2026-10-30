@@ -576,6 +576,13 @@ pub fn info_for_error(code: ErrorCode, data: Option<&serde_json::Value>) -> Rend
             ),
             exit_code: 4,
         },
+        (ErrorCode::Timeout, reason::SCREENSHOT_CAPTURE_FAILED) => RenderInfo {
+            summary: "viewport screenshot timed out",
+            hint: Some(
+                "check that the tab is responsive before capturing again; if capture keeps timing out, reload the tab or restart the browser",
+            ),
+            exit_code: base.exit_code,
+        },
         (ErrorCode::CdpFailed, reason::SCREENSHOT_CAPTURE_FAILED) => RenderInfo {
             summary: "the browser could not capture the tab image",
             hint: Some(
@@ -853,6 +860,20 @@ mod tests {
         );
         // Still the browser/CDP failure bucket.
         assert_eq!(info.exit_code, 3);
+    }
+
+    #[test]
+    fn screenshot_capture_timeout_has_specific_guidance_and_timeout_exit_code() {
+        let data = serde_json::json!({ "reason": reason::SCREENSHOT_CAPTURE_FAILED });
+        let info = info_for_error(ErrorCode::Timeout, Some(&data));
+        assert_eq!(info.summary, "viewport screenshot timed out");
+        assert_eq!(
+            info.hint,
+            Some(
+                "check that the tab is responsive before capturing again; if capture keeps timing out, reload the tab or restart the browser"
+            )
+        );
+        assert_eq!(info.exit_code, 4);
     }
 
     #[test]

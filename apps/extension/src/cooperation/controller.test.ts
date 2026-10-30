@@ -1203,6 +1203,25 @@ describe("shared-tab dispatch fences", () => {
     });
     expect(f.native).toHaveBeenCalledTimes(intervention === "failed-release" ? 1 : 2);
   });
+  it("preserves a completed Enter submission after its document is replaced", async () => {
+    const f = await fixture();
+    const receipt = { tab_id: 7, key: "Enter", code: "Enter", modifiers: [] };
+    const result = await f.act(
+      f.first.context_id,
+      async (runner) => {
+        await runner.send(7, "Input.dispatchKeyEvent", { type: "rawKeyDown", key: "Enter" });
+        await runner.send(7, "Input.dispatchKeyEvent", { type: "char", key: "Enter", text: "\r" });
+        f.controller.invalidate(7);
+        await runner.send(7, "Input.dispatchKeyEvent", { type: "keyUp", key: "Enter" });
+        return receipt;
+      },
+      "tool.press",
+    );
+    expect(result).toEqual(receipt);
+    expect(await f.act()).toMatchObject({ code: "permission_denied" });
+    const fresh = await f.command("sync");
+    expect(await f.act(fresh.context_id)).toEqual({});
+  });
   it("still blocks input after a navigation invalidates the action's document", async () => {
     const f = await fixture();
     const result = await f.act(

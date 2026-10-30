@@ -18,9 +18,11 @@ import { KeyedExecutor } from "../src/queue";
 import { createBskRunner } from "../src/runner";
 import { SessionRegistry } from "../src/sessions";
 
-it.skipIf(!process.env.BSK_COOP_CHROME || !process.env.BSK_COOP_BSK)(
-  "settles cancelled thumbnails before sync and preserves navigating click receipts",
-  async () => {
+it
+  .skipIf(!process.env.BSK_COOP_CHROME || !process.env.BSK_COOP_BSK)
+  .each(["click", "press"] as const)(
+  "settles cancelled thumbnails before sync and preserves navigating %s receipts",
+  async (action) => {
     // Keep the daemon's Unix socket path below macOS's length limit.
     const directory = await mkdtemp(path.join(tmpdir(), "bsk-coop-"));
     const executable = path.resolve(process.env.BSK_COOP_BSK!);
@@ -37,11 +39,13 @@ it.skipIf(!process.env.BSK_COOP_CHROME || !process.env.BSK_COOP_BSK)(
     let arrivals = 0;
     const server = createServer((request, response) => {
       response.setHeader("Content-Type", "text/html");
-      if (request.url === "/done") {
+      if (request.url?.startsWith("/done")) {
         arrivals++;
         response.end("<!doctype html><h1>Navigation completed</h1>");
       } else {
-        response.end('<!doctype html><h1>Settlement regression</h1><a href="/done">Continue</a>');
+        response.end(
+          '<!doctype html><h1>Settlement regression</h1><a href="/done">Continue</a><form action="/done"><input aria-label="Search" name="q" value="test"><button>Submit</button></form>',
+        );
       }
     });
     const cli = async (...args: string[]) => {
@@ -164,6 +168,12 @@ it.skipIf(!process.env.BSK_COOP_CHROME || !process.env.BSK_COOP_BSK)(
             const original = chrome.debugger.sendCommand.bind(chrome.debugger);
             globalThis.holdNextShot = true;
             chrome.debugger.sendCommand = (target, method, params) => {
+              // Let navigation commit before returning the successful key release.
+              if (method === 'Input.dispatchKeyEvent' && params.type === 'keyUp' && params.key === 'Enter')
+                return original(target, method, params).then(async result => {
+                  await new Promise(resolve => setTimeout(resolve, 100));
+                  return result;
+                });
               if (method !== 'Page.captureScreenshot' || !globalThis.holdNextShot) return original(target, method, params);
               globalThis.holdNextShot = false;
               return new Promise(resolve => { globalThis.finishHeldShot = () => resolve({data: ''}); });
@@ -189,21 +199,22 @@ it.skipIf(!process.env.BSK_COOP_CHROME || !process.env.BSK_COOP_BSK)(
             expect(fresh.kind).toBe("unchanged");
             const ref = synced.observation.text.match(/(@e\d+) link "Continue"/)?.[1];
             expect(ref).toBeDefined();
-            const click = await call("bsk_interact", {
-              action: "click",
+            const input = action === "click" ? { target: ref } : { target: "input", key: "Enter" };
+            const receipt = await call("bsk_interact", {
+              action,
               session,
-              target: ref,
+              ...input,
               contextId: fresh.context_id,
             });
-            expect(click.tabId).toEqual(expect.any(Number));
+            expect(receipt.tabId).toEqual(expect.any(Number));
             const destination = await call("bsk_session", { action: "sync", session });
             expect(destination.observation.text).toContain("Navigation completed");
             expect(arrivals).toBe(1);
             await expect(
               call("bsk_interact", {
-                action: "click",
+                action,
                 session,
-                target: ref,
+                ...input,
                 contextId: fresh.context_id,
               }),
             ).rejects.toThrow();
