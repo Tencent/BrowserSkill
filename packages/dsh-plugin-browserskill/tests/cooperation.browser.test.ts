@@ -20,7 +20,7 @@ import { SessionRegistry } from "../src/sessions";
 
 it
   .skipIf(!process.env.BSK_COOP_CHROME || !process.env.BSK_COOP_BSK)
-  .each(["click", "press"] as const)(
+  .each(["click", "press", "drag", "fill", "select"] as const)(
   "settles cancelled thumbnails before sync and preserves navigating %s receipts",
   async (action) => {
     // Keep the daemon's Unix socket path below macOS's length limit.
@@ -43,9 +43,15 @@ it
         arrivals++;
         response.end("<!doctype html><h1>Navigation completed</h1>");
       } else {
-        response.end(
-          '<!doctype html><h1>Settlement regression</h1><a href="/done">Continue</a><form action="/done"><input aria-label="Search" name="q" value="test"><button>Submit</button></form>',
-        );
+        response.end(`<!doctype html><h1>Settlement regression</h1><a href="/done">Continue</a>
+          <form id="form" action="/done">
+            <input aria-label="Search" name="q" value="test" onchange="if(this.value==='submitted')setTimeout(()=>this.form.requestSubmit(),100)">
+            <select aria-label="Category" name="category" onchange="this.form.requestSubmit()"><option value="a">A</option><option value="b">B</option></select>
+            <button>Submit</button>
+          </form>
+          <div id="drag" role="button" style="width:240px;height:60px;user-select:none"
+            onpointerdown="this.startX=event.clientX;this.setPointerCapture(event.pointerId)"
+            onpointerup="if(event.clientX-this.startX>20)document.querySelector('form').requestSubmit()">Drag to submit</div>`);
       }
     });
     const cli = async (...args: string[]) => {
@@ -166,17 +172,28 @@ it
             // dispatcher, daemon cancellation and plugin scheduler remain real.
             await evaluate(`(() => {
             const original = chrome.debugger.sendCommand.bind(chrome.debugger);
+            const committed = new Promise(resolve => {
+              const onCommitted = details => {
+                if (details.frameId !== 0 || new URL(details.url).pathname !== '/done') return;
+                chrome.webNavigation.onCommitted.removeListener(onCommitted);
+                resolve();
+              };
+              chrome.webNavigation.onCommitted.addListener(onCommitted);
+            });
             globalThis.holdNextShot = true;
-            chrome.debugger.sendCommand = (target, method, params) => {
-              // Let navigation commit before returning the successful key release.
-              if (method === 'Input.dispatchKeyEvent' && params.type === 'keyUp' && params.key === 'Enter')
-                return original(target, method, params).then(async result => {
-                  await new Promise(resolve => setTimeout(resolve, 100));
-                  return result;
-                });
-              if (method !== 'Page.captureScreenshot' || !globalThis.holdNextShot) return original(target, method, params);
-              globalThis.holdNextShot = false;
-              return new Promise(resolve => { globalThis.finishHeldShot = () => resolve({data: ''}); });
+            chrome.debugger.sendCommand = async (target, method, params) => {
+              if (method === 'Page.captureScreenshot' && globalThis.holdNextShot) {
+                globalThis.holdNextShot = false;
+                return new Promise(resolve => { globalThis.finishHeldShot = () => resolve({data: ''}); });
+              }
+              const result = await original(target, method, params);
+              const value = result?.result?.value;
+              // Hold only a completed input/verification reply until navigation commits.
+              if ((method === 'Input.dispatchKeyEvent' && params.type === 'keyUp' && params.key === 'Enter') ||
+                  (method === 'Input.dispatchMouseEvent' && params.type === 'mouseReleased') ||
+                  (method === 'Runtime.callFunctionOn' && (value?.selected_values || value?.connected && value?.matches)))
+                await committed;
+              return result;
             };
           })()`);
             unsubscribe = observation.subscribe(() => {});
@@ -199,14 +216,20 @@ it
             expect(fresh.kind).toBe("unchanged");
             const ref = synced.observation.text.match(/(@e\d+) link "Continue"/)?.[1];
             expect(ref).toBeDefined();
-            const input = action === "click" ? { target: ref } : { target: "input", key: "Enter" };
+            const input = {
+              click: { target: ref },
+              press: { target: "input", key: "Enter" },
+              drag: { target: "#drag", deltaX: 80, durationMs: 50 },
+              fill: { target: "input", value: "submitted" },
+              select: { target: "select", values: ["b"] },
+            }[action];
             const receipt = await call("bsk_interact", {
               action,
               session,
               ...input,
               contextId: fresh.context_id,
             });
-            expect(receipt.tabId).toEqual(expect.any(Number));
+            expect(action === "drag" ? receipt.tab_id : receipt.tabId).toEqual(expect.any(Number));
             const destination = await call("bsk_session", { action: "sync", session });
             expect(destination.observation.text).toContain("Navigation completed");
             expect(arrivals).toBe(1);

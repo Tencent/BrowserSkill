@@ -1321,7 +1321,7 @@ export class CooperationController implements ControlAuthority {
           data: { effect_state: sent ? "unknown" : "none" },
         };
       if (["tool.evaluate", "tool.upload"].includes(req.method)) await this.refresh(state);
-      // Navigation, including a completed click or key press, can replace the observed
+      // A completed navigation or input can replace the observed
       // document. Preserve the handler's receipt without authorizing further input.
       // Human intervention, cancellation and failed dispatch still take priority.
       const settledNavigation =
@@ -1330,7 +1330,7 @@ export class CooperationController implements ControlAuthority {
         (["tool.navigate", "tool.navigate_back", "tool.navigate_forward", "tool.reload"].includes(
           req.method,
         ) ||
-          (["tool.click", "tool.press"].includes(req.method) && nativeInputStarted));
+          nativeInputStarted);
       const reason = revoked ?? interruption(settledNavigation);
       if (reason) return failure(reason, sent ? "unknown" : "none");
       return result;

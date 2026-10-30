@@ -1222,6 +1222,45 @@ describe("shared-tab dispatch fences", () => {
     const fresh = await f.command("sync");
     expect(await f.act(fresh.context_id)).toEqual({});
   });
+  it.each([
+    "tool.drag",
+    "tool.select",
+  ])("preserves completed %s receipts after navigation", async (method) => {
+    const f = await fixture();
+    const receipt = { tab_id: 7 };
+    const result = await f.act(
+      f.first.context_id,
+      async (runner) => {
+        if (method === "tool.drag") {
+          await runner.send(7, "Input.dispatchMouseEvent", {
+            type: "mousePressed",
+            button: "left",
+            x: 4,
+            y: 5,
+          });
+          await runner.send(7, "Input.dispatchMouseEvent", {
+            type: "mouseReleased",
+            button: "left",
+            x: 10,
+            y: 5,
+          });
+        } else {
+          await runner.beginDomMutation?.();
+          await runner.send(7, "Runtime.callFunctionOn", {
+            objectId: "select",
+            functionDeclaration: "function() { this.dispatchEvent(new Event('change')); }",
+          });
+        }
+        f.controller.invalidate(7);
+        return receipt;
+      },
+      method,
+    );
+    expect(result).toEqual(receipt);
+    expect(await f.act()).toMatchObject({ code: "permission_denied" });
+    const fresh = await f.command("sync");
+    expect(await f.act(fresh.context_id)).toEqual({});
+  });
   it("still blocks input after a navigation invalidates the action's document", async () => {
     const f = await fixture();
     const result = await f.act(

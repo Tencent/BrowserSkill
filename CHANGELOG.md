@@ -13,9 +13,11 @@ Starting from 0.2.0, CLI / Extension / DSH Plugin share the same version number.
   settle. Viewport capture reads have a 10-second deadline with separate bounded
   cleanup; reaching that deadline returns `timeout` (exit 4) with screenshot-specific
   guidance. Browser/CDP capture failures remain `cdp_failed` (exit 3).
-- Completed clicks and key presses retain their successful receipts when they
-  navigate, including Enter form submissions. A new synchronization is still
-  required before the next action.
+- Completed inputs retain their successful receipts when they navigate, including
+  clicks, Enter submissions, drag submissions, and forms submitted after filling
+  or selecting a value. A new synchronization is still required before the next action.
+- CLI cancellation is armed before sending a browser command, so an immediate
+  Ctrl-C can cancel the operation and return its outcome instead of terminating silently.
 
 ## [0.4.0] - 2026-10-30
 
