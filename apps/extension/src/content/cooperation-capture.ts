@@ -12,6 +12,7 @@ import {
   type InputExpectation,
 } from "@/cooperation/types";
 import { OVERLAY_HOST_SELECTOR } from "@/lib/overlay-bridge";
+import { createRandomUuid } from "@/lib/random-uuid";
 
 const MAX_CHANGES = 64;
 // CDP's native clock conversion and the DOM clock round independently.
@@ -24,7 +25,7 @@ export function attachCooperationCapture() {
   let lease: string | undefined;
   const retired = new Set<string>();
   const state: FrameState = {
-    document: crypto.randomUUID(),
+    document: createRandomUuid(),
     revision: 0,
     structure: 0,
     human: 0,

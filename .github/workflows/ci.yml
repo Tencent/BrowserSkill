@@ -328,6 +328,11 @@ jobs:
           cargo build -p bsk --locked
           pnpm --filter @browser-skill/extension build
           pnpm --filter @wxg-prc-cpg/browser-skill-dsh-plugin build
+      - name: Validate interaction capture on HTTP intranet pages
+        working-directory: apps/extension
+        env:
+          BSK_COOP_CHROME: ${{ env.BSK_VIDEO_CHROME }}
+        run: pnpm exec vitest run src/content/__tests__/cooperation-capture.browser.test.ts
       - name: Validate task termination on tab detachment
         working-directory: apps/extension
         env:

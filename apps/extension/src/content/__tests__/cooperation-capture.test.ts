@@ -48,6 +48,26 @@ function collector(shadowRoot?: (element: HTMLElement) => ShadowRoot | null) {
   };
 }
 
+it("collects and arms page interaction when crypto.randomUUID is unavailable", () => {
+  // Ordinary HTTP origins expose getRandomValues but not randomUUID.
+  vi.stubGlobal("crypto", { getRandomValues: crypto.getRandomValues.bind(crypto) });
+  document.body.innerHTML = '<input aria-label="City" value="Shanghai">';
+
+  const read = collector();
+  const initial = read()!;
+  expect(initial.document).toMatch(/^[\da-f]{8}-(?:[\da-f]{4}-){3}[\da-f]{12}$/);
+  expect(initial.fields).toEqual([expect.objectContaining({ label: "City", value: "Shanghai" })]);
+  expect(read(COOPERATION_ARM, "first", { type: "pointerdown", x: 10, y: 20 })).toMatchObject({
+    document: initial.document,
+    fields: initial.fields,
+  });
+
+  dispose!();
+  dispose = undefined;
+  const restarted = collector();
+  expect(restarted()!.document).not.toBe(initial.document);
+});
+
 it("retires old collection leases so delayed reads cannot restart collection after stop", () => {
   const read = collector();
   expect(read()).toBeDefined();
