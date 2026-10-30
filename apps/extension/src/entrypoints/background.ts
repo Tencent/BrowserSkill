@@ -126,6 +126,7 @@ export default defineBackground(() => {
         /* Disconnect cleanup ends the owning sessions. */
       }
     },
+    (tabId) => cdp.send(tabId, "Page.getFrameTree"),
   );
   // Default collaboration is always present; only explicit help or recording
   // suspends routing of unrelated tabs out of the task window.
