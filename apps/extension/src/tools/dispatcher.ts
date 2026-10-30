@@ -110,12 +110,20 @@ import {
   handleTabBorrow,
   handleTabClose,
   handleTabCreate,
+  handleTabGroupCreate,
+  handleTabGroupList,
+  handleTabGroupUngroup,
+  handleTabGroupUpdate,
   handleTabList,
   handleTabReturn,
   handleTabSelect,
   type TabBorrowParams,
   type TabCloseParams,
   type TabCreateParams,
+  type TabGroupCreateParams,
+  type TabGroupListParams,
+  type TabGroupUngroupParams,
+  type TabGroupUpdateParams,
   type TabListParams,
   type TabReturnParams,
   type TabSelectParams,
@@ -690,6 +698,16 @@ export class ToolDispatcher {
         );
       case "tool.tab_select":
         return handleTabSelect(this.sessions, req.params as TabSelectParams, { signal, cdp });
+      case "tool.tab_group_create":
+        return handleTabGroupCreate(this.sessions, req.params as TabGroupCreateParams, { signal });
+      case "tool.tab_group_update":
+        return handleTabGroupUpdate(this.sessions, req.params as TabGroupUpdateParams, { signal });
+      case "tool.tab_group_list":
+        return handleTabGroupList(this.sessions, req.params as TabGroupListParams, { signal });
+      case "tool.tab_group_ungroup":
+        return handleTabGroupUngroup(this.sessions, req.params as TabGroupUngroupParams, {
+          signal,
+        });
       case "tool.tab_borrow": {
         const result = await handleTabBorrow(this.sessions, req.params as TabBorrowParams, {
           signal,
@@ -1244,6 +1262,9 @@ function sessionIdForBrowserControlMethod(req: RequestFrame): string | null {
     case "tool.tab_select":
     case "tool.tab_borrow":
     case "tool.tab_return":
+    case "tool.tab_group_create":
+    case "tool.tab_group_update":
+    case "tool.tab_group_ungroup":
     case "tool.window_resize":
     case "tool.emulate":
     case "tool.navigate":

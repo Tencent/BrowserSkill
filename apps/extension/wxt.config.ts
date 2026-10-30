@@ -50,6 +50,7 @@ export default defineConfig({
       "tabs",
       "tabGroups",
       "storage",
+      "tabGroups",
       "webNavigation",
       "windows",
     ],
