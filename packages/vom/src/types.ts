@@ -94,6 +94,8 @@ export interface VomScene {
 export interface VomOptions {
   maxDepth?: number;
   maxTokens?: number;
+  /** Allocate names from a caller-owned identity store, before measuring row tokens. */
+  allocateRef?: (node: VomNode) => string;
   /**
    * When true, form values are rendered as masks instead of literal values.
    */
