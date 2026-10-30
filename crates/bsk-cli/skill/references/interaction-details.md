@@ -25,10 +25,11 @@ for click. `--from-offset-x/y` and `--to-offset-x/y` adjust the endpoints from
 their visible action points in top-level viewport CSS pixels. Offsets inside
 out-of-process frames are unsupported. Use the actual thumb/handle when present.
 
-Observation JSON includes `observation_id`; supplying `--observation-id <id>`
-rejects a superseded ref map before input. New observe/snapshot/continuation
-replaces refs. Keep the matching token and refs together; the token does not
-replace `--context` when shared-control coordination requires it.
+Under strict policy, drag's optional `--observation-id <id>` rejects a superseded ref map;
+use the token from the matching observe/snapshot/continuation. Under target policy, DOM drag
+uses stable refs and the control receipt instead of that legacy ref-map check. The global
+`--observation` receipt identifies sync's strict baseline when an opaque action requires it;
+neither observation flag replaces `--context`.
 
 Both endpoints must be visible after preparation. Drag does not auto-scroll
 while held, cross tabs, or synthesize touch gestures. Canvas screenshot-bound
@@ -145,8 +146,9 @@ For one decided action and its resulting state, use [step and cached views](step
 The expensive part of a multi-step task can be caller round trips and repeated
 page interpretation, even when individual CLI calls are fast. After deciding
 one action from current evidence, run that action and its following sync in one
-tool invocation. Check action failure before proceeding; do not pre-plan several
-mutations or reuse one context across them. A known readiness selector can be
+tool invocation. Check action failure before proceeding. Target-policy DOM actions
+can reuse their control context; another sync is needed when the next decision needs
+new page evidence, not solely because a previous action completed. A known readiness selector can be
 waited on between that action and sync; check `satisfied`, without fixed sleeps
 or repeatedly returning a loading page to the model.
 
@@ -187,8 +189,8 @@ true only when neither occurred. A backend `next_cursor` belongs to capture
 pagination, not presentation filtering. Inspect the saved full reply or sync
 without `--match-text` for omitted controls; never infer absence, availability,
 a time range or a business value from an omitted numbered item. The original
-refs, observation/context IDs, activity and whole-page guard are unchanged.
-The guard detects page changes, not errors caused by overlooking existing rules.
+refs, observation/context IDs, activity and negotiated guard policy are unchanged.
+Target checks and explicit conditions cannot correct a decision that overlooks existing rules.
 Use a full view for final business decisions and verification.
 
 `--save-full` stages the complete returned reply before filtering, then publishes
@@ -197,7 +199,8 @@ no destination file; existing files, including concurrent writers, are never
 overwritten. `--max-tokens` still limits the original capture, so a saved reply
 can be capture-truncated. Read another section locally instead of taking a new
 snapshot just to change the display. Saved refs are historical: use them only
-while their context is current; sync after an action, intervention or page change.
+while their context and document remain current. A saved view does not renew control or
+refresh business facts; sync after intervention/navigation and observe changes relevant to the decision.
 
 For an action followed by a transient synchronization refusal, use
 `bsk cooperate sync --settle --session <id>`. It performs at most three read-only
@@ -225,8 +228,9 @@ There is no default token cap. With `observe --max-tokens <n>`, follow a returne
 bsk observe --cursor <token> --session <id>
 ```
 
-Each page replaces the ref map: use its refs before continuing and never reuse
-refs from earlier pages. Continuation reads the same capture, without refreshing
+Under target policy, earlier DOM refs survive continuation; visual refs expire on each page.
+Strict policy replaces the ref map, so use its refs before continuing.
+Continuation reads the same capture, without refreshing
 or hovering; do not combine it with depth changes or hover probing. New observe/
 snapshot or changed page identity invalidates continuation; then observe afresh.
 

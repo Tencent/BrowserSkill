@@ -14,16 +14,22 @@
   "assertions": {
     "site": [
       {
-        "label": "nested frame fixture settled",
+        "label": "root frame fixture settled",
         "type": "geometry.ready",
         "where": { "data.root": true },
         "minCount": 1
       },
       {
-        "label": "both child frames have occupied scrollbars",
+        "label": "outer frame has occupied scrollbars",
         "type": "geometry.scrollbars",
-        "where": { "data.vertical": true, "data.horizontal": true },
-        "minCount": 2
+        "where": { "data.frame": "outer", "data.vertical": true, "data.horizontal": true },
+        "minCount": 1
+      },
+      {
+        "label": "nested frame has occupied scrollbars",
+        "type": "geometry.scrollbars",
+        "where": { "data.frame": "nested", "data.vertical": true, "data.horizontal": true },
+        "minCount": 1
       }
     ],
     "response": [{ "label": "observed the fixture marker", "includes": "OOPIF-SCROLLBARS" }],
@@ -33,6 +39,17 @@
     "steps": [
       { "action": "navigate" },
       { "action": "wait-site-event", "type": "geometry.ready", "where": { "root": true } },
+      {
+        "action": "wait-site-event",
+        "type": "geometry.scrollbars",
+        "where": { "frame": "outer", "vertical": true, "horizontal": true }
+      },
+      {
+        "action": "wait-site-event",
+        "type": "geometry.scrollbars",
+        "where": { "frame": "nested", "vertical": true, "horizontal": true }
+      },
+      { "action": "sync", "saveAs": "control" },
       { "action": "observe" }
     ]
   }

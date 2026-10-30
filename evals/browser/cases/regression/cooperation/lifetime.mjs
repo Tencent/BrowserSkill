@@ -28,6 +28,7 @@ export async function runLifetimeScenario({
       tasks.push({ client, id, url });
       await bsk(["navigate", url, "--session", id]);
       const state = await bsk(["cooperate", "sync", "--session", id]);
+      assert.equal(state.control_policy, "strict");
       await bsk([
         "fill",
         "#city",
@@ -43,6 +44,7 @@ export async function runLifetimeScenario({
       assert(id);
       tasks.push({ client, id, url });
       const state = await dsh.run("bsk_session", { action: "sync", session: id });
+      assert.equal(state.control_policy, "strict");
       await dsh.run("bsk_interact", {
         action: "fill",
         target: "#city",
@@ -81,7 +83,7 @@ export async function runLifetimeScenario({
       await assertCleaned(task);
     }
     const moved = await start("cli", "detached");
-    // Keep the task window alive so explicit stop, rather than window-close cleanup, is tested.
+    // Keep another owned tab behind so this exercises detach cleanup, not window closure.
     await bsk(["tab", "create", "--session", moved.id]);
     const destinationUrl = `${base}/?lifetime=user-window`;
     const destination = await send("Target.createTarget", { url: destinationUrl, newWindow: true });
@@ -101,10 +103,14 @@ export async function runLifetimeScenario({
         worker,
       );
       assert(!result.exceptionDetails, JSON.stringify(result));
-      await stop(moved);
+      const deadline = performance.now() + 5000;
+      while ((await bsk(["session", "list"])).some((entry) => entry.session_id === moved.id)) {
+        assert(performance.now() < deadline, "Moving the controlled page did not end its session");
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
       assert(
         (await targets()).some((t) => t.targetId === moved.targetId),
-        "Stopping a task closed the page moved into the user's window",
+        "Ending a detached task closed the page moved into the user's window",
       );
     } finally {
       await send("Target.detachFromTarget", { sessionId: worker });
@@ -149,6 +155,7 @@ export async function runLifetimeScenario({
       cliAndDsh: true,
       nonblankTasks: true,
       explicitStopCleaned: true,
+      detachedSessionEnded: true,
       detachedUserPagePreserved: true,
       idleTabsAndWindowsCleaned: true,
     };

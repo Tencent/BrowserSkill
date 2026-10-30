@@ -636,10 +636,16 @@ async fn handle_tool_dispatch(
     }
     // Transfer staging normalizes typed params; retain observation and operation bindings.
     let operation_id = params.get("_operation_id").cloned();
-    let metadata: Vec<_> = ["_audit_id", "context_id", "depends_on"]
-        .into_iter()
-        .filter_map(|key| params.get(key).cloned().map(|value| (key, value)))
-        .collect();
+    let metadata: Vec<_> = [
+        "_audit_id",
+        "context_id",
+        "depends_on",
+        "expect",
+        "observation_id",
+    ]
+    .into_iter()
+    .filter_map(|key| params.get(key).cloned().map(|value| (key, value)))
+    .collect();
     let mut params = params;
     if method == Method::ToolTabBorrow {
         // Old CLI clients can still send this field. Never forward their
@@ -686,6 +692,26 @@ async fn handle_tool_dispatch(
             data: Some(serde_json::json!({
                 "effect_state": "none", "required_protocol": bsk_protocol::tools::CLICK_MOVE_CLICK_PROTOCOL,
                 "actual_protocol": browser.extension_protocol_version,
+            })),
+        });
+    }
+    // Older extensions must never execute an action after silently ignoring its conditions.
+    if (matches!(
+        params.get("control_policy").and_then(Value::as_str),
+        Some("target" | "auto")
+    ) || params.get("expect").is_some())
+        && let Some(session) = state.sessions.get(&session_id)
+        && let Some(browser) = state.browsers.get(&session.browser_id)
+        && !bsk_protocol::tools::supports_target_control(&browser.extension_protocol_version)
+    {
+        return ResponseBody::Err(RpcError {
+            code: ErrorCode::Unsupported,
+            message: "Target control and action conditions require extension protocol 1.8; update the extension".into(),
+            data: Some(serde_json::json!({
+                "reason": "unsupported_feature", "phase": "negotiate", "effect_state": "none",
+                "required_protocol": bsk_protocol::tools::TARGET_CONTROL_PROTOCOL,
+                "actual_protocol": browser.extension_protocol_version,
+                "recovery": "Update the extension before using target control or action conditions.",
             })),
         });
     }

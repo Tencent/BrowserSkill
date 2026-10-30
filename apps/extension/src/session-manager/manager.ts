@@ -9,6 +9,8 @@ export interface SessionContext {
   sessionId: string;
   agentWindowId: number;
   refStore: RefStore;
+  /** Negotiated once per session; omitted clients retain strict observations. */
+  controlPolicy?: "strict" | "target";
   borrowedTabs: Map<number, BorrowedTab>;
   /**
    * Tabs explicitly claimed by the agent because it created them. This

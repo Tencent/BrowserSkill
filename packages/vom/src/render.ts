@@ -874,6 +874,7 @@ interface RenderState {
   lines: string[];
   refs: RenderedRef[];
   nextRef: number;
+  allocateRef?: VomOptions["allocateRef"];
   tokens: number;
   maxDepth: number;
   maxTokens: number;
@@ -934,7 +935,10 @@ function* renderTreeRows(
     }
 
     const visual = node.visualKey !== undefined;
-    const ref = visual || isVomReferenceNode(node) ? `e${state.nextRef++}` : undefined;
+    const ref =
+      visual || isVomReferenceNode(node)
+        ? (state.allocateRef?.(node) ?? `e${state.nextRef++}`)
+        : undefined;
     const context = ref && !visual ? handleContext(node, state) : [];
     const surface = state.surfaceMap.get(node.id);
     const indent = "  ".repeat(Math.min(depth, state.maxDepth, 32));
@@ -1010,6 +1014,7 @@ function createRenderState(
     lines: [...initialLines],
     refs: [],
     nextRef: 1,
+    allocateRef: options.allocateRef,
     tokens: estimateTokens(initialLines.join("\n")),
     maxDepth: options.maxDepth ?? DEFAULT_MAX_DEPTH,
     maxTokens: options.maxTokens ?? DEFAULT_MAX_TOKENS,

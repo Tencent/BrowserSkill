@@ -8,7 +8,13 @@ import {
   type ToolRegistrar,
 } from "./phase-one-runtime";
 import { createStepReceiptHandler } from "./step-receipt";
-import { SESSION_PARAM, TAB_ID_PARAM, TIMEOUT_MS_PARAM } from "./tool-params";
+import {
+  CONTROL_POLICY_PARAM,
+  OBSERVATION_ID_PARAM,
+  SESSION_PARAM,
+  TAB_ID_PARAM,
+  TIMEOUT_MS_PARAM,
+} from "./tool-params";
 import type { ToolDeps } from "./tools";
 
 export const SAVED_OBSERVATION_PARAMETERS = {
@@ -62,10 +68,7 @@ export const DRAG_PARAMETERS = {
   toOffsetY: { type: "number", description: "Destination offset Y; requires to." },
   durationMs: { type: "integer", description: "Drag movement duration, 1..5000 ms; default 500." },
   holdMs: { type: "integer", description: "Hold before moving, 0..5000 ms; default 0." },
-  observationId: {
-    type: "string",
-    description: "Optional observation_id from the source VOM; rejects expired observations.",
-  },
+  observationId: OBSERVATION_ID_PARAM,
   button: {
     type: "string",
     enum: ["left", "middle", "right"],
@@ -75,6 +78,11 @@ export const DRAG_PARAMETERS = {
 } as const;
 
 export const STEP_PARAMETERS = {
+  policy: {
+    ...CONTROL_POLICY_PARAM,
+    description:
+      "Step post-sync policy: auto (default) preserves an established policy or chooses target. Sync first to choose strict before an action; this option applies only after the action.",
+  },
   stepAction: {
     type: "string",
     enum: ["click", "press", "fill", "hover", "select", "drag", "scroll-to", "wheel", "navigate"],
@@ -84,7 +92,7 @@ export const STEP_PARAMETERS = {
   params: {
     type: "string",
     description:
-      "Action protocol JSON object (ref/selector/value/key/etc.). Session, tab, context and dependencies must use the outer tool fields.",
+      "Action protocol JSON object (ref/selector/value/key/etc.). Session, tab, context, observation and conditions must use the outer tool fields.",
   },
   untilVisible: {
     type: "string",
@@ -281,7 +289,14 @@ export function registerGestureObservationTools(
         const params: unknown = JSON.parse(args.params);
         if (!params || typeof params !== "object" || Array.isArray(params))
           throw new Error("params must be a JSON object");
-        for (const key of ["session_id", "tab_id", "context_id", "depends_on"])
+        for (const key of [
+          "session_id",
+          "tab_id",
+          "context_id",
+          "depends_on",
+          "observation_id",
+          "expect",
+        ])
           if (Object.hasOwn(params, key)) throw new Error(`${key} must use outer tool fields`);
         if (args.untilVisible !== undefined) requireNonEmpty(args.untilVisible, "untilVisible");
         integerInRange(args.waitTimeoutMs, "waitTimeoutMs", 1, 25_000);
@@ -294,6 +309,8 @@ export function registerGestureObservationTools(
           args.stepAction,
           "--params",
           JSON.stringify(params),
+          "--policy",
+          args.policy ?? "auto",
         ];
         appendTabId(command, args.tabId);
         if (args.untilVisible !== undefined) command.push("--until-visible", args.untilVisible);
@@ -350,6 +367,8 @@ export function registerGestureObservationTools(
         const context = exec as ToolRunContext & {
           observationContext?: unknown;
           observationDependencies?: unknown;
+          observationId?: unknown;
+          actionExpectations?: unknown;
         };
         if (
           [
@@ -357,12 +376,16 @@ export function registerGestureObservationTools(
             extra.tabId,
             extra.contextId,
             extra.dependsOn,
+            extra.observationId,
+            extra.expect,
             context.observationContext,
             context.observationDependencies,
+            context.observationId,
+            context.actionExpectations,
           ].some((value) => value !== undefined)
         )
           throw new Error(
-            "view is historical and does not accept session, tabId, contextId or dependsOn",
+            "view is historical and does not accept session, tabId, contextId, dependsOn, observationId or expect",
           );
         requireNonEmpty(args.file, "file");
         if (args.find !== undefined) requireNonEmpty(args.find, "find");

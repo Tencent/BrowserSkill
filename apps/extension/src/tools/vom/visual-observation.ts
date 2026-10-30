@@ -170,6 +170,7 @@ interface Page {
   consumed: number;
 }
 interface Continuation {
+  stableRefs: boolean;
   output: ObservationOutput;
   tabId: number;
   revision: number;
@@ -201,9 +202,15 @@ function page(
   if (!(max >= 0) || Number.isNaN(max)) return failure("max_tokens must be nonnegative");
   const headers = [
     ...state.output.render.headers,
-    ...(continued ? ["@continued same observation; only refs in this response are current."] : []),
+    ...(continued
+      ? [
+          state.stableRefs
+            ? "@continued same observation; earlier DOM refs remain valid; earlier visual refs expire."
+            : "@continued same observation; only refs in this response are current.",
+        ]
+      : []),
   ];
-  const footer = `@more observe --cursor ${nextToken}; use this page's refs before continuing.`;
+  const footer = `@more observe --cursor ${nextToken}; use this page's ${state.stableRefs ? "visual " : ""}refs before continuing.`;
   if (continued && state.buffer[0]?.context) headers.push(state.buffer[0].context);
   const fixed = [...headers, ...state.output.notices];
   let used = fixed.reduce((n, line) => n + cost(line), 0);
@@ -250,6 +257,7 @@ export async function publishObservationPage(
   let state: Continuation;
   if (input.output)
     state = {
+      stableRefs: store.stableRefsEnabled,
       output: input.output,
       tabId,
       revision: store.revision,

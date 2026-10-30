@@ -33,6 +33,7 @@ pub(crate) fn auto_start_enabled() -> bool {
 pub fn ensure_daemon() -> Result<DaemonInfo> {
     let deadline = Instant::now() + SPAWN_DEADLINE;
     if let Probe::Ready(daemon) = probe::probe(PROBE_TIMEOUT)? {
+        super::business_rpc::check_daemon_protocol(&daemon.status.protocol_version)?;
         return Ok(daemon.info);
     }
     ensure!(auto_start_enabled(), DaemonStartFailure::AutoStartDisabled);

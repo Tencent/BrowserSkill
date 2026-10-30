@@ -41,6 +41,7 @@ import {
   type SessionContext,
   type SessionManager,
 } from "@/session-manager/manager";
+import type { RefStore } from "@/session-manager/ref-store";
 import type {
   GetHtmlParams,
   GetHtmlResult,
@@ -939,6 +940,7 @@ async function runHoverProbes(
 }
 
 export interface CaptureVomObservationOptions extends VomOptions {
+  refStore?: RefStore;
   onScene?: (scene: VomScene) => void;
   includeVisualFacts?: boolean;
   conditionalSurfaceProbe?: boolean;
@@ -972,6 +974,22 @@ async function buildVomObservation(
   options: CaptureVomObservationOptions,
 ): Promise<CaptureVomObservationResult & { visualOutput?: ObservationOutput }> {
   const { captured, documents: normalizedDocuments } = semanticCapture(facts);
+  const store = options.refStore?.stableRefsEnabled ? options.refStore : undefined;
+  const targets = new Map(normalizedDocuments.map((frame) => [frame.frameId, frame.target]));
+  const renderOptions: VomOptions = {
+    ...options,
+    allocateRef: store
+      ? (node) =>
+          node.visualKey !== undefined
+            ? store.allocateVisualRef()
+            : store.allocateRef({
+                backendNodeId: node.backendNodeId ?? node.id,
+                tabId,
+                frameId: node.frameId,
+                cdpSessionId: node.frameId ? targets.get(node.frameId)?.sessionId : undefined,
+              })
+      : options.allocateRef,
+  };
   throwIfAborted(options.signal, "observation");
   const semanticGraph = buildSemanticGraph({
     documents: normalizedDocuments,
@@ -1043,7 +1061,7 @@ async function buildVomObservation(
       identities,
       captured.rootFrameId ?? "root",
       notices,
-      options,
+      renderOptions,
     );
     return {
       ...projectRecordSafeObservation({
@@ -1061,6 +1079,7 @@ async function buildVomObservation(
   }
   const captureNotice = notices.join("\n");
   const rendered = renderVom(decoratedScene, {
+    allocateRef: renderOptions.allocateRef,
     maxDepth: options.maxDepth,
     maxTokens:
       !captureNotice || options.maxTokens === undefined
@@ -1230,6 +1249,7 @@ async function handleVomObservation(
     clearObservationContinuation(ctx.refStore);
     const documentRevision = ctx.refStore.documentRevision(target.tabId);
     const observation = await captureVomObservation(deps.cdp, target.tabId, target.url, {
+      refStore: ctx.refStore,
       onScene: deps.onScene,
       includeVisualFacts: toolName === "observe",
       maxDepth: params.max_depth,

@@ -38,7 +38,9 @@ import {
 import { SessionStarts } from "./session-starts";
 import type { SessionRegistry } from "./sessions";
 import {
+  type ActionExpectation,
   BROWSER_PARAM,
+  CONTROL_POLICY_PARAM,
   SESSION_PARAM,
   SESSION_STOP_PARAMS,
   TAB_ID_PARAM,
@@ -103,14 +105,21 @@ async function runBsk(
   initializing = false,
   parseOptions: ParseBskJsonOptions = {},
 ): Promise<unknown> {
-  const observationContext = (exec as ToolRunContext & { observationContext?: string })
-    .observationContext;
+  const metadata = exec as ToolRunContext & {
+    observationContext?: string;
+    observationDependencies?: string[];
+    observationId?: string;
+    actionExpectations?: ActionExpectation[];
+  };
+  const observationContext = metadata.observationContext;
   if (observationContext) {
     args = [...args, "--context", observationContext];
-    const dependencies = (exec as ToolRunContext & { observationDependencies?: string[] })
-      .observationDependencies;
-    if (dependencies) for (const dependency of dependencies) args.push("--depends-on", dependency);
   }
+  for (const dependency of metadata.observationDependencies ?? [])
+    args.push("--depends-on", dependency);
+  if (metadata.observationId !== undefined) args.push("--observation", metadata.observationId);
+  if (metadata.actionExpectations !== undefined)
+    args.push("--expect", JSON.stringify(metadata.actionExpectations));
   const releaseForeground =
     observeSession !== undefined ? deps.observation.acquireForeground(observeSession) : undefined;
   // beginAction must fire only when the task actually starts inside the
@@ -212,6 +221,7 @@ function defineBrowserOperations(deps: ToolDeps, register: DefinitionRegistrar):
           session: SESSION_PARAM,
           tabId: TAB_ID_PARAM,
           timeoutMs: TIMEOUT_MS_PARAM,
+          policy: CONTROL_POLICY_PARAM,
           ...SAVED_OBSERVATION_PARAMETERS,
           maxTokens: { type: "integer", description: "Token cap for synchronized observations." },
           settle: {
@@ -224,6 +234,8 @@ function defineBrowserOperations(deps: ToolDeps, register: DefinitionRegistrar):
           render: (_args, value) => [{ type: "text", text: JSON.stringify(value) }],
         },
         async execute(args, exec) {
+          if (args.policy !== undefined && action !== "sync" && action !== "enable")
+            throw new Error("policy requires sync or share");
           if (
             action !== "sync" &&
             (args.saveFull !== undefined ||
@@ -250,6 +262,9 @@ function defineBrowserOperations(deps: ToolDeps, register: DefinitionRegistrar):
           if (args.tabId !== undefined) cmd.push("--tab-id", String(args.tabId));
           if (args.timeoutMs !== undefined) cmd.push("--timeout-ms", String(args.timeoutMs));
           if (args.maxTokens !== undefined) cmd.push("--max-tokens", String(args.maxTokens));
+          // An older CLI must reject the explicit flag rather than silently
+          // skipping control-policy negotiation.
+          if (action === "sync" || action === "enable") cmd.push("--policy", args.policy ?? "auto");
           appendSavedObservationOptions(cmd, args);
           if (args.settle) cmd.push("--settle");
           return (await runBsk(

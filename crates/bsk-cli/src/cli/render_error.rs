@@ -331,6 +331,43 @@ pub fn info_for_error(code: ErrorCode, data: Option<&serde_json::Value>) -> Rend
             ),
             ..base
         },
+        (_, "precondition_failed") => RenderInfo {
+            summary: "a required business fact no longer matches",
+            hint: Some(
+                "read the expected and actual values, then reconsider the action; do not silently replace the expected value",
+            ),
+            ..base
+        },
+        (_, "control_context_invalid" | "document_changed") => RenderInfo {
+            summary: "the control context no longer belongs to the current document or control state",
+            hint: Some("synchronize this tab and reconsider the action using the current page"),
+            ..base
+        },
+        (_, "observation_required" | "observation_changed") => RenderInfo {
+            summary: "this action needs an explicit current observation",
+            hint: Some(
+                "synchronize and pass its observation_id with --observation; do not replay an uncertain action",
+            ),
+            ..base
+        },
+        (
+            _,
+            "target_detached" | "target_hidden" | "target_disabled" | "target_readonly"
+            | "target_moved" | "target_covered" | "target_focus_lost",
+        ) => RenderInfo {
+            summary: "the selected target is not currently actionable",
+            hint: Some(
+                "inspect or wait for the target; unrelated page updates do not require a new control context",
+            ),
+            ..base
+        },
+        (_, "human_intervention" | "control_held") => RenderInfo {
+            summary: "the user has control of this tab",
+            hint: Some(
+                "wait for control to return, then synchronize before deciding on another action",
+            ),
+            ..base
+        },
         (_, "control_authority_required") => RenderInfo {
             summary: "the agent does not currently have control",
             hint: Some(
@@ -1173,5 +1210,22 @@ mod tests {
         );
         assert!(borrow.summary.contains("Agent Window"));
         assert!(borrow.hint.unwrap().contains("needs a user move"));
+    }
+    #[test]
+    fn target_control_errors_point_to_the_failed_check() {
+        for (reason, phrase) in [
+            ("precondition_failed", "business fact"),
+            ("target_covered", "not currently actionable"),
+            ("target_focus_lost", "not currently actionable"),
+            ("control_context_invalid", "control context"),
+            ("observation_required", "explicit current observation"),
+            ("human_intervention", "user has control"),
+        ] {
+            let info = info_for_error(
+                ErrorCode::PermissionDenied,
+                Some(&serde_json::json!({"reason":reason})),
+            );
+            assert!(info.summary.contains(phrase));
+        }
     }
 }

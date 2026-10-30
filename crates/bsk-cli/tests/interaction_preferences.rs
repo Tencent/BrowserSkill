@@ -389,3 +389,108 @@ async fn legacy_environment_without_a_daemon_returns_an_error_not_disabled() {
     assert!(result.get("outcome").is_none());
     assert!(!temp.path().join("daemon.json").exists());
 }
+
+#[tokio::test]
+async fn transfer_staging_preserves_explicit_action_conditions() {
+    let (temp, mut daemon, mut ws) =
+        start_with_protocol(bsk::daemon::state::PROTOCOL_VERSION).await;
+    let start = command(temp.path(), &["session", "start", "--json"])
+        .spawn()
+        .unwrap();
+    let request = next_request(&mut ws, Method::ToolSessionStart).await;
+    reply(
+        &mut ws,
+        request,
+        ResponseBody::Ok(json!({"agent_window_id":100})),
+    )
+    .await;
+    let started = successful_json(&output(start).await);
+    let session = started["session_id"].as_str().unwrap();
+    let file = temp.path().join("input.txt");
+    std::fs::write(&file, "fixture upload").unwrap();
+    let checks =
+        r##"[{"target":"#record","field":"attribute","attribute":"data-id","equals":"42"}]"##;
+    let upload = command(
+        temp.path(),
+        &[
+            "upload",
+            "#picker",
+            "--session",
+            session,
+            "--file",
+            file.to_str().unwrap(),
+            "--context",
+            "control",
+            "--observation",
+            "observation",
+            "--expect",
+            checks,
+            "--json",
+        ],
+    )
+    .spawn()
+    .unwrap();
+    let request = next_request(&mut ws, Method::ToolUpload).await;
+    let params = request.params.as_ref().unwrap();
+    assert_eq!(params["context_id"], "control");
+    assert_eq!(params["observation_id"], "observation");
+    assert_eq!(
+        params["expect"],
+        serde_json::from_str::<Value>(checks).unwrap()
+    );
+    assert!(params["files"][0]["staged_path"].as_str().is_some());
+    reply(
+        &mut ws,
+        request,
+        ResponseBody::Ok(json!({"tab_id":7,"used_selector":"#picker","file_names":["input.txt"]})),
+    )
+    .await;
+    successful_json(&output(upload).await);
+
+    let path = temp.path().join("download.txt");
+    let download = command(
+        temp.path(),
+        &[
+            "download",
+            "#download",
+            "--session",
+            session,
+            "--out",
+            path.to_str().unwrap(),
+            "--context",
+            "control",
+            "--observation",
+            "observation",
+            "--expect",
+            checks,
+            "--json",
+        ],
+    )
+    .spawn()
+    .unwrap();
+    let request = next_request(&mut ws, Method::ToolDownload).await;
+    let params = request.params.as_ref().unwrap();
+    assert_eq!(params["context_id"], "control");
+    assert_eq!(params["observation_id"], "observation");
+    assert_eq!(
+        params["expect"],
+        serde_json::from_str::<Value>(checks).unwrap()
+    );
+    assert!(params["browser_relative_dir"].as_str().is_some());
+    reply(
+        &mut ws,
+        request,
+        ResponseBody::Err(RpcError {
+            code: ErrorCode::Cancelled,
+            message: "fixture cancelled before input".into(),
+            data: Some(json!({"effect_state":"none"})),
+        }),
+    )
+    .await;
+    let result = output(download).await;
+    assert!(!result.status.success());
+    assert!(!path.exists());
+    drop(ws);
+    daemon.kill().await.unwrap();
+    daemon.wait().await.unwrap();
+}

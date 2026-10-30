@@ -910,3 +910,65 @@ async fn click_move_click_is_never_forwarded_as_a_legacy_held_drag() {
         handle.shutdown().await;
     }
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn target_control_and_conditions_negotiate_before_browser_dispatch() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    for protocol in ["1.7", "1.8"] {
+        let (handle, sock) = spawn_daemon().await;
+        let mut ws = connect_ext(handle.ws_addr()).await;
+        do_handshake_protocol(&mut ws, protocol).await;
+        let forwarded = Arc::new(AtomicUsize::new(0));
+        let count = forwarded.clone();
+        run_extension(ws, move |req| {
+            count.fetch_add(1, Ordering::SeqCst);
+            ResponseBody::Ok(req.params.clone().unwrap())
+        });
+        let session = ipc_session_start(&sock).await;
+        for (method, params) in [
+            (
+                Method::ToolCooperate,
+                json!({"session_id":session,"action":"sync","control_policy":"target"}),
+            ),
+            (
+                Method::ToolCooperate,
+                json!({"session_id":session,"action":"sync","control_policy":"auto"}),
+            ),
+            (
+                Method::ToolClick,
+                json!({"session_id":session,"ref":"e1","context_id":"c","observation_id":"o", "expect":[{"target":"#price","field":"text","equals":"$12"}]}),
+            ),
+        ] {
+            let result: Result<Value, RpcError> =
+                ipc_tool_call(&sock, method, params.clone()).await;
+            if protocol == "1.7" {
+                let error = result.unwrap_err();
+                assert_eq!(error.code, ErrorCode::Unsupported);
+                let data = error.data.unwrap();
+                assert_eq!(data["effect_state"], "none");
+                assert_eq!(data["required_protocol"], "1.8");
+                assert_eq!(forwarded.load(Ordering::SeqCst), 0);
+            } else {
+                // The daemon preserves exact conditions and explicit evidence.
+                let result = result.unwrap();
+                for (key, value) in params.as_object().unwrap() {
+                    assert_eq!(&result[key], value);
+                }
+            }
+        }
+        // Legacy visual observation IDs remain usable on older extensions.
+        let legacy: Value = ipc_tool_call(
+            &sock,
+            Method::ToolClick,
+            json!({"session_id":session,"ref":"e1","context_id":"old","observation_id":"visual"}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(legacy["observation_id"], "visual");
+        assert_eq!(
+            forwarded.load(Ordering::SeqCst),
+            if protocol == "1.7" { 1 } else { 4 }
+        );
+        handle.shutdown().await;
+    }
+}

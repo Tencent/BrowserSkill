@@ -1,0 +1,54 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "ActionExpectation",
+  "description": "Caller-supplied facts checked immediately before starting an action.",
+  "type": "object",
+  "required": [
+    "equals",
+    "field",
+    "target"
+  ],
+  "properties": {
+    "attribute": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "equals": {
+      "$ref": "#/definitions/ExpectedValue"
+    },
+    "field": {
+      "$ref": "#/definitions/ExpectationField"
+    },
+    "target": {
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "definitions": {
+    "ExpectationField": {
+      "type": "string",
+      "enum": [
+        "text",
+        "value",
+        "checked",
+        "attribute",
+        "exists"
+      ]
+    },
+    "ExpectedValue": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "boolean"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    }
+  }
+}

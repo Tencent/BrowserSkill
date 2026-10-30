@@ -652,9 +652,15 @@ try {
             await read(
               `document.querySelector(${JSON.stringify(scenario.focusBefore)}).focus(); true`,
             );
+          // These cases verify legacy learning, dependencies and single-use contexts.
+          const syncStrict = async () => {
+            const state = await ok(["cooperate", "sync", ...scope, "--policy", "strict"]);
+            assert.equal(state.control_policy, "strict");
+            return state;
+          };
           let learning;
           if (scenario.learn) {
-            const initial = await ok(["cooperate", "sync", ...scope]);
+            const initial = await syncStrict();
             // Keep node identities stable and tick exactly once per observation.
             await read("window.tickNoise(); true");
             const learnArgs = [
@@ -688,18 +694,18 @@ try {
             await read("window.startNoise(); true");
             await delay(100);
           }
-          let sync = await ok(["cooperate", "sync", ...scope]);
+          let sync = await syncStrict();
           if (scenario.continuous) {
             for (let i = 0; i < 2; i++) {
               await delay(100);
-              sync = await ok(["cooperate", "sync", ...scope]);
+              sync = await syncStrict();
             }
           }
           if (scenario.focusAfterFirstSync) {
             await read(
               `document.querySelector(${JSON.stringify(scenario.focusAfterFirstSync)}).focus(); true`,
             );
-            sync = await ok(["cooperate", "sync", ...scope]);
+            sync = await syncStrict();
             assert(sync.observation, "A new recipient must refresh semantic focus evidence");
           }
           const before = await read("window.report()");
@@ -846,14 +852,20 @@ try {
   );
   await writeFile(
     join(artifacts, "result.json"),
-    JSON.stringify({ passed: true, browserVersion, cases: results }, null, 2),
+    JSON.stringify({ passed: true, policy: "strict", browserVersion, cases: results }, null, 2),
   );
   console.log(`PASS ${results.length} real-browser cases; artifacts=${artifacts}`);
 } catch (error) {
   await writeFile(
     join(artifacts, "result.json"),
     JSON.stringify(
-      { passed: false, browserVersion, error: String(error.stack || error), cases: results },
+      {
+        passed: false,
+        policy: "strict",
+        browserVersion,
+        error: String(error.stack || error),
+        cases: results,
+      },
       null,
       2,
     ),

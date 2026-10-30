@@ -8,9 +8,10 @@ import { join, resolve } from "node:path";
 import { promisify } from "node:util";
 import { withChrome } from "../snapshot-coordinates/chrome.mjs";
 import { attachExtensionWorker, runCompatibilityScenarios } from "./compatibility.mjs";
-import { runDefaultDshScenario } from "./dsh-client.mjs";
+import { runLegacyStrictDshScenario } from "./dsh-client.mjs";
 import { runLifetimeScenario } from "./lifetime.mjs";
 import { runGenericScenarios } from "./scenarios.mjs";
+import { runTargetPolicyScenarios } from "./target-policy.mjs";
 
 const executable = process.env.BSK_COOP_CHROME;
 const cli = resolve(process.env.BSK_COOP_CLI ?? "target/debug/bsk");
@@ -19,6 +20,7 @@ const port = Number(process.env.BSK_COOP_PORT ?? 52917);
 const artifacts = process.env.BSK_COOP_ARTIFACTS;
 const loadExtensionOverCdp = process.env.BSK_COOP_LOAD_CDP === "1";
 const compatibilityOnly = process.env.BSK_COOP_COMPAT_ONLY === "1";
+const targetOnly = process.env.BSK_COOP_TARGET_ONLY === "1";
 const fullIdle = process.env.BSK_COOP_FULL_IDLE === "1";
 const headful = process.env.BSK_COOP_HEADFUL === "1";
 const deviceScale = Number(process.env.BSK_COOP_DPR ?? 1);
@@ -26,6 +28,7 @@ const deviceScale = Number(process.env.BSK_COOP_DPR ?? 1);
 const idleWaitMs = fullIdle ? 360500 : 12500;
 if (artifacts) await mkdir(artifacts, { recursive: true });
 assert(executable, "Set BSK_COOP_CHROME to an isolated Chromium executable");
+assert(!(compatibilityOnly && targetOnly), "Choose compatibility-only or target-only coverage");
 assert(port !== 52800 && Number.isInteger(port));
 assert(
   (await readFile(join(extensionPath, "background.js"), "utf8")).includes(`ws://127.0.0.1:${port}`),
@@ -40,7 +43,7 @@ const env = {
   RUST_LOG: "info",
 };
 const exec = promisify(execFile);
-const bsk = async (args, failure = false) => {
+const runBsk = async (args, failure = false) => {
   if (process.env.BSK_COOP_DEBUG) console.error("step", args.slice(0, 3).join(" "));
   try {
     const { stdout } = await exec(cli, [...args, "--json"], {
@@ -71,10 +74,25 @@ const bsk = async (args, failure = false) => {
       throw error;
     }
     const result = JSON.parse(error.stdout);
-    assert.equal(result.data?.reason, "cooperation_sync_required", JSON.stringify(result));
+    assert.equal(
+      result.data?.reason,
+      typeof failure === "string" ? failure : "cooperation_sync_required",
+      JSON.stringify(result),
+    );
     return result;
   }
 };
+// Existing scenarios exercise the legacy single-use and whole-page contract.
+// An explicitly selected policy must never be changed by this test helper.
+const bsk = (args, failure = false) =>
+  runBsk(
+    args[0] === "cooperate" &&
+      ["sync", "enable"].includes(args[1]) &&
+      !args.some((arg) => arg === "--policy" || arg.startsWith("--policy="))
+      ? [...args, "--policy", "strict"]
+      : args,
+    failure,
+  );
 const poll = async (read, label = "setup") => {
   const deadline = performance.now() + 20000;
   while (performance.now() < deadline) {
@@ -85,6 +103,7 @@ const poll = async (read, label = "setup") => {
   throw new Error(`Timed out: ${label}`);
 };
 const html = await readFile(new URL("fixture.html", import.meta.url));
+const targetHtml = await readFile(new URL("target-policy.html", import.meta.url));
 const submissions = [];
 const server = createServer(async (req, res) => {
   if (req.url === "/submit") {
@@ -97,12 +116,17 @@ const server = createServer(async (req, res) => {
   } else {
     res.setHeader("content-type", "text/html; charset=utf-8");
     res.end(
-      req.url === "/frame" ? '<label>Frame note <input aria-label="Frame note"></label>' : html,
+      req.url === "/frame"
+        ? '<label>Frame note <input aria-label="Frame note"></label>'
+        : req.url?.startsWith("/target-policy?")
+          ? targetHtml
+          : html,
     );
   }
 });
 let browserVersion;
 let compatibility;
+let targetPolicy;
 let daemon;
 let daemonOutput = "";
 const evidence = [];
@@ -119,7 +143,7 @@ try {
       "--port",
       String(port),
       // Capability-only runs must not inherit the accelerated idle-test clock.
-      ...(fullIdle || compatibilityOnly ? [] : ["--session-idle", "8s"]),
+      ...(fullIdle || compatibilityOnly || targetOnly ? [] : ["--session-idle", "8s"]),
     ],
     {
       env,
@@ -166,9 +190,21 @@ try {
           console.error("renderer", JSON.stringify(event.params));
       },
     },
-    async (send) => {
+    async (sendCommand) => {
+      const send = async (method, params = {}, sessionId) => {
+        try {
+          return await sendCommand(method, params, sessionId);
+        } catch (error) {
+          if (method === "Runtime.evaluate")
+            console.error("cdp-failure", JSON.stringify({ method, params, sessionId }));
+          throw error;
+        }
+      };
       browserVersion = (await send("Browser.getVersion")).product;
       await poll(async () => (await bsk(["browsers"])).length, "extension connection");
+      if (!compatibilityOnly)
+        targetPolicy = await runTargetPolicyScenarios({ send, bsk: runBsk, cli, env, base });
+      if (targetOnly) return;
       for (const seed of compatibilityOnly ? [] : [4, 7, 14]) {
         const { session_id: session } = await bsk(["session", "start"]);
         const scope = ["--session", session];
@@ -283,6 +319,10 @@ try {
                 evaluate(
                   "!!document.querySelector('browser-skill-overlay')?.shadowRoot?.querySelector('[data-slot=cooperation-toolbar]')",
                 );
+              // Keep focus equal across both syncs so this checks hint visibility
+              // without deliberately forcing a fresh focus baseline.
+              await humanClick("#neutral");
+              await wait();
               const before = await sync();
               assert.equal(before.kind, "baseline");
               await hints(true);
@@ -367,12 +407,8 @@ try {
           const { targetId: otherTarget } = await send("Target.createTarget", {
             url: "about:blank",
           });
+          let browserStateSession;
           try {
-            assert.equal(
-              (await send("Browser.getWindowForTarget", { targetId: otherTarget })).windowId,
-              (await send("Browser.getWindowForTarget", { targetId: target.targetId })).windowId,
-              "the unrelated foreground tab must be in the task window",
-            );
             const { sessionId: otherSession } = await send("Target.attachToTarget", {
               targetId: otherTarget,
               flatten: true,
@@ -397,6 +433,32 @@ try {
                   otherSession,
                 )
               ).result.value;
+            browserStateSession = await attachExtensionWorker(send);
+            // Controlled pages use focus emulation, and external tabs are routed
+            // into user windows. Observe native page and window state instead.
+            const nativeTabState = async () => {
+              const result = await send(
+                "Runtime.evaluate",
+                {
+                  expression: `(async () => {
+                    const task = await chrome.tabs.get(${baseline.tab_id});
+                    const target = (await chrome.debugger.getTargets()).find(target => target.id === ${JSON.stringify(otherTarget)});
+                    const other = await chrome.tabs.get(target.tabId);
+                    const pick = ({id, windowId, active}) => ({id, windowId, active});
+                    const windows = await Promise.all([...new Set([task.windowId, other.windowId])].map(async id => {
+                      const {focused, state} = await chrome.windows.get(id);
+                      return {id, focused, state};
+                    }));
+                    return {task: pick(task), other: pick(other), windows};
+                  })()`,
+                  awaitPromise: true,
+                  returnByValue: true,
+                },
+                browserStateSession,
+              );
+              assert(!result.exceptionDetails, JSON.stringify(result.exceptionDetails));
+              return result.result.value;
+            };
             await send("Page.bringToFront", {}, otherSession);
             // A native human click in the unrelated foreground tab must not retarget
             // the task or invalidate an otherwise current task-page context.
@@ -422,10 +484,19 @@ try {
               clicks: "1",
               visible: "visible",
             });
-            await poll(
-              async () => !(await evaluate("document.hasFocus()")),
-              "shared page moved into background",
-            );
+            let routingState;
+            try {
+              await poll(async () => {
+                routingState = await nativeTabState();
+                return routingState.other.windowId !== routingState.task.windowId;
+              }, "unrelated page routed to its user window");
+            } catch (error) {
+              console.error("native-window-state", JSON.stringify(routingState));
+              throw error;
+            }
+            await send("Page.bringToFront", {}, otherSession);
+            await poll(async () => (await nativeTabState()).other.active, "user foreground tab");
+            const foregroundTabs = await nativeTabState();
             const implicitScope = ["--session", session];
             const implicitWait = await bsk(["cooperate", "wait", ...implicitScope]);
             assert.equal(
@@ -443,8 +514,18 @@ try {
               afterHold.context_id,
             ]);
             assert.equal(await evaluate("document.querySelector('#quantity').value"), "2");
+            assert.deepEqual(
+              await nativeTabState(),
+              foregroundTabs,
+              "Agent fill must preserve native page and window state",
+            );
             const implicitSnapshot = await bsk(["snapshot", ...implicitScope]);
             assert.equal(implicitSnapshot.tab_id, baseline.tab_id);
+            assert.deepEqual(
+              await nativeTabState(),
+              foregroundTabs,
+              "Snapshot must preserve native page and window state",
+            );
             const implicitSync = await bsk(["cooperate", "sync", ...implicitScope]);
             assert.equal(implicitSync.tab_id, baseline.tab_id);
             assert.equal(
@@ -452,10 +533,10 @@ try {
               true,
               "background Agent fill must not create a human editing lease",
             );
-            assert.equal(
-              await evaluate("document.visibilityState"),
-              "hidden",
-              "Agent fill must not activate the background tab",
+            assert.deepEqual(
+              await nativeTabState(),
+              foregroundTabs,
+              "Sync must preserve native page and window state",
             );
             // Scroll in both a foreground and background renderer; the application's
             // counter is independent of the tool response and catches misdirected input.
@@ -473,13 +554,15 @@ try {
               scrolled.context_id,
             ]);
             assert.equal(await evaluate("document.querySelector('#scroll-count').value"), "1");
-            assert.equal(await evaluate("document.visibilityState"), "hidden");
+            assert.deepEqual(await nativeTabState(), foregroundTabs);
             assert.deepEqual(await otherState(), {
               value: "untouched",
               clicks: "1",
               visible: "visible",
             });
           } finally {
+            if (browserStateSession)
+              await send("Target.detachFromTarget", { sessionId: browserStateSession });
             await send("Target.closeTarget", { targetId: otherTarget });
           }
           await send("Page.bringToFront", {}, userSession);
@@ -498,6 +581,9 @@ try {
           ]);
           assert.equal(await evaluate("document.querySelector('#scroll-count').value"), "2");
           await evaluate("scrollTo(0,0)");
+          // Keep the same recipient while the following human click changes only
+          // the field value, which is the strict incremental-sync contract here.
+          await evaluate("document.querySelector('#mistake').focus()");
           const afterBackground = await sync();
           const initialCount = submissions.length;
           await humanClick("#mistake");
@@ -703,7 +789,7 @@ try {
         }
       }
       for (const interruptStart of compatibilityOnly ? [] : [false, true])
-        evidence.push(await runDefaultDshScenario({ send, base, cli, env, interruptStart }));
+        evidence.push(await runLegacyStrictDshScenario({ send, base, cli, env, interruptStart }));
       compatibility = await runCompatibilityScenarios({ send, bsk, cli, env, directory, headful });
       if (artifacts)
         await writeFile(
@@ -780,9 +866,15 @@ try {
   );
   const report = {
     passed: true,
+    suite: targetOnly
+      ? "target-policy"
+      : compatibilityOnly
+        ? "legacy-strict-compatibility"
+        : "legacy-strict-with-target-smoke",
     browserVersion,
     headful,
-    closedTaskTabFailsClosed: true,
+    ...(!targetOnly ? { closedTaskTabFailsClosed: true, legacyStrict: true } : {}),
+    targetPolicy,
     compatibility,
     submissions,
     evidence,

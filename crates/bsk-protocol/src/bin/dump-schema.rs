@@ -33,6 +33,7 @@ fn main() {
     dump!(DialogHandleParams, "tool_dialog_handle_params");
     dump!(OperationParams, "tool_operation_params");
     dump!(CooperateParams, "tool_cooperate_params");
+    dump!(ActionExpectation, "action_expectation");
     dump!(VideoParams, "tool_video_params");
     dump!(VideoRecording, "video_recording");
     dump!(VideoGrant, "video_grant");

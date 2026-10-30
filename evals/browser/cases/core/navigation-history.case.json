@@ -55,13 +55,30 @@
   "smoke": {
     "steps": [
       { "action": "navigate" },
+      { "action": "sync", "saveAs": "control" },
       { "action": "observe" },
       { "action": "snapshot" },
-      { "action": "click", "selector": "#details-link" },
+      { "action": "click", "selector": "#details-link", "contextId": "{control.context_id}" },
+      { "action": "sync", "saveAs": "control" },
       { "action": "html" },
-      { "action": "back" },
-      { "action": "forward" },
-      { "action": "reload" }
+      {
+        "action": "back",
+        "contextId": "{control.context_id}",
+        "observationId": "{control.observation_id}"
+      },
+      { "action": "sync", "saveAs": "control" },
+      {
+        "action": "forward",
+        "contextId": "{control.context_id}",
+        "observationId": "{control.observation_id}"
+      },
+      { "action": "sync", "saveAs": "control" },
+      {
+        "action": "reload",
+        "contextId": "{control.context_id}",
+        "observationId": "{control.observation_id}"
+      },
+      { "action": "sync", "saveAs": "control" }
     ]
   }
 }

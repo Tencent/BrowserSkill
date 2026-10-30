@@ -160,9 +160,9 @@ pub fn render_parse_error(err: clap::Error, args: &[OsString]) -> ExitCode {
     ExitCode::from(exit)
 }
 
-/// clap's own did-you-mean can point `--session` at `--version` and print
-/// `Usage: bsk --version <COMMAND>`. Rebuild the error so its tip and usage
-/// describe where the option actually belongs.
+/// A misplaced command option can resemble an unrelated global flag. Rebuild
+/// that suggestion using the actual command scope, while retaining useful local
+/// corrections such as daemon's `--session-idle`.
 fn misplaced_command_option_error(err: &clap::Error, args: &[OsString]) -> Option<clap::Error> {
     let arg = match (err.kind(), err.get(ContextKind::InvalidArg)) {
         (ErrorKind::UnknownArgument, Some(ContextValue::String(arg)))
@@ -172,14 +172,6 @@ fn misplaced_command_option_error(err: &clap::Error, args: &[OsString]) -> Optio
         }
         _ => return None,
     };
-    // Keep clap's option suggestions (e.g. --session-idle) and their usage.
-    // The --version suggestion is the misleading match this rewrite replaces.
-    if matches!(
-        err.get(ContextKind::SuggestedArg),
-        Some(ContextValue::String(suggested)) if suggested != "--version"
-    ) {
-        return None;
-    }
     let mut cmd = super::Cli::command();
     // Like clap, name the binary after argv[0], e.g. `bsk.exe` on Windows.
     if let Some(name) = args
@@ -189,15 +181,33 @@ fn misplaced_command_option_error(err: &clap::Error, args: &[OsString]) -> Optio
     {
         cmd = cmd.bin_name(name);
     }
-    // The usage clap printed names the suggested argument when it found one;
-    // otherwise it is the usage of the command being parsed, e.g. `bsk tab`.
-    let usage = match (
-        err.get(ContextKind::SuggestedArg),
-        err.get(ContextKind::Usage),
-    ) {
-        (None, Some(ContextValue::StyledStr(usage))) => usage.clone(),
-        _ => cmd.render_usage(),
-    };
+    let partial = cmd.clone().ignore_errors(true);
+    cmd.build();
+    if let Some(ContextValue::String(suggested)) = err.get(ContextKind::SuggestedArg)
+        && !cmd.get_arguments().any(|option| {
+            option
+                .get_long()
+                .is_some_and(|long| suggested.strip_prefix("--") == Some(long))
+        })
+    {
+        // This is a command-local correction, not a misleading global suggestion.
+        return None;
+    }
+    let invalid_index = args.iter().position(|value| {
+        value
+            .to_str()
+            .is_some_and(|value| value.split('=').next() == Some(arg.as_str()))
+    })?;
+    // Let clap distinguish subcommands from option values; a context named "tab"
+    // must not change the usage scope. Only parse the already accepted prefix.
+    let matches = partial.try_get_matches_from(&args[..invalid_index]).ok()?;
+    let mut matches = &matches;
+    let mut scope = &mut cmd;
+    while let Some((name, nested)) = matches.subcommand() {
+        scope = scope.find_subcommand_mut(name)?;
+        matches = nested;
+    }
+    let usage = scope.render_usage();
     let mut rebuilt = clap::Error::new(ErrorKind::UnknownArgument).with_cmd(&cmd);
     rebuilt.insert(ContextKind::InvalidArg, ContextValue::String(arg));
     rebuilt.insert(
@@ -237,10 +247,10 @@ fn parse_error_summary(err: &clap::Error, rendered: &str) -> String {
 /// indirection is a leftover from M3.5 that was easy to script
 /// against.
 #[derive(Debug, Serialize)]
-struct JsonError {
+struct JsonError<'a> {
     code: Option<ErrorCode>,
     message: String,
-    hint: Option<&'static str>,
+    hint: Option<&'a str>,
     exit_code: u8,
     #[serde(skip_serializing_if = "Option::is_none")]
     data: Option<serde_json::Value>,
@@ -249,7 +259,7 @@ struct JsonError {
 /// Build the `--json` payload for a [`CliError`]. Pulled out of
 /// [`render`] so the JSON shape can be unit-tested without capturing
 /// stdout (review I2 fix to round-1).
-fn json_error_string(err: &CliError, exit: u8, hint: Option<&'static str>) -> String {
+fn json_error_string(err: &CliError, exit: u8, hint: Option<&str>) -> String {
     let body = JsonError {
         code: err.code(),
         message: err.to_string(),
@@ -295,17 +305,22 @@ fn render_info_for(err: &CliError) -> Option<render_error::RenderInfo> {
 
 /// Hint line for human / JSON rendering, including the local-failure
 /// fallback when there is no daemon [`ErrorCode`].
-fn hint_for(
-    err: &CliError,
+fn hint_for<'a>(
+    err: &'a CliError,
     render_info: Option<&render_error::RenderInfo>,
-) -> Option<&'static str> {
-    render_info
-        .and_then(|info| info.hint)
-        .or_else(|| match err {
-            CliError::Local(error) => recovery_hint(error).or(Some(
-                "is the daemon running? try `bsk daemon start` or `bsk status`",
-            )),
-            _ => None,
+) -> Option<&'a str> {
+    err.data()
+        .and_then(|data| data.get("recovery"))
+        .and_then(serde_json::Value::as_str)
+        .or_else(|| {
+            render_info
+                .and_then(|info| info.hint)
+                .or_else(|| match err {
+                    CliError::Local(error) => recovery_hint(error).or(Some(
+                        "is the daemon running? try `bsk daemon start` or `bsk status`",
+                    )),
+                    _ => None,
+                })
         })
 }
 
@@ -739,5 +754,26 @@ mod tests {
         .unwrap();
         assert_eq!(json["message"], message);
         assert_eq!(json["data"]["effect_state"], "unknown");
+    }
+    #[test]
+    fn action_recovery_overrides_the_generic_permission_hint() {
+        let error = CliError::from_rpc(bsk_protocol::RpcError {
+            code: ErrorCode::PermissionDenied,
+            message: "Expected price $12; found $15".into(),
+            data: Some(serde_json::json!({
+                "reason": "precondition_failed", "phase": "preflight", "effect_state": "none",
+                "target": "#price", "field": "text", "expected": "$12", "actual": "$15",
+                "recovery": "Read the changed price and decide whether to continue."
+            })),
+        });
+        let hint = hint_for(&error, render_info_for(&error).as_ref());
+        assert_eq!(
+            hint,
+            Some("Read the changed price and decide whether to continue.")
+        );
+        let rendered: serde_json::Value =
+            serde_json::from_str(&json_error_string(&error, 1, hint)).unwrap();
+        assert_eq!(rendered["data"]["expected"], "$12");
+        assert_eq!(rendered["data"]["effect_state"], "none");
     }
 }
