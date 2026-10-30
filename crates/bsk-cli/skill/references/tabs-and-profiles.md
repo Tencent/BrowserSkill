@@ -59,7 +59,15 @@ A viewport screenshot does not issue a Canvas `capture_id`; use the existing
 Never invent tab IDs or keep a user tab across unrelated work. Do not repeat
 pending, denied or timed-out borrows. For `borrow_outcome_unknown`, inspect tab/
 session state first: the tab may already have moved. Do not bypass an outcome
-through another browser backend. `tab borrow --timeout 120s` changes only the
+through another browser backend. A borrow that returns `not_found` means the tab
+closed; ask the user to reopen it instead of substituting a new tab when the task
+depends on that tab's state.
+
+`confirmation_ui_unavailable` means no user window can show the prompt: the active
+tab of every normal window outside Agent Windows is a browser, blank or extension
+store page. Ask the user to bring an ordinary http(s) page to the front of a user
+window, then retry once. Opening a tab yourself does not help, because task tabs
+live in the Agent Window. `tab borrow --timeout 120s` changes only the
 confirmation wait (default 60s); custom waits require daemon and extension protocol 1.2+.
 
 The extension's saved Automation settings control borrow confirmation and human
