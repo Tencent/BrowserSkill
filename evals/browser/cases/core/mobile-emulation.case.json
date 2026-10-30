@@ -29,15 +29,12 @@
   },
   "smoke": {
     "steps": [
-      { "action": "navigate" },
-      { "action": "sync", "saveAs": "control" },
       {
         "action": "resize",
         "width": 900,
-        "height": 700,
-        "contextId": "{control.context_id}",
-        "observationId": "{control.observation_id}"
+        "height": 700
       },
+      { "action": "navigate" },
       { "action": "sync", "saveAs": "control" },
       {
         "action": "emulate",
@@ -46,7 +43,11 @@
         "observationId": "{control.observation_id}",
         "evidence": "emulatedDevice"
       },
-      { "action": "wait", "duration": "300ms" },
+      {
+        "action": "wait-site-event",
+        "type": "viewport.sample",
+        "where": { "width": 390, "height": 844 }
+      },
       { "action": "html" }
     ]
   }

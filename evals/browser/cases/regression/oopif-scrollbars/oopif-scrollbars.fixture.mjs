@@ -40,15 +40,34 @@ export default {
           if (probe) browserEval.send("geometry.clicked", { probe: probe.id });
         });
         window.addEventListener("load", () => {
-          scrollTo(${root ? "80, 240" : nested ? "10, 20" : "40, 100"});
-          requestAnimationFrame(() => requestAnimationFrame(() => {
+          let scrolled = false;
+          const settle = () => {
+            const clientWidth = document.documentElement.clientWidth;
+            const clientHeight = document.documentElement.clientHeight;
+            const width = innerWidth;
+            const height = innerHeight;
+            const vertical = width > clientWidth;
+            const horizontal = height > clientHeight;
+            if (!width || !height || !clientWidth || !clientHeight ||
+                (!${root} && (vertical !== ${mode !== "horizontal" && mode !== "none"} ||
+                  horizontal !== ${mode !== "vertical" && mode !== "none"}))) {
+              requestAnimationFrame(settle);
+              return;
+            }
+            if (!scrolled) {
+              scrollTo(${root ? "80, 240" : nested ? "10, 20" : "40, 100"});
+              scrolled = true;
+              requestAnimationFrame(() => requestAnimationFrame(settle));
+              return;
+            }
             document.documentElement.dataset.geometryReady = "true";
             if (!${root}) browserEval.send("geometry.scrollbars", {
-              vertical: innerWidth > document.documentElement.clientWidth,
-              horizontal: innerHeight > document.documentElement.clientHeight,
+              frame: ${JSON.stringify(nested ? "nested" : "outer")},
+              width, height, clientWidth, clientHeight, vertical, horizontal,
             });
             browserEval.send("geometry.ready", { root: ${root} });
-          }));
+          };
+          requestAnimationFrame(settle);
         });
       `,
     });
