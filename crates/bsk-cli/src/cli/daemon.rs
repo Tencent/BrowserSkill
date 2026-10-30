@@ -24,6 +24,14 @@ pub enum DaemonCmd {
     /// Stop then start the daemon.
     Restart(StartArgs),
 
+    /// Install a per-user Windows logon launcher for the foreground daemon.
+    #[command(name = "install-autostart")]
+    InstallAutostart,
+
+    /// Remove the per-user Windows logon launcher installed by bsk.
+    #[command(name = "uninstall-autostart")]
+    UninstallAutostart,
+
     /// Generate a one-use remote browser pairing link.
     Pair,
 
@@ -182,6 +190,8 @@ pub fn dispatch(cmd: DaemonCmd) -> anyhow::Result<()> {
             daemon::start::run_stop().map_err(|e| e.context("restart failed during stop phase"))?;
             daemon::start::run_start(args)
         }
+        DaemonCmd::InstallAutostart => crate::cli::daemon_autostart::install(),
+        DaemonCmd::UninstallAutostart => crate::cli::daemon_autostart::uninstall(),
         DaemonCmd::Pair => {
             println!("{}", authorization_store()?.pair()?);
             Ok(())
