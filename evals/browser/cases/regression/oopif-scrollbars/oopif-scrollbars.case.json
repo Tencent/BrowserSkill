@@ -33,6 +33,7 @@
     "steps": [
       { "action": "navigate" },
       { "action": "wait-site-event", "type": "geometry.ready", "where": { "root": true } },
+      { "action": "sync", "saveAs": "control" },
       { "action": "observe" }
     ]
   }

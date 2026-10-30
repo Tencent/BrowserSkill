@@ -46,21 +46,29 @@
         "action": "navigate"
       },
       {
+        "action": "sync",
+        "saveAs": "control"
+      },
+      {
         "action": "observe"
       },
       {
         "action": "drag",
         "selector": "#mouse",
-        "dx": 120
+        "dx": 120,
+        "contextId": "{control.context_id}",
+        "observationId": "{control.observation_id}"
       },
       {
         "action": "drag",
         "selector": "#native",
-        "to": "#drop"
+        "to": "#drop",
+        "contextId": "{control.context_id}"
       },
       {
         "action": "click",
-        "selector": "#check"
+        "selector": "#check",
+        "contextId": "{control.context_id}"
       },
       {
         "action": "observe"

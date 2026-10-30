@@ -176,6 +176,8 @@ try {
         const action = async (args) => {
           const c = await cli(["cooperate", "sync", ...sessionArgs]);
           assert(c.context_id);
+          assert.equal(c.control_policy, "target");
+          assert(c.observation_id, JSON.stringify(c));
           // Unchanged/delta replies retain the preceding observation's refs.
           observation = c.observation ?? observation;
           return cli([
@@ -183,6 +185,8 @@ try {
             ...sessionArgs,
             "--context",
             c.context_id,
+            "--observation",
+            c.observation_id,
           ]);
         };
         const verify = async (expression) => {
@@ -232,16 +236,7 @@ try {
             .find((line) => line.includes('[drag-handle] "Frame handle"'));
           const ref = line?.match(/@e\d+/)?.[0];
           assert(ref, context.observation.text);
-          return [
-            "drag",
-            ref,
-            "--dx",
-            "60",
-            "--dy",
-            "20",
-            "--observation-id",
-            context.observation.observation_id,
-          ];
+          return ["drag", ref, "--dx", "60", "--dy", "20"];
         });
         assert.deepEqual(await verify("window.frameMove"), [60, 20]);
         await action(["navigate", `http://127.0.0.1:${server.address().port}/precision`]);

@@ -2,6 +2,7 @@ export const OPERATION_CATALOG = [
   { operation: "session.start" },
   { operation: "session.stop" },
   { operation: "session.list" },
+  { operation: "session.sync" },
   { operation: "page.navigate" },
   { operation: "page.back" },
   { operation: "page.forward" },
@@ -34,6 +35,7 @@ export const OPERATION_CATALOG = [
 ];
 
 export const WORKFLOW_ACTION_OPERATIONS = {
+  sync: "session.sync",
   navigate: "page.navigate",
   back: "page.back",
   forward: "page.forward",

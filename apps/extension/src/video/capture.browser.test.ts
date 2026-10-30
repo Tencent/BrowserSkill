@@ -179,6 +179,7 @@ describe.skipIf(!process.env.BSK_VIDEO_CHROME || !process.env.BSK_VIDEO_BSK)(
           {
             executable: process.env.BSK_VIDEO_CHROME,
             extensionPath: extension,
+            extensionViaCdp: process.env.BSK_VIDEO_LOAD_CDP === "1",
             deviceScale: 1,
             zoom: 1,
             // Prerender admission otherwise depends on the host's network-quality estimate.
@@ -211,12 +212,16 @@ describe.skipIf(!process.env.BSK_VIDEO_CHROME || !process.env.BSK_VIDEO_BSK)(
             expect(started.recording.state).toBe("recording");
             await new Promise((resolve) => setTimeout(resolve, 1100));
             const context = await cli("cooperate", "sync", "--session", session);
+            expect(context.control_policy).toBe("target");
+            expect(context.observation_id).toEqual(expect.any(String));
             await cli(
               "navigate",
               "--session",
               session,
               "--context",
               context.context_id,
+              "--observation",
+              context.observation_id,
               `http://127.0.0.1:${address.port}/blue`,
             );
             const workerSession = await attachVideoBackground(send, manifest.name);

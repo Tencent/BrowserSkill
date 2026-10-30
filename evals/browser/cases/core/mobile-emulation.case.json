@@ -30,10 +30,20 @@
   "smoke": {
     "steps": [
       { "action": "navigate" },
-      { "action": "resize", "width": 900, "height": 700 },
+      { "action": "sync", "saveAs": "control" },
+      {
+        "action": "resize",
+        "width": 900,
+        "height": 700,
+        "contextId": "{control.context_id}",
+        "observationId": "{control.observation_id}"
+      },
+      { "action": "sync", "saveAs": "control" },
       {
         "action": "emulate",
         "device": "iphone-14",
+        "contextId": "{control.context_id}",
+        "observationId": "{control.observation_id}",
         "evidence": "emulatedDevice"
       },
       { "action": "wait", "duration": "300ms" },

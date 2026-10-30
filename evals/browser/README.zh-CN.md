@@ -16,7 +16,7 @@ case、测试页面、`bsk` 直连流程和断言都会自动发现；新增 cas
   `unverified`，不会冒充通过。
 - 隐私安全：用户 badcase 必须先缩减为合成 DOM 和匿名数据，再进入仓库。
 
-当前有 6 个稳定的 `core` case 和 1 个 seed 驱动的 `matrix` case。28 表示浏览器操作能力
+当前有 6 个稳定的 `core` case 和 1 个 seed 驱动的 `matrix` case。30 表示浏览器操作能力
 清单，并不是 case 数量；同一种操作可以在不同页面结构、时序和浏览器状态下由多个 case
 重复覆盖。
 
@@ -94,6 +94,14 @@ evals/browser/
 一个 manifest 同时描述：中英文 prompt、能力 coverage、页面事件/回答/adapter 三类断言，以及
 `bsk` 直连 smoke 的声明式步骤。prompt 可用 `{url}`、`{baseUrl}`、`{runId}`、`{seed}`；
 workflow 可以用 `saveAs` 保存 JSON 结果，并用 `{child.tab_id}` 之类的变量引用后续步骤。
+
+控制凭证由 workflow 显式传递。首次导航后使用
+`{ "action": "sync", "saveAs": "control" }`，DOM 动作传入
+`"contextId": "{control.context_id}"`，补充观察和已完成的 DOM 动作可继续复用它。
+导航、调整窗口、设备模拟和仅指定偏移量的拖动，还需传入新一次同步的
+`"observationId": "{control.observation_id}"`；导航后在新文档操作前须重新同步。
+runner 不会自动插入同步、替换凭证或重放被拒绝的动作。固定脚本 case 验证操作能力，
+持续动态内容和人工接管由专门的 cooperation 回归补充验证。
 完整写法可直接参考 `cases/core/` 和 `cases/matrix/`。
 
 ## 新增普通 case
@@ -193,7 +201,7 @@ BSK_AUTO_UPDATE=off pnpm eval:browser smoke --suite matrix --seed 4,7,14 --bsk .
 failure/error，结束后 `bsk session list --json` 必须为 `[]`。不能为了让回归通过而削弱 oracle
 或替换稳定 marker；如果产品行为确实改变，case 与预期基线必须在同一个受审查改动中更新。
 
-直连 smoke 自动覆盖 28 项中的 25 项。`tabs.borrow`、`tabs.return`、`assist.request-help` 需要
+直连 smoke 自动覆盖 30 项中的 27 项。`tabs.borrow`、`tabs.return`、`assist.request-help` 需要
 真实用户标签页或真人交互，因此保留在 manual lane，避免默认测试具有破坏性或不确定性。
 
 ### Fill 回归用例选项

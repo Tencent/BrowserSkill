@@ -61,6 +61,15 @@ function tabArgs(step, variables) {
   return step.tabId === undefined ? [] : ["--tab-id", String(resolveValue(step.tabId, variables))];
 }
 
+function controlArgs(step, variables) {
+  return [
+    ["contextId", "--context"],
+    ["observationId", "--observation"],
+  ].flatMap(([field, flag]) =>
+    step[field] === undefined ? [] : [flag, String(resolveValue(step[field], variables))],
+  );
+}
+
 function matchesWhere(value, where = {}) {
   return Object.entries(where).every(([path, expected]) => readPath(value, path) === expected);
 }
@@ -137,10 +146,15 @@ export async function runBskSmokeTask({
 
   async function executeWorkflowStep(step) {
     const session = ["--session", sessionId];
+    // Carry only the receipts explicitly selected by this workflow step.
+    const runStep = (args, options) => bsk([...args, ...controlArgs(step, variables)], options);
     let result;
     switch (step.action) {
+      case "sync":
+        result = await runStep(["cooperate", "sync", ...session, ...tabArgs(step, variables)]);
+        break;
       case "navigate":
-        result = await bsk([
+        result = await runStep([
           "navigate",
           String(resolveValue(step.url ?? "{url}", variables)),
           ...session,
@@ -149,13 +163,17 @@ export async function runBskSmokeTask({
         break;
       case "back":
       case "forward":
-        result = await bsk([`navigate-${step.action}`, ...session, ...tabArgs(step, variables)]);
+        result = await runStep([
+          `navigate-${step.action}`,
+          ...session,
+          ...tabArgs(step, variables),
+        ]);
         break;
       case "reload":
-        result = await bsk(["reload", ...session, ...tabArgs(step, variables)]);
+        result = await runStep(["reload", ...session, ...tabArgs(step, variables)]);
         break;
       case "wait":
-        result = await bsk(["wait-ms", String(resolveValue(step.duration, variables))]);
+        result = await runStep(["wait-ms", String(resolveValue(step.duration, variables))]);
         break;
       case "wait-site-event":
         result = await waitForSiteEvent(step);
@@ -164,23 +182,29 @@ export async function runBskSmokeTask({
       case "snapshot":
       case "html": {
         const command = step.action === "html" ? "get-html" : step.action;
-        result = await bsk([command, ...session, ...tabArgs(step, variables)]);
+        result = await runStep([command, ...session, ...tabArgs(step, variables)]);
         break;
       }
       case "screenshot": {
         const name = resolveValue(step.artifactName ?? "screenshot.png", variables);
         const path = join(outputDirectory, `${runId}-${name}`);
-        result = await bsk(["screenshot", ...session, ...tabArgs(step, variables), "--out", path]);
+        result = await runStep([
+          "screenshot",
+          ...session,
+          ...tabArgs(step, variables),
+          "--out",
+          path,
+        ]);
         if (step.evidence) evidence[step.evidence] = await hasNonemptyFile(path);
         break;
       }
       case "console":
       case "network":
-        result = await bsk([step.action, ...session, ...tabArgs(step, variables)]);
+        result = await runStep([step.action, ...session, ...tabArgs(step, variables)]);
         break;
       case "click":
       case "hover":
-        result = await bsk([
+        result = await runStep([
           step.action,
           ...targetArgs(step, variables),
           ...session,
@@ -188,7 +212,7 @@ export async function runBskSmokeTask({
         ]);
         break;
       case "drag":
-        result = await bsk([
+        result = await runStep([
           "drag",
           String(resolveValue(step.ref ?? step.selector, variables)),
           ...(step.to !== undefined ? ["--to", String(resolveValue(step.to, variables))] : []),
@@ -200,7 +224,7 @@ export async function runBskSmokeTask({
         ]);
         break;
       case "fill":
-        result = await bsk(
+        result = await runStep(
           [
             "fill",
             ...targetArgs(step, variables),
@@ -214,7 +238,7 @@ export async function runBskSmokeTask({
         );
         break;
       case "select":
-        result = await bsk([
+        result = await runStep([
           "select",
           ...targetArgs(step, variables),
           ...step.values.flatMap((value) => ["--value", String(resolveValue(value, variables))]),
@@ -223,7 +247,7 @@ export async function runBskSmokeTask({
         ]);
         break;
       case "press":
-        result = await bsk([
+        result = await runStep([
           "press",
           String(resolveValue(step.key, variables)),
           ...targetArgs(step, variables),
@@ -232,10 +256,10 @@ export async function runBskSmokeTask({
         ]);
         break;
       case "tab-list":
-        result = await bsk(["tab", "list", ...session]);
+        result = await runStep(["tab", "list", ...session]);
         break;
       case "tab-create":
-        result = await bsk([
+        result = await runStep([
           "tab",
           "create",
           ...session,
@@ -244,7 +268,7 @@ export async function runBskSmokeTask({
         break;
       case "tab-select":
       case "tab-close":
-        result = await bsk([
+        result = await runStep([
           "tab",
           step.action.slice(4),
           String(resolveValue(step.tabId, variables)),
@@ -253,7 +277,7 @@ export async function runBskSmokeTask({
         break;
       case "borrow":
       case "return":
-        result = await bsk([
+        result = await runStep([
           "tab",
           step.action,
           String(resolveValue(step.tabId, variables)),
@@ -261,7 +285,7 @@ export async function runBskSmokeTask({
         ]);
         break;
       case "resize":
-        result = await bsk([
+        result = await runStep([
           "window",
           "resize",
           ...session,
@@ -272,7 +296,7 @@ export async function runBskSmokeTask({
         ]);
         break;
       case "emulate":
-        result = await bsk([
+        result = await runStep([
           "emulate",
           ...session,
           ...tabArgs(step, variables),
@@ -281,7 +305,7 @@ export async function runBskSmokeTask({
         ]);
         break;
       case "request-help":
-        result = await bsk([
+        result = await runStep([
           "request-help",
           ...session,
           "--prompt",

@@ -89,19 +89,27 @@ try {
           return b.length ? b : false;
         });
         const status = await bsk(["status"]);
-        assert.equal(status.protocol_version, "1.7");
-        assert.equal(status.browsers[0].extension_protocol_version, "1.7");
+        assert.equal(status.protocol_version, "1.8");
+        assert.equal(status.browsers[0].extension_protocol_version, "1.8");
         const start = await bsk(["session", "start", "--browser", browsers[0].instance_id]);
         session = start.session_id;
         const scope = ["--session", session];
+        const synced = async () => {
+          const s = await bsk(["cooperate", "sync", ...scope]);
+          assert.equal(s.control_policy, "target");
+          assert(s.context_id && s.observation_id, JSON.stringify(s));
+          return s;
+        };
         let navigated = false;
         const prepare = async (suffix) => {
-          const navContext = navigated ? await bsk(["cooperate", "sync", ...scope]) : undefined;
+          const navContext = navigated ? await synced() : undefined;
           await bsk([
             "navigate",
             `${base}?${suffix}`,
             ...scope,
-            ...(navContext ? ["--context", navContext.context_id] : []),
+            ...(navContext
+              ? ["--context", navContext.context_id, "--observation", navContext.observation_id]
+              : []),
           ]);
           navigated = true;
           const targets = await send("Target.getTargets");
@@ -121,13 +129,8 @@ try {
             return r.result.value;
           };
           await poll(() => read("document.readyState==='complete'&&!!window.rangeState"));
-          await bsk(["cooperate", "sync", ...scope]);
+          await synced();
           return read;
-        };
-        const synced = async () => {
-          const s = await bsk(["cooperate", "sync", ...scope]);
-          assert(s.context_id, JSON.stringify(s));
-          return s;
         };
         const act = async (args, s) => bsk([...args, ...scope, "--context", s.context_id]);
         // Show that successful delivery of the old held gesture does not select this widget.

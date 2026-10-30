@@ -40,6 +40,7 @@
     "steps": [
       { "action": "navigate" },
       { "action": "wait", "duration": "300ms" },
+      { "action": "sync", "saveAs": "control" },
       { "action": "console", "evidence": "consoleRead" },
       { "action": "network", "evidence": "networkRead" },
       { "action": "observe" }
