@@ -1276,6 +1276,7 @@ pub(super) async fn handle_session_start(
         &state.tool_queues,
         params.browser_instance_id.as_deref(),
         AgentWindowOptions {
+            task_name: task_name.clone(),
             incognito: params.incognito,
             size: window_size,
             focused: params.focused,

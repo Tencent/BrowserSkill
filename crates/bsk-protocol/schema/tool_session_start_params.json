@@ -35,6 +35,13 @@
     "session_id": {
       "type": "string"
     },
+    "task_name": {
+      "description": "Optional task name displayed in the Agent Window's tab group.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
     "width": {
       "description": "Optional Agent Window outer width in CSS pixels (100..=7680).",
       "type": [

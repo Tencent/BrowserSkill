@@ -58,7 +58,7 @@ pub struct SessionStartArgs {
     /// Recoverable request token: <expiry-unix-ms>:<UUID>. Valid for at most ten minutes.
     #[arg(long)]
     pub request_id: Option<String>,
-    /// Optional task name displayed in local operation history.
+    /// Optional task name displayed in the browser tab group and local operation history.
     #[arg(long)]
     pub name: Option<String>,
     /// Target browser instance ID or unique label. Always set this when

@@ -2,6 +2,8 @@ import { AGENT_WINDOW_HOME, type AgentWindowApi, chromeAgentWindowApi } from "./
 import { RefStore } from "./ref-store";
 
 export interface SessionContext {
+  /** Optional display name; never used to identify or grant control of a session. */
+  taskName?: string;
   /** Incognito sessions cannot borrow user tabs. Absent means a normal window. */
   incognito?: boolean;
   /** Remote connections retain dedicated windows, with explicit page ownership. */
@@ -51,6 +53,8 @@ export interface SessionManagerOptions {
 
 /** Options for starting a session's Agent Window. */
 export interface SessionStartOptions {
+  /** Optional display name for the Agent Window's tab group. */
+  taskName?: string;
   /** Use Chrome's shared incognito browsing session. */
   incognito?: boolean;
   /** Optional Agent Window outer size in CSS pixels. */
@@ -260,7 +264,7 @@ export class SessionManager {
     let windowId: number | null = null;
     const agentCreatedTabs = new Set<number>();
     try {
-      const { signal: _signal, ...createOptions } = opts;
+      const { signal: _signal, taskName: _taskName, ...createOptions } = opts;
       const created = await this.agentWindow.create(AGENT_WINDOW_HOME, createOptions);
       windowId = created.windowId;
       for (const tabId of created.initialTabIds) agentCreatedTabs.add(tabId);
@@ -279,6 +283,7 @@ export class SessionManager {
       throwIfSessionStartAborted(opts.signal);
 
       const ctx: SessionContext = {
+        taskName: opts.taskName,
         incognito: created.incognito ?? false,
         ...(this.remote() ? { remote: true } : {}),
         sessionId,
