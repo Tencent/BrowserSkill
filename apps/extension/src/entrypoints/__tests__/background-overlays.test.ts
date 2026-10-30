@@ -4,7 +4,6 @@ import { OverlayController, shouldShowAgentControlOverlay } from "@/content/over
 import { watchDaemonConnection } from "@/lib/daemon-connection-preference";
 import { OVERLAY_AGENT_STATE, type OverlayAgentStateMessage } from "@/lib/overlay-bridge";
 import { attachSessionsLiveFlag } from "@/lib/sessions-live-flag";
-import { AgentWindowTabGroups } from "@/session-manager/agent-window-tab-group";
 import { isAgentControlledTab } from "@/session-manager/manager";
 import { AgentWindowRouting } from "@/session-manager/window-routing";
 import { ToolDispatcher } from "@/tools/dispatcher";
@@ -38,7 +37,6 @@ vi.mock("@/lib/recording/frame-coordinator");
 vi.mock("@/lib/sessions-live-flag");
 vi.mock("@/long-screenshot/background");
 vi.mock("@/session-manager/event-handler");
-vi.mock("@/session-manager/agent-window-tab-group");
 vi.mock("@/session-manager/window-routing");
 vi.mock("@/session-manager/agent-window", () => ({
   AGENT_WINDOW_HOME: "about:blank",
@@ -132,7 +130,7 @@ async function fixture() {
   };
 }
 
-it("refreshes released-page controls and groups after attachment completes", async () => {
+it("refreshes released-page controls after attachment completes", async () => {
   const f = await fixture();
   f.overlay.applyAgentControlMode("one", "control");
   f.deps.sessions.release("one");
@@ -143,18 +141,6 @@ it("refreshes released-page controls and groups after attachment completes", asy
     10,
     expect.objectContaining({ sessionId: null, mode: "hidden" }),
   );
-  const groups = vi.mocked(AgentWindowTabGroups).mock.instances.at(-1)!;
-  expect(groups.sync).toHaveBeenCalledOnce();
-});
-
-it("refreshes native window identification after session changes and explicit tab claims", async () => {
-  const f = await fixture();
-  const groups = vi.mocked(AgentWindowTabGroups).mock.instances.at(-1)!;
-  expect(AgentWindowTabGroups).toHaveBeenLastCalledWith(f.deps.sessions);
-  f.deps.onSessionsChanged?.();
-  expect(groups.sync).toHaveBeenCalledTimes(1);
-  f.deps.onAgentTabClaimed?.(10, 10);
-  expect(groups.sync).toHaveBeenCalledTimes(2);
 });
 
 it.each([false, true])("hides an observed tab after detachment, remote=%s", async (remote) => {

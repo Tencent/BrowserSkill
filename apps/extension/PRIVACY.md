@@ -59,7 +59,6 @@ The Extension requests the following Chrome permissions. Each is used solely for
 - **`scripting`** — Inject the full-page screenshot helper into the selected page when it is missing, such as after an extension reload.
 - **`webNavigation`** — Track page navigation and frames so captures, recordings, and human-help completion checks follow the correct document.
 - **`tabs`** — Inspect, create, and close tabs in the Agent Window; query tab metadata.
-- **`tabGroups`** — Label controlled tabs in Agent Windows with an orange BrowserSkill group, and remove that group when the task ends.
 - **`windows`** — Create and manage the dedicated Agent Window that isolates agent activity from the user's normal browsing.
 - **`alarms`** — Periodically wake the service worker to keep the selected connection alive and renew remote device authorization.
 - **`idle`** — Detect when the device returns from idle/locked so the Extension can promptly re-establish the selected WebSocket connection after the machine wakes. No idle data is stored or transmitted.

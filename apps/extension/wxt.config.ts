@@ -48,7 +48,6 @@ export default defineConfig({
       "offscreen",
       "scripting",
       "tabs",
-      "tabGroups",
       "storage",
       "webNavigation",
       "windows",
