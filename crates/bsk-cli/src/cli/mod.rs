@@ -85,12 +85,18 @@ pub const TOOL_IPC_TIMEOUT: Duration = Duration::from_secs(35);
 /// Global flags shared by every subcommand.
 #[derive(Debug, Clone, Args, Default)]
 pub struct GlobalFlags {
-    /// Observation context returned by cooperate sync. Required for shared-tab actions.
+    /// Control context returned by cooperate sync. Required for shared-tab actions.
     #[arg(long, global = true)]
     pub context: Option<String>,
-    /// Observed refs/selectors covering this decision. Repeat for other regions; omit to validate the whole page.
+    /// Legacy strict-policy decision regions. Target policy uses --expect instead.
     #[arg(long, global = true)]
     pub depends_on: Vec<String>,
+    /// Explicit observation ID for visual or untargeted actions; never inferred from cached state.
+    #[arg(long, global = true)]
+    pub observation: Option<String>,
+    /// JSON array of target facts to check before input: [{"target":"@e1","field":"text","equals":"Save"}].
+    #[arg(long, global = true, value_parser = parse_expectations_json)]
+    pub expect: Option<serde_json::Value>,
     /// Emit machine-readable JSON output (when meaningful).
     #[arg(long, global = true)]
     pub json: bool,
@@ -102,6 +108,11 @@ pub struct GlobalFlags {
     /// Increase log verbosity (`-v` debug, `-vv` trace).
     #[arg(short = 'v', long = "verbose", global = true, action = clap::ArgAction::Count)]
     pub verbose: u8,
+}
+
+fn parse_expectations_json(value: &str) -> Result<serde_json::Value, String> {
+    let conditions = bsk_protocol::tools::parse_expectations(value)?;
+    serde_json::to_value(conditions).map_err(|error| error.to_string())
 }
 
 /// Top-level `bsk` CLI.
@@ -275,4 +286,36 @@ pub struct LogsCmd {
     /// Number of trailing lines to print before following (default 200).
     #[arg(short = 'n', long, default_value_t = 200)]
     pub lines: usize,
+}
+
+#[cfg(test)]
+mod action_condition_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn explicit_action_evidence_parses_without_rewriting_literals() {
+        let expected = json!([{"target":"#price","field":"text","equals":"  $12 [sale]  "}]);
+        let command = Cli::try_parse_from([
+            "bsk",
+            "click",
+            "@e1",
+            "--session",
+            "s",
+            "--context",
+            "c",
+            "--observation",
+            "o",
+            "--expect",
+            &expected.to_string(),
+        ])
+        .unwrap();
+        assert_eq!(command.flags.context.as_deref(), Some("c"));
+        assert_eq!(command.flags.observation.as_deref(), Some("o"));
+        assert_eq!(command.flags.expect, Some(expected));
+        assert!(
+            Cli::try_parse_from(["bsk", "click", "@e1", "--session", "s", "--expect", "{}"])
+                .is_err()
+        );
+    }
 }

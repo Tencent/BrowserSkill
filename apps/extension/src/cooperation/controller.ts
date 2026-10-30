@@ -4,10 +4,17 @@ import {
   type SessionContext,
   type SessionManager,
 } from "@/session-manager/manager";
-import { resolveActionTarget } from "@/tools/interaction";
+import { type ResolvedActionTarget, resolveActionTarget } from "@/tools/interaction";
 import { captureVomObservation, handleSnapshot } from "@/tools/observation";
 import { type CdpRunner, chromeTabsApi, isRpcError, resolveTargetTab } from "@/tools/shared";
 import type { DragTarget, RequestFrame, RpcError } from "@/transport/types";
+import {
+  ActionCheckError,
+  actionError,
+  checkActionTarget,
+  checkExpectations,
+  parseExpectations,
+} from "./action-checks";
 import { guardedRunner } from "./action-guard";
 import { type ControlAuthority, ControlAuthorityError } from "./control-authority";
 import {
@@ -29,6 +36,8 @@ interface Context {
   frames: Frames;
   evidence?: ObservationEvidence;
   activityCursor: number;
+  observationId?: string;
+  consumed?: boolean;
 }
 type Activity = FrameState["events"][number] & {
   frame_id: number;
@@ -84,6 +93,21 @@ export interface CooperationDeps {
   sessionActivity?(sessionId: string, idleProtected: boolean): void;
   now?: () => number;
 }
+/** Only operations whose complete input recipient is a resolved DOM target. */
+const TARGET_ACTIONS = new Set([
+  "tool.click",
+  "tool.fill",
+  "tool.press",
+  "tool.select",
+  "tool.hover",
+  "tool.focus",
+  "tool.blur",
+  "tool.scroll_to",
+  "tool.wheel",
+  "tool.upload",
+  "tool.download",
+  "tool.drag",
+]);
 const READS = new Set([
   "tool.snapshot",
   "tool.observe",
@@ -536,6 +560,29 @@ export class CooperationController implements ControlAuthority {
       return failure("Cooperation requires an owned tab");
     if (!["enable", "status", "sync", "wait"].includes(params.action))
       return { code: "invalid_params", message: "Unknown cooperation action" };
+    if (
+      params.control_policy !== undefined &&
+      (!["auto", "strict", "target"].includes(params.control_policy) ||
+        !["sync", "enable"].includes(params.action))
+    )
+      return {
+        code: "invalid_params",
+        message: "control_policy must be auto, strict or target on sync/enable",
+      };
+    const requestedPolicy =
+      params.control_policy === "auto"
+        ? (session.controlPolicy ?? "target")
+        : params.control_policy;
+    if (requestedPolicy && session.controlPolicy && requestedPolicy !== session.controlPolicy)
+      return {
+        code: "invalid_params",
+        message: "Control policy is fixed for this session; start a new session to change it",
+      };
+    if (["sync", "enable"].includes(params.action)) {
+      session.controlPolicy ??= requestedPolicy ?? "strict";
+      if (session.controlPolicy === "target") session.refStore.enableStableRefs();
+    }
+    const targetPolicy = session.controlPolicy === "target";
     const state = this.track(session, target.tabId);
     if (state.sessionId !== session.sessionId)
       return failure("This tab belongs to another session");
@@ -588,11 +635,13 @@ export class CooperationController implements ControlAuthority {
           ),
           state: this.view(state.tabId),
           ready: !state.unavailable && !state.held && !state.working && !this.humanActive(state),
+          control_policy: session.controlPolicy ?? "strict",
         };
       if (state.held || state.working || this.humanActive(state))
         return failure("The user is still operating this tab; wait for hand-back");
       state.working = true;
-      state.context = undefined;
+      const previousContext = state.context;
+      if (!targetPolicy) state.context = undefined;
       this.changed(state);
       try {
         const before = state.frames;
@@ -601,6 +650,7 @@ export class CooperationController implements ControlAuthority {
         let evidence = baseline?.evidence;
         const delta =
           baseline &&
+          (!targetPolicy || sameFrames(baseline.frames, before, "revision")) &&
           [...before.values()].every((frame) => frame.fieldsComplete !== false) &&
           baseline.refs === session.refStore.revision &&
           sameFrames(baseline.frames, before, "structure") &&
@@ -637,20 +687,25 @@ export class CooperationController implements ControlAuthority {
           signal.aborted ||
           state.epoch !== epoch ||
           !sameFrames(before, after, "human") ||
-          !sameFields(before, after, true) ||
-          !sameMedia(before, after) ||
-          (delta && !sameFrames(before, after, "structure")) ||
+          (!targetPolicy &&
+            (!sameFields(before, after, true) ||
+              !sameMedia(before, after) ||
+              (delta && !sameFrames(before, after, "structure")))) ||
           this.humanActive(state) ||
           state.held
         )
           return failure("Page changed while synchronizing; sync again after it settles");
         const context: Context = {
-          id: crypto.randomUUID(),
+          id:
+            targetPolicy && previousContext?.epoch === epoch
+              ? previousContext.id
+              : crypto.randomUUID(),
           epoch,
           refs: session.refStore.revision,
           frames: before,
           evidence,
           activityCursor: state.activitySequence,
+          observationId: crypto.randomUUID(),
         };
         state.context = context;
         state.baseline = context;
@@ -675,6 +730,8 @@ export class CooperationController implements ControlAuthority {
         return {
           tab_id: state.tabId,
           context_id: context.id,
+          control_policy: session.controlPolicy ?? "strict",
+          ...(targetPolicy ? { observation_id: context.observationId } : {}),
           kind: delta
             ? sameFrames(baseline.frames, after, "revision")
               ? "unchanged"
@@ -715,8 +772,9 @@ export class CooperationController implements ControlAuthority {
               );
             }),
           state: { ...this.view(state.tabId), mode: "ready" },
-          guidance:
-            "Continue toward the assigned goal using this current state. Incorporate helpful progress and correct recoverable mistakes. Page activity is not a change of goal. Each context authorizes one action; sync after it. By default the whole page is checked. Text that changes by itself (clocks, counters) is reported once; after the next sync it no longer blocks actions on a ref or selector unless it shares a form, list, dialog, panel or other container with the target. Keys without a ref or selector can use explicit dependencies, while their actual focused region stays protected; uncertain focus and other untargeted actions keep the exact whole-page check. To tolerate other unrelated updates, declare all observed decision regions with --depends-on refs/selectors (plugin: dependsOn); the target region and form values remain protected. Verify completion and prior submissions from application evidence.",
+          guidance: targetPolicy
+            ? "This context remains valid for DOM-targeted actions until human control or the document changes. Supplementary reads do not invalidate it. Use explicit expect checks for business facts such as price, recipient or record ID. Scripts, untargeted keys and visual clicks require this sync's observation_id and retain strict content checks. Never replay an uncertain action; inspect its result first."
+            : "Continue toward the assigned goal using this current state. Incorporate helpful progress and correct recoverable mistakes. Page activity is not a change of goal. Each context authorizes one action; sync after it. By default the whole page is checked. Text that changes by itself (clocks, counters) is reported once; after the next sync it no longer blocks actions on a ref or selector unless it shares a form, list, dialog, panel or other container with the target. Keys without a ref or selector can use explicit dependencies, while their actual focused region stays protected; uncertain focus and other untargeted actions keep the exact whole-page check. To tolerate other unrelated updates, declare all observed decision regions with --depends-on refs/selectors (plugin: dependsOn); the target region and form values remain protected. Verify completion and prior submissions from application evidence.",
         };
       } finally {
         state.working = false;
@@ -884,6 +942,12 @@ export class CooperationController implements ControlAuthority {
           session_id?: string;
           tab_id?: number;
           context_id?: string;
+          observation_id?: string;
+          expect?: unknown;
+          capture_id?: string;
+          image_x?: number;
+          image_y?: number;
+          timeout_ms?: number;
           probe_hover?: boolean;
           ref?: string;
           selector?: string;
@@ -902,6 +966,7 @@ export class CooperationController implements ControlAuthority {
     if (!params?.session_id || SESSION_TOOLS.has(req.method)) return invoke(cdp);
     const session = this.deps.sessions.get(params.session_id);
     if (!session) return invoke(cdp);
+    const targetPolicy = session.controlPolicy === "target";
     this.startSession(session.sessionId);
     if (
       !READS.has(req.method) &&
@@ -997,7 +1062,14 @@ export class CooperationController implements ControlAuthority {
       params.context_id &&
       (!bound || (params.tab_id !== undefined && params.tab_id !== bound.tabId))
     )
-      return failure("This context belongs to a different or superseded observation");
+      return targetPolicy
+        ? actionError(
+            "control_context_invalid",
+            "This control context is no longer valid for this session and tab",
+            "control",
+            "Synchronize the intended tab after control is returned, inspect the current state and decide again.",
+          )
+        : failure("This context belongs to a different or superseded observation");
     const target = await resolveTargetTab(
       this.deps.sessions,
       session,
@@ -1022,16 +1094,69 @@ export class CooperationController implements ControlAuthority {
       return this.bootstrap(state, req.method, cdp, signal, invoke);
     if (read) return invoke(guardedRunner(cdp));
     if (state.working) return failure("Another operation is settling on this tab");
+    const expectations = parseExpectations(params.expect);
+    if (isRpcError(expectations)) return expectations;
+    if (targetPolicy && params.depends_on?.length)
+      return {
+        code: "invalid_params",
+        message: "depends_on requires strict policy; use explicit expect checks with target policy",
+        data: { phase: "precondition", effect_state: "none" },
+      };
+    const primaryTarget = req.method === "tool.drag" ? params.source : params;
+    const visual =
+      params.capture_id !== undefined ||
+      params.image_x !== undefined ||
+      params.image_y !== undefined;
+    const targeted =
+      targetPolicy &&
+      TARGET_ACTIONS.has(req.method) &&
+      !visual &&
+      !!(primaryTarget?.ref || primaryTarget?.selector) &&
+      (req.method !== "tool.drag" || !!(params.target?.ref || params.target?.selector));
     let sent = false;
     let finished = false;
     let revoked: string | undefined;
     let nativeInputStarted = false;
-    const context = state.context;
+    const context = targetPolicy && !targeted ? state.baseline : state.context;
     const epoch = state.epoch;
     let verifiedFrames = context?.frames;
     let evidenceTargets: { backendNodeId: number; frameId?: string }[] | undefined;
-    let actionTarget: { backendNodeId: number; frameId?: string } | undefined;
+    let actionTarget: ResolvedActionTarget | undefined;
     let destinationTarget: typeof actionTarget;
+    let checkFailure: RpcError | undefined;
+    const reportFailure = (message: string, effect: "none" | "unknown" = "none"): RpcError => {
+      if (!targetPolicy) return failure(message, effect);
+      if (effect === "unknown") state.context = undefined;
+      const controlReason = state.held
+        ? "control_held"
+        : this.humanActive(state) || intervention.signal.aborted
+          ? "human_intervention"
+          : context && documents(context.frames) !== documents(state.frames)
+            ? "document_changed"
+            : undefined;
+      const issue =
+        !controlReason && checkFailure
+          ? checkFailure
+          : actionError(
+              controlReason ?? "control_context_invalid",
+              message,
+              "control",
+              "Wait for control if needed, synchronize and inspect the live result before deciding again. Never replay an uncertain action.",
+            );
+      return {
+        ...issue,
+        data: {
+          ...issue.data,
+          effect_state: effect,
+          ...(effect === "unknown"
+            ? {
+                recovery:
+                  "Inspect the application result and synchronize before choosing another action. Never replay an uncertain submission.",
+              }
+            : {}),
+        },
+      };
+    };
     state.working = true;
     const intervention = new AbortController();
     state.interruption = intervention;
@@ -1057,6 +1182,7 @@ export class CooperationController implements ControlAuthority {
         return "The keyboard focus changed; synchronize before pressing a key";
       if (
         !settledNavigation &&
+        !targeted &&
         !nativeInputStarted &&
         context &&
         !sameMedia(context.frames, state.frames)
@@ -1091,6 +1217,17 @@ export class CooperationController implements ControlAuthority {
       assert();
       // A refusal always requires a fresh sync; the refused context cannot retry.
       const consumeRefused = () => {
+        if (targetPolicy) {
+          context.consumed = true;
+          checkFailure = actionError(
+            "observation_changed",
+            "The strict observation changed before this action",
+            "observation",
+            "Synchronize and reconsider this untargeted action, or use a DOM target with explicit business preconditions.",
+            { observation_id: context.observationId },
+          );
+          return;
+        }
         if (state.context !== context) return;
         state.context = undefined;
         this.changed(state);
@@ -1109,7 +1246,7 @@ export class CooperationController implements ControlAuthority {
         actionTarget !== undefined &&
         observesTarget(context.evidence, actionTarget) &&
         observesTarget(evidence, actionTarget);
-      const tolerant = anchored;
+      const tolerant = !targetPolicy && anchored;
       const pages = documents(state.frames);
       const volatile =
         tolerant && state.volatile?.documents === pages ? state.volatile.keys : undefined;
@@ -1201,28 +1338,78 @@ export class CooperationController implements ControlAuthority {
       }
       throw new Error((revoked = "The action's observed content changed; synchronize and replan"));
     };
+    const verifyDecision = async (requireFocus = false) => {
+      if (targeted) {
+        for (const node of [actionTarget, destinationTarget]) {
+          if (!node) continue;
+          const error = await checkActionTarget(cdp, node, req.method, requireFocus);
+          if (error) throw new ActionCheckError((checkFailure = error));
+        }
+      } else await verifyEvidence();
+      const error = await checkExpectations(cdp, session, target, expectations);
+      if (error) throw new ActionCheckError((checkFailure = error));
+      assert();
+    };
+    // Resolve selectors once per action. Handlers use the same concrete DOM node
+    // that passed the checks, even if a list reorders during preparation.
+    const pin = (node: ResolvedActionTarget) => {
+      const identity = {
+        tabId: target.tabId,
+        backendNodeId: node.backendNodeId,
+        frameId: node.frameId,
+        cdpSessionId: node.cdpTarget.sessionId,
+      };
+      const ref = session.refStore.allocateRef(identity);
+      session.refStore.set(ref, node.backendNodeId, identity);
+      return ref;
+    };
+    const primaryEffect = (method: string) =>
+      (req.method === "tool.focus" && method === "DOM.focus") ||
+      (req.method === "tool.blur" && method === "Runtime.callFunctionOn") ||
+      (req.method === "tool.hover" && method === "Input.dispatchMouseEvent") ||
+      (req.method === "tool.scroll_to" && method === "DOM.scrollIntoViewIfNeeded");
     try {
       await this.refresh(state);
       assert();
       if (
         !context ||
-        params.context_id !== context.id ||
+        !state.context ||
+        params.context_id !== state.context.id ||
         context.epoch !== state.epoch ||
-        context.refs !== session.refStore.revision
+        (!targetPolicy && context.refs !== session.refStore.revision)
       )
-        return failure("This action requires the context returned by the latest cooperate sync");
-      const primaryTarget = req.method === "tool.drag" ? params.source : params;
-      if (primaryTarget?.ref || primaryTarget?.selector) {
+        return targetPolicy
+          ? reportFailure("This action requires a valid control context from cooperate sync")
+          : failure("This action requires the context returned by the latest cooperate sync");
+      if (
+        targetPolicy &&
+        !targeted &&
+        (params.observation_id !== context.observationId || context.consumed)
+      )
+        return actionError(
+          "observation_required",
+          "This action requires an unused strict observation from cooperate sync",
+          "observation",
+          "Synchronize, inspect the result and pass its observation_id explicitly with --observation (plugin: observationId).",
+        );
+      if (!visual && (primaryTarget?.ref || primaryTarget?.selector)) {
         const resolved = await resolveActionTarget(
           guardedRunner(cdp),
           session,
           target,
           primaryTarget,
           "shared action",
-          req.method === "tool.drag",
+          targetPolicy || req.method === "tool.drag",
         );
         if (isRpcError(resolved)) return resolved;
         actionTarget = resolved;
+        if (targeted && primaryTarget.selector) {
+          const pinned = { ...primaryTarget, ref: pin(resolved), selector: undefined };
+          req.params =
+            req.method === "tool.drag"
+              ? { ...(req.params as object), source: pinned }
+              : { ...(req.params as object), ...pinned };
+        }
       }
       if (req.method === "tool.drag" && (params.target?.ref || params.target?.selector)) {
         const resolved = await resolveActionTarget(
@@ -1235,6 +1422,11 @@ export class CooperationController implements ControlAuthority {
         );
         if (isRpcError(resolved)) return resolved;
         destinationTarget = resolved;
+        if (targeted && params.target?.selector)
+          req.params = {
+            ...(req.params as object),
+            target: { ...params.target, ref: pin(resolved), selector: undefined },
+          };
       }
       if (params.depends_on !== undefined) {
         if (
@@ -1265,8 +1457,36 @@ export class CooperationController implements ControlAuthority {
           }
         }
       }
-      await verifyEvidence();
-      state.context = undefined; // Consume before execution, including failed/unknown replies.
+      // Wait only before execution, and only for transient element readiness.
+      // Business facts, missing nodes and ambiguous selectors fail immediately.
+      const deadline = Date.now() + (params.timeout_ms ?? 30_000);
+      while (true) {
+        try {
+          await verifyDecision();
+          break;
+        } catch (error) {
+          if (
+            !targeted ||
+            !(error instanceof ActionCheckError) ||
+            !["target_hidden", "target_disabled", "target_readonly"].includes(
+              error.rpcError.data?.reason ?? "",
+            )
+          )
+            throw error;
+          if (Date.now() >= deadline) {
+            checkFailure = { ...error.rpcError, code: "timeout" };
+            throw new ActionCheckError(checkFailure);
+          }
+          await new Promise((resolve) => setTimeout(resolve, Math.min(50, deadline - Date.now())));
+          await this.refresh(state);
+          assert();
+          checkFailure = undefined;
+        }
+      }
+      if (targeted && params.timeout_ms !== undefined)
+        req.params = { ...(req.params as object), timeout_ms: Math.max(1, deadline - Date.now()) };
+      if (!targetPolicy) state.context = undefined;
+      else if (!targeted) context.consumed = true;
       this.changed(state);
       const result = await invoke(
         guardedRunner(cdp, {
@@ -1282,25 +1502,29 @@ export class CooperationController implements ControlAuthority {
               state.target = { x: input.x!, y: input.y!, expires: this.now() + 650 };
               this.changed(state);
             }
-            if (!nativeInputStarted) await verifyEvidence();
+            if (!nativeInputStarted)
+              await verifyDecision(
+                targeted && req.method === "tool.press" && input?.type === "keydown",
+              );
           },
-          dispatch: (startsInput) => {
+          dispatch: (startsInput, method) => {
             assert();
             sent = true;
-            nativeInputStarted ||= startsInput;
+            nativeInputStarted ||= startsInput || (targeted && primaryEffect(method));
           },
           verifyPointerTarget: async (node, point, offset) => {
             try {
               await pointerTargetValidator(cdp)(node, point, offset);
             } catch (error) {
               revoked = error instanceof Error ? error.message : String(error);
+              if (error instanceof ActionCheckError) checkFailure = error.rpcError;
               throw error;
             }
           },
           beginDomMutation: async () => {
             await this.refresh(state);
             assert();
-            if (!nativeInputStarted) await verifyEvidence();
+            if (!nativeInputStarted) await verifyDecision();
             nativeInputStarted = true;
           },
         }),
@@ -1314,12 +1538,14 @@ export class CooperationController implements ControlAuthority {
         return result;
       // Even a successful CDP reply does not authorize a stale next step.
       if (state.stopped) return stopped(sent ? "unknown" : "none");
-      if (signal.aborted)
+      if (signal.aborted) {
+        if (targetPolicy && sent) state.context = undefined;
         return {
           code: "cancelled",
           message: "Shared-tab action cancelled",
           data: { effect_state: sent ? "unknown" : "none" },
         };
+      }
       if (["tool.evaluate", "tool.upload"].includes(req.method)) await this.refresh(state);
       // Navigation replaces its observed document. Return the handler's completed
       // receipt without restoring that context or allowing any further input.
@@ -1331,17 +1557,38 @@ export class CooperationController implements ControlAuthority {
           req.method,
         );
       const reason = revoked ?? interruption(settledNavigation);
-      if (reason) return failure(reason, sent ? "unknown" : "none");
+      if (checkFailure || reason)
+        return reportFailure(checkFailure?.message ?? reason!, sent ? "unknown" : "none");
+      if (targetPolicy && isRpcError(result)) {
+        const effect = result.data?.effect_state ?? (sent ? "unknown" : "none");
+        if (effect === "unknown") state.context = undefined;
+        return {
+          ...result,
+          data: {
+            ...result.data,
+            effect_state: effect,
+            phase: result.data?.phase ?? "execution",
+            recovery:
+              result.data?.recovery ??
+              (effect === "unknown"
+                ? "Inspect the application result and synchronize before choosing another action. Never replay an uncertain submission."
+                : "Inspect the reported target or parameter before choosing another action."),
+          },
+        };
+      }
       return result;
     } catch (error) {
       if (state.stopped) return stopped(sent ? "unknown" : "none");
-      if (signal.aborted)
+      if (signal.aborted) {
+        if (targetPolicy && sent) state.context = undefined;
         return {
           code: "cancelled",
           message: "Shared-tab action cancelled",
           data: { effect_state: sent ? "unknown" : "none" },
         };
-      return failure(
+      }
+      if (error instanceof ActionCheckError) checkFailure = error.rpcError;
+      return reportFailure(
         error instanceof Error ? error.message : String(error),
         sent ? "unknown" : "none",
       );

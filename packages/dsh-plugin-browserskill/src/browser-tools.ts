@@ -18,11 +18,15 @@ import {
 import toolNames from "./tool-names.json";
 import {
   BROWSER_PARAM,
+  CONTROL_POLICY_PARAM,
   ELEMENT_WAIT_PARAMS,
+  EXPECT_PARAM,
+  OBSERVATION_ID_PARAM,
   SESSION_PARAM,
   SESSION_STOP_PARAMS,
   TAB_ID_PARAM,
   TIMEOUT_MS_PARAM,
+  validateExpectations,
   WAIT_UNTIL_PARAM,
 } from "./tool-params";
 import { createBrowserOperationDefinitions, type ToolDeps } from "./tools";
@@ -99,13 +103,15 @@ function defineBrowserTool(
         type: "array",
         items: { type: "string" },
         description:
-          "Observed refs/selectors covering all regions used for this decision. Omit to validate the whole page. The action target's region and form values are always checked.",
+          "Strict policy only: observed refs/selectors covering the decision regions. Under target policy, declare exact business conditions with expect instead.",
       },
       contextId: {
         type: "string",
         description:
-          "Shared-tab actions require the context_id you actually received from bsk_session sync or a step's post result. One context authorizes one action; never substitute a newer context into an old plan.",
+          "Control context_id actually received from sync or a step's post result. Under target policy it survives supplementary reads and DOM actions until human intervention or document replacement. Strict policy consumes it after one action.",
       },
+      observationId: OBSERVATION_ID_PARAM,
+      expect: EXPECT_PARAM,
     },
     output: {
       schema: DOMAIN_RESULT,
@@ -120,10 +126,13 @@ function defineBrowserTool(
     },
     async execute(args, exec) {
       const definition = definitionFor(definitions, spec.actions, args.action);
+      validateExpectations(args.expect);
       return (await definition.execute(operationArgs(args), {
         ...exec,
         observationContext: args.contextId,
         observationDependencies: args.dependsOn,
+        observationId: definition.name === "interact.drag" ? undefined : args.observationId,
+        actionExpectations: args.expect,
       } as typeof exec)) as never;
     },
     finalizeContent(exec, result) {
@@ -156,7 +165,7 @@ const BROWSER_TOOL_SPECS: BrowserToolSpec[] = [
       "Manage plugin-owned browser sessions. Human collaboration is automatic; share is an optional compatibility alias for sync/rebinding. " +
       "sync returns current state and context_id; wait-user waits for hand-back; cooperation-status reads ownership. " +
       "sync can saveFull to a new JSON file for offline bsk_inspect view; matchText only folds plain numbered fallback buttons, not general text. " +
-      "For shared tabs, pass the observed contextId to one action, sync again, and replan toward the assigned goal. " +
+      "Target policy lets DOM actions reuse contextId across supplementary reads; pass expect for business facts that must remain true. Human intervention or document replacement requires sync. Untargeted actions also require observationId. " +
       "Actions: start opens an Agent Window; stop closes an " +
       "owned session; list returns owned sessions. For start, url/device/width/height/noFocus/incognito are " +
       "optional. When a specific profile is required, always set browser to its verified instance " +
@@ -180,6 +189,7 @@ const BROWSER_TOOL_SPECS: BrowserToolSpec[] = [
       ...SESSION_STOP_PARAMS,
       tabId: TAB_ID_PARAM,
       timeoutMs: TIMEOUT_MS_PARAM,
+      policy: CONTROL_POLICY_PARAM,
       ...SAVED_OBSERVATION_PARAMETERS,
       settle: {
         type: "boolean",

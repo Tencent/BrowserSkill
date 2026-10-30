@@ -1,5 +1,87 @@
 /** Shared model-facing parameter schemas for browser tools. */
 
+export const CONTROL_POLICY_PARAM = {
+  type: "string",
+  enum: ["auto", "target", "strict"],
+  description:
+    "Sync/share: auto (default) preserves the session policy or chooses target for a new session. target checks the chosen element and explicit expect conditions; strict preserves whole-page observation guards. An established policy cannot be changed.",
+} as const;
+
+export const OBSERVATION_ID_PARAM = {
+  type: "string",
+  description:
+    "Explicit observation_id from sync. Required for untargeted actions under target policy. Strict-policy drag instead accepts its ref-map observation token. Never substitute a newer observation into an old decision.",
+} as const;
+
+export const EXPECT_PARAM = {
+  type: "array",
+  description:
+    "At most 16 exact conditions checked before the action. Declare the business facts used for the decision, such as a row's record ID or a price; unrelated page updates do not block target actions.",
+  items: {
+    type: "object",
+    additionalProperties: false,
+    properties: {
+      target: {
+        type: "string",
+        required: true,
+        description: "Ref or CSS selector, at most 1024 characters.",
+      },
+      field: {
+        type: "string",
+        required: true,
+        enum: ["text", "value", "checked", "attribute", "exists"],
+      },
+      equals: {
+        required: true,
+        oneOf: [{ type: "string" }, { type: "boolean" }, { type: "null" }],
+        description:
+          "text/value: string; checked/exists: boolean; attribute: string or null for absence.",
+      },
+      attribute: {
+        type: "string",
+        description: "Required only for field=attribute, at most 256 characters.",
+      },
+    },
+  },
+} as const;
+
+export interface ActionExpectation {
+  target: string;
+  field: "text" | "value" | "checked" | "attribute" | "exists";
+  equals: string | boolean | null;
+  attribute?: string;
+}
+
+/** Field-dependent constraints supplement the public JSON schema. */
+export function validateExpectations(expect: readonly ActionExpectation[] | undefined): void {
+  if (expect === undefined) return;
+  if (!Array.isArray(expect) || expect.length > 16)
+    throw new Error("expect requires at most 16 conditions");
+  for (const condition of expect) {
+    if (
+      !condition ||
+      typeof condition.target !== "string" ||
+      !condition.target.trim() ||
+      condition.target.length > 1024
+    )
+      throw new Error("expect target must be a nonempty ref or selector, at most 1024 characters");
+    const { field, equals, attribute } = condition;
+    const validValue =
+      field === "text" || field === "value"
+        ? typeof equals === "string"
+        : field === "checked" || field === "exists"
+          ? typeof equals === "boolean"
+          : field === "attribute" && (typeof equals === "string" || equals === null);
+    if (!validValue) throw new Error("expect equals must match its field type");
+    if (field === "attribute") {
+      if (typeof attribute !== "string" || !attribute.trim() || attribute.length > 256)
+        throw new Error("expect attribute requires a nonempty name, at most 256 characters");
+    } else if (attribute !== undefined) {
+      throw new Error("expect attribute is only valid for field=attribute");
+    }
+  }
+}
+
 export const BROWSER_PARAM = {
   type: "string",
   description:

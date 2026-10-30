@@ -47,6 +47,8 @@ pub(crate) fn ipc_timeout(timeout_ms: u32) -> Duration {
 static OBSERVATION_DEPENDENCIES: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
 
 static OBSERVATION_CONTEXT: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+static ACTION_EVIDENCE: std::sync::OnceLock<(Option<String>, Option<serde_json::Value>)> =
+    std::sync::OnceLock::new();
 
 // Keep the user's stop request even if the in-flight RPC finishes successfully.
 // One CLI process is one command, including its follow-up reads.
@@ -65,10 +67,30 @@ pub fn set_dependencies(dependencies: Vec<String>) {
     let _ = OBSERVATION_DEPENDENCIES.set(dependencies);
 }
 
+pub fn set_action_evidence(observation: Option<String>, expect: Option<serde_json::Value>) {
+    let _ = ACTION_EVIDENCE.set((observation, expect));
+}
+
+/// Use the status already read during discovery, before any guarded action can be forwarded.
+pub(super) fn check_daemon_protocol(protocol: &str) -> anyhow::Result<()> {
+    if ACTION_EVIDENCE
+        .get()
+        .is_some_and(|(observation, expect)| observation.is_some() || expect.is_some())
+    {
+        anyhow::ensure!(
+            bsk_protocol::tools::supports_target_control(protocol),
+            "--expect and --observation require daemon protocol 1.8; restart the daemon after updating (running protocol {protocol})"
+        );
+    }
+    Ok(())
+}
+
 fn with_context<P: Serialize>(
     params: Option<P>,
     context: Option<&str>,
     dependencies: &[String],
+    observation: Option<&str>,
+    expect: Option<&serde_json::Value>,
 ) -> anyhow::Result<Option<serde_json::Value>> {
     params
         .map(|p| {
@@ -77,6 +99,20 @@ fn with_context<P: Serialize>(
                 object.insert("context_id".into(), context.into());
                 if !dependencies.is_empty() {
                     object.insert("depends_on".into(), serde_json::to_value(dependencies)?);
+                }
+            }
+            if let Some(object) = value.as_object_mut() {
+                if let Some(observation) = observation {
+                    anyhow::ensure!(
+                        object
+                            .get("observation_id")
+                            .is_none_or(|existing| existing == observation),
+                        "--observation conflicts with the action's observation_id"
+                    );
+                    object.insert("observation_id".into(), observation.into());
+                }
+                if let Some(expect) = expect {
+                    object.insert("expect".into(), expect.clone());
                 }
             }
             Ok(value)
@@ -136,6 +172,12 @@ where
             .get()
             .map(Vec::as_slice)
             .unwrap_or_default(),
+        ACTION_EVIDENCE
+            .get()
+            .and_then(|(observation, _)| observation.as_deref()),
+        ACTION_EVIDENCE
+            .get()
+            .and_then(|(_, expect)| expect.as_ref()),
     )?;
     let mut client = IpcClient::connect(sock.clone()).await?;
     let rpc_id_for_call = rpc_id.clone();
@@ -322,15 +364,43 @@ mod tests {
     fn context_is_explicit_and_does_not_change_action_parameters() {
         let params = json!({"session_id":"s1", "ref":"e1", "value":"Shanghai"});
         assert_eq!(
-            with_context(Some(&params), None, &[]).unwrap(),
+            with_context(Some(&params), None, &[], None, None).unwrap(),
             Some(params.clone())
         );
-        let framed = with_context(Some(&params), Some("observed-context"), &["@e2".into()])
-            .unwrap()
-            .unwrap();
+        let framed = with_context(
+            Some(&params),
+            Some("observed-context"),
+            &["@e2".into()],
+            None,
+            None,
+        )
+        .unwrap()
+        .unwrap();
         assert_eq!(framed["context_id"], "observed-context");
         assert_eq!(framed["depends_on"], json!(["@e2"]));
         assert_eq!(framed["value"], "Shanghai");
         assert!(params.get("context_id").is_none());
+    }
+    #[test]
+    fn explicit_conditions_survive_without_implicit_context() {
+        let params = json!({"session_id":"s1", "ref":"e1"});
+        let checks = json!([{ "target":"#price", "field":"text", "equals":"$12" }]);
+        let framed = with_context(Some(&params), None, &[], Some("observed"), Some(&checks))
+            .unwrap()
+            .unwrap();
+        assert_eq!(framed["observation_id"], "observed");
+        assert_eq!(framed["expect"], checks);
+        assert!(framed.get("context_id").is_none());
+        assert_eq!(params, json!({"session_id":"s1", "ref":"e1"}));
+    }
+
+    #[test]
+    fn conflicting_visual_and_action_observations_are_rejected() {
+        let params = json!({"session_id":"s1", "observation_id":"visual"});
+        assert!(with_context(Some(&params), None, &[], Some("other"), None).is_err());
+        assert_eq!(
+            with_context(Some(&params), None, &[], Some("visual"), None).unwrap(),
+            Some(params)
+        );
     }
 }

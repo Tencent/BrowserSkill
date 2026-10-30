@@ -83,7 +83,11 @@ export async function handleDrag(
   const ctx = lookupSession(manager, params, "drag");
   if (isRpcError(ctx)) return ctx;
   const observationId = ctx.refStore.observationId;
-  if (params.observation_id !== undefined && params.observation_id !== observationId)
+  if (
+    ctx.controlPolicy !== "target" &&
+    params.observation_id !== undefined &&
+    params.observation_id !== observationId
+  )
     return {
       code: "not_found",
       message: "observation expired; observe again before dragging",

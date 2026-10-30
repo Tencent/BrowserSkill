@@ -8,7 +8,7 @@ import type {
   RpcError,
 } from "./types";
 
-export const PROTOCOL_VERSION = "1.7";
+export const PROTOCOL_VERSION = "1.8";
 /**
  * Extension semver, injected at build time from `package.json` via
  * Vite's `define` (see `wxt.config.ts` and `vitest.config.ts`).

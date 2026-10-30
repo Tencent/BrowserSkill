@@ -32,6 +32,10 @@ pub enum Action {
 pub struct StepArgs {
     #[arg(long)]
     pub session: String,
+    /// Post-action sync policy. Auto preserves an existing choice or starts target control.
+    /// Use cooperate sync first when choosing a policy before the action.
+    #[arg(long, value_enum, default_value = "auto")]
+    pub policy: cooperate::Policy,
     #[arg(long)]
     pub tab_id: Option<i64>,
     /// Exactly one ordinary browser action; never retried.
@@ -119,7 +123,14 @@ fn prepare(args: &StepArgs) -> anyhow::Result<(Method, Value)> {
     let object = v
         .as_object_mut()
         .context("--params must be a JSON object")?;
-    for key in ["session_id", "tab_id", "context_id", "depends_on"] {
+    for key in [
+        "session_id",
+        "tab_id",
+        "context_id",
+        "depends_on",
+        "expect",
+        "observation_id",
+    ] {
         ensure!(
             !object.contains_key(key),
             "{key} must be supplied with CLI flags"
@@ -236,6 +247,8 @@ fn run(
         call(
             Method::ToolCooperate,
             serde_json::to_value(CooperateParams {
+                control_policy: matches!(mode, CooperateAction::Sync | CooperateAction::Enable)
+                    .then_some(args.policy.into()),
                 session_id: args.session.clone(),
                 action: mode,
                 tab_id: tab,
@@ -245,6 +258,10 @@ fn run(
             .expect("serializable sync"),
             TOOL_IPC_TIMEOUT,
         )
+    })
+    .and_then(|reply| {
+        cooperate::verify_policy(&reply, Some(args.policy.into()))?;
+        Ok(reply)
     });
     match sync {
         Ok(value) => {
@@ -379,7 +396,7 @@ mod tests {
                 3 => {
                     assert_eq!(p["tab_id"], 42);
                     assert_eq!(p["action"], "sync");
-                    Ok(json!({"context_id":"new"}))
+                    Ok(json!({"context_id":"new","control_policy":"target"}))
                 }
                 _ => panic!("unexpected call"),
             }
@@ -427,7 +444,9 @@ mod tests {
             Ok(match n {
                 1 => json!({"tab_id":42}),
                 2 => json!({"satisfied":false,"visible":false}),
-                _ => json!({"context_id":"new","observation":{"text":"login required"}}),
+                _ => {
+                    json!({"context_id":"new","control_policy":"target","observation":{"text":"login required"}})
+                }
             })
         });
         assert_eq!(n, 3);
@@ -448,7 +467,7 @@ mod tests {
                 Ok(match m {
                     Method::ToolNavigate => json!({"tab_id":42,"reached":reached}),
                     Method::ToolWaitForElement => json!({"satisfied":true}),
-                    Method::ToolCooperate => json!({"context_id":"new"}),
+                    Method::ToolCooperate => json!({"context_id":"new","control_policy":"target"}),
                     _ => panic!("unexpected call"),
                 })
             });
@@ -497,7 +516,7 @@ mod tests {
                     assert_eq!(p["action"], "wait");
                     Ok(json!({"ready":true}))
                 }
-                _ => Ok(json!({"context_id":"new"})),
+                _ => Ok(json!({"context_id":"new","control_policy":"target"})),
             }
         });
         assert_eq!(exit, 0);
@@ -590,5 +609,66 @@ mod tests {
             a.params = params.into();
             assert!(prepare(&a).is_ok(), "{action:?}");
         }
+    }
+    #[test]
+    fn first_step_negotiates_target_default_without_overriding_an_existing_policy() {
+        for policy in ["target", "strict"] {
+            let mut args = args();
+            args.until_visible = None;
+            let mut calls = 0;
+            let (reply, exit) = run(&args, Method::ToolClick, json!({}), |method, params, _| {
+                calls += 1;
+                if method == Method::ToolCooperate {
+                    assert_eq!(params["control_policy"], "auto");
+                    Ok(json!({"context_id":"c", "control_policy":policy}))
+                } else {
+                    Ok(json!({"tab_id":7}))
+                }
+            });
+            assert_eq!(exit, 0);
+            assert_eq!(calls, 2);
+            assert_eq!(reply["post"]["control_policy"], policy);
+        }
+    }
+
+    #[test]
+    fn step_retains_action_receipt_when_legacy_sync_cannot_acknowledge_policy() {
+        let mut args = args();
+        args.until_visible = None;
+        let (reply, exit) = run(&args, Method::ToolClick, json!({}), |method, _, _| {
+            if method == Method::ToolCooperate {
+                Ok(json!({"context_id":"legacy"}))
+            } else {
+                Ok(json!({"tab_id":7, "delivered":true}))
+            }
+        });
+        assert_ne!(exit, 0);
+        assert_eq!(reply["action"]["result"]["delivered"], true);
+        assert_eq!(reply["post_error"]["code"], "unsupported");
+        assert_eq!(reply["action_replayed"], false);
+        assert!(reply.get("post").is_none());
+    }
+    #[test]
+    fn explicit_step_policy_is_applied_only_to_post_sync() {
+        let mut args = args();
+        args.until_visible = None;
+        args.policy = cooperate::Policy::Strict;
+        let (reply, exit) = run(
+            &args,
+            Method::ToolClick,
+            json!({"ref":"e1"}),
+            |method, params, _| {
+                if method == Method::ToolCooperate {
+                    assert_eq!(params["control_policy"], "strict");
+                    Ok(json!({"context_id":"legacy"}))
+                } else {
+                    assert!(params.get("control_policy").is_none());
+                    Ok(json!({"tab_id":7}))
+                }
+            },
+        );
+        assert_eq!(exit, 0);
+        assert_eq!(reply["post"]["context_id"], "legacy");
+        assert_eq!(reply["action_replayed"], false);
     }
 }

@@ -6,7 +6,7 @@ use super::{
 use anyhow::Context;
 use bsk_protocol::{
     Method,
-    tools::{CooperateAction, CooperateParams},
+    tools::{ControlPolicy, CooperateAction, CooperateParams},
 };
 use clap::{Args, ValueEnum};
 use std::path::PathBuf;
@@ -23,6 +23,22 @@ pub enum Action {
     Wait,
 }
 
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum Policy {
+    Auto,
+    Strict,
+    Target,
+}
+impl From<Policy> for ControlPolicy {
+    fn from(value: Policy) -> Self {
+        match value {
+            Policy::Auto => Self::Auto,
+            Policy::Strict => Self::Strict,
+            Policy::Target => Self::Target,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Args)]
 pub struct CooperateArgs {
     /// Synchronize default shared control, inspect ownership, or wait for hand-back.
@@ -31,6 +47,9 @@ pub struct CooperateArgs {
     pub action: Action,
     #[arg(long)]
     pub session: String,
+    /// Session control policy (sync/enable only). Auto preserves an existing choice or starts target control.
+    #[arg(long, value_enum)]
+    pub policy: Option<Policy>,
     #[arg(long)]
     pub tab_id: Option<i64>,
     /// Bounded wait, up to 25 seconds. Waiting never holds the action queue.
@@ -61,6 +80,13 @@ pub struct CooperateArgs {
 }
 
 pub fn dispatch(args: CooperateArgs, _format: Format) -> Result<(), CliError> {
+    if args.policy.is_some() && !matches!(args.action, Action::Sync | Action::Enable) {
+        return Err(CliError::Local(anyhow::anyhow!(
+            "--policy requires cooperate sync or enable"
+        )));
+    }
+    let control_policy = matches!(args.action, Action::Sync | Action::Enable)
+        .then(|| ControlPolicy::from(args.policy.unwrap_or(Policy::Auto)));
     if !matches!(args.action, Action::Sync)
         && (!args.match_text.is_empty()
             || args.save_full.is_some()
@@ -84,6 +110,7 @@ pub fn dispatch(args: CooperateArgs, _format: Format) -> Result<(), CliError> {
         .transpose()?;
     let daemon = ensure_daemon().context("ensure daemon is running")?;
     let params = CooperateParams {
+        control_policy,
         session_id: args.session,
         tab_id: args.tab_id,
         action: match args.action {
@@ -99,6 +126,7 @@ pub fn dispatch(args: CooperateArgs, _format: Format) -> Result<(), CliError> {
         settle::run(|action| {
             let mut current = params.clone();
             if matches!(action, CooperateAction::Wait) {
+                current.control_policy = None;
                 current.timeout_ms = Some(args.timeout_ms.unwrap_or(1000));
             }
             current.action = action;
@@ -119,6 +147,7 @@ pub fn dispatch(args: CooperateArgs, _format: Format) -> Result<(), CliError> {
             TOOL_IPC_TIMEOUT,
         )?
     };
+    verify_policy(&reply, control_policy)?;
     super::observation_view::attach(&mut reply, &session, baseline.as_ref());
     if let Some(saved) = saved {
         saved.finish(&reply)?;
@@ -137,6 +166,29 @@ pub fn dispatch(args: CooperateArgs, _format: Format) -> Result<(), CliError> {
         "{}",
         serde_json::to_string_pretty(&reply).context("render cooperation result")?
     );
+    Ok(())
+}
+
+pub(crate) fn verify_policy(
+    reply: &serde_json::Value,
+    policy: Option<ControlPolicy>,
+) -> Result<(), CliError> {
+    // A not-ready settle reply carries no authority to use. Legacy strict clients
+    // remain compatible with replies issued before policy negotiation existed.
+    let acknowledged = match policy {
+        Some(ControlPolicy::Auto) => {
+            matches!(reply["control_policy"].as_str(), Some("target" | "strict"))
+        }
+        Some(ControlPolicy::Target) => reply["control_policy"] == "target",
+        _ => true,
+    };
+    if reply.get("context_id").is_some() && !acknowledged {
+        return Err(CliError::from_rpc(bsk_protocol::RpcError {
+            code: bsk_protocol::ErrorCode::Unsupported,
+            message: "Control policy was not acknowledged; update the daemon and extension, or explicitly select strict policy for legacy behavior".into(),
+            data: Some(serde_json::json!({"reason":"unsupported_feature", "phase":"negotiate", "effect_state":"none", "required_protocol":"1.8", "requested_policy":policy})),
+        }));
+    }
     Ok(())
 }
 
@@ -218,5 +270,80 @@ mod tests {
         .cooperate;
         assert!(dispatch(args, Format::Json).is_err());
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "previous evidence");
+    }
+    #[test]
+    fn target_policy_requires_an_explicit_acknowledgement() {
+        for reply in [
+            serde_json::json!({"context_id":"old"}),
+            serde_json::json!({"context_id":"c", "control_policy":"strict"}),
+        ] {
+            let error = verify_policy(&reply, Some(ControlPolicy::Target)).unwrap_err();
+            assert_eq!(error.code(), Some(bsk_protocol::ErrorCode::Unsupported));
+            assert_eq!(error.data().unwrap()["effect_state"], "none");
+        }
+        assert!(
+            verify_policy(
+                &serde_json::json!({"context_id":"c", "control_policy":"target"}),
+                Some(ControlPolicy::Target)
+            )
+            .is_ok()
+        );
+        assert!(
+            verify_policy(
+                &serde_json::json!({"ready":false}),
+                Some(ControlPolicy::Target)
+            )
+            .is_ok()
+        );
+        assert!(
+            verify_policy(
+                &serde_json::json!({"context_id":"old"}),
+                Some(ControlPolicy::Strict)
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn policy_is_only_valid_for_sync_or_enable() {
+        let args =
+            Command::try_parse_from(["cooperate", "wait", "--session", "s", "--policy", "target"])
+                .unwrap()
+                .cooperate;
+        assert!(
+            dispatch(args, Format::Json)
+                .unwrap_err()
+                .to_string()
+                .contains("--policy requires")
+        );
+        let args =
+            Command::try_parse_from(["cooperate", "sync", "--session", "s", "--policy", "strict"])
+                .unwrap()
+                .cooperate;
+        assert!(matches!(args.policy, Some(Policy::Strict)));
+    }
+    #[test]
+    fn automatic_policy_requires_acknowledgement_and_accepts_existing_strict_sessions() {
+        for selected in ["strict", "target"] {
+            assert!(
+                verify_policy(
+                    &serde_json::json!({"context_id":"c", "control_policy":selected}),
+                    Some(ControlPolicy::Auto)
+                )
+                .is_ok()
+            );
+        }
+        assert!(
+            verify_policy(
+                &serde_json::json!({"context_id":"c"}),
+                Some(ControlPolicy::Auto)
+            )
+            .is_err()
+        );
+        let args =
+            Command::try_parse_from(["cooperate", "sync", "--session", "s", "--policy", "auto"])
+                .unwrap()
+                .cooperate;
+        assert!(matches!(args.policy, Some(Policy::Auto)));
     }
 }
