@@ -1,8 +1,80 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { CdpFrameGraph, CdpTarget } from "@/browser-driver/frame-graph";
 import { projectPolygon, type Quad, unprojectPoint } from "../geometry";
 import type { CdpRunner } from "../shared";
-import { pointReachesTarget } from "../target-hit";
+import { pointBelongsToTarget, pointReachesTarget } from "../target-hit";
+
+describe("hit-test document identity", () => {
+  function fixture(hitFrame: string | undefined, rootFrame: string | undefined = "root-frame") {
+    const send = vi.fn(async (_tab: number, method: string) => {
+      switch (method) {
+        case "Page.getLayoutMetrics":
+          return { cssLayoutViewport: { clientWidth: 800, clientHeight: 600, pageX: 0, pageY: 0 } };
+        case "DOM.getNodeForLocation":
+          return { backendNodeId: 20, frameId: hitFrame };
+        case "Page.getFrameTree":
+          return rootFrame ? { frameTree: { frame: { id: rootFrame } } } : {};
+        case "DOM.resolveNode":
+          return { object: { objectId: "node" } };
+        case "Runtime.callFunctionOn":
+          return { result: { value: true } };
+        default:
+          throw new Error(`Unexpected method ${method}`);
+      }
+    });
+    const cdp = { send } as unknown as CdpRunner;
+    const check = (frameId?: string) =>
+      pointBelongsToTarget(
+        cdp,
+        { cdpTarget: { tabId: 4 }, backendNodeId: 10, frameId },
+        50,
+        50,
+        "hit",
+      );
+    return { send, check };
+  }
+
+  it("rejects a child-document hit before mixing its object with a root selector", async () => {
+    const h = fixture("child-frame");
+    expect(await h.check()).toBe(false);
+    expect(h.send.mock.calls.map((call) => call[1])).toEqual([
+      "Page.getLayoutMetrics",
+      "DOM.getNodeForLocation",
+      "Page.getFrameTree",
+    ]);
+  });
+
+  it("checks root-document descendants after inferring a selector's document", async () => {
+    const h = fixture("root-frame");
+    expect(await h.check()).toBe(true);
+    expect(h.send.mock.calls.filter((call) => call[1] === "DOM.resolveNode")).toHaveLength(2);
+  });
+
+  it("keeps an explicit same-process frame ref in its own document", async () => {
+    const h = fixture("child-frame");
+    expect(await h.check("child-frame")).toBe(true);
+    expect(h.send.mock.calls.some((call) => call[1] === "Page.getFrameTree")).toBe(false);
+  });
+
+  it.each(["root", "hit"])("refuses an unavailable %s frame identity", async (missing) => {
+    const h = fixture(
+      missing === "hit" ? undefined : "root-frame",
+      missing === "root" ? "" : "root-frame",
+    );
+    expect(await h.check()).toBe(false);
+    expect(h.send.mock.calls.some((call) => call[1] === "DOM.resolveNode")).toBe(false);
+  });
+
+  it("propagates a failed frame lookup instead of treating it as a covered element", async () => {
+    const h = fixture("child-frame");
+    const original = h.send.getMockImplementation()!;
+    h.send.mockImplementation((tab, method) => {
+      if (method === "Page.getFrameTree") throw new Error("frame lookup failed");
+      return original(tab, method);
+    });
+    await expect(h.check()).rejects.toThrow("frame lookup failed");
+  });
+});
 
 describe("inverse input projection", () => {
   it.each<Quad>([
