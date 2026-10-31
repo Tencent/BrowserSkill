@@ -573,6 +573,19 @@ mod tests {
                 DaemonStartFailure::IndependentStartFailed,
                 "use `bsk daemon start --foreground` in a persistent host task",
             ),
+            (
+                DaemonStartFailure::BreakawayUnverified,
+                "check access to the bsk executable",
+            ),
+            (
+                DaemonStartFailure::ProcessCreationDenied,
+                "check access to the bsk executable",
+            ),
+            (
+                DaemonStartFailure::PartialBreakaway,
+                "use `bsk daemon start --foreground` in a persistent host task",
+            ),
+            (DaemonStartFailure::ResumeFailed, "retry `bsk daemon start`"),
         ] {
             let error = anyhow::Error::new(std::io::Error::new(
                 std::io::ErrorKind::PermissionDenied,
