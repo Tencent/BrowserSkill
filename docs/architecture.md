@@ -92,12 +92,22 @@ or selects `target` for an unconfigured session. Legacy callers that omit the fi
 `strict`. Explicit `strict` or `target` selects a policy that is fixed for the session.
 CLI and daemon check peer support before
 forwarding new evidence fields; an older peer cannot silently discard a condition.
+Support is within protocol major 1, starting at 1.8; a future major is not assumed compatible.
+With a current CLI and an older extension, every sync/enable and step must explicitly request
+`strict`; conditions still require upgraded peers. A plugin that sends `--policy` requires a
+CLI that recognizes it. Upgrade the CLI and restart its daemon when the flag is unsupported.
+
+`ActionMetadata` defines the shared wire fields below. Schema generation merges them into
+guarded action parameter schemas, including script/file operations and the active variants of
+observe/debug. Passive variants do not evaluate conditions. Operation structs retain their
+existing fields; generated clients can combine them with the shared metadata without inventing
+a separate protocol. Expectation target and attribute limits count Unicode code points.
 
 | Field | Contract |
 | --- | --- |
 | `context_id` | Caller-supplied control receipt bound to session, tab, document and human intervention epoch. Reusable for target-policy DOM actions; single-use under strict policy. |
 | `observation_id` | Sync's strict baseline for target-policy actions without a DOM recipient, including scripts and visual clicks. Supplementary reads do not replace this baseline. Under strict policy, drag retains its existing optional ref-map freshness token; target-policy DOM drag uses stable refs. |
-| `expect` | Up to 16 literal target conditions: `text`, `value`, `checked`, `attribute` or `exists`, each with `equals`; only attribute conditions carry an `attribute` name. |
+| `expect` | Up to 16 literal target conditions: `text`, `value`, `checked`, `attribute` or `exists`, each with `equals`; only attribute conditions carry an `attribute` name. Text is exact `textContent`, including whitespace. Selectors search the main document; frame/shadow targets require observed refs. Target/attribute limits are 1024/256 Unicode code points. |
 | `depends_on` | Legacy strict-policy decision regions. Target policy rejects it with guidance to use explicit conditions. |
 
 Target policy checks the resolved element and declared facts before input, preserving native

@@ -24,7 +24,8 @@ export const EXPECT_PARAM = {
       target: {
         type: "string",
         required: true,
-        description: "Ref or CSS selector, at most 1024 characters.",
+        description:
+          "Observed ref or main-document CSS selector, at most 1024 characters. Use refs for iframe elements.",
       },
       field: {
         type: "string",
@@ -62,7 +63,7 @@ export function validateExpectations(expect: readonly ActionExpectation[] | unde
       !condition ||
       typeof condition.target !== "string" ||
       !condition.target.trim() ||
-      condition.target.length > 1024
+      [...condition.target].length > 1024
     )
       throw new Error("expect target must be a nonempty ref or selector, at most 1024 characters");
     const { field, equals, attribute } = condition;
@@ -74,7 +75,7 @@ export function validateExpectations(expect: readonly ActionExpectation[] | unde
           : field === "attribute" && (typeof equals === "string" || equals === null);
     if (!validValue) throw new Error("expect equals must match its field type");
     if (field === "attribute") {
-      if (typeof attribute !== "string" || !attribute.trim() || attribute.length > 256)
+      if (typeof attribute !== "string" || !attribute.trim() || [...attribute].length > 256)
         throw new Error("expect attribute requires a nonempty name, at most 256 characters");
     } else if (attribute !== undefined) {
       throw new Error("expect attribute is only valid for field=attribute");

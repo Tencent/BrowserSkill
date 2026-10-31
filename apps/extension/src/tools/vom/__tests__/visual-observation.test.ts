@@ -785,6 +785,65 @@ it.each([
   expect(seen.size).toBe(35);
 });
 
+it("rejects a continuation whose session store was replaced during validation", async () => {
+  const f = fixture(20, 130);
+  const manager = new SessionManager({
+    agentWindow: {
+      create: async () => ({ windowId: 100, initialTabIds: [4] }),
+      remove: async () => {},
+      ensureActiveTab: async () => 4,
+    },
+  });
+  const ctx = await manager.start("policy-test");
+  const first = success(await publishObservationPage(ctx.refStore, f.cdp, 4, { output: f.output }));
+  expect(first.next_cursor).toBeDefined();
+  let validating!: () => void;
+  const validationStarted = new Promise<void>((resolve) => {
+    validating = resolve;
+  });
+  let release!: () => void;
+  const resume = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const original = f.send.getMockImplementation()!;
+  f.send.mockImplementation(async (tab, method) => {
+    const result = await original(tab, method);
+    if (method === "Runtime.evaluate") {
+      validating();
+      await resume;
+    }
+    return result;
+  });
+  const tab = { id: 4, windowId: 100, url: "http://fixture.test" } as chrome.tabs.Tab;
+  const pending = handleObserve(
+    manager,
+    { session_id: ctx.sessionId, cursor: first.next_cursor },
+    { cdp: f.cdp, tabsApi: { get: async () => tab, query: async () => [tab] } },
+  );
+  await validationStarted;
+  const committed = ctx.refStore.createObservationStore();
+  committed.enableStableRefs();
+  const entry = { backendNodeId: 2000, tabId: 4 };
+  const ref = committed.allocateRef(entry);
+  committed.replace([[ref, entry]]);
+  ctx.refStore = committed;
+  ctx.controlPolicy = "target";
+  const revision = committed.revision;
+  release();
+
+  const result = await pending;
+  expect(result).toMatchObject({
+    code: "not_found",
+    message: "Control policy changed during observation; observe again",
+    data: { reason: "ref_not_found" },
+  });
+  expect(result).not.toHaveProperty("text");
+  expect(ctx.refStore).toBe(committed);
+  expect(committed.revision).toBe(revision);
+  expect([...committed.entries()].map(([key]) => key)).toEqual([ref]);
+  expect(committed.resolve(ref)).toBe(2000);
+});
+
 it("preserves a Canvas containing an active region rather than treating it as background", () => {
   const scene: VomScene = {
     rootFrameId: "top",

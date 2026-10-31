@@ -24,7 +24,7 @@ bsk click @e8 --session SID --context CONTEXT_ID \
 
 示例中的 ref、selector 和值必须来自实际观察。目标校验不再因为相邻通知数、倒计时或其他列表的变化而重新采集和比较整页。DOM ref 在补充观察中保持稳定；节点删除后不会把旧编号转给另一个节点，导航后旧文档的引用失效。稳定编号代表 DOM 节点，不代表业务记录：虚拟列表复用节点时，应显式检查 `data-record-id` 等业务标识。
 
-`expect` 最多包含 16 个字面量条件。`text` 精确比较 `textContent`，保留空格；`value` 比较字符串；`checked`、`exists` 比较布尔值；`attribute` 另需属性名，`equals: null` 表示属性不存在。补充观察不会修改调用方传入的期望值。稳定 ref 也不冻结节点的角色、名称或动作含义：同一个按钮原地从“保存”改成“删除”时，应通过已观察的文字或属性条件保护决策。VOM 名称可能由语义推导得到，不能直接假设它等于 DOM 的 `textContent`。条件检查发生在输入前，不构成与服务器的原子事务；只检查选中价格也不能证明它仍然是所有候选中最低的价格，需要时应重新观察候选。
+`expect` 最多包含 16 个字面量条件。selector 只搜索主文档，iframe 和 shadow root 内的目标应使用已观察的 ref；未找到 selector 不能证明其他 frame 中不存在该元素。target 最长 1024 个 Unicode 码点，attribute 最长 256 个。`text` 精确比较 `textContent`，保留空格；`value` 比较字符串；`checked`、`exists` 比较布尔值；`attribute` 另需属性名，`equals: null` 表示属性不存在。补充观察不会修改调用方传入的期望值。稳定 ref 也不冻结节点的角色、名称或动作含义：同一个按钮原地从“保存”改成“删除”时，应通过已观察的文字或属性条件保护决策。VOM 名称可能由语义推导得到，不能直接假设它等于 DOM 的 `textContent`。条件检查发生在输入前，不构成与服务器的原子事务；只检查选中价格也不能证明它仍然是所有候选中最低的价格，需要时应重新观察候选。
 
 脚本、无目标按键、视觉点击等操作仍使用严格观察校验，须额外传入同步返回的 `--observation ID`。补充观察不替换这份严格基线，下一次严格动作前重新同步。视觉点击同时保留既有 `capture_id` 检查。Canvas 流程为同步、观察视觉 ref、截图、携带同步凭证和截图凭证点击；不能拿 observe 返回的新 token 代替同步基线。
 
@@ -32,7 +32,7 @@ bsk click @e8 --session SID --context CONTEXT_ID \
 
 DSH 使用 `bsk_session` 的 `sync`、`wait-user`、`cooperation-status`。旧 `share/enable` 入口保留为兼容的同步与任务页绑定操作，无需调用。页面操作显式传 `contextId`、需要时传 `observationId`，业务条件使用 `expect` 数组。插件不会替 Agent 自动填入最新 ID。
 
-新策略和条件要求 Daemon、扩展协议至少为 1.8；旧版本返回能力不支持，不能静默丢弃条件。旧客户端省略策略时继续使用 `strict`。新版 CLI 可在首次同步指定 `--policy strict`，DSH 对应 `policy: "strict"`；后续普通同步和 step 自动保持已选策略，无需重复传参。显式选择其他策略会报错，不会中途改变会话语义。严格策略保留一次动作一次同步、最新观察引用和 `depends_on` 范围检查。目标策略不接受 `depends_on`，应迁移为明确的 `expect` 条件。
+新策略和条件要求兼容的 1.x 协议且版本不低于 1.8；旧版本返回能力不支持，不能静默丢弃条件。旧客户端省略策略时继续使用 `strict`。新版 CLI 可在首次同步指定 `--policy strict`，DSH 对应 `policy: "strict"`；扩展支持新协议时，后续普通同步和 step 自动保持已选策略。旧扩展须在每次 sync/enable 和 step 显式指定 strict，且仍不能使用 `expect`。新版插件遇到不认识 `--policy` 的旧 CLI 时，需要先升级 CLI 并重启 Daemon。显式选择其他策略会报错，不会中途改变会话语义。严格策略保留一次动作一次同步、最新观察引用和 `depends_on` 范围检查。目标策略不接受 `depends_on`，应根据原决策声明明确事实，例如 `expect: [{target: "#row", field: "attribute", attribute: "data-record-id", equals: "42"}]`，不能仅把区域列表自动转换成条件。
 
 ## 用户交互
 

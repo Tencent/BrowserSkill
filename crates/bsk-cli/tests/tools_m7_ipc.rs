@@ -947,6 +947,12 @@ async fn target_control_and_conditions_negotiate_before_browser_dispatch() {
                 let data = error.data.unwrap();
                 assert_eq!(data["effect_state"], "none");
                 assert_eq!(data["required_protocol"], "1.8");
+                assert!(
+                    data["recovery"]
+                        .as_str()
+                        .unwrap()
+                        .contains("every sync/enable and step")
+                );
                 assert_eq!(forwarded.load(Ordering::SeqCst), 0);
             } else {
                 // The daemon preserves exact conditions and explicit evidence.
@@ -955,6 +961,17 @@ async fn target_control_and_conditions_negotiate_before_browser_dispatch() {
                     assert_eq!(&result[key], value);
                 }
             }
+        }
+        // Explicit strict remains available on every sync with an older extension.
+        for _ in 0..2 {
+            let strict: Value = ipc_tool_call(
+                &sock,
+                Method::ToolCooperate,
+                json!({"session_id":session,"action":"sync","control_policy":"strict"}),
+            )
+            .await
+            .unwrap();
+            assert_eq!(strict["control_policy"], "strict");
         }
         // Legacy visual observation IDs remain usable on older extensions.
         let legacy: Value = ipc_tool_call(
@@ -967,7 +984,7 @@ async fn target_control_and_conditions_negotiate_before_browser_dispatch() {
         assert_eq!(legacy["observation_id"], "visual");
         assert_eq!(
             forwarded.load(Ordering::SeqCst),
-            if protocol == "1.7" { 1 } else { 4 }
+            if protocol == "1.7" { 3 } else { 6 }
         );
         handle.shutdown().await;
     }

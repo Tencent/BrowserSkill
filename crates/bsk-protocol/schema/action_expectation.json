@@ -10,19 +10,27 @@
   ],
   "properties": {
     "attribute": {
-      "type": [
-        "string",
-        "null"
-      ]
+      "description": "Required only for field=attribute, measured in Unicode code points.",
+      "type": "string",
+      "maxLength": 256,
+      "minLength": 1
     },
     "equals": {
-      "$ref": "#/definitions/ExpectedValue"
+      "description": "text/value require a string; checked/exists require a boolean; attribute accepts a string or null for absence. Text is exact textContent.",
+      "allOf": [
+        {
+          "$ref": "#/definitions/ExpectedValue"
+        }
+      ]
     },
     "field": {
       "$ref": "#/definitions/ExpectationField"
     },
     "target": {
-      "type": "string"
+      "description": "Observed ref or main-document CSS selector, measured in Unicode code points.",
+      "type": "string",
+      "maxLength": 1024,
+      "minLength": 1
     }
   },
   "additionalProperties": false,

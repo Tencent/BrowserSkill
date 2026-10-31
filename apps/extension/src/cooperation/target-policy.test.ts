@@ -604,6 +604,7 @@ describe("negotiated target control", () => {
 
   it("waits only for initial target readiness and never repeats input", async () => {
     const f = await fixture();
+    f.readFrames.mockClear();
     vi.mocked(checkActionTarget).mockResolvedValueOnce({
       code: "permission_denied",
       message: "disabled",
@@ -611,6 +612,138 @@ describe("negotiated target control", () => {
     });
     expect(await f.run({ timeout_ms: 200 })).toEqual({});
     expect(f.send).toHaveBeenCalledTimes(1);
+    // Collect once at entry and once at dispatch, independently of readiness retries.
+    expect(f.readFrames).toHaveBeenCalledTimes(2);
+  });
+
+  it("rechecks only the target while it is becoming ready", async () => {
+    const f = await fixture();
+    f.readFrames.mockClear();
+    vi.mocked(handleSnapshot).mockClear();
+    for (let i = 0; i < 3; i++)
+      vi.mocked(checkActionTarget).mockResolvedValueOnce({
+        code: "permission_denied",
+        message: "disabled",
+        data: { reason: "target_disabled", effect_state: "none" },
+      });
+    expect(await f.run({ timeout_ms: 1_000 })).toEqual({});
+    expect(checkActionTarget).toHaveBeenCalledTimes(5);
+    expect(f.readFrames).toHaveBeenCalledTimes(2);
+    expect(handleSnapshot).not.toHaveBeenCalled();
+    expect(f.send).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    false,
+    true,
+  ])("checks unreported human input in an iframe at dispatch (existing: %s)", async (existing) => {
+    const f = await fixture();
+    const frames = await f.readFrames();
+    const child = { ...frames.get(0)!, document: "child" };
+    if (existing) frames.set(2, child);
+    f.readFrames.mockImplementation(async () => structuredClone(frames));
+    const observation = await f.sync();
+    f.readFrames.mockClear();
+    vi.mocked(checkActionTarget).mockImplementationOnce(async () => {
+      // No push notification: the final collector must catch even quiet input
+      // in an existing frame, or activity in a frame inserted during the wait.
+      frames.set(2, { ...child, revision: 1, human: 1, editing: !existing });
+      return {
+        code: "permission_denied",
+        message: "disabled",
+        data: { reason: "target_disabled", effect_state: "none" },
+      };
+    });
+    expect(await f.run({ context_id: observation.context_id, timeout_ms: 1_000 })).toMatchObject({
+      code: "permission_denied",
+      data: { effect_state: "none", phase: "control" },
+    });
+    expect(f.readFrames).toHaveBeenCalledTimes(2);
+    expect(f.send).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    "navigation",
+    "collector failure",
+  ])("blocks dispatch after %s during a readiness wait", async (change) => {
+    const f = await fixture();
+    f.readFrames.mockClear();
+    vi.mocked(checkActionTarget).mockImplementationOnce(async () => {
+      if (change === "navigation") f.change({ document: "next-document" }, false);
+      else f.readFrames.mockRejectedValueOnce(new Error("Collector unavailable"));
+      return {
+        code: "permission_denied",
+        message: "hidden",
+        data: { reason: "target_hidden", effect_state: "none" },
+      };
+    });
+    expect(await f.run({ timeout_ms: 1_000 })).toMatchObject({
+      code: "permission_denied",
+      data: { effect_state: "none", phase: "control" },
+    });
+    expect(f.readFrames).toHaveBeenCalledTimes(2);
+    expect(f.send).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    "tool.click",
+    "tool.download",
+    "tool.upload",
+    "tool.wheel",
+  ])("preserves the selector in a pinned %s receipt", async (method) => {
+    const f = await fixture();
+    const request = {
+      id: "selector-action",
+      method,
+      params: {
+        session_id: "s",
+        tab_id: 7,
+        context_id: f.first.context_id,
+        selector: "#confirm",
+      } as Record<string, unknown>,
+    };
+    const result = await f.controller.run(request, f.cdp, f.signal, async (runner) => {
+      expect(request.params.selector).toBeUndefined();
+      expect(request.params.ref).toMatch(/^e\d+$/);
+      expect(f.session.refStore.resolveEntry(request.params.ref as string)).toMatchObject({
+        backendNodeId: 4,
+      });
+      await runner.send(7, "Input.dispatchMouseEvent", {
+        type: "mousePressed",
+        button: "left",
+        x: 10,
+        y: 20,
+      });
+      return { tab_id: 7, used_ref: request.params.ref };
+    });
+    expect(result).toEqual({
+      tab_id: 7,
+      used_ref: request.params.ref,
+      used_selector: "#confirm",
+    });
+    expect(resolveActionTarget).toHaveBeenCalledTimes(1);
+    expect(f.send).toHaveBeenCalledTimes(1);
+  });
+
+  it("preserves handler failures without adding successful selector metadata", async () => {
+    const f = await fixture();
+    const error = {
+      code: "not_found",
+      message: "The pinned node was removed",
+      data: {
+        reason: "target_detached",
+        effect_state: "none",
+        recovery: "Observe the new target.",
+      },
+    };
+    const result = await f.run(
+      { ref: undefined, selector: "#confirm" },
+      "tool.click",
+      async () => error,
+    );
+    expect(result).toMatchObject(error);
+    expect(result).not.toHaveProperty("used_selector");
+    expect(f.send).not.toHaveBeenCalled();
   });
 
   it("keeps business expectations immediate instead of waiting for a price to change back", async () => {

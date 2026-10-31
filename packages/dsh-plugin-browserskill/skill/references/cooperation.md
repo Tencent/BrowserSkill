@@ -30,11 +30,16 @@ supplementary reads do not replace this strict baseline. Read its evidence befor
 operation and sync again for the next strict action. Prefer a targeted key when the recipient is
 known. Never substitute new receipts into stale decisions.
 
-To retain legacy whole-page checks, set `policy: "strict"` on the first sync; later syncs and steps preserve it.
-Policy is fixed for the session. Strict contexts authorize one action and refs follow the latest
-observation. `dependsOn` is supported only in strict policy; use `expect` in target policy.
-Target policy and conditions require daemon and extension protocol 1.8 or newer. Unsupported
-peers return an error without silently weakening the requested checks.
+To retain legacy whole-page checks, set `policy: "strict"` on the first sync. With
+protocol-1.8-capable peers, later syncs and steps preserve it. Policy is fixed for the session.
+Strict contexts authorize one action and refs follow the latest observation. `dependsOn` is
+supported only in strict policy; use `expect` in target policy. Declare the facts behind those
+regions; a region list cannot be translated automatically.
+Target policy and conditions require compatible protocol 1.x peers at version 1.8 or later.
+Unsupported peers return an error without silently weakening the requested checks. With a
+current CLI and an older extension, set `policy: "strict"` on **every** sync/share and step;
+`expect` still requires upgraded peers. If `--policy` is reported as unknown, upgrade the CLI
+and restart its daemon before using this plugin.
 
 ## Protect the facts behind a decision
 
@@ -42,7 +47,10 @@ peers return an error without silently weakening the requested checks.
 bsk_interact({ action: "click", session: "<id>", target: "@e3", contextId: "<context>", expect: [{ target: "#price", field: "text", equals: "$100" }] })
 ```
 
-Use refs/selectors actually observed on the page. `expect` accepts at most 16 literal conditions:
+Use refs/selectors actually observed on the page. Selectors search only the main document;
+use refs for iframe/shadow-root targets. A missing main-document selector does not establish
+absence in other frames. Target and attribute names are limited to 1024 and 256 Unicode code
+points respectively. `expect` accepts at most 16 literal conditions:
 
 | Field | `equals` | Meaning |
 | --- | --- | --- |

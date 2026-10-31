@@ -68,6 +68,21 @@ describe("explicit action conditions", () => {
     });
   });
 
+  it.each(["a", "中", "😀"])("counts %s as one character at condition length limits", (char) => {
+    const target = `#${char.repeat(1023)}`;
+    const attribute = `data-${char.repeat(251)}`;
+    const checks = [{ target, field: "attribute", attribute, equals: null }];
+    expect(parseExpectations(checks)).toBe(checks);
+    expect(parseExpectations([{ ...checks[0], target: target + char }])).toMatchObject({
+      code: "invalid_params",
+      data: { reason: "precondition_invalid", effect_state: "none" },
+    });
+    expect(parseExpectations([{ ...checks[0], attribute: attribute + char }])).toMatchObject({
+      code: "invalid_params",
+      data: { reason: "precondition_invalid", effect_state: "none" },
+    });
+  });
+
   it("reports exact changed facts, releases its object group and checks the correct frame", async () => {
     const f = fixture('<span id="price">$200</span>');
     expect(
@@ -171,6 +186,31 @@ describe("explicit action conditions", () => {
       ]),
     ).toMatchObject({ code: "invalid_params" });
   });
+
+  it("explains selector scope without searching other frames or losing the failure reason", async () => {
+    const f = fixture();
+    vi.mocked(resolveActionTarget).mockResolvedValueOnce({
+      code: "not_found",
+      message: "selector #price did not match any element",
+      data: { reason: "selector_not_found" },
+    });
+    expect(
+      await checkExpectations(f.cdp, session, tab, [
+        { target: "#price", field: "text", equals: "$100" },
+      ]),
+    ).toMatchObject({
+      code: "not_found",
+      message: expect.stringContaining("main document; use an observed ref for iframe elements"),
+      data: {
+        reason: "selector_not_found",
+        phase: "precondition",
+        effect_state: "none",
+        target: "#price",
+      },
+    });
+    expect(resolveActionTarget).toHaveBeenCalledOnce();
+    expect(f.sendToTarget).not.toHaveBeenCalled();
+  });
 });
 
 describe("target actionability", () => {
@@ -202,6 +242,37 @@ describe("target actionability", () => {
     if (kind === "disabled") f.element.setAttribute("disabled", "");
     expect(await checkActionTarget(f.cdp, target, "tool.click")).toMatchObject({
       data: { reason, phase: "target", target: "@e1", effect_state: "none" },
+    });
+  });
+
+  it.each(["display:none", "visibility:hidden"])("allows blur on a %s target", async (style) => {
+    const f = fixture(`<input style="${style}">`);
+    if (style === "display:none")
+      vi.mocked(f.element.getClientRects).mockReturnValue([] as unknown as DOMRectList);
+    expect(await checkActionTarget(f.cdp, target, "tool.blur")).toBeUndefined();
+    f.element.remove();
+    expect(await checkActionTarget(f.cdp, target, "tool.blur")).toMatchObject({
+      data: { reason: "target_detached", phase: "target", effect_state: "none" },
+    });
+  });
+
+  it.each([
+    ["tool.fill", '<input style="display:none">'],
+    ["tool.select", '<select style="display:none"><option>One</option></select>'],
+    ["tool.download", '<a href="/file" style="display:none">Download</a>'],
+  ])("still rejects a hidden target for %s with actionable diagnostics", async (method, html) => {
+    const f = fixture(html);
+    vi.mocked(f.element.getClientRects).mockReturnValue([] as unknown as DOMRectList);
+    expect(await checkActionTarget(f.cdp, target, method)).toMatchObject({
+      code: "permission_denied",
+      message: "The action target is not visible",
+      data: {
+        reason: "target_hidden",
+        phase: "target",
+        effect_state: "none",
+        target: "@e1",
+        recovery: expect.stringContaining("Inspect or wait"),
+      },
     });
   });
 

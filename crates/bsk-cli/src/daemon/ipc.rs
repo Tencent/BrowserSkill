@@ -706,12 +706,12 @@ async fn handle_tool_dispatch(
     {
         return ResponseBody::Err(RpcError {
             code: ErrorCode::Unsupported,
-            message: "Target control and action conditions require extension protocol 1.8; update the extension".into(),
+            message: "Target control and action conditions require extension protocol 1.8 or a later compatible 1.x version; update the extension".into(),
             data: Some(serde_json::json!({
                 "reason": "unsupported_feature", "phase": "negotiate", "effect_state": "none",
                 "required_protocol": bsk_protocol::tools::TARGET_CONTROL_PROTOCOL,
                 "actual_protocol": browser.extension_protocol_version,
-                "recovery": "Update the extension before using target control or action conditions.",
+                "recovery": "Update the extension to use target control or action conditions. With a current CLI and an older extension, pass --policy strict on every sync/enable and step for legacy behavior. Strict policy does not make expect conditions available on old peers.",
             })),
         });
     }

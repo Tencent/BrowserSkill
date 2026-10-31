@@ -578,11 +578,8 @@ export class CooperationController implements ControlAuthority {
         code: "invalid_params",
         message: "Control policy is fixed for this session; start a new session to change it",
       };
-    if (["sync", "enable"].includes(params.action)) {
-      session.controlPolicy ??= requestedPolicy ?? "strict";
-      if (session.controlPolicy === "target") session.refStore.enableStableRefs();
-    }
-    const targetPolicy = session.controlPolicy === "target";
+    const policy = session.controlPolicy ?? requestedPolicy ?? "strict";
+    const targetPolicy = policy === "target";
     const state = this.track(session, target.tabId);
     if (state.sessionId !== session.sessionId)
       return failure("This tab belongs to another session");
@@ -639,6 +636,10 @@ export class CooperationController implements ControlAuthority {
         };
       if (state.held || state.working || this.humanActive(state))
         return failure("The user is still operating this tab; wait for hand-back");
+      const previousRefs = session.refStore;
+      const previousRefRevision = previousRefs.revision;
+      const refStore = session.controlPolicy ? previousRefs : previousRefs.createObservationStore();
+      if (targetPolicy) refStore.enableStableRefs();
       state.working = true;
       const previousContext = state.context;
       if (!targetPolicy) state.context = undefined;
@@ -674,6 +675,7 @@ export class CooperationController implements ControlAuthority {
               {
                 cdp: guardedRunner(cdp),
                 tabsApi: chromeTabsApi,
+                refStore,
                 onScene: (scene) => {
                   evidence = observationEvidence(scene);
                 },
@@ -695,6 +697,17 @@ export class CooperationController implements ControlAuthority {
           state.held
         )
           return failure("Page changed while synchronizing; sync again after it settles");
+        if (
+          refStore !== previousRefs &&
+          (session.refStore !== previousRefs || previousRefs.revision !== previousRefRevision)
+        )
+          return failure(
+            session.controlPolicy
+              ? `Another sync initialized this session with ${session.controlPolicy} control; synchronize again using that policy`
+              : "The session observation changed during policy negotiation; synchronize again",
+          );
+        session.refStore = refStore;
+        session.controlPolicy = policy;
         const context: Context = {
           id:
             targetPolicy && previousContext?.epoch === epoch
@@ -1480,7 +1493,8 @@ export class CooperationController implements ControlAuthority {
             throw new ActionCheckError(checkFailure);
           }
           await new Promise((resolve) => setTimeout(resolve, Math.min(50, deadline - Date.now())));
-          await this.refresh(state);
+          // Push events revoke control while waiting. The dispatch guard still
+          // refreshes every frame before any effect, including missed events.
           assert();
           checkFailure = undefined;
         }
@@ -1490,7 +1504,7 @@ export class CooperationController implements ControlAuthority {
       if (!targetPolicy) state.context = undefined;
       else if (!targeted) context.consumed = true;
       this.changed(state);
-      const result = await invoke(
+      let result = await invoke(
         guardedRunner(cdp, {
           scriptedEffect: req.method === "tool.evaluate",
           prepare: async (input) => {
@@ -1533,6 +1547,16 @@ export class CooperationController implements ControlAuthority {
         operationSignal,
         completionSignal,
       );
+      // Pinning preserves the chosen node; the receipt also preserves how the
+      // caller selected it. This applies to download's early return as well.
+      if (
+        targeted &&
+        params.selector &&
+        result &&
+        typeof result === "object" &&
+        !isRpcError(result)
+      )
+        result = { ...result, used_selector: params.selector };
       // A completed download transfers cleanup ownership to the daemon. Keep its
       // receipt even if control changed during final cleanup; dropping it would
       // orphan the file. The consumed context still requires a fresh next step.

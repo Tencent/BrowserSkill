@@ -9,7 +9,29 @@ use bsk_protocol::system::{
 };
 use bsk_protocol::tools::*;
 use bsk_protocol::{CancelParams, CancelResult};
-use schemars::schema_for;
+use schemars::{JsonSchema, schema::RootSchema, schema_for};
+
+/// Keep operation structs separate from the shared wire metadata without hiding
+/// that metadata from clients generated from the published parameter schemas.
+fn action_schema<T: JsonSchema>() -> RootSchema {
+    let mut schema = schema_for!(T);
+    let metadata = schema_for!(ActionMetadata);
+    schema
+        .schema
+        .object
+        .as_mut()
+        .expect("action params are objects")
+        .properties
+        .extend(
+            metadata
+                .schema
+                .object
+                .expect("metadata is an object")
+                .properties,
+        );
+    schema.definitions.extend(metadata.definitions);
+    schema
+}
 
 fn write_schema(name: &str, schema: impl serde::Serialize) {
     let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("schema");
@@ -27,6 +49,12 @@ macro_rules! dump {
     };
 }
 
+macro_rules! dump_action {
+    ($ty:ty, $file:literal) => {
+        write_schema($file, action_schema::<$ty>());
+    };
+}
+
 fn main() {
     dump!(PendingJavaScriptDialog, "pending_javascript_dialog");
     dump!(DialogStatusParams, "tool_dialog_status_params");
@@ -34,6 +62,7 @@ fn main() {
     dump!(OperationParams, "tool_operation_params");
     dump!(CooperateParams, "tool_cooperate_params");
     dump!(ActionExpectation, "action_expectation");
+    dump!(ActionMetadata, "action_metadata");
     dump!(VideoParams, "tool_video_params");
     dump!(VideoRecording, "video_recording");
     dump!(VideoGrant, "video_grant");
@@ -55,10 +84,10 @@ fn main() {
     dump!(SessionStopParams, "tool_session_stop_params");
     dump!(SessionStopResult, "tool_session_stop_result");
 
-    dump!(WindowResizeParams, "tool_window_resize_params");
+    dump_action!(WindowResizeParams, "tool_window_resize_params");
     dump!(WindowResizeResult, "tool_window_resize_result");
 
-    dump!(EmulateParams, "tool_emulate_params");
+    dump_action!(EmulateParams, "tool_emulate_params");
     dump!(EmulateResult, "tool_emulate_result");
     dump!(EmulateOverrides, "tool_emulate_overrides");
     dump!(UserAgentMetadata, "tool_emulate_user_agent_metadata");
@@ -67,7 +96,7 @@ fn main() {
     dump!(TabListResult, "tool_tab_list_result");
     dump!(TabCreateParams, "tool_tab_create_params");
     dump!(TabCreateResult, "tool_tab_create_result");
-    dump!(TabCloseParams, "tool_tab_close_params");
+    dump_action!(TabCloseParams, "tool_tab_close_params");
     dump!(TabCloseResult, "tool_tab_close_result");
     dump!(TabBorrowParams, "tool_tab_borrow_params");
     dump!(TabBorrowResult, "tool_tab_borrow_result");
@@ -76,43 +105,43 @@ fn main() {
     dump!(TabSelectParams, "tool_tab_select_params");
     dump!(TabSelectResult, "tool_tab_select_result");
 
-    dump!(NavigateParams, "tool_navigate_params");
+    dump_action!(NavigateParams, "tool_navigate_params");
     dump!(NavigateResult, "tool_navigate_result");
-    dump!(NavigateBackParams, "tool_navigate_back_params");
+    dump_action!(NavigateBackParams, "tool_navigate_back_params");
     dump!(NavigateBackResult, "tool_navigate_back_result");
-    dump!(NavigateForwardParams, "tool_navigate_forward_params");
+    dump_action!(NavigateForwardParams, "tool_navigate_forward_params");
     dump!(NavigateForwardResult, "tool_navigate_forward_result");
-    dump!(ReloadParams, "tool_reload_params");
+    dump_action!(ReloadParams, "tool_reload_params");
     dump!(ReloadResult, "tool_reload_result");
 
-    dump!(ClickParams, "tool_click_params");
+    dump_action!(ClickParams, "tool_click_params");
     dump!(ClickResult, "tool_click_result");
-    dump!(HoverParams, "tool_hover_params");
+    dump_action!(HoverParams, "tool_hover_params");
     dump!(HoverResult, "tool_hover_result");
-    dump!(DragParams, "tool_drag_params");
+    dump_action!(DragParams, "tool_drag_params");
     dump!(DragResult, "tool_drag_result");
-    dump!(WheelParams, "tool_wheel_params");
+    dump_action!(WheelParams, "tool_wheel_params");
     dump!(WheelResult, "tool_wheel_result");
-    dump!(ScrollToParams, "tool_scroll_to_params");
+    dump_action!(ScrollToParams, "tool_scroll_to_params");
     dump!(ScrollToResult, "tool_scroll_to_result");
-    dump!(FocusParams, "tool_focus_params");
+    dump_action!(FocusParams, "tool_focus_params");
     dump!(FocusResult, "tool_focus_result");
-    dump!(BlurParams, "tool_blur_params");
+    dump_action!(BlurParams, "tool_blur_params");
     dump!(BlurResult, "tool_blur_result");
-    dump!(FillParams, "tool_fill_params");
+    dump_action!(FillParams, "tool_fill_params");
     dump!(FillResult, "tool_fill_result");
-    dump!(PressParams, "tool_press_params");
+    dump_action!(PressParams, "tool_press_params");
     dump!(PressResult, "tool_press_result");
-    dump!(SelectParams, "tool_select_params");
+    dump_action!(SelectParams, "tool_select_params");
     dump!(SelectResult, "tool_select_result");
-    dump!(UploadParams, "tool_upload_params");
+    dump_action!(UploadParams, "tool_upload_params");
     dump!(UploadResult, "tool_upload_result");
-    dump!(DownloadParams, "tool_download_params");
+    dump_action!(DownloadParams, "tool_download_params");
     dump!(DownloadResult, "tool_download_result");
 
     dump!(SnapshotParams, "tool_snapshot_params");
     dump!(SnapshotResult, "tool_snapshot_result");
-    dump!(ObserveParams, "tool_observe_params");
+    dump_action!(ObserveParams, "tool_observe_params");
     dump!(ObserveResult, "tool_observe_result");
     dump!(GetHtmlParams, "tool_get_html_params");
     dump!(GetHtmlResult, "tool_get_html_result");
@@ -120,7 +149,7 @@ fn main() {
     dump!(ExtractResult, "tool_extract_result");
     dump!(ScreenshotParams, "tool_screenshot_params");
     dump!(ScreenshotResult, "tool_screenshot_result");
-    dump!(ScreenshotFullPageParams, "tool_screenshot_full_page_params");
+    dump_action!(ScreenshotFullPageParams, "tool_screenshot_full_page_params");
     dump!(ScreenshotFullPageResult, "tool_screenshot_full_page_result");
     dump!(ScreenshotReadParams, "tool_screenshot_read_params");
     dump!(ScreenshotReadResult, "tool_screenshot_read_result");
@@ -130,13 +159,13 @@ fn main() {
     dump!(ConsoleResult, "tool_console_result");
     dump!(ConsoleEntry, "tool_console_entry");
     dump!(ConsoleStackFrame, "tool_console_stack_frame");
-    dump!(DebugParams, "tool_debug_params");
+    dump_action!(DebugParams, "tool_debug_params");
     dump!(DebugResult, "tool_debug_result");
     dump!(NetworkParams, "tool_network_params");
     dump!(NetworkResult, "tool_network_result");
     dump!(NetworkEntry, "tool_network_entry");
 
-    dump!(EvaluateParams, "tool_evaluate_params");
+    dump_action!(EvaluateParams, "tool_evaluate_params");
     dump!(EvaluateResult, "tool_evaluate_result");
     dump!(EvaluateError, "tool_evaluate_error");
 
@@ -161,4 +190,100 @@ fn main() {
     dump!(RecordStopResult, "tool_record_stop_result");
     dump!(RecordAwaitParams, "tool_record_await_params");
     dump!(RecordAwaitResult, "tool_record_await_result");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::{Value, json};
+
+    #[test]
+    fn composition_preserves_operation_fields_and_exposes_condition_limits() {
+        let original = schema_for!(DragParams);
+        let combined = action_schema::<DragParams>();
+        let original_object = original.schema.object.unwrap();
+        let combined_object = combined.schema.object.as_ref().unwrap();
+        assert_eq!(combined_object.required, original_object.required);
+        for (name, property) in original_object.properties {
+            if name != "observation_id" {
+                assert_eq!(combined_object.properties[&name], property, "{name}");
+            }
+        }
+        let value = serde_json::to_value(combined).unwrap();
+        assert_eq!(value["title"], "DragParams");
+        assert_eq!(value["properties"]["expect"]["type"], "array");
+        // Drag already exposed this optional field; retain its accepted wire shape.
+        assert_eq!(
+            value["properties"]["observation_id"]["type"],
+            json!(["string", "null"])
+        );
+        assert_eq!(value["properties"]["expect"]["maxItems"], 16);
+        assert_eq!(
+            value["definitions"]["ActionExpectation"]["properties"]["target"]["maxLength"],
+            1024
+        );
+        assert_eq!(
+            value["definitions"]["ActionExpectation"]["properties"]["attribute"]["maxLength"],
+            256
+        );
+        assert!(
+            value["properties"]["observation_id"]["description"]
+                .as_str()
+                .unwrap()
+                .contains("Strict-policy drag")
+        );
+    }
+
+    #[test]
+    fn published_action_schemas_include_shared_metadata() {
+        for operation in [
+            "window_resize",
+            "emulate",
+            "tab_close",
+            "navigate",
+            "navigate_back",
+            "navigate_forward",
+            "reload",
+            "click",
+            "hover",
+            "drag",
+            "wheel",
+            "scroll_to",
+            "focus",
+            "blur",
+            "fill",
+            "press",
+            "select",
+            "upload",
+            "download",
+            "observe",
+            "screenshot_full_page",
+            "debug",
+            "evaluate",
+        ] {
+            let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join(format!("schema/tool_{operation}_params.json"));
+            let schema: Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+            for field in ["context_id", "observation_id", "depends_on", "expect"] {
+                assert!(
+                    schema["properties"].get(field).is_some(),
+                    "{operation}.{field}"
+                );
+                assert!(
+                    !schema["required"]
+                        .as_array()
+                        .unwrap()
+                        .contains(&json!(field))
+                );
+            }
+            assert_eq!(
+                schema["properties"]["expect"]["items"]["$ref"],
+                "#/definitions/ActionExpectation"
+            );
+            assert_eq!(
+                schema["definitions"]["ActionExpectation"]["additionalProperties"],
+                false
+            );
+        }
+    }
 }

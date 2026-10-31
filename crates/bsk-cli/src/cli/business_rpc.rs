@@ -79,7 +79,7 @@ pub(super) fn check_daemon_protocol(protocol: &str) -> anyhow::Result<()> {
     {
         anyhow::ensure!(
             bsk_protocol::tools::supports_target_control(protocol),
-            "--expect and --observation require daemon protocol 1.8; restart the daemon after updating (running protocol {protocol})"
+            "--expect and --observation require daemon protocol 1.8 or a later compatible 1.x version; update the CLI and restart its daemon (running protocol {protocol}). Conditions are never silently discarded"
         );
     }
     Ok(())

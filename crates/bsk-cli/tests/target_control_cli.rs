@@ -73,27 +73,36 @@ async fn run_cli(
 }
 
 #[tokio::test]
-async fn old_daemon_cannot_silently_drop_new_action_evidence() {
-    for extra in [
-        vec![
-            "--expect",
-            r##"[{"target":"#price","field":"text","equals":"$12"}]"##,
-        ],
-        vec!["--observation", "observed"],
-    ] {
-        let mut args = vec!["click", "@e1", "--session", "s", "--context", "c", "--json"];
-        args.extend(extra);
-        let (output, requests) = run_cli("1.7", &args, json!({"tab_id":7,"x":1,"y":2})).await;
-        assert!(!output.status.success());
-        let error: Value = serde_json::from_slice(&output.stdout).unwrap();
-        assert!(
-            error["message"]
-                .as_str()
-                .unwrap()
-                .contains("daemon protocol 1.8")
-        );
-        assert_eq!(requests.len(), 1);
-        assert_eq!(requests[0]["method"], "system.status");
+async fn incompatible_daemon_cannot_silently_drop_new_action_evidence() {
+    for protocol in ["1.7", "2.0"] {
+        for extra in [
+            vec![
+                "--expect",
+                r##"[{"target":"#price","field":"text","equals":"$12"}]"##,
+            ],
+            vec!["--observation", "observed"],
+        ] {
+            let mut args = vec!["click", "@e1", "--session", "s", "--context", "c", "--json"];
+            args.extend(extra);
+            let (output, requests) =
+                run_cli(protocol, &args, json!({"tab_id":7,"x":1,"y":2})).await;
+            assert!(!output.status.success());
+            let error: Value = serde_json::from_slice(&output.stdout).unwrap();
+            assert!(
+                error["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains("daemon protocol 1.8")
+            );
+            assert_eq!(requests.len(), 1);
+            assert_eq!(requests[0]["method"], "system.status");
+            assert!(
+                error["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains("compatible 1.x")
+            );
+        }
     }
 }
 
@@ -116,13 +125,23 @@ async fn target_sync_requires_acknowledgement_but_strict_remains_compatible() {
             assert_eq!(reply["code"], "unsupported");
             assert_eq!(reply["data"]["effect_state"], "none");
             assert!(reply.get("context_id").is_none());
+            assert!(
+                reply["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains("every sync/enable and step")
+            );
         }
     }
 }
 
 #[tokio::test]
 async fn current_daemon_receives_exact_conditions_without_extra_status_calls() {
-    let checks = r##"[{"target":"#price","field":"text","equals":"  $12 [sale]  "}]"##;
+    let checks = json!([
+        {"target":"#price","field":"text","equals":"  $12 [sale]  "},
+        {"target":format!("#{}", "中".repeat(400)),"field":"exists","equals":true}
+    ])
+    .to_string();
     let (output, requests) = run_cli(
         "1.8",
         &[
@@ -135,7 +154,7 @@ async fn current_daemon_receives_exact_conditions_without_extra_status_calls() {
             "--observation",
             "observed",
             "--expect",
-            checks,
+            &checks,
             "--json",
         ],
         json!({"tab_id":7,"x":1,"y":2}),
@@ -153,6 +172,6 @@ async fn current_daemon_receives_exact_conditions_without_extra_status_calls() {
     assert_eq!(params["observation_id"], "observed");
     assert_eq!(
         params["expect"],
-        serde_json::from_str::<Value>(checks).unwrap()
+        serde_json::from_str::<Value>(&checks).unwrap()
     );
 }

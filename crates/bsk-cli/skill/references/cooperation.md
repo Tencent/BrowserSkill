@@ -34,10 +34,14 @@ evidence before choosing the operation; sync again for the next strict action.
 Prefer a targeted key, such as `press Enter --ref @e3`, when the intended recipient is known.
 
 For the legacy whole-page policy, choose `cooperate sync --policy strict` on the first sync.
-Later ordinary syncs and steps preserve it. Policy is fixed for that session. Strict contexts authorize
-one action and refs follow the latest observation. `--depends-on` remains available only in strict
-policy; target policy uses explicit conditions below. Target policy and conditions require daemon
-and extension protocol 1.8 or newer; an unsupported peer returns an error, never a silent downgrade.
+With protocol-1.8-capable peers, later ordinary syncs and steps preserve it. Policy is fixed for
+that session. Strict contexts authorize one action and refs follow the latest observation.
+`--depends-on` remains available only in strict policy; target policy uses explicit conditions
+below. Declare the facts behind those regions; a region list cannot be translated automatically.
+Target policy and conditions require compatible protocol 1.x peers at version 1.8 or later.
+Unsupported peers return an error, never a silent downgrade. With a current CLI and an older
+extension, pass `--policy strict` on **every** sync/enable and step; `--expect` still requires
+updated peers. If a plugin reports that `--policy` is unknown, upgrade the CLI and restart its daemon.
 
 ## Protect the facts behind a decision
 
@@ -48,8 +52,11 @@ bsk click @e3 --session SID --context CONTEXT_ID \
   --expect '[{"target":"#price","field":"text","equals":"$100"}]'
 ```
 
-Use selectors or refs actually observed on the page. Up to 16 conditions are checked literally;
-there is no script evaluation, pattern matching or automatic whitespace normalization.
+Use selectors or refs actually observed on the page. Selectors search only the main document;
+use refs for iframe/shadow-root targets. A missing main-document selector does not establish
+absence in other frames. Target and attribute names are limited to 1024 and 256 Unicode code
+points respectively. Up to 16 conditions are checked literally; there is no script evaluation,
+pattern matching or automatic whitespace normalization.
 
 | Field | `equals` | Meaning |
 | --- | --- | --- |

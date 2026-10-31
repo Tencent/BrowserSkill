@@ -54,14 +54,14 @@ export function parseExpectations(value: unknown): ActionExpectation[] | RpcErro
       Object.keys(check).some((key) => !["target", "field", "equals", "attribute"].includes(key)) ||
       typeof check.target !== "string" ||
       !check.target.trim() ||
-      check.target.length > 1024
+      [...check.target].length > 1024
     )
       return invalid;
     if (check.field === "attribute") {
       if (
         typeof check.attribute !== "string" ||
         !check.attribute.trim() ||
-        check.attribute.length > 256 ||
+        [...check.attribute].length > 256 ||
         (check.equals !== null && typeof check.equals !== "string")
       )
         return invalid;
@@ -159,7 +159,7 @@ export async function checkActionTarget(
   if (isRpcError(facts)) return facts;
   const reason = !facts.connected
     ? "target_detached"
-    : !facts.visible && method !== "tool.upload"
+    : !facts.visible && !["tool.upload", "tool.blur"].includes(method)
       ? "target_hidden"
       : facts.disabled &&
           !["tool.hover", "tool.scroll_to", "tool.wheel", "tool.blur"].includes(method)
@@ -208,6 +208,10 @@ export async function checkExpectations(
       else
         return {
           ...target,
+          message:
+            target.data?.reason === "selector_not_found"
+              ? `${target.message}. CSS selectors search the main document; use an observed ref for iframe elements.`
+              : target.message,
           data: {
             ...target.data,
             phase: "precondition",

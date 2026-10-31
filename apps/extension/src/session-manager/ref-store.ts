@@ -48,6 +48,15 @@ export class RefStore {
     this.clear();
   }
 
+  /** Prepare a fresh publication without mutating this store or recycling issued names. */
+  createObservationStore(): RefStore {
+    const store = new RefStore();
+    store.nextRef = this.nextRef;
+    store.generation = this.generation;
+    for (const [tabId, revision] of this.documents) store.documents.set(tabId, revision);
+    return store;
+  }
+
   /** Reserve a name while rendering; only published rows become actionable. */
   allocateRef(input: DomRefInput | VisualRefInput): string {
     if ("kind" in input) return this.allocateVisualRef();

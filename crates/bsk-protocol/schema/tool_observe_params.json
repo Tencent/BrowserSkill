@@ -7,6 +7,10 @@
     "session_id"
   ],
   "properties": {
+    "context_id": {
+      "description": "Context actually returned by sync. Reusable for target-policy DOM actions; strict policy consumes it after one action. Never fill it from cached state.",
+      "type": "string"
+    },
     "cursor": {
       "description": "Continue a retained observation; does not recapture the page.",
       "type": [
@@ -18,6 +22,22 @@
       "description": "Include implementation diagnostics for conditional surface probes.",
       "default": false,
       "type": "boolean"
+    },
+    "depends_on": {
+      "description": "Strict policy only: observed decision regions. Target policy requires exact business facts in expect; regions cannot be translated to facts automatically.",
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "maxItems": 16
+    },
+    "expect": {
+      "description": "Literal conditions checked before input. Selectors search the main document; use observed refs for iframe/shadow-root targets. Text includes all whitespace.",
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/ActionExpectation"
+      },
+      "maxItems": 16
     },
     "max_depth": {
       "description": "Cap the depth of the rendered VOM tree.",
@@ -37,6 +57,13 @@
       "format": "uint32",
       "minimum": 0.0
     },
+    "observation_id": {
+      "description": "Sync's baseline for untargeted/visual actions under target policy. Strict-policy drag instead accepts its legacy ref-map observation token.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
     "probe_hover": {
       "description": "Opt in to active hover probing: the extension moves the real cursor over a bounded set of controls to discover hover-only menus and tooltips.\n\nOff by default. Probing costs seconds of wall clock, mutates the live page, and pays off only on pages whose content is genuinely hidden behind hover. Request it when a static observation looks like it is missing hover-revealed structure.",
       "default": false,
@@ -52,6 +79,66 @@
         "null"
       ],
       "format": "int64"
+    }
+  },
+  "definitions": {
+    "ActionExpectation": {
+      "description": "Caller-supplied facts checked immediately before starting an action.",
+      "type": "object",
+      "required": [
+        "equals",
+        "field",
+        "target"
+      ],
+      "properties": {
+        "attribute": {
+          "description": "Required only for field=attribute, measured in Unicode code points.",
+          "type": "string",
+          "maxLength": 256,
+          "minLength": 1
+        },
+        "equals": {
+          "description": "text/value require a string; checked/exists require a boolean; attribute accepts a string or null for absence. Text is exact textContent.",
+          "allOf": [
+            {
+              "$ref": "#/definitions/ExpectedValue"
+            }
+          ]
+        },
+        "field": {
+          "$ref": "#/definitions/ExpectationField"
+        },
+        "target": {
+          "description": "Observed ref or main-document CSS selector, measured in Unicode code points.",
+          "type": "string",
+          "maxLength": 1024,
+          "minLength": 1
+        }
+      },
+      "additionalProperties": false
+    },
+    "ExpectationField": {
+      "type": "string",
+      "enum": [
+        "text",
+        "value",
+        "checked",
+        "attribute",
+        "exists"
+      ]
+    },
+    "ExpectedValue": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "boolean"
+        },
+        {
+          "type": "null"
+        }
+      ]
     }
   }
 }

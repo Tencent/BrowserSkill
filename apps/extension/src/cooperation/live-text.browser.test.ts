@@ -9,7 +9,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { CdpFrame, CdpFrameGraph } from "@/browser-driver/frame-graph";
 import { SessionManager } from "@/session-manager/manager";
 import { handleEvaluate } from "@/tools/evaluate";
-import { handleClick, handleFill, handlePress } from "@/tools/interaction";
+import { handleBlur, handleClick, handleFill, handlePress } from "@/tools/interaction";
 import { handleObserve, handleScreenshot, handleSnapshot } from "@/tools/observation";
 import type { CdpRunner } from "@/tools/shared";
 import type { RequestFrame } from "@/transport/types";
@@ -224,6 +224,7 @@ async function withCooperation(
           "tool.click": handleClick,
           "tool.press": handlePress as never,
           "tool.fill": handleFill as never,
+          "tool.blur": handleBlur as never,
           "tool.evaluate": handleEvaluate as never,
         };
         const act = (method: string, params: object) => {
@@ -668,7 +669,7 @@ describe.skipIf(!process.env.BSK_CLICK_CHROME)("target policy in a real browser"
             selector,
             value,
           });
-          expect(result).not.toHaveProperty("code");
+          expect(result).toMatchObject({ used_selector: selector });
           expect(await page.value(selector)).toBe(value);
         }
         expect(
@@ -764,9 +765,32 @@ describe.skipIf(!process.env.BSK_CLICK_CHROME)("target policy in a real browser"
           selector: "#pay",
           timeout_ms: 1000,
         });
-        expect(clicked, JSON.stringify(clicked)).not.toHaveProperty("code");
+        expect(clicked, JSON.stringify(clicked)).toMatchObject({ used_selector: "#pay" });
         expect((await page.inputs()).clicks).toEqual(["pay:true"]);
         expect(page.captures()).toEqual(captures);
+      },
+      { policy: "target" },
+    );
+  }, 120_000);
+
+  it("blurs hidden inputs without waiting for them to become visible", async () => {
+    await withCooperation(
+      async (page) => {
+        await page.open("live");
+        const synced = await page.sync();
+        for (const style of ["display:none", "visibility:hidden"]) {
+          await page.mutate(
+            `document.querySelector('#city').style.cssText = ${JSON.stringify(style)}`,
+          );
+          const blurred = await page.act("tool.blur", {
+            context_id: synced.context_id,
+            selector: "#city",
+            timeout_ms: 100,
+          });
+          expect(blurred, JSON.stringify(blurred)).toMatchObject({ used_selector: "#city" });
+          expect(await page.read<boolean>("document.activeElement.id === 'city'")).toBe(false);
+        }
+        expect(await page.inputs()).toEqual({ clicks: [], keys: [] });
       },
       { policy: "target" },
     );

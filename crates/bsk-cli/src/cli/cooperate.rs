@@ -185,7 +185,7 @@ pub(crate) fn verify_policy(
     if reply.get("context_id").is_some() && !acknowledged {
         return Err(CliError::from_rpc(bsk_protocol::RpcError {
             code: bsk_protocol::ErrorCode::Unsupported,
-            message: "Control policy was not acknowledged; update the daemon and extension, or explicitly select strict policy for legacy behavior".into(),
+            message: "Control policy was not acknowledged; update the CLI, restart its daemon and update the extension. With a current CLI and an older extension, pass --policy strict on every sync/enable and step to retain legacy behavior; expect conditions still require protocol 1.8".into(),
             data: Some(serde_json::json!({"reason":"unsupported_feature", "phase":"negotiate", "effect_state":"none", "required_protocol":"1.8", "requested_policy":policy})),
         }));
     }
