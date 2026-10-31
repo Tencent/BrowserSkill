@@ -8,8 +8,8 @@
   "tags": ["emulation", "mobile", "viewport"],
   "fixture": { "startPath": "/responsive" },
   "prompts": {
-    "en": "Open {url}, emulate an iPhone 14, and report the viewport marker shown on the page. Close the browser session when finished.",
-    "zh-CN": "打开 {url}，模拟 iPhone 14，并报告页面显示的 viewport marker。完成后关闭浏览器会话。"
+    "en": "Open {url} with iPhone 14 emulation and report the viewport marker shown on the page. Close the browser session when finished.",
+    "zh-CN": "以 iPhone 14 模拟配置打开 {url}，并报告页面显示的 viewport marker。完成后关闭浏览器会话。"
   },
   "coverage": ["session.start", "session.stop", "page.navigate", "assist.emulate"],
   "assertions": {
@@ -34,15 +34,12 @@
         "width": 900,
         "height": 700
       },
-      { "action": "navigate" },
-      { "action": "sync", "saveAs": "control" },
       {
         "action": "emulate",
         "device": "iphone-14",
-        "contextId": "{control.context_id}",
-        "observationId": "{control.observation_id}",
         "evidence": "emulatedDevice"
       },
+      { "action": "navigate" },
       {
         "action": "wait-site-event",
         "type": "viewport.sample",

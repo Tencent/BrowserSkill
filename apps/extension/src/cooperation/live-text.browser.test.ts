@@ -6,8 +6,10 @@
 // end-to-end coverage.
 import { createServer } from "node:http";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { ChromiumCdp } from "@/browser-driver/chromium-cdp";
 import type { CdpFrame, CdpFrameGraph } from "@/browser-driver/frame-graph";
 import { SessionManager } from "@/session-manager/manager";
+import { type EmulateCdpRunner, handleEmulate } from "@/tools/emulate";
 import { handleEvaluate } from "@/tools/evaluate";
 import { handleBlur, handleClick, handleFill, handlePress } from "@/tools/interaction";
 import { handleObserve, handleScreenshot, handleSnapshot } from "@/tools/observation";
@@ -78,6 +80,10 @@ const pages: Record<string, string> = {
     <iframe name="detail" src="/frame-initial"></iframe>`,
   "frame-initial": "<p>Initial detail</p>",
   "frame-next": "<p>Saved detail</p>",
+  responsive: `<meta name="viewport" content="width=device-width,initial-scale=1">
+    <p id="viewport"></p><script>
+    const sample = () => document.querySelector('#viewport').textContent = innerWidth + 'x' + innerHeight;
+    addEventListener('resize', sample); sample();</script>`,
   canvas: `<canvas id="canvas" width="200" height="100"></canvas>
     <script>const context = document.querySelector('canvas').getContext('2d');
       context.fillStyle = 'blue'; context.fillRect(0, 0, 200, 100);</script>`,
@@ -165,11 +171,15 @@ async function withCooperation(
           if (method === "Accessibility.getFullAXTree") captures.accessibility++;
           return local(method, params);
         };
-        const cdp: CdpRunner = {
+        const cdp: CdpRunner & EmulateCdpRunner = {
           send: (_tabId, method, params) => instrumented(method, params),
           sendToTarget: (_target, method, params) => instrumented(method, params),
           getAttachmentId: () => sessionId,
           getFrameGraph: graph,
+          setDeviceMetricsOverride: ChromiumCdp.prototype.setDeviceMetricsOverride,
+          clearDeviceMetricsOverride: ChromiumCdp.prototype.clearDeviceMetricsOverride,
+          setUserAgentOverride: ChromiumCdp.prototype.setUserAgentOverride,
+          setTouchEmulationEnabled: ChromiumCdp.prototype.setTouchEmulationEnabled,
         };
         const sessions = new SessionManager({
           agentWindow: {
@@ -226,6 +236,7 @@ async function withCooperation(
           "tool.fill": handleFill as never,
           "tool.blur": handleBlur as never,
           "tool.evaluate": handleEvaluate as never,
+          "tool.emulate": handleEmulate as never,
         };
         const act = (method: string, params: object) => {
           const request: RequestFrame = {
@@ -577,6 +588,46 @@ describe.skipIf(!process.env.BSK_CLICK_CHROME)("target policy in a real browser"
   afterEach(() => {
     vi.unstubAllGlobals();
   });
+
+  it.each([
+    "strict",
+    "target",
+  ] as const)("emulates an already loaded responsive page under %s control", async (policy) => {
+    await withCooperation(
+      async (page) => {
+        await page.open("responsive");
+        const synced = await page.sync();
+        expect(await page.read<string>("document.querySelector('#viewport').textContent")).not.toBe(
+          "390x844",
+        );
+        const result = await page.act("tool.emulate", {
+          context_id: synced.context_id,
+          ...(policy === "target" ? { observation_id: synced.observation_id } : {}),
+          overrides: {
+            width: 390,
+            height: 844,
+            mobile: true,
+            user_agent: "Mobile test device",
+            touch: true,
+            max_touch_points: 1,
+          },
+        });
+        expect(result, JSON.stringify(result)).toMatchObject({
+          cleared: false,
+          applied: { width: 390, height: 844, mobile: true, touch: true },
+        });
+        await expect
+          .poll(() => page.read<string>("document.querySelector('#viewport').textContent"))
+          .toBe("390x844");
+        expect(
+          await page.read(
+            "({width: innerWidth, height: innerHeight, touch: navigator.maxTouchPoints, ua: navigator.userAgent})",
+          ),
+        ).toEqual({ width: 390, height: 844, touch: 1, ua: "Mobile test device" });
+      },
+      { policy },
+    );
+  }, 120_000);
 
   it("compares both policies when a counter changes inside the target's form", async () => {
     for (const policy of ["strict", "target"] as const) {

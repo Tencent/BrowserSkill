@@ -10,7 +10,7 @@ import { createEvalServer } from "../lib/server.mjs";
 
 const mobile = (await loadCaseManifests()).find(({ id }) => id === "mobile-emulation");
 
-async function mobileWorkflow(t, sample, check) {
+async function mobileWorkflow(t, sample, check, emulateError) {
   const outputDirectory = await mkdtemp(join(tmpdir(), "mobile-readiness-"));
   const server = createEvalServer();
   const calls = [];
@@ -32,13 +32,15 @@ async function mobileWorkflow(t, sample, check) {
         let reply = {};
         if (args[0] === "session")
           reply = args[1] === "start" ? { session_id: "test" } : { stopped: ["test"] };
-        if (args[0] === "cooperate")
-          reply = {
-            control_policy: "target",
-            context_id: "control",
-            observation_id: "observation",
+        if (args[0] === "emulate" && emulateError) {
+          started();
+          return {
+            exitCode: 1,
+            stdout: "",
+            stderr: JSON.stringify({ code: "cdp_failed", message: emulateError }),
           };
-        if (args[0] === "emulate") {
+        }
+        if (args[0] === "navigate") {
           if (sample)
             setTimeout(() => server.record("mobile-readiness", "viewport.sample", sample), 750);
           started();
@@ -65,7 +67,7 @@ async function mobileWorkflow(t, sample, check) {
   }
 }
 
-test("mobile emulation waits for the exact viewport event after 300ms without replaying actions", async (t) => {
+test("mobile emulation configures the blank tab before navigation and waits for the exact viewport", async (t) => {
   const { report, calls } = await mobileWorkflow(
     t,
     { width: 390, height: 844 },
@@ -82,7 +84,7 @@ test("mobile emulation waits for the exact viewport event after 300ms without re
   const actions = calls.filter(({ args }) => args[0] !== "session");
   assert.deepEqual(
     actions.map(({ args }) => args[0]),
-    ["window", "navigate", "cooperate", "emulate", "get-html"],
+    ["window", "emulate", "navigate", "get-html"],
   );
   assert.deepEqual(actions[0].args, [
     "window",
@@ -95,14 +97,18 @@ test("mobile emulation waits for the exact viewport event after 300ms without re
     "700",
     "--json",
   ]);
-  assert(!actions[1].args.includes("--context"));
-  assert.deepEqual(actions[3].args.slice(-5), [
-    "--context",
-    "control",
-    "--observation",
-    "observation",
+  assert.deepEqual(actions[1].args, [
+    "emulate",
+    "--session",
+    "test",
+    "--device",
+    "iphone-14",
     "--json",
   ]);
+  assert(
+    actions.every(({ args }) => !args.includes("--context") && !args.includes("--observation")),
+  );
+  assert.equal(report.evidence.emulatedDevice, true);
   assert.equal(report.evidence.sessionStopped, true);
 });
 
@@ -121,6 +127,25 @@ for (const [name, sample] of [
     assert.equal(report.verification.checks.find(({ kind }) => kind === "site").status, "failed");
     assert(!calls.some(({ args }) => args[0] === "get-html"));
     assert.equal(calls.filter(({ args }) => args[0] === "emulate").length, 1);
+    assert.equal(calls.filter(({ args }) => args[0] === "navigate").length, 1);
     assert.equal(report.evidence.sessionStopped, true);
   });
 }
+
+test("failed mobile emulation prevents navigation and still closes its session", async (t) => {
+  const { report, calls } = await mobileWorkflow(
+    t,
+    undefined,
+    async () => {},
+    "Device emulation failed",
+  );
+  assert.match(report.executionError, /Device emulation failed/);
+  assert.equal(report.verification.status, "failed");
+  assert.deepEqual(
+    calls.filter(({ args }) => args[0] !== "session").map(({ args }) => args[0]),
+    ["window", "emulate"],
+  );
+  assert.equal(report.evidence.emulatedDevice, undefined);
+  assert.equal(report.eventCount, 0);
+  assert.equal(report.evidence.sessionStopped, true);
+});
