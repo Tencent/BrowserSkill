@@ -1175,6 +1175,84 @@ describe("ChromiumCdp", () => {
     ]);
   });
 
+  it("retains redirect responses with each hop's original request method", async () => {
+    const { api, onEvent } = fakeApi();
+    const cdp = new ChromiumCdp(api);
+    await cdp.ensureNetworkCapture(31);
+    onEvent.fire({ tabId: 31 }, "Network.requestWillBeSent", {
+      requestId: "redirect-chain",
+      request: { url: "https://one.test/submit", method: "POST" },
+      type: "Document",
+    });
+    onEvent.fire({ tabId: 31 }, "Network.requestWillBeSent", {
+      requestId: "redirect-chain",
+      request: { url: "https://one.test/result", method: "GET" },
+      redirectResponse: {
+        url: "https://one.test/submit",
+        status: 303,
+        statusText: "See Other",
+        mimeType: "text/html",
+      },
+      type: "Document",
+      timestamp: 10,
+    });
+    const first = cdp.networkEntriesSince(31, 0, 50, 1000);
+    expect(first.entries).toMatchObject([
+      {
+        sequence: 1,
+        kind: "response",
+        method: "POST",
+        url: "https://one.test/submit",
+        status: 303,
+        timestamp: 10,
+      },
+    ]);
+    onEvent.fire({ tabId: 31 }, "Network.requestWillBeSent", {
+      requestId: "redirect-chain",
+      request: { url: "https://two.test/final", method: "GET" },
+      redirectResponse: { url: "https://one.test/result", status: 302 },
+      type: "Document",
+      timestamp: 11,
+    });
+    onEvent.fire({ tabId: 31 }, "Network.responseReceived", {
+      requestId: "redirect-chain",
+      response: { url: "https://two.test/final", status: 200 },
+      type: "Document",
+      timestamp: 12,
+    });
+    expect(cdp.networkEntriesSince(31, first.next_since, 50, 1000).entries).toMatchObject([
+      { sequence: 2, kind: "response", method: "GET", url: "https://one.test/result", status: 302 },
+      { sequence: 3, kind: "response", method: "GET", url: "https://two.test/final", status: 200 },
+    ]);
+    onEvent.fire({ tabId: 31 }, "Network.loadingFailed", {
+      requestId: "redirect-chain",
+      errorText: "net::ERR_ABORTED",
+    });
+    expect(cdp.networkEntriesSince(31, 3, 50, 1000).entries).toMatchObject([
+      {
+        kind: "failure",
+        method: "GET",
+        url: "https://two.test/final",
+        error_text: "net::ERR_ABORTED",
+      },
+    ]);
+  });
+
+  it("does not assign the next request's method to a redirect captured mid-chain", async () => {
+    const { api, onEvent } = fakeApi();
+    const cdp = new ChromiumCdp(api);
+    await cdp.ensureNetworkCapture(31);
+    onEvent.fire({ tabId: 31 }, "Network.requestWillBeSent", {
+      requestId: "mid-chain",
+      request: { url: "https://one.test/final", method: "GET" },
+      redirectResponse: { url: "https://one.test/submit", status: 303 },
+      type: "Document",
+    });
+    const entries = cdp.networkEntriesSince(31, 0, 50, 1000).entries;
+    expect(entries).toMatchObject([{ url: "https://one.test/submit", status: 303 }]);
+    expect(entries[0].method).toBeUndefined();
+  });
+
   it("clears request metadata when loading finishes", async () => {
     const { api, onEvent } = fakeApi();
     const cdp = new ChromiumCdp(api);
