@@ -1277,6 +1277,18 @@ export class ChromiumCdp {
     const id = typeof raw.requestId === "string" ? raw.requestId : undefined;
     const request = (raw.request ?? {}) as Record<string, unknown>;
     if (!id || typeof request.url !== "string") return;
+    // CDP reports redirect responses on the next request event, not through
+    // responseReceived. Read the old hop's metadata before replacing it.
+    if (raw.redirectResponse) {
+      this.appendNetwork(
+        tabId,
+        parseNetworkResponse(this.getNetworkRequest(tabId, params), {
+          response: raw.redirectResponse,
+          type: raw.type,
+          timestamp: raw.timestamp,
+        }),
+      );
+    }
     const url = truncateText(request.url, MAX_NETWORK_FIELD_LENGTH);
     const method = truncateOptionalText(
       typeof request.method === "string" ? request.method : undefined,
