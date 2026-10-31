@@ -108,6 +108,9 @@ describe("step receipts through the real run_code PTC bridge", () => {
         JSON.stringify(STEP_PARTIAL),
       );
     expect(contextReceipts(result)).toEqual([STEP_PARTIAL]);
+    expect(result.additionalContexts?.[0].source).toEqual({
+      kind: "plugin:@wxg-prc-cpg/browser-skill-dsh-plugin",
+    });
     expect(run).toHaveBeenCalledOnce();
   });
 

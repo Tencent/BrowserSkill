@@ -742,6 +742,39 @@ describe("lazy activation diagnostics", () => {
     expect(register).not.toHaveBeenCalled();
   });
 
+  it.each([3, 4])("uses a compatible source for format %s activation notices", async (version) => {
+    const host = fakeEventCtx();
+    const session = { header: { version }, events: [] };
+    const register = vi
+      .fn()
+      .mockImplementationOnce(() => {
+        throw new Error("duplicate bsk_tabs");
+      })
+      .mockReturnValue(() => {});
+    armLazyTools(host.ctx, register);
+    const gesture = {
+      id: "gesture-source",
+      source: { kind: "skill-invocation", name: "browser-skill", form: "instructions" },
+    };
+    const source =
+      version < 4
+        ? { kind: "plugin", plugin: "@wxg-prc-cpg/browser-skill-dsh-plugin" }
+        : { kind: "plugin:@wxg-prc-cpg/browser-skill-dsh-plugin" };
+    const failed = (await preStep(host, session, [gesture])) as { messages: { source: object }[] };
+    expect(failed.messages[1].source).toEqual({
+      ...source,
+      form: "notice",
+      summary: "BrowserSkill tools unavailable",
+    });
+    await callListeners(host.listeners, "session/event", session, { type: "turn/start" });
+    const recovered = (await preStep(host, session)) as { messages: { source: object }[] };
+    expect(recovered.messages[0].source).toEqual({
+      ...source,
+      form: "notice",
+      summary: "BrowserSkill tools available",
+    });
+  });
+
   it("reports a gesture failure only in its conversation, then reports recovery once", async () => {
     const host = fakeEventCtx();
     const session = { events: [] };
