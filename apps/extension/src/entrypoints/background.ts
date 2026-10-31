@@ -36,7 +36,6 @@ import { attachSessionsLiveFlag } from "@/lib/sessions-live-flag";
 import { captureTaskPreview, focusTask } from "@/lib/task-preview";
 import { attachUiChannel } from "@/lib/ui-channel";
 import { attachLongScreenshot } from "@/long-screenshot/background";
-import { AgentWindowTabGroups } from "@/session-manager/agent-window-tab-group";
 import { createDisconnectCleanup } from "@/session-manager/disconnect-cleanup";
 import { attachSessionEventHandler } from "@/session-manager/event-handler";
 import { isAgentControlledTab, SessionManager } from "@/session-manager/manager";
@@ -92,7 +91,6 @@ export default defineBackground(() => {
     },
   });
   const sessions = new SessionManager({ remote: () => remoteEndpoint !== null });
-  const windowTabGroups = new AgentWindowTabGroups(sessions);
   // Capture the original owner before cooperation releases a detached page.
   attachSessionEventHandler({
     manager: sessions,
@@ -333,7 +331,6 @@ export default defineBackground(() => {
   }
 
   function onOverlaySessionStateChanged(): void {
-    windowTabGroups.sync();
     cooperation.syncSessions();
     windowRouting.sync();
     debug.sync();
@@ -374,10 +371,8 @@ export default defineBackground(() => {
     void pushOverlayStateForTab(tab.id, tab.windowId);
   });
   chrome.tabs.onAttached.addListener((tabId, { newWindowId }) => {
-    // Reconcile again after Chrome finishes the move; editing a group or
-    // messaging a page can fail transiently while it is being dragged.
+    // Refresh controls after Chrome finishes moving the page.
     void pushOverlayStateForTab(tabId, newWindowId);
-    windowTabGroups.sync();
   });
   chrome.tabs.onDetached.addListener((tabId) => {
     void video.stopTab(tabId, "session_ended").catch(() => {});
@@ -460,7 +455,6 @@ export default defineBackground(() => {
     onSessionsChanged: onOverlaySessionStateChanged,
     onBrowserControlResumed,
     onAgentTabClaimed: (tabId, windowId) => {
-      windowTabGroups.sync();
       void cooperation.observeTab(tabId).catch(() => {});
       void pushOverlayStateForTab(tabId, windowId);
     },

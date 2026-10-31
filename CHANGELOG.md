@@ -19,6 +19,13 @@ Starting from 0.2.0, CLI / Extension / DSH Plugin share the same version number.
 - CLI cancellation is armed before sending a browser command, so an immediate
   Ctrl-C can cancel the operation and return its outcome instead of terminating silently.
 
+### Removed
+
+- Automatic native Agent Window tab groups and the `tabGroups` permission, to
+  prevent new `BrowserSkill` groups from accumulating across browsers through
+  Chrome sync. Existing saved groups are not deleted; page control indicators,
+  background window behavior and user-tab routing remain available.
+
 ## [0.4.0] - 2026-10-30
 
 ### Changed

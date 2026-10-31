@@ -4,12 +4,12 @@ import { OverlayController, shouldShowAgentControlOverlay } from "@/content/over
 import { watchDaemonConnection } from "@/lib/daemon-connection-preference";
 import { OVERLAY_AGENT_STATE, type OverlayAgentStateMessage } from "@/lib/overlay-bridge";
 import { attachSessionsLiveFlag } from "@/lib/sessions-live-flag";
-import { AgentWindowTabGroups } from "@/session-manager/agent-window-tab-group";
 import { isAgentControlledTab } from "@/session-manager/manager";
 import { AgentWindowRouting } from "@/session-manager/window-routing";
 import { ToolDispatcher } from "@/tools/dispatcher";
 import { hasActiveHelp } from "@/tools/human-loop";
 import { hasActiveRecording } from "@/tools/record";
+import { handleTabCreate } from "@/tools/tabs";
 import { VideoManager } from "@/video/manager";
 
 vi.hoisted(() => {
@@ -38,7 +38,6 @@ vi.mock("@/lib/recording/frame-coordinator");
 vi.mock("@/lib/sessions-live-flag");
 vi.mock("@/long-screenshot/background");
 vi.mock("@/session-manager/event-handler");
-vi.mock("@/session-manager/agent-window-tab-group");
 vi.mock("@/session-manager/window-routing");
 vi.mock("@/session-manager/agent-window", () => ({
   AGENT_WINDOW_HOME: "about:blank",
@@ -93,12 +92,21 @@ async function fixture() {
       sendMessage,
       get: vi.fn(async () => ({ url: "https://example.test" })),
       query: vi.fn(async () => []),
+      group: vi.fn(async () => 100),
+      ungroup: vi.fn(async () => {}),
       onDetached,
       onActivated: event(),
       onUpdated: event(),
       onCreated,
       onAttached,
       onRemoved: event(),
+    },
+    tabGroups: {
+      query: vi.fn(async () => []),
+      get: vi.fn(async () => ({ id: 100, windowId: 10 })),
+      update: vi.fn(async () => {}),
+      onRemoved: event(),
+      onMoved: event(),
     },
     debugger: { onDetach: event() },
     webNavigation: {
@@ -132,7 +140,48 @@ async function fixture() {
   };
 }
 
-it("refreshes released-page controls and groups after attachment completes", async () => {
+it("keeps task tabs ungrouped while showing controls after creation and attachment", async () => {
+  vi.useFakeTimers();
+  const f = await fixture();
+  const home = { id: 10, windowId: 10, groupId: -1, pinned: false } as chrome.tabs.Tab;
+  const created = { ...home, id: 20, url: "https://example.test" };
+  const tabs = [home];
+  Object.assign(chrome.tabs, {
+    query: vi.fn(async () => tabs),
+    get: vi.fn(async (id: number) => tabs.find((tab) => tab.id === id)),
+    create: vi.fn(async () => {
+      tabs.push(created);
+      f.onCreated.emit(created);
+      return created;
+    }),
+  });
+
+  f.deps.onSessionsChanged?.();
+  const result = await handleTabCreate(f.deps.sessions, {
+    session_id: f.task.sessionId,
+    url: created.url,
+  });
+  expect(result).toMatchObject({ tab_id: created.id, window_id: home.windowId });
+  if ("code" in result) throw new Error(result.message);
+  // Use the real background callbacks invoked by the dispatcher and browser.
+  f.deps.onAgentTabClaimed?.(result.tab_id, result.window_id);
+  f.onAttached.emit(created.id, { newWindowId: home.windowId, newPosition: 1 });
+  await vi.advanceTimersByTimeAsync(0);
+
+  expect(isAgentControlledTab(f.task, created.id)).toBe(true);
+  for (const tab of tabs) {
+    expect(tab.groupId).toBe(-1);
+    expect(f.sendMessage).toHaveBeenCalledWith(
+      tab.id,
+      expect.objectContaining({ sessionId: f.task.sessionId, mode: "control" }),
+    );
+  }
+  expect(chrome.tabs.group).not.toHaveBeenCalled();
+  expect(chrome.tabs.ungroup).not.toHaveBeenCalled();
+  expect(chrome.tabGroups.update).not.toHaveBeenCalled();
+});
+
+it("refreshes released-page controls after attachment completes", async () => {
   const f = await fixture();
   f.overlay.applyAgentControlMode("one", "control");
   f.deps.sessions.release("one");
@@ -143,18 +192,6 @@ it("refreshes released-page controls and groups after attachment completes", asy
     10,
     expect.objectContaining({ sessionId: null, mode: "hidden" }),
   );
-  const groups = vi.mocked(AgentWindowTabGroups).mock.instances.at(-1)!;
-  expect(groups.sync).toHaveBeenCalledOnce();
-});
-
-it("refreshes native window identification after session changes and explicit tab claims", async () => {
-  const f = await fixture();
-  const groups = vi.mocked(AgentWindowTabGroups).mock.instances.at(-1)!;
-  expect(AgentWindowTabGroups).toHaveBeenLastCalledWith(f.deps.sessions);
-  f.deps.onSessionsChanged?.();
-  expect(groups.sync).toHaveBeenCalledTimes(1);
-  f.deps.onAgentTabClaimed?.(10, 10);
-  expect(groups.sync).toHaveBeenCalledTimes(2);
 });
 
 it.each([false, true])("hides an observed tab after detachment, remote=%s", async (remote) => {

@@ -29,8 +29,8 @@ chrome.runtime.onMessage.addListener((message, _sender, reply) => {
 });
 `;
 
-// Use the production lifecycle listener, ownership, tab tools, CDP driver and
-// native group reconciler. Only the daemon transport is replaced by a recorder.
+// Use the production lifecycle listener, ownership, tab tools and CDP driver.
+// Only the daemon transport is replaced by a recorder.
 // A direct Chrome move deliberately bypasses the tool's expected-move registry,
 // producing the same browser events as a user dragging a tab between windows.
 const entry = `
@@ -38,7 +38,6 @@ import { ChromiumCdp } from '@/browser-driver/chromium-cdp';
 import { attachCooperation } from '@/cooperation/browser-bridge';
 import { nextOverlayVersion } from '@/lib/overlay-version';
 import { OVERLAY_AGENT_STATE } from '@/lib/overlay-bridge';
-import { AgentWindowTabGroups } from '@/session-manager/agent-window-tab-group';
 import { attachSessionEventHandler } from '@/session-manager/event-handler';
 import { SessionManager } from '@/session-manager/manager';
 import { handleSessionStop } from '@/tools/session';
@@ -57,12 +56,12 @@ globalThis.run = async url => {
  await chrome.windows.create({tabId: controller.id, type: 'popup', focused: false});
  const user = (await chrome.windows.getAll({windowTypes: ['normal']}))[0];
  const manager = new SessionManager(), cdp = new ChromiumCdp(chrome.debugger);
- const groups = new AgentWindowTabGroups(manager), events = [], completed = [];
+ const events = [], completed = [];
  let cooperation;
  const lifecycle = attachSessionEventHandler({
   manager, cdp, transport: {send: event => events.push(event)},
   onSessionReleased: task => cooperation.release(task.sessionId),
-  onSessionsChanged: () => { cooperation.syncSessions(); groups.sync(); },
+  onSessionsChanged: () => cooperation.syncSessions(),
  });
  cooperation = attachCooperation(manager, () => {});
  const readOverlay = id => chrome.tabs.sendMessage(id, {type: 'fixture.overlay'});
@@ -92,7 +91,6 @@ globalThis.run = async url => {
    check(!result.code, JSON.stringify(result));
    await active(task, result.tab_id);
   }
-  groups.sync();
   return task;
  };
  const borrow = async task => {
@@ -103,14 +101,12 @@ globalThis.run = async url => {
   check(!result.code, JSON.stringify(result));
   check(manager.has(task.sessionId), 'borrowing ended the task');
   await active(task, tab.id);
-  groups.sync();
   return tab.id;
  };
  const observe = async task => {
   const tab = await chrome.tabs.create({windowId: task.agentWindowId, url: url + '/observed-' + task.sessionId, active: false});
   (task.observedTabs ??= new Set()).add(tab.id);
   await active(task, tab.id);
-  groups.sync();
   return tab.id;
  };
  const claimed = task => [...task.agentCreatedTabs, ...task.borrowedTabs.keys(), ...(task.observedTabs ?? [])];
@@ -122,9 +118,9 @@ globalThis.run = async url => {
   await wait(() => !manager.has(task.sessionId), 'task release');
   await wait(() => sessionEvents(task).length > 0, 'terminal event');
   await wait(async () => (await Promise.all(before.map(async ({id}) => {
-   const tab = await chrome.tabs.get(id), overlay = await readOverlay(id);
-   return tab.groupId === -1 && overlay.controlMode === 'hidden' && !overlay.controlVisible;
-  }))).every(Boolean), 'labels and overlays released');
+   const overlay = await readOverlay(id);
+   return overlay.controlMode === 'hidden' && !overlay.controlVisible;
+  }))).every(Boolean), 'overlays released');
   await wait(async () => {
    const targets = await chrome.debugger.getTargets();
    return before.every(({id}) => !targets.find(target => target.tabId === id)?.attached);
@@ -170,13 +166,18 @@ globalThis.run = async url => {
 
   const grouped = await start('whole-group');
   const groupedTabs = await snapshot(grouped);
-  await wait(async () => {
-   const tabs = await Promise.all(groupedTabs.map(({id}) => chrome.tabs.get(id)));
-   return tabs.every(tab => tab.groupId !== -1 && tab.groupId === tabs[0].groupId);
-  }, 'native group ready');
-  const groupId = (await chrome.tabs.get(groupedTabs[0].id)).groupId;
+  // Simulate a user-created group; BrowserSkill must release control without
+  // dismantling the user's grouping when the whole group is dragged out.
+  const groupId = await chrome.tabs.group({
+   tabIds: groupedTabs.map(tab => tab.id), createProperties: {windowId: grouped.agentWindowId},
+  });
+  await chrome.tabGroups.update(groupId, {title: 'User group', color: 'blue'});
   await chrome.tabGroups.move(groupId, {windowId: user.id, index: -1});
   await assertReleased(grouped, groupedTabs, groupedTabs.map(tab => tab.id));
+  const movedGroup = (await chrome.tabs.get(groupedTabs[0].id)).groupId;
+  check(movedGroup !== -1, 'user group removed');
+  for (const {id} of groupedTabs) check((await chrome.tabs.get(id)).groupId === movedGroup, 'user group split');
+  check((await chrome.tabGroups.get(movedGroup)).title === 'User group', 'user group renamed');
   check(!(await chrome.windows.get(grouped.agentWindowId).catch(() => null)), 'empty source window remained');
 
   const last = await start('last-tab', 0), lastTabs = await snapshot(last);
@@ -220,7 +221,7 @@ globalThis.run = async url => {
   completed.push(stopping.sessionId);
   return {completed, terminalEvents: events};
  } finally {
-  lifecycle.dispose(); groups.dispose(); await cdp.detachAll(); cdp.dispose();
+  lifecycle.dispose(); await cdp.detachAll(); cdp.dispose();
  }
 };
 `;
@@ -275,6 +276,7 @@ describe.skipIf(!process.env.BSK_TAB_DETACH_CHROME)("tab detachment browser regr
           name: "Tab detachment regression",
           version: "1.0",
           background: { service_worker: "worker.js" },
+          // Only the fixture uses tabGroups to simulate the user's group drag.
           permissions: ["debugger", "tabs", "tabGroups", "storage", "webNavigation"],
           host_permissions: ["http://127.0.0.1/*"],
           content_scripts: [{ matches: ["http://127.0.0.1/*"], js: ["content.bundle.js"] }],
