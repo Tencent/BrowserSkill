@@ -43,5 +43,8 @@ Use `bsk_tabs` to list IDs before acting. Borrow for the immediate step and
 return promptly. Browser Automation settings
 govern confirmation and help; never change them to bypass a prompt or repeat
 pending/denied/expired borrows. Inspect unknown outcomes; follow version-error hints.
+`not_found` means the tab closed: ask the user to reopen it, not a substitute tab.
+`confirmation_ui_unavailable` means no user window shows an ordinary http(s) page in
+front; ask the user to bring one forward, then retry once. Task tabs cannot host it.
 Remote reads/actions require task-created or borrowed tabs; popups gain no control.
 An unowned tab inside the Agent Window needs a user move to a user window before borrowing.
