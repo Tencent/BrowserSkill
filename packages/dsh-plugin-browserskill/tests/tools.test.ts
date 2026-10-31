@@ -2280,6 +2280,117 @@ describe("screenshot scratch file lifecycle", () => {
 });
 
 describe("observation action instrumentation timing", () => {
+  it("keeps shared-control reads usable while an ordinary action owns the queue", async () => {
+    const { ctx, tools } = makeCtx();
+    const registry = new SessionRegistry(1);
+    const queue = new KeyedExecutor();
+    const { runner, calls } = fakeRunner({
+      "session start": START_REPLY("s1"),
+      cooperate: { ready: true },
+    });
+    const observation = disabledObservation({ ctx, runner, registry });
+    registerBrowserTools({
+      ctx: ctx as never,
+      runner,
+      registry,
+      queue,
+      observation,
+      config: CONFIG,
+    });
+    await startSession(tools);
+    let release!: () => void;
+    const busy = queue.run(
+      "s1",
+      () =>
+        new Promise<void>((resolve) => {
+          release = resolve;
+        }),
+    );
+    try {
+      await vi.waitFor(() => expect(release).toBeDefined());
+      const sync = tools.get("session.cooperate.sync")!.execute({}, makeExec());
+      await vi.waitFor(() => expect(calls.some((call) => call.args[0] === "cooperate")).toBe(true));
+      await sync;
+    } finally {
+      release();
+      await busy;
+      observation.dispose();
+    }
+  });
+
+  it.each([
+    "sync",
+    "wait",
+    "status",
+    "cancel-sync",
+  ])("waits for preempted thumbnail cleanup before cooperate %s", async (action) => {
+    const { ctx, tools } = makeCtx();
+    const registry = new SessionRegistry(1);
+    const queue = new KeyedExecutor();
+    const fake = fakeRunner({ "session start": START_REPLY("s1"), cooperate: { ready: true } });
+    let finish!: (result: BskRunResult) => void;
+    const capture = new Promise<BskRunResult>((resolve) => {
+      finish = resolve;
+    });
+    const shotStarted = vi.fn();
+    const runner: BskRunner = {
+      ...fake.runner,
+      run: (args, options) => {
+        if (args[0] === "screenshot") {
+          shotStarted();
+          return capture;
+        }
+        return fake.runner.run(args, options);
+      },
+      killFor: vi.fn(() => 1),
+    };
+    const observation = new ObservationService({
+      ctx: ctx as never,
+      runner,
+      registry,
+      queue,
+      options: { enabled: true, thumbnailIntervalMs: 1500, idleIntervalMs: 8000 },
+    });
+    registerBrowserTools({
+      ctx: ctx as never,
+      runner,
+      registry,
+      queue,
+      observation,
+      config: CONFIG,
+    });
+    await startSession(tools);
+    const unsubscribe = observation.subscribe(() => {});
+    const cancelled = { code: 2, stdout: "{}", stderr: "", timedOut: false, aborted: false };
+    try {
+      await vi.waitFor(() => expect(shotStarted).toHaveBeenCalledOnce());
+      const abort = new AbortController();
+      const operation = action === "cancel-sync" ? "sync" : action;
+      const result = tools
+        .get(`session.cooperate.${operation}`)!
+        .execute({}, makeExec({ signal: abort.signal }));
+      const outcome = Promise.resolve(result).then(
+        (value) => ({ value }),
+        (error) => ({ error }),
+      );
+      await vi.waitFor(() => expect(runner.killFor).toHaveBeenCalledWith("observation:s1"));
+      expect(fake.calls.some((call) => call.args[0] === "cooperate")).toBe(false);
+      if (action === "cancel-sync") {
+        abort.abort();
+        expect(await outcome).toMatchObject({ error: expect.any(Error) });
+        expect(fake.calls.some((call) => call.args[0] === "cooperate")).toBe(false);
+      } else {
+        finish(cancelled);
+        expect(await outcome).not.toHaveProperty("error");
+        expect(fake.calls.filter((call) => call.args[0] === "cooperate")).toHaveLength(1);
+      }
+    } finally {
+      unsubscribe();
+      observation.dispose();
+      finish(cancelled);
+    }
+  });
+
   it("a queued call never overwrites the in-flight action label", async () => {
     const { ctx, tools } = makeCtx();
     const registry = new SessionRegistry(5);

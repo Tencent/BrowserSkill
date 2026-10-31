@@ -145,6 +145,10 @@ async function runBsk(
           ? invoke()
           : runWithSessionBusyRetry(invoke, exec.signal);
       };
+      // Shared-control reads stay outside the action queue, but cannot overtake
+      // the cancellation of our own thumbnail in the extension's operation lane.
+      if (observeSession !== undefined && args[0] === "cooperate" && args[1] !== "enable")
+        await deps.observation.waitForCapture(observeSession, exec.signal);
       result =
         observeSession !== undefined && (args[0] !== "cooperate" || args[1] === "enable")
           ? await deps.queue.run(observeSession, runOnce, exec.signal)

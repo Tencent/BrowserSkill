@@ -150,7 +150,7 @@ where
 
     let outcome = tokio::select! {
         biased;
-        res = &mut main_fut => res?,
+        // Arm cancellation before the RPC can dispatch browser input.
         sig = wait_for_cancel(parent_cancel) => {
             sig.context("wait for cancellation").map_err(CliError::Local)?;
             CANCEL_REQUESTED.store(true, Ordering::Relaxed);
@@ -171,6 +171,7 @@ where
                 }
             }
         }
+        res = &mut main_fut => res?,
     };
 
     outcome.map_err(CliError::from_rpc)

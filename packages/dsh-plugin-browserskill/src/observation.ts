@@ -88,6 +88,8 @@ export class ObservationService {
   private thumbnailViewers = 0;
   private readonly captureTimers = new Map<string, unknown>();
   private readonly captureInFlight = new Set<string>();
+  /** Only running thumbnails: shared-control reads must not wait behind actions. */
+  private readonly activeCaptures = new Map<string, Promise<unknown>>();
   /** Captures intentionally cancelled to make way for foreground work. */
   private readonly capturePreempted = new Set<string>();
   /** Number of queued/running model-facing calls that currently outrank thumbnails. */
@@ -253,6 +255,28 @@ export class ObservationService {
     };
   }
 
+  /** Call after acquiring foreground priority, before bypassing the action queue.
+   * Killing the CLI only requests cancellation; wait for its bounded cleanup. */
+  async waitForCapture(sessionId: string, signal: AbortSignal): Promise<void> {
+    signal.throwIfAborted();
+    const capture = this.activeCaptures.get(sessionId);
+    if (!capture) return;
+    let abort: (() => void) | undefined;
+    try {
+      await Promise.race([
+        capture.catch(() => {}),
+        new Promise<never>((_, reject) => {
+          abort = () => reject(signal.reason);
+          signal.addEventListener("abort", abort, { once: true });
+          if (signal.aborted) abort();
+        }),
+      ]);
+      signal.throwIfAborted();
+    } finally {
+      if (abort) signal.removeEventListener("abort", abort);
+    }
+  }
+
   /** Mark an action starting on a session (tool entry instrumentation). */
   beginAction(sessionId: string, action: string): void {
     if (!this.deps.options.enabled || this.disposed) return;
@@ -328,6 +352,7 @@ export class ObservationService {
     for (const sessionId of [...this.captureTimers.keys()]) this.cancelCapture(sessionId);
     this.captureTimers.clear();
     this.captureInFlight.clear();
+    this.activeCaptures.clear();
     this.capturePreempted.clear();
     this.foregroundDepth.clear();
     this.captureFailures.clear();
@@ -406,13 +431,22 @@ export class ObservationService {
     const outPath = join(tmpdir(), `bsk-obs-${this.scratchNamespace}-${sessionKey}.png`);
     let writtenPath = outPath;
     try {
-      const result = await this.deps.queue.run(sessionId, () => {
+      const result = await this.deps.queue.run(sessionId, async () => {
         // The last viewer may have left, or foreground work arrived, while queued.
         if (!this.canCapture(sessionId)) return Promise.resolve(undefined);
-        return this.deps.runner.run(["screenshot", "--session", sessionId, "--out", outPath], {
-          timeoutMs: 15_000,
-          tag: `observation:${sessionId}`,
-        });
+        const capture = this.deps.runner.run(
+          ["screenshot", "--session", sessionId, "--out", outPath],
+          {
+            timeoutMs: 15_000,
+            tag: `observation:${sessionId}`,
+          },
+        );
+        this.activeCaptures.set(sessionId, capture);
+        try {
+          return await capture;
+        } finally {
+          if (this.activeCaptures.get(sessionId) === capture) this.activeCaptures.delete(sessionId);
+        }
       });
       if (result === undefined) return;
       if (result.code !== 0) {

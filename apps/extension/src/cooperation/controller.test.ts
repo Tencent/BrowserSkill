@@ -1129,6 +1129,138 @@ describe("shared-tab dispatch fences", () => {
     const fresh = await f.command("sync");
     expect(await f.act(fresh.context_id)).toEqual({});
   });
+  it.each([
+    "before-release",
+    "after-release",
+  ])("preserves a completed click when navigation invalidates its document %s", async (navigation) => {
+    const f = await fixture();
+    const receipt = { tab_id: 7, used_ref: "e1", x: 4, y: 5 };
+    const result = await f.act(f.first.context_id, async (runner) => {
+      await runner.send(7, "Input.dispatchMouseEvent", {
+        type: "mousePressed",
+        button: "left",
+        x: 4,
+        y: 5,
+      });
+      if (navigation === "before-release") f.controller.invalidate(7);
+      await runner.send(7, "Input.dispatchMouseEvent", {
+        type: "mouseReleased",
+        button: "left",
+        x: 4,
+        y: 5,
+      });
+      if (navigation === "after-release") f.controller.invalidate(7);
+      return receipt;
+    });
+    expect(result).toEqual(receipt);
+    expect(f.native).toHaveBeenCalledTimes(2);
+    expect(await f.act()).toMatchObject({ code: "permission_denied" });
+    const fresh = await f.command("sync");
+    expect(await f.act(fresh.context_id)).toEqual({});
+  });
+  it.each([
+    "human",
+    "hold",
+    "stop",
+    "cancel",
+    "failed-release",
+    "more-input",
+  ])("does not hide %s after a navigating click", async (intervention) => {
+    const f = await fixture();
+    const result = await f.act(f.first.context_id, async (runner) => {
+      await runner.send(7, "Input.dispatchMouseEvent", {
+        type: "mousePressed",
+        button: "left",
+        x: 4,
+        y: 5,
+      });
+      f.controller.invalidate(7);
+      if (intervention === "human") f.change({ human: 1, lastInput: 10000 });
+      if (intervention === "hold")
+        await f.controller.control(7, f.controller.view(7)!.revision, "hold");
+      if (intervention === "stop") f.controller.stopSession("shared");
+      if (intervention === "cancel") f.abort.abort();
+      if (intervention === "failed-release")
+        return { code: "cdp_failed", message: "release failed" };
+      await runner.send(7, "Input.dispatchMouseEvent", {
+        type: "mouseReleased",
+        button: "left",
+        x: 4,
+        y: 5,
+      });
+      if (intervention === "more-input")
+        await runner.send(7, "Input.insertText", { text: "stale" });
+      return { tab_id: 7, x: 4, y: 5 };
+    });
+    expect(result).toMatchObject({
+      code:
+        intervention === "cancel"
+          ? "cancelled"
+          : intervention === "stop"
+            ? "user_aborted"
+            : "permission_denied",
+      data: { effect_state: "unknown" },
+    });
+    expect(f.native).toHaveBeenCalledTimes(intervention === "failed-release" ? 1 : 2);
+  });
+  it("preserves a completed Enter submission after its document is replaced", async () => {
+    const f = await fixture();
+    const receipt = { tab_id: 7, key: "Enter", code: "Enter", modifiers: [] };
+    const result = await f.act(
+      f.first.context_id,
+      async (runner) => {
+        await runner.send(7, "Input.dispatchKeyEvent", { type: "rawKeyDown", key: "Enter" });
+        await runner.send(7, "Input.dispatchKeyEvent", { type: "char", key: "Enter", text: "\r" });
+        f.controller.invalidate(7);
+        await runner.send(7, "Input.dispatchKeyEvent", { type: "keyUp", key: "Enter" });
+        return receipt;
+      },
+      "tool.press",
+    );
+    expect(result).toEqual(receipt);
+    expect(await f.act()).toMatchObject({ code: "permission_denied" });
+    const fresh = await f.command("sync");
+    expect(await f.act(fresh.context_id)).toEqual({});
+  });
+  it.each([
+    "tool.drag",
+    "tool.select",
+  ])("preserves completed %s receipts after navigation", async (method) => {
+    const f = await fixture();
+    const receipt = { tab_id: 7 };
+    const result = await f.act(
+      f.first.context_id,
+      async (runner) => {
+        if (method === "tool.drag") {
+          await runner.send(7, "Input.dispatchMouseEvent", {
+            type: "mousePressed",
+            button: "left",
+            x: 4,
+            y: 5,
+          });
+          await runner.send(7, "Input.dispatchMouseEvent", {
+            type: "mouseReleased",
+            button: "left",
+            x: 10,
+            y: 5,
+          });
+        } else {
+          await runner.beginDomMutation?.();
+          await runner.send(7, "Runtime.callFunctionOn", {
+            objectId: "select",
+            functionDeclaration: "function() { this.dispatchEvent(new Event('change')); }",
+          });
+        }
+        f.controller.invalidate(7);
+        return receipt;
+      },
+      method,
+    );
+    expect(result).toEqual(receipt);
+    expect(await f.act()).toMatchObject({ code: "permission_denied" });
+    const fresh = await f.command("sync");
+    expect(await f.act(fresh.context_id)).toEqual({});
+  });
   it("still blocks input after a navigation invalidates the action's document", async () => {
     const f = await fixture();
     const result = await f.act(
