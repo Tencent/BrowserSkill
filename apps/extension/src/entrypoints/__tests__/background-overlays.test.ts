@@ -9,6 +9,7 @@ import { AgentWindowRouting } from "@/session-manager/window-routing";
 import { ToolDispatcher } from "@/tools/dispatcher";
 import { hasActiveHelp } from "@/tools/human-loop";
 import { hasActiveRecording } from "@/tools/record";
+import { handleTabCreate } from "@/tools/tabs";
 import { VideoManager } from "@/video/manager";
 
 vi.hoisted(() => {
@@ -91,12 +92,21 @@ async function fixture() {
       sendMessage,
       get: vi.fn(async () => ({ url: "https://example.test" })),
       query: vi.fn(async () => []),
+      group: vi.fn(async () => 100),
+      ungroup: vi.fn(async () => {}),
       onDetached,
       onActivated: event(),
       onUpdated: event(),
       onCreated,
       onAttached,
       onRemoved: event(),
+    },
+    tabGroups: {
+      query: vi.fn(async () => []),
+      get: vi.fn(async () => ({ id: 100, windowId: 10 })),
+      update: vi.fn(async () => {}),
+      onRemoved: event(),
+      onMoved: event(),
     },
     debugger: { onDetach: event() },
     webNavigation: {
@@ -129,6 +139,47 @@ async function fixture() {
     task,
   };
 }
+
+it("keeps task tabs ungrouped while showing controls after creation and attachment", async () => {
+  vi.useFakeTimers();
+  const f = await fixture();
+  const home = { id: 10, windowId: 10, groupId: -1, pinned: false } as chrome.tabs.Tab;
+  const created = { ...home, id: 20, url: "https://example.test" };
+  const tabs = [home];
+  Object.assign(chrome.tabs, {
+    query: vi.fn(async () => tabs),
+    get: vi.fn(async (id: number) => tabs.find((tab) => tab.id === id)),
+    create: vi.fn(async () => {
+      tabs.push(created);
+      f.onCreated.emit(created);
+      return created;
+    }),
+  });
+
+  f.deps.onSessionsChanged?.();
+  const result = await handleTabCreate(f.deps.sessions, {
+    session_id: f.task.sessionId,
+    url: created.url,
+  });
+  expect(result).toMatchObject({ tab_id: created.id, window_id: home.windowId });
+  if ("code" in result) throw new Error(result.message);
+  // Use the real background callbacks invoked by the dispatcher and browser.
+  f.deps.onAgentTabClaimed?.(result.tab_id, result.window_id);
+  f.onAttached.emit(created.id, { newWindowId: home.windowId, newPosition: 1 });
+  await vi.advanceTimersByTimeAsync(0);
+
+  expect(isAgentControlledTab(f.task, created.id)).toBe(true);
+  for (const tab of tabs) {
+    expect(tab.groupId).toBe(-1);
+    expect(f.sendMessage).toHaveBeenCalledWith(
+      tab.id,
+      expect.objectContaining({ sessionId: f.task.sessionId, mode: "control" }),
+    );
+  }
+  expect(chrome.tabs.group).not.toHaveBeenCalled();
+  expect(chrome.tabs.ungroup).not.toHaveBeenCalled();
+  expect(chrome.tabGroups.update).not.toHaveBeenCalled();
+});
 
 it("refreshes released-page controls after attachment completes", async () => {
   const f = await fixture();

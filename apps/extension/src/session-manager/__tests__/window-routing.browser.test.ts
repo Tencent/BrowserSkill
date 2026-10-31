@@ -73,7 +73,7 @@ globalThis.run=async(url,soak)=>{
  const created=await handleTabCreate(manager,{session_id:task.sessionId,url:url+'/agent'},{cdp});
  check(!created.code,JSON.stringify(created));
  const id=created.tab_id;
- check((await chrome.tabs.get(id)).groupId===-1,'task tab grouped automatically');
+ check((await chrome.tabs.get(id)).groupId===-1,'expected task tab to remain ungrouped after creation');
  const params={session_id:task.sessionId,tab_id:id};
  // Direct navigation handlers need the same opt-in supplied by ToolDispatcher.
  const deps={cdp,tabsApi:chrome.tabs,backgroundExecution:true};
@@ -177,8 +177,8 @@ globalThis.run=async(url,soak)=>{
    check(await evaluate(external.id,'clicks')===0,'default click changed the external page');
   } finally {finishCreation();}
   await wait(async()=>(await chrome.tabs.get(external.id)).windowId===user.id,'background external routing');
-  check((await chrome.tabs.get(external.id)).groupId===-1,'external tab grouped automatically');
-  check((await chrome.tabs.get(id)).groupId===-1,'routing grouped the task tab');
+  check((await chrome.tabs.get(external.id)).groupId===-1,'expected external tab to remain ungrouped after routing');
+  check((await chrome.tabs.get(id)).groupId===-1,'expected task tab to remain ungrouped after routing');
   check((await chrome.tabs.get(control.id)).active,'routing changed user selection');
   check(!(await chrome.windows.get(task.agentWindowId)).focused,'routing stole focus');
   // Let the host open a URL through Chrome's process singleton, as external
