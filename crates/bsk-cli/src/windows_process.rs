@@ -14,7 +14,11 @@ use std::process::ExitStatus;
 use windows_sys::Win32::Foundation::{
     DUPLICATE_SAME_ACCESS, DuplicateHandle, HANDLE, WAIT_OBJECT_0, WAIT_TIMEOUT,
 };
-use windows_sys::Win32::System::JobObjects::IsProcessInJob;
+use windows_sys::Win32::System::JobObjects::{
+    IsProcessInJob, JOB_OBJECT_LIMIT_BREAKAWAY_OK, JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK,
+    JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
+    QueryInformationJobObject,
+};
 use windows_sys::Win32::System::Threading::{
     CREATE_UNICODE_ENVIRONMENT, CreateProcessW, DeleteProcThreadAttributeList,
     EXTENDED_STARTUPINFO_PRESENT, GetCurrentProcess, GetExitCodeProcess, GetProcessId,
@@ -73,15 +77,8 @@ impl Process {
         Ok(!process_in_job(self.handle.as_raw_handle())?)
     }
 
-    /// Called only for a child created suspended. A nested Job may allow only
-    /// partial breakaway, so successful CreateProcessW is not sufficient.
-    pub(crate) fn resume_outside_job(&self) -> io::Result<()> {
-        if process_in_job(self.handle.as_raw_handle())? {
-            return Err(io::Error::new(
-                io::ErrorKind::PermissionDenied,
-                "daemon is still associated with a host Job Object after breakaway",
-            ));
-        }
+    /// Called only for a child created suspended.
+    pub(crate) fn resume(&self) -> io::Result<()> {
         // SAFETY: this is the primary thread returned by CreateProcessW.
         if unsafe { ResumeThread(self.thread.as_raw_handle()) } == u32::MAX {
             return Err(io::Error::last_os_error());
@@ -230,6 +227,44 @@ fn wide(value: &OsStr) -> io::Result<Vec<u16>> {
 pub(crate) fn current_process_in_job() -> io::Result<bool> {
     // SAFETY: the pseudo handle is valid for the current process.
     process_in_job(unsafe { GetCurrentProcess() })
+}
+
+/// Breakaway policy of the current process's immediate Job.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum JobBreakaway {
+    NotInJob,
+    Allowed,
+    Forbidden,
+}
+
+/// Only the immediate Job is visible here; outer Jobs of a nested chain are
+/// not, so `Allowed` does not mean a child can leave every Job.
+pub(crate) fn current_job_breakaway() -> io::Result<JobBreakaway> {
+    if !current_process_in_job()? {
+        return Ok(JobBreakaway::NotInJob);
+    }
+    // SAFETY: the struct permits zero initialization.
+    let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { std::mem::zeroed() };
+    // SAFETY: a null Job queries the immediate Job of the current process, and
+    // the buffer matches the requested information class.
+    if unsafe {
+        QueryInformationJobObject(
+            std::ptr::null_mut(),
+            JobObjectExtendedLimitInformation,
+            (&mut info as *mut JOBOBJECT_EXTENDED_LIMIT_INFORMATION).cast(),
+            std::mem::size_of_val(&info) as u32,
+            std::ptr::null_mut(),
+        )
+    } == 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+    let breakaway = JOB_OBJECT_LIMIT_BREAKAWAY_OK | JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK;
+    Ok(if info.BasicLimitInformation.LimitFlags & breakaway != 0 {
+        JobBreakaway::Allowed
+    } else {
+        JobBreakaway::Forbidden
+    })
 }
 
 fn process_in_job(process: HANDLE) -> io::Result<bool> {

@@ -33,7 +33,6 @@ document.querySelector('#run').onclick=()=>requestAnimationFrame(()=>{
 const entry = `
 import { ChromiumCdp } from '@/browser-driver/chromium-cdp';
 import { attachCooperation } from '@/cooperation/browser-bridge';
-import { AgentWindowTabGroups } from '@/session-manager/agent-window-tab-group';
 import { isAgentControlledTab, SessionManager } from '@/session-manager/manager';
 import { AgentWindowRouting } from '@/session-manager/window-routing';
 import { withTaskPopups } from '@/session-manager/task-popups';
@@ -52,7 +51,6 @@ globalThis.run=async(url,soak)=>{
  await chrome.windows.create({tabId:controller.id,type:'popup',focused:false});
  const manager=new SessionManager(),cdp=new ChromiumCdp(chrome.debugger);
  const cooperation=attachCooperation(manager,()=>{});
- const groups=new AgentWindowTabGroups(manager);
  const user=(await chrome.windows.getAll({windowTypes:['normal']}))[0];
  const [control]=await chrome.tabs.query({windowId:user.id,active:true});
  await chrome.tabs.update(control.id,{url:url+'/control'});
@@ -69,20 +67,13 @@ globalThis.run=async(url,soak)=>{
  cooperation.startSession(task.sessionId);
  check(cooperation.hasSession(task.sessionId),'default collaboration missing');
  router.sync();
- groups.sync();
  const evaluate=async(id,expression)=>(await cdp.send(id,'Runtime.evaluate',{
   expression,returnByValue:true,awaitPromise:true
  })).result.value;
  const created=await handleTabCreate(manager,{session_id:task.sessionId,url:url+'/agent'},{cdp});
  check(!created.code,JSON.stringify(created));
  const id=created.tab_id;
- groups.sync();
- await wait(async()=>(await chrome.tabs.get(id)).groupId!==-1,'task tab grouped');
- const groupId=(await chrome.tabs.get(id)).groupId;
- await wait(async()=>{
-  const group=await chrome.tabGroups.get(groupId);
-  return group.title==='BrowserSkill'&&group.color==='orange';
- },'orange BrowserSkill label');
+ check((await chrome.tabs.get(id)).groupId===-1,'expected task tab to remain ungrouped after creation');
  const params={session_id:task.sessionId,tab_id:id};
  // Direct navigation handlers need the same opt-in supplied by ToolDispatcher.
  const deps={cdp,tabsApi:chrome.tabs,backgroundExecution:true};
@@ -186,8 +177,8 @@ globalThis.run=async(url,soak)=>{
    check(await evaluate(external.id,'clicks')===0,'default click changed the external page');
   } finally {finishCreation();}
   await wait(async()=>(await chrome.tabs.get(external.id)).windowId===user.id,'background external routing');
-  check((await chrome.tabs.get(external.id)).groupId===-1,'external tab retained task label');
-  check((await chrome.tabs.get(id)).groupId===groupId,'routing changed the task group');
+  check((await chrome.tabs.get(external.id)).groupId===-1,'expected external tab to remain ungrouped after routing');
+  check((await chrome.tabs.get(id)).groupId===-1,'expected task tab to remain ungrouped after routing');
   check((await chrome.tabs.get(control.id)).active,'routing changed user selection');
   check(!(await chrome.windows.get(task.agentWindowId)).focused,'routing stole focus');
   // Let the host open a URL through Chrome's process singleton, as external
@@ -259,12 +250,12 @@ globalThis.run=async(url,soak)=>{
   }
   return {states,backgroundFocusEvents,nativeExternal:true,replacementWindow:nativeFallback.windowId,
    replacementFocused,closedSourcePopup:true,humanAssistancePopupChain:true,defaultTargetProtected:true,
-   defaultCooperation:true,orangeTaskGroup:true};
+   defaultCooperation:true};
  } catch(error) {
   throw new Error(JSON.stringify({error:error.message,phase:globalThis.phase,id,idleId,control:control.id,states,focused,removed,
    tabs:(await chrome.tabs.query({})).map(({id,windowId,url,frozen,discarded,openerTabId})=>({id,windowId,url,frozen,discarded,openerTabId})),
    sources:[...router.pageSourceWindows]}));
- } finally {router.dispose();groups.dispose();await cdp.detachAll();cdp.dispose();}
+ } finally {router.dispose();await cdp.detachAll();cdp.dispose();}
 };`;
 
 describe.skipIf(!process.env.BSK_BACKGROUND_CHROME)("Agent Window browser regression", () => {
@@ -315,7 +306,7 @@ describe.skipIf(!process.env.BSK_BACKGROUND_CHROME)("Agent Window browser regres
           name: "Agent Window regression",
           version: "1.0",
           background: { service_worker: "worker.js" },
-          permissions: ["debugger", "tabs", "tabGroups", "scripting", "webNavigation", "storage"],
+          permissions: ["debugger", "tabs", "scripting", "webNavigation", "storage"],
           host_permissions: ["http://127.0.0.1/*"],
         }),
       );

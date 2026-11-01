@@ -64,6 +64,9 @@ jobs:
       - name: Run Windows named-pipe tests
         run: cargo test -p bsk --lib --locked daemon::ipc::windows::tests
 
+      - name: Run Windows daemon startup diagnostics tests
+        run: cargo test -p bsk --lib --locked daemon::start::windows::tests
+
       - name: Run Windows audit storage tests
         run: cargo test -p bsk --lib --locked daemon::audit::tests
 
@@ -333,6 +336,12 @@ jobs:
         env:
           BSK_COOP_CHROME: ${{ env.BSK_VIDEO_CHROME }}
         run: pnpm exec vitest run src/content/__tests__/cooperation-capture.browser.test.ts
+      - name: Validate thumbnail cancellation, synchronization and navigating clicks
+        working-directory: packages/dsh-plugin-browserskill
+        env:
+          BSK_COOP_CHROME: ${{ env.BSK_VIDEO_CHROME }}
+          BSK_COOP_BSK: ../../target/debug/bsk
+        run: pnpm exec vitest run tests/cooperation.browser.test.ts
       - name: Validate task termination on tab detachment
         working-directory: apps/extension
         env:
