@@ -1,6 +1,8 @@
 import { createUserMessage, HarnessError } from "@deepseek-ai/dsh-llm";
 import type { ToolDefinition, ToolExecution, ToolRunContext } from "@deepseek-ai/dsh-tools";
 
+import { browserSkillSource } from "./message-source";
+
 const STEP_NEEDS_ATTENTION = "BSK_STEP_NEEDS_ATTENTION";
 
 /** Keep validated CLI evidence until the host has settled cancellation and policy. */
@@ -33,7 +35,7 @@ export function createStepReceiptHandler() {
               },
               { type: "text", text: serialized },
             ],
-            source: { kind: "plugin", plugin: "@wxg-prc-cpg/browser-skill-dsh-plugin" },
+            source: browserSkillSource(exec.agent?.session.header.version),
           }),
         );
       }

@@ -29,10 +29,12 @@
 import type { Context } from "@deepseek-ai/cordis";
 import { createUserMessage } from "@deepseek-ai/dsh-llm";
 import { disposeAll } from "./disposables";
+import { browserSkillSource } from "./message-source";
 import { BSK_SKILL_NAME } from "./skill-content.generated";
 
 /** Structural view of the pieces of the session seam we consume. */
 interface SessionLike {
+  header?: { readonly version: number };
   events?: readonly SessionEventLike[];
   snapshotEvents?(): readonly SessionEventLike[];
 }
@@ -351,8 +353,7 @@ export function armLazyTools(ctx: Context, registerSuite: () => () => void): () 
             createUserMessage({
               content: [{ type: "text", text }],
               source: {
-                kind: "plugin",
-                plugin: "@wxg-prc-cpg/browser-skill-dsh-plugin",
+                ...browserSkillSource(session.header?.version),
                 form: "notice",
                 summary:
                   suiteDisposer === undefined
