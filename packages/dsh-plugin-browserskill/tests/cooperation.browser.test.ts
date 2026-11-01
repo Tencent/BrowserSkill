@@ -20,9 +20,13 @@ import { SessionRegistry } from "../src/sessions";
 
 it
   .skipIf(!process.env.BSK_COOP_CHROME || !process.env.BSK_COOP_BSK)
-  .each(["click", "press", "drag", "fill", "select"] as const)(
-  "settles cancelled thumbnails before sync and preserves navigating %s receipts",
-  async (action) => {
+  .each(
+    (["strict", "target"] as const).flatMap((policy) =>
+      (["click", "press", "drag", "fill", "select"] as const).map((action) => ({ policy, action })),
+    ),
+  )(
+  "$policy policy settles cancelled thumbnails before sync and preserves navigating $action receipts",
+  async ({ policy, action }) => {
     // Keep the daemon's Unix socket path below macOS's length limit.
     const directory = await mkdtemp(path.join(tmpdir(), "bsk-coop-"));
     const executable = path.resolve(process.env.BSK_COOP_BSK!);
@@ -202,24 +206,36 @@ it
                 timeout: 10000,
               })
               .toBe(true);
-            const syncing = call("bsk_session", { action: "sync", session });
+            const syncing = call("bsk_session", { action: "sync", session, policy });
             unsubscribe();
             const synced = await syncing;
             expect(synced.context_id).toEqual(expect.any(String));
+            expect(synced.control_policy).toBe(policy);
             expect(observation.getState()[0].thumbnailAttachmentId).toBeUndefined();
             expect((await cli("debug", "activity", "--session", session!)).activity.state).toBe(
               "idle",
             );
             await evaluate("globalThis.finishHeldShot()");
-            const fresh = await call("bsk_session", { action: "sync", session });
-            expect(fresh.context_id).not.toBe(synced.context_id);
+            const fresh = await call("bsk_session", { action: "sync", session, policy });
+            if (policy === "strict") expect(fresh.context_id).not.toBe(synced.context_id);
+            else {
+              expect(fresh.context_id).toBe(synced.context_id);
+              expect(fresh.observation_id).toEqual(expect.any(String));
+              expect(fresh.observation_id).not.toBe(synced.observation_id);
+            }
+            expect(fresh.control_policy).toBe(policy);
             expect(fresh.kind).toBe("unchanged");
             const ref = synced.observation.text.match(/(@e\d+) link "Continue"/)?.[1];
             expect(ref).toBeDefined();
             const input = {
               click: { target: ref },
               press: { target: "input", key: "Enter" },
-              drag: { target: "#drag", deltaX: 80, durationMs: 50 },
+              drag: {
+                target: "#drag",
+                deltaX: 80,
+                durationMs: 50,
+                ...(policy === "target" ? { observationId: fresh.observation_id } : {}),
+              },
               fill: { target: "input", value: "submitted" },
               select: { target: "select", values: ["b"] },
             }[action];
@@ -230,7 +246,7 @@ it
               contextId: fresh.context_id,
             });
             expect(action === "drag" ? receipt.tab_id : receipt.tabId).toEqual(expect.any(Number));
-            const destination = await call("bsk_session", { action: "sync", session });
+            const destination = await call("bsk_session", { action: "sync", session, policy });
             expect(destination.observation.text).toContain("Navigation completed");
             expect(arrivals).toBe(1);
             await expect(
