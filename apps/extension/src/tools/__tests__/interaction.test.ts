@@ -1512,6 +1512,71 @@ describe("handleFill", () => {
     expect(callFns).toHaveLength(5);
   });
 
+  it("routes fill typing into the ref's OOPIF child session", async () => {
+    // DOM.focus already resolves the node in its own session; the typing
+    // that follows must use the same session, or the text lands in the
+    // main frame while the OOPIF field stays empty (issue #438).
+    const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
+    const ctx = await sm.start("aa11");
+    ctx.refStore.set("e3", 1234, {
+      tabId: 4,
+      frameId: "child-frame",
+      cdpSessionId: "child-session",
+    });
+    const fake = makeFakeCdp({
+      "DOM.scrollIntoViewIfNeeded": () => ({}),
+      "Runtime.evaluate": () => ({ result: { value: { width: 200, height: 100 } } }),
+      "Page.getLayoutMetrics": () => ({
+        cssLayoutViewport: { clientWidth: 200, clientHeight: 100 },
+      }),
+    });
+    fake.cdp.getFrameGraph = vi.fn(async () => ({
+      rootFrameId: "main",
+      frames: [
+        { frameId: "main", target: { tabId: 4 } },
+        {
+          frameId: "child-frame",
+          parentFrameId: "main",
+          ownerBackendNodeId: 99,
+          target: { tabId: 4, sessionId: "child-session" },
+        },
+      ],
+    }));
+    const targetCalls: Array<{ sessionId?: string; method: string }> = [];
+    fake.cdp.sendToTarget = vi.fn(async (target, method, params) => {
+      targetCalls.push({ sessionId: target.sessionId, method });
+      if (method === "DOM.describeNode") {
+        return {
+          node: { backendNodeId: 1234, nodeName: "INPUT", attributes: ["type", "text"] },
+        };
+      }
+      if (method === "DOM.scrollIntoViewIfNeeded") return {};
+      if (method === "DOM.focus") return {};
+      if (method === "DOM.resolveNode") return { object: { objectId: "obj-oopif" } };
+      if (method === "Runtime.callFunctionOn") return successfulFillScript(params);
+      if (method === "Runtime.releaseObject") return {};
+      if (method === "Input.insertText") return {};
+      if (method === "Runtime.evaluate") return { result: { value: { width: 200, height: 100 } } };
+      if (method === "Page.getLayoutMetrics") {
+        return { cssLayoutViewport: { clientWidth: 200, clientHeight: 100 } };
+      }
+      throw new Error(`unexpected child CDP call ${method}`);
+    }) as CdpRunner["sendToTarget"];
+
+    const res = await handleFill(
+      sm,
+      { session_id: "aa11", ref: "@e3", value: "hello" },
+      { cdp: fake.cdp, tabsApi: fake.tabsApi },
+    );
+    if ("code" in res) throw new Error(`unexpected error: ${JSON.stringify(res)}`);
+    expect(res.value_length).toBe(5);
+    const childTyping = targetCalls.filter(
+      (c) => c.method === "Input.insertText" || c.method === "Input.dispatchKeyEvent",
+    );
+    expect(childTyping.map((c) => c.sessionId)).toContain("child-session");
+    expect(fake.sent.filter((c) => c.method.startsWith("Input."))).toHaveLength(0);
+  });
+
   it("passes clear_before=false to preparation and verifies the result", async () => {
     const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
     const ctx = await sm.start("aa11");
@@ -1848,6 +1913,66 @@ describe("handlePress", () => {
     const focus = fake.sent.find((c) => c.method === "DOM.focus");
     expect(focus?.params).toEqual({ backendNodeId: 555 });
     expect(res.key).toBe("Enter");
+  });
+
+  it("routes press key events into the ref's OOPIF child session", async () => {
+    // A ref inside an OOPIF carries cdpSessionId; key events must reach
+    // that child session (which owns the focused element), not the root
+    // one the tab-level send hits (issue #438).
+    const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
+    const ctx = await sm.start("aa11");
+    ctx.refStore.set("e3", 1234, {
+      tabId: 4,
+      frameId: "child-frame",
+      cdpSessionId: "child-session",
+    });
+    const fake = makeFakeCdp({
+      "Input.dispatchKeyEvent": () => ({}),
+      "DOM.scrollIntoViewIfNeeded": () => ({}),
+      "Runtime.evaluate": () => ({ result: { value: { width: 200, height: 100 } } }),
+      "Page.getLayoutMetrics": () => ({
+        cssLayoutViewport: { clientWidth: 200, clientHeight: 100 },
+      }),
+    });
+    fake.cdp.getFrameGraph = vi.fn(async () => ({
+      rootFrameId: "main",
+      frames: [
+        { frameId: "main", target: { tabId: 4 } },
+        {
+          frameId: "child-frame",
+          parentFrameId: "main",
+          ownerBackendNodeId: 99,
+          target: { tabId: 4, sessionId: "child-session" },
+        },
+      ],
+    }));
+    const targetCalls: Array<{ sessionId?: string; method: string }> = [];
+    fake.cdp.sendToTarget = vi.fn(async (target, method) => {
+      targetCalls.push({ sessionId: target.sessionId, method });
+      if (method === "DOM.scrollIntoViewIfNeeded") return {};
+      if (method === "DOM.focus") return {};
+      if (method === "Input.dispatchKeyEvent") return {};
+      if (method === "Runtime.evaluate") return { result: { value: { width: 200, height: 100 } } };
+      if (method === "Page.getLayoutMetrics") {
+        return { cssLayoutViewport: { clientWidth: 200, clientHeight: 100 } };
+      }
+      throw new Error(`unexpected child CDP call ${method}`);
+    }) as CdpRunner["sendToTarget"];
+
+    const res = await handlePress(
+      sm,
+      { session_id: "aa11", key: "Enter", ref: "@e3" },
+      { cdp: fake.cdp, tabsApi: fake.tabsApi },
+    );
+    expectPressOk(res);
+    // Every key event went to the child session; none to the root.
+    const childKeyEvents = targetCalls.filter((c) => c.method === "Input.dispatchKeyEvent");
+    expect(childKeyEvents.map((c) => c.sessionId)).toEqual([
+      "child-session",
+      "child-session",
+      "child-session",
+    ]);
+    expect(fake.sent.filter((c) => c.method === "Input.dispatchKeyEvent")).toHaveLength(0);
   });
 
   it.each([
