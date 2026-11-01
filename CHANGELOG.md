@@ -5,19 +5,48 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 Starting from 0.2.0, CLI / Extension / DSH Plugin share the same version number.
 
-## [Unreleased]
+## [0.4.1] - 2026-11-02
+
+### Changed
+
+- **Shared-control default:** new CLI and DSH sync calls select `target` policy.
+  DOM actions can reuse the returned control context across completed actions
+  and supplementary reads; unrelated page updates no longer require a full-page
+  resync. Human intervention or navigation revokes control. Use `--expect` / DSH
+  `expect` to protect observed business facts. Scripts, untargeted keys and visual
+  actions still require the sync's `--observation` / `observationId` and strict
+  observation checks. Select `--policy strict` / `policy: "strict"` on the first
+  sync to retain the one-action-per-context workflow; later syncs and steps
+  preserve that session's policy.
+- CLI/daemon and extension now use protocol 1.8. The new target policy requires
+  both peers to support 1.8; update the CLI, running daemon, extension and DSH
+  plugin together rather than relying on a successful mixed-version connection.
+- DOM references remain attached to the same nodes across supplementary
+  observations. Removed nodes are not silently replaced, and navigation
+  invalidates the document's refs. DOM actions can wait for an existing target
+  to become ready within their timeout without replaying input.
 
 ### Fixed
 
+- Interaction capture initializes on ordinary HTTP intranet pages and their
+  child frames when `crypto.randomUUID()` is unavailable. A compatible UUID
+  fallback restores the frame coverage needed for shared control.
 - Shared-control synchronization waits for cancelled observation thumbnails to
   settle. Viewport capture reads have a 10-second deadline with separate bounded
   cleanup; reaching that deadline returns `timeout` (exit 4) with screenshot-specific
   guidance. Browser/CDP capture failures remain `cdp_failed` (exit 3).
 - Completed inputs retain their successful receipts when they navigate, including
   clicks, Enter submissions, drag submissions, and forms submitted after filling
-  or selecting a value. A new synchronization is still required before the next action.
+  or selecting a value. After navigation, synchronize before the next action.
 - CLI cancellation is armed before sending a browser command, so an immediate
   Ctrl-C can cancel the operation and return its outcome instead of terminating silently.
+- Pointer hit tests stay within the target's document, and human input during
+  frame changes continues to revoke control without discarding completed actions.
+- Windows daemon startup errors distinguish verified Job Object restrictions,
+  unverified breakaway failures, executable access failures, partial breakaway
+  and resume failures, with recovery guidance for the actual failure stage.
+- DSH-injected messages use native durable-format v4 plugin sources while
+  retaining the legacy source shape for older formats.
 
 ### Removed
 
@@ -25,6 +54,17 @@ Starting from 0.2.0, CLI / Extension / DSH Plugin share the same version number.
   prevent new `BrowserSkill` groups from accumulating across browsers through
   Chrome sync. Existing saved groups are not deleted; page control indicators,
   background window behavior and user-tab routing remain available.
+
+### Upgrade
+
+1. Finish active tasks, install CLI 0.4.1 and restart the running daemon.
+2. Install extension 0.4.1 before upgrading the DSH plugin to 0.4.1. Store review
+   can delay availability; verify the installed extension, not just its submission.
+3. Restart the DSH profile and invoke `/browser-skill` again, or start a new CLI
+   agent conversation to load the updated skill. Custom tool integrations need
+   the new observation and expectation fields for target-policy actions.
+4. Check `bsk --version`, `bsk status` and `bsk doctor`; the running daemon and
+   extension should both report protocol 1.8.
 
 ## [0.4.0] - 2026-10-30
 
