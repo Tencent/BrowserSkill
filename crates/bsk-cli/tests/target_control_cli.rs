@@ -107,8 +107,43 @@ async fn incompatible_daemon_cannot_silently_drop_new_action_evidence() {
 }
 
 #[tokio::test]
+async fn explicit_target_policy_is_rejected_before_legacy_daemon_can_lock_the_session() {
+    for protocol in ["1.7", "2.0"] {
+        for mut args in [
+            vec!["cooperate", "sync", "--session", "s"],
+            vec!["cooperate", "enable", "--session", "s"],
+            vec![
+                "step",
+                "--session",
+                "s",
+                "--context",
+                "c",
+                "--action",
+                "click",
+                "--params",
+                r#"{"ref":"e1"}"#,
+            ],
+        ] {
+            args.extend(["--policy", "target", "--json"]);
+            let (output, requests) =
+                run_cli(protocol, &args, json!({"tab_id":7,"context_id":"legacy"})).await;
+            assert!(!output.status.success());
+            let error: Value = serde_json::from_slice(&output.stdout).unwrap();
+            assert!(
+                error["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains("--policy target requires daemon protocol 1.8")
+            );
+            assert_eq!(requests.len(), 1, "no action or negotiation may be sent");
+            assert_eq!(requests[0]["method"], "system.status");
+        }
+    }
+}
+
+#[tokio::test]
 async fn target_sync_requires_acknowledgement_but_strict_remains_compatible() {
-    for policy in [None, Some("strict")] {
+    for policy in [None, Some("auto"), Some("strict")] {
         let mut args = vec!["cooperate", "sync", "--session", "s", "--json"];
         if let Some(policy) = policy {
             args.extend(["--policy", policy]);
@@ -119,9 +154,10 @@ async fn target_sync_requires_acknowledgement_but_strict_remains_compatible() {
             requests[1]["params"]["control_policy"],
             policy.unwrap_or("auto")
         );
-        assert_eq!(output.status.success(), policy.is_some());
+        assert_eq!(requests.len(), 2);
+        assert_eq!(output.status.success(), policy == Some("strict"));
         let reply: Value = serde_json::from_slice(&output.stdout).unwrap();
-        if policy.is_none() {
+        if policy != Some("strict") {
             assert_eq!(reply["code"], "unsupported");
             assert_eq!(reply["data"]["effect_state"], "none");
             assert!(reply.get("context_id").is_none());
@@ -131,6 +167,78 @@ async fn target_sync_requires_acknowledgement_but_strict_remains_compatible() {
                     .unwrap()
                     .contains("every sync/enable and step")
             );
+        }
+    }
+}
+
+#[tokio::test]
+async fn compatible_daemon_receives_target_policy_without_extra_status_calls() {
+    for protocol in ["1.8", "1.9"] {
+        for action in ["sync", "enable"] {
+            let (output, requests) = run_cli(
+                protocol,
+                &[
+                    "cooperate",
+                    action,
+                    "--session",
+                    "s",
+                    "--policy",
+                    "target",
+                    "--json",
+                ],
+                json!({"tab_id":7,"context_id":"c","control_policy":"target"}),
+            )
+            .await;
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stdout)
+            );
+            assert_eq!(requests.len(), 2);
+            assert_eq!(requests[0]["method"], "system.status");
+            assert_eq!(requests[1]["method"], "tool.cooperate");
+            assert_eq!(requests[1]["params"]["control_policy"], "target");
+        }
+    }
+}
+
+#[tokio::test]
+async fn step_keeps_auto_compatible_and_forwards_target_to_a_current_daemon() {
+    for (protocol, policy, acknowledged) in [("1.7", "auto", false), ("1.8", "target", true)] {
+        let mut reply = json!({"tab_id":7,"context_id":"c"});
+        if acknowledged {
+            reply["control_policy"] = "target".into();
+        }
+        let (output, requests) = run_cli(
+            protocol,
+            &[
+                "step",
+                "--session",
+                "s",
+                "--context",
+                "c",
+                "--action",
+                "click",
+                "--params",
+                r#"{"ref":"e1"}"#,
+                "--policy",
+                policy,
+                "--json",
+            ],
+            reply,
+        )
+        .await;
+        assert_eq!(output.status.success(), acknowledged);
+        assert_eq!(requests.len(), 3);
+        assert_eq!(requests[0]["method"], "system.status");
+        assert_eq!(requests[1]["method"], "tool.click");
+        assert_eq!(requests[2]["method"], "tool.cooperate");
+        assert_eq!(requests[2]["params"]["control_policy"], policy);
+        let result: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(result["action"]["result"]["tab_id"], 7);
+        assert_eq!(result["action_replayed"], false);
+        if !acknowledged {
+            assert_eq!(result["post_error"]["code"], "unsupported");
         }
     }
 }

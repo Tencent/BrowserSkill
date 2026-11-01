@@ -1472,6 +1472,39 @@ describe("cooperation is the session default", () => {
   });
 
   it.each([
+    { expect: [{ target: "#ready", field: "exists", equals: true }] },
+    { expect: [] },
+    { observation_id: "unobserved" },
+    { depends_on: ["#ready"] },
+  ])("does not discard explicit bootstrap conditions %j", async (metadata) => {
+    const f = await fixture({ url: "about:blank", sync: false });
+    const invoke = vi.fn(async () => ({}));
+    for (const method of ["tool.navigate", "tool.emulate", "tool.window_resize", "tool.tab_close"])
+      expect(
+        await f.controller.run(
+          { id: "bootstrap", method, params: { session_id: "shared", ...metadata } },
+          f.cdp,
+          f.abort.signal,
+          invoke,
+        ),
+      ).toMatchObject({
+        code: "invalid_params",
+        data: { phase: "precondition", effect_state: "none" },
+      });
+    expect(invoke).not.toHaveBeenCalled();
+    expect(f.readFrames).not.toHaveBeenCalled();
+    expect(
+      await f.controller.run(
+        { id: "navigate", method: "tool.navigate", params: { session_id: "shared" } },
+        f.cdp,
+        f.abort.signal,
+        (runner) => runner.send(7, "Page.navigate", { url: "https://fixture.test" }),
+      ),
+    ).toEqual({});
+    expect(f.native).toHaveBeenCalledOnce();
+  });
+
+  it.each([
     "about:blank",
     "",
   ])("keeps initial setup available while the blank page is committing (url=%s)", async (url) => {

@@ -25,11 +25,11 @@ for click. `--from-offset-x/y` and `--to-offset-x/y` adjust the endpoints from
 their visible action points in top-level viewport CSS pixels. Offsets inside
 out-of-process frames are unsupported. Use the actual thumb/handle when present.
 
+Under target policy, endpoint drags with `--to` need only `--context`; displacement-only
+drags with `--dx`/`--dy` also require sync's single-use `--observation` receipt.
 Under strict policy, drag's optional `--observation-id <id>` rejects a superseded ref map;
-use the token from the matching observe/snapshot/continuation. Under target policy, DOM drag
-uses stable refs and the control receipt instead of that legacy ref-map check. The global
-`--observation` receipt identifies sync's strict baseline when an opaque action requires it;
-neither observation flag replaces `--context`.
+use the token from the matching observe/snapshot/continuation. Neither observation flag
+replaces `--context`. Never substitute a newer observation into an old decision.
 
 Both endpoints must be visible after preparation. Drag does not auto-scroll
 while held, cross tabs, or synthesize touch gestures. Canvas screenshot-bound

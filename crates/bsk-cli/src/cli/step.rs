@@ -301,6 +301,9 @@ pub fn dispatch(args: StepArgs, _format: Format) -> Result<(), CliError> {
         .as_deref()
         .map(cooperate::saved_reply::SavedReply::prepare)
         .transpose()?;
+    if matches!(args.policy, cooperate::Policy::Target) {
+        business_rpc::set_target_policy_requested();
+    }
     let daemon = ensure_daemon().context("ensure daemon is running")?;
     if matches!(args.action, Action::Drag) && params["mode"] == "click-move-click" {
         super::drag::require_click_move_click_daemon(daemon.sock_path.clone())?;

@@ -10,7 +10,7 @@ export const CONTROL_POLICY_PARAM = {
 export const OBSERVATION_ID_PARAM = {
   type: "string",
   description:
-    "Explicit observation_id from sync. Required for untargeted actions under target policy. Strict-policy drag instead accepts its ref-map observation token. Never substitute a newer observation into an old decision.",
+    "Explicit observation_id from sync. Under target policy it is required and consumed by untargeted/visual actions, including scripts, untargeted keys, visual clicks and displacement-only drags (deltaX/deltaY). Endpoint drags with a to ref/selector need only contextId. Strict-policy drag instead accepts its ref-map observation token. Never substitute a newer observation into an old decision.",
 } as const;
 
 export const EXPECT_PARAM = {

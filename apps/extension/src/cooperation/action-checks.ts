@@ -222,7 +222,15 @@ export async function checkExpectations(
     } else {
       const facts = await sample(cdp, target, check);
       if (isRpcError(facts)) return facts;
-      actual = check.field === "exists" ? facts.connected : facts.connected ? facts.value : null;
+      if (!facts.connected && check.field !== "exists")
+        return actionError(
+          "target_detached",
+          `Precondition target ${check.target} was removed from its document`,
+          "precondition",
+          "Observe again, or use a selector for elements that re-render, before deciding.",
+          { target: check.target },
+        );
+      actual = check.field === "exists" ? facts.connected : facts.value;
       redacted = facts.redacted === true;
     }
     if (actual !== check.equals)

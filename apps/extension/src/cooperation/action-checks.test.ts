@@ -154,6 +154,40 @@ describe("explicit action conditions", () => {
     ).toBeUndefined();
   });
 
+  it.each([
+    "detached",
+    "unresolved",
+  ])("does not interpret a %s precondition target as a missing attribute", async (kind) => {
+    const f = fixture();
+    if (kind === "detached") f.element.remove();
+    else f.sendToTarget.mockResolvedValueOnce({});
+    expect(
+      await checkExpectations(f.cdp, session, tab, [
+        { target: "@e1", field: "attribute", attribute: "data-pending", equals: null },
+      ]),
+    ).toMatchObject({
+      code: "permission_denied",
+      data: {
+        reason: "target_detached",
+        phase: "precondition",
+        effect_state: "none",
+        target: "@e1",
+      },
+    });
+    expect(f.sendToTarget.mock.calls.at(-1)?.[1]).toBe("Runtime.releaseObjectGroup");
+  });
+
+  it.each(["detached", "unresolved"])("allows exists:false for a %s node", async (kind) => {
+    const f = fixture();
+    if (kind === "detached") f.element.remove();
+    else f.sendToTarget.mockResolvedValueOnce({});
+    expect(
+      await checkExpectations(f.cdp, session, tab, [
+        { target: "@e1", field: "exists", equals: false },
+      ]),
+    ).toBeUndefined();
+  });
+
   it("distinguishes a missing selector from a stale ref or an ambiguous selector", async () => {
     const f = fixture();
     vi.mocked(resolveActionTarget).mockResolvedValueOnce({

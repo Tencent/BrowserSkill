@@ -75,6 +75,11 @@ describe("registerBskSkill", () => {
     expect(readFileSync(join(base.path, "references/tabs-and-profiles.md"), "utf8")).toContain(
       'bsk_session({ action: "start", browser: "<verified-instance-id>" })',
     );
+    const interactions = readFileSync(join(base.path, "references/interaction-details.md"), "utf8");
+    expect(interactions).toContain("endpoint drags with `to` need only `contextId`");
+    expect(interactions).toContain(
+      "drags with `deltaX`/`deltaY` also require sync's single-use `observationId` receipt",
+    );
     expect(content).toMatch(/Never omit\s+`browser` or substitute another instance/);
     expect(content).toContain("[visual:screenshot]");
     expect(content).toContain("nextCursor");

@@ -49,6 +49,7 @@ static OBSERVATION_DEPENDENCIES: std::sync::OnceLock<Vec<String>> = std::sync::O
 static OBSERVATION_CONTEXT: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
 static ACTION_EVIDENCE: std::sync::OnceLock<(Option<String>, Option<serde_json::Value>)> =
     std::sync::OnceLock::new();
+static TARGET_POLICY_REQUESTED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
 
 // Keep the user's stop request even if the in-flight RPC finishes successfully.
 // One CLI process is one command, including its follow-up reads.
@@ -71,8 +72,18 @@ pub fn set_action_evidence(observation: Option<String>, expect: Option<serde_jso
     let _ = ACTION_EVIDENCE.set((observation, expect));
 }
 
+pub fn set_target_policy_requested() {
+    let _ = TARGET_POLICY_REQUESTED.set(true);
+}
+
 /// Use the status already read during discovery, before any guarded action can be forwarded.
 pub(super) fn check_daemon_protocol(protocol: &str) -> anyhow::Result<()> {
+    if TARGET_POLICY_REQUESTED.get().copied().unwrap_or(false) {
+        anyhow::ensure!(
+            bsk_protocol::tools::supports_target_control(protocol),
+            "--policy target requires daemon protocol 1.8 or a later compatible 1.x version; update the CLI and restart its daemon (running protocol {protocol})"
+        );
+    }
     if ACTION_EVIDENCE
         .get()
         .is_some_and(|(observation, expect)| observation.is_some() || expect.is_some())

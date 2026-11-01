@@ -34,7 +34,7 @@
       ]
     },
     "observation_id": {
-      "description": "Sync's baseline for untargeted/visual actions under target policy. Strict-policy drag instead accepts its legacy ref-map observation token.",
+      "description": "Sync's single-use baseline for untargeted/visual actions under target policy, including scripts, untargeted keys and displacement-only drags. Drags with a target ref/selector need only context_id. Strict-policy drag instead accepts its legacy ref-map observation token.",
       "type": [
         "string",
         "null"

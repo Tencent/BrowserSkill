@@ -415,26 +415,26 @@ export class CooperationController implements ControlAuthority {
   }
   receive(tabId: number, frameId: number, frame: FrameState, lease?: string) {
     const state = this.tabs.get(tabId);
-    const old = state?.frames.get(frameId);
-    if (state && lease === state.lease) this.remember(state, frameId, frame);
-    // Late messages from a replaced document cannot restore ownership.
-    if (
-      !state ||
-      (lease !== undefined && lease !== state.lease) ||
-      !old ||
-      old.document !== frame.document ||
-      frame.revision < old.revision
-    )
-      return;
-    if (frame.human !== old.human) {
-      if (frame.human > old.human) this.preserve(state);
+    if (!state || (lease !== undefined && lease !== state.lease)) return;
+    const old = state.frames.get(frameId);
+    const sameDocument = old?.document === frame.document;
+    const seen = state.activitySeen.get(`${frameId}:${frame.document}`) ?? 0;
+    if (lease === state.lease) this.remember(state, frameId, frame);
+    if (sameDocument && frame.revision < old.revision) return;
+    const humanChanged = sameDocument
+      ? frame.human !== old.human
+      : lease === state.lease && frame.human > seen && this.now() - frame.lastInput < QUIET_MS;
+    if (humanChanged) {
+      if (!sameDocument || frame.human > old.human) this.preserve(state);
       state.interruption?.abort(new Error("User activity revoked this action"));
       state.authorityRevision++;
       state.epoch++;
       state.context = undefined;
     }
-    state.frames = new Map(state.frames).set(frameId, frame);
-    this.changed(state);
+    // New or late documents can revoke control, but only collection establishes
+    // the current frame. Repeated notifications cannot revoke a newer decision.
+    if (sameDocument) state.frames = new Map(state.frames).set(frameId, frame);
+    if (sameDocument || humanChanged) this.changed(state);
   }
   private remember(state: TabState, frameId: number, frame: FrameState) {
     const key = `${frameId}:${frame.document}`;
@@ -526,14 +526,20 @@ export class CooperationController implements ControlAuthority {
     }
     if (!live()) throw new Error("Shared-tab control ended during collection");
     if (!frames.size || !frames.has(0)) throw new Error("Page interaction coverage is unavailable");
-    for (const [id, old] of state.frames) {
-      const next = frames.get(id);
-      if (next?.document === old.document) {
+    for (const [id, next] of frames) {
+      const old = state.frames.get(id);
+      if (old?.document === next.document) {
         if (next.revision < old.revision) frames.set(id, old);
         else if (next.human !== old.human) {
           state.authorityRevision++;
           if (next.human > old.human) this.preserve(state);
         }
+      } else if (
+        next.human > (state.activitySeen.get(`${id}:${next.document}`) ?? 0) &&
+        this.now() - next.lastInput < QUIET_MS
+      ) {
+        state.authorityRevision++;
+        this.preserve(state);
       }
     }
     if (state.frames.size && !sameFrames(state.frames, frames, "human")) {
@@ -1103,8 +1109,20 @@ export class CooperationController implements ControlAuthority {
         req.method,
       ) &&
       !params.context_id
-    )
+    ) {
+      if (
+        params.expect !== undefined ||
+        params.observation_id !== undefined ||
+        params.depends_on?.length
+      )
+        return {
+          code: "invalid_params",
+          message:
+            "The initial blank tab has no observed content; omit expect, observation_id and depends_on or synchronize first",
+          data: { phase: "precondition", effect_state: "none" },
+        };
       return this.bootstrap(state, req.method, cdp, signal, invoke);
+    }
     if (read) return invoke(guardedRunner(cdp));
     if (state.working) return failure("Another operation is settling on this tab");
     const expectations = parseExpectations(params.expect);
@@ -1143,11 +1161,15 @@ export class CooperationController implements ControlAuthority {
       if (effect === "unknown") state.context = undefined;
       const controlReason = state.held
         ? "control_held"
-        : this.humanActive(state) || intervention.signal.aborted
+        : this.humanActive(state) ||
+            intervention.signal.aborted ||
+            state.authorityRevision !== authorityRevision
           ? "human_intervention"
           : context && documents(context.frames) !== documents(state.frames)
             ? "document_changed"
-            : undefined;
+            : state.unavailable || state.epoch !== epoch || this.controlError(session, state)
+              ? "control_context_invalid"
+              : undefined;
       const issue =
         !controlReason && checkFailure
           ? checkFailure
@@ -1208,6 +1230,7 @@ export class CooperationController implements ControlAuthority {
     };
     const assert = () => {
       signal.throwIfAborted();
+      if (checkFailure) throw new ActionCheckError(checkFailure);
       const reason = interruption();
       if (reason) {
         if (context && state.context === context) state.context = undefined;
@@ -1383,6 +1406,21 @@ export class CooperationController implements ControlAuthority {
       (req.method === "tool.blur" && method === "Runtime.callFunctionOn") ||
       (req.method === "tool.hover" && method === "Input.dispatchMouseEvent") ||
       (req.method === "tool.scroll_to" && method === "DOM.scrollIntoViewIfNeeded");
+    const targetError = (error: RpcError): RpcError =>
+      targetPolicy
+        ? {
+            ...error,
+            data: {
+              ...error.data,
+              reason: error.data?.reason ?? "target_unavailable",
+              phase: "target",
+              effect_state: "none",
+              recovery:
+                error.data?.recovery ??
+                "Observe the current page and choose a target again. Nothing was sent.",
+            },
+          }
+        : error;
     try {
       await this.refresh(state);
       assert();
@@ -1416,7 +1454,7 @@ export class CooperationController implements ControlAuthority {
           "shared action",
           targetPolicy || req.method === "tool.drag",
         );
-        if (isRpcError(resolved)) return resolved;
+        if (isRpcError(resolved)) return targetError(resolved);
         actionTarget = resolved;
         if (targeted && primaryTarget.selector) {
           const pinned = { ...primaryTarget, ref: pin(resolved), selector: undefined };
@@ -1435,7 +1473,7 @@ export class CooperationController implements ControlAuthority {
           "drag destination",
           true,
         );
-        if (isRpcError(resolved)) return resolved;
+        if (isRpcError(resolved)) return targetError(resolved);
         destinationTarget = resolved;
         if (targeted && params.target?.selector)
           req.params = {
@@ -1495,8 +1533,8 @@ export class CooperationController implements ControlAuthority {
           await new Promise((resolve) => setTimeout(resolve, Math.min(50, deadline - Date.now())));
           // Push events revoke control while waiting. The dispatch guard still
           // refreshes every frame before any effect, including missed events.
-          assert();
           checkFailure = undefined;
+          assert();
         }
       }
       if (targeted && params.timeout_ms !== undefined)

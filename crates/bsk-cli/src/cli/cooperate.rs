@@ -108,6 +108,9 @@ pub fn dispatch(args: CooperateArgs, _format: Format) -> Result<(), CliError> {
         .as_ref()
         .map(|path| saved_reply::SavedReply::prepare(path))
         .transpose()?;
+    if matches!(control_policy, Some(ControlPolicy::Target)) {
+        business_rpc::set_target_policy_requested();
+    }
     let daemon = ensure_daemon().context("ensure daemon is running")?;
     let params = CooperateParams {
         control_policy,

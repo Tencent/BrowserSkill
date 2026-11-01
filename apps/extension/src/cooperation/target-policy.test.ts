@@ -1,11 +1,12 @@
 import type { VomScene } from "@browser-skill/vom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { SessionManager } from "@/session-manager/manager";
+import { scrollNodeIntoView } from "@/tools/element-geometry";
 import { resolveActionTarget } from "@/tools/interaction";
 import { captureVomObservation, handleSnapshot } from "@/tools/observation";
 import type { CdpRunner } from "@/tools/shared";
 import { checkActionTarget, checkExpectations } from "./action-checks";
-import { CooperationController } from "./controller";
+import { CooperationController, type CooperationDeps } from "./controller";
 import type { FrameState } from "./types";
 
 vi.mock("@/tools/observation", () => ({
@@ -51,7 +52,9 @@ async function fixture(policy: "strict" | "target" = "target") {
   });
   const send = vi.fn(async () => ({}));
   const cdp = { send } as CdpRunner;
-  const readFrames = vi.fn(async () => new Map([[0, structuredClone(frame)]]));
+  const readFrames = vi.fn<CooperationDeps["readFrames"]>(
+    async () => new Map([[0, structuredClone(frame)]]),
+  );
   const controller = new CooperationController({
     sessions,
     readFrames,
@@ -246,6 +249,83 @@ describe.each(["strict", "target"] as const)("completed action receipts (%s)", (
     });
     expect(await f.run()).toHaveProperty("code");
     expect(f.send).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    ["inserted", "poll"],
+    ["inserted", "push"],
+    ["navigated", "poll"],
+    ["navigated", "push"],
+  ])("preserves human work in a %s iframe discovered by %s, even after quiet", async (kind, delivery) => {
+    const f = await fixture(policy);
+    const frames = await f.readFrames.mock.results.at(-1)!.value;
+    const child = { ...frames.get(0)!, document: "child" };
+    if (kind === "navigated") frames.set(2, child);
+    f.readFrames.mockImplementation(async () => structuredClone(frames));
+    const observation = await f.sync();
+    const lease = f.readFrames.mock.calls.at(-1)![2];
+    const result = await f.run(
+      { context_id: observation.context_id, observation_id: observation.observation_id },
+      "tool.evaluate",
+      async (runner) => {
+        await runner.send(7, "Runtime.evaluate", { expression: "openFrame()" });
+        const human = { ...child, document: "new-child", human: 1, lastInput: 10_000 };
+        frames.set(2, human);
+        if (delivery === "push") f.controller.receive(7, 2, human, lease);
+        else await f.controller.observeTab(7);
+        f.advance();
+        return { ok: true, tab_id: 7 };
+      },
+    );
+    expect(result).toMatchObject({
+      code: "permission_denied",
+      data: {
+        reason: policy === "target" ? "human_intervention" : "cooperation_sync_required",
+        effect_state: "unknown",
+      },
+    });
+    expect(f.session.agentCreatedTabs.has(7)).toBe(false);
+    expect(f.session.observedTabs?.has(7)).toBe(true);
+    expect(f.send).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    { human: 0, lastInput: 0 },
+    { human: 1, lastInput: 0 },
+  ])("does not preserve new frame history without recent human input: %j", async (history) => {
+    const f = await fixture(policy);
+    const frames = await f.readFrames.mock.results.at(-1)!.value;
+    const receipt = { ok: true, tab_id: 7 };
+    expect(
+      await f.run({ observation_id: f.first.observation_id }, "tool.evaluate", async (runner) => {
+        await runner.send(7, "Runtime.evaluate", { expression: "openFrame()" });
+        frames.set(2, { ...frames.get(0)!, document: "new-child", ...history });
+        f.readFrames.mockImplementation(async () => structuredClone(frames));
+        return receipt;
+      }),
+    ).toEqual(receipt);
+    expect(f.session.agentCreatedTabs.has(7)).toBe(true);
+  });
+
+  it("does not let an unknown document replace collected frames or repeatedly revoke control", async () => {
+    const f = await fixture(policy);
+    const frame = (await f.readFrames.mock.results.at(-1)!.value).get(0)!;
+    const lease = f.readFrames.mock.calls.at(-1)![2];
+    const human = { ...frame, document: "uncollected", human: 1, lastInput: 10_000 };
+    const guard = f.controller.controlGuard("s", 7);
+    f.controller.receive(7, 0, human, "old-lease");
+    expect(guard).not.toThrow();
+    expect(f.session.agentCreatedTabs.has(7)).toBe(true);
+    f.controller.receive(7, 0, human, lease);
+    expect(guard).toThrow();
+    // The current collected document never had human input, so sync is ready
+    // immediately. A duplicate old message must not invalidate that new decision.
+    const next = await f.sync();
+    expect(next.context_id).toEqual(expect.any(String));
+    const nextGuard = f.controller.controlGuard("s", 7);
+    f.controller.receive(7, 0, human, lease);
+    expect(nextGuard).not.toThrow();
+    expect(await f.run({ context_id: next.context_id })).toEqual({});
   });
 
   it("blocks additional input after a frame changes even if a handler swallows the error", async () => {
@@ -616,6 +696,98 @@ describe("negotiated target control", () => {
     expect(f.readFrames).toHaveBeenCalledTimes(2);
   });
 
+  it("keeps a failed precondition latched through the real scroll fallback", async () => {
+    const f = await fixture();
+    f.send.mockResolvedValue({ object: { objectId: "button" } });
+    vi.mocked(checkExpectations)
+      .mockResolvedValueOnce(undefined)
+      .mockResolvedValueOnce({
+        code: "permission_denied",
+        message: "Changed price",
+        data: { reason: "precondition_failed", phase: "precondition", effect_state: "none" },
+      });
+    const result = await f.run({}, "tool.click", async (runner) => {
+      // The fallback catches its own error too. Even a handler that continues
+      // after it must not dispatch input after any failed business check.
+      await scrollNodeIntoView(runner, 7, 4);
+      return runner.send(7, "Input.dispatchMouseEvent", {
+        type: "mousePressed",
+        button: "left",
+      });
+    });
+    expect(result).toMatchObject({
+      data: { reason: "precondition_failed", phase: "precondition", effect_state: "none" },
+    });
+    expect(checkExpectations).toHaveBeenCalledTimes(2);
+    expect(f.send).toHaveBeenCalledExactlyOnceWith(7, "DOM.resolveNode", { backendNodeId: 4 });
+  });
+
+  it("reports invalidated control instead of the previous readiness failure", async () => {
+    const f = await fixture();
+    vi.mocked(checkActionTarget).mockImplementationOnce(async () => {
+      f.controller.invalidate(7);
+      return {
+        code: "permission_denied",
+        message: "hidden",
+        data: { reason: "target_hidden", effect_state: "none" },
+      };
+    });
+    expect(await f.run({ timeout_ms: 200 })).toMatchObject({
+      data: { reason: "control_context_invalid", phase: "control", effect_state: "none" },
+    });
+    expect(checkActionTarget).toHaveBeenCalledOnce();
+    expect(f.send).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { code: "not_found", message: "No match", data: { reason: "selector_not_found" } },
+    { code: "invalid_params", message: "Ambiguous selector" },
+  ] as const)("marks target resolution failure as unsent: $message", async (error) => {
+    const f = await fixture();
+    vi.mocked(resolveActionTarget).mockResolvedValueOnce(error);
+    expect(await f.run({ ref: undefined, selector: ".button" })).toMatchObject({
+      code: error.code,
+      message: error.message,
+      data: {
+        reason: error.data?.reason ?? "target_unavailable",
+        phase: "target",
+        effect_state: "none",
+        recovery: expect.any(String),
+      },
+    });
+    expect(f.send).not.toHaveBeenCalled();
+  });
+
+  it("marks a missing drag destination as unsent", async () => {
+    const f = await fixture();
+    const source = await resolveActionTarget(
+      f.cdp,
+      f.session,
+      { tabId: 7, windowId: 100, active: true },
+      { ref: "e1" },
+      "test",
+    );
+    vi.mocked(resolveActionTarget)
+      .mockResolvedValueOnce(source)
+      .mockResolvedValueOnce({
+        code: "not_found",
+        message: "No destination",
+        data: { reason: "selector_not_found", recovery: "Choose an existing destination." },
+      });
+    expect(
+      await f.run({ source: { ref: "e1" }, target: { selector: "#missing" } }, "tool.drag"),
+    ).toMatchObject({
+      code: "not_found",
+      data: {
+        reason: "selector_not_found",
+        phase: "target",
+        effect_state: "none",
+        recovery: "Choose an existing destination.",
+      },
+    });
+    expect(f.send).not.toHaveBeenCalled();
+  });
+
   it("rechecks only the target while it is becoming ready", async () => {
     const f = await fixture();
     f.readFrames.mockClear();
@@ -638,7 +810,7 @@ describe("negotiated target control", () => {
     true,
   ])("checks unreported human input in an iframe at dispatch (existing: %s)", async (existing) => {
     const f = await fixture();
-    const frames = await f.readFrames();
+    const frames = await f.readFrames.mock.results.at(-1)!.value;
     const child = { ...frames.get(0)!, document: "child" };
     if (existing) frames.set(2, child);
     f.readFrames.mockImplementation(async () => structuredClone(frames));

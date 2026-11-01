@@ -46,6 +46,8 @@ unsupported wait. If blocked, follow [help and recovery](help-and-recovery.md).
   requires `to` and zero `holdMs`; it clicks, moves with the button released, then
   clicks the destination. Pass the observed `contextId` and verify the resulting
   state. Input delivery does not prove application success.
+  Under target policy, endpoint drags with `to` need only `contextId`; displacement-only
+  drags with `deltaX`/`deltaY` also require sync's single-use `observationId` receipt.
 
 ## Steps and saved observations
 

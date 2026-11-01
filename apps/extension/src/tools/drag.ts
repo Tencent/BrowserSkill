@@ -104,7 +104,7 @@ export async function handleDrag(
     if (Date.now() >= deadline) throw new DOMException("drag timed out", "TimeoutError");
     if (document && ctx.refStore.documentRevision(document.tabId) !== document.revision)
       throw new Error("document changed during drag");
-    if (ctx.refStore.observationId !== observationId)
+    if (ctx.controlPolicy !== "target" && ctx.refStore.observationId !== observationId)
       throw new Error("observation or document changed during drag");
   };
   // Check identity even between frames of a gesture. The transaction also fences
