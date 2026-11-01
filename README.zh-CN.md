@@ -198,7 +198,7 @@ bsk session stop <id>
 
 [DSH 插件](packages/dsh-plugin-browserskill/README.md) 在 DeepSeek Harness Web UI 中提供原生 `bsk_*` 工具、浏览器任务预览和截图结果。它使用同一套 `bsk` CLI 与扩展，并自带 BrowserSkill skill。
 
-**升级到 0.4.0：**先更新 CLI 和正在运行的 daemon，再更新扩展和插件。重启 DSH profile，并重新调用 `/browser-skill`，让已有对话加载共享控制指引及新增的拖拽、step 和观察结果读取工具。详见 [0.4.0 升级指南](packages/dsh-plugin-browserskill/README.md#upgrading-to-040)；从 0.3.3 以前的版本升级时，还需要完成[工具名称迁移](packages/dsh-plugin-browserskill/README.md#breaking-tool-api-migration-033)。
+**升级到 0.4.1：**先更新 CLI 和正在运行的 daemon，再更新扩展和插件。重启 DSH profile，并重新调用 `/browser-skill`，让已有对话加载新的 target 策略及控制、观察指引。详见 [0.4.1 升级指南](packages/dsh-plugin-browserskill/README.md#upgrading-to-041)；从 0.3.3 以前的版本升级时，还需要完成[工具名称迁移](packages/dsh-plugin-browserskill/README.md#breaking-tool-api-migration-033)。
 
 安装好 DeepSeek Harness、pnpm 和 `bsk`，连接扩展后，将插件加入你的 profile：
 
@@ -291,9 +291,9 @@ BrowserSkill 没有必须使用的云服务，也不收集产品遥测。自动�
 
 ## 升级
 
-**升级到 0.4.0 时，先更新 CLI 并重启正在运行的 daemon，再更新扩展，最后更新 DSH。** 新扩展要求 daemon 协议至少为 1.6，而 CLI/daemon 0.3.3 使用 1.3。仅替换二进制不会更新通过前台或外部进程管理器运行的旧 daemon，仍需在所属宿主中重启。使用新功能时请配套使用 0.4.0 组件。
+**升级到 0.4.1 时，先更新 CLI 并重启正在运行的 daemon，再更新扩展，最后更新 DSH。** CLI/daemon 和扩展 0.4.1 使用协议 1.8，新的默认 target 策略要求两端均支持 1.8。仅替换二进制不会更新通过前台或外部进程管理器运行的旧 daemon，仍需在所属宿主中重启。使用新流程时请配套使用 0.4.1 组件。
 
-已有脚本需要遵循[共享控制流程](crates/bsk-cli/skill/references/cooperation.md)：首次导航后执行 `bsk cooperate sync`，将返回的 `--context` 用于一次操作，然后重新同步。请加载新版 skill，避免继续使用旧指令。
+已有脚本需要遵循[共享控制流程](crates/bsk-cli/skill/references/cooperation.md)：首次导航后执行 `bsk cooperate sync`，将返回的 `context_id` 作为 `--context` 传入。target 策略下，DOM 操作和补充观察可以复用该控制上下文，决策依赖的业务事实用 `--expect` 显式校验。脚本、无目标按键和视觉操作还需将同步返回的 `observation_id` 作为 `--observation` 传入。人工介入或导航后重新同步；若要保留每个上下文只执行一次操作的流程，在首次同步时指定 `--policy strict`。继续任务前请加载新版 skill。
 
 先结束正在执行的浏览器任务，再更新 CLI：
 

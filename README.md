@@ -198,7 +198,7 @@ In WorkBuddy/CodeBuddy, or hosts that reap command children, the agent should re
 
 The [DSH plugin](packages/dsh-plugin-browserskill/README.md) adds native `bsk_*` tools, browser task previews, and screenshot results to the DeepSeek Harness Web UI. It uses the same `bsk` CLI and extension and includes its own BrowserSkill skill.
 
-**Upgrading to 0.4.0:** update the CLI and running daemon first, then the extension and plugin. Restart the DSH profile and invoke `/browser-skill` again so existing conversations load the shared-control instructions and new drag, step and saved-observation tools. See the [0.4.0 upgrade guide](packages/dsh-plugin-browserskill/README.md#upgrading-to-040); installations older than 0.3.3 also need the [tool-name migration](packages/dsh-plugin-browserskill/README.md#breaking-tool-api-migration-033).
+**Upgrading to 0.4.1:** update the CLI and running daemon first, then the extension and plugin. Restart the DSH profile and invoke `/browser-skill` again so existing conversations load the new target-policy control and observation instructions. See the [0.4.1 upgrade guide](packages/dsh-plugin-browserskill/README.md#upgrading-to-041); installations older than 0.3.3 also need the [tool-name migration](packages/dsh-plugin-browserskill/README.md#breaking-tool-api-migration-033).
 
 With DeepSeek Harness, pnpm, and `bsk` installed and the extension connected, add the plugin to your profile:
 
@@ -296,9 +296,9 @@ These features offer export and deletion. Stopping a task or disconnecting does 
 
 ## Updating
 
-**For 0.4.0, update the CLI and restart its running daemon before updating the extension; update DSH last.** The new extension requires daemon protocol 1.6 or later, while CLI/daemon 0.3.3 uses 1.3. Updating only the binary leaves a foreground or externally managed daemon on its old version until its host restarts it. Use matching 0.4.0 components for the new features.
+**For 0.4.1, update the CLI and restart its running daemon before updating the extension; update DSH last.** CLI/daemon and extension 0.4.1 use protocol 1.8, which the new default target policy requires on both peers. Updating only the binary leaves a foreground or externally managed daemon on its old version until its host restarts it. Use matching 0.4.1 components for the new workflow.
 
-Existing scripts must follow the [shared-control workflow](crates/bsk-cli/skill/references/cooperation.md): after initial navigation, synchronize with `bsk cooperate sync`, pass its `--context` to one action, then synchronize again. Reload the updated skill instead of continuing with old instructions.
+Existing scripts must follow the [shared-control workflow](crates/bsk-cli/skill/references/cooperation.md): after initial navigation, synchronize with `bsk cooperate sync` and pass its `context_id` as `--context`. Target-policy DOM actions can reuse that context across actions and supplementary reads; use `--expect` to protect decision facts. Scripts, untargeted keys and visual actions also require the sync's `observation_id` as `--observation`. Synchronize again after human intervention or navigation. Select `--policy strict` on the first sync to retain one action per context. Reload the updated skill before continuing.
 
 Finish active browser tasks, then update the CLI:
 

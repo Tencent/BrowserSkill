@@ -54,6 +54,27 @@ dsh plugin --profile web update @wxg-prc-cpg/browser-skill-dsh-plugin --latest
 Restart that dsh profile after upgrading. This command updates the plugin; update
 the `bsk` CLI and browser extension separately when a release requires it.
 
+### Upgrading to 0.4.1
+
+Update the CLI and restart the running daemon first, install extension 0.4.1,
+then update this plugin to 0.4.1. The default target policy requires daemon and
+extension protocol 1.8; a successful connection to an older peer does not provide
+that capability. Wait for the new extension to be available in your installation
+channel before upgrading the plugin. Updating the npm package does not update
+the CLI, daemon or extension.
+
+Restart the DSH profile and invoke `/browser-skill` again in existing conversations.
+The six `bsk_*` tool names remain unchanged. After initial navigation, call
+`bsk_session action:sync` and pass its returned `context_id` as `contextId`.
+New sessions use target policy: DOM actions can reuse control across supplementary
+reads and completed actions, and `expect` checks protect observed business facts.
+Scripts, untargeted keys and visual actions also require the sync's `observation_id`
+as `observationId`. Human intervention or navigation revokes control; synchronize
+and replan. Select `policy: "strict"` on the first sync to retain the legacy
+one-action-per-context workflow. Later syncs and steps preserve the selected policy.
+Custom tool integrations must expose and forward these fields. See the
+[cooperation reference](skill/references/cooperation.md) for action-specific checks.
+
 ### Upgrading to 0.4.0
 
 Update the CLI and restart the running daemon first, then update the browser
@@ -65,13 +86,10 @@ for drag, step and saved-observation workflows.
 Restart the DSH profile and invoke `/browser-skill` again in existing conversations.
 The six `bsk_*` tool names remain unchanged. Shared control is now enabled for new
 tasks: after initial navigation, call `bsk_session action:sync`, pass its returned
-control receipt as `contextId`. Target policy is the new sync default and requires
-daemon and extension protocol 1.8 or later. DOM actions reuse the receipt across
-supplementary reads; use `expect` for decision facts such as prices or record IDs.
-Untargeted and visual actions also require the sync's `observationId`. Human
-intervention or navigation revokes control; synchronize and replan instead of repeating
-the old call. Select `policy: "strict"` on the first sync to retain the legacy workflow;
-later ordinary syncs and steps preserve the selected policy.
+context identifier as `contextId` for one action, then synchronize again. Human
+edits and changed page evidence can revoke a pending action; synchronize and replan
+instead of repeating the old call. Version 0.4.1 changes the default policy as
+described above.
 Custom tool policies and integrations must allow the new actions they intend to use.
 
 Explicit `saveFull` results remain as JSON files on the CLI machine until deleted;
@@ -312,11 +330,12 @@ The [Release dsh plugin workflow](https://github.com/Tencent/BrowserSkill/blob/m
 publishes the package and this README to npm. Pushing a `dsh-plugin-vX.Y.Z` tag
 triggers it; ordinary commits to `main` do not.
 
-Before publishing the 0.4.0 plugin, publish the coordinated 0.4.0 CLI and extension.
-The extension's raised daemon protocol floor requires the CLI release to be
-downloadable before the extension goes live. Confirm that the new CLI still
-supports the intended basic workflows with the previous extension during rollout;
-new shared-control, drag and step workflows require the matching components.
+Before publishing the 0.4.1 plugin, publish the coordinated 0.4.1 CLI and extension.
+Make the CLI release downloadable first, then confirm extension availability in
+the supported installation channels. The default target policy requires protocol
+1.8 on both the running daemon and extension. During rollout, explicitly select
+strict policy on every sync/enable and step when using older compatible peers;
+do not assume a successful handshake enables target policy.
 Publishing the npm package alone does not upgrade either component on users' machines.
 
 1. Prepare a release PR that updates the shared CLI, extension and plugin version,
