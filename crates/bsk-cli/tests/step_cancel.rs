@@ -58,13 +58,15 @@ async fn sigint_stops_step_even_when_the_current_rpc_returns_success() {
                     }
                     let result = match method {
                         "system.status" => {
-                            json!({"daemon_version":"0.3.3","protocol_version":"1.7",
+                            json!({"daemon_version":"0.3.3","protocol_version":"1.8",
                             "pid":std::process::id(),"uptime_secs":0,"ws_port":0,"sock_path":sock,
                             "browsers":[],"sessions":[]})
                         }
                         "tool.click" => json!({"tab_id":42,"delivered":true}),
                         "tool.wait_for_element" => json!({"tab_id":42,"satisfied":true}),
-                        "tool.cooperate" => json!({"tab_id":42,"context_id":"fresh"}),
+                        "tool.cooperate" => {
+                            json!({"tab_id":42,"context_id":"fresh","control_policy":"target"})
+                        }
                         "cancel" => {
                             cancel.send(true).unwrap();
                             // The original operation finished just before cancellation.

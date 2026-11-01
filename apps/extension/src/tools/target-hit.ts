@@ -1,4 +1,4 @@
-import { type CdpTarget, cdpTargetKey } from "@/browser-driver/frame-graph";
+import { type CdpFrameTreeNode, type CdpTarget, cdpTargetKey } from "@/browser-driver/frame-graph";
 import { type Point, unprojectPoint } from "./geometry";
 import { cssViewport, GeometryContext, type LayoutMetrics } from "./geometry/frame-context";
 import { type CdpRunner, sendToCdpTarget } from "./shared";
@@ -42,7 +42,14 @@ export async function pointBelongsToTarget(
   const target = actionTarget.cdpTarget;
   const hit = await nodeAtViewportPoint(cdp, target, x, y, includeUserAgentShadowDOM);
   if (typeof hit.backendNodeId !== "number") return false;
-  if (actionTarget.frameId && hit.frameId !== actionTarget.frameId) return false;
+  // Frameless addresses (CSS selectors) belong to the target's root document.
+  // Hit testing can descend into an iframe in the same CDP target; its object
+  // cannot be passed to a function in the root document's JavaScript world.
+  const frameId =
+    actionTarget.frameId ??
+    (await sendToCdpTarget<{ frameTree?: CdpFrameTreeNode }>(cdp, target, "Page.getFrameTree", {}))
+      .frameTree?.frame.id;
+  if (!frameId || hit.frameId !== frameId) return false;
 
   const [resolvedTarget, resolvedHit] = await Promise.all([
     sendToCdpTarget<{ object?: { objectId?: string } }>(cdp, target, "DOM.resolveNode", {

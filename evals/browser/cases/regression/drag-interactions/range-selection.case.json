@@ -35,13 +35,18 @@
         "action": "navigate"
       },
       {
+        "action": "sync",
+        "saveAs": "control"
+      },
+      {
         "action": "observe"
       },
       {
         "action": "drag",
         "selector": "#slot-14",
         "to": "#slot-16",
-        "mode": "click-move-click"
+        "mode": "click-move-click",
+        "contextId": "{control.context_id}"
       },
       {
         "action": "observe"

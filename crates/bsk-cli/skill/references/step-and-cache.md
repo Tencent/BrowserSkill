@@ -2,8 +2,10 @@
 
 Use `step` when one action is already decided from current evidence. It invokes
 that action exactly once, optionally waits for a known main-document selector to
-be visible, then synchronizes. All operations use the existing guard and protocol;
-this CLI orchestration does not require an extension upgrade.
+be visible, then synchronizes. It uses the session's negotiated guard policy;
+target policy requires compatible protocol 1.x peers at version 1.8 or later. With a current CLI
+and an older extension, pass `--policy strict` on every step for its post-action sync. Choose
+strict with an explicit sync before the action; a post-sync failure does not undo a completed action.
 
 ```sh
 bsk step --session SID --context CURRENT --action click \
@@ -15,12 +17,13 @@ Replace every example ref/selector with actual observed evidence. `--params` use
 existing protocol fields: `ref` or `selector`; `key` for press; `value` for fill;
 `values` for select; `source`, `target`/`delta`, `mode` for drag; `url` for navigate.
 Supported actions are click, press, fill, hover, select, drag, scroll-to, wheel and
-navigate. No shell or script is executed. Session, tab, context and `--depends-on`
-are CLI flags. Unknown fields and conflicting targets fail before the action.
+navigate. No shell or script is executed. Session, tab, context, `--observation` and
+`--expect` are CLI flags; `--depends-on` is for strict policy only. Unknown fields and conflicting targets fail before the action.
 Each command authorizes one action, never a sequence of decisions.
 
-Read `action`, `readiness`, and `post` separately. `post.context_id` is the next
-single-use action context; `post.observation` is the resulting VOM. `ok` means the
+Read `action`, `readiness`, and `post` separately. `post.context_id` is the current
+control context; it remains reusable for target-policy DOM actions. `post.observation_id`
+identifies the strict baseline and `post.observation` is the resulting VOM. `ok` means the
 requested stages completed, not that a reservation/order succeeded. Verify the
 actual form/values before declaring completion. With no `--until-visible`, the
 returned state can still be intermediate; no readiness is claimed.

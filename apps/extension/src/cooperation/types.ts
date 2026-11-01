@@ -74,6 +74,7 @@ export interface CooperationParams {
   action: "enable" | "status" | "sync" | "wait";
   timeout_ms?: number;
   max_tokens?: number;
+  control_policy?: "auto" | "strict" | "target";
 }
 
 export const COOPERATION_READY = "cooperation.ready";

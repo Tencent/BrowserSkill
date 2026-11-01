@@ -10,7 +10,7 @@ import {
 
 /** Drive the shipped DSH tool definitions, runner and lifecycle against a real daemon.
  * A separate native-input connection represents the person; no model request is needed. */
-export function createDshRegressionClient(cli, env) {
+export function createDshRegressionClient(cli, env, { legacyStrict = true } = {}) {
   const tools = new Map();
   const calls = [];
   const ctx = {
@@ -53,12 +53,22 @@ export function createDshRegressionClient(cli, env) {
   };
   const dispose = registerBrowserTools(deps);
   const run = (name, args) =>
-    tools.get(name).execute(args, {
-      callId: crypto.randomUUID(),
-      name,
-      signal: new AbortController().signal,
-      agent: { id: "default-cooperation-regression" },
-    });
+    tools
+      .get(name)
+      .execute(
+        legacyStrict &&
+          name === "bsk_session" &&
+          ["sync", "share"].includes(args.action) &&
+          args.policy === undefined
+          ? { ...args, policy: "strict" }
+          : args,
+        {
+          callId: crypto.randomUUID(),
+          name,
+          signal: new AbortController().signal,
+          agent: { id: "cooperation-regression" },
+        },
+      );
   return {
     run,
     runner,
@@ -72,7 +82,7 @@ export function createDshRegressionClient(cli, env) {
   };
 }
 
-export async function runDefaultDshScenario({ send, base, cli, env, interruptStart = false }) {
+export async function runLegacyStrictDshScenario({ send, base, cli, env, interruptStart = false }) {
   const { run, runner, calls, dispose } = createDshRegressionClient(cli, env);
   let human;
   let session;
@@ -130,6 +140,7 @@ export async function runDefaultDshScenario({ send, base, cli, env, interruptSta
     }
     const sync = () => run("bsk_session", { action: "sync", session });
     const first = await sync();
+    assert.equal(first.control_policy, "strict", "legacy DSH regression must select strict policy");
     const point = await read(
       "(() => { const r = document.querySelector('#mistake').getBoundingClientRect(); return {x:r.x+r.width/2,y:r.y+r.height/2}; })()",
     );
@@ -184,6 +195,7 @@ export async function runDefaultDshScenario({ send, base, cli, env, interruptSta
     assert(!calls.some((args) => args[0] === "cooperate" && args[1] === "enable"));
     return {
       client: "dsh",
+      policy: "strict",
       automatic: true,
       startupInterruption: interruptStart,
       staleActionRejected: true,

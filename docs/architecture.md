@@ -84,9 +84,54 @@ WXT / MV3 Chromium extension. Built with React popup and a service worker backgr
 Shared Rust types + JSON Schema generation. TypeScript mirrors frame shapes in
 `apps/extension/src/transport/types.ts` (kept in sync via tests and schema dumps).
 
+### Control policy and action evidence
+
+Protocol 1.8 adds explicit `control_policy` negotiation on `tool.cooperate` sync/enable.
+New CLI/plugin syncs and step post-syncs request `auto`, which preserves an established policy
+or selects `target` for an unconfigured session. Legacy callers that omit the field retain
+`strict`. Explicit `strict` or `target` selects a policy that is fixed for the session.
+CLI and daemon check peer support before
+forwarding new evidence fields; an older peer cannot silently discard a condition.
+Support is within protocol major 1, starting at 1.8; a future major is not assumed compatible.
+With a current CLI and an older extension, every sync/enable and step must explicitly request
+`strict`; conditions still require upgraded peers. A plugin that sends `--policy` requires a
+CLI that recognizes it. Upgrade the CLI and restart its daemon when the flag is unsupported.
+
+`ActionMetadata` defines the shared wire fields below. Schema generation merges them into
+guarded action parameter schemas, including script/file operations and the active variants of
+observe/debug. Passive variants do not evaluate conditions. Operation structs retain their
+existing fields; generated clients can combine them with the shared metadata without inventing
+a separate protocol. Expectation target and attribute limits count Unicode code points.
+
+| Field | Contract |
+| --- | --- |
+| `context_id` | Caller-supplied control receipt bound to session, tab, document and human intervention epoch. Reusable for target-policy DOM actions; single-use under strict policy. |
+| `observation_id` | Sync's strict baseline for target-policy actions without a DOM recipient, including scripts and visual clicks. Supplementary reads do not replace this baseline. Under strict policy, drag retains its existing optional ref-map freshness token; target-policy DOM drag uses stable refs. |
+| `expect` | Up to 16 literal target conditions: `text`, `value`, `checked`, `attribute` or `exists`, each with `equals`; only attribute conditions carry an `attribute` name. Text is exact `textContent`, including whitespace. Selectors search the main document; frame/shadow targets require observed refs. Target/attribute limits are 1024/256 Unicode code points. |
+| `depends_on` | Legacy strict-policy decision regions. Target policy rejects it with guidance to use explicit conditions. |
+
+Target policy checks the resolved element and declared facts before input, preserving native
+hit testing and the human-control dispatch fence without recapturing the whole VOM on ordinary
+DOM actions. Stable refs identify nodes across supplementary observations; document replacement
+invalidates them, and visual captures keep their own single-use freshness rules. A recycled
+table row is still the same node, so business identity must be an explicit condition.
+Refs also do not freeze a node's role, name or action meaning: a Save button changed in place
+to Delete requires an explicit text/attribute condition when that distinction matters.
+Inferred VOM labels are not automatically treated as DOM text or a frozen semantic fingerprint.
+Conditions are browser-side preconditions, not an atomic transaction with the application server.
+
+Action failures preserve `reason`, `phase`, `effect_state` and recovery guidance; failed conditions
+include target, field, expected and actual values. Unknown outcomes require application reconciliation.
+The daemon and plugin never replace caller receipts or automatically replay a business action.
+Completed tool results survive ordinary page/frame changes and unavailable post-action collection.
+Document or coverage changes still revoke the old context; subsequent actions require a fresh sync.
+In-flight input guards, human intervention, stop and cancellation remain enforced. A completed
+tool result does not by itself prove that the application committed a business transaction.
+See [shared browser control](shared-browser-control.zh-CN.md) for lifecycle details and regressions.
+
 ## Typical tool call
 
-1. Agent runs `bsk click @e1 --tab-id 42 --session ab12`.
+1. Agent uses its sync receipt: `bsk click @e1 --tab-id 42 --session ab12 --context CONTEXT_ID`.
 2. CLI ensures daemon is running, opens UDS, sends one JSON request line.
 3. Daemon resolves session `ab12` → browser client → forwards `tool.click` over WS.
 4. Extension dispatcher validates sandbox rules, invokes CDP via `BrowserDriver`.

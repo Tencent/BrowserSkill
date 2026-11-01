@@ -109,7 +109,14 @@ try {
     await cli(["status"]);
   });
   await withChrome(
-    { executable: chrome, deviceScale: 1, zoom: 1, extensionPath: extension, headless: false },
+    {
+      executable: chrome,
+      deviceScale: 1,
+      zoom: 1,
+      extensionPath: extension,
+      extensionViaCdp: process.env.BSK_DIALOG_LOAD_CDP === "1",
+      headless: false,
+    },
     async (send) => {
       const version = await send("Browser.getVersion");
       const worker = await eventually(async () => {
@@ -137,7 +144,19 @@ try {
         if (baseline) return cli([...args, ...sessionArgs], expectedCode);
         const context = await cli(["cooperate", "sync", ...sessionArgs]);
         assert(context.context_id, JSON.stringify(context));
-        return cli([...args, ...sessionArgs, "--context", context.context_id], expectedCode);
+        assert.equal(context.control_policy, "target");
+        assert(context.observation_id, JSON.stringify(context));
+        return cli(
+          [
+            ...args,
+            ...sessionArgs,
+            "--context",
+            context.context_id,
+            "--observation",
+            context.observation_id,
+          ],
+          expectedCode,
+        );
       };
       const evaluate = (expression, expectedCode = 0) =>
         action(["evaluate", expression], expectedCode);
@@ -439,12 +458,16 @@ try {
         );
         assert(teardownPage, "Fresh session's owned page not found");
         const context = await cli(["cooperate", "sync", ...teardownScope]);
+        assert.equal(context.control_policy, "target");
+        assert(context.context_id && context.observation_id, JSON.stringify(context));
         await cli([
           "evaluate",
           "setTimeout(() => { confirm('Stop first'); prompt('Stop chained'); }, 300); 'scheduled'",
           ...teardownScope,
           "--context",
           context.context_id,
+          "--observation",
+          context.observation_id,
         ]);
         await eventually(async () => {
           const status = await cli(["dialog", "status", ...teardownScope]);

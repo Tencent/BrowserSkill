@@ -39,6 +39,7 @@ import { type ClickOverlayDeps, withClickOverlay } from "./click-overlay";
 import { attachDialogs, markDialogCursor } from "./dialogs";
 import { backendNodeToObject } from "./element-geometry";
 import { rpcError } from "./errors";
+import { FOCUS_CHECK } from "./focus-state";
 import { resolveNodeGeometry, scrollElementAndFramesIntoView } from "./frame-geometry";
 import {
   type CdpRunner,
@@ -246,19 +247,6 @@ export async function resolveBackendNode(
     };
   }
 }
-
-// Check the target's own root, then its hosts: closed shadow roots are not
-// reachable via host.shadowRoot. DOM focus remains meaningful in background tabs.
-const FOCUS_CHECK = `function() {
-  if (!this.isConnected) return false;
-  let element = this;
-  while (element) {
-    const root = element.getRootNode();
-    if (root.activeElement !== element) return false;
-    element = root.host;
-  }
-  return true;
-}`;
 
 const BLUR_TARGET = `function() {
   if (!this.isConnected) throw new Error('blur target is detached');

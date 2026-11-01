@@ -66,6 +66,8 @@ fn misplaced_session_and_tab_flags_report_json_and_position_guidance() {
         vec!["--tab-id", "7", "click", "--session", "s1"],
         vec!["--tab-id=7", "click", "--session", "s1"],
         vec!["tab", "--session", "s1", "list"],
+        vec!["--observation", "tab", "tab", "--session", "s1", "list"],
+        vec!["tab", "--observation", "click", "--session=s1", "list"],
     ] {
         // clap can stop before it reaches --json. Both placements must work.
         for json_first in [true, false] {
@@ -84,6 +86,10 @@ fn misplaced_session_and_tab_flags_report_json_and_position_guidance() {
             let details = error["data"]["details"].as_str().unwrap();
             assert!(details.contains(hint), "{details}");
             assert!(!details.contains("--version"), "{details}");
+            assert!(
+                !details.contains("a similar argument exists: '--observation'"),
+                "{details}"
+            );
         }
     }
 }
@@ -257,6 +263,10 @@ fn human_usage_errors_keep_stderr_and_replace_the_misleading_suggestion() {
         (vec!["--tab-id", "7", "click"], usage("[OPTIONS] <COMMAND>")),
         (
             vec!["tab", "--session", "s1", "list"],
+            usage("tab [OPTIONS] <COMMAND>"),
+        ),
+        (
+            vec!["--context", "tab", "tab", "--session", "s1", "list"],
             usage("tab [OPTIONS] <COMMAND>"),
         ),
     ] {

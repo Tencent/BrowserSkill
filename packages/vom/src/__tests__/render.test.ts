@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { renderVom } from "../render";
+import { prepareObservationRender, renderVom } from "../render";
 import type { VomNode, VomScene } from "../types";
 
 function node(p: Partial<VomNode> & { id: number }): VomNode {
@@ -27,6 +27,44 @@ function scene(nodes: VomNode[]): VomScene {
 function coreRefs(refs: ReturnType<typeof renderVom>["refs"]) {
   return refs.map(({ ref, backendNodeId }) => ({ ref, backendNodeId }));
 }
+
+it("allocates displayed references before rendering without rewriting literal page text", () => {
+  const input = scene([
+    node({
+      id: 1,
+      backendNodeId: 19,
+      tag: "button",
+      role: "button",
+      name: "Keep @e1 in this label",
+    }),
+    node({ id: 2, backendNodeId: 20, tag: "button", role: "button", name: "Save" }),
+  ]);
+  const options = { allocateRef: (n: VomNode) => `e${100 + n.backendNodeId!}` };
+  const full = renderVom(input, options);
+  expect(full.text).toContain('@e119 button "Keep @e1 in this label"');
+  expect(full.refs.map((ref) => ref.ref)).toEqual(["e119", "e120"]);
+  const prepared = prepareObservationRender(input, options);
+  const rows = Array.from({ [Symbol.iterator]: () => prepared.rows });
+  expect(rows.filter((row) => row.ref).map((row) => row.ref!.ref)).toEqual(["e119", "e120"]);
+  expect(rows.map((row) => row.text).join("\n")).toContain('"Keep @e1 in this label"');
+});
+
+it("measures allocated reference names within the token budget", () => {
+  const input = scene(
+    Array.from({ length: 12 }, (_, i) =>
+      node({ id: i + 1, tag: "button", role: "button", name: `Save ${i}` }),
+    ),
+  );
+  const full = renderVom(input, { allocateRef: (n) => `e${100000000 + n.id}` });
+  const bounded = renderVom(input, {
+    allocateRef: (n) => `e${100000000 + n.id}`,
+    maxTokens: 65,
+  });
+  expect(bounded.truncated).toBe(true);
+  expect(bounded.refs.length).toBeGreaterThan(0);
+  expect(bounded.refs.length).toBeLessThan(full.refs.length);
+  expect(full.text.startsWith(bounded.text)).toBe(true);
+});
 
 describe("renderVom single-layer page", () => {
   it.each([

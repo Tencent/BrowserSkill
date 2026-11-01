@@ -57,13 +57,25 @@
         "type": "matrix.ready",
         "timeoutMs": 5000
       },
+      { "action": "sync", "saveAs": "control" },
       { "action": "observe" },
-      { "action": "fill", "selector": "[name=text]", "value": "seeded-agent" },
-      { "action": "select", "selector": "[name=choice]", "values": ["two"] },
+      {
+        "action": "fill",
+        "selector": "[name=text]",
+        "value": "seeded-agent",
+        "contextId": "{control.context_id}"
+      },
+      {
+        "action": "select",
+        "selector": "[name=choice]",
+        "values": ["two"],
+        "contextId": "{control.context_id}"
+      },
       {
         "action": "press",
         "key": "Enter",
-        "selector": "button[type=submit]"
+        "selector": "button[type=submit]",
+        "contextId": "{control.context_id}"
       },
       {
         "action": "wait-site-event",
@@ -71,6 +83,7 @@
         "where": { "path": "/matrix/generated-result" }
       },
       { "action": "wait", "duration": "200ms" },
+      { "action": "sync", "saveAs": "control" },
       { "action": "observe" }
     ]
   }

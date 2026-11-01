@@ -69,7 +69,15 @@ async fn drag_and_step_gate_new_gestures_but_keep_legacy_drags_working() {
                     if click_mode {
                         params["mode"] = "click-move-click".into();
                     }
-                    command.args(["step", "--action", "drag", "--params", &params.to_string()]);
+                    command.args([
+                        "step",
+                        "--policy",
+                        "strict",
+                        "--action",
+                        "drag",
+                        "--params",
+                        &params.to_string(),
+                    ]);
                 } else {
                     command.args(["drag", "@e1", "--to", "@e2"]);
                     if click_mode {

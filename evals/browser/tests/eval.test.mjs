@@ -278,11 +278,11 @@ test("report summary keeps partial verification distinct from full verification"
   assert.equal(rows[0].errors, 1);
 });
 
-test("coverage inventory contains all 29 operations and three manual lanes", () => {
+test("coverage inventory contains all 30 operations and three manual lanes", () => {
   const coverage = buildOperationCoverage(cases);
   const operations = coverage.map(({ operation }) => operation);
-  assert.equal(operations.length, 29);
-  assert.equal(new Set(operations).size, 29);
+  assert.equal(operations.length, 30);
+  assert.equal(new Set(operations).size, 30);
   assert.deepEqual(
     coverage.filter(({ directSmoke }) => !directSmoke).map(({ operation }) => operation),
     ["tabs.borrow", "tabs.return", "assist.request-help"],
@@ -362,7 +362,7 @@ test("CLI accepts pnpm separator and supports suite and tag filters", async () =
     timeoutMs: 5_000,
   });
   assert.equal(coverageResult.exitCode, 0, coverageResult.stderr);
-  assert.equal(JSON.parse(coverageResult.stdout).length, 29);
+  assert.equal(JSON.parse(coverageResult.stdout).length, 30);
 
   const coreResult = await runProcess(
     process.execPath,

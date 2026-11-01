@@ -65,9 +65,13 @@ for drag, step and saved-observation workflows.
 Restart the DSH profile and invoke `/browser-skill` again in existing conversations.
 The six `bsk_*` tool names remain unchanged. Shared control is now enabled for new
 tasks: after initial navigation, call `bsk_session action:sync`, pass its returned
-context identifier as `contextId` for one action, then synchronize again. Human
-edits and changed page evidence can revoke a pending action; synchronize and replan
-instead of repeating the old call.
+control receipt as `contextId`. Target policy is the new sync default and requires
+daemon and extension protocol 1.8 or later. DOM actions reuse the receipt across
+supplementary reads; use `expect` for decision facts such as prices or record IDs.
+Untargeted and visual actions also require the sync's `observationId`. Human
+intervention or navigation revokes control; synchronize and replan instead of repeating
+the old call. Select `policy: "strict"` on the first sync to retain the legacy workflow;
+later ordinary syncs and steps preserve the selected policy.
 Custom tool policies and integrations must allow the new actions they intend to use.
 
 Explicit `saveFull` results remain as JSON files on the CLI machine until deleted;
@@ -154,7 +158,8 @@ is not exposed by this plugin.
 Human/agent collaboration is enabled automatically for new sessions and owned task tabs.
 No `share` call is required. See [cooperation](skill/references/cooperation.md).
 Actions on shared tabs require the `contextId` returned by `sync` or a step's
-`post.context_id`; each context is used once.
+`post.context_id`. Target-policy DOM actions can reuse it; strict-policy contexts
+remain single-use. The plugin never infers context or observation receipts from its cache.
 
 ### Activation failures
 

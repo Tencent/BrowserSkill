@@ -41,6 +41,7 @@ import {
   type SessionContext,
   type SessionManager,
 } from "@/session-manager/manager";
+import type { RefStore } from "@/session-manager/ref-store";
 import type {
   GetHtmlParams,
   GetHtmlResult,
@@ -742,6 +743,8 @@ function attachCapturedSceneAnnotations(
 
 export interface SnapshotDeps {
   onScene?: (scene: VomScene) => void;
+  /** A first policy negotiation publishes refs only after its sync succeeds. */
+  refStore?: RefStore;
   cdp: CdpRunner;
   tabsApi: {
     get(tabId: number): Promise<chrome.tabs.Tab>;
@@ -939,6 +942,7 @@ async function runHoverProbes(
 }
 
 export interface CaptureVomObservationOptions extends VomOptions {
+  refStore?: RefStore;
   onScene?: (scene: VomScene) => void;
   includeVisualFacts?: boolean;
   conditionalSurfaceProbe?: boolean;
@@ -972,6 +976,22 @@ async function buildVomObservation(
   options: CaptureVomObservationOptions,
 ): Promise<CaptureVomObservationResult & { visualOutput?: ObservationOutput }> {
   const { captured, documents: normalizedDocuments } = semanticCapture(facts);
+  const store = options.refStore?.stableRefsEnabled ? options.refStore : undefined;
+  const targets = new Map(normalizedDocuments.map((frame) => [frame.frameId, frame.target]));
+  const renderOptions: VomOptions = {
+    ...options,
+    allocateRef: store
+      ? (node) =>
+          node.visualKey !== undefined
+            ? store.allocateVisualRef()
+            : store.allocateRef({
+                backendNodeId: node.backendNodeId ?? node.id,
+                tabId,
+                frameId: node.frameId,
+                cdpSessionId: node.frameId ? targets.get(node.frameId)?.sessionId : undefined,
+              })
+      : options.allocateRef,
+  };
   throwIfAborted(options.signal, "observation");
   const semanticGraph = buildSemanticGraph({
     documents: normalizedDocuments,
@@ -1043,7 +1063,7 @@ async function buildVomObservation(
       identities,
       captured.rootFrameId ?? "root",
       notices,
-      options,
+      renderOptions,
     );
     return {
       ...projectRecordSafeObservation({
@@ -1061,6 +1081,7 @@ async function buildVomObservation(
   }
   const captureNotice = notices.join("\n");
   const rendered = renderVom(decoratedScene, {
+    allocateRef: renderOptions.allocateRef,
     maxDepth: options.maxDepth,
     maxTokens:
       !captureNotice || options.maxTokens === undefined
@@ -1182,6 +1203,8 @@ async function handleVomObservation(
   const ctxOrErr = lookupSession(manager, params, toolName);
   if (isRpcError(ctxOrErr)) return ctxOrErr;
   const ctx = ctxOrErr;
+  const sessionRefs = ctx.refStore;
+  const refStore = deps.refStore ?? sessionRefs;
   const target = await resolveCdpAccessibleTargetTab(
     manager,
     ctx,
@@ -1217,19 +1240,26 @@ async function handleVomObservation(
           message: "cursor cannot change depth or request hover/debug probes",
         };
       const page = await publishObservationPage(
-        ctx.refStore,
+        refStore,
         deps.cdp,
         target.tabId,
         { cursor, maxTokens: params.max_tokens },
         signal,
       );
       if (isRpcError(page)) return page;
+      if (ctx.refStore !== sessionRefs)
+        return rpcError(
+          "not_found",
+          "ref_not_found",
+          "Control policy changed during observation; observe again",
+        );
       readSucceeded = true;
       return attachDialogs(deps.cdp, target.tabId, dialogCursor, page);
     }
-    clearObservationContinuation(ctx.refStore);
-    const documentRevision = ctx.refStore.documentRevision(target.tabId);
+    clearObservationContinuation(refStore);
+    const documentRevision = sessionRefs.documentRevision(target.tabId);
     const observation = await captureVomObservation(deps.cdp, target.tabId, target.url, {
+      refStore,
       onScene: deps.onScene,
       includeVisualFacts: toolName === "observe",
       maxDepth: params.max_depth,
@@ -1240,16 +1270,22 @@ async function handleVomObservation(
       signal,
     });
     throwIfAborted(signal, toolName);
-    if (ctx.refStore.documentRevision(target.tabId) !== documentRevision) {
+    if (
+      ctx.refStore !== sessionRefs ||
+      sessionRefs.documentRevision(target.tabId) !== documentRevision
+    ) {
       return {
         code: "not_found",
-        message: "Document changed during observation; observe again",
+        message:
+          ctx.refStore !== sessionRefs
+            ? "Control policy changed during observation; observe again"
+            : "Document changed during observation; observe again",
         data: { reason: "ref_not_found" },
       };
     }
     if (observation.visualOutput) {
       const page = await publishObservationPage(
-        ctx.refStore,
+        refStore,
         deps.cdp,
         target.tabId,
         { output: observation.visualOutput },
@@ -1285,7 +1321,7 @@ async function handleVomObservation(
     const targetByFrameId = new Map(
       observation.frames.map((frame) => [frame.frameId, frame.target]),
     );
-    ctx.refStore.replace(
+    refStore.replace(
       observation.refs.map((ref) => {
         const refTarget = ref.frameId ? targetByFrameId.get(ref.frameId) : undefined;
         return [
@@ -1302,7 +1338,7 @@ async function handleVomObservation(
     );
     readSucceeded = true;
     return attachDialogs(deps.cdp, target.tabId, dialogCursor, {
-      observation_id: ctx.refStore.observationId,
+      observation_id: refStore.observationId,
       text: observation.text,
       ref_count: observation.refs.length,
       tab_id: target.tabId,

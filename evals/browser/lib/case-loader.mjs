@@ -63,6 +63,18 @@ function validateWorkflowStep(errors, step, path) {
   if (step.saveAs !== undefined && !ID_PATTERN.test(step.saveAs)) {
     errors.push(`${path}.saveAs must use lowercase kebab-case`);
   }
+  for (const field of ["contextId", "observationId"]) {
+    if (step[field] !== undefined) checkString(errors, step[field], `${path}.${field}`);
+  }
+  if (step.observationId !== undefined && step.contextId === undefined) {
+    errors.push(`${path}.observationId requires contextId`);
+  }
+  if (step.action === "sync") {
+    if (!step.saveAs) errors.push(`${path}.sync requires saveAs`);
+    if (step.contextId !== undefined || step.observationId !== undefined) {
+      errors.push(`${path}.sync returns control receipts and does not accept them`);
+    }
+  }
   if (step.evidence !== undefined && !EVIDENCE_PATTERN.test(step.evidence)) {
     errors.push(`${path}.evidence must be an identifier`);
   }

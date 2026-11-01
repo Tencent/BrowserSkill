@@ -276,6 +276,149 @@ it("forwards only the context explicitly supplied by the caller, never a cached 
   expect(actions[1].args).not.toContain("--context");
 });
 
+it("forwards explicit conditions and observation receipts without replacing them from sync", async () => {
+  const conditions = [
+    { target: "#price", field: "text", equals: ' ￥1,280\n"quoted" $() ' },
+    { target: "@e2", field: "checked", equals: false },
+    { target: "#row", field: "attribute", attribute: "data-record-id", equals: "record-42" },
+    { target: "#row", field: "attribute", attribute: "data-error", equals: null },
+    { target: "#busy", field: "exists", equals: false },
+  ];
+  const { tools, calls } = setup({
+    "session start": START_REPLY("s1"),
+    "cooperate sync": { context_id: "latest", observation_id: "newer-observation" },
+    click: { tab_id: 7 },
+  });
+  await startSession(tools);
+  await tools.get("session.cooperate.sync")!.execute({}, makeExec());
+  await tools.get("interact.click")!.execute(
+    {
+      target: "@e1",
+      contextId: "chosen-control",
+      observationId: "chosen-observation",
+      expect: conditions,
+    },
+    makeExec(),
+  );
+  await tools.get("interact.click")!.execute({ target: "@e1" }, makeExec());
+  const [guarded, plain] = calls.filter((call) => call.args[0] === "click");
+  expect(guarded.args.slice(-6)).toEqual([
+    "--context",
+    "chosen-control",
+    "--observation",
+    "chosen-observation",
+    "--expect",
+    JSON.stringify(conditions),
+  ]);
+  expect(plain.args).not.toContain("--context");
+  expect(plain.args).not.toContain("--observation");
+  expect(plain.args).not.toContain("--expect");
+});
+
+it("does not discard explicit conditions when the caller omits contextId", async () => {
+  const { tools, calls } = setup({ "session start": START_REPLY("s1"), click: { tab_id: 7 } });
+  await startSession(tools);
+  const conditions = [{ target: "#price", field: "value", equals: "12" }];
+  await tools.get("interact.click")!.execute({ target: "@e1", expect: conditions }, makeExec());
+  const command = calls.find((call) => call.args[0] === "click")!.args;
+  expect(command.slice(-2)).toEqual(["--expect", JSON.stringify(conditions)]);
+  expect(command).not.toContain("--context");
+});
+
+it.each([
+  { target: "#price", field: "text", equals: 12 },
+  { target: "#selected", field: "checked", equals: "true" },
+  { target: "#busy", field: "exists", equals: null },
+  { target: "#row", field: "attribute", equals: "42" },
+  { target: "#row", field: "attribute", attribute: " ", equals: null },
+  { target: "#row", field: "value", attribute: "id", equals: "42" },
+  { target: " ", field: "text", equals: "12" },
+  { target: "x".repeat(1025), field: "text", equals: "12" },
+])("rejects malformed action conditions before running the CLI: %j", async (condition) => {
+  const { tools, calls } = setup({});
+  await expect(
+    tools.get("interact.click")!.execute({ target: "@e1", expect: [condition] }, makeExec()),
+  ).rejects.toThrow(/expect/);
+  expect(calls).toHaveLength(0);
+});
+
+it("bounds the number of explicit conditions", async () => {
+  const { tools, calls } = setup({});
+  await expect(
+    tools.get("interact.click")!.execute(
+      {
+        target: "@e1",
+        expect: Array.from({ length: 17 }, () => ({
+          target: "#row",
+          field: "exists",
+          equals: true,
+        })),
+      },
+      makeExec(),
+    ),
+  ).rejects.toThrow("at most 16");
+  expect(calls).toHaveLength(0);
+});
+
+it.each([
+  ["sync", undefined, "auto"],
+  ["enable", undefined, "auto"],
+  ["sync", "target", "target"],
+  ["enable", "target", "target"],
+  ["sync", "strict", "strict"],
+  ["enable", "strict", "strict"],
+])("negotiates policy explicitly for %s (%s)", async (action, policy, expectedPolicy) => {
+  const { tools, calls } = setup({
+    "session start": START_REPLY("s1"),
+    [`cooperate ${action}`]: {
+      context_id: "ctx",
+      control_policy: expectedPolicy === "auto" ? "target" : expectedPolicy,
+    },
+  });
+  await startSession(tools);
+  await tools
+    .get(`session.cooperate.${action}`)!
+    .execute(policy === undefined ? {} : { policy }, makeExec());
+  expect(calls.find((call) => call.args[0] === "cooperate")!.args).toEqual([
+    "cooperate",
+    action,
+    "--session",
+    "s1",
+    "--policy",
+    expectedPolicy,
+  ]);
+});
+
+it("surfaces an older CLI's policy error without retrying in strict mode", async () => {
+  const { tools, calls } = setup({
+    "session start": START_REPLY("s1"),
+    "cooperate sync": {
+      __result: {
+        code: 2,
+        stdout: "",
+        stderr: "error: unexpected argument '--policy' found",
+        timedOut: false,
+        aborted: false,
+      },
+    },
+  });
+  await startSession(tools);
+  await expect(tools.get("session.cooperate.sync")!.execute({}, makeExec())).rejects.toThrow(
+    "unexpected argument '--policy'",
+  );
+  const commands = calls.filter((call) => call.args[0] === "cooperate");
+  expect(commands).toHaveLength(1);
+  expect(commands[0].args).toEqual(["cooperate", "sync", "--session", "s1", "--policy", "auto"]);
+});
+
+it.each(["wait", "status"])("does not negotiate policy through %s", async (action) => {
+  const { tools, calls } = setup({});
+  await expect(
+    tools.get(`session.cooperate.${action}`)!.execute({ policy: "target" }, makeExec()),
+  ).rejects.toThrow("policy requires sync or share");
+  expect(calls).toHaveLength(0);
+});
+
 const EXPECTED_ACTIONS = {
   bsk_session: ["start", "stop", "list", "share", "sync", "wait-user", "cooperation-status"],
   bsk_page: ["navigate", "back", "forward", "reload", "wait", "wait-for-element"],
@@ -359,6 +502,7 @@ describe("gesture and saved observation actions", () => {
         pair,
       );
     expect(call.args).toContain("@e1");
+    expect(call.args).not.toContain("--observation");
     expect(call.options).toMatchObject({ tag: "s1", signal: expect.any(AbortSignal) });
     expect(call.options.timeoutMs).toBeGreaterThanOrEqual(55000);
     expect(tool.isConcurrencySafe?.(args)).toBe(false);
@@ -438,6 +582,8 @@ describe("gesture and saved observation actions", () => {
         "click",
         "--params",
         '{"ref":"e1"}',
+        "--policy",
+        "auto",
         "--until-visible",
         "#ready",
         "--save-full",
@@ -447,6 +593,67 @@ describe("gesture and saved observation actions", () => {
       ]),
     );
     expect(callsForStep[0].options.timeoutMs).toBeGreaterThan(120000);
+  });
+
+  it.each([
+    "target",
+    "strict",
+  ])("forwards an explicit step post-sync policy: %s", async (policy) => {
+    const { tools, calls } = setup({
+      "session start": START_REPLY("s1"),
+      step: {
+        __result: {
+          code: 1,
+          stdout: JSON.stringify(partialStep),
+          stderr: "",
+          timedOut: false,
+          aborted: false,
+        },
+      },
+    });
+    await startSession(tools);
+    await expect(
+      tools
+        .get("interact.step")!
+        .execute({ stepAction: "click", params: '{"ref":"e1"}', policy }, makeExec()),
+    ).rejects.toMatchObject({ code: "BSK_STEP_NEEDS_ATTENTION" });
+    const commands = calls.filter((call) => call.args[0] === "step");
+    expect(commands).toHaveLength(1);
+    expect(commands[0].args).toEqual([
+      "step",
+      "--session",
+      "s1",
+      "--action",
+      "click",
+      "--params",
+      '{"ref":"e1"}',
+      "--policy",
+      policy,
+    ]);
+  });
+
+  it("fails step policy negotiation on an older CLI without a fallback invocation", async () => {
+    const { tools, calls } = setup({
+      "session start": START_REPLY("s1"),
+      step: {
+        __result: {
+          code: 2,
+          stdout: "",
+          stderr: "error: unexpected argument '--policy' found",
+          timedOut: false,
+          aborted: false,
+        },
+      },
+    });
+    await startSession(tools);
+    await expect(
+      tools
+        .get("interact.step")!
+        .execute({ stepAction: "click", params: '{"ref":"e1"}' }, makeExec()),
+    ).rejects.toThrow("unexpected argument '--policy'");
+    const commands = calls.filter((call) => call.args[0] === "step");
+    expect(commands).toHaveLength(1);
+    expect(commands[0].args.slice(-2)).toEqual(["--policy", "auto"]);
   });
 
   it.each([
@@ -548,6 +755,24 @@ describe("gesture and saved observation actions", () => {
   });
 
   it.each([
+    "context_id",
+    "observation_id",
+    "expect",
+  ])("requires step %s in the outer tool fields", async (key) => {
+    const { tools, calls } = setup({});
+    await expect(
+      tools.get("interact.step")!.execute(
+        {
+          stepAction: "click",
+          params: JSON.stringify({ ref: "e1", [key]: key === "expect" ? [] : "receipt" }),
+        },
+        makeExec(),
+      ),
+    ).rejects.toThrow(`${key} must use outer tool fields`);
+    expect(calls).toHaveLength(0);
+  });
+
+  it.each([
     { operation: "session.cooperate.sync", command: "cooperate", args: {} },
     {
       operation: "interact.step",
@@ -622,6 +847,8 @@ describe("gesture and saved observation actions", () => {
     { tabId: 7 },
     { contextId: "old-context" },
     { dependsOn: ["@e1"] },
+    { observationId: "old-observation" },
+    { expect: [{ target: "#price", field: "text", equals: "12" }] },
   ])("does not treat a historical view as live authority: %j", async (args) => {
     const { tools, calls } = setup({});
     await expect(
@@ -632,6 +859,33 @@ describe("gesture and saved observation actions", () => {
 });
 
 describe("tool registration", () => {
+  it("exposes structured conditions and explicit control receipts in the public schemas", () => {
+    const { tools } = setup({});
+    const properties = tools.get("bsk_interact")!.parameters.properties as Record<string, unknown>;
+    expect(properties.expect).toMatchObject({
+      type: "array",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: ["target", "field", "equals"],
+        properties: {
+          field: { enum: ["text", "value", "checked", "attribute", "exists"] },
+          equals: { oneOf: [{ type: "string" }, { type: "boolean" }, { type: "null" }] },
+        },
+      },
+    });
+    expect(properties.observationId).toMatchObject({ type: "string" });
+    expect(properties.policy).toMatchObject({
+      enum: ["auto", "target", "strict"],
+      description: expect.stringContaining("applies only after the action"),
+    });
+    expect(properties.contextId).toMatchObject({
+      description: expect.stringContaining("survives supplementary reads"),
+    });
+    const session = tools.get("bsk_session")!.parameters.properties as Record<string, unknown>;
+    expect(session.policy).toMatchObject({ enum: ["auto", "target", "strict"] });
+  });
+
   it("registers exactly six public schemas with the complete action contract", () => {
     const { tools } = setup({});
     expect([...tools.keys()].sort()).toEqual(Object.keys(EXPECTED_ACTIONS).sort());

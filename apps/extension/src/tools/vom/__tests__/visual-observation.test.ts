@@ -195,6 +195,35 @@ describe("visual observation output", () => {
       ),
     ).toBe(true);
   });
+  it("retains DOM refs between stable pages while expiring visual refs", async () => {
+    const f = fixture(20, 160);
+    f.store.enableStableRefs();
+    const existing = { backendNodeId: 50, tabId: 4, frameId: "top" };
+    const dom = f.store.allocateRef(existing);
+    f.store.replace([[dom, existing]]);
+    f.output.render = prepareObservationRender(f.scene, {
+      allocateRef: () => f.store.allocateVisualRef(),
+    });
+    const first = success(await publishObservationPage(f.store, f.cdp, 4, { output: f.output }));
+    expect(first.next_cursor).toBeDefined();
+    const visuals = [...f.store.entries()]
+      .filter(([, entry]) => entry.kind === "visual-region")
+      .map(([ref]) => ref);
+    expect(visuals.length).toBeGreaterThan(0);
+    const second = success(
+      await publishObservationPage(f.store, f.cdp, 4, {
+        cursor: first.next_cursor,
+      }),
+    );
+    expect(second.text).toContain("earlier DOM refs remain valid; earlier visual refs expire");
+    expect(f.store.resolve(dom)).toBe(50);
+    for (const ref of visuals) expect(f.store.resolveEntry(ref)).toBeNull();
+    const revision = f.store.revision;
+    expect(await publishObservationPage(f.store, f.cdp, 4, { cursor: first.next_cursor })).toEqual(
+      second,
+    );
+    expect(f.store.revision).toBe(revision);
+  });
   it.each(["DOM", "replace", "clear", "tab"])("rejects a cursor after %s changes", async (kind) => {
     const f = fixture(20, 130);
     const first = success(await publishObservationPage(f.store, f.cdp, 4, { output: f.output }));
@@ -445,7 +474,10 @@ describe("visual observation output", () => {
   });
 });
 
-it("observe discovers and registers visual refs from its single production capture; snapshot stays semantic", async () => {
+it.each([
+  false,
+  true,
+])("observe discovers visual refs from one capture; snapshot expires them (stable: %s)", async (stable) => {
   const strings = [
     "#document",
     "HTML",
@@ -468,6 +500,7 @@ it("observe discovers and registers visual refs from its single production captu
     },
   });
   const ctx = await manager.start("test");
+  if (stable) ctx.refStore.enableStableRefs();
   const send = vi.fn(async (_tab: number, method: string, params: Record<string, unknown> = {}) => {
     if (method === "Page.getLayoutMetrics")
       return {
@@ -569,6 +602,12 @@ it("observe discovers and registers visual refs from its single production captu
   expect([...ctx.refStore.entries()].some(([, entry]) => entry.kind === "visual-region")).toBe(
     false,
   );
+  if (stable) {
+    const next = await handleObserve(manager, { session_id: "test" }, deps);
+    expect(next).not.toHaveProperty("code");
+    expect((next as ObserveResult).text).toContain("@e2 canvas [visual:screenshot]");
+    expect(ctx.refStore.resolveEntry("e1")).toBeNull();
+  }
 });
 
 it.each([
@@ -744,6 +783,65 @@ it.each([
     cursor = page.next_cursor;
   }
   expect(seen.size).toBe(35);
+});
+
+it("rejects a continuation whose session store was replaced during validation", async () => {
+  const f = fixture(20, 130);
+  const manager = new SessionManager({
+    agentWindow: {
+      create: async () => ({ windowId: 100, initialTabIds: [4] }),
+      remove: async () => {},
+      ensureActiveTab: async () => 4,
+    },
+  });
+  const ctx = await manager.start("policy-test");
+  const first = success(await publishObservationPage(ctx.refStore, f.cdp, 4, { output: f.output }));
+  expect(first.next_cursor).toBeDefined();
+  let validating!: () => void;
+  const validationStarted = new Promise<void>((resolve) => {
+    validating = resolve;
+  });
+  let release!: () => void;
+  const resume = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const original = f.send.getMockImplementation()!;
+  f.send.mockImplementation(async (tab, method) => {
+    const result = await original(tab, method);
+    if (method === "Runtime.evaluate") {
+      validating();
+      await resume;
+    }
+    return result;
+  });
+  const tab = { id: 4, windowId: 100, url: "http://fixture.test" } as chrome.tabs.Tab;
+  const pending = handleObserve(
+    manager,
+    { session_id: ctx.sessionId, cursor: first.next_cursor },
+    { cdp: f.cdp, tabsApi: { get: async () => tab, query: async () => [tab] } },
+  );
+  await validationStarted;
+  const committed = ctx.refStore.createObservationStore();
+  committed.enableStableRefs();
+  const entry = { backendNodeId: 2000, tabId: 4 };
+  const ref = committed.allocateRef(entry);
+  committed.replace([[ref, entry]]);
+  ctx.refStore = committed;
+  ctx.controlPolicy = "target";
+  const revision = committed.revision;
+  release();
+
+  const result = await pending;
+  expect(result).toMatchObject({
+    code: "not_found",
+    message: "Control policy changed during observation; observe again",
+    data: { reason: "ref_not_found" },
+  });
+  expect(result).not.toHaveProperty("text");
+  expect(ctx.refStore).toBe(committed);
+  expect(committed.revision).toBe(revision);
+  expect([...committed.entries()].map(([key]) => key)).toEqual([ref]);
+  expect(committed.resolve(ref)).toBe(2000);
 });
 
 it("preserves a Canvas containing an active region rather than treating it as background", () => {

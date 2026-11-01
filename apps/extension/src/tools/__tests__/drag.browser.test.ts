@@ -489,8 +489,45 @@ describe.skipIf(!process.env.BSK_DRAG_CHROME)("real browser drag", () => {
       expect(await h.drag({})).toHaveProperty("code");
       expect(h.calls.some((c) => c.params?.type === "mousePressed")).toBe(false);
     }));
-  it("retires a gesture when its document changes and releases its button", async () =>
+  it.each([
+    "target",
+    "strict",
+  ] as const)("%s policy handles a supplementary observation during a drag", async (policy) =>
     withPage(async (h) => {
+      h.ctx.controlPolicy = policy;
+      if (policy === "target") h.ctx.refStore.enableStableRefs();
+      await h.ref("pointer");
+      const observationId = h.ctx.refStore.observationId;
+      h.setHook((method, p) => {
+        if (method === "Input.dispatchMouseEvent" && p?.type === "mousePressed")
+          h.ctx.refStore.replace([]);
+      });
+      const result = await h.drag({ source: { ref: "e1" }, observation_id: observationId });
+      expect(h.ctx.refStore.observationId).not.toBe(observationId);
+      if (policy === "target") {
+        ok(result);
+        expect(await h.evaluate("window.moved.pointer")).toEqual({ dx: 120, dy: 0 });
+        expect(h.calls.some((c) => c.method === "Input.cancelDragging")).toBe(false);
+      } else {
+        expect(result).toMatchObject({
+          code: "cdp_failed",
+          message: "observation or document changed during drag",
+          data: { effect_state: "unknown" },
+        });
+        expect(await h.evaluate("window.moved.pointer")).toBeUndefined();
+        expect(h.calls.filter((c) => c.params?.type === "mouseMoved" && c.params.buttons)).toEqual(
+          [],
+        );
+      }
+      expect(h.calls.filter((c) => c.params?.type === "mouseReleased")).toHaveLength(1);
+    }));
+  it.each([
+    "target",
+    "strict",
+  ] as const)("%s policy retires a gesture when its document changes and releases its button", async (policy) =>
+    withPage(async (h) => {
+      h.ctx.controlPolicy = policy;
+      if (policy === "target") h.ctx.refStore.enableStableRefs();
       h.setHook((method, p) => {
         if (method === "Input.dispatchMouseEvent" && p?.type === "mousePressed")
           h.ctx.refStore.invalidateTab(4);
