@@ -26,11 +26,8 @@ pub(crate) async fn accept<S: AsyncRead + AsyncWrite + Unpin>(
             .as_ref()
             .and_then(|p| p.get("version"))
             .and_then(|v| v.as_str());
-        let capable = version
-            .and_then(|v| semver::Version::parse(v).ok())
-            .is_some_and(|v| v >= semver::Version::new(0, 4, 0));
-        state.record_unpaired(version, capable);
         if !local.mode().accepts_legacy() {
+            state.record_unpaired(version);
             reply(
                 ws,
                 &request.id,
@@ -71,7 +68,9 @@ pub(crate) async fn accept<S: AsyncRead + AsyncWrite + Unpin>(
     let probe = Probe::parse(&first)?;
     let hello = probe.params.local_auth;
     let Some(initial) = local.store.select(&hello.credentials) else {
-        state.record_unpaired(None, true);
+        if !local.mode().accepts_legacy() {
+            state.record_unpaired(None);
+        }
         challenge(
             ws,
             &probe.id,
@@ -306,6 +305,15 @@ async fn durable_commit(
     txn: bsk_protocol::local_auth::Bytes<16>,
     instance: String,
 ) -> Result<()> {
+    // Publish the paired identity before another unverified registration can
+    // claim it. Reuse the gate already shared by registration and revocation.
+    let _registry = state
+        .local_auth
+        .lifecycle
+        .registry_gate
+        .clone()
+        .lock_owned()
+        .await;
     let local = state.local_auth.clone();
     let replaced =
         tokio::task::spawn_blocking(move || local.store.commit(&id, txn, &instance)).await??;

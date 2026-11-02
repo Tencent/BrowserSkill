@@ -90,10 +90,7 @@ impl DaemonState {
 }
 
 impl DaemonState {
-    pub fn record_unpaired(&self, version: Option<&str>, pairing_capable: bool) {
-        if !pairing_capable && self.local_auth.mode() == super::local_auth::LocalAuthMode::Warn {
-            return;
-        }
+    pub fn record_unpaired(&self, version: Option<&str>) {
         let extension_version = version
             .and_then(|v| semver::Version::parse(v).ok())
             .map(|v| v.to_string());
@@ -109,6 +106,9 @@ impl DaemonState {
         ));
     }
     pub fn recent_unpaired(&self) -> Option<bsk_protocol::system::UnpairedAttempt> {
+        if self.local_auth.mode().accepts_legacy() {
+            return None;
+        }
         self.last_unpaired_attempt
             .lock()
             .unwrap()
