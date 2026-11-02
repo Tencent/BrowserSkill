@@ -1,3 +1,4 @@
+import { createRandomUuid } from "@/lib/random-uuid";
 import {
   markRecordingDocument,
   type RecordingDocumentMarker,
@@ -67,7 +68,7 @@ export class RecordFrameAgent {
   async #start(
     message: RecordFrameStartMessage,
   ): Promise<{ ok: true } | { ok: false; error: string }> {
-    const producerId = crypto.randomUUID();
+    const producerId = createRandomUuid();
     const root = await waitForDocumentElement();
     if (this.#disposed) return { ok: false, error: "recording document is disposed" };
     const marker = markRecordingDocument(producerId, root);

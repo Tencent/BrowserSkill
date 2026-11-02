@@ -5,11 +5,18 @@
  * the event allowlist lives in dsh-api-remotes), so the plugin serves its
  * observation channel through the documented `webServer` route seam instead:
  *
- *   GET  /bsk-observation/state      → { sessions, available }
- *   GET  /bsk-observation/events     → SSE stream of ObservationEvent
+ *   GET  /bsk-observation/state      → one-time { sessions, available } read
+ *   GET  /bsk-observation/events     → SSE snapshot, then ObservationEvent increments
+ *                                    (on every connection, including reconnects)
+ *                                    ?thumbnails=0: state only; =1: request screenshots
+ *                                    Omitted parameter defaults to screenshots.
  *   POST /bsk-observation/interrupt  → body {sessionId?} → {interrupted: boolean}
  *   POST /bsk-observation/stop       → body {sessionId} → {stopped: boolean}
  *   GET  /bsk-observation/thumbnail/<attachmentId> → image bytes
+ *
+ * Live clients initialize/resynchronize from the SSE snapshot; a separate
+ * /state read has no ordering guarantee relative to the stream and does not
+ * request screenshots. Closing an SSE connection releases its screenshot demand.
  *
  * Routes exist only when a webServer service is mounted (web composition);
  * headless deployments skip registration entirely.
@@ -18,6 +25,7 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { Context } from "@deepseek-ai/cordis";
 import type { ObservationService } from "./observation";
+import type { SessionStarts } from "./session-starts";
 
 /** Structural view of the dsh-host-webserver route seam. */
 interface WebServerLike {
@@ -94,11 +102,13 @@ function fenceRejected(req: IncomingMessage, res: ServerResponse): boolean {
 export function registerObservationRoutes(
   ctx: Context,
   observation: ObservationService,
+  lifecycle: Pick<SessionStarts, "stop">,
 ): () => void {
   const webServer = ctx.get("webServer") as WebServerLike | undefined;
   if (webServer === undefined) {
     return () => {};
   }
+  const streams = new Set<() => void>();
   const disposers = [
     webServer.register({
       kind: "exact",
@@ -129,14 +139,42 @@ export function registerObservationRoutes(
           "cache-control": "no-cache",
           connection: "keep-alive",
         });
-        const unsubscribe = observation.subscribe((event) => {
-          res.write(`data: ${JSON.stringify(event)}\n\n`);
-        });
-        const heartbeat = setInterval(() => res.write(": heartbeat\n\n"), SSE_HEARTBEAT_MS);
-        res.on("close", () => {
+        const thumbnails =
+          new URL(req.url ?? "/", "http://localhost").searchParams.get("thumbnails") !== "0";
+        let unsubscribe: (() => void) | undefined;
+        let heartbeat: ReturnType<typeof setInterval> | undefined;
+        let closed = false;
+        const close = () => {
+          if (closed) return;
+          closed = true;
           clearInterval(heartbeat);
-          unsubscribe();
-        });
+          unsubscribe?.();
+          streams.delete(close);
+          res.end();
+        };
+        const write = (data: string) => {
+          if (closed) return;
+          try {
+            res.write(data);
+          } catch {
+            close();
+          }
+        };
+        streams.add(close);
+        res.on("close", close);
+        res.on("error", close);
+        try {
+          unsubscribe = observation.subscribe(
+            (event) => {
+              write(`data: ${JSON.stringify(event)}\n\n`);
+            },
+            { thumbnails },
+          );
+          if (closed) unsubscribe();
+          else heartbeat = setInterval(() => write(": heartbeat\n\n"), SSE_HEARTBEAT_MS);
+        } catch {
+          close();
+        }
       },
     }),
     webServer.register({
@@ -196,8 +234,8 @@ export function registerObservationRoutes(
             sendJson(res, 400, { error: "sessionId required" });
             return;
           }
-          void observation.stopSession(sessionId).then(
-            (stopped) => sendJson(res, 200, { stopped }),
+          void lifecycle.stop({ sessionId }).then(
+            () => sendJson(res, 200, { stopped: true }),
             () => sendJson(res, 500, { error: "stop failed" }),
           );
         });
@@ -228,6 +266,7 @@ export function registerObservationRoutes(
     }),
   ];
   return () => {
+    for (const close of streams) close();
     for (const dispose of disposers) dispose();
   };
 }

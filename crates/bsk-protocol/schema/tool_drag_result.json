@@ -1,0 +1,116 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "DragResult",
+  "type": "object",
+  "required": [
+    "source",
+    "tab_id",
+    "target"
+  ],
+  "properties": {
+    "dialogs": {
+      "description": "Input delivery completed; application acceptance must be observed separately.",
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/JavaScriptDialogInfo"
+      }
+    },
+    "source": {
+      "$ref": "#/definitions/DragPoint"
+    },
+    "tab_id": {
+      "type": "integer",
+      "format": "int64"
+    },
+    "target": {
+      "$ref": "#/definitions/DragPoint"
+    }
+  },
+  "definitions": {
+    "DragPoint": {
+      "type": "object",
+      "required": [
+        "x",
+        "y"
+      ],
+      "properties": {
+        "x": {
+          "type": "number",
+          "format": "double"
+        },
+        "y": {
+          "type": "number",
+          "format": "double"
+        }
+      }
+    },
+    "JavaScriptDialogHandledAction": {
+      "description": "How the extension resolved the dialog so CDP could continue.",
+      "type": "string",
+      "enum": [
+        "accepted",
+        "dismissed"
+      ]
+    },
+    "JavaScriptDialogInfo": {
+      "description": "One observed + handled JavaScript dialog during a tool call.",
+      "type": "object",
+      "required": [
+        "handled",
+        "message",
+        "sequence",
+        "tab_id",
+        "type"
+      ],
+      "properties": {
+        "default_prompt": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "handled": {
+          "$ref": "#/definitions/JavaScriptDialogHandledAction"
+        },
+        "has_browser_handler": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "message": {
+          "type": "string"
+        },
+        "sequence": {
+          "description": "Monotonic per-tab sequence for ordering within a session.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "tab_id": {
+          "type": "integer",
+          "format": "int64"
+        },
+        "type": {
+          "$ref": "#/definitions/JavaScriptDialogType"
+        },
+        "url": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "JavaScriptDialogType": {
+      "description": "Native JS dialog kind reported by CDP.",
+      "type": "string",
+      "enum": [
+        "alert",
+        "confirm",
+        "prompt",
+        "beforeunload"
+      ]
+    }
+  }
+}

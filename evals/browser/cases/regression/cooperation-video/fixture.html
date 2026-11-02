@@ -1,0 +1,157 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>BrowserSkill looping video regression</title>
+<style>
+  body { margin: 40px; font: 18px system-ui; background: #f6f8fb; color: #203040; }
+  main { max-width: 800px; }
+  video { display: block; width: 420px; height: 236px; background: #172030; margin: 20px 0; }
+  form, aside { padding: 20px; border: 1px solid #ccd6e0; margin: 16px 0; background: white; }
+  button { font: inherit; padding: 12px 28px; }
+  input { width: 300px; }
+  .phase-a, .phase-b { color: #203040; }
+</style>
+<main>
+  <h1>Looping preview</h1>
+  <p>Local regression fixture. Space or the Pause button pauses the video.</p>
+  <video id="preview" autoplay muted loop playsinline aria-label="Looping video preview"></video>
+  <form id="controls" aria-label="Player controls">
+    <button id="pause" type="button">Pause preview</button>
+  </form>
+  <aside id="dynamic" aria-label="Playback information"></aside>
+</main>
+<script>
+  const query = new URLSearchParams(location.search);
+  const variant = query.get('variant') || 'pixels';
+  const interval = Number(query.get('interval') || 80);
+  const video = document.querySelector('#preview');
+  if (query.get('shadow') === 'closed') {
+    const host = document.createElement('div');
+    video.before(host);
+    host.attachShadow({mode: 'closed'}).append(video);
+  }
+  const dynamic = document.querySelector('#dynamic');
+  const stats = { variant, keydowns: 0, clicks: 0, pauseCalls: 0, ticks: 0, presentedFrames: 0 };
+  if (variant === 'text') dynamic.innerHTML = '<span id="clock">Playback tick 0</span>';
+  if (['range', 'submitted-range', 'form-range', 'combined', 'source-range', 'src-range', 'same-region', 'same-region-field'].includes(variant)) dynamic.innerHTML = '<label>Playback progress <input id="progress" type="range" min="0" max="10000" value="0"></label>';
+  if (variant === 'business-range') dynamic.innerHTML = '<label>Order amount <input id="progress" type="range" min="0" max="10000" value="0"></label>';
+  let progress = document.querySelector('#progress');
+  if (variant === 'submitted-range') progress.name = 'order_amount';
+  if (variant === 'form-range') {
+    const form = document.createElement('form'); form.id = 'order-form'; dynamic.append(form); form.append(progress.closest('label') || progress);
+  }
+  if (variant === 'combined') dynamic.insertAdjacentHTML('beforeend', '<label>Order total <input id="order" value="100"></label>');
+  if (variant === 'field' || variant === 'focus') dynamic.innerHTML = '<label>Order total <input id="order" value="100"></label>';
+  if (variant === 'cosmetic') dynamic.innerHTML = '<span id="cosmetic" class="phase-a">Preview information</span>';
+  if (['learned-price', 'focused-price'].includes(variant)) dynamic.innerHTML = '<form aria-label="Purchase"><span id="price">Order total 100</span><button id="buy" type="button">Buy</button></form>';
+  stats.purchases = 0;
+  if (variant === 'focused-price') {
+    document.querySelector('#buy').addEventListener('click', () => stats.purchases++);
+    document.querySelector('#buy').focus();
+  }
+  if (variant.startsWith('same-region')) {
+    const controls = document.querySelector('#controls');
+    const region = document.createElement('section');
+    region.id = 'player';
+    region.setAttribute('aria-label', 'Video player');
+    controls.before(region);
+    const timeline = progress;
+    region.append(video, document.querySelector('#pause'), timeline.closest('label') || timeline);
+    controls.remove();
+    if (variant === 'same-region-field') region.insertAdjacentHTML('beforeend', '<label>Order total <input id="order" value="100"></label>');
+  }
+  // Preserve the accessible name while removing the form's own visible text.
+  // This makes role=none/presentation forms actually disappear from the VOM.
+  if (query.has('formRole')) {
+    const form = document.createElement(query.get('nonForm') === 'true' ? 'div' : 'form');
+    form.id = 'order-form';
+    form.setAttribute('role', query.get('formRole') === 'external' ? 'none' : query.get('formRole'));
+    if (query.get('formContents') === 'true') form.style.display = 'contents';
+    const label = progress.closest('label');
+    progress.setAttribute('aria-label', query.get('businessLabel') === 'true' ? 'Order amount' : 'Playback progress');
+    dynamic.append(form);
+    if (query.get('formRole') === 'external') { progress.setAttribute('form', form.id); dynamic.append(progress); }
+    else form.append(progress);
+    label?.remove();
+    if (query.get('named') === 'true') progress.name = 'start_time';
+  }
+  if (query.get('customProgress') === 'true') {
+    const widget = document.createElement('div');
+    widget.id = 'progress'; widget.setAttribute('role', 'slider'); widget.tabIndex = 0;
+    widget.setAttribute('aria-label', 'Playback progress');
+    widget.setAttribute('aria-valuenow', '0'); widget.setAttribute('aria-valuemin', '0'); widget.setAttribute('aria-valuemax', '10000');
+    widget.style.cssText = 'width:300px;height:20px;background:#ccd6e0';
+    progress.replaceWith(widget); progress = widget;
+  }
+  if (query.has('controlShadow')) {
+    const container = progress.closest('form') || progress.closest('label') || progress;
+    const host = document.createElement('div'); dynamic.append(host);
+    host.attachShadow({mode: query.get('controlShadow')}).append(video, container);
+    if (query.get('shadowHostForm') === 'true') {
+      const outer = document.createElement('form'); outer.id = 'outer-form'; outer.setAttribute('role', 'none');
+      host.before(outer); outer.append(host);
+    }
+  }
+  const pause = () => { stats.pauseCalls++; video.pause(); };
+  document.querySelector('#pause').addEventListener('click', () => { stats.clicks++; pause(); });
+  document.addEventListener('keydown', event => {
+    if (variant === 'focused-price' && event.key === 'Enter') { stats.keydowns++; return; }
+    if (event.code !== 'Space' && event.key !== ' ') return;
+    event.preventDefault();
+    stats.keydowns++;
+    pause();
+  });
+  window.tickNoise = () => {
+      if (video.paused) return;
+      stats.ticks++;
+      if (variant === 'text') document.querySelector('#clock').textContent = `Playback tick ${stats.ticks}`;
+      if (progress instanceof HTMLInputElement) progress.value = String(stats.ticks % 10000);
+      else if (progress) progress.setAttribute('aria-valuenow', String(stats.ticks % 10000));
+      if (['field', 'combined', 'same-region-field'].includes(variant)) document.querySelector('#order').value = String(100 + stats.ticks);
+      if (variant === 'body-recipient') { document.body.tabIndex = 0; document.body.setAttribute('role', 'button'); }
+      if (variant === 'focus') document.querySelector('#order').focus();
+      if (variant === 'cosmetic') document.querySelector('#cosmetic').className = stats.ticks % 2 ? 'phase-a' : 'phase-b';
+      if (['learned-price', 'focused-price'].includes(variant)) document.querySelector('#price').firstChild.nodeValue = `Order total ${100 + stats.ticks}`;
+      if (variant === 'source-range' || variant === 'source-only') {
+        video.querySelector('source').src = '/preview.webm?version=2';
+        video.load();
+        void video.play();
+      }
+      if (variant === 'src-range') { video.src = '/preview.webm?version=2'; void video.play(); }
+  };
+  window.startNoise = () => {
+    if (!window.noiseTimer) window.noiseTimer = setInterval(window.tickNoise, interval);
+  };
+  window.report = () => ({
+    ...stats,
+    ready: window.fixtureReady === true,
+    decodedFrames: video.getVideoPlaybackQuality().totalVideoFrames,
+    readyState: video.readyState,
+    networkState: video.networkState,
+    error: video.error?.message,
+    visibility: document.visibilityState,
+    paused: video.paused,
+    loop: video.loop,
+    currentTime: video.currentTime,
+    duration: video.duration,
+    currentSrc: video.currentSrc,
+    sourceSrc: video.querySelector('source')?.src,
+    focused: document.activeElement?.id || document.activeElement?.tagName,
+    clock: document.querySelector('#clock')?.textContent,
+    progress: progress instanceof HTMLInputElement ? progress.value : progress?.getAttribute('aria-valuenow'),
+    formOwner: (progress instanceof HTMLInputElement ? progress.form : progress?.closest('form'))?.id || null,
+    progressLabel: progress?.getAttribute('aria-label') || progress?.labels?.[0]?.textContent?.trim(),
+    controlName: progress?.getAttribute('name') || '',
+    progressShadow: progress?.getRootNode() instanceof ShadowRoot,
+    order: document.querySelector('#order')?.value,
+    price: document.querySelector('#price')?.textContent,
+  });
+  (async () => {
+    // A bundled synthetic WebM avoids depending on live MediaRecorder scheduling.
+    if (variant === 'source-range' || variant === 'source-only') video.innerHTML = '<source src="/preview.webm?version=1" type="video/webm">';
+    else video.src = '/preview.webm';
+    const frame = () => { stats.presentedFrames++; video.requestVideoFrameCallback(frame); };
+    video.requestVideoFrameCallback(frame);
+    await video.play();
+    window.fixtureReady = true;
+  })().catch(error => { window.fixtureError = String(error.stack || error); });
+</script>

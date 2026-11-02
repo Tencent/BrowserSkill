@@ -6,7 +6,8 @@ use std::sync::Arc;
 use tokio::task::JoinHandle;
 
 use super::abort::AbortRegistry;
-use super::browsers::BrowserRegistry;
+use super::browsers::{BrowserId, BrowserRegistry};
+use super::file_transfer::TransferRegistry;
 use super::inflight::ToolInflightRegistry;
 use super::ipc::IpcHandle;
 use super::queue::ToolQueueRegistry;
@@ -16,8 +17,8 @@ use super::start::DaemonConfig;
 use super::ws::WsHandle;
 
 pub const DAEMON_VERSION: &str = env!("CARGO_PKG_VERSION");
-pub const PROTOCOL_VERSION: &str = "1.1";
-/// Lowest **protocol** version peers must speak (e.g. `"1.0"`).
+pub const PROTOCOL_VERSION: &str = "1.8";
+/// Base wire compatibility. New interaction semantics are checked per operation.
 pub const MIN_COMPATIBLE_PROTOCOL: &str = "1.0";
 /// Legacy app-semver floor used only when `HandshakeResult.min_compatible_peer`
 /// is emitted for old extensions. New code ignores this on read.
@@ -26,9 +27,11 @@ pub const SERVER_NAME: &str = "browser-skill-daemon";
 
 #[derive(Debug)]
 pub struct DaemonState {
+    pub audit: Arc<super::audit::AuditStore>,
     pub config: DaemonConfig,
     pub browsers: Arc<BrowserRegistry>,
     pub sessions: Arc<SessionRegistry>,
+    pub session_requests: super::session_requests::SessionRequests,
     /// Per-session serial dispatch queues for `tool.*` RPCs (M6.5,
     /// design §5). Populated by `start_session`, drained by
     /// `stop_session` / browser disconnect.
@@ -43,6 +46,7 @@ pub struct DaemonState {
     /// translated into a WS-side cancel frame addressed to the
     /// matching browser (M10.2).
     pub tool_inflight: Arc<ToolInflightRegistry>,
+    pub dialog_operations: Arc<super::dialog_operations::DialogOperations>,
     /// Per-session "pending interrupt" signal. The WS event handler
     /// `mark`s the session when the user clicks the agent-window
     /// mask's stop button; the IPC tool-dispatch handler
@@ -51,12 +55,47 @@ pub struct DaemonState {
     /// `SessionRegistry` because the signal is a transient runtime
     /// control state.
     pub session_interrupts: Arc<SessionInterruptRegistry>,
+    /// Operation-scoped local file staging. The extension only sees paths
+    /// minted here; agent-facing RPCs use opaque transfer ids.
+    pub transfers: Arc<TransferRegistry>,
+}
+
+impl DaemonState {
+    /// Forget every session owned by `browser_id`: drop its queue and
+    /// interrupt state, release its transfers, clear its dialog
+    /// operations, and tombstone why the ids ended so later dispatches
+    /// answer "browser disconnected" instead of a bare not-found.
+    ///
+    /// Shared by every browser-driven purge (maintainer review of
+    /// issue #465): the reconnect-time stale purge, the ordinary socket
+    /// cleanup, and the liveness-timeout reaper.
+    pub fn purge_sessions_of_browser(
+        &self,
+        browser_id: &BrowserId,
+        end_reason: &'static str,
+        note: &'static str,
+    ) {
+        for session in self.sessions.purge_browser(browser_id) {
+            self.tool_queues.remove(&session.id);
+            self.session_interrupts.drop_session(&session.id);
+            self.transfers.release_session(&session.id.0);
+            self.dialog_operations.remove_session(&session.id.0);
+            self.sessions.remember_end(&session.id, end_reason);
+            tracing::debug!(session = %session.id, note);
+        }
+    }
 }
 
 impl DaemonState {
     pub fn new(config: DaemonConfig) -> Self {
+        if crate::cli::human_loop::legacy_help_override_requested() {
+            crate::cli::interaction_policy::warn_legacy_override("BSK_REQUEST_HELP=off");
+        }
         let browsers = Arc::new(BrowserRegistry::new());
-        let sessions = Arc::new(SessionRegistry::new());
+        let audit = Arc::new(super::audit::AuditStore::new(
+            super::paths::bsk_home().ok().map(|path| path.join("audit")),
+        ));
+        let sessions = Arc::new(SessionRegistry::with_audit(Arc::clone(&audit)));
         let tool_inflight = Arc::new(ToolInflightRegistry::new());
         let tool_queues = Arc::new(ToolQueueRegistry::new(
             Arc::clone(&browsers),
@@ -64,14 +103,19 @@ impl DaemonState {
         ));
         let abort_registry = Arc::new(AbortRegistry::new());
         let session_interrupts = Arc::new(SessionInterruptRegistry::new());
+        let transfers = Arc::new(TransferRegistry::new().expect("initialise transfer staging"));
         Self {
+            audit,
             config,
             browsers,
             sessions,
+            session_requests: Default::default(),
             tool_queues,
             abort_registry,
             tool_inflight,
+            dialog_operations: Default::default(),
             session_interrupts,
+            transfers,
         }
     }
 }

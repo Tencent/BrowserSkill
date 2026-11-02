@@ -1,4 +1,5 @@
-import { coverage, detectBlockingLayer } from "./layers";
+import { coverage, detectBlockingLayer, spansViewport } from "./layers";
+import { estimateLineTokens, estimateTokens } from "./tokens";
 import type {
   ActiveScopeBlock,
   BlockingLayer,
@@ -51,6 +52,7 @@ const STRUCTURAL_ROLES = new Set([
   "figure",
   "form",
   "grid",
+  "gridcell",
   "group",
   "heading",
   "iframe",
@@ -74,6 +76,10 @@ const STRUCTURAL_ROLES = new Set([
   "tree",
   "webarea",
 ]);
+
+export function isVomStructuralRole(role: string | undefined): boolean {
+  return STRUCTURAL_ROLES.has(role?.toLowerCase() ?? "");
+}
 
 const SENSITIVE_MASK = "•••";
 const DEFAULT_MAX_DEPTH = Number.POSITIVE_INFINITY;
@@ -117,10 +123,6 @@ const WEAK_ACTION_LABELS = new Set([
 ]);
 
 const ACTIVE_REGION_POSITIONS = new Set(["fixed", "absolute", "sticky"]);
-
-function estimateTokens(text: string): number {
-  return Math.ceil(text.length / 4);
-}
 
 function cleaned(value: string | undefined): string | undefined {
   const trimmed = value?.replace(/\s+/g, " ").trim();
@@ -187,22 +189,74 @@ function isUrlBearingStructuralAction(node: VomNode): boolean {
   return name !== undefined && isProbableNavigationTarget(name);
 }
 
+/** Hints describe observed evidence, not a promise that a drop will be accepted. */
+function dragHint(node: VomNode): string | undefined {
+  if (
+    node.disabled ||
+    node.inert ||
+    node.pointerEvents === "none" ||
+    ["statictext", "inlinetextbox"].includes(normalizedRole(node))
+  )
+    return undefined;
+  if (node.dragHint !== undefined) return node.dragHint || undefined;
+  if (node.attrs?.draggable?.toLowerCase() === "true") return "draggable";
+  if (node.attrs?.ondrop !== undefined || node.attrs?.ondragover !== undefined)
+    return "drop-target";
+  if (["grab", "grabbing", "move"].includes(node.cursor ?? "") || node.cursor?.endsWith("-resize"))
+    return "drag-handle";
+  return undefined;
+}
+
+/** Selection evidence shared by rendered hints and observation freshness checks. */
+export function selectionMarker(node: VomNode): string | undefined {
+  const attrs = node.attrs ?? {};
+  const aria = attrs["aria-selected"]?.toLowerCase();
+  if (aria === "true" || aria === "false") return aria === "true" ? "selected" : "unselected";
+  // Custom styling is only a hint on controls, never semantic proof on wrappers.
+  if (!isSemanticReferenceNode(node) && !hasRecoveryHandler(node)) return undefined;
+  if (attrs["data-selected"] === "true" || attrs["data-state"] === "selected")
+    return "selected:data";
+  if (attrs["data-selected"] === "false" || attrs["data-state"] === "unselected")
+    return "unselected:data";
+  if (attrs.class?.split(/\s+/).some((token) => token === "selected" || token === "is-selected"))
+    return "selected:class";
+  return undefined;
+}
+
+function indexedItemName(node: VomNode): string | undefined {
+  const index = node.attrs?.["data-index"];
+  return hasRecoveryHandler(node) && index !== undefined && /^\d{1,9}$/.test(index)
+    ? `item ${index}`
+    : undefined;
+}
+
 function shouldRender(node: VomNode): boolean {
+  if (dragHint(node)) return true;
   if (!node.role) return false;
 
   const role = normalizedRole(node);
   if (SKIP_ROLES.has(role)) return false;
   if (INTERACTIVE_ROLES.has(role)) return true;
-  if (STRUCTURAL_ROLES.has(role)) return true;
+  if (isVomStructuralRole(role)) return true;
 
   return cleaned(node.name) !== undefined;
 }
 
+function isSemanticReferenceNode(node: VomNode): boolean {
+  return (
+    node.referenceable !== false &&
+    (INTERACTIVE_ROLES.has(normalizedRole(node)) || isUrlBearingStructuralAction(node))
+  );
+}
+
 export function isVomReferenceNode(node: VomNode): boolean {
-  return INTERACTIVE_ROLES.has(normalizedRole(node)) || isUrlBearingStructuralAction(node);
+  return (
+    isSemanticReferenceNode(node) || (node.referenceable !== false && dragHint(node) !== undefined)
+  );
 }
 
 function hasRecoveryHandler(node: VomNode): boolean {
+  if (node.clickable) return true;
   const attrs = node.attrs ?? {};
   return RECOVERY_HANDLER_ATTRS.some((key) => Object.prototype.hasOwnProperty.call(attrs, key));
 }
@@ -216,17 +270,35 @@ function isFocusable(node: VomNode): boolean {
 
 function isContentEditable(node: VomNode): boolean {
   const contentEditable = node.attrs?.contenteditable?.toLowerCase();
-  return contentEditable === "true" || contentEditable === "plaintext-only";
+  return (
+    contentEditable === "" || contentEditable === "true" || contentEditable === "plaintext-only"
+  );
 }
 
-function iconKeyword(value: string | undefined): string | undefined {
-  const cleanedValue = cleaned(value);
-  if (!cleanedValue) return undefined;
-  const last = cleanedValue
-    .split(/[#/.\s:_-]+/)
+const ICON_REFERENCE_MARKERS = new Set(["glyph", "icon", "icons", "symbol"]);
+const ICON_REFERENCE_DECORATORS = new Set(["fill", "filled", "line", "outline", "outlined"]);
+
+function iconReferenceName(value: string | undefined): string | undefined {
+  const reference = cleaned(value);
+  if (!reference) return undefined;
+  const fragment = reference.includes("#") ? reference.slice(reference.lastIndexOf("#") + 1) : "";
+  const tokens = (fragment || reference)
+    ?.split(/[#/.\s:_-]+/)
     .filter(Boolean)
-    .pop();
-  return last && /^[a-z][a-z0-9_-]{1,32}$/i.test(last) ? last.toLowerCase() : undefined;
+    .map((token) => token.toLowerCase());
+  if (tokens.length === 0) return undefined;
+  if (fragment) {
+    const semanticTokens = tokens.filter(
+      (token) => !ICON_REFERENCE_MARKERS.has(token) && !ICON_REFERENCE_DECORATORS.has(token),
+    );
+    return semanticTokens.length > 0 ? semanticTokens.join(" ") : undefined;
+  }
+  const marker = tokens.findLastIndex((token) => ICON_REFERENCE_MARKERS.has(token));
+  if (marker < 0) return undefined;
+  const semanticTokens = tokens
+    .slice(marker + 1)
+    .filter((token) => !ICON_REFERENCE_DECORATORS.has(token));
+  return semanticTokens.length > 0 ? semanticTokens.join(" ") : undefined;
 }
 
 function iconHintFromSubtree(
@@ -238,12 +310,12 @@ function iconHintFromSubtree(
   for (const child of children.get(node.id) ?? []) {
     const attrs = child.attrs ?? {};
     const hint =
-      iconKeyword(attrs["aria-label"]) ??
-      iconKeyword(attrs.title) ??
-      iconKeyword(attrs.href) ??
-      iconKeyword(attrs["xlink:href"]) ??
-      iconKeyword(attrs.class) ??
-      iconKeyword(child.text);
+      cleaned(attrs["aria-label"]) ??
+      cleaned(attrs.title) ??
+      (normalizedRole(child) === "img" ? cleaned(child.name) : undefined) ??
+      (["img", "svg", "use"].includes(normalizedTag(child))
+        ? (iconReferenceName(attrs.href) ?? iconReferenceName(attrs["xlink:href"]))
+        : undefined);
     if (hint) return hint;
     const nested = iconHintFromSubtree(child, children, depth + 1);
     if (nested) return nested;
@@ -261,7 +333,8 @@ function recoveryCandidateName(
     cleaned(node.name) ??
     cleaned(node.text) ??
     cleaned(node.nearbyText) ??
-    (children ? iconHintFromSubtree(node, children) : undefined)
+    (children ? iconHintFromSubtree(node, children) : undefined) ??
+    indexedItemName(node)
   );
 }
 
@@ -269,6 +342,7 @@ function recoveredRole(
   node: VomNode,
   children?: Map<number | null, VomNode[]>,
 ): string | undefined {
+  const currentRole = normalizedRole(node);
   const explicitRole = node.attrs?.role?.toLowerCase() ?? "";
   const hasHandler = hasRecoveryHandler(node);
   const focusable = isFocusable(node);
@@ -290,7 +364,9 @@ function recoveredRole(
       : "button";
   }
   if (hasHandler && hasName) return "button";
-  if (node.cursor === "pointer" && hasName) return "button";
+  if ((!currentRole || SKIP_ROLES.has(currentRole)) && node.cursor === "pointer" && hasName) {
+    return "button";
+  }
   return undefined;
 }
 
@@ -344,6 +420,19 @@ function isAncestorOf(
 }
 
 export function applyVomInteractionRecovery(nodes: VomNode[]): VomNode[] {
+  // CSS cursors inherit. Expose the handle once instead of assigning refs to
+  // every decorative span inside it; retain explicit nested draggable/drop cues.
+  const byId = new Map(nodes.map((node) => [node.id, node]));
+  nodes = nodes.map((node) => {
+    const parent = node.parentId === null ? undefined : byId.get(node.parentId);
+    return dragHint(node) === "drag-handle" &&
+      parent &&
+      dragHint(parent) &&
+      parent.cursor === node.cursor &&
+      parent.frameId === node.frameId
+      ? { ...node, dragHint: false }
+      : node;
+  });
   const parentMap = buildParentMap(nodes);
   const children = buildChildren(nodes);
   const recoveredIds = new Set<number>();
@@ -351,7 +440,8 @@ export function applyVomInteractionRecovery(nodes: VomNode[]): VomNode[] {
   const recoveredNameById = new Map<number, string>();
 
   for (const node of nodes) {
-    if (isVomReferenceNode(node)) continue;
+    // Drag evidence adds a capability; it must not suppress existing role/name recovery.
+    if (isSemanticReferenceNode(node)) continue;
     const role = recoveredRole(node, children);
     if (!role || !passesRecoveryGuards(node, children)) continue;
     recoveredIds.add(node.id);
@@ -395,6 +485,41 @@ function buildChildren(nodes: VomNode[]): Map<number | null, VomNode[]> {
   return children;
 }
 
+const CONTEXT_LABEL_ROLES = new Set([
+  "heading",
+  "article",
+  "section",
+  "group",
+  "region",
+  "row",
+  "form",
+]);
+
+interface DomContextIndex {
+  nonBoundaryByScopeParent: Map<string | undefined, Map<number, VomNode[]>>;
+  sourceOrderById: Map<number, number>;
+}
+
+function buildDomContextIndex(nodes: VomNode[]): DomContextIndex {
+  const nonBoundaryByScopeParent = new Map<string | undefined, Map<number, VomNode[]>>();
+  const sourceOrderById = new Map<number, number>();
+  for (const [sourceOrder, node] of nodes.entries()) {
+    sourceOrderById.set(node.id, sourceOrder);
+    if (!CONTEXT_LABEL_ROLES.has(normalizedRole(node)) || isContextBoundary(node)) continue;
+    const parentId = node.domParentId;
+    if (parentId === undefined || parentId === null) continue;
+    let byParent = nonBoundaryByScopeParent.get(node.contextScopeId);
+    if (!byParent) {
+      byParent = new Map();
+      nonBoundaryByScopeParent.set(node.contextScopeId, byParent);
+    }
+    const siblings = byParent.get(parentId) ?? [];
+    siblings.push(node);
+    byParent.set(parentId, siblings);
+  }
+  return { nonBoundaryByScopeParent, sourceOrderById };
+}
+
 function duplicateReferenceNames(nodes: VomNode[]): Set<string> {
   const counts = new Map<string, number>();
   for (const node of nodes) {
@@ -414,13 +539,7 @@ function needsHandleContext(nodeName: string, duplicateRefNames: Set<string>): b
 }
 
 function contextLabel(node: VomNode, targetName: string): string | undefined {
-  if (
-    !["heading", "article", "section", "group", "region", "row", "form"].includes(
-      normalizedRole(node),
-    )
-  ) {
-    return undefined;
-  }
+  if (!CONTEXT_LABEL_ROLES.has(normalizedRole(node))) return undefined;
   return weakContextText(
     cleaned(node.name) ?? cleaned(node.text) ?? cleaned(node.nearbyText),
     targetName,
@@ -559,11 +678,32 @@ function collectSameContainerContext(
   let guard = 0;
   while (parentId !== null && guard <= state.parentMap.size) {
     const siblings = state.children.get(parentId) ?? [];
-    for (const sibling of siblings) {
-      if (sibling.id === childId) break;
-      collectWeakLabelsFromSubtree(sibling, node, nodeName, state, labels);
-      while (labels.length > MAX_HANDLE_CONTEXT_ITEMS) labels.shift();
+    const end = state.siblingIndex.get(childId) ?? siblings.length;
+    let cache = state.siblingContextCache.get(parentId);
+    if (!cache) {
+      cache = new Map();
+      state.siblingContextCache.set(parentId, cache);
     }
+    // The subtree collector depends on scope, target name and incoming labels.
+    // Include all three so descendants arriving from different containers retain
+    // the original context semantics. DFS visits sibling prefixes in order.
+    const key = JSON.stringify([node.contextScopeId, nodeName, labels]);
+    let prefix = cache.get(key);
+    if (!prefix || prefix.nextIndex > end) prefix = { nextIndex: 0, labels: [...labels] };
+    for (; prefix.nextIndex < end; prefix.nextIndex++) {
+      collectWeakLabelsFromSubtree(
+        siblings[prefix.nextIndex],
+        node,
+        nodeName,
+        state,
+        prefix.labels,
+      );
+      while (prefix.labels.length > MAX_HANDLE_CONTEXT_ITEMS) prefix.labels.shift();
+    }
+    labels.splice(0, labels.length, ...prefix.labels);
+    // Bound retained variants on pages with many distinct action names.
+    if (!cache.has(key) && cache.size >= 64) cache.delete(cache.keys().next().value!);
+    cache.set(key, prefix);
 
     const parent = state.nodesById.get(parentId);
     if (!parent || !sharesContextScope(node, parent) || isContextBoundary(parent)) break;
@@ -581,19 +721,45 @@ function collectDomContext(
 ): ContextCandidate[] {
   const ancestorIds = node.domAncestorIds ?? [];
   if (ancestorIds.length === 0) return [];
-  const ancestors = new Set(ancestorIds);
   const contexts: ContextCandidate[] = [];
+  const ancestorRank = new Map<number, number>();
+  for (const [rank, ancestorId] of ancestorIds.entries()) {
+    if (!ancestorRank.has(ancestorId)) ancestorRank.set(ancestorId, rank);
+  }
 
-  for (const candidate of state.nodesById.values()) {
+  const candidates = new Map<number, VomNode>();
+  const nonBoundaryByParent = state.domContextIndex.nonBoundaryByScopeParent.get(
+    node.contextScopeId,
+  );
+  for (const ancestorId of ancestorRank.keys()) {
+    const boundary = state.nodesById.get(ancestorId);
+    const boundaryParentId = boundary?.domParentId;
+    if (
+      boundary &&
+      sharesContextScope(node, boundary) &&
+      isContextBoundary(boundary) &&
+      boundaryParentId !== undefined &&
+      boundaryParentId !== null &&
+      ancestorRank.has(boundaryParentId)
+    ) {
+      candidates.set(boundary.id, boundary);
+    }
+    for (const candidate of nonBoundaryByParent?.get(ancestorId) ?? []) {
+      candidates.set(candidate.id, candidate);
+    }
+  }
+
+  const sourceOrderById = state.domContextIndex.sourceOrderById;
+  const orderedCandidates = [...candidates.values()].sort(
+    (a, b) => (sourceOrderById.get(a.id) ?? 0) - (sourceOrderById.get(b.id) ?? 0),
+  );
+  for (const candidate of orderedCandidates) {
     if (candidate.id === node.id) continue;
-    if (!sharesContextScope(node, candidate)) continue;
-    if (isContextBoundary(candidate) && !ancestorIds.includes(candidate.id)) continue;
     const parentId = candidate.domParentId;
-    if (parentId === undefined || parentId === null || !ancestors.has(parentId)) continue;
+    if (parentId === undefined || parentId === null) continue;
     const label = contextLabel(candidate, nodeName);
     if (!label) continue;
-    const rank = ancestorIds.indexOf(parentId);
-    contexts.push({ text: label, source: "dom", order: rank < 0 ? contexts.length : rank });
+    contexts.push({ text: label, source: "dom", order: ancestorRank.get(parentId) ?? 0 });
   }
 
   return contexts;
@@ -617,8 +783,10 @@ function renderNodeLine(
   surface: CondSurface | undefined = undefined,
   redactValues = false,
 ): string {
-  let line = `${"  ".repeat(depth)}${ref ? `@${ref} ` : ""}${node.role}`;
+  let line = `${"  ".repeat(depth)}${ref ? `@${ref} ` : ""}${node.role ?? "generic"}`;
 
+  const hint = dragHint(node);
+  if (hint) line += ` [${hint}]`;
   const name = cleaned(node.name);
   if (name) line += ` ${JSON.stringify(name)}`;
   if (context.length > 0) line += ` [ctx: ${context.join(" > ")}]`;
@@ -632,6 +800,12 @@ function renderNodeLine(
   const rawValue = cleaned(node.value);
   const role = normalizedRole(node);
   const fillable = ["textbox", "searchbox"].includes(role);
+  if (node.disabled) line += " [disabled]";
+  const selection = selectionMarker(node);
+  if (selection) line += ` [${selection}]`;
+  if (node.checked !== undefined) {
+    line += ` [${node.checked === "mixed" ? "mixed" : node.checked ? "checked" : "unchecked"}]`;
+  }
   if (fillable) {
     line += ` [${node.inputState ?? (rawValue === undefined ? "empty" : "filled")}]`;
   }
@@ -696,109 +870,174 @@ function shouldSkipRedundantChildren(node: VomNode, state: RenderState): boolean
 }
 
 interface RenderState {
+  visualAncestors: Set<number>;
   lines: string[];
   refs: RenderedRef[];
   nextRef: number;
+  allocateRef?: VomOptions["allocateRef"];
   tokens: number;
   maxDepth: number;
   maxTokens: number;
   redactValues: boolean;
   truncated: boolean;
-  stopped: boolean;
   children: Map<number | null, VomNode[]>;
+  siblingIndex: Map<number, number>;
+  siblingContextCache: Map<number, Map<string, { nextIndex: number; labels: string[] }>>;
   parentMap: Map<number, number | null>;
   nodesById: Map<number, VomNode>;
+  domContextIndex: DomContextIndex;
   duplicateRefNames: Set<string>;
   surfaceMap: Map<number, CondSurface>;
   scopeMap: Map<number, ActiveScopeBlock>;
 }
 
-function emitActiveScopeBlock(scope: ActiveScopeBlock, depth: number, state: RenderState): void {
-  if (state.stopped || scope.lines.length === 0) return;
-  const indent = "  ".repeat(depth);
-  const header = `${indent}[§ active: ${scope.label}]`;
-  const headerTokens = estimateTokens(header);
-  if (state.tokens + headerTokens > state.maxTokens) {
-    state.truncated = true;
-    state.stopped = true;
-    return;
-  }
-  state.lines.push(header);
-  state.tokens += headerTokens;
+export interface RenderRow {
+  context?: string;
+  frameId?: string;
+  text: string;
+  ref?: RenderedRef;
+  /** Minimal complete visual entry when a long label cannot fit. */
+  minimal?: string;
+}
 
-  for (const text of scope.lines.slice(0, MAX_SCOPE_LINES)) {
-    if (state.stopped) return;
-    const clean = cleaned(text);
-    if (!clean) continue;
-    const line = `${indent}  ${clean}`;
-    const nextTokens = state.tokens + estimateTokens(line);
-    if (nextTokens > state.maxTokens) {
-      state.truncated = true;
-      state.stopped = true;
-      return;
-    }
-    state.lines.push(line);
-    state.tokens = nextTokens;
+function pushRenderChildren(
+  stack: Array<{ node: VomNode; depth: number }>,
+  children: readonly VomNode[],
+  depth: number,
+): void {
+  for (let index = children.length - 1; index >= 0; index -= 1) {
+    stack.push({ node: children[index], depth });
   }
 }
 
-function renderTree(
+function* renderTreeRows(
   children: Map<number | null, VomNode[]>,
-  parentId: number | null,
-  depth: number,
   state: RenderState,
-): void {
-  if (state.stopped) return;
+  observation = false,
+  representedSources?: ReadonlySet<number>,
+): Generator<RenderRow> {
+  const stack: Array<{ node: VomNode; depth: number }> = [];
+  pushRenderChildren(stack, children.get(null) ?? [], 1);
 
-  const nodes = children.get(parentId) ?? [];
-  for (const node of nodes) {
-    if (state.stopped) return;
+  while (stack.length > 0) {
+    const { node, depth } = stack.pop() as { node: VomNode; depth: number };
 
-    if (!shouldRender(node)) {
-      renderTree(children, node.id, depth, state);
+    if (representedSources?.has(node.id) || (node.visualKey === undefined && !shouldRender(node))) {
+      pushRenderChildren(stack, children.get(node.id) ?? [], depth);
       continue;
     }
 
-    if (depth > state.maxDepth) {
+    if (depth > state.maxDepth && node.visualKey === undefined) {
       state.truncated = true;
+      if (observation && state.visualAncestors.has(node.id))
+        pushRenderChildren(stack, children.get(node.id) ?? [], depth);
       continue;
     }
 
-    const ref = isVomReferenceNode(node) ? `e${state.nextRef}` : undefined;
-    const context = ref ? handleContext(node, state) : [];
+    const visual = node.visualKey !== undefined;
+    const ref =
+      visual || isVomReferenceNode(node)
+        ? (state.allocateRef?.(node) ?? `e${state.nextRef++}`)
+        : undefined;
+    const context = ref && !visual ? handleContext(node, state) : [];
     const surface = state.surfaceMap.get(node.id);
-    const line = renderNodeLine(node, depth, ref, context, surface, state.redactValues);
-    const nextTokens = state.tokens + estimateTokens(line);
-    if (nextTokens > state.maxTokens) {
-      state.truncated = true;
-      state.stopped = true;
-      return;
-    }
-
-    state.lines.push(line);
-    state.tokens = nextTokens;
-    if (ref) {
-      const name = cleaned(node.name);
-      state.refs.push({
-        ref,
-        backendNodeId: node.backendNodeId ?? node.id,
-        ...(node.frameId ? { frameId: node.frameId } : {}),
-        ...(node.role ? { role: node.role } : {}),
-        ...(name ? { name } : {}),
-        ...(context.length > 0 ? { ctx: context.join(" > ") } : {}),
-        line: state.lines.length - 1,
-      });
-      state.nextRef += 1;
-    }
-
+    const indent = "  ".repeat(Math.min(depth, state.maxDepth, 32));
+    const minimal = visual ? `${indent}@${ref} canvas [visual:screenshot]` : undefined;
+    const label = cleaned(node.name);
+    const text = visual
+      ? label
+        ? `${indent}@${ref} canvas ${JSON.stringify(Array.from(label).slice(0, 160).join(""))} [visual:screenshot]`
+        : minimal!
+      : renderNodeLine(node, depth, ref, context, surface, state.redactValues);
+    const parent = node.parentId === null ? undefined : state.nodesById.get(node.parentId);
+    const parentLabel = parent ? cleaned(parent.name) : undefined;
+    yield {
+      ...(parent
+        ? {
+            context: `@context ${parent.role ?? parent.tag}${parentLabel ? ` ${JSON.stringify(Array.from(parentLabel).slice(0, 80).join(""))}` : ""}`,
+          }
+        : {}),
+      frameId: node.frameId,
+      text,
+      ...(minimal ? { minimal } : {}),
+      ...(ref
+        ? {
+            ref: {
+              ref,
+              backendNodeId: node.backendNodeId ?? node.id,
+              ...(visual ? { visualKey: node.visualKey } : {}),
+              ...(node.frameId ? { frameId: node.frameId } : {}),
+              ...(node.role ? { role: node.role } : {}),
+              ...(label ? { name: label } : {}),
+              ...(context.length > 0 ? { ctx: context.join(" > ") } : {}),
+              line: 0,
+            },
+          }
+        : {}),
+    };
     const scope = state.scopeMap.get(node.id);
-    if (scope) emitActiveScopeBlock(scope, depth + 1, state);
+    if (scope?.lines.length) {
+      yield { text: `${"  ".repeat(depth + 1)}[§ active: ${scope.label}]` };
+      for (const text of scope.lines.slice(0, MAX_SCOPE_LINES)) {
+        const clean = cleaned(text);
+        if (clean) yield { text: `${"  ".repeat(depth + 2)}${clean}` };
+      }
+    }
 
-    if ((ref && shouldSkipRedundantRefChildren(node)) || shouldSkipRedundantChildren(node, state)) {
+    if (
+      (!observation || !state.visualAncestors.has(node.id)) &&
+      ((ref && shouldSkipRedundantRefChildren(node)) || shouldSkipRedundantChildren(node, state))
+    ) {
       continue;
     }
-    renderTree(children, node.id, depth + 1, state);
+    pushRenderChildren(stack, children.get(node.id) ?? [], depth + 1);
   }
+}
+
+function createRenderState(
+  nodes: VomNode[],
+  options: VomOptions,
+  initialLines: string[],
+  surfaces: CondSurface[],
+  activeScopeBlocks: ActiveScopeBlock[],
+): RenderState {
+  const children = buildChildren(nodes);
+  const siblingIndex = new Map<number, number>();
+  for (const siblings of children.values()) {
+    for (let index = 0; index < siblings.length; index++)
+      siblingIndex.set(siblings[index].id, index);
+  }
+  const state: RenderState = {
+    visualAncestors: new Set(),
+    siblingIndex,
+    siblingContextCache: new Map(),
+    lines: [...initialLines],
+    refs: [],
+    nextRef: 1,
+    allocateRef: options.allocateRef,
+    tokens: estimateTokens(initialLines.join("\n")),
+    maxDepth: options.maxDepth ?? DEFAULT_MAX_DEPTH,
+    maxTokens: options.maxTokens ?? DEFAULT_MAX_TOKENS,
+    redactValues: options.redactValues ?? false,
+    truncated: false,
+    children,
+    parentMap: buildParentMap(nodes),
+    nodesById: new Map(nodes.map((node) => [node.id, node])),
+    domContextIndex: buildDomContextIndex(nodes),
+    duplicateRefNames: duplicateReferenceNames(nodes),
+    surfaceMap: new Map(surfaces.map((surface) => [surface.triggerId, surface])),
+    scopeMap: new Map(activeScopeBlocks.map((scope) => [scope.triggerId, scope])),
+  };
+
+  for (const node of nodes) {
+    if (node.visualKey === undefined) continue;
+    let id = node.parentId;
+    while (id !== null && !state.visualAncestors.has(id)) {
+      state.visualAncestors.add(id);
+      id = state.parentMap.get(id) ?? null;
+    }
+  }
+  return state;
 }
 
 function renderNodes(
@@ -808,26 +1047,18 @@ function renderNodes(
   surfaces: CondSurface[] = [],
   activeScopeBlocks: ActiveScopeBlock[] = [],
 ): RenderState {
-  const children = buildChildren(nodes);
-  const state: RenderState = {
-    lines: [...initialLines],
-    refs: [],
-    nextRef: 1,
-    tokens: estimateTokens(initialLines.join("\n")),
-    maxDepth: options.maxDepth ?? DEFAULT_MAX_DEPTH,
-    maxTokens: options.maxTokens ?? DEFAULT_MAX_TOKENS,
-    redactValues: options.redactValues ?? false,
-    truncated: false,
-    stopped: false,
-    children,
-    parentMap: buildParentMap(nodes),
-    nodesById: new Map(nodes.map((node) => [node.id, node])),
-    duplicateRefNames: duplicateReferenceNames(nodes),
-    surfaceMap: new Map(surfaces.map((surface) => [surface.triggerId, surface])),
-    scopeMap: new Map(activeScopeBlocks.map((scope) => [scope.triggerId, scope])),
-  };
-
-  renderTree(children, null, 1, state);
+  const state = createRenderState(nodes, options, initialLines, surfaces, activeScopeBlocks);
+  const children = state.children;
+  for (const row of renderTreeRows(children, state)) {
+    const cost = estimateLineTokens(row.text);
+    if (state.tokens + cost > state.maxTokens) {
+      state.truncated = true;
+      break;
+    }
+    if (row.ref) state.refs.push({ ...row.ref, line: state.lines.length });
+    state.lines.push(row.text);
+    state.tokens += cost;
+  }
 
   return state;
 }
@@ -866,19 +1097,6 @@ function interactionPoints(rect: Rect): Array<[number, number]> {
   ];
 }
 
-function isModalLike(node: VomNode): boolean {
-  const role = normalizedRole(node);
-  const tag = normalizedTag(node);
-  return node.modal === true || tag === "dialog" || role === "dialog" || role === "alertdialog";
-}
-
-function activeRegionCandidatePriority(node: VomNode, viewportCoverage: number): number {
-  if (isModalLike(node)) return 4;
-  if (viewportCoverage >= 0.9) return 3;
-  if (viewportCoverage >= 0.15) return 2;
-  return 1;
-}
-
 function paintLineageByFrame(
   node: VomNode,
   parentMap: Map<number, number | null>,
@@ -896,23 +1114,33 @@ function paintLineageByFrame(
   return lineage;
 }
 
+function cachedPaintLineageByFrame(
+  node: VomNode,
+  parentMap: Map<number, number | null>,
+  nodesById: Map<number, VomNode>,
+  cache: Map<number, Map<string | undefined, VomNode>>,
+): Map<string | undefined, VomNode> {
+  const cached = cache.get(node.id);
+  if (cached) return cached;
+  const lineage = paintLineageByFrame(node, parentMap, nodesById);
+  cache.set(node.id, lineage);
+  return lineage;
+}
+
 /** Resolve both nodes to the nearest document where their paint order is comparable. */
 function comparablePaintNodes(
   target: VomNode,
   blocker: VomNode,
   parentMap: Map<number, number | null>,
   nodesById: Map<number, VomNode>,
+  lineageCache: Map<number, Map<string | undefined, VomNode>>,
 ): { target: VomNode; blocker: VomNode } | null {
   if (target.frameId === blocker.frameId) return { target, blocker };
-  const targetLineage = paintLineageByFrame(target, parentMap, nodesById);
-  let blockerInFrame: VomNode | undefined = blocker;
-  let guard = 0;
-  while (blockerInFrame && guard <= parentMap.size) {
-    const targetInFrame = targetLineage.get(blockerInFrame.frameId);
+  const targetLineage = cachedPaintLineageByFrame(target, parentMap, nodesById, lineageCache);
+  const blockerLineage = cachedPaintLineageByFrame(blocker, parentMap, nodesById, lineageCache);
+  for (const [frameId, blockerInFrame] of blockerLineage) {
+    const targetInFrame = targetLineage.get(frameId);
     if (targetInFrame) return { target: targetInFrame, blocker: blockerInFrame };
-    const parentId: number | null = parentMap.get(blockerInFrame.id) ?? null;
-    blockerInFrame = parentId === null ? undefined : nodesById.get(parentId);
-    guard += 1;
   }
   return null;
 }
@@ -922,19 +1150,20 @@ function isBlockedByRegion(
   blocker: VomNode,
   parentMap: Map<number, number | null>,
   nodesById: Map<number, VomNode>,
-  viewportCoverage: number,
+  fullCover: boolean,
+  lineageCache: Map<number, Map<string | undefined, VomNode>>,
 ): boolean {
   if (target.id === blocker.id) return false;
   if (isAncestorOf(parentMap, blocker.id, target.id)) return false;
   if (isAncestorOf(parentMap, target.id, blocker.id)) return false;
   if (!target.rect || !blocker.rect) return false;
-  const paintNodes = comparablePaintNodes(target, blocker, parentMap, nodesById);
+  const paintNodes = comparablePaintNodes(target, blocker, parentMap, nodesById, lineageCache);
   if (!paintNodes) return false;
 
   const points = interactionPoints(target.rect);
 
   if (
-    viewportCoverage < 0.9 &&
+    !fullCover &&
     paintNodes.target.paintOrder >= paintNodes.blocker.paintOrder &&
     points.some(([x, y]) => rectContains(blocker.rect as Rect, x, y))
   ) {
@@ -948,72 +1177,67 @@ function isBlockedByRegion(
   ) {
     return false;
   }
-  if (viewportCoverage >= 0.9) return true;
-
+  // Even a near-full region must overlap the target to occlude it.
   return points.some(([x, y]) => rectContains(blocker.rect as Rect, x, y));
 }
 
-function collectDescendantsOfIds(nodes: VomNode[], roots: Set<number>): Set<number> {
+function collectDescendants(nodes: VomNode[], roots: Set<number>): Set<number> {
+  const children = new Map<number, number[]>();
+  for (const node of nodes) {
+    if (node.parentId === null) continue;
+    const siblings = children.get(node.parentId) ?? [];
+    siblings.push(node.id);
+    children.set(node.parentId, siblings);
+  }
+
   const included = new Set(roots);
-  let changed = true;
-  while (changed) {
-    changed = false;
-    for (const node of nodes) {
-      if (included.has(node.id)) continue;
-      if (node.parentId !== null && included.has(node.parentId)) {
-        included.add(node.id);
-        changed = true;
-      }
+  const queue = [...roots];
+  for (let index = 0; index < queue.length; index += 1) {
+    for (const childId of children.get(queue[index]) ?? []) {
+      if (included.has(childId)) continue;
+      included.add(childId);
+      queue.push(childId);
     }
   }
   return included;
 }
 
-function applyActiveRegionPolicy(nodes: VomNode[], scene: VomScene): VomNode[] {
+function applyActiveRegionPolicy(
+  nodes: VomNode[],
+  scene: VomScene,
+  visualSources?: ReadonlyMap<number, VomNode>,
+): VomNode[] {
   const parentMap = buildParentMap(nodes);
   const nodesById = new Map(nodes.map((node) => [node.id, node]));
+  const lineageCache = new Map<number, Map<string | undefined, VomNode>>();
   const candidates = nodes
     .filter(isPositionedRegionCandidate)
-    .map((node) => {
-      const viewportCoverage = coverage(node.rect, scene.viewport);
-      return {
-        node,
-        viewportCoverage,
-        priority: activeRegionCandidatePriority(node, viewportCoverage),
-      };
-    })
-    .filter((candidate) => candidate.priority > 1 || candidate.viewportCoverage > 0);
+    .map((node) => ({
+      node,
+      viewportCoverage: coverage(node.rect, scene.viewport),
+      fullCover: spansViewport(node.rect, scene.viewport),
+    }))
+    .filter((candidate) => candidate.viewportCoverage > 0 || candidate.node.modal === true);
 
   const blockedRoots = new Set<number>();
   for (const target of nodes) {
-    if (!isVomReferenceNode(target)) continue;
+    if (target.visualKey === undefined && !isVomReferenceNode(target)) continue;
     const blocked = candidates.some((candidate) =>
-      isBlockedByRegion(target, candidate.node, parentMap, nodesById, candidate.viewportCoverage),
+      isBlockedByRegion(
+        visualSources?.get(target.id) ?? target,
+        candidate.node,
+        parentMap,
+        nodesById,
+        candidate.fullCover,
+        lineageCache,
+      ),
     );
     if (blocked) blockedRoots.add(target.id);
   }
 
   if (blockedRoots.size === 0) return nodes;
-  const blocked = collectDescendantsOfIds(nodes, blockedRoots);
+  const blocked = collectDescendants(nodes, blockedRoots);
   return nodes.filter((node) => !blocked.has(node.id));
-}
-
-function collectDescendantsOfMembers(nodes: VomNode[], members: Set<number>): Set<number> {
-  const included = new Set(members);
-  let changed = true;
-
-  while (changed) {
-    changed = false;
-    for (const node of nodes) {
-      if (included.has(node.id)) continue;
-      if (node.parentId !== null && included.has(node.parentId)) {
-        included.add(node.id);
-        changed = true;
-      }
-    }
-  }
-
-  return included;
 }
 
 function countRenderable(nodes: VomNode[]): number {
@@ -1021,7 +1245,7 @@ function countRenderable(nodes: VomNode[]): number {
 }
 
 function renderDoubleLayer(scene: VomScene, layer: BlockingLayer, options: VomOptions): VomResult {
-  const included = collectDescendantsOfMembers(scene.nodes, layer.members);
+  const included = collectDescendants(scene.nodes, layer.members);
   const visibleNodes = scene.nodes.filter((node) => included.has(node.id));
   const hiddenCount = countRenderable(scene.nodes.filter((node) => !included.has(node.id)));
   const header = [
@@ -1065,4 +1289,160 @@ export function renderVom(scene: VomScene, options: VomOptions = {}): VomResult 
     refs: state.refs,
     truncated: state.truncated,
   };
+}
+
+/** Prepare semantics once; the iterator retains traversal position, never raw capture facts. */
+export function prepareObservationRender(
+  scene: VomScene,
+  options: VomOptions = {},
+): {
+  headers: string[];
+  rows: Iterator<RenderRow>;
+  truncated: () => boolean;
+} {
+  const recovered = applyVomInteractionRecovery(scene.nodes);
+  const layer = detectBlockingLayer(recovered, scene.viewport, scene.rootFrameId);
+  const recoveredById = new Map(recovered.map((n) => [n.id, n]));
+  let nextId = recovered.reduce((max, n) => Math.max(max, n.id), 0) + 1;
+  // Scope targets participate in existing filtering, never in blocker detection.
+  // Keep the exact source as parent so an excluded source cannot reappear via fallback.
+  const visualTargets: VomNode[] = (scene.visuals ?? []).map((v) => ({
+    id: nextId++,
+    parentId: v.sourceId ?? v.parentId,
+    frameId: v.frameId,
+    visualKey: v.key,
+    tag: "canvas",
+    rect: v.rect ?? (v.sourceId === undefined ? null : recoveredById.get(v.sourceId)?.rect) ?? null,
+    paintOrder:
+      v.paintOrder ??
+      (v.sourceId === undefined ? undefined : recoveredById.get(v.sourceId)?.paintOrder) ??
+      0,
+    position: "static",
+    pointerEvents: "none",
+    referenceable: false,
+  }));
+  const visualSources = new Map<number, VomNode>();
+  for (let i = 0; i < visualTargets.length; i++) {
+    const sourceId = scene.visuals![i].sourceId;
+    const source = sourceId === undefined ? undefined : recoveredById.get(sourceId);
+    if (source) visualSources.set(visualTargets[i].id, { ...source, rect: visualTargets[i].rect });
+  }
+  const scopeNodes = [...recovered, ...visualTargets];
+  const members = layer ? new Set(layer.members) : undefined;
+  if (members && layer) {
+    const blocker = recoveredById.get(layer.rootId)!;
+    for (let i = 0; i < visualTargets.length; i++) {
+      const target = visualTargets[i];
+      const v = scene.visuals![i];
+      if (
+        v.sourceId === undefined &&
+        v.paintOrder !== undefined &&
+        target.frameId === blocker.frameId &&
+        target.paintOrder >= blocker.paintOrder
+      )
+        members.add(target.id);
+    }
+  }
+  const included = members ? collectDescendants(scopeNodes, members) : undefined;
+  const scoped = included
+    ? scopeNodes.filter((n) => included.has(n.id))
+    : options.activeRegionPolicy
+      ? applyActiveRegionPolicy(scopeNodes, scene, visualSources)
+      : scopeNodes;
+  const allowedVisuals = new Set(
+    scoped.filter((n) => n.visualKey !== undefined).map((n) => n.visualKey),
+  );
+  const visible = scoped.filter((n) => n.visualKey === undefined);
+  const byId = new Map(visible.map((n) => [n.id, n]));
+  const ids = new Set(byId.keys());
+  const before = new Map<number, VomNode[]>();
+  const tail: VomNode[] = [];
+  const fallbackGroups = new Map<string, number>();
+  const representedSources = new Set<number>();
+  for (const v of scene.visuals ?? []) {
+    if (!allowedVisuals.has(v.key)) continue;
+    const source = v.sourceId === undefined ? undefined : byId.get(v.sourceId);
+    // Only suppress an exact passive Canvas description already carried by the visual line.
+    // Action refs and distinct semantic content remain separate.
+    if (
+      source &&
+      normalizedTag(source) === "canvas" &&
+      normalizedRole(source) === "canvas" &&
+      !isVomReferenceNode(source) &&
+      !source.value &&
+      !source.text &&
+      (!cleaned(source.name) || cleaned(source.name) === cleaned(v.label))
+    ) {
+      representedSources.add(source.id);
+    }
+
+    const node: VomNode = {
+      id: nextId++,
+      parentId: v.parentId !== null && ids.has(v.parentId) ? v.parentId : null,
+      tag: "canvas",
+      role: "canvas",
+      name: v.label,
+      frameId: v.frameId,
+      visualKey: v.key,
+      rect: null,
+      paintOrder: 0,
+      position: "static",
+      pointerEvents: "none",
+      referenceable: false,
+    };
+    if (node.parentId === null) {
+      const label = v.fallbackContext ?? "Unplaced Canvas regions";
+      let groupId = fallbackGroups.get(label);
+      if (groupId === undefined) {
+        groupId = nextId++;
+        fallbackGroups.set(label, groupId);
+        tail.push({
+          id: groupId,
+          parentId: null,
+          tag: "section",
+          role: "group",
+          name: label,
+          rect: null,
+          paintOrder: 0,
+          position: "static",
+          pointerEvents: "none",
+          referenceable: false,
+        });
+      }
+      node.parentId = groupId;
+    }
+    if (
+      v.beforeId !== undefined &&
+      ids.has(v.beforeId) &&
+      byId.get(v.beforeId)?.parentId === node.parentId
+    ) {
+      const list = before.get(v.beforeId) ?? [];
+      list.push(node);
+      before.set(v.beforeId, list);
+    } else tail.push(node);
+  }
+  const nodes = visible.flatMap((n) => [...(before.get(n.id) ?? []), n]).concat(tail);
+  const headers = [
+    "@vom 1",
+    `@view ${scene.viewport.width}x${scene.viewport.height}`,
+    `@layers ${layer ? 2 : 1} focus=L1`,
+    layer ? `L1 ${layer.kind} cover=${Math.round(layer.coverage * 100)}%` : "L1 page",
+  ];
+  const state = createRenderState(
+    nodes,
+    options,
+    [],
+    scene.surfaces ?? [],
+    scene.activeScopeBlocks ?? [],
+  );
+  function* rows(): Generator<RenderRow> {
+    yield* renderTreeRows(state.children, state, true, representedSources);
+    if (layer)
+      yield {
+        text: renderPageOcclusionLine(
+          countRenderable(recovered.filter((n) => !included!.has(n.id))),
+        ),
+      };
+  }
+  return { headers, rows: rows(), truncated: () => state.truncated };
 }

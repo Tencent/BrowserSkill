@@ -19,16 +19,27 @@ export type LayerKind = "page" | "modal" | "mask";
  * before constructing these nodes.
  */
 export interface VomNode {
+  /** Internal render-only visual entry; never a DOM action target. */
+  visualKey?: number;
   id: number;
   parentId: number | null;
   backendNodeId?: number;
   frameId?: string;
   contextScopeId?: string;
+  /** False for semantic-only nodes that cannot be addressed through CDP. */
+  referenceable?: boolean;
 
   role?: string;
   name?: string;
   value?: string;
+  /** Checked state is separate from the control's submitted value. */
+  checked?: boolean | "mixed";
+  /** Browser accessibility focus, used to protect implicit keyboard recipients. */
+  focused?: boolean;
   placeholder?: string;
+  /** Native form ownership, or raw DOM form containment for custom widgets.
+   * Absence means unknown, never proof that a control is outside a form. */
+  inForm?: boolean;
   inputState?: "empty" | "filled" | "default" | "unknown";
   href?: string; // hostname of external link target; omitted for same-origin links
   text?: string;
@@ -40,6 +51,10 @@ export interface VomNode {
   position: string;
   pointerEvents: string;
   cursor?: string;
+  /** Derived interaction hint; false suppresses an inherited cursor hint. */
+  dragHint?: "draggable" | "drag-handle" | "drop-target" | false;
+  /** Browser-reported clickability, independent of role and inline attributes. */
+  clickable?: boolean;
   attrs?: Record<string, string>;
   domParentId?: number | null;
   domAncestorIds?: number[];
@@ -52,7 +67,22 @@ export interface VomNode {
   insideNative?: boolean;
 }
 
+export interface VisualEntry {
+  /** Existing capture geometry/order used only by observation scope filtering. */
+  rect?: Rect;
+  paintOrder?: number;
+  /** Exact retained Canvas node, distinct from the next sibling insertion point. */
+  sourceId?: number;
+  fallbackContext?: string;
+  key: number;
+  parentId: number | null;
+  beforeId?: number;
+  label?: string;
+  frameId: string;
+}
+
 export interface VomScene {
+  visuals?: VisualEntry[];
   viewport: Viewport;
   nodes: VomNode[];
   /** Root document whose paint order defines page-level blocking layers. */
@@ -64,6 +94,8 @@ export interface VomScene {
 export interface VomOptions {
   maxDepth?: number;
   maxTokens?: number;
+  /** Allocate names from a caller-owned identity store, before measuring row tokens. */
+  allocateRef?: (node: VomNode) => string;
   /**
    * When true, form values are rendered as masks instead of literal values.
    */
@@ -95,6 +127,7 @@ export interface VomRef {
 }
 
 export interface RenderedRef extends VomRef {
+  visualKey?: number;
   role?: string;
   name?: string;
   ctx?: string;

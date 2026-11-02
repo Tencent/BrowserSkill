@@ -4,6 +4,7 @@
 // sides without extra adapters.
 
 export type RpcId = string;
+export type { ExtractParams, ExtractResult } from "@/tools/extract/types";
 
 export type ErrorCode =
   | "unknown_method"
@@ -12,31 +13,112 @@ export type ErrorCode =
   | "not_found"
   | "permission_denied"
   | "timeout"
+  | "dialog_pending"
   | "cdp_failed"
   | "protocol_error"
   | "cancelled"
+  | "user_aborted"
   | "version_too_old"
   | "multiple_browsers_online"
   | "no_browser_connected";
 
 /** Stable `RpcError.data.reason` values for CLI hint selection. */
 export type RpcErrorReason =
+  | "user_moved_tab"
+  | "cooperation_sync_required"
+  | "control_authority_required"
+  | "control_context_invalid"
+  | "human_intervention"
+  | "control_held"
+  | "document_changed"
+  | "observation_required"
+  | "observation_changed"
+  | "precondition_invalid"
+  | "precondition_failed"
+  | "target_detached"
+  | "target_hidden"
+  | "target_disabled"
+  | "target_readonly"
+  | "target_focus_lost"
+  | "target_moved"
+  | "target_covered"
+  | "extract_params_invalid"
+  | "extract_target_stale"
+  | "extract_target_ambiguous"
+  | "extract_target_hidden"
+  | "extract_selector_invalid"
+  | "extract_structure_invalid"
+  | "extract_field_ambiguous"
+  | "extract_limit"
+  | "ui_lookup_failed"
+  | "task_unavailable"
+  | "target_unavailable"
+  | "task_stopping"
+  | "ui_deadline"
+  | "preview_busy"
   | "agent_window_scope"
   | "element_not_visible"
+  | "input_not_ready"
+  | "input_outcome_unknown"
+  | "input_paint_unconfirmed"
+  | "input_cleanup_failed"
   | "ref_not_found"
+  | "ref_kind_unsupported"
+  | "visual_capture_stale"
+  | "visual_capture_invalid"
+  | "visual_coordinate_invalid"
+  | "visual_target_changed"
+  | "visual_pixel_budget_exceeded"
   | "selector_not_found"
   | "target_not_fillable"
+  | "fill_value_invalid"
+  | "fill_target_changed"
+  | "fill_focus_lost"
+  | "fill_value_mismatch"
+  | "fill_failed"
   | "target_not_select"
   | "option_not_found"
   | "single_select_value_count"
   | "tab_not_active"
   | "restricted_tab_url"
+  | "cdp_extension_access_denied"
+  | "observe_identity_reload_loop"
+  | "borrow_agent_window_tab"
   | "borrow_conflict"
+  | "incognito_borrow_disabled"
+  | "borrow_in_progress"
+  | "user_denied"
+  | "confirmation_timeout"
+  | "confirmation_ui_unavailable"
+  | "borrow_outcome_unknown"
   | "screenshot_capture_failed"
+  | "renderer_read_timeout"
+  | "user_cancelled"
+  | "page_hidden"
+  | "navigation"
+  | "watchdog_timeout"
+  | "stale_frame"
+  | "loading_stalled"
+  | "file_input_probe_failed"
+  | "file_input_not_activated"
+  | "set_file_input_failed"
+  | "upload_mechanism_unsupported"
+  | "file_drop_target_unavailable"
+  | "file_drop_failed"
+  | "download_capture_failed"
+  | "download_path_mismatch"
+  | "transfer_outcome_unknown"
+  | "transfer_timeout"
   | "cleanup_failed";
+
+export type TransferEffectState = "none" | "committed" | "unknown";
+export type TransferCleanupState = "complete" | "failed";
 
 export interface RpcErrorData {
   reason?: RpcErrorReason;
+  effect_state?: TransferEffectState;
+  phase?: string;
+  cleanup_state?: TransferCleanupState;
   [key: string]: unknown;
 }
 
@@ -69,6 +151,16 @@ export interface EventFrame {
   payload?: unknown;
 }
 
+/** Terminal user action: pages stay open, but the session cannot resume. */
+export interface SessionEndedEvent extends EventFrame {
+  event: "session.ended";
+  payload: {
+    session_id: string;
+    reason: "user_moved_tab";
+    tab_id: number;
+  };
+}
+
 export type ProtocolFrame = RequestFrame | ResponseFrame | EventFrame;
 
 export function isRequestFrame(f: ProtocolFrame): f is RequestFrame {
@@ -86,12 +178,18 @@ export function isEventFrame(f: ProtocolFrame): f is EventFrame {
   return typeof (f as EventFrame).event === "string";
 }
 
+export interface InteractionPolicy {
+  borrow_confirmation: "always" | "never";
+  request_help: "enabled" | "disabled";
+}
+
 export interface BrowserPeerInfo {
   name: string;
   version: string;
 }
 
 export interface HandshakeParams {
+  audit_enabled?: boolean;
   client: string;
   version: string;
   protocol_version: string;
@@ -108,6 +206,8 @@ export interface HandshakeParams {
 }
 
 export interface HandshakeResult {
+  audit_version?: number;
+  audit_ready?: boolean;
   server: string;
   version: string;
   protocol_version: string;
@@ -125,6 +225,28 @@ export type ConnectionState = "disconnected" | "connecting" | "connected" | "ver
 
 export type JavaScriptDialogType = "alert" | "confirm" | "prompt" | "beforeunload";
 export type JavaScriptDialogHandledAction = "accepted" | "dismissed";
+
+export interface PendingJavaScriptDialog {
+  id: string;
+  tab_id: number;
+  type: JavaScriptDialogType;
+  message: string;
+  url?: string;
+  default_prompt?: string;
+  sequence: number;
+  decision_deadline: number;
+}
+
+export interface DialogStatusParams {
+  session_id: string;
+  tab_id?: number;
+}
+
+export interface DialogHandleParams {
+  session_id: string;
+  dialog_id: string;
+  text?: string;
+}
 
 export interface JavaScriptDialogInfo {
   tab_id: number;
@@ -340,12 +462,48 @@ export interface ScreenshotParams {
 }
 
 export interface ScreenshotResult {
+  capture_id?: string;
+  capture_unavailable?: string;
   image_base64: string;
   width: number;
   height: number;
   format: string;
   tab_id: number;
   dialogs?: JavaScriptDialogInfo[];
+}
+
+export interface ScreenshotFullPageParams {
+  scope?: "follow" | "current";
+  session_id: string;
+  tab_id?: number;
+  timeout_ms?: number;
+}
+export interface ScreenshotFullPageResult {
+  scope?: "follow" | "current";
+  capture_id: string;
+  width: number;
+  height: number;
+  format: "png";
+  tab_id: number;
+  byte_size: number;
+  dialogs?: JavaScriptDialogInfo[];
+}
+export interface ScreenshotReadParams {
+  session_id: string;
+  capture_id: string;
+  offset: number;
+}
+export interface ScreenshotReadResult {
+  data_base64: string;
+  next_offset: number;
+  eof: boolean;
+}
+export interface ScreenshotReleaseParams {
+  session_id: string;
+  capture_id: string;
+}
+export interface ScreenshotReleaseResult {
+  released: boolean;
 }
 
 export interface SnapshotParams {
@@ -356,6 +514,7 @@ export interface SnapshotParams {
 }
 
 export interface SnapshotResult {
+  observation_id?: string;
   text: string;
   ref_count: number;
   tab_id: number;
@@ -364,10 +523,17 @@ export interface SnapshotResult {
 }
 
 export interface ObserveParams extends SnapshotParams {
+  cursor?: string;
   debug_surfaces?: boolean;
+  probe_hover?: boolean;
 }
 
 export interface ObserveResult extends SnapshotResult {
+  next_cursor?: string;
+  hover_probe?: {
+    performed: boolean;
+    revealed_content: boolean;
+  };
   debug?: {
     surface_probes?: Array<{
       trigger_backend_node_id: number;
@@ -453,6 +619,9 @@ export type MouseButton = "left" | "middle" | "right";
 export type KeyModifier = "alt" | "ctrl" | "meta" | "shift";
 
 export interface ClickParams {
+  capture_id?: string;
+  image_x?: number;
+  image_y?: number;
   session_id: string;
   ref?: string;
   selector?: string;
@@ -488,6 +657,112 @@ export interface HoverResult {
   used_selector?: string;
   x: number;
   y: number;
+  dialogs?: JavaScriptDialogInfo[];
+}
+
+export interface DragPoint {
+  x: number;
+  y: number;
+}
+export interface DragTarget {
+  ref?: string;
+  selector?: string;
+  offset?: DragPoint;
+}
+export type DragMode = "press-move-release" | "click-move-click";
+export interface DragParams {
+  session_id: string;
+  tab_id?: number;
+  source: DragTarget;
+  mode?: DragMode;
+  target?: DragTarget;
+  delta?: DragPoint;
+  button?: MouseButton;
+  modifiers?: KeyModifier[];
+  hold_ms?: number;
+  duration_ms?: number;
+  timeout_ms?: number;
+  observation_id?: string;
+}
+export interface DragResult {
+  tab_id: number;
+  source: DragPoint;
+  target: DragPoint;
+  dialogs?: JavaScriptDialogInfo[];
+}
+
+export interface WheelParams {
+  session_id: string;
+  ref?: string;
+  selector?: string;
+  tab_id?: number;
+  delta_x?: number;
+  delta_y?: number;
+  modifiers?: KeyModifier[];
+  timeout_ms?: number;
+}
+
+export interface WheelResult {
+  tab_id: number;
+  used_ref?: string;
+  used_selector?: string;
+  x: number;
+  y: number;
+  delta_x: number;
+  delta_y: number;
+  dialogs?: JavaScriptDialogInfo[];
+}
+
+export interface ScrollToParams {
+  session_id: string;
+  ref?: string;
+  selector?: string;
+  tab_id?: number;
+  timeout_ms?: number;
+}
+
+export interface ScrollToResult {
+  tab_id: number;
+  used_ref?: string;
+  used_selector?: string;
+  /** Clipped border-box bounds in top-level viewport CSS pixels; not an occlusion test. */
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  dialogs?: JavaScriptDialogInfo[];
+}
+
+export interface FocusParams {
+  session_id: string;
+  ref?: string;
+  selector?: string;
+  tab_id?: number;
+  timeout_ms?: number;
+}
+
+export interface FocusResult {
+  tab_id: number;
+  used_ref?: string;
+  used_selector?: string;
+  focused: boolean;
+  dialogs?: JavaScriptDialogInfo[];
+}
+
+export interface BlurParams {
+  session_id: string;
+  ref?: string;
+  selector?: string;
+  tab_id?: number;
+  timeout_ms?: number;
+}
+
+export interface BlurResult {
+  tab_id: number;
+  used_ref?: string;
+  used_selector?: string;
+  was_focused: boolean;
+  focused: boolean;
   dialogs?: JavaScriptDialogInfo[];
 }
 
@@ -547,6 +822,53 @@ export interface SelectResult {
   dialogs?: JavaScriptDialogInfo[];
 }
 
+export interface UploadFile {
+  transfer_id: string;
+  name: string;
+  staged_path?: string;
+}
+
+export type UploadMode = "input" | "drop";
+
+export interface UploadParams {
+  session_id: string;
+  ref?: string;
+  selector?: string;
+  tab_id?: number;
+  files: UploadFile[];
+  mode?: UploadMode;
+  timeout_ms?: number;
+}
+
+export interface UploadResult {
+  tab_id: number;
+  used_ref?: string;
+  used_selector?: string;
+  file_names: string[];
+}
+
+export interface DownloadParams {
+  session_id: string;
+  ref?: string;
+  selector?: string;
+  tab_id?: number;
+  timeout_ms?: number;
+  browser_relative_dir?: string;
+  max_byte_size?: number;
+}
+
+export interface DownloadResult {
+  tab_id: number;
+  used_ref?: string;
+  used_selector?: string;
+  suggested_filename: string;
+  byte_size: number;
+  mime?: string;
+  danger?: string;
+  browser_path?: string;
+  transfer_id?: string;
+}
+
 // --------------------------------------------------------------------------
 // M9 tool payloads — evaluate / wait_for_navigation / wait_ms
 // --------------------------------------------------------------------------
@@ -590,6 +912,36 @@ export interface WaitForNavigationResult {
   dialogs?: JavaScriptDialogInfo[];
 }
 
+/**
+ * Element states `wait-for-element` can wait on. `visible` / `hidden` ask about
+ * visibility; `attached` / `detached` ask about presence in the DOM.
+ * `hidden` is the opposite of `visible`: absent or attached but not visible.
+ * The `attached` result distinguishes these two observations.
+ */
+export type ElementState = "visible" | "hidden" | "attached" | "detached";
+
+export interface WaitForElementParams {
+  session_id: string;
+  ref?: string;
+  selector?: string;
+  state: ElementState;
+  tab_id?: number;
+  timeout_ms?: number;
+  poll_ms?: number;
+}
+
+export interface WaitForElementResult {
+  tab_id: number;
+  used_ref?: string;
+  used_selector?: string;
+  satisfied: boolean;
+  /** Last completed probe; null if no probe completed before timeout. */
+  attached: boolean | null;
+  visible: boolean | null;
+  elapsed_ms: number;
+  dialogs?: JavaScriptDialogInfo[];
+}
+
 // --------------------------------------------------------------------------
 // Human-in-loop payloads — request_help (mirror bsk-protocol)
 // --------------------------------------------------------------------------
@@ -609,7 +961,7 @@ export type HelpOutcome =
 
 export interface HelpCompletionCondition {
   url_contains?: string;
-  url_matches?: string;
+  url_matches?: string | null;
   selector_exists?: string;
   selector_missing?: string;
   text_exists?: string;

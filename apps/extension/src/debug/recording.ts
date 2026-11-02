@@ -1,0 +1,113 @@
+import { analyzeRecording } from "./analysis";
+import { operationContext, operationEvidence } from "./evidence-model";
+import { requestProjection } from "./network-store";
+import { matchesRequest, projectFields } from "./query";
+import type { DebugParams, DebugRecording, DebugResult } from "./types";
+
+/** Read retained data only. This path never attaches to or evaluates a website. */
+export function readRecording(recording: DebugRecording, params: DebugParams): DebugResult {
+  const result: DebugResult = { session_id: recording.run.session_id, run: recording.run };
+  const since = params.since ?? 0;
+  const limit = params.limit ?? 30;
+  if (["aggregate", "duplicates"].includes(params.action))
+    return analyzeRecording(recording, params);
+  if (params.action === "performance") {
+    const all = recording.performance ?? [];
+    const offset = params.offset ?? 0,
+      end = Math.min(all.length, offset + (params.limit ?? 30));
+    return {
+      ...result,
+      performance: all.slice(offset, end),
+      ...(end < all.length ? { next_offset: end, truncated: true } : {}),
+    };
+  }
+  if (params.action === "export")
+    return {
+      ...result,
+      recording: {
+        ...recording,
+        operations: recording.operations.map(
+          (entry) => operationContext(recording, entry).operation,
+        ),
+      },
+    };
+  if (params.action === "rules")
+    return { ...result, rules: recording.rules ?? [], replays: recording.replays ?? [] };
+  if (params.action === "pages" || params.action === "console") {
+    const values = recording[params.action];
+    const offset = params.offset ?? 0;
+    const end = Math.min(values.length, offset + (params.limit ?? values.length));
+    return {
+      ...result,
+      [params.action]: values.slice(offset, end),
+      ...(end < values.length ? { next_offset: end, truncated: true } : {}),
+    };
+  }
+  if (params.action === "request") {
+    const entry = recording.requests.find((item) => item.id === params.id);
+    if (!entry) throw new Error("request not found or evicted");
+    return {
+      ...result,
+      request: requestProjection(
+        entry,
+        params.part,
+        params.offset,
+        params.max_chars,
+        params.pointer,
+      ),
+    };
+  }
+  if (params.action === "requests" || params.action === "operations") {
+    const requests = params.action === "requests";
+    const entries = (
+      requests
+        ? recording.requests.filter((entry) => matchesRequest(entry, params))
+        : recording.operations
+    )
+      .filter((entry) => entry.sequence > since)
+      .sort((a, b) => a.sequence - b.sequence);
+    const page = entries.slice(0, limit);
+    const data = requests
+      ? {
+          requests: recording.requests
+            .filter((item) => page.includes(item))
+            .sort((a, b) => a.sequence - b.sequence)
+            .map((item) => projectFields(requestProjection(item), params.fields)),
+        }
+      : {
+          operations: recording.operations
+            .filter((item) => page.includes(item))
+            .sort((a, b) => a.sequence - b.sequence)
+            .map((entry) => {
+              const {
+                before: _before,
+                after: _after,
+                observations: _observations,
+                ...item
+              } = operationContext(recording, entry).operation;
+              return item;
+            }),
+        };
+    return {
+      ...result,
+      ...data,
+      next_since: page.at(-1)?.sequence ?? recording.run.next_since,
+      truncated:
+        entries.length > limit ||
+        (requests ? recording.run.dropped_requests : recording.run.dropped_operations) > 0,
+    };
+  }
+  if (params.action === "operation") {
+    const operation = recording.operations.find((entry) => entry.id === params.id);
+    if (!operation) throw new Error("operation not found or evicted");
+    const context = operationContext(recording, operation);
+    return {
+      ...result,
+      operation: context.operation,
+      evidence: operationEvidence(recording, operation, context),
+      requests: context.requests.map((entry) => requestProjection(entry)),
+      console: context.console,
+    };
+  }
+  throw new Error("unsupported history action");
+}

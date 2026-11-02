@@ -518,11 +518,18 @@ pub struct BrowserStatusEntry {
     /// Protocol version the extension advertised at handshake.
     #[serde(default)]
     pub extension_protocol_version: String,
+    /// The socket is still registered, but a call failed after this
+    /// heartbeat-capable extension missed two heartbeats. Cleared when any
+    /// frame arrives.
+    #[serde(default)]
+    pub unresponsive: bool,
 }
 
 /// Snapshot of a single live session.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct SessionStatusEntry {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interaction: Option<crate::tools::InteractionPolicy>,
     pub session_id: String,
     pub browser_instance_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]

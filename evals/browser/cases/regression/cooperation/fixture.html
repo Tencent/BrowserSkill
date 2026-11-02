@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="zh-CN"><meta charset="utf-8"><title>协作订票测试</title>
+<style>
+  body { font: 16px/1.7 system-ui; color: #27303f; background: #f5f6fa; padding: 50px; }
+  main { max-width: 720px; margin: auto; background: white; padding: 36px; border-radius: 24px; }
+  h1 { margin-top: 0; } label { display: block; margin: 16px 0; }
+  input, button { font: inherit; padding: 10px 16px; border: 1px solid #ccd2dc; border-radius: 9px; }
+  button { margin: 8px 8px 8px 0; cursor: pointer; background: #edf2ff; }
+  #submit { color: white; background: #3458d4; } #outcome { min-height: 60px; }
+  dialog { width: 650px; max-height: 85vh; border: 0; border-radius: 16px; }
+  dialog label { display: inline-block; margin: 8px; }
+  #notice { position: fixed; top: 4px; right: 10px; }
+  .highlight { background: #fc9; }
+  #hover-action { position: relative; }
+  #hover-action:hover::before { content: ""; position: absolute; inset: 0; }
+</style>
+<aside id="notice">Announcement</aside>
+<main>
+  <h1>共同完成一张订单</h1>
+  <p>任务目标：城市为 Shanghai、数量为 2，并且只提交一次。</p>
+  <button id="open-controls">通用控件测试</button>
+  <label>城市 <input id="city" aria-label="City" value="Shanghai"></label>
+  <label>数量 <input id="quantity" aria-label="Quantity" value="1" inputmode="numeric"></label>
+  <button id="submit">提交订单</button>
+  <button id="mistake">误操作：改成 Beijing</button>
+  <button id="help">协助：改回 Shanghai</button>
+  <button id="neutral">完成编辑</button>
+  <div id="outcome" role="status"></div>
+  <iframe title="辅助输入" src="/frame" style="width:100%;height:90px;border:0"></iframe>
+</main>
+<section style="margin-top:1800px;padding:40px"><button id="scroll-probe">滚动后操作</button><output id="scroll-count">0</output></section>
+<dialog id="controls">
+  <h2>通用协作控件</h2>
+  <form onsubmit="return false">
+    <label>选择结果 <input id="choice" aria-label="Choice" readonly value="A"></label>
+    <div id="picker" hidden>
+      <div id="choice-b" style="cursor:pointer" tabindex="0">B</div>
+    </div>
+    <label><input id="check" type="checkbox">启用选项</label>
+    <label>分类 <select id="category" aria-label="Category"><option value="a">A</option><option value="b">B</option></select></label>
+    <label>调整 <input id="slider" type="range" aria-label="Adjustment"></label>
+    <div id="shadow"></div>
+    <button type="button" id="noise">开始持续刷新</button>
+    <button type="button" id="hover-action">继续操作</button>
+    <output id="probe">0</output>
+    <button type="button" id="arm-price">稍后更新候选</button>
+    <ul id="candidates"><li>方案 A <span id="price">100</span><button type="button" id="pick-a">选择 A</button></li><li>方案 B 120</li></ul>
+    <button type="button" id="arm-cover">准备遮挡测试</button>
+    <div style="position:relative;display:inline-block"><button type="button" id="covered">检查目标</button><div id="cover" hidden style="position:absolute;inset:0;background:#aaa">遮挡</div></div>
+    <button type="button" id="finish-help">完成人工步骤</button>
+    <button type="button" id="close-controls">完成编辑</button>
+  </form>
+</dialog>
+<script>
+  document.querySelector("#scroll-probe").onclick = () => { document.querySelector("#scroll-count").value = String(Number(document.querySelector("#scroll-count").value) + 1); };
+  const controls = document.querySelector('#controls');
+  document.querySelector('#open-controls').onclick = () => controls.showModal();
+  document.querySelector('#choice').onclick = () => { document.querySelector('#picker').hidden = false; };
+  document.querySelector('#choice-b').onclick = () => {
+    document.querySelector('#choice').value = 'B';
+    document.querySelector('#picker').hidden = true;
+  };
+  document.querySelector('#shadow').attachShadow({mode:'open'}).innerHTML = '<label>Shadow note <input aria-label="Shadow note"></label>';
+  let noise;
+  document.querySelector('#noise').onclick = () => {
+    clearInterval(noise);
+    noise = setInterval(() => { document.querySelector('#notice').textContent = 'Announcement ' + performance.now(); }, 40);
+  };
+  document.querySelector('#hover-action').onmouseenter = (e) => e.target.classList.add('highlight');
+  document.querySelector('#hover-action').onclick = () => { document.querySelector('#probe').value = String(Number(document.querySelector('#probe').value) + 1); };
+  document.querySelector('#arm-price').onclick = () => setTimeout(() => {
+    document.querySelector('#price').textContent = '200';
+  }, 4000);
+  document.querySelector('#pick-a').onclick = () => { document.querySelector('#candidates').dataset.selected = 'a'; };
+  document.querySelector('#arm-cover').onclick = () => {
+    document.querySelector('#covered').onmouseenter = () => { document.querySelector('#cover').hidden = false; };
+  };
+  document.querySelector('#covered').onclick = () => { document.querySelector('#covered').dataset.clicked = 'yes'; };
+  document.querySelector('#finish-help').onclick = () => { controls.dataset.complete = 'yes'; };
+  document.querySelector('#close-controls').onclick = () => {
+    clearInterval(noise);
+    controls.close();
+  };
+  const city = document.querySelector('#city');
+  const quantity = document.querySelector('#quantity');
+  for (const [id, value] of [['mistake', 'Beijing'], ['help', 'Shanghai']]) {
+    document.getElementById(id).onclick = () => {
+      city.value = value;
+      city.dispatchEvent(new Event('input', { bubbles: true }));
+    };
+  }
+  document.getElementById('submit').onclick = async () => {
+    const result = await fetch('/submit', { method:'POST', headers:{'content-type':'application/json'}, body:JSON.stringify({city:city.value, quantity:quantity.value}) }).then(r => r.json());
+    document.getElementById('outcome').textContent = '订单已提交：' + result.city + ' × ' + result.quantity + '（第 ' + result.count + ' 次）';
+  };
+  const seed = Number(new URLSearchParams(location.search).get('seed') || 4);
+  document.querySelector('main').style.marginLeft = (seed * 7 % 95) + 'px';
+</script></html>

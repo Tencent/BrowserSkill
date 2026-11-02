@@ -27,6 +27,11 @@ pub struct DaemonInfo {
     /// `SystemTime` rendered as RFC 3339-ish seconds-since-epoch for
     /// portability across platforms.
     pub started_at_epoch_secs: u64,
+    /// Owned by a terminal or supervisor (`--foreground`, server mode) rather
+    /// than started by `bsk` in the background. Only its owner restarts it.
+    /// Omitted when false, so detached daemons write the same file as before.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub host_managed: bool,
 }
 
 impl DaemonInfo {
@@ -40,7 +45,13 @@ impl DaemonInfo {
                 .duration_since(SystemTime::UNIX_EPOCH)
                 .map(|d| d.as_secs())
                 .unwrap_or(0),
+            host_managed: false,
         }
+    }
+
+    pub fn with_host_managed(mut self, host_managed: bool) -> Self {
+        self.host_managed = host_managed;
+        self
     }
 }
 
@@ -106,7 +117,16 @@ pub fn write_to_path(info: &DaemonInfo, final_path: &Path) -> Result<()> {
 /// callers can distinguish "no daemon running" from "I/O error".
 pub fn read() -> Result<Option<DaemonInfo>> {
     let p = paths::info_path()?;
-    read_from_path(&p)
+    read_from_path(&p).map_err(|err| {
+        if err
+            .downcast_ref::<std::io::Error>()
+            .is_some_and(|io| io.kind() == std::io::ErrorKind::PermissionDenied)
+        {
+            err.context(paths::BSK_HOME_HINT)
+        } else {
+            err
+        }
+    })
 }
 
 pub fn read_from_path(path: &Path) -> Result<Option<DaemonInfo>> {
@@ -122,8 +142,8 @@ pub fn read_from_path(path: &Path) -> Result<Option<DaemonInfo>> {
 }
 
 /// Read `daemon.json` and only return it if the recorded pid is alive
-/// on the local machine. Stale files (daemon crashed without cleanup)
-/// surface as `Ok(None)` so callers can fall through to "auto-spawn".
+/// in the caller's PID namespace. This legacy helper does not establish
+/// daemon availability or identity; production discovery uses IPC probing.
 pub fn read_valid() -> Result<Option<DaemonInfo>> {
     Ok(read()?.filter(|info| lockfile::pid_alive(info.pid)))
 }
@@ -183,5 +203,29 @@ mod tests {
         let parsed = read_from_path(&path).unwrap().unwrap();
         assert_eq!(parsed.pid, 2);
         assert_eq!(parsed.version, "b");
+    }
+
+    #[test]
+    fn only_host_managed_daemons_record_their_owner() {
+        let detached = DaemonInfo::now(1, "sock".into(), 1, "a");
+        let json = serde_json::to_value(&detached).unwrap();
+        assert!(json.get("host_managed").is_none(), "{json}");
+
+        let host_managed = detached.clone().with_host_managed(true);
+        let json = serde_json::to_value(&host_managed).unwrap();
+        assert_eq!(json["host_managed"], true);
+        assert_eq!(
+            serde_json::from_value::<DaemonInfo>(json).unwrap(),
+            host_managed
+        );
+
+        // Files written before the field existed describe detached daemons.
+        let mut older = serde_json::to_value(&detached).unwrap();
+        older.as_object_mut().unwrap().remove("host_managed");
+        assert!(
+            !serde_json::from_value::<DaemonInfo>(older)
+                .unwrap()
+                .host_managed
+        );
     }
 }

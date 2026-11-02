@@ -8,6 +8,7 @@ import { ControlOverlay } from "@/content/ControlOverlay";
 import { createCaptureSuppressController } from "@/content/capture-suppress";
 import { HelpRequestOverlay } from "@/content/HelpRequestOverlay";
 import { createHelpRequestData } from "@/content/help-request";
+import { createInputPassthroughController } from "@/content/input-passthrough";
 import overlayCss from "@/content/overlay.css?inline";
 import { OverlayController, shouldShowAgentControlOverlay } from "@/content/overlay-controller";
 import { RecordOverlay } from "@/content/RecordOverlay";
@@ -28,6 +29,11 @@ import {
   isHelpCancelMessage,
   isHelpRequestMessage,
 } from "@/lib/help-bridge";
+import {
+  type InputPassthroughAck,
+  type InputPassthroughMessage,
+  isInputPassthroughMessage,
+} from "@/lib/input-passthrough-bridge";
 import { getControlHintsHidden, STORAGE_KEYS } from "@/lib/instance-id";
 import {
   isOverlayAgentOverlayResetMessage,
@@ -37,6 +43,7 @@ import {
   type OverlayAgentOverlayResetMessage,
   type OverlayAgentStateMessage,
   type OverlayAutomationBypassMessage,
+  OverlayVersionGate,
 } from "@/lib/overlay-bridge";
 import { sendInterrupt } from "@/lib/overlay-interrupt-client";
 import {
@@ -57,6 +64,7 @@ import type {
   BorrowRequestMessage,
   BorrowResponseMessage,
 } from "@/tools/borrow-confirmation";
+import { VIDEO_OVERLAY, VideoOverlayGate, type VideoOverlayMessage } from "@/video/overlay";
 
 // Run at document_end so the overlay does not block first paint. Only attach
 // in the top-level frame so iframes do not double-render overlays.
@@ -64,7 +72,6 @@ export default defineContentScript({
   matches: ["<all_urls>"],
   runAt: "document_end",
   allFrames: false,
-  cssInjectionMode: "ui",
 
   async main(ctx) {
     if (window.top !== window) return;
@@ -75,8 +82,23 @@ export default defineContentScript({
     let overlayHost: HTMLElement | null = null;
     let overlayContainer: HTMLElement | null = null;
     let activeAgentState: OverlayAgentStateMessage | null = null;
+    const overlayVersions = new OverlayVersionGate();
     let hostLossReported = false;
     let remountInProgress = false;
+    const videoOverlay = new VideoOverlayGate(
+      async (action) => {
+        const response = await chrome.runtime.sendMessage({ type: VIDEO_OVERLAY, action });
+        if (
+          !response ||
+          response.error ||
+          (response.recording_id !== null && typeof response.recording_id !== "string")
+        )
+          throw new Error(response?.error ?? "Video overlay unavailable");
+        return response;
+      },
+      () => renderAll(),
+      () => waitForRenderedOverlayUpdate(),
+    );
 
     // Load the user's control-hints preference up front so an already-active
     // Agent session does not flash the overlay before the stored value lands.
@@ -87,6 +109,7 @@ export default defineContentScript({
     }
 
     const captureSuppress = createCaptureSuppressController(() => overlayHost);
+    const inputPassthrough = createInputPassthroughController(() => overlayHost);
 
     const ui = await createShadowRootUi(ctx, {
       name: "browser-skill-overlay",
@@ -101,6 +124,7 @@ export default defineContentScript({
         hostLossReported = false;
         // A host rebuilt mid-capture must stay hidden until `end` arrives.
         captureSuppress.onHostMounted(shadowHost);
+        inputPassthrough.onHostMounted(shadowHost);
         const app = document.createElement("div");
         app.className = "bsk-overlay-root";
         container.append(app);
@@ -165,12 +189,20 @@ export default defineContentScript({
 
     function renderReactOverlays(): void {
       const overlayState = overlays.snapshot();
-      const controlOverlayVisible = shouldShowAgentControlOverlay(overlayState);
+      const controlVisible =
+        videoOverlay.canRenderControl() && shouldShowAgentControlOverlay(overlayState);
+      const controlOverlayVisible = controlVisible && !activeAgentState?.cooperation;
+      // Leaving control (including help/record UI) must not retain click leases.
+      if (!controlOverlayVisible) inputPassthrough.reset();
       const interactiveOverlayVisible =
         overlayState.borrowRequests.length > 0 ||
         overlayState.activeHelp !== null ||
         overlayState.activeRecord !== null;
-      setOverlayHostHiddenFromAccessibility(!interactiveOverlayVisible);
+      const showInteractive = videoOverlay.canRenderInteractive(interactiveOverlayVisible);
+      const cooperationState =
+        controlVisible && !interactiveOverlayVisible ? activeAgentState?.cooperation : undefined;
+      const cardVisible = controlOverlayVisible || !!cooperationState;
+      setOverlayHostHiddenFromAccessibility(!interactiveOverlayVisible && !cardVisible);
       setOverlaySurfaceState(
         controlOverlayVisible,
         controlOverlayVisible && overlayState.automationBypassCount === 0,
@@ -186,12 +218,17 @@ export default defineContentScript({
               React.Fragment,
               null,
               React.createElement(BorrowConfirmationOverlay, {
-                requests: overlayState.borrowRequests,
+                requests: showInteractive ? overlayState.borrowRequests : [],
               }),
-              React.createElement(HelpRequestOverlay, { request: overlayState.activeHelp }),
-              React.createElement(RecordOverlay, { request: overlayState.activeRecord }),
+              React.createElement(HelpRequestOverlay, {
+                request: showInteractive ? overlayState.activeHelp : null,
+              }),
+              React.createElement(RecordOverlay, {
+                request: showInteractive ? overlayState.activeRecord : null,
+              }),
               React.createElement(ControlOverlay, {
-                visible: controlOverlayVisible,
+                visible: cardVisible,
+                state: cooperationState,
                 interrupting: overlayState.interrupting,
                 automationBypass: overlayState.automationBypassCount > 0,
                 onInterrupt: handleInterrupt,
@@ -207,8 +244,18 @@ export default defineContentScript({
     }
 
     async function waitForRenderedOverlayUpdate(): Promise<void> {
-      await new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()));
-      await new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()));
+      // Background tabs may not receive animation frames. Rendering has already
+      // committed synchronously; the fallback also bounds shutdown/navigation.
+      const frame = () =>
+        new Promise<void>((resolve) => {
+          const timer = window.setTimeout(resolve, 500);
+          window.requestAnimationFrame(() => {
+            window.clearTimeout(timer);
+            resolve();
+          });
+        });
+      await frame();
+      await frame();
     }
 
     function clearCurrentAgentSession(): void {
@@ -217,13 +264,24 @@ export default defineContentScript({
       resetAgentOverlayState(sessionId);
     }
 
+    function receiveOverlayState(state: OverlayAgentStateMessage): void {
+      if (overlayVersions.admit(state)) {
+        recoverVideoOverlay();
+        applyOverlayState(state);
+      }
+    }
+
     function applyOverlayState(state: OverlayAgentStateMessage): void {
+      if (overlays.snapshot().activeSessionId !== state.sessionId) inputPassthrough.reset();
       activeAgentState = state;
       overlays.applyAgentControlMode(state.sessionId, state.mode);
       renderAll();
     }
 
     function resetAgentOverlayState(sessionId: string) {
+      const activeSessionId = overlays.snapshot().activeSessionId;
+      if (activeSessionId && activeSessionId !== sessionId) return;
+      inputPassthrough.reset();
       const previousHelp = overlays.resetAgentOverlays(sessionId);
       if (previousHelp) {
         void sendHelpFinish(previousHelp.id, "cancelled");
@@ -257,6 +315,7 @@ export default defineContentScript({
         | HelpRequestMessage
         | HelpCancelMessage
         | CaptureSuppressMessage
+        | InputPassthroughMessage
         | RecordStartMessage
         | RecordStopMessage
         | RecordCancelMessage
@@ -264,13 +323,31 @@ export default defineContentScript({
         | OverlayAgentStateMessage
         | OverlayAutomationBypassMessage,
       _sender: chrome.runtime.MessageSender,
-      sendResponse: (response: BorrowResponseMessage | HelpAckMessage | CaptureSuppressAck) => void,
+      sendResponse: (
+        response: BorrowResponseMessage | HelpAckMessage | CaptureSuppressAck | InputPassthroughAck,
+      ) => void,
     ) => {
+      if ((message as { type?: string }).type === VIDEO_OVERLAY) {
+        void videoOverlay.set((message as unknown as VideoOverlayMessage).recording_id).then(() => {
+          const state = overlays.snapshot();
+          (sendResponse as (value: unknown) => void)({
+            interactive:
+              state.borrowRequests.length > 0 ||
+              state.activeHelp !== null ||
+              state.activeRecord !== null,
+          });
+        });
+        return true;
+      }
       if (isCaptureSuppressMessage(message)) {
         return captureSuppress.handleMessage(message, sendResponse);
       }
+      if (isInputPassthroughMessage(message)) {
+        return inputPassthrough.handleMessage(message, sendResponse);
+      }
 
       if (isRecordStartMessage(message)) {
+        recoverVideoOverlay();
         activeRecordRequestId = message.requestId;
         overlays.setAgentRecordRequest({
           id: message.requestId,
@@ -311,12 +388,12 @@ export default defineContentScript({
       }
 
       if (isOverlayAgentStateMessage(message)) {
-        applyOverlayState(message);
+        receiveOverlayState(message);
         return false;
       }
 
       if (isOverlayAgentOverlayResetMessage(message)) {
-        resetAgentOverlayState(message.sessionId);
+        if (overlayVersions.admit(message)) resetAgentOverlayState(message.sessionId);
         return false;
       }
 
@@ -336,6 +413,7 @@ export default defineContentScript({
       }
 
       if (isHelpRequestMessage(message)) {
+        recoverVideoOverlay();
         const helpMsg = message as HelpRequestMessage;
         const previousHelp = mountHelpRequest(helpMsg);
         if (previousHelp && previousHelp.id !== helpMsg.requestId) {
@@ -347,11 +425,12 @@ export default defineContentScript({
       }
 
       if (message.type === "borrow-request") {
+        recoverVideoOverlay();
         let responded = false;
-        const respond = (allowed: boolean) => {
+        const respond = (allowed: boolean, timedOut = false) => {
           if (responded) return;
           responded = true;
-          sendResponse({ type: "borrow-response", allowed });
+          sendResponse({ type: "borrow-response", allowed, ...(timedOut ? { timedOut } : {}) });
           overlays.removeBorrowRequest(message.requestId);
           renderAll();
         };
@@ -362,7 +441,7 @@ export default defineContentScript({
           tabTitle: message.tabTitle,
           timeoutMs: message.timeoutMs,
           onAllow: () => respond(true),
-          onDeny: () => respond(false),
+          onDeny: (timedOut) => respond(false, timedOut),
         });
         renderAll();
         return true;
@@ -461,7 +540,7 @@ export default defineContentScript({
           kind: OVERLAY_MSG_READY,
         })) as OverlayAgentStateMessage | undefined;
         if (state && isOverlayAgentStateMessage(state)) {
-          applyOverlayState(state);
+          receiveOverlayState(state);
         }
         void refreshAuxiliaryOverlayState();
       } catch (err) {
@@ -469,8 +548,34 @@ export default defineContentScript({
       }
     }
 
+    function refreshVideoOverlay(): void {
+      // Prerendered documents are not the captured page. Discover their state
+      // on activation, when the bridge can validate the active document.
+      if ((document as Document & { prerendering?: boolean }).prerendering) return;
+      void videoOverlay
+        .initialize()
+        .then(() => videoOverlay.clean())
+        .catch((error) => {
+          console.debug(
+            "[bsk overlay] video discovery failed; will retry on activation or request",
+            error,
+          );
+        });
+    }
+
+    function recoverVideoOverlay(): void {
+      if (videoOverlay.needsDiscovery()) refreshVideoOverlay();
+    }
+
+    const onPageActivated = () => {
+      refreshVideoOverlay();
+      void requestOverlayState();
+    };
     const onPageShow = (event: PageTransitionEvent) => {
-      if (event.persisted) void requestOverlayState();
+      if (event.persisted) onPageActivated();
+    };
+    const onVisibilityChange = () => {
+      if (document.visibilityState === "visible") recoverVideoOverlay();
     };
 
     // Live-apply popup toggles of the control-hints preference.
@@ -488,9 +593,13 @@ export default defineContentScript({
 
     ui.mount();
     chrome.runtime.onMessage.addListener(onMessage);
+    // Start the handshake after mounting/listening; it never delays page setup.
+    refreshVideoOverlay();
     void requestOverlayState();
 
     window.addEventListener("pageshow", onPageShow);
+    document.addEventListener("prerenderingchange", onPageActivated);
+    document.addEventListener("visibilitychange", onVisibilityChange);
 
     const hostObserver = new MutationObserver(() => {
       const connected = overlayHost?.isConnected ?? false;
@@ -514,10 +623,14 @@ export default defineContentScript({
     hostObserver.observe(document.documentElement, { childList: true, subtree: false });
 
     ctx.onInvalidated(() => {
+      videoOverlay.dispose();
+      inputPassthrough.reset();
       hostObserver.disconnect();
       chrome.runtime.onMessage.removeListener(onMessage);
       chrome.storage.onChanged.removeListener(onStorageChange);
       window.removeEventListener("pageshow", onPageShow);
+      document.removeEventListener("prerenderingchange", onPageActivated);
+      document.removeEventListener("visibilitychange", onVisibilityChange);
       activeRecordRequestId = null;
     });
   },

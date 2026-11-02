@@ -8,6 +8,27 @@ function start(registry: SessionRegistry, sessionId: string): void {
 }
 
 describe("SessionRegistry", () => {
+  it.each([
+    "starting",
+    "cleanup",
+  ] as const)("counts %s resources against capacity without selecting them", (state) => {
+    const registry = new SessionRegistry(2);
+    start(registry, "working");
+    registry.reserveStart();
+    registry.trackStart({ sessionId: "pending", startedAtMs: 1 }, state);
+    expect(registry.current()).toBe("working");
+    expect(registry.size()).toBe(2);
+    expect(() => registry.reserveStart()).toThrow(/session limit/);
+    expect(() => registry.resolve("pending", "tool")).toThrow(/not ready|awaiting cleanup/);
+    expect(registry.resolveForStop("pending")).toBe("pending");
+    registry.remove("working");
+    expect(registry.current()).toBeUndefined();
+    expect(() => registry.resolve(undefined, "tool")).toThrow(/none is active/);
+    expect(registry.resolveForStop(undefined)).toBe("pending");
+    registry.remove("pending");
+    expect(() => registry.reserveStart()).not.toThrow();
+  });
+
   it("tracks the current session across start and remove", () => {
     const registry = new SessionRegistry(5);
     expect(registry.current()).toBeUndefined();
@@ -71,7 +92,9 @@ describe("SessionRegistry", () => {
 
   it("resolve throws actionable guidance when no session exists", () => {
     const registry = new SessionRegistry(5);
-    expect(() => registry.resolve(undefined, "browser_click")).toThrow(/browser_session_start/);
+    expect(() => registry.resolve(undefined, "bsk_interact(action=click)")).toThrow(
+      /bsk_session action=start/,
+    );
   });
 
   it("recency order survives remove of the current session", () => {

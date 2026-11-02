@@ -45,8 +45,30 @@ function portHarness() {
 
 describe("RecordFrameAgent", () => {
   afterEach(() => {
+    vi.unstubAllGlobals();
     document.documentElement.removeAttribute(RECORD_DOCUMENT_ATTRIBUTE);
     document.body.replaceChildren();
+  });
+
+  it("starts when crypto.randomUUID is unavailable", async () => {
+    const harness = portHarness();
+    const getRandomValues = vi.fn((bytes: Uint8Array) => {
+      bytes.fill(0x11);
+      return bytes;
+    });
+    vi.stubGlobal("crypto", { getRandomValues });
+    vi.stubGlobal("chrome", {
+      runtime: {
+        connect: vi.fn(() => harness.port),
+        sendMessage: vi.fn(),
+      },
+    });
+    const agent = new RecordFrameAgent();
+
+    await expect(
+      agent.start({ type: RECORD_FRAME_START, requestId: "rec-http", startedAtMs: 10 }),
+    ).resolves.toEqual({ ok: true });
+    expect(getRandomValues).toHaveBeenCalled();
   });
 
   it("keeps a failed stop retryable and flushes the final dirty fill", async () => {

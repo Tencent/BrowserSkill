@@ -44,6 +44,7 @@
       "!packages/dsh-plugin-browserskill/src/client/bsk-ui.nomodule.css",
       "!packages/dsh-plugin-browserskill/.bsk-ui.raw.css",
       "!packages/dsh-plugin-browserskill/.bsk-ui.input.css",
+      "!evals/browser/results/**",
       "!**/target/**",
       "!**/.wxt/**",
       "!**/.output/**",

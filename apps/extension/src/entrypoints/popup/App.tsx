@@ -1,33 +1,31 @@
 import { useTranslation } from "@browser-skill/i18n/react";
 import { Badge, Button, Input, Label } from "@browser-skill/ui";
-import {
-  RiArrowLeftLine,
-  RiArrowRightSLine,
-  RiCheckLine,
-  RiFileCopyLine,
-  RiInformationLine,
-} from "@remixicon/react";
+import { RiArrowLeftLine, RiArrowRightSLine, RiCheckLine, RiFileCopyLine } from "@remixicon/react";
 import { type ChangeEvent, useEffect, useState } from "react";
+import { AuditPanel } from "@/components/audit-panel";
+import { compareProtocol } from "@/lib/semver";
 import { PROTOCOL_VERSION } from "@/transport/handshake";
 import functionIconUrl from "../../../assets/function.svg";
+import { BrowserProfile } from "./browser-profile";
+import { ConnectionSettings } from "./connection-settings";
 import { ConnectionStatusIndicator } from "./connection-status-indicator";
+import { CurrentTasks } from "./current-tasks";
+import { DaemonUpgradeNotice } from "./daemon-upgrade-notice";
+import { DebugPanel } from "./debug-panel";
 import { POPUP_FEATURES, type PopupView } from "./features";
+import { InteractionSettings } from "./interaction-settings";
+import { LongScreenshot } from "./long-screenshot";
+import { SettingInfo } from "./setting-info";
 import { Switch } from "./switch";
 import { type PopupStatusState, useConnectionState } from "./use-connection-state";
 import { useControlHintsHidden } from "./use-control-hints-hidden";
+import { VideoPanel } from "./video-panel";
 
 const STATE_LABEL_KEYS = {
   disconnected: "popup.stateLabel.disconnected",
   connected: "popup.stateLabel.connected",
   version_skew: "popup.stateLabel.version_skew",
   disabled: "popup.stateLabel.disabled",
-} as const satisfies Record<PopupStatusState, string>;
-
-const STATE_BADGE_KEYS = {
-  disconnected: "popup.stateBadge.disconnected",
-  connected: "popup.stateBadge.connected",
-  version_skew: "popup.stateBadge.version_skew",
-  disabled: "popup.stateBadge.disabled",
 } as const satisfies Record<PopupStatusState, string>;
 
 function getLogoSrc() {
@@ -39,7 +37,7 @@ function getLogoSrc() {
 
 export function App() {
   const { t } = useTranslation("extension");
-  const { snapshot, statusState, setConnectionEnabled } = useConnectionState();
+  const { snapshot, statusState, setLabel, setConnectionEnabled } = useConnectionState();
   const [controlHintsHidden, setControlHintsHidden] = useControlHintsHidden();
   const [view, setView] = useState<PopupView>("main");
   const [copiedInstanceId, setCopiedInstanceId] = useState(false);
@@ -79,8 +77,18 @@ export function App() {
   }, [copiedTick]);
 
   const isSkewed = statusState === "version_skew";
-  const daemonVersion = snapshot.handshake?.version ?? "—";
+  const isDisconnected = statusState === "disconnected";
+  const connectionLive = statusState === "connected" || isSkewed;
+  const daemonUpgrade =
+    snapshot.connectionEnabled &&
+    snapshot.state !== "connected" &&
+    snapshot.state !== "version_skew"
+      ? snapshot.daemonUpgradeRequired
+      : null;
+  const daemonVersion = snapshot.handshake?.version ?? daemonUpgrade?.daemonVersion ?? "—";
   const daemonProtocol = snapshot.handshake?.protocol_version ?? "—";
+  const interactionProtocolOrder = compareProtocol(daemonProtocol, "1.3");
+  const legacyInteraction = interactionProtocolOrder !== null && interactionProtocolOrder < 0;
   const extensionVersion = snapshot.extensionVersion || "—";
   const instanceId = snapshot.instanceId || "—";
 
@@ -90,7 +98,7 @@ export function App() {
     setCopiedInstanceId(true);
   };
 
-  const recordReady = statusState === "connected" && Boolean(snapshot.instanceId);
+  const recordReady = connectionLive && Boolean(snapshot.instanceId);
   const recordPurpose = purposeDraft.trim();
   const recordStartUrl = startUrlDraft.trim();
   const recordCommand = snapshot.instanceId
@@ -115,11 +123,19 @@ export function App() {
   };
 
   const headerTitle =
-    view === "features"
-      ? t("popup.launcher.title")
-      : view === "record"
-        ? t("popup.record.sectionTitle")
-        : t("popup.brandName");
+    view === "video"
+      ? t("video.title")
+      : view === "features"
+        ? t("popup.launcher.title")
+        : view === "debug"
+          ? t("debug.title")
+          : view === "record"
+            ? t("popup.record.sectionTitle")
+            : view === "long-screenshot"
+              ? t("longScreenshot.title")
+              : view === "audit"
+                ? t("audit.title")
+                : t("popup.brandName");
 
   return (
     <main
@@ -139,7 +155,7 @@ export function App() {
             size="icon"
             className="size-7 shrink-0 rounded-md"
             aria-label={t("popup.back")}
-            onClick={() => setView(view === "record" ? "features" : "main")}
+            onClick={() => setView(view === "features" ? "main" : "features")}
             data-slot="popup-back"
           >
             <RiArrowLeftLine className="size-4" aria-hidden />
@@ -175,6 +191,10 @@ export function App() {
         )}
       </header>
 
+      {daemonUpgrade && <DaemonUpgradeNotice upgrade={daemonUpgrade} error={snapshot.lastError} />}
+
+      {view === "video" && <VideoPanel />}
+
       {view === "main" && (
         <>
           <section
@@ -189,13 +209,15 @@ export function App() {
                 </span>
               </div>
               <div className="flex shrink-0 items-center gap-2">
-                <Badge
-                  variant="outline"
-                  className="px-1.5 py-0 text-[10px] font-medium uppercase"
-                  data-slot="popup-state-badge"
-                >
-                  {t(STATE_BADGE_KEYS[statusState])}
-                </Badge>
+                {isSkewed && (
+                  <Badge
+                    variant="outline"
+                    className="px-1.5 py-0 text-[10px] font-medium uppercase"
+                    data-slot="popup-state-badge"
+                  >
+                    {t("popup.stateBadge.version_skew")}
+                  </Badge>
+                )}
                 <Switch
                   checked={snapshot.connectionEnabled}
                   onCheckedChange={setConnectionEnabled}
@@ -206,42 +228,51 @@ export function App() {
             </div>
             {isSkewed && (
               <p
-                className="mt-2 text-xs leading-snug text-amber-600 dark:text-amber-400"
+                className="mt-2 text-xs leading-snug text-muted-foreground"
                 data-slot="popup-version-skew-warning"
               >
-                {t("popup.versionSkewWarning", {
-                  extensionProtocol: PROTOCOL_VERSION,
-                  daemonProtocol,
-                })}
+                {t(
+                  legacyInteraction
+                    ? "popup.interactionCompatibilityWarning"
+                    : "popup.versionSkewWarning",
+                  {
+                    extensionProtocol: PROTOCOL_VERSION,
+                    cliProtocol: daemonProtocol,
+                  },
+                )}
               </p>
             )}
+            <BrowserProfile
+              label={snapshot.label}
+              instanceId={snapshot.instanceId}
+              connected={
+                snapshot.connectionEnabled &&
+                (snapshot.state === "connected" || snapshot.state === "version_skew")
+              }
+              sessionCount={snapshot.sessionCount}
+              onSave={setLabel}
+            />
+            <ConnectionSettings
+              connectionEnabled={snapshot.connectionEnabled}
+              disconnected={isDisconnected && !snapshot.lastError && !daemonUpgrade}
+            />
           </section>
 
           <section
             className="rounded-xl border border-border/80 bg-card/60 px-3 py-2.5"
             data-slot="popup-control-hints-card"
           >
-            <div className="flex items-center justify-between gap-2">
+            <div className="relative flex items-center justify-between gap-2">
               <span className="flex min-w-0 items-center gap-1">
                 <span className="truncate text-sm font-medium">
                   {t("popup.controlHintsToggleTitle")}
                 </span>
-                <span className="group relative inline-flex shrink-0">
-                  <button
-                    type="button"
-                    aria-label={t("popup.controlHintsInfoLabel")}
-                    data-slot="popup-control-hints-info"
-                    className="flex size-4 items-center justify-center rounded-full text-muted-foreground/70 transition-colors hover:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
-                  >
-                    <RiInformationLine className="size-3.5" aria-hidden />
-                  </button>
-                  <span
-                    role="tooltip"
-                    className="pointer-events-none absolute bottom-full left-0 z-10 mb-1.5 w-56 whitespace-normal rounded-md bg-foreground/65 px-2 py-1 text-[10px] font-medium leading-snug text-background opacity-0 shadow-md backdrop-blur-sm transition-opacity group-hover:opacity-100 group-focus-within:opacity-100"
-                  >
-                    {t("popup.controlHintsToggleHint")}
-                  </span>
-                </span>
+                <SettingInfo
+                  label={t("popup.controlHintsInfoLabel")}
+                  data-slot="popup-control-hints-info"
+                >
+                  {t("popup.controlHintsToggleHint")}
+                </SettingInfo>
               </span>
               <Switch
                 checked={!controlHintsHidden}
@@ -252,7 +283,11 @@ export function App() {
             </div>
           </section>
 
-          {snapshot.lastError && (
+          <InteractionSettings />
+
+          <CurrentTasks enabled={connectionLive} />
+
+          {snapshot.lastError && !daemonUpgrade && (
             <div
               className="rounded-lg border border-destructive/25 bg-destructive/10 px-3 py-2 text-xs leading-snug text-destructive"
               data-slot="popup-error"
@@ -266,9 +301,9 @@ export function App() {
             data-slot="popup-meta"
           >
             <div className="flex shrink-0 items-center gap-1">
-              <span title={t("popup.extensionVersionHint")}>{extensionVersion}</span>
+              <span title={t("popup.daemonVersionHint")}>CLI {daemonVersion}</span>
               <span aria-hidden>/</span>
-              <span title={t("popup.daemonVersionHint")}>{daemonVersion}</span>
+              <span title={t("popup.extensionVersionHint")}>Ext {extensionVersion}</span>
             </div>
             <div className="flex min-w-0 items-center justify-end gap-1">
               <span className="shrink-0">{t("popup.instanceTitle")}</span>
@@ -329,6 +364,10 @@ export function App() {
           })}
         </section>
       )}
+
+      {view === "long-screenshot" && <LongScreenshot />}
+      {view === "audit" && <AuditPanel />}
+      {view === "debug" && <DebugPanel connected={connectionLive} />}
 
       {view === "record" && (
         <section className="space-y-2.5" data-slot="popup-record-body">

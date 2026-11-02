@@ -1,0 +1,6 @@
+{
+  "app": {
+    "name": "browser-skill",
+    "description": "Controla tu navegador con sesión iniciada desde agentes de IA mediante la CLI bsk"
+  }
+}

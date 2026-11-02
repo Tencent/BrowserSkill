@@ -1,19 +1,21 @@
 /**
- * Client-side data layer for the observation overlay: initial state fetch,
- * SSE increment stream (with a state refetch on every (re)open — events that
- * fired while the stream was down are otherwise lost forever), on-demand
- * thumbnail blob loading through the session-authorized readAttachment path,
+ * Client-side data layer for the observation overlay: an ordered SSE snapshot
+ * and increment stream (each reconnect starts with a fresh snapshot), on-demand
+ * thumbnail blob loading through the host's ephemeral-frame route,
  * and the interrupt call. The last ready blob per session is held until its
- * replacement decodes so the overlay can swap frames in place. All I/O is
+ * replacement loads so the overlay can swap frames in place. All I/O is
  * injected so tests never touch a network.
  */
 
 import type { ObservationEvent, SessionObservation } from "../observation";
+import { ObservationPresentation } from "./observation-presentation";
 
 export interface EventSourceLike {
   onmessage: ((event: { data: string }) => void) | null;
-  /** Fires on the initial connect AND on every automatic reconnect. */
-  onopen?: (() => void) | null;
+  /** Present on a real EventSource; test doubles may omit it. */
+  onerror?: ((event: unknown) => void) | null;
+  /** 0 CONNECTING, 1 OPEN, 2 CLOSED; undefined on test doubles. */
+  readyState?: number;
   close(): void;
 }
 
@@ -48,12 +50,25 @@ export interface OverlaySnapshot {
   readonly displayFrames: Readonly<Record<string, ThumbnailState>>;
   /** False when the host reports the browser/daemon as unreachable. */
   readonly available: boolean;
+  /**
+   * True from a stream error until the stream delivers a frame again;
+   * meanwhile sessions and availability are the last ones received.
+   */
+  readonly reconnecting: boolean;
 }
 
-const STATE_URL = "/bsk-observation/state";
 const EVENTS_URL = "/bsk-observation/events";
 const INTERRUPT_URL = "/bsk-observation/interrupt";
 const STOP_URL = "/bsk-observation/stop";
+const THUMBNAIL_RETRY_DELAYS_MS = [1000, 3000];
+/**
+ * Backoff for re-creating the live event stream after a *fatal* failure.
+ * A non-200 response (for example the observation route answering 404 while
+ * the plugin is still starting, or right after a plugin reload) is terminal
+ * for an EventSource: the browser never retries it. Without this the view
+ * stays empty until the page is reloaded.
+ */
+const EVENT_STREAM_RETRY_DELAYS_MS = [1000, 3000, 10000, 30000];
 
 function revoke(url: string | undefined): void {
   if (url !== undefined && typeof URL.revokeObjectURL === "function") {
@@ -62,25 +77,34 @@ function revoke(url: string | undefined): void {
 }
 
 export class ObservationClientStore {
+  readonly presentation = new ObservationPresentation();
   private sessions = new Map<string, SessionObservation>();
   private thumbs = new Map<string, ThumbnailState>();
   /** sessionId → the attachment id currently advertised for it. */
   private readonly thumbBySession = new Map<string, string>();
-  /** sessionId → last successfully decoded frame (held across the next load). */
+  /** sessionId → last successfully loaded frame (held across the next load). */
   private readonly lastReady = new Map<string, { attachmentId: string; url: string }>();
+  private readonly retryTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  private readonly retryCounts = new Map<string, number>();
   private listeners = new Set<() => void>();
   private events: EventSourceLike | undefined;
+  /** Pending re-creation of the event stream after a fatal failure. */
+  private reconnectTimer: ReturnType<typeof setTimeout> | undefined;
+  private reconnectAttempts = 0;
   private snapshot: OverlaySnapshot = {
     sessions: [],
     subscribed: false,
     thumbnails: {},
     displayFrames: {},
     available: true,
+    reconnecting: false,
   };
   private available = true;
+  private reconnecting = false;
   private started = false;
   /** Refcount of mounted consumers (overlay card, sidebar tab, sidebar fiber). */
   private consumers = 0;
+  private thumbnailConsumers = 0;
 
   constructor(private readonly deps: ObservationClientDeps) {}
 
@@ -98,6 +122,7 @@ export class ObservationClientStore {
       thumbnails: Object.fromEntries(this.thumbs),
       displayFrames: this.buildDisplayFrames(),
       available: this.available,
+      reconnecting: this.reconnecting,
     };
     for (const listener of [...this.listeners]) listener();
   }
@@ -133,69 +158,83 @@ export class ObservationClientStore {
     return undefined;
   }
 
-  /** (Re)pull the full state: initial load and every SSE (re)open. */
-  private refreshState(): void {
-    void this.deps
-      .fetchFn(STATE_URL)
-      .then(async (res) => {
-        if (!res.ok) return;
-        const body = (await res.json()) as {
-          sessions?: SessionObservation[];
-          available?: boolean;
-        };
-        const sessions = body.sessions ?? [];
-        this.sessions = new Map(sessions.map((s) => [s.sessionId, s]));
-        // Prune thumbnails of sessions that vanished while we were away.
-        const alive = new Set(sessions.map((s) => s.sessionId));
-        for (const sessionId of [...this.thumbBySession.keys()]) {
-          if (!alive.has(sessionId)) this.dropThumb(sessionId);
-        }
-        for (const s of sessions) this.trackThumb(s.sessionId, s.thumbnailAttachmentId);
-        if (typeof body.available === "boolean") this.available = body.available;
-        this.publish();
-      })
-      .catch(() => {});
-  }
-
-  /** Initial fetch + SSE subscription. Idempotent. */
-  start(): void {
-    if (this.started) return;
-    this.started = true;
-    this.refreshState();
-    const events = this.deps.eventSourceFactory(EVENTS_URL);
+  private connectEvents(): void {
+    clearTimeout(this.reconnectTimer);
+    this.reconnectTimer = undefined;
+    const previous = this.events;
+    this.events = undefined;
+    previous?.close();
+    const events = this.deps.eventSourceFactory(
+      `${EVENTS_URL}?thumbnails=${this.thumbnailConsumers > 0 ? "1" : "0"}`,
+    );
+    this.events = events;
     events.onmessage = (message) => {
+      if (!this.started || this.events !== events) return;
       let event: ObservationEvent;
       try {
         event = JSON.parse(message.data) as ObservationEvent;
       } catch {
         return;
       }
+      // Healthy traffic resets the backoff and ends the outage.
+      this.reconnectAttempts = 0;
+      this.reconnecting = false;
       this.apply(event);
     };
-    events.onopen = () => {
-      // Reconnects lose every event fired during the outage — resync.
-      if (this.events === events) this.refreshState();
+    // A non-200 response is fatal for an EventSource: the browser fails the
+    // connection permanently and never retries it. Transient drops keep
+    // readyState 0/1 and are still retried by the EventSource itself, so only
+    // a CLOSED (2) readyState asks us to rebuild the stream.
+    events.onerror = () => {
+      if (!this.started || this.events !== events) return;
+      if (events.readyState === undefined || events.readyState === 2) this.scheduleReconnect();
+      if (this.reconnecting) return;
+      this.reconnecting = true;
+      this.publish();
     };
-    this.events = events;
+  }
+
+  /** Re-create the stream after a fatal failure, with a bounded backoff. */
+  private scheduleReconnect(): void {
+    if (this.reconnectTimer !== undefined) return;
+    const index = Math.min(this.reconnectAttempts, EVENT_STREAM_RETRY_DELAYS_MS.length - 1);
+    const delay = EVENT_STREAM_RETRY_DELAYS_MS[index];
+    if (delay === undefined) return;
+    this.reconnectAttempts += 1;
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = undefined;
+      if (!this.started) return;
+      this.connectEvents();
+    }, delay);
+  }
+
+  /** Every initial connection and reconnect starts with the server's snapshot. */
+  start(): void {
+    if (this.started) return;
+    this.started = true;
+    this.connectEvents();
     this.publish();
   }
 
   stop(): void {
-    this.events?.close();
+    const previous = this.events;
     this.events = undefined;
     this.started = false;
-    for (const thumb of this.thumbs.values()) revoke(thumb.url);
-    this.thumbs.clear();
-    this.thumbBySession.clear();
-    this.lastReady.clear();
+    previous?.close();
+    clearTimeout(this.reconnectTimer);
+    this.reconnectTimer = undefined;
+    this.reconnectAttempts = 0;
+    this.reconnecting = false;
+    this.clearThumbnails();
     this.sessions.clear();
+    this.available = true;
     this.publish();
   }
 
   /**
    * Hold the feed for one consumer's lifetime: the stream starts with the
    * first holder and stops with the last release. Several carriers can share
-   * the store (the floating card, the better-sidebar tab, and the sidebar
+   * the store (the floating card, the native sidebar tab, and the sidebar
    * integration fiber) without one unmount killing the others' updates.
    */
   acquire(): void {
@@ -209,6 +248,33 @@ export class ObservationClientStore {
     if (this.consumers === 0) this.stop();
   }
 
+  /** Only visible image surfaces request screenshots; metadata watchers do not. */
+  watchThumbnails(): () => void {
+    this.thumbnailConsumers += 1;
+    if (this.thumbnailConsumers === 1 && this.started) this.connectEvents();
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      this.thumbnailConsumers -= 1;
+      if (this.thumbnailConsumers === 0 && this.started) this.connectEvents();
+    };
+  }
+
+  private forgetThumbnail(attachmentId: string): void {
+    clearTimeout(this.retryTimers.get(attachmentId));
+    this.retryTimers.delete(attachmentId);
+    this.retryCounts.delete(attachmentId);
+    revoke(this.thumbs.get(attachmentId)?.url);
+    this.thumbs.delete(attachmentId);
+  }
+
+  private clearThumbnails(): void {
+    for (const attachmentId of this.thumbs.keys()) this.forgetThumbnail(attachmentId);
+    this.thumbBySession.clear();
+    this.lastReady.clear();
+  }
+
   /** Forget one session's tracked + held frames, revoking their blob URLs. */
   private dropThumb(sessionId: string): void {
     const attachmentId = this.thumbBySession.get(sessionId);
@@ -216,39 +282,45 @@ export class ObservationClientStore {
     this.thumbBySession.delete(sessionId);
     this.lastReady.delete(sessionId);
     if (attachmentId !== undefined) {
-      revoke(this.thumbs.get(attachmentId)?.url);
-      this.thumbs.delete(attachmentId);
+      this.forgetThumbnail(attachmentId);
     }
     if (held !== undefined && held.attachmentId !== attachmentId) {
-      revoke(held.url);
-      this.thumbs.delete(held.attachmentId);
+      this.forgetThumbnail(held.attachmentId);
     }
   }
 
   /**
    * Track the frame a session currently advertises. The last *ready* blob is
-   * kept until the replacement decodes — dropping it on the upsert is what
+   * kept until the replacement loads — dropping it on the upsert is what
    * made the overlay flash a placeholder between breaths.
    */
   private trackThumb(sessionId: string, attachmentId: string | undefined): void {
+    if (attachmentId === undefined) {
+      this.dropThumb(sessionId);
+      return;
+    }
     const previous = this.thumbBySession.get(sessionId);
     if (previous === attachmentId) return;
-    if (attachmentId !== undefined) this.thumbBySession.set(sessionId, attachmentId);
-    else this.thumbBySession.delete(sessionId);
+    this.thumbBySession.set(sessionId, attachmentId);
     const heldId = this.lastReady.get(sessionId)?.attachmentId;
     if (previous !== undefined && previous !== heldId) {
-      revoke(this.thumbs.get(previous)?.url);
-      this.thumbs.delete(previous);
+      this.forgetThumbnail(previous);
     }
   }
 
   private apply(event: ObservationEvent): void {
-    if (event.type === "reset") {
+    if (event.type === "snapshot") {
+      this.sessions = new Map(event.sessions.map((session) => [session.sessionId, session]));
+      for (const sessionId of this.thumbBySession.keys()) {
+        if (!this.sessions.has(sessionId)) this.dropThumb(sessionId);
+      }
+      for (const session of event.sessions) {
+        this.trackThumb(session.sessionId, session.thumbnailAttachmentId);
+      }
+      this.available = event.available;
+    } else if (event.type === "reset") {
       this.sessions.clear();
-      for (const thumb of this.thumbs.values()) revoke(thumb.url);
-      this.thumbs.clear();
-      this.thumbBySession.clear();
-      this.lastReady.clear();
+      this.clearThumbnails();
     } else if (event.type === "remove" && event.session !== undefined) {
       this.sessions.delete(event.session.sessionId);
       this.dropThumb(event.session.sessionId);
@@ -259,42 +331,75 @@ export class ObservationClientStore {
       this.available = event.available;
     }
     this.publish();
+    if (event.type === "snapshot") {
+      for (const session of event.sessions) this.retryThumbnail(session.thumbnailAttachmentId);
+    }
   }
 
   /**
    * Ensure a thumbnail load is in flight for one attachment reference. New
-   * frames replace the old URL only after they decode; failures keep the last
+   * frames replace the old URL only after they load; failures keep the last
    * good frame (the caller renders `status: 'error'` as a small badge over
    * the old image).
    */
   ensureThumbnail(attachmentId: string | undefined): void {
-    if (attachmentId === undefined || this.thumbs.has(attachmentId)) return;
-    this.thumbs.set(attachmentId, { status: "loading" });
+    if (
+      !this.started ||
+      attachmentId === undefined ||
+      this.sessionOf(attachmentId) === undefined ||
+      this.thumbs.has(attachmentId)
+    )
+      return;
+    const loading: ThumbnailState = { status: "loading" };
+    this.thumbs.set(attachmentId, loading);
     this.publish();
     this.deps.loadImage(attachmentId).then(
       (url) => {
-        if (!this.thumbs.has(attachmentId)) {
+        if (this.thumbs.get(attachmentId) !== loading) {
           // Replaced or removed while loading: never resurrect (or leak) it.
           revoke(url);
           return;
         }
+        this.retryCounts.delete(attachmentId);
         this.thumbs.set(attachmentId, { status: "ready", url });
         const sessionId = this.sessionOf(attachmentId);
         if (sessionId !== undefined) {
           const previous = this.lastReady.get(sessionId);
           if (previous !== undefined && previous.attachmentId !== attachmentId) {
-            revoke(previous.url);
-            this.thumbs.delete(previous.attachmentId);
+            this.forgetThumbnail(previous.attachmentId);
           }
           this.lastReady.set(sessionId, { attachmentId, url });
         }
         this.publish();
       },
       () => {
-        this.thumbs.set(attachmentId, { status: "error" });
+        if (this.thumbs.get(attachmentId) !== loading) return;
+        const failed: ThumbnailState = { status: "error" };
+        this.thumbs.set(attachmentId, failed);
+        const attempts = this.retryCounts.get(attachmentId) ?? 0;
+        const delay = THUMBNAIL_RETRY_DELAYS_MS[attempts];
+        if (delay !== undefined) {
+          this.retryCounts.set(attachmentId, attempts + 1);
+          this.retryTimers.set(
+            attachmentId,
+            setTimeout(() => {
+              this.retryTimers.delete(attachmentId);
+              if (this.thumbs.get(attachmentId) !== failed) return;
+              this.thumbs.delete(attachmentId);
+              this.ensureThumbnail(attachmentId);
+            }, delay),
+          );
+        }
         this.publish();
       },
     );
+  }
+
+  /** Explicit retry (also used on a fresh connection after an outage). */
+  retryThumbnail(attachmentId: string | undefined): void {
+    if (attachmentId === undefined || this.thumbs.get(attachmentId)?.status !== "error") return;
+    this.forgetThumbnail(attachmentId);
+    this.ensureThumbnail(attachmentId);
   }
 
   /** Interrupt the current or named session's in-flight call. */

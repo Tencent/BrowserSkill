@@ -7,6 +7,7 @@ import type { ToolDefinition, ToolRunContext } from "@deepseek-ai/dsh-tools";
 import { describe, expect, it } from "vitest";
 import { apply } from "../src/index";
 import type { BskRunOptions, BskRunResult } from "../src/runner";
+import { memoryStartJournal } from "../src/start-journal";
 
 interface FakeCall {
   args: string[];
@@ -46,6 +47,14 @@ describe("dispose cleanup ownership", () => {
         calls.push({ args });
         const joined = args.join(" ");
         if (joined.startsWith("status")) return ok({});
+        if (joined.startsWith("session request"))
+          return ok({
+            state: args.includes("--prepare")
+              ? "prepared"
+              : args.includes("--claim")
+                ? "active"
+                : "closed",
+          });
         if (joined.startsWith("session start")) return ok(startReplies.shift());
         if (joined.startsWith("snapshot")) {
           return ok({ text: "x", ref_count: 1, tab_id: 7, truncated: false });
@@ -63,7 +72,14 @@ describe("dispose cleanup ownership", () => {
     const tools = new Map<string, ToolDefinition>();
     const disposers: Array<() => Promise<void>> = [];
     const ctx = {
-      tools: { register: (def: ToolDefinition) => tools.set(def.name, def) },
+      tools: {
+        register: (def: ToolDefinition) => {
+          tools.set(def.name, def);
+          return () => {
+            tools.delete(def.name);
+          };
+        },
+      },
       get: () => undefined,
       // No webServer in this harness: the inject callback never runs.
       inject: () => {},
@@ -71,24 +87,29 @@ describe("dispose cleanup ownership", () => {
         disposers.push(fn());
       },
     };
-    apply(ctx as never, { maxSessions: 5, lazyTools: false }, { runnerFactory: () => runner });
-
-    const start = tools.get("browser_session_start");
-    const snapshot = tools.get("browser_snapshot");
-    if (start === undefined || snapshot === undefined) throw new Error("tools not registered");
-    await start.execute({}, makeExec());
-    await start.execute({}, makeExec());
-    // A foreign session cannot even be referenced any more.
-    await expect(snapshot.execute({ session: "ext9" }, makeExec())).rejects.toThrow(
-      /does not belong to this plugin/,
+    apply(
+      ctx as never,
+      { maxSessions: 5, lazyTools: false },
+      { runnerFactory: () => runner, startJournal: memoryStartJournal() },
     );
+
+    const session = tools.get("bsk_session");
+    const inspect = tools.get("bsk_inspect");
+    if (session === undefined || inspect === undefined) throw new Error("tools not registered");
+    await session.execute({ action: "start" }, makeExec());
+    await session.execute({ action: "start" }, makeExec());
+    // A foreign session cannot even be referenced any more.
+    await expect(
+      inspect.execute({ action: "snapshot", session: "ext9" }, makeExec()),
+    ).rejects.toThrow(/does not belong to this plugin/);
 
     await Promise.all(disposers.map((dispose) => dispose()));
 
     const stops = calls
       .map((call) => call.args.join(" "))
-      .filter((joined) => joined.startsWith("session stop"));
-    expect(stops.sort()).toEqual(["session stop own1", "session stop own2"]);
+      .filter((joined) => joined.startsWith("session request") && joined.endsWith("--cancel"));
+    expect(stops).toHaveLength(2);
+    expect(new Set(stops).size).toBe(2);
     expect(stops.some((joined) => joined.includes("ext9"))).toBe(false);
   });
 });

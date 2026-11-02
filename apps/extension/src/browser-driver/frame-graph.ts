@@ -14,6 +14,43 @@ export interface CdpFrame {
 export interface CdpFrameGraph {
   rootFrameId: string;
   frames: CdpFrame[];
+  /** Unavailable subtrees are excluded from routing, but remain visible as gaps. */
+  unavailableFrames?: CdpFrame[];
+}
+
+export function omitFrameSubtrees(
+  graph: CdpFrameGraph,
+  unavailable: ReadonlyMap<string, CdpTarget>,
+): CdpFrameGraph {
+  if (!unavailable.size) return graph;
+  const blocked = new Set(unavailable.keys());
+  const children = new Map<string, string[]>();
+  for (const frame of graph.frames) {
+    if (!frame.parentFrameId) continue;
+    const siblings = children.get(frame.parentFrameId) ?? [];
+    siblings.push(frame.frameId);
+    children.set(frame.parentFrameId, siblings);
+  }
+  const queue = [...blocked];
+  for (let i = 0; i < queue.length; i++) {
+    for (const child of children.get(queue[i]) ?? []) {
+      if (blocked.has(child)) continue;
+      blocked.add(child);
+      queue.push(child);
+    }
+  }
+  const omitted = new Map(
+    graph.frames
+      .filter((frame) => blocked.has(frame.frameId))
+      .map((frame) => [frame.frameId, frame]),
+  );
+  for (const [frameId, target] of unavailable)
+    omitted.set(frameId, { ...omitted.get(frameId), frameId, target });
+  return {
+    ...graph,
+    frames: graph.frames.filter((frame) => !blocked.has(frame.frameId)),
+    unavailableFrames: [...omitted.values()],
+  };
 }
 
 export interface CdpFrameTreeNode {

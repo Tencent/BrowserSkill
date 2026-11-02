@@ -1,7 +1,10 @@
+import { normalizeDaemonPort } from "@/transport/daemon-endpoint";
+
 const STORAGE_KEY = "bsk_instance_id";
 const LABEL_STORAGE_KEY = "bh_label";
 const CONNECTION_ENABLED_KEY = "bh_connection_enabled";
 const CONTROL_HINTS_HIDDEN_KEY = "bsk_control_hints_hidden";
+const DAEMON_PORT_KEY = "bsk_daemon_port";
 
 export interface StorageBackend {
   get(keys: string | string[]): Promise<Record<string, unknown>>;
@@ -127,9 +130,23 @@ export async function setControlHintsHidden(
   await storage.set({ [CONTROL_HINTS_HIDDEN_KEY]: hidden });
 }
 
+/** Defaults to {@link DEFAULT_DAEMON_PORT} when unset or invalid. */
+export async function getDaemonPort(storage: StorageBackend = defaultStorage()): Promise<number> {
+  const items = await storage.get(DAEMON_PORT_KEY);
+  return normalizeDaemonPort(items[DAEMON_PORT_KEY]);
+}
+
+export async function setDaemonPort(
+  port: number,
+  storage: StorageBackend = defaultStorage(),
+): Promise<void> {
+  await storage.set({ [DAEMON_PORT_KEY]: port });
+}
+
 export const STORAGE_KEYS = {
   INSTANCE_ID: STORAGE_KEY,
   LABEL: LABEL_STORAGE_KEY,
   CONNECTION_ENABLED: CONNECTION_ENABLED_KEY,
   CONTROL_HINTS_HIDDEN: CONTROL_HINTS_HIDDEN_KEY,
+  DAEMON_PORT: DAEMON_PORT_KEY,
 } as const;

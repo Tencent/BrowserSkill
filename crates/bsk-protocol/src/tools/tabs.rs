@@ -121,16 +121,28 @@ pub struct TabSelectResult {
 // tab_borrow (M8.2)
 // ---------------------------------------------------------------------------
 
+pub const BORROW_CONFIRMATION_TIMEOUT_PROTOCOL: &str = "1.2";
+
+/// Earlier peers may silently ignore a custom confirmation wait.
+pub fn supports_borrow_confirmation_timeout(protocol: &str) -> bool {
+    crate::system::compare_protocol(protocol, "2.0") == Some(std::cmp::Ordering::Less)
+        && matches!(
+            crate::system::compare_protocol(protocol, BORROW_CONFIRMATION_TIMEOUT_PROTOCOL),
+            Some(std::cmp::Ordering::Equal | std::cmp::Ordering::Greater)
+        )
+}
+
 /// Params for `tool.tab_borrow`. Moves a *user* tab into the
 /// requesting session's Agent Window, recording its original window /
 /// index so `tab_return` (or session_stop) can put it back.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct TabBorrowParams {
+    /// Maximum time to wait for user confirmation (default 60 seconds).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confirmation_timeout_ms: Option<u32>,
     pub tab_id: i64,
     pub session_id: String,
-    /// Whether to wait for an inline user confirmation overlay (M10
-    /// will introduce the UI). Currently ignored: the M8 stub always
-    /// proceeds when `false` and forwards `true` to a no-op approver.
+    /// Legacy input, ignored. Browser settings decide whether confirmation is required.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub confirm: Option<bool>,
 }

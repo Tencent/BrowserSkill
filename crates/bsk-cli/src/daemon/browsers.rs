@@ -8,11 +8,10 @@
 use std::collections::HashMap;
 use std::fmt;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
-use bsk_protocol::{Frame, RpcId};
+use bsk_protocol::{ErrorCode, Frame, RequestFrame, ResponseBody, ResponseFrame, RpcError, RpcId};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::sync::{mpsc, oneshot};
@@ -45,6 +44,14 @@ pub const BROWSER_LIVENESS_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// How often the liveness reaper scans the registry for stale browsers.
 pub const BROWSER_LIVENESS_TICK: Duration = Duration::from_secs(15);
+
+/// Silence long enough that a heartbeat-capable extension has missed two
+/// of its ~20s beats. One missed beat is ordinary MV3 scheduling jitter,
+/// so it must not stand in for a dead control plane; three is already the
+/// [`BROWSER_LIVENESS_TIMEOUT`] the reaper uses to drop the registration.
+/// Sitting between the two means every browser marked unresponsive is
+/// either cleared by its next beat or removed by the reaper.
+pub const EXTENSION_SILENCE_BEFORE_UNRESPONSIVE: Duration = Duration::from_secs(40);
 
 /// Process-wide monotonic counter for [`BrowserClient::generation`]. Used
 /// by the reconnect-race guard: when an old WS task tears down it only
@@ -85,16 +92,36 @@ impl BrowserSink {
 
 /// Pending in-flight RPCs that the daemon is awaiting a response for from
 /// a specific browser, keyed by the request's `id`.
+///
+/// A socket the daemon has abandoned — replaced by a reconnect, or closed —
+/// is terminal: its waiters settle at once and every later
+/// [`Pending::register`] fails, so no call can queue work onto a connection
+/// whose responses would never be read.
 #[derive(Debug, Default)]
 pub struct Pending {
     waiters: HashMap<RpcId, oneshot::Sender<bsk_protocol::ResponseFrame>>,
+    terminated: Option<Termination>,
+}
+
+#[derive(Debug)]
+enum Termination {
+    Replaced(RpcError),
+    Closed,
 }
 
 impl Pending {
-    pub fn register(&mut self, id: RpcId) -> oneshot::Receiver<bsk_protocol::ResponseFrame> {
+    pub fn register(
+        &mut self,
+        id: RpcId,
+    ) -> Result<oneshot::Receiver<bsk_protocol::ResponseFrame>, SendError> {
+        match &self.terminated {
+            Some(Termination::Replaced(cause)) => return Err(SendError::Terminated(cause.clone())),
+            Some(Termination::Closed) => return Err(SendError::SinkClosed),
+            None => {}
+        }
         let (tx, rx) = oneshot::channel();
         self.waiters.insert(id, tx);
-        rx
+        Ok(rx)
     }
 
     pub fn resolve(&mut self, frame: bsk_protocol::ResponseFrame) -> bool {
@@ -113,6 +140,171 @@ impl Pending {
     /// still-pending caller observes a `TransportClosed`-style error.
     pub fn cancel(&mut self, id: &RpcId) {
         self.waiters.remove(id);
+    }
+
+    /// A newer socket took over: settle every waiter with `cause` and refuse
+    /// later registrations. The first termination wins, so a replaced socket
+    /// keeps reporting the reconnect when its own teardown closes it later.
+    pub fn terminate(&mut self, cause: RpcError) {
+        if self.terminated.is_some() {
+            return;
+        }
+        self.terminated = Some(Termination::Replaced(cause.clone()));
+        for (id, tx) in std::mem::take(&mut self.waiters) {
+            let _ = tx.send(ResponseFrame {
+                id,
+                body: ResponseBody::Err(cause.clone()),
+            });
+        }
+    }
+
+    /// The socket is gone: drop every waiter so each caller takes its
+    /// existing transport-closed path, and refuse later registrations.
+    pub fn close(&mut self) {
+        self.terminated.get_or_insert(Termination::Closed);
+        self.waiters.clear();
+    }
+
+    #[cfg(test)]
+    pub fn waiter_count(&self) -> usize {
+        self.waiters.len()
+    }
+}
+
+/// Why [`BrowserClient::dispatch`] could not hand a request to the browser.
+/// Either way the frame never left the daemon.
+#[derive(Debug)]
+pub enum SendError {
+    /// The daemon abandoned this socket; the inner error names the cause.
+    Terminated(RpcError),
+    /// The socket's writer is gone.
+    SinkClosed,
+}
+
+pub(crate) fn extension_reconnected_error() -> RpcError {
+    RpcError {
+        code: ErrorCode::ProtocolError,
+        message: "extension reconnected; the previous session is no longer valid".into(),
+        data: Some(serde_json::json!({ "reason": "extension_reconnected" })),
+    }
+}
+
+/// `data` for a call that failed because the extension's connection closed,
+/// so the CLI does not blame a protocol mismatch.
+pub(crate) fn extension_disconnected_data() -> serde_json::Value {
+    serde_json::json!({ "reason": "extension_disconnected" })
+}
+
+pub(crate) fn extension_unresponsive_error() -> RpcError {
+    RpcError {
+        code: ErrorCode::Timeout,
+        message: "extension is not responding".into(),
+        data: Some(serde_json::json!({ "reason": "extension_unresponsive" })),
+    }
+}
+
+/// Whether `err` was synthesised by the daemon because the socket carrying
+/// the call was abandoned, rather than reported by the extension.
+pub(crate) fn is_link_failure(err: &RpcError) -> bool {
+    err.data
+        .as_ref()
+        .and_then(|data| data.get("reason"))
+        .and_then(|reason| reason.as_str())
+        == Some("extension_reconnected")
+}
+
+/// What inbound traffic tells the daemon about one socket.
+///
+/// The last-seen timestamp, the heartbeat capability and the unresponsive
+/// mark move under a single lock. A frame that arrives while a caller is
+/// judging silence therefore wins over that older verdict, which a pair of
+/// independent atomics could not guarantee whatever their memory ordering.
+#[derive(Debug)]
+pub struct Liveness(Mutex<LivenessState>);
+
+#[derive(Debug)]
+struct LivenessState {
+    /// Monotonic timestamp of the most recent inbound frame (any response
+    /// or event, including `system.heartbeat`).
+    last_seen: Instant,
+    /// `true` once this browser has sent at least one `system.heartbeat`.
+    /// Silence only means something for a browser that promised to speak
+    /// periodically: a pre-heartbeat extension is never reaped and never
+    /// marked unresponsive, exactly as before.
+    heartbeat_seen: bool,
+    /// The socket is still registered, but a call failed after this browser
+    /// went quiet for [`EXTENSION_SILENCE_BEFORE_UNRESPONSIVE`]. Cleared by
+    /// the next inbound frame.
+    unresponsive: bool,
+}
+
+impl Default for Liveness {
+    fn default() -> Self {
+        Self(Mutex::new(LivenessState {
+            last_seen: Instant::now(),
+            heartbeat_seen: false,
+            unresponsive: false,
+        }))
+    }
+}
+
+impl Liveness {
+    fn state(&self) -> std::sync::MutexGuard<'_, LivenessState> {
+        match self.0.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        }
+    }
+
+    /// Record that a frame just arrived: the browser is answering again.
+    pub fn touch(&self) {
+        let mut state = self.state();
+        state.last_seen = Instant::now();
+        state.unresponsive = false;
+    }
+
+    /// Note that a `system.heartbeat` arrived, opting this browser in to
+    /// liveness reaping and to the silence rule below.
+    pub fn mark_heartbeat_seen(&self) {
+        self.state().heartbeat_seen = true;
+    }
+
+    pub fn has_heartbeat(&self) -> bool {
+        self.state().heartbeat_seen
+    }
+
+    /// How long since the last inbound frame from this browser.
+    pub fn idle_for(&self) -> Duration {
+        self.state().last_seen.elapsed()
+    }
+
+    pub fn is_unresponsive(&self) -> bool {
+        self.state().unresponsive
+    }
+
+    /// Record what a just-failed call implies about the control plane, and
+    /// report whether this browser is unresponsive now. Called for its
+    /// diagnostic value only: it never decides a call's own error.
+    pub fn note_unresponsive_if_silent(&self) -> bool {
+        self.note_unresponsive_after(EXTENSION_SILENCE_BEFORE_UNRESPONSIVE)
+    }
+
+    fn note_unresponsive_after(&self, silence: Duration) -> bool {
+        let mut state = self.state();
+        if state.heartbeat_seen && state.last_seen.elapsed() >= silence {
+            state.unresponsive = true;
+        }
+        state.unresponsive
+    }
+
+    /// Test-only hook: pretend the last frame arrived `by` earlier, so the
+    /// silence rules can be exercised without sleeping through a real
+    /// heartbeat interval. `#[doc(hidden)]` keeps it reachable from the
+    /// integration tests under `tests/`.
+    #[doc(hidden)]
+    pub fn __backdate_for_tests(&self, by: Duration) {
+        let mut state = self.state();
+        state.last_seen = state.last_seen.checked_sub(by).unwrap_or(state.last_seen);
     }
 }
 
@@ -145,45 +337,57 @@ pub struct BrowserClient {
     /// `true` when the peer's `protocol_version` differs from ours
     /// (same major, minor drift). Set during WS handshake (M10.4).
     pub version_skew: bool,
-    /// Monotonic timestamp of the most recent inbound frame from this
-    /// browser (any response/event, including `system.heartbeat`).
-    /// Bumped by [`BrowserClient::touch`] from the WS read loop and read
-    /// by the liveness reaper to detect a silently-dead connection.
-    pub last_seen: Mutex<Instant>,
-    /// `true` once this browser has sent at least one `system.heartbeat`.
-    /// The liveness reaper only acts on heartbeat-capable browsers: a
-    /// pre-heartbeat extension never sets this, so it is never reaped on
-    /// silence and instead relies on socket-close detection exactly as
-    /// before — otherwise a new daemon paired with an old extension would
-    /// wrongly drop a live-but-idle connection.
-    pub heartbeat_seen: AtomicBool,
+    /// What inbound frames say about this socket: read by the liveness
+    /// reaper to drop a silently-dead connection, and by the CLI to tell a
+    /// registered browser apart from a browser that still answers.
+    pub liveness: Liveness,
 }
 
 impl BrowserClient {
-    /// Record that a frame just arrived from this browser.
-    pub fn touch(&self) {
-        if let Ok(mut last) = self.last_seen.lock() {
-            *last = Instant::now();
+    /// Register a waiter for `request` and hand the frame to the socket
+    /// while holding the pending lock. A reconnect or close that terminates
+    /// this socket therefore lands strictly before (the call fails and
+    /// nothing is sent) or strictly after (the waiter settles), never in
+    /// between.
+    pub fn dispatch(
+        &self,
+        request: RequestFrame,
+    ) -> Result<oneshot::Receiver<bsk_protocol::ResponseFrame>, SendError> {
+        let id = request.id.clone();
+        let mut pending = self.pending.lock().expect("browser pending poisoned");
+        let waiter = pending.register(id.clone())?;
+        if self.sink.send(Frame::Request(request)).is_err() {
+            pending.cancel(&id);
+            return Err(SendError::SinkClosed);
         }
+        Ok(waiter)
     }
 
-    /// Note that a `system.heartbeat` arrived, opting this browser in to
-    /// liveness reaping.
+    /// Record that a frame just arrived from this browser.
+    pub fn touch(&self) {
+        self.liveness.touch();
+    }
+
+    pub fn is_unresponsive(&self) -> bool {
+        self.liveness.is_unresponsive()
+    }
+
+    pub fn note_unresponsive_if_silent(&self) -> bool {
+        self.liveness.note_unresponsive_if_silent()
+    }
+
     pub fn mark_heartbeat_seen(&self) {
-        self.heartbeat_seen.store(true, Ordering::Relaxed);
+        self.liveness.mark_heartbeat_seen();
     }
 
     /// Whether this browser has ever sent a heartbeat.
     pub fn has_heartbeat(&self) -> bool {
-        self.heartbeat_seen.load(Ordering::Relaxed)
+        self.liveness.has_heartbeat()
     }
 
     /// How long since the last inbound frame from this browser.
     pub fn idle_for(&self) -> Duration {
-        match self.last_seen.lock() {
-            Ok(last) => last.elapsed(),
-            Err(poisoned) => poisoned.into_inner().elapsed(),
-        }
+        self.liveness.idle_for()
     }
 
     pub fn status_entry(&self, session_count: u32) -> BrowserStatusEntry {
@@ -197,6 +401,7 @@ impl BrowserClient {
             connected_at_ms: self.connected_at_ms,
             version_skew: self.version_skew,
             extension_protocol_version: self.extension_protocol_version.clone(),
+            unresponsive: self.is_unresponsive(),
         }
     }
 }
@@ -214,16 +419,30 @@ impl BrowserRegistry {
     }
 
     pub fn insert(&self, client: std::sync::Arc<BrowserClient>) {
-        let mut guard = self.inner.lock().expect("browser registry poisoned");
-        if let Some(prev) = guard.get(&client.id) {
-            tracing::info!(
-                id = %client.id,
-                old_generation = prev.generation,
-                new_generation = client.generation,
-                "browser reconnect: replacing previous registration"
-            );
+        let id = client.id.clone();
+        let new_generation = client.generation;
+        let replaced = {
+            let mut guard = self.inner.lock().expect("browser registry poisoned");
+            let replaced = guard.insert(id.clone(), client);
+            if let Some(prev) = &replaced {
+                tracing::info!(
+                    id = %id,
+                    old_generation = prev.generation,
+                    new_generation,
+                    "browser reconnect: replacing previous registration"
+                );
+            }
+            replaced
+        };
+        // Outside the registry lock: the replaced socket must stop holding
+        // callers, and it must never accept another call, but its own
+        // teardown still runs and may not touch the new generation.
+        if let Some(prev) = replaced {
+            prev.pending
+                .lock()
+                .expect("browser pending poisoned")
+                .terminate(extension_reconnected_error());
         }
-        guard.insert(client.id.clone(), client);
     }
 
     pub fn remove(&self, id: &BrowserId) -> Option<std::sync::Arc<BrowserClient>> {
@@ -410,8 +629,20 @@ mod tests {
     use super::*;
 
     fn fake_client(id: &str, label: &str) -> std::sync::Arc<BrowserClient> {
-        let (tx, _rx) = mpsc::unbounded_channel::<Frame>();
-        std::sync::Arc::new(BrowserClient {
+        connected_client(id, label).0
+    }
+
+    /// Keeps the socket's receiver alive so a test can assert exactly which
+    /// frames reached the connection.
+    fn connected_client(
+        id: &str,
+        label: &str,
+    ) -> (
+        std::sync::Arc<BrowserClient>,
+        mpsc::UnboundedReceiver<Frame>,
+    ) {
+        let (tx, rx) = mpsc::unbounded_channel::<Frame>();
+        let client = std::sync::Arc::new(BrowserClient {
             id: BrowserId(id.into()),
             browser_name: "chrome".into(),
             browser_version: "131".into(),
@@ -423,9 +654,9 @@ mod tests {
             generation: next_browser_generation(),
             connected_at_ms: 0,
             version_skew: false,
-            last_seen: Mutex::new(Instant::now()),
-            heartbeat_seen: AtomicBool::new(false),
-        })
+            liveness: Liveness::default(),
+        });
+        (client, rx)
     }
 
     #[test]
@@ -624,7 +855,9 @@ mod tests {
     fn touch_resets_idle_for() {
         let client = fake_client("a", "");
         // Force the last_seen well into the past, then touch.
-        *client.last_seen.lock().unwrap() = Instant::now() - Duration::from_secs(120);
+        client
+            .liveness
+            .__backdate_for_tests(Duration::from_secs(120));
         assert!(client.idle_for() >= Duration::from_secs(120));
         client.touch();
         assert!(client.idle_for() < Duration::from_secs(1));
@@ -637,7 +870,7 @@ mod tests {
         fresh.mark_heartbeat_seen();
         let stale = fake_client("stale", "");
         stale.mark_heartbeat_seen();
-        *stale.last_seen.lock().unwrap() = Instant::now() - Duration::from_secs(90);
+        stale.liveness.__backdate_for_tests(Duration::from_secs(90));
         reg.insert(fresh);
         reg.insert(stale);
 
@@ -656,7 +889,9 @@ mod tests {
         // it has been silent well past the threshold.
         let reg = BrowserRegistry::new();
         let legacy = fake_client("legacy", "");
-        *legacy.last_seen.lock().unwrap() = Instant::now() - Duration::from_secs(600);
+        legacy
+            .liveness
+            .__backdate_for_tests(Duration::from_secs(600));
         reg.insert(legacy);
 
         assert!(
@@ -675,5 +910,151 @@ mod tests {
             started.elapsed() < Duration::from_millis(50),
             "should return immediately when browsers already connected"
         );
+    }
+
+    #[tokio::test]
+    async fn replacing_a_registration_settles_pending_calls_immediately() {
+        let reg = BrowserRegistry::new();
+        let first = fake_client("same", "");
+        reg.insert(std::sync::Arc::clone(&first));
+        let waiter = first
+            .pending
+            .lock()
+            .unwrap()
+            .register("inflight".to_string())
+            .expect("a live socket accepts a call");
+
+        reg.insert(fake_client("same", ""));
+
+        let frame = waiter.await.expect("replaced client settles the waiter");
+        match frame.body {
+            ResponseBody::Err(err) => assert!(is_link_failure(&err)),
+            other => panic!("expected reconnect error, got {other:?}"),
+        }
+        assert_eq!(first.pending.lock().unwrap().waiter_count(), 0);
+        assert_ne!(
+            reg.get(&BrowserId("same".into())).unwrap().generation,
+            first.generation
+        );
+    }
+
+    #[test]
+    fn a_replaced_socket_refuses_every_later_call() {
+        let reg = BrowserRegistry::new();
+        let (first, mut socket) = connected_client("same", "");
+        reg.insert(std::sync::Arc::clone(&first));
+        reg.insert(fake_client("same", ""));
+
+        // A caller that resolved the old client before the replacement and
+        // only reaches `dispatch` afterwards must fail without sending.
+        let refused = first
+            .dispatch(RequestFrame {
+                id: "late".into(),
+                method: bsk_protocol::Method::ToolSnapshot,
+                params: None,
+            })
+            .expect_err("a replaced socket must not accept a new call");
+        match refused {
+            SendError::Terminated(err) => assert!(is_link_failure(&err)),
+            other => panic!("expected the reconnect cause, got {other:?}"),
+        }
+        assert_eq!(first.pending.lock().unwrap().waiter_count(), 0);
+        assert!(
+            socket.try_recv().is_err(),
+            "no frame may reach a terminated socket"
+        );
+    }
+
+    #[test]
+    fn a_replaced_socket_keeps_reporting_the_reconnect_after_its_teardown() {
+        let client = fake_client("same", "");
+        {
+            let mut pending = client.pending.lock().unwrap();
+            pending.terminate(extension_reconnected_error());
+            pending.close();
+        }
+        match client.pending.lock().unwrap().register("later".to_string()) {
+            Err(SendError::Terminated(err)) => assert!(is_link_failure(&err)),
+            other => panic!("expected the reconnect cause, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_closed_socket_drops_its_waiters_and_refuses_later_calls() {
+        let (client, mut socket) = connected_client("gone", "");
+        let waiter = client
+            .dispatch(RequestFrame {
+                id: "inflight".into(),
+                method: bsk_protocol::Method::ToolSnapshot,
+                params: None,
+            })
+            .expect("a live socket accepts a call");
+        assert!(socket.try_recv().is_ok());
+
+        client.pending.lock().unwrap().close();
+
+        assert!(
+            waiter.await.is_err(),
+            "a closed socket must release its caller instead of leaving it to time out"
+        );
+        let refused = client
+            .dispatch(RequestFrame {
+                id: "late".into(),
+                method: bsk_protocol::Method::ToolSnapshot,
+                params: None,
+            })
+            .expect_err("a closed socket must not accept a new call");
+        assert!(matches!(refused, SendError::SinkClosed));
+        assert!(socket.try_recv().is_err());
+        assert_eq!(client.pending.lock().unwrap().waiter_count(), 0);
+    }
+
+    #[test]
+    fn silence_marks_only_heartbeat_capable_browsers_and_any_frame_clears_it() {
+        let client = fake_client("a", "");
+
+        // A browser that never promised periodic frames is never judged on
+        // silence, however long it has been quiet.
+        client
+            .liveness
+            .__backdate_for_tests(Duration::from_secs(600));
+        assert!(!client.note_unresponsive_if_silent());
+        assert!(!client.is_unresponsive());
+
+        client.mark_heartbeat_seen();
+        assert!(client.note_unresponsive_if_silent());
+        assert!(client.is_unresponsive());
+        assert!(client.status_entry(0).unresponsive);
+
+        // Recovery needs nothing but a frame; the next heartbeat is enough.
+        client.touch();
+        assert!(!client.is_unresponsive());
+        assert!(!client.status_entry(0).unresponsive);
+    }
+
+    #[test]
+    fn a_short_gap_is_a_slow_command_not_a_dead_control_plane() {
+        let client = fake_client("a", "");
+        client.mark_heartbeat_seen();
+        client
+            .liveness
+            .__backdate_for_tests(EXTENSION_SILENCE_BEFORE_UNRESPONSIVE - Duration::from_secs(1));
+        assert!(!client.note_unresponsive_if_silent());
+        assert!(!client.is_unresponsive());
+    }
+
+    #[test]
+    fn a_frame_that_lands_during_the_call_wins_over_the_silence_verdict() {
+        // `touch()` and the silence rule share one lock, so a heartbeat that
+        // arrives while a caller is failing cannot be overwritten by that
+        // caller's older observation.
+        let client = fake_client("a", "");
+        client.mark_heartbeat_seen();
+        client
+            .liveness
+            .__backdate_for_tests(Duration::from_secs(600));
+        client.touch();
+        assert!(!client.note_unresponsive_if_silent());
+        assert!(!client.is_unresponsive());
     }
 }

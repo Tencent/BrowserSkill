@@ -1,6 +1,11 @@
 import { useEffect, useRef, useState } from "react";
 import type { SnapshotInfo } from "@/lib/connection-controller";
-import { POPUP_PORT_NAME, type PopupInbound, type PopupOutbound } from "@/lib/popup-bridge";
+import {
+  POPUP_PORT_NAME,
+  type PopupInbound,
+  type PopupOutbound,
+  type PopupSnapshotInfo,
+} from "@/lib/popup-bridge";
 import type { ConnectionState } from "@/transport/types";
 
 export type PopupDisplayState = Exclude<ConnectionState, "connecting">;
@@ -27,7 +32,7 @@ export function resolvePopupStatusState(
   return displayState;
 }
 
-const FALLBACK_SNAPSHOT: SnapshotInfo = {
+const FALLBACK_SNAPSHOT: PopupSnapshotInfo = {
   state: "disconnected",
   instanceId: "",
   label: "",
@@ -35,26 +40,22 @@ const FALLBACK_SNAPSHOT: SnapshotInfo = {
   handshake: null,
   lastError: null,
   connectionEnabled: true,
+  sessionCount: 0,
 };
 
 /**
  * Live snapshot of the background's `ConnectionController` for popup UI.
  *
- * Posts `set_label` mutations back to the background; the incoming
- * snapshot stream reflects the canonical state. The `set_port` channel
- * is defined by the popup-bridge but is not currently routed to the
- * background — wiring it requires `ConnectionController` to swap its
- * Transport URL and persist the chosen port. Tracked for a follow-up
- * milestone; the popup intentionally does not expose a control until
- * the underlying support lands (review M4/M5 C2).
+ * Posts `set_label` and `set_connection_enabled` mutations back to the
+ * background; the incoming snapshot stream reflects the canonical state.
  */
 export function useConnectionState(): {
-  snapshot: SnapshotInfo;
+  snapshot: PopupSnapshotInfo;
   statusState: PopupStatusState;
   setLabel: (value: string) => void;
   setConnectionEnabled: (value: boolean) => void;
 } {
-  const [snapshot, setSnapshot] = useState<SnapshotInfo>(FALLBACK_SNAPSHOT);
+  const [snapshot, setSnapshot] = useState<PopupSnapshotInfo>(FALLBACK_SNAPSHOT);
   const portRef = useRef<chrome.runtime.Port | null>(null);
   const lastStableRef = useRef<ConnectionState>("disconnected");
 

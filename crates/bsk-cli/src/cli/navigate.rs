@@ -5,7 +5,6 @@
 //! emits the full bsk-protocol payload.
 
 use std::path::PathBuf;
-use std::time::Duration;
 
 use anyhow::Context;
 use bsk_protocol::Method;
@@ -16,6 +15,7 @@ use bsk_protocol::tools::{
 use clap::{Args, Subcommand, ValueEnum};
 use serde::Serialize;
 
+use crate::cli::business_rpc::ipc_timeout;
 use crate::cli::dialogs::print_dialog_summaries;
 use crate::cli::ensure_daemon::ensure_daemon;
 use crate::cli::error::{CliError, Format};
@@ -257,22 +257,7 @@ where
     P: serde::Serialize + Send + 'static,
     R: serde::de::DeserializeOwned + Send + 'static,
 {
-    crate::cli::business_rpc::call::<P, R>(
-        sock,
-        id,
-        method,
-        Some(params),
-        navigate_ipc_timeout(timeout_ms),
-    )
-}
-
-/// Use the global tool IPC timeout but extend it so a long navigation
-/// (e.g. networkidle on a slow page) doesn't trip the IPC layer before
-/// the daemon's own timeout fires.
-fn navigate_ipc_timeout(timeout_ms: u32) -> Duration {
-    Duration::from_millis(u64::from(timeout_ms))
-        .checked_add(Duration::from_secs(15))
-        .unwrap_or(Duration::from_secs(u64::from(timeout_ms / 1_000) + 15))
+    crate::cli::business_rpc::call::<P, R>(sock, id, method, Some(params), ipc_timeout(timeout_ms))
 }
 
 fn render_navigate(reply: &NavigateResult, format: Format) -> Result<(), CliError> {
@@ -294,6 +279,13 @@ fn render_navigate(reply: &NavigateResult, format: Format) -> Result<(), CliErro
             }
             print_dialog_summaries(&reply.dialogs);
         }
+    }
+    // `--timeout` is documented as a hard timeout; treat lifecycle wait
+    // expiry as exit 4 (design §3.1) while still printing the payload so
+    // agents can inspect `final_url` / `error_text`. Distinct from
+    // `wait-for-element` / `wait-for-navigation`, which intentionally stay 0.
+    if reply.reached == "timeout" {
+        return Err(CliError::RenderedExit { exit_code: 4 });
     }
     Ok(())
 }
@@ -324,6 +316,9 @@ fn render_history(
             }
             print_dialog_summaries(&view.dialogs);
         }
+    }
+    if view.reached == "timeout" {
+        return Err(CliError::RenderedExit { exit_code: 4 });
     }
     Ok(())
 }
@@ -407,11 +402,62 @@ mod tests {
         assert_eq!(WaitUntil::Commit, CliWaitUntil::Commit.into());
     }
 
+    fn sample_navigate(reached: &str) -> NavigateResult {
+        NavigateResult {
+            tab_id: 1,
+            url: "https://example.com/".into(),
+            final_url: Some("https://example.com/".into()),
+            reached: reached.into(),
+            error_text: if reached == "timeout" {
+                Some("timed out waiting for load".into())
+            } else {
+                None
+            },
+            dialogs: vec![],
+        }
+    }
+
     #[test]
-    fn navigate_ipc_timeout_tracks_user_timeout_with_grace() {
-        assert_eq!(
-            navigate_ipc_timeout(60_000),
-            Duration::from_secs(60) + Duration::from_secs(15)
-        );
+    fn render_navigate_exits_4_on_timeout_after_printing() {
+        let err = render_navigate(&sample_navigate("timeout"), Format::Json).unwrap_err();
+        match err {
+            CliError::RenderedExit { exit_code } => assert_eq!(exit_code, 4),
+            other => panic!("expected RenderedExit(4), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn render_navigate_ok_when_lifecycle_reached() {
+        assert!(render_navigate(&sample_navigate("load"), Format::Json).is_ok());
+    }
+
+    #[test]
+    fn render_history_exits_4_on_timeout() {
+        let view = OwnedHistoryView {
+            tab_id: 2,
+            previous_url: Some("https://a.example/".into()),
+            final_url: Some("https://b.example/".into()),
+            reached: "timeout".into(),
+            error_text: Some("timed out waiting for load".into()),
+            dialogs: vec![],
+        };
+        let err = render_history(&view, "reload", Format::Json).unwrap_err();
+        match err {
+            CliError::RenderedExit { exit_code } => assert_eq!(exit_code, 4),
+            other => panic!("expected RenderedExit(4), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn render_history_ok_when_lifecycle_reached() {
+        let view = OwnedHistoryView {
+            tab_id: 2,
+            previous_url: None,
+            final_url: Some("https://example.com/".into()),
+            reached: "load".into(),
+            error_text: None,
+            dialogs: vec![],
+        };
+        assert!(render_history(&view, "reload", Format::Json).is_ok());
     }
 }

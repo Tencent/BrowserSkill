@@ -4,7 +4,8 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use bsk::daemon::{self, DaemonConfig, state::PROTOCOL_VERSION};
+use bsk::daemon::state::PROTOCOL_VERSION;
+use bsk::daemon::{self, DaemonConfig};
 use bsk::ipc_client::IpcClient;
 use bsk_protocol::system::{HandshakeParams, HandshakeResult, StatusResult};
 use bsk_protocol::{BrowserPeerInfo, ErrorCode, Method, RequestFrame, ResponseBody, ResponseFrame};
@@ -139,7 +140,7 @@ async fn handshake_ok_when_app_versions_differ_but_protocol_matches() {
         PROTOCOL_VERSION,
         "9.9.9",
         Some("0.0.0"),
-        Some("1.1"),
+        Some(PROTOCOL_VERSION),
     )
     .await;
     match resp.body {
@@ -153,12 +154,14 @@ async fn handshake_ok_when_app_versions_differ_but_protocol_matches() {
 async fn handshake_skew_when_protocol_minor_differs() {
     let (handle, _sock) = spawn_daemon().await;
     let mut ws = open_ws(handle.ws_addr()).await;
+    let (major, minor) = PROTOCOL_VERSION.split_once('.').unwrap();
+    let newer_protocol = format!("{major}.{}", minor.parse::<u32>().unwrap() + 1);
     let resp = send_handshake_with_floors(
         &mut ws,
-        "1.2",
+        &newer_protocol,
         env!("CARGO_PKG_VERSION"),
         Some("0.0.0"),
-        Some("1.1"),
+        Some("1.5"),
     )
     .await;
     match resp.body {
@@ -211,12 +214,34 @@ async fn handshake_rejected_when_peer_protocol_major_is_below_daemon() {
 }
 
 #[tokio::test]
+async fn handshake_keeps_pre_terminal_event_extension_connected() {
+    let (handle, _sock) = spawn_daemon().await;
+    let mut ws = open_ws(handle.ws_addr()).await;
+    let response = send_handshake_with_floors(
+        &mut ws,
+        "1.5",
+        env!("CARGO_PKG_VERSION"),
+        Some("0.0.0"),
+        Some("1.5"),
+    )
+    .await;
+    assert!(matches!(response.body, ResponseBody::Ok(_)));
+    let browser = handle
+        .state()
+        .browsers
+        .get(&bsk::daemon::browsers::BrowserId(TEST_EXT_ID.into()))
+        .expect("older extension stays registered");
+    assert!(browser.version_skew);
+    handle.shutdown().await;
+}
+
+#[tokio::test]
 async fn handshake_legacy_ext_without_protocol_floor_still_ok() {
     let (handle, _sock) = spawn_daemon().await;
     let mut ws = open_ws(handle.ws_addr()).await;
     let resp = send_handshake_with_floors(
         &mut ws,
-        "1.1",
+        "1.5",
         env!("CARGO_PKG_VERSION"),
         Some("0.1.0"),
         None,
@@ -241,15 +266,14 @@ async fn status_surfaces_version_skew_for_skewed_browser() {
         browser_name: "chrome".into(),
         browser_version: "131.0".into(),
         extension_version: "9.9.9".into(),
-        extension_protocol_version: "1.2".into(),
+        extension_protocol_version: "1.5".into(),
         label: "Older".into(),
         sink: bsk::daemon::browsers::BrowserSink { tx },
         pending: Mutex::new(bsk::daemon::browsers::Pending::default()),
         generation: bsk::daemon::browsers::next_browser_generation(),
         connected_at_ms: 0,
         version_skew: true,
-        last_seen: Mutex::new(std::time::Instant::now()),
-        heartbeat_seen: std::sync::atomic::AtomicBool::new(false),
+        liveness: bsk::daemon::browsers::Liveness::default(),
     });
     state.browsers.insert(client);
 
@@ -269,7 +293,7 @@ async fn status_surfaces_version_skew_for_skewed_browser() {
         .iter()
         .find(|s| s.instance_id == "skew-only-test")
         .expect("status must list our skew client");
-    assert_eq!(skew.client_protocol_version, "1.2");
+    assert_eq!(skew.client_protocol_version, "1.5");
     assert_eq!(skew.server_protocol_version, PROTOCOL_VERSION);
     assert_eq!(skew.client_version, "9.9.9");
     let entry = status
@@ -287,7 +311,7 @@ async fn handshake_rejects_when_local_below_peer_min_compatible_protocol() {
     let mut ws = open_ws(handle.ws_addr()).await;
     let resp = send_handshake_with_floors(
         &mut ws,
-        "1.1",
+        "1.5",
         env!("CARGO_PKG_VERSION"),
         Some("0.0.0"),
         Some("99.0.0"),
@@ -304,6 +328,28 @@ async fn handshake_rejects_when_local_below_peer_min_compatible_protocol() {
             );
         }
         other => panic!("expected reject, got {other:?}"),
+    }
+    handle.shutdown().await;
+}
+
+#[tokio::test]
+async fn handshake_keeps_legacy_peers_connected_with_version_skew() {
+    let (handle, _) = spawn_daemon().await;
+    for protocol in ["1.0", "1.1", "1.2", "1.3"] {
+        let mut ws = open_ws(handle.ws_addr()).await;
+        let response = send_handshake(&mut ws, protocol, env!("CARGO_PKG_VERSION")).await;
+        let ResponseBody::Ok(result) = response.body else {
+            panic!("rejected compatible legacy protocol {protocol}")
+        };
+        assert_eq!(result["min_compatible_protocol"], "1.0");
+        let state = handle.state();
+        let browser = state
+            .browsers
+            .get(&bsk::daemon::browsers::BrowserId(TEST_EXT_ID.into()))
+            .unwrap();
+        assert!(browser.version_skew);
+        assert_eq!(browser.extension_protocol_version, protocol);
+        assert!(handle.state().sessions.is_empty());
     }
     handle.shutdown().await;
 }

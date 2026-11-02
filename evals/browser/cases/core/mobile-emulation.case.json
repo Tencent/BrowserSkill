@@ -1,0 +1,51 @@
+{
+  "$schema": "../../schemas/case.schema.json",
+  "schemaVersion": 1,
+  "id": "mobile-emulation",
+  "title": "Mobile emulation",
+  "order": 60,
+  "suite": "core",
+  "tags": ["emulation", "mobile", "viewport"],
+  "fixture": { "startPath": "/responsive" },
+  "prompts": {
+    "en": "Open {url} with iPhone 14 emulation and report the viewport marker shown on the page. Close the browser session when finished.",
+    "zh-CN": "以 iPhone 14 模拟配置打开 {url}，并报告页面显示的 viewport marker。完成后关闭浏览器会话。"
+  },
+  "coverage": ["session.start", "session.stop", "page.navigate", "assist.emulate"],
+  "assertions": {
+    "site": [
+      {
+        "label": "iPhone-sized viewport was observed",
+        "type": "viewport.sample",
+        "where": { "data.width": 390, "data.height": 844 },
+        "minCount": 1
+      }
+    ],
+    "response": [{ "label": "reported viewport marker", "includes": "VIEWPORT-84" }],
+    "adapter": [
+      { "label": "device emulation was executed", "key": "emulatedDevice" },
+      { "label": "browser session was closed", "key": "sessionStopped" }
+    ]
+  },
+  "smoke": {
+    "steps": [
+      {
+        "action": "resize",
+        "width": 900,
+        "height": 700
+      },
+      {
+        "action": "emulate",
+        "device": "iphone-14",
+        "evidence": "emulatedDevice"
+      },
+      { "action": "navigate" },
+      {
+        "action": "wait-site-event",
+        "type": "viewport.sample",
+        "where": { "width": 390, "height": 844 }
+      },
+      { "action": "html" }
+    ]
+  }
+}

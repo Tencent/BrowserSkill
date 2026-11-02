@@ -40,7 +40,7 @@ interface MessageLikeEvent {
  *    (1s, 2s, 4s, …, capped at 5s) until `disconnect()` is called.
  */
 export class WSTransport implements Transport {
-  private readonly url: string;
+  private url: string;
   private readonly factory: WebSocketFactory;
   private readonly initialDelayMs: number;
   private readonly maxDelayMs: number;
@@ -69,6 +69,13 @@ export class WSTransport implements Transport {
     return this.currentState;
   }
 
+  /** Returns whether the URL changed. Does not reconnect. */
+  setUrl(url: string): boolean {
+    if (url === this.url) return false;
+    this.url = url;
+    return true;
+  }
+
   connect(): Promise<void> {
     if (this.currentState === "connected") return Promise.resolve();
 
@@ -81,16 +88,18 @@ export class WSTransport implements Transport {
     if (this.connectingPromise) {
       // A previous physical attempt closed before reaching OPEN. Keep the
       // original caller's promise, but start the next socket generation.
+      const pending = this.connectingPromise;
       if (!this.socket) this.openSocket();
-      return this.connectingPromise;
+      return pending;
     }
 
     this.connectingPromise = new Promise<void>((resolve, reject) => {
       this.resolveConnect = resolve;
       this.rejectConnect = reject;
     });
+    const pending = this.connectingPromise;
     this.openSocket();
-    return this.connectingPromise;
+    return pending;
   }
 
   async disconnect(): Promise<void> {
@@ -148,9 +157,21 @@ export class WSTransport implements Transport {
   }
 
   private openSocket(): void {
+    let socket: WebSocket;
+    try {
+      socket = this.factory(this.url);
+    } catch (err) {
+      // A rejected configuration never enters the connecting state. Settle
+      // the pending attempt so callers can report it and retry after recovery.
+      const reject = this.rejectConnect;
+      this.connectingPromise = null;
+      this.resolveConnect = null;
+      this.rejectConnect = null;
+      reject?.(err instanceof Error ? err : new Error(String(err)));
+      return;
+    }
     this.setState("connecting");
     const generation = ++this.socketGeneration;
-    const socket = this.factory(this.url);
     this.socket = socket;
 
     socket.addEventListener("open", () => {

@@ -6,7 +6,7 @@ import { existsSync, mkdtempSync, writeFileSync } from "node:fs";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { tmpdir } from "node:os";
 import { basename, dirname } from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   actionForLabel,
   type ObservationEvent,
@@ -78,7 +78,7 @@ function fakeRunner(
         if (opts.stopNotFound) {
           return {
             code: 4,
-            stdout: JSON.stringify({ code: "session_not_found", message: "no such session" }),
+            stdout: JSON.stringify({ code: "not_found", message: "no such session" }),
             stderr: "",
             timedOut: false,
             aborted: false,
@@ -93,7 +93,7 @@ function fakeRunner(
         if (opts.screenshotNotFound) {
           return {
             code: 4,
-            stdout: JSON.stringify({ code: "session_not_found", message: "no such session" }),
+            stdout: JSON.stringify({ code: "not_found", message: "no such session" }),
             stderr: "",
             timedOut: false,
             aborted: false,
@@ -138,21 +138,31 @@ function setup(opts: {
   runner?: FakeRunner;
   registry?: SessionRegistry;
   scheduler?: ReturnType<typeof fakeScheduler>;
+  thumbnails?: boolean;
+  queue?: KeyedExecutor;
 }) {
   const registry = opts.registry ?? new SessionRegistry(5);
+  // Ordinary observation fixtures represent an initialized, usable session.
+  // Lifecycle tests supply their own registry to exercise other states.
+  if (!opts.registry) own(registry, "s1");
   const runner = opts.runner ?? fakeRunner();
   const scheduler = opts.scheduler ?? fakeScheduler();
   const service = new ObservationService({
     ctx: fakeCtx(),
     runner,
     registry,
-    queue: new KeyedExecutor(),
+    queue: opts.queue ?? new KeyedExecutor(),
     options: OPTIONS,
     scheduler,
   });
   const events: ObservationEvent[] = [];
-  service.subscribe((event) => events.push(event));
-  return { service, registry, runner, scheduler, events };
+  const unsubscribe = service.subscribe(
+    (event) => {
+      if (event.type !== "snapshot") events.push(event);
+    },
+    { thumbnails: opts.thumbnails ?? true },
+  );
+  return { service, registry, runner, scheduler, events, unsubscribe };
 }
 
 /** Drive the registry through a real start so the session is owned. */
@@ -171,6 +181,35 @@ async function waitFor(cond: () => boolean, timeoutMs = 10_000): Promise<void> {
 }
 
 describe("state machine", () => {
+  it("shows pending resources without capturing until activation, and stops captures during cleanup", async () => {
+    const registry = new SessionRegistry(5);
+    registry.trackStart({ sessionId: "pending", startedAtMs: 1 });
+    const { service, scheduler, runner } = setup({ registry });
+    service.addSession("pending");
+    expect(service.getState()[0].action).toBe("starting");
+    expect(scheduler.pending()).toEqual([]);
+    expect(runner.calls).toEqual([]);
+    registry.activate("pending");
+    service.endAction("pending");
+    expect(service.getState()[0].action).toBe("idle");
+    expect(scheduler.pending()).toEqual([0]);
+    scheduler.runNext();
+    await waitFor(
+      () =>
+        service.getState()[0].thumbnailAttachmentId !== undefined &&
+        scheduler.pending().length === 1,
+    );
+    registry.markForCleanup("pending");
+    service.endAction("pending");
+    expect(service.getState()[0].action).toBe("awaiting cleanup");
+    // Even a previously scheduled capture must recheck usability before running.
+    scheduler.runNext();
+    expect(runner.calls).toHaveLength(1);
+    expect(scheduler.pending()).toEqual([]);
+    expect(registry.isOwned("pending")).toBe(true);
+    service.dispose();
+  });
+
   it("tracks add/action/end/url/remove and emits upsert/remove/reset events", () => {
     const { service, events } = setup({});
     service.addSession("s1");
@@ -224,6 +263,162 @@ describe("state machine", () => {
 });
 
 describe("thumbnail cadence", () => {
+  it("keeps metadata current without screenshots and resumes when a viewer arrives", async () => {
+    const { service, scheduler, runner, events } = setup({ thumbnails: false });
+    service.addSession("s1");
+    service.beginAction("s1", "clicking");
+    service.endAction("s1");
+    const releaseForeground = service.acquireForeground("s1");
+    releaseForeground();
+    expect(service.getState()[0].action).toBe("idle");
+    expect(events).toHaveLength(3);
+    expect(scheduler.pending()).toEqual([]);
+    expect(runner.calls).toEqual([]);
+    const snapshots: ObservationEvent[] = [];
+    const leave = service.subscribe((event) => snapshots.push(event));
+    expect(snapshots[0]).toEqual({
+      type: "snapshot",
+      sessions: service.getState(),
+      available: true,
+    });
+    expect(scheduler.pending()).toEqual([0]);
+    scheduler.runNext();
+    await waitFor(() => scheduler.pending().length === 1);
+    expect(runner.calls).toHaveLength(1);
+    leave();
+    leave();
+    expect(scheduler.pending()).toEqual([]);
+    service.endAction("s1");
+    expect(scheduler.pending()).toEqual([]);
+    const resume = service.subscribe(() => {});
+    expect(scheduler.pending()).toEqual([0]);
+    resume();
+    service.dispose();
+  });
+
+  it("does not capture in a headless service with no subscribers", () => {
+    const { service, scheduler, unsubscribe } = setup({});
+    unsubscribe();
+    service.addSession("s1");
+    service.endAction("s1");
+    expect(scheduler.pending()).toEqual([]);
+    expect(service.getState()).toHaveLength(1);
+    service.dispose();
+  });
+
+  it("keeps capturing until the last viewer leaves, including reused callbacks", () => {
+    const { service, scheduler } = setup({ thumbnails: false });
+    service.addSession("s1");
+    const listener = () => {};
+    const first = service.subscribe(listener);
+    const second = service.subscribe(listener);
+    expect(scheduler.pending()).toEqual([0]);
+    first();
+    first();
+    expect(scheduler.pending()).toEqual([0]);
+    second();
+    expect(scheduler.pending()).toEqual([]);
+    service.dispose();
+  });
+
+  it("skips a queued screenshot if its last viewer leaves before execution", async () => {
+    const queue = new KeyedExecutor();
+    let unblock!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      unblock = resolve;
+    });
+    const busy = queue.run("s1", () => gate);
+    const { service, scheduler, runner, unsubscribe } = setup({ queue });
+    service.addSession("s1");
+    scheduler.runNext();
+    unsubscribe();
+    unblock();
+    await busy;
+    await queue.run("s1", async () => {});
+    expect(runner.calls).toEqual([]);
+    expect(scheduler.pending()).toEqual([]);
+    service.dispose();
+  });
+
+  it("lets an already running capture finish without restarting the loop after the last viewer leaves", async () => {
+    const runner = fakeRunner();
+    const run = runner.run.bind(runner);
+    let finish!: () => void;
+    let started = false;
+    runner.run = async (args, options) => {
+      started = true;
+      await new Promise<void>((resolve) => {
+        finish = resolve;
+      });
+      return run(args, options);
+    };
+    const { service, scheduler, unsubscribe } = setup({ runner });
+    service.addSession("s1");
+    scheduler.runNext();
+    await waitFor(() => started);
+    unsubscribe();
+    finish();
+    await waitFor(() => service.getState()[0]?.thumbnailAttachmentId !== undefined);
+    const args = runner.calls[0].args;
+    await waitFor(() => !existsSync(args[args.indexOf("--out") + 1]));
+    expect(scheduler.pending()).toEqual([]);
+    const leave = service.subscribe(() => {});
+    expect(scheduler.pending()).toEqual([0]);
+    leave();
+    service.dispose();
+  });
+
+  it("gives foreground work priority and resumes with one fresh capture", async () => {
+    const scheduler = fakeScheduler();
+    let finishCapture: ((result: BskRunResult) => void) | undefined;
+    const killed: string[] = [];
+    const runner: FakeRunner = {
+      calls: [],
+      killed,
+      run(args) {
+        if (args[0] !== "screenshot") {
+          return Promise.resolve({
+            code: 0,
+            stdout: "{}",
+            stderr: "",
+            timedOut: false,
+            aborted: false,
+          });
+        }
+        return new Promise((resolve) => {
+          finishCapture = resolve;
+        });
+      },
+      killAll() {},
+      killFor(tag) {
+        killed.push(tag);
+        if (tag === "observation:s1" && finishCapture !== undefined) {
+          finishCapture({
+            code: 5,
+            stdout: JSON.stringify({ code: "cancelled", message: "cancelled" }),
+            stderr: "",
+            timedOut: false,
+            aborted: false,
+          });
+          finishCapture = undefined;
+          return 1;
+        }
+        return 0;
+      },
+    };
+    const { service } = setup({ runner, scheduler });
+    service.addSession("s1");
+    scheduler.runNext();
+    await waitFor(() => finishCapture !== undefined);
+
+    const release = service.acquireForeground("s1");
+    expect(killed).toEqual(["observation:s1"]);
+    await waitFor(() => scheduler.pending().length === 0);
+    release();
+    expect(service.isAvailable()).toBe(true);
+    expect(scheduler.pending()).toEqual([0]);
+  });
+
   it("captures immediately on add and after action end, then fast-cadences while active", async () => {
     const scheduler = fakeScheduler();
     const runner = fakeRunner();
@@ -284,6 +479,18 @@ describe("thumbnail cadence", () => {
     await waitFor(() => service.getState()[0]?.thumbnailAttachmentId === "obs-s1-1");
     expect((await service.readThumbnail("obs-s1-1"))?.mediaType).toBe("image/png");
   });
+
+  it("detects JPEG thumbnail bytes instead of hardcoding image/png", async () => {
+    const scheduler = fakeScheduler();
+    const runner = fakeRunner({
+      screenshotBytes: () => new Uint8Array([0xff, 0xd8, 0xff, 0xdb, 0x00, 0x01]),
+    });
+    const { service } = setup({ runner, scheduler });
+    service.addSession("s1");
+    scheduler.runNext();
+    await waitFor(() => service.getState()[0]?.thumbnailAttachmentId === "obs-s1-1");
+    expect((await service.readThumbnail("obs-s1-1"))?.mediaType).toBe("image/jpeg");
+  });
 });
 
 describe("observation traffic isolation", () => {
@@ -341,58 +548,15 @@ describe("interrupt routing", () => {
   });
 });
 
-describe("stopSession", () => {
-  it("stops an owned session: kills in-flight tools, runs session stop, removes the entry", async () => {
-    const registry = new SessionRegistry(5);
-    own(registry, "s1");
-    const runner = fakeRunner();
-    const { service, events } = setup({ registry, runner });
-    service.addSession("s1");
-    expect(registry.isOwned("s1")).toBe(true);
-
-    await expect(service.stopSession("s1")).resolves.toBe(true);
-    expect(runner.killed).toEqual(["s1"]);
-    const stop = runner.calls.find((c) => c.args[0] === "session" && c.args[1] === "stop");
-    expect(stop?.args).toEqual(["session", "stop", "s1"]);
-    expect(registry.isOwned("s1")).toBe(false);
-    expect(service.getState()).toEqual([]);
-    expect(events[events.length - 1]).toMatchObject({ type: "remove" });
-  });
-
-  it("refuses foreign sessions without touching the runner", async () => {
-    const registry = new SessionRegistry(5);
-    own(registry, "s1");
-    const runner = fakeRunner();
-    const { service } = setup({ registry, runner });
-    await expect(service.stopSession("foreign")).resolves.toBe(false);
-    expect(runner.killed).toEqual([]);
-    expect(runner.calls).toEqual([]);
-  });
-
-  it("stops idempotently when the daemon already forgot the session (dead entries)", async () => {
-    const registry = new SessionRegistry(5);
-    own(registry, "s1");
-    const runner = fakeRunner({ stopNotFound: true });
-    const { service, events } = setup({ registry, runner });
-    service.addSession("s1");
-    await expect(service.stopSession("s1")).resolves.toBe(true);
-    expect(registry.isOwned("s1")).toBe(false);
-    expect(events[events.length - 1]).toMatchObject({ type: "remove" });
-  });
-
-  it("returns false and keeps the entry when the stop itself fails", async () => {
-    const registry = new SessionRegistry(5);
-    own(registry, "s1");
-    const runner = fakeRunner({ stopFails: true });
-    const { service } = setup({ registry, runner });
-    service.addSession("s1");
-    await expect(service.stopSession("s1")).resolves.toBe(false);
-    expect(registry.isOwned("s1")).toBe(true);
-    expect(service.getState().map((s) => s.sessionId)).toEqual(["s1"]);
-  });
-});
-
 describe("HTTP/SSE interface", () => {
+  // Route tests verify transport/forwarding; lifecycle entry tests exercise real cleanup.
+  const lifecycleFor = (service: ObservationService) => ({
+    stop: vi.fn(async ({ sessionId: id }: { sessionId?: string } = {}) => {
+      if (!id) throw new Error("session required");
+      service.removeSession(id);
+      return { stopped: id, requestId: `request-${id}`, alreadyClosed: false };
+    }),
+  });
   interface RecordedRoute {
     path: string;
     handler: (req: IncomingMessage, res: ServerResponse) => void | Promise<void>;
@@ -462,7 +626,7 @@ describe("HTTP/SSE interface", () => {
 
     const { routes, webServer } = routeHarness();
     const ctx = { get: (key: string) => (key === "webServer" ? webServer : undefined) } as never;
-    const dispose = registerObservationRoutes(ctx, service);
+    const dispose = registerObservationRoutes(ctx, service, lifecycleFor(service));
 
     // state
     const stateRoute = routes.get("/bsk-observation/state");
@@ -477,6 +641,12 @@ describe("HTTP/SSE interface", () => {
     const eventsRes = fakeRes();
     await eventsRoute?.handler(fakeReq(), eventsRes.res as never);
     service.beginAction("s1", "clicking");
+    const streamed = eventsRes.chunks.map((chunk) => JSON.parse(chunk.slice(6)));
+    expect(streamed.map((event) => event.type)).toEqual(["snapshot", "upsert"]);
+    expect(streamed[0]).toMatchObject({
+      sessions: [{ sessionId: "s1", action: "idle" }],
+      available: true,
+    });
     expect(eventsRes.res.body()).toContain('"action":"clicking"');
     eventsRes.res.close();
 
@@ -503,13 +673,62 @@ describe("HTTP/SSE interface", () => {
     service.dispose();
   });
 
+  it("state-only SSE does not capture, and route disposal releases every active viewer", async () => {
+    const { service, scheduler } = setup({ thumbnails: false });
+    service.addSession("s1");
+    const { routes, webServer } = routeHarness();
+    const dispose = registerObservationRoutes(
+      { get: () => webServer } as never,
+      service,
+      lifecycleFor(service),
+    );
+    const route = routes.get("/bsk-observation/events")!;
+    const metadata = fakeRes();
+    await route.handler(fakeReq({ url: "/bsk-observation/events?thumbnails=0" }), metadata.res);
+    expect(scheduler.pending()).toEqual([]);
+    const viewing = fakeRes();
+    await route.handler(fakeReq({ url: "/bsk-observation/events?thumbnails=1" }), viewing.res);
+    expect(scheduler.pending()).toEqual([0]);
+    const endMetadata = vi.spyOn(metadata.res, "end");
+    const endViewing = vi.spyOn(viewing.res, "end");
+    dispose();
+    expect(endMetadata).toHaveBeenCalledOnce();
+    expect(endViewing).toHaveBeenCalledOnce();
+    expect(scheduler.pending()).toEqual([]);
+    viewing.res.close();
+    metadata.res.close();
+    expect(endViewing).toHaveBeenCalledOnce();
+    service.dispose();
+  });
+
+  it("releases a viewer when writing its initial snapshot fails", async () => {
+    const { service, scheduler } = setup({ thumbnails: false });
+    service.addSession("s1");
+    const { routes, webServer } = routeHarness();
+    const dispose = registerObservationRoutes(
+      { get: () => webServer } as never,
+      service,
+      lifecycleFor(service),
+    );
+    const response = fakeRes();
+    vi.spyOn(response.res, "write").mockImplementation(() => {
+      throw new Error("closed socket");
+    });
+    const end = vi.spyOn(response.res, "end");
+    await routes.get("/bsk-observation/events")!.handler(fakeReq(), response.res);
+    expect(end).toHaveBeenCalledOnce();
+    expect(scheduler.pending()).toEqual([]);
+    dispose();
+    service.dispose();
+  });
+
   it("refuses a stop without a sessionId", async () => {
     const registry = new SessionRegistry(5);
     own(registry, "s1");
     const { service } = setup({ registry });
     const { routes, webServer } = routeHarness();
     const ctx = { get: (key: string) => (key === "webServer" ? webServer : undefined) } as never;
-    const dispose = registerObservationRoutes(ctx, service);
+    const dispose = registerObservationRoutes(ctx, service, lifecycleFor(service));
 
     const stopRoute = routes.get("/bsk-observation/stop");
     const res = fakeRes();
@@ -536,7 +755,7 @@ describe("HTTP/SSE interface", () => {
     service.addSession("s1");
     const { routes, webServer } = routeHarness();
     const ctx = { get: (key: string) => (key === "webServer" ? webServer : undefined) } as never;
-    const dispose = registerObservationRoutes(ctx, service);
+    const dispose = registerObservationRoutes(ctx, service, lifecycleFor(service));
     const stateRoute = routes.get("/bsk-observation/state");
     const interruptRoute = routes.get("/bsk-observation/interrupt");
 
@@ -583,14 +802,14 @@ describe("HTTP/SSE interface", () => {
   it("registers nothing when no webServer is mounted", () => {
     const { service } = setup({});
     const ctx = { get: () => undefined } as never;
-    const dispose = registerObservationRoutes(ctx, service);
+    const dispose = registerObservationRoutes(ctx, service, lifecycleFor(service));
     expect(typeof dispose).toBe("function");
     dispose();
     service.dispose();
   });
 });
 
-describe("availability and dead sessions", () => {
+describe("availability and missing sessions", () => {
   it("flips availability off after repeated global failures and back on success", async () => {
     const scheduler = fakeScheduler();
     const runner = fakeRunner({ screenshotFails: true });
@@ -610,23 +829,18 @@ describe("availability and dead sessions", () => {
     service.dispose();
   });
 
-  it("marks a session dead on session_not_found and stops asking for frames", async () => {
+  it("removes an owned ghost on not_found and stops asking for frames", async () => {
     const scheduler = fakeScheduler();
     const runner = fakeRunner({ screenshotNotFound: true });
-    const { service, events } = setup({ runner, scheduler });
+    const registry = new SessionRegistry(5);
+    own(registry, "s1");
+    const { service, events } = setup({ runner, scheduler, registry });
     service.addSession("s1");
     scheduler.runNext();
-    await waitFor(() => events.some((e) => e.type === "upsert" && e.session?.dead === true));
-    expect(service.getState()[0].dead).toBe(true);
-    expect(service.getState()[0].action).toBe("idle");
-    // No further captures are scheduled for a dead session.
-    expect(scheduler.pending()).toEqual([]);
-    // Instrumentation is dropped for dead sessions.
-    service.beginAction("s1", "clicking");
-    expect(service.getState()[0].action).toBe("idle");
-    // A dead session leaves cleanly.
-    service.removeSession("s1");
+    await waitFor(() => events.some((e) => e.type === "remove"));
     expect(service.getState()).toEqual([]);
+    expect(registry.isOwned("s1")).toBe(false);
+    expect(scheduler.pending()).toEqual([]);
   });
 
   it("clears lastError on the next action and keeps it on failure", () => {
@@ -649,6 +863,9 @@ describe("actionForLabel", () => {
     expect(actionForLabel("navigate")).toBe("navigating");
     expect(actionForLabel("screenshot")).toBe("capturing");
     expect(actionForLabel("session start")).toBe("starting");
+    expect(actionForLabel("tab borrow")).toBe("borrowing tab");
+    expect(actionForLabel("request-help")).toBe("waiting for user");
+    expect(actionForLabel("wait-for-navigation")).toBe("waiting for navigation");
   });
 });
 

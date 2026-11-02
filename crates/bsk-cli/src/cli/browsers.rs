@@ -96,6 +96,14 @@ fn run_list(sock: PathBuf, format: Format) -> Result<(), CliError> {
                     w3 = widths[3],
                 );
             }
+            for browser in &reply.browsers {
+                if browser.unresponsive {
+                    println!(
+                        "{} is connected, but the extension is not responding",
+                        browser.instance_id
+                    );
+                }
+            }
         }
     }
     Ok(())

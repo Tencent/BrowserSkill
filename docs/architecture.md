@@ -5,6 +5,10 @@ Consolidates design §2, §3, §5, and §6.
 
 ## System diagram
 
+The diagram shows the default local setup. In [remote mode](remote-extension-connection.md),
+the CLI and daemon run on a server; the extension connects from the user's browser
+over authenticated WSS. CLI-to-daemon communication remains local IPC on the server.
+
 ```mermaid
 flowchart TB
   subgraph harness [Agent harness]
@@ -29,8 +33,11 @@ flowchart TB
 ### bsk CLI (`crates/bsk-cli`)
 
 - Parses verb-noun subcommands (`bsk session start`, `bsk click`, …).
-- On first use, **auto-spawns** the daemon if `~/.bsk/daemon.lock` is absent or stale.
-- Speaks JSON Lines over `~/.bsk/daemon.sock` (Unix) or a named pipe (Windows).
+- Uses IPC to discover a running daemon. Automatically starts one only when
+  discovery or its listener is absent, unless `BSK_AUTO_START=0` disables implicit
+  startup. See [sandboxed agent setup](sandboxed-agents.md) for host-managed daemons.
+- Speaks JSON Lines over `$BSK_HOME/run/daemon.sock` (Unix) or a named pipe (Windows);
+  the default home is `~/.bsk`.
 - Renders human-readable output by default; `--json` emits structured responses.
 
 Key modules:
@@ -43,7 +50,8 @@ Key modules:
 
 ### bsk daemon (same binary: `bsk daemon`)
 
-- Listens on loopback WebSocket (default **52800**) for extensions.
+- In local mode, listens on loopback WebSocket (default **52800**, configurable with `bsk daemon start --port`) for extensions. The extension popup saves the matching connection port; saving ends existing sessions and reconnects when enabled.
+- Server mode supports authenticated remote extension connections with device pairing, renewal and revocation. Native TLS or a TLS reverse proxy provides WSS; the deployment supervisor owns server restarts.
 - Validates `Origin: chrome-extension://…` on handshake.
 - Maintains `browsers` (connected extensions) and `sessions` (Agent Window bindings).
 - **Per-session queue** serializes tool calls targeting one session.
@@ -76,13 +84,68 @@ WXT / MV3 Chromium extension. Built with React popup and a service worker backgr
 Shared Rust types + JSON Schema generation. TypeScript mirrors frame shapes in
 `apps/extension/src/transport/types.ts` (kept in sync via tests and schema dumps).
 
+### Control policy and action evidence
+
+Protocol 1.8 adds explicit `control_policy` negotiation on `tool.cooperate` sync/enable.
+New CLI/plugin syncs and step post-syncs request `auto`, which preserves an established policy
+or selects `target` for an unconfigured session. Legacy callers that omit the field retain
+`strict`. Explicit `strict` or `target` selects a policy that is fixed for the session.
+CLI and daemon check peer support before
+forwarding new evidence fields; an older peer cannot silently discard a condition.
+Support is within protocol major 1, starting at 1.8; a future major is not assumed compatible.
+With a current CLI and an older extension, every sync/enable and step must explicitly request
+`strict`; conditions still require upgraded peers. A plugin that sends `--policy` requires a
+CLI that recognizes it. Upgrade the CLI and restart its daemon when the flag is unsupported.
+
+`ActionMetadata` defines the shared wire fields below. Schema generation merges them into
+guarded action parameter schemas, including script/file operations and the active variants of
+observe/debug. Passive variants do not evaluate conditions. Operation structs retain their
+existing fields; generated clients can combine them with the shared metadata without inventing
+a separate protocol. Expectation target and attribute limits count Unicode code points.
+
+| Field | Contract |
+| --- | --- |
+| `context_id` | Caller-supplied control receipt bound to session, tab, document and human intervention epoch. Reusable for target-policy DOM actions; single-use under strict policy. |
+| `observation_id` | Sync's strict baseline for target-policy actions without a DOM recipient, including scripts and visual clicks. Supplementary reads do not replace this baseline. Under strict policy, drag retains its existing optional ref-map freshness token; target-policy DOM drag uses stable refs. |
+| `expect` | Up to 16 literal target conditions: `text`, `value`, `checked`, `attribute` or `exists`, each with `equals`; only attribute conditions carry an `attribute` name. Text is exact `textContent`, including whitespace. Selectors search the main document; frame/shadow targets require observed refs. Target/attribute limits are 1024/256 Unicode code points. |
+| `depends_on` | Legacy strict-policy decision regions. Target policy rejects it with guidance to use explicit conditions. |
+
+Target policy checks the resolved element and declared facts before input, preserving native
+hit testing and the human-control dispatch fence without recapturing the whole VOM on ordinary
+DOM actions. Stable refs identify nodes across supplementary observations; document replacement
+invalidates them, and visual captures keep their own single-use freshness rules. A recycled
+table row is still the same node, so business identity must be an explicit condition.
+Refs also do not freeze a node's role, name or action meaning: a Save button changed in place
+to Delete requires an explicit text/attribute condition when that distinction matters.
+Inferred VOM labels are not automatically treated as DOM text or a frozen semantic fingerprint.
+Conditions are browser-side preconditions, not an atomic transaction with the application server.
+
+Action failures preserve `reason`, `phase`, `effect_state` and recovery guidance; failed conditions
+include target, field, expected and actual values. Unknown outcomes require application reconciliation.
+The daemon and plugin never replace caller receipts or automatically replay a business action.
+Completed tool results survive ordinary page/frame changes and unavailable post-action collection.
+Document or coverage changes still revoke the old context; subsequent actions require a fresh sync.
+In-flight input guards, human intervention, stop and cancellation remain enforced. A completed
+tool result does not by itself prove that the application committed a business transaction.
+See [shared browser control](shared-browser-control.zh-CN.md) for lifecycle details and regressions.
+
 ## Typical tool call
 
-1. Agent runs `bsk click @e1 --tab-id 42 --session ab12`.
+1. Agent uses its sync receipt: `bsk click @e1 --tab-id 42 --session ab12 --context CONTEXT_ID`.
 2. CLI ensures daemon is running, opens UDS, sends one JSON request line.
 3. Daemon resolves session `ab12` → browser client → forwards `tool.click` over WS.
 4. Extension dispatcher validates sandbox rules, invokes CDP via `BrowserDriver`.
 5. Response travels CLI ← daemon ← extension; CLI prints result and exits.
+
+The [scroll-to primitive reference](scroll-to.md) documents `tool.scroll_to`,
+including its CLI/plugin mappings, visible-bounds contract and cancellation
+behavior. It follows the same routing path and is classified as a browser
+mutation for session queueing and user-interruption gating.
+
+Structured extraction follows the same routing path as a passive read. The
+extension gathers bounded DOM facts and normalizes tables/lists; the CLI owns
+CSV encoding and file output. Discovery handles are scoped to session, tab,
+attachment and frame document. See [structured extraction](structured-extraction.md).
 
 ## Session and sandbox model
 
@@ -93,6 +156,9 @@ Shared Rust types + JSON Schema generation. TypeScript mirrors frame shapes in
 - **Session stop is mandatory** in agent workflows (`bsk session stop`); idle timeout
   (default 5 min) is a safety net only.
 - Multiple sessions on one browser → multiple Agent Windows, fully isolated.
+- Remote content reads and actions require task-created or explicitly borrowed tabs.
+  A page-opened popup or a user tab moved into the Agent Window does not become
+  controlled automatically; see [remote tab ownership](remote-extension-connection.md#browser-permissions-and-task-lifetime).
 
 ### tab_list scopes
 
@@ -136,12 +202,30 @@ flowchart LR
   CLI <-->|JSON protocol| T
 ```
 
-## Security (v1)
+## Connection security
 
-- Daemon and WebSocket bind to **loopback** only.
+- Local mode binds WebSocket to **loopback**. Server mode permits remote access
+  through authenticated WSS; plaintext listeners remain on loopback behind TLS
+  termination or for development.
 - Extension origin allow-list at WS upgrade.
-- No credential storage in bsk — cookies stay in the user's browser profile.
+- Website cookies stay in the user's browser profile. Remote device credentials
+  are stored in extension-origin IndexedDB; the built-in server stores credential
+  hashes in its private `BSK_HOME`. Pairing and device grants govern remote access.
 - `evaluate` restricted to Agent Window tabs in sandbox mode.
+- Operation audit, when enabled, is stored on the daemon host, including the
+  server in remote mode. See [operation audit](operation-audit.md).
+
+### File-transfer boundary
+
+Upload and download are supported only for local connections. Remote sessions
+return `unsupported`; screenshots and other RPC content results remain available.
+
+- The invoking agent/harness decides whether a transfer is authorized and supplies the task-local source or destination path.
+- The CLI is the only component that reads an upload source or writes the final download destination. Before browser dispatch it owns rollback of partially staged uploads; after dispatch, ownership moves to the session because a transport timeout cannot prove that Chrome did not attach the file. Download output becomes visible through one atomic commit, and replacement is opt-in without a pre-delete window. The extension never receives either agent-facing path.
+- The daemon is the authority for storage capabilities and limits. It issues opaque session-scoped transfer IDs, stages bounded chunks in a private runtime directory, and injects only private staged upload paths. For download it mints one relative Chrome directory capability. Only after validating the reported path, file type, symlink boundary, and authoritative byte limit does it take ownership of browser-file cleanup and import the bytes.
+- The extension owns only the browser transaction. Every transfer resolves one `ResolvedActionTarget`. The default upload mechanism arms Chrome's chooser interception before clicking, then accepts either an exact `Page.fileChooserOpened` input node or an independent probe anchored in the trigger node's document; one verified input is committed with `DOM.setFileInputFiles`, while a non-input picker is rejected immediately. Explicit drop mode performs no click and never falls back to the chooser mechanism: after geometry resolution it temporarily excludes BrowserSkill's own overlay, verifies that the resolved drop zone still owns its local action point, and sends one native `dragEnter` / `dragOver` / `drop` transaction to that node's CDP target before restoring the overlay. OOPIF drops use target-local coordinates rather than top-level click coordinates. Download correlates exact-target CDP intent and `chrome.downloads` filename candidates in either arrival order, claims only one unique match, and never cancels an unclaimed candidate. When the click opens a new tab instead (for example a `target="_blank"` attachment link), the clicked target receives no CDP intent; the URL of a `webNavigation` navigation target whose source is the clicked tab and that appears after the mouse press is then the intent, and only candidates observed after the press can match it.
+- Browser-side operations report `effect_state` (`none`, `committed`, or `unknown`), `phase`, and `cleanup_state`. Confirmed success wins over a late cancel; an unknown effect is preserved across timeout or transport loss and must not be retried blindly. A transfer deadline sends cancellation to the extension and keeps the session queue occupied for bounded compensation rather than abandoning an in-flight browser effect.
+- Download staging is released after CLI commit. Upload staging remains until session teardown because the page may read an attached file only on a later form submission. Remaining staging is released on session stop/browser disconnect and on daemon startup after a crash. BrowserSkill does not inspect content or decide whether a transfer is appropriate.
 
 ## Repository layout
 
@@ -150,8 +234,28 @@ browser-skill/
 ├── apps/extension/       # WXT Chromium extension
 ├── crates/
 │   ├── bsk-cli/           # `bsk` binary (CLI + daemon)
+│   │   └── skill/        # Canonical CLI SKILL.md + references/
 │   └── bsk-protocol/      # Wire types + schemas
 ├── install.sh            # CLI installer (GitHub Releases)
-├── skill/SKILL.md        # Agent harness instructions
+├── packages/dsh-plugin-browserskill/skill/  # DSH SKILL.md + references/
 └── docs/                 # architecture, guides
 ```
+
+
+The two skill directories above are the only authored skill sources. The CLI build
+embeds every file from its crate-local directory without copying or modifying sources.
+Installation writes the complete package. A versioned `.bsk-source` manifest tracks
+SHA-256 checksums per file; automatic updates verify all managed files and new-path
+collisions before replacing anything. Resources precede the entry point, and a pending
+manifest records expected old/new hashes so interrupted writes can be resumed safely.
+Known historical single-file checksums in `src/skill_install/legacy-digests.txt` are
+migration data, not a third instruction source. They recognize exact LF originals
+and CRLF copies; recorded per-file checksums remain byte-exact. Frozen pre-bundle
+snapshots under `tests/fixtures/legacy-skills/` cover adoption and edit protection
+without requiring Git history during CI. Explicit custom installations opt out.
+
+The DSH build embeds only its entry point. Its npm package ships the complete `skill/`
+directory, registered with a module-relative `resourceBase` so agents can read references
+on demand regardless of their working directory. CI validates local links, entry point
+budgets, Cargo contents and the actual npm archive, including resource resolution from
+the unpacked runtime.

@@ -1,3 +1,4 @@
+import { createRandomUuid } from "@/lib/random-uuid";
 import {
   isAcceptedRecordStepAck,
   RECORD_STEP,
@@ -18,7 +19,7 @@ export class RecordStepDelivery {
   constructor(
     requestId: string,
     send: SendRecordStepMessage = (message) => chrome.runtime.sendMessage(message),
-    producerId: string = crypto.randomUUID(),
+    producerId: string = createRandomUuid(),
   ) {
     this.#requestId = requestId;
     this.#producerId = producerId;

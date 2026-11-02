@@ -1,0 +1,563 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "DebugParams",
+  "type": "object",
+  "required": [
+    "action",
+    "session_id"
+  ],
+  "properties": {
+    "action": {
+      "$ref": "#/definitions/DebugAction"
+    },
+    "budget": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint32",
+      "maximum": 262144.0,
+      "minimum": 4096.0
+    },
+    "command_id": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "context_id": {
+      "description": "Context actually returned by sync. Reusable for target-policy DOM actions; strict policy consumes it after one action. Never fill it from cached state.",
+      "type": "string"
+    },
+    "depends_on": {
+      "description": "Strict policy only: observed decision regions. Target policy requires exact business facts in expect; regions cannot be translated to facts automatically.",
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "maxItems": 16
+    },
+    "expect": {
+      "description": "Literal conditions checked before input. Selectors search the main document; use observed refs for iframe/shadow-root targets. Text includes all whitespace.",
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/ActionExpectation"
+      },
+      "maxItems": 16
+    },
+    "fields": {
+      "type": [
+        "array",
+        "null"
+      ],
+      "items": {
+        "type": "string"
+      }
+    },
+    "id": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "include_controlled": {
+      "type": [
+        "boolean",
+        "null"
+      ]
+    },
+    "kind": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "limit": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint32",
+      "maximum": 100.0,
+      "minimum": 1.0
+    },
+    "max_chars": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint32",
+      "maximum": 16384.0,
+      "minimum": 1.0
+    },
+    "method": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "name": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "observation_id": {
+      "description": "Sync's single-use baseline for untargeted/visual actions under target policy, including scripts, untargeted keys and displacement-only drags. Drags with a target ref/selector need only context_id. Strict-policy drag instead accepts its legacy ref-map observation token.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "offset": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint32",
+      "maximum": 65536.0,
+      "minimum": 0.0
+    },
+    "part": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "pointer": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "replay": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/DebugReplaySpec"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "resource_type": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "rule": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/DebugRuleSpec"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "run_id": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "session_id": {
+      "type": "string"
+    },
+    "since": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "slow_ms": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint32",
+      "maximum": 60000.0,
+      "minimum": 0.0
+    },
+    "state": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "status": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint16",
+      "maximum": 599.0,
+      "minimum": 100.0
+    },
+    "tab_id": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "int64"
+    },
+    "url": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "wait_ms": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint32",
+      "maximum": 60000.0,
+      "minimum": 0.0
+    },
+    "window_ms": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint32",
+      "maximum": 10000.0,
+      "minimum": 100.0
+    }
+  },
+  "definitions": {
+    "ActionExpectation": {
+      "description": "Caller-supplied facts checked immediately before starting an action.",
+      "type": "object",
+      "required": [
+        "equals",
+        "field",
+        "target"
+      ],
+      "properties": {
+        "attribute": {
+          "description": "Required only for field=attribute, measured in Unicode code points.",
+          "type": "string",
+          "maxLength": 256,
+          "minLength": 1
+        },
+        "equals": {
+          "description": "text/value require a string; checked/exists require a boolean; attribute accepts a string or null for absence. Text is exact textContent.",
+          "allOf": [
+            {
+              "$ref": "#/definitions/ExpectedValue"
+            }
+          ]
+        },
+        "field": {
+          "$ref": "#/definitions/ExpectationField"
+        },
+        "target": {
+          "description": "Observed ref or main-document CSS selector, measured in Unicode code points.",
+          "type": "string",
+          "maxLength": 1024,
+          "minLength": 1
+        }
+      },
+      "additionalProperties": false
+    },
+    "DebugAction": {
+      "type": "string",
+      "enum": [
+        "performance",
+        "aggregate",
+        "duplicates",
+        "capabilities",
+        "activity",
+        "wait",
+        "pin",
+        "unpin",
+        "start",
+        "stop",
+        "status",
+        "requests",
+        "request",
+        "operations",
+        "operation",
+        "console",
+        "pages",
+        "export",
+        "rules",
+        "rule_add",
+        "rule_enable",
+        "rule_disable",
+        "rule_remove",
+        "replay"
+      ]
+    },
+    "DebugJsonEdit": {
+      "type": "object",
+      "properties": {
+        "remove": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          }
+        },
+        "rename": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "set": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "additionalProperties": true
+        }
+      },
+      "additionalProperties": false
+    },
+    "DebugReplaySpec": {
+      "type": "object",
+      "required": [
+        "key"
+      ],
+      "properties": {
+        "body": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "headers": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "additionalProperties": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "key": {
+          "type": "string"
+        },
+        "method": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "url": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "DebugRuleEffect": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "type"
+          ],
+          "properties": {
+            "type": {
+              "type": "string",
+              "enum": [
+                "block"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "type"
+          ],
+          "properties": {
+            "body": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "headers": {
+              "type": [
+                "object",
+                "null"
+              ],
+              "additionalProperties": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "json": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/DebugJsonEdit"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "method": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "modify"
+              ]
+            },
+            "url": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "body",
+            "status",
+            "type"
+          ],
+          "properties": {
+            "body": {
+              "type": "string"
+            },
+            "delay_ms": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint32",
+              "minimum": 0.0
+            },
+            "headers": {
+              "type": [
+                "object",
+                "null"
+              ],
+              "additionalProperties": {
+                "type": "string"
+              }
+            },
+            "status": {
+              "type": "integer",
+              "format": "uint16",
+              "minimum": 0.0
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "mock"
+              ]
+            }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "DebugRuleMatch": {
+      "type": "object",
+      "required": [
+        "url"
+      ],
+      "properties": {
+        "method": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "resource_type": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "url": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "DebugRuleSpec": {
+      "type": "object",
+      "required": [
+        "effect",
+        "match"
+      ],
+      "properties": {
+        "effect": {
+          "$ref": "#/definitions/DebugRuleEffect"
+        },
+        "match": {
+          "$ref": "#/definitions/DebugRuleMatch"
+        },
+        "name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "times": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0.0
+        }
+      }
+    },
+    "ExpectationField": {
+      "type": "string",
+      "enum": [
+        "text",
+        "value",
+        "checked",
+        "attribute",
+        "exists"
+      ]
+    },
+    "ExpectedValue": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "boolean"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    }
+  }
+}

@@ -1,0 +1,2 @@
+# Historical test snapshots must retain their original bytes on Windows.
+/crates/bsk-cli/tests/fixtures/legacy-skills/*.md text eol=lf

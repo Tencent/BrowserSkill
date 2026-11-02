@@ -14,6 +14,9 @@ use crate::cli::error::{CliError, Format};
 
 #[derive(Debug, Clone, Args)]
 pub struct ObserveArgs {
+    /// Continue the same observation. Use current refs before continuing.
+    #[arg(long, conflicts_with_all = ["max_depth", "probe_hover", "debug_surfaces"])]
+    pub cursor: Option<String>,
     /// Session id (must be active).
     #[arg(long)]
     pub session: String,
@@ -26,13 +29,19 @@ pub struct ObserveArgs {
     #[arg(long = "max-depth")]
     pub max_depth: Option<u32>,
 
-    /// Soft cap on rendered tokens (~4 chars/token).
+    /// Soft cap on rendered tokens (estimated; CJK-aware).
     #[arg(long = "max-tokens")]
     pub max_tokens: Option<u32>,
 
     /// Include conditional surface probe diagnostics in JSON output.
     #[arg(long = "debug-surfaces")]
     pub debug_surfaces: bool,
+
+    /// Actively hover page controls to reveal hover-only menus and tooltips.
+    /// Costs seconds of wall clock and touches the live page, so it is off
+    /// unless a static observation looks like it is missing hover content.
+    #[arg(long = "probe-hover")]
+    pub probe_hover: bool,
 }
 
 pub fn dispatch(args: ObserveArgs, format: Format) -> Result<(), CliError> {
@@ -42,11 +51,13 @@ pub fn dispatch(args: ObserveArgs, format: Format) -> Result<(), CliError> {
 
 fn run(sock: PathBuf, args: ObserveArgs, format: Format) -> Result<(), CliError> {
     let params = ObserveParams {
+        cursor: args.cursor,
         session_id: args.session.clone(),
         tab_id: args.tab_id,
         max_depth: args.max_depth,
         max_tokens: args.max_tokens,
         debug_surfaces: args.debug_surfaces,
+        probe_hover: args.probe_hover,
     };
     let reply: ObserveResult = call(sock, params)?;
     match format {
@@ -61,7 +72,7 @@ fn run(sock: PathBuf, args: ObserveArgs, format: Format) -> Result<(), CliError>
             } else {
                 println!("{}", reply.text);
             }
-            if reply.truncated {
+            if reply.truncated && reply.next_cursor.is_none() {
                 eprintln!(
                     "warning: observation truncated (refs={}, tab={}). Increase --max-depth / --max-tokens if needed.",
                     reply.ref_count, reply.tab_id
@@ -81,4 +92,61 @@ fn call(sock: PathBuf, params: ObserveParams) -> Result<ObserveResult, CliError>
         Some(params),
         TOOL_IPC_TIMEOUT,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ObserveArgs;
+    use clap::Parser;
+
+    #[derive(Parser)]
+    struct Command {
+        #[command(flatten)]
+        observe: ObserveArgs,
+    }
+
+    #[test]
+    fn cursor_accepts_a_page_budget() {
+        let parsed = Command::try_parse_from([
+            "observe",
+            "--session",
+            "s1",
+            "--cursor",
+            "page-two",
+            "--max-tokens",
+            "100",
+        ])
+        .unwrap();
+        assert_eq!(parsed.observe.cursor.as_deref(), Some("page-two"));
+        assert_eq!(parsed.observe.max_tokens, Some(100));
+    }
+
+    #[test]
+    fn cursor_cannot_change_capture_options() {
+        for option in ["--probe-hover", "--debug-surfaces"] {
+            assert!(
+                Command::try_parse_from([
+                    "observe",
+                    "--session",
+                    "s1",
+                    "--cursor",
+                    "page-two",
+                    option,
+                ])
+                .is_err()
+            );
+        }
+        assert!(
+            Command::try_parse_from([
+                "observe",
+                "--session",
+                "s1",
+                "--cursor",
+                "page-two",
+                "--max-depth",
+                "2",
+            ])
+            .is_err()
+        );
+    }
 }

@@ -17,6 +17,7 @@ import { readFile, unlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Context } from "@deepseek-ai/cordis";
+import { sniffImageMediaType } from "./image";
 import type { KeyedExecutor } from "./queue";
 import type { BskRunner } from "./runner";
 import type { SessionRegistry } from "./sessions";
@@ -35,21 +36,17 @@ export interface SessionObservation {
   /** Summary of the most recent failed action (drives the red status dot). */
   lastError?: string;
   /**
-   * The daemon reports this session as gone (e.g. daemon restart): the strip
-   * greys it out until it is stopped/removed. No more frames are requested.
-   */
-  dead?: boolean;
-  /**
    * The DSH conversations this session belongs to (the starting agent's
    * session plus its seed-lineage ancestors), recorded at start. Scoped
-   * surfaces (the better-sidebar tab) filter by it; absent means untracked
+   * surfaces (the native sidebar tab) filter by it; absent means untracked
    * ownership — visible only in the global (unscoped) view.
    */
   dshSessionIds?: string[];
 }
 
-/** Incremental event carried to subscribers (SSE on the wire). */
+/** Initial snapshot or incremental change carried to subscribers (SSE on the wire). */
 export type ObservationEvent =
+  | { type: "snapshot"; sessions: SessionObservation[]; available: boolean }
   | { type: "upsert" | "remove" | "reset"; session?: SessionObservation }
   | { type: "availability"; available: boolean };
 
@@ -88,8 +85,15 @@ export class ObservationService {
   private readonly scratchNamespace = randomUUID();
   private readonly observations = new Map<string, SessionObservation>();
   private readonly listeners = new Set<(event: ObservationEvent) => void>();
+  private thumbnailViewers = 0;
   private readonly captureTimers = new Map<string, unknown>();
   private readonly captureInFlight = new Set<string>();
+  /** Only running thumbnails: shared-control reads must not wait behind actions. */
+  private readonly activeCaptures = new Map<string, Promise<unknown>>();
+  /** Captures intentionally cancelled to make way for foreground work. */
+  private readonly capturePreempted = new Set<string>();
+  /** Number of queued/running model-facing calls that currently outrank thumbnails. */
+  private readonly foregroundDepth = new Map<string, number>();
   private readonly captureFailures = new Map<string, number>();
   private readonly lastActivity = new Map<string, number>();
   /** Ephemeral frame id → PNG bytes. Only the live ring members are present. */
@@ -120,7 +124,7 @@ export class ObservationService {
     return this.deps.scheduler ?? DEFAULT_SCHEDULER;
   }
 
-  /** All current entries (client initial/resync snapshot). */
+  /** One-time state read; use subscribe for an ordered snapshot and subsequent changes. */
   getState(): SessionObservation[] {
     return [...this.observations.values()].map((entry) => ({ ...entry }));
   }
@@ -136,10 +140,42 @@ export class ObservationService {
     this.emit({ type: "availability", available });
   }
 
-  /** Subscribe to incremental changes; returns an unsubscribe function. */
-  subscribe(listener: (event: ObservationEvent) => void): () => void {
-    this.listeners.add(listener);
-    return () => this.listeners.delete(listener);
+  /**
+   * Subscribe to an ordered initial snapshot and subsequent changes. On an
+   * active service, listener receives the snapshot synchronously before this
+   * method returns. Subscribing after disposal is a no-op.
+   *
+   * `thumbnails` defaults to true for compatibility: this subscription counts
+   * as a screenshot viewer for the service's owned sessions. Pass false for
+   * state-only observation. The first viewer starts capture scheduling.
+   *
+   * @returns An idempotent unsubscribe function releasing this subscription's
+   * screenshot demand. When the last viewer leaves, scheduled/queued captures
+   * are cancelled/skipped; an already running capture may finish.
+   */
+  subscribe(
+    listener: (event: ObservationEvent) => void,
+    { thumbnails = true }: { thumbnails?: boolean } = {},
+  ): () => void {
+    if (this.disposed) return () => {};
+    // Each subscription owns its lease, even if a caller reuses a callback.
+    const receive = (event: ObservationEvent) => listener(event);
+    this.listeners.add(receive);
+    try {
+      listener({ type: "snapshot", sessions: this.getState(), available: this.available });
+    } catch (error) {
+      this.listeners.delete(receive);
+      throw error;
+    }
+    if (thumbnails && ++this.thumbnailViewers === 1) {
+      for (const sessionId of this.observations.keys()) this.scheduleCapture(sessionId, 0);
+    }
+    return () => {
+      if (!this.listeners.delete(receive)) return;
+      if (thumbnails && --this.thumbnailViewers === 0) {
+        for (const sessionId of this.captureTimers.keys()) this.cancelCapture(sessionId);
+      }
+    };
   }
 
   private emit(event: ObservationEvent): void {
@@ -157,14 +193,14 @@ export class ObservationService {
     this.emit({ type: "upsert", session: { ...entry } });
   }
 
-  /** Register a fresh owned session (called from browser_session_start). */
+  /** Register a fresh owned session (called from bsk_session action=start). */
   addSession(sessionId: string, url?: string): void {
     if (!this.deps.options.enabled || this.disposed) return;
     const dshSessionIds = this.deps.registry.dshOwnersOf(sessionId);
     this.put({
       sessionId,
       ...(url !== undefined ? { url } : {}),
-      action: "idle",
+      action: this.restingAction(sessionId),
       since: this.scheduler.now(),
       ...(dshSessionIds.length > 0 ? { dshSessionIds } : {}),
     });
@@ -172,9 +208,11 @@ export class ObservationService {
     this.scheduleCapture(sessionId, 0);
   }
 
-  /** Drop a session (called from browser_session_stop). */
+  /** Drop a session (called from bsk_session action=stop). */
   removeSession(sessionId: string): void {
     this.cancelCapture(sessionId);
+    this.foregroundDepth.delete(sessionId);
+    this.capturePreempted.delete(sessionId);
     this.captureFailures.delete(sessionId);
     this.lastActivity.delete(sessionId);
     this.dropSessionFrames(sessionId);
@@ -186,11 +224,64 @@ export class ObservationService {
     }
   }
 
+  /**
+   * Give model-facing work priority over the best-effort thumbnail lane.
+   * The first lease cancels a pending timer and gracefully interrupts an
+   * active bsk screenshot; the last release schedules one fresh frame.
+   */
+  acquireForeground(sessionId: string): () => void {
+    if (!this.deps.options.enabled || this.disposed || !this.observations.has(sessionId)) {
+      return () => {};
+    }
+    const depth = this.foregroundDepth.get(sessionId) ?? 0;
+    this.foregroundDepth.set(sessionId, depth + 1);
+    if (depth === 0) {
+      this.cancelCapture(sessionId);
+      if (this.deps.runner.killFor(`observation:${sessionId}`) > 0) {
+        this.capturePreempted.add(sessionId);
+      }
+    }
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      const remaining = (this.foregroundDepth.get(sessionId) ?? 1) - 1;
+      if (remaining > 0) {
+        this.foregroundDepth.set(sessionId, remaining);
+        return;
+      }
+      this.foregroundDepth.delete(sessionId);
+      if (!this.disposed && this.observations.has(sessionId)) this.scheduleCapture(sessionId, 0);
+    };
+  }
+
+  /** Call after acquiring foreground priority, before bypassing the action queue.
+   * Killing the CLI only requests cancellation; wait for its bounded cleanup. */
+  async waitForCapture(sessionId: string, signal: AbortSignal): Promise<void> {
+    signal.throwIfAborted();
+    const capture = this.activeCaptures.get(sessionId);
+    if (!capture) return;
+    let abort: (() => void) | undefined;
+    try {
+      await Promise.race([
+        capture.catch(() => {}),
+        new Promise<never>((_, reject) => {
+          abort = () => reject(signal.reason);
+          signal.addEventListener("abort", abort, { once: true });
+          if (signal.aborted) abort();
+        }),
+      ]);
+      signal.throwIfAborted();
+    } finally {
+      if (abort) signal.removeEventListener("abort", abort);
+    }
+  }
+
   /** Mark an action starting on a session (tool entry instrumentation). */
   beginAction(sessionId: string, action: string): void {
     if (!this.deps.options.enabled || this.disposed) return;
     const entry = this.observations.get(sessionId);
-    if (entry === undefined || entry.dead === true) return;
+    if (entry === undefined) return;
     const now = this.scheduler.now();
     this.lastActivity.set(sessionId, now);
     // A fresh action clears the previous error marker (red dot means "last action failed").
@@ -206,14 +297,18 @@ export class ObservationService {
   endAction(sessionId: string, error?: string): void {
     if (!this.deps.options.enabled || this.disposed) return;
     const entry = this.observations.get(sessionId);
-    if (entry === undefined || entry.dead === true) return;
+    if (entry === undefined) return;
     const now = this.scheduler.now();
     this.lastActivity.set(sessionId, now);
-    const next: SessionObservation = { ...entry, action: "idle", since: now };
+    const next: SessionObservation = {
+      ...entry,
+      action: this.restingAction(sessionId),
+      since: now,
+    };
     if (error !== undefined) next.lastError = error;
     else delete next.lastError;
     this.put(next);
-    this.scheduleCapture(sessionId, 0);
+    if (!this.foregroundDepth.has(sessionId)) this.scheduleCapture(sessionId, 0);
   }
 
   /** Record the settled page URL (navigate success / start with url). */
@@ -238,36 +333,6 @@ export class ObservationService {
   }
 
   /**
-   * Stop one owned session and close its Agent Window (the overlay's stop
-   * button — same end state as `browser_session_stop`). Never waits behind a
-   * hung in-flight command: tool children are killed first so the session's
-   * keyed queue drains immediately, and no further captures queue up. A
-   * session the daemon already forgot (dead strip entries) stops
-   * idempotently — the goal state (entry gone) is identical.
-   * @returns whether the session ended up stopped/removed.
-   */
-  async stopSession(sessionId: string): Promise<boolean> {
-    if (!this.deps.registry.isOwned(sessionId)) return false;
-    this.cancelCapture(sessionId);
-    this.deps.runner.killFor(sessionId);
-    const result = await this.deps.queue.run(sessionId, () =>
-      this.deps.runner.run(["session", "stop", sessionId], { timeoutMs: 30_000 }),
-    );
-    if (result.code !== 0) {
-      let code: string | undefined;
-      try {
-        code = (JSON.parse(result.stdout) as { code?: string }).code;
-      } catch {
-        code = undefined;
-      }
-      if (code !== "session_not_found") return false;
-    }
-    this.deps.registry.remove(sessionId);
-    this.removeSession(sessionId);
-    return true;
-  }
-
-  /**
    * Read one captured thumbnail from the in-process ring. Powers the plugin's
    * own HTTP thumbnail route — frames are plugin-owned runtime data, never
    * referenced by any session log, so the session-authorized client RPC
@@ -287,6 +352,9 @@ export class ObservationService {
     for (const sessionId of [...this.captureTimers.keys()]) this.cancelCapture(sessionId);
     this.captureTimers.clear();
     this.captureInFlight.clear();
+    this.activeCaptures.clear();
+    this.capturePreempted.clear();
+    this.foregroundDepth.clear();
     this.captureFailures.clear();
     this.lastActivity.clear();
     this.frames.clear();
@@ -296,6 +364,7 @@ export class ObservationService {
     this.observations.clear();
     this.emit({ type: "reset" });
     this.listeners.clear();
+    this.thumbnailViewers = 0;
   }
 
   // ------------------------------------------------------------------
@@ -310,11 +379,26 @@ export class ObservationService {
     }
   }
 
+  private canCapture(sessionId: string): boolean {
+    const entry = this.observations.get(sessionId);
+    return (
+      this.deps.options.enabled &&
+      this.deps.registry.isUsable(sessionId) &&
+      !this.disposed &&
+      this.thumbnailViewers > 0 &&
+      !this.foregroundDepth.has(sessionId) &&
+      entry !== undefined
+    );
+  }
+
+  private restingAction(sessionId: string): string {
+    const state = this.deps.registry.stateFor(sessionId);
+    return state === "cleanup" ? "awaiting cleanup" : state === "starting" ? "starting" : "idle";
+  }
+
   /** Schedule the next capture for a session; `delayMs` 0 means "as soon as the event loop allows". */
   private scheduleCapture(sessionId: string, delayMs?: number): void {
-    if (!this.deps.options.enabled || this.disposed) return;
-    const entry = this.observations.get(sessionId);
-    if (entry === undefined || entry.dead === true) return;
+    if (!this.canCapture(sessionId)) return;
     this.cancelCapture(sessionId);
     const now = this.scheduler.now();
     const lastSeen = this.lastActivity.get(sessionId) ?? 0;
@@ -339,9 +423,7 @@ export class ObservationService {
    * Failures keep the previous frame and back off silently.
    */
   private async capture(sessionId: string): Promise<void> {
-    if (this.disposed) return;
-    const current = this.observations.get(sessionId);
-    if (current === undefined || current.dead === true) return;
+    if (!this.canCapture(sessionId)) return;
     if (this.captureInFlight.has(sessionId)) return;
     this.captureInFlight.add(sessionId);
     // Stable within this service, isolated from captures owned by other instances.
@@ -349,12 +431,24 @@ export class ObservationService {
     const outPath = join(tmpdir(), `bsk-obs-${this.scratchNamespace}-${sessionKey}.png`);
     let writtenPath = outPath;
     try {
-      const result = await this.deps.queue.run(sessionId, () =>
-        this.deps.runner.run(["screenshot", "--session", sessionId, "--out", outPath], {
-          timeoutMs: 15_000,
-          tag: `observation:${sessionId}`,
-        }),
-      );
+      const result = await this.deps.queue.run(sessionId, async () => {
+        // The last viewer may have left, or foreground work arrived, while queued.
+        if (!this.canCapture(sessionId)) return Promise.resolve(undefined);
+        const capture = this.deps.runner.run(
+          ["screenshot", "--session", sessionId, "--out", outPath],
+          {
+            timeoutMs: 15_000,
+            tag: `observation:${sessionId}`,
+          },
+        );
+        this.activeCaptures.set(sessionId, capture);
+        try {
+          return await capture;
+        } finally {
+          if (this.activeCaptures.get(sessionId) === capture) this.activeCaptures.delete(sessionId);
+        }
+      });
+      if (result === undefined) return;
       if (result.code !== 0) {
         let code: string | undefined;
         try {
@@ -362,8 +456,12 @@ export class ObservationService {
         } catch {
           code = undefined;
         }
-        if (code === "session_not_found") {
-          this.markDead(sessionId);
+        if (isSessionNotFoundCode(code)) {
+          // Observation entries are owned sessions. If the daemon has already
+          // forgotten one (external close / restart), reconcile both stores so
+          // the PiP cannot retain a ghost strip or keep retrying screenshots.
+          this.deps.registry.remove(sessionId);
+          this.removeSession(sessionId);
           return;
         }
         throw new Error(`screenshot exited ${result.code}`);
@@ -378,12 +476,18 @@ export class ObservationService {
       this.setAvailable(true);
       this.publishFrame(sessionId, entry, data);
     } catch {
-      // Silent by design: keep the previous frame, count toward backoff.
-      this.captureFailures.set(sessionId, (this.captureFailures.get(sessionId) ?? 0) + 1);
-      this.globalFailures += 1;
-      if (this.globalFailures >= FAILURE_BACKOFF_THRESHOLD) this.setAvailable(false);
+      if (this.disposed || !this.observations.has(sessionId)) return;
+      // Foreground preemption is healthy scheduling, not browser/daemon
+      // unavailability; do not let normal tool traffic trip capture backoff.
+      if (!this.capturePreempted.delete(sessionId)) {
+        // Silent by design: keep the previous frame, count toward backoff.
+        this.captureFailures.set(sessionId, (this.captureFailures.get(sessionId) ?? 0) + 1);
+        this.globalFailures += 1;
+        if (this.globalFailures >= FAILURE_BACKOFF_THRESHOLD) this.setAvailable(false);
+      }
     } finally {
       await unlink(writtenPath).catch(() => {});
+      this.capturePreempted.delete(sessionId);
       this.captureInFlight.delete(sessionId);
       if (!this.disposed && this.observations.has(sessionId)) this.scheduleCapture(sessionId);
     }
@@ -396,7 +500,7 @@ export class ObservationService {
     const seq = (this.seqs.get(sessionId) ?? 0) + 1;
     this.seqs.set(sessionId, seq);
     const id = `obs-${sessionId}-${seq}`;
-    this.frames.set(id, { data, mediaType: "image/png" });
+    this.frames.set(id, { data, mediaType: sniffImageMediaType(data) ?? "image/png" });
     this.hashes.set(sessionId, hash);
     const ring = this.rings.get(sessionId) ?? [];
     ring.push(id);
@@ -414,14 +518,10 @@ export class ObservationService {
     this.hashes.delete(sessionId);
     this.seqs.delete(sessionId);
   }
+}
 
-  /** Mark a session dead: grey it out, stop asking for frames, keep the entry for the strip. */
-  private markDead(sessionId: string): void {
-    const entry = this.observations.get(sessionId);
-    if (entry === undefined || entry.dead === true) return;
-    this.cancelCapture(sessionId);
-    this.put({ ...entry, dead: true, action: "idle" });
-  }
+function isSessionNotFoundCode(code: string | undefined): boolean {
+  return code === "not_found" || code === "session_not_found";
 }
 
 /** Map a bsk command label onto its observation action verb. */
@@ -439,14 +539,52 @@ export function actionForLabel(label: string): string {
       return "observing";
     case "click":
       return "clicking";
+    case "hover":
+      return "hovering";
+    case "focus":
+      return "focusing";
+    case "blur":
+      return "blurring";
     case "fill":
       return "filling";
+    case "select":
+      return "selecting";
     case "press":
       return "pressing";
     case "screenshot":
       return "capturing";
     case "emulate":
       return "emulating";
+    case "tab list":
+      return "listing tabs";
+    case "tab create":
+      return "creating tab";
+    case "tab close":
+      return "closing tab";
+    case "tab select":
+      return "selecting tab";
+    case "tab borrow":
+      return "borrowing tab";
+    case "tab return":
+      return "returning tab";
+    case "navigate-back":
+      return "navigating back";
+    case "navigate-forward":
+      return "navigating forward";
+    case "reload":
+      return "reloading";
+    case "wait-for-navigation":
+      return "waiting for navigation";
+    case "request-help":
+      return "waiting for user";
+    case "get-html":
+      return "reading HTML";
+    case "console":
+      return "reading console";
+    case "network":
+      return "reading network";
+    case "window resize":
+      return "resizing window";
     default:
       return label;
   }

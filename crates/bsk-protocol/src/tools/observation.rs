@@ -32,6 +32,9 @@ pub struct SnapshotParams {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct SnapshotResult {
+    /// Token identifying the current ref map; pass to drag to reject stale refs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observation_id: Option<String>,
     /// Indented aria-snapshot text. Refs are rendered as `@e<N>` so the
     /// agent can copy them into subsequent `tool.click` / `tool.fill`
     /// selectors.
@@ -58,10 +61,14 @@ pub struct SnapshotResult {
 /// for one tab plus a fresh `@e<N>` ref-store on the extension side.
 ///
 /// Unlike `tool.snapshot`, this path may run bounded perception probes
-/// such as hover-surface discovery. It must not submit input, click,
-/// navigate, or otherwise commit page state.
+/// such as hover-surface discovery, but only when `probe_hover` asks for
+/// them. It must not submit input, click, navigate, or otherwise commit
+/// page state.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct ObserveParams {
+    /// Continue a retained observation; does not recapture the page.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
     pub session_id: String,
     /// Optional target tab. Defaults to the Agent Window's currently
     /// active tab.
@@ -77,6 +84,16 @@ pub struct ObserveParams {
     /// Include implementation diagnostics for conditional surface probes.
     #[serde(default)]
     pub debug_surfaces: bool,
+    /// Opt in to active hover probing: the extension moves the real cursor
+    /// over a bounded set of controls to discover hover-only menus and
+    /// tooltips.
+    ///
+    /// Off by default. Probing costs seconds of wall clock, mutates the live
+    /// page, and pays off only on pages whose content is genuinely hidden
+    /// behind hover. Request it when a static observation looks like it is
+    /// missing hover-revealed structure.
+    #[serde(default)]
+    pub probe_hover: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -102,8 +119,25 @@ pub struct ObserveDebug {
     pub surface_probes: Vec<SurfaceProbeDebug>,
 }
 
+/// Reports what active hover probing did during an observation, so the agent
+/// can judge how far the live page may have drifted from the returned text.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct HoverProbeReport {
+    /// The real cursor was moved over page content during this observation.
+    pub performed: bool,
+    /// Hovering surfaced content the static tree does not contain, so the page
+    /// reacts to the cursor and may not have fully reverted.
+    pub revealed_content: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct ObserveResult {
+    /// Token identifying the current ref map; pass to drag to reject stale refs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observation_id: Option<String>,
+    /// Continue omitted content from this same observation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
     /// Semantic VOM observation text. Refs are rendered as `@e<N>` so
     /// the agent can copy them into subsequent interaction tools.
     pub text: String,
@@ -118,6 +152,9 @@ pub struct ObserveResult {
     pub truncated: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub dialogs: Vec<JavaScriptDialogInfo>,
+    /// Present only when `probe_hover` was requested and probing actually ran.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hover_probe: Option<HoverProbeReport>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub debug: Option<ObserveDebug>,
 }
@@ -195,6 +232,12 @@ pub struct ScreenshotParams {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct ScreenshotResult {
+    /// Single-use visual point-click capture, in the original PNG coordinate space.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capture_id: Option<String>,
+    /// Image remains viewable but cannot authorize a point click.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capture_unavailable: Option<String>,
     /// Base64-encoded PNG payload (no `data:` prefix).
     pub image_base64: String,
     /// Pixel width parsed from the PNG IHDR. May be `0` when parsing
@@ -210,6 +253,70 @@ pub struct ScreenshotResult {
     pub tab_id: i64,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub dialogs: Vec<JavaScriptDialogInfo>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ScreenshotScope {
+    Follow,
+    Current,
+}
+
+/// Scroll the session's active web page from top to bottom. PNG bytes are
+/// exported in bounded chunks through `tool.screenshot_read`, then released.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct ScreenshotFullPageParams {
+    /// Follow appended content (default), or capture the initial document height.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<ScreenshotScope>,
+    pub session_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tab_id: Option<i64>,
+    /// Capture and PNG encoding deadline; defaults to 120000 milliseconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_ms: Option<u32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct ScreenshotFullPageResult {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<ScreenshotScope>,
+    /// Opaque, session-scoped export capability. Never an agent filesystem path.
+    pub capture_id: String,
+    pub width: u32,
+    pub height: u32,
+    pub format: String,
+    pub tab_id: i64,
+    pub byte_size: u64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dialogs: Vec<JavaScriptDialogInfo>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct ScreenshotReadParams {
+    pub session_id: String,
+    pub capture_id: String,
+    /// Byte offset, allowing an interrupted chunk request to be retried.
+    pub offset: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct ScreenshotReadResult {
+    /// At most 256 KiB of PNG bytes, base64 encoded.
+    pub data_base64: String,
+    pub next_offset: u64,
+    pub eof: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct ScreenshotReleaseParams {
+    pub session_id: String,
+    pub capture_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct ScreenshotReleaseResult {
+    pub released: bool,
 }
 
 #[cfg(test)]
@@ -247,6 +354,7 @@ mod tests {
     #[test]
     fn snapshot_result_round_trips_with_ref_count() {
         let r = SnapshotResult {
+            observation_id: None,
             text: "root\n  @e1 button \"submit\"\n".into(),
             ref_count: 1,
             tab_id: 42,
@@ -288,6 +396,8 @@ mod tests {
     #[test]
     fn screenshot_result_round_trips_with_image_fields() {
         let r = ScreenshotResult {
+            capture_id: None,
+            capture_unavailable: None,
             image_base64: "iVBORw0KGgo=".into(),
             width: 800,
             height: 600,
@@ -303,15 +413,65 @@ mod tests {
     #[test]
     fn observe_result_round_trips_with_ref_count() {
         let r = ObserveResult {
+            observation_id: None,
+            next_cursor: None,
             text: "@vom 1\n  @e1 button \"submit\"\n".into(),
             ref_count: 1,
             tab_id: 42,
             truncated: false,
             dialogs: Vec::new(),
+            hover_probe: None,
             debug: None,
         };
         let v = serde_json::to_value(&r).unwrap();
         assert_eq!(v.get("ref_count").and_then(|v| v.as_u64()), Some(1));
+        let round: ObserveResult = serde_json::from_value(v).unwrap();
+        assert_eq!(round, r);
+    }
+
+    #[test]
+    fn observe_cursor_round_trips_without_changing_snapshot() {
+        let params: ObserveParams = serde_json::from_value(json!({
+            "session_id": "s1", "cursor": "next-page", "max_tokens": 100
+        }))
+        .unwrap();
+        assert_eq!(params.cursor.as_deref(), Some("next-page"));
+        assert_eq!(serde_json::to_value(params).unwrap()["cursor"], "next-page");
+        let result: ObserveResult = serde_json::from_value(json!({
+            "text": "@more", "ref_count": 0, "tab_id": 4,
+            "truncated": true, "next_cursor": "next-page"
+        }))
+        .unwrap();
+        assert_eq!(
+            serde_json::to_value(result).unwrap()["next_cursor"],
+            "next-page"
+        );
+    }
+
+    #[test]
+    fn observe_params_default_to_no_hover_probing() {
+        let params: ObserveParams =
+            serde_json::from_value(serde_json::json!({ "session_id": "s1" })).unwrap();
+        assert!(!params.probe_hover);
+    }
+
+    #[test]
+    fn observe_result_round_trips_with_hover_probe_report() {
+        let r = ObserveResult {
+            observation_id: None,
+            next_cursor: None,
+            text: "@vom 1\n".into(),
+            ref_count: 0,
+            tab_id: 42,
+            truncated: false,
+            dialogs: Vec::new(),
+            hover_probe: Some(HoverProbeReport {
+                performed: true,
+                revealed_content: true,
+            }),
+            debug: None,
+        };
+        let v = serde_json::to_value(&r).unwrap();
         let round: ObserveResult = serde_json::from_value(v).unwrap();
         assert_eq!(round, r);
     }

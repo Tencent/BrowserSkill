@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>BrowserSkill file-transfer fixture</title>
+    <style>
+      body { font: 16px system-ui; max-width: 760px; margin: 48px auto; }
+      .actions { display: flex; gap: 12px; align-items: center; margin: 24px 0; }
+      button, a { padding: 10px 16px; border: 1px solid #777; border-radius: 8px; }
+      a[aria-disabled="true"] { opacity: .45; pointer-events: none; }
+      #drop { padding: 36px; border: 3px dashed #777; border-radius: 12px; text-align: center; }
+      #drop.dragging { border-color: #2563eb; background: #eff6ff; }
+      img { display: block; max-width: 480px; max-height: 360px; margin-top: 20px; }
+    </style>
+  </head>
+  <body>
+    <h1>Upload then download the same image</h1>
+    <p id="status">No image selected</p>
+    <div class="actions">
+      <button id="upload" type="button">Upload through file input</button>
+      <input id="file" type="file" accept="image/png" hidden />
+      <a id="download" aria-disabled="true">Download uploaded image</a>
+    </div>
+    <div id="drop" role="button" tabindex="0">Drop an image here</div>
+    <img id="preview" alt="Uploaded image preview" hidden />
+    <script>
+      const input = document.querySelector('#file');
+      const upload = document.querySelector('#upload');
+      const drop = document.querySelector('#drop');
+      const download = document.querySelector('#download');
+      const preview = document.querySelector('#preview');
+      const status = document.querySelector('#status');
+      let objectUrl;
+
+      window.__bskTransferFixture = { events: [], result: null };
+
+      function accept(file, mechanism) {
+        if (!file) return;
+        if (objectUrl) URL.revokeObjectURL(objectUrl);
+        objectUrl = URL.createObjectURL(file);
+        preview.src = objectUrl;
+        preview.hidden = false;
+        download.href = objectUrl;
+        download.download = file.name;
+        download.removeAttribute('aria-disabled');
+        status.textContent = `Ready via ${mechanism}: ${file.name} (${file.size} bytes)`;
+        window.__bskTransferFixture.result = {
+          mechanism,
+          name: file.name,
+          size: file.size,
+          type: file.type,
+          hasPathProperty: 'path' in file,
+        };
+      }
+
+      upload.addEventListener('click', () => input.click());
+      input.addEventListener('change', () => accept(input.files[0], 'input'));
+
+      for (const type of ['dragenter', 'dragover']) {
+        drop.addEventListener(type, event => {
+          const types = [...event.dataTransfer.types];
+          window.__bskTransferFixture.events.push({ type, types });
+          if (!types.includes('Files')) return;
+          event.preventDefault();
+          drop.classList.add('dragging');
+        });
+      }
+      drop.addEventListener('dragleave', () => drop.classList.remove('dragging'));
+      drop.addEventListener('drop', event => {
+        window.__bskTransferFixture.events.push({
+          type: 'drop',
+          types: [...event.dataTransfer.types],
+          fileCount: event.dataTransfer.files.length,
+        });
+        event.preventDefault();
+        drop.classList.remove('dragging');
+        accept(event.dataTransfer.files[0], 'drop');
+      });
+    </script>
+  </body>
+</html>

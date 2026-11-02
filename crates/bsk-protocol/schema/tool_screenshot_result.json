@@ -8,6 +8,20 @@
     "tab_id"
   ],
   "properties": {
+    "capture_id": {
+      "description": "Single-use visual point-click capture, in the original PNG coordinate space.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "capture_unavailable": {
+      "description": "Image remains viewable but cannot authorize a point click.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
     "dialogs": {
       "type": "array",
       "items": {

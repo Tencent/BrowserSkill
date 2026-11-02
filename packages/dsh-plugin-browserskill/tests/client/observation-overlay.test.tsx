@@ -19,10 +19,12 @@ interface Harness {
   emitRaw: (event: unknown) => void;
   fetches: { url: string; init?: { body?: string } }[];
   loadImage: ReturnType<typeof vi.fn>;
+  eventUrls: string[];
 }
 
 function makeHarness(initial: SessionObservation[]): Harness {
   const fetches: Harness["fetches"] = [];
+  const eventUrls: string[] = [];
   let es: EventSourceLike | undefined;
   let current = initial;
   const loadImage = vi.fn(async (id: string) => `blob:${id}`);
@@ -34,9 +36,16 @@ function makeHarness(initial: SessionObservation[]): Harness {
       }
       return { ok: true, json: async () => ({ interrupted: true }) };
     },
-    eventSourceFactory: () => {
-      es = { onmessage: null, close: vi.fn() };
-      return es;
+    eventSourceFactory: (url) => {
+      eventUrls.push(url);
+      const connection = { onmessage: null, close: vi.fn() } as EventSourceLike;
+      es = connection;
+      queueMicrotask(() =>
+        connection.onmessage?.({
+          data: JSON.stringify({ type: "snapshot", sessions: current, available: true }),
+        }),
+      );
+      return connection;
     },
     loadImage,
   });
@@ -58,10 +67,120 @@ function makeHarness(initial: SessionObservation[]): Harness {
     },
     fetches,
     loadImage,
+    eventUrls,
   };
 }
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  vi.restoreAllMocks();
+  vi.unstubAllGlobals();
+});
+
+describe("visible thumbnail demand", () => {
+  function intersections() {
+    const observers: Array<{
+      notify: (visible: boolean) => void;
+      disconnect: ReturnType<typeof vi.fn>;
+    }> = [];
+    vi.stubGlobal(
+      "IntersectionObserver",
+      class {
+        private target?: Element;
+        disconnect = vi.fn();
+        constructor(private callback: IntersectionObserverCallback) {
+          observers.push(this);
+        }
+        observe(target: Element) {
+          this.target = target;
+        }
+        notify(visible: boolean) {
+          this.callback(
+            [{ target: this.target, isIntersecting: visible } as IntersectionObserverEntry],
+            this as unknown as IntersectionObserver,
+          );
+        }
+      },
+    );
+    return observers;
+  }
+
+  it("pauses screenshots on collapse while keeping the metadata feed", async () => {
+    const observers = intersections();
+    const h = makeHarness([BUSY]);
+    const { unmount } = render(<ObservationOverlay store={h.store} />);
+    await screen.findByTestId("obs-card");
+    expect(h.eventUrls.at(-1)).toBe("/bsk-observation/events?thumbnails=0");
+    act(() => observers[0].notify(true));
+    expect(h.eventUrls.at(-1)).toBe("/bsk-observation/events?thumbnails=1");
+    fireEvent.click(screen.getByRole("button", { name: "Collapse" }));
+    expect(h.eventUrls.at(-1)).toBe("/bsk-observation/events?thumbnails=0");
+    expect(h.es().close).not.toHaveBeenCalled();
+    expect(observers[0].disconnect).toHaveBeenCalledOnce();
+    // A callback queued before disconnect must not reclaim screenshot demand.
+    act(() => observers[0].notify(true));
+    expect(h.eventUrls.at(-1)).toBe("/bsk-observation/events?thumbnails=0");
+    fireEvent.click(screen.getByRole("button", { name: /Expand browser observation/ }));
+    act(() => observers[1].notify(true));
+    expect(h.eventUrls.at(-1)).toBe("/bsk-observation/events?thumbnails=1");
+    unmount();
+    expect(h.es().close).toHaveBeenCalledOnce();
+  });
+
+  it("ignores an initial visibility notification delivered after collapse", async () => {
+    const observers = intersections();
+    const h = makeHarness([BUSY]);
+    render(<ObservationOverlay store={h.store} />);
+    await screen.findByTestId("obs-card");
+    fireEvent.click(screen.getByRole("button", { name: "Collapse" }));
+    act(() => observers[0].notify(true));
+    expect(h.eventUrls).toEqual(["/bsk-observation/events?thumbnails=0"]);
+  });
+
+  it("pauses for a hidden document or hidden panel and resumes when visible", async () => {
+    const observers = intersections();
+    let visibility: DocumentVisibilityState = "visible";
+    vi.spyOn(document, "visibilityState", "get").mockImplementation(() => visibility);
+    const h = makeHarness([BUSY]);
+    render(<ObservationOverlay store={h.store} />);
+    await screen.findByTestId("obs-card");
+    act(() => observers[0].notify(true));
+    expect(h.eventUrls.at(-1)).toContain("thumbnails=1");
+    act(() => {
+      visibility = "hidden";
+      document.dispatchEvent(new Event("visibilitychange"));
+    });
+    expect(h.eventUrls.at(-1)).toContain("thumbnails=0");
+    act(() => {
+      visibility = "visible";
+      document.dispatchEvent(new Event("visibilitychange"));
+    });
+    expect(h.eventUrls.at(-1)).toContain("thumbnails=1");
+    act(() => observers[0].notify(false));
+    expect(h.eventUrls.at(-1)).toContain("thumbnails=0");
+  });
+
+  it("keeps a visible PiP watching when the main document is hidden", async () => {
+    // The detached PiP test document has no window/IntersectionObserver.
+    vi.stubGlobal("IntersectionObserver", undefined);
+    let visibility: DocumentVisibilityState = "visible";
+    vi.spyOn(document, "visibilityState", "get").mockImplementation(() => visibility);
+    const pipDoc = document.implementation.createHTMLDocument("pip");
+    Object.defineProperty(pipDoc, "visibilityState", { value: "visible" });
+    (window as unknown as Record<string, unknown>).documentPictureInPicture = {
+      requestWindow: async () => ({ document: pipDoc, addEventListener: () => {}, close: vi.fn() }),
+    };
+    const h = makeHarness([BUSY]);
+    render(<ObservationOverlay store={h.store} />);
+    fireEvent.click(await screen.findByRole("button", { name: /Pop out/ }));
+    await waitFor(() => expect(pipDoc.body.textContent).toContain("s1"));
+    act(() => {
+      visibility = "hidden";
+      document.dispatchEvent(new Event("visibilitychange"));
+    });
+    expect(h.eventUrls.at(-1)).toContain("thumbnails=1");
+  });
+});
 
 describe("ObservationOverlay", () => {
   beforeEach(() => {
@@ -78,6 +197,68 @@ describe("ObservationOverlay", () => {
     expect(screen.getByTestId("obs-card")).toBeTruthy();
   });
 
+  it("never commits the card without sessions, even while the feed is down", async () => {
+    const h = makeHarness([]);
+    const inserted: Node[] = [];
+    const collect = (records: MutationRecord[]) => {
+      for (const record of records) inserted.push(...record.addedNodes);
+    };
+    const observer = new MutationObserver(collect);
+    observer.observe(document.body, { childList: true, subtree: true });
+    render(<ObservationOverlay store={h.store} />);
+    await waitFor(() => expect(h.es).not.toThrow());
+    act(() => {
+      h.es().readyState = 2;
+      h.es().onerror?.({});
+    });
+    collect(observer.takeRecords());
+    observer.disconnect();
+    expect(h.store.getSnapshot().reconnecting).toBe(true);
+    const cardCommitted = inserted.some(
+      (node) => node instanceof Element && node.closest("[data-obs-card]") !== null,
+    );
+    expect(cardCommitted).toBe(false);
+  });
+
+  it("marks a live session as reconnecting until the feed recovers", async () => {
+    const h = makeHarness([BUSY]);
+    render(<ObservationOverlay store={h.store} />);
+    await screen.findByText(/s1 · clicking/);
+    act(() => {
+      h.es().readyState = 0;
+      h.es().onerror?.({});
+    });
+    const header = screen.getByTestId("obs-header");
+    expect(header.textContent).toContain("reconnecting…");
+    expect(header.querySelector("[data-state]")?.getAttribute("data-state")).toBe("reconnecting");
+    expect(screen.queryByText(/s1 · clicking/)).toBeNull();
+    act(() => h.emitRaw({ type: "snapshot", sessions: [BUSY], available: true }));
+    expect(header.textContent).not.toContain("reconnecting");
+    expect(header.querySelector("[data-state]")?.getAttribute("data-state")).toBe("active");
+    expect(screen.getByText(/s1 · clicking/)).toBeTruthy();
+  });
+
+  it("collapses to a capsule that drops stale action timing while reconnecting", async () => {
+    const h = makeHarness([BUSY]);
+    render(<ObservationOverlay store={h.store} />);
+    await screen.findByText(/s1 · clicking/);
+    fireEvent.click(screen.getByRole("button", { name: "Collapse" }));
+    const capsule = await screen.findByTestId("obs-capsule");
+    expect(capsule.textContent).toContain("clicking");
+    expect(capsule.getAttribute("data-state")).toBe("active");
+    act(() => {
+      h.es().readyState = 0;
+      h.es().onerror?.({});
+    });
+    expect(capsule.textContent).toContain("reconnecting…");
+    expect(capsule.textContent).not.toContain("clicking");
+    expect(capsule.getAttribute("data-state")).toBe("reconnecting");
+    expect(capsule.querySelector("[data-state]")?.getAttribute("data-state")).toBe("reconnecting");
+    act(() => h.emitRaw({ type: "snapshot", sessions: [BUSY], available: true }));
+    expect(capsule.textContent).toContain("clicking");
+    expect(capsule.getAttribute("data-state")).toBe("active");
+  });
+
   it("shows the status row and a placeholder without a thumbnail", async () => {
     const h = makeHarness([BUSY]);
     render(<ObservationOverlay store={h.store} />);
@@ -90,6 +271,16 @@ describe("ObservationOverlay", () => {
     render(<ObservationOverlay store={h.store} />);
     await waitFor(() => expect(h.loadImage).toHaveBeenCalledWith("att-9"));
     await screen.findByRole("img", { name: "session s1 view" });
+  });
+
+  it("offers a retry after a thumbnail fails without requiring a new frame id", async () => {
+    const h = makeHarness([{ ...BUSY, thumbnailAttachmentId: "att-9" }]);
+    h.loadImage.mockRejectedValueOnce(new Error("temporary failure"));
+    render(<ObservationOverlay store={h.store} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Retry thumbnail" }));
+    await screen.findByRole("img", { name: "session s1 view" });
+    expect(h.loadImage).toHaveBeenCalledTimes(2);
+    expect(screen.queryByRole("button", { name: "Retry thumbnail" })).toBeNull();
   });
 
   it("keeps the current frame on stage while the next thumbnail loads", async () => {
@@ -298,6 +489,33 @@ describe("ObservationOverlay", () => {
     expect(close).toHaveBeenCalledTimes(1);
   });
 
+  it("shows a close button inside the PiP window that closes it", async () => {
+    const h = makeHarness([BUSY]);
+    const pipDoc = document.implementation.createHTMLDocument("pip");
+    const close = vi.fn();
+    const listeners = new Map<string, (() => void)[]>();
+    const requestWindow = vi.fn(async () => {
+      return {
+        document: pipDoc,
+        addEventListener: (name: string, fn: () => void) => {
+          listeners.set(name, [...(listeners.get(name) ?? []), fn]);
+        },
+        close,
+      } as unknown as Window;
+    });
+    (window as unknown as Record<string, unknown>).documentPictureInPicture = { requestWindow };
+    render(<ObservationOverlay store={h.store} />);
+    const popout = await screen.findByRole("button", { name: /Pop out/ });
+    fireEvent.click(popout);
+    await waitFor(() => expect(pipDoc.body.textContent).toContain("s1"));
+    const closeBtn = pipDoc.body.querySelector<HTMLButtonElement>(
+      'button[aria-label="Close mini window"]',
+    );
+    expect(closeBtn).not.toBeNull();
+    closeBtn!.click();
+    expect(close).toHaveBeenCalledTimes(1);
+  });
+
   it("renders the strip for two sessions and pins focus on click", async () => {
     const older: SessionObservation = {
       sessionId: "s1",
@@ -356,22 +574,6 @@ describe("ObservationOverlay", () => {
       "disabled",
       true,
     );
-  });
-
-  it("greys out a dead session in the strip and skips it for focus", async () => {
-    const s1: SessionObservation = { sessionId: "s1", action: "idle", since: Date.now() - 20000 };
-    const s2: SessionObservation = { sessionId: "s2", action: "idle", since: Date.now() - 10000 };
-    const h = makeHarness([s1, s2]);
-    render(<ObservationOverlay store={h.store} />);
-    await screen.findByText(/s2 · idle/);
-    h.push([{ ...s1, dead: true, since: Date.now() }, s2]);
-    await waitFor(() =>
-      expect(
-        screen.getByRole("button", { name: "Pin session s1" }).closest("[data-state]"),
-      ).toHaveProperty("dataset", expect.objectContaining({ state: "dead" })),
-    );
-    // Dead sessions never take the stage.
-    expect(screen.getByText(/s2 · idle/)).toBeTruthy();
   });
 
   it("interrupts a strip session directly on hover without focusing it", async () => {

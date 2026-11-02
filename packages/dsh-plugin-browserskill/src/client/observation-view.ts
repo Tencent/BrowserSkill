@@ -1,24 +1,24 @@
 /**
  * Shared view logic for the observation carriers (the floating overlay card
- * and the better-sidebar tab): the store-backed view model (snapshot, focus
+ * and the native sidebar tab): the store-backed view model (snapshot, focus
  * pinning, elapsed ticker) and the Document PiP pop-out. Extracted from
  * ObservationOverlay so both carriers run the same focus/interrupt behavior
  * without duplicating hooks.
  */
 
-import { useCallback, useEffect, useState, useSyncExternalStore } from "react";
+import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
 import type { SessionObservation } from "../observation";
 import type { ObservationClientStore, OverlaySnapshot } from "./observation-store";
 
 /**
  * Auto-follow focus: the most recently touched session, but never yank focus
  * to a session whose latest action failed (errors flag the strip item, they
- * do not steal the stage) or one already reported dead.
+ * do not steal the stage).
  */
 export function focusOf(sessions: readonly SessionObservation[]): SessionObservation | undefined {
   if (sessions.length === 0) return undefined;
   const byRecency = [...sessions].sort((a, b) => b.since - a.since);
-  const healthy = byRecency.find((s) => s.lastError === undefined && s.dead !== true);
+  const healthy = byRecency.find((s) => s.lastError === undefined);
   return healthy ?? byRecency[0];
 }
 
@@ -68,7 +68,7 @@ export function visibleToScope(obs: SessionObservation, scopeId: string): boolea
  * The store-backed observation view model. Holds the feed for the component
  * lifetime (refcounted — overlapping carriers never kill each other's
  * stream). `scopeId` narrows the view to one DSH conversation's sessions
- * (the better-sidebar tab); undefined keeps the global view (floating
+ * (the native sidebar tab); undefined keeps the global view (floating
  * card, PiP).
  */
 export function useObservationView(
@@ -114,6 +114,49 @@ export function useObservationView(
   };
 }
 
+/** A mounted metadata watcher is not necessarily a visible screenshot viewer. */
+export function useThumbnailObservation(store: ObservationClientStore, enabled: boolean) {
+  const ref = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const element = ref.current;
+    if (!enabled || element === null) return;
+    // A portal uses its PiP document's visibility, independently of the main tab.
+    const doc = element.ownerDocument;
+    const Observer = doc.defaultView?.IntersectionObserver;
+    let active = true;
+    let intersecting = Observer === undefined;
+    let release: (() => void) | undefined;
+    const update = () => {
+      if (!active) return;
+      const visible = intersecting && doc.visibilityState !== "hidden";
+      if (visible && release === undefined) release = store.watchThumbnails();
+      else if (!visible && release !== undefined) {
+        release();
+        release = undefined;
+      }
+    };
+    const observer =
+      Observer === undefined
+        ? undefined
+        : new Observer((entries) => {
+            intersecting = entries.some(
+              (entry) => entry.target === element && entry.isIntersecting,
+            );
+            update();
+          });
+    observer?.observe(element);
+    doc.addEventListener("visibilitychange", update);
+    update();
+    return () => {
+      active = false;
+      observer?.disconnect();
+      doc.removeEventListener("visibilitychange", update);
+      release?.();
+    };
+  }, [store, enabled]);
+  return ref;
+}
+
 export interface PipHandle {
   /** The open PiP window, or null while the content renders in its carrier. */
   readonly pipWindow: Window | null;
@@ -128,21 +171,54 @@ export interface PipHandle {
 
 export function usePip(): PipHandle {
   const [pipWindow, setPipWindow] = useState<Window | null>(null);
+  const activeWindow = useRef<Window | null>(null);
+  const mounted = useRef(false);
+  const generation = useRef(0);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+      generation.current += 1;
+      const win = activeWindow.current;
+      activeWindow.current = null;
+      win?.close();
+    };
+  }, []);
   const popOut = useCallback((size?: { width: number; height: number }): void => {
     const pip = pipApi();
-    if (pip === undefined) return;
+    if (pip === undefined || !mounted.current) return;
+    const request = ++generation.current;
     void pip
       .requestWindow(size)
       .then((win) => {
-        cloneStylesInto(win);
-        win.addEventListener("pagehide", () => setPipWindow(null));
+        // A late result still owns a native window, even after its carrier left.
+        if (!mounted.current || generation.current !== request) {
+          if (activeWindow.current !== win) win.close();
+          return;
+        }
+        if (win.closed) return;
+        try {
+          cloneStylesInto(win);
+          win.addEventListener(
+            "pagehide",
+            () => {
+              if (activeWindow.current !== win) return;
+              activeWindow.current = null;
+              if (mounted.current) setPipWindow(null);
+            },
+            { once: true },
+          );
+        } catch {
+          if (activeWindow.current !== win) win.close();
+          return;
+        }
+        const previous = activeWindow.current;
+        activeWindow.current = win;
+        // Closing a replaced window may deliver pagehide after its successor opens.
+        if (previous !== win) previous?.close();
         setPipWindow(win);
       })
       .catch(() => {});
   }, []);
-  // Unmounting the carrier (tab close, conversation switch, plugin HMR) does
-  // not destroy the PiP browsing context: close it ourselves or it survives
-  // as a blank window. close() on an already-closed window is a no-op.
-  useEffect(() => () => pipWindow?.close(), [pipWindow]);
   return { pipWindow, pipSupported: pipApi() !== undefined, popOut };
 }

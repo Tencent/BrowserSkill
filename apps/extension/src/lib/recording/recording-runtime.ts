@@ -29,14 +29,50 @@ export class RecordingObservationRuntime {
   readonly #contexts = new Map<number, TabRecordingContext>();
   readonly #maxTokens?: number;
   readonly #redactValues: boolean;
+  #cancelled = false;
 
   constructor(input: {
     cdp: CdpRunner;
     tabsApi: ChromeTabsApi;
     maxTokens?: number;
     redactValues?: boolean;
+    isTabAllowed?: (tabId: number) => boolean;
   }) {
-    this.#cdp = input.cdp;
+    const check = (tabId: number) => {
+      if (this.#cancelled || (input.isTabAllowed && !input.isTabAllowed(tabId))) {
+        throw new Error("Recording capture is no longer authorized");
+      }
+    };
+    // Wrap only the operations used by observation capture. Cleanup still uses
+    // the original CDP connection, so cancellation cannot prevent detaching.
+    this.#cdp = input.isTabAllowed
+      ? {
+          send: async (tabId, method, params) => {
+            check(tabId);
+            return input.cdp.send(tabId, method, params);
+          },
+          sendToTarget: input.cdp.sendToTarget
+            ? async (target, method, params) => {
+                check(target.tabId);
+                return input.cdp.sendToTarget!(target, method, params);
+              }
+            : undefined,
+          getFrameGraph: input.cdp.getFrameGraph
+            ? async (tabId) => {
+                check(tabId);
+                return input.cdp.getFrameGraph!(tabId);
+              }
+            : undefined,
+          getAttachmentId: input.cdp.getAttachmentId?.bind(input.cdp),
+          ensureAttachedToUrl: input.cdp.ensureAttachedToUrl
+            ? async (tabId, url) => {
+                check(tabId);
+                return input.cdp.ensureAttachedToUrl!(tabId, url);
+              }
+            : undefined,
+          onEvent: input.cdp.onEvent?.bind(input.cdp),
+        }
+      : input.cdp;
     this.#tabsApi = input.tabsApi;
     this.#maxTokens = input.maxTokens;
     this.#redactValues = input.redactValues ?? false;
@@ -245,6 +281,7 @@ export class RecordingObservationRuntime {
   }
 
   cancel(): void {
+    this.#cancelled = true;
     for (const context of this.#contexts.values()) {
       context.frameRefreshAbort?.abort();
       context.pendingCapture?.abort.abort();

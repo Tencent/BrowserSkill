@@ -1,5 +1,6 @@
 import {
   EXTENSION_VERSION,
+  type HandshakeRejectedError,
   MIN_COMPATIBLE_PROTOCOL,
   PROTOCOL_VERSION,
   performHandshake,
@@ -11,6 +12,12 @@ import { compareProtocol, parseProtocolMajor } from "./semver";
 
 const HANDSHAKE_RETRY_DELAY_MS = 1_000;
 
+export interface DaemonUpgradeRequired {
+  daemonVersion: string | null;
+  daemonProtocolVersion: string;
+  requiredProtocolVersion: string;
+}
+
 export interface SnapshotInfo {
   state: ConnectionState;
   instanceId: string;
@@ -18,6 +25,7 @@ export interface SnapshotInfo {
   extensionVersion: string;
   handshake: HandshakeResult | null;
   lastError: string | null;
+  daemonUpgradeRequired?: DaemonUpgradeRequired | null;
   connectionEnabled: boolean;
 }
 
@@ -42,15 +50,27 @@ export class ConnectionController {
   private handshake: HandshakeResult | null = null;
   private instanceId = "";
   private label = "";
+  private auditEnabled = false;
+
+  setAuditEnabled(enabled: boolean): void {
+    this.auditEnabled = enabled;
+  }
   private lastError: string | null = null;
+  private daemonUpgradeRequired: DaemonUpgradeRequired | null = null;
   private connectionEnabled = true;
   private listeners = new Set<Listener>();
   private lifecycleHooks: ConnectionLifecycleHooks = {};
-  private disconnectRecovery: Promise<void> | null = null;
+  private ready = false;
+  private preferenceChanged = false;
+  private transition: Promise<void> | null = null;
+  private cleanupNeeded = false;
+  private hasConnected = false;
+  private configurationKey: string | null = null;
+  private pendingConfiguration: (() => void) | null = null;
   private connectionGeneration = 0;
   private handshakeAbort: AbortController | null = null;
   private handshakeRetryTimer: ReturnType<typeof setTimeout> | null = null;
-  private suppressDisconnectRecovery = false;
+  private intentionalDisconnects = 0;
 
   get isConnectionEnabled(): boolean {
     return this.connectionEnabled;
@@ -74,6 +94,7 @@ export class ConnectionController {
       extensionVersion: EXTENSION_VERSION,
       handshake: this.handshake,
       lastError: this.lastError,
+      daemonUpgradeRequired: this.daemonUpgradeRequired,
       connectionEnabled: this.connectionEnabled,
     };
   }
@@ -85,75 +106,109 @@ export class ConnectionController {
     lifecycleHooks: ConnectionLifecycleHooks = {},
   ): Promise<void> {
     this.transport = transport;
-    this.connectionEnabled = connectionEnabled;
+    if (!this.preferenceChanged) this.connectionEnabled = connectionEnabled;
     this.lifecycleHooks = lifecycleHooks;
     this.instanceId = await getOrCreateInstanceId();
     this.label = await getLabel();
 
-    transport.onConnectionStateChange((s) => {
-      if (s === "disconnected") {
-        // An in-flight handshake belongs to the dead connection — cancel it so
-        // a late resolution can never clobber the next attempt.
+    transport.onConnectionStateChange((state) => {
+      if (state === "disconnected") {
         this.cancelHandshake();
         this.handshake = null;
-        if (this.connectionEnabled) {
-          this.setState("disconnected");
-          if (this.suppressDisconnectRecovery) {
-            // Deliberate disconnect from runHandshake (rejected peer or failed
-            // handshake bounce); the caller owns the reconnect policy there.
-            this.suppressDisconnectRecovery = false;
-          } else {
-            void this.recoverFromDisconnect();
-          }
+        this.setState("disconnected");
+        if (this.intentionalDisconnects > 0) return;
+        if (this.transition) {
+          // The transport schedules its retry after notifying listeners. Cancel
+          // it after that notification, including loss during disable cleanup.
+          void Promise.resolve()
+            .then(() => {
+              if (this.transition) return this.disconnectTransport();
+            })
+            .catch((err) => this.reportError(err));
+        } else if (this.connectionEnabled && this.hasConnected) {
+          void this.teardown(false);
         }
         return;
       }
-      if (!this.connectionEnabled) return;
-      if (s === "connected") {
+      if (!this.connectionEnabled || this.transition) return;
+      if (state === "connected") {
+        this.hasConnected = true;
         this.startHandshake(browser);
-        return;
+      } else {
+        this.setState(state);
       }
-      this.setState(s);
     });
 
-    transport.onMessage(() => {
-      // Real RPC dispatching is wired in M5 (tools/dispatcher.ts).
-    });
-
-    if (this.connectionEnabled) {
-      try {
-        await transport.connect();
-      } catch (err) {
-        this.lastError = err instanceof Error ? err.message : String(err);
-        this.setState("disconnected");
-      }
-    } else {
-      this.applyDisabledState();
-    }
+    this.applyPendingConfiguration();
+    this.ready = true;
+    this.fire();
+    if (this.connectionEnabled) this.requestConnect();
+    else await this.teardown(true);
   }
 
   async setConnectionEnabled(enabled: boolean): Promise<void> {
+    this.preferenceChanged = true;
     if (this.connectionEnabled === enabled) return;
     this.connectionEnabled = enabled;
-
     if (!enabled) {
-      await this.applyDisabledState();
+      this.daemonUpgradeRequired = null;
+      this.lastError = null;
+    }
+    this.fire();
+    if (!this.ready) return;
+    if (!enabled) await this.teardown(true);
+    else this.requestConnect();
+  }
+
+  /** Apply only the latest configuration, after the old sessions are cleaned up. */
+  reconfigureTransport(key: string, apply: () => void): Promise<void> {
+    if (key === this.configurationKey) {
+      // Credentials may rotate while the same device is still waiting for
+      // startup or cleanup. Apply the latest snapshot without another teardown.
+      if (this.pendingConfiguration) this.pendingConfiguration = apply;
+      return this.transition ?? Promise.resolve();
+    }
+    this.daemonUpgradeRequired = null;
+    this.lastError = null;
+    this.configurationKey = key;
+    this.pendingConfiguration = apply;
+    this.fire();
+    if (!this.ready) return Promise.resolve();
+    return this.teardown(false);
+  }
+
+  /** Shared entry point for startup, wake events, keepalive, and handshake retries. */
+  requestConnect(): void {
+    if (!this.ready || !this.connectionEnabled || this.transition) return;
+    if (this.cleanupNeeded) {
+      void this.teardown(false);
       return;
     }
-
-    this.fire();
-    if (!this.transport) return;
+    if (this.handshakeRetryTimer || !this.transport || this.transport.state !== "disconnected")
+      return;
+    const generation = this.connectionGeneration;
+    // Never hold the lifecycle operation open while an unreachable endpoint is
+    // retrying: disabling or changing its configuration must remain possible.
+    const onError = (err: unknown) => {
+      if (generation !== this.connectionGeneration || !this.connectionEnabled || this.transition)
+        return;
+      this.reportError(err);
+    };
     try {
-      await this.transport.connect();
+      void this.transport.connect().catch(onError);
     } catch (err) {
-      this.lastError = err instanceof Error ? err.message : String(err);
-      this.setState("disconnected");
+      onError(err);
     }
   }
 
   async refreshLabel(): Promise<void> {
-    this.label = await getLabel();
+    const nextLabel = await getLabel();
+    if (nextLabel === this.label) return;
+    this.label = nextLabel;
     this.fire();
+    // The label is part of the opening handshake, so reconnect to make the
+    // daemon's browser registry reflect the saved name immediately.
+    if (this.ready && this.connectionEnabled) await this.teardown(false);
   }
 
   private startHandshake(browser: { name: string; version: string }): void {
@@ -170,7 +225,7 @@ export class ConnectionController {
     signal: AbortSignal,
   ): Promise<void> {
     if (!this.transport) return;
-    if (!this.connectionEnabled) return;
+    if (!this.connectionEnabled || this.transition) return;
     this.setState("connecting");
     try {
       const outcome = await performHandshake(
@@ -179,82 +234,116 @@ export class ConnectionController {
           instanceId: this.instanceId,
           browser,
           label: this.label,
+          auditEnabled: this.auditEnabled,
         },
-        { signal },
+        {
+          signal,
+          onRejected: (error) => {
+            if (generation !== this.connectionGeneration || signal.aborted) return;
+            // Record before the promise settles: a daemon may send the rejection
+            // and close the socket before runHandshake's catch gets to run.
+            // A fresh reply supersedes the previous diagnosis; only transport
+            // failures retain an earlier daemon-upgrade requirement.
+            this.daemonUpgradeRequired = daemonUpgradeFromRejection(error);
+            this.lastError = error.message;
+            this.fire();
+          },
+        },
       );
       if (generation !== this.connectionGeneration || signal.aborted) return;
       this.handshake = outcome.result;
       const verdict = computeConnectedState(outcome.result);
       if (verdict.kind === "rejected") {
         this.lastError = `version_too_old: ${verdict.reason}`;
+        this.daemonUpgradeRequired = daemonUpgradeFromVersion(
+          outcome.result.protocol_version,
+          outcome.result.version,
+        );
         this.handshake = null;
-        // Rejected peers must not be auto-retried: mark this disconnect as
-        // deliberate so the listener skips unexpected-loss recovery.
-        this.suppressDisconnectRecovery = true;
-        await this.transport.disconnect().catch(() => {});
-        this.setState("disconnected");
+        // Preserve the rejection until the next explicit/wake-driven attempt.
+        await this.disconnectTransport();
         return;
       }
       this.clearHandshakeRetry();
       this.lastError = null;
+      this.daemonUpgradeRequired = null;
       this.setState(verdict.kind);
     } catch (err) {
       if (generation !== this.connectionGeneration || signal.aborted || isAbortError(err)) return;
       this.handshake = null;
       this.lastError = err instanceof Error ? err.message : String(err);
-      // Bounce the half-open socket deliberately; the retry timer below owns
-      // the reconnect, so skip unexpected-loss recovery for this disconnect.
-      this.suppressDisconnectRecovery = true;
-      await this.transport.disconnect().catch(() => {});
-      this.setState("disconnected");
-      this.scheduleHandshakeRetry(browser);
+      const disconnect = this.disconnectTransport();
+      const disconnectedGeneration = this.connectionGeneration;
+      await disconnect;
+      if (
+        disconnectedGeneration !== this.connectionGeneration ||
+        this.transition ||
+        !this.connectionEnabled
+      )
+        return;
+      this.scheduleHandshakeRetry();
     } finally {
       if (generation === this.connectionGeneration) this.handshakeAbort = null;
     }
   }
 
-  private async applyDisabledState(): Promise<void> {
+  /** Only finite teardown work is shared; the next connect is interruptible. */
+  private teardown(cleanupBeforeDisconnect: boolean): Promise<void> {
+    if (this.transition) return this.transition;
+    this.cleanupNeeded = true;
     this.cancelHandshake();
     this.clearHandshakeRetry();
     this.handshake = null;
-    this.lastError = null;
-    await this.lifecycleHooks.beforeDisconnect?.();
-    if (this.transport) {
-      await this.transport.disconnect().catch(() => {});
-    }
-    const was = this.currentState;
+    if (!this.daemonUpgradeRequired) this.lastError = null;
     this.setState("disconnected");
-    if (was === "disconnected") this.fire();
+    this.fire();
+    // Install the gate before disconnect can synchronously notify listeners.
+    this.transition = Promise.resolve().then(async () => {
+      try {
+        if (cleanupBeforeDisconnect) {
+          // Preserve the existing safe user-disable ordering.
+          try {
+            await this.lifecycleHooks.beforeDisconnect?.();
+          } finally {
+            await this.disconnectTransport();
+          }
+        } else {
+          await this.disconnectTransport();
+          await (this.lifecycleHooks.onDisconnected ?? this.lifecycleHooks.beforeDisconnect)?.();
+        }
+        this.applyPendingConfiguration();
+        this.cleanupNeeded = false;
+        this.hasConnected = false;
+        this.setState("disconnected");
+      } catch (err) {
+        // Keep the pending configuration and cleanup gate for a later retry.
+        this.reportError(err);
+      } finally {
+        this.transition = null;
+        if (!this.cleanupNeeded) this.requestConnect();
+      }
+    });
+    return this.transition;
   }
 
-  private recoverFromDisconnect(): Promise<void> {
-    if (this.disconnectRecovery) return this.disconnectRecovery;
-    const recovery = (async () => {
-      // WSTransport schedules its reconnect timer immediately after notifying
-      // state listeners. Yield once, then disconnect explicitly so that timer
-      // is cancelled before local session teardown begins.
-      await Promise.resolve();
-      if (!this.connectionEnabled || !this.transport) return;
-      // Another path already reconnected while we yielded — nothing to do.
-      if (this.currentState !== "disconnected") return;
-      await this.transport.disconnect().catch(() => {});
-      try {
-        await this.lifecycleHooks.onDisconnected?.();
-      } catch (err) {
-        console.warn("[browser-skill] session cleanup after disconnect failed", err);
-      }
-      if (!this.connectionEnabled) return;
-      try {
-        await this.transport.connect();
-      } catch (err) {
-        this.lastError = err instanceof Error ? err.message : String(err);
-        this.setState("disconnected");
-      }
-    })();
-    this.disconnectRecovery = recovery.finally(() => {
-      this.disconnectRecovery = null;
-    });
-    return this.disconnectRecovery;
+  private applyPendingConfiguration(): void {
+    this.pendingConfiguration?.();
+    this.pendingConfiguration = null;
+  }
+
+  private async disconnectTransport(): Promise<void> {
+    this.intentionalDisconnects += 1;
+    try {
+      await this.transport?.disconnect();
+    } finally {
+      this.intentionalDisconnects -= 1;
+    }
+  }
+
+  private reportError(err: unknown): void {
+    this.lastError = err instanceof Error ? err.message : String(err);
+    this.setState("disconnected");
+    this.fire();
   }
 
   private cancelHandshake(): void {
@@ -263,15 +352,11 @@ export class ConnectionController {
     this.handshakeAbort = null;
   }
 
-  private scheduleHandshakeRetry(browser: { name: string; version: string }): void {
+  private scheduleHandshakeRetry(): void {
     if (this.handshakeRetryTimer || !this.connectionEnabled) return;
     this.handshakeRetryTimer = setTimeout(() => {
       this.handshakeRetryTimer = null;
-      if (!this.connectionEnabled || !this.transport) return;
-      void this.transport.connect().catch((err) => {
-        this.lastError = err instanceof Error ? err.message : String(err);
-        this.setState("disconnected");
-      });
+      this.requestConnect();
     }, HANDSHAKE_RETRY_DELAY_MS);
   }
 
@@ -297,6 +382,25 @@ export class ConnectionController {
       }
     }
   }
+}
+
+function daemonUpgradeFromRejection(error: HandshakeRejectedError): DaemonUpgradeRequired | null {
+  if (error.code !== "version_too_old") return null;
+  return daemonUpgradeFromVersion(error.data?.daemon_protocol_version, error.data?.daemon_version);
+}
+
+function daemonUpgradeFromVersion(
+  protocol: unknown,
+  version: unknown,
+): DaemonUpgradeRequired | null {
+  if (typeof protocol !== "string") return null;
+  const order = compareProtocol(protocol, MIN_COMPATIBLE_PROTOCOL);
+  if (order === null || order >= 0) return null;
+  return {
+    daemonVersion: typeof version === "string" && version.trim() ? version : null,
+    daemonProtocolVersion: protocol,
+    requiredProtocolVersion: MIN_COMPATIBLE_PROTOCOL,
+  };
 }
 
 function isAbortError(err: unknown): boolean {

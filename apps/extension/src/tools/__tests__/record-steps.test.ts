@@ -135,6 +135,7 @@ function makeFakeCdp(
   let busyUntil = 0;
   const handlers: Record<string, (params: unknown, tabId: number) => unknown> = {
     "Page.enable": () => ({}),
+    "Network.enable": () => ({}),
     "Page.setLifecycleEventsEnabled": () => ({}),
     "Page.getFrameTree": () => ({
       frameTree: { frame: { id: "frame-1", loaderId: "loader-before" } },
@@ -412,6 +413,39 @@ describe("recorded user steps reach the exported trace", () => {
     expect(trace.steps).toHaveLength(1);
     const [step] = trace.steps;
     expect(step?.op).toBe("navigate");
+    expect(step?.state).toBeTruthy();
+    expect(step?.result.state).toBeTruthy();
+  });
+
+  it("records a reload of the page the recording is on", async () => {
+    // Issue #139: a reload commits to the URL the tab is already on, so it used to
+    // be dropped as the duplicate half of a navigation and the trace had no step
+    // for it, even though replaying the flow may depend on the refresh.
+    const chromeApi = installChrome();
+    const manager = fakeManager();
+    const tabsApi = makeTabsApi();
+    const sendToTab = vi.fn(async () => ({ ok: true }));
+
+    await handleRecordStart(manager, RECORD_START_V3, { tabsApi, sendToTab, cdp: makeFakeCdp() });
+
+    const details = { tabId: TAB_ID, frameId: 0, url: START_URL };
+    chromeApi.webNavigationOnCommitted.emit({
+      ...details,
+      transitionType: "reload",
+      transitionQualifiers: [],
+    } as unknown as chrome.webNavigation.WebNavigationTransitionCallbackDetails);
+    chromeApi.webNavigationOnCompleted.emit(
+      details as unknown as chrome.webNavigation.WebNavigationFramedCallbackDetails,
+    );
+    // Let findRecordingForTab's tab lookup and the settle capture resolve.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const stopped = await handleRecordStop(manager, { session_id: "abcd" }, { tabsApi, sendToTab });
+    const trace = (stopped as RecordStopResult).trace as TraceV3;
+
+    expect(trace.steps).toHaveLength(1);
+    const [step] = trace.steps;
+    expect(step).toMatchObject({ op: "navigate", to: START_URL, cause: "reload" });
     expect(step?.state).toBeTruthy();
     expect(step?.result.state).toBeTruthy();
   });
@@ -1122,14 +1156,20 @@ describe("recorded user steps reach the exported trace", () => {
     const sendToTab = vi.fn(async (_tabId: number, msg: unknown) => {
       const typed = msg as { type?: string; requestId?: string };
       if (typed.type === RECORD_START && typed.requestId) requestId = typed.requestId;
-      if (typed.type === RECORD_STOP) {
-        announceStop();
-        await stopReleased;
-        return { ok: false, error: "final capture failed" };
-      }
       return { ok: true };
     });
-    const deps = { tabsApi, sendToTab, cdp: makeFakeCdp() };
+    const frameCoordinator = {
+      begin: vi.fn(),
+      armTab: vi.fn(async () => true),
+      sourceFor: vi.fn(() => null),
+      stop: vi.fn(async () => {
+        announceStop();
+        await stopReleased;
+        return false;
+      }),
+      cancel: vi.fn(),
+    };
+    const deps = { tabsApi, sendToTab, cdp: makeFakeCdp(), frameCoordinator };
 
     await handleRecordStart(manager, RECORD_START_V3, deps);
     attachRecordFinishListener(deps);
@@ -1212,6 +1252,69 @@ describe("recorded user steps reach the exported trace", () => {
       { tabsApi: makeTabsApi(), sendToTab: vi.fn(), cdp: makeFakeCdp() },
     );
     expect(result).toMatchObject({ code: "invalid_params" });
+  });
+
+  it("does not record an unclaimed user tab inside a remote Agent Window", async () => {
+    const chromeApi = installChrome();
+    const manager = fakeManager();
+    const context = { ...manager.get("abcd")!, remote: true, agentCreatedTabs: new Set([TAB_ID]) };
+    manager.get = (id) => (id === "abcd" ? context : null);
+    const privateUrl = "https://private.example/secret";
+    const tabsApi = makeMultiTabsApi([
+      {
+        id: TAB_ID,
+        windowId: AGENT_WINDOW_ID,
+        active: true,
+        status: "complete",
+        url: START_URL,
+      } as chrome.tabs.Tab,
+      {
+        id: 5,
+        windowId: AGENT_WINDOW_ID,
+        active: false,
+        status: "complete",
+        url: privateUrl,
+      } as chrome.tabs.Tab,
+    ]);
+    const cdp = makeFakeCdp(undefined, {
+      treesByTab: { [TAB_ID]: axTree("Allowed"), 5: axTree("Private secret") },
+    });
+    const send = vi.spyOn(cdp, "send");
+    let requestId = "";
+    const sendToTab = vi.fn(async (_tabId: number, message: unknown) => {
+      const typed = message as { type?: string; requestId?: string };
+      if (typed.type === RECORD_START && typed.requestId) requestId = typed.requestId;
+      return { ok: true };
+    });
+    const deps = { tabsApi, sendToTab, cdp };
+    const started = await handleRecordStart(manager, RECORD_START_V3, deps);
+    expect(started).toMatchObject({ recording: true });
+    attachRecordStepListener(deps);
+    tabsApi.activate(5);
+    chromeApi.tabsOnActivated.emit({ tabId: 5, windowId: AGENT_WINDOW_ID });
+    runtimeOnMessageEmit(
+      chromeApi,
+      requestId,
+      {
+        op: "click",
+        page_url: privateUrl,
+        target: { role: "button", name: "Secret", tag: "button" },
+      },
+      5,
+    );
+    chromeApi.webNavigationOnCompleted.emit({
+      tabId: 5,
+      frameId: 0,
+      url: privateUrl,
+    } as chrome.webNavigation.WebNavigationFramedCallbackDetails);
+    await settleWait();
+    tabsApi.activate(TAB_ID);
+    const stopped = await handleRecordStop(manager, { session_id: "abcd" }, deps);
+    const trace = asTraceV3((stopped as RecordStopResult).trace);
+    expect(JSON.stringify(trace)).not.toContain(privateUrl);
+    expect(JSON.stringify(trace)).not.toContain("Private secret");
+    expect(sendToTab.mock.calls.some(([tabId]) => tabId === 5)).toBe(false);
+    expect(send.mock.calls.some(([tabId]) => tabId === 5)).toBe(false);
   });
 
   it("records tab transitions and binds actions to each tab's observation", async () => {
@@ -1375,6 +1478,106 @@ describe("recorded user steps reach the exported trace", () => {
     const stateUrl = (stateId: string) => trace.states.find((state) => state.id === stateId)?.url;
     expect(switches).toHaveLength(1);
     expect(stateUrl(switches[0]!.result.state)).toBe("https://example.com/tab-6");
+  });
+
+  it("stops a recording whose current tab is a blob: document without content scripts", async () => {
+    const chromeApi = installChrome();
+    const manager = fakeManager();
+    const blobUrl = "blob:https://example.com/5f0c1d2e-preview";
+    const tabsApi = makeMultiTabsApi([
+      {
+        id: TAB_ID,
+        windowId: AGENT_WINDOW_ID,
+        active: true,
+        status: "complete",
+        url: START_URL,
+      } as chrome.tabs.Tab,
+      {
+        id: 5,
+        windowId: AGENT_WINDOW_ID,
+        active: false,
+        status: "complete",
+        url: blobUrl,
+      } as chrome.tabs.Tab,
+    ]);
+    let requestId = "";
+    const sendToTab = vi.fn(async (tabId: number, message: unknown) => {
+      const typed = message as { type?: string; requestId?: string };
+      if (typed.type === RECORD_START && typed.requestId) requestId = typed.requestId;
+      if (tabId === 5) {
+        throw new Error("Could not establish connection. Receiving end does not exist.");
+      }
+      return { ok: true };
+    });
+    const frameCoordinator = {
+      begin: vi.fn(),
+      armTab: vi.fn(async (_requestId: string, tabId: number) => tabId === TAB_ID),
+      sourceFor: vi.fn(
+        (_requestId: string, producerId: string, sender: chrome.runtime.MessageSender) => ({
+          tabId: sender.tab?.id ?? TAB_ID,
+          documentId: `document-${sender.tab?.id ?? TAB_ID}`,
+          browserFrameId: 0,
+          producerId,
+        }),
+      ),
+      stop: vi.fn(async () => true),
+      cancel: vi.fn(),
+    };
+    const deps = { tabsApi, sendToTab, cdp: makeFakeCdp(), frameCoordinator };
+
+    await handleRecordStart(manager, RECORD_START_V3, deps);
+    attachRecordStepListener(deps);
+    runtimeOnMessageEmit(chromeApi, requestId, {
+      op: "click",
+      page_url: START_URL,
+      target: { role: "button", name: "Open PDF blob", tag: "button" },
+    });
+    await settleWait();
+
+    tabsApi.activate(5);
+    chromeApi.tabsOnActivated.emit({ tabId: 5, windowId: AGENT_WINDOW_ID });
+    chromeApi.webNavigationOnCommitted.emit({
+      tabId: 5,
+      frameId: 0,
+      url: blobUrl,
+      transitionType: "link",
+      transitionQualifiers: [],
+    } as unknown as chrome.webNavigation.WebNavigationTransitionCallbackDetails);
+    await settleWait();
+
+    const stopped = await handleRecordStop(manager, { session_id: "abcd" }, deps);
+
+    expect(stopped).not.toHaveProperty("code");
+    const trace = asTraceV3((stopped as RecordStopResult).trace);
+    expect(trace.steps.map((step) => step.op)).toEqual(["click", "switch_tab"]);
+    expect(sendToTab).toHaveBeenCalledWith(5, expect.objectContaining({ type: RECORD_STOP }));
+  }, 15_000);
+
+  it("reports why a recording could not be flushed", async () => {
+    installChrome();
+    const manager = fakeManager();
+    const tabsApi = makeTabsApi();
+    const frameCoordinator = {
+      begin: vi.fn(),
+      armTab: vi.fn(async () => true),
+      sourceFor: vi.fn(() => null),
+      stop: vi.fn(async () => false),
+      cancel: vi.fn(),
+    };
+    const deps = {
+      tabsApi,
+      sendToTab: vi.fn(async () => ({ ok: true })),
+      cdp: makeFakeCdp(),
+      frameCoordinator,
+    };
+
+    await handleRecordStart(manager, RECORD_START_V3, deps);
+    const stopped = await handleRecordStop(manager, { session_id: "abcd" }, deps);
+
+    expect(stopped).toMatchObject({ code: "protocol_error" });
+    expect((stopped as { message: string }).message).toContain(
+      "recording documents did not confirm their final steps",
+    );
   });
 
   it("does not retry an in-flight tab rearm after recording stops", async () => {

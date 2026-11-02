@@ -1,0 +1,199 @@
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  DEFAULT_INTERACTION_PREFERENCES,
+  INTERACTION_STORAGE_KEY,
+  InteractionPreferenceStore,
+  interactionPolicy,
+  normalizeInteractionPreferences,
+} from "../interaction-preferences";
+
+describe("interaction preferences", () => {
+  let listener: (changes: Record<string, chrome.storage.StorageChange>, area: string) => void;
+  let addListener: ReturnType<typeof vi.fn>;
+  beforeEach(() => {
+    addListener = vi.fn((callback: typeof listener) => {
+      listener = callback;
+    });
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    vi.stubGlobal("chrome", {
+      storage: {
+        onChanged: {
+          addListener,
+        },
+      },
+    });
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it("falls back to enabled prompts at runtime but keeps reads and writes strict", async () => {
+    const storage = {
+      get: vi.fn().mockRejectedValue(new Error("read failed")),
+      set: vi.fn(),
+    };
+    const store = new InteractionPreferenceStore(storage);
+    await store.readyOrFallback();
+    expect(store.get()).toEqual(DEFAULT_INTERACTION_PREFERENCES);
+    await expect(store.ready()).rejects.toThrow("read failed");
+    await expect(store.set({ confirmTabBorrow: false, requestHelpEnabled: false })).rejects.toThrow(
+      "read failed",
+    );
+    expect(storage.set).not.toHaveBeenCalled();
+    expect(addListener).toHaveBeenCalledOnce();
+  });
+
+  it("retries a failed read and shares the retry between concurrent callers", async () => {
+    const storage = {
+      get: vi
+        .fn()
+        .mockRejectedValueOnce(new Error("temporary failure"))
+        .mockResolvedValueOnce({
+          [INTERACTION_STORAGE_KEY]: { confirmTabBorrow: false, requestHelpEnabled: false },
+        }),
+      set: vi.fn(),
+    };
+    const store = new InteractionPreferenceStore(storage);
+    await store.readyOrFallback();
+    await Promise.all([store.ready(), store.ready(), store.readyOrFallback()]);
+    expect(store.get()).toEqual({ confirmTabBorrow: false, requestHelpEnabled: false });
+    expect(storage.get).toHaveBeenCalledTimes(2);
+    expect(addListener).toHaveBeenCalledOnce();
+    expect(storage.set).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    true,
+    false,
+  ])("a later storage event restores readiness (enabled=%s)", async (enabled) => {
+    const storage = { get: vi.fn().mockRejectedValue(new Error("failed")), set: vi.fn() };
+    const store = new InteractionPreferenceStore(storage);
+    await expect(store.ready()).rejects.toThrow("failed");
+    const preferences = { confirmTabBorrow: enabled, requestHelpEnabled: enabled };
+    listener({ [INTERACTION_STORAGE_KEY]: { newValue: preferences } }, "local");
+    await store.ready();
+    expect(store.get()).toEqual(preferences);
+    expect(storage.get).toHaveBeenCalledOnce();
+    expect(addListener).toHaveBeenCalledOnce();
+  });
+
+  it("keeps a valid storage event when the pending read rejects", async () => {
+    let reject!: (error: Error) => void;
+    const store = new InteractionPreferenceStore({
+      get: () =>
+        new Promise((_resolve, fail) => {
+          reject = fail;
+        }),
+      set: vi.fn(),
+    });
+    const pending = store.ready();
+    listener({ [INTERACTION_STORAGE_KEY]: { newValue: { requestHelpEnabled: false } } }, "local");
+    reject(new Error("late failure"));
+    await pending;
+    expect(store.get()).toEqual({ confirmTabBorrow: true, requestHelpEnabled: false });
+  });
+
+  it("does not replace a newer storage event with a stale retry result", async () => {
+    let read!: (items: Record<string, unknown>) => void;
+    const storage = {
+      get: vi
+        .fn()
+        .mockRejectedValueOnce(new Error("failed"))
+        .mockImplementationOnce(
+          () =>
+            new Promise((resolve) => {
+              read = resolve;
+            }),
+        ),
+      set: vi.fn(),
+    };
+    const store = new InteractionPreferenceStore(storage);
+    await store.readyOrFallback();
+    const retry = store.ready();
+    listener({ [INTERACTION_STORAGE_KEY]: { newValue: { confirmTabBorrow: false } } }, "local");
+    read({ [INTERACTION_STORAGE_KEY]: DEFAULT_INTERACTION_PREFERENCES });
+    await retry;
+    expect(store.get()).toEqual({ confirmTabBorrow: false, requestHelpEnabled: true });
+    expect(addListener).toHaveBeenCalledOnce();
+  });
+
+  it("keeps both prompts enabled unless explicitly disabled", () => {
+    for (const value of [
+      null,
+      undefined,
+      {},
+      { confirmTabBorrow: 0, requestHelpEnabled: "false" },
+    ]) {
+      expect(normalizeInteractionPreferences(value)).toEqual(DEFAULT_INTERACTION_PREFERENCES);
+    }
+    expect(normalizeInteractionPreferences({ confirmTabBorrow: false })).toEqual({
+      confirmTabBorrow: false,
+      requestHelpEnabled: true,
+    });
+  });
+
+  it("a storage change wins over a stale initial read", async () => {
+    let read!: (items: Record<string, unknown>) => void;
+    const store = new InteractionPreferenceStore({
+      get: () =>
+        new Promise((resolve) => {
+          read = resolve;
+        }),
+      set: vi.fn(),
+    });
+    const ready = store.ready();
+    listener({ [INTERACTION_STORAGE_KEY]: { newValue: { confirmTabBorrow: false } } }, "local");
+    read({ [INTERACTION_STORAGE_KEY]: DEFAULT_INTERACTION_PREFERENCES });
+    await ready;
+    expect(store.get().confirmTabBorrow).toBe(false);
+  });
+
+  it("a failed save preserves the previous policy", async () => {
+    const store = new InteractionPreferenceStore({
+      get: vi.fn().mockResolvedValue({}),
+      set: vi.fn().mockRejectedValue(new Error("disk full")),
+    });
+    await expect(store.set({ confirmTabBorrow: false, requestHelpEnabled: false })).rejects.toThrow(
+      "disk full",
+    );
+    expect(store.get()).toEqual(DEFAULT_INTERACTION_PREFERENCES);
+  });
+
+  it("does not overwrite a newer storage event when a write finishes late", async () => {
+    let written!: () => void;
+    const store = new InteractionPreferenceStore({
+      get: vi.fn().mockResolvedValue({}),
+      set: () =>
+        new Promise((resolve) => {
+          written = resolve;
+        }),
+    });
+    await store.ready();
+    const pending = store.set({ confirmTabBorrow: false, requestHelpEnabled: true });
+    await vi.waitFor(() => expect(written).toBeDefined());
+    listener(
+      {
+        [INTERACTION_STORAGE_KEY]: {
+          newValue: { confirmTabBorrow: true, requestHelpEnabled: false },
+        },
+      },
+      "local",
+    );
+    written();
+    await pending;
+    expect(store.get()).toEqual({ confirmTabBorrow: true, requestHelpEnabled: false });
+  });
+
+  it.each([
+    [true, true, "always", "enabled"],
+    [true, false, "always", "disabled"],
+    [false, true, "never", "enabled"],
+    [false, false, "never", "disabled"],
+  ] as const)("browser settings independently decide both prompts (%s, %s)", (confirmTabBorrow, requestHelpEnabled, borrow_confirmation, request_help) => {
+    expect(interactionPolicy({ confirmTabBorrow, requestHelpEnabled })).toEqual({
+      borrow_confirmation,
+      request_help,
+    });
+  });
+});

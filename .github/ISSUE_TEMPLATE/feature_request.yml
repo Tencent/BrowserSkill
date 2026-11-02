@@ -1,0 +1,67 @@
+name: Feature Request
+description: Propose a new feature, enhancement, or improvement for BrowserSkill.
+title: "[Feature]: "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for suggesting an idea to improve BrowserSkill!
+        Please describe the problem you are trying to solve so we can understand the motivation behind your proposal.
+  - type: checkboxes
+    id: prerequisites
+    attributes:
+      label: Prerequisites
+      description: Please verify before submitting.
+      options:
+        - label: I have searched existing [open and closed issues](https://github.com/Tencent/BrowserSkill/issues) to confirm this feature hasn't already been requested.
+          required: true
+        - label: I understand that feature requests should focus on the underlying user need or problem rather than only an implementation detail.
+          required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem or Use Case
+      description: What problem are you trying to solve? Who is affected? Why is the current behavior insufficient?
+      placeholder: Describe the user problem, workflow friction, or limitation you encountered.
+    validations:
+      required: true
+  - type: textarea
+    id: proposed_solution
+    attributes:
+      label: Proposed Behavior
+      description: How should BrowserSkill behave? Describe your desired solution.
+      placeholder: Explain the proposed behavior and how it addresses the use case.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives Considered
+      description: What other approaches or workarounds did you consider, and why were they rejected?
+      placeholder: Alternative designs, scripts, or existing tools tried.
+    validations:
+      required: true
+  - type: textarea
+    id: affected_surface
+    attributes:
+      label: Affected CLI / API Surface
+      description: Which commands, flags, IPC protocol endpoints, or extension components would be affected? (Optional / N/A if not sure).
+      placeholder: e.g., `bsk session`, `bsk daemon`, CDP bridge, extension popup, protocol schemas (leave blank or enter "N/A" if unknown).
+    validations:
+      required: false
+  - type: textarea
+    id: compatibility
+    attributes:
+      label: Compatibility Considerations
+      description: Does this introduce breaking changes to the CLI interface, protocol schema, or platform requirements? (Optional / N/A if not sure).
+      placeholder: Note any backward-compatibility impact or platform-specific considerations (Windows/macOS/Linux). Enter "N/A" if unknown.
+    validations:
+      required: false
+  - type: textarea
+    id: additional_context
+    attributes:
+      label: Additional Context
+      description: Add any other context, mockups, or references here.
+    validations:
+      required: false

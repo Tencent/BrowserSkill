@@ -54,6 +54,8 @@ export interface KeepaliveOptions {
   transport: Transport;
   /** When provided and returns false, skip reconnect attempts on alarm ticks. */
   shouldConnect?: () => boolean;
+  /** Let the connection owner coordinate cleanup and retry policy. */
+  requestConnect?: () => void | Promise<void>;
   alarms?: AlarmsApi;
   /** Override the alarm name (tests). */
   alarmName?: string;
@@ -82,7 +84,8 @@ export function startKeepalive(options: KeepaliveOptions): KeepaliveHandle {
     if (options.shouldConnect && !options.shouldConnect()) return;
     if (options.transport.state === "connected") return;
     try {
-      await options.transport.connect();
+      if (options.requestConnect) await options.requestConnect();
+      else await options.transport.connect();
     } catch (err) {
       console.debug("[bsk keepalive] connect attempt failed", err);
     }

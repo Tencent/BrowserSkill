@@ -1,0 +1,33 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "UploadResult",
+  "type": "object",
+  "required": [
+    "file_names",
+    "tab_id"
+  ],
+  "properties": {
+    "file_names": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "tab_id": {
+      "type": "integer",
+      "format": "int64"
+    },
+    "used_ref": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "used_selector": {
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  }
+}

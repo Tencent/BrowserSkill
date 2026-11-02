@@ -7,7 +7,7 @@
  * are hidden from every surface, so their Agent Windows would otherwise
  * linger with no way back to them.
  *
- * Ownership lineage: browser_session_start records the calling agent's
+ * Ownership lineage: bsk_session action=start records the calling agent's
  * session id PLUS every ancestor along `header.parentSession` (a subagent's
  * browsers are reaped when any ancestor is archived, the root conversation
  * included). Lineage is resolved through the host session store; an
@@ -15,8 +15,7 @@
  */
 
 import type { Context } from "@deepseek-ai/cordis";
-import type { ObservationService } from "./observation";
-import type { SessionRegistry } from "./sessions";
+import type { SessionStarts } from "./session-starts";
 
 /** The wire shape of a `domain/changed` frame (see dsh-storage-domain). */
 interface DomainChange {
@@ -40,7 +39,7 @@ const MAX_LINEAGE_DEPTH = 16;
 
 /**
  * The DSH session ids that own a tool call's browser sessions: the calling
- * agent's own session plus every ancestor along the seed lineage. Empty
+ * agent's own session first, followed by ancestors along the seed lineage. Empty
  * when the call carried no agent identity (those sessions outlive any
  * archive cleanup by design — nothing can name their owner).
  */
@@ -65,8 +64,7 @@ export function ownerSessionIds(ctx: Context, agentId: string | undefined): stri
  */
 export function armArchiveCleanup(
   ctx: Context,
-  registry: SessionRegistry,
-  observation: ObservationService,
+  starts: Pick<SessionStarts, "archive">,
 ): () => void {
   // 'domain/changed' lives outside the vendored Events type map, so the
   // listener goes through a structural view of the events mixin.
@@ -75,7 +73,7 @@ export function armArchiveCleanup(
   ).on;
   if (typeof on !== "function") return () => {};
 
-  /** Archived ids already accounted for; lazily seeded from the registry. */
+  /** Archived ids already accounted for, seeded before the first change event. */
   let seen: Set<string> | undefined;
   const initialize = (): Set<string> => {
     if (seen === undefined) {
@@ -87,6 +85,9 @@ export function armArchiveCleanup(
     return seen;
   };
 
+  // The host may update its registry before emitting domain/changed.
+  initialize();
+
   return on.call(ctx, "domain/changed", (change: DomainChange) => {
     if (change?.domain !== "workspace" || change?.table !== "") return;
     const archived = (change.value as WorkspaceGlobal | undefined)?.archivedSessionIds;
@@ -97,12 +98,7 @@ export function armArchiveCleanup(
     );
     seen = new Set(archived.filter((id): id is string => typeof id === "string"));
     for (const dshSessionId of fresh) {
-      for (const sessionId of registry.ownedByDsh(dshSessionId)) {
-        // stopSession owns the full teardown (kill in-flight tools, queue
-        // the daemon stop, drop registry + observation entries); a failure
-        // just leaves the session for idle timeout or unload cleanup.
-        void observation.stopSession(sessionId).catch(() => {});
-      }
+      starts.archive(dshSessionId);
     }
   });
 }

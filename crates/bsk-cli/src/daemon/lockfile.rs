@@ -64,16 +64,26 @@ pub fn acquire() -> Result<DaemonLock> {
 
     match file.try_lock_exclusive() {
         Ok(()) => Ok(DaemonLock { file, path }),
-        Err(_) => Err(anyhow::anyhow!(AlreadyLocked { path })),
+        Err(err) if err.raw_os_error() == fs2::lock_contended_error().raw_os_error() => {
+            Err(anyhow::anyhow!(AlreadyLocked { path }))
+        }
+        Err(err) => Err(anyhow::Error::new(err).context(format!("lock {}", path.display()))),
     }
 }
 
 /// Check if a pid is alive on the local machine.
 ///
 /// Returns `true` if a process with that pid exists (we don't differentiate
-/// our own daemon vs an unrelated process — the pid in `daemon.json` is
-/// validated against the held lock by [`info::read_valid`] in M2.4).
+/// our own daemon vs an unrelated process). This is local process metadata,
+/// not a daemon availability or identity check.
 pub fn pid_alive(pid: u32) -> bool {
+    if pid == 0 {
+        return false;
+    }
+    #[cfg(unix)]
+    if pid > i32::MAX as u32 {
+        return false;
+    }
     #[cfg(unix)]
     {
         use nix::errno::Errno;
@@ -90,17 +100,21 @@ pub fn pid_alive(pid: u32) -> bool {
 
     #[cfg(windows)]
     {
-        use windows_sys::Win32::Foundation::CloseHandle;
+        use windows_sys::Win32::Foundation::{CloseHandle, WAIT_TIMEOUT};
         use windows_sys::Win32::System::Threading::{
-            OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+            OpenProcess, PROCESS_SYNCHRONIZE, WaitForSingleObject,
         };
         unsafe {
-            let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+            let handle = OpenProcess(PROCESS_SYNCHRONIZE, 0, pid);
             if handle.is_null() {
                 return false;
             }
+            // An exited process can still be opened while another handle
+            // keeps its kernel object alive. Poll its termination signal;
+            // unlike checking STILL_ACTIVE, this also handles exit code 259.
+            let alive = WaitForSingleObject(handle, 0) == WAIT_TIMEOUT;
             CloseHandle(handle);
-            true
+            alive
         }
     }
 
@@ -108,5 +122,41 @@ pub fn pid_alive(pid: u32) -> bool {
     {
         let _ = pid;
         false
+    }
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+    use super::pid_alive;
+    use std::os::windows::process::CommandExt;
+    use std::process::Command;
+
+    #[test]
+    fn current_process_is_alive() {
+        assert!(pid_alive(std::process::id()));
+    }
+
+    #[test]
+    fn invalid_process_is_not_alive() {
+        assert!(!pid_alive(0));
+        assert!(!pid_alive(u32::MAX));
+    }
+
+    #[test]
+    fn exited_process_with_retained_handle_is_not_alive() {
+        for exit_code in [0, 259] {
+            let mut child = Command::new("cmd.exe")
+                .args(["/D", "/C", &format!("exit {exit_code}")])
+                .creation_flags(0x0800_0000) // CREATE_NO_WINDOW
+                .spawn()
+                .expect("spawn short-lived process");
+            assert_eq!(child.wait().unwrap().code(), Some(exit_code));
+            // Keep Child (and its process handle) alive during the probe.
+            assert!(
+                !pid_alive(child.id()),
+                "exited process with code {exit_code}"
+            );
+            drop(child);
+        }
     }
 }

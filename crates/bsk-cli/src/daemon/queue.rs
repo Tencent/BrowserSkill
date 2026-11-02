@@ -37,7 +37,10 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use bsk_protocol::{ErrorCode, Frame, Method, RequestFrame, ResponseBody, RpcError, RpcId};
+use bsk_protocol::tools::DebugActivity;
+use bsk_protocol::{
+    ErrorCode, Frame, Method, RequestFrame, ResponseBody, ResponseFrame, RpcError, RpcId,
+};
 use rand::Rng;
 use serde_json::Value;
 use tokio::sync::{mpsc, oneshot};
@@ -104,9 +107,14 @@ pub struct ToolJob {
 #[derive(Debug, thiserror::Error)]
 pub enum DispatchError {
     /// Session id does not have a queue (either never started or was
-    /// stopped concurrently with this dispatch).
+    /// stopped concurrently with this dispatch). `ended` carries the
+    /// registry's tombstone for why the session stopped (idle timeout,
+    /// Agent Window closed, browser disconnect), surfaced through
+    /// [`RpcError.data.reason`]; `None` for ids without a recorded end.
     #[error("session not registered or already stopped")]
-    SessionNotFound,
+    SessionNotFound {
+        ended: Option<super::sessions::SessionEnd>,
+    },
     /// Session is draining for `session.stop`; new tool calls must not
     /// enter behind the queued stop request.
     #[error("session is stopping")]
@@ -133,15 +141,42 @@ pub enum DispatchError {
 }
 
 impl DispatchError {
+    fn with_session_end_reason(self, entry: Option<&ToolInflightEntry>) -> Self {
+        if entry.and_then(ToolInflightEntry::cancel_reason)
+            != Some(super::inflight::CancelReason::UserMovedTab)
+        {
+            return self;
+        }
+        // Apply the terminal cause when returning to the caller, including when
+        // the outer wait expires before the worker finishes cancellation cleanup.
+        let mut error = self.into_rpc();
+        let data = error.data.get_or_insert_with(|| serde_json::json!({}));
+        if data.is_null() {
+            *data = serde_json::json!({});
+        } else if !data.is_object() {
+            *data = serde_json::json!({ "details": data.take() });
+        }
+        data["reason"] = serde_json::json!(crate::rpc_reason::SESSION_USER_MOVED_TAB);
+        Self::Rpc(error)
+    }
+
     /// Convert this dispatch outcome into a structured [`RpcError`]
     /// suitable for sending back over the IPC line.
     pub fn into_rpc(self) -> RpcError {
         match self {
-            DispatchError::SessionNotFound => RpcError {
-                code: ErrorCode::NotFound,
-                message: "session not registered or already stopped".into(),
-                data: None,
-            },
+            DispatchError::SessionNotFound { ended } => {
+                let data = ended.map(|end| {
+                    serde_json::json!({
+                        "reason": end.reason,
+                        "ended_unix_ms": end.ended_unix_ms,
+                    })
+                });
+                RpcError {
+                    code: ErrorCode::NotFound,
+                    message: "session not registered or already stopped".into(),
+                    data,
+                }
+            }
             DispatchError::SessionStopping => RpcError {
                 code: ErrorCode::Timeout,
                 message: "session is stopping".into(),
@@ -172,6 +207,7 @@ impl DispatchError {
 #[derive(Debug, Default)]
 struct QueueState {
     busy: bool,
+    active: Option<DebugActivity>,
 }
 
 fn session_busy_rpc() -> RpcError {
@@ -185,6 +221,7 @@ fn session_busy_rpc() -> RpcError {
 fn clear_busy(state: &Mutex<QueueState>) {
     let mut guard = state.lock().expect("queue state poisoned");
     guard.busy = false;
+    guard.active = None;
 }
 
 #[derive(Debug)]
@@ -233,6 +270,17 @@ impl ToolQueueRegistry {
     pub fn is_accepting(&self, sid: &SessionId) -> bool {
         let guard = self.queues.lock().expect("tool queue registry poisoned");
         guard.get(sid).is_some_and(|entry| entry.accepting)
+    }
+
+    /// The session-missing [`DispatchError`] for `sid`, enriched with
+    /// the registry's tombstone when the id recently stopped with a
+    /// known reason (issue #465: idle timeout / window close / browser
+    /// disconnect). Without a tombstone this is the same generic
+    /// not-found as before.
+    fn session_missing(&self, sid: &SessionId) -> DispatchError {
+        DispatchError::SessionNotFound {
+            ended: self.sessions.end_info(sid),
+        }
     }
 
     #[cfg(test)]
@@ -309,7 +357,7 @@ impl ToolQueueRegistry {
         let (sender, state) = {
             let guard = self.queues.lock().expect("tool queue registry poisoned");
             let Some(entry) = guard.get(sid) else {
-                return Err(DispatchError::SessionNotFound);
+                return Err(self.session_missing(sid));
             };
             if !entry.accepting {
                 return Err(DispatchError::SessionStopping);
@@ -319,6 +367,17 @@ impl ToolQueueRegistry {
                 return Err(DispatchError::SessionBusy);
             }
             queue_state.busy = true;
+            queue_state.active = Some(DebugActivity {
+                state: "running".into(),
+                command_id: inflight.as_ref().map(|entry| entry.cli_rpc_id.clone()),
+                method: serde_json::to_value(&method)
+                    .ok()
+                    .and_then(|value| value.as_str().map(str::to_owned)),
+                started_at: Some(epoch_ms()),
+                elapsed_ms: Some(0),
+                wait_complete: None,
+                wait_timed_out: None,
+            });
             (entry.sender.clone(), Arc::clone(&entry.state))
         };
         self.sessions.touch(sid);
@@ -330,7 +389,7 @@ impl ToolQueueRegistry {
             params,
             timeout,
             false,
-            inflight,
+            inflight.clone(),
             None,
             CANCEL_CLEANUP_TIMEOUT,
         )
@@ -340,7 +399,54 @@ impl ToolQueueRegistry {
         // while it is running, session.stop observes SessionBusy and retries
         // on a later sweep rather than interrupting the tool.
         self.sessions.touch(sid);
-        outcome
+        outcome.map_err(|error| error.with_session_end_reason(inflight.as_deref()))
+    }
+
+    pub fn activity(&self, sid: &SessionId) -> Result<DebugActivity, DispatchError> {
+        let queues = self.queues.lock().expect("tool queue registry poisoned");
+        let entry = queues.get(sid).ok_or_else(|| self.session_missing(sid))?;
+        let state = entry.state.lock().expect("queue state poisoned");
+        let mut activity = state.active.clone().unwrap_or(DebugActivity {
+            state: if state.busy { "running" } else { "idle" }.into(),
+            command_id: None,
+            method: None,
+            started_at: None,
+            elapsed_ms: None,
+            wait_complete: None,
+            wait_timed_out: None,
+        });
+        if !entry.accepting {
+            activity.state = "stopping".into();
+        }
+        activity.elapsed_ms = activity
+            .started_at
+            .map(|start| epoch_ms().saturating_sub(start));
+        Ok(activity)
+    }
+
+    pub async fn wait_idle(
+        &self,
+        sid: &SessionId,
+        command_id: Option<&str>,
+        milliseconds: u32,
+        cancel: AbortToken,
+    ) -> Result<DebugActivity, DispatchError> {
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(milliseconds.into());
+        loop {
+            let mut activity = self.activity(sid)?;
+            let settled = activity.state == "idle"
+                || command_id.is_some_and(|id| activity.command_id.as_deref() != Some(id));
+            let expired = tokio::time::Instant::now() >= deadline;
+            if settled || expired {
+                activity.wait_complete = Some(settled);
+                activity.wait_timed_out = Some(!settled);
+                return Ok(activity);
+            }
+            tokio::select! {
+                _ = cancel.cancelled() => return Err(DispatchError::Rpc(RpcError { code: ErrorCode::Cancelled, message: "execution wait cancelled; original command unchanged".into(), data: None })),
+                _ = tokio::time::sleep_until((tokio::time::Instant::now() + Duration::from_millis(100)).min(deadline)) => {},
+            }
+        }
     }
 
     /// Forward a tool RPC to the extension without taking the
@@ -358,7 +464,7 @@ impl ToolQueueRegistry {
         {
             let guard = self.queues.lock().expect("tool queue registry poisoned");
             let Some(entry) = guard.get(sid) else {
-                return Err(DispatchError::SessionNotFound);
+                return Err(self.session_missing(sid));
             };
             if !entry.accepting {
                 return Err(DispatchError::SessionStopping);
@@ -375,10 +481,11 @@ impl ToolQueueRegistry {
             cancel_cleanup_timeout: CANCEL_CLEANUP_TIMEOUT,
             session_id: sid.clone(),
         };
-        match forward_one(sid, &self.browsers, &self.sessions, &job).await {
-            Ok(v) => Ok(v),
-            Err(err) => Err(DispatchError::Rpc(err)),
-        }
+        forward_one(sid, &self.browsers, &self.sessions, &job)
+            .await
+            .map_err(|error| {
+                DispatchError::Rpc(error).with_session_end_reason(job.inflight.as_deref())
+            })
     }
 
     /// Stop accepting new jobs for `sid`, enqueue one final control RPC,
@@ -396,7 +503,7 @@ impl ToolQueueRegistry {
         let (sender, state) = {
             let mut guard = self.queues.lock().expect("tool queue registry poisoned");
             let Some(entry) = guard.get_mut(sid) else {
-                return Err(DispatchError::SessionNotFound);
+                return Err(self.session_missing(sid));
             };
             if !entry.accepting {
                 return Err(DispatchError::SessionStopping);
@@ -438,6 +545,7 @@ async fn dispatch_with_sender(
     lifecycle_cancel: Option<AbortToken>,
     cancel_cleanup_timeout: Duration,
 ) -> Result<Value, DispatchError> {
+    let deadline_cleanup = waits_for_deadline_cleanup(&method);
     let (respond_tx, respond_rx) = oneshot::channel();
     let job = ToolJob {
         method,
@@ -450,6 +558,10 @@ async fn dispatch_with_sender(
         session_id,
     };
     let lifecycle_cancellable = job.lifecycle_cancel.is_some();
+    let dialog_changes = job
+        .inflight
+        .as_ref()
+        .map(|entry| entry.dialog_pending.subscribe());
     if wait_for_capacity {
         let waited = tokio::time::timeout(
             timeout.saturating_add(Duration::from_secs(1)),
@@ -474,15 +586,25 @@ async fn dispatch_with_sender(
             mpsc::error::TrySendError::Closed(_) => DispatchError::QueueClosed,
         });
     }
-    let mut response_timeout = timeout.saturating_add(Duration::from_secs(1));
-    if lifecycle_cancellable {
-        // A lifecycle cancel can arrive at the original RPC deadline and
-        // intentionally keeps the worker alive while extension cleanup
-        // settles. Do not let this outer waiter abandon that reconciliation
-        // early, which could reopen a daemon session whose window is gone.
-        response_timeout = response_timeout.saturating_add(cancel_cleanup_timeout);
-    }
-    let waited = tokio::time::timeout(response_timeout, respond_rx).await;
+    // Lifecycle teardown, native input and effect-aware transfers keep the worker busy
+    // for bounded compensation after their original deadline. Keep the outer
+    // waiter alive for the same grace period so it cannot abandon reconciliation.
+    let response_grace = if lifecycle_cancellable || deadline_cleanup {
+        cancel_cleanup_timeout
+    } else {
+        Duration::ZERO
+    };
+    let deadline = dialog_deadline(
+        timeout
+            .saturating_add(response_grace)
+            .saturating_add(Duration::from_secs(1)),
+        dialog_changes,
+    );
+    tokio::pin!(deadline);
+    let waited = tokio::select! {
+        value = respond_rx => Ok(value),
+        _ = &mut deadline => Err(()),
+    };
     match waited {
         Ok(Ok(Ok(v))) => Ok(v),
         Ok(Ok(Err(rpc))) => Err(DispatchError::Rpc(rpc)),
@@ -548,49 +670,50 @@ async fn forward_one(
             data: None,
         });
     };
+    // The browser is registered but has stopped answering; a call would
+    // only hang until its own deadline. Nothing has been sent yet, so this
+    // is the one place where "not executed" is certain.
+    if client.is_unresponsive() {
+        return Err(super::browsers::extension_unresponsive_error());
+    }
     let rpc_id = next_rpc_id("tool");
-    let waiter = {
-        let mut pending = client.pending.lock().unwrap();
-        pending.register(rpc_id.clone())
-    };
-    let request = Frame::Request(RequestFrame {
+    let request = RequestFrame {
         id: rpc_id.clone(),
         method: job.method.clone(),
         params: Some(job.params.clone()),
-    });
-    // Promote the inflight entry to "forwarded" AND push the WS
-    // request frame to the sink inside the same critical section
-    // (review round 2 C1). The closure runs while the entry's inner
-    // lock is held, so a concurrent `cancel` either:
+    };
+    // Promote the inflight entry to "forwarded" AND hand the WS request
+    // frame to the socket inside the same critical section (review round 2
+    // C1). The closure runs while the entry's inner lock is held, so a
+    // concurrent `cancel` either:
     //   * acquires the lock first → `cancelled` is set → the closure
     //     never runs → no WS frame escapes the daemon;
     //   * acquires the lock AFTER this dispatch → snapshot is
     //     Some/Some → the cancel caller forwards a WS cancel frame,
     //     which is enqueued strictly behind the request we just
     //     pushed, preserving the "request-before-cancel" wire order.
+    // `BrowserClient::dispatch` closes the second half of the same
+    // question: it registers the waiter and pushes the frame under the
+    // socket's pending lock, so a reconnect cannot land between them.
+    let mut dispatched = None;
     let cancel_token = match job.inflight.as_ref() {
         Some(entry) => {
             let outcome =
                 entry.promote_to_forwarded_with(session.browser_id.clone(), rpc_id.clone(), || {
-                    client.sink.send(request).is_ok()
+                    let result = client.dispatch(request);
+                    let sent = result.is_ok();
+                    dispatched = Some(result);
+                    sent
                 });
             match outcome {
                 PromoteOutcome::Promoted => Some(entry.cancel_token()),
                 PromoteOutcome::Cancelled => {
-                    client.pending.lock().unwrap().cancel(&rpc_id);
                     return Err(cancelled_error(
                         Some(entry),
                         "tool dispatch cancelled before forwarding",
                     ));
                 }
-                PromoteOutcome::SendFailed => {
-                    client.pending.lock().unwrap().cancel(&rpc_id);
-                    return Err(RpcError {
-                        code: ErrorCode::ProtocolError,
-                        message: "browser sink closed before request was queued".into(),
-                        data: None,
-                    });
-                }
+                PromoteOutcome::SendFailed => return Err(not_dispatched_error(dispatched)),
             }
         }
         None => {
@@ -602,22 +725,21 @@ async fn forward_one(
                 .as_ref()
                 .is_some_and(AbortToken::is_cancelled)
             {
-                client.pending.lock().unwrap().cancel(&rpc_id);
                 return Err(cancelled_error(
                     None,
                     "session lifecycle cancelled before forwarding",
                 ));
             }
-            if client.sink.send(request).is_err() {
-                client.pending.lock().unwrap().cancel(&rpc_id);
-                return Err(RpcError {
-                    code: ErrorCode::ProtocolError,
-                    message: "browser sink closed before request was queued".into(),
-                    data: None,
-                });
+            dispatched = Some(client.dispatch(request));
+            if dispatched.as_ref().is_some_and(Result::is_err) {
+                return Err(not_dispatched_error(dispatched));
             }
             job.lifecycle_cancel.clone()
         }
+    };
+    let waiter = match dispatched {
+        Some(Ok(waiter)) => waiter,
+        other => return Err(not_dispatched_error(other)),
     };
     let forward_lifecycle_cancel = || {
         if job.lifecycle_cancel.is_none() {
@@ -636,50 +758,136 @@ async fn forward_one(
         .lifecycle_cancel
         .as_ref()
         .map(|_| &forward_lifecycle_cancel as &(dyn Fn() + Sync));
-    let waited = await_with_optional_cancel(
+    let send_deadline_cancel = || {
+        client
+            .sink
+            .send(Frame::Request(RequestFrame {
+                id: format!("deadline-cancel-{rpc_id}"),
+                method: Method::Cancel,
+                params: Some(serde_json::json!({ "rpc_id": rpc_id })),
+            }))
+            .is_ok()
+    };
+    let deadline_cancel: Option<&(dyn Fn() -> bool + Sync)> =
+        waits_for_deadline_cleanup(&job.method).then_some(&send_deadline_cancel);
+    let waited = await_with_dialog_cancel(
         job.timeout,
         job.cancel_cleanup_timeout,
         waiter,
         cancel_token.as_ref(),
         on_abort,
+        deadline_cancel,
+        job.inflight
+            .as_ref()
+            .map(|entry| entry.dialog_pending.subscribe()),
     )
     .await;
-    let response = match waited {
+    // Record what this call implies about the control plane before shaping
+    // its error. Health and business errors are decided separately: the
+    // mark is diagnostic, every arm below keeps its own contract.
+    let silent = matches!(
+        waited,
+        WaitOutcome::Timeout | WaitOutcome::CleanupTimeout | WaitOutcome::TimeoutCleanupFailed
+    ) && client.note_unresponsive_if_silent();
+    let response = match with_link_contract(&job.method, waited) {
         WaitOutcome::Response(resp) => resp,
         WaitOutcome::CancelledAfterResponse(resp) => {
-            if job.method == Method::ToolSessionStop
-                && let ResponseBody::Ok(value) = resp.body
+            if matches!(job.method, Method::ToolSessionStop | Method::ToolTabBorrow)
+                && let ResponseBody::Ok(value) = &resp.body
             {
-                // Teardown crossed its final irreversible boundary before
-                // the cancel landed. Commit the real extension result so the
-                // daemon does not retain a session whose window is gone.
-                return Ok(value);
+                // The extension completed teardown or committed the borrow
+                // before cancellation. Preserve its confirmed result.
+                return Ok(value.clone());
             }
-            // Cancellation wins the external verdict, but only after the
-            // extension's original RPC has settled. Preserve any non-cancel
-            // error so compensation failures remain explicit instead of
-            // being hidden behind a generic cancelled result.
-            if let ResponseBody::Err(err) = resp.body
-                && !matches!(err.code, ErrorCode::Cancelled | ErrorCode::UserAborted)
-            {
-                return Err(err);
+            if is_native_input(&job.method) {
+                if let ResponseBody::Err(err) = &resp.body
+                    && !matches!(err.code, ErrorCode::Cancelled | ErrorCode::UserAborted)
+                {
+                    return Err(err.clone());
+                }
+                let mut error = cancelled_error(
+                    job.inflight.as_deref(),
+                    "tool dispatch cancelled after extension cleanup",
+                );
+                error.data = Some(input_effect_data(Some(&resp.body)));
+                return Err(error);
             }
-            return Err(cancelled_error(
-                job.inflight.as_deref(),
-                "tool dispatch cancelled after extension cleanup",
-            ));
+            // File transfer commits are irreversible. A late cancel cannot
+            // overwrite a confirmed success, and an unknown transfer effect
+            // must remain explicit so callers do not retry or release upload
+            // staging as though nothing happened.
+            if is_effect_aware_transfer(&job.method) {
+                match &resp.body {
+                    ResponseBody::Ok(_) => resp,
+                    ResponseBody::Err(err)
+                        if transfer_effect(err) == Some("unknown")
+                            || transfer_effect(err) == Some("committed") =>
+                    {
+                        return Err(err.clone());
+                    }
+                    ResponseBody::Err(err)
+                        if !matches!(err.code, ErrorCode::Cancelled | ErrorCode::UserAborted) =>
+                    {
+                        return Err(err.clone());
+                    }
+                    ResponseBody::Err(_) => {
+                        return Err(cancelled_error(
+                            job.inflight.as_deref(),
+                            "tool dispatch cancelled after extension cleanup",
+                        ));
+                    }
+                }
+            } else {
+                // For ordinary tools cancellation keeps the existing verdict,
+                // while non-cancel errors still expose compensation failures.
+                if let ResponseBody::Err(err) = resp.body
+                    && !matches!(err.code, ErrorCode::Cancelled | ErrorCode::UserAborted)
+                {
+                    return Err(err);
+                }
+                return Err(cancelled_error(
+                    job.inflight.as_deref(),
+                    "tool dispatch cancelled after extension cleanup",
+                ));
+            }
         }
         WaitOutcome::TimedOutAfterResponse(resp) => match resp.body {
-            ResponseBody::Ok(value) if job.method == Method::ToolSessionStop => {
-                // The close crossed its irreversible boundary during the
-                // timeout cleanup grace. Reconcile daemon state instead of
-                // reopening a session whose window is already gone.
+            body if is_native_input(&job.method) => {
+                if let ResponseBody::Err(err) = &body
+                    && !matches!(err.code, ErrorCode::Cancelled | ErrorCode::UserAborted)
+                {
+                    return Err(err.clone());
+                }
+                return Err(RpcError {
+                    code: ErrorCode::Timeout,
+                    message: format!("tool RPC timed out after {:?}", job.timeout),
+                    data: Some(input_effect_data(Some(&body))),
+                });
+            }
+            ResponseBody::Ok(value)
+                if matches!(
+                    job.method,
+                    Method::ToolSessionStop | Method::ToolTabBorrow | Method::ToolRequestHelp
+                ) || is_effect_aware_transfer(&job.method) =>
+            {
+                // Preserve a completed operation or a settled human-help
+                // outcome received during deadline cleanup.
                 return Ok(value);
             }
             ResponseBody::Err(err)
                 if !matches!(err.code, ErrorCode::Cancelled | ErrorCode::UserAborted) =>
             {
                 return Err(err);
+            }
+            ResponseBody::Err(err) if is_effect_aware_transfer(&job.method) => {
+                return Err(timed_out_transfer_error(&err));
+            }
+            _ if matches!(job.method, Method::ToolTabBorrow | Method::ToolRequestHelp) => {
+                return Err(RpcError {
+                    code: ErrorCode::Timeout,
+                    message: "The human interaction deadline expired; the extension cancelled the request".into(),
+                    data: Some(serde_json::json!({ "reason": "confirmation_timeout" })),
+                });
             }
             _ => {
                 return Err(RpcError {
@@ -691,29 +899,126 @@ async fn forward_one(
         },
         WaitOutcome::CleanupTimeout => {
             client.pending.lock().unwrap().cancel(&rpc_id);
+            if job.method == Method::ToolTabBorrow {
+                return Err(unknown_borrow_error(ErrorCode::Timeout));
+            }
+            if is_effect_aware_transfer(&job.method) {
+                return Err(unknown_transfer_error(
+                    ErrorCode::Timeout,
+                    "cancelled file transfer did not confirm its outcome before cleanup timed out",
+                    "cleanup",
+                    true,
+                ));
+            }
             return Err(RpcError {
                 code: ErrorCode::Timeout,
                 message: format!(
                     "cancelled tool did not finish cleanup within {:?}",
                     job.cancel_cleanup_timeout
                 ),
-                data: Some(serde_json::json!({ "reason": "cancel_cleanup_timeout" })),
+                data: Some(if is_native_input(&job.method) {
+                    input_effect_data(None)
+                } else {
+                    serde_json::json!({ "reason": "cancel_cleanup_timeout" })
+                }),
             });
+        }
+        WaitOutcome::TimeoutCleanupFailed => {
+            client.pending.lock().unwrap().cancel(&rpc_id);
+            if matches!(
+                job.method,
+                Method::ToolEvaluate
+                    | Method::ToolNavigate
+                    | Method::ToolNavigateBack
+                    | Method::ToolNavigateForward
+                    | Method::ToolReload
+            ) {
+                return Err(RpcError {
+                    code: ErrorCode::Timeout,
+                    message: "page operation timed out and extension cleanup could not be confirmed; page effects may have occurred".into(),
+                    data: Some(serde_json::json!({
+                        "reason": "cancel_cleanup_timeout",
+                        "effect_state": "unknown",
+                    })),
+                });
+            }
+            if job.method == Method::ToolTabBorrow {
+                return Err(unknown_borrow_error(ErrorCode::Timeout));
+            }
+            if job.method == Method::ToolRequestHelp {
+                return Err(RpcError {
+                    code: ErrorCode::Timeout,
+                    message: "request-help timed out and cleanup could not be confirmed".into(),
+                    data: Some(serde_json::json!({ "reason": "confirmation_timeout" })),
+                });
+            }
+            if is_native_input(&job.method) || job.method == Method::ToolScreenshotFullPage {
+                return Err(RpcError {
+                    code: ErrorCode::Timeout,
+                    message: if is_native_input(&job.method) {
+                        "input timed out and extension cleanup could not be confirmed".into()
+                    } else {
+                        "full-page screenshot timed out and extension cleanup could not be confirmed".into()
+                    },
+                    data: Some(if is_native_input(&job.method) {
+                        input_effect_data(None)
+                    } else {
+                        serde_json::json!({ "reason": "cancel_cleanup_timeout" })
+                    }),
+                });
+            }
+            return Err(unknown_transfer_error(
+                ErrorCode::Timeout,
+                "file transfer timed out and cleanup could not be confirmed",
+                "cleanup",
+                true,
+            ));
         }
         WaitOutcome::WaiterClosed => {
             client.pending.lock().unwrap().cancel(&rpc_id);
+            if job.method == Method::ToolTabBorrow {
+                return Err(unknown_borrow_error(ErrorCode::ProtocolError));
+            }
+            if is_effect_aware_transfer(&job.method) {
+                return Err(unknown_transfer_error(
+                    ErrorCode::ProtocolError,
+                    "file transfer transport closed after dispatch; outcome is unknown",
+                    "transport",
+                    false,
+                ));
+            }
             return Err(RpcError {
                 code: ErrorCode::ProtocolError,
                 message: "transport closed mid-call".into(),
-                data: None,
+                data: Some(if is_native_input(&job.method) {
+                    input_effect_data(None)
+                } else {
+                    super::browsers::extension_disconnected_data()
+                }),
             });
         }
         WaitOutcome::Timeout => {
             client.pending.lock().unwrap().cancel(&rpc_id);
+            if job.method == Method::ToolTabBorrow {
+                return Err(unknown_borrow_error(ErrorCode::Timeout));
+            }
+            if is_effect_aware_transfer(&job.method) {
+                return Err(unknown_transfer_error(
+                    ErrorCode::Timeout,
+                    "file transfer timed out after dispatch; outcome is unknown",
+                    "transport",
+                    false,
+                ));
+            }
+            // Only a method with nothing to report about side effects can
+            // trade its timeout for the connection diagnosis.
+            if silent && !is_native_input(&job.method) {
+                return Err(super::browsers::extension_unresponsive_error());
+            }
             return Err(RpcError {
                 code: ErrorCode::Timeout,
                 message: format!("tool RPC timed out after {:?}", job.timeout),
-                data: None,
+                data: is_native_input(&job.method).then(|| input_effect_data(None)),
             });
         }
     };
@@ -723,26 +1028,251 @@ async fn forward_one(
     }
 }
 
+/// The daemon synthesises a link failure when the socket carrying an
+/// already-dispatched call is abandoned. It can surface from any wait
+/// stage — plain wait, cancel cleanup or deadline cleanup — so it is
+/// converted once, here, and every arm below then handles an error that
+/// already carries this method's effect contract.
+fn with_link_contract(method: &Method, waited: WaitOutcome) -> WaitOutcome {
+    fn settle(method: &Method, frame: ResponseFrame) -> ResponseFrame {
+        match frame.body {
+            ResponseBody::Err(err) if super::browsers::is_link_failure(&err) => ResponseFrame {
+                id: frame.id,
+                body: ResponseBody::Err(link_failure_error(method, err)),
+            },
+            body => ResponseFrame { id: frame.id, body },
+        }
+    }
+    match waited {
+        WaitOutcome::Response(frame) => WaitOutcome::Response(settle(method, frame)),
+        WaitOutcome::CancelledAfterResponse(frame) => {
+            WaitOutcome::CancelledAfterResponse(settle(method, frame))
+        }
+        WaitOutcome::TimedOutAfterResponse(frame) => {
+            WaitOutcome::TimedOutAfterResponse(settle(method, frame))
+        }
+        other => other,
+    }
+}
+
+/// The request was already on the wire when the connection went away, so
+/// the extension may well have run it. Methods with a side effect keep
+/// their machine-readable "outcome unknown" contract; nothing is replayed.
+fn link_failure_error(method: &Method, err: RpcError) -> RpcError {
+    if is_native_input(method) {
+        return RpcError {
+            code: err.code,
+            message: err.message,
+            data: Some(input_effect_data(None)),
+        };
+    }
+    if is_effect_aware_transfer(method) {
+        return unknown_transfer_error(
+            err.code,
+            "extension reconnected; file transfer outcome is unknown",
+            "transport",
+            false,
+        );
+    }
+    if matches!(method, Method::ToolTabBorrow) {
+        return unknown_borrow_error(err.code);
+    }
+    err
+}
+
+/// Nothing left the daemon, so this call certainly had no effect: report
+/// why without any unknown-outcome wording.
+fn not_dispatched_error(
+    dispatched: Option<Result<oneshot::Receiver<ResponseFrame>, super::browsers::SendError>>,
+) -> RpcError {
+    match dispatched {
+        Some(Err(super::browsers::SendError::Terminated(cause))) => cause,
+        _ => RpcError {
+            code: ErrorCode::ProtocolError,
+            message: "browser sink closed before request was queued".into(),
+            data: Some(super::browsers::extension_disconnected_data()),
+        },
+    }
+}
+
+fn is_native_input(method: &Method) -> bool {
+    matches!(
+        method,
+        Method::ToolClick | Method::ToolPress | Method::ToolWheel | Method::ToolDrag
+    )
+}
+
+// Preserve the extension's knowledge of whether input was sent. A missing
+// cleanup response cannot establish that replaying the input would be safe.
+fn input_effect_data(response: Option<&ResponseBody>) -> Value {
+    if let Some(ResponseBody::Err(err)) = response
+        && let Some(data) = &err.data
+        && matches!(
+            data.get("effect_state").and_then(Value::as_str),
+            Some("none" | "unknown")
+        )
+    {
+        return data.clone();
+    }
+    serde_json::json!({ "reason": "input_outcome_unknown", "effect_state": "unknown" })
+}
+
+// Native inputs and full-page screenshots must cancel at the daemon deadline: local
+// deadlines cannot account for transit delays. Keep the queue held for cleanup.
+// Human interaction deadlines also dismiss their pending UI before releasing the queue.
+fn waits_for_deadline_cleanup(method: &Method) -> bool {
+    matches!(
+        method,
+        Method::ToolScreenshotFullPage
+            | Method::ToolTabBorrow
+            | Method::ToolRequestHelp
+            | Method::ToolEvaluate
+            | Method::ToolNavigate
+            | Method::ToolNavigateBack
+            | Method::ToolNavigateForward
+            | Method::ToolReload
+    ) || is_native_input(method)
+        || is_effect_aware_transfer(method)
+}
+
+fn unknown_borrow_error(code: ErrorCode) -> RpcError {
+    RpcError {
+        code,
+        message:
+            "Tab borrow ended without a confirmed outcome; inspect tab state before continuing"
+                .into(),
+        data: Some(
+            serde_json::json!({ "reason": "borrow_outcome_unknown", "effect_state": "unknown" }),
+        ),
+    }
+}
+
+fn is_effect_aware_transfer(method: &Method) -> bool {
+    matches!(method, Method::ToolUpload | Method::ToolDownload)
+}
+
+fn transfer_effect(err: &RpcError) -> Option<&str> {
+    err.data.as_ref()?.get("effect_state")?.as_str()
+}
+
+fn unknown_transfer_error(
+    code: ErrorCode,
+    message: impl Into<String>,
+    phase: &str,
+    cleanup_failed: bool,
+) -> RpcError {
+    let mut data = serde_json::json!({
+        "reason": "transfer_outcome_unknown",
+        "effect_state": "unknown",
+        "phase": phase,
+    });
+    if cleanup_failed {
+        data["cleanup_state"] = serde_json::json!("failed");
+    }
+    RpcError {
+        code,
+        message: message.into(),
+        data: Some(data),
+    }
+}
+
+fn timed_out_transfer_error(err: &RpcError) -> RpcError {
+    let data = err.data.as_ref();
+    RpcError {
+        code: ErrorCode::Timeout,
+        message: "file transfer timed out after dispatch".into(),
+        data: Some(serde_json::json!({
+            "reason": "transfer_timeout",
+            "effect_state": data
+                .and_then(|value| value.get("effect_state"))
+                .and_then(Value::as_str)
+                .unwrap_or("unknown"),
+            "phase": data
+                .and_then(|value| value.get("phase"))
+                .and_then(Value::as_str)
+                .unwrap_or("cleanup"),
+            "cleanup_state": data
+                .and_then(|value| value.get("cleanup_state"))
+                .and_then(Value::as_str)
+                .unwrap_or("complete"),
+        })),
+    }
+}
+
 #[derive(Debug)]
 enum WaitOutcome {
     Response(bsk_protocol::ResponseFrame),
     CancelledAfterResponse(bsk_protocol::ResponseFrame),
     TimedOutAfterResponse(bsk_protocol::ResponseFrame),
     CleanupTimeout,
+    TimeoutCleanupFailed,
     WaiterClosed,
     Timeout,
 }
 
+/// A dialog adds one bounded 60s decision budget to the original RPC deadline.
+/// Ordinary requests retain their original timeout; repeated dialogs cannot reset it forever.
+async fn dialog_deadline(
+    timeout: Duration,
+    mut changes: Option<tokio::sync::watch::Receiver<bool>>,
+) {
+    let start = tokio::time::Instant::now();
+    let deadline = tokio::time::sleep_until(start + timeout);
+    tokio::pin!(deadline);
+    let mut extended = false;
+    loop {
+        if !extended && changes.as_ref().is_some_and(|rx| *rx.borrow()) {
+            extended = true;
+            deadline
+                .as_mut()
+                .reset(start + timeout + Duration::from_secs(60));
+        }
+        tokio::select! {
+            _ = &mut deadline => return,
+            _ = async {
+                match changes.as_mut() {
+                    Some(rx) => { if rx.changed().await.is_err() { std::future::pending::<()>().await; } },
+                    None => std::future::pending::<()>().await,
+                }
+            } => {},
+        }
+    }
+}
+
+#[cfg(test)]
 async fn await_with_optional_cancel(
+    timeout: Duration,
+    cleanup_timeout: Duration,
+    waiter: oneshot::Receiver<bsk_protocol::ResponseFrame>,
+    cancel: Option<&super::abort::AbortToken>,
+    on_abort: Option<&(dyn Fn() + Sync)>,
+    on_deadline: Option<&(dyn Fn() -> bool + Sync)>,
+) -> WaitOutcome {
+    await_with_dialog_cancel(
+        timeout,
+        cleanup_timeout,
+        waiter,
+        cancel,
+        on_abort,
+        on_deadline,
+        None,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn await_with_dialog_cancel(
     timeout: Duration,
     cleanup_timeout: Duration,
     mut waiter: oneshot::Receiver<bsk_protocol::ResponseFrame>,
     cancel: Option<&super::abort::AbortToken>,
     on_abort: Option<&(dyn Fn() + Sync)>,
+    on_deadline: Option<&(dyn Fn() -> bool + Sync)>,
+    dialog_changes: Option<tokio::sync::watch::Receiver<bool>>,
 ) -> WaitOutcome {
     match cancel {
         Some(token) => {
-            let deadline = tokio::time::sleep(timeout);
+            let deadline = dialog_deadline(timeout, dialog_changes);
             tokio::pin!(deadline);
             tokio::select! {
                 // Cancel keeps same-tick priority, but it no longer drops the
@@ -764,6 +1294,16 @@ async fn await_with_optional_cancel(
                     Err(_) => WaitOutcome::WaiterClosed,
                 },
                 _ = &mut deadline => {
+                    if let Some(send_cancel) = on_deadline {
+                        return if send_cancel() {
+                            match tokio::time::timeout(cleanup_timeout, &mut waiter).await {
+                                Ok(Ok(resp)) => WaitOutcome::TimedOutAfterResponse(resp),
+                                Ok(Err(_)) | Err(_) => WaitOutcome::TimeoutCleanupFailed,
+                            }
+                        } else {
+                            WaitOutcome::TimeoutCleanupFailed
+                        };
+                    }
                     let Some(on_abort) = on_abort else {
                         return WaitOutcome::Timeout;
                     };
@@ -779,7 +1319,16 @@ async fn await_with_optional_cancel(
         None => match tokio::time::timeout(timeout, &mut waiter).await {
             Ok(Ok(resp)) => WaitOutcome::Response(resp),
             Ok(Err(_)) => WaitOutcome::WaiterClosed,
-            Err(_) => WaitOutcome::Timeout,
+            Err(_) => match on_deadline {
+                Some(send_cancel) if send_cancel() => {
+                    match tokio::time::timeout(cleanup_timeout, &mut waiter).await {
+                        Ok(Ok(resp)) => WaitOutcome::TimedOutAfterResponse(resp),
+                        Ok(Err(_)) | Err(_) => WaitOutcome::TimeoutCleanupFailed,
+                    }
+                }
+                Some(_) => WaitOutcome::TimeoutCleanupFailed,
+                None => WaitOutcome::Timeout,
+            },
         },
     }
 }
@@ -804,6 +1353,17 @@ fn cancelled_error(entry: Option<&ToolInflightEntry>, default_msg: &str) -> RpcE
             ErrorCode::UserAborted,
             "tool dispatch interrupted by user".to_string(),
         ),
+        Some(CancelReason::UserMovedTab) => {
+            return RpcError {
+                code: ErrorCode::UserAborted,
+                message:
+                    "session ended because the user moved a controlled tab out of its Agent Window"
+                        .into(),
+                data: Some(
+                    serde_json::json!({ "reason": crate::rpc_reason::SESSION_USER_MOVED_TAB }),
+                ),
+            };
+        }
         Some(CancelReason::Cancelled) | None => (ErrorCode::Cancelled, default_msg.to_string()),
     };
     RpcError {
@@ -864,6 +1424,7 @@ mod await_with_optional_cancel_tests {
             rx,
             Some(&token),
             None,
+            None,
         )
         .await;
         assert!(
@@ -887,6 +1448,7 @@ mod await_with_optional_cancel_tests {
             rx,
             Some(&token),
             None,
+            None,
         )
         .await;
         match outcome {
@@ -907,6 +1469,7 @@ mod await_with_optional_cancel_tests {
             rx,
             None,
             None,
+            None,
         )
         .await;
         assert!(matches!(outcome, WaitOutcome::Response(_)));
@@ -923,6 +1486,7 @@ mod await_with_optional_cancel_tests {
                 Duration::from_secs(1),
                 rx,
                 Some(&token),
+                None,
                 None,
             )
             .await
@@ -948,6 +1512,7 @@ mod await_with_optional_cancel_tests {
             rx,
             Some(&token),
             None,
+            None,
         )
         .await;
         assert!(matches!(outcome, WaitOutcome::CleanupTimeout));
@@ -972,11 +1537,48 @@ mod await_with_optional_cancel_tests {
             rx,
             Some(&token),
             Some(&forward_abort),
+            None,
         )
         .await;
 
         assert!(abort_forwarded.load(Ordering::SeqCst));
         assert!(matches!(outcome, WaitOutcome::TimedOutAfterResponse(_)));
+    }
+
+    #[tokio::test]
+    async fn transfer_deadline_sends_cancel_and_waits_for_cleanup_response() {
+        let (tx, rx) = oneshot::channel();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+            tx.send(dummy_response()).unwrap();
+        });
+        let send_cancel = || true;
+        let outcome = await_with_optional_cancel(
+            Duration::from_millis(1),
+            Duration::from_secs(1),
+            rx,
+            None,
+            None,
+            Some(&send_cancel),
+        )
+        .await;
+        assert!(matches!(outcome, WaitOutcome::TimedOutAfterResponse(_)));
+    }
+
+    #[tokio::test]
+    async fn transfer_deadline_is_unknown_when_cancel_cannot_be_sent() {
+        let (_tx, rx) = oneshot::channel();
+        let send_cancel = || false;
+        let outcome = await_with_optional_cancel(
+            Duration::from_millis(1),
+            Duration::from_secs(1),
+            rx,
+            None,
+            None,
+            Some(&send_cancel),
+        )
+        .await;
+        assert!(matches!(outcome, WaitOutcome::TimeoutCleanupFailed));
     }
 }
 
@@ -1010,6 +1612,21 @@ mod forward_one_cancel_reason_tests {
         let err = super::cancelled_error(Some(&g.entry()), "fallback");
         assert_eq!(err.code, ErrorCode::UserAborted);
         assert_eq!(err.message, "tool dispatch interrupted by user");
+    }
+
+    #[test]
+    fn user_moved_tab_cancellation_retains_terminal_reason() {
+        let reg = Arc::new(ToolInflightRegistry::new());
+        let sid = SessionId("ended".into());
+        let guard = reg.register("move".into(), sid.clone()).unwrap();
+        reg.cancel_session_with_reason(&sid, CancelReason::UserMovedTab);
+        let error = cancelled_error(Some(&guard.entry()), "fallback");
+        assert_eq!(error.code, ErrorCode::UserAborted);
+        assert_eq!(
+            error.data.unwrap()["reason"],
+            crate::rpc_reason::SESSION_USER_MOVED_TAB
+        );
+        assert!(error.message.contains("session ended"));
     }
 
     #[tokio::test]
@@ -1093,4 +1710,112 @@ mod dispatch_unlocked_tests {
         // No session row → forward_one returns NotFound as Rpc.
         assert!(matches!(unlocked, Err(DispatchError::Rpc(_))));
     }
+}
+
+#[cfg(test)]
+mod link_error_tests {
+    use super::*;
+
+    fn reconnected() -> RpcError {
+        crate::daemon::browsers::extension_reconnected_error()
+    }
+
+    fn settled(method: Method, stage: fn(ResponseFrame) -> WaitOutcome) -> RpcError {
+        let frame = ResponseFrame {
+            id: "rpc".into(),
+            body: ResponseBody::Err(reconnected()),
+        };
+        match with_link_contract(&method, stage(frame)) {
+            WaitOutcome::Response(frame)
+            | WaitOutcome::CancelledAfterResponse(frame)
+            | WaitOutcome::TimedOutAfterResponse(frame) => match frame.body {
+                ResponseBody::Err(err) => err,
+                other => panic!("expected an error, got {other:?}"),
+            },
+            _ => panic!("the wait stage must be preserved"),
+        }
+    }
+
+    #[test]
+    fn a_dispatched_call_keeps_its_effect_contract_in_every_wait_stage() {
+        let stages: [fn(ResponseFrame) -> WaitOutcome; 3] = [
+            WaitOutcome::Response,
+            WaitOutcome::CancelledAfterResponse,
+            WaitOutcome::TimedOutAfterResponse,
+        ];
+        for stage in stages {
+            for method in [Method::ToolClick, Method::ToolDrag] {
+                let input = settled(method, stage);
+                assert_eq!(input.data.unwrap()["reason"], "input_outcome_unknown");
+            }
+
+            let upload = settled(Method::ToolUpload, stage);
+            let upload = upload.data.unwrap();
+            assert_eq!(upload["reason"], "transfer_outcome_unknown");
+            assert_eq!(upload["effect_state"], "unknown");
+
+            let borrow = settled(Method::ToolTabBorrow, stage);
+            assert_eq!(borrow.data.unwrap()["reason"], "borrow_outcome_unknown");
+
+            let observe = settled(Method::ToolSnapshot, stage);
+            assert_eq!(observe.data.unwrap()["reason"], "extension_reconnected");
+        }
+    }
+
+    #[test]
+    fn an_extension_error_is_not_mistaken_for_a_link_failure() {
+        let frame = ResponseFrame {
+            id: "rpc".into(),
+            body: ResponseBody::Err(RpcError {
+                code: ErrorCode::Timeout,
+                message: "page did not settle".into(),
+                data: Some(serde_json::json!({ "reason": "navigation_timeout" })),
+            }),
+        };
+        match with_link_contract(&Method::ToolClick, WaitOutcome::Response(frame)) {
+            WaitOutcome::Response(ResponseFrame {
+                body: ResponseBody::Err(err),
+                ..
+            }) => assert_eq!(err.data.unwrap()["reason"], "navigation_timeout"),
+            _ => panic!("extension errors must pass through unchanged"),
+        }
+    }
+}
+
+/// Issue #465 §7: a dispatch against an ended session id turns into a
+/// `not_found` RpcError carrying the tombstoned stop reason.
+#[cfg(test)]
+mod ended_session_dispatch_tests {
+    use super::{super::sessions::SessionEnd, DispatchError};
+    use crate::rpc_reason;
+    use bsk_protocol::ErrorCode;
+
+    #[test]
+    fn ended_session_surfaces_reason_and_timestamp() {
+        let rpc = DispatchError::SessionNotFound {
+            ended: Some(SessionEnd {
+                reason: rpc_reason::SESSION_IDLE_TIMEOUT,
+                ended_unix_ms: 1_760_000_000_000,
+            }),
+        }
+        .into_rpc();
+        assert_eq!(rpc.code, ErrorCode::NotFound);
+        let data = rpc.data.expect("ended session must carry data");
+        assert_eq!(data["reason"], rpc_reason::SESSION_IDLE_TIMEOUT);
+        assert_eq!(data["ended_unix_ms"], 1_760_000_000_000i64);
+    }
+
+    #[test]
+    fn unknown_session_defaults_to_the_plain_not_found() {
+        let rpc = DispatchError::SessionNotFound { ended: None }.into_rpc();
+        assert_eq!(rpc.code, ErrorCode::NotFound);
+        assert_eq!(rpc.data, None);
+    }
+}
+
+fn epoch_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
 }

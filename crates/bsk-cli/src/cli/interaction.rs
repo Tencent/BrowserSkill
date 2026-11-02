@@ -1,20 +1,22 @@
-//! `bsk click` / `bsk fill` / `bsk press` (M7 interaction tools).
+//! `bsk click` / `bsk focus` / `bsk blur` / `bsk fill` / `bsk press`
+//! interaction tools.
 //!
 //! The `<target>` positional accepts either a snapshot ref (`@e3`,
 //! `e3`) or a CSS selector. Use `--ref` / `--selector` explicitly when
 //! the value is ambiguous.
 
 use std::path::PathBuf;
-use std::time::Duration;
 
 use anyhow::Context;
 use bsk_protocol::Method;
 use bsk_protocol::tools::{
-    ClickParams, ClickResult, FillParams, FillResult, HoverParams, HoverResult, KeyModifier,
-    MouseButton, PressParams, PressResult, SelectParams, SelectResult,
+    BlurParams, BlurResult, ClickParams, ClickResult, FillParams, FillResult, FocusParams,
+    FocusResult, HoverParams, HoverResult, KeyModifier, MouseButton, PressParams, PressResult,
+    SelectParams, SelectResult,
 };
 use clap::{Args, ValueEnum};
 
+use crate::cli::business_rpc::ipc_timeout;
 use crate::cli::dialogs::print_dialog_summaries;
 use crate::cli::ensure_daemon::ensure_daemon;
 use crate::cli::error::{CliError, Format};
@@ -71,7 +73,7 @@ pub(crate) fn parse_modifiers(input: &str) -> Result<Vec<KeyModifier>, String> {
     Ok(out)
 }
 
-fn split_target(
+pub(crate) fn split_target(
     positional: Option<String>,
     explicit_ref: Option<String>,
     explicit_selector: Option<String>,
@@ -101,6 +103,15 @@ fn split_target(
 
 #[derive(Debug, Clone, Args)]
 pub struct ClickArgs {
+    /// Bind a Canvas point click to the image returned by screenshot --ref.
+    #[arg(long = "capture", requires_all = ["image_x", "image_y"], conflicts_with = "selector")]
+    pub capture_id: Option<String>,
+    /// X coordinate in the original screenshot PNG, not viewport CSS pixels.
+    #[arg(long, requires = "capture_id")]
+    pub image_x: Option<f64>,
+    /// Y coordinate in the original screenshot PNG.
+    #[arg(long, requires = "capture_id")]
+    pub image_y: Option<f64>,
     /// Snapshot ref (`@e3`, `e3`) or CSS selector. Optional when `--ref`/`--selector` is used.
     pub target: Option<String>,
 
@@ -148,6 +159,9 @@ pub fn dispatch_click(args: ClickArgs, format: Format) -> Result<(), CliError> {
     let modifiers = parse_modifiers(&args.modifiers)
         .map_err(|e| CliError::Local(anyhow::anyhow!("--modifiers: {e}")))?;
     let params = ClickParams {
+        capture_id: args.capture_id.clone(),
+        image_x: args.image_x,
+        image_y: args.image_y,
         session_id: args.session.clone(),
         ref_,
         selector,
@@ -267,6 +281,124 @@ pub fn dispatch_hover(args: HoverArgs, format: Format) -> Result<(), CliError> {
             println!(
                 "hover ok tab={} target={target} at=({}, {})",
                 reply.tab_id, reply.x, reply.y
+            );
+            print_dialog_summaries(&reply.dialogs);
+        }
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// bsk focus / bsk blur
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Args)]
+pub struct FocusArgs {
+    /// Snapshot ref (`@e3`, `e3`) or CSS selector. Optional when `--ref`/`--selector` is used.
+    pub target: Option<String>,
+
+    #[arg(long = "ref")]
+    pub ref_: Option<String>,
+
+    #[arg(long = "selector")]
+    pub selector: Option<String>,
+
+    #[arg(long)]
+    pub session: String,
+
+    #[arg(long = "tab-id")]
+    pub tab_id: Option<i64>,
+
+    #[arg(long, default_value = "30s", value_parser = parse_timeout_ms)]
+    pub timeout: u32,
+}
+
+pub fn dispatch_focus(args: FocusArgs, format: Format) -> Result<(), CliError> {
+    let info = ensure_daemon().context("ensure daemon is running")?;
+    let (ref_, selector) = split_target(args.target, args.ref_, args.selector)?;
+    let params = FocusParams {
+        session_id: args.session,
+        ref_,
+        selector,
+        tab_id: args.tab_id,
+        timeout_ms: Some(args.timeout),
+    };
+    let reply: FocusResult = call(
+        info.sock_path,
+        Method::ToolFocus,
+        params,
+        "focus-1",
+        args.timeout,
+    )?;
+    match format {
+        Format::Json => println!(
+            "{}",
+            serde_json::to_string_pretty(&reply)
+                .map_err(|e| CliError::Local(anyhow::anyhow!(e)))?
+        ),
+        Format::Human => {
+            let target =
+                format_used_target(reply.used_ref.as_deref(), reply.used_selector.as_deref());
+            println!(
+                "focus ok tab={} target={target} focused={}",
+                reply.tab_id, reply.focused
+            );
+            print_dialog_summaries(&reply.dialogs);
+        }
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct BlurArgs {
+    /// Snapshot ref (`@e3`, `e3`) or CSS selector. Optional when `--ref`/`--selector` is used.
+    pub target: Option<String>,
+
+    #[arg(long = "ref")]
+    pub ref_: Option<String>,
+
+    #[arg(long = "selector")]
+    pub selector: Option<String>,
+
+    #[arg(long)]
+    pub session: String,
+
+    #[arg(long = "tab-id")]
+    pub tab_id: Option<i64>,
+
+    #[arg(long, default_value = "30s", value_parser = parse_timeout_ms)]
+    pub timeout: u32,
+}
+
+pub fn dispatch_blur(args: BlurArgs, format: Format) -> Result<(), CliError> {
+    let info = ensure_daemon().context("ensure daemon is running")?;
+    let (ref_, selector) = split_target(args.target, args.ref_, args.selector)?;
+    let params = BlurParams {
+        session_id: args.session,
+        ref_,
+        selector,
+        tab_id: args.tab_id,
+        timeout_ms: Some(args.timeout),
+    };
+    let reply: BlurResult = call(
+        info.sock_path,
+        Method::ToolBlur,
+        params,
+        "blur-1",
+        args.timeout,
+    )?;
+    match format {
+        Format::Json => println!(
+            "{}",
+            serde_json::to_string_pretty(&reply)
+                .map_err(|e| CliError::Local(anyhow::anyhow!(e)))?
+        ),
+        Format::Human => {
+            let target =
+                format_used_target(reply.used_ref.as_deref(), reply.used_selector.as_deref());
+            println!(
+                "blur ok tab={} target={target} was_focused={} focused={}",
+                reply.tab_id, reply.was_focused, reply.focused
             );
             print_dialog_summaries(&reply.dialogs);
         }
@@ -546,19 +678,7 @@ where
     P: serde::Serialize + Send + 'static,
     R: serde::de::DeserializeOwned + Send + 'static,
 {
-    crate::cli::business_rpc::call::<P, R>(
-        sock,
-        id,
-        method,
-        Some(params),
-        interaction_ipc_timeout(timeout_ms),
-    )
-}
-
-fn interaction_ipc_timeout(timeout_ms: u32) -> Duration {
-    Duration::from_millis(u64::from(timeout_ms))
-        .checked_add(Duration::from_secs(15))
-        .unwrap_or(Duration::from_secs(u64::from(timeout_ms / 1_000) + 15))
+    crate::cli::business_rpc::call::<P, R>(sock, id, method, Some(params), ipc_timeout(timeout_ms))
 }
 
 #[cfg(test)]
@@ -599,14 +719,6 @@ mod tests {
         let (r, s) = split_target(Some(".btn".into()), None, None).unwrap();
         assert!(r.is_none());
         assert_eq!(s.as_deref(), Some(".btn"));
-    }
-
-    #[test]
-    fn interaction_ipc_timeout_tracks_user_timeout_with_grace() {
-        assert_eq!(
-            interaction_ipc_timeout(60_000),
-            Duration::from_secs(60) + Duration::from_secs(15)
-        );
     }
 
     #[test]

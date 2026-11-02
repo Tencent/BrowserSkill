@@ -1,6 +1,6 @@
 # BrowserSkill — Privacy Policy
 
-**Last updated:** May 25, 2026
+**Last updated:** October 30, 2026
 
 This Privacy Policy describes how the **BrowserSkill** browser extension (the "Extension") handles information when you install and use it. BrowserSkill is published as part of the open-source [BrowserSkill](https://github.com/Tencent/BrowserSkill) project. The source code is publicly auditable.
 
@@ -10,76 +10,127 @@ If you have questions about this policy, please open an issue in the project rep
 
 ## 1. What BrowserSkill Does
 
-BrowserSkill is a local automation bridge that lets AI coding agents (such as Cursor, Claude Code, Codex, and OpenClaw) drive a Chromium browser through a command-line tool (`bsk`). The Extension communicates exclusively with a local daemon running on your own computer. **The Extension itself does not contact any remote server, cloud service, or AI provider.**
+BrowserSkill lets a user-directed AI agent drive a Chromium browser through the `bsk` command-line tool. By default the Extension connects to a daemon on the same computer. Users can instead explicitly pair with a server running `bsk` or a compatible third-party gateway. In that mode, automation data is sent to the selected server. The Extension does not independently call an AI provider.
 
 ## 2. Single Purpose
 
-The Extension's single purpose is to expose browser automation primitives (navigation, DOM observation, screenshots, clicks, form filling, tab management) to a locally running BrowserSkill daemon over a WebSocket connection on `127.0.0.1`, so that an AI agent invoked by the user can interact with web pages on the user's behalf.
+The Extension exposes browser automation primitives to the user's selected BrowserSkill daemon or compatible gateway so an AI agent can interact with web pages on the user's behalf. Local connections use loopback WebSocket; remote connections use authenticated WSS. The `bsk upload` and `bsk download` file-transfer commands are limited to local mode; authorized video exports use a separate mechanism described below.
+
+Optional website debugging helps the user or their agent inspect requests, page behavior and performance in the same authorized browser task, with browser-local history for later review.
+
+Optional task video recording captures one authorized tab as a silent MP4 so the user can review or save the task's visible progress. It is separate from semantic action recording and website debugging.
 
 ## 3. Data the Extension Accesses
 
-Depending on the commands the user (via their AI agent) sends to the local daemon, the Extension may access the following categories of data **on the user's local device**:
+Depending on the commands the user (via their AI agent) sends to the selected daemon or gateway and the features the user starts in the Extension, it may access the following categories of data **on the user's local device**:
 
 | Category | What is accessed | Why |
 |---|---|---|
-| **Web page content** | The DOM, accessibility tree, HTML, and visible-tab screenshots of pages opened in the BrowserSkill-controlled "Agent Window," or in user tabs the user explicitly approves for borrowing. | Required so the AI agent can read pages, locate elements, and verify results. |
-| **User input simulated by the agent** | Mouse clicks, keystrokes, and form values that the AI agent dispatches through the Chrome DevTools Protocol (CDP). | Required to perform automation actions the user has asked the agent to do. |
-| **Network activity during explicit HAR recording** | Request/response URLs, headers, timing, status, and optionally bodies for the one controlled tab selected by `bsk har start`. Credential-bearing headers and common sensitive query parameters are redacted by default. | Required to produce the HAR validation artifact requested by the user. |
-| **Tab and window metadata** | Tab IDs, URLs, titles, window IDs of the Agent Window and any tabs the user explicitly authorizes. | Required to target automation commands at the correct tab/window. |
-| **Local extension storage** | A randomly generated 8-character instance ID and an optional user-supplied label. | Used so the local daemon can recognize this browser instance across reconnects. No personal data is stored. |
-| **OS notifications** | Permission to display a system notification when the agent requests to "borrow" one of the user's existing tabs. | Required to obtain explicit, per-tab user consent before the agent touches any pre-existing tab. |
+| **Web page content** | The DOM, accessibility tree, HTML, and screenshots of pages controlled in the "Agent Window," tabs borrowed according to the browser's confirmation setting, or pages selected for user-initiated Quick Actions. | Required to read pages, locate elements, verify results, and capture requested screenshots. |
+| **User input simulated by the agent** | Mouse clicks, drags, keystrokes, and form values that the AI agent dispatches through the Chrome DevTools Protocol (CDP). | Required to perform automation actions the user has asked the agent to do. |
+| **Shared-control evidence** | Current observations of controlled pages, page and form changes, bounded manual-activity events, focus and control state, and observation context identifiers. | Used to coordinate human and agent actions, yield control during manual interaction, and reject actions based on stale page evidence. |
+| **Website debugging evidence** | For the selected tab while capture is active: request URLs, methods, headers, request and response bodies when available, status, timing, errors and related network metadata; console messages; agent actions and supported manual input, click, submission and navigation events; bounded visible page text, form-field values and page/performance context. Configured HTTP rules and replay outcomes are also recorded. | Used to inspect and reproduce website behavior, associate operations with requests and page changes, analyze performance, and review or export debugging history. |
+| **Network activity during explicit HAR recording** | Request/response URLs, headers, timing, status, and optionally bodies for the controlled tab selected by `bsk har start`. Credential-bearing headers and common sensitive query parameters are redacted by default. | Required to produce the HAR validation artifact requested by the user. |
+| **Tab and window metadata** | Tab IDs, URLs, titles and window IDs, including user tabs listed to select a tab for borrowing. | Required to target automation commands at the correct tab/window. |
+| **Local extension storage** | A randomly generated 8-character instance ID, an optional user-supplied label, feature preferences including the audit toggle, and optionally a paired endpoint and device credential. | Used to recognize this browser instance and restore user settings. |
+| **File transfers requested by the agent** | Local files explicitly supplied to `bsk upload`, and the file created by a single `bsk download` action. | Required to attach a task file to a web page or return a browser-generated download to the invoking local agent. |
+| **Screenshot exports requested by the user** | Screenshot image data, including full-page captures, and a suggested filename when the user chooses to save an image from the preview. | Used to save the requested image through the browser's Save As dialog. |
+| **Task video recordings** | Rendered frames of the selected task tab; a silent MP4; and metadata such as tab title, task/tab IDs, timestamps, duration, quality, size, completion state and interruption reason. | Used to record an explicitly requested task, recover playable partial recordings, and let the user preview, export or delete the result. |
+| **OS notifications** | System notifications for tab-borrow approval, agent requests for human assistance, and an incompatible running daemon. | Used to request per-tab consent when browser confirmation is enabled, alert the user to a task requiring manual help when enabled, or explain why a daemon upgrade is needed. |
 
-## 4. Data the Extension Does **Not** Collect
+## 4. Data Collection Boundaries
 
-BrowserSkill does **not**:
-
-- Send any data to remote servers, the Extension's authors, or any third party.
-- Call any LLM, AI, or cloud API. The Extension contains no API keys, model identifiers, or remote endpoints.
-- Read browsing history, bookmarks, downloads, saved passwords, or autofill data. Cookie headers are accessed only while the user has explicitly started HAR recording on a controlled tab; they are redacted from the archive by default.
-- Use webcam, microphone, geolocation, or any device sensor.
-- Include analytics, telemetry, crash reporting, advertising SDKs, or fingerprinting code.
-- Track users across websites or across sessions.
-- Sell, rent, share, or transfer user data — there is no user data leaving the device.
+- The Extension sends automation results only to the daemon or gateway the user selects. BrowserSkill's authors do not receive telemetry or operate a mandatory hosted service.
+- The Extension does not independently call LLM, AI or cloud APIs and contains no AI provider API keys.
+- Shared control is enabled for new tasks and their controlled tabs, including explicitly borrowed tabs. The Extension observes page changes and supported manual activity to coordinate that task even when website debugging, video recording and operation audit are off. This does not authorize access to unrelated tabs or start those optional recording features.
+- BrowserSkill does not enumerate the browser's browsing-history database, bookmarks, saved passwords or autofill databases. Website debugging creates its own history of the selected tab's activity during capture; this is separate from the browser's browsing-history database. Download handling supports user-requested screenshot and MP4 exports and the download initiated by an active local `bsk download` call; it does not enumerate download history.
+- Website debugging starts only when explicitly requested by the user or their agent. Each capture targets one task-created or borrowed tab per task, including network evidence from its frames. Merely opening a tab or moving it into the Agent Window does not authorize capture. During capture, supported manual actions in the selected page are recorded as well as agent actions.
+- HAR recording starts only when the user or their agent explicitly runs `bsk har start`. It targets one controlled tab; credential-bearing headers and common sensitive query parameters are redacted by default, and `--include-sensitive` should only be used when the user explicitly needs an unredacted archive. Stopping the recording or ending its task stops new collection, but does not delete an exported archive.
+- Stopping capture, returning or closing its tab, ending its task, or disconnecting stops new collection but does not delete saved debugging history. After a browser or extension restart, unfinished captures are recovered as interrupted rather than automatically resumed.
+- Video recording starts only when explicitly requested by the user or their agent and targets one task-created or borrowed tab. It captures that tab's rendered content, including visible manual activity, without following switches to other task tabs. It does not request microphone or system audio. Recording stops at its time or size limit, or when its tab, task or connection ends; interrupted recordings may retain a playable partial result. Closing the extension popup does not stop an active recording.
+- Automation uses the existing browser profile. Controlled pages may expose personal data and signed-in website sessions; pairing with a server allows its Agent to operate those pages.
+- Incognito tasks require the browser's Allow in incognito setting and cannot borrow ordinary tabs. They use the profile's incognito website session, shared with its other incognito windows. Incognito does not prevent requested observations, debugging evidence, recordings or exported files from being transmitted or retained under the rules in this policy.
+- The Extension includes no analytics, advertising, fingerprinting or cross-site tracking system and does not sell user data.
 
 ## 5. Permissions Justification
 
 The Extension requests the following Chrome permissions. Each is used solely for the single purpose described above.
 
-- **`debugger`** — Attach the Chrome DevTools Protocol to the Agent Window so the agent can observe and interact with pages. Used only on tabs explicitly under BrowserSkill's control.
+- **`debugger`** — Attach the Chrome DevTools Protocol to tabs selected for automation or user-initiated capture, so BrowserSkill can observe, interact with, and capture those pages. For explicitly requested task videos, it captures rendered frames from the authorized tab. During explicitly started website debugging, it also reads network headers and bodies, console and performance evidence, observes page actions and field values, and applies explicitly configured task-local HTTP rules and request replays.
+- **`activeTab`** — Allow temporary access to the active tab when the user invokes the Extension, for user-initiated Quick Actions.
+- **`scripting`** — Inject the full-page screenshot helper into the selected page when it is missing, such as after an extension reload.
+- **`webNavigation`** — Track page navigation and frames so captures, recordings, and human-help completion checks follow the correct document.
 - **`tabs`** — Inspect, create, and close tabs in the Agent Window; query tab metadata.
 - **`windows`** — Create and manage the dedicated Agent Window that isolates agent activity from the user's normal browsing.
-- **`alarms`** — Periodically wake the service worker to keep the local WebSocket connection alive.
-- **`idle`** — Detect when the device returns from idle/locked so the Extension can promptly re-establish the local WebSocket connection after the machine wakes. No idle data is stored or transmitted.
-- **`notifications`** — Show a system notification to obtain user approval before the agent borrows a user-owned tab.
-- **`storage`** — Persist a random instance ID and optional label in `chrome.storage.local`.
-- **Host permission `<all_urls>`** — Inject a small status overlay (showing "Agent Active") on pages controlled by the agent, and enable automation across whatever sites the user directs the agent to. The Extension does **not** read or transmit page content from sites the agent is not actively driving.
+- **`alarms`** — Periodically wake the service worker to keep the selected connection alive and renew remote device authorization.
+- **`idle`** — Detect when the device returns from idle/locked so the Extension can promptly re-establish the selected WebSocket connection after the machine wakes. No idle data is stored or transmitted.
+- **`notifications`** — Request user approval before borrowing a user-owned tab when browser confirmation is enabled, alert the user when an active task requests human assistance when enabled, and notify the user when an incompatible running daemon prevents connection. Notifications support the user's browser task and are not used for advertising or promotional messages.
+- **`downloads`** — Save screenshots, including full-page captures, and recorded MP4 videos when the user explicitly exports them. Track the requested video's download to distinguish successful saves from canceled or failed saves and release its temporary download URL. Also correlate and route the one browser download initiated by an active `bsk download` command. If that claimed transaction fails, BrowserSkill cancels an in-progress file or removes its completed temporary browser file. It is not used to enumerate download history or alter unrelated downloads.
+- **`offscreen`** — Run the video encoder worker and manage temporary video download URLs in an extension-owned offscreen document, allowing explicitly started recording and MP4 finalization to continue when the popup closes. This does not capture other tabs, the desktop or audio.
+- **`storage`** — Persist a random instance ID, optional label, and feature preferences in `chrome.storage.local`, and track pending video exports in `chrome.storage.session`. Remote credentials, website debugging history and the video catalog are stored separately in extension-origin IndexedDB; video files and recovery fragments use the origin-private file system (OPFS).
+- **Host permission `<all_urls>`** — Inject a small status overlay (showing "Agent Active") on pages controlled by the agent, and enable automation across whatever sites the user directs the agent to. Remote connections also use this permission for the selected endpoint. Remote page-content access requires a task-created or explicitly borrowed tab.
 
 ## 6. Where Data Goes
 
-All Extension activity stays on the user's local device. The only network traffic the Extension generates is a WebSocket connection to `ws://127.0.0.1:52800` (loopback only). What the AI agent connected to that local daemon does with the data afterwards (for example, sending a screenshot to an LLM provider) is governed by the privacy policy of that agent or LLM provider, **not** by this policy. BrowserSkill is not a party to those communications.
+Local mode connects to the loopback daemon (default port **52800**). Remote mode sends pairing and renewal requests over HTTPS and automation traffic over authenticated WSS to the endpoint the user explicitly selects. Plain HTTP/WS is allowed only on loopback for development. Pairing secrets are removed from the URL before network requests.
+
+The selected server receives task results, including requested page content, screenshots, recording traces, tab metadata and requested website debugging evidence, which can include retained request/response headers and bodies, console messages and field values. Agents and gateway operators may retain or forward those results under their own policies. In remote mode, enabled operation audit is stored on the daemon's server, not on the browser computer. BrowserSkill does not operate a required intermediary service.
+
+Website debugging history is saved in the current browser profile even when connected to a remote daemon. It is available in the Extension's history page without a daemon connection. The owning agent can request retained evidence while its task retains access to the target tab; ending that task or releasing the tab revokes that agent access, while the user can still review or export local history. Saving history does not automatically upload the entire archive to the selected server. Exported JSON files include retained evidence and can be shared by the user.
+
+Shared-control replies can include observed page text, changes, activity evidence and action results returned through the selected daemon or gateway. When the user or agent explicitly supplies `--save-full` to CLI `cooperate sync` or `step` (DSH: `saveFull`), the complete reply is written as JSON to the specified path on the CLI machine, which may be a remote server. Display filtering does not remove content from that saved full reply. `bsk view` (DSH: `bsk_inspect action:view`) reads an existing file locally without a new browser capture; `--baseline` reuses eligible saved evidence during a live synchronization. File contents may enter the agent's context.
+
+Screenshot exports are saved through the browser's Save As dialog to a location the user chooses. Exporting an image does not itself send the file to a daemon, gateway or external service; screenshots requested by an agent are returned as task results as described above.
+
+Video frames are encoded and temporarily saved in the current browser profile. Opening the local video library does not upload its recordings. Save MP4 as writes to the browser computer through the browser's Save As dialog. An authorized `bsk video save` or `stop --out` request transfers video bytes through the selected daemon or gateway and writes to the specified path on the CLI machine, which may be a remote server. The original connection owner with a valid recording access grant can retrieve the retained video after its task ends, until the recording expires or is deleted. Merely knowing a recording ID does not grant access. An agent or gateway receiving an exported video may retain or share it under its own policies.
+
+When explicitly configured by the user or agent during an active capture, HTTP rules can block or modify requests or supply mock responses. Request replay sends a new request to the same HTTP(S) origin as the source request and current page, using the page's current browser session, including cookies supplied by the browser. Replays can send supplied headers and bodies to that website and change its server-side data. Merely opening history or reading evidence does not replay requests.
 
 ## 7. Data Retention
 
-- The instance ID and optional label persist in `chrome.storage.local` until the user uninstalls the Extension or clears extension storage.
-- Page content, screenshots, DOM snapshots, and other observed data are returned to the local daemon in response to commands and are **not retained by the Extension**. They live only as long as the agent's tool call.
-- An active HAR recording is held in extension memory from `bsk har start` until `bsk har stop` or session teardown. On stop it is returned to the local CLI, which writes the user-selected local file; the Extension does not persist a copy.
+- The instance ID, optional label, and feature preferences persist in `chrome.storage.local` until the user uninstalls the Extension or clears extension storage.
+- Outside website debugging and task video recording, page content, screenshots, DOM snapshots, and other observed data are returned to the selected daemon or gateway in response to commands. Shared control keeps bounded observations and activity state in memory for the active task; semantic action recording and screenshot export may retain temporary results until the operation ends or its results are released. Explicitly saved observation replies, website debugging evidence and task videos follow the separate rules below.
+- Observation and step JSON files are created only when a save path is explicitly requested. They persist on the CLI machine until deleted by the user or agent, with no automatic expiry. Ending the task, clearing extension storage, uninstalling the Extension or closing an incognito window does not delete these files or copies already received by an agent or gateway.
+- Website debugging saves redacted evidence to extension-origin IndexedDB during capture and when capture stops. Stopped records expire after **30 days**, with automatic cleanup when history is read or written. History has retention budgets of **50 records / 50 MiB of serialized data**; older stopped records may be removed earlier to stay within these budgets, while active captures are protected from this cleanup. These budgets do not describe the exact disk size of IndexedDB. Per-capture limits can omit or evict individual requests, bodies and other evidence sooner.
+- Website debugging history survives task completion and disconnection. Users can delete stopped records from the history page; clearing extension storage or uninstalling removes local history. Previously exported files and copies already received by an agent or gateway are not deleted by these actions or by automatic expiration.
+- Task videos, recovery fragments and their catalog survive task completion and disconnection. Recordings expire **24 hours after creation** and expired data is removed on startup or catalog access. Each video is limited to **10 minutes / 256 MiB**, with a **1 GiB** temporary video budget that includes recovery and finalization files; browser storage limits may prevent a recording from starting earlier. Unexpired recordings are not silently deleted to make room. Users can delete retained videos from the library; clearing all extension-local data or uninstalling removes local video data.
+- Video access grants are stored in the browser catalog and, for CLI access, in the CLI's private per-user application directory. Video commands remove expired CLI grant files. Grant expiration does not delete exported videos on disk.
+- Upload and download bytes are staged by the local daemon in a private, session-scoped directory. Download staging is removed after it is copied to the requested destination. Upload staging is retained until the session ends so a later form submission can still read the attached file. Remaining staging is removed when the session ends or disconnects, or when the daemon next starts after a crash.
+- Screenshot and MP4 files saved by the user, authorized CLI video exports, and files copied to the requested download destination remain on disk until the user deletes them. Closing a task, deleting a retained recording, clearing extension storage or uninstalling the Extension does not delete these exported files.
+
+- Operation audit is separate from website debugging and is off by default. When enabled, the selected daemon stores task and operation metadata in `BSK_HOME/audit` (by default `.bsk/audit` under the user home directory). Records include timestamps, tool types, website origins, element names with basic redaction, statuses, and error codes. Input values, page bodies, screenshots, scripts, and file contents are excluded from operation audit; these exclusions do not apply to website debugging history described above. Ended tasks are retained for 30 days and pruned when history is loaded, audit is enabled, a task starts, or the task list is queried. Users can export or delete ended tasks from the audit page. Exported copies are not automatically removed.
+
+- Remote endpoint and device credentials remain in extension-origin IndexedDB until the user selects Local connection, clears extension storage or uninstalls. The server retains device grants until revoked; expired grants cannot connect. Disconnecting does not delete results or audit records already held by a server.
 
 ## 8. User Control
 
 Users can at any time:
 
-- Uninstall the Extension from `chrome://extensions`, which removes all stored data.
+- Uninstall the Extension from `chrome://extensions`, which removes extension storage. Audit files on the daemon host and exported copies must be deleted separately.
+- Stop website debugging from Quick Actions → Website debugging, or ask the agent to stop capture. Open its history page to review or export records and delete stopped records, including when no daemon is connected. Stop an active capture before deleting its record.
+- Stop video recording from its extension panel or ask the agent to stop it; stopping a video leaves the browser task running. Use the recent recordings page to preview, save or delete retained videos, including after a task ends. CLI users can use `bsk video stop`, `save` and `discard`. Stop an active recording before deleting it.
+- Turn operation audit off in Quick Features to stop collecting new audit operations while retaining existing audit history. Previously recorded tasks still receive their final lifecycle status. This switch does not stop website debugging capture or delete its history.
 - Close the Agent Window to stop all agent automation immediately.
-- Deny tab-borrow notification prompts to keep their existing tabs off-limits.
-- Stop the local daemon to sever the WebSocket connection.
+- Use the task's manual-control hold and resume controls to coordinate agent actions. Moving a controlled tab out of its original Agent Window ends that session and leaves its pages in place; moving it back does not resume automation. These controls do not delete saved evidence or exports.
+- Omit observation save options to avoid creating those JSON files, or delete previously saved files on the CLI machine. Browser storage controls do not manage these files.
+- Enable confirmation before borrowing and deny tab-borrow prompts to keep existing tabs off-limits.
+- Disable human-help requests in the Extension's interaction settings to prevent the agent from requesting manual assistance and sending the associated notifications.
+- Disable the connection, choose Local connection, or stop the selected daemon to disconnect.
+- Revoke a paired device from the server with `bsk daemon revoke DEVICE_ID`, or use the gateway operator’s revocation controls.
 
 ## 9. Children's Privacy
 
-The Extension is a developer tool and is not directed at children under 13. It does not knowingly collect personal information from anyone, including children.
+The Extension is a developer tool and is not directed at children under 13.
 
 ## 10. Security
 
-Because the Extension communicates only with `127.0.0.1`, no data is exposed to the network. Users should still avoid running BrowserSkill in untrusted environments, since any local process able to bind to `127.0.0.1:52800` could send commands to the Extension. Run BrowserSkill only on machines you control.
+Local mode trusts processes able to bind the configured loopback port. Remote mode requires explicit pairing and encrypted transport, except for loopback development. The built-in server stores credential hashes, validates connections, supports rotation and closes connections on revocation or expiration. Third-party gateways are responsible for implementing the same authorization lifecycle and isolating device routing.
+
+Remote page reads and operations require task-owned tabs; merely moving a user tab into an Agent Window does not authorize it. Borrowing follows the confirmation preference controlled in the browser. Treat a paired server as trusted to operate your browser profile and signed-in websites. Browser profile files, server data and TLS keys must remain private to trusted local users. See [remote browser connections](../../docs/remote-extension-connection.md) for deployment details.
+
+Website debugging redacts recognized credential headers (such as Authorization, Cookie and Set-Cookie), sensitive URL parameters, JSON/form keys and common credential text patterns before retaining evidence. Observed credential, payment and file-input fields are omitted or redacted. This filtering does not guarantee that arbitrary request/response bodies, console messages, page text or field values contain no personal or confidential information. Treat retained and exported evidence as potentially sensitive, review it before sharing, and delete copies that are no longer needed. See [website debugging](../../docs/website-debugging.md) for capture, redaction and retention limits.
+
+Video captures rendered pixels. Website-debugging redaction rules do not automatically mask video frames, so visible personal information and entered text can appear in recordings. Review videos before exporting or sharing them. See [task video recording](../../docs/video-recording.md) for access, recovery and retention details.
 
 ## 11. Open Source and Auditability
 

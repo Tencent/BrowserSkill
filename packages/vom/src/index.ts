@@ -1,4 +1,13 @@
-export { applyVomInteractionRecovery, isVomReferenceNode, renderVom } from "./render";
+export {
+  applyVomInteractionRecovery,
+  isVomReferenceNode,
+  isVomStructuralRole,
+  prepareObservationRender,
+  type RenderRow,
+  renderVom,
+  selectionMarker,
+} from "./render";
+export { estimateLineTokens, estimateTokens, TOKEN_ESTIMATOR } from "./tokens";
 export type {
   ActiveScopeBlock,
   BlockingLayer,
@@ -7,6 +16,7 @@ export type {
   Rect,
   RenderedRef,
   Viewport,
+  VisualEntry,
   VomNode,
   VomOptions,
   VomRef,

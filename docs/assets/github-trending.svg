@@ -1,0 +1,38 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="440" height="94" viewBox="0 0 440 94" role="img" aria-labelledby="title desc">
+<title id="title">GitHub Trending: best recorded daily rank #4</title>
+<desc id="desc">BrowserSkill reached a recorded best of #4 on the GitHub Trending daily all-language list in September 2026, according to third-party historical records. Source: https://trend.ondo.sh/github/r/Tencent--BrowserSkill/en.html</desc>
+<rect x="1" y="1" width="438" height="92" rx="17" fill="#ffffff" stroke="#7c3aed" stroke-width="2"/>
+<g fill="#5b21b6" transform="translate(55 44)">
+<path d="M-26 2 Q-21 31 0 33 M26 2 Q21 31 0 33" fill="none" stroke="#5b21b6" stroke-width="1.8" stroke-linecap="round"/>
+
+<ellipse cx="-26.35" cy="9.89" rx="2.6" ry="5.5" transform="rotate(-38 -26.35 9.89)"/>
+<ellipse cx="-20.35" cy="10.89" rx="2.3" ry="5" transform="rotate(48 -20.35 10.89)"/>
+<ellipse cx="-24.87" cy="14.51" rx="2.6" ry="5.5" transform="rotate(-26 -24.87 14.51)"/>
+<ellipse cx="-18.87" cy="15.51" rx="2.3" ry="5" transform="rotate(48 -18.87 15.51)"/>
+<ellipse cx="-22.58" cy="18.80" rx="2.6" ry="5.5" transform="rotate(-14 -22.58 18.80)"/>
+<ellipse cx="-16.58" cy="19.80" rx="2.3" ry="5" transform="rotate(48 -16.58 19.80)"/>
+<ellipse cx="-19.57" cy="22.60" rx="2.6" ry="5.5" transform="rotate(-2 -19.57 22.60)"/>
+<ellipse cx="-13.57" cy="23.60" rx="2.3" ry="5" transform="rotate(48 -13.57 23.60)"/>
+<ellipse cx="-15.92" cy="25.80" rx="2.6" ry="5.5" transform="rotate(10 -15.92 25.80)"/>
+<ellipse cx="-9.92" cy="26.80" rx="2.3" ry="5" transform="rotate(48 -9.92 26.80)"/>
+<ellipse cx="-11.76" cy="28.30" rx="2.6" ry="5.5" transform="rotate(22 -11.76 28.30)"/>
+<ellipse cx="-5.76" cy="29.30" rx="2.3" ry="5" transform="rotate(48 -5.76 29.30)"/>
+<ellipse cx="26.35" cy="9.89" rx="2.6" ry="5.5" transform="rotate(38 26.35 9.89)"/>
+<ellipse cx="20.35" cy="10.89" rx="2.3" ry="5" transform="rotate(-48 20.35 10.89)"/>
+<ellipse cx="24.87" cy="14.51" rx="2.6" ry="5.5" transform="rotate(26 24.87 14.51)"/>
+<ellipse cx="18.87" cy="15.51" rx="2.3" ry="5" transform="rotate(-48 18.87 15.51)"/>
+<ellipse cx="22.58" cy="18.80" rx="2.6" ry="5.5" transform="rotate(14 22.58 18.80)"/>
+<ellipse cx="16.58" cy="19.80" rx="2.3" ry="5" transform="rotate(-48 16.58 19.80)"/>
+<ellipse cx="19.57" cy="22.60" rx="2.6" ry="5.5" transform="rotate(2 19.57 22.60)"/>
+<ellipse cx="13.57" cy="23.60" rx="2.3" ry="5" transform="rotate(-48 13.57 23.60)"/>
+<ellipse cx="15.92" cy="25.80" rx="2.6" ry="5.5" transform="rotate(-10 15.92 25.80)"/>
+<ellipse cx="9.92" cy="26.80" rx="2.3" ry="5" transform="rotate(-48 9.92 26.80)"/>
+<ellipse cx="11.76" cy="28.30" rx="2.6" ry="5.5" transform="rotate(-22 11.76 28.30)"/>
+<ellipse cx="5.76" cy="29.30" rx="2.3" ry="5" transform="rotate(-48 5.76 29.30)"/>
+<text x="0" y="10" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="40" font-weight="600">4</text>
+</g>
+<g fill="#4c1d95" font-family="Arial, Helvetica, sans-serif">
+<text x="107" y="25" font-size="12" letter-spacing="1.1">GITHUB TRENDING</text>
+<text x="106" y="55" font-size="25" font-weight="700">Best recorded: #4</text>
+<text x="107" y="78" font-size="12.5">Daily · All languages · Sep 2026</text>
+</g></svg>

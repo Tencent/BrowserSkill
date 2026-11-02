@@ -6,9 +6,9 @@ import { handleHarStart, handleHarStatus, handleHarStop } from "../har";
 function makeSessionManager() {
   return new SessionManager({
     agentWindow: {
-      create: vi.fn(async () => 100),
+      create: vi.fn(async () => ({ windowId: 100, initialTabIds: [7] })),
       remove: vi.fn(async () => {}),
-      ensureActiveTab: vi.fn(async () => {}),
+      ensureActiveTab: vi.fn(async () => 7),
     },
   });
 }

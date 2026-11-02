@@ -1,3 +1,4 @@
+import { createRandomUuid } from "../random-uuid";
 import {
   isRecordFrameQueryMessage,
   RECORD_FRAME_PORT,
@@ -188,7 +189,7 @@ export class RecordFrameCoordinator {
     const recording = this.#recordings.get(requestId);
     if (!recording) return true;
     recording.finishing = true;
-    const commandId = crypto.randomUUID();
+    const commandId = createRandomUuid();
     const results = await Promise.all(
       [...recording.agents.values()].map((agent) => this.#stopAgent(agent, requestId, commandId)),
     );

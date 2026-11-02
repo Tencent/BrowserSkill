@@ -91,6 +91,9 @@ jobs:
       - name: Test plugin
         run: pnpm --filter "${{ env.PACKAGE_NAME }}" test
 
+      - name: Verify packaged skill resources
+        run: pnpm --filter "${{ env.PACKAGE_NAME }}" build && node scripts/check-dsh-package.mjs
+
       - name: Publish to npm
         working-directory: ${{ env.PACKAGE_DIR }}
         env:

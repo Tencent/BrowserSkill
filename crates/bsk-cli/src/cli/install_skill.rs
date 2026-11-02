@@ -1,4 +1,4 @@
-//! `bsk install-skill` — install browser-skill SKILL.md into agent harnesses.
+//! `bsk install-skill` — install the complete browser-skill package into agent harnesses.
 
 use std::io::{self, IsTerminal};
 use std::path::PathBuf;
@@ -11,7 +11,7 @@ use serde::Serialize;
 use crate::cli::error::CliError;
 use crate::cli::status::Output;
 use crate::skill_install::{
-    InstallOptions, all_harness_reports,
+    InstallOptions, SkillSource, all_harness_reports,
     harness::{HarnessId, parse_harness_id},
     load_source, print_harness_table, run_interactive_prompt,
 };
@@ -34,13 +34,23 @@ pub struct InstallSkillArgs {
     #[arg(long, short = 'y')]
     pub yes: bool,
 
-    /// Path to a `SKILL.md` to install instead of the bundled skill.
+    /// Path to a skill directory (with SKILL.md and resources), or a single SKILL.md.
     #[arg(long, value_name = "PATH")]
     pub source: Option<PathBuf>,
 
     /// Overwrite an existing `browser-skill` skill installation.
     #[arg(long)]
     pub force: bool,
+}
+
+impl InstallSkillArgs {
+    fn source_kind(&self) -> SkillSource {
+        if self.source.is_some() {
+            SkillSource::Custom
+        } else {
+            SkillSource::Bundled
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -61,6 +71,7 @@ pub fn dispatch(args: InstallSkillArgs, output: Output) -> Result<(), CliError> 
     let install_output = crate::skill_install::install_to_harnesses(&InstallOptions {
         harnesses: &harnesses,
         source: &source,
+        source_kind: args.source_kind(),
         force: args.force,
         home: None,
     });
@@ -200,6 +211,44 @@ mod tests {
             detection_detail: None,
             installed: false,
         }
+    }
+
+    #[test]
+    fn identical_explicit_source_remains_custom_after_install_and_upgrade() {
+        use crate::skill_install::{DEFAULT_SKILL_MD, SOURCE_CUSTOM, SOURCE_MARKER_FILE, sync};
+        let home = tempfile::tempdir().unwrap();
+        let path = home.path().join("my-skill.md");
+        std::fs::write(&path, DEFAULT_SKILL_MD).unwrap();
+        let mut args = args(false, false);
+        assert_eq!(args.source_kind(), SkillSource::Bundled);
+        args.source = Some(path);
+        let source = load_source(args.source.as_deref()).unwrap();
+        let result = crate::skill_install::install_to_harnesses(&InstallOptions {
+            harnesses: &[HarnessId::Cursor],
+            source: &source,
+            source_kind: args.source_kind(),
+            force: false,
+            home: Some(home.path()),
+        });
+        assert!(result.success());
+        let dir = HarnessId::Cursor.skill_dest_dir_for_home(home.path());
+        assert_eq!(
+            std::fs::read_to_string(dir.join(SOURCE_MARKER_FILE)).unwrap(),
+            SOURCE_CUSTOM
+        );
+        // Matching bytes do not turn a custom installation into an up-to-date managed one.
+        assert_eq!(
+            sync::sync_installed_skills(home.path()).protected,
+            vec![HarnessId::Cursor]
+        );
+        assert_eq!(
+            sync::sync_with_source(home.path(), "next bundled version").protected,
+            vec![HarnessId::Cursor]
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.join("SKILL.md")).unwrap(),
+            DEFAULT_SKILL_MD
+        );
     }
 
     #[test]

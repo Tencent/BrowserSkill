@@ -1,30 +1,35 @@
 /**
- * dsh-plugin-browserskill browser half: the `browser_screenshot` keyed
- * toolview plus the observation overlay (live thumbnails + interrupt). The
- * default carrier is a floating card on the `shell.overlay` seat; when the
- * dsh-better-sidebar plugin provides its `betterSidebar` service, the view
- * moves into a sidebar tab instead (see observation-sidebar.tsx).
+ * dsh-plugin-browserskill browser half: the `bsk_inspect` keyed toolview
+ * plus the observation overlay (live thumbnails + interrupt). The
+ * native right Sidebar is preferred when the host provides it; older hosts
+ * keep the floating card. The user may switch to floating for this page.
  */
 
+import type { Context as ClientContext } from "@deepseek-ai/cordis";
+import type { ISessions } from "@deepseek-ai/dsh-api-session-controller/client";
 import type { ImageAttachmentRef } from "@deepseek-ai/dsh-attachment";
-import type { ClientContext, ISessions, SessionId } from "@deepseek-ai/dsh-client-runtime/client";
 // Type-only: pulls the 'shell.overlay' SlotMap merge into scope.
 import type {} from "@deepseek-ai/dsh-client-ui-layout/client";
+// Current renderer/session adapters own Context.slots and the session-scoped props.
+import type {} from "@deepseek-ai/dsh-client-ui-renderer/client";
+import type {} from "@deepseek-ai/dsh-client-ui-session/client";
 import type { ToolCallViewProps } from "@deepseek-ai/dsh-client-ui-tool/client";
-import { createElement } from "react";
+import type { SessionId } from "@deepseek-ai/dsh-session";
+import { createElement, useCallback } from "react";
 // Scope-prefixed BSK design tokens and utility sheet (injected verbatim as
 // <style> tags; selectors stay unhashed so `cn(..., "bsk-obs")` roots match).
 import "./bsk-tokens.nomodule.css";
 import "./bsk-ui.nomodule.css";
+import toolNames from "../tool-names.json";
+import { BrowserInspectToolView } from "./BrowserInspectToolView";
 import { ObservationOverlay } from "./ObservationOverlay";
-import { type BetterSidebarLike, registerObservationSidebar } from "./observation-sidebar";
+import { type NativeSidebarHost, registerObservationSidebar } from "./observation-sidebar";
 import { type EventSourceLike, ObservationClientStore } from "./observation-store";
-import { ScreenshotToolView } from "./ScreenshotToolView";
 
 /** Required services: slots, session-scoped attachment reads, and the overlay seat. */
 export const inject = ["slots", "sessions"];
 
-/** Resolve one durable image attachment into a browser blob URL. */
+/** Return a fresh component-owned URL; the host's loadImage may return shared cached URLs. */
 async function loadSessionImage(
   sessions: ISessions,
   sessionId: SessionId,
@@ -65,13 +70,18 @@ export function apply(ctx: ClientContext): void {
   const sessions = ctx.get("sessions") as unknown as ISessions;
   ctx.slots.inject("tool.call.toolview", () =>
     ctx.slots.register(
-      { name: "tool.call.toolview", key: "browser_screenshot" },
-      (props: ToolCallViewProps) =>
-        createElement(ScreenshotToolView, {
-          ...props,
-          loadImage: (attachment: ImageAttachmentRef) =>
+      { name: "tool.call.toolview", key: toolNames.inspect },
+      function BrowserInspectSessionView(props: ToolCallViewProps) {
+        const loadImage = useCallback(
+          (attachment: ImageAttachmentRef) =>
             loadSessionImage(sessions, props.sessionId, attachment),
-        }),
+          [props.sessionId],
+        );
+        return createElement(BrowserInspectToolView, {
+          ...props,
+          loadImage,
+        });
+      },
     ),
   );
   const store = new ObservationClientStore({
@@ -84,14 +94,9 @@ export function apply(ctx: ClientContext): void {
       createElement(ObservationOverlay, { store }),
     ),
   );
-  // Optional carrier upgrade: when the dsh-better-sidebar plugin is installed,
-  // its service moves the tracking view into a sidebar tab (the floating
-  // overlay hides itself through the sidebar-mode flag). In profiles without
-  // the sidebar plugin this fiber never runs and nothing changes.
-  ctx.inject(["betterSidebar"], (injected) =>
-    registerObservationSidebar(
-      (injected as unknown as { betterSidebar: BetterSidebarLike }).betterSidebar,
-      store,
-    ),
+  // Optional services, not required client packages: profiles without the
+  // native sidebar still load this bundle and use the floating observation.
+  ctx.inject(["sidebarRight", "sidebarRightTabs"], (injected) =>
+    registerObservationSidebar(injected as unknown as NativeSidebarHost, store),
   );
 }

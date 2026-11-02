@@ -1,5 +1,4 @@
-//! M7 integration: drive the 7 new tool RPCs (navigate /
-//! navigate_back / navigate_forward / reload / click / fill / press)
+//! M7 integration: drive interaction and navigation tool RPCs
 //! through the IPC + per-session queue + fake extension and assert
 //! the wire shapes line up. The extension stub mirrors each method's
 //! `*Result` so we exercise the daemon's serialise → forward →
@@ -13,11 +12,13 @@ use bsk::daemon::{self, DaemonConfig};
 use bsk::ipc_client::IpcClient;
 use bsk_protocol::system::{HandshakeParams, HandshakeResult};
 use bsk_protocol::tools::{
-    ClickParams, ClickResult, FillParams, FillResult, KeyModifier, MouseButton, NavigateBackParams,
-    NavigateBackResult, NavigateForwardParams, NavigateForwardResult, NavigateParams,
-    NavigateResult, PressParams, PressResult, ReloadParams, ReloadResult, SelectParams,
-    SelectResult, SessionStartParams, SessionStartResult, WaitUntil,
+    BlurParams, BlurResult, ClickParams, ClickResult, FillParams, FillResult, FocusParams,
+    FocusResult, KeyModifier, MouseButton, NavigateBackParams, NavigateBackResult,
+    NavigateForwardParams, NavigateForwardResult, NavigateParams, NavigateResult, PressParams,
+    PressResult, ReloadParams, ReloadResult, SelectParams, SelectResult, SessionStartParams,
+    SessionStartResult, WaitUntil, WheelParams, WheelResult,
 };
+use bsk_protocol::tools::{ScrollToParams, ScrollToResult};
 use bsk_protocol::{
     BrowserPeerInfo, ErrorCode, Frame, Method, RequestFrame, ResponseBody, ResponseFrame, RpcError,
 };
@@ -73,10 +74,14 @@ async fn connect_ext(addr: std::net::SocketAddr) -> Ws {
 }
 
 async fn do_handshake(ws: &mut Ws) -> HandshakeResult {
+    do_handshake_protocol(ws, bsk::daemon::state::PROTOCOL_VERSION).await
+}
+
+async fn do_handshake_protocol(ws: &mut Ws, protocol: &str) -> HandshakeResult {
     let params = HandshakeParams {
         client: "browser-skill-extension".into(),
         version: "0.1.0-dev.0".parse().unwrap(),
-        protocol_version: "1.0".into(),
+        protocol_version: protocol.into(),
         instance_id: TEST_EXT_ID.into(),
         browser: BrowserPeerInfo {
             name: "chrome".into(),
@@ -135,6 +140,7 @@ where
                     window_id += 1;
                     ResponseBody::Ok(
                         serde_json::to_value(SessionStartResult {
+                            interaction: None,
                             agent_window_id: Some(id),
                         })
                         .unwrap(),
@@ -342,6 +348,9 @@ async fn click_round_trips_ref_and_modifiers() {
         }
         let p: ClickParams = serde_json::from_value(params).unwrap();
         assert_eq!(p.ref_.as_deref(), Some("@e3"));
+        assert_eq!(p.capture_id.as_deref(), Some("capture-test"));
+        assert_eq!(p.image_x, Some(12.5));
+        assert_eq!(p.image_y, Some(34.0));
         assert_eq!(p.button, Some(MouseButton::Right));
         assert_eq!(
             p.modifiers,
@@ -365,6 +374,9 @@ async fn click_round_trips_ref_and_modifiers() {
         &sock,
         Method::ToolClick,
         ClickParams {
+            capture_id: Some("capture-test".into()),
+            image_x: Some(12.5),
+            image_y: Some(34.0),
             session_id,
             ref_: Some("@e3".into()),
             selector: None,
@@ -379,6 +391,137 @@ async fn click_round_trips_ref_and_modifiers() {
     .expect("click ok");
     assert_eq!(result.used_ref.as_deref(), Some("e3"));
     assert!((result.x - 12.5).abs() < f64::EPSILON);
+    handle.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn focus_round_trips_verified_state() {
+    let (handle, sock) = spawn_daemon().await;
+    let mut ws = connect_ext(handle.ws_addr()).await;
+    let _ = do_handshake(&mut ws).await;
+
+    run_extension(ws, |req| {
+        assert_eq!(req.method, Method::ToolFocus);
+        let params = req.params.clone().unwrap();
+        let p: FocusParams = serde_json::from_value(params).unwrap();
+        assert_eq!(p.ref_.as_deref(), Some("@e3"));
+        ResponseBody::Ok(
+            serde_json::to_value(FocusResult {
+                tab_id: 9,
+                used_ref: Some("e3".into()),
+                used_selector: None,
+                focused: true,
+                dialogs: vec![],
+            })
+            .unwrap(),
+        )
+    });
+
+    let session_id = ipc_session_start(&sock).await;
+    let result: FocusResult = ipc_tool_call(
+        &sock,
+        Method::ToolFocus,
+        FocusParams {
+            session_id,
+            ref_: Some("@e3".into()),
+            selector: None,
+            tab_id: None,
+            timeout_ms: Some(5_000),
+        },
+    )
+    .await
+    .expect("focus ok");
+    assert!(result.focused);
+    assert_eq!(result.used_ref.as_deref(), Some("e3"));
+    handle.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn blur_round_trips_previous_focus_state() {
+    let (handle, sock) = spawn_daemon().await;
+    let mut ws = connect_ext(handle.ws_addr()).await;
+    let _ = do_handshake(&mut ws).await;
+
+    run_extension(ws, |req| {
+        assert_eq!(req.method, Method::ToolBlur);
+        let params = req.params.clone().unwrap();
+        let p: BlurParams = serde_json::from_value(params).unwrap();
+        assert_eq!(p.selector.as_deref(), Some("#search"));
+        ResponseBody::Ok(
+            serde_json::to_value(BlurResult {
+                tab_id: 9,
+                used_ref: None,
+                used_selector: Some("#search".into()),
+                was_focused: true,
+                focused: false,
+                dialogs: vec![],
+            })
+            .unwrap(),
+        )
+    });
+
+    let session_id = ipc_session_start(&sock).await;
+    let result: BlurResult = ipc_tool_call(
+        &sock,
+        Method::ToolBlur,
+        BlurParams {
+            session_id,
+            ref_: None,
+            selector: Some("#search".into()),
+            tab_id: None,
+            timeout_ms: Some(5_000),
+        },
+    )
+    .await
+    .expect("blur ok");
+    assert!(result.was_focused);
+    assert!(!result.focused);
+    assert_eq!(result.used_selector.as_deref(), Some("#search"));
+    handle.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn scroll_to_round_trips_visible_bounds() {
+    let (handle, sock) = spawn_daemon().await;
+    let mut ws = connect_ext(handle.ws_addr()).await;
+    let _ = do_handshake(&mut ws).await;
+
+    run_extension(ws, |req| {
+        assert_eq!(req.method, Method::ToolScrollTo);
+        let params = req.params.clone().unwrap();
+        let parsed: ScrollToParams = serde_json::from_value(params).unwrap();
+        assert_eq!(parsed.ref_.as_deref(), Some("@e3"));
+        ResponseBody::Ok(
+            serde_json::to_value(ScrollToResult {
+                tab_id: 9,
+                used_ref: Some("e3".into()),
+                used_selector: None,
+                x: 10.0,
+                y: 20.0,
+                width: 100.0,
+                height: 40.0,
+                dialogs: vec![],
+            })
+            .unwrap(),
+        )
+    });
+
+    let session_id = ipc_session_start(&sock).await;
+    let result: ScrollToResult = ipc_tool_call(
+        &sock,
+        Method::ToolScrollTo,
+        ScrollToParams {
+            session_id,
+            ref_: Some("@e3".into()),
+            selector: None,
+            tab_id: None,
+            timeout_ms: Some(5_000),
+        },
+    )
+    .await
+    .expect("scroll-to ok");
+    assert_eq!(result.used_ref.as_deref(), Some("e3"));
+    assert_eq!(result.width, 100.0);
     handle.shutdown().await;
 }
 
@@ -602,6 +745,9 @@ async fn m7_tools_propagate_extension_errors() {
         &sock,
         Method::ToolClick,
         ClickParams {
+            capture_id: None,
+            image_x: None,
+            image_y: None,
             session_id: session_id.clone(),
             ref_: Some("@e1".into()),
             selector: None,
@@ -668,4 +814,178 @@ async fn m7_tools_propagate_extension_errors() {
     assert_eq!(select.code, ErrorCode::CdpFailed);
 
     handle.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn wheel_round_trips_native_deltas_and_point() {
+    let (handle, sock) = spawn_daemon().await;
+    let mut ws = connect_ext(handle.ws_addr()).await;
+    let _ = do_handshake(&mut ws).await;
+
+    run_extension(ws, |req| {
+        assert_eq!(req.method, Method::ToolWheel);
+        let params: WheelParams = serde_json::from_value(req.params.clone().unwrap()).unwrap();
+        assert_eq!(params.selector.as_deref(), Some("#panel"));
+        assert_eq!(params.delta_x, 10.0);
+        assert_eq!(params.delta_y, 600.0);
+        ResponseBody::Ok(
+            serde_json::to_value(WheelResult {
+                tab_id: 9,
+                used_ref: None,
+                used_selector: Some("#panel".into()),
+                x: 320.0,
+                y: 240.0,
+                delta_x: 10.0,
+                delta_y: 600.0,
+                dialogs: vec![],
+            })
+            .unwrap(),
+        )
+    });
+
+    let session_id = ipc_session_start(&sock).await;
+    let result: WheelResult = ipc_tool_call(
+        &sock,
+        Method::ToolWheel,
+        WheelParams {
+            session_id,
+            ref_: None,
+            selector: Some("#panel".into()),
+            tab_id: None,
+            delta_x: 10.0,
+            delta_y: 600.0,
+            modifiers: None,
+            timeout_ms: Some(5_000),
+        },
+    )
+    .await
+    .expect("wheel ok");
+    assert_eq!(result.used_selector.as_deref(), Some("#panel"));
+    assert_eq!((result.delta_x, result.delta_y), (10.0, 600.0));
+    handle.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn click_move_click_is_never_forwarded_as_a_legacy_held_drag() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    for protocol in ["1.6", "1.7"] {
+        let (handle, sock) = spawn_daemon().await;
+        let mut ws = connect_ext(handle.ws_addr()).await;
+        do_handshake_protocol(&mut ws, protocol).await;
+        let forwarded = Arc::new(AtomicUsize::new(0));
+        let count = forwarded.clone();
+        run_extension(ws, move |req| {
+            assert_eq!(req.method, Method::ToolDrag);
+            let p: bsk_protocol::tools::DragParams =
+                serde_json::from_value(req.params.clone().unwrap()).unwrap();
+            if protocol == "1.6" {
+                assert_eq!(p.mode, None);
+            }
+            count.fetch_add(1, Ordering::SeqCst);
+            ResponseBody::Ok(
+                json!({"tab_id":17,"source":{"x":10,"y":10},"target":{"x":100,"y":10}}),
+            )
+        });
+        let session = ipc_session_start(&sock).await;
+        let mut params = json!({"session_id":session,"source":{"selector":"#start"},"target":{"selector":"#end"},"mode":"click-move-click"});
+        let result: Result<Value, RpcError> =
+            ipc_tool_call(&sock, Method::ToolDrag, params.clone()).await;
+        if protocol == "1.6" {
+            let error = result.unwrap_err();
+            assert_eq!(error.code, ErrorCode::Unsupported);
+            assert_eq!(error.data.unwrap()["effect_state"], "none");
+            assert_eq!(forwarded.load(Ordering::SeqCst), 0);
+        } else {
+            assert_eq!(result.unwrap()["tab_id"], 17);
+        }
+        params.as_object_mut().unwrap().remove("mode");
+        let legacy: Value = ipc_tool_call(&sock, Method::ToolDrag, params)
+            .await
+            .unwrap();
+        assert_eq!(legacy["tab_id"], 17);
+        assert_eq!(
+            forwarded.load(Ordering::SeqCst),
+            if protocol == "1.6" { 1 } else { 2 }
+        );
+        handle.shutdown().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn target_control_and_conditions_negotiate_before_browser_dispatch() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    for protocol in ["1.7", "1.8"] {
+        let (handle, sock) = spawn_daemon().await;
+        let mut ws = connect_ext(handle.ws_addr()).await;
+        do_handshake_protocol(&mut ws, protocol).await;
+        let forwarded = Arc::new(AtomicUsize::new(0));
+        let count = forwarded.clone();
+        run_extension(ws, move |req| {
+            count.fetch_add(1, Ordering::SeqCst);
+            ResponseBody::Ok(req.params.clone().unwrap())
+        });
+        let session = ipc_session_start(&sock).await;
+        for (method, params) in [
+            (
+                Method::ToolCooperate,
+                json!({"session_id":session,"action":"sync","control_policy":"target"}),
+            ),
+            (
+                Method::ToolCooperate,
+                json!({"session_id":session,"action":"sync","control_policy":"auto"}),
+            ),
+            (
+                Method::ToolClick,
+                json!({"session_id":session,"ref":"e1","context_id":"c","observation_id":"o", "expect":[{"target":"#price","field":"text","equals":"$12"}]}),
+            ),
+        ] {
+            let result: Result<Value, RpcError> =
+                ipc_tool_call(&sock, method, params.clone()).await;
+            if protocol == "1.7" {
+                let error = result.unwrap_err();
+                assert_eq!(error.code, ErrorCode::Unsupported);
+                let data = error.data.unwrap();
+                assert_eq!(data["effect_state"], "none");
+                assert_eq!(data["required_protocol"], "1.8");
+                assert!(
+                    data["recovery"]
+                        .as_str()
+                        .unwrap()
+                        .contains("every sync/enable and step")
+                );
+                assert_eq!(forwarded.load(Ordering::SeqCst), 0);
+            } else {
+                // The daemon preserves exact conditions and explicit evidence.
+                let result = result.unwrap();
+                for (key, value) in params.as_object().unwrap() {
+                    assert_eq!(&result[key], value);
+                }
+            }
+        }
+        // Explicit strict remains available on every sync with an older extension.
+        for _ in 0..2 {
+            let strict: Value = ipc_tool_call(
+                &sock,
+                Method::ToolCooperate,
+                json!({"session_id":session,"action":"sync","control_policy":"strict"}),
+            )
+            .await
+            .unwrap();
+            assert_eq!(strict["control_policy"], "strict");
+        }
+        // Legacy visual observation IDs remain usable on older extensions.
+        let legacy: Value = ipc_tool_call(
+            &sock,
+            Method::ToolClick,
+            json!({"session_id":session,"ref":"e1","context_id":"old","observation_id":"visual"}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(legacy["observation_id"], "visual");
+        assert_eq!(
+            forwarded.load(Ordering::SeqCst),
+            if protocol == "1.7" { 3 } else { 6 }
+        );
+        handle.shutdown().await;
+    }
 }

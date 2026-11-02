@@ -3,9 +3,8 @@
 // composer's way); collapsed = a status capsule; "pop out" upgrades the same
 // content to a native Document PiP window (user gesture required by the
 // browser). Multi-session renders a meeting-style strip under the focus view.
-// When the dsh-better-sidebar plugin is installed the tracking view moves
-// into a sidebar tab instead (see observation-sidebar.tsx) and this floating
-// card hides itself via the sidebar-mode flag. Visuals follow the
+// A native DSH sidebar hosts the view by default when available; the user
+// can switch to this floating card for the current page. Visuals follow the
 // BrowserSkill product family: @browser-skill/ui components and oklch tokens
 // on a .bsk-obs scope root, so the card reads as BSK's own surface without
 // leaking styles into (or inheriting themes from) the shell.
@@ -15,10 +14,13 @@ import {
   RiArrowDownSLine,
   RiCheckLine,
   RiCloseCircleLine,
+  RiCloseLine,
   RiErrorWarningLine,
+  RiLayoutRightLine,
   RiPictureInPicture2Line,
   RiPushpinFill,
   RiStopCircleLine,
+  RiWindowLine,
 } from "@remixicon/react";
 
 // remixicon's component types target @types/react 19 while the dsh shell
@@ -28,10 +30,13 @@ const asIcon = (component: unknown): IconComponent => component as IconComponent
 const IconStop = asIcon(RiStopCircleLine);
 const IconPip = asIcon(RiPictureInPicture2Line);
 const IconDown = asIcon(RiArrowDownSLine);
+const IconClose = asIcon(RiCloseLine);
 const IconWarn = asIcon(RiErrorWarningLine);
 const IconPin = asIcon(RiPushpinFill);
 const IconCloseSession = asIcon(RiCloseCircleLine);
 const IconCheck = asIcon(RiCheckLine);
+const IconSidebar = asIcon(RiLayoutRightLine);
+const IconWindow = asIcon(RiWindowLine);
 
 import {
   type ReactNode,
@@ -46,8 +51,13 @@ import { createPortal } from "react-dom";
 import type { SessionObservation } from "../observation";
 import css from "./ObservationOverlay.module.css";
 import type { ObservationClientStore } from "./observation-store";
-import { focusOf, statusOf, useObservationView, usePip } from "./observation-view";
-import { getSidebarMode, subscribeSidebarMode } from "./sidebar-mode";
+import {
+  focusOf,
+  statusOf,
+  useObservationView,
+  usePip,
+  useThumbnailObservation,
+} from "./observation-view";
 
 // The pure view helpers live in observation-view (shared with the sidebar
 // tab); re-export so existing imports of this module keep working.
@@ -229,14 +239,16 @@ function StopSessionAction(props: {
   );
 }
 
+type ChromeState = "active" | "idle" | "error" | "reconnecting";
+
 /** Flat status dot, specced after the BSK popup's ConnectionStatusIndicator. */
-function StatusDot({ state }: { state: "active" | "idle" | "error" | "dead" }) {
+function StatusDot({ state }: { state: ChromeState }) {
   const color =
     state === "active"
       ? "bg-emerald-500"
       : state === "error"
         ? "bg-red-500"
-        : state === "dead"
+        : state === "reconnecting"
           ? "bg-amber-500"
           : "bg-muted-foreground/40";
   return (
@@ -263,7 +275,7 @@ function StripItem(props: {
     store.ensureThumbnail(thumbId);
   }, [store, thumbId]);
   const thumb = store.getSnapshot().displayFrames[obs.sessionId];
-  const state = obs.dead === true ? "dead" : statusOf(obs);
+  const state = statusOf(obs);
   return (
     <div
       className={css["strip-item"]}
@@ -291,7 +303,7 @@ function StripItem(props: {
         <StatusDot state={state} />
         {pinned ? <IconPin size={9} className={css["pin-badge"]} aria-label="pinned" /> : null}
       </button>
-      {hover && !pinned && obs.dead !== true ? (
+      {hover && !pinned ? (
         <button
           type="button"
           className={css["strip-interrupt"]}
@@ -315,11 +327,17 @@ export function OverlayBody(props: {
   focus: SessionObservation | undefined;
   sessions: readonly SessionObservation[];
   available: boolean;
+  /** The live feed dropped; sessions shown are the last ones received. */
+  reconnecting: boolean;
   pinnedId: string | null;
   onTogglePin: (sessionId: string) => void;
   now: number;
   onPopOut?: (() => void) | undefined;
   onCollapse?: (() => void) | undefined;
+  onClosePip?: (() => void) | undefined;
+  onUseFloating?: () => void;
+  onUseSidebar?: () => void;
+  visible?: boolean;
   inPip: boolean;
   onHeaderPointerDown?: (event: ReactPointerEvent<HTMLDivElement>) => void;
 }) {
@@ -328,15 +346,21 @@ export function OverlayBody(props: {
     focus,
     sessions,
     available,
+    reconnecting,
     pinnedId,
     onTogglePin,
     now,
     onPopOut,
     onCollapse,
+    onClosePip,
+    onUseFloating,
+    onUseSidebar,
+    visible = true,
     inPip,
     onHeaderPointerDown,
   } = props;
   const [interrupting, setInterrupting] = useState(false);
+  const viewRef = useThumbnailObservation(store, visible && sessions.length > 0);
 
   const thumbId = focus?.thumbnailAttachmentId;
   useEffect(() => {
@@ -349,27 +373,35 @@ export function OverlayBody(props: {
     focus !== undefined ? store.getSnapshot().displayFrames[focus.sessionId] : undefined;
   const displayUrl = thumb?.url;
 
-  const canInterrupt =
-    available &&
-    !interrupting &&
-    focus !== undefined &&
-    focus.action !== "idle" &&
-    focus.dead !== true;
+  const canInterrupt = available && !interrupting && focus !== undefined && focus.action !== "idle";
   const onInterrupt = (): void => {
     if (!canInterrupt || focus === undefined) return;
     setInterrupting(true);
     void store.interrupt(focus.sessionId).finally(() => setInterrupting(false));
   };
 
-  const statusText = !available
-    ? "browser unavailable"
-    : focus === undefined
-      ? "no session"
-      : `${focus.sessionId} · ${focus.action === "idle" ? "idle" : focus.action} · ${formatElapsed(focus.since, now)}`;
-  const state = !available ? "error" : focus !== undefined ? statusOf(focus) : "idle";
+  const statusText = reconnecting
+    ? "reconnecting…"
+    : !available
+      ? "browser unavailable"
+      : focus === undefined
+        ? "no session"
+        : `${focus.sessionId} · ${focus.action === "idle" ? "idle" : focus.action} · ${formatElapsed(focus.since, now)}`;
+  const state: ChromeState = reconnecting
+    ? "reconnecting"
+    : !available
+      ? "error"
+      : focus !== undefined
+        ? statusOf(focus)
+        : "idle";
 
   return (
-    <div className={cn(css.body, "bsk-obs")} data-state={state} data-in-pip={inPip || undefined}>
+    <div
+      ref={viewRef}
+      className={cn(css.body, "bsk-obs")}
+      data-state={state}
+      data-in-pip={inPip || undefined}
+    >
       <div
         className={css.header}
         data-testid="obs-header"
@@ -377,8 +409,26 @@ export function OverlayBody(props: {
         onPointerDown={onHeaderPointerDown}
         role="presentation"
       >
-        <StatusDot state={state === "error" ? "error" : state === "active" ? "active" : "idle"} />
+        <StatusDot state={state} />
         <span className={css["status-text"]}>{statusText}</span>
+        {onUseFloating !== undefined ? (
+          <IconAction
+            label="Use floating view"
+            hint="Show the browser view in a floating window."
+            onClick={onUseFloating}
+          >
+            <IconWindow size={14} />
+          </IconAction>
+        ) : null}
+        {onUseSidebar !== undefined ? (
+          <IconAction
+            label="Move to sidebar"
+            hint="Show the browser view in the sidebar."
+            onClick={onUseSidebar}
+          >
+            <IconSidebar size={14} />
+          </IconAction>
+        ) : null}
         {onCollapse !== undefined ? (
           <button
             type="button"
@@ -387,6 +437,16 @@ export function OverlayBody(props: {
             onClick={onCollapse}
           >
             <IconDown size={14} />
+          </button>
+        ) : null}
+        {onClosePip !== undefined ? (
+          <button
+            type="button"
+            className={css["icon-button"]}
+            aria-label="Close mini window"
+            onClick={onClosePip}
+          >
+            <IconClose size={14} />
           </button>
         ) : null}
       </div>
@@ -407,9 +467,15 @@ export function OverlayBody(props: {
           </div>
         )}
         {thumb?.status === "error" ? (
-          <span className={css.badge} aria-label="thumbnail failed">
+          <button
+            type="button"
+            className={css.badge}
+            aria-label="Retry thumbnail"
+            title="Frame unavailable — retry"
+            onClick={() => store.retryThumbnail(thumbId)}
+          >
             <IconWarn size={12} />
-          </span>
+          </button>
         ) : null}
       </div>
       {sessions.length >= 2 ? (
@@ -459,10 +525,10 @@ export function OverlayBody(props: {
 
 export function ObservationOverlay({ store }: { store: ObservationClientStore }) {
   const { snapshot, focus, pinnedId, onTogglePin, now } = useObservationView(store);
-  // While the better-sidebar plugin carries the tracking view, this floating
-  // card (and its capsule) stays out of the way; an already-open PiP window
-  // keeps its portal until the user closes it.
-  const sidebarMode = useSyncExternalStore(subscribeSidebarMode, getSidebarMode);
+  const presentation = useSyncExternalStore(
+    store.presentation.subscribe,
+    store.presentation.getSnapshot,
+  );
 
   const [collapsed, setCollapsed] = useState(false);
   const [pos, setPos] = useState<Point | null>(null);
@@ -562,6 +628,7 @@ export function ObservationOverlay({ store }: { store: ObservationClientStore })
       focus={focus}
       sessions={snapshot.sessions}
       available={snapshot.available}
+      reconnecting={snapshot.reconnecting}
       pinnedId={pinnedId}
       onTogglePin={onTogglePin}
       now={now}
@@ -572,6 +639,15 @@ export function ObservationOverlay({ store }: { store: ObservationClientStore })
           : undefined
       }
       onCollapse={pipWindow === null ? () => setCollapsed(true) : undefined}
+      onClosePip={pipWindow !== null ? () => pipWindow.close() : undefined}
+      onUseSidebar={
+        presentation.sidebarAvailable
+          ? () => {
+              pipWindow?.close();
+              store.presentation.showSidebar();
+            }
+          : undefined
+      }
       onHeaderPointerDown={pipWindow === null ? beginMove : undefined}
     />
   );
@@ -581,27 +657,34 @@ export function ObservationOverlay({ store }: { store: ObservationClientStore })
   }
 
   // The sidebar tab is the carrier now — no floating card, no capsule.
-  if (sidebarMode) return null;
+  if (!presentation.floating) return null;
 
   // Hidden while no owned session exists (and no PiP is up).
   if (snapshot.sessions.length === 0) return null;
 
   if (collapsed) {
-    const state = focus !== undefined ? statusOf(focus) : "idle";
+    const state: ChromeState = snapshot.reconnecting
+      ? "reconnecting"
+      : focus !== undefined
+        ? statusOf(focus)
+        : "idle";
     return (
       <button
         type="button"
         className={cn(css.capsule, "bsk-obs")}
         data-state={state}
+        data-testid="obs-capsule"
         aria-label="Expand browser observation overlay"
         onClick={() => setCollapsed(false)}
       >
         <StatusDot state={state} />
         <span className={css["capsule-text"]}>
           {snapshot.sessions.length} session{snapshot.sessions.length === 1 ? "" : "s"}
-          {focus !== undefined && focus.action !== "idle"
-            ? ` · ${focus.action} · ${formatElapsed(focus.since, now)}`
-            : ""}
+          {snapshot.reconnecting
+            ? " · reconnecting…"
+            : focus !== undefined && focus.action !== "idle"
+              ? ` · ${focus.action} · ${formatElapsed(focus.since, now)}`
+              : ""}
         </span>
       </button>
     );

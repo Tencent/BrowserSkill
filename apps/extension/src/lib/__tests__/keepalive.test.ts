@@ -147,4 +147,13 @@ describe("startKeepalive", () => {
     await Promise.resolve();
     expect(transport.connectCalls).toBe(1);
   });
+  it("delegates reconnect policy to the controller callback", async () => {
+    const transport = makeTransport("disconnected");
+    const requestConnect = vi.fn();
+    const handle = startKeepalive({ transport, alarms: makeAlarms(), requestConnect });
+    await handle.tickForTest();
+    expect(requestConnect).toHaveBeenCalledOnce();
+    expect(transport.connect).not.toHaveBeenCalled();
+    handle.dispose();
+  });
 });

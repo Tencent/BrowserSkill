@@ -1,9 +1,7 @@
 import type { BlockingLayer, Rect, Viewport, VomNode } from "./types";
 
-/** Default fraction of the viewport an overlay must cover to block. */
-export const BLOCK_COVERAGE_THRESHOLD = 0.6;
-/** At/above this coverage with no inputs we call it an opaque mask. */
-export const MASK_COVERAGE_THRESHOLD = 0.9;
+/** CSS pixels of layout rounding allowed at each viewport edge. */
+const VIEWPORT_EDGE_TOLERANCE = 1;
 
 const POSITIONED = new Set(["fixed", "absolute", "sticky"]);
 const FORM_TAGS = new Set(["input", "textarea", "select"]);
@@ -25,29 +23,37 @@ export function coverage(rect: Rect | null, vp: Viewport): number {
   return Math.min(1, overlap / (vp.width * vp.height));
 }
 
+export function spansViewport(rect: Rect | null, vp: Viewport): boolean {
+  if (!rect || vp.width <= 0 || vp.height <= 0) return false;
+  const t = VIEWPORT_EDGE_TOLERANCE;
+  return (
+    rect.x <= t &&
+    rect.y <= t &&
+    rect.x + rect.w >= vp.width - t &&
+    rect.y + rect.h >= vp.height - t
+  );
+}
+
 function isBlockingCandidate(node: VomNode): boolean {
   if (node.pointerEvents === "none") return false;
   return POSITIONED.has(node.position);
 }
 
-function hasModalFeature(node: VomNode): boolean {
+/** Naming only: dialog roles/tags do not determine whether a layer blocks. */
+function looksLikeDialog(node: VomNode): boolean {
   const role = normalizedRole(node);
   const tag = normalizedTag(node);
   return node.modal === true || tag === "dialog" || role === "dialog" || role === "alertdialog";
 }
 
-function classifyLayer(
-  nodes: VomNode[],
-  members: Set<number>,
-  blockerCoverage: number,
-): BlockingLayer["kind"] {
+function classifyLayer(nodes: VomNode[], members: Set<number>): BlockingLayer["kind"] {
   for (const node of nodes) {
     if (!members.has(node.id)) continue;
-    if (hasModalFeature(node)) return "modal";
-    if (FORM_TAGS.has(normalizedTag(node))) return "modal";
-    if (normalizedTag(node) === "iframe") return "modal";
+    if (looksLikeDialog(node)) return "modal";
+    const tag = normalizedTag(node);
+    if (FORM_TAGS.has(tag) || tag === "iframe") return "modal";
   }
-  return blockerCoverage >= MASK_COVERAGE_THRESHOLD ? "mask" : "modal";
+  return "mask";
 }
 
 export function detectBlockingLayer(
@@ -64,7 +70,9 @@ export function detectBlockingLayer(
     if (rootFrameId !== undefined && node.frameId !== rootFrameId) continue;
     if (!isBlockingCandidate(node)) continue;
     const cov = coverage(node.rect, vp);
-    const qualifies = cov >= BLOCK_COVERAGE_THRESHOLD || (hasModalFeature(node) && cov >= 0.15);
+    // A large sidebar can leave usable page content beside it. Only actual
+    // modality or a cover spanning the whole viewport can fold the base page.
+    const qualifies = spansViewport(node.rect, vp) || (node.modal === true && cov > 0);
     if (!qualifies) continue;
     if (
       blocker === null ||
@@ -87,7 +95,7 @@ export function detectBlockingLayer(
 
   return {
     rootId: blocker.node.id,
-    kind: classifyLayer(nodes, members, blocker.coverage),
+    kind: classifyLayer(nodes, members),
     coverage: blocker.coverage,
     members,
   };

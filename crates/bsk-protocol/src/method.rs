@@ -21,6 +21,13 @@ pub enum MethodEffect {
 /// Namespaced method string (`system.handshake`, `tool.tab_list`, …).
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Method {
+    #[serde(rename = "tool.cooperate")]
+    ToolCooperate,
+    #[serde(rename = "tool.video")]
+    ToolVideo,
+    /// Extension-only local history API; browser identity comes from the peer.
+    #[serde(rename = "audit.request")]
+    AuditRequest,
     #[serde(rename = "system.handshake")]
     SystemHandshake,
     #[serde(rename = "system.ping")]
@@ -30,6 +37,11 @@ pub enum Method {
 
     #[serde(rename = "session.start")]
     SessionStart,
+    /// Recoverable CLI start; distinct method prevents unsafe fallback on old daemons.
+    #[serde(rename = "session.start_tracked")]
+    SessionStartTracked,
+    #[serde(rename = "session.request")]
+    SessionRequest,
     #[serde(rename = "session.stop")]
     SessionStop,
     #[serde(rename = "session.stop_all")]
@@ -72,22 +84,46 @@ pub enum Method {
     ToolClick,
     #[serde(rename = "tool.hover")]
     ToolHover,
+    #[serde(rename = "tool.drag")]
+    ToolDrag,
+    #[serde(rename = "tool.wheel")]
+    ToolWheel,
+    #[serde(rename = "tool.scroll_to")]
+    ToolScrollTo,
+    #[serde(rename = "tool.focus")]
+    ToolFocus,
+    #[serde(rename = "tool.blur")]
+    ToolBlur,
     #[serde(rename = "tool.fill")]
     ToolFill,
     #[serde(rename = "tool.press")]
     ToolPress,
     #[serde(rename = "tool.select")]
     ToolSelect,
+    #[serde(rename = "tool.upload")]
+    ToolUpload,
+    #[serde(rename = "tool.download")]
+    ToolDownload,
     #[serde(rename = "tool.snapshot")]
     ToolSnapshot,
     #[serde(rename = "tool.observe")]
     ToolObserve,
     #[serde(rename = "tool.get_html")]
     ToolGetHtml,
+    #[serde(rename = "tool.extract")]
+    ToolExtract,
     #[serde(rename = "tool.screenshot")]
     ToolScreenshot,
+    #[serde(rename = "tool.screenshot_full_page")]
+    ToolScreenshotFullPage,
+    #[serde(rename = "tool.screenshot_read")]
+    ToolScreenshotRead,
+    #[serde(rename = "tool.screenshot_release")]
+    ToolScreenshotRelease,
     #[serde(rename = "tool.console")]
     ToolConsole,
+    #[serde(rename = "tool.debug")]
+    ToolDebug,
     #[serde(rename = "tool.network")]
     ToolNetwork,
     #[serde(rename = "tool.har_start")]
@@ -98,8 +134,20 @@ pub enum Method {
     ToolHarStop,
     #[serde(rename = "tool.evaluate")]
     ToolEvaluate,
+    #[serde(rename = "tool.dialog_status")]
+    ToolDialogStatus,
+    #[serde(rename = "tool.dialog_accept")]
+    ToolDialogAccept,
+    #[serde(rename = "tool.dialog_dismiss")]
+    ToolDialogDismiss,
+    #[serde(rename = "tool.operation_await")]
+    ToolOperationAwait,
+    #[serde(rename = "tool.operation_cancel")]
+    ToolOperationCancel,
     #[serde(rename = "tool.wait_for_navigation")]
     ToolWaitForNavigation,
+    #[serde(rename = "tool.wait_for_element")]
+    ToolWaitForElement,
     #[serde(rename = "tool.wait_ms")]
     ToolWaitMs,
     #[serde(rename = "tool.request_help")]
@@ -110,6 +158,17 @@ pub enum Method {
     ToolRecordStop,
     #[serde(rename = "tool.record_await")]
     ToolRecordAwait,
+
+    #[serde(rename = "transfer.begin")]
+    TransferBegin,
+    #[serde(rename = "transfer.chunk")]
+    TransferChunk,
+    #[serde(rename = "transfer.finish")]
+    TransferFinish,
+    #[serde(rename = "transfer.read")]
+    TransferRead,
+    #[serde(rename = "transfer.release")]
+    TransferRelease,
 
     #[serde(rename = "cancel")]
     Cancel,
@@ -159,17 +218,25 @@ impl Method {
             | Method::ToolNavigateForward
             | Method::ToolReload
             | Method::ToolClick
+            | Method::ToolDrag
+            | Method::ToolWheel
+            | Method::ToolScrollTo
+            | Method::ToolFocus
+            | Method::ToolBlur
             | Method::ToolFill
             | Method::ToolPress
             | Method::ToolSelect
+            | Method::ToolUpload
+            | Method::ToolDownload
             | Method::ToolEvaluate
+            | Method::ToolDialogAccept
             // May navigate via optional `url` and changes Agent Window
             // chrome; gate behind pending-interrupt like other writes.
             | Method::ToolRecordStart => MethodEffect::BrowserMutation,
 
             // Transient input — no committed browser action, but still page
             // input. It must be stopped by pending user interrupts.
-            Method::ToolHover | Method::ToolObserve => MethodEffect::TransientInput,
+            Method::ToolHover | Method::ToolObserve | Method::ToolScreenshotFullPage => MethodEffect::TransientInput,
 
             // Passive reads — transparent.
             // `record_stop` / `record_await` observe / finish a recording
@@ -178,20 +245,29 @@ impl Method {
             Method::ToolTabList
             | Method::ToolSnapshot
             | Method::ToolGetHtml
+            | Method::ToolExtract
             | Method::ToolScreenshot
+            | Method::ToolScreenshotRead
             | Method::ToolConsole
             | Method::ToolNetwork
             | Method::ToolHarStart
             | Method::ToolHarStatus
             | Method::ToolHarStop
             | Method::ToolWaitForNavigation
+            | Method::ToolWaitForElement
             | Method::ToolWaitMs
             | Method::ToolRequestHelp
             | Method::ToolRecordStop
             | Method::ToolRecordAwait => MethodEffect::PassiveRead,
 
+            Method::ToolDialogStatus | Method::ToolOperationAwait => MethodEffect::PassiveRead,
+            // Rejecting a modal / cancelling an operation must remain possible after stop.
+            Method::ToolDialogDismiss | Method::ToolOperationCancel => MethodEffect::ControlPlane,
+
             // Session lifecycle — not gated.
             Method::SessionStart
+            | Method::SessionStartTracked
+            | Method::SessionRequest
             | Method::SessionStop
             | Method::SessionStopAll
             | Method::SessionList
@@ -199,12 +275,35 @@ impl Method {
             | Method::ToolSessionStop => MethodEffect::ControlPlane,
 
             // System / control — not gated.
-            Method::SystemHandshake
+            Method::ToolCooperate
+            | Method::ToolDebug
+            | Method::ToolVideo
+            | Method::AuditRequest
+            | Method::SystemHandshake
             | Method::SystemPing
             | Method::SystemStatus
             | Method::BrowserList
+            | Method::TransferBegin
+            | Method::TransferChunk
+            | Method::TransferFinish
+            | Method::TransferRead
+            | Method::TransferRelease
+            | Method::ToolScreenshotRelease
             | Method::Cancel => MethodEffect::ControlPlane,
         }
+    }
+
+    /// Debug reads/teardown remain available after interruption, while explicit
+    /// network interventions and replay are gated like other browser writes.
+    pub fn requires_interrupt_gate_with_params(&self, params: &serde_json::Value) -> bool {
+        self.requires_interrupt_gate()
+            || (matches!(self, Method::ToolVideo)
+                && params.get("action").and_then(|value| value.as_str()) == Some("start"))
+            || (matches!(self, Method::ToolDebug)
+                && matches!(
+                    params.get("action").and_then(|value| value.as_str()),
+                    Some("rule_add" | "rule_enable" | "replay")
+                ))
     }
 
     /// Whether this RPC drives browser/page state in the traditional sense.
@@ -226,6 +325,28 @@ mod tests {
     use super::*;
     use crate::{CancelParams, CancelResult};
     use serde_json::json;
+
+    #[test]
+    fn video_start_respects_interrupts_but_teardown_and_artifact_reads_remain_available() {
+        assert!(
+            super::Method::ToolVideo
+                .requires_interrupt_gate_with_params(&serde_json::json!({"action":"start"}))
+        );
+        for action in [
+            "capabilities",
+            "list",
+            "status",
+            "stop",
+            "read",
+            "exported",
+            "discard",
+        ] {
+            assert!(
+                !super::Method::ToolVideo
+                    .requires_interrupt_gate_with_params(&serde_json::json!({"action": action}))
+            );
+        }
+    }
 
     #[test]
     fn cancel_method_round_trips() {
@@ -280,12 +401,49 @@ mod tests {
     }
 
     #[test]
+    fn full_page_capture_is_input_but_export_reads_are_not() {
+        assert!(Method::ToolScreenshotFullPage.requires_interrupt_gate());
+        assert_eq!(
+            Method::ToolScreenshotFullPage.effect(),
+            MethodEffect::TransientInput
+        );
+        assert!(!Method::ToolScreenshot.requires_interrupt_gate());
+        assert!(!Method::ToolScreenshotRead.requires_interrupt_gate());
+        assert!(!Method::ToolScreenshotRelease.requires_interrupt_gate());
+    }
+
+    #[test]
+    fn debug_network_writes_respect_interrupts_without_blocking_teardown() {
+        for action in ["rule_add", "rule_enable", "replay"] {
+            assert!(
+                Method::ToolDebug
+                    .requires_interrupt_gate_with_params(&serde_json::json!({"action":action}))
+            );
+        }
+        for action in [
+            "request",
+            "rules",
+            "export",
+            "stop",
+            "rule_disable",
+            "rule_remove",
+        ] {
+            assert!(
+                !Method::ToolDebug
+                    .requires_interrupt_gate_with_params(&serde_json::json!({"action":action}))
+            );
+        }
+    }
+
+    #[test]
     fn is_mutating_classifies_read_only_tools_as_non_mutating() {
         assert!(!Method::ToolTabList.is_mutating());
         assert!(!Method::ToolSnapshot.is_mutating());
         assert!(!Method::ToolHover.is_mutating());
         assert!(!Method::ToolObserve.is_mutating());
         assert!(!Method::ToolGetHtml.is_mutating());
+        assert_eq!(Method::ToolExtract.effect(), MethodEffect::PassiveRead);
+        assert!(!Method::ToolExtract.is_mutating());
         assert!(!Method::ToolScreenshot.is_mutating());
         assert!(!Method::ToolConsole.is_mutating());
         assert!(!Method::ToolNetwork.is_mutating());
@@ -293,6 +451,7 @@ mod tests {
         assert!(!Method::ToolHarStatus.is_mutating());
         assert!(!Method::ToolHarStop.is_mutating());
         assert!(!Method::ToolWaitForNavigation.is_mutating());
+        assert!(!Method::ToolWaitForElement.is_mutating());
         assert!(!Method::ToolWaitMs.is_mutating());
     }
 
@@ -308,6 +467,10 @@ mod tests {
         assert!(Method::ToolNavigateForward.is_mutating());
         assert!(Method::ToolReload.is_mutating());
         assert!(Method::ToolClick.is_mutating());
+        assert!(Method::ToolWheel.is_mutating());
+        assert!(Method::ToolScrollTo.is_mutating());
+        assert!(Method::ToolFocus.is_mutating());
+        assert!(Method::ToolBlur.is_mutating());
         assert!(Method::ToolFill.is_mutating());
         assert!(Method::ToolPress.is_mutating());
         assert!(Method::ToolSelect.is_mutating());
@@ -352,6 +515,11 @@ mod tests {
         assert_eq!(Method::ToolHover.effect(), MethodEffect::TransientInput);
         assert_eq!(Method::ToolObserve.effect(), MethodEffect::TransientInput);
         assert_eq!(Method::ToolClick.effect(), MethodEffect::BrowserMutation);
+        assert_eq!(Method::ToolDrag.effect(), MethodEffect::BrowserMutation);
+        assert_eq!(Method::ToolWheel.effect(), MethodEffect::BrowserMutation);
+        assert_eq!(Method::ToolScrollTo.effect(), MethodEffect::BrowserMutation);
+        assert_eq!(Method::ToolFocus.effect(), MethodEffect::BrowserMutation);
+        assert_eq!(Method::ToolBlur.effect(), MethodEffect::BrowserMutation);
         assert_eq!(Method::Cancel.effect(), MethodEffect::ControlPlane);
     }
 
@@ -361,6 +529,10 @@ mod tests {
         assert!(Method::ToolHover.requires_interrupt_gate());
         assert!(Method::ToolObserve.requires_interrupt_gate());
         assert!(Method::ToolClick.requires_interrupt_gate());
+        assert!(Method::ToolWheel.requires_interrupt_gate());
+        assert!(Method::ToolScrollTo.requires_interrupt_gate());
+        assert!(Method::ToolFocus.requires_interrupt_gate());
+        assert!(Method::ToolBlur.requires_interrupt_gate());
         assert!(!Method::Cancel.requires_interrupt_gate());
     }
 }

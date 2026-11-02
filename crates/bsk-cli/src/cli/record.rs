@@ -1,7 +1,6 @@
 //! `bsk record start|stop` — capture user actions in the Agent Window.
 
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 
 use anyhow::Context;
 use bsk_protocol::tools::{
@@ -15,7 +14,7 @@ use crate::cli::TOOL_IPC_TIMEOUT;
 
 mod export;
 
-use crate::cli::business_rpc;
+use crate::cli::business_rpc::{self, ipc_timeout};
 use crate::cli::ensure_daemon::ensure_daemon;
 use crate::cli::error::{CliError, Format};
 use crate::cli::record_recovery;
@@ -103,6 +102,7 @@ fn dispatch_start(args: RecordStartArgs, format: Format) -> Result<(), CliError>
         info.sock_path.clone(),
         SessionStartOptions {
             browser: args.browser,
+            focused: Some(true),
             ..SessionStartOptions::default()
         },
     )?;
@@ -154,7 +154,7 @@ fn dispatch_start(args: RecordStartArgs, format: Format) -> Result<(), CliError>
         "record-await",
         Method::ToolRecordAwait,
         Some(await_params),
-        record_await_ipc_timeout(RECORD_AWAIT_TIMEOUT_MS),
+        ipc_timeout(RECORD_AWAIT_TIMEOUT_MS),
     );
 
     // Keep write/render inside a Result so `?` cannot skip session teardown.
@@ -167,7 +167,7 @@ fn dispatch_start(args: RecordStartArgs, format: Format) -> Result<(), CliError>
     };
 
     let session_stop_result = stop_session(info.sock_path, &session.session_id);
-    record_state::clear();
+    record_state::clear_session(&session.session_id);
 
     run_result?;
     session_stop_result?;
@@ -190,7 +190,8 @@ fn dispatch_stop(args: RecordStopArgs, format: Format) -> Result<(), CliError> {
             Method::ToolRecordStop,
             Some(params),
             TOOL_IPC_TIMEOUT,
-        )?;
+        )
+        .map_err(|err| forget_stale_recording(err, &session_id))?;
 
         let run_result: Result<(), CliError> = (|| {
             let exported = export_with_recovery(&args.output, &result.trace)?;
@@ -198,7 +199,7 @@ fn dispatch_stop(args: RecordStopArgs, format: Format) -> Result<(), CliError> {
         })();
 
         let session_stop_result = stop_session(info.sock_path, &session_id);
-        record_state::clear();
+        record_state::clear_session(&session_id);
 
         run_result?;
         session_stop_result?;
@@ -213,6 +214,29 @@ fn dispatch_stop(args: RecordStopArgs, format: Format) -> Result<(), CliError> {
 
     let exported = export_with_recovery(&args.output, &trace)?;
     render_finish(&trace, &args.output, &exported, format)
+}
+
+/// A `not_found` stop means the session or its recording is gone, so the
+/// saved pointer can never be stopped; drop it so `record start` works again.
+fn forget_stale_recording(err: CliError, session_id: &str) -> CliError {
+    let CliError::Rpc {
+        code: ErrorCode::NotFound,
+        message,
+        data,
+        source,
+    } = err
+    else {
+        return err;
+    };
+    record_state::clear_session(session_id);
+    CliError::Rpc {
+        code: ErrorCode::NotFound,
+        message: format!(
+            "{message}; cleared the stale recording state for session {session_id}, so `bsk record start` can run again"
+        ),
+        data,
+        source,
+    }
 }
 
 /// When `record start` omitted `--url` and the default example.com page
@@ -270,12 +294,6 @@ fn prepare_record_start(output: &Path) -> Result<(), CliError> {
         )));
     }
     validate_record_output(output)
-}
-
-fn record_await_ipc_timeout(timeout_ms: u32) -> Duration {
-    Duration::from_millis(u64::from(timeout_ms))
-        .checked_add(Duration::from_secs(15))
-        .unwrap_or(Duration::from_secs(u64::from(timeout_ms / 1_000) + 15))
 }
 
 fn render_finish(
@@ -409,6 +427,65 @@ mod tests {
     }
 
     #[test]
+    fn stop_of_a_vanished_session_unblocks_record_start() {
+        with_temp_home(|| {
+            record_state::write("megi").unwrap();
+            let err = CliError::from_rpc(bsk_protocol::RpcError {
+                code: ErrorCode::NotFound,
+                message: "session not registered or already stopped".into(),
+                data: None,
+            });
+
+            let err = forget_stale_recording(err, "megi");
+
+            assert_eq!(err.code(), Some(ErrorCode::NotFound));
+            assert!(
+                err.to_string()
+                    .contains("cleared the stale recording state")
+            );
+            assert!(record_state::read().is_err());
+            prepare_record_start(Path::new("trace")).unwrap();
+        });
+    }
+
+    #[test]
+    fn late_stale_stop_keeps_a_newer_recording_state() {
+        with_temp_home(|| {
+            let not_found = || {
+                CliError::from_rpc(bsk_protocol::RpcError {
+                    code: ErrorCode::NotFound,
+                    message: "session not registered or already stopped".into(),
+                    data: None,
+                })
+            };
+            record_state::write("old").unwrap();
+            forget_stale_recording(not_found(), "old");
+            record_state::write("new").unwrap();
+
+            forget_stale_recording(not_found(), "old");
+
+            assert_eq!(record_state::read().unwrap().session_id, "new");
+        });
+    }
+
+    #[test]
+    fn failed_flush_keeps_the_recording_state_for_a_retry() {
+        with_temp_home(|| {
+            record_state::write("oabu").unwrap();
+            let err = CliError::from_rpc(bsk_protocol::RpcError {
+                code: ErrorCode::ProtocolError,
+                message: "failed to flush recorded steps for session oabu".into(),
+                data: None,
+            });
+
+            let err = forget_stale_recording(err, "oabu");
+
+            assert_eq!(err.code(), Some(ErrorCode::ProtocolError));
+            assert_eq!(record_state::read().unwrap().session_id, "oabu");
+        });
+    }
+
+    #[test]
     fn default_output_is_trace_dir() {
         let args = RecordStopArgs {
             output: PathBuf::from("trace"),
@@ -432,8 +509,8 @@ mod tests {
 
     #[test]
     fn record_await_ipc_timeout_covers_long_wait() {
-        let got = record_await_ipc_timeout(RECORD_AWAIT_TIMEOUT_MS);
-        assert!(got >= Duration::from_secs(86_400));
+        let got = ipc_timeout(RECORD_AWAIT_TIMEOUT_MS);
+        assert!(got >= std::time::Duration::from_secs(86_400));
     }
 
     #[test]

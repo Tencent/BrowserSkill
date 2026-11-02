@@ -1,169 +1,316 @@
-# dsh-plugin-browserskill
+# BrowserSkill for DeepSeek Harness
 
-npm: [`@wxg-prc-cpg/browser-skill-dsh-plugin`](https://www.npmjs.com/package/@wxg-prc-cpg/browser-skill-dsh-plugin)
+[![npm version](https://img.shields.io/npm/v/@wxg-prc-cpg/browser-skill-dsh-plugin)](https://www.npmjs.com/package/@wxg-prc-cpg/browser-skill-dsh-plugin)
 
-A [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (dsh) tool plugin that exposes
-[BrowserSkill](https://github.com/Tencent/BrowserSkill) (`bsk`) browser automation to the model.
+Use [BrowserSkill](https://github.com/Tencent/BrowserSkill) in
+[DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (`dsh`) to browse
+websites, fill forms, and capture screenshots through native `bsk_*` tools.
+Browser tasks run in Agent Windows, with a live view in the dsh Web UI.
 
-Each tool maps to one `bsk <cmd> --json` invocation: the plugin spawns the bsk CLI, parses its
-structured JSON output, and returns a canonical typed value. The bsk daemon, browser, and browser
-extension keep owning the actual browser control — this package is a thin, well-typed bridge.
+## Installation
+
+Before installing the plugin:
+
+- Install [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) and
+  [pnpm](https://pnpm.io/installation), which dsh uses to manage plugins.
+- Install the `bsk` CLI and connect the BrowserSkill extension in Chrome or Edge.
+  Follow the [BrowserSkill setup guide](https://github.com/Tencent/BrowserSkill#quick-start).
+- Make sure `bsk` is on the `PATH` used to start dsh, or set `bskPath` in the plugin configuration.
+
+Install the plugin into the `web` profile, then start it:
+
+```sh
+dsh plugin --profile web add @wxg-prc-cpg/browser-skill-dsh-plugin
+dsh --profile web
+```
+
+Replace `web` with your profile name if you use a different profile. The plugin
+includes the complete `browser-skill` package; no separate `bsk install-skill` step is needed.
+Its compact entry point loads first; references ship with the plugin and are read only
+when needed. Relative paths resolve from the packaged skill directory, not your project.
+
+In a conversation, try:
+
+```text
+/browser-skill open example.com and summarize the page.
+```
+
+By default, the browser tools become available when the skill is invoked.
+
+The plugin declares support for DSH `^0.1.5-rc.3 || ^0.2.0-rc.1`.
+DSH 0.2 checks these peer requirements before loading the plugin; versions outside
+this range are not declared compatible. The range preserves the existing 0.1.x
+baseline and admits 0.2.x without opting into future 0.3.x hosts.
+
+## Updating
+
+Installed plugins do not update automatically. To upgrade this plugin to npm's
+`latest` version, including versions outside the profile's saved dependency range:
+
+```sh
+dsh plugin --profile web update @wxg-prc-cpg/browser-skill-dsh-plugin --latest
+```
+
+Restart that dsh profile after upgrading. This command updates the plugin; update
+the `bsk` CLI and browser extension separately when a release requires it.
+
+### Upgrading to 0.4.1
+
+Update the CLI and restart the running daemon first, install extension 0.4.1,
+then update this plugin to 0.4.1. The default target policy requires daemon and
+extension protocol 1.8; a successful connection to an older peer does not provide
+that capability. Wait for the new extension to be available in your installation
+channel before upgrading the plugin. Updating the npm package does not update
+the CLI, daemon or extension.
+
+Restart the DSH profile and invoke `/browser-skill` again in existing conversations.
+The six `bsk_*` tool names remain unchanged. After initial navigation, call
+`bsk_session action:sync` and pass its returned `context_id` as `contextId`.
+New sessions use target policy: DOM actions can reuse control across supplementary
+reads and completed actions, and `expect` checks protect observed business facts.
+Scripts, untargeted keys and visual actions also require the sync's `observation_id`
+as `observationId`. Human intervention or navigation revokes control; synchronize
+and replan. Select `policy: "strict"` on the first sync to retain the legacy
+one-action-per-context workflow. Later syncs and steps preserve the selected policy.
+Custom tool integrations must expose and forward these fields. See the
+[cooperation reference](skill/references/cooperation.md) for action-specific checks.
+
+### Upgrading to 0.4.0
+
+Update the CLI and restart the running daemon first, then update the browser
+extension, and finally update this plugin. The 0.4.0 extension requires daemon
+protocol 1.6 or later; CLI/daemon 0.3.3 uses 1.3 and cannot connect. Updating the npm
+package does not update the CLI, daemon or extension. Use matching 0.4.0 components
+for drag, step and saved-observation workflows.
+
+Restart the DSH profile and invoke `/browser-skill` again in existing conversations.
+The six `bsk_*` tool names remain unchanged. Shared control is now enabled for new
+tasks: after initial navigation, call `bsk_session action:sync`, pass its returned
+context identifier as `contextId` for one action, then synchronize again. Human
+edits and changed page evidence can revoke a pending action; synchronize and replan
+instead of repeating the old call. Version 0.4.1 changes the default policy as
+described above.
+Custom tool policies and integrations must allow the new actions they intend to use.
+
+Explicit `saveFull` results remain as JSON files on the CLI machine until deleted;
+closing a browser task or clearing extension storage does not remove them.
+See [cooperation](skill/references/cooperation.md) and
+[steps and saved observations](skill/references/interaction-details.md#steps-and-saved-observations).
+If upgrading from before 0.3.3, also apply the tool-name migration below.
+
+### Breaking tool API migration (0.3.3)
+
+The coordinated 0.3.3 release replaces all six `browser_*` tool names with stable
+BrowserSkill-specific names. This avoids collisions with other browser plugins
+such as `dsh-builtin-browser`; both plugins keep their own tools and sessions.
+
+| Previous name | New name |
+| --- | --- |
+| `browser_session` | `bsk_session` |
+| `browser_page` | `bsk_page` |
+| `browser_inspect` | `bsk_inspect` |
+| `browser_interact` | `bsk_interact` |
+| `browser_tabs` | `bsk_tabs` |
+| `browser_assist` | `bsk_assist` |
+
+The tool-name migration leaves actions, parameters, results and `/browser-skill`
+unchanged. The old tool
+names are not registered as aliases. After upgrading, restart the DSH profile and
+invoke `/browser-skill` again in existing conversations to load the new instructions.
+Update hardcoded tool calls, allow/deny lists, and `toolOrder` entries to the new
+names. Do not replay old calls unchanged: another plugin may own those names.
+
+Existing conversation logs and screenshot attachments are left intact. New
+`bsk_inspect` results use the screenshot view; old `browser_inspect` cards may use
+DSH's generic renderer and do not retain the custom thumbnail/preview interaction.
+This is a breaking change from 0.3.2. Upgrade the CLI and browser extension to
+0.3.3 before upgrading this plugin to use the new video, extraction and element-wait
+capabilities. Updating the npm package does not update either component.
 
 ## Tools
 
-| Tool | bsk command | Purpose |
+| Tool | Actions | Purpose |
 | --- | --- | --- |
-| `browser_session_start` | `bsk session start` | Open an Agent Window session; optional initial URL, window size, and device emulation preset. Returns the session id and makes it the current session. |
-| `browser_session_stop` | `bsk session stop` | Stop a session (the current one by default) and close its Agent Window. Only plugin-created sessions can be stopped. |
-| `browser_session_list` | — (registry only) | List the sessions this plugin created, marking the current one. Foreign daemon sessions are never shown. |
-| `browser_navigate` | `bsk navigate` | Navigate the active tab, with `waitUntil` / timeout control. |
-| `browser_snapshot` | `bsk snapshot` | Indented aria-tree snapshot with `@eN` refs for interaction tools. |
-| `browser_observe` | `bsk observe` | Semantic VOM observation (read-only) with `@eN` refs. |
-| `browser_click` | `bsk click` | Click a snapshot ref or CSS selector (button / click-count options). |
-| `browser_fill` | `bsk fill` | Fill an input / textarea / contenteditable (clears first by default). |
-| `browser_press` | `bsk press` | Dispatch a key or combo, optionally focusing a target first. |
-| `browser_screenshot` | `bsk screenshot` | PNG capture of the tab or a ref-cropped element; inlines the image when the deployment supports image input, otherwise returns a file path. |
-| `browser_emulate` | `bsk emulate` | Apply or clear mobile device emulation on the active tab. |
+| `bsk_session` | `start`, `stop`, `list`, `share`, `sync`, `wait-user`, `cooperation-status` | Manage owned sessions and shared-tab control. |
+| `bsk_page` | `navigate`, `back`, `forward`, `reload`, `wait`, `wait-for-element` | Navigate the active tab; wait for page lifecycle events or one element condition. |
+| `bsk_inspect` | `observe`, `snapshot`, `view`, `html`, `screenshot`, `console`, `network`, `debug`, `video`, `extract` | Inspect page state, read saved observations, debug websites, capture screenshots or requested task videos, and export structured tables/lists. |
+| `bsk_interact` | `click`, `hover`, `drag`, `step`, `wheel`, `scroll-to`, `focus`, `blur`, `fill`, `select`, `press`, `evaluate`, `upload`, `download` | Interact with controls using fresh refs or selectors. |
+| `bsk_tabs` | `list`, `create`, `select`, `close`, `borrow`, `return` | Manage Agent Window tabs and temporarily borrow user tabs. |
+| `bsk_assist` | `resize`, `emulate`, `request-help` | Resize or emulate the browser and pause for human-only steps. |
 
-## Agent skill (progressive disclosure)
+For `bsk_page` with `action: "wait-for-element"`, see the
+[element-wait reference](skill/references/interaction-details.md#element-waits) for
+supported conditions, timeout results and recovery with existing single actions.
 
-Beyond the tools, the plugin publishes the **`browser-skill` agent skill** through the harness's
-official skill seam (`ctx.skills.register`): the catalog entry (name + routing description) is
-resident in `<available_skills>`, and the body is loaded only when the model invokes the `skill`
-tool. The body is assembled at build time from two parts, so there is exactly one source of
-truth: a dsh-specific prelude (`skill/prelude.md` — tool↔CLI map, owned-session semantics,
-plugin-only overrides) followed verbatim by the canonical CLI skill (`skill/SKILL.md` at the
-repo root — the same file `crates/bsk-cli/build.rs` mirrors for the CLI package; workflows,
-stop-when-done rules, refs usage, sandbox rules). Registration and every pre-step catalog
-snapshot are pure in-memory reads (no disk/process/daemon); compositions without the skill
-seam degrade silently.
+For native wheel input (`action: "wheel"`), see the [wheel reference](../../docs/wheel.md)
+for signed deltas, optional targets, result semantics and interruption.
+
+For `bsk_interact` with `action: "scroll-to"`, see the
+[scroll-to reference](../../docs/scroll-to.md) for parameters, visible bounds and errors.
+
+For `bsk_interact` with `action: "drag"`, pass the source as `target` and either a
+destination `to` or relative `deltaX`/`deltaY`. The default holds the mouse button
+while moving; `dragMode: "click-move-click"` selects ranges using two clicks and
+requires a destination. Use current observed refs/selectors and inspect the result.
+
+Use `action: "step"` for one decided interaction, with `stepAction` and a `params`
+JSON string using that action's CLI protocol fields. It executes once, optionally
+waits for `untilVisible`, then synchronizes. Read action, readiness and sync outcomes
+separately; a failed follow-up does not mean the action should be repeated.
+
+Save complete observations with `saveFull` on `bsk_session action: "sync"` or
+`bsk_interact action: "step"`. Use `bsk_inspect action: "view"` with `file` and
+optional `find`, `startLine` or `lineCount` to inspect the saved file locally, even
+after the browser session ends. The view is historical, makes no browser calls,
+and needs no `session` or `contextId`. It never refreshes refs or authorizes an
+action. See [steps and saved observations](skill/references/interaction-details.md#steps-and-saved-observations).
+
+For `bsk_inspect` with `action: "extract"`, see
+[structured extraction](../../docs/structured-extraction.md) for discovery, list
+fields, JSON/CSV output and loaded-DOM completeness.
+
+Scripts and file transfers use `bsk_interact` actions `evaluate`, `upload` and `download`,
+with the same session ownership and observation context as other actions. Interaction recording
+is not exposed by this plugin.
+
+Human/agent collaboration is enabled automatically for new sessions and owned task tabs.
+No `share` call is required. See [cooperation](skill/references/cooperation.md).
+Actions on shared tabs require the `contextId` returned by `sync` or a step's
+`post.context_id`. Target-policy DOM actions can reuse it; strict-policy contexts
+remain single-use. The plugin never infers context or observation receipts from its cache.
+
+### Activation failures
+
+The six tools register as a complete suite. If any registration fails, the plugin
+rolls back that attempt and reports the failing tool through DSH's logger. A model
+invocation of `skill` returns an error instead of claiming successful activation;
+slash-command and restored conversations receive a scoped notice. Unrelated
+conversations continue normally, and repeated identical failures do not flood logs.
+
+Resolve the reported registration error, then invoke `/browser-skill` again or
+start the next turn to retry. Session entry and service discovery also retry a
+pending activation; streaming events do not. The affected conversation receives
+one recovery notice. If the failed model call never delivered the skill body,
+the notice asks the model to load it before using the tools. With `lazyTools: false`,
+a registration failure fails plugin startup and releases its resources; reload
+after fixing it.
 
 ## Multi-session model
 
 One agent conversation can drive several browser sessions at once:
 
-- `browser_session_start` returns the session id and makes it the **current session**.
-- Every operation tool accepts an optional `session` argument. When omitted, the call acts on the
+- `bsk_session` with `action: start` returns the session id and makes it the **current session**.
+- Browser operations accept an optional `session` argument. When omitted, the call acts on the
   current session (the one most recently started or used); when given, that session becomes current.
-- Every tool result echoes the session it actually acted on, so the model never has to guess.
+- Browser operation results echo the session they acted on; offline `view` reads only its local file.
 - The number of concurrent sessions started through the plugin is capped (`maxSessions`, default 5).
 - Unloading the plugin stops every session it started and kills in-flight bsk processes.
 
+Starts are journaled before creating a window. Lost replies and failed cleanup remain
+recoverable on reload; `bsk_session action=list` reports `pendingCleanup`, and stop
+can retry it even when there is no current session. This requires a CLI and daemon
+that support recoverable starts. See [the lifecycle contract](../../docs/recoverable-session-starts.md).
+
+Stops also retain their target and cleanup intent. A failed or interrupted stop can be
+retried without accidentally stopping the next current session. Once the intent is saved,
+cancelling the call only stops waiting; cleanup continues in the background. If it finishes
+before a retry, that retry acknowledges the original result. With several unacknowledged
+stops, pass `session` or the owned `requestId` explicitly (not both). List exposes request
+IDs; stop results include `requestId` and `alreadyClosed`. Completed receipts survive reload
+until acknowledged and do not occupy browser capacity.
+
 **Ownership boundary**: the bsk daemon may be shared with other agents, terminals, or dsh
 instances. The plugin therefore only ever sees and operates on sessions it created itself —
-an explicit `session` argument naming a foreign or unknown id is rejected, `browser_session_list`
-shows plugin-created sessions only (no daemon-wide view), and stop/unload cleanup can never touch
-a session owned by another program.
-
-## Installation
-
-The plugin follows the standard dsh bundle layout (`dsh.bundle` manifest + `cordis.patch.yml`):
-
-```sh
-dsh plugin --profile <name> add @wxg-prc-cpg/browser-skill-dsh-plugin
-dsh --profile <name>
-```
-
-Prerequisite: the `bsk` CLI must be installed and on `PATH`, and the BrowserSkill browser extension
-(Chrome or Edge) must be connected — see the
-[BrowserSkill README](https://github.com/Tencent/BrowserSkill). When bsk is missing, tool calls fail
-with install guidance instead of a bare spawn error.
+an explicit `session` argument naming a foreign or unknown id is rejected, the `list` action on
+`bsk_session` shows plugin-created sessions only (no daemon-wide view), and stop/unload cleanup
+can never touch a session owned by another program.
 
 ## Configuration
 
-All fields are optional and validated through the plugin's Schemastery `Config`:
+After installing the plugin, edit your profile's `cordis.patch.yml`. For the `web`
+profile, the default location is `~/.dsh/profiles/web/cordis.patch.yml`. If you set
+`DSH_HOME`, use `$DSH_HOME/profiles/web/cordis.patch.yml` instead. Replace `web` with
+your profile name as needed.
+
+If the file contains only comments and `[]`, keep the comments and replace `[]`
+with the YAML below. If it already contains patch entries, add this entry to the
+existing list or edit its existing `id: browserskill` entry. Keep a single
+top-level YAML list. This overrides the plugin registered by the installed bundle:
 
 ```yaml
-# cordis.patch.yml override example
-- insert:
-    - id: browserskill
-      name: "@wxg-prc-cpg/browser-skill-dsh-plugin"
-      config:
-        bskPath: bsk          # path to the bsk binary (default: resolve from PATH)
-        defaultTimeoutMs: 120000
-        maxSessions: 5
-        # observationEnabled: true     # live PiP/overlay observation (below)
-        # thumbnailIntervalMs: 1500    # frame cadence while a session is active
-        # idleIntervalMs: 8000         # idle cadence / recent-activity window
-        # lazyTools: true              # reveal browser_* tools only after the skill is invoked
+- id: browserskill
+  config:
+    bskPath: bsk
+    defaultTimeoutMs: 120000
+    maxSessions: 5
+    observationEnabled: true
+    thumbnailIntervalMs: 1500
+    idleIntervalMs: 8000
+    lazyTools: true
 ```
 
-- **`lazyTools` (default `true`)** — the final progressive-disclosure stage: the eleven
-  `browser_*` tool schemas stay OUT of the system prompt (zero schema tokens) until the
-  `browser-skill` skill is actually invoked — the skill catalog entry is the only
-  advertisement. One successful invocation (model tool call, or a `/browser-skill` user
-  gesture) registers the whole suite for the rest of the process; repeated invocations are
-  no-ops, and sessions resumed with a past invocation in their durable log reveal the suite
-  on entry. Set `false` for the legacy always-on registration.
+Change `bskPath` to the full path of your CLI binary if it is not on dsh's `PATH`.
+A patch replaces the entry's entire `config` object, so keep all overrides you need
+together in that object.
 
-## Observation overlay (PiP mini-window)
+Configuration changes follow `dsh.profile.patchReload` in the profile's
+`package.json`: `live` (the default for `web`) applies changes when you save the
+patch file; `startup` requires restarting the profile. Restart after upgrading
+the plugin in either case.
 
-When the plugin runs inside the dsh Web UI, an **observation overlay** floats over the app
-(registered into the `shell.overlay` seat): a breathing thumbnail per owned session plus its
-current action and elapsed time. The card docks at the top-right of the content area (clear of
-the composer and the shell's header controls) and wears the **BrowserSkill product family's own
-look**: the overlay reuses `@browser-skill/ui` components (`Button`, `cn`) and its oklch design
-tokens (`--card`, `--primary`, `--destructive`, `--ring`, …), status dots spec'd after the
-extension popup's connection indicator, and Remix icons. The BSK utility sheet is compiled
-scoped under the `.bsk-obs` root class (`scripts/build-client-css.mjs`), so the overlay looks
-like the BrowserSkill extension without leaking a single selector into the host shell — and the
-shell's theme cannot bleed back in.
+All fields are optional; omitted fields use the defaults below:
 
-- **Lifecycle**: hidden while the plugin owns no sessions; appears on the first
-  `browser_session_start`; disappears when all sessions stop (or the plugin unloads).
-- **Focus view**: status row (green/idle/red dot + session + action + mm:ss), the latest page
-  frame (refreshes every ~1.5s while active, ~8s when idle; the last good frame stays on
-  stage while the next one loads, and is kept on errors so the card does not flash),
-  and a compact icon toolbar (Interrupt + Pop out, hover for the label).
-- **Interrupt**: one click kills the in-flight bsk command of the focus session (same semantics
-  as the chat Stop button — the current action fails, the agent run may continue). Strip items
-  carry their own hover interrupt button.
-- **Multi-session strip**: every session gets a tile (mini frame + id + status dot); focus
-  auto-follows the most recently active session; clicking a tile pins focus (pin badge, click
-  again to release); errored sessions get a red edge without stealing focus; sessions the daemon
-  lost are greyed out; prolonged daemon/browser outage shows "browser unavailable" and greys
-  the interrupt button until captures recover.
-- **Drag & resize**: drag the header to move the card; drag any of the four
-  corners to resize (min 240×180, max 80% of the viewport; no visible grip).
-  Both are remembered for the page lifetime.
-- **Pop out (PiP)**: upgrades the card into a native Document PiP window (requires a user
-  gesture, per browser rules), sized from the current card; closing the PiP falls back to the
-  in-page card with state intact. Browsers without Document PiP simply hide the button.
-- **Wire**: the host serves `GET /bsk-observation/state`, `GET /bsk-observation/events` (SSE),
-  `POST /bsk-observation/interrupt`, and `GET /bsk-observation/thumbnail/<attachmentId>` over
-  the dsh `webServer` route seam (dsh 0.1's Typert Remote pipeline is closed to out-of-tree
-  packages). All commands for one session — tool calls and frame captures alike — run through a
-  per-session FIFO, because the daemon accepts only one unfinished command per session.
-- **Trust model**: these routes expose live screenshots (and an interrupt write), so they
-  replicate the browser-trust fence dsh applies to its own `/api` routes: the request Host
-  must be a loopback authority (`localhost`, `127.0.0.0/8`, `[::1]`), a present Origin must
-  match the Host, `sec-fetch-site: cross-site` is refused, and POST requires an
-  `application/json` body (cross-site simple requests can never satisfy that). The channel is
-  therefore built for **loopback-only serving** — binding the dsh web server to `0.0.0.0` and
-  reaching it through a LAN address will (deliberately) fail the fence; do not put these
-  routes behind a non-loopback reverse proxy without adding your own authentication.
-- Configure with `observationEnabled` / `thumbnailIntervalMs` / `idleIntervalMs`.
+| Option | Default | Purpose |
+| --- | --- | --- |
+| `bskPath` | `bsk` | Path to the CLI binary. |
+| `sessionStateDirectory` | Scoped under `$BSK_HOME/dsh-starts` (or `~/.bsk/dsh-starts`) | Durable recovery records; optionally isolate by host/profile. |
+| `defaultTimeoutMs` | `120000` | Default command execution timeout in milliseconds; output collection after exit has a separate 2-second limit. |
+| `maxSessions` | `5` | Maximum concurrent sessions started by this plugin. |
+| `observationEnabled` | `true` | Enable live browser observation. |
+| `thumbnailIntervalMs` | `1500` | Screenshot interval for active sessions, in milliseconds. |
+| `idleIntervalMs` | `8000` | Screenshot interval for idle sessions and the recent-activity window, in milliseconds. |
+| `lazyTools` | `true` | Reveal the browser tools when the skill is invoked. Set `false` to register them at startup. |
 
-## Behavior notes
+With `lazyTools: true`, only the skill's catalog entry is initially advertised to
+the model. A successful model `skill` call makes the six `bsk_*` schemas available
+in the next step. A user `/browser-skill` gesture activates them when the host
+claims the input, before prompt assembly, so the first request includes both the
+skill instructions and tool schemas. Set `lazyTools: false` to register at startup.
 
-- **Cancellation**: aborting a tool call (`exec.signal`) kills the underlying bsk child process,
-  matching BrowserSkill's cooperative tool-cancellation model.
-- **UI cards**: calls render as terminal cards (command line as title, output as the completed
-  card). Screenshots additionally attach the image itself when the host mounts an attachment store
-  and the active model route declares image input; otherwise the PNG path is returned.
-- **Web UI toolview (browser half)**: the package is dual-face. `dsh.client` (platform `web`) ships
-  `lib/client.js`, which registers a keyed `tool.call.toolview` view for `browser_screenshot`. The
-  custom view keeps the terminal block (command + output) and, when the settled result carries an
-  image block, resolves the durable attachment through the client session's authorized
-  `readAttachment` RPC and renders it with the shared `MessageImage` thumbnail/lightbox atoms.
-  Every other `browser_*` tool keeps the stock terminal card. The bundle follows the dsh client
-  contract: a CJS closure factory handed to `window.__ModuleLoader__.load`, platform modules
-  (`react`, `dsh-client-ui-*`) external, everything else inlined, CSS Modules compiled by
-  lightningcss.
-- **Errors**: non-zero bsk exits surface the CLI's JSON error envelope (`code`, `message`, `hint`)
-  so the model gets the daemon's actionable guidance.
-- **Long-running work** (e.g. `bsk record`) is not backgrounded via `ctx.jobs` yet — tracked as a
-  follow-up.
+After a plugin reload, a live or resumed conversation's successful skill invocation
+restores the tools from its stored history. If an older plugin reports
+`unknown tool "bsk_session"`, invoke `skill browser-skill` again, or set
+`lazyTools: false` in the profile patch as a temporary workaround.
+
+## Live browser view
+
+The dsh Web UI prefers a **Browser Skill** tab in DSH's native right sidebar.
+The native tab opens when the current conversation first has a browser session;
+ordinary screenshot and action updates do not switch tabs or reopen a tab you
+closed. You can reopen it from the sidebar's guide.
+
+The native sidebar is optional. Profiles without its services use a floating
+panel, and a failed native integration falls back to that panel. No
+`dsh-better-sidebar` installation is required; it can coexist with BrowserSkill,
+which registers directly with DSH rather than with the third-party sidebar.
+
+- See the current action, elapsed time, and recent screenshot for each session.
+- Select a session to focus on it. The sidebar view follows the current conversation.
+- Use **Use floating view** to move observation into a floating panel, and
+  **Move to sidebar** (or **Show here** in the tab) to return. This choice lasts
+  only until the page reloads; it is not saved in your profile or browser storage.
+- Use **Interrupt** to cancel the current browser command. The agent may continue
+  with another action afterward.
+- Drag or resize the floating panel, or use **Pop out** to open a Picture-in-Picture
+  window in browsers that support it.
+- Periodic screenshots are requested while a browser observation view is visible.
+  Configure the active and idle intervals with the options above.
+
+The floating panel shows all browser sessions managed by this plugin instance;
+the native tab shows the current conversation's browsers and those of its subagents.
+
+The observation endpoints require a loopback address such as `localhost` or
+`127.0.0.1`. Access through a LAN hostname or non-loopback reverse proxy is not supported.
 
 ## Development
 
@@ -174,22 +321,66 @@ pnpm --filter @wxg-prc-cpg/browser-skill-dsh-plugin test     # unit tests mock b
 pnpm --filter @wxg-prc-cpg/browser-skill-dsh-plugin build    # tsdown -> lib/
 ```
 
+See the [development notes](https://github.com/Tencent/BrowserSkill/blob/main/packages/dsh-plugin-browserskill/docs/development.md)
+for skill registration, tool results, and observation APIs in the current source.
+
 ## Publishing
 
-The GitHub Actions workflow **Release dsh plugin** publishes this package to npm
-as `@wxg-prc-cpg/browser-skill-dsh-plugin`. The Cordis plugin id stays
-`dsh-plugin-browserskill`.
+The [Release dsh plugin workflow](https://github.com/Tencent/BrowserSkill/blob/main/.github/workflows/release-dsh-plugin.yml)
+publishes the package and this README to npm. Pushing a `dsh-plugin-vX.Y.Z` tag
+triggers it; ordinary commits to `main` do not.
 
-Trigger it by pushing a tag that matches `package.json`'s `version`:
+Before publishing the 0.4.1 plugin, publish the coordinated 0.4.1 CLI and extension.
+Make the CLI release downloadable first, then confirm extension availability in
+the supported installation channels. The default target policy requires protocol
+1.8 on both the running daemon and extension. During rollout, explicitly select
+strict policy on every sync/enable and step when using older compatible peers;
+do not assume a successful handshake enables target policy.
+Publishing the npm package alone does not upgrade either component on users' machines.
 
-```sh
-git tag dsh-plugin-v0.1.0
-git push origin dsh-plugin-v0.1.0
-```
+1. Prepare a release PR that updates the shared CLI, extension and plugin version,
+   local Cargo lock entries, changelog and relevant documentation. Merge it after
+   validation and record the merge commit.
+2. Tag that commit as `cli-v<version>` and wait for the complete public CLI release,
+   including [Windows signing](../../docs/windows-signing.md) and
+   [macOS signing and notarization](../../docs/macos-signing.md). `Release CLI`
+   builds alone are not publication; both `Publish CLI` verification jobs and its
+   final publish job must succeed. Synchronize store permission/privacy disclosures,
+   then tag the same commit as `ext-v<version>` and wait for store availability.
+3. Create `dsh-plugin-v<version>` on that same merge commit and push only that tag:
 
-Or run the workflow from the Actions tab (`workflow_dispatch`). The job reads the
-`NPM_TOKEN` secret from the `npm-publish` GitHub Environment.
+   ```sh
+   git tag -a dsh-plugin-v<version> <merge-commit> -m "Release DSH plugin <version>"
+   git -c push.followTags=false push origin refs/tags/dsh-plugin-v<version>
+   ```
+
+4. Approve the `npm-publish` environment deployment in GitHub Actions when required,
+   then verify the published npm version and `latest` dist-tag.
+
+The workflow checks the version, runs typechecks and tests, builds the package,
+and publishes it to npm.
+
+You can also run the workflow manually from GitHub Actions on the intended release
+ref. Both triggers require an unpublished version and the `NPM_TOKEN` secret in the
+`npm-publish` GitHub Environment.
+
+npm updates the package README only when a new version is published, including
+for documentation-only changes. Published versions cannot be overwritten. See
+[npm's README update rules](https://docs.npmjs.com/about-package-readme-files/).
 
 ## License
 
 MIT
+
+## Task video recording
+
+Ask the agent to record before it performs the task. It starts an authorized task
+tab, confirms recording is active, performs the task, then stops video before
+ending the session. No manual Start click is required. Preview and Save As are in
+the extension's Features → Video recording → Recent recordings.
+
+`bsk_inspect` with `action: "video"` exposes `videoAction` start/status/stop/save/
+list/discard. The default is a silent, fixed-tab MP4 with a 60-second limit (up to
+10 minutes). Export requires an explicit `output` path on the harness host; the
+extension's Save As writes on the browser computer. Partial recordings and limits
+are reported explicitly. See the [video reference](skill/references/video.md).
