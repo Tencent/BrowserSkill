@@ -241,9 +241,74 @@ async fn authenticate(socket: &mut Socket, pair: &mut Pairing) {
     }
     pair.role = CredentialRole::Active;
 }
+fn handshake_request(instance: &str) -> Value {
+    json!({"id":"handshake","method":"system.handshake","params":{
+        "client":"browser-skill-extension","version":env!("CARGO_PKG_VERSION"),
+        "protocol_version":bsk::daemon::state::PROTOCOL_VERSION,"instance_id":instance,
+        "browser":{"name":"Chrome","version":"130"},"label":"test"}})
+}
 async fn handshake(socket: &mut Socket, instance: &str) -> Value {
-    send(socket,json!({"id":"handshake","method":"system.handshake","params":{"client":"browser-skill-extension","version":env!("CARGO_PKG_VERSION"),"protocol_version":bsk::daemon::state::PROTOCOL_VERSION,"instance_id":instance,"browser":{"name":"Chrome","version":"130"},"label":"test"}})).await;
+    send(socket, handshake_request(instance)).await;
     serde_json::from_str(&receive(socket).await).unwrap()
+}
+
+#[tokio::test]
+async fn optional_pairing_preserves_unpaired_use_but_protects_paired_and_revoked_identities() {
+    for revoked in [false, true] {
+        let handle = daemon::run(DaemonConfig::new(0), None).await.unwrap();
+        assert_eq!(handle.state().local_auth.mode(), LocalAuthMode::Warn);
+        let mut unpaired = connect(&handle).await;
+        assert!(
+            handshake(&mut unpaired, INSTANCE)
+                .await
+                .get("result")
+                .is_some()
+        );
+        unpaired.close(None).await.unwrap();
+
+        let mut pairing = Pairing::create(&handle, None);
+        let mut paired = connect(&handle).await;
+        authenticate(&mut paired, &mut pairing).await;
+        assert!(
+            handshake(&mut paired, INSTANCE)
+                .await
+                .get("result")
+                .is_some()
+        );
+        let state = handle.state();
+        let browser = state.browsers.select(Some(INSTANCE)).unwrap();
+        let session = state
+            .sessions
+            .reserve_id(browser.id.clone(), 1, || 0)
+            .unwrap();
+        if revoked {
+            daemon::local_auth::lifecycle::revoke(state.clone(), Some(pairing.device.encode()))
+                .await
+                .unwrap();
+            closed(&mut paired).await;
+        }
+        let mut impostor = connect(&handle).await;
+        send(&mut impostor, handshake_request(INSTANCE)).await;
+        closed(&mut impostor).await;
+        if revoked {
+            assert!(state.browsers.is_empty());
+        } else {
+            assert_eq!(
+                state.browsers.select(Some(INSTANCE)).unwrap().generation,
+                browser.generation
+            );
+            assert!(state.sessions.get(&session).is_some());
+        }
+        // Pairing one browser must not force an unrelated old extension to pair.
+        let mut other = connect(&handle).await;
+        assert!(
+            handshake(&mut other, "12345678")
+                .await
+                .get("result")
+                .is_some()
+        );
+        handle.shutdown().await;
+    }
 }
 
 #[tokio::test]
@@ -608,9 +673,11 @@ async fn l17_legacy_handshake_obeys_daemon_policy() {
         let result = handshake(&mut socket, INSTANCE).await;
         if mode == LocalAuthMode::Required {
             assert_eq!(result["error"]["code"], "pairing_required");
+            assert!(handle.state().recent_unpaired().is_some());
             closed(&mut socket).await;
         } else {
             assert!(result.get("result").is_some());
+            assert!(handle.state().recent_unpaired().is_none());
             socket.close(None).await.unwrap();
         }
         handle.shutdown().await;
@@ -691,20 +758,19 @@ async fn l10_revocation_after_authentication_prevents_late_registration() {
 }
 
 #[tokio::test]
-async fn warn_records_only_pairing_capable_unpaired_attempts() {
-    let state = daemon::DaemonState::new(DaemonConfig::new(0).with_local_auth(LocalAuthMode::Warn));
-    state.record_unpaired(Some("0.3.0"), false);
-    assert!(state.recent_unpaired().is_none());
-    state.record_unpaired(Some("0.4.0"), true);
-    let status = state.local_auth_status().unwrap();
-    assert_eq!(status.mode, "warn");
-    assert_eq!(status.paired_devices, 0);
-    assert_eq!(
-        status
-            .last_unpaired_attempt
-            .unwrap()
-            .extension_version
-            .as_deref(),
-        Some("0.4.0")
-    );
+async fn optional_mode_does_not_report_required_pairing_from_stale_attempts() {
+    for mode in [
+        LocalAuthMode::Warn,
+        LocalAuthMode::Required,
+        LocalAuthMode::TrustLocal,
+    ] {
+        let state = daemon::DaemonState::new(DaemonConfig::new(0).with_local_auth(mode));
+        state.record_unpaired(Some("0.4.1"));
+        let status = state.local_auth_status().unwrap();
+        assert_eq!(status.paired_devices, 0);
+        assert_eq!(
+            status.last_unpaired_attempt.is_some(),
+            mode == LocalAuthMode::Required
+        );
+    }
 }

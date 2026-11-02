@@ -224,6 +224,14 @@ impl PairingStore {
     pub fn resolve(&self, id: &str) -> Result<String> {
         resolve(&self.state.lock().unwrap(), id)
     }
+    pub fn has_paired_browser(&self, instance: &str) -> bool {
+        self.state
+            .lock()
+            .unwrap()
+            .devices
+            .values()
+            .any(|device| device.browser_id.as_deref() == Some(instance))
+    }
     pub fn revoke(&self, id: Option<&str>) -> Result<Vec<String>> {
         self.update(|state| {
             let ids = match id {

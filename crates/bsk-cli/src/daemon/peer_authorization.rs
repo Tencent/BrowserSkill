@@ -1,5 +1,5 @@
 //! Local HMAC and remote TLS/Bearer authorization share the business driver.
-use super::local_auth::{LocalAuth, store::DeviceStatus};
+use super::local_auth::{LocalAuth, LocalAuthMode, store::DeviceStatus};
 use std::sync::Arc;
 
 pub(crate) struct LocalPeer {
@@ -66,22 +66,19 @@ impl PeerAuthorization {
     pub async fn registration_guard(
         &self,
     ) -> Option<(
-        tokio::sync::OwnedMutexGuard<()>,
+        Option<tokio::sync::OwnedMutexGuard<()>>,
         tokio::sync::OwnedMutexGuard<()>,
     )> {
-        if let Self::Local(peer) = self {
-            let device = peer.local.device_gate(&peer.device_id).lock_owned().await;
-            let registry = peer
-                .local
-                .lifecycle
-                .registry_gate
-                .clone()
-                .lock_owned()
-                .await;
-            Some((device, registry))
-        } else {
-            None
-        }
+        let (device, local) = match self {
+            Self::Local(peer) => (
+                Some(peer.local.device_gate(&peer.device_id).lock_owned().await),
+                &peer.local,
+            ),
+            Self::Legacy(local) => (None, local),
+            Self::Remote(_) => return None,
+        };
+        let registry = local.lifecycle.registry_gate.clone().lock_owned().await;
+        Some((device, registry))
     }
     pub fn register(&self, client: &Arc<super::browsers::BrowserClient>) {
         if let Self::Local(peer) = self {
@@ -91,7 +88,15 @@ impl PeerAuthorization {
         }
     }
     pub fn matches_instance(&self, instance: &str) -> bool {
-        !matches!(self, Self::Local(peer) if peer.browser_id != instance)
+        match self {
+            Self::Local(peer) => peer.browser_id == instance,
+            // Revoking a key does not turn its identity into an unpaired one.
+            Self::Legacy(local) => {
+                local.mode() == LocalAuthMode::TrustLocal
+                    || !local.store.has_paired_browser(instance)
+            }
+            Self::Remote(_) => true,
+        }
     }
 }
 
