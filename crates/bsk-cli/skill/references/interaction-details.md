@@ -83,17 +83,23 @@ Do not infer the first-selected cell or range direction from a static highlight.
 Verify the final displayed range/form and, when requested, the eventual business
 success message separately.
 
-### Filling text
+### Filling fields
 
 `fill` supports enabled, editable text inputs, textareas, and contenteditable
-editor roots. Target the whole editing host, not an internal paragraph or span,
+editor roots, as well as `date`, `time`, `datetime-local`, `month`, and `week`
+inputs. Use browser value formats such as `2026-10-14`, `14:30`,
+`2026-10-14T14:30`, `2026-10`, and `2026-W42`, respectively. Use `bsk upload`
+for file inputs.
+
+Target the whole editing host, not an internal paragraph or span,
 even if that child has `tabindex` or repeats `contenteditable`. Unsupported
 targets are rejected without focusing or changing them; the tool never promotes
 a child target to its parent editor.
 
 By default, fill replaces all text in the target. `--no-clear` appends at its end.
-An empty value clears the target unless `--no-clear` is set. Use the editor root's
-ref from a fresh observation. After a mid-operation failure or cancellation,
+An empty value clears the target unless `--no-clear` is set. For date/time inputs,
+the combined value must be valid. Use the editor root's ref from a fresh
+observation. After a mid-operation failure or cancellation,
 observe before retrying: earlier input events or edits may already have occurred.
 Rich-text framework state and undo behavior require application-specific checks.
 

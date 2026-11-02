@@ -212,6 +212,49 @@ describe("fill result verification", () => {
     );
   });
 
+  it("clears a background date after deferred focus restores a value", async () => {
+    const h = await setup('<input type="date" value="2026-01-01">');
+    vi.spyOn(document, "hasFocus").mockReturnValue(false);
+    const send = h.send.getMockImplementation()!;
+    h.send.mockImplementation(async (tabId, method, params) => {
+      const reply = await send(tabId, method, params);
+      if (
+        method === "Input.dispatchKeyEvent" &&
+        (params as { type: string }).type === "rawKeyDown"
+      ) {
+        h.element.value = "2026-01-01";
+      }
+      return reply;
+    });
+
+    expect(await h.fill("")).toMatchObject({ value_length: 0 });
+    expect(h.element.value).toBe("");
+    expect(h.insert).not.toHaveBeenCalled();
+  });
+
+  it("preserves a date-like value changed by deferred focus when appending", async () => {
+    const h = await setup('<input type="time" step="1" value="12:34">');
+    vi.spyOn(document, "hasFocus").mockReturnValue(false);
+    const send = h.send.getMockImplementation()!;
+    h.send.mockImplementation(async (tabId, method, params) => {
+      const reply = await send(tabId, method, params);
+      if (
+        method === "Input.dispatchKeyEvent" &&
+        (params as { type: string }).type === "rawKeyDown"
+      ) {
+        h.element.value = "08:00";
+      }
+      return reply;
+    });
+
+    expect(await h.fill(":56", false)).toMatchObject({
+      code: "cdp_failed",
+      data: { reason: "fill_target_changed" },
+    });
+    expect(h.element.value).toBe("08:00");
+    expect(h.insert).not.toHaveBeenCalled();
+  });
+
   it("stops a background date fill when flush loses focus", async () => {
     const h = await setup('<input type="date" value="">');
     vi.spyOn(document, "hasFocus").mockReturnValue(false);
@@ -258,7 +301,11 @@ describe("fill result verification", () => {
     const ctx = await manager.start("aa11");
     ctx.refStore.set("e1", 12, { tabId: 4 });
     const hostInputs: Event[] = [];
-    host.addEventListener("input", (event) => hostInputs.push(event));
+    const hostInputValues: string[] = [];
+    host.addEventListener("input", (event) => {
+      hostInputs.push(event);
+      hostInputValues.push(element.value);
+    });
     const script = vi.fn(async (params: ScriptParams): Promise<unknown> => {
       try {
         const fn = new Function(`return (${params.functionDeclaration})`)();
@@ -315,9 +362,8 @@ describe("fill result verification", () => {
     );
     expect(result).toMatchObject({ value_length: 10 });
     expect(element.value).toBe("2026-10-14");
-    expect(hostInputs).toHaveLength(1);
-    expect(hostInputs[0].composed).toBe(true);
-    expect(hostInputs[0].bubbles).toBe(true);
+    expect(hostInputValues).toEqual(["", "2026-10-14"]);
+    expect(hostInputs.every((event) => event.composed && event.bubbles)).toBe(true);
   });
 
   it("rejects an overlong value before clearing", async () => {

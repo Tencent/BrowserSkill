@@ -525,6 +525,61 @@ describe.skipIf(!process.env.BSK_FILL_CHROME)("date-like fill regressions", () =
     ["month", "2026-10"],
     ["week", "2026-W42"],
   ] as const)(
+    "keeps a background %s clear after deferred focus and tab activation",
+    async (type, defaultValue) => {
+      await withFillBrowser(
+        {
+          background: true,
+          markup: guard + `<input id="target" type="${type}" value="${defaultValue}">`,
+        },
+        async (h) => {
+          await h.ref("document.querySelector('#target')");
+          await h.evaluate(`document.querySelector('#target').addEventListener('focus', () => {
+            document.querySelector('#target').value = '${defaultValue}';
+          })`);
+          expect(await h.fill("")).toMatchObject({ value_length: 0 });
+          expect(await h.evaluate("document.querySelector('#target').value")).toBe("");
+          await h.activate();
+          expect(await h.evaluate("document.querySelector('#target').value")).toBe("");
+          expect(h.calls).toContain("Input.dispatchKeyEvent");
+          expect(h.calls).not.toContain("Input.insertText");
+        },
+      );
+    },
+    30_000,
+  );
+
+  it.each([
+    ":56",
+    "",
+  ])("does not overwrite a value changed by deferred focus when appending %s", async (value) => {
+    await withFillBrowser(
+      {
+        background: true,
+        markup: guard + '<input id="target" type="time" step="1" value="12:34">',
+      },
+      async (h) => {
+        await h.ref("document.querySelector('#target')");
+        await h.evaluate(`document.querySelector('#target').addEventListener('focus', () => {
+            document.querySelector('#target').value = '08:00';
+          })`);
+        expect(await h.fill(value, false)).toMatchObject({
+          code: "cdp_failed",
+          data: { reason: "fill_target_changed" },
+        });
+        expect(await h.evaluate("document.querySelector('#target').value")).toBe("08:00");
+        expect(h.calls).not.toContain("Input.insertText");
+      },
+    );
+  }, 30_000);
+
+  it.each([
+    ["date", "2026-10-14"],
+    ["time", "14:30"],
+    ["datetime-local", "2026-10-14T14:30"],
+    ["month", "2026-10"],
+    ["week", "2026-W42"],
+  ] as const)(
     "notifies a shadow host when filling %s",
     async (type, value) => {
       await withFillBrowser(
@@ -549,10 +604,38 @@ describe.skipIf(!process.env.BSK_FILL_CHROME)("date-like fill regressions", () =
               "document.querySelector('#host').shadowRoot.querySelector('#target').value",
             ),
           ).toBe(value);
-          expect(await h.evaluate("window.hostInputEvents")).toEqual([{ composed: true, value }]);
+          expect(await h.evaluate("window.hostInputEvents")).toEqual([
+            { composed: true, value: "" },
+            { composed: true, value },
+          ]);
           expect(h.calls).not.toContain("Input.insertText");
         },
       );
+    },
+    30_000,
+  );
+
+  it.each([
+    ["text", "hello"],
+    ["date", "2026-10-14"],
+  ] as const)(
+    "does not duplicate a shadow component's forwarded change for %s",
+    async (type, value) => {
+      await withFillBrowser({ background: false, markup: '<div id="host"></div>' }, async (h) => {
+        await h.evaluate(`(() => {
+        const host = document.querySelector('#host');
+        const root = host.attachShadow({ mode: 'open' });
+        root.innerHTML = '<input id="target" type="${type}">';
+        window.hostChanges = 0;
+        root.querySelector('#target').addEventListener('change', () => {
+          host.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
+        });
+        host.addEventListener('change', () => window.hostChanges++);
+      })()`);
+        await h.ref("document.querySelector('#host').shadowRoot.querySelector('#target')");
+        expect(await h.fill(value)).toMatchObject({ value_length: value.length });
+        expect(await h.evaluate("window.hostChanges")).toBe(1);
+      });
     },
     30_000,
   );
