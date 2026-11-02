@@ -20,6 +20,9 @@ Starting from 0.2.0, CLI / Extension / DSH Plugin share the same version number.
   human control retains the existing `not_ready` behavior, including explicit
   holds during navigation. Status and wait report
   `control_policy: null` until the first successful policy negotiation.
+- DSH plugin: a selector miss now lists the connected browsers in the error the model
+  sees, instead of only the `bsk browsers` hint, so a retry can name a browser that
+  is actually connected.
 
 ## [0.4.1] - 2026-11-02
 
