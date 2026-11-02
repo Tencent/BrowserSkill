@@ -67,6 +67,7 @@ export interface SnapshotDocument {
     textValue?: SparseArray;
     inputChecked?: RareBooleanData;
     optionSelected?: RareBooleanData;
+    isClickable?: RareBooleanData;
   };
   layout?: {
     nodeIndex?: number[];
@@ -150,6 +151,7 @@ export async function decodeDocument(
   const textValues = sparseIndexMap(dn.textValue);
   const checkedInputs = new Set(dn.inputChecked?.index ?? []);
   const selectedOptions = new Set(dn.optionSelected?.index ?? []);
+  const clickableNodes = new Set(dn.isClickable?.index ?? []);
 
   // Collect visible text from #text child nodes so element CapturedNodes
   // carry a textContent value usable as a button/link label fallback.
@@ -229,8 +231,7 @@ export async function decodeDocument(
       backendNodeId,
       nodeType: dn.nodeType?.[n],
       parentBackendNodeId,
-      ...(profile.includeVisualFacts &&
-      (dn.parentIndex?.[n] === undefined || (parentIdx >= 0 && parentBackendNodeId === null))
+      ...(dn.parentIndex?.[n] === undefined || (parentIdx >= 0 && parentBackendNodeId === null)
         ? { parentMissing: true }
         : {}),
 
@@ -241,6 +242,7 @@ export async function decodeDocument(
       position: styles.position || "static",
       pointerEvents: styles["pointer-events"] || "auto",
       cursor: styles.cursor || "auto",
+      ...(clickableNodes.has(n) ? { clickable: true } : {}),
 
       textContent,
       ...(formValue !== undefined ? { formValue } : {}),

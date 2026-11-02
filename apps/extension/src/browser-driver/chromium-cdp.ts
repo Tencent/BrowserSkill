@@ -17,8 +17,8 @@
 //   callers can decide whether to retry vs. surface an `cdp_failed`.
 // * Native JS dialogs (`alert` / `confirm` / `prompt` / `beforeunload`)
 //   block CDP until dismissed. We listen for `Page.javascriptDialogOpening`,
-//   record the payload for tool results, and auto-accept so automation
-//   can continue.
+//   retain pending state until an explicit agent decision, and record the
+//   actual closing event for tool results.
 
 import type {
   ConsoleEntry,
@@ -30,6 +30,7 @@ import type {
   NetworkEntry,
   NetworkEntryKind,
   NetworkResult,
+  PendingJavaScriptDialog,
 } from "@/transport/types";
 import { BackgroundExecution } from "./background-execution";
 import { CdpReadGate, CdpReadTimeoutError, READ_TIMEOUT_MS } from "./command-deadline";
@@ -190,6 +191,23 @@ export class ChromiumCdp {
       this.api.sendCommand({ tabId }, "Emulation.setFocusEmulationEnabled", { enabled }),
   );
   private readonly tabOwners = new Map<number, Set<string>>();
+  private readonly pendingDialogEntries = new Map<
+    number,
+    {
+      dialog: PendingJavaScriptDialog;
+      attachmentId: string;
+      defaultPrompt?: string;
+      hasBrowserHandler?: boolean;
+      source: CdpDebuggee;
+      resolving: boolean;
+      timer: ReturnType<typeof setTimeout>;
+      closed: Set<(result: JavaScriptDialogInfo | Error) => void>;
+    }
+  >();
+  private readonly dialogGenerations = new Map<number, number>();
+  private readonly dialogListeners = new Set<
+    (tabId: number, dialog: PendingJavaScriptDialog | null, reason?: "decision_timeout") => void
+  >();
   private readonly dialogBuffers = new Map<number, JavaScriptDialogInfo[]>();
   private readonly dialogSequences = new Map<number, number>();
   private readonly consoleBuffers = new Map<number, ConsoleEntry[]>();
@@ -210,7 +228,7 @@ export class ChromiumCdp {
     api: CdpDebuggerApi = chromeDebuggerApi,
     private readonly options: {
       /** CDP observation alone does not authorize dismissing user dialogs. */
-      shouldAutoAcceptDialog?: (tabId: number) => boolean | Promise<boolean>;
+      canControlDialog?: (tabId: number) => boolean | Promise<boolean>;
       /** Invalidate tab refs when the root document or debugger attachment changes. */
       onDocumentChanged?: (tabId: number) => void;
     } = {},
@@ -403,18 +421,50 @@ export class ChromiumCdp {
     }
   }
 
-  async getFrameGraph(tabId: number): Promise<CdpFrameGraph> {
+  async getFrameGraph(tabId: number, signal?: AbortSignal): Promise<CdpFrameGraph> {
+    signal?.throwIfAborted();
     await this.ensureAttached(tabId);
+    const attachmentId = this.getAttachmentId(tabId);
+    const check = () => {
+      signal?.throwIfAborted();
+      if (attachmentId === undefined || this.getAttachmentId(tabId) !== attachmentId) {
+        const error = new Error("Debugger attachment changed during frame discovery");
+        error.name = "CdpAttachmentChangedError";
+        throw error;
+      }
+    };
+    // Frame discovery belongs to this attachment. An old tree reply must not
+    // reconnect a released tab, or continue against another reader's connection.
+    const read = async <T>(
+      target: CdpTarget,
+      method: string,
+      params: object,
+      timeoutMs?: number,
+    ): Promise<T> => {
+      check();
+      try {
+        const result = await this.command(target, method, params, timeoutMs, check);
+        check();
+        return result as T;
+      } catch (error) {
+        check();
+        throw error;
+      }
+    };
+    check();
     // Ordinary configuration failures leave the graph to the root tree. A
     // timed-out read means the renderer is not answering: stop here instead of
     // queueing the tree, owner and snapshot reads behind the stuck command.
     await this.enableFrameDiscovery({ tabId }).catch(rethrowReadTimeout);
+    check();
     this.retryChildFrameDiscovery(tabId);
     await this.drainFrameAttachTasks(tabId);
+    check();
 
     const sources: CdpFrameTreeSource[] = [];
     const unavailable = new Map<string, CdpTarget>();
     const isolateChildTimeout = (error: unknown, target: CdpTarget) => {
+      check();
       if (!(error instanceof CdpReadTimeoutError)) return;
       const frameId =
         target.sessionId && this.frameDiscovery.get(tabId)?.frameIds.get(target.sessionId);
@@ -424,7 +474,7 @@ export class ChromiumCdp {
         throw error;
       unavailable.set(frameId, target);
     };
-    const root = await this.sendToTarget<{ frameTree?: CdpFrameTreeNode }>(
+    const root = await read<{ frameTree?: CdpFrameTreeNode }>(
       { tabId },
       "Page.getFrameTree",
       {},
@@ -437,7 +487,7 @@ export class ChromiumCdp {
       sessions.map(async (sessionId): Promise<CdpFrameTreeSource | null> => {
         const target = { tabId, sessionId };
         try {
-          const reply = await this.sendToTarget<{ frameTree?: CdpFrameTreeNode }>(
+          const reply = await read<{ frameTree?: CdpFrameTreeNode }>(
             target,
             "Page.getFrameTree",
             {},
@@ -466,11 +516,9 @@ export class ChromiumCdp {
         const parent = frameById.get(frame.parentFrameId);
         if (!parent) return;
         try {
-          const owner = await this.sendToTarget<{ backendNodeId?: number }>(
-            parent.target,
-            "DOM.getFrameOwner",
-            { frameId: frame.frameId },
-          );
+          const owner = await read<{ backendNodeId?: number }>(parent.target, "DOM.getFrameOwner", {
+            frameId: frame.frameId,
+          });
           if (owner.backendNodeId !== undefined) frame.ownerBackendNodeId = owner.backendNodeId;
         } catch (err) {
           // The frame may have navigated between tree capture and owner lookup.
@@ -478,6 +526,7 @@ export class ChromiumCdp {
         }
       }),
     );
+    check();
     return omitFrameSubtrees(discovered, unavailable);
   }
 
@@ -699,6 +748,7 @@ export class ChromiumCdp {
     this.attachedTabs.clear();
     this.attachmentIds.clear();
     for (const tabId of tabs) this.options.onDocumentChanged?.(tabId);
+    for (const tabId of this.pendingDialogEntries.keys()) this.clearDialogState(tabId);
     this.dialogBuffers.clear();
     this.dialogSequences.clear();
     this.consoleBuffers.clear();
@@ -949,52 +999,177 @@ export class ChromiumCdp {
     this.readGate.reset(tabId);
   }
 
+  pendingDialogs(tabId?: number): PendingJavaScriptDialog[] {
+    return [...this.pendingDialogEntries.values()]
+      .filter((entry) => tabId === undefined || entry.dialog.tab_id === tabId)
+      .map((entry) => ({ ...entry.dialog }));
+  }
+
+  onDialogChanged(
+    handler: (
+      tabId: number,
+      dialog: PendingJavaScriptDialog | null,
+      reason?: "decision_timeout",
+    ) => void,
+  ): { dispose(): void } {
+    this.dialogListeners.add(handler);
+    return { dispose: () => this.dialogListeners.delete(handler) };
+  }
+
+  private emitDialogChanged(
+    tabId: number,
+    dialog: PendingJavaScriptDialog | null,
+    reason?: "decision_timeout",
+  ): void {
+    for (const listener of this.dialogListeners) listener(tabId, dialog, reason);
+  }
+
+  async resolveDialog(
+    id: string,
+    accept: boolean,
+    text?: string,
+    guard: Pick<CdpDispatchGuard, "signal" | "onDispatch"> = {},
+  ): Promise<JavaScriptDialogInfo> {
+    const entry = [...this.pendingDialogEntries.values()].find((item) => item.dialog.id === id);
+    if (!entry) throw new Error("Dialog is no longer pending");
+    if (entry.resolving) throw new Error("Dialog decision is already in progress");
+    if (text !== undefined && (!accept || entry.dialog.type !== "prompt"))
+      throw new Error("text is only valid when accepting a prompt");
+    guard.signal?.throwIfAborted();
+    if (
+      this.options.canControlDialog &&
+      !(await this.options.canControlDialog(entry.dialog.tab_id))
+    )
+      throw new Error("Tab is no longer agent controlled");
+    // Scope checks can await tab metadata; repeat identity checks at native dispatch.
+    if (this.pendingDialogEntries.get(entry.dialog.tab_id) !== entry)
+      throw new Error("Dialog is no longer pending");
+    if (entry.resolving) throw new Error("Dialog decision is already in progress");
+    entry.resolving = true;
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    let closeListener: ((result: JavaScriptDialogInfo | Error) => void) | undefined;
+    const closed = new Promise<JavaScriptDialogInfo>((resolve, reject) => {
+      closeListener = (result) => (result instanceof Error ? reject(result) : resolve(result));
+      entry.closed.add(closeListener);
+      timeout = setTimeout(() => reject(new Error("Browser did not confirm dialog closure")), 2000);
+    });
+    // Attach a rejection handler immediately, including when native dispatch fails first.
+    void closed.catch(() => {});
+    try {
+      await this.sendGuarded(
+        { ...entry.source, tabId: entry.dialog.tab_id },
+        "Page.handleJavaScriptDialog",
+        {
+          accept,
+          // CDP treats omitted promptText as empty, so preserve the full native
+          // default privately instead of reusing the bounded status preview.
+          ...(accept && entry.dialog.type === "prompt"
+            ? { promptText: text ?? entry.defaultPrompt ?? "" }
+            : {}),
+        },
+        {
+          signal: guard.signal,
+          attachmentId: entry.attachmentId,
+          onDispatch: () => {
+            if (this.pendingDialogEntries.get(entry.dialog.tab_id) !== entry)
+              throw new Error("Dialog changed before native dispatch");
+            guard.onDispatch?.();
+          },
+        },
+      );
+      return await closed;
+    } finally {
+      if (timeout) clearTimeout(timeout);
+      if (closeListener) entry.closed.delete(closeListener);
+      entry.resolving = false;
+    }
+  }
+
   private bindDialogHandler(): void {
     if (this.dialogSubscription) return;
     const listener = (source: CdpDebuggee, method: string, params: unknown) => {
-      if (method !== "Page.javascriptDialogOpening") return;
       const tabId = source.tabId;
       if (typeof tabId !== "number") return;
-      void this.onJavaScriptDialogOpening(tabId, params);
+      if (method === "Page.javascriptDialogOpening") {
+        const generation = (this.dialogGenerations.get(tabId) ?? 0) + 1;
+        this.dialogGenerations.set(tabId, generation);
+        void this.onJavaScriptDialogOpening(source, params, generation);
+      } else if (method === "Page.javascriptDialogClosed") {
+        this.dialogGenerations.set(tabId, (this.dialogGenerations.get(tabId) ?? 0) + 1);
+        const entry = this.pendingDialogEntries.get(tabId);
+        if (!entry) return;
+        const info: JavaScriptDialogInfo = {
+          tab_id: tabId,
+          type: entry.dialog.type,
+          message: entry.dialog.message,
+          url: entry.dialog.url,
+          default_prompt: entry.dialog.default_prompt,
+          has_browser_handler: entry.hasBrowserHandler,
+          handled: (params as { result?: boolean })?.result ? "accepted" : "dismissed",
+          sequence: entry.dialog.sequence,
+        };
+        clearTimeout(entry.timer);
+        this.pendingDialogEntries.delete(tabId);
+        this.appendDialog(tabId, info);
+        for (const close of entry.closed) close(info);
+        this.emitDialogChanged(tabId, null);
+      }
     };
     this.api.onEvent.addListener(listener);
-    this.dialogSubscription = {
-      dispose: () => this.api.onEvent.removeListener(listener),
-    };
+    this.dialogSubscription = { dispose: () => this.api.onEvent.removeListener(listener) };
   }
 
-  private async onJavaScriptDialogOpening(tabId: number, params: unknown): Promise<void> {
-    if (!this.attachedTabs.has(tabId) && !this.attachInFlight.has(tabId)) return;
+  private async onJavaScriptDialogOpening(
+    source: CdpDebuggee,
+    params: unknown,
+    generation: number,
+  ): Promise<void> {
+    const tabId = source.tabId;
+    if (tabId === undefined) return;
+    const attachmentId = this.getAttachmentId(tabId);
+    if (!attachmentId) return;
     const parsed = parseDialogOpeningParams(params);
     try {
+      if (this.options.canControlDialog && !(await this.options.canControlDialog(tabId))) return;
       if (
-        this.options.shouldAutoAcceptDialog &&
-        !(await this.options.shouldAutoAcceptDialog(tabId))
-      ) {
+        this.getAttachmentId(tabId) !== attachmentId ||
+        this.dialogGenerations.get(tabId) !== generation
+      )
         return;
-      }
-      // The tab may have been returned while its current scope was checked.
-      if (!this.attachedTabs.has(tabId) && !this.attachInFlight.has(tabId)) return;
-      const handleParams: { accept: boolean; promptText?: string } = { accept: true };
-      if (parsed.type === "prompt") {
-        handleParams.promptText = parsed.defaultPrompt ?? "";
-      }
-      await this.command({ tabId }, "Page.handleJavaScriptDialog", handleParams);
-      if (!this.attachedTabs.has(tabId) && !this.attachInFlight.has(tabId)) return;
       const sequence = (this.dialogSequences.get(tabId) ?? 0) + 1;
       this.dialogSequences.set(tabId, sequence);
-      this.appendDialog(tabId, {
+      const dialog: PendingJavaScriptDialog = {
+        id: crypto.randomUUID(),
         tab_id: tabId,
         type: parsed.type,
         message: parsed.message,
         url: parsed.url,
-        default_prompt: parsed.defaultPrompt,
-        has_browser_handler: parsed.hasBrowserHandler,
-        handled: "accepted",
+        default_prompt:
+          parsed.defaultPrompt === undefined
+            ? undefined
+            : truncateDialogField(parsed.defaultPrompt),
         sequence,
+        decision_deadline: Date.now() + 60000,
+      };
+      const timer = setTimeout(() => {
+        // A bounded fallback rejects; never confirms on behalf of an absent agent.
+        if (this.pendingDialogEntries.get(tabId)?.dialog.id !== dialog.id) return;
+        this.emitDialogChanged(tabId, dialog, "decision_timeout");
+        void this.resolveDialog(dialog.id, false).catch(() => {});
+      }, 60000);
+      this.pendingDialogEntries.set(tabId, {
+        dialog,
+        source,
+        attachmentId,
+        defaultPrompt: parsed.defaultPrompt,
+        hasBrowserHandler: parsed.hasBrowserHandler,
+        resolving: false,
+        timer,
+        closed: new Set(),
       });
-    } catch (err) {
-      console.debug("[bsk cdp] Page.handleJavaScriptDialog failed", { tabId, err });
+      this.emitDialogChanged(tabId, dialog);
+    } catch (error) {
+      console.debug("[bsk cdp] dialog state unavailable", error);
     }
   }
 
@@ -1008,6 +1183,15 @@ export class ChromiumCdp {
   }
 
   private clearDialogState(tabId: number): void {
+    const pending = this.pendingDialogEntries.get(tabId);
+    if (pending) {
+      clearTimeout(pending.timer);
+      this.pendingDialogEntries.delete(tabId);
+      for (const close of pending.closed)
+        close(new Error("Debugger attachment changed; dialog outcome is unknown"));
+      this.emitDialogChanged(tabId, null);
+    }
+    this.dialogGenerations.set(tabId, (this.dialogGenerations.get(tabId) ?? 0) + 1);
     this.dialogBuffers.delete(tabId);
     this.dialogSequences.delete(tabId);
   }
@@ -1060,14 +1244,17 @@ export class ChromiumCdp {
         case "Network.responseReceived":
           this.appendNetwork(
             tabId,
-            parseNetworkResponse(this.takeNetworkRequest(tabId, params), params),
+            parseNetworkResponse(this.getNetworkRequest(tabId, params), params),
           );
           break;
         case "Network.loadingFailed":
           this.appendNetwork(
             tabId,
-            parseNetworkFailure(this.takeNetworkRequest(tabId, params), params),
+            parseNetworkFailure(this.getNetworkRequest(tabId, params, true), params),
           );
+          break;
+        case "Network.loadingFinished":
+          this.getNetworkRequest(tabId, params, true);
           break;
       }
     };
@@ -1116,14 +1303,18 @@ export class ChromiumCdp {
     this.networkRequestMeta.set(tabId, tabMeta);
   }
 
-  /** Consume request metadata once its response or failure has been observed. */
-  private takeNetworkRequest(tabId: number, params: unknown): NetworkRequestMeta | undefined {
+  /** Keep metadata through response headers; consume it only when loading ends. */
+  private getNetworkRequest(
+    tabId: number,
+    params: unknown,
+    finished = false,
+  ): NetworkRequestMeta | undefined {
     const raw = (params ?? {}) as Record<string, unknown>;
     const id = typeof raw.requestId === "string" ? raw.requestId : undefined;
     if (!id) return undefined;
     const tabMeta = this.networkRequestMeta.get(tabId);
     const info = tabMeta?.get(id);
-    tabMeta?.delete(id);
+    if (finished) tabMeta?.delete(id);
     if (tabMeta?.size === 0) this.networkRequestMeta.delete(tabId);
     return info;
   }
@@ -1166,6 +1357,8 @@ export class ChromiumCdp {
 
   /** Remove internal Chrome event listeners; tests and SW teardown call this. */
   dispose(): void {
+    for (const tabId of this.pendingDialogEntries.keys()) this.clearDialogState(tabId);
+    this.dialogListeners.clear();
     this.detachSubscription?.dispose();
     this.detachSubscription = null;
     this.dialogSubscription?.dispose();
@@ -1230,8 +1423,7 @@ function parseDialogOpeningParams(params: unknown): ParsedDialogOpening {
   const type = normalizeDialogType(raw.type);
   const message = truncateDialogField(typeof raw.message === "string" ? raw.message : "");
   const url = typeof raw.url === "string" ? truncateDialogField(raw.url) : undefined;
-  const defaultPrompt =
-    typeof raw.defaultPrompt === "string" ? truncateDialogField(raw.defaultPrompt) : undefined;
+  const defaultPrompt = typeof raw.defaultPrompt === "string" ? raw.defaultPrompt : undefined;
   const hasBrowserHandler =
     typeof raw.hasBrowserHandler === "boolean" ? raw.hasBrowserHandler : undefined;
   return { type, message, url, defaultPrompt, hasBrowserHandler };
@@ -1277,7 +1469,7 @@ export function parseExceptionThrown(params: unknown): ParsedConsoleEntry | null
   const details = (raw.exceptionDetails ?? {}) as Record<string, unknown>;
   const exception = (details.exception ?? {}) as Record<string, unknown>;
   const text =
-    firstLine(typeof exception.description === "string" ? exception.description : undefined) ||
+    firstLine(remoteObjectToText(exception)) ||
     firstLine(typeof details.text === "string" ? details.text : undefined) ||
     "Uncaught (unknown error)";
   return makeConsoleEntry({

@@ -329,3 +329,127 @@ describe("form state identity", () => {
     expect(send).not.toHaveBeenCalledWith(7, "Runtime.callFunctionOn", expect.anything());
   });
 });
+
+it("captures actual native form membership independently of the form's accessibility role", async () => {
+  const doc = document.implementation.createHTMLDocument("ownership");
+  doc.body.innerHTML =
+    '<form id="order" role="none"><input id="11" type="range" aria-label="Playback progress"></form><input id="12" type="range"><input id="13" type="range" form="order">';
+  const { cdp, nodes } = await fakeCdp(
+    [[11, 12, 13].map((id) => ({ id, type: "range", value: "0" }))],
+    (params) => {
+      const entries = new Function("document", `return ${params.expression}`)(doc) as [
+        HTMLInputElement,
+        string,
+      ][];
+      return reply(entries.map(([element, json]) => [Number(element.id), JSON.parse(json)]));
+    },
+  );
+  await enrichFormControlStates(cdp, 7, nodes);
+  expect(nodes[0].filter((n) => n.tag === "input").map((n) => n.inForm)).toEqual([
+    true,
+    false,
+    true,
+  ]);
+});
+
+it.each([
+  true,
+  false,
+  undefined,
+])("reads missing range ownership by backend identity, preserving unknown results (%s)", async (inForm) => {
+  const nodes = await decodeControls(snapshot([[{ id: 11, type: "range", value: "0" }]]));
+  const send = vi.fn(async (_tabId, method) => {
+    if (method === "Runtime.evaluate") return reply([]);
+    if (method === "DOM.resolveNode") return { object: { objectId: "closed-shadow-range" } };
+    if (method === "Runtime.callFunctionOn") return { result: { value: inForm } };
+    return {};
+  });
+  await enrichFormControlStates({ send: send as CdpRunner["send"] }, 7, nodes);
+  expect(send).toHaveBeenCalledWith(
+    7,
+    "DOM.resolveNode",
+    expect.objectContaining({ backendNodeId: 11 }),
+  );
+  expect(nodes[0].find((n) => n.backendNodeId === 11)?.inForm).toBe(inForm);
+  expect(send).toHaveBeenCalledWith(7, "Runtime.releaseObjectGroup", expect.anything());
+});
+
+it("bounds missing range-owner reads and keeps the uninspected remainder unknown", async () => {
+  const nodes = await decodeControls(
+    snapshot([Array.from({ length: 65 }, (_, i) => ({ id: i + 1, type: "range", value: "0" }))]),
+  );
+  const send = vi.fn(async (_tabId, method, params) => {
+    if (method === "Runtime.evaluate") return reply([]);
+    if (method === "DOM.resolveNode") return { object: { objectId: String(params.backendNodeId) } };
+    if (method === "Runtime.callFunctionOn") return { result: { value: false } };
+    return {};
+  });
+  await enrichFormControlStates({ send: send as CdpRunner["send"] }, 7, nodes);
+  expect(send.mock.calls.filter(([, method]) => method === "DOM.resolveNode")).toHaveLength(64);
+  expect(nodes[0].find((n) => n.backendNodeId === 64)?.inForm).toBe(false);
+  expect(nodes[0].find((n) => n.backendNodeId === 65)?.inForm).toBeUndefined();
+});
+
+it("drains in-flight range reads before releasing objects after a terminal error", async () => {
+  const nodes = await decodeControls(
+    snapshot([
+      [
+        { id: 11, type: "range", value: "0" },
+        { id: 12, type: "range", value: "0" },
+      ],
+    ]),
+  );
+  let rejectFirst!: (reason: Error) => void;
+  let resolveSecond!: (value: unknown) => void;
+  const send = vi.fn(async (_tabId, method, params) => {
+    if (method === "Runtime.evaluate") return reply([]);
+    if (method === "DOM.resolveNode")
+      return new Promise((resolve, reject) => {
+        if (params.backendNodeId === 11) rejectFirst = reject;
+        else resolveSecond = resolve;
+      });
+    return {};
+  });
+  let settled = false;
+  const result = enrichFormControlStates({ send: send as CdpRunner["send"] }, 7, nodes).catch(
+    (error) => {
+      settled = true;
+      return error;
+    },
+  );
+  await vi.waitFor(() => expect(resolveSecond).toBeTypeOf("function"));
+  const error = Object.assign(new Error("renderer timed out"), { name: "CdpReadTimeoutError" });
+  rejectFirst(error);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  expect(settled).toBe(false);
+  expect(send).not.toHaveBeenCalledWith(7, "Runtime.releaseObjectGroup", expect.anything());
+  resolveSecond({ object: { objectId: "second" } });
+  expect(await result).toBe(error);
+  expect(send).toHaveBeenCalledWith(7, "Runtime.releaseObjectGroup", expect.anything());
+  expect(send).not.toHaveBeenCalledWith(7, "Runtime.callFunctionOn", expect.anything());
+});
+
+it("keeps fallback owner reads with identical backend ids scoped to their OOPIF target", async () => {
+  const sendToTarget = vi.fn(async (target, method) => {
+    if (method === "Runtime.evaluate") return reply([]);
+    if (method === "DOM.resolveNode") return { object: { objectId: "range" } };
+    if (method === "Runtime.callFunctionOn")
+      return { result: { value: target.sessionId === "owned-frame" } };
+    return {};
+  });
+  const send = vi.fn(async () => {
+    throw new Error("unexpected root target");
+  });
+  const cdp = { send, sendToTarget } as unknown as CdpRunner;
+  for (const sessionId of ["owned-frame", "free-frame"]) {
+    const nodes = await decodeControls(snapshot([[{ id: 11, type: "range", value: "0" }]]));
+    await enrichFormControlStates(cdpRunnerForTarget(cdp, { tabId: 7, sessionId }), 7, nodes);
+    expect(nodes[0].find((n) => n.backendNodeId === 11)?.inForm).toBe(sessionId === "owned-frame");
+    expect(sendToTarget).toHaveBeenCalledWith(
+      { tabId: 7, sessionId },
+      "Runtime.callFunctionOn",
+      expect.objectContaining({ objectId: "range" }),
+    );
+  }
+  expect(send).not.toHaveBeenCalled();
+});

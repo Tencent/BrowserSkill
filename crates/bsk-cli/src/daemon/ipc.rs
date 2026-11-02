@@ -209,8 +209,9 @@ pub fn full_handler(status: DaemonStatus, state: Arc<DaemonState>) -> RpcHandler
             // Internal correlation is minted here, never accepted from a CLI caller.
             if let Some(object) = params.as_object_mut() {
                 object.remove("_audit_id");
+                object.remove("_operation_id");
             }
-            let ticket = if serde_json::to_value(&method)
+            let mut ticket = if serde_json::to_value(&method)
                 .ok()
                 .and_then(|v| v.as_str().map(|s| s.starts_with("tool.")))
                 .unwrap_or(false)
@@ -294,6 +295,7 @@ pub fn full_handler(status: DaemonStatus, state: Arc<DaemonState>) -> RpcHandler
                 | Method::ToolReload
                 | Method::ToolClick
                 | Method::ToolHover
+                | Method::ToolDrag
                 | Method::ToolWheel
                 | Method::ToolScrollTo
                 | Method::ToolFocus
@@ -309,8 +311,21 @@ pub fn full_handler(status: DaemonStatus, state: Arc<DaemonState>) -> RpcHandler
                 | Method::ToolRequestHelp
                 | Method::ToolRecordStart
                 | Method::ToolRecordStop
-                | Method::ToolRecordAwait => {
-                    handle_tool_dispatch(&state, rpc_id, method, params).await
+                | Method::ToolRecordAwait
+                | Method::ToolDialogStatus
+                | Method::ToolDialogAccept
+                | Method::ToolDialogDismiss => {
+                    handle_dialog_aware_dispatch(
+                        Arc::clone(&state),
+                        rpc_id,
+                        method,
+                        params,
+                        ticket.take(),
+                    )
+                    .await
+                }
+                Method::ToolOperationAwait | Method::ToolOperationCancel => {
+                    handle_operation(&state, rpc_id, method, params).await
                 }
                 Method::ToolWaitMs => handle_wait_ms(&state.abort_registry, rpc_id, params).await,
                 Method::Cancel => handle_cancel(&state, params),
@@ -409,6 +424,121 @@ async fn handle_video(state: &Arc<DaemonState>, rpc_id: RpcId, params: Value) ->
 /// `handle_cancel`). The same entry covers the in-flight phase too,
 /// so the worker can short-circuit via its cancel token instead of
 /// hand-rolling a second mechanism.
+async fn handle_dialog_aware_dispatch(
+    state: Arc<DaemonState>,
+    cli_rpc_id: RpcId,
+    method: Method,
+    mut params: Value,
+    ticket: Option<super::audit::Ticket>,
+) -> ResponseBody {
+    if matches!(
+        method,
+        Method::ToolDialogStatus
+            | Method::ToolDialogAccept
+            | Method::ToolDialogDismiss
+            | Method::ToolRecordStop
+            | Method::ToolDebug
+    ) {
+        let body = handle_tool_dispatch(&state, cli_rpc_id, method, params).await;
+        if let Some(ticket) = ticket {
+            state.audit.finish(ticket, &body);
+        }
+        return body;
+    }
+    let session = params
+        .get("session_id")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let operation = match state
+        .dialog_operations
+        .register(session, &cli_rpc_id, method.clone())
+    {
+        Ok(operation) => operation,
+        Err(error) => return ResponseBody::Err(error),
+    };
+    if let Some(params) = params.as_object_mut() {
+        params.insert("_operation_id".into(), Value::String(operation.id.clone()));
+    }
+    let work = Arc::clone(&operation);
+    let background = Arc::clone(&state);
+    tokio::spawn(async move {
+        use futures_util::FutureExt;
+        let body = std::panic::AssertUnwindSafe(handle_tool_dispatch(
+            &background,
+            cli_rpc_id,
+            method,
+            params,
+        ))
+        .catch_unwind()
+        .await
+        .unwrap_or_else(|_| {
+            ResponseBody::Err(RpcError {
+                code: ErrorCode::ProtocolError,
+                message: "operation task failed; browser effect is unknown".into(),
+                data: None,
+            })
+        });
+        if let Some(ticket) = ticket {
+            background.audit.finish(ticket, &body);
+        }
+        work.finish(body);
+    });
+    let (body, suspended) = operation.initial_response().await;
+    if !suspended {
+        state.dialog_operations.remove(&operation.id);
+    }
+    body
+}
+
+async fn handle_operation(
+    state: &Arc<DaemonState>,
+    cli_rpc_id: RpcId,
+    method: Method,
+    params: Value,
+) -> ResponseBody {
+    let p: bsk_protocol::tools::OperationParams = match serde_json::from_value(params) {
+        Ok(p) => p,
+        Err(error) => return ResponseBody::Err(invalid_params(error.to_string())),
+    };
+    if p.wait_ms.is_some_and(|ms| ms > 60000) {
+        return ResponseBody::Err(invalid_params("wait_ms must be 0..60000"));
+    }
+    let Some(session) = state.sessions.get(&SessionId(p.session_id.clone())) else {
+        return ResponseBody::Err(RpcError {
+            code: ErrorCode::NotFound,
+            message: "session no longer exists".into(),
+            data: None,
+        });
+    };
+    if state.browsers.get(&session.browser_id).is_none() {
+        return ResponseBody::Err(RpcError {
+            code: ErrorCode::NotFound,
+            message: "owning browser disconnected; original effect is unknown".into(),
+            data: None,
+        });
+    }
+    let Some(operation) = state.dialog_operations.get(&p.session_id, &p.operation_id) else {
+        return ResponseBody::Err(RpcError { code: ErrorCode::NotFound, message: "operation not found in this session or its retained result expired; do not replay an action with unknown effects".into(), data: None });
+    };
+    if method == Method::ToolOperationCancel {
+        return handle_cancel(state, serde_json::json!({"rpc_id":operation.cli_rpc_id}));
+    }
+    let guard = match state.abort_registry.register(cli_rpc_id) {
+        Ok(guard) => guard,
+        Err(error) => {
+            return ResponseBody::Err(RpcError {
+                code: ErrorCode::ProtocolError,
+                message: format!("operation await registration failed: {error:?}"),
+                data: None,
+            });
+        }
+    };
+    tokio::select! {
+        body = operation.await_result(p.wait_ms.unwrap_or(10000)) => body,
+        _ = guard.token().cancelled() => ResponseBody::Err(RpcError { code: ErrorCode::Cancelled, message: "Result wait cancelled; the original operation continues. Use operation cancel to stop it".into(), data: None }),
+    }
+}
+
 async fn handle_tool_dispatch(
     state: &Arc<DaemonState>,
     cli_rpc_id: RpcId,
@@ -504,11 +634,18 @@ async fn handle_tool_dispatch(
             Err(error) => ResponseBody::Err(error.into_rpc()),
         };
     }
-    // Transfer staging normalizes typed params; retain the caller's observation binding.
-    let metadata: Vec<_> = ["_audit_id", "context_id", "depends_on"]
-        .into_iter()
-        .filter_map(|key| params.get(key).cloned().map(|value| (key, value)))
-        .collect();
+    // Transfer staging normalizes typed params; retain observation and operation bindings.
+    let operation_id = params.get("_operation_id").cloned();
+    let metadata: Vec<_> = [
+        "_audit_id",
+        "context_id",
+        "depends_on",
+        "expect",
+        "observation_id",
+    ]
+    .into_iter()
+    .filter_map(|key| params.get(key).cloned().map(|value| (key, value)))
+    .collect();
     let mut params = params;
     if method == Method::ToolTabBorrow {
         // Old CLI clients can still send this field. Never forward their
@@ -541,6 +678,42 @@ async fn handle_tool_dispatch(
                 })),
             });
         }
+    }
+    if method == Method::ToolDrag
+        && params.get("mode").and_then(Value::as_str) == Some("click-move-click")
+        && let Some(session) = state.sessions.get(&session_id)
+        && let Some(browser) = state.browsers.get(&session.browser_id)
+        && !bsk_protocol::tools::supports_click_move_click(&browser.extension_protocol_version)
+    {
+        return ResponseBody::Err(RpcError {
+            code: ErrorCode::Unsupported,
+            message: "click-move-click requires extension protocol 1.7; update the extension"
+                .into(),
+            data: Some(serde_json::json!({
+                "effect_state": "none", "required_protocol": bsk_protocol::tools::CLICK_MOVE_CLICK_PROTOCOL,
+                "actual_protocol": browser.extension_protocol_version,
+            })),
+        });
+    }
+    // Older extensions must never execute an action after silently ignoring its conditions.
+    if (matches!(
+        params.get("control_policy").and_then(Value::as_str),
+        Some("target" | "auto")
+    ) || params.get("expect").is_some())
+        && let Some(session) = state.sessions.get(&session_id)
+        && let Some(browser) = state.browsers.get(&session.browser_id)
+        && !bsk_protocol::tools::supports_target_control(&browser.extension_protocol_version)
+    {
+        return ResponseBody::Err(RpcError {
+            code: ErrorCode::Unsupported,
+            message: "Target control and action conditions require extension protocol 1.8 or a later compatible 1.x version; update the extension".into(),
+            data: Some(serde_json::json!({
+                "reason": "unsupported_feature", "phase": "negotiate", "effect_state": "none",
+                "required_protocol": bsk_protocol::tools::TARGET_CONTROL_PROTOCOL,
+                "actual_protocol": browser.extension_protocol_version,
+                "recovery": "Update the extension to use target control or action conditions. With a current CLI and an older extension, pass --policy strict on every sync/enable and step for legacy behavior. Strict policy does not make expect conditions available on old peers.",
+            })),
+        });
     }
     let mut download_transfer_id: Option<String> = None;
     if method == Method::ToolUpload {
@@ -582,12 +755,24 @@ async fn handle_tool_dispatch(
             object.insert(key.into(), value);
         }
     }
+    if let Some(operation_id) = operation_id
+        && let Some(object) = params.as_object_mut()
+    {
+        object.insert("_operation_id".into(), operation_id);
+    }
     let entry = inflight_guard.entry();
     // `record_stop` must reach the extension while `record_await` holds the
     // serial busy lock — finishing the recording unblocks await.
     let independent_control = method == Method::ToolCooperate
         && params.get("action").and_then(Value::as_str) != Some("enable");
-    let outcome = if method == Method::ToolRecordStop || independent_control {
+    let outcome = if independent_control
+        || matches!(
+            method,
+            Method::ToolRecordStop
+                | Method::ToolDialogStatus
+                | Method::ToolDialogAccept
+                | Method::ToolDialogDismiss
+        ) {
         state
             .tool_queues
             .dispatch_unlocked(&session_id, method.clone(), params, timeout, Some(entry))
@@ -1258,6 +1443,7 @@ async fn handle_session_stop(
     {
         Ok(stop) => {
             state.transfers.release_session(&session_id.0);
+            state.dialog_operations.remove_session(&session_id.0);
             let result = CliSessionStopResult {
                 stopped: vec![session_id.0],
                 failed: Vec::new(),
@@ -1360,6 +1546,7 @@ async fn handle_session_stop_all(
         {
             Ok(stop) => {
                 state.transfers.release_session(&id.0);
+                state.dialog_operations.remove_session(&id.0);
                 stopped.push(id.0);
                 returned_tab_ids.extend(stop.returned_tab_ids);
                 return_failures.extend(stop.return_failures);

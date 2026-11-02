@@ -313,7 +313,10 @@ fn success(output: Output) {
     );
 }
 
-fn refused(output: Output) {
+const JOB_FORBIDS_BREAKAWAY: &str = "does not allow breakaway";
+const PARTIAL_BREAKAWAY: &str = "still belongs to a Job Object after breakaway";
+
+fn refused(output: Output, diagnosis: &str) {
     assert!(!output.status.success());
     let text = format!(
         "{}{}",
@@ -323,6 +326,12 @@ fn refused(output: Output) {
     assert!(text.contains("Job Object"), "{text}");
     assert!(text.contains("persistent host task"), "{text}");
     assert!(text.contains("BSK_AUTO_START=0"), "{text}");
+    assert!(text.contains(diagnosis), "{text}");
+    for other in [JOB_FORBIDS_BREAKAWAY, PARTIAL_BREAKAWAY] {
+        if other != diagnosis {
+            assert!(!text.contains(other), "{text}");
+        }
+    }
 }
 
 // Re-exec the test binary as a gated launcher so assignment to a Job happens
@@ -398,7 +407,7 @@ fn restrictive_job_refuses_explicit_and_automatic_start_without_a_daemon() {
     ] {
         let fixture = Fixture::new();
         let job = Job::new(0);
-        refused(fixture.run(&args, &[&job]));
+        refused(fixture.run(&args, &[&job]), JOB_FORBIDS_BREAKAWAY);
         fixture.assert_stopped();
         job.assert_empty();
     }
@@ -412,7 +421,7 @@ fn nested_jobs_require_breakaway_from_every_level() {
         let inner = Job::new(JOB_OBJECT_LIMIT_BREAKAWAY_OK);
         let output = fixture.run(&["daemon", "start", "--port", "0"], &[&outer, &inner]);
         if outer_flags == 0 {
-            refused(output);
+            refused(output, PARTIAL_BREAKAWAY);
             fixture.assert_stopped();
             inner.assert_empty();
             outer.assert_empty();

@@ -20,21 +20,32 @@
   "definitions": {
     "ErrorCode": {
       "description": "Stable daemon/extension error codes (§4.5).",
-      "type": "string",
-      "enum": [
-        "unknown_method",
-        "unsupported",
-        "invalid_params",
-        "not_found",
-        "permission_denied",
-        "timeout",
-        "cdp_failed",
-        "protocol_error",
-        "cancelled",
-        "user_aborted",
-        "version_too_old",
-        "multiple_browsers_online",
-        "no_browser_connected"
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "unknown_method",
+            "unsupported",
+            "invalid_params",
+            "not_found",
+            "permission_denied",
+            "timeout",
+            "cdp_failed",
+            "protocol_error",
+            "cancelled",
+            "user_aborted",
+            "version_too_old",
+            "multiple_browsers_online",
+            "no_browser_connected"
+          ]
+        },
+        {
+          "description": "The original operation is still running and needs an agent dialog decision.",
+          "type": "string",
+          "enum": [
+            "dialog_pending"
+          ]
+        }
       ]
     },
     "ReturnFailure": {

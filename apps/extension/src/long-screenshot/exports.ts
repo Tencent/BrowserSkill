@@ -5,7 +5,7 @@ import type {
   ScreenshotReleaseParams,
   ScreenshotReleaseResult,
 } from "@/transport/types";
-import { removeTiledScreenshot } from "./tiles";
+import { removeTiledScreenshot, screenshotRoot } from "./tiles";
 
 export const SCREENSHOT_CHUNK_BYTES = 256 * 1024;
 const EXPORT_IDLE_MS = 10 * 60_000;
@@ -38,10 +38,9 @@ export class ScreenshotExports {
   }
 
   private async removeOrphans() {
-    const root = await navigator.storage.getDirectory();
     let directory: FileSystemDirectoryHandle;
     try {
-      directory = await root.getDirectoryHandle("long-screenshots");
+      directory = await screenshotRoot();
     } catch (error) {
       if (error instanceof DOMException && error.name === "NotFoundError") return;
       throw error;

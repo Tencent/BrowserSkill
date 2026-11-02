@@ -7,6 +7,7 @@ No private key or signing-service credential leaves the internal signing job.
 import argparse
 import hashlib
 import io
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -292,6 +293,8 @@ def collect(args, api):
     Path('dist').mkdir(exist_ok=True)
     Path('signed/bsk.exe').write_bytes(signed)
     for target in TARGETS:
+        if args.linux_only and target.endswith('apple-darwin'):
+            continue
         artifact_name = f'bsk-{target}-{state["run_id"]}-{state["run_attempt"]}'
         matches = [a for a in artifacts if a['name'] == artifact_name]
         require(len(matches) == 1, f'Missing {artifact_name}; rerun all build jobs, not only failed jobs')
@@ -315,11 +318,15 @@ def publish(args, api):
     with zipfile.ZipFile(Path('dist', names[-2])) as archive:
         require(archive.namelist() == ['bsk.exe'], 'Unexpected Windows package contents')
         require(digest(archive.read('bsk.exe')) == state['signed_sha256'], 'Verified Windows executable was changed during packaging')
+    spec = importlib.util.spec_from_file_location('macos_release', Path(__file__).with_name('macos-release.py'))
+    macos = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(macos)
+    macos.check_final(state)
     for name in names:
         api.upload(release, name, Path('dist', name).read_bytes())
     # Remove only this protocol's staging assets before making the release visible.
     for asset in api.assets(release):
-        if re.fullmatch(r'bsk-windows-signed-\d+-\d+\.(exe|json)', asset['name']):
+        if re.fullmatch(r'bsk-(?:windows-signed-\d+-\d+\.(?:exe|json)|macos-signed-\d+-\d+\.(?:zip|json))', asset['name']):
             api.request(f'releases/assets/{asset["id"]}', method='DELETE')
     update = {'draft': False, 'prerelease': '-' in version, 'make_latest': 'false' if '-' in version else 'true'}
     if not release.get('body'):
@@ -332,6 +339,7 @@ def publish(args, api):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('command', choices=['request', 'prepare', 'return-signed', 'collect', 'publish'])
+    parser.add_argument('--linux-only', action='store_true', help='Collect Linux archives; Mac has its own verification job')
     parser.add_argument('--tag')
     parser.add_argument('--run-id', type=int)
     parser.add_argument('--attempt', type=int)

@@ -625,7 +625,7 @@ describe("handleTabBorrow", () => {
     });
   });
 
-  it("returns a moved tab if its session ends before the borrow commits", async () => {
+  it("does not issue a compensating move after the borrowing session ends", async () => {
     const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
     await sm.start("aa11");
     const state: FakeTabState = {
@@ -645,7 +645,7 @@ describe("handleTabBorrow", () => {
         { tabs: api, approveBorrow: async () => true },
       ),
     ).toMatchObject({ code: "cancelled" });
-    expect(spies.move).toHaveBeenLastCalledWith(7, { windowId: 200, index: 4 });
+    expect(spies.move).toHaveBeenCalledExactlyOnceWith(7, { windowId: 100, index: -1 });
   });
 
   it.each([
@@ -829,7 +829,14 @@ describe("handleTabBorrow", () => {
       { session_id: "aa11", tab_id: 7 },
       { tabs: api, approveBorrow: async () => true },
     );
-    expect(res).toMatchObject({ code: "invalid_params" });
+    // Issue #465 §6: the borrow rejection carries a stable reason so the
+    // CLI explains that a user must move the tab out of the Agent Window
+    // first, instead of falling back to generic invalid-parameters copy.
+    expect(res).toMatchObject({
+      code: "invalid_params",
+      data: { reason: "borrow_agent_window_tab" },
+    });
+    expect((res as { message?: unknown }).message).toContain("already lives in the Agent Window");
   });
 
   it("refuses to borrow a tab already held by another session", async () => {

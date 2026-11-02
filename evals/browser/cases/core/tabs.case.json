@@ -43,6 +43,7 @@
   "smoke": {
     "steps": [
       { "action": "navigate", "saveAs": "original" },
+      { "action": "sync", "tabId": "{original.tab_id}", "saveAs": "control" },
       { "action": "tab-list" },
       {
         "action": "tab-create",
@@ -50,22 +51,36 @@
         "saveAs": "child"
       },
       {
+        "action": "wait-site-event",
+        "type": "page.shown",
+        "where": { "path": "/tabs/child" }
+      },
+      { "action": "sync", "tabId": "{child.tab_id}", "saveAs": "control" },
+      {
         "action": "navigate",
         "url": "{baseUrl}/tabs/child?run={runId}",
-        "tabId": "{child.tab_id}"
+        "tabId": "{child.tab_id}",
+        "contextId": "{control.context_id}",
+        "observationId": "{control.observation_id}"
       },
+      { "action": "sync", "tabId": "{child.tab_id}", "saveAs": "control" },
       {
         "action": "click",
         "selector": "#mark-child",
-        "tabId": "{child.tab_id}"
+        "tabId": "{child.tab_id}",
+        "contextId": "{control.context_id}"
       },
       { "action": "html", "tabId": "{child.tab_id}" },
+      { "action": "sync", "tabId": "{child.tab_id}", "saveAs": "control" },
       {
         "action": "tab-close",
         "tabId": "{child.tab_id}",
+        "contextId": "{control.context_id}",
+        "observationId": "{control.observation_id}",
         "evidence": "childTabClosed"
       },
-      { "action": "tab-select", "tabId": "{original.tab_id}" }
+      { "action": "tab-select", "tabId": "{original.tab_id}" },
+      { "action": "sync", "tabId": "{original.tab_id}", "saveAs": "control" }
     ]
   }
 }

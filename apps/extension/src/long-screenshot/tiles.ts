@@ -15,9 +15,13 @@ export interface TiledScreenshot {
   notice?: CaptureError;
 }
 
+export async function screenshotRoot(create = false) {
+  return (await navigator.storage.getDirectory()).getDirectoryHandle(ROOT, { create });
+}
+
 export async function screenshotDirectory(id: string, create = false) {
   if (!/^[a-zA-Z0-9-]{1,100}$/.test(id)) throw new Error("Invalid screenshot id");
-  const root = await (await navigator.storage.getDirectory()).getDirectoryHandle(ROOT, { create });
+  const root = await screenshotRoot(create);
   return root.getDirectoryHandle(id, { create });
 }
 async function writeFile(directory: FileSystemDirectoryHandle, name: string, data: Blob | string) {
@@ -42,7 +46,7 @@ export async function readTiledScreenshot(id: string): Promise<TiledScreenshot |
   }
 }
 export async function removeTiledScreenshot(id: string) {
-  const root = await (await navigator.storage.getDirectory()).getDirectoryHandle(ROOT);
+  const root = await screenshotRoot();
   await root.removeEntry(id, { recursive: true });
 }
 export async function readTile(shot: TiledScreenshot, index: number, preview = false) {

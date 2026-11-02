@@ -1,5 +1,6 @@
-import type { CdpTarget } from "@/browser-driver/frame-graph";
-import { cssViewport, type LayoutMetrics } from "./geometry/frame-context";
+import { type CdpFrameTreeNode, type CdpTarget, cdpTargetKey } from "@/browser-driver/frame-graph";
+import { type Point, unprojectPoint } from "./geometry";
+import { cssViewport, GeometryContext, type LayoutMetrics } from "./geometry/frame-context";
 import { type CdpRunner, sendToCdpTarget } from "./shared";
 
 interface RuntimeReply {
@@ -41,7 +42,14 @@ export async function pointBelongsToTarget(
   const target = actionTarget.cdpTarget;
   const hit = await nodeAtViewportPoint(cdp, target, x, y, includeUserAgentShadowDOM);
   if (typeof hit.backendNodeId !== "number") return false;
-  if (actionTarget.frameId && hit.frameId !== actionTarget.frameId) return false;
+  // Frameless addresses (CSS selectors) belong to the target's root document.
+  // Hit testing can descend into an iframe in the same CDP target; its object
+  // cannot be passed to a function in the root document's JavaScript world.
+  const frameId =
+    actionTarget.frameId ??
+    (await sendToCdpTarget<{ frameTree?: CdpFrameTreeNode }>(cdp, target, "Page.getFrameTree", {}))
+      .frameTree?.frame.id;
+  if (!frameId || hit.frameId !== frameId) return false;
 
   const [resolvedTarget, resolvedHit] = await Promise.all([
     sendToCdpTarget<{ object?: { objectId?: string } }>(cdp, target, "DOM.resolveNode", {
@@ -76,4 +84,63 @@ export async function pointBelongsToTarget(
   });
   if (reply.exceptionDetails) return false;
   return reply.result?.value === true;
+}
+
+/** Check the actual root input point through every target boundary, including
+ * parent-page overlays that an OOPIF-local hit test cannot see. */
+export async function pointReachesTarget(
+  cdp: CdpRunner,
+  target: { tabId: number; cdpTarget: CdpTarget; backendNodeId: number; frameId?: string },
+  point: Point,
+): Promise<boolean> {
+  const objectGroup = `pointer-hit-${crypto.randomUUID()}`;
+  const touched = new Map<string, CdpTarget>();
+  const hit = async (node: typeof target, local: Point) => {
+    touched.set(cdpTargetKey(node.cdpTarget), node.cdpTarget);
+    return pointBelongsToTarget(cdp, node, local.x, local.y, objectGroup, false);
+  };
+  try {
+    let local = point;
+    if (target.cdpTarget.sessionId) {
+      if (!target.frameId) return false;
+      const context = new GeometryContext(cdp, target.tabId);
+      const frame = await context.frame(target.frameId);
+      if (!frame || cdpTargetKey(frame.target) !== cdpTargetKey(target.cdpTarget)) return false;
+      const ancestry = await context.ancestry(target.frameId);
+      const projection = await context.targetProjection(target.frameId);
+      if (!ancestry || !projection) return false;
+      const owners: (typeof target)[] = [];
+      for (const child of ancestry) {
+        const parent = child.parentFrameId && (await context.frame(child.parentFrameId));
+        if (!parent) return false;
+        if (cdpTargetKey(child.target) === cdpTargetKey(parent.target)) continue;
+        if (child.ownerBackendNodeId === undefined) return false;
+        owners.push({
+          tabId: target.tabId,
+          cdpTarget: parent.target,
+          backendNodeId: child.ownerBackendNodeId,
+          frameId: parent.frameId,
+        });
+      }
+      if (owners.length !== projection.edges.length) return false;
+      // Descend from the dispatched point, not from an independently clipped
+      // element centroid: clipping and CSS transforms can make those differ.
+      for (let index = owners.length - 1; index >= 0; index--) {
+        if (!(await hit(owners[index], local))) return false;
+        const projected = unprojectPoint(local, projection.edges[index]);
+        if (!projected) return false;
+        local = projected;
+      }
+    }
+    return await hit(target, local);
+  } finally {
+    const cleanup = cdp.resourceCleanup ?? cdp;
+    await Promise.all(
+      [...touched.values()].map((address) =>
+        sendToCdpTarget(cleanup, address, "Runtime.releaseObjectGroup", { objectGroup }).catch(
+          () => {},
+        ),
+      ),
+    );
+  }
 }

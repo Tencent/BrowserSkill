@@ -6,6 +6,7 @@ import type { RpcError } from "@/transport/types";
 import { rpcError } from "./errors";
 import { parsePngDimensions } from "./png";
 import type { CdpRunner } from "./shared";
+import { BoundedWaitError, waitBounded } from "./transfer-transaction";
 import { isAbortError, throwIfAborted } from "./vom/capture-abort";
 import { verifyDocumentIdentity } from "./vom/document-identity";
 import type { DocumentIdentity } from "./vom/facts";
@@ -88,19 +89,59 @@ export async function captureControlledViewport(
   signal?: AbortSignal,
   sendToTab?: CaptureSuppressSendToTab,
 ): Promise<{ image_base64: string; width: number; height: number } | RpcError> {
-  try {
+  const deadline = Date.now() + 10_000;
+  const wait = <T>(work: Promise<T>, cleanup = false) =>
+    waitBounded(
+      work,
+      cleanup ? Date.now() + 500 : deadline,
+      cleanup ? undefined : signal,
+      "Viewport capture timed out",
+    );
+  const check = () => {
     throwIfAborted(signal);
-    if (!(await stillControlled())) return changed();
-    const identity = await readDocumentIdentity(cdp, tabId, signal);
+    if (Date.now() >= deadline) throw new BoundedWaitError("timeout", "Viewport capture timed out");
+  };
+  // Chrome cannot cancel dispatched reads. Retire their waiters and consume late
+  // replies; never continue the pipeline after its cancellation or deadline.
+  const captureCdp: CdpRunner = {
+    getAttachmentId: (id) => cdp.getAttachmentId?.(id),
+    send: (id, method, params) => {
+      const cleanup = method === "Runtime.releaseObjectGroup";
+      if (!cleanup) check();
+      return wait(cdp.send(id, method, params), cleanup);
+    },
+  };
+  const controlled = () => {
+    check();
+    return wait(stillControlled());
+  };
+  const send = sendToTab ?? ((id, message) => chrome.tabs.sendMessage(id, message));
+  const overlay: CaptureSuppressSendToTab = async (id, message) => {
+    if (message.phase === "end") return wait(send(id, message), true);
+    check();
+    try {
+      return await wait(send(id, message));
+    } catch (error) {
+      // The content script hides the overlay before acknowledging begin. Restore
+      // it even if that acknowledgement never arrives, with a separate budget.
+      if (error instanceof BoundedWaitError)
+        await wait(send(id, { ...message, phase: "end" }), true).catch(() => {});
+      throw error;
+    }
+  };
+  try {
+    check();
+    if (!(await controlled())) return changed();
+    const identity = await readDocumentIdentity(captureCdp, tabId, signal);
     if (!identity) return changed();
-    const bound = boundToAttachment(cdp, tabId, identity.attachmentId);
+    const bound = boundToAttachment(captureCdp, tabId, identity.attachmentId);
     const current = async () => {
-      throwIfAborted(signal);
-      return (
-        (await stillControlled()) &&
-        (await verifyDocumentIdentity(bound, identity, signal)) === "current" &&
-        cdp.getAttachmentId?.(tabId) === identity.attachmentId
-      );
+      if (!(await controlled())) return false;
+      const verified = await verifyDocumentIdentity(bound, identity, signal);
+      // Identity verification treats failed reads as unavailable. Preserve this
+      // transaction's timeout instead of reporting a document change.
+      check();
+      return verified === "current" && cdp.getAttachmentId?.(tabId) === identity.attachmentId;
     };
     const shot = await withExtensionOverlayHidden(
       tabId,
@@ -112,11 +153,11 @@ export async function captureControlledViewport(
           captureBeyondViewport: false,
         });
       },
-      sendToTab,
+      overlay,
     );
     throwIfAborted(signal);
     // Validate after overlay restoration as well: navigation/return can race it.
-    if (!shot || !(await current()) || !(await stillControlled())) return changed();
+    if (!shot || !(await current()) || !(await controlled())) return changed();
     throwIfAborted(signal);
     if (cdp.getAttachmentId?.(tabId) !== identity.attachmentId) return changed();
     const dims = shot.data ? parsePngDimensions(shot.data) : null;
@@ -133,7 +174,7 @@ export async function captureControlledViewport(
       return { code: "cancelled", message: "screenshot aborted" };
     }
     return rpcError(
-      "cdp_failed",
+      error instanceof BoundedWaitError && error.kind === "timeout" ? "timeout" : "cdp_failed",
       "screenshot_capture_failed",
       error instanceof Error ? error.message : String(error),
     );

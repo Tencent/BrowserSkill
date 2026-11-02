@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<title>Target control regression</title>
+<style>
+  body { font: 16px system-ui; padding: 80px; }
+  button { padding: 12px; margin: 8px; }
+  #clock { display: inline-block; width: 160px; }
+</style>
+<form onsubmit="return false">
+  <span id="clock">Tick 0</span>
+  <button id="apply" type="button">Apply</button>
+  <button id="human" type="button">Human change</button>
+  <output id="count">0</output>
+</form>
+<script>
+  window.applied = 0;
+  window.ticks = 0;
+  window.humanChanged = false;
+  setInterval(() => document.querySelector('#clock').textContent = 'Tick ' + ++ticks, 40);
+  document.querySelector('#apply').onclick = () => {
+    document.querySelector('#count').value = String(++applied);
+  };
+  document.querySelector('#human').onclick = () => { window.humanChanged = true; };
+</script>
+</html>

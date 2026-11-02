@@ -4,7 +4,7 @@
 #![cfg(unix)]
 
 use std::path::PathBuf;
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use tempfile::TempDir;
@@ -82,4 +82,46 @@ fn bsk_logs_handles_empty_home_gracefully() {
         .output()
         .expect("bsk logs");
     assert!(logs.status.success());
+}
+
+#[test]
+fn following_logs_exits_when_the_output_pipe_closes() {
+    use std::io::{BufRead, BufReader, Write};
+
+    let temp = TempDir::new().unwrap();
+    let path = temp.path().join("daemon.log.2026-01-01");
+    std::fs::write(&path, b"ready\n").unwrap();
+    let mut child = Command::new(bsk_bin())
+        .args(["logs", "--follow", "-n", "1"])
+        .env("BSK_HOME", temp.path())
+        .env("BSK_AUTO_UPDATE", "off")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut reader = BufReader::new(child.stdout.take().unwrap());
+    let mut line = String::new();
+    reader.read_line(&mut line).unwrap();
+    assert_eq!(line, "ready\n");
+    drop(reader);
+    std::fs::OpenOptions::new()
+        .append(true)
+        .open(path)
+        .unwrap()
+        .write_all(b"after close\n")
+        .unwrap();
+
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            assert!(!status.success());
+            break;
+        }
+        if Instant::now() >= deadline {
+            child.kill().unwrap();
+            child.wait().unwrap();
+            panic!("logs --follow kept running after its output pipe closed");
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
 }

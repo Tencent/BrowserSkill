@@ -157,6 +157,20 @@
       "promptTemplate": "本次任务使用 BrowserSkill 的浏览器 {{name}}（实例 ID：{{instanceId}}）。为本次任务创建每个新会话时，请使用对应接口：\nCLI：{{command}}\nDeepSeek Harness：{{toolCall}}\n在 DeepSeek Harness 中请使用工具调用，不要另行执行 CLI 命令。\n如果此实例未连接，请停止并让我重新连接此 Profile。不要省略 --browser / browser，也不要切换到其他实例。",
       "title": "当前浏览器",
       "unnamed": "未命名浏览器"
+    },
+    "daemonUpgrade": {
+      "title": "需要升级 bsk 浏览器服务",
+      "description": "正在运行的 bsk 服务（daemon）版本过旧，浏览器任务暂时无法执行。",
+      "runCommand": "请在运行该服务的电脑上打开终端，执行：",
+      "restart": "若已更新仍出现此提示，请通过启动该服务的终端或宿主应用重启服务。",
+      "copyButton": "复制命令",
+      "copyFailed": "复制失败，请手动复制上方命令。",
+      "details": "查看技术详情",
+      "protocols": "服务协议：{{actual}}；扩展要求：{{required}} 或更新的兼容协议。",
+      "version": "当前运行：bsk {{version}}",
+      "notificationMessage": "浏览器任务暂不可用。请在运行 bsk 浏览器服务的电脑上升级 bsk，并确认正在运行的服务也已更新。",
+      "toolbarTitle": "BrowserSkill：需要升级 bsk 浏览器服务",
+      "notificationButton": "查看升级步骤"
     }
   },
   "controlOverlay": {
@@ -315,6 +329,7 @@
       "press": "按键",
       "select": "选择选项",
       "hover": "悬停",
+      "drag": "拖动",
       "focus": "聚焦",
       "blur": "移开焦点",
       "scroll": "滚动",

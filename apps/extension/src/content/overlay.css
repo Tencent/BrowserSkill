@@ -19,8 +19,8 @@
    Keep this after the equally specific host blocking rule above. */
 :host([data-bsk-overlay-surface][data-bsk-input-passthrough]),
 :host([data-bsk-input-passthrough]) [data-slot="control-overlay-blocker"],
-:host([data-bsk-input-passthrough]) [data-slot="control-overlay-pill"],
-:host([data-bsk-input-passthrough]) [data-slot="control-overlay-pill"] * {
+:host([data-bsk-input-passthrough]) [data-slot="control-overlay-card"],
+:host([data-bsk-input-passthrough]) [data-slot="control-overlay-card"] * {
   pointer-events: none !important;
 }
 
@@ -49,6 +49,8 @@
 }
 
 .bsk-cooperation {
+  display: flex;
+  flex-direction: column;
   position: fixed;
   right: 20px;
   bottom: 20px;
@@ -57,7 +59,7 @@
   width: 300px;
   max-width: calc(100vw - 32px);
   max-height: calc(100dvh - 32px);
-  overflow: auto;
+  overflow: hidden;
   pointer-events: auto;
   padding: 16px;
   border: 1px solid var(--bsk-coop-warm-line);
@@ -70,6 +72,12 @@
   font:
     13px / 1.5 system-ui,
     sans-serif;
+}
+
+/* Keep actions reachable without scrolling, including while fallback input is blocked. */
+.bsk-cooperation-details {
+  min-height: 0;
+  overflow: auto;
 }
 
 .bsk-cooperation-header,
@@ -153,6 +161,7 @@
 }
 
 .bsk-cooperation-actions {
+  flex-shrink: 0;
   gap: 8px;
   margin-top: 16px;
   padding-top: 13px;
@@ -269,6 +278,16 @@
   .bsk-cooperation {
     right: 16px;
     bottom: 16px;
+  }
+}
+@media (height <= 160px) {
+  .bsk-cooperation {
+    padding: 8px;
+  }
+
+  .bsk-cooperation-actions {
+    margin-top: 8px;
+    padding-top: 8px;
   }
 }
 @media (pointer: coarse) {

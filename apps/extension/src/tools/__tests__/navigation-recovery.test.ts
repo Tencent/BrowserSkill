@@ -775,3 +775,133 @@ it("does not let a late cancellation probe complete a successor document", async
   expect(await work).toMatchObject({ reached: "match", url: next.url });
   f.expectCleanedUp();
 });
+
+it.each(
+  (["navigate", "back", "forward"] as const).flatMap((operation) =>
+    (["commit", "domcontentloaded", "load", "networkidle"] as const).map((phase) => ({
+      operation,
+      phase,
+    })),
+  ),
+)("recovers same-document $operation at the $phase checkpoint", async ({ operation, phase }) => {
+  const f = await fixture();
+  const same = { ...f.main, documentId: "old-document" };
+  f.deps.browserNavigation.getFrame.mockReset().mockResolvedValue({ documentId: same.documentId });
+  const action = async () => {
+    f.state.blocked = false;
+    f.events.onReferenceFragmentUpdated.fire(same);
+  };
+  f.deps.browserNavigation.update.mockImplementation(action);
+  f.deps.browserNavigation.goBack.mockImplementation(action);
+  f.deps.browserNavigation.goForward.mockImplementation(action);
+  const params = { session_id: "test", wait_until: phase };
+  const result =
+    operation === "navigate"
+      ? await handleNavigate(f.manager, { ...params, url }, f.deps)
+      : operation === "back"
+        ? await handleNavigateBack(f.manager, params, f.deps)
+        : await handleNavigateForward(f.manager, params, f.deps);
+  expect(result).toMatchObject({ reached: phase, final_url: url });
+  f.expectCleanedUp();
+});
+
+it.each([
+  "different-document",
+  "child-frame",
+  "wrong-url",
+  "reload",
+])("rejects %s same-document evidence in browser recovery", async (kind) => {
+  const f = await fixture();
+  f.deps.defaultTimeoutMs = 20;
+  f.deps.browserNavigation.getFrame.mockReset().mockResolvedValue({ documentId: "old-document" });
+  const action = async () => {
+    f.state.blocked = false;
+    f.events.onReferenceFragmentUpdated.fire({
+      ...f.main,
+      documentId: kind === "different-document" ? "other-document" : "old-document",
+      frameId: kind === "child-frame" ? 1 : 0,
+      url: kind === "wrong-url" ? `${url}#unrelated` : url,
+    });
+  };
+  f.deps.browserNavigation.update.mockImplementation(action);
+  f.deps.browserNavigation.reload.mockImplementation(action);
+  const result =
+    kind === "reload"
+      ? await handleReload(f.manager, { session_id: "test" }, f.deps)
+      : await handleNavigate(f.manager, { session_id: "test", url }, f.deps);
+  expect(result).toMatchObject({ reached: "timeout" });
+  f.expectCleanedUp();
+});
+
+it("keeps waiting for load when a recovered same-document page is still loading", async () => {
+  const f = await fixture();
+  f.state.emitIdle = false;
+  f.deps.browserNavigation.getFrame.mockReset().mockResolvedValue({ documentId: "old-document" });
+  f.deps.browserNavigation.update.mockImplementation(async () => {
+    f.state.blocked = false;
+    f.events.onHistoryStateUpdated.fire({ ...f.main, documentId: "old-document" });
+  });
+  let settled = false;
+  const work = handleNavigate(f.manager, { session_id: "test", url }, f.deps).then((result) => {
+    settled = true;
+    return result;
+  });
+  await vi.waitFor(() => expect(f.cdpEvents.listeners.size).toBe(1));
+  expect(settled).toBe(false);
+  f.cdpEvents.fire({ tabId: 4 }, "Page.lifecycleEvent", {
+    frameId: "main",
+    loaderId: "new-loader",
+    name: "load",
+  });
+  expect(await work).toMatchObject({ reached: "load" });
+  f.expectCleanedUp();
+});
+
+it("cancels same-document browser recovery while awaiting lifecycle evidence", async () => {
+  const f = await fixture();
+  const abort = new AbortController();
+  f.state.emitIdle = false;
+  f.deps.browserNavigation.getFrame.mockReset().mockResolvedValue({ documentId: "old-document" });
+  f.deps.browserNavigation.update.mockImplementation(async () => {
+    f.state.blocked = false;
+    f.events.onReferenceFragmentUpdated.fire({ ...f.main, documentId: "old-document" });
+  });
+  const work = handleNavigate(
+    f.manager,
+    { session_id: "test", url },
+    { ...f.deps, signal: abort.signal },
+  );
+  await vi.waitFor(() => expect(f.cdpEvents.listeners.size).toBe(1));
+  abort.abort();
+  expect(await work).toMatchObject({ code: "cancelled" });
+  f.expectCleanedUp();
+});
+
+it("follows a new document that replaces a same-document browser handoff", async () => {
+  const f = await fixture();
+  f.state.emitIdle = false;
+  let current = "old-document";
+  f.deps.browserNavigation.getFrame
+    .mockReset()
+    .mockImplementation(async () => ({ documentId: current }));
+  f.deps.browserNavigation.update.mockImplementation(async () => {
+    f.state.blocked = false;
+    f.events.onReferenceFragmentUpdated.fire({ ...f.main, documentId: "old-document" });
+  });
+  let settled = false;
+  const work = handleNavigate(f.manager, { session_id: "test", url }, f.deps).then((result) => {
+    settled = true;
+    return result;
+  });
+  await vi.waitFor(() => expect(f.cdpEvents.listeners.size).toBe(1));
+  const next = { ...f.main, documentId: "successor", url: `${url}/next` };
+  f.events.onBeforeNavigate.fire(next);
+  current = "successor";
+  f.events.onCommitted.fire(next);
+  f.events.onCompleted.fire({ ...f.main, documentId: "old-document" });
+  await vi.waitFor(() => expect(f.cdpEvents.listeners.size).toBe(0));
+  expect(settled).toBe(false);
+  f.events.onCompleted.fire(next);
+  expect(await work).toMatchObject({ reached: "load", final_url: next.url });
+  f.expectCleanedUp();
+});

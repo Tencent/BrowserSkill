@@ -34,7 +34,12 @@ export interface VomNode {
   value?: string;
   /** Checked state is separate from the control's submitted value. */
   checked?: boolean | "mixed";
+  /** Browser accessibility focus, used to protect implicit keyboard recipients. */
+  focused?: boolean;
   placeholder?: string;
+  /** Native form ownership, or raw DOM form containment for custom widgets.
+   * Absence means unknown, never proof that a control is outside a form. */
+  inForm?: boolean;
   inputState?: "empty" | "filled" | "default" | "unknown";
   href?: string; // hostname of external link target; omitted for same-origin links
   text?: string;
@@ -46,6 +51,10 @@ export interface VomNode {
   position: string;
   pointerEvents: string;
   cursor?: string;
+  /** Derived interaction hint; false suppresses an inherited cursor hint. */
+  dragHint?: "draggable" | "drag-handle" | "drop-target" | false;
+  /** Browser-reported clickability, independent of role and inline attributes. */
+  clickable?: boolean;
   attrs?: Record<string, string>;
   domParentId?: number | null;
   domAncestorIds?: number[];
@@ -85,6 +94,8 @@ export interface VomScene {
 export interface VomOptions {
   maxDepth?: number;
   maxTokens?: number;
+  /** Allocate names from a caller-owned identity store, before measuring row tokens. */
+  allocateRef?: (node: VomNode) => string;
   /**
    * When true, form values are rendered as masks instead of literal values.
    */

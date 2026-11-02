@@ -10,6 +10,7 @@ import { BrowserProfile } from "./browser-profile";
 import { ConnectionSettings } from "./connection-settings";
 import { ConnectionStatusIndicator } from "./connection-status-indicator";
 import { CurrentTasks } from "./current-tasks";
+import { DaemonUpgradeNotice } from "./daemon-upgrade-notice";
 import { DebugPanel } from "./debug-panel";
 import { POPUP_FEATURES, type PopupView } from "./features";
 import { InteractionSettings } from "./interaction-settings";
@@ -78,7 +79,13 @@ export function App() {
   const isSkewed = statusState === "version_skew";
   const isDisconnected = statusState === "disconnected";
   const connectionLive = statusState === "connected" || isSkewed;
-  const daemonVersion = snapshot.handshake?.version ?? "—";
+  const daemonUpgrade =
+    snapshot.connectionEnabled &&
+    snapshot.state !== "connected" &&
+    snapshot.state !== "version_skew"
+      ? snapshot.daemonUpgradeRequired
+      : null;
+  const daemonVersion = snapshot.handshake?.version ?? daemonUpgrade?.daemonVersion ?? "—";
   const daemonProtocol = snapshot.handshake?.protocol_version ?? "—";
   const interactionProtocolOrder = compareProtocol(daemonProtocol, "1.3");
   const legacyInteraction = interactionProtocolOrder !== null && interactionProtocolOrder < 0;
@@ -184,6 +191,8 @@ export function App() {
         )}
       </header>
 
+      {daemonUpgrade && <DaemonUpgradeNotice upgrade={daemonUpgrade} error={snapshot.lastError} />}
+
       {view === "video" && <VideoPanel />}
 
       {view === "main" && (
@@ -245,7 +254,7 @@ export function App() {
             />
             <ConnectionSettings
               connectionEnabled={snapshot.connectionEnabled}
-              disconnected={isDisconnected && !snapshot.lastError}
+              disconnected={isDisconnected && !snapshot.lastError && !daemonUpgrade}
             />
           </section>
 
@@ -278,7 +287,7 @@ export function App() {
 
           <CurrentTasks enabled={connectionLive} />
 
-          {snapshot.lastError && (
+          {snapshot.lastError && !daemonUpgrade && (
             <div
               className="rounded-lg border border-destructive/25 bg-destructive/10 px-3 py-2 text-xs leading-snug text-destructive"
               data-slot="popup-error"

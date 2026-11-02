@@ -20,9 +20,10 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-function collector() {
+function collector(shadowRoot?: (element: HTMLElement) => ShadowRoot | null) {
   let receive!: (message: unknown, sender: unknown, reply: (result: unknown) => void) => void;
   vi.stubGlobal("chrome", {
+    dom: shadowRoot ? { openOrClosedShadowRoot: shadowRoot } : undefined,
     runtime: {
       sendMessage: vi.fn(async () => {}),
       onMessage: {
@@ -46,6 +47,26 @@ function collector() {
     return result as FrameState | undefined;
   };
 }
+
+it("collects and arms page interaction when crypto.randomUUID is unavailable", () => {
+  // Ordinary HTTP origins expose getRandomValues but not randomUUID.
+  vi.stubGlobal("crypto", { getRandomValues: crypto.getRandomValues.bind(crypto) });
+  document.body.innerHTML = '<input aria-label="City" value="Shanghai">';
+
+  const read = collector();
+  const initial = read()!;
+  expect(initial.document).toMatch(/^[\da-f]{8}-(?:[\da-f]{4}-){3}[\da-f]{12}$/);
+  expect(initial.fields).toEqual([expect.objectContaining({ label: "City", value: "Shanghai" })]);
+  expect(read(COOPERATION_ARM, "first", { type: "pointerdown", x: 10, y: 20 })).toMatchObject({
+    document: initial.document,
+    fields: initial.fields,
+  });
+
+  dispose!();
+  dispose = undefined;
+  const restarted = collector();
+  expect(restarted()!.document).not.toBe(initial.document);
+});
 
 it("retires old collection leases so delayed reads cannot restart collection after stop", () => {
   const read = collector();
@@ -403,4 +424,110 @@ it("announces renderer readiness once after the collection listener exists", () 
   const read = collector();
   expect(chrome.runtime.sendMessage).toHaveBeenCalledWith({ kind: COOPERATION_READY });
   expect(read()).toHaveProperty("document");
+});
+
+it("classifies a non-submitted media timeline without masking business fields", () => {
+  document.body.innerHTML =
+    '<video id="preview"></video><label>Playback progress<input id="timeline" type="range" value="1"></label><input aria-label="Order total" value="100"><input type="range" aria-label="Order amount" value="10">';
+  const read = collector();
+  const before = read()!;
+  expect(before.fields[0]).toMatchObject({ value: "1", kind: "media_progress" });
+  expect(before.fields.slice(1).every((field) => field.kind === undefined)).toBe(true);
+  const progress = document.querySelector<HTMLInputElement>("#timeline")!;
+  progress.value = "2";
+  expect(read()!.fields[0]).toMatchObject({ value: "2", kind: "media_progress" });
+  progress.name = "order_amount";
+  expect(read()!.fields[0].kind).toBeUndefined();
+});
+
+it.each([
+  "form",
+  "external",
+  "ambiguous",
+  "missing",
+])("does not classify a %s timeline as incidental", (kind) => {
+  document.body.innerHTML =
+    '<video id="preview"></video><input id="timeline" type="range" aria-label="Playback progress">';
+  const timeline = document.querySelector<HTMLInputElement>("#timeline")!;
+  if (kind === "form") {
+    const form = document.createElement("form");
+    document.body.append(form);
+    form.append(timeline);
+  }
+  if (kind === "external") {
+    const form = document.createElement("form");
+    form.id = "order";
+    document.body.append(form);
+    timeline.setAttribute("form", "order");
+  }
+  if (kind === "ambiguous") document.body.append(document.createElement("video"));
+  if (kind === "missing") document.querySelector("video")!.remove();
+  expect(collector()()!.fields[0].kind).toBeUndefined();
+});
+
+it("reports programmatic focus changes even without a human event", () => {
+  document.body.innerHTML = '<button id="pause">Pause</button><input id="order">';
+  const read = collector();
+  const first = read()!.focus;
+  document.querySelector<HTMLInputElement>("#order")!.focus();
+  const current = read()!;
+  expect(current.focus).not.toBe(first);
+  expect(current.human).toBe(0);
+});
+
+it("records media sources independently of playback time, including runtime-only source changes", () => {
+  document.body.innerHTML = '<video><source src="one.webm" type="video/webm"></video>';
+  const video = document.querySelector("video")!;
+  const source = video.querySelector("source")!;
+  const read = collector();
+  const first = read()!;
+  video.currentTime = 1;
+  expect(read()!.media).toEqual(first.media);
+  source.src = "two.webm";
+  const changed = read()!;
+  expect(changed.media).not.toEqual(first.media);
+  expect(changed.revision).toBeGreaterThan(first.revision);
+  Object.defineProperty(video, "currentSrc", { configurable: true, value: "selected.webm" });
+  const selected = read()!;
+  expect(selected.media![0].currentSrc).toBe("selected.webm");
+  expect(selected.revision).toBeGreaterThan(changed.revision);
+  Object.defineProperty(video, "srcObject", { configurable: true, value: {} });
+  const stream = read()!;
+  expect(stream.media![0].srcObject).toEqual(expect.any(String));
+  Object.defineProperty(video, "srcObject", { configurable: true, value: {} });
+  expect(read()!.media![0].srcObject).not.toBe(stream.media![0].srcObject);
+});
+
+it("collects media and deep focus in open shadow roots", () => {
+  document.body.innerHTML = '<div id="host"></div>';
+  const root = document.querySelector("#host")!.attachShadow({ mode: "open" });
+  root.innerHTML = '<audio><source src="one.ogg"></audio><button>Pause</button>';
+  const read = collector();
+  expect(read()!.focusIsDocument).toBe(true);
+  root.querySelector<HTMLButtonElement>("button")!.focus();
+  const focused = read()!;
+  expect(focused.focusIsDocument).toBe(false);
+  expect(focused.media).toHaveLength(1);
+  root.querySelector("source")!.src = "two.ogg";
+  expect(read()!.media).not.toEqual(focused.media);
+});
+
+it("collects source and recipient changes inside closed shadow roots", () => {
+  document.body.innerHTML = '<div id="host"></div>';
+  const host = document.querySelector<HTMLElement>("#host")!;
+  const root = host.attachShadow({ mode: "closed" });
+  root.innerHTML =
+    '<video><source src="one.webm"></video><button>Pause</button><button>Buy</button>';
+  const read = collector((element) => (element === host ? root : null));
+  const buttons = root.querySelectorAll<HTMLButtonElement>("button");
+  buttons[0].focus();
+  const first = read()!;
+  expect(host.shadowRoot).toBeNull();
+  expect(first.media).toHaveLength(1);
+  buttons[1].focus();
+  root.querySelector("source")!.src = "two.webm";
+  const changed = read()!;
+  expect(changed.focus).not.toBe(first.focus);
+  expect(changed.media).not.toEqual(first.media);
+  expect(changed.revision).toBeGreaterThan(first.revision);
 });

@@ -5,7 +5,6 @@ import { flushSync } from "react-dom";
 import ReactDOM from "react-dom/client";
 import { BorrowConfirmationOverlay } from "@/content/BorrowConfirmationOverlay";
 import { ControlOverlay } from "@/content/ControlOverlay";
-import { CooperationOverlay } from "@/content/CooperationOverlay";
 import { createCaptureSuppressController } from "@/content/capture-suppress";
 import { HelpRequestOverlay } from "@/content/HelpRequestOverlay";
 import { createHelpRequestData } from "@/content/help-request";
@@ -202,7 +201,8 @@ export default defineContentScript({
       const showInteractive = videoOverlay.canRenderInteractive(interactiveOverlayVisible);
       const cooperationState =
         controlVisible && !interactiveOverlayVisible ? activeAgentState?.cooperation : undefined;
-      setOverlayHostHiddenFromAccessibility(!interactiveOverlayVisible && !cooperationState);
+      const cardVisible = controlOverlayVisible || !!cooperationState;
+      setOverlayHostHiddenFromAccessibility(!interactiveOverlayVisible && !cardVisible);
       setOverlaySurfaceState(
         controlOverlayVisible,
         controlOverlayVisible && overlayState.automationBypassCount === 0,
@@ -227,14 +227,11 @@ export default defineContentScript({
                 request: showInteractive ? overlayState.activeRecord : null,
               }),
               React.createElement(ControlOverlay, {
-                visible: controlOverlayVisible,
+                visible: cardVisible,
+                state: cooperationState,
                 interrupting: overlayState.interrupting,
                 automationBypass: overlayState.automationBypassCount > 0,
                 onInterrupt: handleInterrupt,
-              }),
-              React.createElement(CooperationOverlay, {
-                state: cooperationState,
-                onStop: handleInterrupt,
               }),
             ),
           ),

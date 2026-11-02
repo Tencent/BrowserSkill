@@ -5,7 +5,11 @@ import { watchDaemonConnection } from "@/lib/daemon-connection-preference";
 import { OVERLAY_AGENT_STATE, type OverlayAgentStateMessage } from "@/lib/overlay-bridge";
 import { attachSessionsLiveFlag } from "@/lib/sessions-live-flag";
 import { isAgentControlledTab } from "@/session-manager/manager";
+import { AgentWindowRouting } from "@/session-manager/window-routing";
 import { ToolDispatcher } from "@/tools/dispatcher";
+import { hasActiveHelp } from "@/tools/human-loop";
+import { hasActiveRecording } from "@/tools/record";
+import { handleTabCreate } from "@/tools/tabs";
 import { VideoManager } from "@/video/manager";
 
 vi.hoisted(() => {
@@ -25,6 +29,7 @@ vi.mock("@/lib/audit");
 vi.mock("@/lib/audit-bridge");
 vi.mock("@/lib/connection-controller");
 vi.mock("@/lib/daemon-connection-preference");
+vi.mock("@/lib/daemon-upgrade-notice");
 vi.mock("@/lib/heartbeat");
 vi.mock("@/lib/instance-id");
 vi.mock("@/lib/interaction-preferences");
@@ -43,6 +48,7 @@ vi.mock("@/session-manager/agent-window", () => ({
 }));
 vi.mock("@/tools/borrow-confirmation");
 vi.mock("@/tools/dispatcher");
+vi.mock("@/tools/human-loop");
 vi.mock("@/tools/record");
 vi.mock("@/transport/handshake");
 vi.mock("@/transport/remote-authorization");
@@ -53,12 +59,16 @@ import background from "@/entrypoints/background";
 afterEach(() => {
   vi.unstubAllGlobals();
   vi.clearAllMocks();
+  vi.mocked(hasActiveHelp).mockReset();
+  vi.mocked(hasActiveRecording).mockReset();
+  vi.useRealTimers();
 });
 
 function event<T extends unknown[] = []>() {
-  const listeners: Array<(...args: T) => void> = [];
+  const listeners = new Set<(...args: T) => void>();
   return {
-    addListener: (listener: (...args: T) => void) => listeners.push(listener),
+    addListener: (listener: (...args: T) => void) => listeners.add(listener),
+    removeListener: (listener: (...args: T) => void) => listeners.delete(listener),
     emit: (...args: T) => {
       for (const listener of listeners) listener(...args);
     },
@@ -68,6 +78,9 @@ function event<T extends unknown[] = []>() {
 async function fixture() {
   const overlay = new OverlayController();
   const onDetached = event<[number]>();
+  const onAttached = event<[number, chrome.tabs.TabAttachInfo]>();
+  const onCreated = event<[chrome.tabs.Tab]>();
+  const onCreatedNavigationTarget = event<[{ tabId: number; sourceTabId: number }]>();
   const sendMessage = vi.fn(
     async (_tabId: number, message: OverlayAgentStateMessage): Promise<unknown> => {
       overlay.applyAgentControlMode(message.sessionId, message.mode);
@@ -78,14 +91,30 @@ async function fixture() {
     tabs: {
       sendMessage,
       get: vi.fn(async () => ({ url: "https://example.test" })),
+      query: vi.fn(async () => []),
+      group: vi.fn(async () => 100),
+      ungroup: vi.fn(async () => {}),
       onDetached,
       onActivated: event(),
       onUpdated: event(),
-      onCreated: event(),
+      onCreated,
+      onAttached,
       onRemoved: event(),
     },
+    tabGroups: {
+      query: vi.fn(async () => []),
+      get: vi.fn(async () => ({ id: 100, windowId: 10 })),
+      update: vi.fn(async () => {}),
+      onRemoved: event(),
+      onMoved: event(),
+    },
     debugger: { onDetach: event() },
-    webNavigation: { onBeforeNavigate: event(), onCompleted: event(), onErrorOccurred: event() },
+    webNavigation: {
+      onBeforeNavigate: event(),
+      onCompleted: event(),
+      onErrorOccurred: event(),
+      onCreatedNavigationTarget,
+    },
     runtime: { onMessage: event(), onConnect: event() },
     notifications: { onClicked: event(), onButtonClicked: event() },
   });
@@ -99,8 +128,71 @@ async function fixture() {
   (background as unknown as () => void)();
   const deps = vi.mocked(ToolDispatcher).mock.calls.at(-1)![0];
   const task = await deps.sessions.start("one");
-  return { overlay, onDetached, sendMessage, deps, task };
+  return {
+    overlay,
+    onDetached,
+    onAttached,
+    onCreated,
+    onCreatedNavigationTarget,
+    sendMessage,
+    deps,
+    task,
+  };
 }
+
+it("keeps task tabs ungrouped while showing controls after creation and attachment", async () => {
+  vi.useFakeTimers();
+  const f = await fixture();
+  const home = { id: 10, windowId: 10, groupId: -1, pinned: false } as chrome.tabs.Tab;
+  const created = { ...home, id: 20, url: "https://example.test" };
+  const tabs = [home];
+  Object.assign(chrome.tabs, {
+    query: vi.fn(async () => tabs),
+    get: vi.fn(async (id: number) => tabs.find((tab) => tab.id === id)),
+    create: vi.fn(async () => {
+      tabs.push(created);
+      f.onCreated.emit(created);
+      return created;
+    }),
+  });
+
+  f.deps.onSessionsChanged?.();
+  const result = await handleTabCreate(f.deps.sessions, {
+    session_id: f.task.sessionId,
+    url: created.url,
+  });
+  expect(result).toMatchObject({ tab_id: created.id, window_id: home.windowId });
+  if ("code" in result) throw new Error(result.message);
+  // Use the real background callbacks invoked by the dispatcher and browser.
+  f.deps.onAgentTabClaimed?.(result.tab_id, result.window_id);
+  f.onAttached.emit(created.id, { newWindowId: home.windowId, newPosition: 1 });
+  await vi.advanceTimersByTimeAsync(0);
+
+  expect(isAgentControlledTab(f.task, created.id)).toBe(true);
+  for (const tab of tabs) {
+    expect(tab.groupId).toBe(-1);
+    expect(f.sendMessage).toHaveBeenCalledWith(
+      tab.id,
+      expect.objectContaining({ sessionId: f.task.sessionId, mode: "control" }),
+    );
+  }
+  expect(chrome.tabs.group).not.toHaveBeenCalled();
+  expect(chrome.tabs.ungroup).not.toHaveBeenCalled();
+  expect(chrome.tabGroups.update).not.toHaveBeenCalled();
+});
+
+it("refreshes released-page controls after attachment completes", async () => {
+  const f = await fixture();
+  f.overlay.applyAgentControlMode("one", "control");
+  f.deps.sessions.release("one");
+  f.onAttached.emit(10, { newWindowId: 90, newPosition: 0 });
+  await Promise.resolve();
+  expect(f.overlay.snapshot().controlVisible).toBe(false);
+  expect(f.sendMessage).toHaveBeenCalledWith(
+    10,
+    expect.objectContaining({ sessionId: null, mode: "hidden" }),
+  );
+});
 
 it.each([false, true])("hides an observed tab after detachment, remote=%s", async (remote) => {
   const f = await fixture();
@@ -154,4 +246,77 @@ it("accepts an absent video listener but preserves real overlay replies and erro
   }
   f.sendMessage.mockRejectedValueOnce(new Error("Overlay paint failed"));
   await expect(video.overlay(10, "video")).rejects.toThrow("Overlay paint failed");
+});
+
+// Exercise the background's actual routing predicate with real cooperation and
+// routing controllers. Module-only routing tests cannot catch wiring regressions.
+it.each([
+  "cooperation",
+  "help",
+  "recording",
+])("respects external-tab routing and task pages during %s", async (mode) => {
+  vi.useFakeTimers();
+  const f = await fixture();
+  vi.mocked(hasActiveHelp).mockReturnValue(mode === "help");
+  vi.mocked(hasActiveRecording).mockReturnValue(mode === "recording");
+  const tabs = new Map<number, chrome.tabs.Tab>();
+  const add = (id: number) => {
+    const tab = { id, windowId: 10, active: false, incognito: false } as chrome.tabs.Tab;
+    tabs.set(id, tab);
+    return tab;
+  };
+  add(10);
+  Object.assign(chrome.tabs, {
+    get: vi.fn(async (id: number) => ({ ...tabs.get(id)! })),
+    query: vi.fn(async ({ windowId }: chrome.tabs.QueryInfo) =>
+      [...tabs.values()].filter((tab) => tab.windowId === windowId),
+    ),
+    move: vi.fn(async (id: number, { windowId }: chrome.tabs.MoveProperties) => {
+      f.onDetached.emit(id);
+      const tab = tabs.get(id)!;
+      tab.windowId = windowId!;
+      return { ...tab };
+    }),
+    update: vi.fn(),
+  });
+  Object.assign(chrome, {
+    windows: {
+      getAll: vi.fn(async () => [
+        { id: 1, type: "normal", incognito: false, focused: false },
+        { id: 10, type: "normal", incognito: false, focused: false },
+      ]),
+      update: vi.fn(),
+      onFocusChanged: event(),
+      onRemoved: event(),
+    },
+  });
+  const { AgentWindowRouting: RealRouting } = await vi.importActual<
+    typeof import("@/session-manager/window-routing")
+  >("@/session-manager/window-routing");
+  const router = new RealRouting(...vi.mocked(AgentWindowRouting).mock.calls.at(-1)!);
+  try {
+    f.deps.cooperation!.startSession(f.task.sessionId);
+    expect(f.deps.cooperation!.hasSession(f.task.sessionId)).toBe(true);
+    router.sync();
+    await vi.advanceTimersByTimeAsync(0);
+    f.onCreated.emit(add(20));
+    f.onCreatedNavigationTarget.emit({ tabId: 20, sourceTabId: 10 });
+    f.onCreated.emit(add(30));
+    await vi.advanceTimersByTimeAsync(150);
+    expect(tabs.get(10)!.windowId).toBe(10);
+    expect(tabs.get(20)!.windowId).toBe(10);
+    expect(isAgentControlledTab(f.task, 20)).toBe(false);
+    expect(isAgentControlledTab(f.task, 30)).toBe(false);
+    if (mode === "cooperation") {
+      expect(chrome.tabs.move).toHaveBeenCalledExactlyOnceWith(30, { windowId: 1, index: -1 });
+      expect(tabs.get(30)!.windowId).toBe(1);
+    } else {
+      expect(chrome.tabs.move).not.toHaveBeenCalled();
+      expect(tabs.get(30)!.windowId).toBe(10);
+    }
+    expect(chrome.windows.update).not.toHaveBeenCalled();
+    expect(chrome.tabs.update).not.toHaveBeenCalled();
+  } finally {
+    router.dispose();
+  }
 });

@@ -39,6 +39,7 @@ import { type ClickOverlayDeps, withClickOverlay } from "./click-overlay";
 import { attachDialogs, markDialogCursor } from "./dialogs";
 import { backendNodeToObject } from "./element-geometry";
 import { rpcError } from "./errors";
+import { FOCUS_CHECK } from "./focus-state";
 import { resolveNodeGeometry, scrollElementAndFramesIntoView } from "./frame-geometry";
 import {
   type CdpRunner,
@@ -149,6 +150,7 @@ export async function resolveBackendNode(
   target: { tabId: number },
   params: { ref?: string; selector?: string },
   toolName: string,
+  strictSelector = false,
 ): Promise<
   | {
       backendNodeId: number;
@@ -200,11 +202,25 @@ export async function resolveBackendNode(
         message: "DOM.getDocument returned no root nodeId",
       };
     }
-    const found = await cdp.send<{ nodeId?: number }>(target.tabId, "DOM.querySelector", {
-      nodeId: rootNodeId,
-      selector: params.selector,
-    });
-    if (typeof found.nodeId !== "number" || found.nodeId === 0) {
+    const query = { nodeId: rootNodeId, selector: params.selector };
+    let nodeId: number | undefined;
+    if (strictSelector) {
+      const found = await cdp.send<{ nodeIds: number[] }>(
+        target.tabId,
+        "DOM.querySelectorAll",
+        query,
+      );
+      if (found.nodeIds.length > 1)
+        return {
+          code: "invalid_params",
+          message: `${toolName}: selector matched ${found.nodeIds.length} elements; use a VOM ref or a narrower selector`,
+        };
+      nodeId = found.nodeIds[0];
+    } else {
+      nodeId = (await cdp.send<{ nodeId?: number }>(target.tabId, "DOM.querySelector", query))
+        .nodeId;
+    }
+    if (typeof nodeId !== "number" || nodeId === 0) {
       return rpcError(
         "not_found",
         "selector_not_found",
@@ -214,7 +230,7 @@ export async function resolveBackendNode(
     const described = await cdp.send<{ node?: { backendNodeId?: number } }>(
       target.tabId,
       "DOM.describeNode",
-      { nodeId: found.nodeId },
+      { nodeId },
     );
     const backendNodeId = described.node?.backendNodeId;
     if (typeof backendNodeId !== "number") {
@@ -231,19 +247,6 @@ export async function resolveBackendNode(
     };
   }
 }
-
-// Check the target's own root, then its hosts: closed shadow roots are not
-// reachable via host.shadowRoot. DOM focus remains meaningful in background tabs.
-const FOCUS_CHECK = `function() {
-  if (!this.isConnected) return false;
-  let element = this;
-  while (element) {
-    const root = element.getRootNode();
-    if (root.activeElement !== element) return false;
-    element = root.host;
-  }
-  return true;
-}`;
 
 const BLUR_TARGET = `function() {
   if (!this.isConnected) throw new Error('blur target is detached');
@@ -439,8 +442,9 @@ export async function resolveActionTarget(
   target: ResolvedTargetTab,
   params: { ref?: string; selector?: string },
   toolName: string,
+  strictSelector = false,
 ): Promise<ResolvedActionTarget | RpcError> {
-  const node = await resolveBackendNode(cdp, ctx, target, params, toolName);
+  const node = await resolveBackendNode(cdp, ctx, target, params, toolName, strictSelector);
   return isRpcError(node) ? node : { tab: target, ...node };
 }
 
@@ -940,7 +944,7 @@ type SelectMutationResult =
     }
   | {
       ok: false;
-      reason: "option_not_found";
+      reason: "option_not_found" | "target_disabled";
       missing?: string;
     };
 
@@ -1206,7 +1210,7 @@ export async function handleFill(
             } else {
               this.textContent = '';
             }
-            this.dispatchEvent(new Event('input', { bubbles: true }));
+            this.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
           }
           return preparation;
         }`,
@@ -1427,7 +1431,7 @@ export async function handleFill(
         objectId,
         functionDeclaration: `function() {
           this.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
-          this.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
+          this.dispatchEvent(new Event('change', { bubbles: true }));
         }`,
         returnByValue: true,
       },
@@ -1521,6 +1525,14 @@ export function parseKeySpec(spec: string): { key: string; modifiers: KeyModifie
     .split("+")
     .map((s) => s.trim())
     .filter((s) => s.length > 0);
+  // The final '+' is a base key only when every preceding token is a modifier.
+  if (
+    /\+\s*\+\s*$/.test(spec) &&
+    parts.length > 0 &&
+    parts.every((part) => normaliseModifier(part))
+  ) {
+    parts.push("+");
+  }
   if (parts.length <= 1) {
     return { key: spec.trim(), modifiers: [] };
   }
@@ -1863,6 +1875,9 @@ export async function handleSelect(
       objectId,
       functionDeclaration: `function(values) {
         const select = this;
+        if (select.matches(':disabled')) {
+          return { ok: false, reason: 'target_disabled' };
+        }
         const multiple = select.multiple;
         const known = new Set(Array.from(select.options).map((o) => o.value));
         for (const v of values) {
@@ -1874,7 +1889,7 @@ export async function handleSelect(
         for (const opt of select.options) {
           opt.selected = want.has(opt.value);
         }
-        select.dispatchEvent(new Event('input', { bubbles: true }));
+        select.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
         select.dispatchEvent(new Event('change', { bubbles: true }));
         const selected = Array.from(select.selectedOptions);
         return {
@@ -1889,6 +1904,9 @@ export async function handleSelect(
     });
     const mutation = evaluated.result?.value;
     if (!mutation?.ok) {
+      if (mutation?.reason === "target_disabled") {
+        return { code: "invalid_params", message: "select requires an enabled <select>" };
+      }
       if (mutation?.reason === "option_not_found") {
         return rpcError(
           "invalid_params",

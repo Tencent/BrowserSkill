@@ -1,4 +1,5 @@
 import { coverage, detectBlockingLayer, spansViewport } from "./layers";
+import { estimateLineTokens, estimateTokens } from "./tokens";
 import type {
   ActiveScopeBlock,
   BlockingLayer,
@@ -51,6 +52,7 @@ const STRUCTURAL_ROLES = new Set([
   "figure",
   "form",
   "grid",
+  "gridcell",
   "group",
   "heading",
   "iframe",
@@ -122,10 +124,6 @@ const WEAK_ACTION_LABELS = new Set([
 
 const ACTIVE_REGION_POSITIONS = new Set(["fixed", "absolute", "sticky"]);
 
-function estimateTokens(text: string): number {
-  return Math.ceil(text.length / 4);
-}
-
 function cleaned(value: string | undefined): string | undefined {
   const trimmed = value?.replace(/\s+/g, " ").trim();
   return trimmed ? trimmed : undefined;
@@ -191,7 +189,49 @@ function isUrlBearingStructuralAction(node: VomNode): boolean {
   return name !== undefined && isProbableNavigationTarget(name);
 }
 
+/** Hints describe observed evidence, not a promise that a drop will be accepted. */
+function dragHint(node: VomNode): string | undefined {
+  if (
+    node.disabled ||
+    node.inert ||
+    node.pointerEvents === "none" ||
+    ["statictext", "inlinetextbox"].includes(normalizedRole(node))
+  )
+    return undefined;
+  if (node.dragHint !== undefined) return node.dragHint || undefined;
+  if (node.attrs?.draggable?.toLowerCase() === "true") return "draggable";
+  if (node.attrs?.ondrop !== undefined || node.attrs?.ondragover !== undefined)
+    return "drop-target";
+  if (["grab", "grabbing", "move"].includes(node.cursor ?? "") || node.cursor?.endsWith("-resize"))
+    return "drag-handle";
+  return undefined;
+}
+
+/** Selection evidence shared by rendered hints and observation freshness checks. */
+export function selectionMarker(node: VomNode): string | undefined {
+  const attrs = node.attrs ?? {};
+  const aria = attrs["aria-selected"]?.toLowerCase();
+  if (aria === "true" || aria === "false") return aria === "true" ? "selected" : "unselected";
+  // Custom styling is only a hint on controls, never semantic proof on wrappers.
+  if (!isSemanticReferenceNode(node) && !hasRecoveryHandler(node)) return undefined;
+  if (attrs["data-selected"] === "true" || attrs["data-state"] === "selected")
+    return "selected:data";
+  if (attrs["data-selected"] === "false" || attrs["data-state"] === "unselected")
+    return "unselected:data";
+  if (attrs.class?.split(/\s+/).some((token) => token === "selected" || token === "is-selected"))
+    return "selected:class";
+  return undefined;
+}
+
+function indexedItemName(node: VomNode): string | undefined {
+  const index = node.attrs?.["data-index"];
+  return hasRecoveryHandler(node) && index !== undefined && /^\d{1,9}$/.test(index)
+    ? `item ${index}`
+    : undefined;
+}
+
 function shouldRender(node: VomNode): boolean {
+  if (dragHint(node)) return true;
   if (!node.role) return false;
 
   const role = normalizedRole(node);
@@ -202,14 +242,21 @@ function shouldRender(node: VomNode): boolean {
   return cleaned(node.name) !== undefined;
 }
 
-export function isVomReferenceNode(node: VomNode): boolean {
+function isSemanticReferenceNode(node: VomNode): boolean {
   return (
     node.referenceable !== false &&
     (INTERACTIVE_ROLES.has(normalizedRole(node)) || isUrlBearingStructuralAction(node))
   );
 }
 
+export function isVomReferenceNode(node: VomNode): boolean {
+  return (
+    isSemanticReferenceNode(node) || (node.referenceable !== false && dragHint(node) !== undefined)
+  );
+}
+
 function hasRecoveryHandler(node: VomNode): boolean {
+  if (node.clickable) return true;
   const attrs = node.attrs ?? {};
   return RECOVERY_HANDLER_ATTRS.some((key) => Object.prototype.hasOwnProperty.call(attrs, key));
 }
@@ -286,7 +333,8 @@ function recoveryCandidateName(
     cleaned(node.name) ??
     cleaned(node.text) ??
     cleaned(node.nearbyText) ??
-    (children ? iconHintFromSubtree(node, children) : undefined)
+    (children ? iconHintFromSubtree(node, children) : undefined) ??
+    indexedItemName(node)
   );
 }
 
@@ -372,6 +420,19 @@ function isAncestorOf(
 }
 
 export function applyVomInteractionRecovery(nodes: VomNode[]): VomNode[] {
+  // CSS cursors inherit. Expose the handle once instead of assigning refs to
+  // every decorative span inside it; retain explicit nested draggable/drop cues.
+  const byId = new Map(nodes.map((node) => [node.id, node]));
+  nodes = nodes.map((node) => {
+    const parent = node.parentId === null ? undefined : byId.get(node.parentId);
+    return dragHint(node) === "drag-handle" &&
+      parent &&
+      dragHint(parent) &&
+      parent.cursor === node.cursor &&
+      parent.frameId === node.frameId
+      ? { ...node, dragHint: false }
+      : node;
+  });
   const parentMap = buildParentMap(nodes);
   const children = buildChildren(nodes);
   const recoveredIds = new Set<number>();
@@ -379,7 +440,8 @@ export function applyVomInteractionRecovery(nodes: VomNode[]): VomNode[] {
   const recoveredNameById = new Map<number, string>();
 
   for (const node of nodes) {
-    if (isVomReferenceNode(node)) continue;
+    // Drag evidence adds a capability; it must not suppress existing role/name recovery.
+    if (isSemanticReferenceNode(node)) continue;
     const role = recoveredRole(node, children);
     if (!role || !passesRecoveryGuards(node, children)) continue;
     recoveredIds.add(node.id);
@@ -721,8 +783,10 @@ function renderNodeLine(
   surface: CondSurface | undefined = undefined,
   redactValues = false,
 ): string {
-  let line = `${"  ".repeat(depth)}${ref ? `@${ref} ` : ""}${node.role}`;
+  let line = `${"  ".repeat(depth)}${ref ? `@${ref} ` : ""}${node.role ?? "generic"}`;
 
+  const hint = dragHint(node);
+  if (hint) line += ` [${hint}]`;
   const name = cleaned(node.name);
   if (name) line += ` ${JSON.stringify(name)}`;
   if (context.length > 0) line += ` [ctx: ${context.join(" > ")}]`;
@@ -737,6 +801,8 @@ function renderNodeLine(
   const role = normalizedRole(node);
   const fillable = ["textbox", "searchbox"].includes(role);
   if (node.disabled) line += " [disabled]";
+  const selection = selectionMarker(node);
+  if (selection) line += ` [${selection}]`;
   if (node.checked !== undefined) {
     line += ` [${node.checked === "mixed" ? "mixed" : node.checked ? "checked" : "unchecked"}]`;
   }
@@ -808,6 +874,7 @@ interface RenderState {
   lines: string[];
   refs: RenderedRef[];
   nextRef: number;
+  allocateRef?: VomOptions["allocateRef"];
   tokens: number;
   maxDepth: number;
   maxTokens: number;
@@ -868,7 +935,10 @@ function* renderTreeRows(
     }
 
     const visual = node.visualKey !== undefined;
-    const ref = visual || isVomReferenceNode(node) ? `e${state.nextRef++}` : undefined;
+    const ref =
+      visual || isVomReferenceNode(node)
+        ? (state.allocateRef?.(node) ?? `e${state.nextRef++}`)
+        : undefined;
     const context = ref && !visual ? handleContext(node, state) : [];
     const surface = state.surfaceMap.get(node.id);
     const indent = "  ".repeat(Math.min(depth, state.maxDepth, 32));
@@ -944,6 +1014,7 @@ function createRenderState(
     lines: [...initialLines],
     refs: [],
     nextRef: 1,
+    allocateRef: options.allocateRef,
     tokens: estimateTokens(initialLines.join("\n")),
     maxDepth: options.maxDepth ?? DEFAULT_MAX_DEPTH,
     maxTokens: options.maxTokens ?? DEFAULT_MAX_TOKENS,
@@ -979,7 +1050,7 @@ function renderNodes(
   const state = createRenderState(nodes, options, initialLines, surfaces, activeScopeBlocks);
   const children = state.children;
   for (const row of renderTreeRows(children, state)) {
-    const cost = estimateTokens(row.text);
+    const cost = estimateLineTokens(row.text);
     if (state.tokens + cost > state.maxTokens) {
       state.truncated = true;
       break;

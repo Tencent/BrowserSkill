@@ -157,6 +157,20 @@
       "promptTemplate": "Para esta tarea, usa BrowserSkill en el navegador {{name}} (ID de instancia: {{instanceId}}). Inicia cada nueva sesión de esta tarea con la interfaz correspondiente:\nCLI: {{command}}\nDeepSeek Harness: {{toolCall}}\nEn DeepSeek Harness, llama a la herramienta sin ejecutar el comando CLI por separado.\nSi esta instancia no está conectada, detente y pídeme que vuelva a conectar este perfil. No omitas --browser / browser ni cambies a otra instancia.",
       "title": "Navegador actual",
       "unnamed": "Navegador sin nombre"
+    },
+    "daemonUpgrade": {
+      "title": "Actualiza el servicio de navegador bsk",
+      "description": "El servicio bsk (daemon) en ejecución es demasiado antiguo. Las tareas del navegador requieren que se actualice.",
+      "runCommand": "Abre una terminal en el equipo que ejecuta este servicio y ejecuta:",
+      "restart": "Si este aviso sigue apareciendo tras actualizar, reinicia el servicio desde la terminal o la aplicación anfitriona que lo inició.",
+      "copyButton": "Copiar comando",
+      "copyFailed": "No se pudo copiar. Copia manualmente el comando de arriba.",
+      "details": "Detalles técnicos",
+      "protocols": "Protocolo del servicio: {{actual}}. La extensión requiere {{required}} o un protocolo compatible más reciente.",
+      "version": "En ejecución: bsk {{version}}",
+      "notificationMessage": "Las tareas del navegador no están disponibles. Actualiza bsk en el equipo que ejecuta el servicio de navegador y comprueba que el servicio en ejecución también esté actualizado.",
+      "toolbarTitle": "BrowserSkill: actualiza el servicio de navegador bsk",
+      "notificationButton": "Ver cómo actualizar"
     }
   },
   "controlOverlay": {
@@ -315,6 +329,7 @@
       "press": "Pulsar tecla",
       "select": "Seleccionar opción",
       "hover": "Pasar el ratón por encima",
+      "drag": "Arrastrar",
       "focus": "Enfocar",
       "blur": "Quitar el foco",
       "scroll": "Desplazar",

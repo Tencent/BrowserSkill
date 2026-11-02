@@ -38,13 +38,10 @@ export async function runCommandTask({
   variantOverride,
 }) {
   const variant = variantOverride ?? adapter.variant ?? "unspecified";
-  const runId = [
-    safeRunPart(adapterName),
-    safeRunPart(variant),
-    safeRunPart(task.id),
-    iteration,
-    randomUUID().slice(0, 8),
-  ].join("-");
+  const suffix = `-${iteration}-${randomUUID().slice(0, 8)}`;
+  const prefix = [safeRunPart(adapterName), safeRunPart(variant), safeRunPart(task.id)].join("-");
+  // The event server accepts at most 120 characters; retain the unique suffix.
+  const runId = `${prefix.slice(0, 120 - suffix.length)}${suffix}`;
   server.reset(runId);
   const prompt = renderPrompt(task, { baseUrl: serverInfo.baseUrl, runId, locale, seed });
   const values = {

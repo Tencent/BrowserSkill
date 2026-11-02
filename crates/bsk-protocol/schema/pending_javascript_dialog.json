@@ -1,0 +1,62 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "PendingJavaScriptDialog",
+  "type": "object",
+  "required": [
+    "decision_deadline",
+    "id",
+    "message",
+    "sequence",
+    "tab_id",
+    "type"
+  ],
+  "properties": {
+    "decision_deadline": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "default_prompt": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "id": {
+      "type": "string"
+    },
+    "message": {
+      "type": "string"
+    },
+    "sequence": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "tab_id": {
+      "type": "integer",
+      "format": "int64"
+    },
+    "type": {
+      "$ref": "#/definitions/JavaScriptDialogType"
+    },
+    "url": {
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  },
+  "definitions": {
+    "JavaScriptDialogType": {
+      "description": "Native JS dialog kind reported by CDP.",
+      "type": "string",
+      "enum": [
+        "alert",
+        "confirm",
+        "prompt",
+        "beforeunload"
+      ]
+    }
+  }
+}

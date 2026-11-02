@@ -10,9 +10,9 @@ import {
   type DownloadsApi,
   type NavigationTargetsApi,
 } from "./download-capture";
-import { fileTransferTriggerDeps } from "./file-transfer-trigger";
 import { withInputReady } from "./input-readiness";
 import { clickResolvedTarget, type InteractionDeps, resolveActionTarget } from "./interaction";
+import { pointerTransactionDeps } from "./pointer-transaction";
 import { enforceAgentWindow, isRpcError, lookupSession, resolveTargetTab } from "./shared";
 
 let downloadActive = false;
@@ -48,7 +48,7 @@ export async function handleDownload(
 
     const timeoutMs = params.timeout_ms ?? 120_000;
     const deadline = Date.now() + timeoutMs;
-    let trigger: ReturnType<typeof fileTransferTriggerDeps> | undefined;
+    let trigger: ReturnType<typeof pointerTransactionDeps> | undefined;
     const capture = await captureBrowserDownload({
       cdp: deps.cdp,
       target: address.cdpTarget,
@@ -62,7 +62,7 @@ export async function handleDownload(
       expectedFrameId: address.frameId,
       trigger: (markDispatched, captureSignal) => {
         const signal = deps.signal ? AbortSignal.any([captureSignal, deps.signal]) : captureSignal;
-        trigger = fileTransferTriggerDeps(deps, signal);
+        trigger = pointerTransactionDeps(deps, signal);
         const clickDeps = trigger.deps;
         return withInputReady(
           ctx,

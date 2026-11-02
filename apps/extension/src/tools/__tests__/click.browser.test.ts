@@ -1,7 +1,9 @@
 // @vitest-environment node
 // Opt in with BSK_CLICK_CHROME; each test owns its browser, profile and HTTP server.
+
 import { readFileSync } from "node:fs";
 import { createServer } from "node:http";
+import { i18n } from "@browser-skill/i18n";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import ts from "typescript";
@@ -401,6 +403,107 @@ describe.skipIf(!process.env.BSK_CLICK_CHROME)("real browser click readiness", (
     }
   }, 90_000);
 
+  it("keeps Stop fully visible and clickable in short control cards", async () => {
+    const { withChrome } = await import(
+      new URL(
+        "../../../../../evals/browser/cases/regression/snapshot-coordinates/chrome.mjs",
+        import.meta.url,
+      ).href
+    );
+    const css = readFileSync(new URL("../../content/overlay.css", import.meta.url), "utf8");
+    const language = i18n.language;
+    try {
+      await withChrome(
+        { executable: process.env.BSK_CLICK_CHROME, deviceScale: 1, zoom: 1 },
+        async (send: Send) => {
+          const { targetId } = await send<{ targetId: string }>("Target.createTarget", {
+            url: "about:blank",
+          });
+          const { sessionId } = await send<{ sessionId: string }>("Target.attachToTarget", {
+            targetId,
+            flatten: true,
+          });
+          const local: Send = (method, params) => send(method, params, sessionId);
+          const evaluate = async <T>(expression: string) => {
+            const reply = await local<{ result: { value: T }; exceptionDetails?: unknown }>(
+              "Runtime.evaluate",
+              { expression, returnByValue: true },
+            );
+            expect(reply.exceptionDetails).toBeUndefined();
+            return reply.result.value;
+          };
+          await local("Page.bringToFront");
+          await evaluate(`window.overlay=document.createElement('browser-skill-overlay');
+            document.documentElement.append(overlay);
+            window.overlayRoot=overlay.attachShadow({mode:'closed'});`);
+          for (const locale of ["zh-CN", "de-DE"]) {
+            await i18n.changeLanguage(locale);
+            for (const [width, height, coarse] of [
+              [600, 140, false],
+              [600, 160, false],
+              [320, 120, true],
+              [320, 140, true],
+              [1280, 800, false],
+            ] as const) {
+              await local("Emulation.setDeviceMetricsOverride", {
+                width,
+                height,
+                deviceScaleFactor: 1,
+                mobile: false,
+              });
+              await local("Emulation.setTouchEmulationEnabled", { enabled: coarse });
+              expect(await evaluate("matchMedia('(pointer: coarse)').matches")).toBe(coarse);
+              for (const cooperative of [false, true]) {
+                const scenario = `${locale} ${width}x${height} ${cooperative ? "cooperative" : "fallback"}`;
+                const markup = renderToStaticMarkup(
+                  createElement(ControlOverlay, {
+                    visible: true,
+                    state: cooperative ? { mode: "human", editing: true, revision: 1 } : undefined,
+                    interrupting: false,
+                    automationBypass: false,
+                    onInterrupt: () => {},
+                  }),
+                );
+                await evaluate(`overlay.toggleAttribute('data-bsk-overlay-surface',${!cooperative});
+                  overlay.toggleAttribute('data-bsk-overlay-blocking',${!cooperative});
+                  overlayRoot.innerHTML=${JSON.stringify(`<style>${css}</style>`)}+${JSON.stringify(markup)};
+                  window.stops=[];
+                  overlayRoot.querySelector('[data-slot="control-overlay-stop-all"]').addEventListener('click',e=>stops.push(e.isTrusted));`);
+                const target = await evaluate<{
+                  visible: boolean;
+                  hit: boolean;
+                  x: number;
+                  y: number;
+                }>(`(() => {
+                  const stop=overlayRoot.querySelector('[data-slot="control-overlay-stop-all"]');
+                  const r=stop.getBoundingClientRect(), card=stop.closest('[role="toolbar"]').getBoundingClientRect();
+                  const x=r.x+r.width/2, y=r.y+r.height/2;
+                  return {x,y,
+                    visible:r.width>0 && r.height>0 && r.left>=Math.max(0,card.left) && r.top>=Math.max(0,card.top) && r.right<=Math.min(innerWidth,card.right) && r.bottom<=Math.min(innerHeight,card.bottom),
+                    hit:stop.contains(overlayRoot.elementFromPoint(x,y))};
+                })()`);
+                expect(target.visible, scenario).toBe(true);
+                expect(target.hit, scenario).toBe(true);
+                for (const type of ["mouseMoved", "mousePressed", "mouseReleased"]) {
+                  await local("Input.dispatchMouseEvent", {
+                    type,
+                    x: target.x,
+                    y: target.y,
+                    button: "left",
+                    clickCount: 1,
+                  });
+                }
+                expect(await evaluate("stops"), scenario).toEqual([true]);
+              }
+            }
+          }
+        },
+      );
+    } finally {
+      await i18n.changeLanguage(language);
+    }
+  }, 30_000);
+
   it("preserves hover and visible controls while scoped passthrough clears closed shadow click targets", async () => {
     const { withChrome } = await import(
       new URL(
@@ -482,7 +585,7 @@ describe.skipIf(!process.env.BSK_CLICK_CHROME)("real browser click readiness", (
               expect(await evaluate("getComputedStyle(overlay).display")).toBe("block");
               expect(
                 await evaluate(
-                  "getComputedStyle(overlayRoot.querySelector('[data-slot=control-overlay-pill]')).opacity",
+                  "getComputedStyle(overlayRoot.querySelector('[data-slot=control-overlay-card]')).opacity",
                 ),
               ).toBe("1");
               expect(await evaluate("overlay.hasAttribute('data-bsk-capture-hidden')")).toBe(false);
@@ -502,7 +605,7 @@ describe.skipIf(!process.env.BSK_CLICK_CHROME)("real browser click readiness", (
             overlay.toggleAttribute('data-bsk-overlay-blocking',bypassCount===0);
             overlayRoot.querySelector('[data-slot="control-overlay-blocker"]').style.pointerEvents=bypassCount>0?'none':'auto';`);
         };
-        // A retained hover bypass leaves the pill interactive even though the host is transparent.
+        // A retained hover bypass leaves the card interactive even though the host is transparent.
         for (const automationBypass of [false, true]) {
           const markup = renderToStaticMarkup(
             createElement(ControlOverlay, {
@@ -514,8 +617,6 @@ describe.skipIf(!process.env.BSK_CLICK_CHROME)("real browser click readiness", (
           );
           await evaluate(`window.bypassCount=${automationBypass ? 1 : 0}; overlay.toggleAttribute('data-bsk-overlay-blocking', ${!automationBypass});
             overlayRoot.innerHTML = ${JSON.stringify(`<style>${css}</style>`)} + ${JSON.stringify(markup)};
-            // Static markup starts before the component's reveal effect; model its settled state.
-            for (const control of overlayRoot.querySelectorAll('[data-slot^="control-overlay"]')) control.style.opacity='1';
             overlayRoot.querySelector('[data-slot="control-overlay-stop-all"]').addEventListener('click',()=>stops++);`);
           await evaluate(
             "Object.assign(document.querySelector('#target').style,{left:'20px',top:'20px'})",
@@ -529,10 +630,10 @@ describe.skipIf(!process.env.BSK_CLICK_CHROME)("real browser click readiness", (
           expect(clear).not.toHaveProperty("code");
           expect(phases).toEqual([]);
           expect(await evaluate("bypassCount")).toBe(automationBypass ? 1 : 0);
-          for (const slot of ["control-overlay-pill", "control-overlay-stop-all"]) {
+          for (const slot of ["control-overlay-card", "control-overlay-stop-all"]) {
             const point = await evaluate<{ x: number; y: number }>(`(() => {
               const r=overlayRoot.querySelector('[data-slot="${slot}"]').getBoundingClientRect();
-              const x=${slot === "control-overlay-pill" ? "r.x+25" : "r.x+r.width/2"}, y=r.y+r.height/2;
+              const x=${slot === "control-overlay-card" ? "r.x+25" : "r.x+r.width/2"}, y=r.y+r.height/2;
               Object.assign(document.querySelector('#target').style,{left:(x-40)+'px',top:(y-15)+'px'});
               clicks=[]; stops=0; return {x,y};
             })()`);

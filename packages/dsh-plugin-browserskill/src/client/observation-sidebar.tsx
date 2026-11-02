@@ -43,8 +43,28 @@ export interface NativeSidebarSlots {
   ): () => void;
 }
 
+/**
+ * Session catalog list, narrowed to the fields the auto-open reads.
+ * DSH 0.2.0 removed `current` from this snapshot (view selection moved to
+ * the uiSession service); it stays optional so one shape covers all hosts.
+ */
 export interface SessionListSource {
-  getSnapshot(): { current: string | undefined };
+  getSnapshot(): { current?: string | undefined };
+  subscribe(listener: () => void): () => void;
+}
+
+/** Reading of the uiSession service's renderer-facing main-binding adapter. */
+export interface UiSessionService {
+  adapter?: {
+    /** Main-view session binding; `key` is its session id, undefined when absent. */
+    current?: MainSessionBindingSource;
+  };
+  current?: MainSessionBindingSource;
+}
+
+/** `key`-addressed binding source exposed by uiSession on DSH 0.1.5 and 0.2.x alike. */
+export interface MainSessionBindingSource {
+  getSnapshot(): { key?: string | undefined };
   subscribe(listener: () => void): () => void;
 }
 
@@ -167,6 +187,22 @@ export function registerObservationSidebar(
     | { register(definition: NativeTabDefinition): () => void }
     | undefined;
   const sessions = (host.get("sessions") as { list?: SessionListSource } | undefined)?.list;
+  // DSH 0.2.0+ removed `current` from the session list; the uiSession service
+  // owns the main-view binding instead. Optional on every host: 0.1.5 exposes
+  // it through adapter.current as well, so either shape can drive the fallback.
+  const mainSession = (host.get("uiSession") as UiSessionService | undefined) ?? undefined;
+  const mainBinding =
+    mainSession?.adapter?.current ??
+    (mainSession && "current" in mainSession ? mainSession.current : undefined);
+  const mainBindingUsable =
+    typeof mainBinding?.getSnapshot === "function" && typeof mainBinding?.subscribe === "function";
+  /** Prefer the list's own selection (0.1.5); fall back to the main binding (0.2.x). */
+  const currentSession = (): string | undefined => {
+    const listed = sessions?.getSnapshot().current;
+    if (listed !== undefined) return listed;
+    if (!mainBindingUsable) return undefined;
+    return mainBinding.getSnapshot().key;
+  };
   if (
     typeof sidebar?.openTabIn !== "function" ||
     typeof tabs?.register !== "function" ||
@@ -227,10 +263,7 @@ export function registerObservationSidebar(
         const attempt = () => {
           if (disposed || pending !== request) return;
           try {
-            if (
-              sessions.getSnapshot().current !== sessionId ||
-              store.presentation.getSnapshot().floating
-            ) {
+            if (currentSession() !== sessionId || store.presentation.getSnapshot().floating) {
               cancelOpen();
               return;
             }
@@ -255,7 +288,7 @@ export function registerObservationSidebar(
       };
       function reveal() {
         try {
-          const current = sessions?.getSnapshot().current;
+          const current = currentSession();
           if (current !== undefined) open(current);
         } catch (error) {
           fail(error);
@@ -275,7 +308,7 @@ export function registerObservationSidebar(
       };
       const evaluate = () => {
         if (disposed) return;
-        const current = sessions.getSnapshot().current;
+        const current = currentSession();
         const observations = store.getSnapshot().sessions;
         for (const id of autoOpened) {
           if (!observations.some((session) => visibleToScope(session, id))) autoOpened.delete(id);
@@ -352,6 +385,9 @@ export function registerObservationSidebar(
         store.acquire();
         disposers.push(store.subscribe(schedule));
         disposers.push(sessions.subscribe(schedule));
+        // DSH 0.2.0+: conversation switches update the uiSession main binding
+        // without necessarily touching the session list, so follow it too.
+        if (mainBindingUsable) disposers.push(mainBinding.subscribe(schedule));
         disposers.push(store.presentation.subscribe(schedule));
         connect();
         schedule();

@@ -1,7 +1,7 @@
 import type { RpcErrorData, RpcErrorReason } from "@/transport/types";
 import type { CdpDebuggee } from "./chromium-cdp";
 
-// Renderer reads that observation issues on the agent's behalf. A read that
+// Renderer reads and cleanup that observation issues on the agent's behalf. A command that
 // chrome.debugger has already dispatched cannot be cancelled: the deadline
 // only ends the caller's wait, ignores the late reply and lets the capture
 // pipeline stop instead of issuing fallback reads against the same
@@ -11,6 +11,7 @@ const RENDERER_READS = new Set([
   "DOMSnapshot.enable",
   "DOMSnapshot.captureSnapshot",
   "Accessibility.enable",
+  "Accessibility.disable",
   "Accessibility.getFullAXTree",
   "Page.getLayoutMetrics",
   "Page.getFrameTree",
@@ -21,6 +22,8 @@ const RENDERER_READS = new Set([
 const READ_COMMANDS = new Set([...RENDERER_READS, "Target.setAutoAttach"]);
 export const READ_TIMEOUT_MS = 10_000;
 export const CAPTURE_READ_TIMEOUT_MS = 20_000;
+// Best-effort cleanup must not hold a completed or cancelled capture open.
+export const ACCESSIBILITY_CLEANUP_TIMEOUT_MS = 1_000;
 const SLOW_COMMAND_MS = 2_000;
 /** Compatibility reason for bounded CDP reads, including browser-side attach
  * and reads refused behind a pending command. `phase` distinguishes these. */
@@ -35,6 +38,8 @@ export function isRendererRead(method: string): boolean {
 // Frame discovery opts into a deadline; navigation's frame-tree reads retain
 // their caller's budget. These other capture queries need no new deadline, but
 // must not be queued behind a read that is still running after its timeout.
+// The capture's Accessibility cleanup waits for no such read either; the next
+// capture on that target releases the domain again.
 const GUARDED_READS = new Set([
   ...READ_COMMANDS,
   "Page.getFrameTree",
@@ -146,11 +151,13 @@ export async function runCdpCommand<T>(
   target: CdpDebuggee,
   method: string,
   run: () => Promise<T>,
-  timeoutMs = method === "DOMSnapshot.captureSnapshot" || method === "Accessibility.getFullAXTree"
-    ? CAPTURE_READ_TIMEOUT_MS
-    : method !== "Page.getFrameTree" && READ_COMMANDS.has(method)
-      ? READ_TIMEOUT_MS
-      : undefined,
+  timeoutMs = method === "Accessibility.disable"
+    ? ACCESSIBILITY_CLEANUP_TIMEOUT_MS
+    : method === "DOMSnapshot.captureSnapshot" || method === "Accessibility.getFullAXTree"
+      ? CAPTURE_READ_TIMEOUT_MS
+      : method !== "Page.getFrameTree" && READ_COMMANDS.has(method)
+        ? READ_TIMEOUT_MS
+        : undefined,
   lifecycle?: { timedOut(error: CdpReadTimeoutError): void; settled(): void },
 ): Promise<T> {
   const started = Date.now();

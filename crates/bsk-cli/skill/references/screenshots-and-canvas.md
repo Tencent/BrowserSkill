@@ -36,15 +36,19 @@ that ref when its contents matter; never infer Canvas controls or names from
 nearby labels. If images cannot be received/understood, explain the limitation,
 ask for an image-capable model when needed, and continue with available semantics.
 
-To click a point seen in a Canvas image, retain that screenshot's `capture_id`:
+For a target-policy Canvas click, retain `context_id` and `observation_id` from sync,
+then observe and screenshot the visual ref. Retain that screenshot's `capture_id`:
 
 ```sh
-bsk click @e3 --capture <capture-id> --image-x <x> --image-y <y> --session <id>
+bsk click @e3 --capture <capture-id> --image-x <x> --image-y <y> --session <id> \
+  --context <context-id> --observation <sync-observation-id>
 ```
 
 Use ORIGINAL PNG coordinates and dimensions, not resized display/viewport pixels.
-Captures are single-use, expire after 2m, and are invalidated by ref replacement
-(observe/snapshot/continuation) or a newer screenshot of that ref. With
+The strict baseline is the sync's observation, not the newer observe response's token.
+Supplementary observe/screenshot calls do not replace that baseline. Captures are single-use,
+expire after 2m, and are invalidated by another observe/snapshot/continuation or a newer
+screenshot of that ref, even when DOM refs are stable. With
 `capture_unavailable`, the image is view-only: observe and screenshot again before
 clicking. Counts 1/2, buttons and modifiers work; Canvas fill, IME, drag, hover
 and HTML extraction do not. Repainting is allowed; changed identity/geometry/hit

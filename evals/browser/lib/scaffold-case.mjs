@@ -20,7 +20,7 @@ async function moduleSpecifier(fromDirectory, target) {
   const targetPath = await realpath(target);
   const relativePath = relative(await realpath(fromDirectory), targetPath);
   if (isAbsolute(relativePath)) return pathToFileURL(targetPath).href;
-  const path = relativePath.split(sep).join("/");
+  const path = relativePath.split(sep).map(encodeURIComponent).join("/");
   return path.startsWith(".") ? path : `./${path}`;
 }
 

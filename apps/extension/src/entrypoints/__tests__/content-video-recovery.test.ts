@@ -1,6 +1,11 @@
 import { afterEach, expect, it, vi } from "vitest";
 import { HELP_REQUEST } from "@/lib/help-bridge";
-import { OVERLAY_AGENT_STATE } from "@/lib/overlay-bridge";
+import { INPUT_PASSTHROUGH, INPUT_PASSTHROUGH_ATTR } from "@/lib/input-passthrough-bridge";
+import {
+  OVERLAY_AGENT_STATE,
+  OVERLAY_AUTOMATION_BYPASS,
+  OVERLAY_MSG_INTERRUPT,
+} from "@/lib/overlay-bridge";
 import { RECORD_START, RECORD_STOP } from "@/lib/record-bridge";
 import { VIDEO_OVERLAY } from "@/video/overlay";
 
@@ -147,7 +152,7 @@ const requests = [
       epoch: "worker",
       generation: 1,
     },
-    "control-overlay-pill",
+    "control-overlay-card",
   ],
 ] as const;
 
@@ -216,13 +221,19 @@ function cooperationState(generation = 1) {
   };
 }
 
-it("honors saved hidden control hints before the first cooperation render and remount", async () => {
+it.each([
+  "fallback",
+  "cooperation",
+])("honors saved hidden hints before the first %s render and remount", async (mode) => {
   const f = await fixture(0, false, true);
-  f.send(cooperationState());
+  f.send(mode === "cooperation" ? cooperationState() : requests[3][0]);
   await vi.advanceTimersByTimeAsync(1100);
   for (const remount of [false, true]) {
     if (remount) f.remount();
     expect(f.visible("cooperation-toolbar")).toBe(false);
+    expect(f.visible("control-overlay-card")).toBe(false);
+    expect(f.visible("control-overlay-blocker")).toBe(false);
+    expect(f.visible("control-overlay")).toBe(false);
     expect(f.find(".bsk-cooperation-target")).toBeNull();
     expect(document.querySelector("browser-skill-overlay")?.getAttribute("aria-hidden")).toBe(
       "true",
@@ -230,21 +241,118 @@ it("honors saved hidden control hints before the first cooperation render and re
   }
 });
 
+it("keeps fallback hints, input bypass and remounts on their existing lifecycle", async () => {
+  const f = await fixture(0);
+  f.send(requests[3][0]);
+  await vi.advanceTimersByTimeAsync(1100);
+  const host = () => document.querySelector("browser-skill-overlay")!;
+  const blocker = () => f.find('[data-slot="control-overlay-blocker"]') as HTMLElement | null;
+  expect(f.visible("control-overlay-card")).toBe(true);
+  expect(f.visible("control-overlay")).toBe(true);
+  expect(host().hasAttribute("aria-hidden")).toBe(false);
+  expect(host().hasAttribute("data-bsk-overlay-blocking")).toBe(true);
+  expect(blocker()?.style.pointerEvents).toBe("auto");
+
+  f.send({ type: OVERLAY_AUTOMATION_BYPASS, enabled: true });
+  expect(host().hasAttribute("data-bsk-overlay-surface")).toBe(true);
+  expect(host().hasAttribute("data-bsk-overlay-blocking")).toBe(false);
+  expect(blocker()?.style.pointerEvents).toBe("none");
+  f.send({ type: INPUT_PASSTHROUGH, phase: "begin", id: "click" });
+  f.remount();
+  expect(host().hasAttribute(INPUT_PASSTHROUGH_ATTR)).toBe(true);
+  expect(blocker()?.style.pointerEvents).toBe("none");
+
+  f.preference(true);
+  expect(f.visible("control-overlay-card")).toBe(false);
+  expect(f.visible("control-overlay")).toBe(false);
+  expect(blocker()).toBeNull();
+  expect(host().hasAttribute("data-bsk-overlay-surface")).toBe(false);
+  expect(host().hasAttribute(INPUT_PASSTHROUGH_ATTR)).toBe(false);
+  f.remount();
+  f.preference(false);
+  expect(f.visible("control-overlay-card")).toBe(true);
+  expect(f.visible("control-overlay")).toBe(true);
+  expect(blocker()?.style.pointerEvents).toBe("none");
+  f.send({ type: OVERLAY_AUTOMATION_BYPASS, enabled: false });
+  expect(host().hasAttribute("data-bsk-overlay-blocking")).toBe(true);
+  expect(blocker()?.style.pointerEvents).toBe("auto");
+});
+
+it("adds cooperation controls to the same card only after receiving real cooperation state", async () => {
+  const f = await fixture(0);
+  f.send(requests[3][0]);
+  await vi.advanceTimersByTimeAsync(1100);
+  const card = f.find('[data-slot="control-overlay-card"]')!;
+  const glow = f.find('[data-slot="control-overlay"]');
+  expect(card.querySelectorAll("button")).toHaveLength(1);
+  expect(card.getAttribute("data-mode")).toBeNull();
+  f.send({ type: INPUT_PASSTHROUGH, phase: "begin", id: "claim-click" });
+  vi.mocked(chrome.runtime.sendMessage).mockClear();
+
+  const state = cooperationState(2);
+  f.send({ ...state, cooperation: { ...state.cooperation, mode: "held", revision: 23 } });
+  expect(f.find('[data-slot="cooperation-toolbar"]')).toBe(card);
+  expect(f.find('[data-slot="control-overlay"]')).toBe(glow);
+  expect(card.getAttribute("data-mode")).toBe("held");
+  expect(card.querySelectorAll("button")).toHaveLength(2);
+  expect(f.visible("control-overlay-blocker")).toBe(false);
+  const host = document.querySelector("browser-skill-overlay")!;
+  expect(host.hasAttribute("data-bsk-overlay-surface")).toBe(false);
+  expect(host.hasAttribute(INPUT_PASSTHROUGH_ATTR)).toBe(false);
+  expect(chrome.runtime.sendMessage).not.toHaveBeenCalled();
+});
+
+it.each([
+  "fallback",
+  "cooperation",
+])("stops the same session and clears the %s card and glow", async (mode) => {
+  const f = await fixture(0);
+  f.send(mode === "cooperation" ? cooperationState() : requests[3][0]);
+  await vi.advanceTimersByTimeAsync(1100);
+  const send = vi.mocked(chrome.runtime.sendMessage);
+  send.mockClear();
+  let acknowledge!: (reply: { ok: boolean }) => void;
+  send.mockReturnValueOnce(
+    new Promise((resolve) => {
+      acknowledge = resolve;
+    }),
+  );
+  const stop = f.find('[data-slot="control-overlay-stop-all"]') as HTMLButtonElement;
+  stop.click();
+  stop.click();
+  expect(send).toHaveBeenCalledExactlyOnceWith({ kind: OVERLAY_MSG_INTERRUPT, sessionId: "task" });
+  if (mode === "fallback") expect(stop.disabled).toBe(true);
+  acknowledge({ ok: true });
+  await vi.advanceTimersByTimeAsync(0);
+  expect(f.visible("control-overlay-card")).toBe(false);
+  expect(f.visible("cooperation-toolbar")).toBe(false);
+  expect(f.visible("control-overlay")).toBe(false);
+  expect(f.visible("control-overlay-blocker")).toBe(false);
+  expect(
+    document.querySelector("browser-skill-overlay")?.hasAttribute("data-bsk-overlay-surface"),
+  ).toBe(false);
+});
+
 it("hides only control UI and restores the latest cooperation state when hints return", async () => {
   const f = await fixture(0);
   f.send(cooperationState());
   await vi.advanceTimersByTimeAsync(1100);
   expect(f.visible("cooperation-toolbar")).toBe(true);
+  expect(f.visible("control-overlay")).toBe(true);
+  expect(f.visible("control-overlay-blocker")).toBe(false);
   expect(f.find(".bsk-cooperation-target")).not.toBeNull();
   f.preference(true);
   expect(f.visible("cooperation-toolbar")).toBe(false);
+  expect(f.visible("control-overlay")).toBe(false);
   expect(f.find(".bsk-cooperation-target")).toBeNull();
   const state = cooperationState(2);
   f.send({ ...state, cooperation: { ...state.cooperation, mode: "human", editing: true } });
   f.remount();
   expect(f.visible("cooperation-toolbar")).toBe(false);
+  expect(f.visible("control-overlay")).toBe(false);
   f.preference(false);
   expect(f.find('[data-slot="cooperation-toolbar"]')?.getAttribute("data-mode")).toBe("human");
+  expect(f.visible("control-overlay")).toBe(true);
   expect(f.find(".bsk-cooperation-target")).not.toBeNull();
   expect(
     vi.mocked(chrome.runtime.sendMessage).mock.calls.some((args) => {
@@ -263,6 +371,22 @@ it.each(
   await vi.advanceTimersByTimeAsync(1100);
   expect(f.visible(slot)).toBe(true);
   expect(f.visible("cooperation-toolbar")).toBe(false);
+  expect(f.visible("control-overlay-card")).toBe(false);
+  expect(f.visible("control-overlay")).toBe(false);
+});
+
+it.each(
+  requests.slice(0, 3),
+)("does not render fallback UI when %j hides the cooperative card", async (request, slot) => {
+  const f = await fixture(0);
+  f.send(cooperationState());
+  await vi.advanceTimersByTimeAsync(1100);
+  f.send(request);
+  expect(f.visible(slot)).toBe(true);
+  expect(f.visible("cooperation-toolbar")).toBe(false);
+  expect(f.visible("control-overlay-card")).toBe(false);
+  expect(f.visible("control-overlay-blocker")).toBe(false);
+  expect(f.visible("control-overlay")).toBe(false);
 });
 
 it("retains post-record control suppression across preference changes and remount", async () => {
@@ -270,13 +394,16 @@ it("retains post-record control suppression across preference changes and remoun
   f.send(cooperationState());
   await vi.advanceTimersByTimeAsync(1100);
   expect(f.visible("cooperation-toolbar")).toBe(true);
+  expect(f.visible("control-overlay")).toBe(true);
   f.send({ type: RECORD_START, requestId: "record" });
   expect(f.visible("record-overlay-pill")).toBe(true);
+  expect(f.visible("control-overlay")).toBe(false);
   f.send({ type: RECORD_STOP, requestId: "record" });
   expect(f.visible("record-overlay-pill")).toBe(false);
   f.preference(true);
   f.preference(false);
   f.remount();
   expect(f.visible("cooperation-toolbar")).toBe(false);
+  expect(f.visible("control-overlay")).toBe(false);
   expect(f.find(".bsk-cooperation-target")).toBeNull();
 });

@@ -129,6 +129,120 @@ describe("App", () => {
     expect(setConnectionEnabled).toHaveBeenCalledWith(false);
   });
 
+  it("shows upgrade steps for a rejected old daemon and keeps its raw error collapsed", async () => {
+    const lastError = "version_too_old: daemon protocol 1.3 < client requires 1.5";
+    mockUseConnectionState.mockReturnValue({
+      snapshot: {
+        ...baseSnapshot,
+        lastError,
+        daemonUpgradeRequired: {
+          daemonVersion: null,
+          daemonProtocolVersion: "1.3",
+          requiredProtocolVersion: "1.5",
+        },
+      },
+      statusState: "disconnected",
+      setLabel,
+      setConnectionEnabled,
+    });
+
+    const { container } = render(<App />);
+    const title = screen.getByRole("heading", { name: "需要升级 bsk 浏览器服务" });
+    expect(title.closest('[data-slot="popup-daemon-upgrade"]')?.getAttribute("role")).toBe("alert");
+    expect(screen.getByText("请在运行该服务的电脑上打开终端，执行：")).toBeTruthy();
+    expect(screen.getByText(/若已更新仍出现此提示/)).toBeTruthy();
+    expect(screen.queryByText("无法连接，请确认 daemon 已启动且端口一致。")).toBeNull();
+    expect(screen.getByTitle("bsk 版本").textContent).toBe("CLI —");
+    const details = container.querySelector<HTMLDetailsElement>(
+      '[data-slot="popup-daemon-upgrade-details"]',
+    );
+    expect(details?.open).toBe(false);
+    expect(details?.textContent).toContain("1.3");
+    expect(details?.textContent).toContain("1.5");
+    expect(screen.getAllByText(lastError)).toHaveLength(1);
+    expect(container.querySelector('[data-slot="popup-error"]')).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "复制命令" }));
+    expect(navigator.clipboard.writeText).toHaveBeenCalledWith("bsk update");
+    expect(await screen.findByRole("button", { name: "已复制" })).toBeTruthy();
+    fireEvent.click(screen.getByRole("switch", { name: "BrowserSkill 连接" }));
+    expect(setConnectionEnabled).toHaveBeenCalledWith(false);
+  });
+
+  it("keeps the reported daemon version without a completed handshake and clears the notice on connection", () => {
+    const upgrade = {
+      daemonVersion: "0.3.3",
+      daemonProtocolVersion: "1.3",
+      requiredProtocolVersion: "1.5",
+    };
+    const disconnected = {
+      snapshot: { ...baseSnapshot, daemonUpgradeRequired: upgrade },
+      statusState: "disconnected" as const,
+      setLabel,
+      setConnectionEnabled,
+    };
+    mockUseConnectionState.mockReturnValue(disconnected);
+    const { rerender } = render(<App />);
+    expect(screen.getByText("当前运行：bsk 0.3.3")).toBeTruthy();
+    expect(screen.getByTitle("bsk 版本").textContent).toBe("CLI 0.3.3");
+
+    mockUseConnectionState.mockReturnValue({
+      ...disconnected,
+      snapshot: {
+        ...baseSnapshot,
+        state: "connected",
+        handshake: {
+          server: "bh",
+          version: mockDaemonVersion,
+          protocol_version: PROTOCOL_VERSION,
+        },
+        daemonUpgradeRequired: null,
+      },
+      statusState: "connected",
+    });
+    rerender(<App />);
+    expect(screen.queryByRole("heading", { name: "需要升级 bsk 浏览器服务" })).toBeNull();
+    expect(screen.getByTitle("bsk 版本").textContent).toBe(`CLI ${mockDaemonVersion}`);
+  });
+
+  it("does not report an upgrade for ordinary disconnects or unrelated protocol errors", () => {
+    const { rerender } = render(<App />);
+    expect(screen.queryByRole("heading", { name: "需要升级 bsk 浏览器服务" })).toBeNull();
+    mockUseConnectionState.mockReturnValue({
+      snapshot: { ...baseSnapshot, lastError: "version_too_old: protocol-major mismatch" },
+      statusState: "disconnected",
+      setLabel,
+      setConnectionEnabled,
+    });
+    rerender(<App />);
+    expect(screen.queryByRole("heading", { name: "需要升级 bsk 浏览器服务" })).toBeNull();
+    expect(screen.getByText("version_too_old: protocol-major mismatch")).toBeTruthy();
+  });
+
+  it("reports failed update-command copies and allows retry without false success", async () => {
+    vi.mocked(navigator.clipboard.writeText).mockRejectedValueOnce(new Error("denied"));
+    mockUseConnectionState.mockReturnValue({
+      snapshot: {
+        ...baseSnapshot,
+        daemonUpgradeRequired: {
+          daemonVersion: null,
+          daemonProtocolVersion: "1.3",
+          requiredProtocolVersion: "1.5",
+        },
+      },
+      statusState: "disconnected",
+      setLabel,
+      setConnectionEnabled,
+    });
+    render(<App />);
+    fireEvent.click(screen.getByRole("button", { name: "复制命令" }));
+    expect(await screen.findByText("复制失败，请手动复制上方命令。")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "已复制" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "复制命令" }));
+    expect(await screen.findByRole("button", { name: "已复制" })).toBeTruthy();
+    expect(screen.queryByText("复制失败，请手动复制上方命令。")).toBeNull();
+  });
+
   it("does not render record UI on the main view", () => {
     render(<App />);
 

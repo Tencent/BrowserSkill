@@ -43,10 +43,12 @@ export function guardedRunner<T extends CdpRunner>(cdp: T, options: ActionGuard 
     const key = method === "Input.dispatchKeyEvent";
     const focus = method === "Emulation.setFocusEmulationEnabled";
     const drag = method === "Input.dispatchDragEvent";
+    const cancelDrag = method === "Input.cancelDragging";
     const chooser = method === "Page.setInterceptFileChooserDialog";
-    const identity = `${target.tabId}:${target.sessionId ?? ""}:${chooser ? "chooser" : drag ? "drag" : focus ? "focus" : mouse ? "mouse:" + String(p?.button) : "key:" + String(p?.key)}`;
+    const identity = `${target.tabId}:${target.sessionId ?? ""}:${cancelDrag ? "mouse:left" : chooser ? "chooser" : drag ? "drag" : focus ? "focus" : mouse ? "mouse:" + String(p?.button) : "key:" + String(p?.key)}`;
     const release =
-      ((mouse && p?.type === "mouseReleased") ||
+      (cancelDrag ||
+        (mouse && p?.type === "mouseReleased") ||
         (key && p?.type === "keyUp") ||
         (focus && p?.enabled === false) ||
         (chooser && p?.enabled === false) ||
@@ -96,7 +98,7 @@ export function guardedRunner<T extends CdpRunner>(cdp: T, options: ActionGuard 
         (drag && p?.type === "dragEnter")
       )
         leases.set(identity, cdp.getAttachmentId?.(target.tabId));
-      if (release) leases.delete(identity);
+      if (release && !cancelDrag) leases.delete(identity);
     };
     if (cdp.sendGuarded)
       return cdp.sendGuarded(target, method, params, {

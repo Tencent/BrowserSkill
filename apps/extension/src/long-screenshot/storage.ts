@@ -9,7 +9,6 @@ export interface SavedScreenshot {
 
 const DATABASE = "bsk-long-screenshots";
 const STORE = "screenshots";
-const MAX_AGE = 24 * 60 * 60 * 1000;
 
 async function openDatabase(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
@@ -22,31 +21,6 @@ async function openDatabase(): Promise<IDBDatabase> {
     request.onsuccess = () => resolve(request.result);
     request.onerror = () => reject(request.error);
   });
-}
-
-export async function saveScreenshot(value: SavedScreenshot) {
-  const db = await openDatabase();
-  try {
-    await new Promise<void>((resolve, reject) => {
-      const transaction = db.transaction(STORE, "readwrite");
-      const store = transaction.objectStore(STORE);
-      let retained = 0;
-      const cursor = store.index("createdAt").openCursor(null, "prev");
-      cursor.onsuccess = () => {
-        const entry = cursor.result;
-        if (!entry) return;
-        if ((entry.value as SavedScreenshot).createdAt < Date.now() - MAX_AGE || retained++ >= 4)
-          entry.delete();
-        entry.continue();
-      };
-      store.put(value);
-      transaction.oncomplete = () => resolve();
-      transaction.onerror = () => reject(transaction.error);
-      transaction.onabort = () => reject(transaction.error);
-    });
-  } finally {
-    db.close();
-  }
 }
 
 export async function readScreenshot(id: string): Promise<SavedScreenshot | undefined> {

@@ -10,6 +10,17 @@
     "action": {
       "$ref": "#/definitions/CooperateAction"
     },
+    "control_policy": {
+      "description": "Omitted by legacy callers. A negotiated policy remains fixed for the session.",
+      "anyOf": [
+        {
+          "$ref": "#/definitions/ControlPolicy"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "max_tokens": {
       "type": [
         "integer",
@@ -38,6 +49,24 @@
     }
   },
   "definitions": {
+    "ControlPolicy": {
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "strict",
+            "target"
+          ]
+        },
+        {
+          "description": "Keep the negotiated policy, or choose target when the session is unconfigured.",
+          "type": "string",
+          "enum": [
+            "auto"
+          ]
+        }
+      ]
+    },
     "CooperateAction": {
       "type": "string",
       "enum": [

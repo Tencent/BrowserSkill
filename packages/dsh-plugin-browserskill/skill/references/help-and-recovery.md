@@ -33,7 +33,11 @@ backends to bypass limits. Borrow confirmation still applies.
 - Unknown browser tool after plugin reload: invoke `skill` with `name: "browser-skill"`
   again (users can enter `/browser-skill`), then retry the intended browser tool once
   after its schema appears. If it remains unavailable, report the failure.
-- Stale ref: observe, then retry the intended action once.
+- Stale ref or target failure: inspect the live target and choose the appropriate action.
+  A missing, hidden or covered target is not evidence of human takeover.
+- `precondition_failed`: compare `target`, `field`, `expected` and `actual`, then reconsider
+  the decision. A new context does not make the expected value true.
+- Control revoked: wait-user while the person is active, then sync and reconcile completed steps.
 - Unknown tab/session: list owned resources or start a session with the required
   browser selector, if any; never guess IDs.
 - Failed/interrupted stop: accepted cleanup continues in the background. Retry the

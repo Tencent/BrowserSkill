@@ -242,13 +242,13 @@ function StopSessionAction(props: {
 type ChromeState = "active" | "idle" | "error" | "reconnecting";
 
 /** Flat status dot, specced after the BSK popup's ConnectionStatusIndicator. */
-function StatusDot({ state }: { state: ChromeState | "dead" }) {
+function StatusDot({ state }: { state: ChromeState }) {
   const color =
     state === "active"
       ? "bg-emerald-500"
       : state === "error"
         ? "bg-red-500"
-        : state === "dead" || state === "reconnecting"
+        : state === "reconnecting"
           ? "bg-amber-500"
           : "bg-muted-foreground/40";
   return (
@@ -275,7 +275,7 @@ function StripItem(props: {
     store.ensureThumbnail(thumbId);
   }, [store, thumbId]);
   const thumb = store.getSnapshot().displayFrames[obs.sessionId];
-  const state = obs.dead === true ? "dead" : statusOf(obs);
+  const state = statusOf(obs);
   return (
     <div
       className={css["strip-item"]}
@@ -303,7 +303,7 @@ function StripItem(props: {
         <StatusDot state={state} />
         {pinned ? <IconPin size={9} className={css["pin-badge"]} aria-label="pinned" /> : null}
       </button>
-      {hover && !pinned && obs.dead !== true ? (
+      {hover && !pinned ? (
         <button
           type="button"
           className={css["strip-interrupt"]}
@@ -373,12 +373,7 @@ export function OverlayBody(props: {
     focus !== undefined ? store.getSnapshot().displayFrames[focus.sessionId] : undefined;
   const displayUrl = thumb?.url;
 
-  const canInterrupt =
-    available &&
-    !interrupting &&
-    focus !== undefined &&
-    focus.action !== "idle" &&
-    focus.dead !== true;
+  const canInterrupt = available && !interrupting && focus !== undefined && focus.action !== "idle";
   const onInterrupt = (): void => {
     if (!canInterrupt || focus === undefined) return;
     setInterrupting(true);

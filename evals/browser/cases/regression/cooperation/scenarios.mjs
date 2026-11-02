@@ -14,6 +14,7 @@ export async function runGenericScenarios({
   await humanClick("#open-controls");
   await wait();
   const before = await sync();
+  assert.equal(before.control_policy, "strict", "legacy scenarios must retain whole-page checks");
   await humanClick("#choice");
   assert.equal((await wait()).ready, true, "readonly controls must not hold a text editing lease");
   await bsk(["click", "#hover-action", ...scope, "--context", before.context_id], true);

@@ -64,6 +64,17 @@
             "required": ["action"],
             "properties": {
               "action": { "type": "string" },
+              "saveAs": { "type": "string", "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$" },
+              "contextId": {
+                "type": "string",
+                "minLength": 1,
+                "description": "Explicit context_id, usually {control.context_id} from a saved sync."
+              },
+              "observationId": {
+                "type": "string",
+                "minLength": 1,
+                "description": "Explicit observation_id from a saved sync for an untargeted action."
+              },
               "noClear": {
                 "type": "boolean",
                 "description": "Fill only: append instead of replacing."
@@ -79,6 +90,18 @@
                 "additionalProperties": false
               }
             },
+            "dependentRequired": { "observationId": ["contextId"] },
+            "allOf": [
+              {
+                "if": { "properties": { "action": { "const": "sync" } } },
+                "then": {
+                  "required": ["saveAs"],
+                  "not": {
+                    "anyOf": [{ "required": ["contextId"] }, { "required": ["observationId"] }]
+                  }
+                }
+              }
+            ],
             "additionalProperties": true
           }
         }

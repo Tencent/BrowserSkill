@@ -5,42 +5,78 @@
 </p>
 
 <p align="center">
-  <strong>让 AI Agent 在你已登录的浏览器里工作，你继续做自己的事。</strong>
+  <strong>你的 Agent。你的浏览器。连接，就能协作。</strong><br />
+  让 AI Agent 在你熟悉、已登录的浏览器里办事。
 </p>
 
 <p align="center">
-  <a href="README.md">English</a> · 中文
+  <a href="https://browserskill.weixin.qq.com/"><img src="docs/assets/readme-website-zh-CN.svg" alt="访问 BrowserSkill 官网" /></a>
+  <a href="#快速开始"><img src="docs/assets/readme-start-zh-CN.svg" alt="开始使用 BrowserSkill" /></a>
 </p>
 
 <p align="center">
-  <a href="#快速开始">快速开始</a> ·
+  <a href="https://trend.ondo.sh/github/r/Tencent--BrowserSkill/en.html"><img src="docs/assets/github-trending.svg" alt="BrowserSkill：GitHub Trending 全语言日榜已记录最佳第 4 名，2026 年 9 月" width="360" /></a>
+</p>
+
+<p align="center">
+  <a href="README.md">English</a> · 中文<br />
+  <a href="https://browserskill.weixin.qq.com/">官网</a> ·
+  <a href="#看看实际效果">演示视频</a> ·
+  <a href="#能做什么">功能一览</a> ·
   <a href="#网站调试">网站调试</a> ·
-  <a href="#deepseek-harness-插件">DSH 插件</a> ·
   <a href="#文档导航">文档导航</a> ·
   <a href="CHANGELOG.md">更新日志</a>
 </p>
 
-**BrowserSkill 把你的 AI Agent 连接到 Chrome 或 Microsoft Edge，直接使用你已有的登录状态。** 你可以让它读取页面、填写表单、完成网站操作、截取长图，也可以让它调查某个请求为什么失败。任务在独立、可见的 **Agent Window（代理窗口）** 中运行；需要操作已有标签页时，显式借用，任务结束后归还。
+**BrowserSkill 把你的 AI Agent 连接到 Chrome 或 Microsoft Edge，直接使用你已有的登录状态。** 交给它读取、点击、填表或排查问题。任务在独立、可见的 **Agent Window（代理窗口）** 中运行，需要时由你接手；也可以显式借用已有标签页，任务结束后归还。
 
-Cursor、Claude Code、Codex、OpenClaw、CodeBuddy、WorkBuddy、Pi、Hermes Agent 等能调用 Shell 的 Agent，都可以通过 `bsk` CLI 使用。**DeepSeek Harness** 还提供专用插件，直接使用浏览器工具并查看任务预览。Agent 和模型由你选择，BrowserSkill 负责连接浏览器。
+## 看看实际效果
+
+<details>
+<summary><strong>▶ 观看演示 · 81 秒 · 中文版</strong><br /><picture><img src="docs/assets/demo/browserskill-demo-zh-CN.png" alt="BrowserSkill 演示预览 — 你的 Agent，你的浏览器，一次连接。" width="960" /></picture></summary>
+
+https://github.com/user-attachments/assets/959cb520-80ba-4b9e-b6d8-d94523b03693
+
+</details>
+
+<p align="center">
+  点击封面展开播放 · <a href="docs/assets/demo/browserskill-demo-zh-CN.mp4">下载 MP4</a><br />
+  基于 main 版本，在本地演示网站中录制的真实浏览器操作。
+</p>
+
+## 用你熟悉的 Agent
+
+<table align="center">
+  <tr>
+    <td align="center" width="180"><img src="docs/assets/harnesses/codex.svg" alt="Codex" width="42" height="42" /><br /><strong>Codex</strong></td>
+    <td align="center" width="180"><img src="docs/assets/harnesses/claude.svg" alt="Claude Code" width="42" height="42" /><br /><strong>Claude Code</strong></td>
+    <td align="center" width="180"><img src="docs/assets/harnesses/cursor.svg" alt="Cursor" width="42" height="42" /><br /><strong>Cursor</strong></td>
+    <td align="center" width="180"><img src="docs/assets/harnesses/openclaw.svg" alt="OpenClaw" width="42" height="42" /><br /><strong>OpenClaw</strong></td>
+  </tr>
+  <tr>
+    <td align="center" width="180"><img src="docs/assets/harnesses/codebuddy.svg" alt="CodeBuddy" width="42" height="42" /><br /><strong>CodeBuddy</strong></td>
+    <td align="center" width="180"><img src="docs/assets/harnesses/workbuddy.svg" alt="WorkBuddy" width="42" height="42" /><br /><strong>WorkBuddy</strong></td>
+    <td align="center" width="180"><img src="docs/assets/harnesses/pi.svg" alt="Pi" width="42" height="42" /><br /><strong>Pi</strong></td>
+    <td align="center" width="180"><img src="docs/assets/harnesses/hermes.png" alt="Hermes Agent" width="42" height="42" /><br /><strong>Hermes Agent</strong></td>
+  </tr>
+</table>
+
+这些 Agent，以及其他能调用 Shell 的 Agent，都可以通过同一套 **`bsk` CLI** 使用。**[DeepSeek Harness](#deepseek-harness-插件)** 还提供专用插件，直接使用浏览器工具并查看任务预览。Agent 和模型由你选择，BrowserSkill 负责连接浏览器。
 
 ## 能做什么
 
-| 能力 | 你可以用它做什么 |
+| 你想完成的事 | BrowserSkill 如何帮忙 |
 | --- | --- |
-| **使用已有账号工作** | 复用浏览器登录态，读取文档、搜索内部网站、填写表单，完成需要登录的网站流程。 |
-| **看得见的浏览器任务** | 给 Agent 一个独立窗口，需要时借用已有标签页；遇到登录、验证等步骤，可以由你接手。 |
-| **读取、操作与截图** | 读取页面文本和控件，点击、输入、管理标签页，截取可见区域或完整页面，在本地模式上传和下载文件。 |
-| **带着证据调试网站** | 把操作与请求、响应正文、控制台和页面变化关联起来，检查性能、慢接口与疑似重复请求，用明确配置的 HTTP 规则或请求重放验证问题。 |
-| **选对浏览器和账号** | 为浏览器实例命名，让任务绑定指定 Profile；也可以让服务器上的 Agent 连接你电脑上的浏览器。 |
-| **回看任务过程** | 重新打开浏览器本地的调试历史、导出 JSON，或单独开启操作审计，查看任务执行记录。 |
-| **提取结构化数据** | 将已加载的表格和列表导出为 JSON/CSV，保留列名、页面/frame 来源、合并单元格信息和完整性标记。见[结构化提取说明](docs/structured-extraction.md)。 |
-| **录制任务视频** | 让 Agent 将一个已授权标签页录制为无声 MP4，再从扩展中预览、保存或删除视频。见[任务视频录制](docs/video-recording.md)。 |
-| **等待页面条件** | 设置明确的超时，等待目标元素满足指定条件后再继续操作。见[元素等待](docs/wait-for-element.md)。 |
-
-看看 Agent 如何完成一次浏览器任务：
-
-https://github.com/user-attachments/assets/db782c92-b1d4-4aae-a255-039675937a90
+| **用已有账号，做网站任务** | 复用浏览器登录态，读取文档、搜索内部网站，完成需要登录的网页流程。 |
+| **一句指令，落实到操作** | 读取页面文本和控件，点击、输入、填写表单、拖拽元素、选择范围、管理标签页；截取可见区域或完整页面，在本地模式上传和下载文件。 |
+| **Agent 操作，你来掌控** | 共享控制让你与 Agent 协作；编辑时暂停 Agent，让它核对你的改动后继续。任务在独立窗口中可见运行，也可显式借用已有标签页。 |
+| **网页表格，导出即用** | 将已加载的表格和列表导出为 JSON/CSV，保留列名、页面/frame 来源、合并单元格信息和完整性标记。[结构化提取](docs/structured-extraction.md) |
+| **操作出错，找到线索** | 关联操作、请求、响应正文、控制台和页面变化，检查性能、慢接口与疑似重复请求；用明确配置的 HTTP 规则或请求重放验证判断。[网站调试](docs/website-debugging.md) |
+| **录下过程，随时回看** | 将一个已授权的任务标签页录制为无声 MP4，在扩展中预览、保存或删除。[任务视频录制](docs/video-recording.md) |
+| **页面就绪，再做下一步** | 设置明确的超时，等待目标元素满足指定条件后再继续操作。[元素等待](docs/wait-for-element.md) |
+| **已经观察，按需复用** | 用 `step` 执行一个已决定的动作并同步状态；明确保存完整观察结果，再用 `view` 搜索或分段阅读，无需重新采集页面。[步骤与观察结果保存](crates/bsk-cli/skill/references/step-and-cache.md) |
+| **浏览器与账号，选对再开工** | 为浏览器实例命名，让任务绑定指定 Profile；也可以让服务器上的 Agent 连接你电脑上的浏览器。[浏览器 Profile](docs/browser-profiles.md) |
+| **任务结束，记录可查** | 重新打开浏览器本地的调试历史、导出 JSON，或单独开启操作审计，查看任务执行记录。[操作审计](docs/operation-audit.md) |
 
 ## 快速开始
 
@@ -130,6 +166,8 @@ bsk doctor
 
 Agent 默认在后台打开独立代理窗口、读取页面、返回总结，并结束任务。误入代理窗口的外部链接或手动新建标签会移回最近使用的普通用户窗口；没有用户窗口时会新建一个。分流发生在标签创建之后，可能短暂显示在代理窗口中。页面打开的子标签、人类协助和录制流程会保留。支持 skill 斜杠命令的 Agent，也可以通过 `/browser-skill` 调用。
 
+将任一受控标签移出原代理窗口会结束整个浏览器会话，保留全部页面并清除控制标识；借用页也留在当前位置。拖回标签不会恢复任务，需要由用户决定是否重新开始。同窗口内调整标签顺序不受影响，正常结束会话仍按原规则归还借用页、清理任务页。
+
 网页打开原生弹窗时，Chrome 仍可能激活窗口。对于观察到的任务弹窗，若用户没有切换窗口，扩展会恢复之前的 Chrome 用户窗口或最小化状态。Chrome 公开扩展 API 无法保证完全没有瞬时激活，也无法恢复其他应用的焦点。
 
 <details>
@@ -160,7 +198,7 @@ bsk session stop <id>
 
 [DSH 插件](packages/dsh-plugin-browserskill/README.md) 在 DeepSeek Harness Web UI 中提供原生 `bsk_*` 工具、浏览器任务预览和截图结果。它使用同一套 `bsk` CLI 与扩展，并自带 BrowserSkill skill。
 
-**升级到 0.3.3：**先更新 CLI 和扩展，再更新插件。六个 `browser_*` 工具已改名为 `bsk_*`，不保留旧名称别名。请更新自定义工具调用和策略，重启 DSH profile，并在已有对话中重新调用 `/browser-skill`。详见[迁移指南](packages/dsh-plugin-browserskill/README.md#breaking-tool-api-migration-033)。
+**升级到 0.4.1：**先更新 CLI 和正在运行的 daemon，再更新扩展和插件。重启 DSH profile，并重新调用 `/browser-skill`，让已有对话加载新的 target 策略及控制、观察指引。详见 [0.4.1 升级指南](packages/dsh-plugin-browserskill/README.md#upgrading-to-041)；从 0.3.3 以前的版本升级时，还需要完成[工具名称迁移](packages/dsh-plugin-browserskill/README.md#breaking-tool-api-migration-033)。
 
 安装好 DeepSeek Harness、pnpm 和 `bsk`，连接扩展后，将插件加入你的 profile：
 
@@ -225,6 +263,8 @@ bsk session start --browser "工作账号" --no-focus --json
 
 ## 浏览器控制与隐私
 
+新任务默认启用共享控制。BrowserSkill 会观察受控标签页中的页面变化和受支持的手动活动，让 Agent 在你编辑时让出控制权，并在再次操作前同步状态。即使调试、审计和视频录制均关闭，这种协调仍会进行。你可以通过任务的手动接管与恢复功能决定何时继续。[共享控制指南](crates/bsk-cli/skill/references/cooperation.md)
+
 代理窗口共享所选 Profile 的登录态，**它不是独立账号，也不是安全沙盒**。Agent 可以使用已登录网站授予的权限执行操作，请选择你信任的 Agent 和任务。
 
 扩展提供两个默认开启、相互独立的**自动化设置**：
@@ -243,12 +283,17 @@ BrowserSkill 没有必须使用的云服务，也不收集产品遥测。自动�
 | **网站调试** | 当前浏览器配置中，远程模式也一样 | 保存采集到的数据，包括可获取的正文和字段值。已停止记录 30 天后过期，保留预算为 50 条／50 MiB，达到限制时可能提前清理。删除记录前需先停止采集。 |
 | **操作审计** | daemon 所在主机的 `BSK_HOME/audit` | 默认关闭。记录任务与操作元数据，不记录输入值、页面正文、截图或文件内容。已结束任务 30 天后过期。 |
 | **任务视频** | 当前浏览器配置；导出副本保存在指定位置 | 主动开启后，录制一个已授权标签页的无声视频；单个视频上限为 10 分钟／256 MiB，创建 24 小时后过期，临时视频预算为 1 GiB。视频库支持预览、导出和删除。 |
+| **观察结果及 step 响应** | CLI 所在计算机上明确指定的 JSON 路径，也可能是远程服务器 | `--save-full`／DSH `saveFull` 会在显示过滤前保存完整响应。文件不会自动过期，需要在该计算机上删除；`view` 读取历史数据，不会刷新浏览器状态。 |
 
 这些功能均支持导出和删除。结束任务或断开连接不会删除保留的历史或视频，过期数据会在访问或清理时处理。导出的文件、Agent 或网关已经收到的副本需要另行管理。调试数据会过滤已知敏感信息，但不能保证完全脱敏。视频画面不会自动脱敏，分享前请检查可见内容。
 
 [隐私政策](apps/extension/PRIVACY.zh-CN.md) · [操作审计](docs/operation-audit.md) · [调试历史与保留限制](docs/website-debugging.md#history-and-export)
 
 ## 升级
+
+**升级到 0.4.1 时，先更新 CLI 并重启正在运行的 daemon，再更新扩展，最后更新 DSH。** CLI/daemon 和扩展 0.4.1 使用协议 1.8，新的默认 target 策略要求两端均支持 1.8。仅替换二进制不会更新通过前台或外部进程管理器运行的旧 daemon，仍需在所属宿主中重启。使用新流程时请配套使用 0.4.1 组件。
+
+已有脚本需要遵循[共享控制流程](crates/bsk-cli/skill/references/cooperation.md)：首次导航后执行 `bsk cooperate sync`，将返回的 `context_id` 作为 `--context` 传入。target 策略下，DOM 操作和补充观察可以复用该控制上下文，决策依赖的业务事实用 `--expect` 显式校验。脚本、无目标按键和视觉操作还需将同步返回的 `observation_id` 作为 `--observation` 传入。人工介入或导航后重新同步；若要保留每个上下文只执行一次操作的流程，在首次同步时指定 `--policy strict`。继续任务前请加载新版 skill。
 
 先结束正在执行的浏览器任务，再更新 CLI：
 
@@ -320,6 +365,64 @@ CLI 产物位于 `target/release/`；将 `apps/extension/dist/chrome-mv3/` 作�
 相关检查包括 `cargo test --workspace --locked`、`pnpm ext:test` 和 `pnpm lint`。可复现的浏览器用例见[评测指南](evals/browser/README.zh-CN.md)。欢迎通过 [GitHub Issues](https://github.com/Tencent/BrowserSkill/issues) 报告问题，或提交聚焦的 PR；附上浏览器证据前，请移除敏感数据。
 
 扩展界面支持英语、简体中文、繁体中文、韩语、日语、法语、意大利语、西班牙语、德语和巴西葡萄牙语。翻译贡献见[多语言说明](packages/i18n/README.md)。
+
+## 贡献者
+
+感谢每一位贡献代码、文档、翻译与反馈的朋友。
+
+<!-- CONTRIBUTORS:START -->
+<!-- Generated by node scripts/update-readme-contributors.mjs -->
+<p align="center">
+  <a href="https://github.com/TencentXiaowei"><img src="https://avatars.githubusercontent.com/u/87162611?s=96&amp;v=4" width="48" height="48" alt="TencentXiaowei" title="TencentXiaowei" /></a>
+  <a href="https://github.com/iuyo5678"><img src="https://avatars.githubusercontent.com/u/5351707?s=96&amp;v=4" width="48" height="48" alt="iuyo5678" title="iuyo5678" /></a>
+  <a href="https://github.com/Ljy-0827"><img src="https://avatars.githubusercontent.com/u/84192562?s=96&amp;v=4" width="48" height="48" alt="Ljy-0827" title="Ljy-0827" /></a>
+  <a href="https://github.com/BB-fat"><img src="https://avatars.githubusercontent.com/u/45072480?s=96&amp;v=4" width="48" height="48" alt="BB-fat" title="BB-fat" /></a>
+  <a href="https://github.com/NianJiuZst"><img src="https://avatars.githubusercontent.com/u/180004567?s=96&amp;v=4" width="48" height="48" alt="NianJiuZst" title="NianJiuZst" /></a>
+  <a href="https://github.com/shnpd"><img src="https://avatars.githubusercontent.com/u/61319465?s=96&amp;v=4" width="48" height="48" alt="shnpd" title="shnpd" /></a>
+  <a href="https://github.com/lyingbug"><img src="https://avatars.githubusercontent.com/u/11257935?s=96&amp;v=4" width="48" height="48" alt="lyingbug" title="lyingbug" /></a>
+  <a href="https://github.com/ch-z-hc"><img src="https://avatars.githubusercontent.com/u/45302000?s=96&amp;v=4" width="48" height="48" alt="ch-z-hc" title="ch-z-hc" /></a>
+  <a href="https://github.com/kevin9327"><img src="https://avatars.githubusercontent.com/u/5299031?s=96&amp;v=4" width="48" height="48" alt="kevin9327" title="kevin9327" /></a>
+  <a href="https://github.com/ArcueidMP"><img src="https://avatars.githubusercontent.com/u/263883869?s=96&amp;v=4" width="48" height="48" alt="ArcueidMP" title="ArcueidMP" /></a>
+  <br />
+  <a href="https://github.com/MaxFreedomPollard"><img src="https://avatars.githubusercontent.com/u/272618364?s=96&amp;v=4" width="48" height="48" alt="MaxFreedomPollard" title="MaxFreedomPollard" /></a>
+  <a href="https://github.com/legend91019"><img src="https://avatars.githubusercontent.com/u/221850659?s=96&amp;v=4" width="48" height="48" alt="legend91019" title="legend91019" /></a>
+  <a href="https://github.com/wcy12378"><img src="https://avatars.githubusercontent.com/u/192684309?s=96&amp;v=4" width="48" height="48" alt="wcy12378" title="wcy12378" /></a>
+  <a href="https://github.com/iAstro"><img src="https://avatars.githubusercontent.com/u/17198256?s=96&amp;v=4" width="48" height="48" alt="iAstro" title="iAstro" /></a>
+  <a href="https://github.com/lymerin"><img src="https://avatars.githubusercontent.com/u/183121539?s=96&amp;v=4" width="48" height="48" alt="lymerin" title="lymerin" /></a>
+  <a href="https://github.com/hobostay"><img src="https://avatars.githubusercontent.com/u/110803307?s=96&amp;v=4" width="48" height="48" alt="hobostay" title="hobostay" /></a>
+  <a href="https://github.com/martinm86867-ops"><img src="https://avatars.githubusercontent.com/u/265926788?s=96&amp;v=4" width="48" height="48" alt="martinm86867-ops" title="martinm86867-ops" /></a>
+  <a href="https://github.com/starsstreaming"><img src="https://avatars.githubusercontent.com/u/232207448?s=96&amp;v=4" width="48" height="48" alt="starsstreaming" title="starsstreaming" /></a>
+  <a href="https://github.com/xiyanjun"><img src="https://avatars.githubusercontent.com/u/19499978?s=96&amp;v=4" width="48" height="48" alt="xiyanjun" title="xiyanjun" /></a>
+  <a href="https://github.com/klren0312"><img src="https://avatars.githubusercontent.com/u/10903843?s=96&amp;v=4" width="48" height="48" alt="klren0312" title="klren0312" /></a>
+  <br />
+  <a href="https://github.com/hZsFN"><img src="https://avatars.githubusercontent.com/u/66200546?s=96&amp;v=4" width="48" height="48" alt="hZsFN" title="hZsFN" /></a>
+  <a href="https://github.com/cyberspace-cs"><img src="https://avatars.githubusercontent.com/u/53992553?s=96&amp;v=4" width="48" height="48" alt="cyberspace-cs" title="cyberspace-cs" /></a>
+  <a href="https://github.com/basil-k-aji-dev"><img src="https://avatars.githubusercontent.com/u/70605804?s=96&amp;v=4" width="48" height="48" alt="basil-k-aji-dev" title="basil-k-aji-dev" /></a>
+  <a href="https://github.com/PerryLink"><img src="https://avatars.githubusercontent.com/u/255665900?s=96&amp;v=4" width="48" height="48" alt="PerryLink" title="PerryLink" /></a>
+  <a href="https://github.com/Li-john1021"><img src="https://avatars.githubusercontent.com/u/215793081?s=96&amp;v=4" width="48" height="48" alt="Li-john1021" title="Li-john1021" /></a>
+  <a href="https://github.com/dayi"><img src="https://avatars.githubusercontent.com/u/1650262?s=96&amp;v=4" width="48" height="48" alt="dayi" title="dayi" /></a>
+  <a href="https://github.com/zhuhaoran291"><img src="https://avatars.githubusercontent.com/u/269347582?s=96&amp;v=4" width="48" height="48" alt="zhuhaoran291" title="zhuhaoran291" /></a>
+  <a href="https://github.com/u7-u7"><img src="https://avatars.githubusercontent.com/u/116776533?s=96&amp;v=4" width="48" height="48" alt="u7-u7" title="u7-u7" /></a>
+  <a href="https://github.com/huong8373tt-beep"><img src="https://avatars.githubusercontent.com/u/294879785?s=96&amp;v=4" width="48" height="48" alt="huong8373tt-beep" title="huong8373tt-beep" /></a>
+  <a href="https://github.com/hjxccc"><img src="https://avatars.githubusercontent.com/u/96366907?s=96&amp;v=4" width="48" height="48" alt="hjxccc" title="hjxccc" /></a>
+  <br />
+  <a href="https://github.com/zjxzjw"><img src="https://avatars.githubusercontent.com/u/180378968?s=96&amp;v=4" width="48" height="48" alt="zjxzjw" title="zjxzjw" /></a>
+  <a href="https://github.com/dvd233"><img src="https://avatars.githubusercontent.com/u/111864431?s=96&amp;v=4" width="48" height="48" alt="dvd233" title="dvd233" /></a>
+  <a href="https://github.com/drakeo338"><img src="https://avatars.githubusercontent.com/u/328244157?s=96&amp;v=4" width="48" height="48" alt="drakeo338" title="drakeo338" /></a>
+  <a href="https://github.com/dr-coton"><img src="https://avatars.githubusercontent.com/u/54978448?s=96&amp;v=4" width="48" height="48" alt="dr-coton" title="dr-coton" /></a>
+  <a href="https://github.com/djtzemx"><img src="https://avatars.githubusercontent.com/u/246582102?s=96&amp;v=4" width="48" height="48" alt="djtzemx" title="djtzemx" /></a>
+  <a href="https://github.com/WhyBusyy"><img src="https://avatars.githubusercontent.com/u/148039117?s=96&amp;v=4" width="48" height="48" alt="WhyBusyy" title="WhyBusyy" /></a>
+  <a href="https://github.com/Sthreal"><img src="https://avatars.githubusercontent.com/u/297435533?s=96&amp;v=4" width="48" height="48" alt="Sthreal" title="Sthreal" /></a>
+  <a href="https://github.com/KennyMcSimpson"><img src="https://avatars.githubusercontent.com/u/70093673?s=96&amp;v=4" width="48" height="48" alt="KennyMcSimpson" title="KennyMcSimpson" /></a>
+  <a href="https://github.com/MakerFlyFly"><img src="https://avatars.githubusercontent.com/u/223868679?s=96&amp;v=4" width="48" height="48" alt="MakerFlyFly" title="MakerFlyFly" /></a>
+  <a href="https://github.com/claude"><img src="https://avatars.githubusercontent.com/u/81847?s=96&amp;v=4" width="48" height="48" alt="claude" title="claude" /></a>
+</p>
+<!-- CONTRIBUTORS:END -->
+
+<p align="center">
+  <a href="https://github.com/Tencent/BrowserSkill/graphs/contributors">查看 GitHub 贡献记录</a> ·
+  <a href="https://github.com/Tencent/BrowserSkill/issues">提交问题与建议</a>
+</p>
 
 ## 许可证
 

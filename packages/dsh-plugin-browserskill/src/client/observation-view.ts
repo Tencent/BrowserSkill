@@ -13,12 +13,12 @@ import type { ObservationClientStore, OverlaySnapshot } from "./observation-stor
 /**
  * Auto-follow focus: the most recently touched session, but never yank focus
  * to a session whose latest action failed (errors flag the strip item, they
- * do not steal the stage) or one already reported dead.
+ * do not steal the stage).
  */
 export function focusOf(sessions: readonly SessionObservation[]): SessionObservation | undefined {
   if (sessions.length === 0) return undefined;
   const byRecency = [...sessions].sort((a, b) => b.since - a.since);
-  const healthy = byRecency.find((s) => s.lastError === undefined && s.dead !== true);
+  const healthy = byRecency.find((s) => s.lastError === undefined);
   return healthy ?? byRecency[0];
 }
 
@@ -171,21 +171,54 @@ export interface PipHandle {
 
 export function usePip(): PipHandle {
   const [pipWindow, setPipWindow] = useState<Window | null>(null);
+  const activeWindow = useRef<Window | null>(null);
+  const mounted = useRef(false);
+  const generation = useRef(0);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+      generation.current += 1;
+      const win = activeWindow.current;
+      activeWindow.current = null;
+      win?.close();
+    };
+  }, []);
   const popOut = useCallback((size?: { width: number; height: number }): void => {
     const pip = pipApi();
-    if (pip === undefined) return;
+    if (pip === undefined || !mounted.current) return;
+    const request = ++generation.current;
     void pip
       .requestWindow(size)
       .then((win) => {
-        cloneStylesInto(win);
-        win.addEventListener("pagehide", () => setPipWindow(null));
+        // A late result still owns a native window, even after its carrier left.
+        if (!mounted.current || generation.current !== request) {
+          if (activeWindow.current !== win) win.close();
+          return;
+        }
+        if (win.closed) return;
+        try {
+          cloneStylesInto(win);
+          win.addEventListener(
+            "pagehide",
+            () => {
+              if (activeWindow.current !== win) return;
+              activeWindow.current = null;
+              if (mounted.current) setPipWindow(null);
+            },
+            { once: true },
+          );
+        } catch {
+          if (activeWindow.current !== win) win.close();
+          return;
+        }
+        const previous = activeWindow.current;
+        activeWindow.current = win;
+        // Closing a replaced window may deliver pagehide after its successor opens.
+        if (previous !== win) previous?.close();
         setPipWindow(win);
       })
       .catch(() => {});
   }, []);
-  // Unmounting the carrier (tab close, conversation switch, plugin HMR) does
-  // not destroy the PiP browsing context: close it ourselves or it survives
-  // as a blank window. close() on an already-closed window is a no-op.
-  useEffect(() => () => pipWindow?.close(), [pipWindow]);
   return { pipWindow, pipSupported: pipApi() !== undefined, popOut };
 }

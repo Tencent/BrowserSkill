@@ -233,7 +233,8 @@ function dropCdp(
     if (method === "DOM.getContentQuads") {
       return { quads: [[10, 20, 210, 20, 210, 120, 10, 120]] };
     }
-    if (method === "DOM.getNodeForLocation") return { backendNodeId: 124 };
+    if (method === "Page.getFrameTree") return { frameTree: { frame: { id: "main" } } };
+    if (method === "DOM.getNodeForLocation") return { backendNodeId: 124, frameId: "main" };
     if (method === "DOM.resolveNode") {
       const id = (params as { backendNodeId?: number }).backendNodeId;
       return { object: { objectId: id === 123 ? "drop-target" : "hit-target" } };

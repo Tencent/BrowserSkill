@@ -9,8 +9,13 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 import { describe, expect, it } from "vitest";
-import { attachVideoBackground, type BrowserSend as Send } from "./browser-fixture";
+import {
+  attachVideoBackground,
+  type BrowserSend as Send,
+  saveVideoEvidence,
+} from "./browser-fixture";
 import { createDshVideoFixture } from "./dsh-fixture";
+import { readVideoPixels, videoFrameTargets } from "./playback-fixture";
 
 const run = promisify(execFile);
 
@@ -174,6 +179,7 @@ describe.skipIf(!process.env.BSK_VIDEO_CHROME || !process.env.BSK_VIDEO_BSK)(
           {
             executable: process.env.BSK_VIDEO_CHROME,
             extensionPath: extension,
+            extensionViaCdp: process.env.BSK_VIDEO_LOAD_CDP === "1",
             deviceScale: 1,
             zoom: 1,
             // Prerender admission otherwise depends on the host's network-quality estimate.
@@ -206,12 +212,16 @@ describe.skipIf(!process.env.BSK_VIDEO_CHROME || !process.env.BSK_VIDEO_BSK)(
             expect(started.recording.state).toBe("recording");
             await new Promise((resolve) => setTimeout(resolve, 1100));
             const context = await cli("cooperate", "sync", "--session", session);
+            expect(context.control_policy).toBe("target");
+            expect(context.observation_id).toEqual(expect.any(String));
             await cli(
               "navigate",
               "--session",
               session,
               "--context",
               context.context_id,
+              "--observation",
+              context.observation_id,
               `http://127.0.0.1:${address.port}/blue`,
             );
             const workerSession = await attachVideoBackground(send, manifest.name);
@@ -257,6 +267,8 @@ describe.skipIf(!process.env.BSK_VIDEO_CHROME || !process.env.BSK_VIDEO_BSK)(
             );
             const output = path.join(directory, "result.mp4");
             await cli("video", "save", "--recording", id, "--out", output);
+            const version = await send("Browser.getVersion");
+            await saveVideoEvidence("capture", { version, recording: stopped.recording }, output);
             expect((await stat(output)).size).toBe(stopped.recording.byte_size);
             await expect(
               cli("video", "save", "--recording", id, "--out", output),
@@ -274,25 +286,34 @@ describe.skipIf(!process.env.BSK_VIDEO_CHROME || !process.env.BSK_VIDEO_BSK)(
                 { timeout: 10_000 },
               )
               .toBe(true);
+            const captureTargets = await videoFrameTargets(await readFile(output), [
+              0.2,
+              stopped.recording.duration_ms / 1000 - 0.3,
+            ]);
             const pixels = await evaluate<number[][]>(
               preview.sessionId,
-              `(async()=>{const v=document.querySelector('video'),c=document.createElement('canvas');c.width=v.videoWidth;c.height=v.videoHeight;const ctx=c.getContext('2d'),pixels=[];for(const time of [.2,v.duration-.3]){v.currentTime=time;await new Promise(r=>v.onseeked=r);ctx.drawImage(v,0,0);pixels.push(Array.from(ctx.getImageData(c.width/2,c.height/2,1,1).data));}return pixels})()`,
+              `(${readVideoPixels.toString()})(document.querySelector('video'), ${JSON.stringify(captureTargets)})`,
             );
+            await saveVideoEvidence("capture", { version, recording: stopped.recording, pixels });
             expect(pixels[0][0]).toBeGreaterThan(240);
             expect(pixels[1][1]).toBeGreaterThan(240);
             expect(pixels[1][0]).toBeLessThan(15);
             const screenshot = async (sessionId: string, name: string) => {
               if (!process.env.BSK_VIDEO_ARTIFACTS) return;
-              await mkdir(process.env.BSK_VIDEO_ARTIFACTS, { recursive: true });
-              const capture = await send<{ data: string }>(
-                "Page.captureScreenshot",
-                { format: "png" },
-                sessionId,
-              );
-              await writeFile(
-                path.join(process.env.BSK_VIDEO_ARTIFACTS, name),
-                Buffer.from(capture.data, "base64"),
-              );
+              try {
+                await mkdir(process.env.BSK_VIDEO_ARTIFACTS, { recursive: true });
+                const capture = await send<{ data: string }>(
+                  "Page.captureScreenshot",
+                  { format: "png" },
+                  sessionId,
+                );
+                await writeFile(
+                  path.join(process.env.BSK_VIDEO_ARTIFACTS, name),
+                  Buffer.from(capture.data, "base64"),
+                );
+              } catch (error) {
+                console.warn(`Could not save video screenshot ${name}:`, error);
+              }
             };
             await screenshot(preview.sessionId, "preview.png");
             // Exercise the real popup entry and its recording card.
@@ -512,6 +533,24 @@ describe.skipIf(!process.env.BSK_VIDEO_CHROME || !process.env.BSK_VIDEO_BSK)(
                 ).toContain(result.stop_reason);
               } else {
                 expect(result, route).toMatchObject({ state: "ready", completeness: "complete" });
+                const routeFile = path.join(directory, `route-${route}.mp4`);
+                await cli(
+                  "video",
+                  "save",
+                  "--recording",
+                  recording.recording_id,
+                  "--out",
+                  routeFile,
+                );
+                await saveVideoEvidence(
+                  `route-${route}`,
+                  { version, recording: result },
+                  routeFile,
+                );
+                const duration = result.duration_ms / 1000;
+                const times: number[] = [];
+                for (let time = 0.1; time < duration - 0.1; time += 0.1) times.push(time);
+                const targets = await videoFrameTargets(await readFile(routeFile), times);
                 await send(
                   "Page.navigate",
                   { url: `${origin}/video.html?id=${recording.recording_id}` },
@@ -527,13 +566,14 @@ describe.skipIf(!process.env.BSK_VIDEO_CHROME || !process.env.BSK_VIDEO_BSK)(
                   .toBe(true);
                 const pixels = await evaluate<number[][]>(
                   preview.sessionId,
-                  `(async()=>{
-                  const v=document.querySelector('video'),c=document.createElement('canvas');c.width=v.videoWidth;c.height=v.videoHeight;
-                  const ctx=c.getContext('2d'),pixels=[];
-                  for(let time=.1;time<v.duration-.1;time+=.1){v.currentTime=time;await new Promise(r=>v.onseeked=r);ctx.drawImage(v,0,0);pixels.push(Array.from(ctx.getImageData(c.width/2,c.height/2,1,1).data));}
-                  return pixels;
-                })()`,
+                  `(${readVideoPixels.toString()})(document.querySelector('video'), ${JSON.stringify(targets)})`,
                 );
+                await saveVideoEvidence(`route-${route}`, {
+                  version,
+                  recording: result,
+                  targets,
+                  pixels,
+                });
                 // Navigation must never paint the neutral user-confirmation slate.
                 if (!["error", "pdf"].includes(route))
                   expect(
@@ -551,26 +591,35 @@ describe.skipIf(!process.env.BSK_VIDEO_CHROME || !process.env.BSK_VIDEO_BSK)(
                   // Sample faster than the 15 fps capture rate, including the
                   // initial frames. Uniform page colors make any control pill
                   // or orange breathing border visible as a pixel deviation.
-                  const deviation = await evaluate<number>(
+                  const overlayTimes: number[] = [];
+                  for (let time = 0.01; time < duration - 0.01; time += 1 / 30)
+                    overlayTimes.push(time);
+                  const overlayTargets = await videoFrameTargets(
+                    await readFile(routeFile),
+                    overlayTimes,
+                  );
+                  const deviations = await evaluate<number[][]>(
                     preview.sessionId,
                     `(async()=>{
                     const v=document.querySelector('video'),c=document.createElement('canvas');
                     c.width=160;c.height=Math.round(160*v.videoHeight/v.videoWidth);
-                    const ctx=c.getContext('2d');let deviation=0;
-                    for(let time=.01;time<v.duration-.01;time+=1/30){
-                      v.currentTime=time;await new Promise(r=>v.onseeked=r);ctx.drawImage(v,0,0,c.width,c.height);
+                    const ctx=c.getContext('2d');
+                    return (${readVideoPixels.toString()})(v, ${JSON.stringify(overlayTargets)}, () => {
+                      ctx.drawImage(v,0,0,c.width,c.height);
                       const data=ctx.getImageData(0,0,c.width,c.height).data;
                       const center=4*(Math.floor(c.height/2)*c.width+Math.floor(c.width/2));
+                      let deviation=0;
                       for(let y=2;y<c.height-2;y++)for(let x=2;x<c.width-2;x++){
                         const border=x<4||x>=c.width-4||y<4||y>=c.height-4;
                         const pill=y>c.height*.75&&x>c.width*.25&&x<c.width*.75;
                         if(!border&&!pill)continue;
                         for(let channel=0;channel<3;channel++)deviation=Math.max(deviation,Math.abs(data[4*(y*c.width+x)+channel]-data[center+channel]));
                       }
-                    }
-                    return deviation;
+                      return [deviation];
+                    });
                   })()`,
                   );
+                  const deviation = Math.max(...deviations.flat());
                   expect(deviation, "control overlay pixels in the recording").toBeLessThan(20);
                 }
                 if (route === "pdf") {
@@ -771,7 +820,12 @@ describe.skipIf(!process.env.BSK_VIDEO_CHROME || !process.env.BSK_VIDEO_BSK)(
                 .toBe(recordingId);
               await new Promise((resolve) => setTimeout(resolve, 1200));
               const finished = await dsh.call<{
-                recording: { state: string; completeness: string; byte_size: number };
+                recording: {
+                  state: string;
+                  completeness: string;
+                  byte_size: number;
+                  duration_ms: number;
+                };
               }>("bsk_inspect", { action: "video", videoAction: "stop", recordingId });
               expect(finished.recording.state).toBe("ready");
               expect(finished.recording.completeness).toBe("complete");
@@ -783,6 +837,11 @@ describe.skipIf(!process.env.BSK_VIDEO_CHROME || !process.env.BSK_VIDEO_BSK)(
                 recordingId,
                 output,
               });
+              await saveVideoEvidence(
+                "capture-dsh",
+                { version, recording: finished.recording },
+                output,
+              );
               expect((await stat(output)).size).toBe(finished.recording.byte_size);
               await expect(
                 dsh.call("bsk_inspect", {
@@ -820,10 +879,18 @@ describe.skipIf(!process.env.BSK_VIDEO_CHROME || !process.env.BSK_VIDEO_BSK)(
                 });
               // The preview intentionally preloads only metadata. Seek to
               // request and verify a decoded frame from the completed task.
-              const pixel = await evaluate<number[]>(
+              const dshTargets = await videoFrameTargets(await readFile(output), [
+                finished.recording.duration_ms / 1000 - 0.2,
+              ]);
+              const [pixel] = await evaluate<number[][]>(
                 preview.sessionId,
-                `(async()=>{const v=document.querySelector('video'),c=document.createElement('canvas');c.width=v.videoWidth;c.height=v.videoHeight;v.currentTime=v.duration-.2;await new Promise(r=>v.onseeked=r);const ctx=c.getContext('2d');ctx.drawImage(v,0,0);return Array.from(ctx.getImageData(c.width/2,c.height/2,1,1).data)})()`,
+                `(${readVideoPixels.toString()})(document.querySelector('video'), ${JSON.stringify(dshTargets)})`,
               );
+              await saveVideoEvidence("capture-dsh", {
+                version,
+                recording: finished.recording,
+                pixel,
+              });
               expect(pixel[0]).toBeGreaterThan(240);
               expect(pixel[1]).toBeLessThan(15);
             } finally {

@@ -3,7 +3,7 @@ import { act, cleanup, fireEvent, render } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { COOPERATION_CONTROL, type CooperationView } from "@/cooperation/types";
-import { CooperationOverlay } from "../CooperationOverlay";
+import { ControlOverlay } from "../ControlOverlay";
 
 const view = (mode: CooperationView["mode"], extra = {}): CooperationView => ({
   mode,
@@ -13,7 +13,7 @@ const view = (mode: CooperationView["mode"], extra = {}): CooperationView => ({
 });
 const modes = ["ready", "acting", "human", "held", "yielding", "syncing", "unavailable"] as const;
 
-describe("CooperationOverlay", () => {
+describe("ControlOverlay cooperation", () => {
   const sendMessage = vi.fn();
   beforeEach(() => {
     sendMessage.mockReset().mockResolvedValue(undefined);
@@ -25,15 +25,37 @@ describe("CooperationOverlay", () => {
     vi.unstubAllGlobals();
   });
 
-  it("does not render controls without an active cooperation state", () => {
-    const { container } = render(<CooperationOverlay onStop={vi.fn()} />);
+  it("does not render hidden controls even with an active cooperation state", () => {
+    const { container } = render(
+      <ControlOverlay
+        visible={false}
+        state={view("ready")}
+        interrupting={false}
+        automationBypass={false}
+        onInterrupt={vi.fn()}
+      />,
+    );
     expect(container.childElementCount).toBe(0);
     expect(sendMessage).not.toHaveBeenCalled();
   });
 
   it.each(modes)("preserves control messages and stop behavior in %s mode", async (mode) => {
     const onStop = vi.fn();
-    const { getByRole } = render(<CooperationOverlay state={view(mode)} onStop={onStop} />);
+    const { container, getByRole } = render(
+      <ControlOverlay
+        visible={true}
+        interrupting={false}
+        automationBypass={false}
+        state={view(mode)}
+        onInterrupt={onStop}
+      />,
+    );
+    const glow = container.querySelector<HTMLElement>('[data-slot="control-overlay"]');
+    expect(glow).not.toBeNull();
+    expect(glow?.style.pointerEvents).toBe("none");
+    expect(glow?.getAttribute("aria-hidden")).toBe("true");
+    expect(container.querySelector('[data-slot="control-overlay-blocker"]')).toBeNull();
+    expect(container.querySelector('[data-slot="control-overlay-card"]')).toBeNull();
     const resume = mode === "human" || mode === "held";
     const action = getByRole("button", {
       name: i18n.t(resume ? "cooperation.resume" : "cooperation.hold", { ns: "extension" }),
@@ -62,11 +84,23 @@ describe("CooperationOverlay", () => {
   it("keeps editing and explicit pause distinct and uses the latest revision", async () => {
     const onStop = vi.fn();
     const { getByRole, rerender } = render(
-      <CooperationOverlay state={view("human", { editing: true })} onStop={onStop} />,
+      <ControlOverlay
+        visible={true}
+        interrupting={false}
+        automationBypass={false}
+        state={view("human", { editing: true })}
+        onInterrupt={onStop}
+      />,
     );
     expect(getByRole("status").textContent).toBe("你正在编辑完成编辑后交给 Agent");
     rerender(
-      <CooperationOverlay state={view("held", { revision: 23, editing: true })} onStop={onStop} />,
+      <ControlOverlay
+        visible={true}
+        interrupting={false}
+        automationBypass={false}
+        state={view("held", { revision: 23, editing: true })}
+        onInterrupt={onStop}
+      />,
     );
     expect(getByRole("status").textContent).toBe("Agent 已暂停准备好后交给 Agent");
     await act(async () => fireEvent.click(getByRole("button", { name: "交给 Agent" })));
@@ -85,7 +119,15 @@ describe("CooperationOverlay", () => {
       }),
     );
     const onStop = vi.fn();
-    const { getByRole } = render(<CooperationOverlay state={view("human")} onStop={onStop} />);
+    const { getByRole } = render(
+      <ControlOverlay
+        visible={true}
+        interrupting={false}
+        automationBypass={false}
+        state={view("human")}
+        onInterrupt={onStop}
+      />,
+    );
     const action = getByRole("button", { name: "交给 Agent" }) as HTMLButtonElement;
     fireEvent.click(action);
     expect(action.disabled).toBe(true);
@@ -102,7 +144,13 @@ describe("CooperationOverlay", () => {
     const { getByRole } = render(
       <>
         <input aria-label="Page field" />
-        <CooperationOverlay state={view("human", { editing: true })} onStop={vi.fn()} />
+        <ControlOverlay
+          visible={true}
+          interrupting={false}
+          automationBypass={false}
+          state={view("human", { editing: true })}
+          onInterrupt={vi.fn()}
+        />
       </>,
     );
     const field = getByRole("textbox");
@@ -114,7 +162,15 @@ describe("CooperationOverlay", () => {
 
   it("supports handing back with the keyboard", async () => {
     const user = userEvent.setup();
-    const { getByRole } = render(<CooperationOverlay state={view("held")} onStop={vi.fn()} />);
+    const { getByRole } = render(
+      <ControlOverlay
+        visible={true}
+        interrupting={false}
+        automationBypass={false}
+        state={view("held")}
+        onInterrupt={vi.fn()}
+      />,
+    );
     await user.tab();
     expect(document.activeElement).toBe(getByRole("button", { name: "交给 Agent" }));
     await user.keyboard("{Enter}");
@@ -128,9 +184,12 @@ describe("CooperationOverlay", () => {
   it("keeps target coordinates and expiration independent of card rendering", () => {
     vi.useFakeTimers();
     const { container, rerender } = render(
-      <CooperationOverlay
+      <ControlOverlay
+        visible={true}
+        interrupting={false}
+        automationBypass={false}
         state={view("acting", { target: { x: 75, y: 120, expires: Date.now() + 500 } })}
-        onStop={vi.fn()}
+        onInterrupt={vi.fn()}
       />,
     );
     const target = container.querySelector<HTMLElement>(".bsk-cooperation-target");
@@ -140,9 +199,12 @@ describe("CooperationOverlay", () => {
     act(() => vi.advanceTimersByTime(500));
     expect(container.querySelector(".bsk-cooperation-target")).toBeNull();
     rerender(
-      <CooperationOverlay
+      <ControlOverlay
+        visible={true}
+        interrupting={false}
+        automationBypass={false}
         state={view("acting", { target: { x: 90, y: 150, expires: Date.now() + 500 } })}
-        onStop={vi.fn()}
+        onInterrupt={vi.fn()}
       />,
     );
     expect(container.querySelector<HTMLElement>(".bsk-cooperation-target")?.style.left).toBe(

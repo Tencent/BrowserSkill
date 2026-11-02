@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { renderVom } from "../render";
+import { prepareObservationRender, renderVom } from "../render";
 import type { VomNode, VomScene } from "../types";
 
 function node(p: Partial<VomNode> & { id: number }): VomNode {
@@ -27,6 +27,44 @@ function scene(nodes: VomNode[]): VomScene {
 function coreRefs(refs: ReturnType<typeof renderVom>["refs"]) {
   return refs.map(({ ref, backendNodeId }) => ({ ref, backendNodeId }));
 }
+
+it("allocates displayed references before rendering without rewriting literal page text", () => {
+  const input = scene([
+    node({
+      id: 1,
+      backendNodeId: 19,
+      tag: "button",
+      role: "button",
+      name: "Keep @e1 in this label",
+    }),
+    node({ id: 2, backendNodeId: 20, tag: "button", role: "button", name: "Save" }),
+  ]);
+  const options = { allocateRef: (n: VomNode) => `e${100 + n.backendNodeId!}` };
+  const full = renderVom(input, options);
+  expect(full.text).toContain('@e119 button "Keep @e1 in this label"');
+  expect(full.refs.map((ref) => ref.ref)).toEqual(["e119", "e120"]);
+  const prepared = prepareObservationRender(input, options);
+  const rows = Array.from({ [Symbol.iterator]: () => prepared.rows });
+  expect(rows.filter((row) => row.ref).map((row) => row.ref!.ref)).toEqual(["e119", "e120"]);
+  expect(rows.map((row) => row.text).join("\n")).toContain('"Keep @e1 in this label"');
+});
+
+it("measures allocated reference names within the token budget", () => {
+  const input = scene(
+    Array.from({ length: 12 }, (_, i) =>
+      node({ id: i + 1, tag: "button", role: "button", name: `Save ${i}` }),
+    ),
+  );
+  const full = renderVom(input, { allocateRef: (n) => `e${100000000 + n.id}` });
+  const bounded = renderVom(input, {
+    allocateRef: (n) => `e${100000000 + n.id}`,
+    maxTokens: 65,
+  });
+  expect(bounded.truncated).toBe(true);
+  expect(bounded.refs.length).toBeGreaterThan(0);
+  expect(bounded.refs.length).toBeLessThan(full.refs.length);
+  expect(full.text.startsWith(bounded.text)).toBe(true);
+});
 
 describe("renderVom single-layer page", () => {
   it.each([
@@ -428,6 +466,43 @@ describe("renderVom single-layer page", () => {
 
     expect(out.text).toContain('@e1 button "Open settings"');
     expect(coreRefs(out.refs)).toEqual([{ ref: "e1", backendNodeId: 2 }]);
+  });
+
+  it.each([
+    { tag: "div", role: "generic" },
+    { tag: "span", role: "generic" },
+    { tag: "li", role: "listitem" },
+  ])("recovers browser-reported clickable $tag nodes without HTML handlers", ({ tag, role }) => {
+    const out = renderVom(
+      scene([node({ id: 1, tag, role, text: "Open settings", clickable: true })]),
+    );
+    expect(out.text).toContain('@e1 button "Open settings"');
+    expect(coreRefs(out.refs)).toEqual([{ ref: "e1", backendNodeId: 1 }]);
+  });
+
+  it.each<Partial<VomNode>>([
+    { disabled: true },
+    { inert: true },
+    { pointerEvents: "none" },
+    { insideNative: true },
+    { hasNativeDescendant: true },
+    { rect: { x: 0, y: 0, w: 1000, h: 800 } },
+    { tag: "svg" },
+    { text: undefined },
+  ])("keeps recovery guards for browser-reported clickability: %j", (guard) => {
+    const out = renderVom(
+      scene([node({ id: 1, role: "generic", text: "Open settings", clickable: true, ...guard })]),
+    );
+    expect(out.refs).toEqual([]);
+  });
+
+  it("does not infer clickable list items from a pointer cursor alone", () => {
+    const out = renderVom(
+      scene([
+        node({ id: 1, tag: "li", role: "listitem", text: "Section label", cursor: "pointer" }),
+      ]),
+    );
+    expect(out.refs).toEqual([]);
   });
 
   it("does not treat implementation CSS classes as control names", () => {
@@ -1170,5 +1245,256 @@ describe("disabled form state", () => {
     expect(out.text).toContain('button "Save" [disabled]');
     expect(out.text).toContain('checkbox "Terms" [disabled] [unchecked] ="payload"');
     expect(out.text).not.toContain('button "Cancel" [disabled]');
+  });
+});
+
+describe("drag affordances", () => {
+  it.each([
+    "",
+    "true",
+    "plaintext-only",
+  ])("preserves contenteditable=%s semantics on draggable cards", (contenteditable) => {
+    const out = renderVom(
+      scene([
+        node({
+          id: 1,
+          backendNodeId: 42,
+          role: "group",
+          attrs: { contenteditable, draggable: "true", "aria-label": "Message editor" },
+          value: "Draft message",
+          rect: { x: 0, y: 0, w: 200, h: 80 },
+        }),
+      ]),
+    );
+    expect(out.text).toContain(
+      '@e1 textbox [draggable] "Message editor" [filled] ="Draft message"',
+    );
+    expect(out.refs).toEqual([
+      expect.objectContaining({ backendNodeId: 42, role: "textbox", name: "Message editor" }),
+    ]);
+  });
+  it.each<Partial<VomNode> & { hint: string }>([
+    { attrs: { draggable: "true" }, hint: "draggable" },
+    { attrs: { ondrop: "accept(event)" }, hint: "drop-target" },
+    { cursor: "grab", hint: "drag-handle" },
+  ])("recovers clickable semantics alongside $hint", ({ hint, attrs, ...props }) => {
+    const out = renderVom(
+      scene([
+        node({
+          id: 1,
+          role: "group",
+          text: "Open settings",
+          attrs: { onclick: "handleOpen()", ...attrs },
+          ...props,
+        }),
+      ]),
+    );
+    expect(out.text).toContain(`@e1 button [${hint}] "Open settings"`);
+    expect(out.refs).toEqual([
+      expect.objectContaining({ backendNodeId: 1, role: "button", name: "Open settings" }),
+    ]);
+  });
+  it("preserves native roles and state when adding a drag hint", () => {
+    const out = renderVom(
+      scene([
+        node({
+          id: 1,
+          tag: "input",
+          role: "checkbox",
+          name: "Select card",
+          checked: true,
+          value: "card-1",
+          attrs: { draggable: "true", onclick: "selectCard()" },
+        }),
+      ]),
+    );
+    expect(out.text).toContain('@e1 checkbox [draggable] "Select card" [checked] ="card-1"');
+    expect(out.refs[0].role).toBe("checkbox");
+  });
+  it.each(["combobox", "switch"])("recovers an explicit %s role on a draggable card", (role) => {
+    const out = renderVom(
+      scene([
+        node({
+          id: 1,
+          role: "group",
+          attrs: { draggable: "true", role, tabindex: "0", "aria-label": "Card setting" },
+        }),
+      ]),
+    );
+    expect(out.text).toContain(`@e1 ${role} [draggable] "Card setting"`);
+    expect(out.refs[0].role).toBe(role);
+  });
+  it("keeps clickable children when their inherited drag hint is suppressed", () => {
+    const out = renderVom(
+      scene([
+        node({ id: 1, role: "generic", name: "Card", cursor: "grab" }),
+        node({
+          id: 2,
+          parentId: 1,
+          role: "generic",
+          text: "Edit card",
+          clickable: true,
+          cursor: "grab",
+        }),
+      ]),
+    );
+    expect(out.text).toContain('@e1 generic [drag-handle] "Card"');
+    expect(out.text).toContain('@e2 button "Edit card"');
+    expect(coreRefs(out.refs)).toEqual([
+      { ref: "e1", backendNodeId: 1 },
+      { ref: "e2", backendNodeId: 2 },
+    ]);
+  });
+  it.each<Partial<VomNode> & { hint: string }>([
+    { attrs: { draggable: "true" }, hint: "draggable" },
+    { cursor: "grab", hint: "drag-handle" },
+    { cursor: "col-resize", hint: "drag-handle" },
+    { attrs: { ondrop: "accept(event)" }, hint: "drop-target" },
+  ])("keeps an addressable drag candidate without inventing a button: %j", ({ hint, ...props }) => {
+    const out = renderVom(
+      scene([
+        node({
+          id: 1,
+          backendNodeId: 42,
+          role: "generic",
+          name: "Item",
+          rect: { x: 0, y: 0, w: 100, h: 50 },
+          ...props,
+        }),
+      ]),
+    );
+    expect(out.refs).toHaveLength(1);
+    expect(out.text).toContain(`[${hint}]`);
+    expect(out.text).not.toContain("button");
+  });
+  it.each([
+    { attrs: { draggable: "false" } },
+    { cursor: "default" },
+    { cursor: "grab", inert: true },
+    { cursor: "grab", pointerEvents: "none" },
+  ])("does not manufacture drag refs from %j", (props) => {
+    const out = renderVom(
+      scene([
+        node({
+          id: 1,
+          backendNodeId: 42,
+          role: "generic",
+          rect: { x: 0, y: 0, w: 100, h: 50 },
+          ...props,
+        }),
+      ]),
+    );
+    expect(out.refs).toHaveLength(0);
+  });
+});
+
+it("does not turn inherited drag cursors into duplicate handles", () => {
+  const out = renderVom(
+    scene([
+      node({
+        id: 1,
+        backendNodeId: 10,
+        role: "generic",
+        name: "Card",
+        cursor: "grab",
+        rect: { x: 0, y: 0, w: 100, h: 80 },
+      }),
+      node({
+        id: 2,
+        parentId: 1,
+        backendNodeId: 20,
+        role: "generic",
+        name: "Title",
+        cursor: "grab",
+        rect: { x: 0, y: 0, w: 100, h: 20 },
+      }),
+      node({
+        id: 3,
+        parentId: 1,
+        backendNodeId: 30,
+        role: "generic",
+        name: "Resize",
+        cursor: "ew-resize",
+        rect: { x: 90, y: 20, w: 10, h: 60 },
+      }),
+    ]),
+  );
+  expect(out.refs.map((ref) => ref.backendNodeId)).toEqual([10, 30]);
+  expect(out.text).not.toContain('[drag-handle] "Title"');
+});
+
+describe("selection evidence", () => {
+  it.each([
+    [{ "aria-selected": "true" }, "selected"],
+    [{ "aria-selected": "false", class: "selected" }, "unselected"],
+    [{ "data-selected": "true" }, "selected:data"],
+    [{ "data-state": "selected" }, "selected:data"],
+    [{ "data-selected": "false", class: "selected" }, "unselected:data"],
+    [{ class: "grid-item selected" }, "selected:class"],
+    [{ class: "is-selected" }, "selected:class"],
+  ])("exposes %j without conflating styling and semantic state", (attrs, marker) => {
+    const out = renderVom(
+      scene([
+        node({
+          id: 1,
+          backendNodeId: 1,
+          role: "button",
+          name: "16:00",
+          attrs: attrs as Record<string, string>,
+          rect: { x: 10, y: 10, w: 50, h: 30 },
+        }),
+      ]),
+    );
+    expect(out.text).toContain(`[${marker}]`);
+  });
+  it.each([
+    "active",
+    "unselected",
+    "selected-item",
+    "not-selected",
+  ])("does not guess selection from %s", (value) => {
+    const out = renderVom(
+      scene([
+        node({
+          id: 1,
+          backendNodeId: 1,
+          role: "button",
+          name: "Cell",
+          attrs: { class: value },
+          rect: { x: 10, y: 10, w: 50, h: 30 },
+        }),
+      ]),
+    );
+    expect(out.text).not.toContain("[selected");
+  });
+  it("recovers unnamed indexed clickable cells and preserves their selected styling", () => {
+    const out = renderVom(
+      scene([
+        node({
+          id: 1,
+          backendNodeId: 1,
+          clickable: true,
+          attrs: { "data-index": "14", class: "grid-item selected" },
+          rect: { x: 10, y: 10, w: 23, h: 30 },
+        }),
+      ]),
+    );
+    expect(out.text).toContain('@e1 button "item 14" [selected:class]');
+  });
+  it("does not create actions or selection hints for decorative indexed wrappers", () => {
+    const out = renderVom(
+      scene([
+        node({
+          id: 1,
+          backendNodeId: 1,
+          role: "group",
+          name: "Decoration",
+          attrs: { "data-index": "14", class: "selected" },
+          rect: { x: 10, y: 10, w: 23, h: 30 },
+        }),
+      ]),
+    );
+    expect(out.refs).toHaveLength(0);
+    expect(out.text).not.toContain("[selected");
   });
 });

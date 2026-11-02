@@ -1,3 +1,5 @@
+import { copyFile, mkdir, writeFile } from "node:fs/promises";
+import path from "node:path";
 import { expect } from "vitest";
 
 export type BrowserSend = <T = Record<string, unknown>>(
@@ -47,4 +49,25 @@ export async function attachVideoBackground(send: BrowserSend, name: string) {
     )
     .toBe(true);
   return found!;
+}
+
+/** Evidence is best effort: its failure must never replace the regression's result. */
+export async function saveVideoEvidence(
+  name: string,
+  details: unknown,
+  video?: string | Uint8Array | (() => Promise<Uint8Array>),
+) {
+  const directory = process.env.BSK_VIDEO_ARTIFACTS;
+  if (!directory) return;
+  try {
+    await mkdir(directory, { recursive: true });
+    // Save the MP4 first, even if diagnostic metadata cannot be serialized.
+    const destination = path.join(directory, `${name}.mp4`);
+    if (typeof video === "function") await writeFile(destination, await video());
+    else if (typeof video === "string") await copyFile(video, destination);
+    else if (video) await writeFile(destination, video);
+    await writeFile(path.join(directory, `${name}.json`), JSON.stringify(details, null, 2));
+  } catch (error) {
+    console.warn(`Could not save video evidence ${name}:`, error);
+  }
 }

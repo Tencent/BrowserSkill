@@ -97,8 +97,13 @@
         "action": "navigate"
       },
       {
+        "action": "sync",
+        "saveAs": "control"
+      },
+      {
         "action": "fill",
         "selector": "#paragraph",
+        "contextId": "{control.context_id}",
         "value": "wrong",
         "expectError": {
           "code": "invalid_params",
@@ -108,49 +113,59 @@
       },
       {
         "action": "click",
-        "selector": "#check"
+        "selector": "#check",
+        "contextId": "{control.context_id}"
       },
       {
         "action": "fill",
         "selector": "#notes",
+        "contextId": "{control.context_id}",
         "value": "notes"
       },
       {
         "action": "fill",
         "selector": "#editor",
+        "contextId": "{control.context_id}",
         "value": "hello"
       },
       {
         "action": "click",
-        "selector": "#check"
+        "selector": "#check",
+        "contextId": "{control.context_id}"
       },
       {
         "action": "fill",
         "selector": "#editor",
+        "contextId": "{control.context_id}",
         "value": " world",
         "noClear": true
       },
       {
         "action": "click",
-        "selector": "#check"
+        "selector": "#check",
+        "contextId": "{control.context_id}"
       },
       {
         "action": "fill",
         "selector": "#editor",
+        "contextId": "{control.context_id}",
         "value": ""
       },
       {
         "action": "click",
-        "selector": "#check"
+        "selector": "#check",
+        "contextId": "{control.context_id}"
       },
       {
         "action": "fill",
         "selector": "#editor",
+        "contextId": "{control.context_id}",
         "value": "done"
       },
       {
         "action": "click",
-        "selector": "#check"
+        "selector": "#check",
+        "contextId": "{control.context_id}"
       },
       {
         "action": "wait-site-event",

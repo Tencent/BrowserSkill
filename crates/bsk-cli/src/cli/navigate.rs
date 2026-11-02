@@ -5,7 +5,6 @@
 //! emits the full bsk-protocol payload.
 
 use std::path::PathBuf;
-use std::time::Duration;
 
 use anyhow::Context;
 use bsk_protocol::Method;
@@ -16,6 +15,7 @@ use bsk_protocol::tools::{
 use clap::{Args, Subcommand, ValueEnum};
 use serde::Serialize;
 
+use crate::cli::business_rpc::ipc_timeout;
 use crate::cli::dialogs::print_dialog_summaries;
 use crate::cli::ensure_daemon::ensure_daemon;
 use crate::cli::error::{CliError, Format};
@@ -257,22 +257,7 @@ where
     P: serde::Serialize + Send + 'static,
     R: serde::de::DeserializeOwned + Send + 'static,
 {
-    crate::cli::business_rpc::call::<P, R>(
-        sock,
-        id,
-        method,
-        Some(params),
-        navigate_ipc_timeout(timeout_ms),
-    )
-}
-
-/// Use the global tool IPC timeout but extend it so a long navigation
-/// (e.g. networkidle on a slow page) doesn't trip the IPC layer before
-/// the daemon's own timeout fires.
-fn navigate_ipc_timeout(timeout_ms: u32) -> Duration {
-    Duration::from_millis(u64::from(timeout_ms))
-        .checked_add(Duration::from_secs(15))
-        .unwrap_or(Duration::from_secs(u64::from(timeout_ms / 1_000) + 15))
+    crate::cli::business_rpc::call::<P, R>(sock, id, method, Some(params), ipc_timeout(timeout_ms))
 }
 
 fn render_navigate(reply: &NavigateResult, format: Format) -> Result<(), CliError> {
@@ -415,14 +400,6 @@ mod tests {
     fn cli_wait_until_matches_protocol_enum() {
         assert_eq!(WaitUntil::Load, CliWaitUntil::Load.into());
         assert_eq!(WaitUntil::Commit, CliWaitUntil::Commit.into());
-    }
-
-    #[test]
-    fn navigate_ipc_timeout_tracks_user_timeout_with_grace() {
-        assert_eq!(
-            navigate_ipc_timeout(60_000),
-            Duration::from_secs(60) + Duration::from_secs(15)
-        );
     }
 
     fn sample_navigate(reached: &str) -> NavigateResult {

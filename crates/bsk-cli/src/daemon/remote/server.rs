@@ -309,8 +309,8 @@ async fn handle(
                 Ok(Ok(grant)) => response(StatusCode::OK, serde_json::to_value(grant).unwrap()),
                 Ok(Err(error))
                     if error
-                        .downcast_ref::<std::io::Error>()
-                        .is_some_and(|error| error.kind() == std::io::ErrorKind::WouldBlock) =>
+                        .chain()
+                        .any(|cause| cause.is::<super::authorization::StoreBusy>()) =>
                 {
                     retry_response(
                         StatusCode::SERVICE_UNAVAILABLE,

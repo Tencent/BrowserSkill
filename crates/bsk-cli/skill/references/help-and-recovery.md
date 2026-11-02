@@ -29,7 +29,9 @@ substring is enough.
 | Help `continued` / `completed` | Observe again, then resume with fresh refs. |
 | Help `cancelled` / `timed_out` | Respect rejection or the blocker; do not repeat the request. |
 | Help `disabled` | No human action was confirmed. Re-observe and follow the disabled-help rules below. |
-| Stale ref | Observe and retry the intended action once. |
+| Stale ref or target failure | Inspect the live target and choose the appropriate action. A missing, hidden or covered target is not evidence of human takeover. |
+| `precondition_failed` | Compare `target`, `field`, `expected` and `actual`, then reconsider the decision. A new context does not make the expected value true. |
+| Control revoked | Wait while the person is active, then sync and reconcile completed steps. |
 | Unknown tab/session | List current tabs/sessions; never guess IDs or use another task's session. |
 | Timeout or unknown effect | Inspect current state before retrying; the action may already have happened. |
 | `fill_value_mismatch` | Read the field: formatting may still satisfy the request. Correct only a remaining difference; no blind refill or immediate handoff. |

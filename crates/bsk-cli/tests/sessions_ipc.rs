@@ -1200,6 +1200,26 @@ async fn session_window_closed_event_purges_session() {
 
     wait_for_no_sessions(&state).await;
 
+    // Issue #465 (maintainer review): a dispatch against the ended id
+    // must surface why the session stopped, not a generic not-found.
+    let err = state
+        .tool_queues
+        .dispatch(
+            &bsk::daemon::sessions::SessionId("zzzz".into()),
+            Method::ToolTabList,
+            serde_json::json!({"session_id": "zzzz"}),
+            Duration::from_secs(1),
+            None,
+        )
+        .await
+        .expect_err("the dead session must reject dispatches")
+        .into_rpc();
+    assert_eq!(err.code, bsk_protocol::ErrorCode::NotFound);
+    assert_eq!(
+        err.data.unwrap()["reason"],
+        bsk::rpc_reason::SESSION_WINDOW_CLOSED
+    );
+
     let _ = ws.close(None).await;
     handle.shutdown().await;
 }
@@ -1226,6 +1246,26 @@ async fn browser_disconnect_purges_sessions() {
     let _ = ws.close(None).await;
     drop(ws);
     wait_for_no_sessions(&state).await;
+
+    // Issue #465 (maintainer review, P2): the ordinary socket-cleanup
+    // purge must tombstone the same reason as the other disconnect paths.
+    let err = state
+        .tool_queues
+        .dispatch(
+            &bsk::daemon::sessions::SessionId("zzzz".into()),
+            Method::ToolTabList,
+            serde_json::json!({"session_id": "zzzz"}),
+            Duration::from_secs(1),
+            None,
+        )
+        .await
+        .expect_err("the dead session must reject dispatches")
+        .into_rpc();
+    assert_eq!(err.code, bsk_protocol::ErrorCode::NotFound);
+    assert_eq!(
+        err.data.unwrap()["reason"],
+        bsk::rpc_reason::BROWSER_DISCONNECTED
+    );
 
     handle.shutdown().await;
 }
@@ -1378,6 +1418,27 @@ async fn reconnect_with_same_instance_id_purges_stale_sessions_but_keeps_new_bro
         state.sessions.len(),
         0,
         "stale sessions must not survive reconnect"
+    );
+
+    // Issue #465 (maintainer review, P2): the same-instance reconnect
+    // purge must tombstone the same reason as the ordinary disconnect
+    // path, so a later dispatch explains instead of guessing.
+    let err = state
+        .tool_queues
+        .dispatch(
+            &bsk::daemon::sessions::SessionId("xxxx".into()),
+            Method::ToolTabList,
+            serde_json::json!({"session_id": "xxxx"}),
+            Duration::from_secs(1),
+            None,
+        )
+        .await
+        .expect_err("the dead session must reject dispatches")
+        .into_rpc();
+    assert_eq!(err.code, bsk_protocol::ErrorCode::NotFound);
+    assert_eq!(
+        err.data.unwrap()["reason"],
+        bsk::rpc_reason::BROWSER_DISCONNECTED
     );
 
     let _ = ws_b.close(None).await;

@@ -1,3 +1,4 @@
+import { playbackProgressMedia } from "@/cooperation/media-progress";
 import {
   COOPERATION_ARM,
   COOPERATION_DISABLE,
@@ -11,6 +12,7 @@ import {
   type InputExpectation,
 } from "@/cooperation/types";
 import { OVERLAY_HOST_SELECTOR } from "@/lib/overlay-bridge";
+import { createRandomUuid } from "@/lib/random-uuid";
 
 const MAX_CHANGES = 64;
 // CDP's native clock conversion and the DOM clock round independently.
@@ -23,7 +25,7 @@ export function attachCooperationCapture() {
   let lease: string | undefined;
   const retired = new Set<string>();
   const state: FrameState = {
-    document: crypto.randomUUID(),
+    document: createRandomUuid(),
     revision: 0,
     structure: 0,
     human: 0,
@@ -42,9 +44,9 @@ export function attachCooperationCapture() {
   const keys = new Set<string>();
   const fields = new Map<Element, FieldChange>();
   const sampledValues = new WeakMap<Element, string>();
-  const ids = new WeakMap<Element, string>();
+  const ids = new WeakMap<object, string>();
   let nextId = 0;
-  const id = (element: Element) => {
+  const id = (element: object) => {
     let value = ids.get(element);
     if (!value) ids.set(element, (value = String(++nextId)));
     return value;
@@ -101,6 +103,20 @@ export function attachCooperationCapture() {
   };
   const observer = new MutationObserver(mutations);
   const roots = new Set<Document | ShadowRoot>();
+  // Page JS cannot see closed roots, but the extension can. Observation also
+  // traverses these roots, so source and focus guards must cover the same DOM.
+  const shadowRoot = (element: Element): ShadowRoot | null =>
+    element.shadowRoot ??
+    (element instanceof HTMLElement ? (chrome.dom?.openOrClosedShadowRoot(element) ?? null) : null);
+  const activeElement = () => {
+    let active = document.activeElement;
+    while (active) {
+      const nested = shadowRoot(active)?.activeElement;
+      if (!nested) break;
+      active = nested;
+    }
+    return active;
+  };
   const controls = function* (root: Document | ShadowRoot): Generator<Element> {
     if (!roots.has(root)) {
       observer.observe(root, {
@@ -114,17 +130,24 @@ export function attachCooperationCapture() {
     for (const element of root.querySelectorAll("*")) {
       if (overlay(element)) continue;
       if (element.matches("input,textarea,select,[contenteditable=true]")) yield element;
-      if (element.shadowRoot) yield* controls(element.shadowRoot);
+      const nested = shadowRoot(element);
+      if (nested) yield* controls(nested);
     }
   };
   const read = () => {
     mutations(observer.takeRecords());
+    const active = activeElement();
+    state.focus = active ? id(active) : undefined;
+    state.focusIsDocument =
+      (active === document.body || active === document.documentElement) &&
+      !active?.matches('[tabindex],[role],[contenteditable]:not([contenteditable="false"])');
     if ([...roots].some((root) => root instanceof ShadowRoot && !root.host.isConnected)) {
       observer.disconnect();
       roots.clear();
     }
     for (const element of fields.keys()) if (!element.isConnected) fields.delete(element);
     let fieldCount = 0;
+    const mediaByRoot = new Map<Document | ShadowRoot, { id: string }[]>();
     state.fieldsComplete = true;
     for (const target of controls(document)) {
       if (
@@ -140,6 +163,34 @@ export function attachCooperationCapture() {
             : (target.textContent ?? "");
       const value = fullValue.slice(0, 500);
       const name = label(target);
+      let mediaProgress = false;
+      if (target instanceof HTMLInputElement && target.type === "range") {
+        const root = target.getRootNode() as Document | ShadowRoot;
+        let media = mediaByRoot.get(root);
+        if (!media) {
+          media = [...root.querySelectorAll("video,audio")].map((element) => ({ id: element.id }));
+          mediaByRoot.set(root, media);
+        }
+        const labelledBy = (target.getAttribute("aria-labelledby") ?? "")
+          .split(/\s+/)
+          .filter(Boolean)
+          .map((id) => root.getElementById(id)?.textContent ?? "")
+          .join(" ");
+        const labels = [...new Set(target.labels ?? [])]
+          .map((label) => label.textContent)
+          .join(" ");
+        mediaProgress = !!playbackProgressMedia(
+          {
+            tag: "input",
+            name: target.getAttribute("aria-label") || labelledBy || labels,
+            attrs: Object.fromEntries(
+              [...target.attributes].map((attr) => [attr.name, attr.value]),
+            ),
+            inForm: target.form !== null,
+          },
+          media,
+        );
+      }
       fieldCount++;
       if (fieldCount > MAX_CHANGES || fullValue.length > 500) state.fieldsComplete = false;
       const sampled = sampledValues.get(target);
@@ -147,9 +198,44 @@ export function attachCooperationCapture() {
       sampledValues.set(target, fullValue);
       const old = fields.get(target);
       if (fields.size < MAX_CHANGES || old)
-        fields.set(target, { id: id(target), label: name, value });
+        fields.set(target, {
+          id: id(target),
+          label: name,
+          value,
+          ...(mediaProgress ? { kind: "media_progress" as const } : {}),
+        });
     }
     for (const element of fields.keys()) if (!element.isConnected) fields.delete(element);
+    const media = [...roots].flatMap((root) =>
+      [...root.querySelectorAll<HTMLMediaElement>("video,audio")].map((element) => {
+        const stream = element.srcObject;
+        return {
+          id: id(element),
+          src: element.getAttribute("src"),
+          currentSrc: element.currentSrc,
+          srcObject: stream ? id(stream) : null,
+          tracks:
+            typeof MediaStream !== "undefined" && stream instanceof MediaStream
+              ? stream
+                  .getTracks()
+                  .map((track) => track.id)
+                  .sort()
+              : [],
+          sources: [...element.children]
+            .filter((child): child is HTMLSourceElement => child instanceof HTMLSourceElement)
+            .map((source) => ({
+              id: id(source),
+              src: source.src,
+              type: source.type,
+              media: source.media,
+            })),
+        };
+      }),
+    );
+    // currentSrc/srcObject may change without a DOM mutation. Keep the source
+    // evidence fresh even when the page's mutation counter did not advance.
+    if (state.media && JSON.stringify(state.media) !== JSON.stringify(media)) state.revision++;
+    state.media = media;
     state.busy = composing || pointer || keys.size > 0;
     state.fields = [...fields.values()];
     return { ...state };
@@ -219,8 +305,7 @@ export function attachCooperationCapture() {
       clearTimeout(focusTimer);
       focusTimer = setTimeout(() => {
         if (!enabled) return;
-        let active = document.activeElement;
-        while (active?.shadowRoot?.activeElement) active = active.shadowRoot.activeElement;
+        const active = activeElement();
         if (state.editing) state.revision++;
         state.editing = state.editing && editable(active);
         composing = false;

@@ -157,6 +157,20 @@
       "promptTemplate": "Nutze für diese Aufgabe BrowserSkill im Browser {{name}} (Instanz-ID: {{instanceId}}). Starte jede neue Sitzung für diese Aufgabe über die passende Schnittstelle:\nCLI: {{command}}\nDeepSeek Harness: {{toolCall}}\nNutze in DeepSeek Harness den Tool-Aufruf. Führe den CLI-Befehl nicht zusätzlich aus.\nWenn diese Instanz nicht verbunden ist, halte an und bitte mich, dieses Profil wieder zu verbinden. Lasse --browser / browser nicht weg und wechsle nicht zu einer anderen Instanz.",
       "title": "Aktueller Browser",
       "unnamed": "Unbenannter Browser"
+    },
+    "daemonUpgrade": {
+      "title": "bsk-Browserdienst aktualisieren",
+      "description": "Der laufende bsk-Dienst (Daemon) ist zu alt. Browseraufgaben können erst nach seiner Aktualisierung ausgeführt werden.",
+      "runCommand": "Öffnen Sie auf dem Computer, auf dem der Dienst läuft, ein Terminal und führen Sie Folgendes aus:",
+      "restart": "Falls dieser Hinweis nach der Aktualisierung weiterhin erscheint, starten Sie den Dienst über das Terminal oder die Host-Anwendung neu, die ihn gestartet hat.",
+      "copyButton": "Befehl kopieren",
+      "copyFailed": "Kopieren fehlgeschlagen. Kopieren Sie den obigen Befehl manuell.",
+      "details": "Technische Details",
+      "protocols": "Dienstprotokoll: {{actual}}. Die Erweiterung benötigt {{required}} oder ein neueres kompatibles Protokoll.",
+      "version": "Aktuell ausgeführt: bsk {{version}}",
+      "notificationMessage": "Browseraufgaben sind nicht verfügbar. Aktualisieren Sie bsk auf dem Computer, auf dem der Browserdienst läuft, und stellen Sie sicher, dass auch der laufende Dienst aktualisiert wurde.",
+      "toolbarTitle": "BrowserSkill: bsk-Browserdienst aktualisieren",
+      "notificationButton": "Update-Anleitung anzeigen"
     }
   },
   "controlOverlay": {
@@ -315,6 +329,7 @@
       "press": "Taste drücken",
       "select": "Option auswählen",
       "hover": "Hover",
+      "drag": "Ziehen",
       "focus": "Fokussieren",
       "blur": "Fokus entfernen",
       "scroll": "Scrollen",

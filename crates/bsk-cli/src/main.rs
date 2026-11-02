@@ -36,8 +36,11 @@ fn main() -> ExitCode {
 fn dispatch(cli: Cli, format: Format) -> Result<(), CliError> {
     cli::business_rpc::set_context(cli.flags.context.clone());
     cli::business_rpc::set_dependencies(cli.flags.depends_on.clone());
+    cli::business_rpc::set_action_evidence(cli.flags.observation.clone(), cli.flags.expect.clone());
     match cli.command {
         Command::Cooperate(args) => cli::cooperate::dispatch(args, format),
+        Command::Step(args) => cli::step::dispatch(args, format),
+        Command::View(args) => cli::observation_view::dispatch(args, format),
         Command::Daemon(cmd) => cli::daemon::dispatch(cmd).map_err(CliError::Local),
         Command::Status => {
             let output = if cli.flags.json {
@@ -93,6 +96,7 @@ fn dispatch(cli: Cli, format: Format) -> Result<(), CliError> {
         Command::Reload(args) => cli::navigate::dispatch_reload(args, format),
         Command::Click(args) => cli::interaction::dispatch_click(args, format),
         Command::Hover(args) => cli::interaction::dispatch_hover(args, format),
+        Command::Drag(args) => cli::drag::dispatch(args, format),
         Command::Wheel(args) => cli::wheel::dispatch(args, format),
         Command::ScrollTo(args) => cli::scroll::dispatch(args, format),
         Command::Focus(args) => cli::interaction::dispatch_focus(args, format),
@@ -108,6 +112,8 @@ fn dispatch(cli: Cli, format: Format) -> Result<(), CliError> {
         Command::WaitMs(args) => cli::waits::dispatch_wait_ms(args, format),
         Command::RequestHelp(args) => cli::human_loop::dispatch(args, format),
         Command::Record(cmd) => cli::record::dispatch(cmd, format),
+        Command::Dialog(cmd) => cli::dialog_control::dispatch_dialog(cmd, format),
+        Command::Operation(cmd) => cli::dialog_control::dispatch_operation(cmd, format),
         Command::Video(cmd) => cli::video::dispatch(cmd, format),
     }
 }
