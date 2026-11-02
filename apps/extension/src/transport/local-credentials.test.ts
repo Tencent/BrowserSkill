@@ -4,7 +4,6 @@ import v from "../../../../crates/bsk-protocol/tests/fixtures/local-auth-v1.json
 import { openCredentialDatabase } from "./credential-db";
 import {
   discardStaged,
-  initializeLocalMigration,
   parseLocalPairing,
   promoteCandidate,
   readLocalState,
@@ -46,7 +45,6 @@ it("L08c: key writes use strict durability, compare candidates, and promote atom
   const state = await readLocalState();
   expect(state.credentials[0]).toMatchObject({ role: "active", gen: 1, key: v.candidate });
   expect(state.credentials[0].pending).toBeUndefined();
-  expect(state.policy).toMatchObject({ everPaired: true, legacyCompat: false });
   const writes = transactions.mock.calls.filter((call) => call[1] === "readwrite");
   expect(writes.length).toBeGreaterThan(2);
   for (const call of writes) expect(call[2]).toEqual({ durability: "strict" });
@@ -76,7 +74,6 @@ it("L08c/L14c: startup retains an expired replacement candidate until recovery c
   vi.spyOn(Date, "now").mockReturnValue(saved.createdAt + 24 * 60 * 60_000);
 
   expect((await readLocalState()).credentials).toEqual([active, saved]);
-  await initializeLocalMigration();
   await setSkipLocalVerification(true);
   expect((await readLocalState()).credentials).toEqual([active, saved]);
   await expect(
@@ -94,29 +91,17 @@ it("L08c/L14c: startup retains an expired replacement candidate until recovery c
   });
   expect(recovered[0].pending).toBeUndefined();
 });
-it("L18: only eligible updates get migration compatibility; pairing never resurrects it", async () => {
-  await initializeLocalMigration({ reason: "install" }, "0.4.2");
-  expect((await readLocalState()).policy.legacyCompat).toBe(false);
-  await initializeLocalMigration({ reason: "update", previousVersion: "0.4.1" }, "0.4.2");
-  expect((await readLocalState()).policy.legacyCompat).toBe(true);
-  let credential = parseLocalPairing(link);
-  await stageCredential(credential);
-  credential = await saveCandidate(credential, { txn: v.txn, gen: 1, key: v.candidate });
-  await promoteCandidate(credential, { txn: v.txn, gen: 1 });
-  await initializeLocalMigration({ reason: "update", previousVersion: "0.4.1" }, "0.4.2");
-  expect((await readLocalState()).policy.legacyCompat).toBe(false);
-  await setSkipLocalVerification(true);
-  expect((await readLocalState()).credentials).toHaveLength(1);
-});
-it("L18: the exit version clears compatibility and never clears explicit skipping", async () => {
-  await initializeLocalMigration({ reason: "update", previousVersion: "0.4.1" }, "0.4.2");
-  await setSkipLocalVerification(true);
-  await initializeLocalMigration(undefined, "0.4.3");
-  expect((await readLocalState()).policy).toEqual({
-    skip: true,
-    everPaired: false,
-    legacyCompat: false,
+it("ignores obsolete migration fields while retaining the explicit skip preference", async () => {
+  const db = await openCredentialDatabase();
+  const tx = db.transaction("migration", "readwrite");
+  tx.objectStore("migration").put({ skip: true, everPaired: true, legacyCompat: true }, "policy");
+  await new Promise<void>((resolve) => {
+    tx.oncomplete = () => resolve();
   });
+  db.close();
+  expect((await readLocalState()).policy).toEqual({ skip: true });
+  await setSkipLocalVerification(false);
+  expect((await readLocalState()).policy).toEqual({ skip: false });
 });
 it("upgrades the shared database while keeping the existing remote grant", async () => {
   await new Promise<void>((resolve) => {
