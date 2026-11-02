@@ -1438,7 +1438,7 @@ function successfulFillScript(params: unknown) {
   return {
     result: {
       value: script.functionDeclaration.startsWith("function(value, clearBefore")
-        ? { before: "", expected: args[0].value }
+        ? { before: "", expected: args[0].value, write: "insert" }
         : script.functionDeclaration.startsWith("function(expected)")
           ? { connected: true, matches: true, valueLength: String(args[0].value).length }
           : "ready",

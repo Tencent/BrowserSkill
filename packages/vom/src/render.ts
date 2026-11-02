@@ -92,6 +92,7 @@ const MAX_SURFACE_ITEMS = 12;
 const MAX_SCOPE_LINES = 40;
 const RECOVERY_HANDLER_ATTRS = ["onclick", "onmousedown", "onkeydown", "onkeyup", "onkeypress"];
 const NATIVE_TAGS = new Set(["button", "input", "select", "textarea"]);
+const DATE_LIKE_INPUT_TYPES = new Set(["date", "time", "datetime-local", "month", "week"]);
 const GRAPHIC_ONLY_TAGS = new Set(["svg", "use", "path", "g", "symbol"]);
 const EXPLICIT_RECOVERY_ROLES = new Set([
   "button",
@@ -173,6 +174,16 @@ function normalizedTag(node: VomNode): string {
   return node.tag.toLowerCase();
 }
 
+function isDateLikeInput(node: VomNode): boolean {
+  const role = normalizedRole(node);
+  return (
+    normalizedTag(node) === "input" &&
+    role !== "" &&
+    !SKIP_ROLES.has(role) &&
+    DATE_LIKE_INPUT_TYPES.has(node.attrs?.type?.toLowerCase() ?? "")
+  );
+}
+
 function normalizeContextKey(s: string): string {
   return s.split(/\s+/).join(" ").toLowerCase();
 }
@@ -231,7 +242,7 @@ function indexedItemName(node: VomNode): string | undefined {
 }
 
 function shouldRender(node: VomNode): boolean {
-  if (dragHint(node)) return true;
+  if (dragHint(node) || isDateLikeInput(node)) return true;
   if (!node.role) return false;
 
   const role = normalizedRole(node);
@@ -245,7 +256,9 @@ function shouldRender(node: VomNode): boolean {
 function isSemanticReferenceNode(node: VomNode): boolean {
   return (
     node.referenceable !== false &&
-    (INTERACTIVE_ROLES.has(normalizedRole(node)) || isUrlBearingStructuralAction(node))
+    (INTERACTIVE_ROLES.has(normalizedRole(node)) ||
+      isDateLikeInput(node) ||
+      isUrlBearingStructuralAction(node))
   );
 }
 
