@@ -75,7 +75,7 @@ export interface CooperationFrames {
   gaps: FrameGap[];
 }
 
-/** Shared by concurrent collections for the lifetime of the controlled tab. */
+/** Shared by concurrent collections; pruned against the tab's document inventory. */
 export type FrameRepairs = Map<string, Promise<void>>;
 
 export interface CooperationView {

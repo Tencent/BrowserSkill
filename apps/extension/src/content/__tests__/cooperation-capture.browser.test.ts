@@ -3,11 +3,10 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { build } from "esbuild";
 import { describe, expect, it, vi } from "vitest";
 import { collectCooperationFrames } from "@/cooperation/browser-bridge";
 import { CooperationController } from "@/cooperation/controller";
-import { COOPERATION_ARM, COOPERATION_READ } from "@/cooperation/types";
+import { COOPERATION_ARM, COOPERATION_READ, type FrameState } from "@/cooperation/types";
 import { SessionManager } from "@/session-manager/manager";
 
 type Send = <T = Record<string, unknown>>(
@@ -30,37 +29,35 @@ describe.skipIf(!process.env.BSK_COOP_CHROME)("frame interaction coverage", () =
       response.end(
         request.url === "/broken"
           ? brokenFrame
-          : request.url === "/frame"
-            ? '<!doctype html><input aria-label="Frame" value="child">'
-            : '<!doctype html><input aria-label="Page" value="top"><iframe src="/frame"></iframe>',
+          : request.url === "/late-frame"
+            ? '<!doctype html><iframe src="/delayed"></iframe>'
+            : request.url === "/frame" || request.url === "/delayed"
+              ? '<!doctype html><input aria-label="Frame" value="child">'
+              : '<!doctype html><input aria-label="Page" value="top"><iframe src="/frame"></iframe>',
       );
     });
     try {
-      const entry = path.join(directory, "content.js");
+      // Use the shipped WXT entrypoint, including its invalidation/cleanup.
+      // Build the extension before running this browser regression.
+      const cooperationScript = await readFile(
+        path.resolve("dist/chrome-mv3/content-scripts/cooperation.js"),
+        "utf8",
+      );
       await writeFile(
-        entry,
-        `import { attachCooperationCapture } from '@/content/cooperation-capture';
-chrome.runtime.onMessage.addListener((message, _sender, reply) => {
+        path.join(directory, "content.bundle.js"),
+        `if (location.pathname !== '/delayed') chrome.runtime.onMessage.addListener((message, _sender, reply) => {
   if (message.kind === 'fixture.environment') reply({
     secure: isSecureContext,
     randomUUID: typeof crypto.randomUUID,
     getRandomValues: typeof crypto.getRandomValues,
   });
 });
-attachCooperationCapture();`,
+const start = () => { ${cooperationScript} };
+if (location.pathname === '/delayed') globalThis.fixtureStartCapture = start;
+else start();`,
       );
-      await build({
-        entryPoints: [entry],
-        outfile: path.join(directory, "content.bundle.js"),
-        bundle: true,
-        format: "iife",
-        alias: { "@": path.resolve("src") },
-      });
       await mkdir(path.join(directory, "content-scripts"));
-      await writeFile(
-        path.join(directory, "content-scripts/cooperation.js"),
-        await readFile(path.join(directory, "content.bundle.js")),
-      );
+      await writeFile(path.join(directory, "content-scripts/cooperation.js"), cooperationScript);
       const matches = ["http://127.0.0.1/*", "http://intranet.test/*"];
       await writeFile(
         path.join(directory, "manifest.json"),
@@ -78,7 +75,12 @@ attachCooperationCapture();`,
       );
       await writeFile(
         path.join(directory, "http-cooperation-worker.js"),
-        "chrome.runtime.onInstalled.addListener(() => {}); globalThis.httpCooperationReady = true;",
+        `chrome.runtime.onInstalled.addListener(() => {});
+globalThis.frameUpdates = [];
+chrome.runtime.onMessage.addListener(message => {
+  if (message.kind === 'cooperation.frame') globalThis.frameUpdates.push(message.state);
+});
+globalThis.httpCooperationReady = true;`,
       );
       await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
       const port = (server.address() as { port: number }).port;
@@ -140,9 +142,11 @@ attachCooperationCapture();`,
               );
             return reply.result.value;
           };
-          await expect
-            .poll(() => evaluate("globalThis.httpCooperationReady"), { timeout: 10000 })
-            .toBe(true);
+          const waitForWorker = () =>
+            expect
+              .poll(() => evaluate("globalThis.httpCooperationReady"), { timeout: 10000 })
+              .toBe(true);
+          await waitForWorker();
           expect(await evaluate("chrome.runtime.getManifest().name")).toBe(
             "HTTP interaction regression",
           );
@@ -235,6 +239,37 @@ attachCooperationCapture();`,
               .toMatchObject({ status: "complete" });
             return tab;
           };
+          const clickFrame = async (route: string) => {
+            const { targetInfos } = await send<{
+              targetInfos: { targetId: string; url: string }[];
+            }>("Target.getTargets");
+            const target = targetInfos.find(
+              (target) => target.url === `http://127.0.0.1:${port}${route}`,
+            )!;
+            const { sessionId: human } = await send<{ sessionId: string }>(
+              "Target.attachToTarget",
+              { targetId: target.targetId, flatten: true },
+            );
+            try {
+              await send("Page.bringToFront", {}, human);
+              const point = await send<{ result: { value: { x: number; y: number } } }>(
+                "Runtime.evaluate",
+                {
+                  expression: `(() => { const f = document.querySelector('iframe'); const a = f.getBoundingClientRect(); const b = f.contentDocument.querySelector('input').getBoundingClientRect(); return { x: a.x + f.clientLeft + b.x + 10, y: a.y + f.clientTop + b.y + 10 }; })()`,
+                  returnByValue: true,
+                },
+                human,
+              );
+              for (const type of ["mousePressed", "mouseReleased"])
+                await send(
+                  "Input.dispatchMouseEvent",
+                  { type, button: "left", clickCount: 1, ...point.result.value },
+                  human,
+                );
+            } finally {
+              await send("Target.detachFromTarget", { sessionId: human });
+            }
+          };
           const broken = await createTab("/broken");
           const browserFrames = await getAllFrames({ tabId: broken.id });
           const failed = browserFrames.find((frame) => frame.frameId !== 0)!;
@@ -247,6 +282,47 @@ attachCooperationCapture();`,
           ]);
           expect(executeScript).not.toHaveBeenCalled();
           await evaluate(`chrome.tabs.remove(${broken.id})`);
+
+          const delayed = await createTab("/late-frame");
+          const child = (await getAllFrames({ tabId: delayed.id })).find(
+            (frame) => frame.frameId !== 0,
+          )!;
+          await expect(
+            sendMessage(
+              delayed.id,
+              { kind: COOPERATION_READ, lease: "late" },
+              { documentId: child.documentId },
+            ),
+          ).rejects.toThrow("Receiving end does not exist");
+          const repaired = await collectCooperationFrames(delayed.id, COOPERATION_READ, "late");
+          expect(executeScript).toHaveBeenCalledOnce();
+          const repairedDocument = repaired.frames.get(child.frameId)!.document;
+          // Let the delayed declared script run after the repair. WXT must
+          // dispose the previous collector rather than leave both listening.
+          await evaluate(
+            `chrome.scripting.executeScript({target:{tabId:${delayed.id},documentIds:[${JSON.stringify(child.documentId)}]},func:()=>globalThis.fixtureStartCapture()})`,
+          );
+          const declared = await collectCooperationFrames(delayed.id, COOPERATION_READ, "late");
+          const declaredDocument = declared.frames.get(child.frameId)!.document;
+          expect(declaredDocument).not.toBe(repairedDocument);
+          await evaluate("globalThis.frameUpdates = []");
+          await clickFrame("/late-frame");
+          const afterInput = await collectCooperationFrames(delayed.id, COOPERATION_READ, "late");
+          expect(afterInput.frames.get(child.frameId)).toMatchObject({
+            document: declaredDocument,
+            human: 1,
+          });
+          const updates = await evaluate<FrameState[]>(
+            "globalThis.frameUpdates.filter(state => state.human > 0)",
+          );
+          expect(updates.length).toBeGreaterThan(0);
+          expect(new Set(updates.map((state) => state.document))).toEqual(
+            new Set([declaredDocument]),
+          );
+          expect(updates.every((state) => state.human === 1)).toBe(true);
+          expect(executeScript).toHaveBeenCalledOnce();
+          await evaluate(`chrome.tabs.remove(${delayed.id})`);
+          executeScript.mockClear();
 
           const oldTab = await createTab("/");
           const beforeReload = await getAllFrames({ tabId: oldTab.id });
@@ -273,6 +349,7 @@ attachCooperationCapture();`,
             targetId: worker!.targetId,
             flatten: true,
           }));
+          await waitForWorker();
           expect(await getAllFrames({ tabId: oldTab.id })).toEqual(beforeReload);
           for (const frame of beforeReload)
             await expect(
@@ -319,29 +396,7 @@ attachCooperationCapture();`,
           const guard = controller.controlGuard("repair", oldTab.id);
           expect(guard).not.toThrow();
 
-          const { targetInfos } = await send<{ targetInfos: { targetId: string; url: string }[] }>(
-            "Target.getTargets",
-          );
-          const target = targetInfos.find((target) => target.url === `http://127.0.0.1:${port}/`)!;
-          const { sessionId: human } = await send<{ sessionId: string }>("Target.attachToTarget", {
-            targetId: target.targetId,
-            flatten: true,
-          });
-          await send("Page.bringToFront", {}, human);
-          const point = await send<{ result: { value: { x: number; y: number } } }>(
-            "Runtime.evaluate",
-            {
-              expression: `(() => { const f = document.querySelector('iframe'); const a = f.getBoundingClientRect(); const b = f.contentDocument.querySelector('input').getBoundingClientRect(); return { x: a.x + f.clientLeft + b.x + 10, y: a.y + f.clientTop + b.y + 10 }; })()`,
-              returnByValue: true,
-            },
-            human,
-          );
-          for (const type of ["mousePressed", "mouseReleased"])
-            await send(
-              "Input.dispatchMouseEvent",
-              { type, button: "left", clickCount: 1, ...point.result.value },
-              human,
-            );
+          await clickFrame("/");
           await controller.observeTab(oldTab.id);
           expect(controller.view(oldTab.id)?.mode).toBe("human");
           expect(guard).toThrow();

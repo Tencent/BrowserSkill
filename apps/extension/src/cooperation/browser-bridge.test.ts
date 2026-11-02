@@ -170,6 +170,7 @@ it("repairs a missing listener on the same document and lease", async () => {
   expect(execute).toHaveBeenCalledExactlyOnceWith({
     target: { tabId: 7, documentIds: [main.documentId] },
     files: ["content-scripts/cooperation.js"],
+    injectImmediately: true,
   });
   expect(send).toHaveBeenCalledTimes(2);
   expect(send.mock.calls[1]).toEqual(send.mock.calls[0]);
@@ -201,6 +202,50 @@ it("reports every unreachable active frame and never repeats a failed document r
     });
   }
   expect(execute).toHaveBeenCalledTimes(2);
+});
+
+it("prunes repair attempts for documents that left the tab", async () => {
+  const send = vi.fn().mockRejectedValue(missingReceiver());
+  const frames = [main, { ...main, frameId: 3, documentId: "child" }];
+  const execute = bridge(send, frames);
+  const repairs: FrameRepairs = new Map();
+  const collect = () => collectCooperationFrames(7, COOPERATION_READ, "lease", undefined, repairs);
+  await expect(collect()).rejects.toMatchObject({ reason: "frame_unobservable" });
+  expect([...repairs.keys()]).toEqual([main.documentId, "child"]);
+  frames.pop();
+  await expect(collect()).rejects.toMatchObject({ reason: "frame_unobservable" });
+  expect([...repairs.keys()]).toEqual([main.documentId]);
+  expect(execute).toHaveBeenCalledTimes(2);
+  frames.length = 0;
+  await expect(collect()).rejects.toThrow("No observable document");
+  expect(repairs.size).toBe(0);
+});
+
+it.each([
+  "gap",
+  "unobservable",
+  "main",
+])("omits URL credentials, query and fragment from %s diagnostics", async (kind) => {
+  const url = "https://user:password@pay.test/checkout?token=secret#callback-token";
+  const target = {
+    ...main,
+    frameId: kind === "main" ? 0 : 3,
+    documentId: "sensitive",
+    url,
+    errorOccurred: kind !== "unobservable",
+  };
+  const send = vi.fn().mockImplementation(async (_tab, _message, { documentId }) => {
+    if (documentId === "sensitive") throw missingReceiver();
+    return frame();
+  });
+  bridge(send, kind === "main" ? [target] : [main, target]);
+  const result = await collectCooperationFrames(7, COOPERATION_READ, "lease").then(
+    (collection) => collection.gaps,
+    (error: FrameCollectionError) => error.toRpcError(),
+  );
+  const diagnostic = JSON.stringify(result);
+  expect(diagnostic).toContain("https://pay.test/checkout");
+  expect(diagnostic).not.toMatch(/user|password|token|secret|callback|\?|#/);
 });
 
 it("shares an in-flight repair across concurrent reads", async () => {

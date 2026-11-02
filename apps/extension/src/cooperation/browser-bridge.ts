@@ -40,7 +40,12 @@ function missingReceiver(error: unknown): boolean {
 }
 
 function frameIdentity(frame: chrome.webNavigation.GetAllFrameResultDetails): FrameIdentity {
-  return { frame_id: frame.frameId, url: frame.url };
+  const url = new URL(frame.url);
+  url.username = "";
+  url.password = "";
+  url.search = "";
+  url.hash = "";
+  return { frame_id: frame.frameId, url: url.href };
 }
 
 async function readFrame(
@@ -71,6 +76,7 @@ async function readFrame(
               .executeScript({
                 target: { tabId, documentIds: [frame.documentId] },
                 files: ["content-scripts/cooperation.js"],
+                injectImmediately: true,
               })
               .then(() => {});
             repairs.set(frame.documentId, repair);
@@ -118,6 +124,9 @@ export async function collectCooperationFrames(
   repairs: FrameRepairs = new Map(),
 ): Promise<CooperationFrames> {
   const frames = await chrome.webNavigation.getAllFrames({ tabId });
+  const documents = new Set(frames?.map((frame) => frame.documentId));
+  for (const documentId of repairs.keys())
+    if (!documents.has(documentId)) repairs.delete(documentId);
   if (!frames?.length) throw new Error("No observable document in this tab");
   const gaps: FrameGap[] = [];
   const live = frames.filter((frame) => {
