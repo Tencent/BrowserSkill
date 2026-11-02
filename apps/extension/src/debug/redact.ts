@@ -7,11 +7,25 @@ const MASK = "[redacted]";
 export const BODY_CHARS = 64 * 1024;
 export const URL_CHARS = 2048;
 
+/**
+ * Vendor credential names that name their secret in their last part: GitLab `private-token` (and the
+ * `private_token` query parameter), Google `x-goog-api-key`, AWS `x-amz-security-token`, Azure
+ * `ocp-apim-subscription-key`, Vault `x-vault-token`.
+ */
+const SECRET_HEADER_SUFFIX =
+  /(?:^|[_-])(?:token|api[_-]?key|apikey|secret|subscription[_-]key|password|passwd)$/i;
+
+function secretHeader(name: string): boolean {
+  return SECRET.test(name) || SECRET_HEADER_SUFFIX.test(name);
+}
+
 function secretField(key: string): boolean {
   return key
     .replace(/([a-z0-9])([A-Z])/g, "$1_$2")
     .split(/[.[\]]+/)
-    .some((part) => SECRET.test(part) || /(?:^|[_-])(?:password|passwd|pwd)(?:[_-]|$)/i.test(part));
+    .some(
+      (part) => secretHeader(part) || /(?:^|[_-])(?:password|passwd|pwd)(?:[_-]|$)/i.test(part),
+    );
 }
 
 const HTML_FIELD_SEPARATORS: Record<string, string> = {
@@ -97,7 +111,7 @@ export function redactHeaderEvidence(value: unknown): {
   let remaining = 4 * 1024;
   for (const [key, raw] of entries.slice(0, 80)) {
     const name = key.slice(0, 128).toLowerCase();
-    const secret = SECRET.test(name);
+    const secret = secretHeader(name);
     const original = String(raw);
     const redacted = secret ? MASK : redactText(original, 2048);
     const limit = Math.max(0, Math.min(2048, remaining - name.length));

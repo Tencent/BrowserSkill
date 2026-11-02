@@ -2,9 +2,41 @@
 
 import { describe, expect, it } from "vitest";
 import { jsonPointer, parseJsonSource } from "../json-source";
-import { BODY_CHARS, redactBody, redactRequestUrl } from "../redact";
+import { BODY_CHARS, redactBody, redactHeaders, redactRequestUrl } from "../redact";
 
 describe("source-preserving evidence redaction", () => {
+  it.each([
+    "PRIVATE-TOKEN",
+    "x-goog-api-key",
+    "x-amz-security-token",
+    "x-access-token",
+    "X-Vault-Token",
+    "Ocp-Apim-Subscription-Key",
+    "x-client-secret",
+  ])("redacts the vendor credential header %s", (name) => {
+    expect(redactHeaders({ [name]: "BSK_SYNTHETIC_SECRET_7264" })).toEqual({
+      [name.toLowerCase()]: "[redacted]",
+    });
+  });
+
+  it("redacts vendor credential fields in JSON bodies", () => {
+    const text =
+      '{"private_token":"BSK_SYNTHETIC_SECRET_7264","x_goog_api_key":"BSK_SYNTHETIC_SECRET_7264","page":2}';
+    expect(redactBody(text, "application/json")).toMatchObject({
+      text: '{"private_token":"[redacted]","x_goog_api_key":"[redacted]","page":2}',
+      redacted: true,
+    });
+  });
+
+  it.each([
+    "content-type",
+    "x-request-id",
+    "idempotency-key",
+    "x-tokenizer",
+  ])("keeps the ordinary header %s", (name) => {
+    expect(redactHeaders({ [name]: "value-7264" })).toEqual({ [name]: "value-7264" });
+  });
+
   it.each([
     'type="password"',
     'type="pass&#x77;ord"',
