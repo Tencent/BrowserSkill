@@ -360,6 +360,67 @@ describe.skipIf(!process.env.BSK_FILL_CHROME)("fill lifecycle and discoverabilit
     );
   }, 30_000);
 
+  describe.each([
+    "document",
+    "shadow",
+    "closed-shadow",
+    "iframe",
+  ] as const)("%s date/time fields", (kind) => {
+    it.each([
+      ["date", "2026-10-14"],
+      ["time", "14:30"],
+      ["datetime-local", "2026-10-14T14:30"],
+      ["month", "2026-10"],
+      ["week", "2026-W42"],
+    ] as const)(
+      "observes and fills a %s input by ref",
+      async (type, value) => {
+        const input = `<input id="target" type="${type}" aria-label="Booking field">`;
+        const markup =
+          kind === "document"
+            ? input
+            : kind === "shadow" || kind === "closed-shadow"
+              ? '<div id="container"></div>'
+              : '<iframe id="container"></iframe>';
+        await withFillBrowser({ background: false, markup }, async (h) => {
+          if (kind !== "document") {
+            await h.evaluate(`(() => {
+            const container = document.querySelector('#container');
+            const root = ${
+              kind === "shadow"
+                ? "container.attachShadow({ mode: 'open' })"
+                : kind === "closed-shadow"
+                  ? "container.attachShadow({ mode: 'closed' })"
+                  : "container.contentDocument.body"
+            };
+            root.innerHTML = ${JSON.stringify(input)};
+            window.bookingInput = root.querySelector('#target');
+          })()`);
+          }
+          const observation = await h.observe();
+          expect(observation).not.toHaveProperty("code");
+          if (!("text" in observation)) throw new Error("observation failed");
+          const ref = observation.text.match(
+            /(@e\d+) (?:Date|DateTime|InputTime) "Booking field"/,
+          )?.[1];
+          expect(ref, observation.text).toBeDefined();
+          expect(await h.fill(value, true, undefined, undefined, ref)).toMatchObject({
+            value_length: value.length,
+          });
+          const valueExpression =
+            kind === "document"
+              ? "document.querySelector('#target').value"
+              : "window.bookingInput.value";
+          expect(await h.evaluate(valueExpression)).toBe(value);
+          const after = await h.observe();
+          if (!("text" in after)) throw new Error("observation failed after fill");
+          expect(after.text).toContain(`="${value}"`);
+        });
+      },
+      30_000,
+    );
+  });
+
   it.each(["iframe", "shadow"])("fills roots and rejects descendants in %s", async (kind) => {
     await withFillBrowser(
       { background: false, markup: guard + '<div id="container"></div>' },

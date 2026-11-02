@@ -68,6 +68,41 @@ it("measures allocated reference names within the token budget", () => {
 
 describe("renderVom single-layer page", () => {
   it.each([
+    ["date", "Date"],
+    ["DATE", "Date"],
+    ["time", "InputTime"],
+    ["datetime-local", "DateTime"],
+    ["month", "DateTime"],
+    ["week", "DateTime"],
+  ] as const)("exposes an unnamed %s input as a reference", (type, role) => {
+    const out = renderVom(
+      scene([
+        node({
+          id: 1,
+          backendNodeId: 42,
+          tag: "input",
+          role,
+          attrs: { type },
+          rect: { x: 0, y: 0, w: 200, h: 40 },
+        }),
+      ]),
+    );
+    expect(out.text).toContain(`@e1 ${role}`);
+    expect(coreRefs(out.refs)).toEqual([{ ref: "e1", backendNodeId: 42 }]);
+  });
+
+  it("does not promote passive or unaddressable date-like nodes to references", () => {
+    const out = renderVom(
+      scene([
+        node({ id: 1, tag: "div", role: "Date", name: "Today", attrs: { type: "date" } }),
+        node({ id: 2, tag: "input", role: "presentation", attrs: { type: "date" } }),
+        node({ id: 3, tag: "input", role: "Date", attrs: { type: "date" }, referenceable: false }),
+      ]),
+    );
+    expect(out.refs).toEqual([]);
+  });
+
+  it.each([
     "",
     "true",
     "plaintext-only",
