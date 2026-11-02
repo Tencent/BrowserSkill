@@ -48,7 +48,7 @@ beforeEach(() => {
   vi.mocked(readLocalPairingInfo)
     .mockReset()
     .mockResolvedValue({
-      policy: { skip: false, everPaired: false, legacyCompat: false },
+      policy: { skip: false },
       devices: [],
     });
   vi.mocked(readSavedRemoteConnection)
@@ -323,7 +323,7 @@ it("pair: opens local pairing immediately and recognizes local links from either
 });
 function pairedInfo(skip = false) {
   vi.mocked(readLocalPairingInfo).mockResolvedValue({
-    policy: { skip, everPaired: true, legacyCompat: false },
+    policy: { skip },
     devices: [{ daemonId: v.daemon_id, deviceId: v.device_id, endpoint: "ws://127.0.0.1:52800/" }],
   });
 }

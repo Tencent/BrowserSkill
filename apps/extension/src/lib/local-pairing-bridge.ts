@@ -1,9 +1,5 @@
 import { LocalAuthError } from "@/transport/local-auth";
-import {
-  initializeLocalMigration,
-  readLocalState,
-  setSkipLocalVerification,
-} from "@/transport/local-credentials";
+import { readLocalState, setSkipLocalVerification } from "@/transport/local-credentials";
 import { verifyLocalPairing } from "@/transport/pairing-verifier";
 import { writeRemoteConnection } from "@/transport/remote-storage";
 import type { WSTransport } from "@/transport/ws-transport";
@@ -19,14 +15,6 @@ export function trustedPopup(sender: chrome.runtime.MessageSender): boolean {
   );
 }
 export function attachLocalPairing(controller: ConnectionController, transport: WSTransport): void {
-  const initialize = () =>
-    initializeLocalMigration().catch(() => controller.setLocalAuth({ state: "server_unverified" }));
-  void initialize();
-  chrome.runtime.onInstalled.addListener((details) => {
-    void initializeLocalMigration(details).catch(() =>
-      controller.setLocalAuth({ state: "server_unverified" }),
-    );
-  });
   chrome.runtime.onMessage.addListener((message, sender, reply) => {
     if (message?.kind !== LOCAL_PAIRING_MESSAGE) return false;
     if (!trustedPopup(sender)) {
