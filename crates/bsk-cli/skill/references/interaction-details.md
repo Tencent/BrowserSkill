@@ -260,7 +260,10 @@ snapshot or changed page identity invalidates continuation; then observe afresh.
 ## Diagnostics and other tools
 
 Use `console` / `network` for bounded read-only diagnostics; follow returned
-sequence cursors. `emulate --device iphone-14` affects one tab; `--off` restores it.
+sequence cursors. The first `console` read and `debug start` turn on page console
+reporting for that tab until it is released; sites with anti-debugging checks can
+detect this and reload, so skip them there unless the task needs them.
+`emulate --device iphone-14` affects one tab; `--off` restores it.
 `window resize` changes outer window dimensions, not an exact viewport size. It
 checks the actual bounds and whether the target tab's viewport follows a change.
 If the target tab is inactive, select it within the Agent Window and sync before

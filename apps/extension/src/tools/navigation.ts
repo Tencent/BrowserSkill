@@ -97,7 +97,6 @@ export async function probeMainFrameReadyState(
   tabId: number,
 ): Promise<string | null> {
   try {
-    await cdp.send(tabId, "Runtime.enable", {});
     const reply = await cdp.send<ReadyStateProbeReply>(tabId, "Runtime.evaluate", {
       expression: "document.readyState",
       returnByValue: true,

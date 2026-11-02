@@ -319,8 +319,6 @@ export class ChromiumCdp {
         check();
         await this.enablePageDomain(tabId);
         check();
-        await this.enableConsoleDomains(tabId);
-        check();
         await this.enableNetworkDomainBestEffort(tabId);
         check();
         this.attachedTabs.add(tabId);
@@ -568,11 +566,14 @@ export class ChromiumCdp {
     return buf.filter((entry) => entry.sequence > cursor);
   }
 
-  /** Ensure CDP domains for console capture are enabled for this tab. */
+  /**
+   * Enable console capture for this tab on first use. Attach leaves Runtime
+   * off: while it is on, every `console.*` call builds argument previews,
+   * which anti-debugging pages time to detect a debugger.
+   */
   async ensureConsoleCapture(tabId: number): Promise<void> {
     if (!this.attachedTabs.has(tabId)) {
       await this.ensureAttached(tabId);
-      return;
     }
     await this.enableConsoleDomains(tabId);
   }
@@ -795,23 +796,27 @@ export class ChromiumCdp {
 
   private async enableConsoleDomains(tabId: number): Promise<void> {
     if (this.consoleDomainsEnabledTabs.has(tabId)) return;
-    // Mark the tab only after both domains enable successfully — a
-    // transient failure (e.g. restricted page during attach) must leave
-    // the tab unmarked so a later `ensureConsoleCapture` can retry,
-    // instead of silently returning no console output forever. Mirrors
-    // `enableNetworkDomain`, which records the tab after success only.
-    let failed = false;
-    for (const method of ["Runtime.enable", "Log.enable"]) {
-      try {
-        await this.command({ tabId }, method, {});
-      } catch (err) {
-        failed = true;
-        console.debug("[bsk cdp] console domain enable failed", { tabId, method, err });
-      }
+    // Runtime carries page console calls and exceptions, so its failure is the
+    // caller's error. Log only adds browser-generated entries and stays
+    // best-effort. Either failure leaves the tab unmarked so the next read
+    // retries instead of silently returning no console output.
+    await this.command({ tabId }, "Runtime.enable", {});
+    let logEnabled = true;
+    try {
+      await this.command({ tabId }, "Log.enable", {});
+    } catch (err) {
+      logEnabled = false;
+      console.debug("[bsk cdp] console domain enable failed", { tabId, method: "Log.enable", err });
     }
-    if (!failed) {
-      this.consoleDomainsEnabledTabs.add(tabId);
-    }
+    // Runtime.enable replays stored console messages as events, which are not
+    // ordered with its command reply. One more renderer round trip lets them
+    // reach the buffer before the first read.
+    await this.command({ tabId }, "Runtime.evaluate", {
+      expression: "0",
+      returnByValue: true,
+      silent: true,
+    }).catch(() => {});
+    if (logEnabled) this.consoleDomainsEnabledTabs.add(tabId);
   }
 
   private async enableNetworkDomain(tabId: number): Promise<void> {

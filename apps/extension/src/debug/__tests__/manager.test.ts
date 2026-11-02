@@ -117,6 +117,27 @@ describe("task-scoped debug lifecycle", () => {
     expect(f.cdp.ensureNetworkCapture).toHaveBeenCalledTimes(1);
   });
 
+  it("enables Runtime on the root tab before installing the observer", async () => {
+    const f = await fixture();
+    active.push(f.manager);
+    const normal = f.sendAttached.getMockImplementation()!;
+    f.sendAttached.mockImplementation(async (target, method) =>
+      method === "Page.getFrameTree"
+        ? { frameTree: { frame: { id: "root" } } }
+        : method === "Page.createIsolatedWorld"
+          ? { executionContextId: 1 }
+          : normal(target, method),
+    );
+    await f.manager.start("s1", 7);
+    const rootCalls = f.sendAttached.mock.calls
+      .filter(([target]) => target.sessionId === undefined)
+      .map(([, method]) => method);
+    expect(rootCalls).toContain("Runtime.enable");
+    expect(rootCalls.indexOf("Runtime.enable")).toBeLessThan(
+      rootCalls.indexOf("Runtime.addBinding"),
+    );
+  });
+
   it("cancels a hung Network.enable promptly, stops events, and ignores late completion", async () => {
     const f = await fixture();
     active.push(f.manager);

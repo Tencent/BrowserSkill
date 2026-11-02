@@ -681,22 +681,74 @@ describe("ChromiumCdp", () => {
     expect(api.sendCommand).toHaveBeenCalledWith({ tabId: 9 }, "Page.enable", {});
   });
 
-  it("enables console capture domains best-effort during attach", async () => {
+  it("attaches without enabling Runtime or Log", async () => {
     const { api } = fakeApi();
-    (api.sendCommand as ReturnType<typeof vi.fn>).mockImplementation(
-      async (_target, method: string) => {
-        if (method === "Log.enable") throw new Error("restricted");
-        return {};
-      },
-    );
     const cdp = new ChromiumCdp(api);
-    await expect(cdp.ensureAttached(12)).resolves.toBeUndefined();
-    expect(cdp.isAttached(12)).toBe(true);
-    expect(api.sendCommand).toHaveBeenCalledWith({ tabId: 12 }, "Runtime.enable", {});
-    expect(api.sendCommand).toHaveBeenCalledWith({ tabId: 12 }, "Log.enable", {});
+    await cdp.ensureAttached(12);
+    await cdp.send(12, "DOM.getDocument");
+    await cdp.send(12, "Runtime.evaluate", { expression: "document.title" });
+    const methods = (api.sendCommand as ReturnType<typeof vi.fn>).mock.calls.map(
+      ([, method]) => method,
+    );
+    expect(methods).not.toContain("Runtime.enable");
+    expect(methods).not.toContain("Log.enable");
   });
 
-  it("retries console capture after a domain enable fails during attach", async () => {
+  it("enables console domains on first console capture and only once", async () => {
+    const { api } = fakeApi();
+    const cdp = new ChromiumCdp(api);
+    await cdp.ensureConsoleCapture(12);
+    await cdp.ensureConsoleCapture(12);
+    const methods = (api.sendCommand as ReturnType<typeof vi.fn>).mock.calls.map(
+      ([, method]) => method,
+    );
+    expect(methods.filter((method) => method === "Runtime.enable")).toHaveLength(1);
+    expect(methods.filter((method) => method === "Log.enable")).toHaveLength(1);
+    expect(methods.indexOf("Runtime.enable")).toBeGreaterThan(methods.indexOf("Page.enable"));
+  });
+
+  it("buffers replayed console messages before the first capture resolves", async () => {
+    const { api, onEvent } = fakeApi();
+    let replay: (() => void) | undefined;
+    (api.sendCommand as ReturnType<typeof vi.fn>).mockImplementation(
+      async (_target, method: string) => {
+        if (method === "Runtime.enable")
+          replay = () =>
+            onEvent.fire({ tabId: 12 }, "Runtime.consoleAPICalled", {
+              type: "log",
+              args: [{ type: "string", value: "before capture" }],
+            });
+        // Chrome may deliver replayed events after the enable reply.
+        if (method === "Runtime.evaluate") replay?.();
+        return {};
+      },
+    );
+    const cdp = new ChromiumCdp(api);
+    await cdp.ensureConsoleCapture(12);
+    const result = cdp.consoleEntriesSince(12, undefined, 10, 1000, false);
+    expect(result.entries.map((entry) => entry.text)).toEqual(["before capture"]);
+  });
+
+  it("surfaces Runtime.enable failures and retries on the next capture", async () => {
+    const { api } = fakeApi();
+    let runtimeFails = true;
+    (api.sendCommand as ReturnType<typeof vi.fn>).mockImplementation(
+      async (_target, method: string) => {
+        if (method === "Runtime.enable" && runtimeFails) throw new Error("restricted");
+        return {};
+      },
+    );
+    const cdp = new ChromiumCdp(api);
+    await expect(cdp.ensureConsoleCapture(12)).rejects.toThrow("restricted");
+    runtimeFails = false;
+    await expect(cdp.ensureConsoleCapture(12)).resolves.toBeUndefined();
+    const enables = (api.sendCommand as ReturnType<typeof vi.fn>).mock.calls.filter(
+      ([, method]) => method === "Runtime.enable",
+    );
+    expect(enables).toHaveLength(2);
+  });
+
+  it("keeps console capture usable when only Log.enable fails, retrying it later", async () => {
     const { api } = fakeApi();
     (api.sendCommand as ReturnType<typeof vi.fn>).mockImplementation(
       async (_target, method: string) => {
@@ -705,22 +757,24 @@ describe("ChromiumCdp", () => {
       },
     );
     const cdp = new ChromiumCdp(api);
-    // Attach is best-effort: Log.enable fails but attach still succeeds,
-    // leaving the tab unmarked so capture can be retried.
-    await cdp.ensureAttached(12);
-    const afterAttach = (api.sendCommand as ReturnType<typeof vi.fn>).mock.calls.filter(
-      ([, method]) => method === "Runtime.enable" || method === "Log.enable",
+    await expect(cdp.ensureConsoleCapture(12)).resolves.toBeUndefined();
+    await expect(cdp.ensureConsoleCapture(12)).resolves.toBeUndefined();
+    const logEnables = (api.sendCommand as ReturnType<typeof vi.fn>).mock.calls.filter(
+      ([, method]) => method === "Log.enable",
     );
-    expect(afterAttach).toHaveLength(2);
+    expect(logEnables).toHaveLength(2);
+  });
 
-    // Before the fix the "attempted" flag was set before success, so this
-    // was a no-op and the tab silently returned no console output forever.
-    // Now it retries both domains.
+  it("re-enables console domains after the debugger reattaches", async () => {
+    const { api } = fakeApi();
+    const cdp = new ChromiumCdp(api);
     await cdp.ensureConsoleCapture(12);
-    const afterRetry = (api.sendCommand as ReturnType<typeof vi.fn>).mock.calls.filter(
-      ([, method]) => method === "Runtime.enable" || method === "Log.enable",
+    await cdp.detach(12);
+    await cdp.ensureConsoleCapture(12);
+    const enables = (api.sendCommand as ReturnType<typeof vi.fn>).mock.calls.filter(
+      ([, method]) => method === "Runtime.enable",
     );
-    expect(afterRetry).toHaveLength(4);
+    expect(enables).toHaveLength(2);
   });
 
   it("retries and surfaces Network.enable failures for explicit capture", async () => {

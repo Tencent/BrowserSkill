@@ -9,6 +9,7 @@ import {
   handleReload,
   lifecycleAlreadyReached,
   lifecycleMeetsOrExceeds,
+  probeMainFrameReadyState,
   shouldTrustReadyStateProbe,
 } from "../navigation";
 
@@ -96,7 +97,6 @@ function makeFakeCdp(opts?: {
       }
       return {};
     },
-    "Runtime.enable": () => ({}),
     "Runtime.evaluate": () => {
       if (opts?.evaluateThrows) throw new Error("Cannot execute in a destroyed execution context");
       return { result: { value: nextReadyState() } };
@@ -186,6 +186,19 @@ function makeFakeCdp(opts?: {
     listeners: events,
   };
 }
+
+describe("probeMainFrameReadyState", () => {
+  it("evaluates on the default context without enabling Runtime", async () => {
+    const send = vi.fn(async (_tabId: number, method: string) => {
+      if (method === "Runtime.evaluate") return { result: { value: "complete" } };
+      throw new Error(`unexpected CDP call ${method}`);
+    });
+    const cdp = { send } as unknown as CdpRunner;
+
+    await expect(probeMainFrameReadyState(cdp, 4)).resolves.toBe("complete");
+    expect(send.mock.calls.map(([, method]) => method)).toEqual(["Runtime.evaluate"]);
+  });
+});
 
 describe("lifecycleAlreadyReached", () => {
   it("maps document.readyState to CDP lifecycle phases", () => {
