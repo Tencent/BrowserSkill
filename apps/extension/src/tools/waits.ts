@@ -449,11 +449,10 @@ async function probeState(
     );
     objectId = resolved.object?.objectId;
   } catch (error) {
-    // The node left the document between the lookup and the handle
-    // request. That is the `detached` transition itself — the one case
-    // where a failing CDP call is an observation rather than a fault.
+    // A missing ref identifies a removed node. A selector may already match
+    // its replacement, so only a fresh lookup can establish its absence.
     if (!isMissingNode(error)) throw error;
-    return { attached: false, visible: false };
+    return params.selector ? null : { attached: false, visible: false };
   }
   if (!objectId) return { code: "cdp_failed", message: "DOM.resolveNode returned no objectId" };
 
@@ -479,6 +478,8 @@ async function probeState(
       message: reply.exceptionDetails?.text ?? "wait-for-element state probe returned nothing",
     };
   }
+  // The selected node can also detach after its remote object was resolved.
+  if (params.selector && !value.attached) return null;
   return {
     attached: value.attached,
     visible: value.visible === true,

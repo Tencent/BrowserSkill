@@ -791,6 +791,119 @@ describe("wait-for-element regression coverage", () => {
   });
 
   it.each([
+    ["hidden", "resolve"],
+    ["detached", "resolve"],
+    ["hidden", "probe"],
+    ["detached", "probe"],
+  ] as const)("rechecks %s selectors after replacement during %s", async (state, phase) => {
+    const manager = await sessionWithRef();
+    let queries = 0;
+    const fake = makeFakeCdp({
+      handlers: {
+        "DOM.getDocument": () => ({ root: { nodeId: 1 } }),
+        "DOM.querySelector": () => ({ nodeId: ++queries + 1 }),
+        "DOM.describeNode": () => ({ node: { backendNodeId: 555 + queries } }),
+        "DOM.resolveNode": () => {
+          if (queries === 1 && phase === "resolve") {
+            throw new Error("No node with given id found");
+          }
+          return { object: { objectId: `obj-${queries}` } };
+        },
+        "Runtime.callFunctionOn": () => ({
+          result: { value: { attached: queries !== 1, visible: queries !== 1 } },
+        }),
+      },
+    });
+    const pending = handleWaitForElement(
+      manager,
+      { session_id: "aa11", selector: "#mask", state, timeout_ms: 100 },
+      fake,
+    );
+    await vi.advanceTimersByTimeAsync(100);
+    expect(await pending).toMatchObject({
+      satisfied: false,
+      attached: true,
+      visible: true,
+      elapsed_ms: 100,
+    });
+    expect(queries).toBeGreaterThan(1);
+  });
+
+  it.each([
+    "resolve",
+    "probe",
+  ] as const)("confirms selector absence after a stale %s", async (phase) => {
+    const manager = await sessionWithRef();
+    let queries = 0;
+    const fake = makeFakeCdp({
+      handlers: {
+        ...probeHandlers({ attached: false, visible: false }),
+        "DOM.getDocument": () => ({ root: { nodeId: 1 } }),
+        "DOM.querySelector": () => ({ nodeId: ++queries === 1 ? 2 : 0 }),
+        "DOM.describeNode": () => ({ node: { backendNodeId: 555 } }),
+        "DOM.resolveNode": () => {
+          if (phase === "resolve") {
+            throw new Error(
+              JSON.stringify({ code: -32000, message: "No node with given id found" }),
+            );
+          }
+          return { object: { objectId: "obj-1" } };
+        },
+      },
+    });
+    const pending = handleWaitForElement(
+      manager,
+      { session_id: "aa11", selector: "#mask", state: "detached", timeout_ms: 100 },
+      fake,
+    );
+    await vi.advanceTimersByTimeAsync(100);
+    expect(await pending).toMatchObject({
+      satisfied: true,
+      attached: false,
+      visible: false,
+      used_selector: "#mask",
+    });
+    expect(queries).toBe(2);
+  });
+
+  it.each([
+    ["resolve", false],
+    ["resolve", true],
+    ["probe", false],
+    ["probe", true],
+  ] as const)("bounds stale %s probes and retains prior evidence (%s)", async (phase, initialProbe) => {
+    const manager = await sessionWithRef();
+    let queries = 0;
+    const stale = () => !initialProbe || queries > 1;
+    const fake = makeFakeCdp({
+      handlers: {
+        "DOM.getDocument": () => ({ root: { nodeId: 1 } }),
+        "DOM.querySelector": () => ({ nodeId: ++queries + 1 }),
+        "DOM.describeNode": () => ({ node: { backendNodeId: 555 + queries } }),
+        "DOM.resolveNode": () => {
+          if (stale() && phase === "resolve") throw new Error("Could not find node with given id");
+          return { object: { objectId: `obj-${queries}` } };
+        },
+        "Runtime.callFunctionOn": () => ({
+          result: { value: { attached: !stale(), visible: !stale() } },
+        }),
+      },
+    });
+    const pending = handleWaitForElement(
+      manager,
+      { session_id: "aa11", selector: "#mask", state: "hidden", timeout_ms: 100 },
+      fake,
+    );
+    await vi.advanceTimersByTimeAsync(100);
+    expect(await pending).toMatchObject({
+      satisfied: false,
+      attached: initialProbe ? true : null,
+      visible: initialProbe ? true : null,
+      elapsed_ms: 100,
+    });
+  });
+
+  it.each([
     false,
     true,
   ])("bounds repeated stale lookups and preserves evidence (initial probe=%s)", async (initialProbe) => {
