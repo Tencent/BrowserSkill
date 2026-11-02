@@ -1043,6 +1043,8 @@ const FILL_PREPARATION_FUNCTION = `function(value, clearBefore) {
   const native = tag === 'input' || tag === 'textarea';
   const dateLike = tag === 'input' && ${FILL_DATE_LIKE_TYPES}.includes(this.type);
   if (!(${FILL_EDITABLE_FUNCTION}).call(this)) return { reason: 'target_not_fillable', error: 'fill requires an enabled text input, textarea, date/time control, or contenteditable editing host; target the editor root rather than an internal paragraph or span' };
+  // Appending to a date/time value only concatenates strings; always replace.
+  if (dateLike && !clearBefore) return { reason: 'fill_value_invalid', error: 'fill --no-clear is not supported for date/time inputs; omit it to replace the value' };
   const before = clearBefore ? '' : (${FILL_VALUE_FUNCTION}).call(this);
   let expected = before + value;
   if (native) {
@@ -1062,6 +1064,15 @@ const FILL_PREPARATION_FUNCTION = `function(value, clearBefore) {
         : 'fill value is not valid for a number input' };
     }
     expected = normalizer.value;
+    if (dateLike && expected !== '') {
+      // Let the browser compare against min/max, including reversed time ranges.
+      if (this.min) normalizer.min = this.min;
+      if (this.max) normalizer.max = this.max;
+      if (normalizer.validity.rangeUnderflow || normalizer.validity.rangeOverflow) {
+        const bounds = [this.min && 'min ' + this.min, this.max && 'max ' + this.max].filter(Boolean).join(', ');
+        return { reason: 'fill_value_invalid', error: 'fill value ' + expected + ' is outside the allowed range of this date/time input (' + bounds + ')' };
+      }
+    }
     if (!dateLike && this.type !== 'number' && this.maxLength >= 0 && expected.length > this.maxLength) {
       return { reason: 'fill_value_invalid', error: 'fill value exceeds the target maxlength' };
     }
@@ -1349,10 +1360,11 @@ export async function handleFill(
       return fillError(ready, "fill target changed or lost focus before typing");
     }
     if (preparation.write === "value") {
-      // Date-like inputs have no text caret; assign the sanitized value directly.
-      // Still flush deferred background focus first so a later tab switch cannot
-      // replay a pending focus handler over the value we are about to write.
-      if (ready === "background" || (params.value !== "" && !clearBefore)) {
+      // Date-like inputs have no text caret and always replace (preparation
+      // rejects --no-clear); assign the sanitized value directly. Still flush
+      // deferred background focus first so a later tab switch cannot replay a
+      // pending focus handler over the value we are about to write.
+      if (ready === "background") {
         try {
           await deps.cdp.send(target.tabId, "Input.dispatchKeyEvent", {
             type: "rawKeyDown",
@@ -1364,20 +1376,17 @@ export async function handleFill(
         if (throwIfAborted(deps.signal)) {
           return { code: "cancelled", message: "fill aborted" };
         }
-        // A replacement may overwrite a value set by a focus handler, but an
-        // append must not silently discard changes to the value it builds on.
+        // The replacement may overwrite a value set by a focus handler.
         const focusReply = await nodeCdp.send<FillScriptReply<FillReadiness>>(
           target.tabId,
           "Runtime.callFunctionOn",
           {
             objectId,
-            functionDeclaration: `function(before, clearBefore) {
-              if (!(${FILL_EDITABLE_FUNCTION}).call(this) ||
-                  (!clearBefore && (${FILL_VALUE_FUNCTION}).call(this) !== before)) return 'fill_target_changed';
+            functionDeclaration: `function() {
+              if (!(${FILL_EDITABLE_FUNCTION}).call(this)) return 'fill_target_changed';
               if (this.getRootNode().activeElement !== this) return 'fill_focus_lost';
               return this.ownerDocument.hasFocus() ? 'ready' : 'background';
             }`,
-            arguments: [{ value: preparation.before }, { value: clearBefore }],
             returnByValue: true,
           },
         );

@@ -97,8 +97,9 @@ targets are rejected without focusing or changing them; the tool never promotes
 a child target to its parent editor.
 
 By default, fill replaces all text in the target. `--no-clear` appends at its end.
-An empty value clears the target unless `--no-clear` is set. For date/time inputs,
-the combined value must be valid. Use the editor root's ref from a fresh
+An empty value clears the target unless `--no-clear` is set. Date/time inputs
+always replace their value: `--no-clear` is rejected, and the value must be valid
+and within the input's `min`/`max`. Use the editor root's ref from a fresh
 observation. After a mid-operation failure or cancellation,
 observe before retrying: earlier input events or edits may already have occurred.
 Rich-text framework state and undo behavior require application-specific checks.

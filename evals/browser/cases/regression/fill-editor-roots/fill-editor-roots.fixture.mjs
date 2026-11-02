@@ -136,7 +136,7 @@ export const acceptedTargets = [
     steps: [
       [value, true, value],
       ["", true, ""],
-      [value, false, value],
+      [value, true, value],
     ],
   })),
 ];

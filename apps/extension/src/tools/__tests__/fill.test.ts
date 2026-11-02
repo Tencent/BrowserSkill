@@ -232,27 +232,61 @@ describe("fill result verification", () => {
     expect(h.insert).not.toHaveBeenCalled();
   });
 
-  it("preserves a date-like value changed by deferred focus when appending", async () => {
-    const h = await setup('<input type="time" step="1" value="12:34">');
-    vi.spyOn(document, "hasFocus").mockReturnValue(false);
-    const send = h.send.getMockImplementation()!;
-    h.send.mockImplementation(async (tabId, method, params) => {
-      const reply = await send(tabId, method, params);
-      if (
-        method === "Input.dispatchKeyEvent" &&
-        (params as { type: string }).type === "rawKeyDown"
+  it.each([
+    ["date", "2026-10-14", ""],
+    ["time", "12:34", ":56"],
+    ["week", "2026-W42", ""],
+  ] as const)("rejects --no-clear on a %s input before focus", async (type, initial, value) => {
+    const h = await setup(`<input type="${type}" value="${initial}">`);
+    expect(await h.fill(value, false)).toMatchObject({
+      code: "invalid_params",
+      data: { reason: "fill_value_invalid" },
+      message: expect.stringContaining("--no-clear"),
+    });
+    expect(h.element.value).toBe(initial);
+    expect(h.send).not.toHaveBeenCalledWith(4, "DOM.focus", expect.anything());
+    expect(h.insert).not.toHaveBeenCalled();
+  });
+
+  describe("date-like min/max", () => {
+    // Happy DOM only implements range validity for number inputs. Model the
+    // browser's check for these fixed-width values to cover the plumbing; the
+    // Chrome suite covers the browser's own comparison.
+    const outside = (input: HTMLInputElement, key: "min" | "max") => {
+      const bound = input.getAttribute(key);
+      if (!bound || input.value === "") return false;
+      return key === "min" ? input.value < bound : input.value > bound;
+    };
+
+    it.each([
+      ["date", 'min="2026-01-01" max="2026-12-31"', "2027-01-01", "max 2026-12-31"],
+      ["date", 'min="2026-01-01" max="2026-12-31"', "2025-12-31", "min 2026-01-01"],
+      ["month", 'min="2026-03"', "2026-02", "min 2026-03"],
+      ["time", 'max="18:00"', "18:30", "max 18:00"],
+    ] as const)("rejects an out-of-range %s value before focus", async (type, attrs, value, bound) => {
+      const h = await setup(`<input type="${type}" ${attrs} value="">`);
+      vi.spyOn(HTMLInputElement.prototype, "validity", "get").mockImplementation(function (
+        this: HTMLInputElement,
       ) {
-        h.element.value = "08:00";
-      }
-      return reply;
+        return {
+          rangeUnderflow: outside(this, "min"),
+          rangeOverflow: outside(this, "max"),
+        } as ValidityState;
+      });
+      expect(await h.fill(value)).toMatchObject({
+        code: "invalid_params",
+        data: { reason: "fill_value_invalid" },
+        message: expect.stringContaining(bound),
+      });
+      expect(h.element.value).toBe("");
+      expect(h.send).not.toHaveBeenCalledWith(4, "DOM.focus", expect.anything());
     });
 
-    expect(await h.fill(":56", false)).toMatchObject({
-      code: "cdp_failed",
-      data: { reason: "fill_target_changed" },
+    it("fills a value on the inclusive bounds", async () => {
+      const h = await setup('<input type="date" min="2026-01-01" max="2026-12-31" value="">');
+      expect(await h.fill("2026-12-31")).toMatchObject({ value_length: 10 });
+      expect(h.element.value).toBe("2026-12-31");
     });
-    expect(h.element.value).toBe("08:00");
-    expect(h.insert).not.toHaveBeenCalled();
   });
 
   it("stops a background date fill when flush loses focus", async () => {

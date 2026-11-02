@@ -648,28 +648,86 @@ describe.skipIf(!process.env.BSK_FILL_CHROME)("date-like fill regressions", () =
   );
 
   it.each([
-    ":56",
-    "",
-  ])("does not overwrite a value changed by deferred focus when appending %s", async (value) => {
-    await withFillBrowser(
-      {
-        background: true,
-        markup: guard + '<input id="target" type="time" step="1" value="12:34">',
-      },
-      async (h) => {
-        await h.ref("document.querySelector('#target')");
-        await h.evaluate(`document.querySelector('#target').addEventListener('focus', () => {
-            document.querySelector('#target').value = '08:00';
-          })`);
-        expect(await h.fill(value, false)).toMatchObject({
-          code: "cdp_failed",
-          data: { reason: "fill_target_changed" },
-        });
-        expect(await h.evaluate("document.querySelector('#target').value")).toBe("08:00");
-        expect(h.calls).not.toContain("Input.insertText");
-      },
-    );
-  }, 30_000);
+    ["date", "2026-10-14", "2026-10-15"],
+    ["time", "12:34", ":56"],
+    ["week", "2026-W42", ""],
+  ] as const)(
+    "rejects --no-clear on a %s input without side effects",
+    async (type, initial, value) => {
+      await withFillBrowser(
+        {
+          background: false,
+          markup: guard + `<input id="target" type="${type}" step="1" value="${initial}">`,
+        },
+        async (h) => {
+          await h.ref("document.querySelector('#target')");
+          await h.evaluate("document.querySelector('#guard').focus(); window.fillEvents = []");
+          const before = await h.evaluate(unchangedState);
+          expect(await h.fill(value, false)).toMatchObject({
+            code: "invalid_params",
+            data: { reason: "fill_value_invalid" },
+          });
+          expect(await h.evaluate(unchangedState)).toBe(before);
+          expect(await h.evaluate("document.querySelector('#target').value")).toBe(initial);
+          expect(h.calls).not.toContain("DOM.focus");
+        },
+      );
+    },
+    30_000,
+  );
+
+  it.each([
+    ["date", 'min="2026-01-01" max="2026-12-31"', "2027-01-01", "min 2026-01-01, max 2026-12-31"],
+    ["date", 'min="2026-01-01" max="2026-12-31"', "2025-12-31", "min 2026-01-01, max 2026-12-31"],
+    ["time", 'min="09:00" max="18:00"', "18:30", "min 09:00, max 18:00"],
+    ["time", 'min="22:00" max="02:00"', "12:00", "min 22:00, max 02:00"],
+    ["datetime-local", 'max="2026-10-14T12:00"', "2026-10-14T12:01", "max 2026-10-14T12:00"],
+    ["month", 'min="2026-03"', "2026-02", "min 2026-03"],
+    ["week", 'max="2026-W10"', "2026-W42", "max 2026-W10"],
+  ] as const)(
+    "rejects an out-of-range %s value (%s) before focus",
+    async (type, attrs, value, bounds) => {
+      await withFillBrowser(
+        {
+          background: false,
+          markup: guard + `<input id="target" type="${type}" ${attrs}>`,
+        },
+        async (h) => {
+          await h.ref("document.querySelector('#target')");
+          await h.evaluate("document.querySelector('#guard').focus(); window.fillEvents = []");
+          const before = await h.evaluate(unchangedState);
+          expect(await h.fill(value)).toMatchObject({
+            code: "invalid_params",
+            data: { reason: "fill_value_invalid" },
+            message: expect.stringContaining(`(${bounds})`),
+          });
+          expect(await h.evaluate(unchangedState)).toBe(before);
+          expect(h.calls).not.toContain("DOM.focus");
+        },
+      );
+    },
+    30_000,
+  );
+
+  it.each([
+    ["date", 'min="2026-01-01" max="2026-12-31"', "2026-12-31"],
+    ["date", 'min="2026-01-01" max="2026-12-31"', "2026-01-01"],
+    ["time", 'min="22:00" max="02:00"', "23:30"],
+    ["week", 'min="2026-W10" max="2026-W42"', "2026-W42"],
+  ] as const)(
+    "fills an in-range %s value (%s) %s",
+    async (type, attrs, value) => {
+      await withFillBrowser(
+        { background: false, markup: guard + `<input id="target" type="${type}" ${attrs}>` },
+        async (h) => {
+          await h.ref("document.querySelector('#target')");
+          expect(await h.fill(value)).toMatchObject({ value_length: value.length });
+          expect(await h.evaluate("document.querySelector('#target').value")).toBe(value);
+        },
+      );
+    },
+    30_000,
+  );
 
   it.each([
     ["date", "2026-10-14"],
