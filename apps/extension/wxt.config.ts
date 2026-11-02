@@ -51,6 +51,7 @@ export default defineConfig({
       "storage",
       "webNavigation",
       "windows",
+      "bookmarks",
     ],
     host_permissions: ["<all_urls>"],
     icons: {

@@ -6,6 +6,7 @@ import { attachDebugBridge } from "@/debug/bridge";
 import { DebugManager } from "@/debug/manager";
 import { getAuditEnabled } from "@/lib/audit";
 import { attachAuditBridge } from "@/lib/audit-bridge";
+import { cleanupOrphanedBrowserSkillTabGroups } from "@/lib/cleanup-orphaned-tab-groups";
 import { ConnectionController } from "@/lib/connection-controller";
 import { watchDaemonConnection } from "@/lib/daemon-connection-preference";
 import { attachDaemonUpgradeNotice } from "@/lib/daemon-upgrade-notice";
@@ -554,6 +555,10 @@ export default defineBackground(() => {
   }
 
   void (async () => {
+    // Clean up orphaned "BrowserSkill" saved tab groups left by 0.4.0
+    // and earlier. Chrome persists closed groups as bookmarks; this
+    // removes them so they stop accumulating on the bookmarks bar.
+    void cleanupOrphanedBrowserSkillTabGroups();
     const [connectionEnabled, , auditEnabled] = await Promise.all([
       getConnectionEnabled(),
       daemonPort.ready,
