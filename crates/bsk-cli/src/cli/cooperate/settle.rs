@@ -1,6 +1,6 @@
 //! Retry only read-only synchronization, never the action that preceded it.
 use crate::cli::error::CliError;
-use bsk_protocol::{ErrorCode, tools::CooperateAction};
+use bsk_protocol::{ErrorCode, RpcError, tools::CooperateAction};
 use serde_json::{Value, json};
 
 fn recoverable(error: &CliError) -> bool {
@@ -20,6 +20,17 @@ pub(crate) fn run(
             }
             Err(error) if attempt < 3 && recoverable(&error) => {
                 let mut wait = call(CooperateAction::Wait)?;
+                if wait["state"]["mode"] == "unavailable" {
+                    return Err(CliError::from_rpc(RpcError {
+                        code: ErrorCode::PermissionDenied,
+                        message: "Page interaction coverage is unavailable".into(),
+                        data: Some(json!({
+                            "reason": "frame_unobservable",
+                            "effect_state": "none",
+                            "recovery": "Reload the tab once. If it persists, use read-only commands such as get-html or snapshot."
+                        })),
+                    }));
+                }
                 if wait["ready"] != true || wait["stopped"] == true {
                     // No action context is issued while ownership is unavailable.
                     if let Some(map) = wait.as_object_mut() {
@@ -37,7 +48,6 @@ pub(crate) fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bsk_protocol::RpcError;
     fn error(code: ErrorCode, effect: &str) -> CliError {
         CliError::from_rpc(RpcError {
             code,
@@ -120,5 +130,39 @@ mod tests {
             assert!(result.get("context_id").is_none());
             assert_eq!(result["settle"]["outcome"], "not_ready");
         }
+    }
+
+    #[test]
+    fn unobservable_frames_and_failed_pages_are_not_retried() {
+        for reason in ["frame_unobservable", "page_load_failed"] {
+            let mut calls = Vec::new();
+            let result = run(|action| {
+                calls.push(format!("{action:?}"));
+                Err(CliError::from_rpc(RpcError {
+                    code: ErrorCode::PermissionDenied,
+                    message: "page unavailable".into(),
+                    data: Some(json!({"reason": reason, "effect_state": "none"})),
+                }))
+            });
+            assert_eq!(calls, ["Sync"]);
+            assert_eq!(result.unwrap_err().data().unwrap()["reason"], reason);
+        }
+    }
+
+    #[test]
+    fn unavailable_wait_is_an_error_without_another_sync() {
+        let mut calls = Vec::new();
+        let result = run(|action| {
+            calls.push(format!("{action:?}"));
+            match action {
+                CooperateAction::Sync => Err(error(ErrorCode::PermissionDenied, "none")),
+                CooperateAction::Wait => Ok(json!({"ready":false,"state":{"mode":"unavailable"}})),
+                _ => panic!(),
+            }
+        });
+        assert_eq!(calls, ["Sync", "Wait"]);
+        let error = result.unwrap_err();
+        assert_eq!(error.code(), Some(ErrorCode::PermissionDenied));
+        assert_eq!(error.data().unwrap()["reason"], "frame_unobservable");
     }
 }

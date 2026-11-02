@@ -1,5 +1,6 @@
 import type { SessionManager } from "@/session-manager/manager";
 import { CooperationController } from "./controller";
+import { FrameCollectionError } from "./frame-error";
 import {
   COOPERATION_ARM,
   COOPERATION_CONTROL,
@@ -8,6 +9,10 @@ import {
   COOPERATION_READ,
   COOPERATION_READY,
   COOPERATION_RESUME,
+  type CooperationFrames,
+  type FrameGap,
+  type FrameIdentity,
+  type FrameRepairs,
   type FrameState,
   type InputExpectation,
 } from "./types";
@@ -30,47 +35,124 @@ function validFrame(value: unknown): value is FrameState {
   );
 }
 
+function missingReceiver(error: unknown): boolean {
+  return error instanceof Error && error.message.includes("Receiving end does not exist");
+}
+
+function frameIdentity(frame: chrome.webNavigation.GetAllFrameResultDetails): FrameIdentity {
+  return { frame_id: frame.frameId, url: frame.url };
+}
+
+async function readFrame(
+  tabId: number,
+  frame: chrome.webNavigation.GetAllFrameResultDetails,
+  message: { kind: string; lease: string; input?: InputExpectation },
+  repairs: FrameRepairs,
+): Promise<FrameState> {
+  const { kind } = message;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let active = true;
+  try {
+    const request = () => chrome.tabs.sendMessage(tabId, message, { documentId: frame.documentId });
+    const value = await Promise.race([
+      (async () => {
+        let first: unknown;
+        try {
+          first = await request();
+        } catch (error) {
+          if (!active || !missingReceiver(error)) throw error;
+          // Repair only a missing listener, never timeouts or navigation
+          // failures. Cleanup must not install a new collector after release.
+          if (kind === COOPERATION_DISABLE)
+            throw new FrameCollectionError("frame_unobservable", [frameIdentity(frame)]);
+          let repair = repairs.get(frame.documentId);
+          if (!repair) {
+            repair = chrome.scripting
+              .executeScript({
+                target: { tabId, documentIds: [frame.documentId] },
+                files: ["content-scripts/cooperation.js"],
+              })
+              .then(() => {});
+            repairs.set(frame.documentId, repair);
+          }
+          try {
+            await repair;
+          } catch {
+            throw new FrameCollectionError("frame_unobservable", [frameIdentity(frame)]);
+          }
+          if (!active) return undefined;
+          try {
+            first = await request();
+          } catch (error) {
+            if (!missingReceiver(error)) throw error;
+            throw new FrameCollectionError("frame_unobservable", [frameIdentity(frame)]);
+          }
+        }
+        if (first !== undefined || ![COOPERATION_READ, COOPERATION_ARM].includes(kind))
+          return first;
+        // A renderer can transiently return an empty reply. Retry only this
+        // state read, on the same document and lease, within the same deadline.
+        await new Promise((resolve) => setTimeout(resolve, 25));
+        return active ? request() : undefined;
+      })(),
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error("A page frame is not responding")), 1200);
+      }),
+    ]);
+    if (!validFrame(value))
+      throw new Error(
+        `Interaction collection is unavailable in frame ${frame.frameId} (${value === undefined ? "no reply" : "invalid state"})`,
+      );
+    return value;
+  } finally {
+    active = false;
+    clearTimeout(timer);
+  }
+}
+
 export async function collectCooperationFrames(
   tabId: number,
   kind: string,
   lease: string,
   input?: InputExpectation,
-): Promise<Map<number, FrameState>> {
+  repairs: FrameRepairs = new Map(),
+): Promise<CooperationFrames> {
   const frames = await chrome.webNavigation.getAllFrames({ tabId });
   if (!frames?.length) throw new Error("No observable document in this tab");
-  const results = await Promise.all(
-    frames.map(async (frame) => {
-      let timer: ReturnType<typeof setTimeout> | undefined;
-      let active = true;
-      try {
-        const request = () =>
-          chrome.tabs.sendMessage(tabId, { kind, input, lease }, { documentId: frame.documentId });
-        const value = await Promise.race([
-          (async () => {
-            const first = await request();
-            if (first !== undefined || ![COOPERATION_READ, COOPERATION_ARM].includes(kind))
-              return first;
-            // A renderer can transiently return an empty reply. Retry only this
-            // state read, on the same document and lease, within the same deadline.
-            await new Promise((resolve) => setTimeout(resolve, 25));
-            return active ? request() : undefined;
-          })(),
-          new Promise<never>((_, reject) => {
-            timer = setTimeout(() => reject(new Error("A page frame is not responding")), 1200);
-          }),
-        ]);
-        if (!validFrame(value))
-          throw new Error(
-            `Interaction collection is unavailable in frame ${frame.frameId} (${value === undefined ? "no reply" : "invalid state"})`,
-          );
-        return [frame.frameId, value] as const;
-      } finally {
-        active = false;
-        clearTimeout(timer);
-      }
+  const gaps: FrameGap[] = [];
+  const live = frames.filter((frame) => {
+    if (frame.errorOccurred) {
+      if (frame.frameId === 0)
+        throw new FrameCollectionError("page_load_failed", [frameIdentity(frame)]);
+      gaps.push({ ...frameIdentity(frame), reason: "load_error" });
+      return false;
+    }
+    if (frame.documentLifecycle && frame.documentLifecycle !== "active") {
+      gaps.push({ ...frameIdentity(frame), reason: "inactive_document" });
+      return false;
+    }
+    return true;
+  });
+  const results = await Promise.allSettled(
+    live.map(async (frame) => {
+      return [
+        frame.frameId,
+        await readFrame(tabId, frame, { kind, input, lease }, repairs),
+      ] as const;
     }),
   );
-  return new Map(results);
+  const failures = results.filter((result) => result.status === "rejected");
+  const unobservable = failures.flatMap((result) =>
+    result.reason instanceof FrameCollectionError ? result.reason.frames : [],
+  );
+  if (unobservable.length) throw new FrameCollectionError("frame_unobservable", unobservable);
+  if (failures.length) throw failures[0].reason;
+  return {
+    frames: new Map(
+      results.flatMap((result) => (result.status === "fulfilled" ? [result.value] : [])),
+    ),
+    gaps,
+  };
 }
 
 export function attachCooperation(
@@ -82,10 +164,16 @@ export function attachCooperation(
     sessions,
     changed,
     sessionActivity,
-    readFrames: (tabId, input, lease) =>
-      collectCooperationFrames(tabId, input ? COOPERATION_ARM : COOPERATION_READ, lease, input),
-    resumeFrames: async (tabId, lease) => {
-      await collectCooperationFrames(tabId, COOPERATION_RESUME, lease);
+    readFrames: (tabId, input, lease, repairs) =>
+      collectCooperationFrames(
+        tabId,
+        input ? COOPERATION_ARM : COOPERATION_READ,
+        lease,
+        input,
+        repairs,
+      ),
+    resumeFrames: async (tabId, lease, repairs) => {
+      await collectCooperationFrames(tabId, COOPERATION_RESUME, lease, undefined, repairs);
     },
     releaseFrames: async (tabId, lease) => {
       await collectCooperationFrames(tabId, COOPERATION_DISABLE, lease);

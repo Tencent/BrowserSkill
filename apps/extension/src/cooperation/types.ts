@@ -60,6 +60,24 @@ export interface FrameState {
   events: HumanActivity[];
 }
 
+export interface FrameIdentity {
+  frame_id: number;
+  url: string;
+}
+
+/** Documents that cannot receive page input and need no interaction collector. */
+export interface FrameGap extends FrameIdentity {
+  reason: "load_error" | "inactive_document";
+}
+
+export interface CooperationFrames {
+  frames: Map<number, FrameState>;
+  gaps: FrameGap[];
+}
+
+/** Shared by concurrent collections for the lifetime of the controlled tab. */
+export type FrameRepairs = Map<string, Promise<void>>;
+
 export interface CooperationView {
   target?: { x: number; y: number; expires: number };
   revision: number;

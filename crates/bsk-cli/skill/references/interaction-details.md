@@ -207,11 +207,22 @@ For an action followed by a transient synchronization refusal, use
 sync attempts, each retry preceded by `cooperate wait` (default 1s per wait;
 `--timeout-ms` overrides it). It retries only `cooperation_sync_required` with
 `effect_state: none`. Unknown effects, cancellation, user stop and other errors
-are returned without retries. A wait that is not ready returns `settle.outcome:
-not_ready` and no action context; continue the cooperation hand-back workflow.
+are returned without retries. An unavailable page returns an error and a non-zero
+exit code, including when a wait reports `state.mode: unavailable`. Human control
+or a stopped wait still returns `settle.outcome: not_ready` and no action context;
+continue the cooperation hand-back workflow unless the user stopped the task.
 Inspect `settle`, ownership and context, not just exit code. This does not prove
 application readiness: use an observed loading-complete signal where available.
 Never replay the preceding click, drag or submission because sync was refused.
+
+`frame_unobservable` means an active document still lacks interaction coverage
+after one targeted collector repair. Reload once; if it persists, use read-only
+commands such as `get-html` or `snapshot`. `page_load_failed` means the main page
+failed to load: check its URL and network, then reload. Neither reason is retried
+by `--settle`. Failed child frames and inactive documents are listed in
+`frame_gaps` without blocking sync; other active frames must remain observable.
+Before the first successful sync, status/wait reports `control_policy: null`
+because the session has not yet selected a policy.
 
 Use the ordinary full view for discovery when you do not yet know a useful
 label. Keep enough evidence to choose the next action; do not dump all markup

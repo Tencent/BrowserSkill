@@ -8,7 +8,8 @@ import { captureVomObservation, handleSnapshot } from "@/tools/observation";
 import type { CdpRunner } from "@/tools/shared";
 import { handleTabBorrow, handleTabCreate, handleTabReturn, handleTabSelect } from "@/tools/tabs";
 import { CooperationController } from "./controller";
-import type { FrameState } from "./types";
+import { FrameCollectionError } from "./frame-error";
+import type { CooperationFrames, FrameState } from "./types";
 
 vi.mock("@/tools/observation", () => ({
   captureVomObservation: vi.fn(),
@@ -75,7 +76,12 @@ async function fixture(options: { url?: string; sync?: boolean } = {}) {
       return native();
     },
   } as CdpRunner;
-  const readFrames = vi.fn(async () => new Map([[0, structuredClone(frame)]]));
+  const readFrames = vi.fn(
+    async (): Promise<CooperationFrames> => ({
+      frames: new Map([[0, structuredClone(frame)]]),
+      gaps: [],
+    }),
+  );
   const resumeFrames = vi.fn(async () => {
     frame = { ...frame, editing: false, revision: frame.revision + 1 };
   });
@@ -1316,6 +1322,44 @@ describe("shared-tab dispatch fences", () => {
     expect(await f.command("wait")).toMatchObject({ ready: false, state: { mode: "unavailable" } });
     expect(await f.command("wait")).toMatchObject({ ready: true });
     expect(await f.act()).toMatchObject({ code: "permission_denied" });
+  });
+  it.each([
+    "frame_unobservable",
+    "page_load_failed",
+  ] as const)("returns %s immediately from sync, wait and actions without granting control", async (reason) => {
+    const f = await fixture();
+    f.readFrames.mockRejectedValue(
+      new FrameCollectionError(reason, [{ frame_id: 3, url: "https://frame.test" }]),
+    );
+    for (const action of ["sync", "wait"] as const)
+      expect(await f.command(action)).toMatchObject({
+        code: "permission_denied",
+        data: {
+          reason,
+          effect_state: "none",
+          frames: [{ frame_id: 3, url: "https://frame.test" }],
+        },
+      });
+    expect(await f.act()).toMatchObject({ data: { reason, effect_state: "none" } });
+    expect(f.controller.view(7)?.mode).toBe("unavailable");
+    expect(f.native).not.toHaveBeenCalled();
+  });
+  it("exposes skipped frame gaps and leaves the policy unset until a successful sync", async () => {
+    const f = await fixture({ sync: false });
+    const collection = await f.readFrames();
+    collection.gaps = [{ frame_id: 3, url: "http://127.0.0.1:9/ad", reason: "load_error" }];
+    f.readFrames.mockImplementation(async () => structuredClone(collection));
+    expect(await f.command("status")).toMatchObject({
+      control_policy: null,
+      frame_gaps: collection.gaps,
+    });
+    expect(await f.command("wait")).toMatchObject({ control_policy: null, ready: true });
+    expect(await f.command("sync")).toMatchObject({
+      control_policy: "strict",
+      frame_gaps: collection.gaps,
+      context_id: expect.any(String),
+    });
+    expect(await f.command("status")).toMatchObject({ control_policy: "strict" });
   });
   it("fails closed when any frame is inaccessible and preserves a page the person touched", async () => {
     const f = await fixture();
@@ -2857,7 +2901,7 @@ it("revokes actions on media source changes even without DOM revision changes", 
   const synced = await f.command("sync");
   // A browser source selection can change currentSrc without a DOM mutation.
   const rev = f.readFrames.mock.results.at(-1)!.value;
-  const frames = await rev;
+  const { frames } = await rev;
   f.change(
     { media: [{ ...media, currentSrc: "two.webm" }], revision: frames.get(0)!.revision },
     false,

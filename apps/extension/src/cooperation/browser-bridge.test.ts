@@ -1,6 +1,14 @@
 import { afterEach, expect, it, vi } from "vitest";
 import { collectCooperationFrames } from "./browser-bridge";
-import { COOPERATION_ARM, COOPERATION_READ, COOPERATION_RESUME, type FrameState } from "./types";
+import { FrameCollectionError } from "./frame-error";
+import {
+  COOPERATION_ARM,
+  COOPERATION_DISABLE,
+  COOPERATION_READ,
+  COOPERATION_RESUME,
+  type FrameRepairs,
+  type FrameState,
+} from "./types";
 
 const frame = (human = 0): FrameState => ({
   document: "document-a",
@@ -13,12 +21,22 @@ const frame = (human = 0): FrameState => ({
   fields: [],
   events: [],
 });
-function bridge(sendMessage: ReturnType<typeof vi.fn>) {
+const main = {
+  frameId: 0,
+  documentId: "chrome-document-a",
+  url: "https://page.test/",
+  documentLifecycle: "active",
+  errorOccurred: false,
+};
+function bridge(sendMessage: ReturnType<typeof vi.fn>, frames = [main]) {
   vi.useFakeTimers();
+  const executeScript = vi.fn().mockResolvedValue([]);
   vi.stubGlobal("chrome", {
-    webNavigation: { getAllFrames: async () => [{ frameId: 0, documentId: "chrome-document-a" }] },
+    webNavigation: { getAllFrames: async () => frames },
     tabs: { sendMessage },
+    scripting: { executeScript },
   });
+  return executeScript;
 }
 afterEach(() => {
   vi.useRealTimers();
@@ -31,7 +49,7 @@ it("retries an empty collection reply on the same document and retains interveni
   const input = { type: "pointerdown" as const, timestamp: 123, x: 4, y: 5 };
   const result = collectCooperationFrames(7, COOPERATION_ARM, "lease", input);
   await vi.advanceTimersByTimeAsync(25);
-  expect((await result).get(0)?.human).toBe(1);
+  expect((await result).frames.get(0)?.human).toBe(1);
   expect(send).toHaveBeenCalledTimes(2);
   for (const call of send.mock.calls)
     expect(call).toEqual([
@@ -44,7 +62,7 @@ it("retries an empty collection reply on the same document and retains interveni
 it("does not retry a successful state read", async () => {
   const send = vi.fn().mockResolvedValue(frame());
   bridge(send);
-  expect((await collectCooperationFrames(7, COOPERATION_READ, "lease")).size).toBe(1);
+  expect((await collectCooperationFrames(7, COOPERATION_READ, "lease")).frames.size).toBe(1);
   expect(send).toHaveBeenCalledOnce();
 });
 
@@ -100,6 +118,159 @@ it("cannot arm a late retry after the collection deadline", async () => {
   await vi.advanceTimersByTimeAsync(1200);
   await result;
   reply(undefined);
+  await vi.advanceTimersByTimeAsync(25);
+  expect(send).toHaveBeenCalledOnce();
+});
+
+it.each([
+  COOPERATION_READ,
+  COOPERATION_RESUME,
+  COOPERATION_DISABLE,
+])("skips only failed child frames and inactive documents for %s", async (kind) => {
+  const send = vi.fn().mockResolvedValue(frame());
+  const execute = bridge(send, [
+    main,
+    { ...main, frameId: 2, documentId: "failed", errorOccurred: true },
+    ...["prerender", "cached", "pending_deletion"].map((documentLifecycle, i) => ({
+      ...main,
+      frameId: i + 3,
+      documentId: documentLifecycle,
+      documentLifecycle,
+    })),
+  ]);
+  const result = await collectCooperationFrames(7, kind, "lease");
+  expect([...result.frames.keys()]).toEqual([0]);
+  expect(result.gaps).toEqual([
+    { frame_id: 2, url: main.url, reason: "load_error" },
+    ...[3, 4, 5].map((frame_id) => ({ frame_id, url: main.url, reason: "inactive_document" })),
+  ]);
+  expect(send).toHaveBeenCalledOnce();
+  expect(execute).not.toHaveBeenCalled();
+});
+
+it("rejects a failed main page before messaging any frames", async () => {
+  const send = vi.fn();
+  const execute = bridge(send, [{ ...main, errorOccurred: true }]);
+  await expect(collectCooperationFrames(7, COOPERATION_READ, "lease")).rejects.toMatchObject({
+    reason: "page_load_failed",
+    frames: [{ frame_id: 0, url: main.url }],
+  });
+  expect(send).not.toHaveBeenCalled();
+  expect(execute).not.toHaveBeenCalled();
+});
+
+const missingReceiver = () =>
+  new Error("Could not establish connection. Receiving end does not exist.");
+
+it("repairs a missing listener on the same document and lease", async () => {
+  const send = vi.fn().mockRejectedValueOnce(missingReceiver()).mockResolvedValue(frame(1));
+  const execute = bridge(send);
+  const result = await collectCooperationFrames(7, COOPERATION_READ, "lease");
+  expect(result.frames.get(0)?.human).toBe(1);
+  expect(execute).toHaveBeenCalledExactlyOnceWith({
+    target: { tabId: 7, documentIds: [main.documentId] },
+    files: ["content-scripts/cooperation.js"],
+  });
+  expect(send).toHaveBeenCalledTimes(2);
+  expect(send.mock.calls[1]).toEqual(send.mock.calls[0]);
+});
+
+it("reports every unreachable active frame and never repeats a failed document repair", async () => {
+  const send = vi.fn().mockRejectedValue(missingReceiver());
+  const execute = bridge(send, [main, { ...main, frameId: 3, documentId: "child" }]);
+  const repairs: FrameRepairs = new Map();
+  for (let i = 0; i < 2; i++) {
+    const error = await collectCooperationFrames(
+      7,
+      COOPERATION_READ,
+      "lease",
+      undefined,
+      repairs,
+    ).catch((error) => error as FrameCollectionError);
+    expect(error).toBeInstanceOf(FrameCollectionError);
+    expect((error as FrameCollectionError).toRpcError()).toMatchObject({
+      code: "permission_denied",
+      data: {
+        reason: "frame_unobservable",
+        effect_state: "none",
+        frames: [
+          { frame_id: 0, url: main.url },
+          { frame_id: 3, url: main.url },
+        ],
+      },
+    });
+  }
+  expect(execute).toHaveBeenCalledTimes(2);
+});
+
+it("shares an in-flight repair across concurrent reads", async () => {
+  let repaired = false;
+  let finish!: () => void;
+  const send = vi.fn(async () => {
+    if (!repaired) throw missingReceiver();
+    return frame();
+  });
+  const execute = bridge(send);
+  execute.mockImplementation(
+    () =>
+      new Promise<void>((resolve) => {
+        finish = () => {
+          repaired = true;
+          resolve();
+        };
+      }),
+  );
+  const repairs: FrameRepairs = new Map();
+  const pending = [1, 2].map(() =>
+    collectCooperationFrames(7, COOPERATION_READ, "lease", undefined, repairs),
+  );
+  await vi.advanceTimersByTimeAsync(0);
+  expect(execute).toHaveBeenCalledOnce();
+  finish();
+  expect((await Promise.all(pending)).every((result) => result.frames.has(0))).toBe(true);
+});
+
+it("does not retry a denied injection or install collectors during release", async () => {
+  const send = vi.fn().mockRejectedValue(missingReceiver());
+  const execute = bridge(send);
+  execute.mockRejectedValue(new Error("Cannot access contents of the page"));
+  const repairs: FrameRepairs = new Map();
+  for (const kind of [COOPERATION_READ, COOPERATION_READ, COOPERATION_DISABLE])
+    await expect(
+      collectCooperationFrames(7, kind, "lease", undefined, repairs),
+    ).rejects.toMatchObject({
+      reason: "frame_unobservable",
+    });
+  expect(execute).toHaveBeenCalledOnce();
+  expect(send).toHaveBeenCalledTimes(3);
+});
+
+it.each([
+  "Frame was removed",
+  "The message port closed before a response was received.",
+])("does not inject for unrelated messaging errors: %s", async (message) => {
+  const send = vi.fn().mockRejectedValue(new Error(message));
+  const execute = bridge(send);
+  await expect(collectCooperationFrames(7, COOPERATION_READ, "lease")).rejects.toThrow(message);
+  expect(execute).not.toHaveBeenCalled();
+});
+
+it("cannot arm a repaired collector after the deadline", async () => {
+  let finish!: () => void;
+  const send = vi.fn().mockRejectedValue(missingReceiver());
+  const execute = bridge(send);
+  execute.mockImplementation(
+    () =>
+      new Promise<void>((resolve) => {
+        finish = resolve;
+      }),
+  );
+  const result = expect(collectCooperationFrames(7, COOPERATION_ARM, "lease")).rejects.toThrow(
+    "not responding",
+  );
+  await vi.advanceTimersByTimeAsync(1200);
+  await result;
+  finish();
   await vi.advanceTimersByTimeAsync(25);
   expect(send).toHaveBeenCalledOnce();
 });

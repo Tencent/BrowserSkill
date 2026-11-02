@@ -5,6 +5,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 Starting from 0.2.0, CLI / Extension / DSH Plugin share the same version number.
 
+## [Unreleased]
+
+### Fixed
+
+- Shared-control synchronization skips failed child frames and inactive documents,
+  reporting them in `frame_gaps`, and repairs missing interaction collectors once
+  per document. Active frames without coverage still block actions with
+  `frame_unobservable`; a failed main page reports `page_load_failed`.
+- `cooperate sync --settle` now exits non-zero when page interaction coverage is
+  unavailable instead of returning a successful `not_ready` reply. Temporary
+  human control retains the existing `not_ready` behavior. Status and wait report
+  `control_policy: null` until the first successful policy negotiation.
+
 ## [0.4.1] - 2026-11-02
 
 ### Changed

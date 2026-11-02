@@ -69,8 +69,9 @@ async function fixture() {
     sessions: manager,
     changed: () => {},
     resumeFrames: async () => {},
-    readFrames: async () =>
-      new Map([
+    readFrames: async () => ({
+      gaps: [],
+      frames: new Map([
         [
           0,
           {
@@ -86,6 +87,7 @@ async function fixture() {
           },
         ],
       ]),
+    }),
   });
   cooperation.startSession("one");
   await cooperation.observeTab(7);
