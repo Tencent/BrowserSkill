@@ -212,7 +212,10 @@ async function withCooperation(
             const states = await evaluate<Array<{ document: string; revision: number }>>(
               "[window, ...Array.from(document.querySelectorAll('iframe'), f => f.contentWindow)].map(w => w.coop)",
             );
-            return new Map(states.map((state, id) => [id, frameState(state)]));
+            return {
+              frames: new Map(states.map((state, id) => [id, frameState(state)])),
+              gaps: [],
+            };
           },
           resumeFrames: async () => {},
           changed: () => {},

@@ -17,6 +17,7 @@ import {
 } from "./action-checks";
 import { guardedRunner } from "./action-guard";
 import { type ControlAuthority, ControlAuthorityError } from "./control-authority";
+import { FrameCollectionError } from "./frame-error";
 import {
   contentChanges,
   type ObservationEvidence,
@@ -26,7 +27,15 @@ import {
   sameObservationEvidence,
 } from "./observation-evidence";
 import { pointerTargetValidator } from "./pointer-target";
-import type { CooperationParams, CooperationView, FrameState, InputExpectation } from "./types";
+import type {
+  CooperationFrames,
+  CooperationParams,
+  CooperationView,
+  FrameGap,
+  FrameRepairs,
+  FrameState,
+  InputExpectation,
+} from "./types";
 
 type Frames = Map<number, FrameState>;
 interface Context {
@@ -64,6 +73,8 @@ interface TabState {
   unavailable: boolean;
   frames: Frames;
   context?: Context;
+  frameGaps: FrameGap[];
+  frameRepairs: FrameRepairs;
   baseline?: Context;
   activity: Activity[];
   activitySequence: number;
@@ -86,8 +97,13 @@ interface Volatile {
 }
 export interface CooperationDeps {
   sessions: SessionManager;
-  readFrames(tabId: number, input: InputExpectation | undefined, lease: string): Promise<Frames>;
-  resumeFrames(tabId: number, lease: string): Promise<void>;
+  readFrames(
+    tabId: number,
+    input: InputExpectation | undefined,
+    lease: string,
+    repairs: FrameRepairs,
+  ): Promise<CooperationFrames>;
+  resumeFrames(tabId: number, lease: string, repairs: FrameRepairs): Promise<void>;
   releaseFrames?(tabId: number, lease: string): Promise<void>;
   changed(tabId: number): void;
   sessionActivity?(sessionId: string, idleProtected: boolean): void;
@@ -306,6 +322,8 @@ export class CooperationController implements ControlAuthority {
       working: false,
       unavailable: true,
       frames: new Map(),
+      frameGaps: [],
+      frameRepairs: new Map(),
       activity: [],
       activitySequence: 0,
       activitySeen: new Map(),
@@ -388,19 +406,21 @@ export class CooperationController implements ControlAuthority {
     return {
       target: !state.held && !this.humanActive(state) ? state.target : undefined,
       revision: state.revision,
-      mode: state.unavailable
-        ? "unavailable"
-        : state.working && (state.held || this.humanActive(state))
-          ? "yielding"
-          : state.held
-            ? "held"
-            : this.humanActive(state)
-              ? "human"
-              : state.working
-                ? "acting"
-                : state.context
-                  ? "ready"
-                  : "syncing",
+      // Explicit human ownership survives navigation and unavailable collection.
+      mode:
+        state.unavailable && !state.held
+          ? "unavailable"
+          : state.working && (state.held || this.humanActive(state))
+            ? "yielding"
+            : state.held
+              ? "held"
+              : this.humanActive(state)
+                ? "human"
+                : state.working
+                  ? "acting"
+                  : state.context
+                    ? "ready"
+                    : "syncing",
       editing: [...state.frames.values()].some((frame) => frame.editing),
     };
   }
@@ -482,7 +502,7 @@ export class CooperationController implements ControlAuthority {
     const epoch = state.epoch;
     this.changed(state);
     if (action === "resume") {
-      await this.deps.resumeFrames(tabId, state.lease);
+      await this.deps.resumeFrames(tabId, state.lease, state.frameRepairs);
       if (state.epoch === epoch) await this.refresh(state);
     }
     return { ok: true, state: this.view(tabId) };
@@ -517,15 +537,23 @@ export class CooperationController implements ControlAuthority {
     if (!live()) throw new Error("Shared-tab control has ended");
     let frames: Frames;
     try {
-      frames = await this.deps.readFrames(state.tabId, input, state.lease);
+      const collection = await this.deps.readFrames(
+        state.tabId,
+        input,
+        state.lease,
+        state.frameRepairs,
+      );
+      frames = collection.frames;
+      if (!live()) throw new Error("Shared-tab control ended during collection");
+      if (!frames.size || !frames.has(0))
+        throw new Error("Page interaction coverage is unavailable");
+      state.frameGaps = collection.gaps;
     } catch (error) {
       state.unavailable = true;
       state.context = undefined;
       this.changed(state);
       throw error;
     }
-    if (!live()) throw new Error("Shared-tab control ended during collection");
-    if (!frames.size || !frames.has(0)) throw new Error("Page interaction coverage is unavailable");
     for (const [id, next] of frames) {
       const old = state.frames.get(id);
       if (old?.document === next.document) {
@@ -600,7 +628,8 @@ export class CooperationController implements ControlAuthority {
         try {
           await this.refresh(state);
         } catch (error) {
-          if (params.action !== "wait" || signal.aborted) throw error;
+          if (params.action !== "wait" || signal.aborted || error instanceof FrameCollectionError)
+            throw error;
           state.unavailable = true;
         }
       };
@@ -638,7 +667,8 @@ export class CooperationController implements ControlAuthority {
           ),
           state: this.view(state.tabId),
           ready: !state.unavailable && !state.held && !state.working && !this.humanActive(state),
-          control_policy: session.controlPolicy ?? "strict",
+          control_policy: session.controlPolicy ?? null,
+          ...(state.frameGaps.length ? { frame_gaps: state.frameGaps } : {}),
         };
       if (state.held || state.working || this.humanActive(state))
         return failure("The user is still operating this tab; wait for hand-back");
@@ -750,6 +780,7 @@ export class CooperationController implements ControlAuthority {
           tab_id: state.tabId,
           context_id: context.id,
           control_policy: session.controlPolicy ?? "strict",
+          ...(state.frameGaps.length ? { frame_gaps: state.frameGaps } : {}),
           ...(targetPolicy ? { observation_id: context.observationId } : {}),
           kind: delta
             ? sameFrames(baseline.frames, after, "revision")
@@ -805,6 +836,7 @@ export class CooperationController implements ControlAuthority {
       state.unavailable = true;
       state.context = undefined;
       this.changed(state);
+      if (error instanceof FrameCollectionError) return error.toRpcError();
       return failure(error instanceof Error ? error.message : String(error));
     }
   }
@@ -1050,7 +1082,7 @@ export class CooperationController implements ControlAuthority {
         if (outcome === "cancelled") this.stopSession(state.sessionId);
         if (outcome === "continued" || outcome === "completed") {
           this.preserve(state);
-          await this.deps.resumeFrames(state.tabId, state.lease);
+          await this.deps.resumeFrames(state.tabId, state.lease, state.frameRepairs);
         }
         return result;
       } finally {
@@ -1659,6 +1691,7 @@ export class CooperationController implements ControlAuthority {
         };
       }
       if (error instanceof ActionCheckError) checkFailure = error.rpcError;
+      if (error instanceof FrameCollectionError) return error.toRpcError(sent ? "unknown" : "none");
       return reportFailure(
         error instanceof Error ? error.message : String(error),
         sent ? "unknown" : "none",

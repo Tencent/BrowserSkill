@@ -9,6 +9,7 @@ import { promisify } from "node:util";
 import { withChrome } from "../snapshot-coordinates/chrome.mjs";
 import { attachExtensionWorker, runCompatibilityScenarios } from "./compatibility.mjs";
 import { runLegacyStrictDshScenario } from "./dsh-client.mjs";
+import { runFrameObservabilityScenarios } from "./frame-observability.mjs";
 import { runLifetimeScenario } from "./lifetime.mjs";
 import { runGenericScenarios } from "./scenarios.mjs";
 import { runTargetPolicyScenarios } from "./target-policy.mjs";
@@ -21,6 +22,7 @@ const artifacts = process.env.BSK_COOP_ARTIFACTS;
 const loadExtensionOverCdp = process.env.BSK_COOP_LOAD_CDP === "1";
 const compatibilityOnly = process.env.BSK_COOP_COMPAT_ONLY === "1";
 const targetOnly = process.env.BSK_COOP_TARGET_ONLY === "1";
+const framesOnly = process.env.BSK_COOP_FRAMES_ONLY === "1";
 const fullIdle = process.env.BSK_COOP_FULL_IDLE === "1";
 const headful = process.env.BSK_COOP_HEADFUL === "1";
 const deviceScale = Number(process.env.BSK_COOP_DPR ?? 1);
@@ -28,7 +30,10 @@ const deviceScale = Number(process.env.BSK_COOP_DPR ?? 1);
 const idleWaitMs = fullIdle ? 360500 : 12500;
 if (artifacts) await mkdir(artifacts, { recursive: true });
 assert(executable, "Set BSK_COOP_CHROME to an isolated Chromium executable");
-assert(!(compatibilityOnly && targetOnly), "Choose compatibility-only or target-only coverage");
+assert(
+  [compatibilityOnly, targetOnly, framesOnly].filter(Boolean).length <= 1,
+  "Choose one coverage subset",
+);
 assert(port !== 52800 && Number.isInteger(port));
 assert(
   (await readFile(join(extensionPath, "background.js"), "utf8")).includes(`ws://127.0.0.1:${port}`),
@@ -104,6 +109,7 @@ const poll = async (read, label = "setup") => {
 };
 const html = await readFile(new URL("fixture.html", import.meta.url));
 const targetHtml = await readFile(new URL("target-policy.html", import.meta.url));
+const brokenFrameHtml = await readFile(new URL("broken-frame.html", import.meta.url));
 const submissions = [];
 const server = createServer(async (req, res) => {
   if (req.url === "/submit") {
@@ -118,15 +124,18 @@ const server = createServer(async (req, res) => {
     res.end(
       req.url === "/frame"
         ? '<label>Frame note <input aria-label="Frame note"></label>'
-        : req.url?.startsWith("/target-policy?")
-          ? targetHtml
-          : html,
+        : req.url === "/broken-frame"
+          ? brokenFrameHtml
+          : req.url?.startsWith("/target-policy?")
+            ? targetHtml
+            : html,
     );
   }
 });
 let browserVersion;
 let compatibility;
 let targetPolicy;
+let frameObservability;
 let daemon;
 let daemonOutput = "";
 const evidence = [];
@@ -143,7 +152,9 @@ try {
       "--port",
       String(port),
       // Capability-only runs must not inherit the accelerated idle-test clock.
-      ...(fullIdle || compatibilityOnly || targetOnly ? [] : ["--session-idle", "8s"]),
+      ...(fullIdle || compatibilityOnly || targetOnly || framesOnly
+        ? []
+        : ["--session-idle", "8s"]),
     ],
     {
       env,
@@ -202,6 +213,9 @@ try {
       };
       browserVersion = (await send("Browser.getVersion")).product;
       await poll(async () => (await bsk(["browsers"])).length, "extension connection");
+      if (!compatibilityOnly)
+        frameObservability = await runFrameObservabilityScenarios({ send, bsk: runBsk, base });
+      if (framesOnly) return;
       if (!compatibilityOnly)
         targetPolicy = await runTargetPolicyScenarios({ send, bsk: runBsk, cli, env, base });
       if (targetOnly) return;
@@ -866,14 +880,17 @@ try {
   );
   const report = {
     passed: true,
-    suite: targetOnly
-      ? "target-policy"
-      : compatibilityOnly
-        ? "legacy-strict-compatibility"
-        : "legacy-strict-with-target-smoke",
+    suite: framesOnly
+      ? "frame-observability"
+      : targetOnly
+        ? "target-policy"
+        : compatibilityOnly
+          ? "legacy-strict-compatibility"
+          : "legacy-strict-with-target-smoke",
     browserVersion,
     headful,
-    ...(!targetOnly ? { closedTaskTabFailsClosed: true, legacyStrict: true } : {}),
+    ...(!targetOnly && !framesOnly ? { closedTaskTabFailsClosed: true, legacyStrict: true } : {}),
+    frameObservability,
     targetPolicy,
     compatibility,
     submissions,

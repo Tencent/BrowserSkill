@@ -26,6 +26,8 @@ export type ErrorCode =
 export type RpcErrorReason =
   | "user_moved_tab"
   | "cooperation_sync_required"
+  | "frame_unobservable"
+  | "page_load_failed"
   | "control_authority_required"
   | "control_context_invalid"
   | "human_intervention"

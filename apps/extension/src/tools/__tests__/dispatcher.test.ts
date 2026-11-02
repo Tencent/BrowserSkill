@@ -401,7 +401,7 @@ describe("ToolDispatcher", () => {
     await sessions.start("aa11");
     const cooperation = new CooperationController({
       sessions,
-      readFrames: async () => new Map(),
+      readFrames: async () => ({ frames: new Map(), gaps: [] }),
       resumeFrames: async () => {},
       changed: vi.fn(),
     });
@@ -933,7 +933,7 @@ describe("ToolDispatcher", () => {
     };
     const cooperation = new CooperationController({
       sessions,
-      readFrames: async () => new Map(),
+      readFrames: async () => ({ frames: new Map(), gaps: [] }),
       resumeFrames: async () => {},
       changed: vi.fn(),
     });
