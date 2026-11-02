@@ -40,12 +40,16 @@ function missingReceiver(error: unknown): boolean {
 }
 
 function frameIdentity(frame: chrome.webNavigation.GetAllFrameResultDetails): FrameIdentity {
-  const url = new URL(frame.url);
-  url.username = "";
-  url.password = "";
-  url.search = "";
-  url.hash = "";
-  return { frame_id: frame.frameId, url: url.href };
+  let url = "[unavailable]";
+  try {
+    const parsed = new URL(frame.url);
+    url = ["http:", "https:"].includes(parsed.protocol)
+      ? `${parsed.origin}${parsed.pathname}`
+      : parsed.protocol;
+  } catch {
+    // Diagnostic formatting must not fail collection or expose the original value.
+  }
+  return { frame_id: frame.frameId, url };
 }
 
 async function readFrame(

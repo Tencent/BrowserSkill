@@ -406,19 +406,21 @@ export class CooperationController implements ControlAuthority {
     return {
       target: !state.held && !this.humanActive(state) ? state.target : undefined,
       revision: state.revision,
-      mode: state.unavailable
-        ? "unavailable"
-        : state.working && (state.held || this.humanActive(state))
-          ? "yielding"
-          : state.held
-            ? "held"
-            : this.humanActive(state)
-              ? "human"
-              : state.working
-                ? "acting"
-                : state.context
-                  ? "ready"
-                  : "syncing",
+      // Explicit human ownership survives navigation and unavailable collection.
+      mode:
+        state.unavailable && !state.held
+          ? "unavailable"
+          : state.working && (state.held || this.humanActive(state))
+            ? "yielding"
+            : state.held
+              ? "held"
+              : this.humanActive(state)
+                ? "human"
+                : state.working
+                  ? "acting"
+                  : state.context
+                    ? "ready"
+                    : "syncing",
       editing: [...state.frames.values()].some((frame) => frame.editing),
     };
   }

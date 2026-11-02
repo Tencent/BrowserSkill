@@ -1323,6 +1323,15 @@ describe("shared-tab dispatch fences", () => {
     expect(await f.command("wait")).toMatchObject({ ready: true });
     expect(await f.act()).toMatchObject({ code: "permission_denied" });
   });
+  it("keeps an explicit human hold visible while navigation makes collection unavailable", async () => {
+    const f = await fixture();
+    await f.controller.control(7, f.controller.view(7)!.revision, "hold");
+    f.controller.invalidate(7);
+    f.readFrames.mockRejectedValueOnce(new Error("frame is loading"));
+    expect(await f.command("wait")).toMatchObject({ ready: false, state: { mode: "held" } });
+    expect(await f.act()).toMatchObject({ code: "permission_denied" });
+    expect(f.native).not.toHaveBeenCalled();
+  });
   it.each([
     "frame_unobservable",
     "page_load_failed",

@@ -213,6 +213,7 @@ three attempts fail, the last sync error is returned with a non-zero exit code;
 the CLI does not invent a frame failure or suggest reloading a loading page. Human control
 or a stopped wait still returns `settle.outcome: not_ready` and no action context;
 continue the cooperation hand-back workflow unless the user stopped the task.
+An explicit human hold takes priority over unavailable coverage in the returned state.
 Inspect `settle`, ownership and context, not just exit code. This does not prove
 application readiness: use an observed loading-complete signal where available.
 Never replay the preceding click, drag or submission because sync was refused.
@@ -223,7 +224,8 @@ commands such as `get-html` or `snapshot`. `page_load_failed` means the main pag
 failed to load: check its URL and network, then reload. Neither reason is retried
 by `--settle`. Failed child frames and inactive documents are listed in
 `frame_gaps` without blocking sync; other active frames must remain observable.
-Frame diagnostic URLs omit credentials, query parameters and fragments.
+Frame diagnostic URLs retain only HTTP(S) origins and paths. Other URLs show
+only their protocol, and malformed URLs show `[unavailable]`.
 Before the first successful sync, status/wait reports `control_policy: null`
 because the session has not yet selected a policy.
 

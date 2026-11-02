@@ -109,6 +109,7 @@ mod tests {
     fn human_hold_and_stopped_wait_return_without_an_action_context() {
         for wait in [
             json!({"ready":false,"state":{"mode":"human"},"activity":["typing"]}),
+            json!({"ready":false,"state":{"mode":"held"}}),
             json!({"ready":true,"stopped":true}),
             json!({"ready":false,"stopped":true,"state":{"mode":"unavailable"}}),
         ] {

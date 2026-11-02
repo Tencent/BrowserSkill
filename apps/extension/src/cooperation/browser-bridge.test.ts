@@ -275,6 +275,18 @@ it("shares an in-flight repair across concurrent reads", async () => {
   expect((await Promise.all(pending)).every((result) => result.frames.has(0))).toBe(true);
 });
 
+it.each([
+  ["data:text/html,<input value=secret>", "data:"],
+  ["blob:https://page.test/private-content", "blob:"],
+  ["https://bad host/private-content", "[unavailable]"],
+])("limits opaque or malformed URL diagnostics without failing collection: %s", async (url, expected) => {
+  const send = vi.fn().mockResolvedValue(frame());
+  bridge(send, [main, { ...main, frameId: 3, documentId: "child", errorOccurred: true, url }]);
+  const result = await collectCooperationFrames(7, COOPERATION_READ, "lease");
+  expect(result.frames.has(0)).toBe(true);
+  expect(result.gaps).toEqual([{ frame_id: 3, url: expected, reason: "load_error" }]);
+});
+
 it("does not retry a denied injection or install collectors during release", async () => {
   const send = vi.fn().mockRejectedValue(missingReceiver());
   const execute = bridge(send);
