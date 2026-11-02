@@ -1193,6 +1193,49 @@ export async function handleFill(
     // Check editability before clearing. Keep the expected result tied to
     // this object, including the existing value on the append path.
     await deps.cdp.beginDomMutation?.();
+    if (plan.write === "insert" && params.value === "") {
+      // Empty fills do not send insertText, so flush any background focus
+      // before clearing (or reading an unchanged value for --no-clear).
+      const focus = await nodeCdp.send<
+        FillScriptReply<"ready" | "background" | "target_not_fillable" | "fill_focus_lost">
+      >(target.tabId, "Runtime.callFunctionOn", {
+        objectId,
+        functionDeclaration: `function() {
+          if (!(${FILL_EDITABLE_FUNCTION}).call(this)) return 'target_not_fillable';
+          if (this.getRootNode().activeElement !== this) return 'fill_focus_lost';
+          return this.ownerDocument.hasFocus() ? 'ready' : 'background';
+        }`,
+        returnByValue: true,
+      });
+      if (throwIfAborted(deps.signal)) return { code: "cancelled", message: "fill aborted" };
+      const state = focus.result?.value;
+      if (
+        focus.exceptionDetails ||
+        (state !== "ready" &&
+          state !== "background" &&
+          state !== "target_not_fillable" &&
+          state !== "fill_focus_lost")
+      ) {
+        return fillError(
+          "fill_failed",
+          "fill readiness script failed or returned an unexpected result",
+        );
+      }
+      if (state === "target_not_fillable" || state === "fill_focus_lost") {
+        return fillError(state, "fill target changed or lost focus before clearing");
+      }
+      if (state === "background") {
+        try {
+          await deps.cdp.send(target.tabId, "Input.dispatchKeyEvent", {
+            type: "rawKeyDown",
+            commands: [],
+          });
+        } finally {
+          await deps.cdp.send(target.tabId, "Input.dispatchKeyEvent", { type: "keyUp" });
+        }
+        if (throwIfAborted(deps.signal)) return { code: "cancelled", message: "fill aborted" };
+      }
+    }
     const prepared = await nodeCdp.send<FillScriptReply<FillPreparation>>(
       target.tabId,
       "Runtime.callFunctionOn",

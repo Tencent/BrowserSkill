@@ -530,6 +530,43 @@ describe.skipIf(!process.env.BSK_FILL_CHROME)("fill lifecycle and discoverabilit
 
 describe.skipIf(!process.env.BSK_FILL_CHROME)("fill focus changes", () => {
   it.each([
+    ["input", '<input id="target" value="old">', "value"],
+    ["textarea", '<textarea id="target">old</textarea>', "value"],
+    ["contenteditable", '<div id="target" contenteditable="true">old</div>', "textContent"],
+  ] as const)(
+    "keeps a background %s clear after tab activation",
+    async (_name, markup, field) => {
+      await withFillBrowser({ background: true, markup: guard + markup }, async (h) => {
+        await h.ref("document.querySelector('#target')");
+        await h.evaluate(`document.querySelector('#target').addEventListener('focus', () => {
+        document.querySelector('#target').${field} = 'default';
+      })`);
+        expect(await h.fill("")).toMatchObject({ value_length: 0 });
+        expect(await h.evaluate(`document.querySelector('#target').${field}`)).toBe("");
+        await h.activate();
+        expect(await h.evaluate(`document.querySelector('#target').${field}`)).toBe("");
+        expect(h.calls).toContain("Input.dispatchKeyEvent");
+        expect(h.calls).not.toContain("Input.insertText");
+      });
+    },
+    30_000,
+  );
+
+  it("does not clear a background text input when deferred focus moves away", async () => {
+    await withFillBrowser(
+      { background: true, markup: guard + '<input id="target" value="old">' },
+      async (h) => {
+        await h.ref("document.querySelector('#target')");
+        await h.evaluate(`document.querySelector('#target').addEventListener('focus', () => {
+          document.querySelector('#guard').focus();
+        })`);
+        expect(await h.fill("")).toMatchObject({ data: { reason: "fill_focus_lost" } });
+        expect(await h.evaluate("document.querySelector('#target').value")).toBe("old");
+      },
+    );
+  }, 30_000);
+
+  it.each([
     false,
     true,
   ])("stops when focus changes after root caret placement (background=%s)", async (background) => {

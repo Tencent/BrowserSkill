@@ -751,6 +751,52 @@ describe("fill result verification", () => {
     expect(h.insert).not.toHaveBeenCalled();
   });
 
+  it.each([
+    true,
+    false,
+  ])("flushes background focus before an empty text request (clear_before=%s)", async (clearBefore) => {
+    const h = await setup();
+    vi.spyOn(document, "hasFocus").mockReturnValue(false);
+    const send = h.send.getMockImplementation()!;
+    h.send.mockImplementation(async (tabId, method, params) => {
+      const reply = await send(tabId, method, params);
+      if (
+        method === "Input.dispatchKeyEvent" &&
+        (params as { type: string }).type === "rawKeyDown"
+      ) {
+        h.element.value = "default";
+      }
+      return reply;
+    });
+    expect(await h.fill("", clearBefore)).toMatchObject({ value_length: clearBefore ? 0 : 7 });
+    expect(h.element.value).toBe(clearBefore ? "" : "default");
+    expect(h.insert).not.toHaveBeenCalled();
+  });
+
+  it("does not clear a background text target if deferred focus moves elsewhere", async () => {
+    const h = await setup();
+    vi.spyOn(document, "hasFocus").mockReturnValue(false);
+    const other = document.createElement("input");
+    document.body.append(other);
+    const send = h.send.getMockImplementation()!;
+    h.send.mockImplementation(async (tabId, method, params) => {
+      const reply = await send(tabId, method, params);
+      if (
+        method === "Input.dispatchKeyEvent" &&
+        (params as { type: string }).type === "rawKeyDown"
+      ) {
+        other.focus();
+      }
+      return reply;
+    });
+    expect(await h.fill("")).toMatchObject({
+      code: "cdp_failed",
+      data: { reason: "fill_focus_lost" },
+    });
+    expect(h.element.value).toBe("old");
+    expect(h.send).toHaveBeenCalledWith(4, "Input.dispatchKeyEvent", { type: "keyUp" });
+  });
+
   it("cancels after insertion without sending change events", async () => {
     const h = await setup();
     const controller = new AbortController();
