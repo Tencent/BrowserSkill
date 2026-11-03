@@ -35,6 +35,10 @@ backends to bypass limits. Borrow confirmation still applies.
   after its schema appears. If it remains unavailable, report the failure.
 - Stale ref or target failure: inspect the live target and choose the appropriate action.
   A missing, hidden or covered target is not evidence of human takeover.
+- `Could not clear the extension overlay from the click point`: the extension's control
+  UI may cover the intended target. Temporarily turn off **Control hints** in the extension
+  popup, then sync and inspect that same target before retrying. A page mask reported by
+  VOM is separate from the extension overlay and may still block the action.
 - `precondition_failed`: compare `target`, `field`, `expected` and `actual`, then reconsider
   the decision. A new context does not make the expected value true.
 - Control revoked: wait-user while the person is active, then sync and reconcile completed steps.
