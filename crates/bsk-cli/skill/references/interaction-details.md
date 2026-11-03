@@ -85,6 +85,19 @@ success message separately.
 
 ### Filling fields
 
+Use `--value "text"` for an inline value, or `--value-stdin` to keep the value
+out of the CLI's process arguments. Exactly one of these options is required.
+For example, in a POSIX shell:
+
+```sh
+bsk fill @e3 --value-stdin --session SID --context CONTEXT_ID < /path/to/value.txt
+```
+
+Standard input must be UTF-8 and is read until EOF without trimming: all spaces,
+newlines (including a trailing newline), and an empty input are preserved.
+This cannot be combined with `BSK_CANCEL_ON_STDIN_CLOSE=1`, which reserves stdin
+for parent-process cancellation; unset that variable for stdin values.
+
 `fill` supports enabled, editable text inputs, textareas, and contenteditable
 editor roots, as well as `date`, `time`, `datetime-local`, `month`, and `week`
 inputs. Use browser value formats such as `2026-10-14`, `14:30`,
