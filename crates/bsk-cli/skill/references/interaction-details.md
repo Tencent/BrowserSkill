@@ -261,6 +261,12 @@ snapshot or changed page identity invalidates continuation; then observe afresh.
 
 Use `console` / `network` for bounded read-only diagnostics; follow returned
 sequence cursors. `emulate --device iphone-14` affects one tab; `--off` restores it.
+`window resize` changes outer window dimensions, not an exact viewport size. It
+checks the actual bounds and whether the target tab's viewport follows a change.
+If the target tab is inactive, select it within the Agent Window and sync before
+resizing. A fixed emulated viewport may need its own `emulate` adjustment; resize
+does not clear emulation or focus the window. When a resize reports an unconfirmed
+result, inspect its actual dimensions and sync before deciding what to do next.
 `evaluate` is a last resort: inspect JSON `.ok`, since a script exception can have
 CLI exit code 0. Never evaluate secrets. `record start` captures user actions;
 read its help first and never record banking, SSO or password-manager pages.

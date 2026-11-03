@@ -336,6 +336,11 @@ jobs:
         env:
           BSK_COOP_CHROME: ${{ env.BSK_VIDEO_CHROME }}
         run: pnpm exec vitest run src/content/__tests__/cooperation-capture.browser.test.ts
+      - name: Validate window resize and viewport reporting
+        working-directory: apps/extension
+        env:
+          BSK_WINDOW_CHROME: ${{ env.BSK_VIDEO_CHROME }}
+        run: pnpm exec vitest run src/tools/__tests__/window.browser.test.ts
       - name: Validate thumbnail cancellation, synchronization and navigating clicks
         working-directory: packages/dsh-plugin-browserskill
         env:

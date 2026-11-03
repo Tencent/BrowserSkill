@@ -1894,6 +1894,66 @@ describe("legacy capabilities under default cooperation", () => {
     expect(effect).toHaveBeenCalledOnce();
   });
 
+  it.each([
+    false,
+    true,
+  ])("recaptures the observation after a dispatched window resize, even when it fails=%s", async (fails) => {
+    const f = await fixture();
+    const baseline = await f.command("sync");
+    expect(baseline.kind).toBe("unchanged");
+    await f.act(
+      baseline.context_id,
+      (cdp) =>
+        cdp.runBrowserMutation!(async () =>
+          fails
+            ? { code: "protocol_error", message: "constrained" }
+            : { window_id: 100, width: 1280, height: 800 },
+        ),
+      "tool.window_resize",
+    );
+    expect(await f.command("sync")).toMatchObject({ kind: "baseline", observation: { tab_id: 7 } });
+  });
+
+  it.each([
+    false,
+    true,
+  ])("recaptures all window observations after a bootstrap resize, even when it fails=%s", async (fails) => {
+    const f = await fixture({ url: "about:blank" });
+    expect(await f.command("sync")).toMatchObject({ kind: "unchanged" });
+    f.ctx.agentCreatedTabs.add(8);
+    f.tab.id = 8;
+    f.tab.url = "https://fixture.test";
+    const syncPage = () =>
+      f.controller.command(
+        { session_id: "shared", tab_id: 8, action: "sync" },
+        f.cdp,
+        f.abort.signal,
+      );
+    expect(await syncPage()).toMatchObject({ kind: "baseline", tab_id: 8 });
+    expect(await syncPage()).toMatchObject({ kind: "unchanged" });
+    f.tab.id = 7;
+    f.tab.url = "about:blank";
+    await f.controller.run(
+      {
+        id: "bootstrap-resize",
+        method: "tool.window_resize",
+        params: { session_id: "shared", tab_id: 7 },
+      },
+      f.cdp,
+      f.abort.signal,
+      (cdp) =>
+        cdp.runBrowserMutation!(async () =>
+          fails
+            ? { code: "protocol_error", message: "constrained" }
+            : { window_id: 100, width: 1280, height: 800 },
+        ),
+    );
+    expect(await f.command("sync")).toMatchObject({ kind: "baseline", tab_id: 7 });
+    f.tab.id = 8;
+    f.tab.url = "https://fixture.test";
+    expect(await syncPage()).toMatchObject({ kind: "baseline", tab_id: 8 });
+  });
+
   it("cancels a pending transfer when the person takes over and never repeats its effect", async () => {
     const f = await fixture();
     const started = deferred();
