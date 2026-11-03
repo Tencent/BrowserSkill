@@ -1,5 +1,6 @@
 import { afterEach, expect, it, vi } from "vitest";
-import { collectCooperationFrames } from "./browser-bridge";
+import type { SessionManager } from "@/session-manager/manager";
+import { attachCooperation, collectCooperationFrames } from "./browser-bridge";
 import { FrameCollectionError } from "./frame-error";
 import {
   COOPERATION_ARM,
@@ -330,4 +331,47 @@ it("cannot arm a repaired collector after the deadline", async () => {
   finish();
   await vi.advanceTimersByTimeAsync(25);
   expect(send).toHaveBeenCalledOnce();
+});
+
+it("invalidates control for a root navigation but not for a subframe navigation", () => {
+  type NavigateListener = (
+    details: chrome.webNavigation.WebNavigationParentedCallbackDetails,
+  ) => void;
+  let navigate!: NavigateListener;
+  vi.stubGlobal("chrome", {
+    runtime: { id: "test", onMessage: { addListener: vi.fn() } },
+    webNavigation: {
+      onBeforeNavigate: {
+        addListener: vi.fn((listener: NavigateListener) => {
+          navigate = listener;
+        }),
+      },
+    },
+    tabs: { onRemoved: { addListener: vi.fn() }, onDetached: { addListener: vi.fn() } },
+  });
+  const controller = attachCooperation({} as SessionManager, () => {});
+  const invalidate = vi.spyOn(controller, "invalidate");
+  const details = {
+    tabId: 7,
+    documentLifecycle: "active" as const,
+    frameType: "sub_frame" as const,
+    processId: 1,
+    timeStamp: Date.now(),
+  };
+  // A child frame navigation start must not discard the observed root page.
+  navigate({
+    ...details,
+    frameId: 8,
+    parentFrameId: 0,
+    url: "https://page.test/frame",
+  });
+  expect(invalidate).not.toHaveBeenCalled();
+  navigate({
+    ...details,
+    frameId: 0,
+    parentFrameId: -1,
+    frameType: "outermost_frame",
+    url: "https://page.test/",
+  });
+  expect(invalidate).toHaveBeenCalledExactlyOnceWith(7);
 });
