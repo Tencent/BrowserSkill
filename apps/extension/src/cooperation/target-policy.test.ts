@@ -498,6 +498,27 @@ describe("negotiated target control", () => {
     expect(f.send).toHaveBeenCalledTimes(2);
   });
 
+  it("names the sync reply's top-level observation_id when given a ref-map token", async () => {
+    const f = await fixture();
+    const script = (runner: CdpRunner) =>
+      runner.send(7, "Runtime.evaluate", { expression: "submit()" });
+    const nestedObservationId = f.session.refStore.observationId;
+    expect(nestedObservationId).not.toBe(f.first.observation_id);
+    expect(
+      await f.run({ observation_id: nestedObservationId }, "tool.evaluate", script),
+    ).toMatchObject({
+      data: {
+        reason: "observation_required",
+        effect_state: "none",
+        recovery: expect.stringContaining("top-level observation_id"),
+      },
+    });
+    expect(f.send).not.toHaveBeenCalled();
+    expect(
+      await f.run({ observation_id: f.first.observation_id }, "tool.evaluate", script),
+    ).toEqual({});
+  });
+
   it("never learns live-text tolerance for an opaque script supplied with a ref", async () => {
     let tick = 0;
     const scene = (): VomScene => ({

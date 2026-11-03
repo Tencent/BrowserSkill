@@ -20,6 +20,11 @@ Starting from 0.2.0, CLI / Extension / DSH Plugin share the same version number.
   human control retains the existing `not_ready` behavior, including explicit
   holds during navigation. Status and wait report
   `control_policy: null` until the first successful policy negotiation.
+- Shared control: the `observation_required` recovery, the target-policy sync
+  guidance and the skill references now say to pass the sync reply's top-level
+  `observation_id`. The reply also carries `observation.observation_id` for its
+  ref map, and passing that one was refused with a hint that did not say which
+  of the two ids to use.
 
 ## [0.4.1] - 2026-11-02
 
