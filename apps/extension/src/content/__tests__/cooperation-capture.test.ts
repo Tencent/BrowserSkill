@@ -531,3 +531,27 @@ it("collects source and recipient changes inside closed shadow roots", () => {
   expect(changed.media).not.toEqual(first.media);
   expect(changed.revision).toBeGreaterThan(first.revision);
 });
+
+it("increments structure on childList mutations but keeps structure unchanged on in-place characterData mutations", async () => {
+  document.body.innerHTML = '<div id="timer">10</div><div id="container"></div>';
+  const read = collector();
+  const initial = read()!;
+  expect(initial.structure).toBe(0);
+  expect(initial.revision).toBe(0);
+
+  // In-place text mutation (characterData, e.g. live countdown or clock)
+  const timer = document.querySelector("#timer")!;
+  timer.firstChild!.nodeValue = "9";
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  const afterText = read()!;
+  expect(afterText.revision).toBeGreaterThan(initial.revision);
+  expect(afterText.structure).toBe(initial.structure);
+
+  // Structural mutation (childList, adding/removing elements)
+  const container = document.querySelector("#container")!;
+  container.appendChild(document.createElement("span"));
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  const afterChild = read()!;
+  expect(afterChild.revision).toBeGreaterThan(afterText.revision);
+  expect(afterChild.structure).toBeGreaterThan(initial.structure);
+});

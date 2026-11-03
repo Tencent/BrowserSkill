@@ -89,6 +89,14 @@ export function attachCooperationCapture() {
   const schedule = () => {
     if (!timer) timer = setTimeout(publish, 60);
   };
+  // `structure` answers one question: can a later observation still be described
+  // as a delta of the baseline? A node whose own text is rewritten in place (a
+  // clock, a countdown, a stock or viewer counter) keeps the same nodes in the
+  // same order, so it must not count. Counting it forced every sync on such a
+  // page back to `baseline`, which then refused every action on the exact
+  // whole-page comparison. `revision` still moves, so actions that depend on the
+  // changed text remain exact.
+  const restructures = (record: MutationRecord) => record.type !== "characterData";
   const mutations = (records: MutationRecord[]) => {
     if (
       !enabled ||
@@ -98,7 +106,7 @@ export function attachCooperationCapture() {
     )
       return;
     state.revision++;
-    state.structure++;
+    if (records.some(restructures)) state.structure++;
     schedule();
   };
   const observer = new MutationObserver(mutations);

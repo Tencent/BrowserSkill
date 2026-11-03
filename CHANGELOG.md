@@ -9,6 +9,10 @@ Starting from 0.2.0, CLI / Extension / DSH Plugin share the same version number.
 
 ### Fixed
 
+- Shared-control synchronization ignores in-place `characterData` text mutations
+  when computing frame structure increments, allowing pages with live countdowns
+  and counters to settle into incremental observation deltas rather than forcing
+  a full baseline resync on every second.
 - Shared-control synchronization skips failed child frames and inactive documents,
   reporting them in `frame_gaps` with only HTTP(S) origins and paths or other URL schemes,
   and repairs missing interaction collectors immediately once per current
