@@ -9,6 +9,11 @@ Starting from 0.2.0, CLI / Extension / DSH Plugin share the same version number.
 
 ### Fixed
 
+- Window resize verifies the browser's resulting bounds and the target tab's
+  layout viewport. It reports constrained bounds, inactive tabs and viewports
+  that did not follow the resize instead of echoing the requested size as success.
+  A dispatched resize also forces the next shared-control sync to recapture the
+  page, even when no DOM mutation recorded the layout change.
 - Shared-control synchronization skips failed child frames and inactive documents,
   reporting them in `frame_gaps` with only HTTP(S) origins and paths or other URL schemes,
   and repairs missing interaction collectors immediately once per current

@@ -123,7 +123,7 @@ import {
 import { handleUpload } from "./upload";
 import { handleWaitForElement, handleWaitForNavigation } from "./waits";
 import { handleWheel } from "./wheel";
-import { handleWindowResize, type WindowResizeParams } from "./window";
+import { chromeWindowResizeApi, handleWindowResize, type WindowResizeParams } from "./window";
 
 type DispatcherCdpRunner = CdpRunner &
   NetworkCdpRunner &
@@ -715,9 +715,8 @@ export class ToolDispatcher {
         return handleWindowResize(
           this.sessions,
           req.params as WindowResizeParams,
-          undefined,
+          { windows: chromeWindowResizeApi, tabs: chromeTabsApi, cdp },
           signal,
-          cdp?.runBrowserMutation,
         );
       case "tool.emulate":
         return handleEmulate(

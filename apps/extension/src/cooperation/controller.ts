@@ -1698,6 +1698,12 @@ export class CooperationController implements ControlAuthority {
       );
     } finally {
       finished = true;
+      if (sent && req.method === "tool.window_resize") {
+        // Window geometry can change layout without a DOM mutation. A delta
+        // based only on frame revisions would otherwise reuse the old viewport.
+        for (const tab of this.tabs.values())
+          if (tab.sessionId === state.sessionId) tab.baseline = undefined;
+      }
       if (state.interruption === intervention) state.interruption = undefined;
       if (state.completion === completion) state.completion = undefined;
       state.working = false;
