@@ -30,6 +30,7 @@ substring is enough.
 | Help `cancelled` / `timed_out` | Respect rejection or the blocker; do not repeat the request. |
 | Help `disabled` | No human action was confirmed. Re-observe and follow the disabled-help rules below. |
 | Stale ref or target failure | Inspect the live target and choose the appropriate action. A missing, hidden or covered target is not evidence of human takeover. |
+| `Could not clear the extension overlay from the click point` | The extension's control UI may cover the intended target. Temporarily turn off **Control hints** in the extension popup, then sync and inspect that same target before retrying. A page mask reported by VOM is separate from the extension overlay and may still block the action. |
 | `precondition_failed` | Compare `target`, `field`, `expected` and `actual`, then reconsider the decision. A new context does not make the expected value true. |
 | Control revoked | Wait while the person is active, then sync and reconcile completed steps. |
 | Unknown tab/session | List current tabs/sessions; never guess IDs or use another task's session. |
