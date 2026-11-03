@@ -211,7 +211,12 @@ export function attachCooperation(
     }
     return false;
   });
-  chrome.webNavigation.onBeforeNavigate.addListener(({ tabId }) => controller.invalidate(tabId));
+  chrome.webNavigation.onBeforeNavigate.addListener(({ tabId, frameId }) => {
+    // Only the root document replaces the observed page. Child frames are
+    // collected separately; invalidating here would discard the whole context
+    // for an unrelated iframe navigation that may never commit.
+    if (frameId === 0) controller.invalidate(tabId);
+  });
   chrome.tabs.onRemoved.addListener((tabId) => controller.releaseTab(tabId));
   chrome.tabs.onDetached.addListener((tabId) => controller.detachTab(tabId));
   return controller;
