@@ -191,7 +191,12 @@ export function redactBody(
           if (
             secretField(value) ||
             secretField(value.toLowerCase()) ||
-            /^(?:current-password|new-password|one-time-code|cc-.+)$/i.test(value)
+            value
+              .trim()
+              .split(/\s+/)
+              .some((token) =>
+                /^(?:current-password|new-password|one-time-code|cc-.+)$/i.test(token),
+              )
           )
             return '<input data-bsk-redacted="true">';
         }

@@ -30,6 +30,10 @@ describe("source-preserving evidence redaction", () => {
     'autocomplete="one&#45;time&#x2d;code"',
     "autocomplete='cc&#45;number'",
     'autocomplete="new-pass&#119;ord"',
+    'autocomplete=" current-password "',
+    'autocomplete="section-login one-time-code"',
+    'autocomplete="section-checkout billing cc-number"',
+    'autocomplete="section-login current-password "',
   ])("redacts HTML-encoded sensitive input attributes: %s", (attribute) => {
     const before = "<p>Keep &amp;</p>";
     const after = '<input name="nickname" value="Alice &amp; Bob">';
@@ -45,6 +49,8 @@ describe("source-preserving evidence redaction", () => {
   it.each([
     'name="nick&#110;ame"',
     'name="display&period;name"',
+    'autocomplete="section-login email"',
+    'autocomplete=" shipping street-address "',
     'id="user&lsqb;label&rsqb;"',
     'name="label&#x1F600;"',
     'type="pass&amp;#119;ord"',
