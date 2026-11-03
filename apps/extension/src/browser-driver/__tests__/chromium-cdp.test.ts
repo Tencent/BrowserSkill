@@ -3,6 +3,7 @@ import { SessionManager } from "@/session-manager/manager";
 import { RefStore } from "@/session-manager/ref-store";
 import { handleWaitForNavigation } from "@/tools/waits";
 import { type CdpDebuggee, type CdpDebuggerApi, ChromiumCdp } from "../chromium-cdp";
+import { CdpReadTimeoutError, READ_TIMEOUT_MS } from "../command-deadline";
 
 function fakeChromeEvent<TArgs extends unknown[]>() {
   const listeners = new Set<(...args: TArgs) => void>();
@@ -775,6 +776,141 @@ describe("ChromiumCdp", () => {
       ([, method]) => method === "Runtime.enable",
     );
     expect(enables).toHaveLength(2);
+  });
+
+  it("does not mark a replacement attachment when an old replay finishes late", async () => {
+    const { api } = fakeApi();
+    let finishReplay!: (value: object) => void;
+    let replayStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      replayStarted = resolve;
+    });
+    let firstReplay = true;
+    vi.mocked(api.sendCommand).mockImplementation(async (_target, method) => {
+      if (method === "Runtime.evaluate" && firstReplay) {
+        firstReplay = false;
+        replayStarted();
+        return new Promise<object>((resolve) => {
+          finishReplay = resolve;
+        });
+      }
+      return {};
+    });
+    const cdp = new ChromiumCdp(api);
+    const first = cdp.ensureConsoleCapture(12);
+    await started;
+    await cdp.detach(12);
+    await cdp.ensureAttached(12);
+    const rejected = expect(first).rejects.toThrow("attachment changed");
+    finishReplay({});
+    await rejected;
+    await cdp.ensureConsoleCapture(12);
+    expect(
+      vi.mocked(api.sendCommand).mock.calls.filter(([, method]) => method === "Runtime.enable"),
+    ).toHaveLength(2);
+    cdp.dispose();
+  });
+
+  it("does not send later console setup commands to a replacement attachment", async () => {
+    const { api } = fakeApi();
+    let finishRuntime!: (value: object) => void;
+    let runtimeStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      runtimeStarted = resolve;
+    });
+    vi.mocked(api.sendCommand).mockImplementation(async (_target, method) => {
+      if (method === "Runtime.enable") {
+        runtimeStarted();
+        return new Promise<object>((resolve) => {
+          finishRuntime = resolve;
+        });
+      }
+      return {};
+    });
+    const cdp = new ChromiumCdp(api);
+    const first = cdp.ensureConsoleCapture(12);
+    await started;
+    await cdp.detach(12);
+    await cdp.ensureAttached(12);
+    const rejected = expect(first).rejects.toThrow("attachment changed");
+    finishRuntime({});
+    await rejected;
+    expect(vi.mocked(api.sendCommand).mock.calls.map(([, method]) => method)).not.toContain(
+      "Log.enable",
+    );
+    cdp.dispose();
+  });
+
+  it("bounds a stuck replay and gates later reads until Chrome settles it", async () => {
+    vi.useFakeTimers();
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    vi.spyOn(console, "debug").mockImplementation(() => {});
+    const { api } = fakeApi();
+    let finishReplay!: (value: object) => void;
+    let firstReplay = true;
+    vi.mocked(api.sendCommand).mockImplementation(async (_target, method) => {
+      if (method === "Runtime.evaluate" && firstReplay) {
+        firstReplay = false;
+        return new Promise<object>((resolve) => {
+          finishReplay = resolve;
+        });
+      }
+      return {};
+    });
+    const cdp = new ChromiumCdp(api);
+    const first = expect(cdp.ensureConsoleCapture(12)).rejects.toMatchObject({
+      name: "CdpReadTimeoutError",
+      method: "Runtime.evaluate",
+      phase: "deadline",
+    });
+    await vi.advanceTimersByTimeAsync(READ_TIMEOUT_MS);
+    await first;
+    await expect(cdp.ensureConsoleCapture(12)).rejects.toBeInstanceOf(CdpReadTimeoutError);
+    finishReplay({});
+    await vi.advanceTimersByTimeAsync(0);
+    await expect(cdp.ensureConsoleCapture(12)).resolves.toBeUndefined();
+    cdp.dispose();
+  });
+
+  it.each([
+    "Runtime.enable",
+    "Log.enable",
+    "Runtime.evaluate",
+  ])("cancels a pending %s without sending retries until Chrome settles it", async (pendingMethod) => {
+    const { api } = fakeApi();
+    let finishReplay!: (value: object) => void;
+    let replayStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      replayStarted = resolve;
+    });
+    let firstReplay = true;
+    vi.mocked(api.sendCommand).mockImplementation(async (_target, method) => {
+      if (method === pendingMethod && firstReplay) {
+        firstReplay = false;
+        replayStarted();
+        return new Promise<object>((resolve) => {
+          finishReplay = resolve;
+        });
+      }
+      return {};
+    });
+    const cdp = new ChromiumCdp(api);
+    const abort = new AbortController();
+    const first = cdp.ensureConsoleCapture(12, abort.signal);
+    await started;
+    const rejected = expect(first).rejects.toMatchObject({ name: "AbortError" });
+    abort.abort();
+    await rejected;
+    await expect(cdp.ensureConsoleCapture(12)).rejects.toMatchObject({
+      name: "CdpReadTimeoutError",
+      phase: "blocked",
+    });
+    expect(
+      vi.mocked(api.sendCommand).mock.calls.filter(([, method]) => method === "Runtime.enable"),
+    ).toHaveLength(1);
+    finishReplay({});
+    await vi.waitFor(() => expect(cdp.ensureConsoleCapture(12)).resolves.toBeUndefined());
+    cdp.dispose();
   });
 
   it("retries and surfaces Network.enable failures for explicit capture", async () => {

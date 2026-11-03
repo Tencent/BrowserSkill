@@ -133,9 +133,40 @@ describe("task-scoped debug lifecycle", () => {
       .filter(([target]) => target.sessionId === undefined)
       .map(([, method]) => method);
     expect(rootCalls).toContain("Runtime.enable");
+    expect(rootCalls).toContain("Log.enable");
     expect(rootCalls.indexOf("Runtime.enable")).toBeLessThan(
       rootCalls.indexOf("Runtime.addBinding"),
     );
+  });
+
+  it("records browser-generated log entries after starting capture", async () => {
+    const f = await fixture();
+    active.push(f.manager);
+    await f.manager.start("s1", 7);
+    f.event("Log.entryAdded", {
+      entry: {
+        source: "network",
+        level: "error",
+        text: "Failed to load resource",
+        timestamp: 10_001,
+        url: "https://site.test/missing",
+      },
+    });
+    const result = await f.manager.read({ action: "console", session_id: "s1" });
+    expect(result.console).toMatchObject([{ text: "Failed to load resource", level: "error" }]);
+  });
+
+  it("keeps debug capture usable when browser log capture is unavailable", async () => {
+    const f = await fixture();
+    active.push(f.manager);
+    const normal = f.sendAttached.getMockImplementation()!;
+    f.sendAttached.mockImplementation(async (target, method) => {
+      if (method === "Log.enable") throw new Error("restricted");
+      return normal(target, method);
+    });
+    const run = await f.manager.start("s1", 7);
+    expect(run.state).toBe("capturing");
+    expect(run.coverage).toContain("browser_log_capture_unavailable");
   });
 
   it("cancels a hung Network.enable promptly, stops events, and ignores late completion", async () => {

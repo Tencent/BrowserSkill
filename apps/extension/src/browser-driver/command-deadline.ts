@@ -50,6 +50,8 @@ const GUARDED_READS = new Set([
   "DOM.resolveNode",
   "DOM.getBoxModel",
   "DOM.getContentQuads",
+  "Runtime.enable",
+  "Log.enable",
   "Runtime.evaluate",
   "Runtime.callFunctionOn",
 ]);
@@ -63,7 +65,7 @@ export class CdpReadTimeoutError extends Error {
     readonly phase: "deadline" | "blocked" = "deadline",
   ) {
     super(
-      `Browser read ${method} timed out after ${timeout}ms (tab ${tabId}); the ${isRendererRead(method) ? "renderer" : "browser"} is not answering. ${RECOVERY}`,
+      `Browser read ${method} timed out after ${timeout}ms (tab ${tabId}); the ${isRendererRead(method) || method.startsWith("Runtime.") || method === "Log.enable" ? "renderer" : "browser"} is not answering. ${RECOVERY}`,
     );
     this.name = "CdpReadTimeoutError";
   }
@@ -113,7 +115,9 @@ export class CdpReadGate {
     method: string,
     run: () => Promise<T>,
     timeoutMs?: number,
+    signal?: AbortSignal,
   ): Promise<T> {
+    signal?.throwIfAborted();
     let sessions = this.tabs.get(target.tabId);
     if (!sessions) this.tabs.set(target.tabId, (sessions = new Map()));
     const key = target.sessionId ?? "root";
@@ -124,17 +128,25 @@ export class CdpReadGate {
       return Promise.reject(
         CdpReadTimeoutError.stillPending(method, target.tabId, error.sessionId),
       );
-    let timeout: CdpReadTimeoutError | undefined;
+    let pending = true;
+    let blocker: CdpReadTimeoutError | undefined;
+    const blockUntilSettled = (error: CdpReadTimeoutError) => {
+      if (!pending || blocker) return;
+      blocker = error;
+      blocked.add(error);
+    };
     // Capture the set, so an old reply cannot modify a replacement attachment.
-    return runCdpCommand(target, method, run, timeoutMs, {
-      timedOut: (error) => {
-        timeout = error;
-        blocked.add(error);
-      },
+    const work = runCdpCommand(target, method, run, timeoutMs, {
+      timedOut: blockUntilSettled,
       settled: () => {
-        if (timeout) blocked.delete(timeout);
+        pending = false;
+        if (blocker) blocked.delete(blocker);
       },
     });
+    if (!signal) return work;
+    return waitForAbort(work, signal, () =>
+      blockUntilSettled(CdpReadTimeoutError.stillPending(method, target.tabId, target.sessionId)),
+    );
   }
 
   reset(tabId: number, sessionId?: string): void {
@@ -144,6 +156,30 @@ export class CdpReadGate {
 
   clear(): void {
     this.tabs.clear();
+  }
+}
+
+/** Stop waiting on cancellation; native Chrome commands continue until they settle. */
+async function waitForAbort<T>(
+  work: Promise<T>,
+  signal: AbortSignal,
+  onAbort?: () => void,
+): Promise<T> {
+  let abort: (() => void) | undefined;
+  try {
+    return await Promise.race([
+      work,
+      new Promise<never>((_, reject) => {
+        abort = () => {
+          onAbort?.();
+          reject(signal.reason ?? new DOMException("Operation aborted", "AbortError"));
+        };
+        signal.addEventListener("abort", abort, { once: true });
+        if (signal.aborted) abort();
+      }),
+    ]);
+  } finally {
+    if (abort) signal.removeEventListener("abort", abort);
   }
 }
 
@@ -175,16 +211,22 @@ export async function runCdpCommand<T>(
     const log = timedOut ? console.warn : console.debug;
     log("[bsk cdp] slow command settled", { ...details(), outcome, late: timedOut });
   };
-  const pending = run().then(
-    (value) => {
-      settled("returned");
-      return value;
-    },
-    (error) => {
-      settled("failed");
-      throw error;
-    },
-  );
+  let pending: Promise<T>;
+  try {
+    pending = run().then(
+      (value) => {
+        settled("returned");
+        return value;
+      },
+      (error) => {
+        settled("failed");
+        throw error;
+      },
+    );
+  } catch (error) {
+    settled("failed");
+    throw error;
+  }
   if (timeoutMs === undefined) return pending;
   let deadline: ReturnType<typeof setTimeout> | undefined;
   try {

@@ -766,7 +766,7 @@ describe("ToolDispatcher", () => {
     deliver(makeRequest("tool.console", { session_id: "aa11" }));
     await flushMicrotasks();
 
-    expect(cdp.ensureConsoleCapture).toHaveBeenCalledWith(7);
+    expect(cdp.ensureConsoleCapture).toHaveBeenCalledWith(7, expect.any(AbortSignal));
     expect(sent[0]).toEqual({
       id: "r-1",
       result: {

@@ -212,7 +212,7 @@ export class ChromiumCdp {
   private readonly dialogSequences = new Map<number, number>();
   private readonly consoleBuffers = new Map<number, ConsoleEntry[]>();
   private readonly consoleSequences = new Map<number, number>();
-  private readonly consoleDomainsEnabledTabs = new Set<number>();
+  private readonly consoleDomainsEnabledTabs = new Map<number, string>();
   private readonly networkBuffers = new Map<number, NetworkEntry[]>();
   private readonly networkSequences = new Map<number, number>();
   private readonly networkDomainsEnabledTabs = new Set<number>();
@@ -571,11 +571,13 @@ export class ChromiumCdp {
    * off: while it is on, every `console.*` call builds argument previews,
    * which anti-debugging pages time to detect a debugger.
    */
-  async ensureConsoleCapture(tabId: number): Promise<void> {
+  async ensureConsoleCapture(tabId: number, signal?: AbortSignal): Promise<void> {
+    signal?.throwIfAborted();
     if (!this.attachedTabs.has(tabId)) {
       await this.ensureAttached(tabId);
     }
-    await this.enableConsoleDomains(tabId);
+    signal?.throwIfAborted();
+    await this.enableConsoleDomains(tabId, signal);
   }
 
   /** Console entries observed on `tabId`, bounded for agent context safety. */
@@ -778,6 +780,7 @@ export class ChromiumCdp {
     params: object,
     readTimeoutMs?: number,
     beforeDispatch?: () => void,
+    signal?: AbortSignal,
   ): Promise<unknown> {
     return this.readGate.run(
       target,
@@ -787,6 +790,7 @@ export class ChromiumCdp {
         return this.api.sendCommand(target, method, params);
       },
       readTimeoutMs,
+      signal,
     );
   }
 
@@ -794,29 +798,45 @@ export class ChromiumCdp {
     await this.command({ tabId }, "Page.enable", {});
   }
 
-  private async enableConsoleDomains(tabId: number): Promise<void> {
-    if (this.consoleDomainsEnabledTabs.has(tabId)) return;
+  private async enableConsoleDomains(tabId: number, signal?: AbortSignal): Promise<void> {
+    const attachmentId = this.getAttachmentId(tabId);
+    if (attachmentId === undefined) throw new Error("debugger detached");
+    const check = () => {
+      signal?.throwIfAborted();
+      if (this.getAttachmentId(tabId) !== attachmentId)
+        throw new Error("Debugger attachment changed during console capture");
+    };
+    check();
+    if (this.consoleDomainsEnabledTabs.get(tabId) === attachmentId) return;
     // Runtime carries page console calls and exceptions, so its failure is the
     // caller's error. Log only adds browser-generated entries and stays
     // best-effort. Either failure leaves the tab unmarked so the next read
     // retries instead of silently returning no console output.
-    await this.command({ tabId }, "Runtime.enable", {});
+    await this.command({ tabId }, "Runtime.enable", {}, READ_TIMEOUT_MS, check, signal);
+    check();
     let logEnabled = true;
     try {
-      await this.command({ tabId }, "Log.enable", {});
+      await this.command({ tabId }, "Log.enable", {}, READ_TIMEOUT_MS, check, signal);
     } catch (err) {
+      check();
+      if (err instanceof CdpReadTimeoutError) throw err;
       logEnabled = false;
       console.debug("[bsk cdp] console domain enable failed", { tabId, method: "Log.enable", err });
     }
+    check();
     // Runtime.enable replays stored console messages as events, which are not
     // ordered with its command reply. One more renderer round trip lets them
     // reach the buffer before the first read.
-    await this.command({ tabId }, "Runtime.evaluate", {
-      expression: "0",
-      returnByValue: true,
-      silent: true,
-    }).catch(() => {});
-    if (logEnabled) this.consoleDomainsEnabledTabs.add(tabId);
+    await this.command(
+      { tabId },
+      "Runtime.evaluate",
+      { expression: "0", returnByValue: true, silent: true },
+      READ_TIMEOUT_MS,
+      check,
+      signal,
+    );
+    check();
+    if (logEnabled) this.consoleDomainsEnabledTabs.set(tabId, attachmentId);
   }
 
   private async enableNetworkDomain(tabId: number): Promise<void> {
