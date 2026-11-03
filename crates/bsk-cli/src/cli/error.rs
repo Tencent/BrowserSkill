@@ -271,6 +271,21 @@ fn json_error_string(err: &CliError, exit: u8, hint: Option<&str>) -> String {
         .unwrap_or_else(|_| "{\"message\":\"failed to encode error\"}".into())
 }
 
+/// The same `{ code, message, hint, exit_code, data }` payload `--json`
+/// prints, for callers that return errors as data (the MCP server).
+pub(crate) fn json_error_value(err: &CliError) -> serde_json::Value {
+    let render_info = render_info_for(err);
+    let body = JsonError {
+        code: err.code(),
+        message: err.to_string(),
+        hint: hint_for(err, render_info.as_ref()),
+        exit_code: err.exit_code(),
+        data: err.data().cloned(),
+    };
+    serde_json::to_value(&body)
+        .unwrap_or_else(|_| serde_json::json!({"message": "failed to encode error"}))
+}
+
 /// Renderer extension hook for commands that want to inject a
 /// structured "extra section" between the centralised summary and
 /// the centralised hint (review I3 fix to round-1).

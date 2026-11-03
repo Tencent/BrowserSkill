@@ -77,6 +77,7 @@ fn dispatch(cli: Cli, format: Format) -> Result<(), CliError> {
             lines: cmd.lines,
         })
         .map_err(CliError::Local),
+        Command::Mcp(args) => cli::mcp::dispatch(args),
         Command::Session(cmd) => cli::session::dispatch(cmd, format),
         Command::Browsers => cli::browsers::dispatch(format),
         Command::Tab(cmd) => cli::tab::dispatch(cmd, format),

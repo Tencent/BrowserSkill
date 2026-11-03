@@ -155,6 +155,7 @@ dependencies = [
  "nix",
  "rand 0.8.6",
  "reqwest",
+ "schemars",
  "semver",
  "serde",
  "serde_json",
