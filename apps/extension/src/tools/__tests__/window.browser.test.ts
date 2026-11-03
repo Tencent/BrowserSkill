@@ -25,7 +25,7 @@ async function poll<T>(read: () => Promise<T | undefined | false>): Promise<T> {
 }
 
 describe.skipIf(!process.env.BSK_WINDOW_CHROME)("window resize in a real browser", () => {
-  it("detects an inactive tab and a pinned viewport without claiming success", async () => {
+  it("verifies active-tab resizes, zoom rounding and pinned viewports", async () => {
     const extension = await mkdtemp(path.join(tmpdir(), "bsk-resize-extension-"));
     await writeFile(
       path.join(extension, "manifest.json"),
@@ -163,6 +163,24 @@ describe.skipIf(!process.env.BSK_WINDOW_CHROME)("window resize in a real browser
               deps,
             ),
           ).toEqual({ window_id: windowId, width: 1100, height: 800 });
+          await evaluate(`chrome.tabs.setZoom(${tabId},5)`);
+          const pageZoom = async () => {
+            const metrics = await cdp.send<{ cssVisualViewport?: { zoom?: number } }>(
+              tabId,
+              "Page.getLayoutMetrics",
+            );
+            return metrics.cssVisualViewport?.zoom;
+          };
+          await poll(async () => (await pageZoom()) === 5);
+          expect(
+            await handleWindowResize(
+              manager,
+              { session_id: "agent", tab_id: tabId, width: 1103, height: 800 },
+              deps,
+            ),
+          ).toEqual({ window_id: windowId, width: 1103, height: 800 });
+          await evaluate(`chrome.tabs.setZoom(${tabId},1)`);
+          await poll(async () => (await pageZoom()) === 1);
           await cdp.send(tabId, "Emulation.setDeviceMetricsOverride", {
             width: 825,
             height: 687,

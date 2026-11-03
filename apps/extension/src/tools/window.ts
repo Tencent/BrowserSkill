@@ -32,6 +32,7 @@ export interface WindowResizeResult {
 
 type Size = { width: number; height: number };
 type WindowBounds = { width?: number; height?: number };
+type Viewport = { size: Size; zoom: number };
 
 // A retry at the same window size cannot prove that a previously stale viewport
 // caught up. Remember that failure until the viewport or window actually changes.
@@ -76,21 +77,33 @@ function size(bounds: WindowBounds): Size | undefined {
     : undefined;
 }
 
-async function viewport(cdp: CdpRunner, tabId: number): Promise<Size> {
+async function viewport(cdp: CdpRunner, tabId: number): Promise<Viewport> {
   const metrics = await cdp.send<LayoutMetrics>(tabId, "Page.getLayoutMetrics", {});
   const measured = size({
     width: metrics.cssLayoutViewport?.clientWidth,
     height: metrics.cssLayoutViewport?.clientHeight,
   });
   if (!measured) throw new Error("the browser did not return a usable layout viewport");
-  return measured;
+  const zoom = metrics.cssVisualViewport?.zoom ?? metrics.visualViewport?.zoom;
+  return {
+    size: measured,
+    zoom: typeof zoom === "number" && Number.isFinite(zoom) && zoom > 0 ? zoom : 1,
+  };
 }
 
-function viewportFollowed(before: Size, after: Size, oldWindow: Size, newWindow: Size): boolean {
-  // A 1–2 px change can round to the same CSS pixel at a non-default zoom.
+function viewportFollowed(
+  before: Viewport,
+  after: Viewport,
+  oldWindow: Size,
+  newWindow: Size,
+): boolean {
+  // Window bounds use DIP; integer layout dimensions use zoomed CSS pixels.
+  const roundingTolerance = Math.max(2, before.zoom, after.zoom);
   return (
-    (Math.abs(newWindow.width - oldWindow.width) <= 2 || before.width !== after.width) &&
-    (Math.abs(newWindow.height - oldWindow.height) <= 2 || before.height !== after.height)
+    (Math.abs(newWindow.width - oldWindow.width) <= roundingTolerance ||
+      before.size.width !== after.size.width) &&
+    (Math.abs(newWindow.height - oldWindow.height) <= roundingTolerance ||
+      before.size.height !== after.size.height)
   );
 }
 
@@ -140,7 +153,7 @@ export async function handleWindowResize(
     };
 
   let beforeWindow: Size;
-  let beforeViewport: Size;
+  let beforeViewport: Viewport;
   try {
     const bounds = size(await deps.windows.get(ctx.agentWindowId));
     if (!bounds) throw new Error("the browser did not return usable window bounds");
@@ -161,7 +174,7 @@ export async function handleWindowResize(
     previousFailure &&
     sameSize(beforeWindow, requested) &&
     sameSize(previousFailure.window, beforeWindow) &&
-    sameSize(previousFailure.viewport, beforeViewport)
+    sameSize(previousFailure.viewport, beforeViewport.size)
   )
     return {
       code: "cdp_failed",
@@ -171,7 +184,7 @@ export async function handleWindowResize(
         effect_state: "none",
         tab_id: target.tabId,
         actual_window: beforeWindow,
-        actual_viewport: beforeViewport,
+        actual_viewport: beforeViewport.size,
         recovery:
           "Inspect the tab's visibility and viewport emulation before trying another resize.",
       },
@@ -182,9 +195,14 @@ export async function handleWindowResize(
     const resize = () => {
       // If the browser applies the update but the reply or a later read fails,
       // a same-size retry must not mistake an unchanged viewport for success.
-      const tabs = unconfirmed.get(ctx) ?? new Map();
-      tabs.set(target.tabId, { window: requested, viewport: beforeViewport });
-      unconfirmed.set(ctx, tabs);
+      if (!viewportFollowed(beforeViewport, beforeViewport, beforeWindow, requested)) {
+        const tabs = unconfirmed.get(ctx) ?? new Map();
+        tabs.set(target.tabId, { window: requested, viewport: beforeViewport.size });
+        unconfirmed.set(ctx, tabs);
+      } else {
+        // Idempotent and rounding-only updates do not require a viewport change.
+        clearUnconfirmed(ctx, target.tabId);
+      }
       dispatched = true;
       return deps.windows.update(ctx.agentWindowId, requested);
     };
@@ -208,7 +226,7 @@ export async function handleWindowResize(
   const wait =
     deps.wait ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
   let actualWindow: Size | undefined;
-  let actualViewport: Size | undefined;
+  let actualViewport: Viewport | undefined;
   try {
     // Chrome can acknowledge the window update before the renderer processes it.
     for (let attempt = 0; attempt <= 20; attempt++) {
@@ -269,7 +287,7 @@ export async function handleWindowResize(
     !viewportFollowed(beforeViewport, actualViewport, beforeWindow, actualWindow)
   ) {
     const tabs = unconfirmed.get(ctx) ?? new Map();
-    tabs.set(target.tabId, { window: actualWindow, viewport: actualViewport });
+    tabs.set(target.tabId, { window: actualWindow, viewport: actualViewport.size });
     unconfirmed.set(ctx, tabs);
   }
   if (actualWindow?.width !== requested.width || actualWindow?.height !== requested.height)
@@ -281,7 +299,7 @@ export async function handleWindowResize(
         effect_state: "committed",
         requested,
         actual_window: actualWindow,
-        actual_viewport: actualViewport,
+        actual_viewport: actualViewport?.size,
         recovery:
           "Inspect the actual window size; the browser or window manager may have constrained it.",
       },
@@ -293,8 +311,8 @@ export async function handleWindowResize(
       reason: "window_resize_viewport_unchanged",
       effect_state: "committed",
       tab_id: target.tabId,
-      before_viewport: beforeViewport,
-      actual_viewport: actualViewport,
+      before_viewport: beforeViewport.size,
+      actual_viewport: actualViewport?.size,
       actual_window: actualWindow,
       recovery:
         "Inspect the tab's visibility and viewport emulation, then synchronize before deciding what to do next.",

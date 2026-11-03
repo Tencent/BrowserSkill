@@ -433,6 +433,10 @@ export class CooperationController implements ControlAuthority {
     state.revision++;
     this.deps.changed(state.tabId);
   }
+  private clearWindowObservations(sessionId: string) {
+    // Window geometry can change every tab's layout without a DOM mutation.
+    for (const tab of this.tabs.values()) if (tab.sessionId === sessionId) tab.baseline = undefined;
+  }
   receive(tabId: number, frameId: number, frame: FrameState, lease?: string) {
     const state = this.tabs.get(tabId);
     if (!state || (lease !== undefined && lease !== state.lease)) return;
@@ -892,6 +896,7 @@ export class CooperationController implements ControlAuthority {
         sent ? "unknown" : "none",
       );
     } finally {
+      if (sent && method === "tool.window_resize") this.clearWindowObservations(state.sessionId);
       state.working = false;
       if (method === "tool.navigate") await this.observeTab(state.tabId);
       this.changed(state);
@@ -1698,12 +1703,8 @@ export class CooperationController implements ControlAuthority {
       );
     } finally {
       finished = true;
-      if (sent && req.method === "tool.window_resize") {
-        // Window geometry can change layout without a DOM mutation. A delta
-        // based only on frame revisions would otherwise reuse the old viewport.
-        for (const tab of this.tabs.values())
-          if (tab.sessionId === state.sessionId) tab.baseline = undefined;
-      }
+      if (sent && req.method === "tool.window_resize")
+        this.clearWindowObservations(state.sessionId);
       if (state.interruption === intervention) state.interruption = undefined;
       if (state.completion === completion) state.completion = undefined;
       state.working = false;

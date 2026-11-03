@@ -30,6 +30,7 @@ function resizeFixture(
     actual?: { width: number; height: number };
     frozenViewport?: boolean;
     delayViewport?: boolean;
+    zoom?: number;
   } = {},
 ) {
   const state = {
@@ -58,6 +59,7 @@ function resizeFixture(
   const cdp: CdpRunner = {
     send: vi.fn(async () => ({
       cssLayoutViewport: { clientWidth: state.viewport.width, clientHeight: state.viewport.height },
+      cssVisualViewport: { zoom: opts.zoom ?? 1 },
     })) as CdpRunner["send"],
   };
   const wait = vi.fn(async () => {
@@ -251,6 +253,63 @@ describe("handleWindowResize", () => {
       data: { reason: "window_resize_unconfirmed", effect_state: "unknown" },
     });
     f.cdp.send = read;
+    expect(await handleWindowResize(sm, params, f.deps)).toMatchObject({
+      data: { reason: "window_resize_viewport_unchanged", effect_state: "none" },
+    });
+    expect(f.windows.update).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    "update",
+    "viewport",
+  ])("allows an idempotent resize to recover after a transient %s failure", async (failure) => {
+    const sm = await makeManager();
+    const f = resizeFixture({ frozenViewport: true });
+    const read = f.cdp.send;
+    if (failure === "update") {
+      f.windows.update.mockRejectedValueOnce(new Error("window update unavailable"));
+    } else {
+      let calls = 0;
+      f.cdp.send = (async (...args: Parameters<CdpRunner["send"]>) => {
+        if (++calls === 2) throw new Error("renderer unavailable");
+        return read(...args);
+      }) as CdpRunner["send"];
+    }
+    const params = { session_id: "aa11", width: 900, height: 700 };
+    expect(await handleWindowResize(sm, params, f.deps)).toMatchObject({
+      code: failure === "update" ? "protocol_error" : "cdp_failed",
+      data: { effect_state: "unknown" },
+    });
+    f.cdp.send = read;
+    expect(await handleWindowResize(sm, params, f.deps)).toEqual({
+      window_id: 100,
+      width: 900,
+      height: 700,
+    });
+    expect(f.windows.update).toHaveBeenCalledTimes(2);
+  });
+
+  it.each([
+    { width: 903, height: 700 },
+    { width: 900, height: 703 },
+  ])("allows CSS pixel rounding at high page zoom for %j", async (requested) => {
+    const sm = await makeManager();
+    const f = resizeFixture({ frozenViewport: true, zoom: 5 });
+    f.state.viewport = { width: 180, height: 111 };
+    expect(await handleWindowResize(sm, { session_id: "aa11", ...requested }, f.deps)).toEqual({
+      window_id: 100,
+      ...requested,
+    });
+  });
+
+  it("still rejects a pinned viewport for a larger resize at 500% zoom", async () => {
+    const sm = await makeManager();
+    const f = resizeFixture({ frozenViewport: true, zoom: 5 });
+    f.state.viewport = { width: 180, height: 111 };
+    const params = { session_id: "aa11", width: 920, height: 720 };
+    expect(await handleWindowResize(sm, params, f.deps)).toMatchObject({
+      data: { reason: "window_resize_viewport_unchanged", effect_state: "committed" },
+    });
     expect(await handleWindowResize(sm, params, f.deps)).toMatchObject({
       data: { reason: "window_resize_viewport_unchanged", effect_state: "none" },
     });
