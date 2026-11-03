@@ -34,12 +34,16 @@ describe.skipIf(!process.env.BSK_WINDOW_CHROME)("window resize in a real browser
         name: "BrowserSkill resize test",
         version: "1.0",
         permissions: ["tabs", "debugger"],
-        background: { service_worker: "background.js" },
+        background: { service_worker: "resize-test-worker.js" },
       }),
     );
     await writeFile(
-      path.join(extension, "background.js"),
+      path.join(extension, "resize-test-worker.js"),
       "chrome.runtime.onInstalled.addListener(() => {});",
+    );
+    await writeFile(
+      path.join(extension, "probe.html"),
+      "<!doctype html><title>Resize probe</title>",
     );
     try {
       const { withChrome } = await import(
@@ -64,12 +68,20 @@ describe.skipIf(!process.env.BSK_WINDOW_CHROME)("window resize in a real browser
                 "Target.getTargets",
               )
             ).targetInfos.find(
-              (target) => target.type === "service_worker" && target.url.endsWith("/background.js"),
+              (target) =>
+                target.type === "service_worker" && target.url.endsWith("/resize-test-worker.js"),
             ),
           );
+          // A page in this extension gives Runtime.evaluate a stable, privileged
+          // context while the service worker is starting or being suspended.
+          const origin = worker.url.split("/").slice(0, 3).join("/");
+          const probe = await send<{ targetId: string }>("Target.createTarget", {
+            url: `${origin}/probe.html`,
+            background: true,
+          });
           const session = (
             await send<{ sessionId: string }>("Target.attachToTarget", {
-              targetId: worker.targetId,
+              targetId: probe.targetId,
               flatten: true,
             })
           ).sessionId;
@@ -82,6 +94,12 @@ describe.skipIf(!process.env.BSK_WINDOW_CHROME)("window resize in a real browser
             if (reply.exceptionDetails) throw new Error(JSON.stringify(reply.exceptionDetails));
             return reply.result.value;
           };
+          const extensionId = worker.url.split("/")[2];
+          await poll(() =>
+            evaluate<boolean>(
+              `globalThis.chrome?.runtime?.id === ${JSON.stringify(extensionId)} && !!globalThis.chrome?.windows?.create && !!globalThis.chrome?.debugger?.attach`,
+            ),
+          );
           const fixture = "data:text/html,<title>Resize fixture</title><h1>Resize fixture</h1>";
           const created = await evaluate<chrome.windows.Window>(
             `chrome.windows.create(${JSON.stringify({ url: fixture, focused: false, width: 900, height: 700 })})`,
