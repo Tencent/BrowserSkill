@@ -2,7 +2,7 @@ import type { ChildProcess } from "node:child_process";
 import { EventEmitter } from "node:events";
 import { existsSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve as resolvePath } from "node:path";
 import type { ToolDefinition, ToolRunContext } from "@deepseek-ai/dsh-tools";
 import { describe, expect, it, vi } from "vitest";
 import { registerBrowserTools } from "../src/browser-tools";
@@ -587,7 +587,7 @@ describe("gesture and saved observation actions", () => {
         "--until-visible",
         "#ready",
         "--save-full",
-        "/tmp/after.json",
+        resolvePath("/tmp/after.json"),
         "--context",
         "ctx-before",
       ]),
@@ -738,9 +738,9 @@ describe("gesture and saved observation actions", () => {
     expect(command).toEqual(
       expect.arrayContaining([
         "--save-full",
-        "/tmp/new.json",
+        resolvePath("/tmp/new.json"),
         "--baseline",
-        "/tmp/old.json",
+        resolvePath("/tmp/old.json"),
         "--settle",
         "--context-lines",
         "0",
@@ -815,7 +815,7 @@ describe("gesture and saved observation actions", () => {
     const { tools, calls } = setup({ view: { historical: true } });
     await tools.get("inspect.view")!.execute({ file: "/tmp/saved.json", find }, makeExec());
     expect(calls).toHaveLength(1);
-    expect(calls[0].args).toEqual(["view", "/tmp/saved.json", `--find=${find}`]);
+    expect(calls[0].args).toEqual(["view", resolvePath("/tmp/saved.json"), `--find=${find}`]);
     expect(calls[0].options.tag).toBeUndefined();
   });
 
@@ -830,7 +830,7 @@ describe("gesture and saved observation actions", () => {
     expect(calls[0].args).toEqual(
       expect.arrayContaining([
         "view",
-        "/tmp/saved.json",
+        resolvePath("/tmp/saved.json"),
         "--find=Buy",
         "--start-line",
         "2",

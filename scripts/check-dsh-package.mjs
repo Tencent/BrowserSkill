@@ -16,7 +16,7 @@ const temp = mkdtempSync(join(tmpdir(), "bsk-package-"));
 const cwd = process.cwd();
 const disposers = [];
 try {
-  const [archive] = JSON.parse(
+  const packResult = JSON.parse(
     // The shell launches npm.cmd on Windows. Pass paths through npm's config
     // environment so spaces and shell metacharacters remain literal path bytes.
     execSync("npm pack --ignore-scripts --json", {
@@ -33,7 +33,10 @@ try {
       },
     }),
   );
-  execFileSync("tar", ["-xzf", join(temp, archive.filename), "-C", temp]);
+  // npm 10/11 print an array; npm 12 keys the result by package name.
+  const [archive] = Array.isArray(packResult) ? packResult : Object.values(packResult);
+  // Relative names: GNU tar (first on PATH in Git Bash) reads "C:" as a remote host.
+  execFileSync("tar", ["-xzf", archive.filename, "-C", "."], { cwd: temp });
   const unpacked = join(temp, "package");
   const options = { maxEntryBytes: 4_500, browserTools: DSH_BROWSER_TOOLS };
   const original = validateSkillDirectory(join(pkg, "skill"), options);
