@@ -100,14 +100,19 @@ pub fn pid_alive(pid: u32) -> bool {
 
     #[cfg(windows)]
     {
-        use windows_sys::Win32::Foundation::{CloseHandle, WAIT_TIMEOUT};
+        use windows_sys::Win32::Foundation::{
+            CloseHandle, ERROR_ACCESS_DENIED, GetLastError, WAIT_TIMEOUT,
+        };
         use windows_sys::Win32::System::Threading::{
             OpenProcess, PROCESS_SYNCHRONIZE, WaitForSingleObject,
         };
         unsafe {
             let handle = OpenProcess(PROCESS_SYNCHRONIZE, 0, pid);
             if handle.is_null() {
-                return false;
+                // Like EPERM on Unix: the process exists, but this caller may not
+                // open it (for example an elevated or SYSTEM process). A PID with
+                // no process fails with ERROR_INVALID_PARAMETER instead.
+                return GetLastError() == ERROR_ACCESS_DENIED;
             }
             // An exited process can still be opened while another handle
             // keeps its kernel object alive. Poll its termination signal;
@@ -134,6 +139,13 @@ mod tests {
     #[test]
     fn current_process_is_alive() {
         assert!(pid_alive(std::process::id()));
+    }
+
+    #[test]
+    fn existing_process_that_cannot_be_opened_is_alive() {
+        // PID 4 is the System process. An unelevated caller cannot open it and
+        // gets ERROR_ACCESS_DENIED; an elevated caller can. Either way it exists.
+        assert!(pid_alive(4));
     }
 
     #[test]
