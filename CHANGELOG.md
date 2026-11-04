@@ -9,6 +9,9 @@ Starting from 0.2.0, CLI / Extension / DSH Plugin share the same version number.
 
 ### Fixed
 
+- Debug network evidence classifies request and mock bodies by their raw
+  `Content-Type`. Previously a value cut short by the header-evidence budget could
+  let multipart bodies be retained, or skip form field redaction.
 - Window resize verifies the browser's resulting bounds and the target tab's
   layout viewport. It reports constrained bounds, inactive tabs and viewports
   that did not follow the resize instead of echoing the requested size as success.

@@ -112,6 +112,8 @@ export class DebugNetworkStore {
       responseBody?: ReturnType<typeof redactBody>;
       responseHeaders?: ReturnType<typeof redactHeaderEvidence>;
       headersTruncated: boolean;
+      requestMime: string;
+      responseMime: string;
       urlState?: ReturnType<typeof redactRequestUrl>["state"];
     }
   >();
@@ -239,7 +241,7 @@ export class DebugNetworkStore {
           record,
           "request_body",
           event.request.postData,
-          headers["content-type"] ?? "",
+          contentType(event.request.headers),
         );
       }
       this.applyExtra(chain);
@@ -440,6 +442,7 @@ export class DebugNetworkStore {
     }
   }
 
+  // Classify bodies by the raw header: evidence headers may be cut to fit their budget.
   private saveBody(
     record: RequestRecord,
     key: "request_body" | "response_body",
@@ -534,14 +537,15 @@ export class DebugNetworkStore {
     let responseHeaders: ReturnType<typeof redactHeaderEvidence> | undefined;
     let urlState: ReturnType<typeof redactRequestUrl>["state"] | undefined;
     const headers = redactHeaderEvidence(annotation.effective?.headers);
+    const requestMime = contentType(annotation.effective?.headers);
+    const responseMime = contentType(annotation.mock?.headers);
     // Pending annotations must obey the same redaction boundary as live records.
     // Preserve the original completeness flags when formatting expands a JSON body.
     if (annotation.effective) {
       const value = annotation.effective;
       const url = redactRequestUrl(value.url);
       urlState = url.state;
-      if (value.postData !== undefined)
-        requestBody = redactBody(value.postData, value.headers["content-type"] ?? "");
+      if (value.postData !== undefined) requestBody = redactBody(value.postData, requestMime);
       annotation = {
         ...annotation,
         effective: {
@@ -555,7 +559,7 @@ export class DebugNetworkStore {
     if (annotation.mock) {
       const value = annotation.mock;
       responseHeaders = redactHeaderEvidence(value.headers);
-      responseBody = redactBody(value.body, value.headers?.["content-type"] ?? "");
+      responseBody = redactBody(value.body, responseMime);
       annotation = {
         ...annotation,
         mock: {
@@ -571,6 +575,8 @@ export class DebugNetworkStore {
       responseBody,
       responseHeaders,
       headersTruncated: headers.truncated,
+      requestMime,
+      responseMime,
       urlState,
     });
     while (this.annotations.size > 64)
@@ -599,7 +605,7 @@ export class DebugNetworkStore {
           record,
           "request_body",
           effective.postData,
-          effective.headers["content-type"] ?? "",
+          retained.requestMime,
           retained.requestBody,
         );
     }
@@ -611,7 +617,7 @@ export class DebugNetworkStore {
         record,
         "response_body",
         mock.body,
-        record.entry.mime_type,
+        retained.responseMime,
         retained.responseBody,
       );
     }
@@ -717,4 +723,10 @@ export function requestProjection(
       : {}),
     ...(part === "timing" ? { timing: entry.timing } : {}),
   };
+}
+
+function contentType(headers: Record<string, string> | undefined): string {
+  for (const [key, value] of Object.entries(headers ?? {}))
+    if (key.toLowerCase() === "content-type") return String(value);
+  return "";
 }

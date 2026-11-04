@@ -103,6 +103,40 @@ describe("debug network evidence", () => {
   });
 
   it.each([
+    [
+      "network",
+      "multipart/form-data; boundary=b",
+      '--b\r\nContent-Disposition: form-data; name="password"\r\n\r\nSECRET\r\n--b--',
+    ],
+    ["network", "application/x-www-form-urlencoded", "user=a&session_id=SECRET"],
+    [
+      "annotation",
+      "multipart/form-data; boundary=b",
+      '--b\r\nContent-Disposition: form-data; name="password"\r\n\r\nSECRET\r\n--b--',
+    ],
+    ["annotation", "application/x-www-form-urlencoded", "user=a&session_id=SECRET"],
+  ])("classifies %s bodies by the raw content-type when header evidence is cut: %s", (path, mime, body) => {
+    const f = fixture();
+    // Large headers exhaust the evidence budget, so the retained content-type is truncated.
+    const headers = {
+      referer: `https://site.test/${"a".repeat(2000)}`,
+      "x-trace": "t".repeat(2040),
+      "content-type": mime,
+    };
+    const request = { url: "https://site.test/login", method: "POST", headers };
+    if (path === "annotation")
+      f.store.annotate({ tabId: 7 }, "raw", {
+        effective: { ...request, postData: body },
+        mock: { status: 200, headers, body },
+      });
+    f.request({ request: { ...request, ...(path === "network" ? { postData: body } : {}) } });
+    const entry = f.store.list()[0];
+    expect(entry.request_headers!["content-type"]).not.toBe(mime);
+    expect(JSON.stringify(entry)).not.toContain("SECRET");
+    expect(entry.request_body.replay_safe).toBeFalsy();
+  });
+
+  it.each([
     "response",
     "extra-first",
     "extra-last",
