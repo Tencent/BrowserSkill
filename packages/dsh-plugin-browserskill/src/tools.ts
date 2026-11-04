@@ -929,7 +929,8 @@ function defineBrowserOperations(deps: ToolDeps, register: DefinitionRegistrar):
       async execute(args, exec) {
         if (args.target.trim().length === 0) throw new Error("target must be a non-empty string");
         const sessionId = registry.resolve(args.session, "bsk_interact(action=fill)");
-        const cmdArgs = ["fill", "--session", sessionId, "--value", args.value];
+        // `--value=<v>`: clap rejects a separate value token starting with "-".
+        const cmdArgs = ["fill", "--session", sessionId, `--value=${args.value}`];
         if (args.noClear === true) cmdArgs.push("--no-clear");
         cmdArgs.push(args.target);
         const reply = (await runBsk(deps, exec, cmdArgs, "fill", sessionId)) as {
