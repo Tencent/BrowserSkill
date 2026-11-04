@@ -98,9 +98,52 @@
 
 .bsk-cooperation-brand {
   gap: 7px;
-  flex-shrink: 0;
+  min-width: 0;
   color: var(--bsk-coop-muted);
   font-weight: 500;
+}
+
+.bsk-cooperation-brand img,
+.bsk-controller-color {
+  flex-shrink: 0;
+}
+
+.bsk-controller-color {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  outline: 1px solid var(--bsk-coop-muted);
+  outline-offset: 2px;
+}
+
+.bsk-controller-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--bsk-coop-text);
+}
+
+.bsk-controller-details {
+  display: grid;
+  gap: 4px;
+  margin: 0 0 12px;
+  font-size: 11px;
+}
+
+.bsk-controller-details > div {
+  display: flex;
+  gap: 8px;
+}
+
+.bsk-controller-details dt {
+  flex-shrink: 0;
+  color: var(--bsk-coop-muted);
+}
+
+.bsk-controller-details dd {
+  min-width: 0;
+  margin: 0;
+  overflow-wrap: anywhere;
 }
 
 .bsk-cooperation-brand img {
@@ -110,12 +153,20 @@
 }
 
 .bsk-cooperation-badge {
+  flex-shrink: 0;
   padding: 2px 6px;
   border-radius: 5px;
   background: var(--bsk-coop-soft);
   color: var(--bsk-coop-ink);
   text-align: center;
   overflow-wrap: anywhere;
+}
+
+.bsk-controller-action {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .bsk-cooperation-body {
@@ -250,6 +301,9 @@
 }
 
 .bsk-cooperation-target span {
+  max-width: 180px;
+  overflow: hidden;
+  text-overflow: ellipsis;
   position: absolute;
   top: 22px;
   left: 14px;

@@ -1,3 +1,4 @@
+import { type ControllerInfo, isControllerInfo } from "@/lib/controller-info";
 import {
   DEFAULT_INTERACTION_PREFERENCES,
   type InteractionPreferenceStore,
@@ -54,6 +55,7 @@ export function validateWindowSize(
 
 export interface SessionStartParams {
   session_id: string;
+  controller?: ControllerInfo | null;
   /** Opt in to Chrome's shared incognito browsing session. */
   incognito?: boolean;
   browser_instance_id?: string;
@@ -140,9 +142,17 @@ export async function handleSessionStart(
   }
   const sizeOrErr = validateWindowSize(params.width, params.height);
   if (isRpcError(sizeOrErr)) return sizeOrErr;
+  if (params.controller != null && !isControllerInfo(params.controller)) {
+    return {
+      code: "invalid_params",
+      message:
+        "controller requires a name (1..=80 characters), optional project (1..=120), no control characters, and optional #RRGGBB color",
+    };
+  }
   try {
     await deps.preferences?.readyOrFallback();
     const ctx = await manager.start(params.session_id, {
+      controller: params.controller ?? undefined,
       incognito: params.incognito,
       size: sizeOrErr,
       focused: params.focused,

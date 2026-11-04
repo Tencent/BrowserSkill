@@ -1,7 +1,9 @@
+import { type ControllerInfo, controllerColor } from "@/lib/controller-info";
 import { AGENT_WINDOW_HOME, type AgentWindowApi, chromeAgentWindowApi } from "./agent-window";
 import { RefStore } from "./ref-store";
 
 export interface SessionContext {
+  controller?: ControllerInfo;
   /** Incognito sessions cannot borrow user tabs. Absent means a normal window. */
   incognito?: boolean;
   /** Remote connections retain dedicated windows, with explicit page ownership. */
@@ -53,6 +55,7 @@ export interface SessionManagerOptions {
 
 /** Options for starting a session's Agent Window. */
 export interface SessionStartOptions {
+  controller?: ControllerInfo;
   /** Use Chrome's shared incognito browsing session. */
   incognito?: boolean;
   /** Optional Agent Window outer size in CSS pixels. */
@@ -262,7 +265,7 @@ export class SessionManager {
     let windowId: number | null = null;
     const agentCreatedTabs = new Set<number>();
     try {
-      const { signal: _signal, ...createOptions } = opts;
+      const { signal: _signal, controller: _controller, ...createOptions } = opts;
       const created = await this.agentWindow.create(AGENT_WINDOW_HOME, createOptions);
       windowId = created.windowId;
       for (const tabId of created.initialTabIds) agentCreatedTabs.add(tabId);
@@ -281,6 +284,7 @@ export class SessionManager {
       throwIfSessionStartAborted(opts.signal);
 
       const ctx: SessionContext = {
+        controller: this.controllerFor(sessionId, opts.controller),
         incognito: created.incognito ?? false,
         ...(this.remote() ? { remote: true } : {}),
         sessionId,
@@ -304,6 +308,7 @@ export class SessionManager {
           // The daemon may retry stop after a failed startup rollback. Retain
           // the exact window handle until closure is confirmed.
           const pending: SessionContext = {
+            controller: this.controllerFor(sessionId, opts.controller),
             incognito: opts.incognito ?? false,
             ...(this.remote() ? { remote: true } : {}),
             sessionId,
@@ -320,6 +325,21 @@ export class SessionManager {
       }
       throw startupError;
     }
+  }
+
+  private controllerFor(
+    sessionId: string,
+    controller?: ControllerInfo,
+  ): ControllerInfo | undefined {
+    if (!controller) return undefined;
+    return {
+      ...controller,
+      color: controllerColor(
+        sessionId,
+        controller,
+        Array.from(this.sessions.values(), (ctx) => ctx.controller?.color),
+      ),
+    };
   }
 
   /**
