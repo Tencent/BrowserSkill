@@ -1259,6 +1259,20 @@ describe("renderVom double-layer page", () => {
   });
 });
 
+describe("form value length cap", () => {
+  it("cuts a value at 200 code points without splitting an astral character", () => {
+    const value = `${"a".repeat(199)}😀 tail`;
+    const out = renderVom(
+      scene([
+        node({ id: 1, role: "RootWebArea", name: "Doc" }),
+        node({ id: 2, parentId: 1, role: "textbox", name: "Note", tag: "input", value }),
+      ]),
+    );
+    const line = out.text.split("\n").find((l) => l.includes("textbox"))!;
+    expect(line.endsWith(`=${JSON.stringify(`${"a".repeat(199)}😀`)}`)).toBe(true);
+  });
+});
+
 describe("disabled form state", () => {
   it("exposes disabled state independently of checkbox state and submitted value", () => {
     const out = renderVom(

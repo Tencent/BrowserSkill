@@ -831,7 +831,7 @@ function renderNodeLine(
       ? hasValue
         ? SENSITIVE_MASK
         : undefined
-      : rawValue?.slice(0, MAX_VALUE_LENGTH);
+      : rawValue && Array.from(rawValue).slice(0, MAX_VALUE_LENGTH).join("");
   if (value !== undefined) line += ` =${JSON.stringify(value)}`;
 
   if (surface && surface.subItems.length > 0) {
