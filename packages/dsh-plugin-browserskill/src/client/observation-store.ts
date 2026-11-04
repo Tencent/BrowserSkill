@@ -9,6 +9,7 @@
 
 import type { ObservationEvent, SessionObservation } from "../observation";
 import { ObservationPresentation } from "./observation-presentation";
+import { observationUrl } from "./observation-url";
 
 export interface EventSourceLike {
   onmessage: ((event: { data: string }) => void) | null;
@@ -57,9 +58,6 @@ export interface OverlaySnapshot {
   readonly reconnecting: boolean;
 }
 
-const EVENTS_URL = "/bsk-observation/events";
-const INTERRUPT_URL = "/bsk-observation/interrupt";
-const STOP_URL = "/bsk-observation/stop";
 const THUMBNAIL_RETRY_DELAYS_MS = [1000, 3000];
 /**
  * Backoff for re-creating the live event stream after a *fatal* failure.
@@ -165,7 +163,7 @@ export class ObservationClientStore {
     this.events = undefined;
     previous?.close();
     const events = this.deps.eventSourceFactory(
-      `${EVENTS_URL}?thumbnails=${this.thumbnailConsumers > 0 ? "1" : "0"}`,
+      `${observationUrl("events")}?thumbnails=${this.thumbnailConsumers > 0 ? "1" : "0"}`,
     );
     this.events = events;
     events.onmessage = (message) => {
@@ -405,7 +403,7 @@ export class ObservationClientStore {
   /** Interrupt the current or named session's in-flight call. */
   async interrupt(sessionId?: string): Promise<boolean> {
     try {
-      const res = await this.deps.fetchFn(INTERRUPT_URL, {
+      const res = await this.deps.fetchFn(observationUrl("interrupt"), {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify(sessionId === undefined ? {} : { sessionId }),
@@ -424,7 +422,7 @@ export class ObservationClientStore {
    */
   async stopSession(sessionId: string): Promise<boolean> {
     try {
-      const res = await this.deps.fetchFn(STOP_URL, {
+      const res = await this.deps.fetchFn(observationUrl("stop"), {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ sessionId }),

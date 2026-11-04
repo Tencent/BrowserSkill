@@ -244,6 +244,7 @@ top-level YAML list. This overrides the plugin registered by the installed bundl
     defaultTimeoutMs: 120000
     maxSessions: 5
     observationEnabled: true
+    # observationPublicOrigin: https://dsh.example.com
     thumbnailIntervalMs: 1500
     idleIntervalMs: 8000
     lazyTools: true
@@ -267,6 +268,7 @@ All fields are optional; omitted fields use the defaults below:
 | `defaultTimeoutMs` | `120000` | Default command execution timeout in milliseconds; output collection after exit has a separate 2-second limit. |
 | `maxSessions` | `5` | Maximum concurrent sessions started by this plugin. |
 | `observationEnabled` | `true` | Enable live browser observation. |
+| `observationPublicOrigin` | unset | Explicit HTTPS origin allowed to reach observation routes through a local reverse proxy. |
 | `thumbnailIntervalMs` | `1500` | Screenshot interval for active sessions, in milliseconds. |
 | `idleIntervalMs` | `8000` | Screenshot interval for idle sessions and the recent-activity window, in milliseconds. |
 | `lazyTools` | `true` | Reveal the browser tools when the skill is invoked. Set `false` to register them at startup. |
@@ -309,8 +311,18 @@ which registers directly with DSH rather than with the third-party sidebar.
 The floating panel shows all browser sessions managed by this plugin instance;
 the native tab shows the current conversation's browsers and those of its subagents.
 
-The observation endpoints require a loopback address such as `localhost` or
-`127.0.0.1`. Access through a LAN hostname or non-loopback reverse proxy is not supported.
+By default, observation endpoints require a loopback Host such as `localhost` or
+`127.0.0.1`. To mount DSH below a path such as `https://dsh.example.com/dsh/`,
+set `observationPublicOrigin: https://dsh.example.com` and configure the proxy
+to strip `/dsh/` before forwarding to the local DSH server. The client follows
+the page's `<base href>` for observation requests. The configured origin must
+be HTTPS and must not include the `/dsh/` path. The proxy must connect from a
+loopback address and authenticate users before forwarding the observation
+routes: these endpoints expose live screenshots and can interrupt or stop tasks.
+Start DSH with `--public-url https://dsh.example.com/dsh/` and
+`--trusted-host dsh.example.com`; set the upstream `Host` to that public
+authority. Cross-site requests remain blocked, and direct requests from
+non-loopback peers remain forbidden.
 
 ## Development
 

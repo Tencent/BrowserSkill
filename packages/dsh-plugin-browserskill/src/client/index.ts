@@ -25,6 +25,7 @@ import { BrowserInspectToolView } from "./BrowserInspectToolView";
 import { ObservationOverlay } from "./ObservationOverlay";
 import { type NativeSidebarHost, registerObservationSidebar } from "./observation-sidebar";
 import { type EventSourceLike, ObservationClientStore } from "./observation-store";
+import { observationUrl } from "./observation-url";
 
 /** Required services: slots, session-scoped attachment reads, and the overlay seat. */
 export const inject = ["slots", "sessions"];
@@ -57,7 +58,7 @@ async function loadSessionImage(
  * them), served by the host over the plugin's own route.
  */
 async function overlayImageLoader(attachmentId: string): Promise<string> {
-  const res = await fetch(`/bsk-observation/thumbnail/${encodeURIComponent(attachmentId)}`);
+  const res = await fetch(observationUrl(`thumbnail/${encodeURIComponent(attachmentId)}`));
   if (!res.ok) throw new Error(`thumbnail fetch failed: ${res.status}`);
   return URL.createObjectURL(await res.blob());
 }

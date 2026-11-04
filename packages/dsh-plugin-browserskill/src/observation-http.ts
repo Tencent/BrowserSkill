@@ -39,6 +39,36 @@ interface WebServerLike {
 const ROUTE_BASE = "/bsk-observation";
 const SSE_HEARTBEAT_MS = 15_000;
 
+function parsePublicOrigin(value: string | undefined): string | undefined {
+  if (value === undefined) return undefined;
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    throw new Error("observationPublicOrigin must be an HTTPS origin");
+  }
+  if (
+    url.protocol !== "https:" ||
+    url.username !== "" ||
+    url.password !== "" ||
+    url.pathname !== "/" ||
+    url.search !== "" ||
+    url.hash !== ""
+  ) {
+    throw new Error("observationPublicOrigin must be an HTTPS origin without a path");
+  }
+  return url.origin;
+}
+
+function isLoopbackAddress(address: string | undefined): boolean {
+  if (address === undefined) return false;
+  return (
+    address === "::1" ||
+    address.startsWith("::ffff:127.") ||
+    /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(address)
+  );
+}
+
 function sendJson(res: ServerResponse, status: number, body: unknown): void {
   res.writeHead(status, { "content-type": "application/json; charset=utf-8" });
   res.end(JSON.stringify(body));
@@ -47,15 +77,17 @@ function sendJson(res: ServerResponse, status: number, body: unknown): void {
 /**
  * Browser-trust fence, mirroring the one dsh applies to its /api routes (ours
  * live outside that prefix, so the checks are replicated here):
- * - Host must be a loopback authority (localhost / 127.0.0.0/8 / [::1]) — the
- *   observation channel exposes live screenshots and must never answer a LAN
- *   or DNS-rebound name;
+ * - Host must be a loopback authority or the explicitly configured HTTPS
+ *   public authority reached through a local reverse proxy;
  * - a present Origin must be same-host with the Host header (blocks cross-site
  *   reads), and `sec-fetch-site: cross-site` is refused outright;
  * - POST must be `application/json` — anything a cross-site *simple request*
  *   can send (form/plain) never reaches the handler, which kills CSRF.
  */
-function fenceViolation(req: IncomingMessage): string | undefined {
+function fenceViolation(
+  req: IncomingMessage,
+  publicOrigin: string | undefined,
+): string | undefined {
   const host = req.headers.host ?? "";
   const hostname = /^\[.*\](?::\d+)?$/.test(host)
     ? host.slice(1, host.indexOf("]"))
@@ -65,8 +97,14 @@ function fenceViolation(req: IncomingMessage): string | undefined {
     hostname.endsWith(".localhost") ||
     hostname === "::1" ||
     /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(hostname);
-  if (!isLoopback) return "host is not a loopback authority";
+  const isPublicHost =
+    publicOrigin !== undefined && host.toLowerCase() === new URL(publicOrigin).host;
+  if (!isLoopback && !isPublicHost) return "host is not a trusted authority";
+  if (isPublicHost && !isLoopbackAddress(req.socket?.remoteAddress)) {
+    return "public authority requires a local reverse proxy";
+  }
   const origin = req.headers.origin;
+  if (isPublicHost && origin === "null") return "opaque Origin is not allowed for public authority";
   if (origin !== undefined && origin !== "null") {
     let originHost: string | undefined;
     try {
@@ -74,9 +112,13 @@ function fenceViolation(req: IncomingMessage): string | undefined {
     } catch {
       return "unparseable Origin header";
     }
-    if (originHost !== host) return "Origin does not match Host";
+    if (originHost.toLowerCase() !== host.toLowerCase()) return "Origin does not match Host";
+    if (isPublicHost && origin !== publicOrigin) return "Origin does not match public origin";
   }
   if (req.headers["sec-fetch-site"] === "cross-site") return "sec-fetch-site: cross-site";
+  if (isPublicHost && req.headers["sec-fetch-site"] === "same-site") {
+    return "sec-fetch-site: same-site";
+  }
   if (req.method === "POST") {
     const contentType = req.headers["content-type"] ?? "";
     if (!/^\s*application\/json\s*(;|$)/.test(contentType)) {
@@ -87,8 +129,12 @@ function fenceViolation(req: IncomingMessage): string | undefined {
 }
 
 /** Run the fence; returns true when the request was rejected (handled). */
-function fenceRejected(req: IncomingMessage, res: ServerResponse): boolean {
-  const violation = fenceViolation(req);
+function fenceRejected(
+  req: IncomingMessage,
+  res: ServerResponse,
+  publicOrigin: string | undefined,
+): boolean {
+  const violation = fenceViolation(req, publicOrigin);
   if (violation === undefined) return false;
   sendJson(res, 403, { error: `forbidden: ${violation}` });
   return true;
@@ -103,7 +149,9 @@ export function registerObservationRoutes(
   ctx: Context,
   observation: ObservationService,
   lifecycle: Pick<SessionStarts, "stop">,
+  configuredPublicOrigin?: string,
 ): () => void {
+  const publicOrigin = parsePublicOrigin(configuredPublicOrigin);
   const webServer = ctx.get("webServer") as WebServerLike | undefined;
   if (webServer === undefined) {
     return () => {};
@@ -118,7 +166,7 @@ export function registerObservationRoutes(
           sendJson(res, 405, { error: "method not allowed" });
           return;
         }
-        if (fenceRejected(req, res)) return;
+        if (fenceRejected(req, res, publicOrigin)) return;
         sendJson(res, 200, {
           sessions: observation.getState(),
           available: observation.isAvailable(),
@@ -133,7 +181,7 @@ export function registerObservationRoutes(
           sendJson(res, 405, { error: "method not allowed" });
           return;
         }
-        if (fenceRejected(req, res)) return;
+        if (fenceRejected(req, res, publicOrigin)) return;
         res.writeHead(200, {
           "content-type": "text/event-stream",
           "cache-control": "no-cache",
@@ -185,7 +233,7 @@ export function registerObservationRoutes(
           sendJson(res, 405, { error: "method not allowed" });
           return;
         }
-        if (fenceRejected(req, res)) return;
+        if (fenceRejected(req, res, publicOrigin)) return;
         let body = "";
         req.on("data", (chunk: Buffer | string) => {
           body += chunk;
@@ -213,7 +261,7 @@ export function registerObservationRoutes(
           sendJson(res, 405, { error: "method not allowed" });
           return;
         }
-        if (fenceRejected(req, res)) return;
+        if (fenceRejected(req, res, publicOrigin)) return;
         let body = "";
         req.on("data", (chunk: Buffer | string) => {
           body += chunk;
@@ -249,7 +297,7 @@ export function registerObservationRoutes(
           sendJson(res, 405, { error: "method not allowed" });
           return;
         }
-        if (fenceRejected(req, res)) return;
+        if (fenceRejected(req, res, publicOrigin)) return;
         const pathname = decodeURIComponent(new URL(req.url ?? "/", "http://x").pathname);
         const attachmentId = pathname.slice(`${ROUTE_BASE}/thumbnail/`.length);
         const frame = await observation.readThumbnail(attachmentId);
