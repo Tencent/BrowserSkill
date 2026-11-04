@@ -182,8 +182,9 @@ describe.skipIf(!process.env.BSK_CLICK_CHROME)("real browser observation layers"
           const tabsApi = { get: async () => tab, query: async () => [tab] };
           for (const c of cases) {
             await evaluate(`document.open(); document.write(${JSON.stringify(fixture(c))}); document.close();
-          window.mainClicks=[]; window.frameClicks=0;
+          window.mainClicks=[]; window.panelClicks=[]; window.frameClicks=0;
           document.querySelector('#main').onclick=e=>mainClicks.push(e.isTrusted);
+          document.querySelector('#inside').onclick=e=>panelClicks.push(e.isTrusted);
           document.querySelector('canvas').getContext('2d').fillRect(0,0,40,30);
           scrollTo(0,0);
           ${
@@ -245,6 +246,17 @@ describe.skipIf(!process.env.BSK_CLICK_CHROME)("real browser observation layers"
               );
               expect(clicked, c.name + ": " + JSON.stringify(clicked)).not.toHaveProperty("code");
               expect(await evaluate("mainClicks"), c.name).toEqual([true]);
+            }
+            if (c.position && c.modal) {
+              const panelRef = result.text.match(/(@e\d+) button "Panel action"/)?.[1];
+              expect(panelRef, result.text).toBeDefined();
+              const clicked = await handleClick(
+                manager,
+                { session_id: ctx.sessionId, ref: panelRef },
+                { cdp, tabsApi },
+              );
+              expect(clicked, c.name + ": " + JSON.stringify(clicked)).not.toHaveProperty("code");
+              expect(await evaluate("panelClicks"), c.name).toEqual([true]);
             }
             if (!c.transparent && !c.small && !c.ignored && !blocked)
               expect(result.text, c.name).not.toContain('button "Covered action"');
