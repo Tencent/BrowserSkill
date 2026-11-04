@@ -1022,13 +1022,13 @@ describe("action dispatch", () => {
 });
 
 describe("session.start", () => {
-  it("forwards controller labels as individual CLI arguments", async () => {
+  it("forwards controller labels as --flag=value, so labels may start with a hyphen", async () => {
     const { tools, calls } = setup({ "session start": START_REPLY("s1") });
     await tools.get("bsk_session")?.execute(
       {
         action: "start",
-        agentName: "Codex",
-        project: "Search project",
+        agentName: "-Codex",
+        project: "--incognito",
         controllerColor: "#2563eb",
       },
       makeExec(),
@@ -1038,12 +1038,9 @@ describe("session.start", () => {
       "start",
       "--request-id",
       expect.any(String),
-      "--agent-name",
-      "Codex",
-      "--project",
-      "Search project",
-      "--controller-color",
-      "#2563eb",
+      "--agent-name=-Codex",
+      "--project=--incognito",
+      "--controller-color=#2563eb",
     ]);
   });
 

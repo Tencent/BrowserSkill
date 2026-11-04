@@ -381,10 +381,11 @@ function defineBrowserOperations(deps: ToolDeps, register: DefinitionRegistrar):
         await starts.reconcile();
         const record = starts.begin(ownerSessionIds(deps.ctx, exec.agent?.id));
         const startArgs = ["session", "start", "--request-id", record.requestId];
-        if (args.agentName !== undefined) startArgs.push("--agent-name", args.agentName);
-        if (args.project !== undefined) startArgs.push("--project", args.project);
+        // `--flag=<v>`: clap rejects a separate value token starting with "-".
+        if (args.agentName !== undefined) startArgs.push(`--agent-name=${args.agentName}`);
+        if (args.project !== undefined) startArgs.push(`--project=${args.project}`);
         if (args.controllerColor !== undefined)
-          startArgs.push("--controller-color", args.controllerColor);
+          startArgs.push(`--controller-color=${args.controllerColor}`);
         if (args.width !== undefined && args.height !== undefined) {
           startArgs.push("--width", String(args.width), "--height", String(args.height));
         }
