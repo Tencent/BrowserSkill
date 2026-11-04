@@ -237,6 +237,13 @@ pub fn info_for_error(code: ErrorCode, data: Option<&serde_json::Value>) -> Rend
         return base;
     };
     match (code, reason) {
+        (ErrorCode::ProtocolError, "daemon_updating") => RenderInfo {
+            summary: "daemon update is in progress",
+            hint: Some(
+                "wait for the update to finish, then retry the original command; if you used `--request-id`, prepare and use a new request ID",
+            ),
+            ..base
+        },
         (_, "user_denied") => RenderInfo {
             summary: "the user denied the tab borrow",
             hint: Some("do not repeat the same authorization request"),

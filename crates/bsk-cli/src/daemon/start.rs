@@ -33,6 +33,8 @@ use crate::daemon::{
     ws,
 };
 
+#[cfg(test)]
+mod auto_update_tests;
 mod handover;
 #[cfg(windows)]
 mod windows;
@@ -498,26 +500,34 @@ enum Transaction {
     /// Installed and checked; no replacement started yet.
     Installed(Prepared),
     /// A replacement has been started and waits for the daemon lock.
-    HandingOver(handover::Pending),
+    HandingOver(handover::Pending, super::sessions::UpdateGuard),
 }
 
 impl Transaction {
     /// Undo an update this daemon stopped before handing over.
     fn abandon(self) {
-        use crate::cli::update::state::Recovery;
-        let reason = "the daemon stopped before handing over";
-        match self {
-            Transaction::HandingOver(pending) => handover::abandon(pending, reason),
+        self.abandon_with(|| crate::cli::update::state::Recovery::Restored {
+            daemon_serving: false,
+        });
+    }
+
+    fn abandon_with(self, restored: impl FnOnce() -> crate::cli::update::state::Recovery) {
+        let (installed, mut record, _admission) = match self {
+            Transaction::HandingOver(mut pending, admission) => {
+                handover::stop(&mut pending.child);
+                (pending.installed, pending.record, admission)
+            }
             Transaction::Installed(Prepared {
                 installed,
-                mut record,
-            }) => {
-                let recovery = installed.roll_back(|| Recovery::Restored {
-                    daemon_serving: false,
-                });
-                record.fail(&anyhow::anyhow!("handover abandoned: {reason}"), recovery);
-            }
-        }
+                record,
+                admission,
+            }) => (installed, record, admission),
+        };
+        let recovery = installed.roll_back(restored);
+        record.fail(
+            &anyhow::anyhow!("handover abandoned: the daemon stopped before handing over"),
+            recovery,
+        );
     }
 }
 
@@ -766,7 +776,7 @@ fn serve(cfg: &DaemonConfig, resumed: Option<&mut UpdateRecord>) -> Result<Stopp
     let transaction = lock_slot(&transaction).take();
 
     match (reason, transaction) {
-        (Ok(StopReason::Handover), Some(Transaction::HandingOver(pending))) => {
+        (Ok(StopReason::Handover), Some(Transaction::HandingOver(pending, _admission))) => {
             Ok(Stopped::HandOver(Box::new(pending)))
         }
         (reason, transaction) => {
@@ -1022,9 +1032,9 @@ fn spawn_update_check_task(
                         &cache_path,
                         policy == update::AutoUpdatePolicy::Install,
                     )?;
-                    // The session gate is read after the fetch, as late
-                    // as possible before the binary gets replaced.
-                    let active_sessions = state.sessions.len();
+                    // Avoid downloading while sessions are active. The installer
+                    // checks again and closes admission after the download.
+                    let active_sessions = state.sessions.update_blockers();
                     let last_attempt = update::state::current();
                     let outcome = update::auto_update_step(
                         candidate.as_ref(),
@@ -1038,6 +1048,7 @@ fn spawn_update_check_task(
                                 exe_path.as_deref(),
                                 &transaction,
                                 &stopping,
+                                &state.sessions,
                             )
                         },
                     )?;
@@ -1111,7 +1122,7 @@ fn spawn_update_check_task(
                 update::AutoUpdateOutcome::PostponedSessions { latest, sessions } => info!(
                     %latest,
                     sessions,
-                    "auto-update postponed: agent session(s) active; will retry on the next tick"
+                    "auto-update postponed: agent session(s) active or being cleaned up; will retry on the next tick"
                 ),
                 update::AutoUpdateOutcome::Deferred { latest, until } => info!(
                     %latest,
@@ -1153,6 +1164,7 @@ fn spawn_update_check_task(
 struct Prepared {
     installed: crate::cli::update::Installed,
     record: crate::cli::update::state::UpdateRecord,
+    admission: super::sessions::UpdateGuard,
 }
 
 /// Install and self-check `candidate` under the update lock, leaving the
@@ -1163,7 +1175,8 @@ fn prepare_handover(
     exe: Option<&Path>,
     transaction: &TransactionSlot,
     stopping: &std::sync::atomic::AtomicBool,
-) -> Result<()> {
+    sessions: &Arc<super::sessions::SessionRegistry>,
+) -> Result<crate::cli::update::InstallOutcome<()>> {
     use crate::cli::update::{
         self,
         state::{UpdateLock, UpdateRecord, UpdateSource},
@@ -1172,10 +1185,28 @@ fn prepare_handover(
     let lock = UpdateLock::try_acquire(exe)?;
     let mut record = UpdateRecord::start(UpdateSource::Daemon, &candidate.latest, exe);
     record.save();
+    let binary = update::self_download_candidate(candidate, &mut record)?;
+    let admission = match sessions.try_begin_update() {
+        Ok(admission) => admission,
+        Err(super::sessions::UpdateBlocked::ActiveSessions(active)) => {
+            record.postpone_for_sessions();
+            return Ok(update::InstallOutcome::PostponedSessions(active));
+        }
+        Err(err) => {
+            let err = anyhow::Error::from(err);
+            record.fail(&err, update::state::Recovery::Unchanged);
+            return Err(err);
+        }
+    };
     let cancelled = || stopping.load(std::sync::atomic::Ordering::SeqCst);
-    let installed = update::self_install_candidate(candidate, exe, &mut record, lock, &cancelled)?;
-    *lock_slot(transaction) = Some(Transaction::Installed(Prepared { installed, record }));
-    Ok(())
+    let installed =
+        update::install_downloaded(candidate, exe, &binary, &mut record, lock, &cancelled)?;
+    *lock_slot(transaction) = Some(Transaction::Installed(Prepared {
+        installed,
+        record,
+        admission,
+    }));
+    Ok(update::InstallOutcome::Installed(()))
 }
 
 /// Spawn the replacement daemon from the new executable, on the port this
@@ -1188,23 +1219,30 @@ fn start_replacement(
     config: &DaemonConfig,
     ws_port: u16,
 ) -> bool {
+    start_replacement_with_spawn(transaction, ws_port, || {
+        let exe = exe.context("current executable unknown")?;
+        let args = restart_start_args(config, ws_port)?;
+        spawn_detached_at(exe, &args, Some(std::process::id()))
+    })
+}
+
+fn start_replacement_with_spawn(
+    transaction: &TransactionSlot,
+    ws_port: u16,
+    spawn: impl FnOnce() -> Result<DaemonChild>,
+) -> bool {
     use crate::cli::update::state::{Recovery, UpdateStage};
     let mut slot = lock_slot(transaction);
     let Some(Transaction::Installed(Prepared {
         installed,
         mut record,
+        admission,
     })) = slot.take()
     else {
         return false;
     };
     record.enter(UpdateStage::Handover);
-    let spawned = exe
-        .context("current executable unknown")
-        .and_then(|exe| {
-            let args = restart_start_args(config, ws_port)?;
-            spawn_detached_at(exe, &args, Some(std::process::id()))
-        })
-        .context("start the replacement daemon");
+    let spawned = spawn().context("start the replacement daemon");
     match spawned {
         Ok(child) => {
             let child_pid = child.id();
@@ -1212,13 +1250,16 @@ fn start_replacement(
                 replacement = child_pid,
                 "replacement daemon started; handing over once it is ready"
             );
-            *slot = Some(Transaction::HandingOver(handover::Pending {
-                child_pid,
-                child,
-                port: ws_port,
-                installed,
-                record,
-            }));
+            *slot = Some(Transaction::HandingOver(
+                handover::Pending {
+                    child_pid,
+                    child,
+                    port: ws_port,
+                    installed,
+                    record,
+                },
+                admission,
+            ));
             true
         }
         Err(err) => {

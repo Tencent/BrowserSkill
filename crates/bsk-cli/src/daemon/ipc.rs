@@ -1347,6 +1347,7 @@ pub(super) async fn handle_session_start(
 
 fn map_start_error(err: StartSessionError) -> RpcError {
     let code = match &err {
+        StartSessionError::DaemonUpdating => ErrorCode::ProtocolError,
         StartSessionError::NoBrowserConnected => ErrorCode::NoBrowserConnected,
         StartSessionError::MultipleBrowsersOnline { .. } => ErrorCode::MultipleBrowsersOnline,
         StartSessionError::BrowserNotFound { .. } => ErrorCode::NotFound,
@@ -1361,6 +1362,9 @@ fn map_start_error(err: StartSessionError) -> RpcError {
     };
     let message = err.to_string();
     let data = match &err {
+        StartSessionError::DaemonUpdating => {
+            Some(serde_json::json!({ "reason": "daemon_updating" }))
+        }
         StartSessionError::MultipleBrowsersOnline { browsers } => {
             Some(serde_json::json!({ "browsers": browsers }))
         }
@@ -2086,6 +2090,22 @@ mod windows {
 
 #[cfg(windows)]
 pub use windows::{bind, serve};
+
+#[cfg(test)]
+mod start_error_tests {
+    use super::*;
+
+    #[test]
+    fn daemon_updating_has_a_reason_without_changing_the_error_code() {
+        let error = map_start_error(StartSessionError::DaemonUpdating);
+        assert_eq!(error.code, ErrorCode::ProtocolError);
+        assert_eq!(
+            error.data,
+            Some(serde_json::json!({"reason": "daemon_updating"}))
+        );
+        assert!(error.message.contains("retry the original command"));
+    }
+}
 
 #[cfg(all(test, unix))]
 mod tests {
