@@ -25,7 +25,7 @@ export interface WheelDeps {
   tabsApi: ChromeTabsApi;
   signal?: AbortSignal;
   /** Temporarily disable the Agent Window overlay's input blocker. */
-  bypassOverlay?: (tabId: number, enabled: boolean) => Promise<void>;
+  bypassOverlay?: (tabId: number, enabled: boolean) => Promise<boolean | void>;
 }
 
 interface WheelPoint {

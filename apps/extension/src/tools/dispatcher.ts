@@ -1274,14 +1274,17 @@ function sessionIdForBrowserControlMethod(req: RequestFrame): string | null {
   }
 }
 
-async function bypassOverlay(tabId: number, enabled: boolean): Promise<void> {
+async function bypassOverlay(tabId: number, enabled: boolean): Promise<boolean> {
   try {
     await chrome.tabs.sendMessage(tabId, {
       type: OVERLAY_AUTOMATION_BYPASS,
       enabled,
     });
+    return true;
   } catch {
-    // Content script may be unavailable on restricted pages.
+    // Content script may be unavailable on restricted pages; click diagnostics
+    // report the undelivered request instead of failing here.
+    return false;
   }
 }
 
