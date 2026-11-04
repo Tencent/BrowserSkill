@@ -9,6 +9,9 @@ Starting from 0.2.0, CLI / Extension / DSH Plugin share the same version number.
 
 ### Fixed
 
+- On Windows, pairing, rotating or revoking a remote browser no longer fails with
+  `replace authorization snapshot: Access is denied` when another request is
+  reading the authorization store at the same moment.
 - Window resize verifies the browser's resulting bounds and the target tab's
   layout viewport. It reports constrained bounds, inactive tabs and viewports
   that did not follow the resize instead of echoing the requested size as success.
