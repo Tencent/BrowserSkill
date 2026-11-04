@@ -10,6 +10,7 @@ import {
 } from "@/lib/overlay-bridge";
 import { nextOverlayVersion } from "@/lib/overlay-version";
 import {
+  type BorrowedTab,
   isAgentControlledTab,
   type SessionContext,
   type SessionManager,
@@ -147,6 +148,8 @@ export interface TabMutationApi {
     tabId: number,
     moveProps: chrome.tabs.MoveProperties,
   ): Promise<chrome.tabs.Tab | chrome.tabs.Tab[]>;
+  query?(queryInfo: chrome.tabs.QueryInfo): Promise<chrome.tabs.Tab[]>;
+  group?(options: chrome.tabs.GroupOptions): Promise<number>;
 }
 
 export const chromeTabMutationApi: TabMutationApi = {
@@ -155,6 +158,8 @@ export const chromeTabMutationApi: TabMutationApi = {
   update: (id, p) => chrome.tabs.update(id, p),
   get: (id) => chrome.tabs.get(id),
   move: (id, p) => chrome.tabs.move(id, p),
+  query: (q) => chrome.tabs.query(q),
+  group: (opts) => chrome.tabs.group(opts),
 };
 
 async function moveExpectedTab(
@@ -752,6 +757,7 @@ interface ExecuteBorrowCoreParams {
   tabId: number;
   confirmationTimeoutMs?: number;
   tabsApi: TabMutationApi;
+  tabsQuery?: ChromeTabsApi;
   approveBorrow: BorrowConfirmationApprover;
   signal?: AbortSignal;
   mutate?: CdpRunner["runBrowserMutation"];
@@ -760,6 +766,64 @@ interface ExecuteBorrowCoreParams {
 interface ExecuteBorrowCoreOk {
   originalWindowId: number;
   originalIndex: number;
+  leftNeighborTabId?: number;
+  rightNeighborTabId?: number;
+  originalGroupId?: number;
+  originalPinned?: boolean;
+}
+
+async function queryWindowTabs(
+  tabsApi: TabMutationApi,
+  tabsQuery: ChromeTabsApi | undefined,
+  windowId: number,
+): Promise<chrome.tabs.Tab[] | null> {
+  const query =
+    tabsApi.query?.bind(tabsApi) ??
+    tabsQuery?.query?.bind(tabsQuery) ??
+    (typeof chrome !== "undefined" && typeof chrome.tabs?.query === "function"
+      ? (q: chrome.tabs.QueryInfo) => chrome.tabs.query(q)
+      : undefined);
+  if (!query) return null;
+  try {
+    const raw = await query({ windowId });
+    return Array.isArray(raw) ? raw.filter((t) => t.windowId === windowId) : null;
+  } catch {
+    return null;
+  }
+}
+
+async function captureBorrowSnapshot(
+  tabsApi: TabMutationApi,
+  tabsQuery: ChromeTabsApi | undefined,
+  currentTab: chrome.tabs.Tab,
+  tabId: number,
+  originalWindowId: number,
+  originalIndex: number,
+): Promise<ExecuteBorrowCoreOk> {
+  const snapshot: ExecuteBorrowCoreOk = {
+    originalWindowId,
+    originalIndex,
+    ...(currentTab.pinned === true ? { originalPinned: true } : {}),
+    ...(typeof currentTab.groupId === "number" && currentTab.groupId >= 0
+      ? { originalGroupId: currentTab.groupId }
+      : {}),
+  };
+  const windowTabs = await queryWindowTabs(tabsApi, tabsQuery, originalWindowId);
+  if (!windowTabs || windowTabs.length <= 1) return snapshot;
+  const sorted = [...windowTabs]
+    .filter(
+      (t): t is chrome.tabs.Tab & { id: number; index: number } =>
+        typeof t.id === "number" && typeof t.index === "number",
+    )
+    .sort((a, b) => a.index - b.index);
+  const pos = sorted.findIndex((t) => t.id === tabId);
+  if (pos > 0) {
+    snapshot.leftNeighborTabId = sorted[pos - 1]!.id;
+  }
+  if (pos >= 0 && pos + 1 < sorted.length) {
+    snapshot.rightNeighborTabId = sorted[pos + 1]!.id;
+  }
+  return snapshot;
 }
 
 /**
@@ -954,6 +1018,17 @@ async function executeBorrowCore(
 
   const originalWindowId = currentTab.windowId;
   const originalIndex = typeof currentTab.index === "number" ? currentTab.index : 0;
+  const snapshot = await captureBorrowSnapshot(
+    p.tabsApi,
+    p.tabsQuery,
+    currentTab,
+    p.tabId,
+    originalWindowId,
+    originalIndex,
+  );
+  if (p.manager.get(p.ctx.sessionId) !== p.ctx || aborted(p.signal, "tab_borrow")) {
+    return { code: "cancelled", message: "tab_borrow session ended" };
+  }
   const moveErr = await moveTabForBorrow(
     p.tabsApi,
     p.tabId,
@@ -966,7 +1041,7 @@ async function executeBorrowCore(
   );
   if (moveErr) return moveErr;
 
-  return { originalWindowId, originalIndex };
+  return snapshot;
 }
 
 export async function handleTabBorrow(
@@ -1054,6 +1129,7 @@ export async function handleTabBorrow(
       tabId: params.tab_id,
       confirmationTimeoutMs: params.confirmation_timeout_ms,
       tabsApi,
+      tabsQuery: deps.tabsQuery,
       approveBorrow: approve,
       signal: deps.signal,
       mutate: deps.cdp?.runBrowserMutation,
@@ -1063,8 +1139,7 @@ export async function handleTabBorrow(
     try {
       reservation.commit({
         tabId: params.tab_id,
-        originalWindowId: coreResult.originalWindowId,
-        originalIndex: coreResult.originalIndex,
+        ...coreResult,
       });
       committed = true;
     } catch (err) {
@@ -1278,6 +1353,69 @@ async function releaseReturnedTabState(
   }
 }
 
+async function resolveReturnTargetIndex(
+  entry: BorrowedTab,
+  tabsApi: TabMutationApi,
+  tabsQuery: ChromeTabsApi | undefined,
+): Promise<number> {
+  if (entry.leftNeighborTabId === undefined && entry.rightNeighborTabId === undefined) {
+    return entry.originalIndex;
+  }
+  const windowTabs = await queryWindowTabs(tabsApi, tabsQuery, entry.originalWindowId);
+  if (!windowTabs || windowTabs.length === 0) {
+    return entry.originalIndex;
+  }
+  const sorted = [...windowTabs]
+    .filter(
+      (t): t is chrome.tabs.Tab & { id: number; index: number } =>
+        typeof t.id === "number" && typeof t.index === "number" && t.id !== entry.tabId,
+    )
+    .sort((a, b) => a.index - b.index);
+  if (entry.leftNeighborTabId !== undefined) {
+    const left = sorted.find((t) => t.id === entry.leftNeighborTabId);
+    if (left) return left.index + 1;
+  }
+  if (entry.rightNeighborTabId !== undefined) {
+    const right = sorted.find((t) => t.id === entry.rightNeighborTabId);
+    if (right) return right.index;
+  }
+  return entry.originalIndex;
+}
+
+async function restoreReturnedTabAttributes(
+  entry: BorrowedTab,
+  tabsApi: TabMutationApi,
+  deps: TabManagementDeps,
+): Promise<number | undefined> {
+  if (entry.originalPinned) {
+    try {
+      const updated = await mutateBrowser(deps, () =>
+        tabsApi.update(entry.tabId, { pinned: true }),
+      );
+      return typeof updated?.index === "number" ? updated.index : undefined;
+    } catch (err) {
+      console.debug("[bsk tab_return] pinned state restore failed", err);
+      return undefined;
+    }
+  }
+  if (typeof entry.originalGroupId === "number" && entry.originalGroupId >= 0) {
+    const groupFn =
+      tabsApi.group?.bind(tabsApi) ??
+      (typeof chrome !== "undefined" && typeof chrome.tabs?.group === "function"
+        ? (opts: chrome.tabs.GroupOptions) => chrome.tabs.group(opts)
+        : undefined);
+    if (!groupFn) return undefined;
+    try {
+      await mutateBrowser(deps, () =>
+        groupFn({ tabIds: [entry.tabId], groupId: entry.originalGroupId }),
+      );
+    } catch (err) {
+      console.debug("[bsk tab_return] tab group restore failed", err);
+    }
+  }
+  return undefined;
+}
+
 /**
  * Move a single borrowed tab back to its original window (or a
  * fallback normal window when the original is gone). Used both by
@@ -1342,6 +1480,8 @@ async function returnBorrowedTabCore(
     fallbackTarget = target;
     targetWindowId = target.windowId;
     targetIndex = target.index;
+  } else {
+    targetIndex = await resolveReturnTargetIndex(entry, tabsApi, deps.tabsQuery);
   }
 
   const cancelledBeforeMove = aborted(deps.signal, "tab_return", deps.isSessionLive);
@@ -1368,7 +1508,15 @@ async function returnBorrowedTabCore(
       deps.cdp?.runBrowserMutation,
     );
     const movedTab = Array.isArray(moved) ? moved[0] : moved;
-    const finalIndex = typeof movedTab?.index === "number" ? movedTab.index : targetIndex;
+    const restoredIndex = !fallback
+      ? await restoreReturnedTabAttributes(entry, tabsApi, deps)
+      : undefined;
+    const finalIndex =
+      typeof restoredIndex === "number"
+        ? restoredIndex
+        : typeof movedTab?.index === "number"
+          ? movedTab.index
+          : targetIndex;
     await releaseReturnedTabState(ctx, tabId, deps);
     return {
       tabId,

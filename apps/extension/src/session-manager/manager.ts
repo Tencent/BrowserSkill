@@ -38,6 +38,14 @@ export interface BorrowedTab {
   tabId: number;
   originalWindowId: number;
   originalIndex: number;
+  /** Left-hand neighbor tab ID in the original window at borrow time. */
+  leftNeighborTabId?: number;
+  /** Right-hand neighbor tab ID in the original window at borrow time. */
+  rightNeighborTabId?: number;
+  /** Original Chrome Tab Group ID (>= 0 when grouped). */
+  originalGroupId?: number;
+  /** Whether the tab was pinned in the original window before borrowing. */
+  originalPinned?: boolean;
 }
 
 export interface BorrowReservation {

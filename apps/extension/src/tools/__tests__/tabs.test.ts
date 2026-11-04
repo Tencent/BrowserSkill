@@ -125,6 +125,8 @@ function makeTabMutationApi(state: FakeTabState): {
     update: ReturnType<typeof vi.fn>;
     get: ReturnType<typeof vi.fn>;
     move: ReturnType<typeof vi.fn>;
+    query: ReturnType<typeof vi.fn>;
+    group: ReturnType<typeof vi.fn>;
   };
 } {
   const create = vi.fn(async (props: chrome.tabs.CreateProperties) => {
@@ -147,6 +149,7 @@ function makeTabMutationApi(state: FakeTabState): {
     const t = state.tabs.get(tabId);
     if (!t) throw new Error(`update: tab ${tabId} not found`);
     if (props.active !== undefined) (t as { active?: boolean }).active = props.active;
+    if (props.pinned !== undefined) (t as { pinned?: boolean }).pinned = props.pinned;
     return t;
   });
   const get = vi.fn(async (tabId: number) => {
@@ -168,9 +171,25 @@ function makeTabMutationApi(state: FakeTabState): {
     }
     return t;
   });
+  const query = vi.fn(async (queryInfo: chrome.tabs.QueryInfo) =>
+    [...state.tabs.values()].filter(
+      (t) => queryInfo.windowId === undefined || t.windowId === queryInfo.windowId,
+    ),
+  );
+  const group = vi.fn(async (options: chrome.tabs.GroupOptions) => {
+    const gid = typeof options.groupId === "number" ? options.groupId : 1;
+    const ids = Array.isArray(options.tabIds) ? options.tabIds : [options.tabIds];
+    for (const id of ids) {
+      if (typeof id === "number") {
+        const t = state.tabs.get(id);
+        if (t) (t as { groupId?: number }).groupId = gid;
+      }
+    }
+    return gid;
+  });
   return {
-    api: { create, remove, update, get, move },
-    spies: { create, remove, update, get, move },
+    api: { create, remove, update, get, move, query, group },
+    spies: { create, remove, update, get, move, query, group },
   };
 }
 
@@ -1431,6 +1450,106 @@ describe("handleTabReturn", () => {
     expect(res.toWindowId).toBe(777);
     expect(res.fallback).toBe(true);
     expect(spies.move).toHaveBeenLastCalledWith(7, { windowId: 777, index: 0 });
+  });
+
+  it("anchors return position to neighbor tabs and restores tab group and pinned state", async () => {
+    const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
+    const ctx = await sm.start("aa11");
+    const state: FakeTabState = {
+      tabs: new Map([
+        [5, { id: 5, windowId: 200, index: 0 } as chrome.tabs.Tab],
+        [7, { id: 7, windowId: 200, index: 1, groupId: 12 } as chrome.tabs.Tab],
+        [8, { id: 8, windowId: 200, index: 2 } as chrome.tabs.Tab],
+      ]),
+      nextTabId: 50,
+      windowsClosed: new Set(),
+    };
+    const { api, spies } = makeTabMutationApi(state);
+    const { api: windowsApi } = makeWindowsApi(state);
+
+    const borrowed = await handleTabBorrow(
+      sm,
+      { session_id: "aa11", tab_id: 7 },
+      { tabs: api, approveBorrow: async () => true },
+    );
+    expect(borrowed).toEqual({
+      tab_id: 7,
+      original_window_id: 200,
+      original_index: 1,
+      agent_window_id: 100,
+    });
+    expect(ctx.borrowedTabs.get(7)).toEqual({
+      tabId: 7,
+      originalWindowId: 200,
+      originalIndex: 1,
+      leftNeighborTabId: 5,
+      rightNeighborTabId: 8,
+      originalGroupId: 12,
+    });
+
+    // Simulate user opening two new tabs before tab 5 while tab 7 is borrowed.
+    state.tabs.set(20, { id: 20, windowId: 200, index: 0 } as chrome.tabs.Tab);
+    state.tabs.set(21, { id: 21, windowId: 200, index: 1 } as chrome.tabs.Tab);
+    (state.tabs.get(5) as { index?: number }).index = 2;
+    (state.tabs.get(8) as { index?: number }).index = 3;
+
+    const returned = await handleTabReturn(
+      sm,
+      { session_id: "aa11", tab_id: 7 },
+      { tabs: api, windows: windowsApi },
+    );
+    expect(returned).toEqual({
+      tab_id: 7,
+      returned_to_window_id: 200,
+      returned_to_index: 3,
+    });
+    expect(spies.move).toHaveBeenLastCalledWith(7, { windowId: 200, index: 3 });
+    expect(spies.group).toHaveBeenCalledWith({ tabIds: [7], groupId: 12 });
+  });
+
+  it("falls back to rightNeighborTabId when leftNeighborTabId closed, and restores pinned tabs", async () => {
+    const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
+    const ctx = await sm.start("aa11");
+    const state: FakeTabState = {
+      tabs: new Map([
+        [5, { id: 5, windowId: 200, index: 0, pinned: true } as chrome.tabs.Tab],
+        [7, { id: 7, windowId: 200, index: 1, pinned: true } as chrome.tabs.Tab],
+        [8, { id: 8, windowId: 200, index: 2 } as chrome.tabs.Tab],
+      ]),
+      nextTabId: 50,
+      windowsClosed: new Set(),
+    };
+    const { api, spies } = makeTabMutationApi(state);
+    const { api: windowsApi } = makeWindowsApi(state);
+
+    await handleTabBorrow(
+      sm,
+      { session_id: "aa11", tab_id: 7 },
+      { tabs: api, approveBorrow: async () => true },
+    );
+    expect(ctx.borrowedTabs.get(7)).toMatchObject({
+      leftNeighborTabId: 5,
+      rightNeighborTabId: 8,
+      originalPinned: true,
+    });
+
+    // User closes tab 5 and inserts a new tab at index 0, shifting tab 8 to index 4.
+    state.tabs.delete(5);
+    (state.tabs.get(8) as { index?: number }).index = 4;
+
+    const returned = await handleTabReturn(
+      sm,
+      { session_id: "aa11", tab_id: 7 },
+      { tabs: api, windows: windowsApi },
+    );
+    expect(returned).toEqual({
+      tab_id: 7,
+      returned_to_window_id: 200,
+      returned_to_index: 4,
+    });
+    expect(spies.move).toHaveBeenLastCalledWith(7, { windowId: 200, index: 4 });
+    expect(spies.update).toHaveBeenLastCalledWith(7, { pinned: true });
+    expect(spies.group).not.toHaveBeenCalled();
   });
 });
 
