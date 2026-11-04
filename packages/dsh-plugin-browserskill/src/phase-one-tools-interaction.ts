@@ -423,7 +423,7 @@ export function registerPhaseOneInteractionTools(
         const sessionId = registry.resolve(args.session, "bsk_interact(action=select)");
         const cmdArgs = ["select", "--session", sessionId];
         appendTabId(cmdArgs, args.tabId);
-        for (const value of args.values) cmdArgs.push("--value", value);
+        for (const value of args.values) cmdArgs.push(`--value=${value}`);
         if (args.timeoutMs !== undefined) cmdArgs.push("--timeout", `${args.timeoutMs}ms`);
         appendTarget(cmdArgs, args.target);
         const reply = (await runtime.run(

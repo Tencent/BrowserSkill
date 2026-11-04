@@ -1151,6 +1151,8 @@ fn tool_dispatch_transport_timeout(method: &Method, params: &Value) -> Result<Du
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct CliSessionStartParams {
     #[serde(default)]
+    pub controller: Option<bsk_protocol::tools::ControllerInfo>,
+    #[serde(default)]
     pub incognito: bool,
     #[serde(default)]
     pub browser_instance_id: Option<String>,
@@ -1270,6 +1272,7 @@ pub(super) async fn handle_session_start(
     let cancel = abort_guard.token().clone();
     let params: CliSessionStartParams = if params.is_null() {
         CliSessionStartParams {
+            controller: None,
             incognito: false,
             browser_instance_id: None,
             width: None,
@@ -1283,6 +1286,13 @@ pub(super) async fn handle_session_start(
             data: None,
         })?
     };
+    if let Some(controller) = &params.controller {
+        controller.validate().map_err(|message| RpcError {
+            code: ErrorCode::InvalidParams,
+            message,
+            data: None,
+        })?;
+    }
     // `--width` without `--height` (or vice versa) is rejected: the
     // extension only accepts a complete size pair.
     let window_size = match (params.width, params.height) {
@@ -1302,6 +1312,7 @@ pub(super) async fn handle_session_start(
         &state.tool_queues,
         params.browser_instance_id.as_deref(),
         AgentWindowOptions {
+            controller: params.controller,
             incognito: params.incognito,
             size: window_size,
             focused: params.focused,

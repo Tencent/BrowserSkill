@@ -2,9 +2,38 @@
 
 import { describe, expect, it } from "vitest";
 import { jsonPointer, parseJsonSource } from "../json-source";
-import { BODY_CHARS, redactBody, redactRequestUrl } from "../redact";
+import { BODY_CHARS, redactBody, redactHeaders, redactRequestUrl } from "../redact";
 
 describe("source-preserving evidence redaction", () => {
+  it.each([
+    "PRIVATE-TOKEN",
+    "x-goog-api-key",
+    "X-Amz-Security-Token",
+    "Ocp-Apim-Subscription-Key",
+    "X-Vault-Token",
+    "X-Access-Token",
+    "X-CSRFToken",
+    "X-Shopify-Access-Token",
+    "X-Hasura-Admin-Secret",
+  ])("redacts the vendor credential header %s", (name) => {
+    expect(redactHeaders({ [name]: "BSK_SYNTHETIC_SECRET_7264" })).toEqual({
+      [name.toLowerCase()]: "[redacted]",
+    });
+  });
+
+  it("matches vendor credential names exactly, not by a token suffix", () => {
+    // A generic `*token` rule would also hide pagination cursors (#555).
+    expect(redactHeaders({ "x-page-token": "cursor-2", "x-request-id": "r1" })).toEqual({
+      "x-page-token": "cursor-2",
+      "x-request-id": "r1",
+    });
+    const json =
+      '{"nextPageToken":"cursor-2","pageToken":"cursor-1","private_token":"BSK_SYNTHETIC_SECRET_7264"}';
+    expect(redactBody(json, "application/json").text).toBe(
+      '{"nextPageToken":"cursor-2","pageToken":"cursor-1","private_token":"[redacted]"}',
+    );
+  });
+
   it.each([
     'type="password"',
     'type="pass&#x77;ord"',
