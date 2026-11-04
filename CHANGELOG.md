@@ -2,6 +2,7 @@
 
 All notable changes to BrowserSkill will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
+See the [Chinese changelog](CHANGELOG.zh-CN.md). Update both versions in the same PR.
 
 Starting from 0.2.0, CLI / Extension / DSH Plugin share the same version number.
 
