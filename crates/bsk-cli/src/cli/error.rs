@@ -453,6 +453,66 @@ mod tests {
     use super::*;
 
     #[test]
+    fn daemon_updating_renders_retry_guidance_in_human_and_json_output() {
+        let error = CliError::from_rpc(RpcError {
+            code: ErrorCode::ProtocolError,
+            message: crate::daemon::sessions::StartSessionError::DaemonUpdating.to_string(),
+            data: Some(serde_json::json!({"reason": "daemon_updating"})),
+        });
+        let human = render_human_to_string(&error, None);
+        assert!(
+            human.starts_with("error: daemon update is in progress"),
+            "{human}"
+        );
+        let info = render_info_for(&error);
+        let json: serde_json::Value = serde_json::from_str(&json_error_string(
+            &error,
+            error.exit_code(),
+            hint_for(&error, info.as_ref()),
+        ))
+        .unwrap();
+        assert_eq!(json["code"], "protocol_error");
+        assert_eq!(json["data"]["reason"], "daemon_updating");
+        assert_eq!(json["exit_code"], 2);
+        assert!(
+            json["message"]
+                .as_str()
+                .unwrap()
+                .contains("retry the original command")
+        );
+        for output in [human.as_str(), json["hint"].as_str().unwrap()] {
+            assert!(output.contains("retry the original command"), "{output}");
+            assert!(
+                output.contains("prepare") && output.contains("new request ID"),
+                "{output}"
+            );
+            assert!(!output.contains("bsk session start"), "{output}");
+            assert!(!output.contains("protocol versions match"), "{output}");
+        }
+    }
+
+    #[test]
+    fn daemon_updating_override_does_not_replace_other_error_guidance() {
+        for (code, data) in [
+            (ErrorCode::ProtocolError, None),
+            (
+                ErrorCode::ProtocolError,
+                Some(serde_json::json!({"reason": "unknown"})),
+            ),
+            (
+                ErrorCode::Timeout,
+                Some(serde_json::json!({"reason": "daemon_updating"})),
+            ),
+        ] {
+            let actual = render_error::info_for_error(code, data.as_ref());
+            let original = render_error::info_for(code);
+            assert_eq!(actual.summary, original.summary);
+            assert_eq!(actual.hint, original.hint);
+            assert_eq!(actual.exit_code, original.exit_code);
+        }
+    }
+
+    #[test]
     fn exit_code_matches_design_table() {
         // Mirror of `render_error::tests::exit_codes_match_design_table`
         // — keeps both call sites in lockstep with design §3.1.

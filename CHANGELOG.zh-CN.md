@@ -7,6 +7,7 @@ BrowserSkill 的重要变更记录于此，格式参考 [Keep a Changelog](https
 
 ### 修复
 
+- 在 Windows 上，即使其他请求正在读取授权存储，配对远程浏览器、轮换凭据或撤销授权也不会再因 `replace authorization snapshot: Access is denied` 而失败（[#583](https://github.com/Tencent/BrowserSkill/pull/583)）。
 - 调整窗口大小时验证实际窗口边界和目标标签页的布局视口，并报告受限边界、非活动标签页及未随窗口变化的视口。已发送的调整操作还会使下一次共享控制同步重新采集页面。
 - 共享控制同步跳过失败的子框架和非活动文档，在 `frame_gaps` 中仅报告 HTTP(S) 的来源和路径或其他 URL 的协议，并立即为当前文档修复一次缺失的交互采集器。缺少覆盖的活动框架仍以 `frame_unobservable` 阻止操作，主页面失败则报告 `page_load_failed`。
 - `cooperate sync --settle` 在等待报告覆盖不可用时继续有限重试；全部失败时返回最后一次同步错误。临时人工控制仍返回 `not_ready`，包括导航期间的显式保持。首次成功协商策略前状态和等待操作报告 `control_policy: null`。

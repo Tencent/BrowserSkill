@@ -13,6 +13,7 @@ pub(super) fn isolated(test_name: &str, test: impl FnOnce()) {
         .env("BSK_LIFECYCLE_TEST", test_name)
         .env("BSK_HOME", home.path())
         .env("BSK_AUTO_UPDATE", "off")
+        .env("NO_PROXY", "127.0.0.1,localhost")
         .output()
         .unwrap();
     assert!(

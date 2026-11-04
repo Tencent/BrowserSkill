@@ -153,17 +153,6 @@ fn recover(pending: Pending, err: &anyhow::Error) -> Finished {
     }
 }
 
-/// Stop a replacement that has not taken over, and put the previous
-/// executable back, when this daemon stops for another reason first.
-pub(super) fn abandon(mut pending: Pending, reason: &str) {
-    stop(&mut pending.child);
-    let err = anyhow::anyhow!("handover abandoned: {reason}");
-    let recovery = pending.installed.roll_back(|| Recovery::Restored {
-        daemon_serving: false,
-    });
-    pending.record.fail(&err, recovery);
-}
-
 /// Wait until `observe` finds the expected daemon serving, failing as soon as
 /// `child` exits or `timeout` passes; a child still running then is stopped
 /// and reaped, so it releases whatever it holds. Another client may start
@@ -300,7 +289,7 @@ fn reclaim_lock() -> Result<Option<DaemonLock>> {
     }
 }
 
-fn stop(child: &mut DaemonChild) {
+pub(super) fn stop(child: &mut DaemonChild) {
     let _ = child.kill();
     let _ = child.wait();
 }
