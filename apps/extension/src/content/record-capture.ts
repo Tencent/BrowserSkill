@@ -380,6 +380,19 @@ export function startRecordCapture(
   let navigationActionPending = false;
   let navigationActionVersion = 0;
   const committedValues = new WeakMap<FillableElement, string>();
+  // A "show password" toggle switches type=password to text; keep masking those fields.
+  const formerPasswords = new WeakSet<Node>();
+  const markFormerPasswords = (records: MutationRecord[]) => {
+    for (const record of records) {
+      if (record.oldValue?.toLowerCase() === "password") formerPasswords.add(record.target);
+    }
+  };
+  const typeObserver = new MutationObserver(markFormerPasswords);
+  typeObserver.observe(document, {
+    subtree: true,
+    attributeFilter: ["type"],
+    attributeOldValue: true,
+  });
 
   const markNavigationAction = () => {
     navigationActionPending = true;
@@ -393,8 +406,10 @@ export function startRecordCapture(
 
   const emitFill = (session: FillSession) => {
     if (session.lastValue === session.baselineValue) return;
+    markFormerPasswords(typeObserver.takeRecords());
     const isPassword =
       (session.element instanceof HTMLInputElement && session.element.type === "password") ||
+      formerPasswords.has(session.element) ||
       sensitiveAutocomplete(session.element.getAttribute("autocomplete"));
     const value = isPassword ? "***" : session.lastValue;
     emitStep({
@@ -939,6 +954,7 @@ export function startRecordCapture(
       document.removeEventListener("change", onChange, true);
       document.removeEventListener("keydown", onKeyDown, true);
       urlObserver?.disconnect();
+      typeObserver.disconnect();
       if (captureNavigation) {
         window.removeEventListener("hashchange", onUrlEvent);
         window.removeEventListener("popstate", onUrlEvent);

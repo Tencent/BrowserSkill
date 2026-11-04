@@ -108,6 +108,30 @@ describe("record-capture semantic", () => {
     expect(JSON.stringify(steps)).not.toContain("4111111111111111");
   });
 
+  it.each([
+    ["after a masked edit", true],
+    ["before the first edit", false],
+  ])("keeps masking a password field shown as text %s", (_name, editWhileHidden) => {
+    document.body.innerHTML = `<input id="pw" type="password" aria-label="Password">`;
+    const capture = startRecordCapture("rec-1", (step) => steps.push(step));
+    const input = document.querySelector<HTMLInputElement>("#pw")!;
+    const edit = (value: string) => {
+      input.dispatchEvent(new FocusEvent("focusin", { bubbles: true }));
+      input.value = value;
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+      input.dispatchEvent(new FocusEvent("focusout", { bubbles: true }));
+    };
+    if (editWhileHidden) edit("BSK_SYNTHETIC_PASSWORD");
+    input.type = "text"; // a "show password" toggle
+    edit("BSK_SYNTHETIC_PASSWORDx");
+    capture.dispose();
+
+    const fills = steps.filter((step) => step.op === "fill");
+    expect(fills).toHaveLength(editWhileHidden ? 2 : 1);
+    for (const fill of fills) expect(fill).toMatchObject({ value: "***", redacted: true });
+    expect(JSON.stringify(steps)).not.toContain("BSK_SYNTHETIC_PASSWORD");
+  });
+
   it("ignores autocomplete suggestion clicks while a fill session is open", () => {
     const capture = startRecordCapture("rec-2", (step) => steps.push(step));
     const input = document.querySelector("input")!;

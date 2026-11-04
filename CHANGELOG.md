@@ -15,6 +15,8 @@ Starting from 0.2.0, CLI / Extension / DSH Plugin share the same version number.
   already hide, are also kept out of shared-control field state, `expect` failure
   details and recorded fill steps. Every check matches each `autocomplete` token, so
   `section-login current-password` or `billing cc-number` values stay hidden too.
+  Recorded fill steps also stay masked for a password field that a "show password"
+  toggle switched to `type=text` during the recording.
 - On Windows, pairing, rotating or revoking a remote browser no longer fails with
   `replace authorization snapshot: Access is denied` when another request is
   reading the authorization store at the same moment.
