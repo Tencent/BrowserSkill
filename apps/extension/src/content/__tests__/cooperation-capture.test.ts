@@ -393,6 +393,19 @@ it("does not acquire an editing lease when scrolling over an input", () => {
   expect(read()).toMatchObject({ human: 1, editing: false, busy: false });
 });
 
+it("listens for wheel only while collecting so pages keep legacy mousewheel handlers", () => {
+  // Chromium does not run a node's `mousewheel` listeners when it has a `wheel` listener.
+  const add = vi.spyOn(document, "addEventListener");
+  const remove = vi.spyOn(document, "removeEventListener");
+  const wheel = (spy: typeof add) => spy.mock.calls.filter(([type]) => type === "wheel").length;
+  const read = collector();
+  expect(wheel(add)).toBe(0);
+  read();
+  expect(wheel(add)).toBe(1);
+  read(COOPERATION_DISABLE);
+  expect(wheel(remove)).toBe(1);
+});
+
 it("preserves editing across a focus transition into a shadow field", async () => {
   document.body.innerHTML =
     '<input type="range"><div id="host" tabindex="0"></div><button>Done</button>';

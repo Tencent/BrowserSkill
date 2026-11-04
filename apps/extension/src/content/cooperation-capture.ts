@@ -370,7 +370,6 @@ export function attachCooperationCapture() {
     "pointercancel",
     "keydown",
     "keyup",
-    "wheel",
     "compositionstart",
     "compositionend",
     "focusout",
@@ -379,6 +378,13 @@ export function attachCooperationCapture() {
   ];
   for (const event of events)
     document.addEventListener(event, onEvent, { capture: true, passive: true });
+  // Chromium skips a node's legacy `mousewheel` listeners whenever that node has a
+  // `wheel` listener, even a passive one. Listen only while collecting so pages
+  // without a session keep their mousewheel handlers.
+  const listenWheel = (on: boolean) =>
+    on
+      ? document.addEventListener("wheel", onEvent, { capture: true, passive: true })
+      : document.removeEventListener("wheel", onEvent, true);
   const onWindowBlur = () => {
     if (!enabled || (!pointer && !composing && keys.size === 0)) return;
     pointer = false;
@@ -413,6 +419,7 @@ export function attachCooperationCapture() {
     }
     if (message.kind === COOPERATION_DISABLE) {
       enabled = false;
+      listenWheel(false);
       clearTimeout(focusTimer);
       observer.disconnect();
       roots.clear();
@@ -426,6 +433,7 @@ export function attachCooperationCapture() {
       reply({ ...state, busy: false, fields: [] });
     } else if (message.kind === COOPERATION_READ) {
       enabled = true;
+      listenWheel(true);
       reply(read());
     } else if (message.kind === COOPERATION_ARM) {
       if (enabled && message.input) {
@@ -486,5 +494,6 @@ export function attachCooperationCapture() {
     chrome.runtime.onMessage.removeListener(onMessage);
     window.removeEventListener("blur", onWindowBlur);
     for (const event of events) document.removeEventListener(event, onEvent, true);
+    listenWheel(false);
   };
 }
