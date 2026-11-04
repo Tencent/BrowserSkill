@@ -1,4 +1,5 @@
 import type { VomNode } from "@browser-skill/vom";
+import { sensitiveAutocomplete } from "@/lib/sensitive-autocomplete";
 import { stableIdentifierName } from "./name-evidence";
 import type {
   ResolvedSemanticGraph,
@@ -118,11 +119,9 @@ function resolvedRole(node: SemanticGraphNode): {
 function sensitive(node: SemanticGraphNode): boolean {
   const attrs = node.dom?.attrs ?? {};
   const type = (attrs.type ?? "").toLowerCase();
-  const autocomplete = (attrs.autocomplete ?? "").toLowerCase();
   return (
     type === "password" ||
-    autocomplete.startsWith("cc-") ||
-    SENSITIVE_INPUT_TYPES.has(autocomplete) ||
+    sensitiveAutocomplete(attrs.autocomplete) ||
     SENSITIVE_INPUT_TYPES.has(axProperty(node.ax, "inputType") ?? "")
   );
 }

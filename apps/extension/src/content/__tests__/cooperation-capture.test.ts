@@ -374,6 +374,24 @@ it("detects silent value changes beyond the bounded delta and excludes password 
   expect(JSON.stringify(second)).not.toContain("private-value");
 });
 
+it("keeps codes and card details the person types out of field state", () => {
+  document.body.innerHTML =
+    '<input aria-label="Code" autocomplete="one-time-code">' +
+    '<input aria-label="Card" autocomplete="billing cc-number">' +
+    '<input aria-label="City">';
+  const read = collector();
+  read();
+  for (const [input, value] of [...document.querySelectorAll("input")].map(
+    (input, index) => [input, ["482913", "4111111111111111", "Shanghai"][index]] as const,
+  )) {
+    input.value = value;
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+  }
+  const state = read()!;
+  expect(state.fields).toEqual([expect.objectContaining({ label: "City", value: "Shanghai" })]);
+  expect(JSON.stringify(state)).not.toMatch(/482913|4111111111111111/);
+});
+
 it("does not describe ambiguous or truncated field values as complete incremental evidence", () => {
   document.body.innerHTML =
     '<input aria-label="City"><input aria-label="City"><textarea aria-label="Notes"></textarea>';

@@ -9,6 +9,11 @@ Starting from 0.2.0, CLI / Extension / DSH Plugin share the same version number.
 
 ### Fixed
 
+- Values in one-time-code, card and password fields marked by `autocomplete`
+  (`one-time-code`, `cc-*`, `current-password`, `new-password`), which observations
+  already hide, are also kept out of shared-control field state, `expect` failure
+  details and recorded fill steps. Every check matches each `autocomplete` token, so
+  `section-login current-password` or `billing cc-number` values stay hidden too.
 - Window resize verifies the browser's resulting bounds and the target tab's
   layout viewport. It reports constrained bounds, inactive tabs and viewports
   that did not follow the resize instead of echoing the requested size as success.

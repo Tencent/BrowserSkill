@@ -1,3 +1,4 @@
+import { SENSITIVE_AUTOCOMPLETE_SELECTOR } from "@/lib/sensitive-autocomplete";
 import type { SessionContext } from "@/session-manager/manager";
 import { FOCUS_CHECK } from "@/tools/focus-state";
 import { type ResolvedActionTarget, resolveActionTarget } from "@/tools/interaction";
@@ -82,7 +83,7 @@ const SAMPLE_TARGET = `function(field, attribute) {
   if (!this.isConnected) return { connected: false };
   if (field === 'exists') return { connected: true, value: true };
   if (field === 'text') return { connected: true, value: this.textContent };
-  const sensitive = this.matches('input[type="password"],input[type="file"],input[type="hidden"]');
+  const sensitive = this.matches('input[type="password"],input[type="file"],input[type="hidden"],' + ${JSON.stringify(SENSITIVE_AUTOCOMPLETE_SELECTOR)});
   if (field === 'attribute') return { connected: true, value: this.getAttribute(attribute), redacted: sensitive && attribute.toLowerCase() === 'value' };
   if (field) return { connected: true, value: this[field] ?? null, redacted: sensitive && field === 'value' };
   const style = getComputedStyle(this);

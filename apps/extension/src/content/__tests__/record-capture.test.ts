@@ -94,6 +94,20 @@ describe("record-capture semantic", () => {
     expect(steps.some((s) => "selector" in s)).toBe(false);
   });
 
+  it("masks codes and card numbers typed into a recorded field", () => {
+    document.querySelector("input")!.setAttribute("autocomplete", "billing cc-number");
+    const capture = startRecordCapture("rec-1", (step) => steps.push(step));
+    const input = document.querySelector("input")!;
+    input.dispatchEvent(new FocusEvent("focusin", { bubbles: true }));
+    input.value = "4111111111111111";
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    input.dispatchEvent(new FocusEvent("focusout", { bubbles: true }));
+    capture.dispose();
+
+    expect(steps).toEqual([expect.objectContaining({ op: "fill", value: "***", redacted: true })]);
+    expect(JSON.stringify(steps)).not.toContain("4111111111111111");
+  });
+
   it("ignores autocomplete suggestion clicks while a fill session is open", () => {
     const capture = startRecordCapture("rec-2", (step) => steps.push(step));
     const input = document.querySelector("input")!;

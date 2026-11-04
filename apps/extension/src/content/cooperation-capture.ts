@@ -13,6 +13,7 @@ import {
 } from "@/cooperation/types";
 import { OVERLAY_HOST_SELECTOR } from "@/lib/overlay-bridge";
 import { createRandomUuid } from "@/lib/random-uuid";
+import { sensitiveAutocomplete } from "@/lib/sensitive-autocomplete";
 
 const MAX_CHANGES = 64;
 // CDP's native clock conversion and the DOM clock round independently.
@@ -55,6 +56,10 @@ export function attachCooperationCapture() {
   let focusTimer: ReturnType<typeof setTimeout> | undefined;
   const overlay = (target: EventTarget | null) =>
     target instanceof Element && !!target.closest(OVERLAY_HOST_SELECTOR);
+  // Passwords, codes, card details and file selections never enter field state.
+  const secret = (target: Element) =>
+    (target instanceof HTMLInputElement && ["password", "file", "hidden"].includes(target.type)) ||
+    sensitiveAutocomplete(target.getAttribute("autocomplete"));
   const label = (target: EventTarget | null) => {
     if (!(target instanceof Element)) return "page";
     return (
@@ -150,11 +155,7 @@ export function attachCooperationCapture() {
     const mediaByRoot = new Map<Document | ShadowRoot, { id: string }[]>();
     state.fieldsComplete = true;
     for (const target of controls(document)) {
-      if (
-        overlay(target) ||
-        (target instanceof HTMLInputElement && ["password", "file", "hidden"].includes(target.type))
-      )
-        continue;
+      if (overlay(target) || secret(target)) continue;
       const fullValue =
         target instanceof HTMLInputElement && ["checkbox", "radio"].includes(target.type)
           ? String(target.checked)
@@ -278,11 +279,7 @@ export function attachCooperationCapture() {
         target instanceof HTMLTextAreaElement ||
         target instanceof HTMLSelectElement
       ) {
-        // Passwords and file selections never enter the change stream.
-        if (
-          !(target instanceof HTMLInputElement) ||
-          !["password", "file", "hidden"].includes(target.type)
-        ) {
+        if (!secret(target)) {
           fields.set(target, {
             id: id(target),
             label: label(target),

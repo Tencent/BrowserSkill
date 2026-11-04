@@ -14,6 +14,7 @@ import {
 } from "@/lib/hover-trigger-policy";
 import type { RecordStepPayload } from "@/lib/record-bridge";
 import { shouldRecordPress } from "@/lib/recording/draft-policy";
+import { sensitiveAutocomplete } from "@/lib/sensitive-autocomplete";
 import {
   closestHoverSurfaceCandidate,
   collectHoverSurfaceStates,
@@ -393,7 +394,8 @@ export function startRecordCapture(
   const emitFill = (session: FillSession) => {
     if (session.lastValue === session.baselineValue) return;
     const isPassword =
-      session.element instanceof HTMLInputElement && session.element.type === "password";
+      (session.element instanceof HTMLInputElement && session.element.type === "password") ||
+      sensitiveAutocomplete(session.element.getAttribute("autocomplete"));
     const value = isPassword ? "***" : session.lastValue;
     emitStep({
       op: "fill",
