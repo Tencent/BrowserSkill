@@ -402,7 +402,26 @@ describe("ToolDispatcher", () => {
     await sessions.start("aa11");
     const cooperation = new CooperationController({
       sessions,
-      readFrames: async () => ({ frames: new Map(), gaps: [] }),
+      readFrames: async () => ({
+        frames: new Map([
+          [
+            0,
+            {
+              document: "doc-a",
+              focusIsDocument: true,
+              revision: 0,
+              structure: 0,
+              human: 0,
+              busy: false,
+              editing: false,
+              lastInput: 0,
+              fields: [],
+              events: [],
+            },
+          ],
+        ]),
+        gaps: [],
+      }),
       resumeFrames: async () => {},
       changed: vi.fn(),
     });
@@ -934,7 +953,26 @@ describe("ToolDispatcher", () => {
     };
     const cooperation = new CooperationController({
       sessions,
-      readFrames: async () => ({ frames: new Map(), gaps: [] }),
+      readFrames: async () => ({
+        frames: new Map([
+          [
+            0,
+            {
+              document: "doc-a",
+              focusIsDocument: true,
+              revision: 0,
+              structure: 0,
+              human: 0,
+              busy: false,
+              editing: false,
+              lastInput: 0,
+              fields: [],
+              events: [],
+            },
+          ],
+        ]),
+        gaps: [],
+      }),
       resumeFrames: async () => {},
       changed: vi.fn(),
     });
@@ -2041,7 +2079,26 @@ describe("implicit auto-borrow when confirmTabBorrow is false", () => {
     const ctx = await sessions.start("aa11");
     const cooperation = new CooperationController({
       sessions,
-      readFrames: async () => ({ frames: new Map(), gaps: [] }),
+      readFrames: async () => ({
+        frames: new Map([
+          [
+            0,
+            {
+              document: "doc-a",
+              focusIsDocument: true,
+              revision: 0,
+              structure: 0,
+              human: 0,
+              busy: false,
+              editing: false,
+              lastInput: 0,
+              fields: [],
+              events: [],
+            },
+          ],
+        ]),
+        gaps: [],
+      }),
       resumeFrames: async () => {},
       changed: vi.fn(),
     });
@@ -2114,7 +2171,26 @@ describe("implicit auto-borrow when confirmTabBorrow is false", () => {
     const ctx = await sessions.start("aa11");
     const cooperation = new CooperationController({
       sessions,
-      readFrames: async () => ({ frames: new Map(), gaps: [] }),
+      readFrames: async () => ({
+        frames: new Map([
+          [
+            0,
+            {
+              document: "doc-a",
+              focusIsDocument: true,
+              revision: 0,
+              structure: 0,
+              human: 0,
+              busy: false,
+              editing: false,
+              lastInput: 0,
+              fields: [],
+              events: [],
+            },
+          ],
+        ]),
+        gaps: [],
+      }),
       resumeFrames: async () => {},
       changed: vi.fn(),
     });
@@ -2167,6 +2243,154 @@ describe("implicit auto-borrow when confirmTabBorrow is false", () => {
       expect(move).not.toHaveBeenCalled();
     } finally {
       dispatcherNoConfirm.stop();
+    }
+  });
+
+  it("does not auto-borrow when cooperate sync fails control_policy validation, and returns a pinned tab without control error", async () => {
+    const tabs = new Map<number, chrome.tabs.Tab>([
+      [7, { id: 7, windowId: 100, index: 0, active: true, url: "about:blank" } as chrome.tabs.Tab],
+      [
+        8,
+        {
+          id: 8,
+          windowId: 200,
+          index: 1,
+          active: true,
+          pinned: true,
+          url: "https://user.example",
+        } as chrome.tabs.Tab,
+      ],
+    ]);
+    let cooperationRef: CooperationController | undefined;
+    const move = vi.fn(async (tabId: number, props: chrome.tabs.MoveProperties) => {
+      const tab = tabs.get(tabId)!;
+      const oldWin = tab.windowId;
+      if (props.windowId !== undefined && props.windowId !== oldWin) {
+        (tab as { windowId?: number; pinned?: boolean }).windowId = props.windowId;
+        (tab as { pinned?: boolean }).pinned = false;
+        cooperationRef?.detachTab(tabId);
+      }
+      if (props.index !== undefined) {
+        (tab as { index?: number }).index = props.index === -1 ? 1 : props.index;
+      }
+      return tab;
+    });
+    const update = vi.fn(async (tabId: number, props: chrome.tabs.UpdateProperties) => {
+      const tab = tabs.get(tabId)!;
+      if (props.active !== undefined) (tab as { active?: boolean }).active = props.active;
+      if (props.pinned !== undefined) (tab as { pinned?: boolean }).pinned = props.pinned;
+      return tab;
+    });
+    vi.stubGlobal("chrome", {
+      storage: { onChanged: { addListener: vi.fn() } },
+      tabs: {
+        get: vi.fn(async (tabId: number) => tabs.get(tabId)!),
+        query: vi.fn(async (q: chrome.tabs.QueryInfo) =>
+          [...tabs.values()].filter((t) => q.windowId === undefined || t.windowId === q.windowId),
+        ),
+        move,
+        update,
+        sendMessage: vi.fn(async () => ({})),
+      },
+      windows: {
+        get: vi.fn(async (windowId: number) => ({ id: windowId, incognito: false })),
+      },
+    });
+    const { transport, sent, deliver } = fakeTransport();
+    const sessions = new SessionManager({
+      agentWindow: {
+        create: vi.fn(async () => ({ windowId: 100, initialTabIds: [7] })),
+        remove: vi.fn(async () => {}),
+        ensureActiveTab: vi.fn(async () => 7),
+      },
+    });
+    const ctx = await sessions.start("aa11");
+    ctx.controlPolicy = "strict";
+    const cooperation = new CooperationController({
+      sessions,
+      readFrames: async () => ({
+        frames: new Map([
+          [
+            0,
+            {
+              document: "doc-a",
+              focusIsDocument: true,
+              revision: 0,
+              structure: 0,
+              human: 0,
+              busy: false,
+              editing: false,
+              lastInput: 0,
+              fields: [],
+              events: [],
+            },
+          ],
+        ]),
+        gaps: [],
+      }),
+      resumeFrames: async () => {},
+      changed: vi.fn(),
+    });
+    cooperationRef = cooperation;
+    const cdp = {
+      send: vi.fn(async <T>() => ({}) as T),
+      detachSession: vi.fn(async () => {}),
+      acquireBackgroundExecution: vi.fn(async () => {}),
+      releaseSessionTab: vi.fn(async () => {}),
+    };
+    const dispatcher = new ToolDispatcher({
+      transport,
+      sessions,
+      cooperation,
+      cdp: cdp as unknown as TestDispatcherCdp,
+      interactionPreferences: makePreferenceStore(false),
+    });
+    dispatcher.start();
+    try {
+      // 1. Policy conflict (strict vs target) must reject with invalid_params WITHOUT moving tab 8.
+      deliver({
+        id: "conflict",
+        method: "tool.cooperate",
+        params: { session_id: "aa11", action: "sync", control_policy: "target", tab_id: 8 },
+      });
+      await vi.waitFor(() => expect(sent).toHaveLength(1));
+      expect(sent[0]).toMatchObject({
+        id: "conflict",
+        error: { code: "invalid_params" },
+      });
+      expect(ctx.borrowedTabs.has(8)).toBe(false);
+      expect(tabs.get(8)?.windowId).toBe(200);
+      expect(move).not.toHaveBeenCalled();
+
+      // 2. Borrow pinned tab 8 via tab_select, then explicitly return it via tab_return.
+      // Even though move detaches tab 8 from cooperation, restoring pinned:true must succeed without error.
+      deliver({
+        id: "select-pinned",
+        method: "tool.tab_select",
+        params: { session_id: "aa11", tab_id: 8 },
+      });
+      await vi.waitFor(() => expect(sent).toHaveLength(2));
+      expect(sent[1]).toEqual({
+        id: "select-pinned",
+        result: { tab_id: 8, window_id: 100 },
+      });
+      expect(ctx.borrowedTabs.get(8)?.originalPinned).toBe(true);
+
+      deliver({
+        id: "return-pinned",
+        method: "tool.tab_return",
+        params: { session_id: "aa11", tab_id: 8 },
+      });
+      await vi.waitFor(() => expect(sent).toHaveLength(3));
+      expect(sent[2]).toEqual({
+        id: "return-pinned",
+        result: { tab_id: 8, returned_to_window_id: 200, returned_to_index: 1 },
+      });
+      expect(tabs.get(8)?.windowId).toBe(200);
+      expect(tabs.get(8)?.pinned).toBe(true);
+      expect(ctx.borrowedTabs.has(8)).toBe(false);
+    } finally {
+      dispatcher.stop();
     }
   });
 });

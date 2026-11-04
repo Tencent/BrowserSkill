@@ -246,6 +246,7 @@ async function stopSession(
     try {
       const tabManagement = {
         ...(deps.tabManagement ?? {}),
+        tabsQuery: deps.tabsQuery ?? deps.tabManagement?.tabsQuery,
         cdp: deps.cdp ?? deps.tabManagement?.cdp,
         signal: deps.signal,
         isSessionLive: () => manager.get(ctx.sessionId) === ctx,

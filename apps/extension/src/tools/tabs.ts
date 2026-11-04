@@ -11,6 +11,7 @@ import {
 import { nextOverlayVersion } from "@/lib/overlay-version";
 import {
   type BorrowedTab,
+  type BorrowedTabGroupMetadata,
   isAgentControlledTab,
   type SessionContext,
   type SessionManager,
@@ -325,11 +326,20 @@ export async function handleTabList(
 // Shared deps shape for the management handlers
 // ---------------------------------------------------------------------------
 
+export interface ChromeTabGroupsApi {
+  get(groupId: number): Promise<chrome.tabGroups.TabGroup>;
+  update(
+    groupId: number,
+    updateProperties: chrome.tabGroups.UpdateProperties,
+  ): Promise<chrome.tabGroups.TabGroup | undefined>;
+}
+
 export interface TabManagementDeps {
   tabs?: TabMutationApi;
   /** Read-only window membership checks before closing a tab. */
   tabsQuery?: ChromeTabsApi;
   windows?: ChromeWindowsApi;
+  tabGroups?: ChromeTabGroupsApi;
   /** Abort hook (M10 will wire the full chain). */
   signal?: AbortSignal;
   /** Released sessions must not move or close pages during transaction cleanup. */
@@ -364,6 +374,21 @@ function getTabsApi(deps: TabManagementDeps): TabMutationApi {
 
 function getWindowsApi(deps: TabManagementDeps): ChromeWindowsApi {
   return deps.windows ?? chromeWindowsApi;
+}
+
+function getTabGroupsApi(deps: TabManagementDeps): ChromeTabGroupsApi | undefined {
+  if (deps.tabGroups) return deps.tabGroups;
+  if (
+    typeof chrome !== "undefined" &&
+    typeof chrome.tabGroups?.get === "function" &&
+    typeof chrome.tabGroups?.update === "function"
+  ) {
+    return {
+      get: (groupId) => chrome.tabGroups.get(groupId),
+      update: (groupId, props) => chrome.tabGroups.update(groupId, props),
+    };
+  }
+  return undefined;
 }
 
 function getIsAgentWindowId(deps: TabManagementDeps): (windowId: number) => boolean {
@@ -758,6 +783,7 @@ interface ExecuteBorrowCoreParams {
   confirmationTimeoutMs?: number;
   tabsApi: TabMutationApi;
   tabsQuery?: ChromeTabsApi;
+  tabGroupsApi?: ChromeTabGroupsApi;
   approveBorrow: BorrowConfirmationApprover;
   signal?: AbortSignal;
   mutate?: CdpRunner["runBrowserMutation"];
@@ -768,8 +794,44 @@ interface ExecuteBorrowCoreOk {
   originalIndex: number;
   leftNeighborTabId?: number;
   rightNeighborTabId?: number;
+  leftNeighborTabIds?: number[];
+  rightNeighborTabIds?: number[];
   originalGroupId?: number;
+  originalGroup?: BorrowedTabGroupMetadata;
   originalPinned?: boolean;
+}
+
+function getLeftNeighbors(entry: BorrowedTab): number[] {
+  if (entry.leftNeighborTabIds && entry.leftNeighborTabIds.length > 0) {
+    return entry.leftNeighborTabIds;
+  }
+  return entry.leftNeighborTabId !== undefined ? [entry.leftNeighborTabId] : [];
+}
+
+function getRightNeighbors(entry: BorrowedTab): number[] {
+  if (entry.rightNeighborTabIds && entry.rightNeighborTabIds.length > 0) {
+    return entry.rightNeighborTabIds;
+  }
+  return entry.rightNeighborTabId !== undefined ? [entry.rightNeighborTabId] : [];
+}
+
+function insertBorrowedIntoVirtualOrder(order: number[], entry: BorrowedTab): void {
+  if (order.includes(entry.tabId)) return;
+  for (const leftId of getLeftNeighbors(entry)) {
+    const idx = order.indexOf(leftId);
+    if (idx !== -1) {
+      order.splice(idx + 1, 0, entry.tabId);
+      return;
+    }
+  }
+  for (const rightId of getRightNeighbors(entry)) {
+    const idx = order.indexOf(rightId);
+    if (idx !== -1) {
+      order.splice(idx, 0, entry.tabId);
+      return;
+    }
+  }
+  order.splice(Math.min(Math.max(0, entry.originalIndex), order.length), 0, entry.tabId);
 }
 
 async function queryWindowTabs(
@@ -792,36 +854,88 @@ async function queryWindowTabs(
   }
 }
 
-async function captureBorrowSnapshot(
+async function queryAllTabs(
   tabsApi: TabMutationApi,
   tabsQuery: ChromeTabsApi | undefined,
+): Promise<chrome.tabs.Tab[] | null> {
+  const query =
+    tabsApi.query?.bind(tabsApi) ??
+    tabsQuery?.query?.bind(tabsQuery) ??
+    (typeof chrome !== "undefined" && typeof chrome.tabs?.query === "function"
+      ? (q: chrome.tabs.QueryInfo) => chrome.tabs.query(q)
+      : undefined);
+  if (!query) return null;
+  try {
+    const raw = await query({});
+    return Array.isArray(raw) ? raw : null;
+  } catch {
+    return null;
+  }
+}
+
+async function captureBorrowSnapshot(
+  manager: SessionManager,
+  tabsApi: TabMutationApi,
+  tabsQuery: ChromeTabsApi | undefined,
+  tabGroupsApi: ChromeTabGroupsApi | undefined,
   currentTab: chrome.tabs.Tab,
   tabId: number,
   originalWindowId: number,
   originalIndex: number,
 ): Promise<ExecuteBorrowCoreOk> {
+  const originalGroupId =
+    typeof currentTab.groupId === "number" && currentTab.groupId >= 0
+      ? currentTab.groupId
+      : undefined;
+  let originalGroup: BorrowedTabGroupMetadata | undefined;
+  if (originalGroupId !== undefined && tabGroupsApi?.get) {
+    try {
+      const group = await tabGroupsApi.get(originalGroupId);
+      if (group && typeof group === "object") {
+        originalGroup = {
+          ...(typeof group.title === "string" ? { title: group.title } : {}),
+          ...(typeof group.color === "string" ? { color: group.color } : {}),
+          ...(typeof group.collapsed === "boolean" ? { collapsed: group.collapsed } : {}),
+        };
+      }
+    } catch {
+      /* Ignore group lookup failures; groupId alone will still be attempted on return. */
+    }
+  }
   const snapshot: ExecuteBorrowCoreOk = {
     originalWindowId,
     originalIndex,
     ...(currentTab.pinned === true ? { originalPinned: true } : {}),
-    ...(typeof currentTab.groupId === "number" && currentTab.groupId >= 0
-      ? { originalGroupId: currentTab.groupId }
-      : {}),
+    ...(originalGroupId !== undefined ? { originalGroupId } : {}),
+    ...(originalGroup ? { originalGroup } : {}),
   };
   const windowTabs = await queryWindowTabs(tabsApi, tabsQuery, originalWindowId);
-  if (!windowTabs || windowTabs.length <= 1) return snapshot;
+  if (!windowTabs || windowTabs.length === 0) return snapshot;
   const sorted = [...windowTabs]
     .filter(
       (t): t is chrome.tabs.Tab & { id: number; index: number } =>
         typeof t.id === "number" && typeof t.index === "number",
     )
     .sort((a, b) => a.index - b.index);
-  const pos = sorted.findIndex((t) => t.id === tabId);
-  if (pos > 0) {
-    snapshot.leftNeighborTabId = sorted[pos - 1]!.id;
+  const virtualOrder = sorted.map((t) => t.id);
+  for (const session of manager.list()) {
+    for (const borrowed of session.borrowedTabs.values()) {
+      if (borrowed.originalWindowId === originalWindowId && borrowed.tabId !== tabId) {
+        insertBorrowedIntoVirtualOrder(virtualOrder, borrowed);
+      }
+    }
   }
-  if (pos >= 0 && pos + 1 < sorted.length) {
-    snapshot.rightNeighborTabId = sorted[pos + 1]!.id;
+  const pos = virtualOrder.indexOf(tabId);
+  if (pos === -1) return snapshot;
+  const leftIds = virtualOrder.slice(0, pos).reverse();
+  const rightIds = virtualOrder.slice(pos + 1);
+  if (leftIds.length > 0) {
+    snapshot.leftNeighborTabId = leftIds[0];
+    snapshot.leftNeighborTabIds = leftIds;
+  }
+  if (rightIds.length > 0) {
+    snapshot.rightNeighborTabId = rightIds[0];
+    snapshot.rightNeighborTabIds = rightIds;
   }
   return snapshot;
 }
@@ -1019,8 +1133,10 @@ async function executeBorrowCore(
   const originalWindowId = currentTab.windowId;
   const originalIndex = typeof currentTab.index === "number" ? currentTab.index : 0;
   const snapshot = await captureBorrowSnapshot(
+    p.manager,
     p.tabsApi,
     p.tabsQuery,
+    p.tabGroupsApi,
     currentTab,
     p.tabId,
     originalWindowId,
@@ -1130,6 +1246,7 @@ export async function handleTabBorrow(
       confirmationTimeoutMs: params.confirmation_timeout_ms,
       tabsApi,
       tabsQuery: deps.tabsQuery,
+      tabGroupsApi: getTabGroupsApi(deps),
       approveBorrow: approve,
       signal: deps.signal,
       mutate: deps.cdp?.runBrowserMutation,
@@ -1353,46 +1470,239 @@ async function releaseReturnedTabState(
   }
 }
 
-async function resolveReturnTargetIndex(
+interface ReturnMovePlan {
+  targetIndex: number;
+  initialMoveIndex: number;
+  hasWindowTabs: boolean;
+}
+
+async function resolveOriginalReturnWindow(
+  ctx: SessionContext,
   entry: BorrowedTab,
   tabsApi: TabMutationApi,
   tabsQuery: ChromeTabsApi | undefined,
-): Promise<number> {
-  if (entry.leftNeighborTabId === undefined && entry.rightNeighborTabId === undefined) {
-    return entry.originalIndex;
+  windowsApi: ChromeWindowsApi,
+  tabGroupsApi: ChromeTabGroupsApi | undefined,
+  isAgentWindowId: (windowId: number) => boolean,
+): Promise<number | null> {
+  const isEligibleUserWindow = async (windowId: number): Promise<boolean> => {
+    if (windowId === ctx.agentWindowId || isAgentWindowId(windowId)) return false;
+    try {
+      const win = await windowsApi.get(windowId);
+      return !win?.incognito;
+    } catch {
+      return false;
+    }
+  };
+
+  if (typeof entry.originalGroupId === "number" && entry.originalGroupId >= 0) {
+    const origTabs = await queryWindowTabs(tabsApi, tabsQuery, entry.originalWindowId);
+    const stillInOriginalWindow = origTabs?.some(
+      (t) => t.id !== entry.tabId && t.groupId === entry.originalGroupId,
+    );
+    if (!stillInOriginalWindow) {
+      if (tabGroupsApi?.get) {
+        try {
+          const group = await tabGroupsApi.get(entry.originalGroupId);
+          if (
+            typeof group?.windowId === "number" &&
+            group.windowId !== entry.originalWindowId &&
+            (await isEligibleUserWindow(group.windowId))
+          ) {
+            return group.windowId;
+          }
+        } catch {
+          /* Fall through to tab query or originalWindowId check. */
+        }
+      }
+      const allTabs = await queryAllTabs(tabsApi, tabsQuery);
+      const movedGroupMember = allTabs?.find(
+        (t) =>
+          t.id !== entry.tabId &&
+          t.groupId === entry.originalGroupId &&
+          typeof t.windowId === "number" &&
+          t.windowId !== entry.originalWindowId,
+      );
+      if (
+        typeof movedGroupMember?.windowId === "number" &&
+        (await isEligibleUserWindow(movedGroupMember.windowId))
+      ) {
+        return movedGroupMember.windowId;
+      }
+    }
   }
-  const windowTabs = await queryWindowTabs(tabsApi, tabsQuery, entry.originalWindowId);
-  if (!windowTabs || windowTabs.length === 0) {
-    return entry.originalIndex;
+
+  try {
+    await windowsApi.get(entry.originalWindowId);
+    return entry.originalWindowId;
+  } catch (err) {
+    console.debug("[bsk tab_return] original window gone, falling back", err);
+    return null;
   }
-  const sorted = [...windowTabs]
+}
+
+async function resolveReturnPlan(
+  entry: BorrowedTab,
+  targetWindowId: number,
+  tabsApi: TabMutationApi,
+  tabsQuery: ChromeTabsApi | undefined,
+): Promise<ReturnMovePlan> {
+  const windowTabs = await queryWindowTabs(tabsApi, tabsQuery, targetWindowId);
+  const sorted = (windowTabs ?? [])
     .filter(
       (t): t is chrome.tabs.Tab & { id: number; index: number } =>
         typeof t.id === "number" && typeof t.index === "number" && t.id !== entry.tabId,
     )
     .sort((a, b) => a.index - b.index);
-  if (entry.leftNeighborTabId !== undefined) {
-    const left = sorted.find((t) => t.id === entry.leftNeighborTabId);
-    if (left) return left.index + 1;
+  if (sorted.length === 0) {
+    return {
+      targetIndex: entry.originalIndex,
+      initialMoveIndex: entry.originalIndex,
+      hasWindowTabs: false,
+    };
   }
-  if (entry.rightNeighborTabId !== undefined) {
-    const right = sorted.find((t) => t.id === entry.rightNeighborTabId);
-    if (right) return right.index;
+
+  const leftIds = getLeftNeighbors(entry);
+  const rightIds = getRightNeighbors(entry);
+
+  if (entry.originalPinned) {
+    const pinnedTabs = sorted.filter((t) => t.pinned === true);
+    let rawIndex: number | undefined;
+    for (const id of leftIds) {
+      const left = pinnedTabs.find((t) => t.id === id);
+      if (left) {
+        rawIndex = left.index + 1;
+        break;
+      }
+    }
+    if (rawIndex === undefined) {
+      for (const id of rightIds) {
+        const right = pinnedTabs.find((t) => t.id === id);
+        if (right) {
+          rawIndex = right.index;
+          break;
+        }
+      }
+    }
+    if (rawIndex === undefined) {
+      for (const id of leftIds) {
+        const left = sorted.find((t) => t.id === id);
+        if (left) {
+          rawIndex = left.index + 1;
+          break;
+        }
+      }
+    }
+    if (rawIndex === undefined) {
+      for (const id of rightIds) {
+        const right = sorted.find((t) => t.id === id);
+        if (right) {
+          rawIndex = right.index;
+          break;
+        }
+      }
+    }
+    const targetIndex =
+      pinnedTabs.length > 0
+        ? Math.max(0, Math.min(rawIndex ?? entry.originalIndex, pinnedTabs.length))
+        : (rawIndex ?? entry.originalIndex);
+    return { targetIndex, initialMoveIndex: targetIndex, hasWindowTabs: true };
   }
-  return entry.originalIndex;
+
+  if (typeof entry.originalGroupId === "number" && entry.originalGroupId >= 0) {
+    const groupTabs = sorted.filter((t) => t.groupId === entry.originalGroupId);
+    if (groupTabs.length > 0) {
+      let targetIndex: number | undefined;
+      for (const id of leftIds) {
+        const left = groupTabs.find((t) => t.id === id);
+        if (left) {
+          targetIndex = left.index + 1;
+          break;
+        }
+      }
+      if (targetIndex === undefined) {
+        for (const id of rightIds) {
+          const right = groupTabs.find((t) => t.id === id);
+          if (right) {
+            targetIndex = right.index;
+            break;
+          }
+        }
+      }
+      if (targetIndex === undefined) {
+        targetIndex = groupTabs.at(-1)!.index + 1;
+      }
+      const prevTab = sorted.find((t) => t.index === targetIndex - 1);
+      const nextTab = sorted.find((t) => t.index === targetIndex);
+      const splitsGroup =
+        prevTab !== undefined &&
+        nextTab !== undefined &&
+        typeof prevTab.groupId === "number" &&
+        prevTab.groupId >= 0 &&
+        prevTab.groupId === nextTab.groupId;
+      const initialMoveIndex = splitsGroup ? groupTabs.at(-1)!.index + 1 : targetIndex;
+      return { targetIndex, initialMoveIndex, hasWindowTabs: true };
+    }
+  }
+
+  let rawIndex: number | undefined;
+  for (const id of leftIds) {
+    const left = sorted.find((t) => t.id === id);
+    if (left) {
+      rawIndex = left.index + 1;
+      break;
+    }
+  }
+  if (rawIndex === undefined) {
+    for (const id of rightIds) {
+      const right = sorted.find((t) => t.id === id);
+      if (right) {
+        rawIndex = right.index;
+        break;
+      }
+    }
+  }
+  const pinnedCount = sorted.filter((t) => t.pinned === true).length;
+  let targetIndex = Math.max(pinnedCount, rawIndex ?? entry.originalIndex);
+  const prevTab = sorted.find((t) => t.index === targetIndex - 1);
+  const nextTab = sorted.find((t) => t.index === targetIndex);
+  if (
+    prevTab !== undefined &&
+    nextTab !== undefined &&
+    typeof prevTab.groupId === "number" &&
+    prevTab.groupId >= 0 &&
+    prevTab.groupId === nextTab.groupId
+  ) {
+    const lastInGroup = sorted.filter((t) => t.groupId === prevTab.groupId).at(-1);
+    if (lastInGroup) targetIndex = lastInGroup.index + 1;
+  }
+  return { targetIndex, initialMoveIndex: targetIndex, hasWindowTabs: true };
 }
 
 async function restoreReturnedTabAttributes(
+  ctx: SessionContext,
   entry: BorrowedTab,
+  targetWindowId: number,
+  plan: ReturnMovePlan,
+  movedTab: chrome.tabs.Tab | undefined,
   tabsApi: TabMutationApi,
   deps: TabManagementDeps,
 ): Promise<number | undefined> {
   if (entry.originalPinned) {
     try {
-      const updated = await mutateBrowser(deps, () =>
-        tabsApi.update(entry.tabId, { pinned: true }),
-      );
-      return typeof updated?.index === "number" ? updated.index : undefined;
+      const updated = await tabsApi.update(entry.tabId, { pinned: true });
+      const currentIdx =
+        typeof updated?.index === "number"
+          ? updated.index
+          : typeof movedTab?.index === "number"
+            ? movedTab.index
+            : undefined;
+      if (currentIdx !== undefined && currentIdx !== plan.targetIndex) {
+        const repositioned = await tabsApi.move(entry.tabId, { index: plan.targetIndex });
+        const repTab = Array.isArray(repositioned) ? repositioned[0] : repositioned;
+        return typeof repTab?.index === "number" ? repTab.index : plan.targetIndex;
+      }
+      return currentIdx ?? plan.targetIndex;
     } catch (err) {
       console.debug("[bsk tab_return] pinned state restore failed", err);
       return undefined;
@@ -1405,12 +1715,62 @@ async function restoreReturnedTabAttributes(
         ? (opts: chrome.tabs.GroupOptions) => chrome.tabs.group(opts)
         : undefined);
     if (!groupFn) return undefined;
+    const tabGroupsApi = getTabGroupsApi(deps);
+    let joinedExistingGroup = false;
     try {
-      await mutateBrowser(deps, () =>
-        groupFn({ tabIds: [entry.tabId], groupId: entry.originalGroupId }),
-      );
-    } catch (err) {
-      console.debug("[bsk tab_return] tab group restore failed", err);
+      await groupFn({ tabIds: [entry.tabId], groupId: entry.originalGroupId });
+      joinedExistingGroup = true;
+    } catch {
+      try {
+        const newGroupId = await groupFn({
+          tabIds: [entry.tabId],
+          createProperties: { windowId: targetWindowId },
+        });
+        if (typeof newGroupId === "number" && newGroupId >= 0) {
+          for (const other of ctx.borrowedTabs.values()) {
+            if (other.tabId !== entry.tabId && other.originalGroupId === entry.originalGroupId) {
+              other.originalGroupId = newGroupId;
+            }
+          }
+          if (entry.originalGroup && tabGroupsApi?.update) {
+            await tabGroupsApi
+              .update(newGroupId, {
+                ...(entry.originalGroup.title !== undefined
+                  ? { title: entry.originalGroup.title }
+                  : {}),
+                ...(entry.originalGroup.color !== undefined
+                  ? { color: entry.originalGroup.color }
+                  : {}),
+                ...(entry.originalGroup.collapsed !== undefined
+                  ? { collapsed: entry.originalGroup.collapsed }
+                  : {}),
+              })
+              .catch((err) => {
+                console.debug("[bsk tab_return] tab group metadata restore failed", err);
+              });
+          }
+        }
+      } catch (recreateErr) {
+        console.debug("[bsk tab_return] tab group recreate failed", recreateErr);
+      }
+    }
+    if (joinedExistingGroup) {
+      try {
+        const needReposition =
+          plan.initialMoveIndex !== plan.targetIndex ||
+          (plan.hasWindowTabs &&
+            (await tabsApi
+              .get(entry.tabId)
+              .then((t) => typeof t?.index === "number" && t.index !== plan.targetIndex)
+              .catch(() => false)));
+        if (needReposition) {
+          const repositioned = await tabsApi.move(entry.tabId, { index: plan.targetIndex });
+          const repTab = Array.isArray(repositioned) ? repositioned[0] : repositioned;
+          return typeof repTab?.index === "number" ? repTab.index : plan.targetIndex;
+        }
+      } catch (moveErr) {
+        console.debug("[bsk tab_return] grouped tab reposition failed", moveErr);
+      }
     }
   }
   return undefined;
@@ -1447,26 +1807,32 @@ async function returnBorrowedTabCore(
   }
   const tabsApi = getTabsApi(deps);
   const windowsApi = getWindowsApi(deps);
+  const tabGroupsApi = getTabGroupsApi(deps);
   const isAgentWindowId = getIsAgentWindowId(deps);
   const alreadyCancelled = aborted(deps.signal, "tab_return", deps.isSessionLive);
   if (alreadyCancelled) return alreadyCancelled;
 
   let targetWindowId = entry.originalWindowId;
-  let targetIndex = entry.originalIndex;
+  let plan: ReturnMovePlan = {
+    targetIndex: entry.originalIndex,
+    initialMoveIndex: entry.originalIndex,
+    hasWindowTabs: false,
+  };
   let fallback = false;
   let fallbackTarget: FallbackWindowTarget | null = null;
 
-  // Check the original window is still around.
-  let originalAlive = true;
-  try {
-    await windowsApi.get(entry.originalWindowId);
-  } catch (err) {
-    console.debug("[bsk tab_return] original window gone, falling back", err);
-    originalAlive = false;
-  }
+  const resolvedWindowId = await resolveOriginalReturnWindow(
+    ctx,
+    entry,
+    tabsApi,
+    deps.tabsQuery,
+    windowsApi,
+    tabGroupsApi,
+    isAgentWindowId,
+  );
   const cancelledAfterLookup = aborted(deps.signal, "tab_return", deps.isSessionLive);
   if (cancelledAfterLookup) return cancelledAfterLookup;
-  if (!originalAlive) {
+  if (resolvedWindowId === null) {
     fallback = true;
     const target = await chooseFallbackWindow(
       ctx,
@@ -1479,9 +1845,14 @@ async function returnBorrowedTabCore(
     if ("code" in target) return target;
     fallbackTarget = target;
     targetWindowId = target.windowId;
-    targetIndex = target.index;
+    plan = {
+      targetIndex: target.index,
+      initialMoveIndex: target.index,
+      hasWindowTabs: false,
+    };
   } else {
-    targetIndex = await resolveReturnTargetIndex(entry, tabsApi, deps.tabsQuery);
+    targetWindowId = resolvedWindowId;
+    plan = await resolveReturnPlan(entry, targetWindowId, tabsApi, deps.tabsQuery);
   }
 
   const cancelledBeforeMove = aborted(deps.signal, "tab_return", deps.isSessionLive);
@@ -1502,21 +1873,29 @@ async function returnBorrowedTabCore(
     const moved = await moveExpectedTab(
       tabsApi,
       tabId,
-      { windowId: targetWindowId, index: targetIndex },
+      { windowId: targetWindowId, index: plan.initialMoveIndex },
       deps.signal,
       deps.isSessionLive,
       deps.cdp?.runBrowserMutation,
     );
     const movedTab = Array.isArray(moved) ? moved[0] : moved;
     const restoredIndex = !fallback
-      ? await restoreReturnedTabAttributes(entry, tabsApi, deps)
+      ? await restoreReturnedTabAttributes(
+          ctx,
+          entry,
+          targetWindowId,
+          plan,
+          movedTab,
+          tabsApi,
+          deps,
+        )
       : undefined;
     const finalIndex =
       typeof restoredIndex === "number"
         ? restoredIndex
         : typeof movedTab?.index === "number"
           ? movedTab.index
-          : targetIndex;
+          : plan.targetIndex;
     await releaseReturnedTabState(ctx, tabId, deps);
     return {
       tabId,

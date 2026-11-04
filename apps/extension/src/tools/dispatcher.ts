@@ -4,7 +4,11 @@ import type { DebugParams } from "@/debug/types";
 import type { InteractionPreferenceStore } from "@/lib/interaction-preferences";
 import { OVERLAY_AUTOMATION_BYPASS } from "@/lib/overlay-bridge";
 import { ScreenshotExports } from "@/long-screenshot/exports";
-import { isAgentControlledTab, type SessionManager } from "@/session-manager/manager";
+import {
+  isAgentControlledTab,
+  type SessionContext,
+  type SessionManager,
+} from "@/session-manager/manager";
 import { withTaskPopups } from "@/session-manager/task-popups";
 import type { Transport } from "@/transport/transport";
 import type {
@@ -103,7 +107,7 @@ import {
   type SessionStartParams,
   type SessionStopParams,
 } from "./session";
-import { chromeTabsApi, lookupSession, resolveTargetTab } from "./shared";
+import { cdpBlockedUrlReason, chromeTabsApi, lookupSession, resolveTargetTab } from "./shared";
 import {
   type BorrowConfirmationApprover,
   chromeTabMutationApi,
@@ -598,10 +602,22 @@ export class ToolDispatcher {
     };
   }
 
-  private canAutoBorrowForRequest(req: RequestFrame): boolean {
+  private canAutoBorrowForRequest(req: RequestFrame, session: SessionContext): boolean {
     if (req.method === "tool.cooperate") {
-      const action = (req.params as { action?: string } | undefined)?.action;
-      return action === "sync" || action === "enable";
+      const params = req.params as { action?: string; control_policy?: string } | undefined;
+      const action = params?.action;
+      if (action !== "sync" && action !== "enable") return false;
+      if (params?.control_policy !== undefined) {
+        if (!["auto", "strict", "target"].includes(params.control_policy)) return false;
+        const requestedPolicy =
+          params.control_policy === "auto"
+            ? (session.controlPolicy ?? "target")
+            : params.control_policy;
+        if (requestedPolicy && session.controlPolicy && requestedPolicy !== session.controlPolicy) {
+          return false;
+        }
+      }
+      return true;
     }
     if (req.method === "tool.tab_select") return true;
     if (!this.cooperation) {
@@ -618,7 +634,7 @@ export class ToolDispatcher {
     req: RequestFrame,
     signal: AbortSignal,
   ): Promise<{ borrowed: TabBorrowResult } | { error: RpcError } | null> | null {
-    if (!this.interactionPreferences || !this.canAutoBorrowForRequest(req)) return null;
+    if (!this.interactionPreferences) return null;
     const params = req.params as { session_id?: string; tab_id?: number } | undefined;
     const sessionId = params?.session_id;
     const tabId = params?.tab_id;
@@ -631,7 +647,13 @@ export class ToolDispatcher {
       return null;
     }
     const session = this.sessions.get(sessionId);
-    if (!session || session.remote || session.incognito || isAgentControlledTab(session, tabId)) {
+    if (
+      !session ||
+      session.remote ||
+      session.incognito ||
+      isAgentControlledTab(session, tabId) ||
+      !this.canAutoBorrowForRequest(req, session)
+    ) {
       return null;
     }
     if (
@@ -650,9 +672,17 @@ export class ToolDispatcher {
     signal: AbortSignal,
   ): Promise<{ borrowed: TabBorrowResult } | { error: RpcError } | null> {
     const session = this.sessions.get(sessionId);
-    if (!session || !this.interactionPreferences) return null;
+    if (!session || !this.interactionPreferences || !this.canAutoBorrowForRequest(req, session)) {
+      return null;
+    }
     await this.interactionPreferences.readyOrFallback();
-    if (signal.aborted || this.interactionPreferences.get().confirmTabBorrow) return null;
+    if (
+      signal.aborted ||
+      this.interactionPreferences.get().confirmTabBorrow ||
+      !this.canAutoBorrowForRequest(req, session)
+    ) {
+      return null;
+    }
     let tab: chrome.tabs.Tab;
     try {
       tab = await chromeTabsApi.get(tabId);
@@ -664,6 +694,13 @@ export class ToolDispatcher {
       typeof tab.windowId !== "number" ||
       tab.windowId === session.agentWindowId ||
       this.sessions.findByWindowId(tab.windowId) !== null
+    ) {
+      return null;
+    }
+    if (
+      req.method === "tool.cooperate" &&
+      (req.params as { action?: string } | undefined)?.action === "sync" &&
+      cdpBlockedUrlReason(tab.url)
     ) {
       return null;
     }

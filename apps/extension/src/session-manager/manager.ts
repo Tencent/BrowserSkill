@@ -34,6 +34,12 @@ export function isAgentControlledTab(ctx: SessionContext, tabId: number): boolea
   );
 }
 
+export interface BorrowedTabGroupMetadata {
+  title?: string;
+  color?: chrome.tabGroups.ColorEnum;
+  collapsed?: boolean;
+}
+
 export interface BorrowedTab {
   tabId: number;
   originalWindowId: number;
@@ -42,8 +48,14 @@ export interface BorrowedTab {
   leftNeighborTabId?: number;
   /** Right-hand neighbor tab ID in the original window at borrow time. */
   rightNeighborTabId?: number;
+  /** Ordered left-hand neighbor tab IDs (closest to farthest) in the original window. */
+  leftNeighborTabIds?: number[];
+  /** Ordered right-hand neighbor tab IDs (closest to farthest) in the original window. */
+  rightNeighborTabIds?: number[];
   /** Original Chrome Tab Group ID (>= 0 when grouped). */
   originalGroupId?: number;
+  /** Snapshot of the original Tab Group's properties for recreating single-tab groups. */
+  originalGroup?: BorrowedTabGroupMetadata;
   /** Whether the tab was pinned in the original window before borrowing. */
   originalPinned?: boolean;
 }

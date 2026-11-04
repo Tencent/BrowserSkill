@@ -583,15 +583,6 @@ export class CooperationController implements ControlAuthority {
     const session = this.deps.sessions.get(params.session_id);
     if (!session) return { code: "not_found", message: "Unknown session" };
     this.startSession(session.sessionId);
-    const target = await resolveTargetTab(
-      this.deps.sessions,
-      session,
-      params.tab_id ?? this.defaultTabs.get(session.sessionId),
-      chromeTabsApi,
-    );
-    if (isRpcError(target)) return target;
-    if (!isAgentControlledTab(session, target.tabId))
-      return failure("Cooperation requires an owned tab");
     if (!["enable", "status", "sync", "wait"].includes(params.action))
       return { code: "invalid_params", message: "Unknown cooperation action" };
     if (
@@ -612,6 +603,15 @@ export class CooperationController implements ControlAuthority {
         code: "invalid_params",
         message: "Control policy is fixed for this session; start a new session to change it",
       };
+    const target = await resolveTargetTab(
+      this.deps.sessions,
+      session,
+      params.tab_id ?? this.defaultTabs.get(session.sessionId),
+      chromeTabsApi,
+    );
+    if (isRpcError(target)) return target;
+    if (!isAgentControlledTab(session, target.tabId))
+      return failure("Cooperation requires an owned tab");
     const policy = session.controlPolicy ?? requestedPolicy ?? "strict";
     const targetPolicy = policy === "target";
     const state = this.track(session, target.tabId);
