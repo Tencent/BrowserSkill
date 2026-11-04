@@ -49,6 +49,7 @@ import {
   isRpcError,
   lookupSession,
   type ResolvedTargetTab,
+  relativeUrlError,
   resolveTargetTab,
 } from "./shared";
 
@@ -856,6 +857,8 @@ export async function handleNavigate(
   if (!params || typeof params.url !== "string" || params.url.length === 0) {
     return { code: "invalid_params", message: "navigate requires a url" };
   }
+  const relative = relativeUrlError("navigate", params.url);
+  if (relative) return relative;
   const ctxOrErr = lookupSession(manager, params, "navigate");
   if (isRpcError(ctxOrErr)) return ctxOrErr;
   const ctx = ctxOrErr;

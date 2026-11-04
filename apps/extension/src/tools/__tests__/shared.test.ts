@@ -6,6 +6,7 @@ import {
   enforceToolTargetScope,
   lookupSession,
   parseBufferedReadBounds,
+  relativeUrlError,
   resolveCdpAccessibleTargetTab,
   resolveTargetTab,
 } from "../shared";
@@ -73,6 +74,27 @@ describe("parseBufferedReadBounds", () => {
       code: "invalid_params",
       message: expect.stringContaining(field),
     });
+  });
+});
+
+describe("tab URL guard", () => {
+  it.each([
+    "example.com",
+    "/path",
+    "localhost:3000",
+    "example.com:8080/path",
+  ])("rejects %j, which Chrome would not open as a website", (url) => {
+    expect(relativeUrlError("navigate", url)).toMatchObject({ code: "invalid_params" });
+  });
+
+  it.each([
+    undefined,
+    "https://example.com",
+    "about:blank",
+    "data:text/html,x",
+    "tel:123",
+  ])("accepts %j", (url) => {
+    expect(relativeUrlError("navigate", url)).toBeNull();
   });
 });
 

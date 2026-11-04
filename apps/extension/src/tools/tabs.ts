@@ -19,7 +19,13 @@ import { expectedTabMoves } from "@/session-manager/tab-moves";
 import { detectBrowserMeta } from "@/transport/handshake";
 import type { RpcError } from "@/transport/types";
 import { rpcError } from "./errors";
-import { type CdpRunner, cdpBlockedUrlReason, isRpcError, lookupSession } from "./shared";
+import {
+  type CdpRunner,
+  cdpBlockedUrlReason,
+  isRpcError,
+  lookupSession,
+  relativeUrlError,
+} from "./shared";
 
 export type TabScope = "user" | "agent" | "all";
 
@@ -395,6 +401,8 @@ function validateTabCreateParams(params: TabCreateParams): RpcError | null {
   if (params.url !== undefined && typeof params.url !== "string") {
     return { code: "invalid_params", message: "tab_create url must be a string" };
   }
+  const relative = relativeUrlError("tab_create", params.url);
+  if (relative) return relative;
   if (params.active !== undefined && typeof params.active !== "boolean") {
     return { code: "invalid_params", message: "tab_create active must be a boolean" };
   }

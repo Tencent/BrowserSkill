@@ -9,6 +9,12 @@ Starting from 0.2.0, CLI / Extension / DSH Plugin share the same version number.
 
 ### Fixed
 
+- `navigate`, `tab new --url` and `record start --url` reject a URL without a
+  scheme, such as `example.com` or `localhost:3000`, with `invalid_params`.
+  Chrome resolved `example.com` against the extension and opened
+  `chrome-extension://<id>/example.com` when it opened a tab or navigated a page
+  it could not drive over CDP; over CDP the request failed as
+  `cdp_failed: Invalid URL`.
 - Window resize verifies the browser's resulting bounds and the target tab's
   layout viewport. It reports constrained bounds, inactive tabs and viewports
   that did not follow the resize instead of echoing the requested size as success.

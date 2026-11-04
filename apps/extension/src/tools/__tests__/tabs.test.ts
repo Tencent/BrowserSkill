@@ -253,6 +253,20 @@ describe("handleTabCreate", () => {
     expect(res.url).toBe("https://example.com/");
   });
 
+  it("rejects a URL without a scheme instead of opening an extension page", async () => {
+    const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
+    await sm.start("aa11");
+    const state: FakeTabState = { tabs: new Map(), nextTabId: 10, windowsClosed: new Set() };
+    const { api, spies } = makeTabMutationApi(state);
+    const res = await handleTabCreate(
+      sm,
+      { session_id: "aa11", url: "example.com" },
+      { tabs: api },
+    );
+    expect(res).toMatchObject({ code: "invalid_params", message: /absolute/ });
+    expect(spies.create).not.toHaveBeenCalled();
+  });
+
   it("rejects negative index", async () => {
     const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
     await sm.start("aa11");

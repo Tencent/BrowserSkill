@@ -53,6 +53,7 @@ import {
   chromeTabsApi,
   isRpcError,
   lookupSession,
+  relativeUrlError,
   resolveTargetTab,
 } from "./shared";
 
@@ -854,6 +855,8 @@ export async function handleRecordStart(
   params: RecordStartParams,
   deps: RecordDeps = getDefaultDeps(),
 ): Promise<RecordStartResult | RpcError> {
+  const relative = relativeUrlError("record_start", params.url);
+  if (relative) return relative;
   const traceVersionOrErr = negotiatedTraceVersion(params);
   if (typeof traceVersionOrErr !== "number") return traceVersionOrErr;
   if (traceVersionOrErr === 3 && !deps.cdp) {
