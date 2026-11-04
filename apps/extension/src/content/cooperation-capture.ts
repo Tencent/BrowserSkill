@@ -380,11 +380,13 @@ export function attachCooperationCapture() {
     document.addEventListener(event, onEvent, { capture: true, passive: true });
   // Chromium skips a node's legacy `mousewheel` listeners whenever that node has a
   // `wheel` listener, even a passive one. Listen only while collecting so pages
-  // without a session keep their mousewheel handlers.
+  // without a session keep their mousewheel handlers. Window capture runs before
+  // any document listener, so a page that stops propagation there cannot hide
+  // the person's wheel input even though this listener is registered late.
   const listenWheel = (on: boolean) =>
     on
-      ? document.addEventListener("wheel", onEvent, { capture: true, passive: true })
-      : document.removeEventListener("wheel", onEvent, true);
+      ? window.addEventListener("wheel", onEvent, { capture: true, passive: true })
+      : window.removeEventListener("wheel", onEvent, true);
   const onWindowBlur = () => {
     if (!enabled || (!pointer && !composing && keys.size === 0)) return;
     pointer = false;
