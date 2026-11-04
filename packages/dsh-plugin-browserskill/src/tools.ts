@@ -293,6 +293,19 @@ function defineBrowserOperations(deps: ToolDeps, register: DefinitionRegistrar):
         "Optionally navigate to an initial URL and/or apply a mobile device emulation preset. " +
         "Set incognito to open an Agent Window isolated from the profile's ordinary browsing state.",
       parameters: {
+        agentName: {
+          type: "string",
+          description: "Agent name displayed in the browser control overlay (1..=80 characters).",
+        },
+        project: {
+          type: "string",
+          description:
+            "Project label displayed in the browser control overlay (1..=120 characters). Requires agentName.",
+        },
+        controllerColor: {
+          type: "string",
+          description: "Optional controller marker color as #RRGGBB. Requires agentName.",
+        },
         url: {
           type: "string",
           description: "Initial URL to navigate to after the session starts.",
@@ -350,6 +363,12 @@ function defineBrowserOperations(deps: ToolDeps, register: DefinitionRegistrar):
         ],
       },
       async execute(args, exec) {
+        if (
+          (args.project !== undefined || args.controllerColor !== undefined) &&
+          args.agentName === undefined
+        ) {
+          throw new Error("project and controllerColor require agentName");
+        }
         if (args.url !== undefined && args.url.trim().length === 0) {
           throw new Error("url must be a non-empty string");
         }
@@ -362,6 +381,10 @@ function defineBrowserOperations(deps: ToolDeps, register: DefinitionRegistrar):
         await starts.reconcile();
         const record = starts.begin(ownerSessionIds(deps.ctx, exec.agent?.id));
         const startArgs = ["session", "start", "--request-id", record.requestId];
+        if (args.agentName !== undefined) startArgs.push("--agent-name", args.agentName);
+        if (args.project !== undefined) startArgs.push("--project", args.project);
+        if (args.controllerColor !== undefined)
+          startArgs.push("--controller-color", args.controllerColor);
         if (args.width !== undefined && args.height !== undefined) {
           startArgs.push("--width", String(args.width), "--height", String(args.height));
         }
@@ -929,7 +952,8 @@ function defineBrowserOperations(deps: ToolDeps, register: DefinitionRegistrar):
       async execute(args, exec) {
         if (args.target.trim().length === 0) throw new Error("target must be a non-empty string");
         const sessionId = registry.resolve(args.session, "bsk_interact(action=fill)");
-        const cmdArgs = ["fill", "--session", sessionId, "--value", args.value];
+        // `--value=<v>`: clap rejects a separate value token starting with "-".
+        const cmdArgs = ["fill", "--session", sessionId, `--value=${args.value}`];
         if (args.noClear === true) cmdArgs.push("--no-clear");
         cmdArgs.push(args.target);
         const reply = (await runBsk(deps, exec, cmdArgs, "fill", sessionId)) as {

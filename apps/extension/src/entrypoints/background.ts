@@ -270,6 +270,7 @@ export default defineBackground(() => {
     return {
       type: OVERLAY_AGENT_STATE,
       sessionId: ctx.sessionId,
+      controller: ctx.controller,
       mode: controlModes.get(ctx.sessionId) ?? "control",
       ...nextOverlayVersion(),
     };

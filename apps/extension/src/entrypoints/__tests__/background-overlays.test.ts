@@ -4,6 +4,7 @@ import { OverlayController, shouldShowAgentControlOverlay } from "@/content/over
 import { watchDaemonConnection } from "@/lib/daemon-connection-preference";
 import { OVERLAY_AGENT_STATE, type OverlayAgentStateMessage } from "@/lib/overlay-bridge";
 import { attachSessionsLiveFlag } from "@/lib/sessions-live-flag";
+import { chromeAgentWindowApi } from "@/session-manager/agent-window";
 import { isAgentControlledTab } from "@/session-manager/manager";
 import { AgentWindowRouting } from "@/session-manager/window-routing";
 import { ToolDispatcher } from "@/tools/dispatcher";
@@ -83,7 +84,7 @@ async function fixture() {
   const onCreatedNavigationTarget = event<[{ tabId: number; sourceTabId: number }]>();
   const sendMessage = vi.fn(
     async (_tabId: number, message: OverlayAgentStateMessage): Promise<unknown> => {
-      overlay.applyAgentControlMode(message.sessionId, message.mode);
+      overlay.applyAgentControlMode(message.sessionId, message.mode, message.controller);
       return undefined;
     },
   );
@@ -179,6 +180,37 @@ it("keeps task tabs ungrouped while showing controls after creation and attachme
   expect(chrome.tabs.group).not.toHaveBeenCalled();
   expect(chrome.tabs.ungroup).not.toHaveBeenCalled();
   expect(chrome.tabGroups.update).not.toHaveBeenCalled();
+});
+
+it("routes identities by tab ownership and restores or clears them on state refresh", async () => {
+  const f = await fixture();
+  f.task.controller = { name: "Codex", project: "Search" };
+  vi.spyOn(chromeAgentWindowApi, "create").mockResolvedValueOnce({
+    windowId: 20,
+    initialTabIds: [20],
+  });
+  vi.spyOn(chromeAgentWindowApi, "ensureActiveTab").mockResolvedValueOnce(20);
+  const second = await f.deps.sessions.start("two", {
+    controller: { name: "Claude", project: "Payments" },
+  });
+  const assertClaim = (tabId: number, windowId: number, sessionId: string, name: string) => {
+    f.deps.onAgentTabClaimed?.(tabId, windowId);
+    expect(f.sendMessage).toHaveBeenLastCalledWith(
+      tabId,
+      expect.objectContaining({ sessionId, controller: expect.objectContaining({ name }) }),
+    );
+    expect(f.overlay.snapshot().controller?.name).toBe(name);
+  };
+  assertClaim(10, 10, "one", "Codex");
+  assertClaim(20, 20, second.sessionId, "Claude");
+  f.overlay.resetAgentOverlays(second.sessionId);
+  assertClaim(10, 10, "one", "Codex");
+  f.deps.sessions.release("one");
+  f.deps.onAgentTabClaimed?.(10, 10);
+  expect(f.overlay.snapshot().controller).toBeUndefined();
+  expect(f.overlay.snapshot().activeSessionId).toBeNull();
+  expect(f.deps.sessions.get("two")?.controller?.name).toBe("Claude");
+  vi.restoreAllMocks();
 });
 
 it("refreshes released-page controls after attachment completes", async () => {

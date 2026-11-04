@@ -181,9 +181,23 @@ impl AuthorizationStore {
         file.as_file()
             .sync_all()
             .context("sync authorization snapshot")?;
-        file.persist(&self.path)
-            .map_err(|err| err.error)
-            .context("replace authorization snapshot")?;
+        // Windows refuses to replace a file that a lock-free reader has open.
+        // Readers hold the snapshot only for one read, so retry briefly.
+        let deadline = Instant::now() + Duration::from_millis(500);
+        loop {
+            match file.persist(&self.path) {
+                Ok(_) => break,
+                Err(err)
+                    if cfg!(windows)
+                        && err.error.kind() == std::io::ErrorKind::PermissionDenied
+                        && Instant::now() < deadline =>
+                {
+                    file = err.file;
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(err) => return Err(err.error).context("replace authorization snapshot"),
+            }
+        }
         if let Ok(directory) = fs::File::open(parent) {
             let _ = directory.sync_all();
         }
@@ -453,6 +467,20 @@ mod tests {
         restarted.revoke(&grant.device_id).unwrap();
         assert!(store.authenticate(&credential).is_err());
         assert!(!store.is_authorized(&grant.device_id));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn writes_wait_for_a_reader_holding_the_snapshot() {
+        let (_home, store) = setup();
+        // A lock-free read keeps the snapshot open, which blocks its replacement on Windows.
+        let reader = fs::File::open(&store.path).unwrap();
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(100));
+            drop(reader);
+        });
+        store.pair().unwrap();
+        release.join().unwrap();
     }
 
     #[test]
