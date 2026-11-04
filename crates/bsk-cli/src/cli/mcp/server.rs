@@ -94,10 +94,19 @@ where
     }
     // The client is gone: stop daemon work whose result nobody can receive.
     let controls: Vec<_> = server.calls.lock().unwrap().values().cloned().collect();
+    let mut cancellations = JoinSet::new();
     for control in controls {
-        control.cancel().await;
+        cancellations.spawn(async move { control.cancel().await });
     }
-    while tasks.join_next().await.is_some() {}
+    // A disconnected client cannot consume results. Bound shutdown even when
+    // the daemon or a blocking orchestration helper fails to respond.
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        while cancellations.join_next().await.is_some() {}
+        while tasks.join_next().await.is_some() {}
+    })
+    .await;
+    tasks.shutdown().await;
+    cancellations.shutdown().await;
     drop(server);
     writer_task.await??;
     Ok(())
@@ -293,13 +302,17 @@ mod tests {
 
     impl Client {
         fn new() -> Self {
+            Self::with_socket(PathBuf::from("/nonexistent/bsk-mcp-test.sock"))
+        }
+
+        fn with_socket(sock: PathBuf) -> Self {
             let (input, server_input) = tokio::io::duplex(1 << 16);
             let (server_output, output) = tokio::io::duplex(1 << 16);
             tokio::spawn(serve(
                 server_input,
                 server_output,
                 Daemon::Fixed {
-                    sock: PathBuf::from("/nonexistent/bsk-mcp-test.sock"),
+                    sock,
                     protocol: "1.8".into(),
                 },
             ));
@@ -479,5 +492,99 @@ mod tests {
             read_message(&mut reader).await.unwrap(),
             Inbound::Eof
         ));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn action_sync_and_cancellation_cross_the_mcp_ipc_boundary() {
+        use tokio::net::UnixListener;
+        use tokio::sync::mpsc;
+
+        let dir = tempfile::tempdir_in("/tmp").unwrap();
+        let sock = dir.path().join("daemon.sock");
+        let listener = UnixListener::bind(&sock).unwrap();
+        let (sent, mut seen) = mpsc::unbounded_channel::<Value>();
+        let daemon = tokio::spawn(async move {
+            loop {
+                let (stream, _) = listener.accept().await.unwrap();
+                let sent = sent.clone();
+                tokio::spawn(async move {
+                    let (read, mut write) = stream.into_split();
+                    let mut line = String::new();
+                    BufReader::new(read).read_line(&mut line).await.unwrap();
+                    let request: Value = serde_json::from_str(&line).unwrap();
+                    sent.send(request.clone()).unwrap();
+                    let method = request["method"].as_str().unwrap();
+                    if method == "tool.click" && request["params"]["context_id"] == "hold" {
+                        std::future::pending::<()>().await;
+                    }
+                    let value = match method {
+                        "tool.click" => json!({"tab_id":42,"x":1,"y":2}),
+                        "tool.cooperate" => {
+                            json!({"tab_id":42,"context_id":"next","control_policy":"target", "observation":{"text":"button Done [ref=@e2]"}})
+                        }
+                        "tool.emulate" => {
+                            json!({"tab_id":42,"cleared":false,"applied":request["params"]["overrides"]})
+                        }
+                        "cancel" => json!({"cancelled":true}),
+                        _ => panic!("unexpected IPC method {method}"),
+                    };
+                    let response = json!({"id":request["id"], "result":value});
+                    write
+                        .write_all(format!("{response}\n").as_bytes())
+                        .await
+                        .unwrap();
+                });
+            }
+        });
+        let mut client = Client::with_socket(sock);
+        client.send(r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"bsk_interact","arguments":{"action":"click","session":"s","context":"seen","params":{"ref":"@e1"},"sync_after":true}}}"#).await;
+        let reply = client.recv().await;
+        let result: Value =
+            serde_json::from_str(reply["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(result["post"]["context_id"], "next");
+        assert_eq!(
+            reply["result"]["content"][1]["text"],
+            "button Done [ref=@e2]"
+        );
+        let click = seen.recv().await.unwrap();
+        assert_eq!(click["params"]["context_id"], "seen");
+        assert_eq!(click["params"]["ref"], "@e1");
+        assert_eq!(seen.recv().await.unwrap()["method"], "tool.cooperate");
+
+        client.send(r#"{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"bsk_assist","arguments":{"action":"emulate","session":"s","device":"iphone-14","context":"next"}}}"#).await;
+        let emulation = client.recv().await;
+        let result: Value =
+            serde_json::from_str(emulation["result"]["content"][0]["text"].as_str().unwrap())
+                .unwrap();
+        assert_eq!(result["applied"]["width"], 390);
+        let request = seen.recv().await.unwrap();
+        assert_eq!(request["method"], "tool.emulate");
+        assert_eq!(request["params"]["context_id"], "next");
+        assert_eq!(request["params"]["overrides"]["height"], 844);
+
+        client.send(r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"bsk_interact","arguments":{"action":"click","session":"s","context":"hold","params":{"ref":"@e1"},"sync_after":true}}}"#).await;
+        let held = tokio::time::timeout(std::time::Duration::from_secs(2), seen.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(held["method"], "tool.click");
+        client
+            .send(
+                r#"{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":2}}"#,
+            )
+            .await;
+        let cancel = tokio::time::timeout(std::time::Duration::from_secs(2), seen.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(cancel["method"], "cancel");
+        assert_eq!(cancel["params"]["rpc_id"], held["id"]);
+        client
+            .send(r#"{"jsonrpc":"2.0","id":3,"method":"ping"}"#)
+            .await;
+        assert_eq!(client.recv().await["id"], 3);
+        drop(client);
+        daemon.abort();
     }
 }

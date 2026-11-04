@@ -21,7 +21,8 @@ fn main() -> ExitCode {
     }
     cli::update::print_update_hint_from_cache(&cli.flags, &cli.command);
 
-    let format = if cli.flags.json {
+    // Even startup/shutdown errors must not corrupt MCP's JSON-RPC stdout.
+    let format = if cli.flags.json && !matches!(cli.command, Command::Mcp(_)) {
         Format::Json
     } else {
         Format::Human
