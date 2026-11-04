@@ -1642,7 +1642,7 @@ for (let i = 1; i <= 12; i++) {
  */
 export function resolveKeyDescriptor(key: string): KeyDescriptor | null {
   if (key.length === 0) return null;
-  if (SPECIAL_KEYMAP[key]) return SPECIAL_KEYMAP[key];
+  if (Object.hasOwn(SPECIAL_KEYMAP, key)) return SPECIAL_KEYMAP[key];
   if (key.length > 1) {
     const lower = key.toLowerCase();
     for (const [name, descriptor] of Object.entries(SPECIAL_KEYMAP)) {
