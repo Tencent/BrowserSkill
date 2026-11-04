@@ -1007,7 +1007,7 @@ describe("action dispatch", () => {
       ["session", "start", "--request-id", expect.any(String)],
       ["navigate", "--session", "s1", "https://example.test/"],
       ["observe", "--session", "s1"],
-      ["fill", "--session", "s1", "--value", "hello", "@e1"],
+      ["fill", "--session", "s1", "--value=hello", "@e1"],
       ["tab", "list", "--session", "s1"],
       ["window", "resize", "--session", "s1", "--width", "900", "--height", "700"],
     ]);
@@ -1616,15 +1616,16 @@ describe("interaction tools", () => {
     await startSession(tools);
     const fill = tools.get("interact.fill");
     await fill?.execute({ target: "e2", value: "hello", noClear: true }, makeExec());
-    expect(calls[1].args).toEqual([
-      "fill",
-      "--session",
-      "s1",
-      "--value",
-      "hello",
-      "--no-clear",
-      "e2",
-    ]);
+    expect(calls[1].args).toEqual(["fill", "--session", "s1", "--value=hello", "--no-clear", "e2"]);
+  });
+
+  it("interact.fill keeps a value starting with '-' attached to --value", async () => {
+    // bsk's clap definition has no allow_hyphen_values, so `--value -5` is rejected
+    // as an unknown flag; the `--value=<v>` form is the one clap always accepts.
+    const { tools, calls } = setup(responses);
+    await startSession(tools);
+    await tools.get("interact.fill")?.execute({ target: "e2", value: "-5" }, makeExec());
+    expect(calls[1].args).toEqual(["fill", "--session", "s1", "--value=-5", "e2"]);
   });
 
   it("interact.press picks --ref for snapshot refs and --selector otherwise", async () => {
@@ -1716,10 +1717,8 @@ describe("interaction tools", () => {
       "s1",
       "--tab-id",
       "7",
-      "--value",
-      "a",
-      "--value",
-      "b",
+      "--value=a",
+      "--value=b",
       "@e4",
     ]);
   });
