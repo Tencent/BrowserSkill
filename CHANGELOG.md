@@ -8,6 +8,14 @@ Starting from 0.2.0, CLI / Extension / DSH Plugin share the same version number.
 
 ## [Unreleased]
 
+### Changed
+
+- CLI and daemon updates prefer the official website's domestic download source,
+  falling back to GitHub for failed manifest or archive requests and verification.
+  Archive fallback stays on the selected version with SHA256 verification; if both
+  sources fail, the error includes each URL and cause. Explicit manifest overrides
+  continue to use only the configured source.
+
 ### Fixed
 
 - With target control, a carousel, video embed or ad refreshing an iframe no
