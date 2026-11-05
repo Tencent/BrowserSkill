@@ -18,6 +18,10 @@ Starting from 0.2.0, CLI / Extension / DSH Plugin share the same version number.
 
 ### Fixed
 
+- When the click overlay guard cannot clear the extension overlay, `input_not_ready`
+  now reports the click point and which step failed (hit-test result, overlay
+  bypass, passthrough, deadline) in `data` and in the message. Previously it only
+  said the overlay could not be cleared.
 - Commands no longer wait until their timeout when truncated page text cuts an
   emoji in half, for example `bsk console --max-text-chars 4` on `Hi 🚀 there`.
   The lone surrogate left by the cut made the daemon drop the extension's whole
