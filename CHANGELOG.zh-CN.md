@@ -5,6 +5,10 @@ BrowserSkill 的重要变更记录于此，格式参考 [Keep a Changelog](https
 
 ## [Unreleased]
 
+### 新增
+
+- `bsk mcp` 让 MCP 客户端通过标准输入和输出，借助现有守护进程与浏览器扩展控制 BrowserSkill。`bsk install-skill --mcp` 可为 Codex、Claude Code 和 Cursor 配置 MCP 服务。
+
 ### 变更
 
 - CLI 和 daemon 更新优先使用官网国内下载源；清单或安装包下载、验证失败时回退 GitHub。安装包回退固定为已选版本并保留 SHA256 校验，两个源都失败时逐项报告 URL 和失败原因。显式指定的自定义清单仍只使用配置的源。
