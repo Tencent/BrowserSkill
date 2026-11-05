@@ -24,6 +24,10 @@ Starting from 0.2.0, CLI / Extension / DSH Plugin share the same version number.
   `chrome-extension://<id>/example.com` when it opened a tab or navigated a page
   it could not drive over CDP; over CDP the request failed as
   `cdp_failed: Invalid URL`.
+- Commands no longer wait until their timeout when truncated page text cuts an
+  emoji in half, for example `bsk console --max-text-chars 4` on `Hi 🚀 there`.
+  The lone surrogate left by the cut made the daemon drop the extension's whole
+  reply; the extension now sends it as `U+FFFD`.
 - Shared control keeps running during scrolling and ineffective key presses. Completed
   page clicks, keyboard activation and actual field edits yield to the person. Pending
   gestures wait at dispatch without revoking control, and coordinate input waits for
