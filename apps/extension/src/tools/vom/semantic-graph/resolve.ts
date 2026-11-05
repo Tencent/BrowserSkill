@@ -1,5 +1,5 @@
 import type { VomNode } from "@browser-skill/vom";
-import { sensitiveAutocomplete } from "@/lib/sensitive-autocomplete";
+import { RECORD_PASSWORD_ATTRIBUTE, sensitiveAutocomplete } from "@/lib/sensitive-autocomplete";
 import { stableIdentifierName } from "./name-evidence";
 import type {
   ResolvedSemanticGraph,
@@ -121,6 +121,7 @@ function sensitive(node: SemanticGraphNode): boolean {
   const type = (attrs.type ?? "").toLowerCase();
   return (
     type === "password" ||
+    Object.prototype.hasOwnProperty.call(attrs, RECORD_PASSWORD_ATTRIBUTE) ||
     sensitiveAutocomplete(attrs.autocomplete) ||
     SENSITIVE_INPUT_TYPES.has(axProperty(node.ax, "inputType") ?? "")
   );
@@ -132,7 +133,9 @@ function inputState(
   value: string | undefined,
   isSensitive: boolean,
 ): VomNode["inputState"] {
-  if (node.dom?.formState) return node.dom.formState;
+  if (node.dom?.formState) {
+    return isSensitive && node.dom.formState === "default" ? "filled" : node.dom.formState;
+  }
   const tag = node.dom?.tag.toLowerCase() ?? "";
   if (!FORM_TAGS.has(tag) && !["textbox", "searchbox"].includes(role ?? "")) return undefined;
   if (isSensitive) return value ? "filled" : "empty";
@@ -493,6 +496,7 @@ export function resolveSemanticGraph(
     const checked = checkedState(node, role);
     const attrs = { ...(node.dom?.attrs ?? {}) };
     if (isSensitive) delete attrs.value;
+    delete attrs[RECORD_PASSWORD_ATTRIBUTE];
     const frame = graph.frames.get(node.frameId);
     const tag = node.dom?.tag.toLowerCase() ?? "";
     const inForm = node.dom?.inForm;

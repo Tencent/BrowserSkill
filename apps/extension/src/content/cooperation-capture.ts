@@ -56,10 +56,24 @@ export function attachCooperationCapture() {
   let focusTimer: ReturnType<typeof setTimeout> | undefined;
   const overlay = (target: EventTarget | null) =>
     target instanceof Element && !!target.closest(OVERLAY_HOST_SELECTOR);
+  const formerPasswords = new WeakSet<Node>();
+  const markFormerPasswords = (records: MutationRecord[]) => {
+    for (const r of records) {
+      if (r.oldValue?.toLowerCase() === "password") formerPasswords.add(r.target);
+    }
+  };
   // Passwords, codes, card details and file selections never enter field state.
-  const secret = (target: Element) =>
-    (target instanceof HTMLInputElement && ["password", "file", "hidden"].includes(target.type)) ||
-    sensitiveAutocomplete(target.getAttribute("autocomplete"));
+  const secret = (target: Element) => {
+    if (target instanceof HTMLInputElement && target.type === "password") {
+      formerPasswords.add(target);
+      return true;
+    }
+    return (
+      (target instanceof HTMLInputElement && ["file", "hidden"].includes(target.type)) ||
+      formerPasswords.has(target) ||
+      sensitiveAutocomplete(target.getAttribute("autocomplete"))
+    );
+  };
   const label = (target: EventTarget | null) => {
     if (!(target instanceof Element)) return "page";
     return (
@@ -95,6 +109,7 @@ export function attachCooperationCapture() {
     if (!timer) timer = setTimeout(publish, 60);
   };
   const mutations = (records: MutationRecord[]) => {
+    markFormerPasswords(records);
     if (
       !enabled ||
       !records.some(
@@ -128,6 +143,7 @@ export function attachCooperationCapture() {
         subtree: true,
         childList: true,
         attributes: true,
+        attributeOldValue: true,
         characterData: true,
       });
       roots.add(root);
@@ -155,7 +171,12 @@ export function attachCooperationCapture() {
     const mediaByRoot = new Map<Document | ShadowRoot, { id: string }[]>();
     state.fieldsComplete = true;
     for (const target of controls(document)) {
-      if (overlay(target) || secret(target)) continue;
+      if (overlay(target)) continue;
+      if (secret(target)) {
+        fields.delete(target);
+        sampledValues.delete(target);
+        continue;
+      }
       const fullValue =
         target instanceof HTMLInputElement && ["checkbox", "radio"].includes(target.type)
           ? String(target.checked)
@@ -245,6 +266,9 @@ export function attachCooperationCapture() {
     attribution = undefined;
     if (!expectation || expectation.type !== event.type) return false;
     const expected = expectation;
+    // CDP uses the visual viewport. DOM client coordinates use the layout viewport,
+    // which can have a different origin after pinch zoom and pan.
+    const viewport = window.visualViewport;
     // Compare in this frame's monotonic clock. The epoch origin can drift from
     // the current wall clock used by native dispatch in a long-running browser.
     const match =
@@ -256,8 +280,8 @@ export function attachCooperationCapture() {
         ? event.key === expected.key
         : event instanceof MouseEvent &&
           (window !== window.top ||
-            (Math.abs(event.clientX - (expected.x ?? -1)) <= 2 &&
-              Math.abs(event.clientY - (expected.y ?? -1)) <= 2)));
+            (Math.abs(event.clientX - (viewport?.offsetLeft ?? 0) - (expected.x ?? -1)) <= 2 &&
+              Math.abs(event.clientY - (viewport?.offsetTop ?? 0) - (expected.y ?? -1)) <= 2)));
     attribution = match
       ? undefined
       : {
@@ -274,12 +298,16 @@ export function attachCooperationCapture() {
     if (!enabled || event.composedPath().some(overlay)) return;
     const target = event.composedPath()[0] ?? event.target;
     if (event.type === "input" || event.type === "change") {
+      mutations(observer.takeRecords());
       if (
         target instanceof HTMLInputElement ||
         target instanceof HTMLTextAreaElement ||
         target instanceof HTMLSelectElement
       ) {
-        if (!secret(target)) {
+        if (secret(target)) {
+          fields.delete(target);
+          sampledValues.delete(target);
+        } else {
           fields.set(target, {
             id: id(target),
             label: label(target),

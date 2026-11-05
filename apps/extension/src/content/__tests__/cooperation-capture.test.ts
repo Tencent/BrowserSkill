@@ -105,6 +105,36 @@ it("requires the dispatched native time as well as coordinates before attributin
   expect(read()).toMatchObject({ human: 1, editing: true });
 });
 
+it.each([
+  "pointerdown",
+  "wheel",
+] as const)("compares native %s in visual viewport coordinates after pinch zoom and pan", (type) => {
+  document.body.innerHTML = "<button>Apply</button>";
+  const timestamp = 1_790_000_000_000;
+  const ticks = 1000;
+  vi.spyOn(Date, "now").mockReturnValue(timestamp);
+  vi.spyOn(performance, "now").mockReturnValue(ticks);
+  vi.stubGlobal("visualViewport", { offsetLeft: 33, offsetTop: 36, scale: 2 });
+  const read = collector();
+  read();
+  const input = { type, x: 280, y: 143, timestamp };
+  const dispatch = (clientX: number, clientY: number) => {
+    const event = new MouseEvent(type, { bubbles: true, clientX, clientY });
+    Object.defineProperties(event, {
+      isTrusted: { value: true },
+      timeStamp: { value: ticks },
+    });
+    document.querySelector("button")!.dispatchEvent(event);
+  };
+  read(COOPERATION_ARM, "first", input);
+  dispatch(313, 179);
+  expect(read()).toMatchObject({ human: 0, busy: false });
+
+  read(COOPERATION_ARM, "first", input);
+  dispatch(280, 143);
+  expect(read()).toMatchObject({ human: 1 });
+});
+
 // Native events use the renderer's monotonic clock. Its cached epoch origin
 // can diverge from the wall clock used by CDP in a long-running browser.
 it.each(
@@ -390,6 +420,26 @@ it("keeps codes and card details the person types out of field state", () => {
   const state = read()!;
   expect(state.fields).toEqual([expect.objectContaining({ label: "City", value: "Shanghai" })]);
   expect(JSON.stringify(state)).not.toMatch(/482913|4111111111111111/);
+});
+
+it("keeps a password field shown as text and newly marked secret fields out of field state", () => {
+  document.body.innerHTML =
+    '<input id="pw" type="password" aria-label="Password">' +
+    '<input id="code" type="text" aria-label="Code" value="482913">';
+  const read = collector();
+  expect(read()?.fields).toEqual([expect.objectContaining({ label: "Code", value: "482913" })]);
+
+  const pw = document.querySelector<HTMLInputElement>("#pw")!;
+  pw.type = "text";
+  pw.value = "BSK_SYNTHETIC_PASSWORD";
+  pw.dispatchEvent(new Event("input", { bubbles: true }));
+
+  const code = document.querySelector<HTMLInputElement>("#code")!;
+  code.setAttribute("autocomplete", "one-time-code");
+
+  const state = read()!;
+  expect(state.fields).toEqual([]);
+  expect(JSON.stringify(state)).not.toMatch(/BSK_SYNTHETIC_PASSWORD|482913/);
 });
 
 it("does not describe ambiguous or truncated field values as complete incremental evidence", () => {

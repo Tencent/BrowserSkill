@@ -1,5 +1,8 @@
 const SECRET_FIELDS = new Set(["current-password", "new-password", "one-time-code"]);
 
+/** Marks an input whose type was switched away from "password" during recording. */
+export const RECORD_PASSWORD_ATTRIBUTE = "data-bsk-record-password";
+
 /** True when an autocomplete attribute names a credential, code or card field.
  * The attribute is an ASCII-whitespace token list, e.g. "section-login current-password"
  * or "billing cc-number", so match each token rather than the whole value. */

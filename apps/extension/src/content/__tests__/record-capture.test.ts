@@ -124,7 +124,9 @@ describe("record-capture semantic", () => {
     if (editWhileHidden) edit("BSK_SYNTHETIC_PASSWORD");
     input.type = "text"; // a "show password" toggle
     edit("BSK_SYNTHETIC_PASSWORDx");
+    expect(input.hasAttribute("data-bsk-record-password")).toBe(true);
     capture.dispose();
+    expect(input.hasAttribute("data-bsk-record-password")).toBe(false);
 
     const fills = steps.filter((step) => step.op === "fill");
     expect(fills).toHaveLength(editWhileHidden ? 2 : 1);
