@@ -7,6 +7,7 @@ import {
 import { type ResolvedActionTarget, resolveActionTarget } from "@/tools/interaction";
 import { captureVomObservation, handleSnapshot } from "@/tools/observation";
 import { type CdpRunner, chromeTabsApi, isRpcError, resolveTargetTab } from "@/tools/shared";
+import { lookupSnapshotRef } from "@/tools/snapshot-ref";
 import type { DragTarget, RequestFrame, RpcError } from "@/transport/types";
 import {
   ActionCheckError,
@@ -41,6 +42,7 @@ type Frames = Map<number, FrameState>;
 interface Context {
   id: string;
   epoch: number;
+  frameEpoch: number;
   refs: number;
   frames: Frames;
   evidence?: ObservationEvidence;
@@ -64,6 +66,8 @@ interface TabState {
   tabId: number;
   revision: number;
   epoch: number;
+  /** Changes to the collected document set, including subframe navigations. */
+  frameEpoch: number;
   held: boolean;
   stopped: boolean;
   working: boolean;
@@ -163,7 +167,11 @@ function isInitialBlank(tab: { url?: string; pendingUrl?: string }): boolean {
   );
 }
 
-function sameFrames(a: Frames, b: Frames, field: "revision" | "structure" | "human"): boolean {
+function sameFrames(
+  a: Frames,
+  b: Frames,
+  field: "revision" | "structure" | "human" | "document",
+): boolean {
   return (
     a.size === b.size &&
     [...a].every(([id, state]) => {
@@ -317,6 +325,7 @@ export class CooperationController implements ControlAuthority {
       tabId,
       revision: 0,
       epoch: 0,
+      frameEpoch: 0,
       held: false,
       stopped: false,
       working: false,
@@ -558,6 +567,7 @@ export class CooperationController implements ControlAuthority {
       this.changed(state);
       throw error;
     }
+    const authorityRevision = state.authorityRevision;
     for (const [id, next] of frames) {
       const old = state.frames.get(id);
       if (old?.document === next.document) {
@@ -574,7 +584,15 @@ export class CooperationController implements ControlAuthority {
         this.preserve(state);
       }
     }
-    if (state.frames.size && !sameFrames(state.frames, frames, "human")) {
+    const documentsChanged = state.frames.size > 0 && !sameFrames(state.frames, frames, "document");
+    if (documentsChanged) state.frameEpoch++;
+    const mainDocumentChanged =
+      documentsChanged && state.frames.get(0)?.document !== frames.get(0)?.document;
+    if (
+      state.authorityRevision !== authorityRevision ||
+      mainDocumentChanged ||
+      (documentsChanged && this.deps.sessions.get(state.sessionId)?.controlPolicy === "strict")
+    ) {
       state.epoch++;
       state.context = undefined;
     }
@@ -687,10 +705,12 @@ export class CooperationController implements ControlAuthority {
       try {
         const before = state.frames;
         const epoch = state.epoch;
+        const frameEpoch = state.frameEpoch;
         const baseline = state.baseline;
         let evidence = baseline?.evidence;
         const delta =
           baseline &&
+          baseline.frameEpoch === frameEpoch &&
           (!targetPolicy || sameFrames(baseline.frames, before, "revision")) &&
           [...before.values()].every((frame) => frame.fieldsComplete !== false) &&
           baseline.refs === session.refStore.revision &&
@@ -725,10 +745,12 @@ export class CooperationController implements ControlAuthority {
         if (observation && isRpcError(observation)) return observation;
         const after = await this.refresh(state);
         if (state.stopped) return stopped();
+        // A full target snapshot can publish main-document control during child
+        // navigation. Its strict observation remains bound to the pre-capture frames.
         if (
           signal.aborted ||
           state.epoch !== epoch ||
-          !sameFrames(before, after, "human") ||
+          (state.frameEpoch !== frameEpoch && (!targetPolicy || delta)) ||
           (!targetPolicy &&
             (!sameFields(before, after, true) ||
               !sameMedia(before, after) ||
@@ -754,6 +776,7 @@ export class CooperationController implements ControlAuthority {
               ? previousContext.id
               : crypto.randomUUID(),
           epoch,
+          frameEpoch,
           refs: session.refStore.revision,
           frames: before,
           evidence,
@@ -827,7 +850,7 @@ export class CooperationController implements ControlAuthority {
             }),
           state: { ...this.view(state.tabId), mode: "ready" },
           guidance: targetPolicy
-            ? "This context remains valid for DOM-targeted actions until human control or the document changes. Supplementary reads do not invalidate it. Use explicit expect checks for business facts such as price, recipient or record ID. Scripts, untargeted keys and visual clicks require this sync's top-level observation_id (not observation.observation_id) and retain strict content checks. Never replay an uncertain action; inspect its result first."
+            ? "Reuse this context for DOM-targeted actions and supplementary reads. Human intervention or main-document replacement requires sync. Actions using an iframe target or precondition require a fresh sync when frame documents change. Use explicit expect checks for business facts such as price, recipient or record ID. Scripts, untargeted keys and visual clicks require this sync's top-level observation_id (not observation.observation_id) and retain strict content checks. Never replay an uncertain action; inspect its result first."
             : "Continue toward the assigned goal using this current state. Incorporate helpful progress and correct recoverable mistakes. Page activity is not a change of goal. Each context authorizes one action; sync after it. By default the whole page is checked. Text that changes by itself (clocks, counters) is reported once; after the next sync it no longer blocks actions on a ref or selector unless it shares a form, list, dialog, panel or other container with the target. Keys without a ref or selector can use explicit dependencies, while their actual focused region stays protected; uncertain focus and other untargeted actions keep the exact whole-page check. To tolerate other unrelated updates, declare all observed decision regions with --depends-on refs/selectors (plugin: dependsOn); the target region and form values remain protected. Verify completion and prior submissions from application evidence.",
         };
       } finally {
@@ -1186,6 +1209,22 @@ export class CooperationController implements ControlAuthority {
     let revoked: string | undefined;
     let nativeInputStarted = false;
     const context = targetPolicy && !targeted ? state.baseline : state.context;
+    const rootFrameId = context?.evidence?.rootFrameId;
+    const mainDocumentRef = (ref: string) => {
+      const node = lookupSnapshotRef(session, ref, target.tabId);
+      return rootFrameId !== undefined && node?.frameId === rootFrameId && !node.cdpSessionId;
+    };
+    const mainDocumentTarget = (node?: DragTarget) =>
+      node?.ref ? mainDocumentRef(node.ref) : !!node?.selector;
+    // Selectors are main-document only. Refs must prove their frame, including
+    // both drag endpoints and any refs whose facts authorize the action.
+    const mainDocumentAction =
+      targeted &&
+      mainDocumentTarget(primaryTarget) &&
+      (req.method !== "tool.drag" || mainDocumentTarget(params.target)) &&
+      expectations.every(({ target }) => !/^@?e\d+$/.test(target) || mainDocumentRef(target));
+    const observedFramesChanged = () =>
+      !mainDocumentAction && context !== undefined && context.frameEpoch !== state.frameEpoch;
     const epoch = state.epoch;
     const authorityRevision = state.authorityRevision;
     let verifiedFrames = context?.frames;
@@ -1202,7 +1241,8 @@ export class CooperationController implements ControlAuthority {
             intervention.signal.aborted ||
             state.authorityRevision !== authorityRevision
           ? "human_intervention"
-          : context && documents(context.frames) !== documents(state.frames)
+          : observedFramesChanged() ||
+              (context && context.frames.get(0)?.document !== state.frames.get(0)?.document)
             ? "document_changed"
             : state.unavailable || state.epoch !== epoch || this.controlError(session, state)
               ? "control_context_invalid"
@@ -1245,6 +1285,8 @@ export class CooperationController implements ControlAuthority {
       if (state.authorityRevision !== authorityRevision) return "User activity revoked this action";
       if (!completed && state.unavailable)
         return "Page interaction coverage changed; wait and synchronize";
+      if (!completed && observedFramesChanged())
+        return "A page frame changed; synchronize before choosing this action";
       if (
         req.method === "tool.press" &&
         !nativeInputStarted &&
@@ -1270,7 +1312,9 @@ export class CooperationController implements ControlAuthority {
       if (checkFailure) throw new ActionCheckError(checkFailure);
       const reason = interruption();
       if (reason) {
-        if (context && state.context === context) state.context = undefined;
+        if (!targetPolicy && context && state.context === context) state.context = undefined;
+        // Refusing a strict observation must not discard the reusable DOM context.
+        if (targetPolicy && !targeted && context) context.consumed = true;
         throw new Error((revoked = reason));
       }
     };
