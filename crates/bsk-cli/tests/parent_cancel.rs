@@ -1,5 +1,6 @@
-//! Real Windows CLI cancellation, including caller-owned transfer cleanup.
-#![cfg(windows)]
+//! Real CLI cancellation over Unix sockets / Windows named pipes, including
+//! caller-owned transfer cleanup and cancellation before RPC registration.
+#![cfg(any(unix, windows))]
 
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -10,6 +11,7 @@ use bsk_protocol::tools::{TransferBeginParams, TransferIdParams};
 use bsk_protocol::{ErrorCode, Frame, Method, ResponseBody, ResponseFrame, RpcError};
 use serde_json::json;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+#[cfg(windows)]
 use tokio::net::windows::named_pipe::ServerOptions;
 use tokio::process::Command;
 use tokio::sync::{Notify, watch};
@@ -50,6 +52,12 @@ fn stdin_close_cancels_business_but_releases_resources_with_a_bounded_budget() {
 async fn exercise(transfers: Arc<TransferRegistry>, staging_root: &Path) {
     for mode in [
         "wait",
+        "late-registration",
+        "missing-registration",
+        "unregistered-method",
+        "cancel-no-response",
+        "confirmed-but-stalled",
+        "completed-during-cancel",
         "upload",
         "upload-multi",
         "upload-before-dispatch",
@@ -58,17 +66,26 @@ async fn exercise(transfers: Arc<TransferRegistry>, staging_root: &Path) {
         "ordinary",
     ] {
         let home = tempfile::tempdir().unwrap();
-        let pipe_name = format!(r"\\.\pipe\bsk-parent-cancel-{}", uuid::Uuid::new_v4());
-        let info = DaemonInfo::now(std::process::id(), (&pipe_name).into(), 0, "0.2.0");
+        #[cfg(windows)]
+        let address = std::path::PathBuf::from(format!(
+            r"\\.\pipe\bsk-parent-cancel-{}",
+            uuid::Uuid::new_v4()
+        ));
+        #[cfg(unix)]
+        let address = home.path().join("daemon.sock");
+        let info = DaemonInfo::now(std::process::id(), address.clone(), 0, "0.2.0");
         std::fs::write(
             home.path().join("daemon.json"),
             serde_json::to_vec(&info).unwrap(),
         )
         .unwrap();
+        #[cfg(windows)]
         let mut pipe = ServerOptions::new()
             .first_pipe_instance(true)
-            .create(&pipe_name)
+            .create(&address)
             .unwrap();
+        #[cfg(unix)]
+        let listener = tokio::net::UnixListener::bind(&address).unwrap();
         let registered = Arc::new(Notify::new());
         let pending = Arc::new(Mutex::new(None::<String>));
         let ids = Arc::new(Mutex::new(Vec::<String>::new()));
@@ -89,8 +106,9 @@ async fn exercise(transfers: Arc<TransferRegistry>, staging_root: &Path) {
             None
         };
         let (cancel, cancelled) = watch::channel(false);
+        let first_cancel = Arc::new(Notify::new());
         let ready = Arc::clone(&registered);
-        let name = pipe_name.clone();
+        let name = address;
         let registry = Arc::clone(&transfers);
         let server_ids = Arc::clone(&ids);
         let server_released = Arc::clone(&released);
@@ -98,12 +116,18 @@ async fn exercise(transfers: Arc<TransferRegistry>, staging_root: &Path) {
         let server = tokio::spawn(async move {
             let mut connections = tokio::task::JoinSet::new();
             loop {
-                pipe.connect().await.unwrap();
-                let next = ServerOptions::new().create(&name).unwrap();
-                let connection = std::mem::replace(&mut pipe, next);
+                #[cfg(windows)]
+                let connection = {
+                    pipe.connect().await.unwrap();
+                    let next = ServerOptions::new().create(&name).unwrap();
+                    std::mem::replace(&mut pipe, next)
+                };
+                #[cfg(unix)]
+                let (connection, _) = listener.accept().await.unwrap();
                 let ready = Arc::clone(&ready);
                 let pending = Arc::clone(&pending);
                 let cancel = cancel.clone();
+                let first_cancel = Arc::clone(&first_cancel);
                 let mut cancelled = cancelled.clone();
                 let name = name.clone();
                 let registry = Arc::clone(&registry);
@@ -144,6 +168,11 @@ async fn exercise(transfers: Arc<TransferRegistry>, staging_root: &Path) {
                             Method::ToolWaitMs if mode == "ordinary" => {
                                 ResponseBody::Ok(json!({"waited_ms": 1}))
                             }
+                            Method::ToolWaitMs if mode == "completed-during-cancel" => {
+                                ready.notify_one();
+                                first_cancel.notified().await;
+                                ResponseBody::Ok(json!({"waited_ms": 1}))
+                            }
                             Method::TransferChunk
                                 if mode == "upload-before-dispatch"
                                     || (mode.contains("multi")
@@ -157,12 +186,30 @@ async fn exercise(transfers: Arc<TransferRegistry>, staging_root: &Path) {
                                 registry.finish_upload(serde_json::from_value(params).unwrap()),
                             ),
                             Method::ToolWaitMs
+                            | Method::SessionList
                             | Method::TransferChunk
                             | Method::TransferRead
                             | Method::TransferFinish => {
+                                if matches!(
+                                    mode,
+                                    "late-registration"
+                                        | "missing-registration"
+                                        | "unregistered-method"
+                                ) {
+                                    // Independent IPC connections need not reach registration in
+                                    // send order. Let the first cancel overtake this request.
+                                    ready.notify_one();
+                                    first_cancel.notified().await;
+                                    if mode != "late-registration" {
+                                        std::future::pending::<()>().await;
+                                    }
+                                }
                                 *pending.lock().unwrap() = Some(req.id.clone());
                                 ready.notify_one();
                                 cancelled.wait_for(|value| *value).await.unwrap();
+                                if mode == "confirmed-but-stalled" {
+                                    std::future::pending::<()>().await;
+                                }
                                 if mode == "upload-before-dispatch" {
                                     // Finish won the race with cancellation, but tool.upload must
                                     // not be dispatched and the CLI still owns the staging.
@@ -179,16 +226,28 @@ async fn exercise(transfers: Arc<TransferRegistry>, staging_root: &Path) {
                                 }
                             }
                             Method::Cancel => {
+                                if mode == "cancel-no-response" {
+                                    std::future::pending::<()>().await;
+                                }
                                 let target = params["rpc_id"].as_str().unwrap();
-                                assert_eq!(pending.lock().unwrap().as_deref(), Some(target));
-                                cancel.send(true).unwrap();
-                                ResponseBody::Ok(json!({"cancelled": true}))
+                                let matched = pending.lock().unwrap().as_deref() == Some(target);
+                                if matched {
+                                    cancel.send(true).unwrap();
+                                } else {
+                                    assert!(
+                                        mode.ends_with("registration")
+                                            || mode == "unregistered-method"
+                                            || mode == "completed-during-cancel"
+                                    );
+                                    first_cancel.notify_one();
+                                }
+                                ResponseBody::Ok(json!({"cancelled": matched}))
                             }
                             Method::TransferRelease => {
                                 let params: TransferIdParams =
                                     serde_json::from_value(params).unwrap();
                                 released.lock().unwrap().push(params.transfer_id.clone());
-                                if mode.contains("stall") {
+                                if mode == "upload-multi-stall" {
                                     std::future::pending::<()>().await;
                                 }
                                 response(Ok(registry.release(params)))
@@ -212,8 +271,9 @@ async fn exercise(transfers: Arc<TransferRegistry>, staging_root: &Path) {
             .env_remove("BSK_CANCEL_ON_STDIN_CLOSE")
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
-            .creation_flags(0x0800_0000)
             .kill_on_drop(true);
+        #[cfg(windows)]
+        cmd.creation_flags(0x0800_0000);
         if mode.starts_with("upload") {
             let source = home.path().join("upload.txt");
             // Declare 300 MiB without allocating or transferring that much data.
@@ -245,6 +305,8 @@ async fn exercise(transfers: Arc<TransferRegistry>, staging_root: &Path) {
                 "--out",
             ])
             .arg(out);
+        } else if mode == "unregistered-method" {
+            cmd.args(["session", "list"]);
         } else {
             cmd.args(["wait-ms", if mode == "ordinary" { "1ms" } else { "60s" }]);
         }
@@ -278,15 +340,40 @@ async fn exercise(transfers: Arc<TransferRegistry>, staging_root: &Path) {
         let _ = server.await;
         assert_eq!(
             output.status.code(),
-            Some(if mode == "ordinary" { 0 } else { 2 }),
+            Some(if mode == "ordinary" || mode == "completed-during-cancel" {
+                0
+            } else {
+                2
+            }),
             "{mode}: stdout={} stderr={}",
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
         );
-        if mode != "ordinary" {
+        if mode == "completed-during-cancel" {
+            let body: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+            assert_eq!(body["waited_ms"], 1);
+        } else if mode != "ordinary" {
             let body: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
             assert_eq!(body["code"], "cancelled");
-            if mode != "upload-before-dispatch" {
+            if matches!(
+                mode,
+                "missing-registration"
+                    | "unregistered-method"
+                    | "cancel-no-response"
+                    | "confirmed-but-stalled"
+            ) {
+                assert_eq!(
+                    body["message"],
+                    "rpc did not respond within cancel grace window"
+                );
+                // A separate confirmation budget would make these take 4s.
+                assert!(
+                    start.elapsed() >= Duration::from_millis(1800)
+                        && start.elapsed() < Duration::from_secs(3),
+                    "{mode}: cancellation took {:?}",
+                    start.elapsed()
+                );
+            } else if mode != "upload-before-dispatch" {
                 assert_eq!(body["message"], "parent cancellation reached daemon");
             }
             let received = received.lock().unwrap();
@@ -294,12 +381,22 @@ async fn exercise(transfers: Arc<TransferRegistry>, staging_root: &Path) {
             assert!(
                 received[cancel + 1..]
                     .iter()
-                    .all(|m| *m == Method::TransferRelease),
+                    .all(|m| *m == Method::TransferRelease || *m == Method::Cancel),
                 "only cleanup may follow cancellation: {received:?}"
             );
+            let cancel_count = received.iter().filter(|m| **m == Method::Cancel).count();
+            if mode.ends_with("registration") || mode == "unregistered-method" {
+                assert!(cancel_count > 1);
+                assert!(
+                    cancel_count <= 12,
+                    "{mode}: excessive retries: {cancel_count}"
+                );
+            } else {
+                assert_eq!(cancel_count, 1, "{mode}: unexpected cancel retry");
+            }
         }
         let ids = ids.lock().unwrap();
-        if mode.contains("stall") {
+        if mode == "upload-multi-stall" {
             assert_eq!(released.lock().unwrap().len(), 1);
             assert!(start.elapsed() >= Duration::from_secs(4));
             // The CLI cannot force an unresponsive daemon to clean up.
