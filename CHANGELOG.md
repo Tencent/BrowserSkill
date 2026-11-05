@@ -24,6 +24,9 @@ Starting from 0.2.0, CLI / Extension / DSH Plugin share the same version number.
 
 ### Fixed
 
+- Saved HTML debug captures now redact sensitive initial values in `textarea` and
+  `select` controls as well as `input` controls, including encoded field names
+  and autocomplete tokens.
 - CLI cancellation keeps the original RPC progressing and retries cancellation
   that arrives before daemon registration, reducing background screenshots that
   keep a session busy after the caller stops. Confirmation and response waiting
