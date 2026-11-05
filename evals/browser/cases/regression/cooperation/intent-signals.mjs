@@ -144,7 +144,7 @@ export async function runIntentScenarios({
 
     // The same ownership rule covers an iframe editing host.
     await read(
-      "document.querySelector('iframe').contentDocument.querySelector('input').focus(); true",
+      "document.querySelector('#frame-input').contentDocument.querySelector('input').focus(); true",
     );
     await send("Input.insertText", { text: "人工 iframe" }, human);
     await refuse(context);
@@ -163,7 +163,9 @@ export async function runIntentScenarios({
     assert(frameRef, "Frame input was not observed: " + frameSnapshot.text);
     await fill(frameRef, "Agent iframe 中文", context);
     assert.equal(
-      await read("document.querySelector('iframe').contentDocument.querySelector('input').value"),
+      await read(
+        "document.querySelector('#frame-input').contentDocument.querySelector('input').value",
+      ),
       "Agent iframe 中文",
     );
     assert.equal((await status()).activity.length, 0, "Agent iframe edit was classified as human");

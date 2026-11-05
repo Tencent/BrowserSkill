@@ -14,7 +14,8 @@
   <output id="count">0</output>
   <label>Note <input id="note" aria-label="Note"></label>
 </form>
-<iframe src="/frame" title="Frame input"></iframe>
+<iframe id="frame-input" src="/frame" title="Frame input"></iframe>
+<iframe id="promo" title="Promotional carousel" srcdoc="<h2>Promo slide 0</h2>"></iframe>
 <div style="height: 1800px" aria-hidden="true"></div>
 <script>
   window.applied = 0;
@@ -25,5 +26,10 @@
     document.querySelector('#count').value = String(++applied);
   };
   document.querySelector('#human').onclick = () => { window.humanChanged = true; };
+  window.rotatePromo = (slide) => new Promise((resolve) => {
+    const frame = document.querySelector('#promo');
+    frame.addEventListener('load', () => resolve(frame.contentDocument.body.textContent), { once: true });
+    frame.srcdoc = '<h2>Promo slide ' + slide + '</h2>';
+  });
 </script>
 </html>

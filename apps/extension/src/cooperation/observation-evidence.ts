@@ -6,6 +6,7 @@ import { playbackProgressMedia } from "./media-progress";
  * The interaction layer rechecks the live hit target. */
 export interface ObservationEvidence {
   nodes: readonly VomNode[];
+  rootFrameId?: string;
 }
 
 export interface EvidenceTarget {
@@ -53,7 +54,7 @@ const contentAttributes = new Set(["aria-label", "title"]);
 const LEARNED = "\u0000";
 
 export function observationEvidence(scene: VomScene): ObservationEvidence {
-  return { nodes: scene.nodes };
+  return { nodes: scene.nodes, rootFrameId: scene.rootFrameId };
 }
 
 const isTarget = (node: VomNode, target: EvidenceTarget) =>

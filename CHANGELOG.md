@@ -15,6 +15,10 @@ Starting from 0.2.0, CLI / Extension / DSH Plugin share the same version number.
   gestures wait at dispatch without revoking control, and coordinate input waits for
   scrolling to settle. Focusing a text field alone no longer holds editing control.
 
+- With target control, a carousel, video embed or ad refreshing an iframe no
+  longer revokes actions whose targets and preconditions are all in the main
+  document. Actions involving iframe refs or a strict observation require a
+  fresh sync when the frame documents change.
 - Values in one-time-code, card and password fields marked by `autocomplete`
   (`one-time-code`, `cc-*`, `current-password`, `new-password`), which observations
   already hide, are also kept out of shared-control field state, `expect` failure

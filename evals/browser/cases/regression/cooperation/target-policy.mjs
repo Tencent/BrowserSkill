@@ -27,7 +27,11 @@ export async function runTargetPolicyScenarios({ send, bsk, cli, env, base }) {
       }));
       await send("Page.bringToFront", {}, human);
       const read = async (expression) => {
-        const reply = await send("Runtime.evaluate", { expression, returnByValue: true }, human);
+        const reply = await send(
+          "Runtime.evaluate",
+          { expression, awaitPromise: true, returnByValue: true },
+          human,
+        );
         assert(!reply.exceptionDetails, JSON.stringify(reply.exceptionDetails));
         return reply.result.value;
       };
@@ -52,7 +56,9 @@ export async function runTargetPolicyScenarios({ send, bsk, cli, env, base }) {
           ? dsh.run("bsk_interact", { action: "click", session, target: ref, contextId: context })
           : bsk(["click", ref, ...scope, "--context", context]);
       const tick = await read("ticks");
+      assert.equal(await read("rotatePromo(1)"), "Promo slide 1");
       await click(first.context_id);
+      assert.equal(await read("rotatePromo(2)"), "Promo slide 2");
       await click(first.context_id);
       assert.equal(await read("applied"), 2);
       assert((await read("ticks")) > tick, "same-form clock must keep changing during the actions");
@@ -120,6 +126,7 @@ export async function runTargetPolicyScenarios({ send, bsk, cli, env, base }) {
         client,
         policy: "target",
         reusedContext: true,
+        survivedCarouselFrameNavigation: true,
         stableRefAfterSnapshot: true,
         humanRevokedContext: true,
         finalClicks: 4,
