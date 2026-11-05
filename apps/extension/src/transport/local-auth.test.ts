@@ -2,7 +2,8 @@ import { IDBFactory } from "fake-indexeddb";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import v from "../../../../crates/bsk-protocol/tests/fixtures/local-auth-v1.json";
 import { authenticateLocal, createLocalAuthenticator } from "./local-auth";
-import { prove, transcript } from "./local-auth-crypto";
+import { encodeBytes, prove, transcript } from "./local-auth-crypto";
+import { MAX_AUTH_CREDENTIALS } from "./local-auth-protocol";
 import type { LocalCredential } from "./local-credentials";
 import * as credentials from "./local-credentials";
 import { verifyLocalPairing } from "./pairing-verifier";
@@ -12,6 +13,7 @@ const origin = "chrome-extension://abcdefghijklmnopabcdefghijklmnop";
 const instanceId = "a1b2c3d4";
 class Socket extends EventTarget {
   readyState = 1;
+  url = "ws://127.0.0.1:52800/";
   sent: Record<string, unknown>[] = [];
   handler: (frame: any) => void | Promise<void> = () => {};
   send(raw: string) {
@@ -143,6 +145,40 @@ it.each([
   await authenticate(socket.ws(), new AbortController().signal);
   expect(socket.sent).toHaveLength(0);
   expect(status).toHaveBeenLastCalledWith({ state: "unverified_local", reason: "unpaired" });
+});
+it("bounds reconnect offers while retaining the candidate for the current endpoint", async () => {
+  const matching = await credentials.stageCredential(credentials.parseLocalPairing(link));
+  const pending = { txn: v.txn, gen: 1, key: v.candidate };
+  await credentials.saveCandidate(matching, pending);
+  for (let index = 0; index < MAX_AUTH_CREDENTIALS; index++) {
+    const other = await credentials.stageCredential({
+      ...matching,
+      daemonId: v.txn,
+      deviceId: encodeBytes(new Uint8Array(16).fill(index)),
+      endpoint: "ws://127.0.0.1:52801/",
+    });
+    await credentials.saveCandidate(other, pending);
+  }
+  const socket = new Socket();
+  socket.handler = (request) => {
+    const offers = request.params.local_auth.credentials;
+    expect(offers).toHaveLength(MAX_AUTH_CREDENTIALS);
+    expect(offers[0].device_id).toBe(matching.deviceId);
+    socket.receive({
+      id: request.id,
+      result: {
+        local_auth: { type: "pairing_required", daemon_id: v.daemon_id, legacy_accepted: true },
+      },
+    });
+  };
+  const authenticate = createLocalAuthenticator({
+    instanceId: async () => instanceId,
+    origin,
+    status: vi.fn(),
+  });
+  await expect(authenticate(socket.ws(), AbortSignal.timeout(5000))).rejects.toThrow(
+    "pairing_required",
+  );
 });
 it.each(
   ["paired", "pending"].flatMap((profile) =>

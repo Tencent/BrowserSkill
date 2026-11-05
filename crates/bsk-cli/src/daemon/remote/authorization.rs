@@ -132,6 +132,10 @@ impl AuthorizationStore {
         }
     }
 
+    pub fn is_configured(&self) -> Result<bool> {
+        Ok(!self.read_state()?.public_url.is_empty())
+    }
+
     fn transaction<T>(&self, write: bool, work: impl FnOnce(&mut State) -> Result<T>) -> Result<T> {
         // Writers publish complete snapshots using atomic replacement. Readers
         // can safely open either snapshot without contending with durable writes.

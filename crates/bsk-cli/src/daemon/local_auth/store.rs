@@ -113,10 +113,12 @@ pub struct ActivationRejected {
 }
 
 impl PairingStore {
+    const FILE_NAME: &str = "local-pairings.json";
+
     /// The caller keeps daemon.lock while this store is in use; its mutex
     /// serializes writes within that single process.
     pub fn open(lock: &super::super::lockfile::DaemonLock) -> Result<Self> {
-        let path = lock.path().with_file_name("local-pairings.json");
+        let path = lock.path().with_file_name(Self::FILE_NAME);
         let state: State = super::super::json_store::read(&path)?;
         ensure!(
             state.version == 1,
@@ -135,6 +137,14 @@ impl PairingStore {
             state: Mutex::new(State::default()),
             changed: tokio::sync::watch::channel(()).0,
         }
+    }
+    pub(super) fn has_valid_records_at(home: &std::path::Path) -> Result<bool> {
+        let state: State = super::super::json_store::read(&home.join(Self::FILE_NAME))?;
+        ensure!(
+            state.version == 1,
+            "unsupported local pairing store version"
+        );
+        Ok(state.devices.values().any(Device::valid))
     }
     fn update<T>(&self, work: impl FnOnce(&mut State) -> Result<T>) -> Result<T> {
         let mut current = self.state.lock().expect("local pairing store poisoned");

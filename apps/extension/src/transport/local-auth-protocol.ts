@@ -1,6 +1,7 @@
 import { decodeBytes, uint32 } from "./local-auth-crypto";
 
 export const MAX_AUTH_MESSAGE_BYTES = 4096;
+export const MAX_AUTH_CREDENTIALS = 16;
 export interface Rotation {
   txn: string;
   gen: number;

@@ -2,7 +2,7 @@
 /// <reference types="node" />
 import { type ChildProcess, execFile, spawn } from "node:child_process";
 import { once } from "node:events";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -56,11 +56,15 @@ async function cli(binary: string, ...args: string[]) {
     await promisify(execFile)(binary, args, { env: environment(), timeout: 10_000 })
   ).stdout.trim();
 }
-async function start(binary: string) {
-  daemon = spawn(binary, ["daemon", "start", "--foreground", "--port", "0"], {
-    env: environment(),
-    stdio: "ignore",
-  });
+async function start(binary: string, listenPort = 0, args: string[] = []) {
+  daemon = spawn(
+    binary,
+    ["daemon", "start", "--foreground", "--port", String(listenPort), ...args],
+    {
+      env: environment(),
+      stdio: "ignore",
+    },
+  );
   let port = 0;
   await vi.waitFor(
     async () => {
@@ -218,6 +222,111 @@ it.skipIf(!old)(
     const ws = await opened(url);
     await authenticate(browserSocket(ws), AbortSignal.timeout(5000));
     expect((await handshake(ws)).result).toBeDefined();
+  },
+  20_000,
+);
+
+it.skipIf(!current || !old)(
+  "current CLI can issue, list and revoke remote grants on the released daemon",
+  async () => {
+    const serverArgs = ["--mode", "server", "--public-url", "ws://127.0.0.1:52800/extension"];
+    const url = await start(old!, 0, serverArgs);
+    const link = new URL(await cli(current!, "daemon", "pair"));
+    expect(link.pathname).toBe("/extension");
+    const exchanged = await fetch(new URL("/extension/authorize", url.replace("ws:", "http:")), {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${link.hash.slice(1)}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({ action: "pair", next_token: "g".repeat(43), label: "legacy remote" }),
+    });
+    expect(exchanged.status).toBe(200);
+    const grant = await exchanged.json();
+    const devices = JSON.parse(await cli(current!, "daemon", "devices"));
+    expect(devices).toEqual([
+      expect.objectContaining({ kind: "remote", device_id: grant.device_id }),
+    ]);
+    await cli(current!, "daemon", "revoke", grant.device_id);
+    expect(JSON.parse(await cli(old!, "daemon", "devices"))).toEqual([]);
+    await cli(current!, "daemon", "revoke", "--all");
+
+    // A CLI must not report a complete revocation if the legacy server
+    // cannot revoke local credentials that a newer daemon would accept.
+    const oldStopped = once(daemon!, "exit");
+    daemon!.kill();
+    await oldStopped;
+    await start(current!);
+    await cli(current!, "daemon", "pair");
+    const currentStopped = once(daemon!, "exit");
+    daemon!.kill();
+    await currentStopped;
+    await start(old!, 0, serverArgs);
+    await expect(cli(current!, "daemon", "revoke", "--all")).rejects.toHaveProperty(
+      "stderr",
+      expect.stringContaining("local pairings also exist"),
+    );
+  },
+  20_000,
+);
+
+it.skipIf(!current)(
+  "optional pairing: a fresh link recovers an interrupted first activation after its link expires",
+  async () => {
+    const url = await start(current!);
+    const original = await cli(current!, "daemon", "pair");
+    // Interrupt after the candidate is saved and before the daemon sees confirmation.
+    let interrupted = false;
+    const interruptedSocket = (address: string) => {
+      if (interrupted) throw new LocalAuthError({ state: "server_unverified" });
+      const ws = socket(address);
+      const send = ws.send.bind(ws);
+      vi.spyOn(ws, "send").mockImplementation((message) => {
+        if (JSON.parse(String(message)).type === "local.auth.rotate_confirm") {
+          interrupted = true;
+          ws.terminate();
+        } else send(message);
+      });
+      return browserSocket(ws);
+    };
+    await expect(
+      verifyLocalPairing(original, instance, origin, interruptedSocket),
+    ).rejects.toBeInstanceOf(LocalAuthError);
+    const [staged] = (await readLocalState()).credentials;
+    expect(staged.pending).toBeDefined();
+
+    // Set the daemon-side expiry in its isolated store and reload on the same port.
+    const stopped = once(daemon!, "exit");
+    daemon!.kill();
+    await stopped;
+    const storePath = join(home, "local-pairings.json");
+    const store = JSON.parse(await readFile(storePath, "utf8"));
+    expect(store.devices[staged.deviceId].status).toBe("unactivated");
+    store.devices[staged.deviceId].expires_at = "2000-01-01T00:00:00Z";
+    await writeFile(storePath, JSON.stringify(store));
+    await start(current!, Number(new URL(url).port));
+
+    const authenticate = createLocalAuthenticator({
+      instanceId: async () => instance,
+      origin,
+      status: vi.fn(),
+    });
+    await expect(
+      authenticate(browserSocket(await opened(url)), AbortSignal.timeout(5000)),
+    ).rejects.toMatchObject({
+      status: { state: "pairing_required" },
+    });
+    const fresh = await cli(current!, "daemon", "pair");
+    await expect(
+      verifyLocalPairing(fresh, instance, origin, (address) => browserSocket(socket(address))),
+    ).resolves.toMatchObject({ state: "verified" });
+    const [credential, ...obsolete] = (await readLocalState()).credentials;
+    expect(credential).toMatchObject({ role: "active", gen: 1 });
+    expect(credential.deviceId).not.toBe(staged.deviceId);
+    expect(obsolete).toHaveLength(0);
+    const verified = await opened(url);
+    await authenticate(browserSocket(verified), AbortSignal.timeout(5000));
+    expect((await handshake(verified)).result).toBeDefined();
   },
   20_000,
 );

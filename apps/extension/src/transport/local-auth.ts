@@ -1,5 +1,10 @@
 import { prove, randomBytes, transcript, verify } from "./local-auth-crypto";
-import { parseAuthJson, parseAuthMessage, parseChallenge } from "./local-auth-protocol";
+import {
+  MAX_AUTH_CREDENTIALS,
+  parseAuthJson,
+  parseAuthMessage,
+  parseChallenge,
+} from "./local-auth-protocol";
 import {
   type LocalCredential,
   promoteCandidate,
@@ -204,19 +209,25 @@ export function createLocalAuthenticator(options: {
     // An unused link is not a pairing. A saved candidate may already have
     // committed on the daemon, so recovery must authenticate just like an
     // active pairing; errors never select an unverified connection.
-    const paired = credentials.some(
+    const offers = credentials.filter(
       (credential) => credential.role === "active" || credential.pending,
     );
-    if (policy.skip || !paired) {
+    if (policy.skip || !offers.length) {
       options.status({ state: "unverified_local", reason: policy.skip ? "skip" : "unpaired" });
       return;
     }
     options.status({ state: "verifying" });
     try {
+      // Keep probes bounded even after multiple interrupted attempts. Prefer
+      // the current endpoint, active records, then newer offers. The daemon
+      // still selects a committed key before an unactivated link.
+      const priority = (credential: LocalCredential) =>
+        Number(credential.endpoint === socket.url) * 2 + Number(credential.role === "active");
+      offers.reverse().sort((a, b) => priority(b) - priority(a));
       const status = await authenticateLocal(
         socket,
         signal,
-        credentials,
+        offers.slice(0, MAX_AUTH_CREDENTIALS),
         await options.instanceId(),
         options.origin,
       );

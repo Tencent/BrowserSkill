@@ -34,6 +34,62 @@ fn params<T: serde::de::DeserializeOwned>(value: Value) -> Result<T> {
         .map_err(|_| anyhow::anyhow!("invalid pairing maintenance parameters"))
 }
 
+/// Pre-local-pairing daemons used the file-locked remote store directly.
+/// This compatibility path never changes the live local pairings.
+pub fn execute_legacy_remote(home: &Path, method: Method, value: Value) -> Result<Value> {
+    let remote = super::super::remote::authorization::AuthorizationStore::at_home(home);
+    ensure!(
+        remote.is_configured()?,
+        "local pairing maintenance requires a newer daemon"
+    );
+    match method {
+        Method::LocalAuthPair => {
+            let args: PairParams = params(value)?;
+            ensure!(
+                args.replace.is_none(),
+                "--replace requires a newer local daemon"
+            );
+            Ok(json!({"link":remote.pair()?}))
+        }
+        Method::LocalAuthDevices => Ok(Value::Array(remote_devices(&remote)?)),
+        Method::LocalAuthRevoke => {
+            let args: RevokeParams = params(value)?;
+            ensure!(
+                args.all != args.device_id.is_some(),
+                "specify a device or --all"
+            );
+            if args.all {
+                ensure!(
+                    !super::store::PairingStore::has_valid_records_at(home)?,
+                    "local pairings also exist; restart with a newer daemon to revoke all devices"
+                );
+                remote.revoke_all()?;
+            } else {
+                ensure!(
+                    remote.revoke(&args.device_id.unwrap())?,
+                    "device grant not found"
+                );
+            }
+            Ok(json!({"revoked":true}))
+        }
+        _ => anyhow::bail!("local pairing maintenance requires a newer daemon"),
+    }
+}
+
+fn remote_devices(
+    remote: &super::super::remote::authorization::AuthorizationStore,
+) -> Result<Vec<Value>> {
+    remote
+        .devices()?
+        .into_iter()
+        .map(|device| {
+            let mut device = serde_json::to_value(device)?;
+            device["kind"] = json!("remote");
+            Ok(device)
+        })
+        .collect()
+}
+
 pub fn execute(
     local: &LocalAuth,
     home: &Path,
@@ -62,11 +118,7 @@ pub fn execute(
                 .as_array()
                 .unwrap()
                 .clone();
-            for device in remote.devices()? {
-                let mut device = serde_json::to_value(device)?;
-                device["kind"] = json!("remote");
-                devices.push(device);
-            }
+            devices.extend(remote_devices(&remote)?);
             Ok(Value::Array(devices))
         }
         Method::LocalAuthRevoke => {

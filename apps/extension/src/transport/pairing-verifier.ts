@@ -78,10 +78,7 @@ export async function verifyLocalPairing(
   } catch (error) {
     // Once confirmation may have reached the daemon, retain the candidate for
     // recovery. Deleting it on a lost commit reply would strand a replacement.
-    const stored = (await readLocalState()).credentials.find(
-      (c) => c.deviceId === credential.deviceId && c.daemonId === credential.daemonId,
-    );
-    if (staged && !stored?.pending) await discardStaged(credential);
+    if (staged) await discardStaged(credential);
     throw error;
   } finally {
     clearTimeout(timer);

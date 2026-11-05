@@ -72,8 +72,10 @@ link for a new profile and revoke an unused old device separately.
 
 Maintenance commands use the running daemon's IPC. When the daemon is absent,
 they hold `daemon.lock` while editing persistent state. A locked but unavailable
-daemon causes a bounded wait and an error; commands never fall back to editing
-its live files. Do not edit `local-pairings.json` by hand.
+daemon causes a bounded wait and an error. Do not edit `local-pairings.json` by hand.
+When a pre-pairing daemon rejects these IPC methods, existing remote server
+management continues through its separate, file-locked remote grant store. If
+local pairings also exist, use a current daemon for `revoke --all`.
 
 ## Connection problems
 
@@ -93,6 +95,10 @@ an ambiguous commit reply, because deleting it could lose a successful replaceme
 Staged links without a saved candidate expire after ten minutes in the extension.
 Once a candidate is saved, both keys survive cleanup and startup until authenticated
 recovery succeeds; elapsed time cannot prove whether the daemon committed it.
+If the daemon never committed the interrupted pairing and its link expired, paste
+a fresh link from the same daemon. The extension retains the earlier candidate
+until a new pairing has committed. If the daemon reports `already_paired`, retry
+the original link to recover its candidate or issue an explicit replacement.
 
 ## Explicitly skipping verification
 

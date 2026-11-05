@@ -76,9 +76,11 @@ it("L08c/L14c: startup retains an expired replacement candidate until recovery c
   expect((await readLocalState()).credentials).toEqual([active, saved]);
   await setSkipLocalVerification(true);
   expect((await readLocalState()).credentials).toEqual([active, saved]);
-  await expect(
-    stageCredential({ ...parseLocalPairing(link), deviceId: v.daemon_id }),
-  ).rejects.toThrow("Previous pairing needs recovery");
+  const fresh = await stageCredential({ ...parseLocalPairing(link), deviceId: v.daemon_id });
+  expect((await readLocalState()).credentials).toEqual([active, saved, fresh]);
+  await discardStaged(saved);
+  expect((await readLocalState()).credentials).toEqual([active, saved, fresh]);
+  await discardStaged(fresh);
 
   await promoteCandidate(saved, pending);
   const recovered = (await readLocalState()).credentials;

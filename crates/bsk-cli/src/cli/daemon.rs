@@ -283,22 +283,35 @@ fn maintain(
             tracing::debug!("daemon maintenance waiting for IPC after lifecycle lock contention");
             let running = daemon::probe::wait_for_ready(Duration::from_secs(10))?;
             let path = running.info.sock_path.clone();
+            let legacy_possible = running.status.local_auth.is_none();
             drop(running);
-            tokio::runtime::Builder::new_current_thread()
+            let reply = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()?
                 .block_on(async {
                     let mut client = crate::ipc_client::Client::connect_path(path).await?;
+                    // Older decoders reply with id 0 when they cannot deserialize
+                    // the new method. This connection carries just one request.
                     client
-                        .call(method, &params, Duration::from_secs(10))
-                        .await?
-                        .map_err(|error| {
-                            anyhow::anyhow!(
-                                "{}; if the daemon is older, run `bsk update` and restart it",
-                                error.message
-                            )
-                        })
-                })
+                        .call_with_id("0".into(), method.clone(), &params, Duration::from_secs(10))
+                        .await
+                })?;
+            match reply {
+                Ok(value) => Ok(value),
+                Err(error)
+                    if legacy_possible
+                        && error.code == bsk_protocol::ErrorCode::ProtocolError
+                        && error
+                            .message
+                            .starts_with("invalid frame: unknown variant `local_auth.") =>
+                {
+                    daemon::local_auth::maintenance::execute_legacy_remote(&home, method, params)
+                }
+                Err(error) => Err(anyhow::anyhow!(
+                    "{}; if the daemon is older, run `bsk update` and restart it",
+                    error.message
+                )),
+            }
         }
         Err(error) => Err(error),
     }

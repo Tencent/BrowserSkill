@@ -117,12 +117,13 @@ export function stageCredential(credential: LocalCredential): Promise<LocalCrede
     const existing = same.find((c) => c.deviceId === credential.deviceId);
     if (existing?.role === "active") throw new Error("Pairing link already stored");
     if (existing) return existing;
-    if (same.some((c) => c.role === "staged" && c.pending))
-      throw new Error("Previous pairing needs recovery");
     if (!same.length && new Set(state.credentials.map((c) => c.daemonId)).size >= 8)
       throw new Error("Local pairing limit reached");
+    // An earlier candidate may already be committed, but its unactivated
+    // link may also have expired. Let the user try a fresh link without
+    // dropping any key that could still be needed for recovery.
     state.credentials = state.credentials.filter(
-      (c) => c.daemonId !== credential.daemonId || c.role !== "staged",
+      (c) => c.daemonId !== credential.daemonId || c.role !== "staged" || c.pending,
     );
     state.credentials.push(credential);
     return credential;
@@ -166,8 +167,11 @@ export function promoteCandidate(
     record.key = record.pending.key;
     delete record.pending;
     record.role = "active";
+    const promoted = state.credentials.indexOf(record);
+    // A newer attempt can be saving its own candidate on another socket.
+    // Retire only records that predate this authenticated commit.
     state.credentials = state.credentials.filter(
-      (c) => c.daemonId !== record.daemonId || c === record,
+      (c, index) => c.daemonId !== record.daemonId || index >= promoted,
     );
     return record;
   });
@@ -179,7 +183,8 @@ export function discardStaged(expected: LocalCredential): Promise<void> {
         !(
           c.daemonId === expected.daemonId &&
           c.deviceId === expected.deviceId &&
-          c.role === "staged"
+          c.role === "staged" &&
+          !c.pending
         ),
     );
   });
