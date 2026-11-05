@@ -586,7 +586,7 @@ async fn dispatch_with_sender(
             mpsc::error::TrySendError::Closed(_) => DispatchError::QueueClosed,
         });
     }
-    // Lifecycle teardown, native input and effect-aware transfers keep the worker busy
+    // Lifecycle teardown, page actions and effect-aware transfers keep the worker busy
     // for bounded compensation after their original deadline. Keep the outer
     // waiter alive for the same grace period so it cannot abandon reconciliation.
     let response_grace = if lifecycle_cancellable || deadline_cleanup {
@@ -799,7 +799,7 @@ async fn forward_one(
                 // before cancellation. Preserve its confirmed result.
                 return Ok(value.clone());
             }
-            if is_native_input(&job.method) {
+            if is_effect_aware_action(&job.method) {
                 if let ResponseBody::Err(err) = &resp.body
                     && !matches!(err.code, ErrorCode::Cancelled | ErrorCode::UserAborted)
                 {
@@ -809,7 +809,11 @@ async fn forward_one(
                     job.inflight.as_deref(),
                     "tool dispatch cancelled after extension cleanup",
                 );
-                error.data = Some(input_effect_data(Some(&resp.body)));
+                error.data = Some(input_effect_data(
+                    &job.method,
+                    Some(&resp.body),
+                    "execution",
+                ));
                 return Err(error);
             }
             // File transfer commits are irreversible. A late cancel cannot
@@ -852,7 +856,7 @@ async fn forward_one(
             }
         }
         WaitOutcome::TimedOutAfterResponse(resp) => match resp.body {
-            body if is_native_input(&job.method) => {
+            body if is_effect_aware_action(&job.method) => {
                 if let ResponseBody::Err(err) = &body
                     && !matches!(err.code, ErrorCode::Cancelled | ErrorCode::UserAborted)
                 {
@@ -861,7 +865,7 @@ async fn forward_one(
                 return Err(RpcError {
                     code: ErrorCode::Timeout,
                     message: format!("tool RPC timed out after {:?}", job.timeout),
-                    data: Some(input_effect_data(Some(&body))),
+                    data: Some(input_effect_data(&job.method, Some(&body), "execution")),
                 });
             }
             ResponseBody::Ok(value)
@@ -916,8 +920,8 @@ async fn forward_one(
                     "cancelled tool did not finish cleanup within {:?}",
                     job.cancel_cleanup_timeout
                 ),
-                data: Some(if is_native_input(&job.method) {
-                    input_effect_data(None)
+                data: Some(if is_effect_aware_action(&job.method) {
+                    input_effect_data(&job.method, None, "cleanup")
                 } else {
                     serde_json::json!({ "reason": "cancel_cleanup_timeout" })
                 }),
@@ -925,23 +929,6 @@ async fn forward_one(
         }
         WaitOutcome::TimeoutCleanupFailed => {
             client.pending.lock().unwrap().cancel(&rpc_id);
-            if matches!(
-                job.method,
-                Method::ToolEvaluate
-                    | Method::ToolNavigate
-                    | Method::ToolNavigateBack
-                    | Method::ToolNavigateForward
-                    | Method::ToolReload
-            ) {
-                return Err(RpcError {
-                    code: ErrorCode::Timeout,
-                    message: "page operation timed out and extension cleanup could not be confirmed; page effects may have occurred".into(),
-                    data: Some(serde_json::json!({
-                        "reason": "cancel_cleanup_timeout",
-                        "effect_state": "unknown",
-                    })),
-                });
-            }
             if job.method == Method::ToolTabBorrow {
                 return Err(unknown_borrow_error(ErrorCode::Timeout));
             }
@@ -952,16 +939,25 @@ async fn forward_one(
                     data: Some(serde_json::json!({ "reason": "confirmation_timeout" })),
                 });
             }
-            if is_native_input(&job.method) || job.method == Method::ToolScreenshotFullPage {
+            if is_effect_aware_action(&job.method) || job.method == Method::ToolScreenshotFullPage {
                 return Err(RpcError {
                     code: ErrorCode::Timeout,
-                    message: if is_native_input(&job.method) {
+                    message: if matches!(
+                        job.method,
+                        Method::ToolEvaluate
+                            | Method::ToolNavigate
+                            | Method::ToolNavigateBack
+                            | Method::ToolNavigateForward
+                            | Method::ToolReload
+                    ) {
+                        "page operation timed out and extension cleanup could not be confirmed; page effects may have occurred".into()
+                    } else if is_effect_aware_action(&job.method) {
                         "input timed out and extension cleanup could not be confirmed".into()
                     } else {
                         "full-page screenshot timed out and extension cleanup could not be confirmed".into()
                     },
-                    data: Some(if is_native_input(&job.method) {
-                        input_effect_data(None)
+                    data: Some(if is_effect_aware_action(&job.method) {
+                        input_effect_data(&job.method, None, "cleanup")
                     } else {
                         serde_json::json!({ "reason": "cancel_cleanup_timeout" })
                     }),
@@ -990,8 +986,8 @@ async fn forward_one(
             return Err(RpcError {
                 code: ErrorCode::ProtocolError,
                 message: "transport closed mid-call".into(),
-                data: Some(if is_native_input(&job.method) {
-                    input_effect_data(None)
+                data: Some(if is_effect_aware_action(&job.method) {
+                    input_effect_data(&job.method, None, "transport")
                 } else {
                     super::browsers::extension_disconnected_data()
                 }),
@@ -1012,13 +1008,14 @@ async fn forward_one(
             }
             // Only a method with nothing to report about side effects can
             // trade its timeout for the connection diagnosis.
-            if silent && !is_native_input(&job.method) {
+            if silent && !is_effect_aware_action(&job.method) {
                 return Err(super::browsers::extension_unresponsive_error());
             }
             return Err(RpcError {
                 code: ErrorCode::Timeout,
                 message: format!("tool RPC timed out after {:?}", job.timeout),
-                data: is_native_input(&job.method).then(|| input_effect_data(None)),
+                data: is_effect_aware_action(&job.method)
+                    .then(|| input_effect_data(&job.method, None, "transport")),
             });
         }
     };
@@ -1040,6 +1037,19 @@ fn with_link_contract(method: &Method, waited: WaitOutcome) -> WaitOutcome {
                 id: frame.id,
                 body: ResponseBody::Err(link_failure_error(method, err)),
             },
+            ResponseBody::Err(mut err)
+                if err.code == ErrorCode::Timeout && is_effect_aware_action(method) =>
+            {
+                err.data = Some(input_effect_data(
+                    method,
+                    Some(&ResponseBody::Err(err.clone())),
+                    "execution",
+                ));
+                ResponseFrame {
+                    id: frame.id,
+                    body: ResponseBody::Err(err),
+                }
+            }
             body => ResponseFrame { id: frame.id, body },
         }
     }
@@ -1059,11 +1069,11 @@ fn with_link_contract(method: &Method, waited: WaitOutcome) -> WaitOutcome {
 /// the extension may well have run it. Methods with a side effect keep
 /// their machine-readable "outcome unknown" contract; nothing is replayed.
 fn link_failure_error(method: &Method, err: RpcError) -> RpcError {
-    if is_native_input(method) {
+    if is_effect_aware_action(method) {
         return RpcError {
             code: err.code,
             message: err.message,
-            data: Some(input_effect_data(None)),
+            data: Some(input_effect_data(method, None, "transport")),
         };
     }
     if is_effect_aware_transfer(method) {
@@ -1095,43 +1105,73 @@ fn not_dispatched_error(
     }
 }
 
-fn is_native_input(method: &Method) -> bool {
+fn is_effect_aware_action(method: &Method) -> bool {
     matches!(
         method,
-        Method::ToolClick | Method::ToolPress | Method::ToolWheel | Method::ToolDrag
-    )
-}
-
-// Preserve the extension's knowledge of whether input was sent. A missing
-// cleanup response cannot establish that replaying the input would be safe.
-fn input_effect_data(response: Option<&ResponseBody>) -> Value {
-    if let Some(ResponseBody::Err(err)) = response
-        && let Some(data) = &err.data
-        && matches!(
-            data.get("effect_state").and_then(Value::as_str),
-            Some("none" | "unknown")
-        )
-    {
-        return data.clone();
-    }
-    serde_json::json!({ "reason": "input_outcome_unknown", "effect_state": "unknown" })
-}
-
-// Native inputs and full-page screenshots must cancel at the daemon deadline: local
-// deadlines cannot account for transit delays. Keep the queue held for cleanup.
-// Human interaction deadlines also dismiss their pending UI before releasing the queue.
-fn waits_for_deadline_cleanup(method: &Method) -> bool {
-    matches!(
-        method,
-        Method::ToolScreenshotFullPage
-            | Method::ToolTabBorrow
-            | Method::ToolRequestHelp
+        Method::ToolClick
+            | Method::ToolPress
+            | Method::ToolWheel
+            | Method::ToolDrag
+            | Method::ToolFill
+            | Method::ToolSelect
+            | Method::ToolFocus
+            | Method::ToolBlur
+            | Method::ToolHover
+            | Method::ToolScrollTo
             | Method::ToolEvaluate
             | Method::ToolNavigate
             | Method::ToolNavigateBack
             | Method::ToolNavigateForward
             | Method::ToolReload
-    ) || is_native_input(method)
+    )
+}
+
+// Preserve the extension's knowledge of whether input was sent. A missing
+// cleanup response cannot establish that replaying the input would be safe.
+fn input_effect_data(method: &Method, response: Option<&ResponseBody>, phase: &str) -> Value {
+    let mut data = match response {
+        Some(ResponseBody::Err(err)) => err.data.clone().filter(Value::is_object),
+        _ => None,
+    }
+    .unwrap_or_else(|| serde_json::json!({}));
+    if !matches!(
+        data.get("effect_state").and_then(Value::as_str),
+        Some("none" | "unknown" | "committed")
+    ) {
+        data["effect_state"] = serde_json::json!("unknown");
+    }
+    if data.get("reason").is_none() {
+        data["reason"] = serde_json::json!(if phase == "cleanup"
+            && matches!(
+                method,
+                Method::ToolEvaluate
+                    | Method::ToolNavigate
+                    | Method::ToolNavigateBack
+                    | Method::ToolNavigateForward
+                    | Method::ToolReload
+            ) {
+            "cancel_cleanup_timeout"
+        } else if data["effect_state"] == "unknown" {
+            "input_outcome_unknown"
+        } else {
+            "action_timeout"
+        });
+    }
+    if data.get("phase").is_none() {
+        data["phase"] = serde_json::json!(phase);
+    }
+    data["operation"] = serde_json::json!(method);
+    data
+}
+
+// Page actions and full-page screenshots must cancel at the daemon deadline: local
+// deadlines cannot account for transit delays. Keep the queue held for cleanup.
+// Human interaction deadlines also dismiss their pending UI before releasing the queue.
+fn waits_for_deadline_cleanup(method: &Method) -> bool {
+    matches!(
+        method,
+        Method::ToolScreenshotFullPage | Method::ToolTabBorrow | Method::ToolRequestHelp
+    ) || is_effect_aware_action(method)
         || is_effect_aware_transfer(method)
 }
 
@@ -1818,4 +1858,144 @@ fn epoch_ms() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as u64
+}
+
+#[cfg(test)]
+mod action_timeout_tests {
+    use super::*;
+    use crate::daemon::browsers::{BrowserClient, BrowserId, BrowserSink, Liveness, Pending};
+    use crate::daemon::sessions::Session;
+    use serde_json::json;
+
+    async fn timeout_action(method: Method, response: Option<ResponseBody>) -> RpcError {
+        let browsers = Arc::new(BrowserRegistry::new());
+        let sessions = Arc::new(SessionRegistry::new());
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let client = Arc::new(BrowserClient {
+            id: BrowserId("timeout-browser".into()),
+            browser_name: "chrome".into(),
+            browser_version: "1".into(),
+            extension_version: "0.4.1".into(),
+            extension_protocol_version: "1.8".into(),
+            label: String::new(),
+            sink: BrowserSink { tx },
+            pending: Mutex::new(Pending::default()),
+            generation: super::super::browsers::next_browser_generation(),
+            connected_at_ms: 0,
+            version_skew: false,
+            liveness: Liveness::default(),
+        });
+        browsers.insert(Arc::clone(&client));
+        let sid = SessionId("timeout-session".into());
+        sessions.insert(Session {
+            controller: None,
+            interaction: None,
+            id: sid.clone(),
+            browser_id: client.id.clone(),
+            agent_window_id: Some(100),
+            created_at_ms: 0,
+        });
+        let (respond, _receiver) = oneshot::channel();
+        let task = tokio::spawn(async move {
+            forward_one(
+                &sid,
+                &browsers,
+                &sessions,
+                &ToolJob {
+                    method,
+                    params: json!({"session_id": sid.0}),
+                    timeout: Duration::from_millis(20),
+                    respond,
+                    inflight: None,
+                    lifecycle_cancel: None,
+                    cancel_cleanup_timeout: Duration::from_millis(20),
+                    session_id: sid.clone(),
+                },
+            )
+            .await
+        });
+        let Frame::Request(request) = rx.recv().await.unwrap() else {
+            panic!("request expected")
+        };
+        let Frame::Request(cancel) = tokio::time::timeout(Duration::from_secs(1), rx.recv())
+            .await
+            .expect("the deadline must send cancel")
+            .unwrap()
+        else {
+            panic!("cancel expected")
+        };
+        assert_eq!(cancel.method, Method::Cancel);
+        assert_eq!(cancel.params.unwrap()["rpc_id"], request.id);
+        if let Some(body) = response {
+            assert!(client.pending.lock().unwrap().resolve(ResponseFrame {
+                id: request.id,
+                body
+            }));
+        }
+        let error = tokio::time::timeout(Duration::from_secs(1), task)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap_err();
+        assert_eq!(client.pending.lock().unwrap().waiter_count(), 0);
+        assert!(rx.try_recv().is_err(), "the action must never be replayed");
+        error
+    }
+
+    #[tokio::test]
+    async fn deadline_cleanup_preserves_readiness_and_effect_diagnostics() {
+        for method in [
+            Method::ToolFill,
+            Method::ToolSelect,
+            Method::ToolClick,
+            Method::ToolPress,
+            Method::ToolEvaluate,
+            Method::ToolNavigate,
+        ] {
+            let data = json!({
+                "reason": "target_readonly",
+                "phase": "precondition",
+                "effect_state": "none",
+                "recovery": "Inspect the target before choosing an action.",
+                "target": "#readonly"
+            });
+            let error = timeout_action(
+                method.clone(),
+                Some(ResponseBody::Err(RpcError {
+                    code: ErrorCode::Cancelled,
+                    message: "deadline cancelled the readiness wait".into(),
+                    data: Some(data.clone()),
+                })),
+            )
+            .await;
+            assert_eq!(error.code, ErrorCode::Timeout);
+            let mut expected = data;
+            expected["operation"] = json!(method);
+            assert_eq!(error.data.unwrap(), expected);
+        }
+    }
+
+    #[tokio::test]
+    async fn missing_cleanup_and_late_receipts_keep_the_action_outcome_unknown() {
+        for method in [
+            Method::ToolFill,
+            Method::ToolSelect,
+            Method::ToolEvaluate,
+            Method::ToolNavigate,
+        ] {
+            for response in [None, Some(ResponseBody::Ok(json!({"tab_id": 7})))] {
+                let phase = if response.is_some() {
+                    "execution"
+                } else {
+                    "cleanup"
+                };
+                let error = timeout_action(method.clone(), response).await;
+                assert_eq!(error.code, ErrorCode::Timeout);
+                let data = error.data.unwrap();
+                assert_eq!(data["effect_state"], "unknown");
+                assert_eq!(data["operation"], json!(method));
+                assert_eq!(data["phase"], phase);
+            }
+        }
+    }
 }

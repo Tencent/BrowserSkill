@@ -1041,6 +1041,117 @@ describe("renderVom single-layer page", () => {
     expect(out.text).toContain('@e2 button "View" [ctx: Project Beta]');
   });
 
+  it.each([
+    false,
+    true,
+  ])("uses DOM card text even after both CTAs in AX order (reversed=%s)", (reversed) => {
+    const cards = [
+      node({
+        id: 2,
+        parentId: 1,
+        tag: "button",
+        role: "button",
+        name: "Continue",
+        contextScopeId: "root",
+        domParentId: 100,
+        domAncestorIds: [100, 1],
+      }),
+      node({
+        id: 3,
+        parentId: 1,
+        tag: "button",
+        role: "button",
+        name: "Continue",
+        contextScopeId: "root",
+        domParentId: 101,
+        domAncestorIds: [101, 1],
+      }),
+      node({
+        id: 4,
+        parentId: 1,
+        role: "StaticText",
+        name: "Candidate A",
+        contextScopeId: "root",
+        domParentId: 100,
+        domAncestorIds: [100, 1],
+      }),
+      node({
+        id: 5,
+        parentId: 1,
+        role: "StaticText",
+        name: "Candidate B",
+        contextScopeId: "root",
+        domParentId: 101,
+        domAncestorIds: [101, 1],
+      }),
+    ];
+    const out = renderVom(
+      scene([
+        node({ id: 1, role: "RootWebArea", contextScopeId: "root" }),
+        node({
+          id: 6,
+          parentId: 1,
+          role: "StaticText",
+          name: "Record 99",
+          contextScopeId: "root",
+          domParentId: 1,
+          domAncestorIds: [1],
+        }),
+        ...(reversed ? cards.reverse() : cards),
+      ]),
+    );
+    // References remain attached to the concrete card, independent of output order.
+    expect(out.text).not.toContain("[ctx: Record 99]");
+    expect(out.refs.map((ref) => ref.ctx).sort()).toEqual(["Candidate A", "Candidate B"]);
+  });
+
+  it("does not infer duplicate-action context from other cards or frame scopes", () => {
+    const out = renderVom(
+      scene([
+        node({ id: 1, role: "RootWebArea", contextScopeId: "root" }),
+        node({
+          id: 2,
+          parentId: 1,
+          role: "StaticText",
+          name: "Other record",
+          contextScopeId: "root",
+          domParentId: 100,
+          domAncestorIds: [100, 1],
+        }),
+        node({
+          id: 3,
+          parentId: 1,
+          tag: "button",
+          role: "button",
+          name: "Continue",
+          contextScopeId: "root",
+          domParentId: 101,
+          domAncestorIds: [101, 1],
+        }),
+        node({
+          id: 4,
+          parentId: 1,
+          tag: "button",
+          role: "button",
+          name: "Continue",
+          contextScopeId: "root",
+          domParentId: 102,
+          domAncestorIds: [102, 1],
+        }),
+        node({
+          id: 5,
+          parentId: 1,
+          role: "StaticText",
+          name: "Other frame",
+          contextScopeId: "child",
+          domParentId: 101,
+          domAncestorIds: [101, 1],
+        }),
+      ]),
+    );
+    expect(out.refs.map((ref) => ref.ctx)).toEqual([undefined, undefined]);
+  });
+
   it("does not add low-value root context to duplicated brand links", () => {
     const out = renderVom(
       scene([

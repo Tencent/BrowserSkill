@@ -140,8 +140,8 @@ async function fixture(options: { url?: string; sync?: boolean } = {}) {
     act,
     readFrames,
     resumeFrames,
-    advance: () => {
-      now += 10000;
+    advance: (milliseconds = 10000) => {
+      now += milliseconds;
     },
     beforeDispatch: (work: () => Promise<void>) => {
       beforeDispatch = work;
@@ -195,6 +195,22 @@ describe("renderer-independent control authority", () => {
     expect(check).not.toThrow();
     expect(f.readFrames).not.toHaveBeenCalled();
     expect(f.native).not.toHaveBeenCalled();
+  });
+
+  it("waits for two seconds of quiet after the person's last completed action", async () => {
+    const f = await fixture();
+    f.change({ human: 1, lastInput: 10000 });
+    f.advance(650);
+    expect(f.controller.view(7)?.mode).toBe("human");
+    expect(() => f.controller.controlGuard("shared", 7)()).toThrow();
+    f.advance(1349);
+    expect(f.controller.view(7)?.mode).toBe("human");
+    expect(() => f.controller.controlGuard("shared", 7)()).toThrow();
+    f.advance(1);
+    expect(f.controller.view(7)?.mode).toBe("syncing");
+    expect(() => f.controller.controlGuard("shared", 7)()).not.toThrow();
+    const fresh = await f.command("sync");
+    expect(await f.act(fresh.context_id)).not.toHaveProperty("code");
   });
 
   it("keeps an old decision revoked after hold and resume", async () => {

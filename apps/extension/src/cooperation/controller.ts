@@ -155,7 +155,7 @@ const PASSIVE_DEBUG = new Set<string>(
       !["rule_add", "rule_enable", "rule_disable", "rule_remove", "replay"].includes(action),
   ),
 );
-const QUIET_MS = 650;
+const QUIET_MS = 2_000;
 /** Upper bound on nodes whose self-changing text the default check tolerates. */
 const MAX_VOLATILE = 256;
 
@@ -1786,7 +1786,10 @@ export class CooperationController implements ControlAuthority {
         return {
           code: "cancelled",
           message: "Shared-tab action cancelled",
-          data: { effect_state: sent ? "unknown" : "none" },
+          data: {
+            effect_state: sent ? "unknown" : "none",
+            phase: sent ? "execution" : "precondition",
+          },
         };
       }
       const reason = revoked ?? interruption(completed);
@@ -1817,7 +1820,10 @@ export class CooperationController implements ControlAuthority {
         return {
           code: "cancelled",
           message: "Shared-tab action cancelled",
-          data: { effect_state: sent ? "unknown" : "none" },
+          data: {
+            effect_state: sent ? "unknown" : "none",
+            phase: sent ? "execution" : "precondition",
+          },
         };
       }
       if (error instanceof ActionCheckError) checkFailure = error.rpcError;

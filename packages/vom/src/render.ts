@@ -509,28 +509,25 @@ const CONTEXT_LABEL_ROLES = new Set([
 ]);
 
 interface DomContextIndex {
-  nonBoundaryByScopeParent: Map<string | undefined, Map<number, VomNode[]>>;
-  sourceOrderById: Map<number, number>;
+  labelsByScopeParent: Map<string | undefined, Map<number, VomNode[]>>;
 }
 
 function buildDomContextIndex(nodes: VomNode[]): DomContextIndex {
-  const nonBoundaryByScopeParent = new Map<string | undefined, Map<number, VomNode[]>>();
-  const sourceOrderById = new Map<number, number>();
-  for (const [sourceOrder, node] of nodes.entries()) {
-    sourceOrderById.set(node.id, sourceOrder);
-    if (!CONTEXT_LABEL_ROLES.has(normalizedRole(node)) || isContextBoundary(node)) continue;
+  const labelsByScopeParent = new Map<string | undefined, Map<number, VomNode[]>>();
+  for (const node of nodes) {
+    if (isVomReferenceNode(node) || isContextBoundary(node)) continue;
     const parentId = node.domParentId;
     if (parentId === undefined || parentId === null) continue;
-    let byParent = nonBoundaryByScopeParent.get(node.contextScopeId);
+    let byParent = labelsByScopeParent.get(node.contextScopeId);
     if (!byParent) {
       byParent = new Map();
-      nonBoundaryByScopeParent.set(node.contextScopeId, byParent);
+      labelsByScopeParent.set(node.contextScopeId, byParent);
     }
     const siblings = byParent.get(parentId) ?? [];
     siblings.push(node);
     byParent.set(parentId, siblings);
   }
-  return { nonBoundaryByScopeParent, sourceOrderById };
+  return { labelsByScopeParent };
 }
 
 function duplicateReferenceNames(nodes: VomNode[]): Set<string> {
@@ -734,57 +731,44 @@ function collectDomContext(
 ): ContextCandidate[] {
   const ancestorIds = node.domAncestorIds ?? [];
   if (ancestorIds.length === 0) return [];
-  const contexts: ContextCandidate[] = [];
-  const ancestorRank = new Map<number, number>();
-  for (const [rank, ancestorId] of ancestorIds.entries()) {
-    if (!ancestorRank.has(ancestorId)) ancestorRank.set(ancestorId, rank);
-  }
-
-  const candidates = new Map<number, VomNode>();
-  const nonBoundaryByParent = state.domContextIndex.nonBoundaryByScopeParent.get(
-    node.contextScopeId,
-  );
-  for (const ancestorId of ancestorRank.keys()) {
-    const boundary = state.nodesById.get(ancestorId);
-    const boundaryParentId = boundary?.domParentId;
+  const byParent = state.domContextIndex.labelsByScopeParent.get(node.contextScopeId);
+  for (const ancestorId of ancestorIds) {
+    const ancestor = state.nodesById.get(ancestorId);
+    // Body/document siblings describe other records, not this action. An
+    // omitted generic wrapper still has an ID, so its direct text stays local.
     if (
-      boundary &&
-      sharesContextScope(node, boundary) &&
-      isContextBoundary(boundary) &&
-      boundaryParentId !== undefined &&
-      boundaryParentId !== null &&
-      ancestorRank.has(boundaryParentId)
-    ) {
-      candidates.set(boundary.id, boundary);
+      ancestor &&
+      (["rootwebarea", "webarea", "document"].includes(normalizedRole(ancestor)) ||
+        ["body", "html"].includes(ancestor.tag.toLowerCase()))
+    )
+      break;
+    const owned =
+      ancestor &&
+      sharesContextScope(node, ancestor) &&
+      !isVomReferenceNode(ancestor) &&
+      weakContextText(cleaned(ancestor.text) ?? cleaned(ancestor.name), nodeName);
+    if (owned) return [{ text: owned, source: "dom", order: 0 }];
+    const contexts: ContextCandidate[] = [];
+    for (const candidate of byParent?.get(ancestorId) ?? []) {
+      if (candidate.id === node.id) continue;
+      const label = weakLabelContext(candidate, nodeName);
+      if (label) contexts.push({ text: label, source: "dom", order: contexts.length });
     }
-    for (const candidate of nonBoundaryByParent?.get(ancestorId) ?? []) {
-      candidates.set(candidate.id, candidate);
-    }
+    if (contexts.length) return contexts;
+    if (ancestor && isContextBoundary(ancestor)) break;
   }
-
-  const sourceOrderById = state.domContextIndex.sourceOrderById;
-  const orderedCandidates = [...candidates.values()].sort(
-    (a, b) => (sourceOrderById.get(a.id) ?? 0) - (sourceOrderById.get(b.id) ?? 0),
-  );
-  for (const candidate of orderedCandidates) {
-    if (candidate.id === node.id) continue;
-    const parentId = candidate.domParentId;
-    if (parentId === undefined || parentId === null) continue;
-    const label = contextLabel(candidate, nodeName);
-    if (!label) continue;
-    contexts.push({ text: label, source: "dom", order: ancestorRank.get(parentId) ?? 0 });
-  }
-
-  return contexts;
+  return [];
 }
 
 function handleContext(node: VomNode, state: RenderState): string[] {
   const name = cleaned(node.name);
   if (!name || !needsHandleContext(name, state.duplicateRefNames)) return [];
+  // Semantic/AX order can flatten a card and place its text after the CTA.
+  // Prefer raw DOM containment in either order over preceding unrelated rows.
+  if (node.domAncestorIds?.length) return dedupeContexts(collectDomContext(node, name, state));
   return dedupeContexts([
     ...collectOwnedContext(node, name, state),
     ...collectSameContainerContext(node, name, state),
-    ...collectDomContext(node, name, state),
   ]);
 }
 

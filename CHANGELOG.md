@@ -16,6 +16,8 @@ Starting from 0.2.0, CLI / Extension / DSH Plugin share the same version number.
 
 ### Changed
 
+- Shared control waits for two seconds of quiet after the person's last completed
+  action before returning control to the Agent, up from 650 ms.
 - CLI and daemon updates prefer the official website's domestic download source,
   falling back to GitHub for failed manifest or archive requests and verification.
   Archive fallback stays on the selected version with SHA256 verification; if both
@@ -24,6 +26,18 @@ Starting from 0.2.0, CLI / Extension / DSH Plugin share the same version number.
 
 ### Fixed
 
+- The shared-control toolbar yields pointer hits during automated clicks,
+  including page actions beneath its lower-right corner. Its controls become
+  interactive again when the click finishes or its passthrough lease expires.
+- Enter dispatches keydown and text together, preserving a completed link or
+  form navigation receipt without sending a separate character to a new page.
+  The next action still requires a fresh control context after navigation.
+- Timed-out page actions cancel and await bounded cleanup. Error responses retain
+  execution phase, effect state and operation identity; missing receipts remain
+  explicitly uncertain. CLI and MCP timeout guidance asks callers to inspect the
+  application result before choosing another action instead of blindly retrying.
+- Repeated action labels use their own DOM container's text for context, including
+  labels after the button, so adjacent records no longer misidentify their target.
 - CLI cancellation keeps the original RPC progressing and retries cancellation
   that arrives before daemon registration, reducing background screenshots that
   keep a session busy after the caller stops. Confirmation and response waiting

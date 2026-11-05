@@ -1770,21 +1770,27 @@ export async function handlePress(
     // Suppress `text` when any non-shift modifier is held — `Ctrl+a`
     // should not also type the character "a" into the focused field.
     const suppressText = mods.some((m) => m === "ctrl" || m === "meta" || m === "alt");
+    // Enter can navigate on keydown (links) or keypress (form submission).
+    // Let Chromium dispatch that pair in one command: a separate char command
+    // would either fail the old document's guard or reach the new document.
+    const enterText = descriptor.key === "Enter" && !suppressText ? descriptor.text : undefined;
     try {
       let cancelled = false;
       deps.cdp.trackSessionTab?.(ctx.sessionId, target.tabId);
       deps.onInputSent?.(target.tabId);
       input.markSent();
       await deps.cdp.send(target.tabId, "Input.dispatchKeyEvent", {
-        type: "rawKeyDown",
+        type: enterText ? "keyDown" : "rawKeyDown",
         key: descriptor.key,
         code: descriptor.code,
         windowsVirtualKeyCode: descriptor.windowsVirtualKeyCode,
         modifiers,
+        ...(enterText ? { text: enterText } : {}),
       });
       cancelled = throwIfAborted(deps.signal) !== null;
       if (
         !cancelled &&
+        !enterText &&
         !suppressText &&
         typeof descriptor.text === "string" &&
         descriptor.text.length > 0

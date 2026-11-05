@@ -149,7 +149,7 @@ pub fn info_for(code: ErrorCode) -> RenderInfo {
         ErrorCode::Timeout => RenderInfo {
             summary: "operation timed out",
             hint: Some(
-                "retry the command; if timeouts persist, check `bsk logs` and confirm the browser is still responding",
+                "inspect the application result and synchronize before choosing another action; do not replay an action whose effect is unknown",
             ),
             exit_code: 4,
         },

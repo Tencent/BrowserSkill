@@ -63,7 +63,13 @@ export function guardedRunner<T extends CdpRunner>(cdp: T, options: ActionGuard 
           : method === "Input.dispatchKeyEvent" &&
               ["keyDown", "rawKeyDown", "char"].includes(String(p?.type))
             ? // Native editor commands omit the key; Chromium emits an empty DOM key.
-              { type: p?.type === "char" ? "keypress" : "keydown", key: String(p?.key ?? "") }
+              {
+                type: p?.type === "char" ? "keypress" : "keydown",
+                key: String(p?.key ?? ""),
+                ...(p?.type === "keyDown" && typeof p.text === "string" && p.text.length > 0
+                  ? { keypress: true }
+                  : {}),
+              }
             : method === "Input.insertText"
               ? { type: "beforeinput", text: String(p?.text ?? ""), id: crypto.randomUUID() }
               : undefined;
