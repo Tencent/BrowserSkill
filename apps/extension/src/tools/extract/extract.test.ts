@@ -299,6 +299,37 @@ describe("structured extraction facts", () => {
         validateExtract({ session_id: "test", action: "table", ...patch } as ExtractParams),
       ).toThrow();
   });
+  it("omits sensitive autocomplete and former-password input values from extracted tables and lists", () => {
+    document.body.innerHTML = `<table id="pay">
+      <tr><th>字段</th><th>值</th></tr>
+      <tr><td>验证码</td><td><input type="text" autocomplete="one-time-code" value="482913">ok</td></tr>
+      <tr><td>卡号</td><td><input type="text" autocomplete="billing cc-number" value="4111111111111111"></td></tr>
+      <tr><td>密码</td><td><input type="text" data-bsk-record-password="" value="BSK_SYNTHETIC_PASSWORD"></td></tr>
+    </table>
+    <ul id="items">
+      <li><input class="secret" type="text" autocomplete="section-login current-password" value="hunter2"><span class="name">Alice</span></li>
+    </ul>`;
+    const tableResult = extract("#pay");
+    expect(tableResult.rows).toEqual([
+      { c1: "验证码", c2: "ok" },
+      { c1: "卡号", c2: "" },
+      { c1: "密码", c2: "" },
+    ]);
+    expect(JSON.stringify(tableResult)).not.toMatch(
+      /482913|4111111111111111|BSK_SYNTHETIC_PASSWORD/,
+    );
+
+    const listResult = extract("#items", {
+      action: "list",
+      fields: [
+        { key: "secret", selector: ".secret", read: "attribute", attribute: "value" },
+        { key: "name", selector: ".name", read: "text" },
+      ],
+    });
+    expect(listResult.rows).toEqual([{ secret: null, name: "Alice" }]);
+    expect(JSON.stringify(listResult)).not.toContain("hunter2");
+  });
+
   it("distinguishes an empty dataset from unknown completeness", () => {
     const options = validateExtract({ session_id: "test", action: "table" });
     const raw: RawCapture = {

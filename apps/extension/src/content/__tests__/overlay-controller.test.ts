@@ -1,6 +1,25 @@
 import { describe, expect, it, vi } from "vitest";
 import { OverlayController, shouldShowAgentControlOverlay } from "../overlay-controller";
 
+it("clears identity on authoritative legacy/hidden state and only resets the matching session", () => {
+  const overlay = new OverlayController();
+  const codex = { name: "Codex", project: "Search" };
+  overlay.applyAgentControlMode("aaaa", "control", codex);
+  expect(overlay.snapshot().controller).toEqual(codex);
+  overlay.applyAgentControlMode("aaaa", "paused", codex);
+  expect(overlay.snapshot().controller).toEqual(codex);
+  overlay.resetAgentOverlays("other");
+  expect(overlay.snapshot().controller).toEqual(codex);
+  overlay.resetAgentOverlays("aaaa");
+  expect(overlay.snapshot().controller).toBeUndefined();
+  overlay.applyAgentControlMode("aaab", "control", { name: "Claude" });
+  overlay.applyAgentControlMode("legacy", "control");
+  expect(overlay.snapshot().controller).toBeUndefined();
+  overlay.applyAgentControlMode("aaaa", "control", codex);
+  overlay.applyAgentControlMode(null, "hidden", codex);
+  expect(overlay.snapshot().controller).toBeUndefined();
+});
+
 describe("OverlayController", () => {
   it("resets agent overlays without clearing user-tab borrow requests", () => {
     const controller = new OverlayController();

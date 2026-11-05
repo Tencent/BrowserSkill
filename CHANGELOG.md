@@ -16,6 +16,14 @@ Starting from 0.2.0, CLI / Extension / DSH Plugin share the same version number.
   `chrome-extension://<id>/example.com` when it opened a tab or navigated a page
   it could not drive over CDP; over CDP the request failed as
   `cdp_failed: Invalid URL`.
+- Values in one-time-code, card and password fields marked by `autocomplete`
+  (`one-time-code`, `cc-*`, `current-password`, `new-password`), which observations
+  already hide, are also kept out of shared-control field state, `expect` failure
+  details, structured extraction and recorded fill steps. Every check matches each
+  `autocomplete` token, so `section-login current-password` or `billing cc-number`
+  values stay hidden too. Password fields that a "show password" toggle switches to
+  `type=text` also stay masked across shared-control field state and recorded steps
+  and state observations.
 - On Windows, pairing, rotating or revoking a remote browser no longer fails with
   `replace authorization snapshot: Access is denied` when another request is
   reading the authorization store at the same moment.
