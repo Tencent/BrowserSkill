@@ -1,8 +1,5 @@
 //! Authentication is isolated from browser registration and business dispatch.
-use super::{
-    LocalAuth,
-    store::{ActivationRejected, DeviceStatus, Pending, now, random},
-};
+use super::store::{ActivationRejected, DeviceStatus, Pending, now, random};
 use crate::daemon::peer_authorization::{LocalPeer, PeerAuthorization};
 use anyhow::{Result, anyhow, bail, ensure};
 use bsk_protocol::local_auth::{
@@ -15,14 +12,24 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use tokio_tungstenite::{WebSocketStream, tungstenite::Message};
 
 pub(crate) async fn accept<S: AsyncRead + AsyncWrite + Unpin>(
-    local: Arc<LocalAuth>,
+    state: Arc<crate::daemon::state::DaemonState>,
     ws: &mut WebSocketStream<S>,
     origin: &str,
 ) -> Result<(PeerAuthorization, Option<Message>)> {
+    let local = state.local_auth.clone();
     let first = text(ws).await?;
     let request: RequestFrame =
         serde_json::from_str(&first).map_err(|_| anyhow!("invalid authentication probe"))?;
     if request.method == Method::SystemHandshake {
+        let version = request
+            .params
+            .as_ref()
+            .and_then(|p| p.get("version"))
+            .and_then(|v| v.as_str());
+        let capable = version
+            .and_then(|v| semver::Version::parse(v).ok())
+            .is_some_and(|v| v >= semver::Version::new(0, 4, 0));
+        state.record_unpaired(version, capable);
         if !local.mode().accepts_legacy() {
             reply(
                 ws,
@@ -36,7 +43,10 @@ pub(crate) async fn accept<S: AsyncRead + AsyncWrite + Unpin>(
             .await?;
             bail!("local pairing required");
         }
-        return Ok((PeerAuthorization::Legacy, Some(Message::Text(first))));
+        return Ok((
+            PeerAuthorization::Legacy(local.clone()),
+            Some(Message::Text(first)),
+        ));
     }
     if request.method != Method::SystemPing
         || request
@@ -61,6 +71,7 @@ pub(crate) async fn accept<S: AsyncRead + AsyncWrite + Unpin>(
     let probe = Probe::parse(&first)?;
     let hello = probe.params.local_auth;
     let Some(initial) = local.store.select(&hello.credentials) else {
+        state.record_unpaired(None, true);
         challenge(
             ws,
             &probe.id,
@@ -73,18 +84,29 @@ pub(crate) async fn accept<S: AsyncRead + AsyncWrite + Unpin>(
         bail!("local pairing required");
     };
     let device_id = initial.device_id.encode();
-    let gate = local.device_gate(&device_id);
-    let Ok(_guard) = gate.try_lock_owned() else {
-        challenge(
-            ws,
-            &probe.id,
-            ChallengeResponse::Busy {
-                retry_after_ms: 1000,
-            },
-        )
-        .await?;
-        bail!("local device authentication busy");
-    };
+    let mut ids = vec![device_id.clone()];
+    if let Some(replaces) = &initial.device.replaces {
+        ids.push(replaces.clone());
+    }
+    ids.sort();
+    ids.dedup();
+    let mut guards = Vec::new();
+    for id in &ids {
+        match local.device_gate(id).try_lock_owned() {
+            Ok(guard) => guards.push(guard),
+            Err(_) => {
+                challenge(
+                    ws,
+                    &probe.id,
+                    ChallengeResponse::Busy {
+                        retry_after_ms: 1000,
+                    },
+                )
+                .await?;
+                bail!("local device authentication busy");
+            }
+        }
+    }
     // Selection preceded the gate; re-read under it before issuing a proof.
     let selected = local
         .store
@@ -150,7 +172,7 @@ pub(crate) async fn accept<S: AsyncRead + AsyncWrite + Unpin>(
             .is_some_and(|p| p.txn == commit.txn)
         {
             durable_commit(
-                local.clone(),
+                state.clone(),
                 device_id.clone(),
                 commit.txn,
                 hello.instance_id.clone(),
@@ -236,7 +258,7 @@ pub(crate) async fn accept<S: AsyncRead + AsyncWrite + Unpin>(
             "local rotation confirmation rejected"
         );
         durable_commit(
-            local.clone(),
+            state.clone(),
             device_id.clone(),
             txn,
             hello.instance_id.clone(),
@@ -272,18 +294,24 @@ pub(crate) async fn accept<S: AsyncRead + AsyncWrite + Unpin>(
             device_id,
             browser_id,
             local,
+            lease: Default::default(),
         }),
         None,
     ))
 }
 
 async fn durable_commit(
-    local: Arc<LocalAuth>,
+    state: Arc<crate::daemon::state::DaemonState>,
     id: String,
     txn: bsk_protocol::local_auth::Bytes<16>,
     instance: String,
 ) -> Result<()> {
-    tokio::task::spawn_blocking(move || local.store.commit(&id, txn, &instance)).await??;
+    let local = state.local_auth.clone();
+    let replaced =
+        tokio::task::spawn_blocking(move || local.store.commit(&id, txn, &instance)).await??;
+    if let Some(old) = replaced {
+        super::lifecycle::disconnect(&state, &[old]).await?;
+    }
     Ok(())
 }
 async fn text<S: AsyncRead + AsyncWrite + Unpin>(ws: &mut WebSocketStream<S>) -> Result<String> {
