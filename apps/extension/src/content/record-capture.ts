@@ -92,7 +92,9 @@ function isTextFillable(el: Element): el is FillableElement {
   if (el instanceof HTMLTextAreaElement) return true;
   if (!(el instanceof HTMLInputElement)) return false;
   const type = el.type.toLowerCase();
-  return type !== "checkbox" && type !== "radio" && type !== "file" && type !== "button";
+  return !["checkbox", "radio", "file", "button", "submit", "reset", "image", "hidden"].includes(
+    type,
+  );
 }
 
 function fillableFromTarget(target: EventTarget | null): FillableElement | null {
@@ -105,6 +107,14 @@ function fillableFromTarget(target: EventTarget | null): FillableElement | null 
 
 /** Clicks on search chrome that only focus the nearby input should not become steps. */
 function nearbyFillableFromSearchChrome(target: Element): FillableElement | null {
+  // Form actions remain clicks, even when they contain an icon beside a search field.
+  if (
+    target.closest(
+      'button,input[type="button"],input[type="submit"],input[type="reset"],input[type="image"]',
+    )
+  ) {
+    return null;
+  }
   const container = target.closest(
     '[id*="chat-input"], [id*="search"], [class*="search"], form, [role="search"]',
   );
