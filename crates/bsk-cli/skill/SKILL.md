@@ -87,7 +87,7 @@ Prefer refs for iframe/shadow-root targets; CSS selectors search the main docume
 | Need | Command |
 | --- | --- |
 | Click | `bsk click @e3 --session <id> --context ID` |
-| Fill a field | `bsk fill @e3 --value "text" --session <id> --context ID` |
+| Fill text/date/time | `bsk fill @e3 --value "text" --session <id> --context ID` |
 | Select an option | `bsk select @e3 --value "option-value" --session <id> --context ID` |
 | Press a key | `bsk press Enter --ref @e3 --session <id> --context ID` |
 | Click–move–click range | `bsk drag @e3 --to @e8 --mode click-move-click --session <id> --context ID` |
@@ -118,7 +118,7 @@ acting; load others only as needed.
 | Website debugging, reproduction evidence, or request rules/replay | [Debugging](references/debugging.md) |
 | Required profile, existing user tab, multiple/background tabs, or remote tab ownership | [Tabs and profiles](references/tabs-and-profiles.md) |
 | Missing CLI, daemon startup failure, sandboxed startup, connection failure, or remote pairing | [Environment](references/environment.md) |
-| Dragging, click–move–click ranges/selection state, waits, hover menus/probing, scrolling, `next_cursor`/`@more`, console/network, emulation, evaluation, or recording | [Interaction details](references/interaction-details.md) |
+| Date/time values, drag, click–move–click selection, waits, hover menus, scrolling, `next_cursor`/`@more`, console/network, emulation, evaluation, or recording | [Interaction details](references/interaction-details.md) |
 | Screenshot, full-page capture, or `[visual:screenshot]`/Canvas interaction | [Screenshots and Canvas](references/screenshots-and-canvas.md) |
 | Video recording or MP4 export | [Video](references/video.md) |
 | Upload or download | [Files](references/files.md) |

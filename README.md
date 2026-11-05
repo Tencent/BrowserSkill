@@ -144,6 +144,10 @@ bsk install-skill --harness cursor --json
 
 Use `bsk install-skill --list` to see supported targets and paths. Existing installations are skipped unless you explicitly replace them with `--force`. For another harness, copy the entire [`crates/bsk-cli/skill/`](crates/bsk-cli/skill/) directory into its skills directory as `browser-skill/`, including `references/`.
 
+For MCP clients, `bsk install-skill --harness codex --mcp` also configures the
+local stdio server (`claude-code` and `cursor` are supported too). See the
+[MCP setup and workflow](docs/mcp.md).
+
 DSH users should install the [plugin](#deepseek-harness-plugin) instead; it includes the skill.
 
 #### 4. Check the connection
@@ -305,6 +309,8 @@ Finish active browser tasks, then update the CLI:
 ```sh
 bsk update --yes
 ```
+
+Manual and daemon updates fetch the manifest and archives from the official website's domestic download source first, then fall back to GitHub on download, manifest, checksum or archive errors. The GitHub archive fallback is pinned to the selected release and uses the same SHA256 checksum. If both sources fail, the error lists their URLs and individual causes. Setting `BSK_UPDATE_MANIFEST_URL` explicitly uses only that manifest and its asset URLs, without the built-in public-source fallback.
 
 For the default local setup, this installs the new executable and checks that it runs while the daemon keeps serving, then restarts the daemon from it on the same port. If the restarted daemon does not become ready, the previous executable is put back and the daemon is restarted from it. A daemon started with `--foreground` is left running on the previous version; restart it in its terminal or supervisor. So is a background daemon when `bsk update` runs where it could not start one again, such as inside a sandbox whose Windows Job forbids breakaway; restart it with `bsk daemon restart` outside the sandbox. If you use the installer to replace the binary, restart the daemon afterwards with `bsk daemon restart`.
 

@@ -44,7 +44,6 @@ function makeFakeCdp(
     if (method === "Page.getFrameTree") {
       return { frameTree: { frame: { id: opts.mainFrameId ?? "frame-1" } } };
     }
-    if (method === "Runtime.enable") return {};
     if (method === "Runtime.evaluate") {
       if (opts.readyState === null) {
         throw new Error("probe failed");

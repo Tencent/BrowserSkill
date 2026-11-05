@@ -83,4 +83,8 @@ observe/snapshot or changed page identity invalidates it.
 
 Console/network are bounded read-only diagnostics; follow sequence cursors.
 Wait only for expected navigation. `bsk_assist` resizes windows or emulates
-a device for one tab.
+a device for one tab. Resize changes outer window dimensions and verifies the
+actual bounds and target viewport; it does not set an exact viewport size or
+clear emulation. Select an inactive target tab in the Agent Window and sync
+before resizing. If the result is unconfirmed, inspect its actual dimensions and
+sync before deciding what to do next; the window may already have changed.

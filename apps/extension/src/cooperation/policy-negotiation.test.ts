@@ -40,7 +40,10 @@ async function fixture() {
     fields: [],
     events: [],
   };
-  const readFrames = vi.fn(async () => new Map([[0, structuredClone(frame)]]));
+  const readFrames = vi.fn(async () => ({
+    frames: new Map([[0, structuredClone(frame)]]),
+    gaps: [],
+  }));
   const controller = new CooperationController({
     sessions,
     readFrames,

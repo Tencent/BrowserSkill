@@ -136,7 +136,6 @@ describe("fill result verification", () => {
     "checkbox",
     "radio",
     "range",
-    "date",
     "file",
   ])("rejects an unsupported %s input before clearing", async (type) => {
     const h = await setup(`<input type="${type}">`);
@@ -147,6 +146,258 @@ describe("fill result verification", () => {
     });
     expect(h.element.value).toBe(before);
     expect(h.insert).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["date", "2026-10-14"],
+    ["time", "14:30"],
+    ["datetime-local", "2026-10-14T14:30"],
+    ["month", "2026-10"],
+    ["week", "2026-W42"],
+  ] as const)("fills a %s input via the value setter", async (type, value) => {
+    const h = await setup(`<input type="${type}" value="">`);
+    expect(await h.fill(value)).toMatchObject({ value_length: value.length });
+    expect(h.element.value).toBe(value);
+    expect(h.insert).not.toHaveBeenCalled();
+    expect(h.release).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    "date",
+    "time",
+    "datetime-local",
+    "month",
+    "week",
+  ])("rejects an invalid %s value before clearing", async (type) => {
+    const h = await setup(`<input type="${type}" value="">`);
+    expect(await h.fill("not-a-date")).toMatchObject({
+      code: "invalid_params",
+      data: { reason: "fill_value_invalid" },
+    });
+    expect(h.element.value).toBe("");
+    expect(h.insert).not.toHaveBeenCalled();
+  });
+
+  it("clears a date input without insertText", async () => {
+    const h = await setup('<input type="date" value="2026-01-01">');
+    expect(await h.fill("")).toMatchObject({ value_length: 0 });
+    expect(h.element.value).toBe("");
+    expect(h.insert).not.toHaveBeenCalled();
+  });
+
+  it("flushes deferred background focus before a date value write", async () => {
+    const h = await setup('<input type="date" value="">');
+    vi.spyOn(document, "hasFocus").mockReturnValue(false);
+    // Happy DOM fires focus synchronously on DOM.focus; inject the deferred
+    // background focus handler on the flush key event instead.
+    const send = h.send.getMockImplementation()!;
+    h.send.mockImplementation(async (tabId, method, params) => {
+      const reply = await send(tabId, method, params);
+      if (
+        method === "Input.dispatchKeyEvent" &&
+        (params as { type: string; commands?: string[] }).type === "rawKeyDown" &&
+        (params as { commands?: string[] }).commands?.includes("moveToEndOfDocument")
+      ) {
+        h.element.value = "2026-01-01";
+      }
+      return reply;
+    });
+    expect(await h.fill("2026-10-14")).toMatchObject({ value_length: 10 });
+    expect(h.element.value).toBe("2026-10-14");
+    expect(h.insert).not.toHaveBeenCalled();
+    expect(h.send).toHaveBeenCalledWith(
+      4,
+      "Input.dispatchKeyEvent",
+      expect.objectContaining({ type: "rawKeyDown", commands: ["moveToEndOfDocument"] }),
+    );
+  });
+
+  it("clears a background date after deferred focus restores a value", async () => {
+    const h = await setup('<input type="date" value="2026-01-01">');
+    vi.spyOn(document, "hasFocus").mockReturnValue(false);
+    const send = h.send.getMockImplementation()!;
+    h.send.mockImplementation(async (tabId, method, params) => {
+      const reply = await send(tabId, method, params);
+      if (
+        method === "Input.dispatchKeyEvent" &&
+        (params as { type: string }).type === "rawKeyDown"
+      ) {
+        h.element.value = "2026-01-01";
+      }
+      return reply;
+    });
+
+    expect(await h.fill("")).toMatchObject({ value_length: 0 });
+    expect(h.element.value).toBe("");
+    expect(h.insert).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["date", "2026-10-14", ""],
+    ["time", "12:34", ":56"],
+    ["week", "2026-W42", ""],
+  ] as const)("rejects --no-clear on a %s input before focus", async (type, initial, value) => {
+    const h = await setup(`<input type="${type}" value="${initial}">`);
+    expect(await h.fill(value, false)).toMatchObject({
+      code: "invalid_params",
+      data: { reason: "fill_value_invalid" },
+      message: expect.stringContaining("--no-clear"),
+    });
+    expect(h.element.value).toBe(initial);
+    expect(h.send).not.toHaveBeenCalledWith(4, "DOM.focus", expect.anything());
+    expect(h.insert).not.toHaveBeenCalled();
+  });
+
+  describe("date-like min/max", () => {
+    // Happy DOM only implements range validity for number inputs. Model the
+    // browser's check for these fixed-width values to cover the plumbing; the
+    // Chrome suite covers the browser's own comparison.
+    const outside = (input: HTMLInputElement, key: "min" | "max") => {
+      const bound = input.getAttribute(key);
+      if (!bound || input.value === "") return false;
+      return key === "min" ? input.value < bound : input.value > bound;
+    };
+
+    it.each([
+      ["date", 'min="2026-01-01" max="2026-12-31"', "2027-01-01", "max 2026-12-31"],
+      ["date", 'min="2026-01-01" max="2026-12-31"', "2025-12-31", "min 2026-01-01"],
+      ["month", 'min="2026-03"', "2026-02", "min 2026-03"],
+      ["time", 'max="18:00"', "18:30", "max 18:00"],
+    ] as const)("rejects an out-of-range %s value before focus", async (type, attrs, value, bound) => {
+      const h = await setup(`<input type="${type}" ${attrs} value="">`);
+      vi.spyOn(HTMLInputElement.prototype, "validity", "get").mockImplementation(function (
+        this: HTMLInputElement,
+      ) {
+        return {
+          rangeUnderflow: outside(this, "min"),
+          rangeOverflow: outside(this, "max"),
+        } as ValidityState;
+      });
+      expect(await h.fill(value)).toMatchObject({
+        code: "invalid_params",
+        data: { reason: "fill_value_invalid" },
+        message: expect.stringContaining(bound),
+      });
+      expect(h.element.value).toBe("");
+      expect(h.send).not.toHaveBeenCalledWith(4, "DOM.focus", expect.anything());
+    });
+
+    it("fills a value on the inclusive bounds", async () => {
+      const h = await setup('<input type="date" min="2026-01-01" max="2026-12-31" value="">');
+      expect(await h.fill("2026-12-31")).toMatchObject({ value_length: 10 });
+      expect(h.element.value).toBe("2026-12-31");
+    });
+  });
+
+  it("stops a background date fill when flush loses focus", async () => {
+    const h = await setup('<input type="date" value="">');
+    vi.spyOn(document, "hasFocus").mockReturnValue(false);
+    const other = document.createElement("input");
+    document.body.append(other);
+    const send = h.send.getMockImplementation()!;
+    h.send.mockImplementation(async (tabId, method, params) => {
+      const reply = await send(tabId, method, params);
+      if (
+        method === "Input.dispatchKeyEvent" &&
+        (params as { type: string }).type === "rawKeyDown"
+      ) {
+        other.focus();
+      }
+      return reply;
+    });
+    expect(await h.fill("2026-10-14")).toMatchObject({
+      code: "cdp_failed",
+      data: { reason: "fill_focus_lost" },
+    });
+    expect(h.element.value).toBe("");
+    expect(h.insert).not.toHaveBeenCalled();
+    expect(h.send).toHaveBeenCalledWith(
+      4,
+      "Input.dispatchKeyEvent",
+      expect.objectContaining({ type: "keyUp" }),
+    );
+    expect(h.release).toHaveBeenCalledOnce();
+  });
+
+  it("notifies shadow hosts with a composed input event for date-like fills", async () => {
+    document.body.innerHTML = '<div id="host"></div>';
+    const host = document.getElementById("host")!;
+    const shadow = host.attachShadow({ mode: "open" });
+    shadow.innerHTML = '<input type="date" value="">';
+    const element = shadow.querySelector("input") as HTMLInputElement;
+    const manager = new SessionManager({
+      agentWindow: {
+        create: async () => ({ windowId: 100, initialTabIds: [] }),
+        remove: async () => {},
+        ensureActiveTab: async () => 4,
+      },
+    });
+    const ctx = await manager.start("aa11");
+    ctx.refStore.set("e1", 12, { tabId: 4 });
+    const hostInputs: Event[] = [];
+    const hostInputValues: string[] = [];
+    host.addEventListener("input", (event) => {
+      hostInputs.push(event);
+      hostInputValues.push(element.value);
+    });
+    const script = vi.fn(async (params: ScriptParams): Promise<unknown> => {
+      try {
+        const fn = new Function(`return (${params.functionDeclaration})`)();
+        return {
+          result: {
+            value: await fn.apply(
+              element,
+              (params.arguments ?? []).map((arg) => arg.value),
+            ),
+          },
+        };
+      } catch {
+        return { exceptionDetails: { text: "test page script failed" } };
+      }
+    });
+    const send = vi.fn(async (_tabId: number, method: string, params?: object) => {
+      switch (method) {
+        case "DOM.describeNode":
+          return {
+            node: {
+              nodeName: element.tagName,
+              attributes: Array.from(element.attributes).flatMap((attr) => [attr.name, attr.value]),
+            },
+          };
+        case "DOM.scrollIntoViewIfNeeded":
+          return {};
+        case "DOM.focus":
+          element.focus();
+          return {};
+        case "DOM.resolveNode":
+          return { object: { objectId: "fill-target" } };
+        case "Runtime.callFunctionOn":
+          return script(params as ScriptParams);
+        case "Input.insertText":
+          throw new Error("date-like fill must not insertText");
+        case "Input.dispatchKeyEvent":
+          return {};
+        case "Runtime.releaseObject":
+          return {};
+        default:
+          throw new Error(`unexpected ${method}`);
+      }
+    });
+    const result = await handleFill(
+      manager,
+      { session_id: "aa11", ref: "e1", value: "2026-10-14", clear_before: true },
+      {
+        cdp: { send: send as CdpRunner["send"] },
+        tabsApi: {
+          get: async (id) => ({ id, windowId: 100, active: true }) as chrome.tabs.Tab,
+          query: async () => [{ id: 4, windowId: 100, active: true } as chrome.tabs.Tab],
+        },
+      },
+    );
+    expect(result).toMatchObject({ value_length: 10 });
+    expect(element.value).toBe("2026-10-14");
+    expect(hostInputValues).toEqual(["", "2026-10-14"]);
+    expect(hostInputs.every((event) => event.composed && event.bubbles)).toBe(true);
   });
 
   it("rejects an overlong value before clearing", async () => {
@@ -532,6 +783,52 @@ describe("fill result verification", () => {
     expect(await h.fill("", clearBefore)).toMatchObject({ value_length: clearBefore ? 0 : 3 });
     expect(h.element.value).toBe(clearBefore ? "" : "old");
     expect(h.insert).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    true,
+    false,
+  ])("flushes background focus before an empty text request (clear_before=%s)", async (clearBefore) => {
+    const h = await setup();
+    vi.spyOn(document, "hasFocus").mockReturnValue(false);
+    const send = h.send.getMockImplementation()!;
+    h.send.mockImplementation(async (tabId, method, params) => {
+      const reply = await send(tabId, method, params);
+      if (
+        method === "Input.dispatchKeyEvent" &&
+        (params as { type: string }).type === "rawKeyDown"
+      ) {
+        h.element.value = "default";
+      }
+      return reply;
+    });
+    expect(await h.fill("", clearBefore)).toMatchObject({ value_length: clearBefore ? 0 : 7 });
+    expect(h.element.value).toBe(clearBefore ? "" : "default");
+    expect(h.insert).not.toHaveBeenCalled();
+  });
+
+  it("does not clear a background text target if deferred focus moves elsewhere", async () => {
+    const h = await setup();
+    vi.spyOn(document, "hasFocus").mockReturnValue(false);
+    const other = document.createElement("input");
+    document.body.append(other);
+    const send = h.send.getMockImplementation()!;
+    h.send.mockImplementation(async (tabId, method, params) => {
+      const reply = await send(tabId, method, params);
+      if (
+        method === "Input.dispatchKeyEvent" &&
+        (params as { type: string }).type === "rawKeyDown"
+      ) {
+        other.focus();
+      }
+      return reply;
+    });
+    expect(await h.fill("")).toMatchObject({
+      code: "cdp_failed",
+      data: { reason: "fill_focus_lost" },
+    });
+    expect(h.element.value).toBe("old");
+    expect(h.send).toHaveBeenCalledWith(4, "Input.dispatchKeyEvent", { type: "keyUp" });
   });
 
   it("cancels after insertion without sending change events", async () => {

@@ -5,7 +5,8 @@ import type { CdpRunner } from "@/tools/shared";
 import type { InputExpectation } from "./types";
 
 interface ActionGuard {
-  prepare?: (input?: InputExpectation) => Promise<void>;
+  prepare?: (input?: InputExpectation, method?: string) => Promise<void>;
+  finishInput?: (input: InputExpectation) => Promise<void>;
   dispatch?: (startsInput: boolean, method: string) => void;
   verifyPointerTarget?: CdpRunner["verifyPointerTarget"];
   beginDomMutation?: CdpRunner["beginDomMutation"];
@@ -60,11 +61,13 @@ export function guardedRunner<T extends CdpRunner>(cdp: T, options: ActionGuard 
         : method === "Input.dispatchMouseEvent" && p?.type === "mouseWheel"
           ? { type: "wheel", x: Number(p.x), y: Number(p.y) }
           : method === "Input.dispatchKeyEvent" &&
-              ["keyDown", "rawKeyDown"].includes(String(p?.type))
+              ["keyDown", "rawKeyDown", "char"].includes(String(p?.type))
             ? // Native editor commands omit the key; Chromium emits an empty DOM key.
-              { type: "keydown", key: String(p?.key ?? "") }
-            : undefined;
-    if (input) {
+              { type: p?.type === "char" ? "keypress" : "keydown", key: String(p?.key ?? "") }
+            : method === "Input.insertText"
+              ? { type: "beforeinput", text: String(p?.text ?? ""), id: crypto.randomUUID() }
+              : undefined;
+    if (input && input.type !== "beforeinput") {
       input.timestamp = Date.now();
       params = { ...params, timestamp: input.timestamp / 1000 };
     }
@@ -80,7 +83,6 @@ export function guardedRunner<T extends CdpRunner>(cdp: T, options: ActionGuard 
       ["Page.navigate", "Page.navigateToHistoryEntry", "Page.reload"].includes(method);
     if (!prepare && effect && !["Runtime.callFunctionOn", "Runtime.evaluate"].includes(method))
       throw new Error("Shared-tab observation cannot dispatch browser input");
-    if (effect && !release) await prepare?.(input);
     const check = () => {
       if (effect && !release)
         dispatch?.(
@@ -100,17 +102,26 @@ export function guardedRunner<T extends CdpRunner>(cdp: T, options: ActionGuard 
         leases.set(identity, cdp.getAttachmentId?.(target.tabId));
       if (release && !cancelDrag) leases.delete(identity);
     };
-    if (cdp.sendGuarded)
-      return cdp.sendGuarded(target, method, params, {
-        ...guard,
-        ...(release ? { signal: undefined, attachmentId: leases.get(identity) } : {}),
-        onDispatch: check,
-      });
-    // Test/adaptor runners must provide the same synchronous pre-send check.
-    check();
-    return target.sessionId && cdp.sendToTarget
-      ? cdp.sendToTarget(target, method, params)
-      : cdp.send(target.tabId, method, params);
+    const sendNative = () => {
+      if (cdp.sendGuarded)
+        return cdp.sendGuarded(target, method, params, {
+          ...guard,
+          ...(release ? { signal: undefined, attachmentId: leases.get(identity) } : {}),
+          onDispatch: check,
+        });
+      // Test/adaptor runners must provide the same synchronous pre-send check.
+      check();
+      return target.sessionId && cdp.sendToTarget
+        ? cdp.sendToTarget(target, method, params)
+        : cdp.send(target.tabId, method, params);
+    };
+    try {
+      // Geometry must be sampled after a browsing gesture has settled, too.
+      if ((effect && !release) || method === "DOM.getBoxModel") await prepare?.(input, method);
+      return await sendNative();
+    } finally {
+      if (input?.type === "beforeinput") await options.finishInput?.(input);
+    }
   };
   const runner = new Proxy(cdp, {
     get(target, key, receiver) {

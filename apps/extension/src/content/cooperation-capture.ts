@@ -13,6 +13,7 @@ import {
 } from "@/cooperation/types";
 import { OVERLAY_HOST_SELECTOR } from "@/lib/overlay-bridge";
 import { createRandomUuid } from "@/lib/random-uuid";
+import { sensitiveAutocomplete } from "@/lib/sensitive-autocomplete";
 
 const MAX_CHANGES = 64;
 // CDP's native clock conversion and the DOM clock round independently.
@@ -40,8 +41,14 @@ export function attachCooperationCapture() {
   let originTime: number | undefined;
   let attribution: HumanActivity["attribution"];
   let composing = false;
-  let pointer = false;
-  const keys = new Set<string>();
+  let dragging = false;
+  let dragAgent: boolean | undefined;
+  let pointer: { agent: boolean; released: boolean; confirmed: boolean } | undefined;
+  const keys = new Map<string, boolean>();
+  let eventAgent: boolean | undefined;
+  let editingTarget: Element | undefined;
+  let inputSource: { target: EventTarget | null; agent: boolean; before?: string } | undefined;
+  let insertTarget: Element | null | undefined;
   const fields = new Map<Element, FieldChange>();
   const sampledValues = new WeakMap<Element, string>();
   const ids = new WeakMap<object, string>();
@@ -53,8 +60,30 @@ export function attachCooperationCapture() {
   };
   let timer: ReturnType<typeof setTimeout> | undefined;
   let focusTimer: ReturnType<typeof setTimeout> | undefined;
+  let pointerTimer: ReturnType<typeof setTimeout> | undefined;
+  let eventTimer: ReturnType<typeof setTimeout> | undefined;
+  let inputTimer: ReturnType<typeof setTimeout> | undefined;
+  let scrollTimer: ReturnType<typeof setTimeout> | undefined;
   const overlay = (target: EventTarget | null) =>
     target instanceof Element && !!target.closest(OVERLAY_HOST_SELECTOR);
+  const formerPasswords = new WeakSet<Node>();
+  const markFormerPasswords = (records: MutationRecord[]) => {
+    for (const r of records) {
+      if (r.oldValue?.toLowerCase() === "password") formerPasswords.add(r.target);
+    }
+  };
+  // Passwords, codes, card details and file selections never enter field state.
+  const secret = (target: Element) => {
+    if (target instanceof HTMLInputElement && target.type === "password") {
+      formerPasswords.add(target);
+      return true;
+    }
+    return (
+      (target instanceof HTMLInputElement && ["file", "hidden"].includes(target.type)) ||
+      formerPasswords.has(target) ||
+      sensitiveAutocomplete(target.getAttribute("autocomplete"))
+    );
+  };
   const label = (target: EventTarget | null) => {
     if (!(target instanceof Element)) return "page";
     return (
@@ -76,11 +105,32 @@ export function attachCooperationCapture() {
       : target instanceof HTMLTextAreaElement
         ? !target.readOnly && !target.disabled
         : target instanceof HTMLElement && target.isContentEditable);
+  const inputValue = (target: EventTarget | null): string | undefined => {
+    // File selection is coordinated by its click/drag, not by an editable value.
+    // DOM.setFileInputFiles also emits trusted input/change events.
+    if (target instanceof HTMLInputElement && target.type === "file") return;
+    if (target instanceof HTMLInputElement)
+      return ["checkbox", "radio"].includes(target.type) ? String(target.checked) : target.value;
+    if (target instanceof HTMLTextAreaElement || target instanceof HTMLSelectElement)
+      return target.value;
+    if (target instanceof HTMLElement && target.isContentEditable) return target.innerHTML;
+  };
+  const updateInteraction = () => {
+    state.busy =
+      dragging ||
+      (composing && state.editing) ||
+      !!(pointer?.confirmed && !pointer.released) ||
+      (state.editing && [...keys.values()].some((agent) => !agent));
+    state.pending =
+      !!(pointer && !pointer.agent && !pointer.confirmed) ||
+      (composing && !state.editing) ||
+      !!(inputSource && !inputSource.agent);
+  };
   const publish = () => {
     clearTimeout(timer);
     timer = undefined;
     if (!enabled) return;
-    state.busy = composing || pointer || keys.size > 0;
+    updateInteraction();
     state.fields = [...fields.values()];
     void chrome.runtime
       .sendMessage({ kind: COOPERATION_MESSAGE, lease, state: { ...state } })
@@ -90,6 +140,7 @@ export function attachCooperationCapture() {
     if (!timer) timer = setTimeout(publish, 60);
   };
   const mutations = (records: MutationRecord[]) => {
+    markFormerPasswords(records);
     if (
       !enabled ||
       !records.some(
@@ -123,6 +174,7 @@ export function attachCooperationCapture() {
         subtree: true,
         childList: true,
         attributes: true,
+        attributeOldValue: true,
         characterData: true,
       });
       roots.add(root);
@@ -137,6 +189,12 @@ export function attachCooperationCapture() {
   const read = () => {
     mutations(observer.takeRecords());
     const active = activeElement();
+    if (editingTarget && (active !== editingTarget || !editable(editingTarget))) {
+      editingTarget = undefined;
+      state.editing = false;
+      composing = false;
+      state.revision++;
+    }
     state.focus = active ? id(active) : undefined;
     state.focusIsDocument =
       (active === document.body || active === document.documentElement) &&
@@ -150,17 +208,20 @@ export function attachCooperationCapture() {
     const mediaByRoot = new Map<Document | ShadowRoot, { id: string }[]>();
     state.fieldsComplete = true;
     for (const target of controls(document)) {
-      if (
-        overlay(target) ||
-        (target instanceof HTMLInputElement && ["password", "file", "hidden"].includes(target.type))
-      )
-        continue;
+      if (overlay(target)) continue;
       const fullValue =
         target instanceof HTMLInputElement && ["checkbox", "radio"].includes(target.type)
           ? String(target.checked)
           : "value" in target
             ? String(target.value)
             : (target.textContent ?? "");
+      if (secret(target)) {
+        fields.delete(target);
+        if (target instanceof HTMLInputElement && target.type === "file")
+          sampledValues.delete(target);
+        else sampledValues.set(target, fullValue);
+        continue;
+      }
       const value = fullValue.slice(0, 500);
       const name = label(target);
       let mediaProgress = false;
@@ -236,7 +297,7 @@ export function attachCooperationCapture() {
     // evidence fresh even when the page's mutation counter did not advance.
     if (state.media && JSON.stringify(state.media) !== JSON.stringify(media)) state.revision++;
     state.media = media;
-    state.busy = composing || pointer || keys.size > 0;
+    updateInteraction();
     state.fields = [...fields.values()];
     return { ...state };
   };
@@ -244,6 +305,9 @@ export function attachCooperationCapture() {
     attribution = undefined;
     if (!expectation || expectation.type !== event.type) return false;
     const expected = expectation;
+    // CDP uses the visual viewport. DOM client coordinates use the layout viewport,
+    // which can have a different origin after pinch zoom and pan.
+    const viewport = window.visualViewport;
     // Compare in this frame's monotonic clock. The epoch origin can drift from
     // the current wall clock used by native dispatch in a long-running browser.
     const match =
@@ -255,8 +319,8 @@ export function attachCooperationCapture() {
         ? event.key === expected.key
         : event instanceof MouseEvent &&
           (window !== window.top ||
-            (Math.abs(event.clientX - (expected.x ?? -1)) <= 2 &&
-              Math.abs(event.clientY - (expected.y ?? -1)) <= 2)));
+            (Math.abs(event.clientX - (viewport?.offsetLeft ?? 0) - (expected.x ?? -1)) <= 2 &&
+              Math.abs(event.clientY - (viewport?.offsetTop ?? 0) - (expected.y ?? -1)) <= 2)));
     attribution = match
       ? undefined
       : {
@@ -269,78 +333,7 @@ export function attachCooperationCapture() {
     if (match) expectation = undefined;
     return match;
   };
-  const onEvent = (event: Event) => {
-    if (!enabled || event.composedPath().some(overlay)) return;
-    const target = event.composedPath()[0] ?? event.target;
-    if (event.type === "input" || event.type === "change") {
-      if (
-        target instanceof HTMLInputElement ||
-        target instanceof HTMLTextAreaElement ||
-        target instanceof HTMLSelectElement
-      ) {
-        // Passwords and file selections never enter the change stream.
-        if (
-          !(target instanceof HTMLInputElement) ||
-          !["password", "file", "hidden"].includes(target.type)
-        ) {
-          fields.set(target, {
-            id: id(target),
-            label: label(target),
-            value: target.value.slice(0, 500),
-          });
-          if (fields.size > MAX_CHANGES) {
-            fields.clear();
-            state.structure++;
-          }
-        }
-      }
-      state.revision++;
-      schedule();
-      return;
-    }
-    if (!event.isTrusted) return;
-    if (event.type === "focusout") {
-      // Focusout precedes focusin and retargets shadow controls to their host.
-      // Resolve the final deep focus after the transition; never create a lease.
-      clearTimeout(focusTimer);
-      focusTimer = setTimeout(() => {
-        if (!enabled) return;
-        const active = activeElement();
-        if (state.editing) state.revision++;
-        state.editing = state.editing && editable(active);
-        composing = false;
-        publish();
-      }, 0);
-      return;
-    }
-    if (event.type === "pointerup" || event.type === "pointercancel") {
-      if (pointer) state.revision++;
-      pointer = false;
-      publish();
-      return;
-    }
-    if (event.type === "keyup") {
-      if (keys.delete((event as KeyboardEvent).key)) state.revision++;
-      publish();
-      return;
-    }
-    if (event.type === "compositionend") {
-      composing = false;
-      state.revision++;
-      state.lastInput = Date.now();
-      publish();
-      return;
-    }
-    if (event.type === "pointerdown" || event.type === "keydown" || event.type === "wheel") {
-      if (matches(event)) return;
-      if (event.type === "pointerdown") pointer = true;
-      if (event.type === "keydown") keys.add((event as KeyboardEvent).key);
-      // Scrolling over a text field does not start editing it.
-      if (event.type !== "wheel") state.editing = editable(target);
-    } else if (event.type === "compositionstart") {
-      composing = true;
-      state.editing = true;
-    } else return;
+  const humanInput = (event: Event, target: EventTarget | null) => {
     state.human++;
     state.revision++;
     state.lastInput = Date.now();
@@ -361,16 +354,234 @@ export function attachCooperationCapture() {
         : {}),
     });
     if (state.events.length > MAX_CHANGES) state.events.shift();
-    // Ownership notification is immediate, not part of the mutation debounce.
+    // Publish confirmed activity immediately. Native dispatch also pulls frame state.
     publish();
+  };
+  const onEvent = (event: Event) => {
+    if (!enabled) return;
+    const release =
+      (dragging && ["dragend", "drop"].includes(event.type)) ||
+      (pointer && !pointer.released && ["pointerup", "pointercancel"].includes(event.type)) ||
+      (event.type === "keyup" && keys.has((event as KeyboardEvent).key));
+    if (!release && event.composedPath().some(overlay)) return;
+    let target = event.composedPath()[0] ?? event.target;
+    // Closed shadow roots retarget editing events to their host. Resolve the
+    // same deep focus used by collection and native text attribution.
+    if (
+      ["beforeinput", "input", "change"].includes(event.type) &&
+      target instanceof Element &&
+      shadowRoot(target)
+    )
+      target = activeElement() ?? target;
+    if (event.type === "input" || event.type === "change") {
+      mutations(observer.takeRecords());
+      const value = inputValue(target);
+      let previous = target instanceof Element ? sampledValues.get(target) : undefined;
+      // Rich editors compare their local markup during beforeinput, while the
+      // observation's sampled value remains plain text.
+      if (target instanceof HTMLElement && target.isContentEditable) previous = undefined;
+      if (inputSource?.target === target) previous = inputSource.before;
+      const source =
+        inputSource?.target === target ? inputSource.agent : (eventAgent ?? pointer?.agent);
+      const agent = eventAgent !== false && source === true;
+      if (target instanceof Element && value !== undefined) {
+        const fieldValue =
+          target instanceof HTMLElement && target.isContentEditable
+            ? (target.textContent ?? "")
+            : value;
+        sampledValues.set(target, fieldValue);
+        if (secret(target)) {
+          fields.delete(target);
+        } else {
+          fields.set(target, {
+            id: id(target),
+            label: label(target),
+            value: fieldValue.slice(0, 500),
+          });
+          if (fields.size > MAX_CHANGES) {
+            fields.clear();
+            state.structure++;
+          }
+        }
+      }
+      state.revision++;
+      if (event.isTrusted && !agent && value !== undefined && value !== previous) {
+        editingTarget = editable(target) ? (target as Element) : undefined;
+        state.editing = !!editingTarget;
+        if (pointer && !pointer.agent) {
+          pointer.confirmed = true;
+          if (target instanceof HTMLSelectElement) {
+            pointer.released = true;
+            clearTimeout(pointerTimer);
+            pointerTimer = setTimeout(() => {
+              pointer = undefined;
+              state.revision++;
+              publish();
+            }, 0);
+          }
+        }
+        // An input/change pair describes one edit, including native select controls.
+        if (inputSource?.target === target) inputSource.before = value;
+        humanInput(event, target);
+      } else schedule();
+      return;
+    }
+    if (!event.isTrusted) return;
+    if (event.type === "dragend" || event.type === "drop") {
+      if (event.type === "drop") {
+        eventAgent = dragAgent;
+        clearTimeout(eventTimer);
+        eventTimer = setTimeout(() => {
+          eventAgent = undefined;
+        }, 0);
+      }
+      dragging = false;
+      dragAgent = undefined;
+      state.revision++;
+      publish();
+      return;
+    }
+    if (event.type === "beforeinput") {
+      const input = event as InputEvent;
+      const expected = expectation;
+      // insertText has no CDP timestamp. Match this one command's literal text
+      // and focused recipient, then retire it on input or native completion.
+      const insert =
+        expected?.type === "beforeinput" &&
+        target === insertTarget &&
+        editable(target) &&
+        input.inputType === "insertText" &&
+        input.data === expected.text;
+      const human = eventAgent === false || pointer?.agent === false;
+      const agent = !human && (insert || (eventAgent ?? pointer?.agent ?? false));
+      if (insert && agent) expectation = undefined;
+      inputSource = { target, agent, before: inputValue(target) };
+      clearTimeout(inputTimer);
+      inputTimer = setTimeout(() => {
+        inputSource = undefined;
+        publish();
+      }, 0);
+      state.revision++;
+      publish();
+      return;
+    }
+    if (event.type === "focusout") {
+      clearTimeout(focusTimer);
+      focusTimer = setTimeout(() => {
+        if (!enabled) return;
+        if (editingTarget !== activeElement()) {
+          editingTarget = undefined;
+          state.editing = false;
+          composing = false;
+        }
+        state.revision++;
+        publish();
+      }, 0);
+      return;
+    }
+    if (event.type === "pointerdown") {
+      pointer = { agent: matches(event), released: false, confirmed: false };
+      clearTimeout(pointerTimer);
+      state.revision++;
+      publish();
+      return;
+    }
+    if (event.type === "pointerup" || event.type === "pointercancel") {
+      if (pointer) pointer.released = true;
+      clearTimeout(pointerTimer);
+      // The default click follows pointerup in the same browser task.
+      pointerTimer = setTimeout(() => {
+        pointer = undefined;
+        state.revision++;
+        publish();
+      }, 0);
+      if (event.type === "pointercancel") pointer = undefined;
+      state.revision++;
+      publish();
+      return;
+    }
+    if (event.type === "wheel") {
+      // Browsing never transfers control. Retain only the source for a native
+      // control whose wheel handler actually changes its value in this task.
+      eventAgent = matches(event);
+      clearTimeout(eventTimer);
+      eventTimer = setTimeout(() => {
+        eventAgent = undefined;
+      }, 0);
+      return;
+    }
+    if (event.type === "keydown" || event.type === "keypress" || event.type === "keyup") {
+      const key = (event as KeyboardEvent).key;
+      eventAgent = event.type === "keyup" ? keys.get(key) : matches(event);
+      if (event.type === "keydown") keys.set(key, eventAgent ?? false);
+      else if (event.type === "keyup") keys.delete(key);
+      let releasedPending = false;
+      if (
+        event.type === "keydown" &&
+        key === "Escape" &&
+        pointer &&
+        !pointer.agent &&
+        !pointer.confirmed
+      ) {
+        pointer = undefined;
+        clearTimeout(pointerTimer);
+        state.revision++;
+        releasedPending = true;
+      }
+      clearTimeout(eventTimer);
+      // beforeinput, input and keyboard activation inherit only this event task.
+      eventTimer = setTimeout(() => {
+        eventAgent = undefined;
+      }, 0);
+      if (state.editing || releasedPending) publish();
+      return;
+    }
+    if (event.type === "compositionstart" || event.type === "compositionend") {
+      composing = event.type === "compositionstart";
+      state.revision++;
+      publish();
+      return;
+    }
+    if (event.type === "submit" && eventAgent !== false && pointer?.agent !== false) return;
+    if (
+      event.type === "click" ||
+      event.type === "auxclick" ||
+      event.type === "dragstart" ||
+      event.type === "submit"
+    ) {
+      const agent =
+        (event as MouseEvent).detail === 0
+          ? (eventAgent ?? pointer?.agent ?? false)
+          : (pointer?.agent ?? false);
+      if (event.type === "dragstart") dragAgent = agent;
+      if (agent) return;
+      if (event.type === "dragstart") dragging = true;
+      if (pointer) pointer.confirmed = true;
+      if (
+        editingTarget !== target &&
+        !(target instanceof Node && editingTarget?.contains(target) && editable(target))
+      ) {
+        editingTarget = undefined;
+        state.editing = false;
+        composing = false;
+      }
+      humanInput(event, target);
+    }
   };
   const events = [
     "pointerdown",
     "pointerup",
     "pointercancel",
+    "click",
+    "auxclick",
+    "dragstart",
+    "dragend",
+    "drop",
+    "submit",
     "keydown",
+    "keypress",
     "keyup",
-    "wheel",
+    "beforeinput",
     "compositionstart",
     "compositionend",
     "focusout",
@@ -379,13 +590,44 @@ export function attachCooperationCapture() {
   ];
   for (const event of events)
     document.addEventListener(event, onEvent, { capture: true, passive: true });
+  // Chromium skips a node's legacy `mousewheel` listeners whenever that node has a
+  // `wheel` listener, even a passive one. Listen only while collecting so pages
+  // without a session keep their mousewheel handlers. Window capture runs before
+  // any document listener, so a page that stops propagation there cannot hide an
+  // Agent wheel from attribution even though this listener is registered late.
+  const listenWheel = (on: boolean) =>
+    on
+      ? window.addEventListener("wheel", onEvent, { capture: true, passive: true })
+      : window.removeEventListener("wheel", onEvent, true);
+  const onScroll = () => {
+    if (!enabled) return;
+    const started = !state.scrolling;
+    state.scrolling = true;
+    clearTimeout(scrollTimer);
+    scrollTimer = setTimeout(() => {
+      state.scrolling = false;
+      publish();
+    }, 120);
+    if (started) publish();
+  };
+  document.addEventListener("scroll", onScroll, true);
   const onWindowBlur = () => {
-    if (!enabled || (!pointer && !composing && keys.size === 0)) return;
-    pointer = false;
+    if (
+      !enabled ||
+      (!pointer && !composing && !dragging && keys.size === 0 && !eventAgent && !inputSource)
+    )
+      return;
+    clearTimeout(pointerTimer);
+    clearTimeout(eventTimer);
+    clearTimeout(inputTimer);
+    pointer = undefined;
     composing = false;
+    dragging = false;
+    dragAgent = undefined;
     keys.clear();
+    eventAgent = undefined;
+    inputSource = undefined;
     state.revision++;
-    state.lastInput = Date.now();
     publish();
   };
   window.addEventListener("blur", onWindowBlur);
@@ -400,7 +642,12 @@ export function attachCooperationCapture() {
         reply(undefined);
         return false;
       }
-      if (lease && lease !== message.lease) retired.add(lease);
+      if (lease && lease !== message.lease) {
+        retired.add(lease);
+        expectation = undefined;
+        insertTarget = undefined;
+        inputSource = undefined;
+      }
       lease = message.lease;
     } else if (message.kind === COOPERATION_DISABLE) {
       retired.add(message.lease);
@@ -413,7 +660,12 @@ export function attachCooperationCapture() {
     }
     if (message.kind === COOPERATION_DISABLE) {
       enabled = false;
+      listenWheel(false);
       clearTimeout(focusTimer);
+      clearTimeout(pointerTimer);
+      clearTimeout(eventTimer);
+      clearTimeout(inputTimer);
+      clearTimeout(scrollTimer);
       observer.disconnect();
       roots.clear();
       fields.clear();
@@ -421,15 +673,27 @@ export function attachCooperationCapture() {
       expectation = undefined;
       keys.clear();
       composing = false;
-      pointer = false;
+      dragging = false;
+      dragAgent = undefined;
+      pointer = undefined;
       state.editing = false;
+      editingTarget = undefined;
+      inputSource = undefined;
+      eventAgent = undefined;
+      insertTarget = undefined;
+      state.pending = false;
+      state.scrolling = false;
       reply({ ...state, busy: false, fields: [] });
     } else if (message.kind === COOPERATION_READ) {
       enabled = true;
+      listenWheel(true);
       reply(read());
     } else if (message.kind === COOPERATION_ARM) {
-      if (enabled && message.input) {
+      if (enabled && message.input?.type === "clear") {
+        if (expectation?.id === message.input.id) expectation = undefined;
+      } else if (enabled && message.input) {
         expectation = message.input;
+        insertTarget = expectation.type === "beforeinput" ? activeElement() : undefined;
         nativeTime = undefined;
         originTime = undefined;
         if (expectation.timestamp !== undefined) {
@@ -471,6 +735,7 @@ export function attachCooperationCapture() {
     } else if (message.kind === COOPERATION_RESUME) {
       // An explicit hand-back ends an editing lease, never a drag or IME composition.
       state.editing = false;
+      editingTarget = undefined;
       state.revision++;
       publish();
       reply(read());
@@ -482,9 +747,15 @@ export function attachCooperationCapture() {
   return () => {
     clearTimeout(timer);
     clearTimeout(focusTimer);
+    clearTimeout(pointerTimer);
+    clearTimeout(eventTimer);
+    clearTimeout(inputTimer);
+    clearTimeout(scrollTimer);
     observer.disconnect();
     chrome.runtime.onMessage.removeListener(onMessage);
     window.removeEventListener("blur", onWindowBlur);
+    document.removeEventListener("scroll", onScroll, true);
     for (const event of events) document.removeEventListener(event, onEvent, true);
+    listenWheel(false);
   };
 }

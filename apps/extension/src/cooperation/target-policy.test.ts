@@ -52,9 +52,10 @@ async function fixture(policy: "strict" | "target" = "target") {
   });
   const send = vi.fn(async () => ({}));
   const cdp = { send } as CdpRunner;
-  const readFrames = vi.fn<CooperationDeps["readFrames"]>(
-    async () => new Map([[0, structuredClone(frame)]]),
-  );
+  const readFrames = vi.fn<CooperationDeps["readFrames"]>(async () => ({
+    frames: new Map([[0, structuredClone(frame)]]),
+    gaps: [],
+  }));
   const controller = new CooperationController({
     sessions,
     readFrames,
@@ -183,7 +184,7 @@ describe.each(["strict", "target"] as const)("completed action receipts (%s)", (
         await runner.send(7, "Runtime.evaluate", { expression: "save()" });
         if (coverage === "loading")
           f.readFrames.mockRejectedValueOnce(new Error("frame is loading"));
-        else f.readFrames.mockResolvedValueOnce(new Map());
+        else f.readFrames.mockResolvedValueOnce({ frames: new Map(), gaps: [] });
         return receipt;
       }),
     ).toEqual(receipt);
@@ -258,10 +259,10 @@ describe.each(["strict", "target"] as const)("completed action receipts (%s)", (
     ["navigated", "push"],
   ])("preserves human work in a %s iframe discovered by %s, even after quiet", async (kind, delivery) => {
     const f = await fixture(policy);
-    const frames = await f.readFrames.mock.results.at(-1)!.value;
+    const { frames } = await f.readFrames.mock.results.at(-1)!.value;
     const child = { ...frames.get(0)!, document: "child" };
     if (kind === "navigated") frames.set(2, child);
-    f.readFrames.mockImplementation(async () => structuredClone(frames));
+    f.readFrames.mockImplementation(async () => ({ frames: structuredClone(frames), gaps: [] }));
     const observation = await f.sync();
     const lease = f.readFrames.mock.calls.at(-1)![2];
     const result = await f.run(
@@ -294,13 +295,16 @@ describe.each(["strict", "target"] as const)("completed action receipts (%s)", (
     { human: 1, lastInput: 0 },
   ])("does not preserve new frame history without recent human input: %j", async (history) => {
     const f = await fixture(policy);
-    const frames = await f.readFrames.mock.results.at(-1)!.value;
+    const { frames } = await f.readFrames.mock.results.at(-1)!.value;
     const receipt = { ok: true, tab_id: 7 };
     expect(
       await f.run({ observation_id: f.first.observation_id }, "tool.evaluate", async (runner) => {
         await runner.send(7, "Runtime.evaluate", { expression: "openFrame()" });
         frames.set(2, { ...frames.get(0)!, document: "new-child", ...history });
-        f.readFrames.mockImplementation(async () => structuredClone(frames));
+        f.readFrames.mockImplementation(async () => ({
+          frames: structuredClone(frames),
+          gaps: [],
+        }));
         return receipt;
       }),
     ).toEqual(receipt);
@@ -309,7 +313,7 @@ describe.each(["strict", "target"] as const)("completed action receipts (%s)", (
 
   it("does not let an unknown document replace collected frames or repeatedly revoke control", async () => {
     const f = await fixture(policy);
-    const frame = (await f.readFrames.mock.results.at(-1)!.value).get(0)!;
+    const frame = (await f.readFrames.mock.results.at(-1)!.value).frames.get(0)!;
     const lease = f.readFrames.mock.calls.at(-1)![2];
     const human = { ...frame, document: "uncollected", human: 1, lastInput: 10_000 };
     const guard = f.controller.controlGuard("s", 7);
@@ -387,6 +391,64 @@ describe("negotiated target control", () => {
     expect(second.context_id).toBe(f.first.context_id);
     expect(second.observation_id).not.toBe(f.first.observation_id);
     expect(await f.run()).toEqual({});
+  });
+
+  it("publishes main-document control when a carousel frame navigates during sync", async () => {
+    const f = await fixture();
+    const { frames } = await f.readFrames.mock.results.at(-1)!.value;
+    const slide = { ...frames.get(0)!, document: "slide-1" };
+    frames.set(2, slide);
+    f.readFrames.mockImplementation(async () => ({ frames: structuredClone(frames), gaps: [] }));
+    vi.mocked(handleSnapshot).mockImplementationOnce(async (_sessions, _params, deps) => {
+      deps?.onScene?.({ nodes: [], viewport: { width: 800, height: 600 }, rootFrameId: "root" });
+      frames.set(2, { ...slide, document: "slide-2" });
+      return { text: "@e1 button Continue", tab_id: 7 } as never;
+    });
+
+    const current = await f.sync();
+    expect(current).toMatchObject({
+      context_id: f.first.context_id,
+      observation_id: expect.any(String),
+    });
+    f.session.refStore.set("e1", 4, { tabId: 7, frameId: "root" });
+    expect(await f.run({ observation_id: current.observation_id }, "tool.evaluate")).toMatchObject({
+      data: { reason: "document_changed", effect_state: "none" },
+    });
+    expect(f.send).not.toHaveBeenCalled();
+    const applied = await f.run({ expect: [{ target: "@e1", field: "text", equals: "Continue" }] });
+    expect(applied).toEqual({});
+    expect(f.send).toHaveBeenCalledOnce();
+  });
+
+  it("still requires a fresh observation for iframe targets and iframe conditions", async () => {
+    const f = await fixture();
+    const { frames } = await f.readFrames.mock.results.at(-1)!.value;
+    const slide = { ...frames.get(0)!, document: "slide-1" };
+    frames.set(2, slide);
+    f.readFrames.mockImplementation(async () => ({ frames: structuredClone(frames), gaps: [] }));
+    const synced = await f.sync();
+    f.session.refStore.set("e2", 5, { tabId: 7, frameId: "child" });
+    frames.set(2, { ...slide, document: "slide-2" });
+
+    const context_id = synced.context_id;
+    const inChild = { ref: "e2" };
+    const inMain = { ref: undefined, selector: "#continue" };
+    for (const rejected of [
+      await f.run({ context_id, ...inChild }),
+      await f.run({ context_id, source: inMain, target: inChild }, "tool.drag"),
+      await f.run({
+        context_id,
+        ...inMain,
+        expect: [{ target: "@e2", field: "text", equals: "Slide 1" }],
+      }),
+    ]) {
+      expect(rejected).toMatchObject({
+        data: { reason: "document_changed", effect_state: "none" },
+      });
+    }
+    expect(f.send).not.toHaveBeenCalled();
+    expect(await f.run({ context_id, ...inMain })).toEqual({ used_selector: "#continue" });
+    expect(f.send).toHaveBeenCalledOnce();
   });
 
   it("keeps a valid receipt when a supplementary sync cannot produce its snapshot", async () => {
@@ -492,6 +554,27 @@ describe("negotiated target control", () => {
     ).toMatchObject({ data: { reason: "observation_required" } });
     expect(await f.run()).toEqual({});
     expect(f.send).toHaveBeenCalledTimes(2);
+  });
+
+  it("names the sync reply's top-level observation_id when given a ref-map token", async () => {
+    const f = await fixture();
+    const script = (runner: CdpRunner) =>
+      runner.send(7, "Runtime.evaluate", { expression: "submit()" });
+    const nestedObservationId = f.session.refStore.observationId;
+    expect(nestedObservationId).not.toBe(f.first.observation_id);
+    expect(
+      await f.run({ observation_id: nestedObservationId }, "tool.evaluate", script),
+    ).toMatchObject({
+      data: {
+        reason: "observation_required",
+        effect_state: "none",
+        recovery: expect.stringContaining("top-level observation_id"),
+      },
+    });
+    expect(f.send).not.toHaveBeenCalled();
+    expect(
+      await f.run({ observation_id: f.first.observation_id }, "tool.evaluate", script),
+    ).toEqual({});
   });
 
   it("never learns live-text tolerance for an opaque script supplied with a ref", async () => {
@@ -810,10 +893,10 @@ describe("negotiated target control", () => {
     true,
   ])("checks unreported human input in an iframe at dispatch (existing: %s)", async (existing) => {
     const f = await fixture();
-    const frames = await f.readFrames.mock.results.at(-1)!.value;
+    const { frames } = await f.readFrames.mock.results.at(-1)!.value;
     const child = { ...frames.get(0)!, document: "child" };
     if (existing) frames.set(2, child);
-    f.readFrames.mockImplementation(async () => structuredClone(frames));
+    f.readFrames.mockImplementation(async () => ({ frames: structuredClone(frames), gaps: [] }));
     const observation = await f.sync();
     f.readFrames.mockClear();
     vi.mocked(checkActionTarget).mockImplementationOnce(async () => {

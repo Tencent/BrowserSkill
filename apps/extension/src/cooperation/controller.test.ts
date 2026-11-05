@@ -8,7 +8,8 @@ import { captureVomObservation, handleSnapshot } from "@/tools/observation";
 import type { CdpRunner } from "@/tools/shared";
 import { handleTabBorrow, handleTabCreate, handleTabReturn, handleTabSelect } from "@/tools/tabs";
 import { CooperationController } from "./controller";
-import type { FrameState } from "./types";
+import { FrameCollectionError } from "./frame-error";
+import type { CooperationFrames, FrameState } from "./types";
 
 vi.mock("@/tools/observation", () => ({
   captureVomObservation: vi.fn(),
@@ -75,7 +76,12 @@ async function fixture(options: { url?: string; sync?: boolean } = {}) {
       return native();
     },
   } as CdpRunner;
-  const readFrames = vi.fn(async () => new Map([[0, structuredClone(frame)]]));
+  const readFrames = vi.fn(
+    async (): Promise<CooperationFrames> => ({
+      frames: new Map([[0, structuredClone(frame)]]),
+      gaps: [],
+    }),
+  );
   const resumeFrames = vi.fn(async () => {
     frame = { ...frame, editing: false, revision: frame.revision + 1 };
   });
@@ -155,6 +161,32 @@ afterEach(() => {
 });
 
 describe("renderer-independent control authority", () => {
+  it.each([
+    "pending",
+    "scrolling",
+  ] as const)("waits for %s at dispatch without reporting human control", async (field) => {
+    const f = await fixture();
+    f.change({ [field]: true, revision: 0 });
+    const action = f.act();
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    expect(f.native).not.toHaveBeenCalled();
+    expect(f.controller.view(7)?.mode).toBe("acting");
+    f.change({ [field]: false, revision: 0 });
+    expect(await action).not.toHaveProperty("code");
+    expect(f.native).toHaveBeenCalledOnce();
+  });
+  it("lets a confirmed human action win while native input is waiting for a gesture", async () => {
+    const f = await fixture();
+    f.change({ pending: true, revision: 0 });
+    const action = f.act();
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    f.change({ pending: false, human: 1, lastInput: 10000 });
+    expect(await action).toMatchObject({
+      code: "permission_denied",
+      data: { effect_state: "none" },
+    });
+    expect(f.native).not.toHaveBeenCalled();
+  });
   it("does not require an observation or query an unavailable renderer", async () => {
     const f = await fixture({ sync: false });
     f.readFrames.mockClear();
@@ -1317,6 +1349,53 @@ describe("shared-tab dispatch fences", () => {
     expect(await f.command("wait")).toMatchObject({ ready: true });
     expect(await f.act()).toMatchObject({ code: "permission_denied" });
   });
+  it("keeps an explicit human hold visible while navigation makes collection unavailable", async () => {
+    const f = await fixture();
+    await f.controller.control(7, f.controller.view(7)!.revision, "hold");
+    f.controller.invalidate(7);
+    f.readFrames.mockRejectedValueOnce(new Error("frame is loading"));
+    expect(await f.command("wait")).toMatchObject({ ready: false, state: { mode: "held" } });
+    expect(await f.act()).toMatchObject({ code: "permission_denied" });
+    expect(f.native).not.toHaveBeenCalled();
+  });
+  it.each([
+    "frame_unobservable",
+    "page_load_failed",
+  ] as const)("returns %s immediately from sync, wait and actions without granting control", async (reason) => {
+    const f = await fixture();
+    f.readFrames.mockRejectedValue(
+      new FrameCollectionError(reason, [{ frame_id: 3, url: "https://frame.test" }]),
+    );
+    for (const action of ["sync", "wait"] as const)
+      expect(await f.command(action)).toMatchObject({
+        code: "permission_denied",
+        data: {
+          reason,
+          effect_state: "none",
+          frames: [{ frame_id: 3, url: "https://frame.test" }],
+        },
+      });
+    expect(await f.act()).toMatchObject({ data: { reason, effect_state: "none" } });
+    expect(f.controller.view(7)?.mode).toBe("unavailable");
+    expect(f.native).not.toHaveBeenCalled();
+  });
+  it("exposes skipped frame gaps and leaves the policy unset until a successful sync", async () => {
+    const f = await fixture({ sync: false });
+    const collection = await f.readFrames();
+    collection.gaps = [{ frame_id: 3, url: "http://127.0.0.1:9/ad", reason: "load_error" }];
+    f.readFrames.mockImplementation(async () => structuredClone(collection));
+    expect(await f.command("status")).toMatchObject({
+      control_policy: null,
+      frame_gaps: collection.gaps,
+    });
+    expect(await f.command("wait")).toMatchObject({ control_policy: null, ready: true });
+    expect(await f.command("sync")).toMatchObject({
+      control_policy: "strict",
+      frame_gaps: collection.gaps,
+      context_id: expect.any(String),
+    });
+    expect(await f.command("status")).toMatchObject({ control_policy: "strict" });
+  });
   it("fails closed when any frame is inaccessible and preserves a page the person touched", async () => {
     const f = await fixture();
     f.change({ human: 1 });
@@ -1839,6 +1918,66 @@ describe("legacy capabilities under default cooperation", () => {
       done: true,
     });
     expect(effect).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    false,
+    true,
+  ])("recaptures the observation after a dispatched window resize, even when it fails=%s", async (fails) => {
+    const f = await fixture();
+    const baseline = await f.command("sync");
+    expect(baseline.kind).toBe("unchanged");
+    await f.act(
+      baseline.context_id,
+      (cdp) =>
+        cdp.runBrowserMutation!(async () =>
+          fails
+            ? { code: "protocol_error", message: "constrained" }
+            : { window_id: 100, width: 1280, height: 800 },
+        ),
+      "tool.window_resize",
+    );
+    expect(await f.command("sync")).toMatchObject({ kind: "baseline", observation: { tab_id: 7 } });
+  });
+
+  it.each([
+    false,
+    true,
+  ])("recaptures all window observations after a bootstrap resize, even when it fails=%s", async (fails) => {
+    const f = await fixture({ url: "about:blank" });
+    expect(await f.command("sync")).toMatchObject({ kind: "unchanged" });
+    f.ctx.agentCreatedTabs.add(8);
+    f.tab.id = 8;
+    f.tab.url = "https://fixture.test";
+    const syncPage = () =>
+      f.controller.command(
+        { session_id: "shared", tab_id: 8, action: "sync" },
+        f.cdp,
+        f.abort.signal,
+      );
+    expect(await syncPage()).toMatchObject({ kind: "baseline", tab_id: 8 });
+    expect(await syncPage()).toMatchObject({ kind: "unchanged" });
+    f.tab.id = 7;
+    f.tab.url = "about:blank";
+    await f.controller.run(
+      {
+        id: "bootstrap-resize",
+        method: "tool.window_resize",
+        params: { session_id: "shared", tab_id: 7 },
+      },
+      f.cdp,
+      f.abort.signal,
+      (cdp) =>
+        cdp.runBrowserMutation!(async () =>
+          fails
+            ? { code: "protocol_error", message: "constrained" }
+            : { window_id: 100, width: 1280, height: 800 },
+        ),
+    );
+    expect(await f.command("sync")).toMatchObject({ kind: "baseline", tab_id: 7 });
+    f.tab.id = 8;
+    f.tab.url = "https://fixture.test";
+    expect(await syncPage()).toMatchObject({ kind: "baseline", tab_id: 8 });
   });
 
   it("cancels a pending transfer when the person takes over and never repeats its effect", async () => {
@@ -2857,7 +2996,7 @@ it("revokes actions on media source changes even without DOM revision changes", 
   const synced = await f.command("sync");
   // A browser source selection can change currentSrc without a DOM mutation.
   const rev = f.readFrames.mock.results.at(-1)!.value;
-  const frames = await rev;
+  const { frames } = await rev;
   f.change(
     { media: [{ ...media, currentSrc: "two.webm" }], revision: frames.get(0)!.revision },
     false,

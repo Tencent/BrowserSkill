@@ -266,6 +266,18 @@ describe("target actionability", () => {
     expect(JSON.stringify(result)).not.toContain("old-value");
   });
   it.each([
+    '<input autocomplete="one-time-code" value="private-value">',
+    '<input autocomplete="billing cc-number" value="private-value">',
+    '<input autocomplete="section-login Current-Password" value="private-value">',
+  ])("does not expose code or card values in condition failures: %s", async (html) => {
+    const f = fixture(html);
+    const result = await checkExpectations(f.cdp, session, tab, [
+      { target: "@e1", field: "value", equals: "old-value" },
+    ]);
+    expect(result).toMatchObject({ data: { reason: "precondition_failed", redacted: true } });
+    expect(JSON.stringify(result)).not.toContain("private-value");
+  });
+  it.each([
     ["detached", "target_detached"],
     ["hidden", "target_hidden"],
     ["disabled", "target_disabled"],

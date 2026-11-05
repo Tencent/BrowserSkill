@@ -114,7 +114,7 @@ export interface CdpRunner {
       reason?: "decision_timeout",
     ) => void,
   ): { dispose(): void };
-  ensureConsoleCapture?(tabId: number): Promise<void>;
+  ensureConsoleCapture?(tabId: number, signal?: AbortSignal): Promise<void>;
   consoleEntriesSince?(
     tabId: number,
     since: number | undefined,

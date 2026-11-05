@@ -415,12 +415,26 @@ export class DebugManager {
         2500,
         signal,
       );
-      if (
-        target.sessionId &&
-        state.run.state === "capturing" &&
-        this.owned(state.run.session_id, target.tabId)
-      )
+      // The driver attaches with Runtime off, so the root needs it here too:
+      // the observer tracks its world through context events and bindings
+      // only reach new documents while Runtime is on.
+      if (state.run.state === "capturing" && this.owned(state.run.session_id, target.tabId))
         await deadline(this.cdp.sendAttached(target, "Runtime.enable"), 2500, signal);
+      // Root attachment no longer enables Log implicitly. Preserve browser
+      // diagnostics in debug recordings without making Log a startup requirement.
+      if (
+        !target.sessionId &&
+        state.run.state === "capturing" &&
+        this.owned(state.run.session_id, target.tabId) &&
+        !signal?.aborted
+      ) {
+        try {
+          await deadline(this.cdp.sendAttached(target, "Log.enable"), 2500, signal);
+        } catch (error) {
+          if (signal?.aborted) throw error;
+          this.coverage(state, "browser_log_capture_unavailable");
+        }
+      }
       if (state.run.state === "capturing" && !signal?.aborted)
         await deadline(Promise.resolve(state.controls?.target(target)), 2500, signal);
     } catch (error) {

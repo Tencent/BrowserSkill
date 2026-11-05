@@ -331,6 +331,18 @@ pub fn info_for_error(code: ErrorCode, data: Option<&serde_json::Value>) -> Rend
             ),
             ..base
         },
+        (_, "frame_unobservable") => RenderInfo {
+            summary: "page interaction coverage is unavailable",
+            hint: Some(
+                "reload the tab once; if it persists, use read-only commands such as `bsk get-html` or `bsk snapshot`",
+            ),
+            ..base
+        },
+        (_, "page_load_failed") => RenderInfo {
+            summary: "the main page failed to load",
+            hint: Some("check the page URL and network connection, then reload and synchronize"),
+            ..base
+        },
         (_, "precondition_failed") => RenderInfo {
             summary: "a required business fact no longer matches",
             hint: Some(
@@ -346,7 +358,7 @@ pub fn info_for_error(code: ErrorCode, data: Option<&serde_json::Value>) -> Rend
         (_, "observation_required" | "observation_changed") => RenderInfo {
             summary: "this action needs an explicit current observation",
             hint: Some(
-                "synchronize and pass its observation_id with --observation; do not replay an uncertain action",
+                "synchronize and pass the reply's top-level observation_id with --observation; do not replay an uncertain action",
             ),
             ..base
         },
@@ -575,7 +587,7 @@ pub fn info_for_error(code: ErrorCode, data: Option<&serde_json::Value>) -> Rend
         (ErrorCode::Timeout, reason::SESSION_BUSY) => RenderInfo {
             summary: "previous session command is still running",
             hint: Some(
-                "wait for the current command to finish, cancel it with Ctrl-C, or stop/restart the session",
+                "wait for the current command to finish, or cancel it through its parent process or with Ctrl-C in the terminal running that command, then retry; if the caller is gone and the session stays busy, use `bsk daemon restart` (interrupts all sessions)",
             ),
             exit_code: base.exit_code,
         },
@@ -862,10 +874,14 @@ mod tests {
         let data = serde_json::json!({ "reason": reason::SESSION_BUSY });
         let info = info_for_error(ErrorCode::Timeout, Some(&data));
         assert_eq!(info.summary, "previous session command is still running");
-        assert!(
-            info.hint.unwrap().contains("wait for the current command"),
-            "expected session-busy-specific hint"
-        );
+        let hint = info.hint.unwrap();
+        assert!(hint.contains("wait for the current command"));
+        assert!(hint.contains("Ctrl-C in the terminal running that command"));
+        assert!(hint.contains("parent process"));
+        assert!(hint.contains("then retry"));
+        assert!(hint.contains("bsk daemon restart"));
+        assert!(hint.contains("interrupts all sessions"));
+        assert!(!hint.contains("stop/restart"));
         assert_eq!(info.exit_code, 4);
     }
 
@@ -1247,6 +1263,23 @@ mod tests {
                 Some(&serde_json::json!({"reason":reason})),
             );
             assert!(info.summary.contains(phrase));
+        }
+    }
+
+    #[test]
+    fn collection_errors_explain_recovery_without_waiting_again() {
+        for (reason, summary, hint) in [
+            ("frame_unobservable", "coverage is unavailable", "read-only"),
+            ("page_load_failed", "main page failed to load", "network"),
+        ] {
+            let info = info_for_error(
+                ErrorCode::PermissionDenied,
+                Some(&serde_json::json!({"reason":reason})),
+            );
+            assert!(info.summary.contains(summary));
+            assert!(info.hint.unwrap().contains(hint));
+            assert!(!info.hint.unwrap().contains("cooperate wait"));
+            assert_ne!(info.exit_code, 0);
         }
     }
 }
