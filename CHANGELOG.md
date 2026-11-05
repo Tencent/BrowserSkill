@@ -24,6 +24,9 @@ Starting from 0.2.0, CLI / Extension / DSH Plugin share the same version number.
 
 ### Fixed
 
+- On Windows, `daemon stop`, daemon status checks, the post-update wait and
+  leftover cleanup no longer treat a running process the CLI cannot open, such as
+  one started from an elevated terminal, as exited.
 - CLI cancellation keeps the original RPC progressing and retries cancellation
   that arrives before daemon registration, reducing background screenshots that
   keep a session busy after the caller stops. Confirmation and response waiting
