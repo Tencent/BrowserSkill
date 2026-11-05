@@ -24,6 +24,11 @@ Starting from 0.2.0, CLI / Extension / DSH Plugin share the same version number.
   `chrome-extension://<id>/example.com` when it opened a tab or navigated a page
   it could not drive over CDP; over CDP the request failed as
   `cdp_failed: Invalid URL`.
+- Saved HTML debug captures redact sensitive input values when `autocomplete`
+  contains surrounding whitespace or multiple tokens, such as
+  `section-login one-time-code` or `section-checkout billing cc-number`.
+  Non-sensitive token lists such as `section-login email` remain unchanged
+  ([#566](https://github.com/Tencent/BrowserSkill/pull/566)).
 - Pages that handle the legacy `mousewheel` event, such as Bilibili's player volume,
   receive wheel input again. The extension listened for `wheel` on every page even
   without a shared-control session, which made Chromium skip those handlers; it now
