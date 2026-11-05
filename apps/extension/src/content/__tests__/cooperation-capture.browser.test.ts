@@ -31,9 +31,12 @@ describe.skipIf(!process.env.BSK_COOP_CHROME)("frame interaction coverage", () =
           ? brokenFrame
           : request.url === "/late-frame"
             ? '<!doctype html><iframe src="/delayed"></iframe>'
-            : request.url === "/frame" || request.url === "/delayed"
-              ? '<!doctype html><input aria-label="Frame" value="child">'
-              : '<!doctype html><input aria-label="Page" value="top"><iframe src="/frame"></iframe>',
+            : request.url === "/wheel"
+              ? // A legacy handler, as Bilibili uses for volume (#550).
+                '<!doctype html><div style="height:400px"></div><script>window.counts={mousewheel:0};document.addEventListener("mousewheel",()=>counts.mousewheel++)</script>'
+              : request.url === "/frame" || request.url === "/delayed"
+                ? '<!doctype html><input aria-label="Frame" value="child">'
+                : '<!doctype html><input aria-label="Page" value="top"><iframe src="/frame"></iframe>',
       );
     });
     try {
@@ -323,6 +326,55 @@ globalThis.httpCooperationReady = true;`,
           expect(executeScript).toHaveBeenCalledOnce();
           await evaluate(`chrome.tabs.remove(${delayed.id})`);
           executeScript.mockClear();
+
+          // Chromium skips a node's `mousewheel` listeners when that node has a
+          // `wheel` listener. Wheel capture must keep page handlers running (#550).
+          // Passive wheel events reach page script after the input is acknowledged.
+          const wheel = async (route: string, counts: Record<string, number>) => {
+            const { targetInfos } = await send<{
+              targetInfos: { targetId: string; url: string }[];
+            }>("Target.getTargets");
+            const target = targetInfos.find(
+              (target) => target.url === `http://127.0.0.1:${port}${route}`,
+            )!;
+            const { sessionId: human } = await send<{ sessionId: string }>(
+              "Target.attachToTarget",
+              { targetId: target.targetId, flatten: true },
+            );
+            try {
+              await send("Page.bringToFront", {}, human);
+              await send(
+                "Input.dispatchMouseEvent",
+                { type: "mouseWheel", x: 100, y: 100, deltaX: 0, deltaY: -120 },
+                human,
+              );
+              await expect
+                .poll(
+                  async () =>
+                    (
+                      await send<{ result: { value: Record<string, number> } }>(
+                        "Runtime.evaluate",
+                        { expression: "window.counts", returnByValue: true },
+                        human,
+                      )
+                    ).result.value,
+                  { timeout: 3000 },
+                )
+                .toEqual(counts);
+            } finally {
+              await send("Target.detachFromTarget", { sessionId: human });
+            }
+          };
+          const legacy = await createTab("/wheel");
+          await wheel("/wheel", { mousewheel: 1 });
+          await collectCooperationFrames(legacy.id, COOPERATION_READ, "wheel");
+          await wheel("/wheel", { mousewheel: 2 });
+          // Browsing never transfers control.
+          expect(
+            (await collectCooperationFrames(legacy.id, COOPERATION_READ, "wheel")).frames.get(0),
+          ).toMatchObject({ human: 0 });
+          await evaluate(`chrome.tabs.remove(${legacy.id})`);
+          expect(executeScript).not.toHaveBeenCalled();
 
           const oldTab = await createTab("/");
           const beforeReload = await getAllFrames({ tabId: oldTab.id });
