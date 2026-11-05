@@ -52,7 +52,24 @@ const cells = (body: string) =>
 const values = (outcome: Outcome) =>
   outcome.result!.rows.map((row) => outcome.result!.columns.map((column) => row[column.key]));
 
+const slottedLanguageTable = (lightLanguage: string, shadowLanguage: string) =>
+  `<table id="t" lang="${lightLanguage}"><tr>
+    <td><x-case>iı</x-case></td>
+    <td><x-case><span>iı</span></x-case></td>
+    <td><x-case><span lang="${lightLanguage}">iı</span></x-case></td>
+  </tr></table><script>
+    customElements.define("x-case", class extends HTMLElement {
+      constructor() {
+        super();
+        this.attachShadow({ mode: "open" }).innerHTML =
+          '<span lang="${shadowLanguage}" style="text-transform:uppercase"><slot></slot></span>';
+      }
+    });
+  </script>`;
+
 const fixtures: Record<string, string> = {
+  slottedEnglish: slottedLanguageTable("tr", "en"),
+  slottedTurkish: slottedLanguageTable("en", "tr"),
   textTransform: `<style>
       #t { text-transform: uppercase; }
       #t .lower { text-transform: lowercase; }
@@ -143,6 +160,7 @@ const fixtures: Record<string, string> = {
 
 describe.skipIf(!process.env.BSK_CLICK_CHROME)("real browser structured extraction", () => {
   let extract: (fixture: string, params: Omit<ExtractParams, "session_id">) => Promise<Outcome>;
+  let renderedText: (selector: string) => Promise<string>;
   let finish: () => Promise<void>;
 
   beforeAll(async () => {
@@ -179,6 +197,13 @@ describe.skipIf(!process.env.BSK_CLICK_CHROME)("real browser structured extracti
         });
         const local: Send = (method, params) => send(method, params, sessionId);
         await local("Page.enable");
+        renderedText = async (selector) => {
+          const reply = await local<{ result: { value: string } }>("Runtime.evaluate", {
+            expression: `document.querySelector(${JSON.stringify(selector)}).innerText`,
+            returnByValue: true,
+          });
+          return reply.result.value;
+        };
         extract = async (fixture, params) => {
           await local("Page.navigate", { url: `${origin}/${fixture}` });
           await expect
@@ -333,6 +358,16 @@ describe.skipIf(!process.env.BSK_CLICK_CHROME)("real browser structured extracti
     expect(values(await extract("transformedSlot", { action: "table", selector: "#t" }))).toEqual([
       ["PAID"],
     ]);
+  });
+
+  it.each([
+    { fixture: "slottedEnglish", expected: ["II", "II", "İI"] },
+    { fixture: "slottedTurkish", expected: ["İI", "İI", "II"] },
+  ])("uses the rendered slot language for $fixture", async ({ fixture, expected }) => {
+    const table = await extract(fixture, { action: "table", selector: "#t" });
+    const rendered = (await renderedText("#t")).split("\t");
+    expect(rendered).toEqual(expected);
+    expect(values(table)).toEqual([rendered]);
   });
 
   it("omits content-visibility hidden text without dropping auto offscreen content", async () => {

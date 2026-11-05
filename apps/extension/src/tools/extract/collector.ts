@@ -186,7 +186,11 @@ export function collectExtractDom(this: Element, options: CollectorOptions): Raw
         locale = /^(tr|az|lt|el)(?:-|$)/i.exec(language)?.[1].toLowerCase() ?? "";
         break;
       }
-      current = current.parentElement ?? ((current.getRootNode() as ShadowRoot).host || null);
+      // Follow the rendered ancestry for slotted elements.
+      current =
+        current.assignedSlot ??
+        current.parentElement ??
+        ((current.getRootNode() as ShadowRoot).host || null);
     }
     for (const item of chain) caseLocales.set(item, locale);
     return locale;
