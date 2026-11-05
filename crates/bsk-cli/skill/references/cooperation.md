@@ -32,6 +32,9 @@ is replayed to wait for success. Scripts, untargeted keys, visual clicks and oth
 retain strict observation checks. For these, pass `--observation ID` from the sync alongside
 `--context ID`. Supplementary reads do not replace that strict baseline. Read the returned
 evidence before choosing the operation; sync again for the next strict action.
+Under target policy, every successful sync returns a new top-level receipt, including
+`kind: "unchanged"`. Sync again after a refused or failed untargeted attempt too, and
+inspect the new evidence before choosing the next action.
 Prefer a targeted key, such as `press Enter --ref @e3`, when the intended recipient is known.
 
 For the legacy whole-page policy, choose `cooperate sync --policy strict` on the first sync.
