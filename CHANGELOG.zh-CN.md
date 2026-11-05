@@ -16,6 +16,7 @@ BrowserSkill 的重要变更记录于此，格式参考 [Keep a Changelog](https
 ### 修复
 
 - 调试网络证据按原始 `Content-Type` 判断请求体和 mock 正文的类型。此前该值若被请求头证据预算截断，可能导致 multipart 正文被保留，或跳过表单字段脱敏。
+- CLI 取消时继续推进原 RPC，并重试先于 daemon 注册到达的取消请求，减少调用方停止后后台截图仍占用会话的情况。取消确认和响应等待共用两秒预算，MCP 取消也使用同一预算；文件传输清理保留独立的有限预算。超过该期限才注册的请求仍需 daemon 侧取消追踪解决（[#419](https://github.com/Tencent/BrowserSkill/pull/419)）。
 - 保存的 HTML 调试捕获在 `autocomplete` 含首尾空白或多个令牌时（如 `section-login one-time-code` 或 `section-checkout billing cc-number`）也会对敏感输入值脱敏；`section-login email` 等非敏感令牌列表保持不变（[#566](https://github.com/Tencent/BrowserSkill/pull/566)）。
 - 处理旧版 `mousewheel` 事件的页面（如哔哩哔哩播放器的音量调节）重新能收到滚轮输入。此前扩展即使没有共享控制会话也会在每个页面监听 `wheel`，导致 Chromium 跳过这些处理函数；现在只在采集期间于 `window` 上监听。
 - 截断的页面文本把 emoji 切成两半时（例如对 `Hi 🚀 there` 执行 `bsk console --max-text-chars 4`），命令不再一直等到超时。此前截断留下的孤立代理项会让 daemon 丢弃扩展的整条回复；现在扩展会把它替换为 `U+FFFD` 再发送。
