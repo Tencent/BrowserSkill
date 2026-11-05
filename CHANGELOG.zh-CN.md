@@ -8,6 +8,8 @@ BrowserSkill 的重要变更记录于此，格式参考 [Keep a Changelog](https
 ### 修复
 
 - 调试网络证据按原始 `Content-Type` 判断请求体和 mock 正文的类型。此前该值若被请求头证据预算截断，可能导致 multipart 正文被保留，或跳过表单字段脱敏。
+- 目标策略下，轮播、嵌入视频或广告刷新 iframe 时，主文档内的目标和业务条件可继续使用现有控制凭证。涉及 iframe 引用或严格观察的操作会在框架文档变化后要求重新同步。
+- 以 `autocomplete`（`one-time-code`、`cc-*`、`current-password`、`new-password`）标记的一次性验证码、银行卡和密码字段，其值此前已在观察结果中隐藏，现在也不会出现在共享控制字段状态、`expect` 失败详情、结构化提取和录制的填写步骤中。所有检查均逐个匹配 `autocomplete` 令牌，因此 `section-login current-password` 或 `billing cc-number` 的值同样会被隐藏。被“显示密码”切换为 `type=text` 的密码框，在共享控制字段状态以及录制步骤和状态观察中也保持隐藏。
 - 在 Windows 上，配对、轮换或撤销远程浏览器时，若另一请求正在读取授权存储，不再因 `replace authorization snapshot: Access is denied` 而失败。
 - 调整窗口大小时验证实际窗口边界和目标标签页的布局视口，并报告受限边界、非活动标签页及未随窗口变化的视口。已发送的调整操作还会使下一次共享控制同步重新采集页面。
 - 共享控制同步跳过失败的子框架和非活动文档，在 `frame_gaps` 中仅报告 HTTP(S) 的来源和路径或其他 URL 的协议，并立即为当前文档修复一次缺失的交互采集器。缺少覆盖的活动框架仍以 `frame_unobservable` 阻止操作，主页面失败则报告 `page_load_failed`。
