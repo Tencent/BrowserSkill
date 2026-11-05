@@ -28,6 +28,13 @@ Starting from 0.2.0, CLI / Extension / DSH Plugin share the same version number.
   `invalid_params` ("another bsk download is active"). It waits its turn within its
   own `timeout_ms`, and returns `timeout` or `cancelled` with `effect_state: "none"`
   if it cannot start.
+- CLI cancellation keeps the original RPC progressing and retries cancellation
+  that arrives before daemon registration, reducing background screenshots that
+  keep a session busy after the caller stops. Confirmation and response waiting
+  share a two-second budget, including MCP cancellation; transfer cleanup keeps
+  its separate bounded budget. Requests registered after that deadline still
+  require daemon-side cancellation tracking
+  ([#419](https://github.com/Tencent/BrowserSkill/pull/419)).
 - Saved HTML debug captures redact sensitive input values when `autocomplete`
   contains surrounding whitespace or multiple tokens, such as
   `section-login one-time-code` or `section-checkout billing cc-number`.
