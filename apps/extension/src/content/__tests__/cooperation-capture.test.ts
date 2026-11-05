@@ -828,6 +828,56 @@ it("does not acquire an editing lease when scrolling over an input", () => {
   expect(read()).toMatchObject({ human: 0, editing: false, busy: false });
 });
 
+it("listens for wheel only while collecting so pages keep legacy mousewheel handlers", () => {
+  // Chromium does not run a node's `mousewheel` listeners when it has a `wheel` listener.
+  const added = [vi.spyOn(document, "addEventListener"), vi.spyOn(window, "addEventListener")];
+  const removed = vi.spyOn(window, "removeEventListener");
+  const wheel = (...spies: (typeof removed)[]) =>
+    spies.flatMap((spy) => spy.mock.calls).filter(([type]) => type === "wheel").length;
+  const read = collector();
+  expect(wheel(...added)).toBe(0);
+  read();
+  expect(wheel(...added)).toBe(1);
+  read(COOPERATION_DISABLE);
+  expect(wheel(removed)).toBe(1);
+});
+
+it("attributes an Agent wheel that an earlier document listener stops", () => {
+  document.body.innerHTML = '<input type="number" aria-label="Volume" value="5">';
+  const field = document.querySelector("input")!;
+  // Registered by the page before cooperation starts; its wheel handler changes the value.
+  const stop = (event: Event) => {
+    event.stopImmediatePropagation();
+    field.value = String(Number(field.value) + 1);
+    const input = new InputEvent("input", { bubbles: true });
+    Object.defineProperty(input, "isTrusted", { value: true });
+    field.dispatchEvent(input);
+  };
+  document.addEventListener("wheel", stop, true);
+  try {
+    const read = collector();
+    read();
+    const timestamp = Date.now();
+    const point = { x: 10, y: 20 };
+    const wheel = () => {
+      // happy-dom's WheelEvent is not a MouseEvent; Chromium's is.
+      const event = new MouseEvent("wheel", { bubbles: true, clientX: point.x, clientY: point.y });
+      Object.defineProperties(event, {
+        isTrusted: { value: true },
+        timeStamp: { value: timestamp - performance.timeOrigin },
+      });
+      field.dispatchEvent(event);
+    };
+    read(COOPERATION_ARM, "first", { type: "wheel", ...point, timestamp });
+    wheel();
+    expect(read()).toMatchObject({ human: 0 });
+    wheel();
+    expect(read()).toMatchObject({ human: 1 });
+  } finally {
+    document.removeEventListener("wheel", stop, true);
+  }
+});
+
 it("preserves editing across a focus transition into a shadow field", async () => {
   document.body.innerHTML =
     '<input type="range"><div id="host" tabindex="0"></div><button>Done</button>';
