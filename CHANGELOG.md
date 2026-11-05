@@ -24,6 +24,9 @@ Starting from 0.2.0, CLI / Extension / DSH Plugin share the same version number.
 
 ### Fixed
 
+- Debug network evidence classifies request and mock bodies by their raw
+  `Content-Type`. Previously a value cut short by the header-evidence budget could
+  let multipart bodies be retained, or skip form field redaction.
 - CLI cancellation keeps the original RPC progressing and retries cancellation
   that arrives before daemon registration, reducing background screenshots that
   keep a session busy after the caller stops. Confirmation and response waiting
