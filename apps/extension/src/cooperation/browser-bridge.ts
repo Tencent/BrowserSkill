@@ -26,6 +26,8 @@ function validFrame(value: unknown): value is FrameState {
     Number.isSafeInteger(f.structure) &&
     Number.isSafeInteger(f.human) &&
     typeof f.busy === "boolean" &&
+    (f.pending === undefined || typeof f.pending === "boolean") &&
+    (f.scrolling === undefined || typeof f.scrolling === "boolean") &&
     typeof f.editing === "boolean" &&
     typeof f.lastInput === "number" &&
     Array.isArray(f.fields) &&
