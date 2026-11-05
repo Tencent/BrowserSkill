@@ -16,6 +16,20 @@ describe("describeTarget", () => {
     });
   });
 
+  it.each(["button", "input"])("prefers aria-labelledby over aria-label for %s", (tag) => {
+    document.body.innerHTML = `
+      <span id="context">服务</span>
+      <span id="action"> 发布 </span>
+      <${tag} aria-labelledby="action context" aria-label="旧名称"></${tag}>
+    `;
+    expect(describeTarget(document.querySelector(tag)!).name).toBe("发布 服务");
+  });
+
+  it("uses aria-label when aria-labelledby references a missing element", () => {
+    document.body.innerHTML = `<button aria-labelledby="missing" aria-label="发布">go</button>`;
+    expect(describeTarget(document.querySelector("button")!).name).toBe("发布");
+  });
+
   it("uses label text and name_attr for inputs", () => {
     document.body.innerHTML = `
       <label for="svc">服务名称</label>
