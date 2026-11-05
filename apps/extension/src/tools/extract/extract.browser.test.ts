@@ -114,6 +114,10 @@ const fixtures: Record<string, string> = {
   hiddenSlottedItem: `<div id="host"><li style="display:none">Hidden</li><li>Visible</li></div><script>
     document.querySelector('#host').attachShadow({mode: 'open'}).innerHTML = '<ul id="l"><slot></slot></ul>';
   </script>`,
+  closedDetailsAria:
+    '<div id="l" role="list"><details><summary>More</summary><div role="listitem" aria-posinset="1" aria-setsize="2">Hidden</div></details><div role="listitem" aria-posinset="2" aria-setsize="2">Visible</div></div>',
+  closedDetailsDomOrder:
+    '<div id="l" role="list"><details><summary>More</summary><div role="listitem">Hidden</div></details><div role="listitem">Visible</div></div>',
   invalidAria:
     '<div id="g" role="grid"><div role="row" aria-rowindex=""><span role="columnheader" aria-colindex="first">A</span></div><div role="row" aria-rowindex="2"><span role="gridcell">1</span></div></div><ul id="l"><li aria-setsize="unknown" aria-posinset="x">a</li></ul>',
   pinned: pinnedGrid(
@@ -320,6 +324,20 @@ describe.skipIf(!process.env.BSK_CLICK_CHROME)("real browser structured extracti
     );
     expect(result!.rows).toEqual([{ text: "First", url: null }]);
     expect(result!.coverage).toMatchObject({ truncated: true, stop_reason: "row_limit" });
+  });
+
+  it.each([
+    "closedDetailsAria",
+    "closedDetailsDomOrder",
+  ])("preserves hidden list positions inside closed details (%s)", async (fixture) => {
+    const { result } = await extract(fixture, { action: "list", selector: "#l" });
+    expect(result!.rows).toEqual([{ text: "Visible", url: null }]);
+    expect(result!.row_sources[0].source_row).toBe(2);
+    expect(result!.warnings).toEqual(["hidden_rows_omitted"]);
+    expect(result!.coverage).toMatchObject({
+      truncated: false,
+      dataset_complete: "unknown",
+    });
   });
 
   it("reaches the row cap for long and wide tables without row ids", async () => {
