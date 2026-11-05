@@ -24,6 +24,8 @@ Starting from 0.2.0, CLI / Extension / DSH Plugin share the same version number.
 
 ### Fixed
 
+- Recorded controls prefer `aria-labelledby` text over `aria-label` when both
+  attributes are present, so their recorded names follow accessible naming precedence.
 - CLI cancellation keeps the original RPC progressing and retries cancellation
   that arrives before daemon registration, reducing background screenshots that
   keep a session busy after the caller stops. Confirmation and response waiting

@@ -109,11 +109,11 @@ function compactLinkName(el: Element): string | null {
 
 /** Visible accessible name preference order for LLM textbooks. */
 export function accessibleName(el: Element): string | undefined {
-  const ariaLabel = normalizeWhitespace(el.getAttribute("aria-label") ?? "");
-  if (ariaLabel) return truncate(ariaLabel);
-
   const labelledBy = labelledByText(el);
   if (labelledBy) return labelledBy;
+
+  const ariaLabel = normalizeWhitespace(el.getAttribute("aria-label") ?? "");
+  if (ariaLabel) return truncate(ariaLabel);
 
   const forLabel = associatedLabelText(el);
   if (forLabel) return forLabel;
