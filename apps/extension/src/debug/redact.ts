@@ -127,6 +127,49 @@ export function redactHeaders(value: unknown): Record<string, string> {
   return redactHeaderEvidence(value).headers;
 }
 
+function sensitiveHtmlAttributes(tag: string): boolean {
+  const attributes = tag.matchAll(
+    /\b(type|name|id|autocomplete)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))/gi,
+  );
+  for (const match of attributes) {
+    const value = htmlField(match[2] ?? match[3] ?? match[4]);
+    if (
+      secretField(value) ||
+      secretField(value.toLowerCase()) ||
+      value
+        .trim()
+        .split(/\s+/)
+        .some((token) => /^(?:current-password|new-password|one-time-code|cc-.+)$/i.test(token))
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function redactSensitiveHtmlControls(text: string): string {
+  // Remove server-rendered values from controls whose field metadata marks them
+  // as sensitive. Inputs have no child content; textareas and selects do, so
+  // remove the whole control to avoid retaining either text content or option
+  // values that would be submitted as the initial value.
+  let result = text.replace(/<input\b(?:[^>"']|"[^"]*"|'[^']*')*>/gi, (tag) =>
+    sensitiveHtmlAttributes(tag) ? '<input data-bsk-redacted="true">' : tag,
+  );
+  for (const element of ["textarea", "select"] as const) {
+    const block = new RegExp(
+      `<${element}\\b(?:[^>"']|"[^"]*"|'[^']*')*>[\\s\\S]*?(<\\/${element}\\s*>|$)`,
+      "gi",
+    );
+    result = result.replace(block, (value, closing: string) => {
+      const end = value.indexOf(">") + 1;
+      const opening = value.slice(0, end);
+      if (!sensitiveHtmlAttributes(opening)) return value;
+      return `<${element} data-bsk-redacted="true">${closing ? `</${element}>` : ""}`;
+    });
+  }
+  return result;
+}
+
 function redactJson(text: string, bounds: { truncated: boolean }): string {
   const root = parseJsonSource(text);
   const parts: string[] = [];
@@ -187,31 +230,7 @@ export function redactBody(
       };
     }
   } else if (/html/i.test(mime)) {
-    // A password can also occur in a server-rendered input's value attribute.
-    // Remove that input from retained HTML rather than exposing its initial value.
-    result = redactText(
-      text.replace(/<input\b(?:[^>"']|"[^"]*"|'[^']*')*>/gi, (tag) => {
-        const attributes = tag.matchAll(
-          /\b(type|name|id|autocomplete)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))/gi,
-        );
-        for (const match of attributes) {
-          const value = htmlField(match[2] ?? match[3] ?? match[4]);
-          if (
-            secretField(value) ||
-            secretField(value.toLowerCase()) ||
-            value
-              .trim()
-              .split(/\s+/)
-              .some((token) =>
-                /^(?:current-password|new-password|one-time-code|cc-.+)$/i.test(token),
-              )
-          )
-            return '<input data-bsk-redacted="true">';
-        }
-        return tag;
-      }),
-      BODY_CHARS,
-    );
+    result = redactText(redactSensitiveHtmlControls(text), BODY_CHARS);
   } else if (/x-www-form-urlencoded/i.test(mime)) {
     // Preserve untouched bytes, ordering and duplicates (including signed form bodies).
     result = text

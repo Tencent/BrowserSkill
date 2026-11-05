@@ -75,6 +75,41 @@ describe("source-preserving evidence redaction", () => {
     });
   });
 
+  it("redacts initial values from sensitive textarea and select controls", () => {
+    const text =
+      '<textarea name="password">BSK_SYNTHETIC_SECRET_7264</textarea>' +
+      '<select name="token"><option value="BSK_SYNTHETIC_SECRET_7264">Credential A</option></select>' +
+      '<textarea name="nickname">Alice</textarea>' +
+      '<select name="country"><option value="cn">China</option></select>';
+
+    expect(redactBody(text, "text/html")).toEqual({
+      text:
+        '<textarea data-bsk-redacted="true"></textarea>' +
+        '<select data-bsk-redacted="true"></select>' +
+        '<textarea name="nickname">Alice</textarea>' +
+        '<select name="country"><option value="cn">China</option></select>',
+      redacted: true,
+      truncated: false,
+      replay_safe: false,
+    });
+  });
+
+  it("redacts encoded metadata and unclosed sensitive controls", () => {
+    const textarea = redactBody(
+      '<textarea name="pass&#119;ord">BSK_SYNTHETIC_SECRET_7264<p>rest of response</p>',
+      "text/html",
+    );
+    expect(textarea.text).toBe('<textarea data-bsk-redacted="true">');
+    expect(textarea).toMatchObject({ redacted: true, truncated: false, replay_safe: false });
+
+    expect(
+      redactBody(
+        '<select autocomplete="section-login one-time-code"><option value="BSK_SYNTHETIC_SECRET_7264">Code</option></select>',
+        "text/html",
+      ).text,
+    ).toBe('<select data-bsk-redacted="true"></select>');
+  });
+
   it.each([
     'name="nick&#110;ame"',
     'name="display&period;name"',
