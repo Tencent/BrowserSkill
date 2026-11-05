@@ -234,10 +234,8 @@ impl CallControl {
         let Some((sock, rpc_id)) = current else {
             return;
         };
-        for _ in 0..3 {
-            let _ = business_rpc::send_cancel(&sock, &rpc_id).await;
-            tokio::time::sleep(Duration::from_millis(200)).await;
-        }
+        let deadline = tokio::time::Instant::now() + business_rpc::CANCEL_RESPONSE_GRACE;
+        let _ = business_rpc::send_cancel(&sock, &rpc_id, deadline).await;
     }
 }
 
@@ -1664,6 +1662,71 @@ mod tests {
 
     fn args(value: Value) -> InteractArgs {
         serde_json::from_value(value).unwrap()
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cancellation_retries_late_registration_with_one_total_budget() {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+        use tokio::net::UnixListener;
+        use tokio::time::Instant;
+
+        for registration in [Some(Duration::ZERO), Some(Duration::from_millis(800)), None] {
+            let dir = tempfile::tempdir_in("/tmp").unwrap();
+            let sock = dir.path().join("daemon.sock");
+            let listener = UnixListener::bind(&sock).unwrap();
+            let start = Instant::now();
+            let (sent, mut attempts) = tokio::sync::mpsc::unbounded_channel();
+            let daemon = tokio::spawn(async move {
+                loop {
+                    let (stream, _) = listener.accept().await.unwrap();
+                    let (read, mut write) = stream.into_split();
+                    let mut reader = BufReader::new(read);
+                    let mut line = String::new();
+                    while reader.read_line(&mut line).await.unwrap() > 0 {
+                        let request: Value = serde_json::from_str(&line).unwrap();
+                        line.clear();
+                        assert_eq!(request["method"], "cancel");
+                        assert_eq!(request["params"]["rpc_id"], "held-rpc");
+                        let matched = registration.is_some_and(|delay| start.elapsed() >= delay);
+                        sent.send(matched).unwrap();
+                        let response = json!({"id":request["id"], "result":{"cancelled":matched}});
+                        write
+                            .write_all(format!("{response}\n").as_bytes())
+                            .await
+                            .unwrap();
+                    }
+                }
+            });
+            let control = CallControl::default();
+            *control.current.lock().unwrap() = Some((sock, "held-rpc".into()));
+            tokio::time::timeout(Duration::from_secs(3), control.cancel())
+                .await
+                .expect("MCP cancellation must share a single two-second budget");
+            assert!(control.is_cancelled());
+            let mut results = Vec::new();
+            while let Ok(matched) = attempts.try_recv() {
+                results.push(matched);
+            }
+            assert!(!results.is_empty());
+            assert!(results.len() <= 12, "excessive retries: {results:?}");
+            if let Some(delay) = registration {
+                assert_eq!(results.last(), Some(&true), "late RPC escaped cancellation");
+                assert!(start.elapsed() >= delay);
+                if delay.is_zero() {
+                    assert_eq!(
+                        results.len(),
+                        1,
+                        "confirmed cancellation must stop retrying"
+                    );
+                }
+            } else {
+                assert!(results.iter().all(|matched| !matched));
+                assert!(start.elapsed() >= Duration::from_millis(1800));
+            }
+            daemon.abort();
+            let _ = daemon.await;
+        }
     }
 
     #[test]
