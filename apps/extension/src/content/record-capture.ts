@@ -14,6 +14,7 @@ import {
 } from "@/lib/hover-trigger-policy";
 import type { RecordStepPayload } from "@/lib/record-bridge";
 import { shouldRecordPress } from "@/lib/recording/draft-policy";
+import { RECORD_PASSWORD_ATTRIBUTE, sensitiveAutocomplete } from "@/lib/sensitive-autocomplete";
 import {
   closestHoverSurfaceCandidate,
   collectHoverSurfaceStates,
@@ -379,6 +380,22 @@ export function startRecordCapture(
   let navigationActionPending = false;
   let navigationActionVersion = 0;
   const committedValues = new WeakMap<FillableElement, string>();
+  // A "show password" toggle switches type=password to text; keep masking those fields.
+  const formerPasswords = new Set<Element>();
+  const markFormerPasswords = (records: MutationRecord[]) => {
+    for (const record of records) {
+      if (record.oldValue?.toLowerCase() === "password" && record.target instanceof Element) {
+        formerPasswords.add(record.target);
+        record.target.setAttribute(RECORD_PASSWORD_ATTRIBUTE, "");
+      }
+    }
+  };
+  const typeObserver = new MutationObserver(markFormerPasswords);
+  typeObserver.observe(document, {
+    subtree: true,
+    attributeFilter: ["type"],
+    attributeOldValue: true,
+  });
 
   const markNavigationAction = () => {
     navigationActionPending = true;
@@ -392,8 +409,11 @@ export function startRecordCapture(
 
   const emitFill = (session: FillSession) => {
     if (session.lastValue === session.baselineValue) return;
+    markFormerPasswords(typeObserver.takeRecords());
     const isPassword =
-      session.element instanceof HTMLInputElement && session.element.type === "password";
+      (session.element instanceof HTMLInputElement && session.element.type === "password") ||
+      formerPasswords.has(session.element) ||
+      sensitiveAutocomplete(session.element.getAttribute("autocomplete"));
     const value = isPassword ? "***" : session.lastValue;
     emitStep({
       op: "fill",
@@ -937,6 +957,9 @@ export function startRecordCapture(
       document.removeEventListener("change", onChange, true);
       document.removeEventListener("keydown", onKeyDown, true);
       urlObserver?.disconnect();
+      typeObserver.disconnect();
+      for (const element of formerPasswords) element.removeAttribute(RECORD_PASSWORD_ATTRIBUTE);
+      formerPasswords.clear();
       if (captureNavigation) {
         window.removeEventListener("hashchange", onUrlEvent);
         window.removeEventListener("popstate", onUrlEvent);
