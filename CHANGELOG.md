@@ -14,8 +14,46 @@ Starting from 0.2.0, CLI / Extension / DSH Plugin share the same version number.
   daemon and browser extension. `bsk install-skill --mcp` can configure Codex,
   Claude Code, and Cursor.
 
+### Changed
+
+- CLI and daemon updates prefer the official website's domestic download source,
+  falling back to GitHub for failed manifest or archive requests and verification.
+  Archive fallback stays on the selected version with SHA256 verification; if both
+  sources fail, the error includes each URL and cause. Explicit manifest overrides
+  continue to use only the configured source.
+
 ### Fixed
 
+- Saved HTML debug captures redact sensitive input values when `autocomplete`
+  contains surrounding whitespace or multiple tokens, such as
+  `section-login one-time-code` or `section-checkout billing cc-number`.
+  Non-sensitive token lists such as `section-login email` remain unchanged
+  ([#566](https://github.com/Tencent/BrowserSkill/pull/566)).
+- Pages that handle the legacy `mousewheel` event, such as Bilibili's player volume,
+  receive wheel input again. The extension listened for `wheel` on every page even
+  without a shared-control session, which made Chromium skip those handlers; it now
+  listens only while collecting, on `window`.
+- Commands no longer wait until their timeout when truncated page text cuts an
+  emoji in half, for example `bsk console --max-text-chars 4` on `Hi 🚀 there`.
+  The lone surrogate left by the cut made the daemon drop the extension's whole
+  reply; the extension now sends it as `U+FFFD`.
+- Shared control keeps running during scrolling and ineffective key presses. Completed
+  page clicks, keyboard activation and actual field edits yield to the person. Pending
+  gestures wait at dispatch without revoking control, and coordinate input waits for
+  scrolling to settle. Focusing a text field alone no longer holds editing control.
+
+- With target control, a carousel, video embed or ad refreshing an iframe no
+  longer revokes actions whose targets and preconditions are all in the main
+  document. Actions involving iframe refs or a strict observation require a
+  fresh sync when the frame documents change.
+- Values in one-time-code, card and password fields marked by `autocomplete`
+  (`one-time-code`, `cc-*`, `current-password`, `new-password`), which observations
+  already hide, are also kept out of shared-control field state, `expect` failure
+  details, structured extraction and recorded fill steps. Every check matches each
+  `autocomplete` token, so `section-login current-password` or `billing cc-number`
+  values stay hidden too. Password fields that a "show password" toggle switches to
+  `type=text` also stay masked across shared-control field state and recorded steps
+  and state observations.
 - On Windows, pairing, rotating or revoking a remote browser no longer fails with
   `replace authorization snapshot: Access is denied` when another request is
   reading the authorization store at the same moment.

@@ -388,6 +388,13 @@ jobs:
           BSK_COOP_ARTIFACTS: ${{ env.BSK_VIDEO_ARTIFACTS }}/cooperation
         run: node evals/browser/cases/regression/cooperation/run.mjs
 
+      - name: Validate scrolling, effective input and automatic handoff through CLI and DSH
+        env:
+          BSK_COOP_CHROME: ${{ env.BSK_VIDEO_CHROME }}
+          BSK_COOP_TARGET_ONLY: "1"
+          BSK_COOP_ARTIFACTS: ${{ env.BSK_VIDEO_ARTIFACTS }}/cooperation-intent
+        run: node evals/browser/cases/regression/cooperation/run.mjs
+
       - name: Upload video regression evidence
         if: always()
         uses: actions/upload-artifact@v7

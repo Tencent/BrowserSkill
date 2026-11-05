@@ -76,7 +76,11 @@ An expected value stays the caller's literal value even if another observation i
 
 ## Human intervention and failures
 
-Editing, IME, held keys, dragging and manual hold keep the person in control. Human intervention
+Scrolling and keys that only move focus or the caret keep the agent's control context.
+A completed page click, keyboard activation, or a real field/editor change yields to the person.
+A press, composition start or cancelled edit waits locally before conflicting input without
+revoking control. Actual editing and dragging keep the person in control until they finish;
+merely focusing a text field does not create an editing hold. Human intervention
 or document replacement revokes the old context. Use `cooperate wait` when the user is active,
 then sync and replan. While `ready` is false, do not issue page actions. `user_aborted` means stop
 the task, not wait or automatically resume. These coordination results do not change the goal.

@@ -9,9 +9,20 @@ BrowserSkill 的重要变更记录于此，格式参考 [Keep a Changelog](https
 
 - `bsk mcp` 让 MCP 客户端通过标准输入和输出，借助现有守护进程与浏览器扩展控制 BrowserSkill。`bsk install-skill --mcp` 可为 Codex、Claude Code 和 Cursor 配置 MCP 服务。
 
+### 变更
+
+- CLI 和 daemon 更新优先使用官网国内下载源；清单或安装包下载、验证失败时回退 GitHub。安装包回退固定为已选版本并保留 SHA256 校验，两个源都失败时逐项报告 URL 和失败原因。显式指定的自定义清单仍只使用配置的源。
+
 ### 修复
 
-- 在 Windows 上，配对远程浏览器、轮换授权或撤销授权时，即使有其他请求同时读取授权存储，也不会因此触发 `replace authorization snapshot: Access is denied` 错误。
+- 保存的 HTML 调试捕获在 `autocomplete` 含首尾空白或多个令牌时（如 `section-login one-time-code` 或 `section-checkout billing cc-number`）也会对敏感输入值脱敏；`section-login email` 等非敏感令牌列表保持不变（[#566](https://github.com/Tencent/BrowserSkill/pull/566)）。
+- 处理旧版 `mousewheel` 事件的页面（如哔哩哔哩播放器的音量调节）重新能收到滚轮输入。此前扩展即使没有共享控制会话也会在每个页面监听 `wheel`，导致 Chromium 跳过这些处理函数；现在只在采集期间于 `window` 上监听。
+- 截断的页面文本把 emoji 切成两半时（例如对 `Hi 🚀 there` 执行 `bsk console --max-text-chars 4`），命令不再一直等到超时。此前截断留下的孤立代理项会让 daemon 丢弃扩展的整条回复；现在扩展会把它替换为 `U+FFFD` 再发送。
+- 共享控制在滚动和无效按键期间继续执行，真实网页点击、键盘激活和有效字段编辑时向人工让路。待确认手势在输入发送前等待，取消后保留原控制上下文；依赖坐标的操作等待滚动稳定。仅聚焦文本框不再持续保持编辑控制。
+
+- 目标策略下，轮播、嵌入视频或广告刷新 iframe 时，主文档内的目标和业务条件可继续使用现有控制凭证。涉及 iframe 引用或严格观察的操作会在框架文档变化后要求重新同步。
+- 以 `autocomplete`（`one-time-code`、`cc-*`、`current-password`、`new-password`）标记的一次性验证码、银行卡和密码字段，其值此前已在观察结果中隐藏，现在也不会出现在共享控制字段状态、`expect` 失败详情、结构化提取和录制的填写步骤中。所有检查均逐个匹配 `autocomplete` 令牌，因此 `section-login current-password` 或 `billing cc-number` 的值同样会被隐藏。被“显示密码”切换为 `type=text` 的密码框，在共享控制字段状态以及录制步骤和状态观察中也保持隐藏。
+- 在 Windows 上，配对、轮换或撤销远程浏览器时，若另一请求正在读取授权存储，不再因 `replace authorization snapshot: Access is denied` 而失败。
 - 调整窗口大小时验证实际窗口边界和目标标签页的布局视口，并报告受限边界、非活动标签页及未随窗口变化的视口。已发送的调整操作还会使下一次共享控制同步重新采集页面。
 - 共享控制同步跳过失败的子框架和非活动文档，在 `frame_gaps` 中仅报告 HTTP(S) 的来源和路径或其他 URL 的协议，并立即为当前文档修复一次缺失的交互采集器。缺少覆盖的活动框架仍以 `frame_unobservable` 阻止操作，主页面失败则报告 `page_load_failed`。
 - `cooperate sync --settle` 在等待报告覆盖不可用时继续有限重试；全部失败时返回最后一次同步错误。临时人工控制仍返回 `not_ready`，包括导航期间的显式保持。首次成功协商策略前状态和等待操作报告 `control_policy: null`。

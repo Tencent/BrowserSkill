@@ -331,9 +331,11 @@ fn hint_for<'a>(
             render_info
                 .and_then(|info| info.hint)
                 .or_else(|| match err {
-                    CliError::Local(error) => recovery_hint(error).or(Some(
-                        "is the daemon running? try `bsk daemon start` or `bsk status`",
-                    )),
+                    CliError::Local(error) => recovery_hint(error)
+                        .or_else(|| super::update::source_recovery_hint(error))
+                        .or(Some(
+                            "is the daemon running? try `bsk daemon start` or `bsk status`",
+                        )),
                     _ => None,
                 })
         })
