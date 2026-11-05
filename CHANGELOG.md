@@ -21,6 +21,11 @@ Starting from 0.2.0, CLI / Extension / DSH Plugin share the same version number.
 - On Windows, `daemon stop`, daemon status checks, the post-update wait and
   leftover cleanup no longer treat a running process the CLI cannot open, such as
   one started from an elevated terminal, as exited.
+- Saved HTML debug captures redact sensitive input values when `autocomplete`
+  contains surrounding whitespace or multiple tokens, such as
+  `section-login one-time-code` or `section-checkout billing cc-number`.
+  Non-sensitive token lists such as `section-login email` remain unchanged
+  ([#566](https://github.com/Tencent/BrowserSkill/pull/566)).
 - Pages that handle the legacy `mousewheel` event, such as Bilibili's player volume,
   receive wheel input again. The extension listened for `wheel` on every page even
   without a shared-control session, which made Chromium skip those handlers; it now
