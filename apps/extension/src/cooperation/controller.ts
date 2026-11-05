@@ -438,6 +438,65 @@ export class CooperationController implements ControlAuthority {
       (f) => f.busy || f.editing || this.now() - f.lastInput < QUIET_MS,
     );
   }
+  private async prepareFrames(
+    state: TabState,
+    signal: AbortSignal,
+    input?: InputExpectation,
+    method?: string,
+    deadline = Date.now() + 25000,
+  ) {
+    // A press or a cancelled edit can finish without transferring control.
+    // Wait at the dispatch boundary, retaining the action and its context.
+    const coordinateInput =
+      method === "DOM.getBoxModel" ||
+      method === "DOM.scrollIntoViewIfNeeded" ||
+      method === "Input.dispatchMouseEvent" ||
+      method === "Input.dispatchDragEvent";
+    const authorityRevision = state.authorityRevision;
+    const epoch = state.epoch;
+    const inputDeadline = Math.min(deadline, Date.now() + 25000);
+    await this.refresh(state, input?.type === "beforeinput" ? undefined : input);
+    let waited = false;
+    while (
+      !state.held &&
+      !state.stopped &&
+      !this.humanActive(state) &&
+      !state.interruption?.signal.aborted &&
+      [...state.frames.values()].some(
+        (frame) => frame.pending || (coordinateInput && frame.scrolling),
+      )
+    ) {
+      signal.throwIfAborted();
+      if (Date.now() >= inputDeadline)
+        throw new ActionCheckError({
+          ...actionError(
+            "input_not_ready",
+            "The page input gesture has not finished",
+            "precondition",
+            "Wait for the gesture to finish before choosing another action.",
+          ),
+          code: "timeout",
+        });
+      await new Promise<void>((resolve) =>
+        setTimeout(resolve, Math.min(25, inputDeadline - Date.now())),
+      );
+      signal.throwIfAborted();
+      await this.refresh(state);
+      waited = true;
+    }
+    if ((waited && input) || input?.type === "beforeinput") {
+      if (
+        !this.humanActive(state) &&
+        !state.held &&
+        !state.stopped &&
+        !signal.aborted &&
+        !state.interruption?.signal.aborted &&
+        state.authorityRevision === authorityRevision &&
+        state.epoch === epoch
+      )
+        await this.refresh(state, input);
+    }
+  }
   private changed(state: TabState) {
     state.revision++;
     this.deps.changed(state.tabId);
@@ -660,7 +719,11 @@ export class CooperationController implements ControlAuthority {
         const timeout = Math.min(Math.max(params.timeout_ms ?? 15000, 0), 25000);
         const deadline = this.now() + timeout;
         while (
-          (state.unavailable || state.held || this.humanActive(state) || state.working) &&
+          (state.unavailable ||
+            state.held ||
+            this.humanActive(state) ||
+            state.working ||
+            [...state.frames.values()].some((frame) => frame.pending)) &&
           this.now() < deadline
         ) {
           if (state.stopped) return stopped();
@@ -688,7 +751,12 @@ export class CooperationController implements ControlAuthority {
             (event) => event.cursor > (state.baseline?.activityCursor ?? 0),
           ),
           state: this.view(state.tabId),
-          ready: !state.unavailable && !state.held && !state.working && !this.humanActive(state),
+          ready:
+            !state.unavailable &&
+            !state.held &&
+            !state.working &&
+            !this.humanActive(state) &&
+            ![...state.frames.values()].some((frame) => frame.pending),
           control_policy: session.controlPolicy ?? null,
           ...(state.frameGaps.length ? { frame_gaps: state.frameGaps } : {}),
         };
@@ -961,7 +1029,7 @@ export class CooperationController implements ControlAuthority {
       // Blank tabs have no collector. Other owned pages must confirm that no
       // human input was missed while a browser lookup/borrow approval was pending.
       try {
-        for (const state of states) if (!state.bootstrap) await this.refresh(state);
+        for (const state of states) if (!state.bootstrap) await this.prepareFrames(state, signal);
         assert();
       } catch (error) {
         revoked ??= error instanceof Error ? error.message : String(error);
@@ -1626,8 +1694,9 @@ export class CooperationController implements ControlAuthority {
       let result = await invoke(
         guardedRunner(cdp, {
           scriptedEffect: req.method === "tool.evaluate",
-          prepare: async (input) => {
-            await this.refresh(state, input);
+          prepare: async (input, method) => {
+            assert();
+            await this.prepareFrames(state, operationSignal, input, method, deadline);
             assert();
             if (
               input?.type === "pointerdown" &&
@@ -1641,6 +1710,18 @@ export class CooperationController implements ControlAuthority {
               await verifyDecision(
                 targeted && req.method === "tool.press" && input?.type === "keydown",
               );
+          },
+          finishInput: async (input) => {
+            // Retire only this command's one-shot text expectation. A late
+            // acknowledgement must not clear another action's expectation.
+            await this.deps
+              .readFrames(
+                state.tabId,
+                { type: "clear", id: input.id },
+                state.lease,
+                state.frameRepairs,
+              )
+              .catch(() => {});
           },
           dispatch: (startsInput, method) => {
             assert();
