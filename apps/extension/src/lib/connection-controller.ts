@@ -7,6 +7,7 @@ import {
 } from "../transport/handshake";
 import type { Transport } from "../transport/transport";
 import type { ConnectionState, HandshakeResult } from "../transport/types";
+import { recordDiagnostic } from "./connection-diagnostics";
 import { getLabel, getOrCreateInstanceId } from "./instance-id";
 import { compareProtocol, parseProtocolMajor } from "./semver";
 
@@ -179,6 +180,30 @@ export class ConnectionController {
 
   /** Shared entry point for startup, wake events, keepalive, and handshake retries. */
   requestConnect(): void {
+    recordDiagnostic("controller.request", {
+      state: this.transport?.state ?? "missing",
+      generation: this.connectionGeneration,
+      enabled: this.connectionEnabled,
+      ready: this.ready,
+      transition: this.transition !== null,
+      cleanupNeeded: this.cleanupNeeded,
+      handshakeRetry: this.handshakeRetryTimer !== null,
+      gate: !this.ready
+        ? "not-ready"
+        : !this.connectionEnabled
+          ? "disabled"
+          : this.transition
+            ? "transition"
+            : this.cleanupNeeded
+              ? "cleanup"
+              : this.handshakeRetryTimer
+                ? "handshake-retry"
+                : !this.transport
+                  ? "no-transport"
+                  : this.transport.state !== "disconnected"
+                    ? "transport-state"
+                    : "connect",
+    });
     if (!this.ready || !this.connectionEnabled || this.transition) return;
     if (this.cleanupNeeded) {
       void this.teardown(false);
@@ -227,6 +252,7 @@ export class ConnectionController {
     if (!this.transport) return;
     if (!this.connectionEnabled || this.transition) return;
     this.setState("connecting");
+    recordDiagnostic("handshake.begin", { generation });
     try {
       const outcome = await performHandshake(
         this.transport,
@@ -253,6 +279,10 @@ export class ConnectionController {
       if (generation !== this.connectionGeneration || signal.aborted) return;
       this.handshake = outcome.result;
       const verdict = computeConnectedState(outcome.result);
+      recordDiagnostic("handshake.complete", {
+        generation,
+        outcome: verdict.kind === "rejected" ? "rejected" : "success",
+      });
       if (verdict.kind === "rejected") {
         this.lastError = `version_too_old: ${verdict.reason}`;
         this.daemonUpgradeRequired = daemonUpgradeFromVersion(
@@ -269,6 +299,16 @@ export class ConnectionController {
       this.daemonUpgradeRequired = null;
       this.setState(verdict.kind);
     } catch (err) {
+      recordDiagnostic("handshake.failed", {
+        generation,
+        outcome:
+          signal.aborted || isAbortError(err)
+            ? "aborted"
+            : err instanceof Error &&
+                err.message === "[handshake] timed out waiting for daemon response"
+              ? "timeout"
+              : "error",
+      });
       if (generation !== this.connectionGeneration || signal.aborted || isAbortError(err)) return;
       this.handshake = null;
       this.lastError = err instanceof Error ? err.message : String(err);
@@ -290,6 +330,10 @@ export class ConnectionController {
   /** Only finite teardown work is shared; the next connect is interruptible. */
   private teardown(cleanupBeforeDisconnect: boolean): Promise<void> {
     if (this.transition) return this.transition;
+    recordDiagnostic("cleanup.begin", {
+      phase: cleanupBeforeDisconnect ? "before-disconnect" : "after-disconnect",
+      generation: this.connectionGeneration,
+    });
     this.cleanupNeeded = true;
     this.cancelHandshake();
     this.clearHandshakeRetry();
@@ -315,7 +359,12 @@ export class ConnectionController {
         this.cleanupNeeded = false;
         this.hasConnected = false;
         this.setState("disconnected");
+        recordDiagnostic("cleanup.complete", { generation: this.connectionGeneration });
       } catch (err) {
+        recordDiagnostic("cleanup.failed", {
+          generation: this.connectionGeneration,
+          outcome: "error",
+        });
         // Keep the pending configuration and cleanup gate for a later retry.
         this.reportError(err);
       } finally {
@@ -347,6 +396,8 @@ export class ConnectionController {
   }
 
   private cancelHandshake(): void {
+    if (this.handshakeAbort)
+      recordDiagnostic("handshake.cancel", { generation: this.connectionGeneration });
     this.connectionGeneration += 1;
     this.handshakeAbort?.abort();
     this.handshakeAbort = null;
@@ -354,6 +405,10 @@ export class ConnectionController {
 
   private scheduleHandshakeRetry(): void {
     if (this.handshakeRetryTimer || !this.connectionEnabled) return;
+    recordDiagnostic("handshake.retry-scheduled", {
+      delayMs: HANDSHAKE_RETRY_DELAY_MS,
+      generation: this.connectionGeneration,
+    });
     this.handshakeRetryTimer = setTimeout(() => {
       this.handshakeRetryTimer = null;
       this.requestConnect();
@@ -369,6 +424,7 @@ export class ConnectionController {
   private setState(next: ConnectionState): void {
     if (this.currentState === next) return;
     this.currentState = next;
+    recordDiagnostic("controller.state", { state: next, generation: this.connectionGeneration });
     this.fire();
   }
 

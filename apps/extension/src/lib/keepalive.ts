@@ -21,6 +21,7 @@
  */
 
 import type { Transport } from "@/transport/transport";
+import { recordDiagnostic } from "./connection-diagnostics";
 
 export const KEEPALIVE_ALARM_NAME = "bh-keepalive";
 export const KEEPALIVE_PERIOD_MIN = 0.5; // 30s, the smallest Chrome accepts.
@@ -81,8 +82,14 @@ export function startKeepalive(options: KeepaliveOptions): KeepaliveHandle {
   const period = options.periodMin ?? KEEPALIVE_PERIOD_MIN;
 
   const tick = async () => {
-    if (options.shouldConnect && !options.shouldConnect()) return;
-    if (options.transport.state === "connected") return;
+    if (options.shouldConnect && !options.shouldConnect()) {
+      recordDiagnostic("alarm.skipped", { gate: "predicate", state: options.transport.state });
+      return;
+    }
+    if (options.transport.state === "connected") {
+      recordDiagnostic("alarm.skipped", { gate: "connected", state: options.transport.state });
+      return;
+    }
     try {
       if (options.requestConnect) await options.requestConnect();
       else await options.transport.connect();
@@ -102,6 +109,7 @@ export function startKeepalive(options: KeepaliveOptions): KeepaliveHandle {
 
   const handler = (alarm: { name: string }) => {
     if (alarm.name !== name) return;
+    recordDiagnostic("alarm.tick", { state: options.transport.state });
     void tick();
   };
   alarms.onAlarm.addListener(handler);
