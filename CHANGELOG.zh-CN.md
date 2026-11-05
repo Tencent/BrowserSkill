@@ -29,6 +29,8 @@ BrowserSkill 的重要变更记录于此，格式参考 [Keep a Changelog](https
 - `cooperate sync --settle` 在等待报告覆盖不可用时继续有限重试；全部失败时返回最后一次同步错误。临时人工控制仍返回 `not_ready`，包括导航期间的显式保持。首次成功协商策略前状态和等待操作报告 `control_policy: null`。
 - 共享控制的 `observation_required` 恢复提示、目标策略同步指南及技能文档明确要求使用同步响应顶层的 `observation_id`，而非用于引用映射的 `observation.observation_id`。
 
+- 录制 contenteditable 填写时保留换行，包括空行和末尾换行。录制与 fill 校验共用值读取逻辑，避免将光标占位换行录成额外内容。
+
 ## [0.4.1] - 2026-11-02
 
 ### 变更
