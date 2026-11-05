@@ -301,6 +301,8 @@ BrowserSkill 没有必须使用的云服务，也不收集产品遥测。自动�
 bsk update --yes
 ```
 
+手动更新和 daemon 自动更新默认优先从官网国内下载源获取清单与安装包；下载、清单解析、校验或解压失败时回退 GitHub。GitHub 安装包固定为已选版本，并使用同一 SHA256 校验值。两个源都失败时，错误会列出各自的 URL 和失败原因。显式设置 `BSK_UPDATE_MANIFEST_URL` 后，仅使用自定义清单及其中的安装包地址，不启用内置公共源回退。
+
 默认本地配置下，这条命令会在 daemon 继续服务的同时安装新版本并检查它能否运行，然后用新版本在原端口重启 daemon。重启后的 daemon 没有就绪时，会放回旧版本并用它重启 daemon。通过 `--foreground` 启动的 daemon 不会被停止，会继续运行旧版本，请在它所在的终端或进程管理器中重启。如果 `bsk update` 运行在无法重新启动后台 daemon 的环境里（例如 Windows Job 禁止 breakaway 的沙盒），后台 daemon 同样不会被停止，请在沙盒外执行 `bsk daemon restart`。如果使用安装脚本替换了二进制，请随后执行 `bsk daemon restart`。
 
 由 `bsk` 在后台启动的 daemon 还会每 30 分钟检查一次新版本。没有 Agent 会话时，它按同样方式安装新版本，再用新版本启动一个 daemon，确认新版本的 daemon 已在原端口服务后才退出。新 daemon 退出，或 20 秒内没有就绪时，它会被停止，当前 daemon 放回旧版本，在原端口继续服务，6 小时后再尝试这个版本。交接期间浏览器连接会短暂断开并自动重连。更新过程中 daemon 因其他原因（例如空闲超时）停止时，会先放回旧版本再退出。通过 `--foreground` 启动的 daemon 归所在终端或进程管理器管理，只提示新版本：执行 `bsk update`，再在那里重启 daemon。bsk 无法在可执行文件所在目录写入时，也只提示新版本，请用原来的安装脚本或包管理器升级。设置 `BSK_AUTO_UPDATE=off` 可关闭 daemon 自动升级，手动 `bsk update` 仍然可用。

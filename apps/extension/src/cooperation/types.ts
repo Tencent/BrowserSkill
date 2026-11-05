@@ -1,11 +1,14 @@
 /** The collector reports facts, never instructions or inferred user intent. */
 export interface InputExpectation {
-  type: "pointerdown" | "keydown" | "wheel";
+  type: "pointerdown" | "keydown" | "keypress" | "wheel" | "beforeinput" | "clear";
   x?: number;
   y?: number;
   key?: string;
   /** Native event time in epoch milliseconds, shared across frame coordinate spaces. */
   timestamp?: number;
+  /** One-shot insertText attribution, cleared when the native command settles. Never logged. */
+  text?: string;
+  id?: string;
 }
 
 export interface FieldChange {
@@ -53,6 +56,10 @@ export interface FrameState {
   structure: number;
   human: number;
   busy: boolean;
+  /** A gesture may still become a click or edit. It has not revoked control. */
+  pending?: boolean;
+  /** Only coordinate-dependent input waits for an actively scrolling viewport. */
+  scrolling?: boolean;
   editing: boolean;
   lastInput: number;
   fields: FieldChange[];
