@@ -3,6 +3,7 @@
 use std::fs;
 use std::path::PathBuf;
 
+use bsk_protocol::cancel::{RpcPrepareParams, RpcPrepareResult};
 use bsk_protocol::system::{
     BrowserListParams, HandshakeParams, HandshakeResult, PingParams, PingResult, StatusParams,
     StatusResult,
@@ -78,6 +79,8 @@ fn main() {
 
     dump!(CancelParams, "cancel_params");
     dump!(CancelResult, "cancel_result");
+    dump!(RpcPrepareParams, "rpc_prepare_params");
+    dump!(RpcPrepareResult, "rpc_prepare_result");
 
     dump!(SessionStartParams, "tool_session_start_params");
     dump!(SessionStartResult, "tool_session_start_result");

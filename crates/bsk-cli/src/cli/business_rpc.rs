@@ -52,6 +52,23 @@ static TARGET_POLICY_REQUESTED: std::sync::OnceLock<bool> = std::sync::OnceLock:
 // One CLI process is one command, including its follow-up reads.
 static CANCEL_REQUESTED: AtomicBool = AtomicBool::new(false);
 
+// CLI discovery already reads status. Retain only its current endpoint's
+// capability; long-lived MCP links carry their own discovery snapshot instead.
+static DAEMON_ADMISSION: std::sync::Mutex<Option<(PathBuf, bool)>> = std::sync::Mutex::new(None);
+
+pub(crate) fn set_daemon_admission(sock: &Path, capability: Option<bool>) {
+    *DAEMON_ADMISSION.lock().unwrap() = capability.map(|enabled| (sock.to_path_buf(), enabled));
+}
+
+fn daemon_admission(sock: &Path) -> Option<bool> {
+    DAEMON_ADMISSION
+        .lock()
+        .unwrap()
+        .as_ref()
+        .filter(|(endpoint, _)| endpoint == sock)
+        .map(|(_, enabled)| *enabled)
+}
+
 pub(super) fn cancel_requested() -> bool {
     CANCEL_REQUESTED.load(Ordering::Relaxed)
 }
@@ -199,7 +216,17 @@ where
             .get()
             .and_then(|(_, expect)| expect.as_ref()),
     )?;
-    let mut client = IpcClient::connect(sock.clone()).await?;
+    // Preparation can allocate a ticket, but cannot dispatch browser work.
+    // If cancelled here, drop the connection; any orphan ticket expires.
+    let (mut client, rpc_id) = tokio::select! {
+        biased;
+        sig = wait_for_cancel(parent_cancel.clone()) => {
+            sig.context("wait for cancellation").map_err(CliError::Local)?;
+            CANCEL_REQUESTED.store(true, Ordering::Relaxed);
+            return Err(cancelled_before_dispatch());
+        }
+        prepared = prepare_rpc(&sock, &method, rpc_id, call_timeout, daemon_admission(&sock)) => prepared?,
+    };
     let rpc_id_for_call = rpc_id.clone();
     let rpc_id_for_cancel = rpc_id.clone();
 
@@ -252,6 +279,88 @@ where
     };
 
     outcome.map_err(CliError::from_rpc)
+}
+
+/// Negotiate local admission on the same connection used for the operation.
+/// Old daemons omit the capability and keep the existing bounded-retry path.
+/// Once support is advertised, a failed preparation never falls back to an
+/// unprotected request, including when the daemon restarts mid-handshake.
+pub(crate) async fn prepare_rpc(
+    sock: &Path,
+    method: &Method,
+    legacy_id: RpcId,
+    timeout: Duration,
+    known_admission: Option<bool>,
+) -> Result<(IpcClient, RpcId), CliError> {
+    let budget = timeout.min(Duration::from_secs(3));
+    tokio::time::timeout(budget, async {
+        let mut client = IpcClient::connect(sock).await?;
+        let supported = match known_admission {
+            Some(supported) => supported,
+            None => {
+                let status = client
+                    .call::<(), serde_json::Value>(
+                        "rpc-capabilities",
+                        Method::SystemStatus,
+                        None,
+                        budget,
+                    )
+                    .await?
+                    .map_err(CliError::from_rpc)?;
+                status
+                    .get("rpc_admission")
+                    .and_then(serde_json::Value::as_bool)
+                    == Some(true)
+            }
+        };
+        if !supported {
+            // Some legacy embedding transports close after their status reply.
+            if known_admission.is_none() {
+                client = IpcClient::connect(sock).await?;
+            }
+            return Ok((client, legacy_id));
+        }
+        let method = serde_json::to_value(method)
+            .context("serialize RPC method")?
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let ticket = client
+            .call::<_, bsk_protocol::cancel::RpcPrepareResult>(
+                "rpc-prepare",
+                Method::RpcPrepare,
+                Some(bsk_protocol::cancel::RpcPrepareParams { method }),
+                budget,
+            )
+            .await?
+            .map_err(CliError::from_rpc)?;
+        if !ticket
+            .rpc_id
+            .starts_with(crate::daemon::rpc_admission::PREFIX)
+            || ticket.admission_ms == 0
+        {
+            return Err(CliError::Local(anyhow::anyhow!(
+                "daemon returned an invalid RPC admission ticket"
+            )));
+        }
+        Ok((client, ticket.rpc_id))
+    })
+    .await
+    .map_err(|_| {
+        CliError::from_rpc(RpcError {
+            code: ErrorCode::Timeout,
+            message: "RPC admission timed out before dispatch".into(),
+            data: Some(serde_json::json!({"reason":"rpc_admission_timeout","effect_state":"none"})),
+        })
+    })?
+}
+
+fn cancelled_before_dispatch() -> CliError {
+    CliError::from_rpc(RpcError {
+        code: ErrorCode::Cancelled,
+        message: "command cancelled before dispatch".into(),
+        data: Some(serde_json::json!({"reason":"cancelled_before_dispatch","effect_state":"none"})),
+    })
 }
 
 /// Release caller-owned staging even after cancellation. This deliberately
@@ -440,6 +549,54 @@ mod tests {
     use super::{ipc_timeout, with_context};
     use serde_json::json;
     use std::time::Duration;
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn advertised_admission_never_falls_back_after_prepare_failure() {
+        use super::{CliError, ErrorCode, Method, prepare_rpc};
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+        let dir = tempfile::tempdir_in("/tmp").unwrap();
+        let sock = dir.path().join("admission.sock");
+        let listener = tokio::net::UnixListener::bind(&sock).unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (read, mut write) = stream.into_split();
+            let mut reader = BufReader::new(read);
+            let mut line = String::new();
+            let mut methods = Vec::new();
+            while reader.read_line(&mut line).await.unwrap() > 0 {
+                let request: serde_json::Value = serde_json::from_str(&line).unwrap();
+                line.clear();
+                methods.push(request["method"].as_str().unwrap().to_owned());
+                let response = if methods.len() == 1 {
+                    json!({"id":request["id"],"result":{"rpc_admission":true}})
+                } else {
+                    json!({"id":request["id"],"error":{"code":"unknown_method","message":"unsupported"}})
+                };
+                write
+                    .write_all(format!("{response}\n").as_bytes())
+                    .await
+                    .unwrap();
+            }
+            methods
+        });
+        let error = prepare_rpc(
+            &sock,
+            &Method::ToolClick,
+            "legacy-id".into(),
+            Duration::from_secs(2),
+            None,
+        )
+        .await;
+        assert!(matches!(
+            error,
+            Err(CliError::Rpc {
+                code: ErrorCode::UnknownMethod,
+                ..
+            })
+        ));
+        assert_eq!(server.await.unwrap(), ["system.status", "rpc.prepare"]);
+    }
 
     #[test]
     fn ipc_timeout_preserves_grace_at_the_largest_tool_timeout() {

@@ -31,7 +31,6 @@ use super::server::Daemon;
 use crate::cli::business_rpc::{self, ipc_timeout};
 use crate::cli::error::{CliError, json_error_value};
 use crate::cli::{TOOL_IPC_TIMEOUT, cooperate, ensure_daemon, step};
-use crate::ipc_client::IpcClient;
 
 const SESSION_START_TIMEOUT: Duration =
     crate::daemon::browsers::EXTENSION_CONNECT_WAIT.saturating_add(Duration::from_secs(10));
@@ -242,6 +241,7 @@ impl CallControl {
 /// One tool call's connection to the daemon.
 #[derive(Clone)]
 struct Link {
+    admission: Option<bool>,
     sock: PathBuf,
     protocol: String,
     control: Arc<CallControl>,
@@ -254,7 +254,23 @@ impl Link {
         params: Value,
         timeout: Duration,
     ) -> Result<Value, CliError> {
-        let rpc_id = format!("mcp-{}", uuid::Uuid::new_v4());
+        if self.control.is_cancelled() {
+            return Err(CliError::from_rpc(RpcError {
+                code: ErrorCode::Cancelled,
+                message: "tool call cancelled before dispatch".into(),
+                data: Some(json!({"reason":"cancelled_before_dispatch","effect_state":"none"})),
+            }));
+        }
+        let legacy_id = format!("mcp-{}", uuid::Uuid::new_v4());
+        let (mut client, rpc_id) = tokio::select! {
+            biased;
+            _ = self.control.notify.notified() => return Err(CliError::from_rpc(RpcError {
+                code: ErrorCode::Cancelled,
+                message: "tool call cancelled before dispatch".into(),
+                data: Some(json!({"reason":"cancelled_before_dispatch","effect_state":"none"})),
+            })),
+            prepared = business_rpc::prepare_rpc(&self.sock, &method, legacy_id, timeout, self.admission) => prepared?,
+        };
         {
             let mut current = self.control.current.lock().unwrap();
             if self.control.is_cancelled() {
@@ -269,7 +285,6 @@ impl Link {
             *current = Some((self.sock.clone(), rpc_id.clone()));
         }
         let operation = async {
-            let mut client = IpcClient::connect(&self.sock).await?;
             if self.control.is_cancelled() {
                 return Ok(Err(RpcError {
                     code: ErrorCode::Cancelled,
@@ -424,20 +439,21 @@ async fn connect(daemon: &Daemon, control: &Arc<CallControl>) -> Result<Link, Cl
             data: Some(json!({"reason": "cancelled_before_dispatch", "effect_state": "none"})),
         }));
     }
-    let (sock, protocol) = match daemon {
-        Daemon::Fixed { sock, protocol } => (sock.clone(), protocol.clone()),
+    let (sock, protocol, admission) = match daemon {
+        Daemon::Fixed { sock, protocol } => (sock.clone(), protocol.clone(), None),
         Daemon::Discover => {
-            let (info, protocol) =
-                tokio::task::spawn_blocking(ensure_daemon::ensure_daemon_with_protocol)
+            let (info, protocol, admission) =
+                tokio::task::spawn_blocking(ensure_daemon::ensure_daemon_with_capabilities)
                     .await
                     .map_err(|err| {
                         CliError::Local(anyhow::anyhow!("daemon discovery failed: {err}"))
                     })?
                     .map_err(|err| CliError::Local(err.context("ensure daemon is running")))?;
-            (info.sock_path, protocol)
+            (info.sock_path, protocol, admission)
         }
     };
     Ok(Link {
+        admission,
         sock,
         protocol,
         control: Arc::clone(control),
@@ -1662,6 +1678,99 @@ mod tests {
 
     fn args(value: Value) -> InteractArgs {
         serde_json::from_value(value).unwrap()
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn prepared_mcp_cancellation_survives_a_delayed_daemon_handler() {
+        use crate::daemon::{
+            DaemonConfig, DaemonState,
+            ipc::{self, DaemonStatus},
+        };
+        use bsk_protocol::ResponseBody;
+        let dir = tempfile::tempdir_in("/tmp").unwrap();
+        let sock = dir.path().join("mcp.sock");
+        let state = Arc::new(DaemonState::new(DaemonConfig::new(0)));
+        let handler = ipc::full_handler(
+            DaemonStatus {
+                started_at: std::time::Instant::now(),
+                ws_port: 0,
+                sock_path: sock.clone(),
+                daemon_version: "0.4.1",
+                protocol_version: "1.8",
+            },
+            state.clone(),
+        );
+        let (received, mut incoming) = tokio::sync::mpsc::unbounded_channel();
+        let (release, gate) = tokio::sync::watch::channel(false);
+        let (result, mut results) = tokio::sync::mpsc::unbounded_channel();
+        let delayed: ipc::RpcHandler = Arc::new(move |id, method, params| {
+            let handler = handler.clone();
+            let received = received.clone();
+            let result = result.clone();
+            let mut gate = gate.clone();
+            Box::pin(async move {
+                let wait = method == Method::ToolWaitMs;
+                if wait {
+                    received.send(id.clone()).unwrap();
+                    gate.wait_for(|ready| *ready).await.unwrap();
+                }
+                let body = handler(id, method, params).await;
+                if wait {
+                    result.send(body.clone()).unwrap();
+                }
+                body
+            })
+        });
+        let listener = ipc::bind(&sock).await.unwrap();
+        let server = tokio::spawn(ipc::serve(
+            listener,
+            delayed,
+            || {},
+            || {},
+            || {},
+            std::future::pending(),
+        ));
+        let control = Arc::new(CallControl::default());
+        let link = Link {
+            admission: None,
+            sock,
+            protocol: "1.8".into(),
+            control: control.clone(),
+        };
+        let work = tokio::spawn(async move {
+            link.rpc(
+                Method::ToolWaitMs,
+                json!({"duration_ms":60_000}),
+                Duration::from_secs(65),
+            )
+            .await
+        });
+        let id = tokio::time::timeout(Duration::from_secs(3), incoming.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(id.starts_with(crate::daemon::rpc_admission::PREFIX));
+        control.cancel().await;
+        assert!(work.await.unwrap().is_err());
+        release.send(true).unwrap();
+        let late = tokio::time::timeout(Duration::from_secs(3), results.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            matches!(
+                late,
+                ResponseBody::Err(RpcError {
+                    code: ErrorCode::Cancelled,
+                    ..
+                })
+            ),
+            "{late:?}"
+        );
+        assert!(state.abort_registry.is_empty());
+        server.abort();
+        let _ = server.await;
     }
 
     #[cfg(unix)]

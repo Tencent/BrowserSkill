@@ -325,6 +325,7 @@ impl ToolInflightEntry {
 /// the CLI-side wire `rpc_id`.
 #[derive(Default)]
 pub struct ToolInflightRegistry {
+    admissions: Option<Arc<super::rpc_admission::RpcAdmissions>>,
     inner: Mutex<HashMap<RpcId, Arc<ToolInflightEntry>>>,
 }
 
@@ -339,6 +340,13 @@ impl std::fmt::Debug for ToolInflightRegistry {
 impl ToolInflightRegistry {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub fn with_admissions(admissions: Arc<super::rpc_admission::RpcAdmissions>) -> Self {
+        Self {
+            admissions: Some(admissions),
+            ..Self::default()
+        }
     }
 
     pub fn len(&self) -> usize {
@@ -368,6 +376,15 @@ impl ToolInflightRegistry {
                 return Err(InflightRegisterError::DuplicateRpcId(cli_rpc_id));
             }
             guard.insert(cli_rpc_id.clone(), Arc::clone(&entry));
+        }
+        // Bridge cancel-before-registration without holding both registries'
+        // locks. Later cancellation sees this entry in the execution registry.
+        if self
+            .admissions
+            .as_ref()
+            .is_some_and(|a| a.is_cancelled(&cli_rpc_id))
+        {
+            entry.cancel_and_snapshot(CancelReason::Cancelled);
         }
         Ok(InflightGuard {
             registry: Arc::clone(self),

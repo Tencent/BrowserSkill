@@ -27,6 +27,7 @@ pub const SERVER_NAME: &str = "browser-skill-daemon";
 
 #[derive(Debug)]
 pub struct DaemonState {
+    pub rpc_admissions: Arc<super::rpc_admission::RpcAdmissions>,
     pub audit: Arc<super::audit::AuditStore>,
     pub config: DaemonConfig,
     pub browsers: Arc<BrowserRegistry>,
@@ -96,15 +97,19 @@ impl DaemonState {
             super::paths::bsk_home().ok().map(|path| path.join("audit")),
         ));
         let sessions = Arc::new(SessionRegistry::with_audit(Arc::clone(&audit)));
-        let tool_inflight = Arc::new(ToolInflightRegistry::new());
+        let rpc_admissions = Arc::new(super::rpc_admission::RpcAdmissions::default());
+        let tool_inflight = Arc::new(ToolInflightRegistry::with_admissions(
+            rpc_admissions.clone(),
+        ));
         let tool_queues = Arc::new(ToolQueueRegistry::new(
             Arc::clone(&browsers),
             Arc::clone(&sessions),
         ));
-        let abort_registry = Arc::new(AbortRegistry::new());
+        let abort_registry = Arc::new(AbortRegistry::with_admissions(rpc_admissions.clone()));
         let session_interrupts = Arc::new(SessionInterruptRegistry::new());
         let transfers = Arc::new(TransferRegistry::new().expect("initialise transfer staging"));
         Self {
+            rpc_admissions,
             audit,
             config,
             browsers,
