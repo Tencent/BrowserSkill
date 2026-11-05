@@ -152,9 +152,8 @@ function redactSensitiveHtmlControls(text: string): string {
   // as sensitive. Inputs have no child content; textareas and selects do, so
   // remove the whole control to avoid retaining either text content or option
   // values that would be submitted as the initial value.
-  let result = text.replace(
-    /<input\b(?:[^>"']|"[^"]*"|'[^']*')*>/gi,
-    (tag) => (sensitiveHtmlAttributes(tag) ? '<input data-bsk-redacted="true">' : tag),
+  let result = text.replace(/<input\b(?:[^>"']|"[^"]*"|'[^']*')*>/gi, (tag) =>
+    sensitiveHtmlAttributes(tag) ? '<input data-bsk-redacted="true">' : tag,
   );
   for (const element of ["textarea", "select"] as const) {
     const block = new RegExp(
