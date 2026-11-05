@@ -65,6 +65,14 @@ export function collectExtractDom(this: Element, options: CollectorOptions): Raw
       element !== parent.querySelector(":scope > summary")
     );
   };
+  // `[hidden]` is a UA-stylesheet default, not a hard rule: author CSS can
+  // restore rendering (`hidden` + display:table really paints), so the
+  // attribute alone must not decide visibility. In Chromium the computed-style
+  // check below is already authoritative for it; engines that do not resolve
+  // the UA sheet (test DOMs) still need the attribute, and there an inline
+  // display is the observable form of the same override.
+  const hiddenByAttribute = (element: Element): boolean =>
+    element.hasAttribute("hidden") && (element as HTMLElement).style.display === "";
   const isSubtreeHidden = (node: Element): boolean => {
     const cached = hiddenSubtrees.get(node);
     if (cached !== undefined) return cached;
@@ -83,7 +91,7 @@ export function collectExtractDom(this: Element, options: CollectorOptions): Raw
       // Chromium ignores content-visibility on ordinary inline, boxless and
       // non-cell table boxes. Keep their rendered contents extractable.
       if (
-        current.hasAttribute("hidden") ||
+        hiddenByAttribute(current) ||
         current.hasAttribute("data-bsk-overlay") ||
         current.hasAttribute("data-bsk-overlay-host") ||
         current.tagName.toLowerCase() === "browser-skill-overlay" ||

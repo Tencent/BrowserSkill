@@ -353,4 +353,11 @@ describe("structured extraction facts", () => {
       }).coverage.dataset_complete,
     ).toBe("unknown");
   });
+
+  it("extracts content that author CSS makes visible despite a hidden attribute", () => {
+    document.body.innerHTML =
+      '<table id="t" hidden style="display:table"><tr><td>Visible</td></tr></table>';
+    expect(extract("#t").rows).toEqual([{ c1: "Visible" }]);
+    expect(extract("#t").warnings).not.toContain("hidden_rows_omitted");
+  });
 });
