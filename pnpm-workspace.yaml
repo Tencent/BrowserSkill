@@ -28,3 +28,7 @@ packageExtensions:
     peerDependencies:
       react: "^18.2.0"
       react-dom: "^18.2.0"
+
+# Let newer pnpm releases run local scripts when Corepack provides a version
+# other than the packageManager pin; CI still installs and uses the pin.
+pmOnFail: warn
