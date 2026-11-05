@@ -80,6 +80,14 @@ const pages: Record<string, string> = {
     <iframe name="detail" src="/frame-initial"></iframe>`,
   "frame-initial": "<p>Initial detail</p>",
   "frame-next": "<p>Saved detail</p>",
+  "enter-link": '<a id="enter" href="/submitted">Next</a>',
+  "enter-form":
+    '<form action="/submitted"><label>Search <input id="enter" name="q" value="flex"></label></form>',
+  "enter-keydown": `<input id="enter" aria-label="Navigate" onkeydown="if(event.key==='Enter') location.href='/submitted'">`,
+  submitted: '<p>Saved once</p><button id="next" type="button">Next action</button>',
+  "context-cards": `<button>Replace target</button><span id="record">Record 42</span>
+    <div>Candidate A <button>Continue</button></div>
+    <div><button>Continue</button> Candidate B</div>`,
   responsive: `<meta name="viewport" content="width=device-width,initial-scale=1">
     <p id="viewport"></p><script>
     const sample = () => document.querySelector('#viewport').textContent = innerWidth + 'x' + innerHeight;
@@ -107,10 +115,14 @@ async function withCooperation(
   }) => Promise<void>,
   options: { policy?: "strict" | "target" } = {},
 ) {
+  let submissions = 0;
   const server = createServer((request, response) => {
     const name = decodeURIComponent((request.url ?? "/").slice(1).split("?")[0]);
+    if (name === "submitted") submissions++;
     response.setHeader("Content-Type", "text/html");
-    response.end(`<!doctype html><title>${name}</title><body>${pages[name] ?? ""}${collector}`);
+    response.end(
+      `<!doctype html><title>${name}</title><body>${pages[name] ?? ""}${collector}<script>window.submissions=${submissions}</script>`,
+    );
   });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   const origin = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
@@ -357,6 +369,68 @@ async function withCooperation(
 const learned = expect.stringContaining("changed by itself");
 const changed = "The action's observed content changed; synchronize and replan";
 const refused = { data: { reason: "cooperation_sync_required", effect_state: "none" } };
+
+describe.skipIf(!process.env.BSK_CLICK_CHROME)(
+  "release-blocking navigation and context regressions",
+  () => {
+    afterEach(() => vi.unstubAllGlobals());
+
+    describe.each(["strict", "target"] as const)("%s policy", (policy) => {
+      it.each([
+        "enter-link",
+        "enter-form",
+        "enter-keydown",
+      ])("keeps the completed Enter receipt on %s without replaying input", async (name) => {
+        await withCooperation(
+          async (page) => {
+            await page.open(name);
+            const synced = await page.sync();
+            const result = await page.act("tool.press", {
+              context_id: synced.context_id,
+              observation_id: synced.observation_id,
+              selector: "#enter",
+              key: "Enter",
+            });
+            expect(result, JSON.stringify(result)).toMatchObject({
+              tab_id: 4,
+              key: "Enter",
+              code: "Enter",
+            });
+            expect(result).not.toHaveProperty("message");
+            await expect.poll(() => page.read("document.title")).toBe("submitted");
+            expect(await page.read("window.submissions")).toBe(1);
+            expect(await page.click(synced.context_id, "#next")).toMatchObject({
+              code: "permission_denied",
+            });
+            const fresh = await page.sync();
+            expect(fresh.context_id).not.toBe(synced.context_id);
+            expect(await page.click(fresh.context_id, "#next")).not.toHaveProperty("code");
+            expect(await page.read("window.submissions")).toBe(1);
+            expect((await page.inputs()).keys).toEqual([]);
+          },
+          { policy },
+        );
+      }, 120_000);
+    });
+
+    it("keeps each Continue in its own DOM card across unrelated record changes", async () => {
+      await withCooperation(async (page) => {
+        await page.open("context-cards");
+        for (const record of ["Record 42", "Record 99"]) {
+          if (record === "Record 99") await page.set("#record", record);
+          const observed = await page.observe();
+          const contexts = observed.text
+            .split("\n")
+            .filter((line: string) => line.includes('button "Continue"'));
+          expect(contexts).toHaveLength(2);
+          expect(contexts[0]).toContain("[ctx: Candidate A]");
+          expect(contexts[1]).toContain("[ctx: Candidate B]");
+          expect(contexts.join(" ")).not.toContain("Record");
+        }
+      });
+    }, 120_000);
+  },
+);
 
 describe.skipIf(!process.env.BSK_CLICK_CHROME)("completed input during frame navigation", () => {
   afterEach(() => vi.unstubAllGlobals());

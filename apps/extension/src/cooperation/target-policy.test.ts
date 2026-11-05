@@ -130,6 +130,38 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
+describe("action cancellation diagnostics", () => {
+  it("reports a precondition cancellation before any page effect", async () => {
+    const f = await fixture();
+    const invoke = vi.fn();
+    vi.mocked(checkActionTarget).mockImplementationOnce(async () => {
+      f.abort.abort();
+      return undefined;
+    });
+    expect(await f.run({ ref: "e1" }, "tool.fill", invoke)).toMatchObject({
+      code: "cancelled",
+      data: { phase: "precondition", effect_state: "none" },
+    });
+    expect(invoke).not.toHaveBeenCalled();
+    expect(f.send).not.toHaveBeenCalled();
+  });
+
+  it("reports execution uncertainty when cancellation follows dispatch", async () => {
+    const f = await fixture();
+    expect(
+      await f.run({ ref: "e1" }, "tool.fill", async (runner) => {
+        await runner.send(7, "Input.insertText", { text: "saved" });
+        f.abort.abort();
+        return { tab_id: 7 };
+      }),
+    ).toMatchObject({
+      code: "cancelled",
+      data: { phase: "execution", effect_state: "unknown" },
+    });
+    expect(f.send).toHaveBeenCalledOnce();
+  });
+});
+
 describe.each(["strict", "target"] as const)("completed action receipts (%s)", (policy) => {
   it.each([
     "click",
