@@ -15,7 +15,11 @@ import { clickResolvedTarget, type InteractionDeps, resolveActionTarget } from "
 import { pointerTransactionDeps } from "./pointer-transaction";
 import { enforceAgentWindow, isRpcError, lookupSession, resolveTargetTab } from "./shared";
 
-let downloadActive = false;
+// chrome.downloads is browser-global, so captures run one at a time. A later
+// call waits its turn within its own timeout instead of failing at once (#519).
+// Each gate also waits for its predecessor, so a waiter that gives up early
+// never lets the next call overlap a capture that is still running.
+let downloadGate: Promise<void> = Promise.resolve();
 
 export type { DownloadsApi, NavigationTargetsApi } from "./download-capture";
 
@@ -31,9 +35,17 @@ export async function handleDownload(
   params: DownloadParams,
   deps: DownloadDeps,
 ): Promise<DownloadResult | RpcError> {
-  if (downloadActive) return { code: "invalid_params", message: "another bsk download is active" };
-  downloadActive = true;
+  const timeoutMs = params.timeout_ms ?? 120_000;
+  const deadline = Date.now() + timeoutMs;
+  const turn = downloadGate;
+  let release!: () => void;
+  const done = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  downloadGate = Promise.all([turn, done]).then(() => {});
   try {
+    const waited = await waitForTurn(turn, deadline, deps.signal);
+    if (waited) return waited;
     const ctx = lookupSession(manager, params, "download");
     if (isRpcError(ctx)) return ctx;
     const target = await resolveTargetTab(manager, ctx, params.tab_id, deps.tabsApi);
@@ -46,8 +58,6 @@ export async function handleDownload(
     const address = await resolveActionTarget(deps.cdp, ctx, target, params, "download");
     if (isRpcError(address)) return address;
 
-    const timeoutMs = params.timeout_ms ?? 120_000;
-    const deadline = Date.now() + timeoutMs;
     let trigger: ReturnType<typeof pointerTransactionDeps> | undefined;
     const capture = await captureBrowserDownload({
       cdp: deps.cdp,
@@ -56,7 +66,7 @@ export async function handleDownload(
       navigationTargets: deps.navigationTargets ?? chromeNavigationTargetsApi,
       browserRelativeDir: params.browser_relative_dir,
       maxByteSize: params.max_byte_size,
-      timeoutMs,
+      timeoutMs: Math.max(0, deadline - Date.now()),
       signal: deps.completionSignal ?? deps.signal,
       inputSignal: deps.signal,
       expectedFrameId: address.frameId,
@@ -91,6 +101,43 @@ export async function handleDownload(
       browser_path: item.filename,
     };
   } finally {
-    downloadActive = false;
+    release();
+  }
+}
+
+async function waitForTurn(
+  turn: Promise<void>,
+  deadline: number,
+  signal: AbortSignal | undefined,
+): Promise<RpcError | undefined> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let onAbort: (() => void) | undefined;
+  const data = { effect_state: "none", phase: "queue" } as const;
+  try {
+    return await Promise.race([
+      turn.then(() => undefined),
+      new Promise<RpcError>((resolve) => {
+        timer = setTimeout(
+          () =>
+            resolve({
+              code: "timeout",
+              message: "another bsk download was still active when the timeout expired",
+              data,
+            }),
+          Math.max(0, deadline - Date.now()),
+        );
+        onAbort = () =>
+          resolve({
+            code: "cancelled",
+            message: "cancelled while waiting for another bsk download",
+            data,
+          });
+        if (signal?.aborted) onAbort();
+        else signal?.addEventListener("abort", onAbort, { once: true });
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+    if (onAbort) signal?.removeEventListener("abort", onAbort);
   }
 }
