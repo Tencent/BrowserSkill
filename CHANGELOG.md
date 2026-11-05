@@ -6,16 +6,25 @@ See the [Chinese changelog](CHANGELOG.zh-CN.md). Update both versions in the sam
 
 Starting from 0.2.0, CLI / Extension / DSH Plugin share the same version number.
 
-## [Unreleased]
+## [0.4.2] - 2026-11-05
 
 ### Added
 
+- Session controller labels show an agent name, project, session ID and color in
+  browser overlays. CLI and DSH session startup accept the display metadata.
+- Fill supports date, time, datetime-local, month and week inputs, validates
+  formats and min/max limits, and preserves background input state.
 - `bsk mcp` lets MCP clients control BrowserSkill over stdio using the existing
   daemon and browser extension. `bsk install-skill --mcp` can configure Codex,
   Claude Code, and Cursor.
 
 ### Changed
 
+- Borrowed tabs return relative to their original neighbors, with improved pinned
+  tab and group restoration. Eligible requests support automatic borrowing when
+  borrow confirmation is disabled.
+- The extension restores the `tabGroups` permission to read and restore borrowed
+  tabs' original groups.
 - Shared control waits for two seconds of quiet after the person's last completed
   action before returning control to the Agent, up from 650 ms.
 - CLI and daemon updates prefer the official website's domestic download source,
@@ -26,6 +35,13 @@ Starting from 0.2.0, CLI / Extension / DSH Plugin share the same version number.
 
 ### Fixed
 
+- Element waits requery selectors when matched nodes are replaced, avoiding false
+  hidden/detached success while a replacement remains visible.
+- Console capture is enabled only when requested, avoiding repeated reloads on
+  affected anti-debugging pages while preserving capture diagnostics.
+- Debug evidence redacts exact vendor credential headers.
+- DSH fill/select values beginning with `-` are passed as option values rather
+  than being parsed as CLI flags.
 - The shared-control toolbar yields pointer hits during automated clicks,
   including page actions beneath its lower-right corner. Its controls become
   interactive again when the click finishes or its passthrough lease expires.
