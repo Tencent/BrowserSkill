@@ -52,6 +52,9 @@ pub struct InteractionPolicy {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct SessionStartParams {
     pub session_id: String,
+    /// Caller-supplied display labels, not an authenticated identity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub controller: Option<ControllerInfo>,
     /// Use Chrome's shared incognito browsing session. Omitted means normal.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub incognito: bool,
@@ -71,6 +74,50 @@ pub struct SessionStartParams {
     #[serde(default, skip_serializing)]
     #[schemars(skip)]
     pub unattended: bool,
+}
+
+/// Display identity of the agent controlling a session. Never an authorization claim.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ControllerInfo {
+    #[schemars(length(min = 1, max = 80))]
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(length(min = 1, max = 120))]
+    pub project: Option<String>,
+    /// Optional six-digit hex color. Omitted colors are derived from the session ID.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(regex(pattern = r"^#[0-9a-fA-F]{6}$"))]
+    pub color: Option<String>,
+}
+
+impl ControllerInfo {
+    /// Check display bounds at ingress, before creating any browser resources.
+    pub fn validate(&self) -> Result<(), String> {
+        for (field, value, max) in [
+            ("name", Some(self.name.as_str()), 80),
+            ("project", self.project.as_deref(), 120),
+        ] {
+            if let Some(value) = value
+                && (value
+                    .trim_matches(|c: char| c.is_whitespace() || c == '\u{feff}')
+                    .is_empty()
+                    || value.chars().count() > max
+                    || value.chars().any(char::is_control))
+            {
+                return Err(format!(
+                    "controller.{field} must contain 1..={max} characters without control characters"
+                ));
+            }
+        }
+        if let Some(color) = &self.color
+            && (color.len() != 7
+                || !color.starts_with('#')
+                || !color.as_bytes()[1..].iter().all(u8::is_ascii_hexdigit))
+        {
+            return Err("controller.color must be a six-digit hex color (#RRGGBB)".into());
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -105,6 +152,50 @@ pub struct SessionStopResult {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn controller_is_optional_and_round_trips_in_session_start() {
+        let legacy: SessionStartParams =
+            serde_json::from_value(json!({"session_id":"abcd"})).unwrap();
+        assert_eq!(legacy.controller, None);
+        assert!(
+            serde_json::to_value(legacy)
+                .unwrap()
+                .get("controller")
+                .is_none()
+        );
+        let wire = json!({"session_id":"abcd", "controller": {
+            "name":"Codex", "project":"知识库", "color":"#2563eb"
+        }});
+        let params: SessionStartParams = serde_json::from_value(wire.clone()).unwrap();
+        params.controller.as_ref().unwrap().validate().unwrap();
+        assert_eq!(serde_json::to_value(params).unwrap(), wire);
+    }
+
+    #[test]
+    fn controller_validation_bounds_labels_and_colors() {
+        for value in [
+            json!({"name":""}),
+            json!({"name":"   "}),
+            json!({"name":"\u{feff}"}),
+            json!({"name":"a".repeat(81)}),
+            json!({"name":"Agent\nOther"}),
+            json!({"name":"Agent", "project":"x".repeat(121)}),
+            json!({"name":"Agent", "project":"\u{0085}"}),
+            json!({"name":"Agent", "color":"red"}),
+            json!({"name":"Agent", "color":"#fff"}),
+            json!({"name":"Agent", "color":"#12345g"}),
+        ] {
+            let info: ControllerInfo = serde_json::from_value(value).unwrap();
+            assert!(info.validate().is_err(), "{info:?}");
+        }
+        let unicode = ControllerInfo {
+            name: "🦀".repeat(80),
+            project: Some("项目".repeat(60)),
+            color: None,
+        };
+        unicode.validate().unwrap();
+    }
 
     #[test]
     fn incognito_is_opt_in_and_requires_protocol_1_4() {

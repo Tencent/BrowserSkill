@@ -14,6 +14,8 @@
  *      and conversation context are preserved.
  */
 
+import { type ControllerInfo, isControllerInfo } from "./controller-info";
+
 export const OVERLAY_MSG_WHO_AM_I = "overlay.who_am_i";
 export const OVERLAY_MSG_READY = "overlay.ready";
 export const OVERLAY_MSG_INTERRUPT = "overlay.interrupt";
@@ -79,6 +81,7 @@ export interface OverlayVersion {
 }
 
 export interface OverlayAgentStateMessage extends OverlayVersion {
+  controller?: ControllerInfo;
   cooperation?: import("@/cooperation/types").CooperationView;
   type: typeof OVERLAY_AGENT_STATE;
   sessionId: string | null;
@@ -167,9 +170,11 @@ export function isOverlayAgentStateMessage(message: unknown): message is Overlay
     mode?: unknown;
     epoch?: unknown;
     generation?: unknown;
+    controller?: unknown;
   };
   return (
     candidate.type === OVERLAY_AGENT_STATE &&
+    (candidate.controller === undefined || isControllerInfo(candidate.controller)) &&
     (typeof candidate.sessionId === "string" || candidate.sessionId === null) &&
     (candidate.mode === "control" ||
       candidate.mode === "interrupting" ||

@@ -19,6 +19,23 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  changelog:
+    name: Bilingual changelog synchronization
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - name: Check changelog structure and paired updates
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          if [ -n "$BASE_SHA" ]; then
+            python3 scripts/check-changelog-sync.py "$(git merge-base "$BASE_SHA" HEAD)"
+          else
+            python3 scripts/check-changelog-sync.py
+          fi
+
   release-protocol:
     name: Signing protocols and release manifest
     runs-on: ubuntu-latest
@@ -369,6 +386,13 @@ jobs:
           BSK_COOP_CHROME: ${{ env.BSK_VIDEO_CHROME }}
           BSK_COOP_FRAMES_ONLY: "1"
           BSK_COOP_ARTIFACTS: ${{ env.BSK_VIDEO_ARTIFACTS }}/cooperation
+        run: node evals/browser/cases/regression/cooperation/run.mjs
+
+      - name: Validate scrolling, effective input and automatic handoff through CLI and DSH
+        env:
+          BSK_COOP_CHROME: ${{ env.BSK_VIDEO_CHROME }}
+          BSK_COOP_TARGET_ONLY: "1"
+          BSK_COOP_ARTIFACTS: ${{ env.BSK_VIDEO_ARTIFACTS }}/cooperation-intent
         run: node evals/browser/cases/regression/cooperation/run.mjs
 
       - name: Upload video regression evidence
