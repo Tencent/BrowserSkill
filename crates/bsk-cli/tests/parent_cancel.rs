@@ -16,6 +16,249 @@ use tokio::net::windows::named_pipe::ServerOptions;
 use tokio::process::Command;
 use tokio::sync::{Notify, watch};
 
+/// Keep the actual operation outside the daemon until after the CLI has
+/// returned from its two-second cancel grace. The production handler, queues
+/// and execution registries then see the late request, not a mocked cancel.
+#[test]
+fn cancelled_cli_cannot_dispatch_a_late_admitted_request() {
+    const NAME: &str = "cancelled_cli_cannot_dispatch_a_late_admitted_request";
+    if std::env::var("BSK_ADMISSION_TEST_CHILD").as_deref() != Ok(NAME) {
+        let home = tempfile::tempdir().unwrap();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", NAME, "--nocapture"])
+            .env("BSK_ADMISSION_TEST_CHILD", NAME)
+            .env("BSK_HOME", home.path())
+            .env("BSK_AUTO_UPDATE", "off")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
+    tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(late_admission());
+}
+
+async fn late_admission() {
+    use bsk::daemon::{
+        DaemonConfig, DaemonState,
+        browsers::{BrowserClient, BrowserId, BrowserSink, Liveness, Pending},
+        ipc::{DaemonStatus, full_handler},
+        sessions::{Session, SessionId},
+    };
+    use bsk::ipc_client::IpcClient;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let home = std::path::PathBuf::from(std::env::var_os("BSK_HOME").unwrap());
+    #[cfg(unix)]
+    let address = home.join("admission.sock");
+    #[cfg(windows)]
+    let address =
+        std::path::PathBuf::from(format!(r"\\.\pipe\bsk-admission-{}", uuid::Uuid::new_v4()));
+    #[cfg(unix)]
+    let listener = tokio::net::UnixListener::bind(&address).unwrap();
+    #[cfg(windows)]
+    let mut pipe = ServerOptions::new()
+        .first_pipe_instance(true)
+        .create(&address)
+        .unwrap();
+    let state = Arc::new(DaemonState::new(DaemonConfig::new(0)));
+    let (tx, mut frames) = tokio::sync::mpsc::unbounded_channel();
+    let browser = Arc::new(BrowserClient {
+        id: BrowserId("fixture-browser".into()),
+        browser_name: "chrome".into(),
+        browser_version: "test".into(),
+        extension_version: "0.4.1".into(),
+        extension_protocol_version: "1.8".into(),
+        label: "fixture".into(),
+        sink: BrowserSink { tx },
+        pending: Mutex::new(Pending::default()),
+        generation: 1,
+        connected_at_ms: 0,
+        version_skew: false,
+        liveness: Liveness::default(),
+    });
+    state.browsers.insert(browser.clone());
+    let session = SessionId("fixture".into());
+    state.sessions.insert(Session {
+        controller: None,
+        interaction: None,
+        id: session.clone(),
+        browser_id: browser.id.clone(),
+        agent_window_id: Some(42),
+        created_at_ms: 0,
+    });
+    state.tool_queues.spawn(session);
+    let dispatched = Arc::new(AtomicUsize::new(0));
+    let count = dispatched.clone();
+    let extension = tokio::spawn(async move {
+        while let Some(Frame::Request(request)) = frames.recv().await {
+            count.fetch_add(1, Ordering::SeqCst);
+            browser.pending.lock().unwrap().resolve(ResponseFrame {
+                id: request.id,
+                body: ResponseBody::Ok(json!({"tab_id":42})),
+            });
+        }
+    });
+    let handler = full_handler(
+        DaemonStatus {
+            started_at: Instant::now(),
+            ws_port: 0,
+            sock_path: address.clone(),
+            daemon_version: "0.4.1",
+            protocol_version: "1.8",
+        },
+        state.clone(),
+    );
+    let info = DaemonInfo::now(std::process::id(), address.clone(), 0, "0.4.1");
+    std::fs::write(home.join("daemon.json"), serde_json::to_vec(&info).unwrap()).unwrap();
+    let status_calls = Arc::new(AtomicUsize::new(0));
+    let status_count = status_calls.clone();
+    let received = Arc::new(Notify::new());
+    let first = received.clone();
+    let (release, gate) = watch::channel(false);
+    let (results, mut result) = tokio::sync::mpsc::unbounded_channel();
+    #[cfg(windows)]
+    let endpoint = address.clone();
+    let server = tokio::spawn(async move {
+        let mut connections = tokio::task::JoinSet::new();
+        loop {
+            #[cfg(unix)]
+            let (connection, _) = listener.accept().await.unwrap();
+            #[cfg(windows)]
+            let connection = {
+                pipe.connect().await.unwrap();
+                let next = ServerOptions::new().create(&endpoint).unwrap();
+                std::mem::replace(&mut pipe, next)
+            };
+            let handler = handler.clone();
+            let status_count = status_count.clone();
+            let first = first.clone();
+            let mut gate = gate.clone();
+            let results = results.clone();
+            connections.spawn(async move {
+                let (read, mut write) = tokio::io::split(connection);
+                let mut reader = BufReader::new(read);
+                let mut line = String::new();
+                while reader.read_line(&mut line).await.unwrap_or(0) > 0 {
+                    let Frame::Request(request) = serde_json::from_str::<Frame>(&line).unwrap()
+                    else {
+                        panic!("expected request")
+                    };
+                    line.clear();
+                    if request.method == Method::SystemStatus {
+                        status_count.fetch_add(1, Ordering::SeqCst);
+                    }
+                    let delayed = request.method == Method::ToolClick && !*gate.borrow();
+                    if delayed {
+                        first.notify_one();
+                        gate.wait_for(|ready| *ready).await.unwrap();
+                    }
+                    let body = handler(
+                        request.id.clone(),
+                        request.method,
+                        request.params.unwrap_or_default(),
+                    )
+                    .await;
+                    if delayed {
+                        results.send(body.clone()).unwrap();
+                    }
+                    let mut bytes = serde_json::to_vec(&ResponseFrame {
+                        id: request.id,
+                        body,
+                    })
+                    .unwrap();
+                    bytes.push(b'\n');
+                    if write.write_all(&bytes).await.is_err() {
+                        break;
+                    }
+                }
+            });
+        }
+    });
+    // The optional override also lets this exact regression exercise an older CLI.
+    let executable = std::env::var_os("BSK_ADMISSION_TEST_CLI")
+        .unwrap_or_else(|| env!("CARGO_BIN_EXE_bsk").into());
+    let mut child = Command::new(executable)
+        .env("BSK_HOME", &home)
+        .env("BSK_AUTO_START", "0")
+        .env("BSK_AUTO_UPDATE", "off")
+        .env("BSK_CANCEL_ON_STDIN_CLOSE", "1")
+        .args(["click", "--session", "fixture", "--ref", "@e1", "--json"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(8), received.notified())
+        .await
+        .unwrap();
+    assert_eq!(
+        status_calls.load(Ordering::SeqCst),
+        1,
+        "reuse discovery capability without another status RPC"
+    );
+    let start = Instant::now();
+    drop(child.stdin.take());
+    let output = tokio::time::timeout(Duration::from_secs(4), child.wait_with_output())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(start.elapsed() < Duration::from_secs(3));
+    // The CLI is already gone; no cancellation retry can rescue this request.
+    release.send(true).unwrap();
+    let late = tokio::time::timeout(Duration::from_secs(3), result.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        matches!(
+            late,
+            ResponseBody::Err(RpcError {
+                code: ErrorCode::Cancelled,
+                ..
+            })
+        ),
+        "late result: {late:?}"
+    );
+    assert_eq!(
+        dispatched.load(Ordering::SeqCst),
+        0,
+        "cancelled operation reached browser"
+    );
+    assert!(state.tool_inflight.is_empty());
+    let mut client = IpcClient::connect(address).await.unwrap();
+    let next = client
+        .call::<_, serde_json::Value>(
+            "next",
+            Method::ToolClick,
+            Some(json!({"session_id":"fixture","ref":"@e2"})),
+            Duration::from_secs(2),
+        )
+        .await
+        .unwrap();
+    assert!(next.is_ok(), "session did not recover: {next:?}");
+    assert_eq!(dispatched.load(Ordering::SeqCst), 1);
+    server.abort();
+    extension.abort();
+    let _ = server.await;
+    let _ = extension.await;
+}
+
 fn response<T: serde::Serialize>(result: Result<T, RpcError>) -> ResponseBody {
     match result {
         Ok(value) => ResponseBody::Ok(serde_json::to_value(value).unwrap()),

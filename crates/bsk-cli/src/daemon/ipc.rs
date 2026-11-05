@@ -96,6 +96,7 @@ impl DaemonStatus {
     /// fields are empty.
     pub fn snapshot(&self) -> StatusResult {
         StatusResult {
+            rpc_admission: None,
             daemon_version: self.daemon_version.to_string(),
             protocol_version: self.protocol_version.to_string(),
             pid: std::process::id(),
@@ -138,6 +139,7 @@ impl DaemonStatus {
             .map(|s| s.status_entry())
             .collect();
         StatusResult {
+            rpc_admission: Some(true),
             daemon_version: self.daemon_version.to_string(),
             protocol_version: self.protocol_version.to_string(),
             pid: std::process::id(),
@@ -205,6 +207,10 @@ pub fn full_handler(status: DaemonStatus, state: Arc<DaemonState>) -> RpcHandler
         let status = status.clone();
         let state = Arc::clone(&state);
         Box::pin(async move {
+            let _admission = match state.rpc_admissions.admit(&rpc_id, &method) {
+                Ok(guard) => guard,
+                Err(error) => return ResponseBody::Err(error),
+            };
             let mut params = params;
             // Internal correlation is minted here, never accepted from a CLI caller.
             if let Some(object) = params.as_object_mut() {
@@ -232,6 +238,30 @@ pub fn full_handler(status: DaemonStatus, state: Arc<DaemonState>) -> RpcHandler
                 );
             }
             let body = match method {
+                Method::RpcPrepare => {
+                    let prepared = (|| {
+                        let params: bsk_protocol::cancel::RpcPrepareParams =
+                            serde_json::from_value(params)
+                                .map_err(|error| invalid_params(error.to_string()))?;
+                        let method: Method = serde_json::from_value(Value::String(params.method))
+                            .map_err(|error| invalid_params(error.to_string()))?;
+                        if matches!(
+                            method,
+                            Method::RpcPrepare | Method::Cancel | Method::SystemHandshake
+                        ) {
+                            return Err(invalid_params("method does not support RPC preparation"));
+                        }
+                        let rpc_id = state.rpc_admissions.prepare(method)?;
+                        Ok(bsk_protocol::cancel::RpcPrepareResult {
+                            rpc_id,
+                            admission_ms: super::rpc_admission::ADMISSION_WINDOW.as_millis() as u64,
+                        })
+                    })();
+                    match prepared {
+                        Ok(result) => ResponseBody::Ok(serde_json::to_value(result).unwrap()),
+                        Err(error) => ResponseBody::Err(error),
+                    }
+                }
                 Method::SystemPing => {
                     let result = PingResult { pong: true };
                     ResponseBody::Ok(serde_json::to_value(result).unwrap_or(Value::Null))
@@ -1024,8 +1054,9 @@ fn handle_cancel(state: &Arc<DaemonState>, params: Value) -> ResponseBody {
             });
         }
     };
+    let early = state.rpc_admissions.cancel(&params.rpc_id);
     let local = state.abort_registry.cancel(&params.rpc_id);
-    let mut cancelled = local;
+    let mut cancelled = early || local;
     if !local && let Some(snap) = state.tool_inflight.cancel(&params.rpc_id) {
         cancelled = true;
         // Forward the WS-side cancel only when the worker has

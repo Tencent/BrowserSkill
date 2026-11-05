@@ -31,21 +31,31 @@ pub(crate) fn auto_start_enabled() -> bool {
 /// Return verified discovery info, starting a daemon only when its discovery
 /// file or IPC listener is absent and auto-start is enabled.
 pub fn ensure_daemon() -> Result<DaemonInfo> {
-    let (info, protocol) = ensure_daemon_with_protocol()?;
+    let (info, protocol, admission) = ensure_daemon_with_capabilities()?;
+    super::business_rpc::set_daemon_admission(&info.sock_path, admission);
     super::business_rpc::check_daemon_protocol(&protocol)?;
     Ok(info)
 }
 
 /// Same discovery and startup as [`ensure_daemon`], also returning the
-/// daemon's protocol version so long-lived callers can check features per call.
-pub(crate) fn ensure_daemon_with_protocol() -> Result<(DaemonInfo, String)> {
+/// protocol and admission capability so long-lived callers can check each daemon.
+/// None means startup did not return a status snapshot; negotiate before dispatch.
+pub(crate) fn ensure_daemon_with_capabilities() -> Result<(DaemonInfo, String, Option<bool>)> {
     let deadline = Instant::now() + SPAWN_DEADLINE;
     if let Probe::Ready(daemon) = probe::probe(PROBE_TIMEOUT)? {
-        return Ok((daemon.info, daemon.status.protocol_version));
+        return Ok((
+            daemon.info,
+            daemon.status.protocol_version,
+            Some(daemon.status.rpc_admission == Some(true)),
+        ));
     }
     ensure!(auto_start_enabled(), DaemonStartFailure::AutoStartDisabled);
     let info = start_background(&StartArgs::default(), deadline)
         .context("automatic daemon startup failed")?;
     // A daemon this process just started runs this binary's protocol.
-    Ok((info, crate::daemon::state::PROTOCOL_VERSION.to_string()))
+    Ok((
+        info,
+        crate::daemon::state::PROTOCOL_VERSION.to_string(),
+        None,
+    ))
 }

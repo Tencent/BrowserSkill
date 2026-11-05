@@ -583,6 +583,9 @@ pub struct VersionSkewEntry {
 /// `system.status` reply: daemon meta + connected browsers + live sessions.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct StatusResult {
+    /// Local IPC supports rpc.prepare and durable cancellation before admission.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rpc_admission: Option<bool>,
     /// Semver of the daemon binary (`env!("CARGO_PKG_VERSION")`).
     pub daemon_version: String,
     /// Logical protocol revision (e.g. `"1.0"`).
@@ -630,6 +633,8 @@ mod status_compat_tests {
             }]
         }))
         .expect("new CLI must tolerate old daemon skew payloads");
+
+        assert_eq!(status.rpc_admission, None);
 
         let skew = status
             .version_skew_browsers

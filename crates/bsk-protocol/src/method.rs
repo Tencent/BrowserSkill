@@ -164,6 +164,10 @@ pub enum Method {
     #[serde(rename = "transfer.release")]
     TransferRelease,
 
+    /// Daemon-local one-use RPC admission; never forwarded to the extension.
+    #[serde(rename = "rpc.prepare")]
+    RpcPrepare,
+
     #[serde(rename = "cancel")]
     Cancel,
 }
@@ -280,6 +284,7 @@ impl Method {
             | Method::TransferRead
             | Method::TransferRelease
             | Method::ToolScreenshotRelease
+            | Method::RpcPrepare
             | Method::Cancel => MethodEffect::ControlPlane,
         }
     }

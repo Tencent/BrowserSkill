@@ -1,0 +1,20 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "RpcPrepareResult",
+  "type": "object",
+  "required": [
+    "admission_ms",
+    "rpc_id"
+  ],
+  "properties": {
+    "admission_ms": {
+      "description": "Time available to start the RPC; not its execution timeout.",
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "rpc_id": {
+      "type": "string"
+    }
+  }
+}

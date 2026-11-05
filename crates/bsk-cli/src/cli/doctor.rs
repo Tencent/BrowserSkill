@@ -784,6 +784,7 @@ mod m2_tests {
 
     fn fake_status(browsers: Vec<BrowserStatusEntry>, skew: Vec<VersionSkewEntry>) -> StatusResult {
         StatusResult {
+            rpc_admission: None,
             daemon_version: env!("CARGO_PKG_VERSION").into(),
             protocol_version: "1.0".into(),
             pid: 1,

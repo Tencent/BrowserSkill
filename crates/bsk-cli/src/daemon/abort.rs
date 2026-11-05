@@ -30,6 +30,7 @@ pub enum AbortRegisterError {
 
 #[derive(Default)]
 pub struct AbortRegistry {
+    admissions: Option<Arc<super::rpc_admission::RpcAdmissions>>,
     tokens: Mutex<HashMap<RpcId, AbortToken>>,
 }
 
@@ -44,6 +45,13 @@ impl std::fmt::Debug for AbortRegistry {
 impl AbortRegistry {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub fn with_admissions(admissions: Arc<super::rpc_admission::RpcAdmissions>) -> Self {
+        Self {
+            admissions: Some(admissions),
+            ..Self::default()
+        }
     }
 
     pub fn len(&self) -> usize {
@@ -74,6 +82,15 @@ impl AbortRegistry {
                 return Err(AbortRegisterError::DuplicateRpcId(rpc_id));
             }
             guard.insert(rpc_id.clone(), token.clone());
+        }
+        // Cancel records its intent before looking here. If it arrived before
+        // insertion, this check observes it; if it arrives later, it sees token.
+        if self
+            .admissions
+            .as_ref()
+            .is_some_and(|a| a.is_cancelled(&rpc_id))
+        {
+            token.cancel();
         }
         Ok(AbortGuard {
             registry: Arc::clone(self),

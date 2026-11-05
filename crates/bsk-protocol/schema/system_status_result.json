@@ -35,6 +35,13 @@
       "description": "Logical protocol revision (e.g. `\"1.0\"`).",
       "type": "string"
     },
+    "rpc_admission": {
+      "description": "Local IPC supports rpc.prepare and durable cancellation before admission.",
+      "type": [
+        "boolean",
+        "null"
+      ]
+    },
     "sessions": {
       "description": "Snapshot of live sessions.",
       "type": "array",

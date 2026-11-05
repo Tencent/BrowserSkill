@@ -24,12 +24,17 @@ Starting from 0.2.0, CLI / Extension / DSH Plugin share the same version number.
 
 ### Fixed
 
+- CLI and MCP calls negotiate one-use daemon admission tickets. A cancellation
+  received before an operation is registered prevents that late operation from
+  running, including after the caller's two-second cancellation grace has ended.
+  Tickets expire, reject replay and cannot survive daemon restarts; older daemons
+  retain the existing bounded-retry behavior.
 - CLI cancellation keeps the original RPC progressing and retries cancellation
   that arrives before daemon registration, reducing background screenshots that
   keep a session busy after the caller stops. Confirmation and response waiting
   share a two-second budget, including MCP cancellation; transfer cleanup keeps
-  its separate bounded budget. Requests registered after that deadline still
-  require daemon-side cancellation tracking
+  its separate bounded budget. For older daemons without RPC admission, requests
+  registered after that deadline can still escape cancellation
   ([#419](https://github.com/Tencent/BrowserSkill/pull/419)).
 - Saved HTML debug captures redact sensitive input values when `autocomplete`
   contains surrounding whitespace or multiple tokens, such as

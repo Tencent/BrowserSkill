@@ -513,12 +513,17 @@ mod tests {
                     let mut line = String::new();
                     BufReader::new(read).read_line(&mut line).await.unwrap();
                     let request: Value = serde_json::from_str(&line).unwrap();
-                    sent.send(request.clone()).unwrap();
                     let method = request["method"].as_str().unwrap();
+                    // This fixture models a legacy daemon. Track business RPCs
+                    // separately from the new capability negotiation.
+                    if method != "system.status" {
+                        sent.send(request.clone()).unwrap();
+                    }
                     if method == "tool.click" && request["params"]["context_id"] == "hold" {
                         std::future::pending::<()>().await;
                     }
                     let value = match method {
+                        "system.status" => json!({}),
                         "tool.click" => json!({"tab_id":42,"x":1,"y":2}),
                         "tool.cooperate" => {
                             json!({"tab_id":42,"context_id":"next","control_policy":"target", "observation":{"text":"button Done [ref=@e2]"}})

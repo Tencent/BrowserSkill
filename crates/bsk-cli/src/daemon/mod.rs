@@ -14,6 +14,7 @@ pub mod paths;
 pub(crate) mod probe;
 pub mod queue;
 pub mod remote;
+pub mod rpc_admission;
 pub mod session_interrupt;
 pub mod session_requests;
 pub mod sessions;
