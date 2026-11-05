@@ -578,7 +578,6 @@ export function attachCooperationCapture() {
     "dragend",
     "drop",
     "submit",
-    "wheel",
     "keydown",
     "keypress",
     "keyup",
@@ -591,6 +590,15 @@ export function attachCooperationCapture() {
   ];
   for (const event of events)
     document.addEventListener(event, onEvent, { capture: true, passive: true });
+  // Chromium skips a node's legacy `mousewheel` listeners whenever that node has a
+  // `wheel` listener, even a passive one. Listen only while collecting so pages
+  // without a session keep their mousewheel handlers. Window capture runs before
+  // any document listener, so a page that stops propagation there cannot hide an
+  // Agent wheel from attribution even though this listener is registered late.
+  const listenWheel = (on: boolean) =>
+    on
+      ? window.addEventListener("wheel", onEvent, { capture: true, passive: true })
+      : window.removeEventListener("wheel", onEvent, true);
   const onScroll = () => {
     if (!enabled) return;
     const started = !state.scrolling;
@@ -652,6 +660,7 @@ export function attachCooperationCapture() {
     }
     if (message.kind === COOPERATION_DISABLE) {
       enabled = false;
+      listenWheel(false);
       clearTimeout(focusTimer);
       clearTimeout(pointerTimer);
       clearTimeout(eventTimer);
@@ -677,6 +686,7 @@ export function attachCooperationCapture() {
       reply({ ...state, busy: false, fields: [] });
     } else if (message.kind === COOPERATION_READ) {
       enabled = true;
+      listenWheel(true);
       reply(read());
     } else if (message.kind === COOPERATION_ARM) {
       if (enabled && message.input?.type === "clear") {
@@ -746,5 +756,6 @@ export function attachCooperationCapture() {
     window.removeEventListener("blur", onWindowBlur);
     document.removeEventListener("scroll", onScroll, true);
     for (const event of events) document.removeEventListener(event, onEvent, true);
+    listenWheel(false);
   };
 }
