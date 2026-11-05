@@ -1426,7 +1426,13 @@ describe("buildFrameVomScene", () => {
     expect(rendered).toContain('      @e2 textbox "验证码"');
   });
 
-  it("marks current-password autocomplete as sensitive even for text inputs", () => {
+  it.each([
+    "current-password",
+    "section-login current-password",
+    " one-time-code ",
+    "billing cc-number",
+    "CURRENT-PASSWORD webauthn",
+  ])("marks autocomplete %j as sensitive even for text inputs", (autocomplete) => {
     const axNodes: CdpAxNode[] = [
       {
         nodeId: "1",
@@ -1447,7 +1453,7 @@ describe("buildFrameVomScene", () => {
             type: "text",
             name: "password_hint",
             placeholder: "Enter password recovery email",
-            autocomplete: "current-password",
+            autocomplete,
           },
           rect: { x: 10, y: 10, w: 200, h: 30 },
           paintOrder: 1,

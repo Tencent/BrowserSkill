@@ -8,6 +8,7 @@ interface Control {
   value: string;
   type?: string;
   checked?: boolean;
+  attrs?: Record<string, string>;
 }
 
 function snapshot(groups: Control[][]) {
@@ -31,6 +32,7 @@ function snapshot(groups: Control[][]) {
           str(c.type ?? "text"),
           str("placeholder"),
           str("snapshot placeholder"),
+          ...Object.entries(c.attrs ?? {}).flatMap(([k, v]) => [str(k), str(v)]),
         ]),
       ],
       inputChecked: { index: controls.flatMap((c, i) => (c.checked ? [i + 2] : [])) },
@@ -289,6 +291,26 @@ describe("form state identity", () => {
     const { cdp, nodes } = await fakeCdp([[{ id: 11, value: "secret", type }]], () =>
       reply([[11, { ...state("secret"), sensitive: true }]]),
     );
+    await enrichFormControlStates(cdp, 7, nodes);
+    const control = nodes[0].find((n) => n.backendNodeId === 11);
+    expect(control?.formState).toBe("filled");
+    expect(control?.formValue).toBeUndefined();
+    expect(control?.formDefaultValue).toBeUndefined();
+    expect(control?.attrs.value).toBeUndefined();
+  });
+
+  it.each<Record<string, string>>([
+    { autocomplete: "billing cc-number" },
+    { "data-bsk-record-password": "" },
+  ])("redacts %j controls in snapshot decoding and live form enrichment", async (extraAttrs) => {
+    const { cdp, nodes } = await fakeCdp(
+      [[{ id: 11, value: "secret", type: "text", attrs: { value: "secret", ...extraAttrs } }]],
+      () => reply([[11, { ...state("secret"), state: "default", sensitive: false }]]),
+    );
+    expect(nodes[0].find((n) => n.backendNodeId === 11)).toMatchObject({
+      formState: "filled",
+    });
+    expect(nodes[0].find((n) => n.backendNodeId === 11)?.formValue).toBeUndefined();
     await enrichFormControlStates(cdp, 7, nodes);
     const control = nodes[0].find((n) => n.backendNodeId === 11);
     expect(control?.formState).toBe("filled");
