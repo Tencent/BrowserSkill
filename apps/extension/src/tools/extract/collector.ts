@@ -22,8 +22,6 @@ export function collectExtractDom(this: Element, options: CollectorOptions): Raw
   let work = 0;
   let textBytes = 0;
   const encoder = new TextEncoder();
-  const tableSelector = 'table,[role~="table"],[role~="grid"],[role~="treegrid"]';
-  const listSelector = 'ul,ol,[role~="list"]';
   const sensitiveInputSelector =
     'input[type="password"],input[type="hidden"],[data-bsk-record-password],[autocomplete~="current-password" i],[autocomplete~="new-password" i],[autocomplete~="one-time-code" i],[autocomplete^="cc-" i],[autocomplete*=" cc-" i]';
   const hiddenSubtrees = new WeakMap<Element, boolean>();
@@ -225,7 +223,7 @@ export function collectExtractDom(this: Element, options: CollectorOptions): Raw
         isSubtreeHidden(node) ||
         (node instanceof SVGElement && !renderedSvg.has(node.localName)) ||
         node.matches(`script,style,template,noscript,${sensitiveInputSelector}`) ||
-        (node !== root && node.matches(tableSelector))
+        (node !== root && isTableElement(node))
       )
         continue;
       const nodeVisible = !isVisibilityHidden(node);
@@ -334,15 +332,66 @@ export function collectExtractDom(this: Element, options: CollectorOptions): Raw
     result.warnings.push(`invalid_${name}`);
     return undefined;
   };
-  // The role attribute is a space-separated token list; the first token is the
-  // element's effective role (WAI-ARIA). Exact comparisons miss multi-token
-  // values like role="table grid", and the ~= selectors above cannot express
-  // first-token semantics, so callers compare this value directly.
+  // The role attribute is a space-separated token list whose first token is the
+  // element's effective role (WAI-ARIA). Both exact [role="x"] and ~= token
+  // selectors miss first-token semantics: [role~="table"] would wrongly match
+  // role="heading table". These helpers resolve the effective role so only the
+  // first token decides, matching how Chromium resolves ARIA roles.
   const ariaRole = (element: Element): string | null => {
     const value = element.getAttribute("role");
     if (value === null) return null;
     const first = value.trim().split(/\s+/)[0];
     return first || null;
+  };
+  const TABLE_ROLES = new Set(["table", "grid", "treegrid"]);
+  const CELL_ROLES = new Set(["cell", "gridcell"]);
+  const isTableElement = (element: Element): boolean =>
+    element.tagName === "TABLE" || TABLE_ROLES.has(ariaRole(element) ?? "");
+  const isListElement = (element: Element): boolean =>
+    element.tagName === "UL" || element.tagName === "OL" || ariaRole(element) === "list";
+  const isRowElement = (element: Element): boolean =>
+    element.tagName === "TR" || ariaRole(element) === "row";
+  const isRowgroupElement = (element: Element): boolean =>
+    element.tagName === "TBODY" ||
+    element.tagName === "THEAD" ||
+    element.tagName === "TFOOT" ||
+    ariaRole(element) === "rowgroup";
+  // Element.closest but predicate-based, since role selectors cannot express
+  // first-token semantics. Checks the start element itself, like closest().
+  const closestBy = (
+    start: Element | null,
+    pred: (el: Element) => boolean,
+  ): Element | null => {
+    let node: Element | null = start;
+    while (node) {
+      tick();
+      if (pred(node)) return node;
+      node = node.parentElement;
+    }
+    return null;
+  };
+  // querySelectorAll replacement combining tag matches with effective-role
+  // matches, so role="cell row" is not picked up by a [role~="row"] scan.
+  // When tagSelector is empty, only the effective role is considered.
+  const selectByRole = (
+    root: ParentNode,
+    tagSelector: string,
+    roles: Set<string>,
+  ): Element[] => {
+    const out: Element[] = [];
+    const seen = new Set<Element>();
+    if (tagSelector)
+      for (const el of root.querySelectorAll(tagSelector))
+        if (!seen.has(el)) {
+          seen.add(el);
+          out.push(el);
+        }
+    for (const el of root.querySelectorAll("[role]"))
+      if (!seen.has(el) && roles.has(ariaRole(el) ?? "")) {
+        seen.add(el);
+        out.push(el);
+      }
+    return out;
   };
   const locator = (element: Element): string => {
     const segments: string[] = [];
@@ -398,30 +447,30 @@ export function collectExtractDom(this: Element, options: CollectorOptions): Raw
           const element = stack.pop()!;
           if (isHidden(element)) continue;
           if (
-            element.matches(`${tableSelector},${listSelector}`) &&
+            (isTableElement(element) || isListElement(element)) &&
             !["presentation", "none"].includes(ariaRole(element) ?? "")
           ) {
             found++;
-            const candidates = element.matches(tableSelector) ? tables : lists;
+            const candidates = isTableElement(element) ? tables : lists;
             if (tables.length === 32) {
               stop("target_limit");
               break;
             }
             if (candidates.length < 32) {
               const columns: string[] = [];
-              for (const header of select(element, 'th,[role~="columnheader"]')) {
+              for (const header of selectByRole(element, "th", new Set(["columnheader"]))) {
                 if (columns.length >= 8) break;
-                if (header.closest(tableSelector) !== element || isHidden(header)) continue;
+                if (closestBy(header, isTableElement) !== element || isHidden(header)) continue;
                 const role = ariaRole(header);
                 const scope = header.getAttribute("scope") ?? "";
-                const row = header.closest('tr,[role~="row"]');
+                const row = closestBy(header, isRowElement);
                 const columnHeader =
                   role === "columnheader" ||
                   (role !== "rowheader" &&
                     !["row", "rowgroup"].includes(scope) &&
                     (header.closest("thead") !== null ||
                       ["col", "colgroup"].includes(scope) ||
-                      !row?.querySelector('td,[role~="cell"],[role~="gridcell"]')));
+                      !row || selectByRole(row, "td", CELL_ROLES).length === 0));
                 if (columnHeader) columns.push(text(header));
               }
               const caption = element instanceof HTMLTableElement ? element.caption : null;
@@ -431,7 +480,7 @@ export function collectExtractDom(this: Element, options: CollectorOptions): Raw
                 element.id ||
                 element.tagName.toLowerCase();
               candidates.push({
-                kind: element.matches(tableSelector) ? "table" : "list",
+                kind: isTableElement(element) ? "table" : "list",
                 name: label.slice(0, 500),
                 columns,
                 node: element as unknown as { backendNodeId: number },
@@ -451,7 +500,10 @@ export function collectExtractDom(this: Element, options: CollectorOptions): Raw
       return result;
     }
     if (!options.anchored && !options.selector) {
-      const matches = select(root, options.action === "table" ? tableSelector : listSelector);
+      const matches =
+        options.action === "table"
+          ? selectByRole(root, "table", TABLE_ROLES)
+          : selectByRole(root, "ul,ol", new Set(["list"]));
       let selected: Element | undefined;
       for (const node of matches) {
         tick();
@@ -479,12 +531,12 @@ export function collectExtractDom(this: Element, options: CollectorOptions): Raw
       ];
       const nodes = options.item_selector
         ? select(root, options.item_selector)
-        : select(root, 'li,[role~="listitem"]');
+        : selectByRole(root, "li", new Set(["listitem"]));
       let sourceRow = 0;
       for (const item of nodes) {
         try {
           tick();
-          if (!options.item_selector && item.closest(listSelector) !== root) continue;
+          if (!options.item_selector && closestBy(item, isListElement) !== root) continue;
           sourceRow++;
           if (isHidden(item)) {
             omit(item, sourceRow, "aria-posinset");
@@ -559,11 +611,11 @@ export function collectExtractDom(this: Element, options: CollectorOptions): Raw
       }
       return result;
     }
-    if (!root.matches(tableSelector))
+    if (!isTableElement(root))
       fail("extract_structure_invalid", "Target is not an HTML or ARIA table/grid");
     const native = root instanceof HTMLTableElement;
     result.aria_rows = !native;
-    const rows = native ? (root as HTMLTableElement).rows : select(root, '[role~="row"]');
+    const rows = native ? (root as HTMLTableElement).rows : selectByRole(root, "", new Set(["row"]));
     const groups = new Map<Element | null, number>();
     let dataRows = 0;
     const dataPositions = new Set<number>();
@@ -573,7 +625,7 @@ export function collectExtractDom(this: Element, options: CollectorOptions): Raw
       try {
         tick();
         const element = rows[index];
-        if (element.closest(tableSelector) !== root) continue;
+        if (closestBy(element, isTableElement) !== root) continue;
         ownedRows++;
         if (isHidden(element)) {
           omit(element, ownedRows, "aria-rowindex");
@@ -590,7 +642,7 @@ export function collectExtractDom(this: Element, options: CollectorOptions): Raw
           }
           // A later rowgroup (e.g. pinned columns) may still hold fragments of
           // accepted rows, so skip new data rows instead of stopping.
-          if (!element.querySelector('[role~="columnheader"]')) {
+          if (selectByRole(element, "", new Set(["columnheader"])).length === 0) {
             stop("row_limit");
             continue;
           }
@@ -598,19 +650,20 @@ export function collectExtractDom(this: Element, options: CollectorOptions): Raw
         const rowCells =
           element instanceof HTMLTableRowElement
             ? element.cells
-            : select(
+            : selectByRole(
                 element,
-                '[role~="cell"],[role~="gridcell"],[role~="columnheader"],[role~="rowheader"]',
+                "",
+                new Set(["cell", "gridcell", "columnheader", "rowheader"]),
               );
         const cells: RawCell[] = [];
-        const groupElement = native ? element.parentElement : element.closest('[role~="rowgroup"]');
+        const groupElement = native ? element.parentElement : closestBy(element, isRowgroupElement);
         if (!groups.has(groupElement)) groups.set(groupElement, groups.size);
         const headerGroup = groupElement?.tagName === "THEAD";
         const footerGroup = groupElement?.tagName === "TFOOT";
         for (let cellIndex = 0; cellIndex < rowCells.length; cellIndex++) {
           tick();
           const cell = rowCells[cellIndex];
-          if (cell.closest(native ? "tr" : '[role~="row"]') !== element) continue;
+          if ((native ? cell.closest("tr") : closestBy(cell, isRowElement)) !== element) continue;
           if (cells.length === options.max_columns) fail("extract_limit", "Column budget exceeded");
           const scope = cell.getAttribute("scope") ?? "";
           if (
@@ -683,7 +736,7 @@ export function collectExtractDom(this: Element, options: CollectorOptions): Raw
             const unread = new Set<number>();
             for (let next = index; next < rows.length; next++) {
               const value = Number(rows[next].getAttribute("aria-rowindex")?.trim());
-              if (dataPositions.has(value) && rows[next].closest(tableSelector) === root)
+              if (dataPositions.has(value) && closestBy(rows[next] as Element, isTableElement) === root)
                 unread.add(value);
             }
             if (unread.size) {
