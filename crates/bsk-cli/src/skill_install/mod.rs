@@ -3,6 +3,7 @@
 mod bundle;
 mod conflicts;
 pub mod harness;
+pub mod mcp;
 mod provenance;
 mod storage;
 pub mod sync;

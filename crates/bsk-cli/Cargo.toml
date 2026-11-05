@@ -34,6 +34,7 @@ tokio-tungstenite = { workspace = true }
 futures-util = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+schemars = { workspace = true }
 semver = { workspace = true }
 thiserror = { workspace = true }
 anyhow = { workspace = true }
@@ -62,6 +63,7 @@ hyper-util = { version = "0.1", features = ["tokio"] }
 tokio-rustls = "0.26"
 time = { version = "0.3", features = ["formatting", "parsing"] }
 csv = "1.3"
+toml_edit = "0.25"
 
 [target.'cfg(unix)'.dependencies]
 nix = { workspace = true }
