@@ -6,6 +6,13 @@ See the [Chinese changelog](CHANGELOG.zh-CN.md). Update both versions in the sam
 
 Starting from 0.2.0, CLI / Extension / DSH Plugin share the same version number.
 
+## [Unreleased]
+
+### Fixed
+
+- Structured list extraction includes slot-assigned items while preserving
+  rendered order, nested-list ownership, visibility and collection limits.
+
 ## [0.4.2] - 2026-11-05
 
 ### Added
