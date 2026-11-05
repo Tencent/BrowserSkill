@@ -312,6 +312,45 @@ async fn optional_pairing_preserves_unpaired_use_but_protects_paired_and_revoked
 }
 
 #[tokio::test]
+async fn pairing_ends_an_existing_unverified_connection_for_the_bound_identity() {
+    let handle = daemon::run(DaemonConfig::new(0), None).await.unwrap();
+    let mut legacy = connect(&handle).await;
+    assert!(
+        handshake(&mut legacy, INSTANCE)
+            .await
+            .get("result")
+            .is_some()
+    );
+    let mut other = connect(&handle).await;
+    assert!(
+        handshake(&mut other, "12345678")
+            .await
+            .get("result")
+            .is_some()
+    );
+
+    let mut pairing = Pairing::create(&handle, None);
+    let mut verified = connect(&handle).await;
+    authenticate(&mut verified, &mut pairing).await;
+    // The verifier has committed, but the paired business socket has not registered yet.
+    let _ = legacy
+        .send(Message::Text(
+            json!({"id":"audit","method":"audit.request","params":{"action":"list"}}).to_string(),
+        ))
+        .await;
+    closed(&mut legacy).await;
+    assert!(handle.state().browsers.select(Some(INSTANCE)).is_err());
+    assert!(handle.state().browsers.select(Some("12345678")).is_ok());
+    assert!(
+        handshake(&mut verified, INSTANCE)
+            .await
+            .get("result")
+            .is_some()
+    );
+    handle.shutdown().await;
+}
+
+#[tokio::test]
 async fn l01_l02_no_registration_or_session_purge_without_a_valid_proof() {
     let handle = daemon().await;
     let state = handle.state();

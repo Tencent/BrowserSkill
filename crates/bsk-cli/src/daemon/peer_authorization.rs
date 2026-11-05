@@ -9,21 +9,31 @@ pub(crate) struct LocalPeer {
     pub lease: super::local_auth::lifecycle::Lease,
 }
 pub(crate) enum PeerAuthorization {
-    Legacy(Arc<LocalAuth>),
+    Legacy {
+        local: Arc<LocalAuth>,
+        instance: Option<String>,
+    },
     Local(LocalPeer),
     Remote(super::remote::ConnectionAuthorization),
 }
 impl PeerAuthorization {
     pub fn browser_id<'a>(&'a self, claimed: &'a str) -> &'a str {
         match self {
-            Self::Legacy(_) => claimed,
+            Self::Legacy { .. } => claimed,
             Self::Local(peer) => &peer.browser_id,
             Self::Remote(peer) => &peer.device.browser_id,
         }
     }
     pub fn active(&self) -> bool {
         match self {
-            Self::Legacy(local) => local.mode().accepts_legacy(),
+            Self::Legacy { local, instance } => {
+                let mode = local.mode();
+                mode.accepts_legacy()
+                    && (mode == LocalAuthMode::TrustLocal
+                        || instance
+                            .as_deref()
+                            .is_none_or(|id| !local.store.has_paired_browser(id)))
+            }
             Self::Local(peer) => {
                 peer.lease.active()
                     && peer.local.store.device(&peer.device_id).is_some_and(|d| {
@@ -41,25 +51,16 @@ impl PeerAuthorization {
         }
     }
     pub async fn revoked(&self) {
-        match self {
-            Self::Legacy(local) => {
-                let mut changed = local.lifecycle.changes();
-                while self.active() {
-                    if changed.changed().await.is_err() {
-                        return;
-                    }
-                }
-            }
-            Self::Remote(peer) => peer.revoked().await,
-            Self::Local(peer) => {
-                let mut changed = peer.local.store.changes();
-                let mut lifecycle = peer.local.lifecycle.changes();
-                while self.active() {
-                    tokio::select! {
-                        _ = changed.changed() => {},
-                        _ = lifecycle.changed() => {},
-                    }
-                }
+        let local = match self {
+            Self::Legacy { local, .. } | Self::Local(LocalPeer { local, .. }) => local,
+            Self::Remote(peer) => return peer.revoked().await,
+        };
+        let mut changed = local.store.changes();
+        let mut lifecycle = local.lifecycle.changes();
+        while self.active() {
+            tokio::select! {
+                _ = changed.changed() => {},
+                _ = lifecycle.changed() => {},
             }
         }
     }
@@ -74,7 +75,7 @@ impl PeerAuthorization {
                 Some(peer.local.device_gate(&peer.device_id).lock_owned().await),
                 &peer.local,
             ),
-            Self::Legacy(local) => (None, local),
+            Self::Legacy { local, .. } => (None, local),
             Self::Remote(_) => return None,
         };
         let registry = local.lifecycle.registry_gate.clone().lock_owned().await;
@@ -87,13 +88,12 @@ impl PeerAuthorization {
                 .register(&peer.device_id, &peer.lease, client);
         }
     }
-    pub fn matches_instance(&self, instance: &str) -> bool {
+    pub fn bind_instance(&mut self, claimed: &str) -> bool {
         match self {
-            Self::Local(peer) => peer.browser_id == instance,
-            // Revoking a key does not turn its identity into an unpaired one.
-            Self::Legacy(local) => {
-                local.mode() == LocalAuthMode::TrustLocal
-                    || !local.store.has_paired_browser(instance)
+            Self::Local(peer) => peer.browser_id == claimed,
+            Self::Legacy { instance, .. } => {
+                *instance = Some(claimed.to_owned());
+                self.active()
             }
             Self::Remote(_) => true,
         }

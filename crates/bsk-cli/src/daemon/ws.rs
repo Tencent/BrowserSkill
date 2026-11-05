@@ -215,7 +215,7 @@ const HANDSHAKE_FIRST_FRAME_TIMEOUT: Duration = Duration::from_secs(5);
 pub(super) async fn drive_connection<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>(
     state: Arc<DaemonState>,
     ws: WebSocketStream<S>,
-    authorization: PeerAuthorization,
+    mut authorization: PeerAuthorization,
     first_message: Option<Message>,
 ) -> anyhow::Result<()> {
     let (mut writer, mut reader) = ws.split();
@@ -343,7 +343,7 @@ pub(super) async fn drive_connection<S: tokio::io::AsyncRead + tokio::io::AsyncW
     // socket's cleanup path uses `remove_if_generation_matches` to
     // avoid clobbering the newer entry (review M4/M5 round 2 #1).
     let registration = authorization.registration_guard().await;
-    if !authorization.authorized().await || !authorization.matches_instance(&params.instance_id) {
+    if !authorization.bind_instance(&params.instance_id) || !authorization.authorized().await {
         return Err(anyhow!(
             "device authorization ended or browser identity mismatch"
         ));

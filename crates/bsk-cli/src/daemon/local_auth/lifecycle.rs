@@ -118,11 +118,11 @@ pub(crate) fn remove_browser(state: &DaemonState, client: &BrowserClient) {
         .remove_if_generation_matches(&client.id, client.generation)
         .is_some()
     {
-        for session in state.sessions.purge_browser(&client.id) {
-            state.tool_queues.remove(&session.id);
-            state.session_interrupts.drop_session(&session.id);
-            state.transfers.release_session(&session.id.0);
-        }
+        state.purge_sessions_of_browser(
+            &client.id,
+            crate::rpc_reason::BROWSER_DISCONNECTED,
+            "purged session on browser authorization change",
+        );
     }
 }
 pub async fn revoke(state: Arc<DaemonState>, id: Option<String>) -> Result<()> {

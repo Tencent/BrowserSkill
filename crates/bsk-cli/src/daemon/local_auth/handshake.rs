@@ -41,7 +41,10 @@ pub(crate) async fn accept<S: AsyncRead + AsyncWrite + Unpin>(
             bail!("local pairing required");
         }
         return Ok((
-            PeerAuthorization::Legacy(local.clone()),
+            PeerAuthorization::Legacy {
+                local,
+                instance: None,
+            },
             Some(Message::Text(first)),
         ));
     }
@@ -305,22 +308,33 @@ async fn durable_commit(
     txn: bsk_protocol::local_auth::Bytes<16>,
     instance: String,
 ) -> Result<()> {
-    // Publish the paired identity before another unverified registration can
-    // claim it. Reuse the gate already shared by registration and revocation.
-    let _registry = state
-        .local_auth
-        .lifecycle
-        .registry_gate
-        .clone()
-        .lock_owned()
-        .await;
-    let local = state.local_auth.clone();
-    let replaced =
-        tokio::task::spawn_blocking(move || local.store.commit(&id, txn, &instance)).await??;
-    if let Some(old) = replaced {
-        super::lifecycle::disconnect(&state, &[old]).await?;
-    }
-    Ok(())
+    // Keep the registry gate through cleanup even if the peer times out while
+    // the blocking store write is completing.
+    tokio::spawn(async move {
+        let _registry = state.local_auth.lifecycle.registry_gate.lock().await;
+        let local = state.local_auth.clone();
+        let (first_binding, replaced, instance) = tokio::task::spawn_blocking(move || {
+            let first_binding = !local.store.has_paired_browser(&instance);
+            let replaced = local.store.commit(&id, txn, &instance)?;
+            Ok::<_, anyhow::Error>((first_binding, replaced, instance))
+        })
+        .await??;
+        if first_binding && state.local_auth.mode() != super::LocalAuthMode::TrustLocal {
+            // A browser registered under an identity that was never paired is
+            // necessarily unverified. Drop it before acknowledging activation.
+            if let Some(client) = state
+                .browsers
+                .get(&crate::daemon::browsers::BrowserId(instance))
+            {
+                super::lifecycle::remove_browser(&state, &client);
+            }
+        }
+        if let Some(old) = replaced {
+            super::lifecycle::disconnect(&state, &[old]).await?;
+        }
+        Ok(())
+    })
+    .await?
 }
 async fn text<S: AsyncRead + AsyncWrite + Unpin>(ws: &mut WebSocketStream<S>) -> Result<String> {
     match ws.next().await {
