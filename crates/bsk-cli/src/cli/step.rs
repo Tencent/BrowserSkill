@@ -81,13 +81,13 @@ fn known_keys(input: &Value, normalized: &Value) -> anyhow::Result<()> {
     }
     Ok(())
 }
-fn typed<T: DeserializeOwned + Serialize>(input: &Value) -> anyhow::Result<Value> {
+pub(crate) fn typed<T: DeserializeOwned + Serialize>(input: &Value) -> anyhow::Result<Value> {
     let typed: T = serde_json::from_value(input.clone()).context("invalid action parameters")?;
     let normalized = serde_json::to_value(typed)?;
     known_keys(input, &normalized)?;
     Ok(normalized)
 }
-fn target(value: &Value, required: bool) -> anyhow::Result<()> {
+pub(crate) fn target(value: &Value, required: bool) -> anyhow::Result<()> {
     let count = ["ref", "selector"]
         .iter()
         .filter(|k| value.get(**k).is_some())
@@ -106,7 +106,7 @@ fn target(value: &Value, required: bool) -> anyhow::Result<()> {
     }
     Ok(())
 }
-fn prepare(args: &StepArgs) -> anyhow::Result<(Method, Value)> {
+pub(crate) fn prepare(args: &StepArgs) -> anyhow::Result<(Method, Value)> {
     ensure!(
         args.match_text
             .iter()
@@ -184,7 +184,7 @@ fn interrupted(error: &CliError) -> bool {
     )
 }
 
-fn run(
+pub(crate) fn run(
     args: &StepArgs,
     method: Method,
     params: Value,

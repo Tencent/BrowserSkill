@@ -144,6 +144,10 @@ bsk install-skill --harness cursor --json
 
 Use `bsk install-skill --list` to see supported targets and paths. Existing installations are skipped unless you explicitly replace them with `--force`. For another harness, copy the entire [`crates/bsk-cli/skill/`](crates/bsk-cli/skill/) directory into its skills directory as `browser-skill/`, including `references/`.
 
+For MCP clients, `bsk install-skill --harness codex --mcp` also configures the
+local stdio server (`claude-code` and `cursor` are supported too). See the
+[MCP setup and workflow](docs/mcp.md).
+
 DSH users should install the [plugin](#deepseek-harness-plugin) instead; it includes the skill.
 
 #### 4. Check the connection

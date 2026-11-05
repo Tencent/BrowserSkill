@@ -78,16 +78,28 @@ pub fn set_target_policy_requested() {
 
 /// Use the status already read during discovery, before any guarded action can be forwarded.
 pub(super) fn check_daemon_protocol(protocol: &str) -> anyhow::Result<()> {
-    if TARGET_POLICY_REQUESTED.get().copied().unwrap_or(false) {
+    require_target_control(
+        protocol,
+        TARGET_POLICY_REQUESTED.get().copied().unwrap_or(false),
+        ACTION_EVIDENCE
+            .get()
+            .is_some_and(|(observation, expect)| observation.is_some() || expect.is_some()),
+    )
+}
+
+/// Reject target policy or action evidence when the daemon could silently discard them.
+pub(crate) fn require_target_control(
+    protocol: &str,
+    target_policy: bool,
+    evidence: bool,
+) -> anyhow::Result<()> {
+    if target_policy {
         anyhow::ensure!(
             bsk_protocol::tools::supports_target_control(protocol),
             "--policy target requires daemon protocol 1.8 or a later compatible 1.x version; update the CLI and restart its daemon (running protocol {protocol})"
         );
     }
-    if ACTION_EVIDENCE
-        .get()
-        .is_some_and(|(observation, expect)| observation.is_some() || expect.is_some())
-    {
+    if evidence {
         anyhow::ensure!(
             bsk_protocol::tools::supports_target_control(protocol),
             "--expect and --observation require daemon protocol 1.8 or a later compatible 1.x version; update the CLI and restart its daemon (running protocol {protocol}). Conditions are never silently discarded"
@@ -96,7 +108,7 @@ pub(super) fn check_daemon_protocol(protocol: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn with_context<P: Serialize>(
+pub(crate) fn with_context<P: Serialize>(
     params: Option<P>,
     context: Option<&str>,
     dependencies: &[String],
@@ -296,7 +308,7 @@ pub async fn send_cancel(sock: &Path, rpc_id: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn random_short_id() -> String {
+pub(crate) fn random_short_id() -> String {
     use rand::Rng;
     let mut rng = rand::thread_rng();
     let mut bytes = [0u8; 4];
