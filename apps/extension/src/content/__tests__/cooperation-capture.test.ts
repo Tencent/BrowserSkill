@@ -471,10 +471,11 @@ it("keeps a real drag held after Chrome cancels its pointer stream", () => {
 });
 
 it("retires native text attribution by command id and preserves subsequent human typing", async () => {
-  document.body.innerHTML = '<input type="password" aria-label="Password">';
+  document.body.innerHTML = '<input type="password" aria-label="Password"><button>Next</button>';
   const read = collector();
   read();
   const target = document.querySelector("input")!;
+  const next = document.querySelector("button")!;
   target.focus();
   read(COOPERATION_ARM, "first", {
     type: "beforeinput",
@@ -485,6 +486,14 @@ it("retires native text attribution by command id and preserves subsequent human
   edit(target, "private synthetic text");
   expect(read()).toMatchObject({ human: 0, editing: false });
   await new Promise((resolve) => setTimeout(resolve, 0));
+  // Moving focus away from a password field after insertText dispatches a native
+  // change event on blur; it must not be misclassified as human intervention.
+  next.focus();
+  const blurChange = new Event("change", { bubbles: true });
+  Object.defineProperty(blurChange, "isTrusted", { value: true });
+  target.dispatchEvent(blurChange);
+  expect(read()).toMatchObject({ human: 0, editing: false, fields: [] });
+  target.focus();
   read(COOPERATION_ARM, "first", {
     type: "beforeinput",
     text: "manual synthetic text",
@@ -494,7 +503,108 @@ it("retires native text attribution by command id and preserves subsequent human
   edit(target, "manual synthetic text");
   const state = read();
   expect(state).toMatchObject({ human: 1, editing: true, fields: [] });
+  next.focus();
+  target.dispatchEvent(blurChange);
+  expect(read()).toMatchObject({ human: 1, editing: false, fields: [] });
   expect(JSON.stringify(state)).not.toMatch(/private synthetic text|manual synthetic text/);
+});
+
+it("preserves editing when clicking inside a contenteditable host and releases on non-editable controls", () => {
+  document.body.innerHTML =
+    '<div id="editor" contenteditable="true" tabindex="0"><p>Paragraph</p><button id="chip" contenteditable="false" type="button">Remove</button></div><button id="outside" type="button">Done</button>';
+  const read = collector();
+  read();
+  const editor = document.querySelector<HTMLElement>("#editor")!;
+  const paragraph = editor.querySelector<HTMLElement>("p")!;
+  const chip = editor.querySelector<HTMLElement>("#chip")!;
+  Object.defineProperty(editor, "isContentEditable", { get: () => true });
+  Object.defineProperty(paragraph, "isContentEditable", { get: () => true });
+  Object.defineProperty(chip, "isContentEditable", { get: () => false });
+  editor.focus();
+  const before = new InputEvent("beforeinput", {
+    bubbles: true,
+    composed: true,
+    inputType: "insertText",
+    data: "Edited",
+  });
+  Object.defineProperty(before, "isTrusted", { value: true });
+  editor.dispatchEvent(before);
+  paragraph.textContent = "Edited";
+  const input = new InputEvent("input", {
+    bubbles: true,
+    composed: true,
+    inputType: "insertText",
+    data: "Edited",
+  });
+  Object.defineProperty(input, "isTrusted", { value: true });
+  editor.dispatchEvent(input);
+  expect(read()).toMatchObject({ human: 1, editing: true });
+
+  pointer(paragraph, "pointerdown");
+  pointer(paragraph, "pointerup");
+  pointer(paragraph, "click");
+  expect(read()).toMatchObject({ human: 2, editing: true });
+
+  pointer(chip, "pointerdown");
+  pointer(chip, "pointerup");
+  pointer(chip, "click");
+  expect(read()).toMatchObject({ human: 3, editing: false });
+});
+
+it("releases select pointer state when the native menu swallows pointerup or is cancelled with Escape", () => {
+  document.body.innerHTML =
+    '<select aria-label="Category"><option value="a">A</option><option value="b">B</option></select>';
+  const read = collector();
+  read();
+  const select = document.querySelector("select")!;
+
+  pointer(select, "pointerdown");
+  expect(read()).toMatchObject({ human: 0, pending: true, busy: false });
+  const escape = new KeyboardEvent("keydown", { bubbles: true, key: "Escape" });
+  Object.defineProperty(escape, "isTrusted", { value: true });
+  select.dispatchEvent(escape);
+  const escapeUp = new KeyboardEvent("keyup", { bubbles: true, key: "Escape" });
+  Object.defineProperty(escapeUp, "isTrusted", { value: true });
+  select.dispatchEvent(escapeUp);
+  expect(read()).toMatchObject({ human: 0, pending: false, busy: false });
+
+  pointer(select, "pointerdown");
+  expect(read()).toMatchObject({ human: 0, pending: true, busy: false });
+  select.value = "b";
+  for (const type of ["input", "change"]) {
+    const event = new Event(type, { bubbles: true });
+    Object.defineProperty(event, "isTrusted", { value: true });
+    select.dispatchEvent(event);
+  }
+  expect(read()).toMatchObject({
+    human: 1,
+    pending: false,
+    busy: false,
+    editing: false,
+  });
+});
+
+it("publishes scroll transitions once per burst and ignores idle window blur", () => {
+  vi.useFakeTimers();
+  document.body.innerHTML = "<button>Apply</button>";
+  const read = collector();
+  const initial = read()!;
+  vi.mocked(chrome.runtime.sendMessage).mockClear();
+
+  window.dispatchEvent(new Event("blur"));
+  expect(chrome.runtime.sendMessage).not.toHaveBeenCalled();
+  expect(read()!.revision).toBe(initial.revision);
+
+  document.dispatchEvent(new Event("scroll"));
+  document.dispatchEvent(new Event("scroll"));
+  document.dispatchEvent(new Event("scroll"));
+  expect(chrome.runtime.sendMessage).toHaveBeenCalledTimes(1);
+  expect(read()?.scrolling).toBe(true);
+
+  vi.advanceTimersByTime(120);
+  expect(chrome.runtime.sendMessage).toHaveBeenCalledTimes(2);
+  expect(read()?.scrolling).toBe(false);
+  vi.useRealTimers();
 });
 
 it("clears text attribution when preparation fails before native dispatch", async () => {

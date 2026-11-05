@@ -213,7 +213,7 @@ try {
       };
       browserVersion = (await send("Browser.getVersion")).product;
       await poll(async () => (await bsk(["browsers"])).length, "extension connection");
-      if (!compatibilityOnly)
+      if (!compatibilityOnly && !targetOnly)
         frameObservability = await runFrameObservabilityScenarios({ send, bsk: runBsk, base });
       if (framesOnly) return;
       if (!compatibilityOnly)

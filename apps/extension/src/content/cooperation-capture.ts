@@ -209,17 +209,19 @@ export function attachCooperationCapture() {
     state.fieldsComplete = true;
     for (const target of controls(document)) {
       if (overlay(target)) continue;
-      if (secret(target)) {
-        fields.delete(target);
-        sampledValues.delete(target);
-        continue;
-      }
       const fullValue =
         target instanceof HTMLInputElement && ["checkbox", "radio"].includes(target.type)
           ? String(target.checked)
           : "value" in target
             ? String(target.value)
             : (target.textContent ?? "");
+      if (secret(target)) {
+        fields.delete(target);
+        if (target instanceof HTMLInputElement && target.type === "file")
+          sampledValues.delete(target);
+        else sampledValues.set(target, fullValue);
+        continue;
+      }
       const value = fullValue.slice(0, 500);
       const name = label(target);
       let mediaProgress = false;
@@ -383,15 +385,14 @@ export function attachCooperationCapture() {
         inputSource?.target === target ? inputSource.agent : (eventAgent ?? pointer?.agent);
       const agent = eventAgent !== false && source === true;
       if (target instanceof Element && value !== undefined) {
+        const fieldValue =
+          target instanceof HTMLElement && target.isContentEditable
+            ? (target.textContent ?? "")
+            : value;
+        sampledValues.set(target, fieldValue);
         if (secret(target)) {
           fields.delete(target);
-          sampledValues.delete(target);
         } else {
-          const fieldValue =
-            target instanceof HTMLElement && target.isContentEditable
-              ? (target.textContent ?? "")
-              : value;
-          sampledValues.set(target, fieldValue);
           fields.set(target, {
             id: id(target),
             label: label(target),
@@ -407,7 +408,18 @@ export function attachCooperationCapture() {
       if (event.isTrusted && !agent && value !== undefined && value !== previous) {
         editingTarget = editable(target) ? (target as Element) : undefined;
         state.editing = !!editingTarget;
-        if (pointer && !pointer.agent) pointer.confirmed = true;
+        if (pointer && !pointer.agent) {
+          pointer.confirmed = true;
+          if (target instanceof HTMLSelectElement) {
+            pointer.released = true;
+            clearTimeout(pointerTimer);
+            pointerTimer = setTimeout(() => {
+              pointer = undefined;
+              state.revision++;
+              publish();
+            }, 0);
+          }
+        }
         // An input/change pair describes one edit, including native select controls.
         if (inputSource?.target === target) inputSource.before = value;
         humanInput(event, target);
@@ -503,12 +515,25 @@ export function attachCooperationCapture() {
       eventAgent = event.type === "keyup" ? keys.get(key) : matches(event);
       if (event.type === "keydown") keys.set(key, eventAgent ?? false);
       else if (event.type === "keyup") keys.delete(key);
+      let releasedPending = false;
+      if (
+        event.type === "keydown" &&
+        key === "Escape" &&
+        pointer &&
+        !pointer.agent &&
+        !pointer.confirmed
+      ) {
+        pointer = undefined;
+        clearTimeout(pointerTimer);
+        state.revision++;
+        releasedPending = true;
+      }
       clearTimeout(eventTimer);
       // beforeinput, input and keyboard activation inherit only this event task.
       eventTimer = setTimeout(() => {
         eventAgent = undefined;
       }, 0);
-      if (state.editing) publish();
+      if (state.editing || releasedPending) publish();
       return;
     }
     if (event.type === "compositionstart" || event.type === "compositionend") {
@@ -532,7 +557,10 @@ export function attachCooperationCapture() {
       if (agent) return;
       if (event.type === "dragstart") dragging = true;
       if (pointer) pointer.confirmed = true;
-      if (editingTarget !== target) {
+      if (
+        editingTarget !== target &&
+        !(target instanceof Node && editingTarget?.contains(target) && editable(target))
+      ) {
         editingTarget = undefined;
         state.editing = false;
         composing = false;
@@ -565,17 +593,25 @@ export function attachCooperationCapture() {
     document.addEventListener(event, onEvent, { capture: true, passive: true });
   const onScroll = () => {
     if (!enabled) return;
+    const started = !state.scrolling;
     state.scrolling = true;
     clearTimeout(scrollTimer);
     scrollTimer = setTimeout(() => {
       state.scrolling = false;
       publish();
     }, 120);
-    publish();
+    if (started) publish();
   };
   document.addEventListener("scroll", onScroll, true);
   const onWindowBlur = () => {
-    if (!enabled) return;
+    if (
+      !enabled ||
+      (!pointer && !composing && !dragging && keys.size === 0 && !eventAgent && !inputSource)
+    )
+      return;
+    clearTimeout(pointerTimer);
+    clearTimeout(eventTimer);
+    clearTimeout(inputTimer);
     pointer = undefined;
     composing = false;
     dragging = false;
