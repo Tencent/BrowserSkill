@@ -1,4 +1,5 @@
 import { type CdpFrame, type CdpTarget, cdpTargetKey } from "@/browser-driver/frame-graph";
+import { RECORD_PASSWORD_ATTRIBUTE, sensitiveAutocomplete } from "@/lib/sensitive-autocomplete";
 import { createCaptureCheckpoint } from "./capture-abort";
 import type { CapturedNode } from "./capture-types";
 import type { DecodedDocument, DecodedNode } from "./facts";
@@ -90,7 +91,12 @@ export interface SnapshotReply {
 }
 
 function isSensitiveFormControl(node: Pick<CapturedNode, "tag" | "attrs">): boolean {
-  return node.tag === "input" && (node.attrs.type ?? "").toLowerCase() === "password";
+  return (
+    (node.tag === "input" &&
+      ((node.attrs.type ?? "").toLowerCase() === "password" ||
+        Object.prototype.hasOwnProperty.call(node.attrs, RECORD_PASSWORD_ATTRIBUTE))) ||
+    sensitiveAutocomplete(node.attrs.autocomplete)
+  );
 }
 
 function snapshotFormState(

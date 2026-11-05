@@ -227,6 +227,8 @@ export default defineContentScript({
                 request: showInteractive ? overlayState.activeRecord : null,
               }),
               React.createElement(ControlOverlay, {
+                sessionId: overlayState.activeSessionId,
+                controller: overlayState.controller,
                 visible: cardVisible,
                 state: cooperationState,
                 interrupting: overlayState.interrupting,
@@ -274,7 +276,7 @@ export default defineContentScript({
     function applyOverlayState(state: OverlayAgentStateMessage): void {
       if (overlays.snapshot().activeSessionId !== state.sessionId) inputPassthrough.reset();
       activeAgentState = state;
-      overlays.applyAgentControlMode(state.sessionId, state.mode);
+      overlays.applyAgentControlMode(state.sessionId, state.mode, state.controller);
       renderAll();
     }
 

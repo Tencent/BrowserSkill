@@ -4,7 +4,11 @@ import type { DebugParams } from "@/debug/types";
 import type { InteractionPreferenceStore } from "@/lib/interaction-preferences";
 import { OVERLAY_AUTOMATION_BYPASS } from "@/lib/overlay-bridge";
 import { ScreenshotExports } from "@/long-screenshot/exports";
-import type { SessionManager } from "@/session-manager/manager";
+import {
+  isAgentControlledTab,
+  type SessionContext,
+  type SessionManager,
+} from "@/session-manager/manager";
 import { withTaskPopups } from "@/session-manager/task-popups";
 import type { Transport } from "@/transport/transport";
 import type {
@@ -60,7 +64,7 @@ import { handleDialog } from "./dialog-control";
 import { handleDownload } from "./download";
 import { handleDrag } from "./drag";
 import { type EmulateCdpRunner, handleEmulate } from "./emulate";
-import { classifyCdpError } from "./errors";
+import { classifyCdpError, rpcError } from "./errors";
 import { handleEvaluate } from "./evaluate";
 import { handleExtract } from "./extract";
 import { handleRequestHelp } from "./human-loop";
@@ -103,7 +107,7 @@ import {
   type SessionStartParams,
   type SessionStopParams,
 } from "./session";
-import { chromeTabsApi, lookupSession, resolveTargetTab } from "./shared";
+import { cdpBlockedUrlReason, chromeTabsApi, lookupSession, resolveTargetTab } from "./shared";
 import {
   type BorrowConfirmationApprover,
   chromeTabMutationApi,
@@ -114,6 +118,7 @@ import {
   handleTabReturn,
   handleTabSelect,
   type TabBorrowParams,
+  type TabBorrowResult,
   type TabCloseParams,
   type TabCreateParams,
   type TabListParams,
@@ -171,6 +176,30 @@ export interface DispatcherDeps {
 
 /** Tools whose page input can make the page open another tab or window. */
 const OPENS_TABS = new Set(["tool.click", "tool.press", "tool.drag"]);
+
+const AUTO_BORROW_WRITE_TOOLS = new Set([
+  "tool.navigate",
+  "tool.navigate_back",
+  "tool.navigate_forward",
+  "tool.reload",
+  "tool.click",
+  "tool.hover",
+  "tool.wheel",
+  "tool.drag",
+  "tool.scroll_to",
+  "tool.focus",
+  "tool.blur",
+  "tool.fill",
+  "tool.press",
+  "tool.select",
+  "tool.upload",
+  "tool.download",
+  "tool.emulate",
+  "tool.evaluate",
+  "tool.wait_for_navigation",
+  "tool.wait_for_element",
+  "tool.screenshot_full_page",
+]);
 
 /**
  * Routes RPC requests pushed by the daemon over the Transport to the
@@ -559,6 +588,136 @@ export class ToolDispatcher {
     })();
   }
 
+  private getBorrowApprover(): BorrowConfirmationApprover | undefined {
+    if (this.approveBorrow) return this.approveBorrow;
+    if (!this.interactionPreferences) return undefined;
+    return async () => {
+      await this.interactionPreferences!.readyOrFallback();
+      if (!this.interactionPreferences!.get().confirmTabBorrow) return true;
+      return rpcError(
+        "permission_denied",
+        "confirmation_ui_unavailable",
+        "Borrow confirmation is unavailable",
+      );
+    };
+  }
+
+  private canAutoBorrowForRequest(req: RequestFrame, session: SessionContext): boolean {
+    if (req.method === "tool.cooperate") {
+      const params = req.params as { action?: string; control_policy?: string } | undefined;
+      const action = params?.action;
+      if (action !== "sync" && action !== "enable") return false;
+      if (params?.control_policy !== undefined) {
+        if (!["auto", "strict", "target"].includes(params.control_policy)) return false;
+        const requestedPolicy =
+          params.control_policy === "auto"
+            ? (session.controlPolicy ?? "target")
+            : params.control_policy;
+        if (requestedPolicy && session.controlPolicy && requestedPolicy !== session.controlPolicy) {
+          return false;
+        }
+      }
+      return true;
+    }
+    if (req.method === "tool.tab_select") return true;
+    if (!this.cooperation) {
+      return (
+        AUTO_BORROW_WRITE_TOOLS.has(req.method) ||
+        (req.method === "tool.observe" &&
+          (req.params as { probe_hover?: boolean } | undefined)?.probe_hover === true)
+      );
+    }
+    return false;
+  }
+
+  private tryStartAutoBorrow(
+    req: RequestFrame,
+    signal: AbortSignal,
+  ): Promise<{ borrowed: TabBorrowResult } | { error: RpcError } | null> | null {
+    if (!this.interactionPreferences) return null;
+    const params = req.params as { session_id?: string; tab_id?: number } | undefined;
+    const sessionId = params?.session_id;
+    const tabId = params?.tab_id;
+    if (
+      typeof sessionId !== "string" ||
+      typeof tabId !== "number" ||
+      !Number.isSafeInteger(tabId) ||
+      tabId <= 0
+    ) {
+      return null;
+    }
+    const session = this.sessions.get(sessionId);
+    if (
+      !session ||
+      session.remote ||
+      session.incognito ||
+      isAgentControlledTab(session, tabId) ||
+      !this.canAutoBorrowForRequest(req, session)
+    ) {
+      return null;
+    }
+    if (
+      this.sessions.findControllingSession(tabId) !== null ||
+      this.sessions.findBorrowingSession(tabId, null) !== null
+    ) {
+      return null;
+    }
+    return this.executeAutoBorrow(req, sessionId, tabId, signal);
+  }
+
+  private async executeAutoBorrow(
+    req: RequestFrame,
+    sessionId: string,
+    tabId: number,
+    signal: AbortSignal,
+  ): Promise<{ borrowed: TabBorrowResult } | { error: RpcError } | null> {
+    const session = this.sessions.get(sessionId);
+    if (!session || !this.interactionPreferences || !this.canAutoBorrowForRequest(req, session)) {
+      return null;
+    }
+    await this.interactionPreferences.readyOrFallback();
+    if (
+      signal.aborted ||
+      this.interactionPreferences.get().confirmTabBorrow ||
+      !this.canAutoBorrowForRequest(req, session)
+    ) {
+      return null;
+    }
+    let tab: chrome.tabs.Tab;
+    try {
+      tab = await chromeTabsApi.get(tabId);
+    } catch {
+      return null;
+    }
+    if (
+      tab.incognito ||
+      typeof tab.windowId !== "number" ||
+      tab.windowId === session.agentWindowId ||
+      this.sessions.findByWindowId(tab.windowId) !== null
+    ) {
+      return null;
+    }
+    if (
+      req.method === "tool.cooperate" &&
+      (req.params as { action?: string } | undefined)?.action === "sync" &&
+      cdpBlockedUrlReason(tab.url)
+    ) {
+      return null;
+    }
+    const borrowReq: RequestFrame = {
+      id: `${req.id}:auto_borrow`,
+      method: "tool.tab_borrow",
+      params: { session_id: sessionId, tab_id: tabId },
+    };
+    const runBorrow = (cdp = this.cdp, opSignal = signal) =>
+      this.invokeTool(borrowReq, opSignal, undefined, cdp);
+    const borrowResult = await (this.cooperation && this.cdp
+      ? this.cooperation.run(borrowReq, this.cdp, signal, runBorrow)
+      : runBorrow());
+    if (isRpcError(borrowResult)) return { error: borrowResult };
+    return { borrowed: borrowResult as TabBorrowResult };
+  }
+
   private invoke(
     req: RequestFrame,
     signal: AbortSignal,
@@ -568,13 +727,29 @@ export class ToolDispatcher {
       this.invokeTool(req, operationSignal, onInputSent, cdp, completionSignal);
     // Modal control uses cached authority checks, without blocked renderer preparation.
     if (req.method.startsWith("tool.dialog_")) return run();
-    if (req.method === "tool.cooperate" && this.cooperation && this.cdp) {
-      const cdp = this.cdp;
-      return this.releaseHoverLatch((req.params as { session_id: string }).session_id).then(() =>
-        this.cooperation!.run(req, cdp, signal, run),
-      );
-    }
-    return this.cooperation && this.cdp ? this.cooperation.run(req, this.cdp, signal, run) : run();
+    const dispatchMain = (): Promise<unknown> => {
+      if (req.method === "tool.cooperate" && this.cooperation && this.cdp) {
+        const cdp = this.cdp;
+        return this.releaseHoverLatch((req.params as { session_id: string }).session_id).then(() =>
+          this.cooperation!.run(req, cdp, signal, run),
+        );
+      }
+      return this.cooperation && this.cdp
+        ? this.cooperation.run(req, this.cdp, signal, run)
+        : run();
+    };
+    const autoBorrow = this.tryStartAutoBorrow(req, signal);
+    if (!autoBorrow) return dispatchMain();
+    return autoBorrow.then((outcome) => {
+      if (outcome && "error" in outcome) return outcome.error;
+      if (outcome && "borrowed" in outcome && req.method === "tool.tab_select") {
+        return {
+          tab_id: outcome.borrowed.tab_id,
+          window_id: outcome.borrowed.agent_window_id,
+        };
+      }
+      return dispatchMain();
+    });
   }
 
   private async invokeTool(
@@ -693,7 +868,7 @@ export class ToolDispatcher {
       case "tool.tab_borrow": {
         const result = await handleTabBorrow(this.sessions, req.params as TabBorrowParams, {
           signal,
-          approveBorrow: this.approveBorrow,
+          approveBorrow: this.getBorrowApprover(),
           cdp,
         });
         if (!isRpcError(result)) {

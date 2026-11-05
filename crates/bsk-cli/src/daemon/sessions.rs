@@ -47,6 +47,7 @@ impl std::fmt::Display for SessionId {
 
 #[derive(Debug, Clone)]
 pub struct Session {
+    pub controller: Option<bsk_protocol::tools::ControllerInfo>,
     pub interaction: Option<bsk_protocol::tools::InteractionPolicy>,
     pub id: SessionId,
     pub browser_id: BrowserId,
@@ -57,6 +58,7 @@ pub struct Session {
 impl Session {
     pub fn status_entry(&self) -> SessionStatusEntry {
         SessionStatusEntry {
+            controller: self.controller.clone(),
             interaction: self.interaction,
             session_id: self.id.0.clone(),
             browser_instance_id: self.browser_id.0.clone(),
@@ -111,6 +113,41 @@ impl Default for SessionActivity {
 }
 
 impl SessionRegistry {
+    /// Resolve a stable display color while holding the registry lock so
+    /// concurrent starts avoid colors already used by other live sessions.
+    fn set_controller(
+        &self,
+        id: &SessionId,
+        mut controller: Option<bsk_protocol::tools::ControllerInfo>,
+    ) -> Option<bsk_protocol::tools::ControllerInfo> {
+        const COLORS: [&str; 6] = [
+            "#2563eb", "#9333ea", "#0f766e", "#be185d", "#b45309", "#4d7c0f",
+        ];
+        let mut sessions = self.inner.lock().expect("session registry poisoned");
+        if let Some(info) = &mut controller
+            && info.color.is_none()
+        {
+            let hash = id.0.bytes().fold(0u32, |hash, byte| {
+                hash.wrapping_mul(31).wrapping_add(u32::from(byte))
+            });
+            let start = hash as usize % COLORS.len();
+            let color = (0..COLORS.len())
+                .map(|offset| COLORS[(start + offset) % COLORS.len()])
+                .find(|color| {
+                    !sessions
+                        .values()
+                        .filter_map(|session| session.controller.as_ref()?.color.as_deref())
+                        .any(|used| used.eq_ignore_ascii_case(color))
+                })
+                .unwrap_or(COLORS[start]);
+            info.color = Some(color.into());
+        }
+        if let Some(session) = sessions.get_mut(id) {
+            session.controller = controller.clone();
+        }
+        controller
+    }
+
     pub fn with_audit(audit: Arc<super::audit::AuditStore>) -> Self {
         Self {
             audit: Some(audit),
@@ -201,6 +238,7 @@ impl SessionRegistry {
             guard.insert(
                 candidate.clone(),
                 Session {
+                    controller: None,
                     interaction: None,
                     id: candidate.clone(),
                     browser_id: browser_id.clone(),
@@ -570,8 +608,9 @@ const SESSION_ID_MAX_RESERVE_ATTEMPTS: u32 = 64;
 /// Agent Window creation hints forwarded to the extension on
 /// `tool.session_start`. `None` fields keep the extension-side defaults
 /// (background window, browser-chosen size).
-#[derive(Debug, Default, Clone, Copy)]
+#[derive(Debug, Default, Clone)]
 pub struct AgentWindowOptions {
+    pub controller: Option<bsk_protocol::tools::ControllerInfo>,
     /// Opt in to Chrome's shared incognito browsing session.
     pub incognito: bool,
     /// Optional outer size as `(width, height)` CSS pixels.
@@ -685,6 +724,7 @@ pub(crate) async fn start_session_recoverable(
         sessions.starting.lock().unwrap().insert(session_id.clone());
     }
     let params = SessionStartParams {
+        controller: sessions.set_controller(&session_id, window.controller),
         incognito: window.incognito,
         session_id: session_id.0.clone(),
         browser_instance_id: Some(client.id.0.clone()),
@@ -1433,6 +1473,68 @@ mod link_tests {
     }
 }
 
+#[cfg(test)]
+mod controller_color_tests {
+    use super::*;
+    use bsk_protocol::tools::ControllerInfo;
+
+    #[test]
+    fn concurrent_controller_colors_are_distinct_and_remain_stable() {
+        let registry = Arc::new(SessionRegistry::new());
+        let barrier = Arc::new(std::sync::Barrier::new(6));
+        // All of these IDs hash to the same preferred palette entry.
+        let workers: Vec<_> = ["aaaa", "aaag", "aaam", "aaas", "aaay", "aabf"]
+            .into_iter()
+            .map(|id| {
+                let id = SessionId(id.into());
+                registry.insert(Session {
+                    controller: None,
+                    interaction: None,
+                    id: id.clone(),
+                    browser_id: BrowserId("browser".into()),
+                    agent_window_id: Some(7),
+                    created_at_ms: 1,
+                });
+                let registry = Arc::clone(&registry);
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    let controller = registry
+                        .set_controller(
+                            &id,
+                            Some(ControllerInfo {
+                                name: "Codex".into(),
+                                project: None,
+                                color: None,
+                            }),
+                        )
+                        .unwrap();
+                    (id, controller.color.unwrap())
+                })
+            })
+            .collect();
+        let colors: Vec<_> = workers
+            .into_iter()
+            .map(|worker| worker.join().unwrap())
+            .collect();
+        assert_eq!(
+            colors
+                .iter()
+                .map(|(_, color)| color)
+                .collect::<HashSet<_>>()
+                .len(),
+            6
+        );
+        registry.remove(&colors[0].0);
+        for (id, color) in &colors[1..] {
+            assert_eq!(
+                registry.get(id).unwrap().controller.unwrap().color.as_ref(),
+                Some(color)
+            );
+        }
+    }
+}
+
 /// Issue #465 §7: when a session stops, dispatches against the dead id
 /// must say why it stopped — until the id is reused by a new session.
 #[cfg(test)]
@@ -1442,6 +1544,7 @@ mod ended_tombstone_tests {
 
     fn live_session(id: &str) -> Session {
         Session {
+            controller: None,
             interaction: None,
             id: SessionId(id.into()),
             browser_id: BrowserId("browser".into()),

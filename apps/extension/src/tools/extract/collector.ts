@@ -24,6 +24,8 @@ export function collectExtractDom(this: Element, options: CollectorOptions): Raw
   const encoder = new TextEncoder();
   const tableSelector = 'table,[role="table"],[role="grid"],[role="treegrid"]';
   const listSelector = 'ul,ol,[role="list"]';
+  const sensitiveInputSelector =
+    'input[type="password"],input[type="hidden"],[data-bsk-record-password],[autocomplete~="current-password" i],[autocomplete~="new-password" i],[autocomplete~="one-time-code" i],[autocomplete^="cc-" i],[autocomplete*=" cc-" i]';
   const hiddenSubtrees = new WeakMap<Element, boolean>();
   const styles = new WeakMap<Element, CSSStyleDeclaration>();
   const styleOf = (element: Element) => {
@@ -222,9 +224,7 @@ export function collectExtractDom(this: Element, options: CollectorOptions): Raw
       if (
         isSubtreeHidden(node) ||
         (node instanceof SVGElement && !renderedSvg.has(node.localName)) ||
-        node.matches(
-          'script,style,template,noscript,input[type="password"],input[type="hidden"]',
-        ) ||
+        node.matches(`script,style,template,noscript,${sensitiveInputSelector}`) ||
         (node !== root && node.matches(tableSelector))
       )
         continue;
@@ -511,7 +511,7 @@ export function collectExtractDom(this: Element, options: CollectorOptions): Raw
             if (visible.length > 1)
               fail("extract_field_ambiguous", `Field ${field.key} matches multiple elements`);
             const element = visible[0];
-            if (!element || element.matches('input[type="password"],input[type="hidden"]')) {
+            if (!element || element.matches(sensitiveInputSelector)) {
               row[field.key] = null;
               continue;
             }
