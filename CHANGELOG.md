@@ -8,6 +8,12 @@ Starting from 0.2.0, CLI / Extension / DSH Plugin share the same version number.
 
 ## [Unreleased]
 
+### Added
+
+- `bsk mcp` lets MCP clients control BrowserSkill over stdio using the existing
+  daemon and browser extension. `bsk install-skill --mcp` can configure Codex,
+  Claude Code, and Cursor.
+
 ### Changed
 
 - CLI and daemon updates prefer the official website's domestic download source,

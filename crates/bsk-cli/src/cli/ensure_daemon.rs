@@ -31,11 +31,21 @@ pub(crate) fn auto_start_enabled() -> bool {
 /// Return verified discovery info, starting a daemon only when its discovery
 /// file or IPC listener is absent and auto-start is enabled.
 pub fn ensure_daemon() -> Result<DaemonInfo> {
+    let (info, protocol) = ensure_daemon_with_protocol()?;
+    super::business_rpc::check_daemon_protocol(&protocol)?;
+    Ok(info)
+}
+
+/// Same discovery and startup as [`ensure_daemon`], also returning the
+/// daemon's protocol version so long-lived callers can check features per call.
+pub(crate) fn ensure_daemon_with_protocol() -> Result<(DaemonInfo, String)> {
     let deadline = Instant::now() + SPAWN_DEADLINE;
     if let Probe::Ready(daemon) = probe::probe(PROBE_TIMEOUT)? {
-        super::business_rpc::check_daemon_protocol(&daemon.status.protocol_version)?;
-        return Ok(daemon.info);
+        return Ok((daemon.info, daemon.status.protocol_version));
     }
     ensure!(auto_start_enabled(), DaemonStartFailure::AutoStartDisabled);
-    start_background(&StartArgs::default(), deadline).context("automatic daemon startup failed")
+    let info = start_background(&StartArgs::default(), deadline)
+        .context("automatic daemon startup failed")?;
+    // A daemon this process just started runs this binary's protocol.
+    Ok((info, crate::daemon::state::PROTOCOL_VERSION.to_string()))
 }
