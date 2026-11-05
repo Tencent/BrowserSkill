@@ -116,6 +116,15 @@ was replaced, check session state before continuing; do not blindly replay actio
 A local process identity warning permits browser commands when IPC works.
 For other startup failures, retry once, then use `bsk doctor`.
 
+## Idle timeouts configuration
+
+BrowserSkill provides configurable idle timeouts for both browser sessions and the background daemon:
+
+- `BSK_SESSION_IDLE` (default `5m`): Duration before an inactive browser session is automatically reaped (e.g. `10m`, `30m`, `1h`). Can also be passed via `bsk daemon start --session-idle <duration>`.
+- `BSK_DAEMON_IDLE` (default `10m`): Duration of total inactivity before an unattached local daemon terminates (e.g. `30m`, `2h`). Can also be passed via `bsk daemon start --daemon-idle <duration>`.
+
+Both environment variables are respected during automatic daemon startup (`ensure_daemon`) as well as explicit `bsk daemon start` / `restart`.
+
 ## Extension connection
 
 If the intended extension is still disconnected after the applicable setup above,
