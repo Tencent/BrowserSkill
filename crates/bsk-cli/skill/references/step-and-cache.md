@@ -1,4 +1,4 @@
-# One action and a reusable observation
+# One action, several decided actions, and a reusable observation
 
 Use `step` when one action is already decided from current evidence. It invokes
 that action exactly once, optionally waits for a known main-document selector to
@@ -44,6 +44,41 @@ explicit inspection and selection; `step` does not follow an arbitrary active ta
 A saved step contains its action result even if a later wait/sync fails. Output
 paths are checked before action; a publish failure is reported alongside the
 action result, never as evidence that the action did not occur.
+
+## Several decided actions
+
+When one sync already tells you every action, such as a form's fields or a report's
+filters, send them together. `plan` runs them in order and then synchronizes, so one
+model turn replaces one turn per action.
+
+```sh
+bsk plan --session SID --context CURRENT --until-visible '#summary' --steps '[
+  {"action":"fill","ref":"e3","value":"Ada"},
+  {"action":"select","ref":"e4","values":["ZJ"]},
+  {"action":"wait-for-element","selector":"#city option[value=HZ]","state":"attached"},
+  {"action":"select","ref":"e5","values":["HZ"],"expect":[{"target":"@e4","field":"value","equals":"ZJ"}]},
+  {"action":"click","ref":"e6"}
+]'
+```
+
+A step is `action` plus the fields `step --params` takes for it, and optional `expect`.
+Actions are click, fill, select, press, hover, scroll-to, wheel and drag, plus
+`wait-for-element` (`ref` or `selector`, `state`, `timeout_ms`) for a condition later steps
+need. A plan holds up to 20 steps. Every step passes the same control, target and `expect`
+checks as its own command, immediately before its input.
+
+- Include only what is already decided. A step that depends on what an earlier step
+  reveals, or on a page that an earlier step replaces, belongs in the next call.
+- The first step that does not complete stops the plan, nothing is retried, and completed
+  steps stay done: a plan is not a transaction. Read `completed`, `stopped` (with its
+  `effect_state`) and `not_run`, then replan from `post`, which is omitted after a stop
+  request, a native dialog, a timeout or a lost connection. Never repeat a step whose
+  `effect_state` is `unknown`, or that reported `dialog_pending`.
+- Send an irreversible action such as submit or pay in its own call after reading the
+  state, unless `expect` on that step protects the facts it depends on.
+- Only the first step may be untargeted, and it needs `--observation`. Navigation and
+  scripts run on their own. Under strict policy a context authorizes one action, so a plan
+  stops after its first step.
 
 ## View existing evidence locally
 

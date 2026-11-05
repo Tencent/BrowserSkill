@@ -68,7 +68,7 @@ induced to do is done with their sessions.
 3. Pass sync's `context_id` as `--context ID`; target-policy DOM actions and reads reuse it.
    Protect decision facts with `--expect`. Untargeted/visual actions also need sync's
    `--observation ID`. After intervention/navigation, sync and replan; wait during human input.
-   Use [step/cache](references/step-and-cache.md) for the next state.
+   Use [plan/step](references/step-and-cache.md) for the next state.
    Check ambiguity once; stop at visible success.
 4. Always run `bsk session stop <id>` on success and failure, unless keeping the
    session open is part of the user's request. This also returns borrowed tabs.
@@ -86,6 +86,7 @@ Prefer refs for iframe/shadow-root targets; CSS selectors search the main docume
 
 | Need | Command |
 | --- | --- |
+| Decided actions together | `bsk plan --session <id> --context ID --steps '[{"action":"fill","ref":"@e3","value":"x"},{"action":"click","ref":"@e4"}]'` |
 | Click | `bsk click @e3 --session <id> --context ID` |
 | Fill text/date/time | `bsk fill @e3 --value "text" --session <id> --context ID` |
 | Select an option | `bsk select @e3 --value "option-value" --session <id> --context ID` |
