@@ -24,6 +24,8 @@ Starting from 0.2.0, CLI / Extension / DSH Plugin share the same version number.
 
 ### Fixed
 
+- Recording preserves clicks on submit, reset and image input buttons, including
+  actions beside search fields, and uses reset buttons' visible values as names.
 - CLI cancellation keeps the original RPC progressing and retries cancellation
   that arrives before daemon registration, reducing background screenshots that
   keep a session busy after the caller stops. Confirmation and response waiting
