@@ -5,7 +5,9 @@ export {
   prepareObservationRender,
   type RenderRow,
   renderVom,
+  selectionMarker,
 } from "./render";
+export { estimateLineTokens, estimateTokens, TOKEN_ESTIMATOR } from "./tokens";
 export type {
   ActiveScopeBlock,
   BlockingLayer,

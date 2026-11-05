@@ -1,4 +1,28 @@
 {
+  "cooperation": {
+    "yielding": "Agent 正在停手",
+    "label": "人机协作",
+    "ready": "Agent 已就绪",
+    "acting": "Agent 正在操作",
+    "human": "现在由你操作",
+    "editing": "你正在编辑",
+    "held": "Agent 已暂停",
+    "syncing": "Agent 正在同步",
+    "unavailable": "页面暂不可观察",
+    "hold": "暂停 Agent",
+    "resume": "交给 Agent",
+    "stop": "停止任务",
+    "hints": {
+      "ready": "你可以随时接手",
+      "acting": "你可以随时接手",
+      "human": "停止操作后，Agent 会继续",
+      "editing": "完成编辑后交给 Agent",
+      "held": "准备好后交给 Agent",
+      "yielding": "等待当前操作结束",
+      "syncing": "正在读取最新页面状态",
+      "unavailable": "Agent 已停手"
+    }
+  },
   "popup": {
     "interactionCompatibilityWarning": "已连接到旧版 Daemon（协议 v{{cliProtocol}}）。部分自动化设置需要更新 CLI 和 Daemon 才能完整生效。",
     "brandCategory": "Browser Automation",
@@ -133,9 +157,27 @@
       "promptTemplate": "本次任务使用 BrowserSkill 的浏览器 {{name}}（实例 ID：{{instanceId}}）。为本次任务创建每个新会话时，请使用对应接口：\nCLI：{{command}}\nDeepSeek Harness：{{toolCall}}\n在 DeepSeek Harness 中请使用工具调用，不要另行执行 CLI 命令。\n如果此实例未连接，请停止并让我重新连接此 Profile。不要省略 --browser / browser，也不要切换到其他实例。",
       "title": "当前浏览器",
       "unnamed": "未命名浏览器"
+    },
+    "daemonUpgrade": {
+      "title": "需要升级 bsk 浏览器服务",
+      "description": "正在运行的 bsk 服务（daemon）版本过旧，浏览器任务暂时无法执行。",
+      "runCommand": "请在运行该服务的电脑上打开终端，执行：",
+      "restart": "若已更新仍出现此提示，请通过启动该服务的终端或宿主应用重启服务。",
+      "copyButton": "复制命令",
+      "copyFailed": "复制失败，请手动复制上方命令。",
+      "details": "查看技术详情",
+      "protocols": "服务协议：{{actual}}；扩展要求：{{required}} 或更新的兼容协议。",
+      "version": "当前运行：bsk {{version}}",
+      "notificationMessage": "浏览器任务暂不可用。请在运行 bsk 浏览器服务的电脑上升级 bsk，并确认正在运行的服务也已更新。",
+      "toolbarTitle": "BrowserSkill：需要升级 bsk 浏览器服务",
+      "notificationButton": "查看升级步骤"
     }
   },
   "controlOverlay": {
+    "project": "项目",
+    "session": "会话",
+    "holdController": "暂停 {{name}}",
+    "resumeController": "交给 {{name}}",
     "status": "Agent 正在控制",
     "interrupt": "中断",
     "interrupting": "中断中…"
@@ -291,6 +333,7 @@
       "press": "按键",
       "select": "选择选项",
       "hover": "悬停",
+      "drag": "拖动",
       "focus": "聚焦",
       "blur": "移开焦点",
       "scroll": "滚动",

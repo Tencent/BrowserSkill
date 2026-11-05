@@ -19,6 +19,32 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  changelog:
+    name: Bilingual changelog synchronization
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - name: Check changelog structure and paired updates
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          if [ -n "$BASE_SHA" ]; then
+            python3 scripts/check-changelog-sync.py "$(git merge-base "$BASE_SHA" HEAD)"
+          else
+            python3 scripts/check-changelog-sync.py
+          fi
+
+  release-protocol:
+    name: Signing protocols and release manifest
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - run: python3 scripts/windows-release.test.py
+      - run: python3 scripts/macos-release.test.py
+      - run: node --test scripts/render-version-json.test.mjs
+
   rust:
     name: Rust fmt, clippy, tests
     runs-on: ubuntu-latest
@@ -49,14 +75,26 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
+      - name: Run Windows CLI argument error tests
+        run: cargo test -p bsk --test cli_usage_errors --test cli_parse --locked
+
       - name: Run Windows named-pipe tests
         run: cargo test -p bsk --lib --locked daemon::ipc::windows::tests
+
+      - name: Run Windows daemon startup diagnostics tests
+        run: cargo test -p bsk --lib --locked daemon::start::windows::tests
 
       - name: Run Windows audit storage tests
         run: cargo test -p bsk --lib --locked daemon::audit::tests
 
       - name: Run Windows audit and browser interaction policy tests
         run: cargo test -p bsk --test audit_ws --test interaction_preferences --locked
+
+      - name: Run Windows remote authorization storage tests
+        run: cargo test -p bsk --lib --locked daemon::remote::authorization::tests
+
+      - name: Run Windows remote server integration tests
+        run: cargo test -p bsk --test remote_server --locked
 
       - name: Verify background startup refusal inside the runner Job
         run: cargo test -p bsk --test windows_daemon_start --locked restrictive_job_refuses_explicit_and_automatic_start_without_a_daemon -- --exact
@@ -175,6 +213,9 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: Run DSH runner tests on Windows
+        run: pnpm --filter @wxg-prc-cpg/browser-skill-dsh-plugin exec vitest run tests/runner.test.ts
+
       - name: Build the DSH plugin
         run: pnpm --filter @wxg-prc-cpg/browser-skill-dsh-plugin build
 
@@ -245,17 +286,44 @@ jobs:
           BSK_CLICK_CHROME: google-chrome
         run: pnpm exec vitest run src/tools/__tests__/waits.browser.test.ts
 
+      - name: Run shared-control live text browser regression
+        working-directory: apps/extension
+        env:
+          BSK_CLICK_CHROME: google-chrome
+        run: pnpm exec vitest run src/cooperation/live-text.browser.test.ts
+
       - name: Run emulation-lifecycle browser regression
         working-directory: apps/extension
         env:
           BSK_CLICK_CHROME: google-chrome
         run: pnpm exec vitest run src/tools/__tests__/emulation-lifecycle.browser.test.ts
 
+      - name: Run structured extraction browser regression
+        working-directory: apps/extension
+        env:
+          BSK_CLICK_CHROME: google-chrome
+        run: pnpm exec vitest run src/tools/extract/extract.browser.test.ts
+
+      - name: Run drag browser regression
+        working-directory: apps/extension
+        env:
+          BSK_DRAG_CHROME: google-chrome
+        run: pnpm exec vitest run src/tools/__tests__/drag.browser.test.ts
+
+      - name: Run fill browser regression
+        working-directory: apps/extension
+        env:
+          BSK_FILL_CHROME: google-chrome
+        run: pnpm exec vitest run src/tools/__tests__/fill.browser.test.ts
+
   browser-video:
     name: Browser video recording regression
     # Allows Chrome for Testing's user-namespace sandbox without a custom
     # AppArmor profile for its temporary installation path.
     runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    env:
+      BSK_VIDEO_ARTIFACTS: ${{ github.workspace }}/evals/browser/results/video-regression
 
     steps:
       - uses: actions/checkout@v6
@@ -273,16 +341,106 @@ jobs:
           curl --fail --silent --show-error --location --retry 3 "$video_chrome_download" --output "$RUNNER_TEMP/video-chrome.zip"
           unzip -q "$RUNNER_TEMP/video-chrome.zip" -d "$RUNNER_TEMP/video-chrome"
           echo "BSK_VIDEO_CHROME=$RUNNER_TEMP/video-chrome/chrome-linux64/chrome" >> "$GITHUB_ENV"
+          mkdir -p "$BSK_VIDEO_ARTIFACTS"
+          "$RUNNER_TEMP/video-chrome/chrome-linux64/chrome" --version | tee "$BSK_VIDEO_ARTIFACTS/chrome-version.txt"
       - name: Build CLI, extension and DSH plugin
         run: |
           cargo build -p bsk --locked
           pnpm --filter @browser-skill/extension build
           pnpm --filter @wxg-prc-cpg/browser-skill-dsh-plugin build
+      - name: Validate interaction capture on HTTP intranet pages
+        working-directory: apps/extension
+        env:
+          BSK_COOP_CHROME: ${{ env.BSK_VIDEO_CHROME }}
+        run: pnpm exec vitest run src/content/__tests__/cooperation-capture.browser.test.ts
+      - name: Validate window resize and viewport reporting
+        working-directory: apps/extension
+        env:
+          BSK_WINDOW_CHROME: ${{ env.BSK_VIDEO_CHROME }}
+        run: pnpm exec vitest run src/tools/__tests__/window.browser.test.ts
+      - name: Validate thumbnail cancellation, synchronization and navigating clicks
+        working-directory: packages/dsh-plugin-browserskill
+        env:
+          BSK_COOP_CHROME: ${{ env.BSK_VIDEO_CHROME }}
+          BSK_COOP_BSK: ../../target/debug/bsk
+        run: pnpm exec vitest run tests/cooperation.browser.test.ts
+      - name: Validate task termination on tab detachment
+        working-directory: apps/extension
+        env:
+          BSK_TAB_DETACH_CHROME: ${{ env.BSK_VIDEO_CHROME }}
+          BSK_TAB_DETACH_REPORT: ${{ env.BSK_VIDEO_ARTIFACTS }}/tab-detachment.json
+        run: pnpm exec vitest run src/session-manager/__tests__/tab-detachment.browser.test.ts
       - name: Validate capture, playback, recovery and CLI/DSH export
         working-directory: apps/extension
         env:
           BSK_VIDEO_BSK: ../../target/debug/bsk
-        run: pnpm exec vitest run src/video/*.browser.test.ts
+        run: pnpm exec vitest run src/video/*.browser.test.ts --reporter=default --reporter=json --outputFile.json="$BSK_VIDEO_ARTIFACTS/results.json"
+
+      - name: Build extension for the isolated cooperation daemon
+        env:
+          BSK_DAEMON_WS_URL: ws://127.0.0.1:52917
+        run: pnpm --filter @browser-skill/extension build
+
+      - name: Validate failed-frame synchronization and CLI recovery
+        env:
+          BSK_COOP_CHROME: ${{ env.BSK_VIDEO_CHROME }}
+          BSK_COOP_FRAMES_ONLY: "1"
+          BSK_COOP_ARTIFACTS: ${{ env.BSK_VIDEO_ARTIFACTS }}/cooperation
+        run: node evals/browser/cases/regression/cooperation/run.mjs
+
+      - name: Validate scrolling, effective input and automatic handoff through CLI and DSH
+        env:
+          BSK_COOP_CHROME: ${{ env.BSK_VIDEO_CHROME }}
+          BSK_COOP_TARGET_ONLY: "1"
+          BSK_COOP_ARTIFACTS: ${{ env.BSK_VIDEO_ARTIFACTS }}/cooperation-intent
+        run: node evals/browser/cases/regression/cooperation/run.mjs
+
+      - name: Upload video regression evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: video-regression
+          path: ${{ env.BSK_VIDEO_ARTIFACTS }}/
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: Build extension for the isolated native-dialog daemon
+        env:
+          BSK_DAEMON_WS_URL: ws://127.0.0.1:52837
+        run: pnpm --filter @browser-skill/extension build
+
+      - name: Validate native dialogs, held control, download recovery and teardown
+        env:
+          BSK_DIALOG_CHROME: ${{ env.BSK_VIDEO_CHROME }}
+          BSK_DIALOG_TEST_TIMEOUT: "1"
+          BSK_DIALOG_REVISION: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: xvfb-run -a node evals/browser/cases/regression/js-dialog-control/run.mjs
+
+      - name: Upload native-dialog regression evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: native-dialog-regression
+          path: evals/browser/results/js-dialog-control/
+          if-no-files-found: ignore
+
+      - name: Build extension for the isolated drag daemon
+        env:
+          BSK_DAEMON_WS_URL: ws://127.0.0.1:52839
+        run: pnpm --filter @browser-skill/extension build
+
+      - name: Validate drag CLI, native drops, recovery and cross-origin frame refs
+        env:
+          BSK_DRAG_CHROME: ${{ env.BSK_VIDEO_CHROME }}
+        run: node evals/browser/cases/regression/drag-interactions/run.mjs
+
+      - name: Upload drag regression evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: drag-regression
+          path: evals/browser/results/drag-interactions/
+          if-no-files-found: ignore
 
   node-scripts:
     name: Node script tests

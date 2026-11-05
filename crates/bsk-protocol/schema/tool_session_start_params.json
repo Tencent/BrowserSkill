@@ -12,8 +12,19 @@
         "null"
       ]
     },
+    "controller": {
+      "description": "Caller-supplied display labels, not an authenticated identity.",
+      "anyOf": [
+        {
+          "$ref": "#/definitions/ControllerInfo"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "focused": {
-      "description": "Whether the new Agent Window should take focus. Omitted means the extension's default (`true`) for compatibility with older clients.",
+      "description": "Whether the new Agent Window should take focus. Omitted means the extension's default (`false`).",
       "type": [
         "boolean",
         "null"
@@ -28,6 +39,10 @@
       "format": "uint32",
       "minimum": 0.0
     },
+    "incognito": {
+      "description": "Use Chrome's shared incognito browsing session. Omitted means normal.",
+      "type": "boolean"
+    },
     "session_id": {
       "type": "string"
     },
@@ -39,6 +54,38 @@
       ],
       "format": "uint32",
       "minimum": 0.0
+    }
+  },
+  "definitions": {
+    "ControllerInfo": {
+      "description": "Display identity of the agent controlling a session. Never an authorization claim.",
+      "type": "object",
+      "required": [
+        "name"
+      ],
+      "properties": {
+        "color": {
+          "description": "Optional six-digit hex color. Omitted colors are derived from the session ID.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^#[0-9a-fA-F]{6}$"
+        },
+        "name": {
+          "type": "string",
+          "maxLength": 80,
+          "minLength": 1
+        },
+        "project": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 120,
+          "minLength": 1
+        }
+      }
     }
   }
 }

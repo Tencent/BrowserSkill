@@ -63,13 +63,66 @@ function validateWorkflowStep(errors, step, path) {
   if (step.saveAs !== undefined && !ID_PATTERN.test(step.saveAs)) {
     errors.push(`${path}.saveAs must use lowercase kebab-case`);
   }
+  for (const field of ["contextId", "observationId"]) {
+    if (step[field] !== undefined) checkString(errors, step[field], `${path}.${field}`);
+  }
+  if (step.observationId !== undefined && step.contextId === undefined) {
+    errors.push(`${path}.observationId requires contextId`);
+  }
+  if (step.action === "sync") {
+    if (!step.saveAs) errors.push(`${path}.sync requires saveAs`);
+    if (step.contextId !== undefined || step.observationId !== undefined) {
+      errors.push(`${path}.sync returns control receipts and does not accept them`);
+    }
+  }
   if (step.evidence !== undefined && !EVIDENCE_PATTERN.test(step.evidence)) {
     errors.push(`${path}.evidence must be an identifier`);
   }
-  if (["click", "hover", "fill", "select"].includes(step.action) && !step.selector && !step.ref) {
+  if (
+    ["click", "hover", "fill", "select", "drag"].includes(step.action) &&
+    !step.selector &&
+    !step.ref
+  ) {
     errors.push(`${path} requires selector or ref`);
   }
-  if (step.action === "fill") checkString(errors, step.value, `${path}.value`);
+  if (step.action === "drag") {
+    if (step.mode !== undefined && !["press-move-release", "click-move-click"].includes(step.mode))
+      errors.push(`${path}.mode is unsupported`);
+    if (
+      step.mode === "click-move-click" &&
+      (step.to === undefined ||
+        (step.hold !== undefined && !["0", "0s", "0ms"].includes(step.hold)))
+    )
+      errors.push(`${path} click-move-click requires to and zero hold`);
+    const hasDelta = step.dx !== undefined || step.dy !== undefined;
+    if ((step.to !== undefined) === hasDelta) errors.push(`${path} requires either to or dx/dy`);
+    if (step.to !== undefined) checkString(errors, step.to, `${path}.to`);
+    for (const key of ["dx", "dy"])
+      if (step[key] !== undefined && !Number.isFinite(step[key]))
+        errors.push(`${path}.${key} must be finite`);
+    if (hasDelta && (step.dx ?? 0) === 0 && (step.dy ?? 0) === 0)
+      errors.push(`${path} requires a nonzero delta`);
+    for (const key of ["hold", "duration"])
+      if (step[key] !== undefined) checkString(errors, step[key], `${path}.${key}`);
+  }
+  if (step.action === "fill") {
+    if (typeof step.value !== "string") errors.push(`${path}.value must be a string`);
+    if (step.noClear !== undefined && typeof step.noClear !== "boolean") {
+      errors.push(`${path}.noClear must be a boolean`);
+    }
+  } else if (step.noClear !== undefined || step.expectError !== undefined) {
+    errors.push(`${path}.noClear and expectError are only supported for fill`);
+  }
+  if (step.expectError !== undefined) {
+    if (!isObject(step.expectError)) errors.push(`${path}.expectError must be an object`);
+    else {
+      if (Object.keys(step.expectError).some((key) => !["code", "reason"].includes(key))) {
+        errors.push(`${path}.expectError only supports code and reason`);
+      }
+      checkString(errors, step.expectError.code, `${path}.expectError.code`);
+      checkString(errors, step.expectError.reason, `${path}.expectError.reason`);
+    }
+  }
   if (step.action === "select") {
     if (!Array.isArray(step.values) || step.values.length === 0) {
       errors.push(`${path}.values must be a non-empty array`);

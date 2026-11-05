@@ -7,6 +7,7 @@ import { transferError } from "./errors";
 import { resolveNodeGeometry } from "./frame-geometry";
 import type { ResolvedActionTarget } from "./interaction";
 import { type CdpRunner, isRpcError, sendToCdpTarget } from "./shared";
+import { pointBelongsToTarget } from "./target-hit";
 import { BoundedWaitError, waitBounded } from "./transfer-transaction";
 
 const CLEANUP_TIMEOUT_MS = 1_000;
@@ -83,55 +84,6 @@ function runtimeError(reply: RuntimeReply, fallback: string): Error | null {
   );
 }
 
-async function pointBelongsToTarget(
-  options: FileDropTransactionOptions,
-  x: number,
-  y: number,
-  objectGroup: string,
-): Promise<boolean> {
-  const target = options.actionTarget.cdpTarget;
-  const hit = await sendToCdpTarget<{ backendNodeId?: number; frameId?: string }>(
-    options.cdp,
-    target,
-    "DOM.getNodeForLocation",
-    { x: Math.round(x), y: Math.round(y), includeUserAgentShadowDOM: true },
-  );
-  if (typeof hit.backendNodeId !== "number") return false;
-  if (options.actionTarget.frameId && hit.frameId !== options.actionTarget.frameId) return false;
-
-  const [resolvedTarget, resolvedHit] = await Promise.all([
-    sendToCdpTarget<{ object?: { objectId?: string } }>(options.cdp, target, "DOM.resolveNode", {
-      backendNodeId: options.actionTarget.backendNodeId,
-      objectGroup,
-    }),
-    sendToCdpTarget<{ object?: { objectId?: string } }>(options.cdp, target, "DOM.resolveNode", {
-      backendNodeId: hit.backendNodeId,
-      objectGroup,
-    }),
-  ]);
-  const targetObjectId = resolvedTarget.object?.objectId;
-  const hitObjectId = resolvedHit.object?.objectId;
-  if (!targetObjectId || !hitObjectId) return false;
-
-  const reply = await sendToCdpTarget<RuntimeReply>(options.cdp, target, "Runtime.callFunctionOn", {
-    objectId: targetObjectId,
-    functionDeclaration: `function(hit) {
-        for (let node = hit; node; ) {
-          if (node === this) return true;
-          if (this.contains?.(node)) return true;
-          const root = node.getRootNode?.();
-          node = node.parentNode || (root && root !== node ? root.host : null);
-        }
-        return false;
-      }`,
-    arguments: [{ objectId: hitObjectId }],
-    returnByValue: true,
-  });
-  const error = runtimeError(reply, "failed to verify file-drop target");
-  if (error) throw error;
-  return reply.result?.value === true;
-}
-
 export async function uploadThroughFileDrop(
   options: FileDropTransactionOptions,
 ): Promise<FileDropTransactionResult | RpcError> {
@@ -182,7 +134,7 @@ export async function uploadThroughFileDrop(
       try {
         try {
           const belongs = await waitBounded(
-            pointBelongsToTarget(options, point.x, point.y, objectGroup),
+            pointBelongsToTarget(options.cdp, options.actionTarget, point.x, point.y, objectGroup),
             deadline,
             options.signal,
             "verifying file-drop target timed out",

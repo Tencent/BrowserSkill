@@ -51,6 +51,68 @@ export interface NormalizedDocument {
   documentElementBackendNodeId?: number;
 }
 
+/** Custom progress widgets have no native .form owner. Preserve their raw
+ * containment before document/shadow roots and transparent forms are omitted.
+ * Only a complete path to a document can establish that a widget is form-free. */
+async function captureCustomProgressFormMembership(
+  index: DocumentIndex,
+  signal?: AbortSignal,
+): Promise<void> {
+  const checkpoint = createCaptureCheckpoint(signal);
+  const membership = new Map<number, boolean | undefined>();
+  let work = 0;
+  for (const node of index.nodes.values()) {
+    if (work++ % 256 === 0) {
+      const pending = checkpoint();
+      if (pending) await pending;
+    }
+    if (["input", "textarea", "select"].includes(node.tag)) continue;
+    if (
+      node.tag !== "progress" &&
+      !node.attrs.role
+        ?.toLowerCase()
+        .split(/\s+/)
+        .some((role) => ["slider", "progressbar"].includes(role))
+    )
+      continue;
+    const path: number[] = [];
+    const seen = new Set<number>();
+    let current: NodeFacts | undefined = node;
+    let inForm: boolean | undefined;
+    while (current) {
+      if (work++ % 256 === 0) {
+        const pending = checkpoint();
+        if (pending) await pending;
+      }
+      if (membership.has(current.backendNodeId)) {
+        inForm = membership.get(current.backendNodeId);
+        break;
+      }
+      if (seen.has(current.backendNodeId)) break;
+      seen.add(current.backendNodeId);
+      path.push(current.backendNodeId);
+      if (current.tag === "form") {
+        inForm = true;
+        break;
+      }
+      if (current.parentMissing) break;
+      if (current.parentBackendNodeId === null) {
+        if (current.nodeType === 9) inForm = false;
+        break;
+      }
+      current = index.nodes.get(current.parentBackendNodeId);
+    }
+    for (const id of path) {
+      if (work++ % 256 === 0) {
+        const pending = checkpoint();
+        if (pending) await pending;
+      }
+      membership.set(id, inForm);
+    }
+    node.inForm = inForm;
+  }
+}
+
 /** Interpret one document using a supplied projection. No live reads or frame scheduling. */
 export async function normalizeDocument(
   doc: SnapshotDocument,
@@ -88,6 +150,7 @@ export async function normalizeDocument(
     });
   }
   const index = await buildDocumentIndex(nodes, signal, profile.includeVisualFacts);
+  await captureCustomProgressFormMembership(index, signal);
   const document: NormalizedDocument = {
     nodes: nodes.filter(
       (node) => !node.tag.startsWith("#") && !index.excludedBackendNodeIds.has(node.backendNodeId),

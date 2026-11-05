@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   detectBrowserMeta,
   EXTENSION_VERSION,
+  HandshakeRejectedError,
   MIN_COMPATIBLE_PEER,
   MIN_COMPATIBLE_PROTOCOL,
   PROTOCOL_VERSION,
@@ -66,8 +67,8 @@ function deferredFakeTransport(): { transport: Transport; emit: (frame: Protocol
 
 describe("performHandshake", () => {
   it("advertises the protocol compatibility boundary", () => {
-    expect(PROTOCOL_VERSION).toBe("1.3");
-    expect(MIN_COMPATIBLE_PROTOCOL).toBe("1.0");
+    expect(PROTOCOL_VERSION).toBe("1.8");
+    expect(MIN_COMPATIBLE_PROTOCOL).toBe("1.6");
   });
 
   it("sends system.handshake with identity and both compat fields", async () => {
@@ -166,6 +167,45 @@ describe("performHandshake", () => {
         rpcId: "hs-err",
       }),
     ).rejects.toThrow(/version_too_old/);
+  });
+
+  it("retains rejection diagnostics before an immediate connection abort", async () => {
+    const { transport, emit } = deferredFakeTransport();
+    const abort = new AbortController();
+    const rejection = {
+      code: "version_too_old" as const,
+      message: "local protocol 1.3 is below peer min_compatible_protocol 1.6",
+      data: {
+        daemon_version: "0.3.3",
+        daemon_protocol_version: "1.3",
+        min_compatible_protocol: "1.0",
+      },
+    };
+    let received: HandshakeRejectedError | null = null;
+    const pending = performHandshake(
+      transport,
+      {
+        instanceId: "x",
+        browser: { name: "chrome", version: "131" },
+        label: "",
+        rpcId: "hs-rejected",
+      },
+      {
+        signal: abort.signal,
+        onRejected: (error) => {
+          received = error;
+        },
+      },
+    );
+
+    emit({ id: "hs-rejected", error: rejection });
+    expect(received).toBeInstanceOf(HandshakeRejectedError);
+    abort.abort();
+    await expect(pending).rejects.toBe(received);
+    await expect(pending).rejects.toMatchObject({
+      code: rejection.code,
+      data: rejection.data,
+    });
   });
 
   it("ignores unrelated frames and resolves on the matching response id", async () => {

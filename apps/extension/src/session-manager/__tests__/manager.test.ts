@@ -29,6 +29,25 @@ function fakeAgentWindow(): AgentWindowApi & {
 }
 
 describe("SessionManager", () => {
+  it("records the actual incognito mode on the session", async () => {
+    const aw = fakeAgentWindow();
+    aw.createMock.mockResolvedValueOnce({ windowId: 100, initialTabIds: [7], incognito: true });
+    const sm = new SessionManager({ agentWindow: aw });
+    expect((await sm.start("private", { incognito: true })).incognito).toBe(true);
+    expect(aw.createMock).toHaveBeenCalledWith("about:blank", { incognito: true });
+  });
+
+  it("rolls back a normal window returned for an incognito request before initializing tabs", async () => {
+    const aw = fakeAgentWindow();
+    const sm = new SessionManager({ agentWindow: aw });
+    await expect(sm.start("private", { incognito: true })).rejects.toThrow(
+      /did not create an incognito/,
+    );
+    expect(aw.removeMock).toHaveBeenCalledWith(100);
+    expect(aw.ensureActiveTabMock).not.toHaveBeenCalled();
+    expect(sm.has("private")).toBe(false);
+  });
+
   it("creates an Agent Window when starting a session", async () => {
     const aw = fakeAgentWindow();
     const sm = new SessionManager({ agentWindow: aw, now: () => 1700000000000 });

@@ -7,7 +7,70 @@
 //!
 //! On Windows the same line protocol runs over a per-user named pipe.
 
-use bsk_protocol::RpcError;
+use anyhow::{Context, Result};
+use bsk_protocol::{Frame, ResponseBody, RpcError};
+use serde::de::DeserializeOwned;
+
+fn decode_response<R: DeserializeOwned>(line: &str, id: &str) -> Result<RpcOutcome<R>> {
+    let frame: Frame = serde_json::from_str(line).context("decode IPC response")?;
+    match frame {
+        Frame::Response(resp) => {
+            if resp.id != id {
+                return Err(anyhow::anyhow!(
+                    "IPC response id mismatch: expected {id}, got {}",
+                    resp.id
+                ));
+            }
+            match resp.body {
+                ResponseBody::Ok(v) => {
+                    let value: R = serde_json::from_value(v).context("decode result")?;
+                    Ok(Ok(value))
+                }
+                ResponseBody::Err(e) => Ok(Err(e)),
+            }
+        }
+        other => Err(anyhow::anyhow!("unexpected frame from daemon: {other:?}")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::decode_response;
+    use bsk_protocol::{ErrorCode, PingResult};
+    use serde_json::{Value, json};
+
+    #[test]
+    fn shared_decoder_preserves_typed_results_and_rpc_error_details() {
+        let result: PingResult = decode_response(r#"{"id":"one","result":{"pong":true}}"#, "one")
+            .unwrap()
+            .unwrap();
+        assert!(result.pong);
+        let error = decode_response::<Value>(
+            r#"{"id":"one","error":{"code":"cancelled","message":"stopped","data":{"reason":"test"}}}"#,
+            "one",
+        )
+        .unwrap()
+        .unwrap_err();
+        assert_eq!(error.code, ErrorCode::Cancelled);
+        assert_eq!(error.message, "stopped");
+        assert_eq!(error.data, Some(json!({"reason": "test"})));
+    }
+
+    #[test]
+    fn shared_decoder_rejects_wrong_request_ids_and_invalid_response_shapes() {
+        for wire in [
+            r#"{"id":"other","result":{"pong":true}}"#,
+            r#"{"id":"one","method":"system.ping"}"#,
+            r#"{"id":"one","result":{"pong":"wrong type"}}"#,
+            "not JSON",
+        ] {
+            assert!(
+                decode_response::<PingResult>(wire, "one").is_err(),
+                "{wire}"
+            );
+        }
+    }
+}
 
 #[cfg(unix)]
 mod platform {
@@ -15,13 +78,13 @@ mod platform {
     use std::time::Duration;
 
     use anyhow::{Context, Result};
-    use bsk_protocol::{Frame, Method, RequestFrame, ResponseBody};
+    use bsk_protocol::{Frame, Method, RequestFrame};
     use serde::{Serialize, de::DeserializeOwned};
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     use tokio::net::UnixStream;
     use tokio::time::timeout;
 
-    use crate::ipc_client::{RpcOutcome, random_id};
+    use crate::ipc_client::{RpcOutcome, decode_response, random_id};
 
     /// Connected IPC client. Holds an open UDS connection plus a buffered
     /// reader/writer pair.
@@ -108,28 +171,6 @@ mod platform {
             &self.sock_path
         }
     }
-
-    fn decode_response<R: DeserializeOwned>(line: &str, id: &str) -> Result<RpcOutcome<R>> {
-        let frame: Frame = serde_json::from_str(line).context("decode IPC response")?;
-        match frame {
-            Frame::Response(resp) => {
-                if resp.id != id {
-                    return Err(anyhow::anyhow!(
-                        "IPC response id mismatch: expected {id}, got {}",
-                        resp.id
-                    ));
-                }
-                match resp.body {
-                    ResponseBody::Ok(v) => {
-                        let value: R = serde_json::from_value(v).context("decode result")?;
-                        Ok(Ok(value))
-                    }
-                    ResponseBody::Err(e) => Ok(Err(e)),
-                }
-            }
-            other => Err(anyhow::anyhow!("unexpected frame from daemon: {other:?}")),
-        }
-    }
 }
 
 #[cfg(windows)]
@@ -138,14 +179,14 @@ mod platform {
     use std::time::Duration;
 
     use anyhow::{Context, Result};
-    use bsk_protocol::{Frame, Method, RequestFrame, ResponseBody};
+    use bsk_protocol::{Frame, Method, RequestFrame};
     use serde::{Serialize, de::DeserializeOwned};
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     use tokio::net::windows::named_pipe::{ClientOptions, NamedPipeClient};
     use tokio::time::{sleep, timeout};
-    use windows_sys::Win32::Foundation::ERROR_PIPE_BUSY;
+    use windows_sys::Win32::Foundation::{ERROR_ACCESS_DENIED, ERROR_PIPE_BUSY};
 
-    use crate::ipc_client::{RpcOutcome, random_id};
+    use crate::ipc_client::{RpcOutcome, decode_response, random_id};
 
     pub struct Client {
         stream: BufReader<tokio::io::ReadHalf<NamedPipeClient>>,
@@ -177,6 +218,15 @@ mod platform {
                         Ok(client) => return Ok::<NamedPipeClient, anyhow::Error>(client),
                         Err(err) if err.raw_os_error() == Some(ERROR_PIPE_BUSY as i32) => {
                             sleep(Duration::from_millis(50)).await;
+                        }
+                        Err(err) if err.raw_os_error() == Some(ERROR_ACCESS_DENIED as i32) => {
+                            return Err(anyhow::Error::from(err).context(format!(
+                                "connect IPC named pipe {name}: access denied. The current account \
+                                 or access token lacks permission to open the daemon's pipe. This \
+                                 can happen when a sandbox uses a different account or a restricted \
+                                 token. See https://github.com/Tencent/BrowserSkill/blob/main/docs/\
+                                 sandboxed-agents.md#windows-sandbox-users-access-denied-on-the-pipe"
+                            )));
                         }
                         Err(err) => {
                             return Err(anyhow::Error::from(err)
@@ -256,28 +306,6 @@ mod platform {
 
         pub fn sock_path(&self) -> &Path {
             &self.pipe_name
-        }
-    }
-
-    fn decode_response<R: DeserializeOwned>(line: &str, id: &str) -> Result<RpcOutcome<R>> {
-        let frame: Frame = serde_json::from_str(line).context("decode IPC response")?;
-        match frame {
-            Frame::Response(resp) => {
-                if resp.id != id {
-                    return Err(anyhow::anyhow!(
-                        "IPC response id mismatch: expected {id}, got {}",
-                        resp.id
-                    ));
-                }
-                match resp.body {
-                    ResponseBody::Ok(v) => {
-                        let value: R = serde_json::from_value(v).context("decode result")?;
-                        Ok(Ok(value))
-                    }
-                    ResponseBody::Err(e) => Ok(Err(e)),
-                }
-            }
-            other => Err(anyhow::anyhow!("unexpected frame from daemon: {other:?}")),
         }
     }
 }

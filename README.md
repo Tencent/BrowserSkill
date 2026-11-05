@@ -5,39 +5,78 @@
 </p>
 
 <p align="center">
-  <strong>Let AI agents work in your logged-in browser while you keep working.</strong>
+  <strong>Your agent. Your browser. One connection.</strong><br />
+  Turn the browser you already use into a workspace for your AI agent.
 </p>
 
 <p align="center">
-  English · <a href="README.zh-CN.md">中文</a>
+  <a href="https://browserskill.weixin.qq.com/"><img src="docs/assets/readme-website-en.svg" alt="Visit the BrowserSkill website" /></a>
+  <a href="#quick-start"><img src="docs/assets/readme-start-en.svg" alt="Get started with BrowserSkill" /></a>
 </p>
 
 <p align="center">
-  <a href="#quick-start">Quick start</a> ·
+  <a href="https://trend.ondo.sh/github/r/Tencent--BrowserSkill/en.html"><img src="docs/assets/github-trending.svg" alt="BrowserSkill: best recorded GitHub Trending daily rank #4, all languages, September 2026" width="360" /></a>
+</p>
+
+<p align="center">
+  English · <a href="README.zh-CN.md">中文</a><br />
+  <a href="https://browserskill.weixin.qq.com/">Website</a> ·
+  <a href="#see-it-in-action">Demo</a> ·
+  <a href="#what-you-can-do">Features</a> ·
   <a href="#website-debugging">Website debugging</a> ·
-  <a href="#deepseek-harness-plugin">DSH plugin</a> ·
   <a href="#documentation">Documentation</a> ·
   <a href="CHANGELOG.md">Changelog</a>
 </p>
 
-**BrowserSkill connects your AI agent to Chrome or Microsoft Edge, using the accounts you are already signed into.** Ask it to read pages, fill forms, work through a website, capture a long screenshot, or investigate a failing request. Tasks run in a separate, visible **Agent Window**; an existing tab can be explicitly borrowed and returned when the task ends.
+**BrowserSkill connects your AI agent to Chrome or Microsoft Edge, using your existing logins.** Give it a task to read, click, fill, or investigate. Work stays visible in a separate **Agent Window**, and you can take over when needed. Existing tabs can be explicitly borrowed and returned when the task ends.
 
-Use the `bsk` CLI with Cursor, Claude Code, Codex, OpenClaw, CodeBuddy, WorkBuddy, Pi, Hermes Agent, or another shell-capable agent. **DeepSeek Harness** has a dedicated plugin with native browser tools and task previews. You choose the agent and model; BrowserSkill provides the browser connection.
+## See it in action
+
+<details>
+<summary><strong>▶ Watch the demo · 81 seconds · English</strong><br /><picture><img src="docs/assets/demo/browserskill-demo-en.png" alt="BrowserSkill demo preview — Your agent. Your browser. One connection." width="960" /></picture></summary>
+
+https://github.com/user-attachments/assets/6111d978-baa6-4a76-92c4-4f51d47ae617
+
+</details>
+
+<p align="center">
+  Click the cover to expand the video · <a href="docs/assets/demo/browserskill-demo-en.mp4">Download MP4</a><br />
+  Real browser actions on a local demo workspace, recorded from main.
+</p>
+
+## Bring the agent you already use
+
+<table align="center">
+  <tr>
+    <td align="center" width="180"><img src="docs/assets/harnesses/codex.svg" alt="Codex" width="42" height="42" /><br /><strong>Codex</strong></td>
+    <td align="center" width="180"><img src="docs/assets/harnesses/claude.svg" alt="Claude Code" width="42" height="42" /><br /><strong>Claude Code</strong></td>
+    <td align="center" width="180"><img src="docs/assets/harnesses/cursor.svg" alt="Cursor" width="42" height="42" /><br /><strong>Cursor</strong></td>
+    <td align="center" width="180"><img src="docs/assets/harnesses/openclaw.svg" alt="OpenClaw" width="42" height="42" /><br /><strong>OpenClaw</strong></td>
+  </tr>
+  <tr>
+    <td align="center" width="180"><img src="docs/assets/harnesses/codebuddy.svg" alt="CodeBuddy" width="42" height="42" /><br /><strong>CodeBuddy</strong></td>
+    <td align="center" width="180"><img src="docs/assets/harnesses/workbuddy.svg" alt="WorkBuddy" width="42" height="42" /><br /><strong>WorkBuddy</strong></td>
+    <td align="center" width="180"><img src="docs/assets/harnesses/pi.svg" alt="Pi" width="42" height="42" /><br /><strong>Pi</strong></td>
+    <td align="center" width="180"><img src="docs/assets/harnesses/hermes.png" alt="Hermes Agent" width="42" height="42" /><br /><strong>Hermes Agent</strong></td>
+  </tr>
+</table>
+
+These and other agents that can run shell commands use the same **`bsk` CLI**. **[DeepSeek Harness](#deepseek-harness-plugin)** has a dedicated plugin with native browser tools and task previews. You choose the agent and model; BrowserSkill connects it to your browser.
 
 ## What you can do
 
-| Capability | What it gives you |
+| Your goal | What BrowserSkill provides |
 | --- | --- |
-| **Work with your existing accounts** | Use the browser's current login state to read documents, search internal sites, fill forms, and complete web workflows. |
-| **Keep browser tasks visible** | Give the agent its own window, borrow an existing tab when needed, and take over for login, verification, or other human-only steps. |
-| **Read, interact, and capture** | Inspect page text and controls, click and type, manage tabs, capture viewport or full-page screenshots, and upload or download files in local mode. |
-| **Debug websites with evidence** | Connect actions to requests, response bodies, console messages, and page changes. Inspect performance, slow APIs, and suspected duplicate requests; use explicit HTTP rules or request replay to test a hypothesis. |
-| **Choose the right browser** | Name browser instances, bind a task to a specific profile, or pair an agent running on a server with a browser on your computer. |
-| **Review what happened** | Reopen browser-local debugging history, export evidence as JSON, or enable a separate operation audit to review task activity. |
-
-Watch a browser task in action:
-
-https://github.com/user-attachments/assets/db782c92-b1d4-4aae-a255-039675937a90
+| **Work where you are already signed in** | Read documents, search internal sites, and complete web workflows with the browser's existing login state. |
+| **Turn instructions into browser actions** | Read page text and controls, click, type, fill forms, drag items, select ranges, and manage tabs. Capture viewport or full-page screenshots; upload and download files in local mode. |
+| **Stay in control of the task** | Work alongside the agent with shared control, pause it while you edit, and let it reconcile your changes before continuing. Tasks remain visible in their own window; existing tabs can be explicitly borrowed. |
+| **Take web data with you** | Export loaded tables and lists as JSON/CSV, with column names, page/frame sources, merged-cell metadata, and explicit coverage. [Structured extraction](docs/structured-extraction.md) |
+| **Find the evidence behind a failure** | Connect actions to requests, response bodies, console messages, and page changes. Inspect performance, slow APIs, and suspected duplicate requests; test a hypothesis with explicit HTTP rules or request replay. [Website debugging](docs/website-debugging.md) |
+| **Keep a replay of the work** | Record one authorized task tab as a silent MP4, then preview, save, or delete it from the extension. [Task video recording](docs/video-recording.md) |
+| **Continue when the page is ready** | Wait for a requested element condition with an explicit timeout before the next step. [Element waits](docs/wait-for-element.md) |
+| **Reuse what you already observed** | Execute one chosen action and synchronize with `step`; explicitly save the full observation, then search or read it with `view` without another browser capture. [Steps and saved observations](crates/bsk-cli/skill/references/step-and-cache.md) |
+| **Use the right browser for the job** | Name browser instances, bind a task to a specific profile, or pair a server-side agent with the browser on your computer. [Browser profiles](docs/browser-profiles.md) |
+| **Review what happened** | Reopen browser-local debugging history, export evidence as JSON, or enable a separate operation audit to review task activity. [Operation audit](docs/operation-audit.md) |
 
 ## Quick Start
 
@@ -105,6 +144,10 @@ bsk install-skill --harness cursor --json
 
 Use `bsk install-skill --list` to see supported targets and paths. Existing installations are skipped unless you explicitly replace them with `--force`. For another harness, copy the entire [`crates/bsk-cli/skill/`](crates/bsk-cli/skill/) directory into its skills directory as `browser-skill/`, including `references/`.
 
+For MCP clients, `bsk install-skill --harness codex --mcp` also configures the
+local stdio server (`claude-code` and `cursor` are supported too). See the
+[MCP setup and workflow](docs/mcp.md).
+
 DSH users should install the [plugin](#deepseek-harness-plugin) instead; it includes the skill.
 
 #### 4. Check the connection
@@ -125,7 +168,11 @@ Once connected, ask your agent:
 Use browser-skill to open https://example.com, summarize the page, and end the browser session when finished.
 ```
 
-The agent should open an Agent Window, read the page, return the summary, and stop its task. Harnesses that support skill slash commands can also use `/browser-skill`.
+The agent opens its own window in the background, reads the page, returns the summary, and stops its task. External links or manually created tabs that land in the task window are moved to your most recently used normal window; a user window is created if none remain. Routing happens after tab creation, so a tab may briefly appear in the task window. Page-opened tabs and human assistance or recording are preserved. Harnesses that support skill slash commands can also use `/browser-skill`.
+
+Moving any controlled tab out of its original Agent Window ends the entire browser session, preserves every page in place, and removes its control indicators. Borrowed tabs also stay where they are. Moving a tab back does not resume the task; starting again requires a user decision. Reordering tabs within the same window is unaffected. Normal session stop still returns borrowed tabs and cleans up task pages.
+
+Chrome can still activate a window when a page opens a native popup. For observed task popups, the extension restores the previous Chrome window or minimized state if you have not switched windows. Chrome's public extension APIs cannot guarantee zero transient activation or restore focus to another application.
 
 <details>
 <summary><b>Try the CLI directly</b></summary>
@@ -133,10 +180,10 @@ The agent should open an Agent Window, read the page, return the summary, and st
 Start a session and keep the returned `session_id`:
 
 ```sh
-bsk session start --no-focus --json
+bsk session start --json
 ```
 
-Replace `<id>` with that value in each command below. With multiple connected browsers, select one using `--browser <instance-id-or-name>` when starting the session.
+Replace `<id>` with that value in each command below. With multiple connected browsers, select one using `--browser <instance-id-or-name>` when starting the session. Background creation is the default; `--no-focus` remains supported, and `--focus` explicitly brings the new window forward. Requests for human help and interactive recording still bring the relevant window forward.
 
 ```sh
 bsk navigate https://example.com --session <id>
@@ -153,7 +200,9 @@ In WorkBuddy/CodeBuddy, or hosts that reap command children, the agent should re
 
 ## DeepSeek Harness plugin
 
-The [DSH plugin](packages/dsh-plugin-browserskill/README.md) adds native `browser_*` tools, browser task previews, and screenshot results to the DeepSeek Harness Web UI. It uses the same `bsk` CLI and extension and includes its own BrowserSkill skill.
+The [DSH plugin](packages/dsh-plugin-browserskill/README.md) adds native `bsk_*` tools, browser task previews, and screenshot results to the DeepSeek Harness Web UI. It uses the same `bsk` CLI and extension and includes its own BrowserSkill skill.
+
+**Upgrading to 0.4.1:** update the CLI and running daemon first, then the extension and plugin. Restart the DSH profile and invoke `/browser-skill` again so existing conversations load the new target-policy control and observation instructions. See the [0.4.1 upgrade guide](packages/dsh-plugin-browserskill/README.md#upgrading-to-041); installations older than 0.3.3 also need the [tool-name migration](packages/dsh-plugin-browserskill/README.md#breaking-tool-api-migration-033).
 
 With DeepSeek Harness, pnpm, and `bsk` installed and the extension connected, add the plugin to your profile:
 
@@ -210,15 +259,22 @@ bsk session start --browser "Work profile" --no-focus --json
 
 The name is set in BrowserSkill; it is not automatically taken from Chrome's profile name. Each session stays bound to the selected instance. [Profile selection guide](docs/browser-profiles.md)
 
+Add `--incognito` to isolate a task from the profile's ordinary website login state.
+Enable the extension's **Allow in incognito** setting first. Incognito tasks cannot
+borrow tabs, and all incognito windows in a profile share login state with each other.
+[Incognito guide](docs/browser-profiles.md#incognito-agent-windows)
+
 ### Run the agent on a server
 
 Keep the browser and its logins on your computer while the agent, CLI, and daemon run on a server. Pair the extension with that server over authenticated WSS; the browser initiates the connection, so your computer needs no inbound port.
 
-The built-in server supports device pairing, renewal, and revocation. Remote mode currently does not support file upload or download. [Remote connection guide](docs/remote-extension-connection.md)
+The built-in server supports device pairing, renewal, and revocation. The `bsk upload` and `bsk download` file-transfer commands remain local-only. Authorized video exports can write to the CLI machine, including a remote server; Save MP4 as in the extension writes to the browser computer. [Remote connection guide](docs/remote-extension-connection.md)
 
 ## Browser control and privacy
 
-An Agent Window shares the selected profile's login state; **it is not a separate account or security sandbox**. Agents can act with the permissions of the signed-in websites, so choose the tasks and agent you trust.
+By default, an Agent Window shares the selected profile's login state; **it is not a separate account or security sandbox**. Agents can act with the permissions of the signed-in websites, so choose the tasks and agent you trust.
+
+New tasks enable shared control automatically. BrowserSkill observes page changes and supported manual activity in controlled tabs so the agent can yield while you edit and synchronize before acting again. This coordination works even when debugging, audit and video recording are off. Use the task's manual hold and resume controls to keep control while you work. [Shared-control guide](crates/bsk-cli/skill/references/cooperation.md)
 
 The extension has two independent **Automation settings**, both enabled by default:
 
@@ -231,22 +287,30 @@ These browser settings apply to existing and new sessions. Legacy `--unattended`
 
 BrowserSkill does not operate a mandatory cloud service or collect product telemetry. Automation results go to your selected daemon or gateway and the agent using it; that agent or service may process or retain them under its own policies. The extension does not independently call an AI provider.
 
-| Optional history | Where it is saved | What to know |
+| Optional history and recordings | Where it is saved | What to know |
 | --- | --- | --- |
 | **Website debugging** | The current browser profile, including in remote mode | Retains captured evidence, including available bodies and field values. Stopped records expire after 30 days, with a 50-record / 50 MiB retention budget and earlier eviction when necessary. Stop capture before deleting a record. |
 | **Operation audit** | The daemon's host, under `BSK_HOME/audit` | Off by default. Records task and operation metadata, excluding input values, page bodies, screenshots, and file contents. Ended tasks expire after 30 days. |
+| **Task video** | The current browser profile; exported copies at the chosen destination | Opt-in, silent capture of one authorized tab, limited to 10 minutes / 256 MiB per video. Recordings expire 24 hours after creation; the temporary video budget is 1 GiB. The library supports preview, export and deletion. |
+| **Saved observations and step results** | An explicitly chosen JSON path on the CLI machine, including a remote server | `--save-full` / DSH `saveFull` saves the complete reply before display filtering. Files have no automatic expiry; delete them on that machine. `view` reads historical evidence without refreshing the browser state. |
 
-Both offer export and deletion. Stopping a task or disconnecting does not delete saved history; expiration is applied during history access or cleanup. Exported copies and copies already received by an agent or gateway must be managed separately. Known secrets are filtered from debugging evidence, but redaction cannot guarantee that all sensitive data is removed.
+These features offer export and deletion. Stopping a task or disconnecting does not delete retained history or videos; expiration is applied during access or cleanup. Exported copies and copies already received by an agent or gateway must be managed separately. Known secrets are filtered from debugging evidence, but redaction cannot guarantee that all sensitive data is removed. Video frames are not automatically redacted; review visible content before sharing.
 
 [Privacy policy](apps/extension/PRIVACY.md) · [Operation audit](docs/operation-audit.md) · [Debugging retention and limits](docs/website-debugging.md#history-and-export)
 
 ## Updating
+
+**For 0.4.1, update the CLI and restart its running daemon before updating the extension; update DSH last.** CLI/daemon and extension 0.4.1 use protocol 1.8, which the new default target policy requires on both peers. Updating only the binary leaves a foreground or externally managed daemon on its old version until its host restarts it. Use matching 0.4.1 components for the new workflow.
+
+Existing scripts must follow the [shared-control workflow](crates/bsk-cli/skill/references/cooperation.md): after initial navigation, synchronize with `bsk cooperate sync` and pass its `context_id` as `--context`. Target-policy DOM actions can reuse that context across actions and supplementary reads; use `--expect` to protect decision facts. Scripts, untargeted keys and visual actions also require the sync's `observation_id` as `--observation`. Synchronize again after human intervention or navigation. Select `--policy strict` on the first sync to retain one action per context. Reload the updated skill before continuing.
 
 Finish active browser tasks, then update the CLI:
 
 ```sh
 bsk update --yes
 ```
+
+Manual and daemon updates fetch the manifest and archives from the official website's domestic download source first, then fall back to GitHub on download, manifest, checksum or archive errors. The GitHub archive fallback is pinned to the selected release and uses the same SHA256 checksum. If both sources fail, the error lists their URLs and individual causes. Setting `BSK_UPDATE_MANIFEST_URL` explicitly uses only that manifest and its asset URLs, without the built-in public-source fallback.
 
 For the default local setup, this installs the new executable and checks that it runs while the daemon keeps serving, then restarts the daemon from it on the same port. If the restarted daemon does not become ready, the previous executable is put back and the daemon is restarted from it. A daemon started with `--foreground` is left running on the previous version; restart it in its terminal or supervisor. So is a background daemon when `bsk update` runs where it could not start one again, such as inside a sandbox whose Windows Job forbids breakaway; restart it with `bsk daemon restart` outside the sandbox. If you use the installer to replace the binary, restart the daemon afterwards with `bsk daemon restart`.
 
@@ -278,6 +342,9 @@ Stop the daemon in its owning host or supervisor, update with `bsk update --yes 
 | Install and verify with an agent | [Agent setup](AGENT_INSTALL.md) |
 | Investigate a website or API | [Website debugging](docs/website-debugging.md) |
 | Capture long pages | [Full-page screenshots](docs/long-screenshot.md) |
+| Record and save a task video | [Task video recording](docs/video-recording.md) |
+| Export tables or lists | [Structured extraction](docs/structured-extraction.md) |
+| Wait for an element condition | [Element waits](docs/wait-for-element.md) |
 | Use a specific account or profile | [Browser profiles](docs/browser-profiles.md) |
 | Connect a server-side agent | [Remote browser connections](docs/remote-extension-connection.md) |
 | Run in a sandbox | [Sandboxed agents](docs/sandboxed-agents.md) |
@@ -309,6 +376,64 @@ The CLI is built under `target/release/`; load `apps/extension/dist/chrome-mv3/`
 Run `cargo test --workspace --locked`, `pnpm ext:test`, and `pnpm lint` for the relevant checks. See the [browser evaluation guide](evals/browser/README.md) for reproducible browser cases. Bug reports and focused contributions are welcome through [GitHub Issues](https://github.com/Tencent/BrowserSkill/issues) and pull requests; remove sensitive data before attaching browser evidence.
 
 The extension interface supports English, Simplified and Traditional Chinese, Korean, Japanese, French, Italian, Spanish, German, and Brazilian Portuguese. See [localization](packages/i18n/README.md) to contribute translations.
+
+## Contributors
+
+Thank you to everyone who contributes code, documentation, translations, and feedback.
+
+<!-- CONTRIBUTORS:START -->
+<!-- Generated by node scripts/update-readme-contributors.mjs -->
+<p align="center">
+  <a href="https://github.com/TencentXiaowei"><img src="https://avatars.githubusercontent.com/u/87162611?s=96&amp;v=4" width="48" height="48" alt="TencentXiaowei" title="TencentXiaowei" /></a>
+  <a href="https://github.com/iuyo5678"><img src="https://avatars.githubusercontent.com/u/5351707?s=96&amp;v=4" width="48" height="48" alt="iuyo5678" title="iuyo5678" /></a>
+  <a href="https://github.com/Ljy-0827"><img src="https://avatars.githubusercontent.com/u/84192562?s=96&amp;v=4" width="48" height="48" alt="Ljy-0827" title="Ljy-0827" /></a>
+  <a href="https://github.com/BB-fat"><img src="https://avatars.githubusercontent.com/u/45072480?s=96&amp;v=4" width="48" height="48" alt="BB-fat" title="BB-fat" /></a>
+  <a href="https://github.com/NianJiuZst"><img src="https://avatars.githubusercontent.com/u/180004567?s=96&amp;v=4" width="48" height="48" alt="NianJiuZst" title="NianJiuZst" /></a>
+  <a href="https://github.com/shnpd"><img src="https://avatars.githubusercontent.com/u/61319465?s=96&amp;v=4" width="48" height="48" alt="shnpd" title="shnpd" /></a>
+  <a href="https://github.com/lyingbug"><img src="https://avatars.githubusercontent.com/u/11257935?s=96&amp;v=4" width="48" height="48" alt="lyingbug" title="lyingbug" /></a>
+  <a href="https://github.com/ch-z-hc"><img src="https://avatars.githubusercontent.com/u/45302000?s=96&amp;v=4" width="48" height="48" alt="ch-z-hc" title="ch-z-hc" /></a>
+  <a href="https://github.com/kevin9327"><img src="https://avatars.githubusercontent.com/u/5299031?s=96&amp;v=4" width="48" height="48" alt="kevin9327" title="kevin9327" /></a>
+  <a href="https://github.com/ArcueidMP"><img src="https://avatars.githubusercontent.com/u/263883869?s=96&amp;v=4" width="48" height="48" alt="ArcueidMP" title="ArcueidMP" /></a>
+  <br />
+  <a href="https://github.com/MaxFreedomPollard"><img src="https://avatars.githubusercontent.com/u/272618364?s=96&amp;v=4" width="48" height="48" alt="MaxFreedomPollard" title="MaxFreedomPollard" /></a>
+  <a href="https://github.com/legend91019"><img src="https://avatars.githubusercontent.com/u/221850659?s=96&amp;v=4" width="48" height="48" alt="legend91019" title="legend91019" /></a>
+  <a href="https://github.com/wcy12378"><img src="https://avatars.githubusercontent.com/u/192684309?s=96&amp;v=4" width="48" height="48" alt="wcy12378" title="wcy12378" /></a>
+  <a href="https://github.com/iAstro"><img src="https://avatars.githubusercontent.com/u/17198256?s=96&amp;v=4" width="48" height="48" alt="iAstro" title="iAstro" /></a>
+  <a href="https://github.com/lymerin"><img src="https://avatars.githubusercontent.com/u/183121539?s=96&amp;v=4" width="48" height="48" alt="lymerin" title="lymerin" /></a>
+  <a href="https://github.com/hobostay"><img src="https://avatars.githubusercontent.com/u/110803307?s=96&amp;v=4" width="48" height="48" alt="hobostay" title="hobostay" /></a>
+  <a href="https://github.com/martinm86867-ops"><img src="https://avatars.githubusercontent.com/u/265926788?s=96&amp;v=4" width="48" height="48" alt="martinm86867-ops" title="martinm86867-ops" /></a>
+  <a href="https://github.com/starsstreaming"><img src="https://avatars.githubusercontent.com/u/232207448?s=96&amp;v=4" width="48" height="48" alt="starsstreaming" title="starsstreaming" /></a>
+  <a href="https://github.com/xiyanjun"><img src="https://avatars.githubusercontent.com/u/19499978?s=96&amp;v=4" width="48" height="48" alt="xiyanjun" title="xiyanjun" /></a>
+  <a href="https://github.com/klren0312"><img src="https://avatars.githubusercontent.com/u/10903843?s=96&amp;v=4" width="48" height="48" alt="klren0312" title="klren0312" /></a>
+  <br />
+  <a href="https://github.com/hZsFN"><img src="https://avatars.githubusercontent.com/u/66200546?s=96&amp;v=4" width="48" height="48" alt="hZsFN" title="hZsFN" /></a>
+  <a href="https://github.com/cyberspace-cs"><img src="https://avatars.githubusercontent.com/u/53992553?s=96&amp;v=4" width="48" height="48" alt="cyberspace-cs" title="cyberspace-cs" /></a>
+  <a href="https://github.com/basil-k-aji-dev"><img src="https://avatars.githubusercontent.com/u/70605804?s=96&amp;v=4" width="48" height="48" alt="basil-k-aji-dev" title="basil-k-aji-dev" /></a>
+  <a href="https://github.com/PerryLink"><img src="https://avatars.githubusercontent.com/u/255665900?s=96&amp;v=4" width="48" height="48" alt="PerryLink" title="PerryLink" /></a>
+  <a href="https://github.com/Li-john1021"><img src="https://avatars.githubusercontent.com/u/215793081?s=96&amp;v=4" width="48" height="48" alt="Li-john1021" title="Li-john1021" /></a>
+  <a href="https://github.com/dayi"><img src="https://avatars.githubusercontent.com/u/1650262?s=96&amp;v=4" width="48" height="48" alt="dayi" title="dayi" /></a>
+  <a href="https://github.com/zhuhaoran291"><img src="https://avatars.githubusercontent.com/u/269347582?s=96&amp;v=4" width="48" height="48" alt="zhuhaoran291" title="zhuhaoran291" /></a>
+  <a href="https://github.com/u7-u7"><img src="https://avatars.githubusercontent.com/u/116776533?s=96&amp;v=4" width="48" height="48" alt="u7-u7" title="u7-u7" /></a>
+  <a href="https://github.com/huong8373tt-beep"><img src="https://avatars.githubusercontent.com/u/294879785?s=96&amp;v=4" width="48" height="48" alt="huong8373tt-beep" title="huong8373tt-beep" /></a>
+  <a href="https://github.com/hjxccc"><img src="https://avatars.githubusercontent.com/u/96366907?s=96&amp;v=4" width="48" height="48" alt="hjxccc" title="hjxccc" /></a>
+  <br />
+  <a href="https://github.com/zjxzjw"><img src="https://avatars.githubusercontent.com/u/180378968?s=96&amp;v=4" width="48" height="48" alt="zjxzjw" title="zjxzjw" /></a>
+  <a href="https://github.com/dvd233"><img src="https://avatars.githubusercontent.com/u/111864431?s=96&amp;v=4" width="48" height="48" alt="dvd233" title="dvd233" /></a>
+  <a href="https://github.com/drakeo338"><img src="https://avatars.githubusercontent.com/u/328244157?s=96&amp;v=4" width="48" height="48" alt="drakeo338" title="drakeo338" /></a>
+  <a href="https://github.com/dr-coton"><img src="https://avatars.githubusercontent.com/u/54978448?s=96&amp;v=4" width="48" height="48" alt="dr-coton" title="dr-coton" /></a>
+  <a href="https://github.com/djtzemx"><img src="https://avatars.githubusercontent.com/u/246582102?s=96&amp;v=4" width="48" height="48" alt="djtzemx" title="djtzemx" /></a>
+  <a href="https://github.com/WhyBusyy"><img src="https://avatars.githubusercontent.com/u/148039117?s=96&amp;v=4" width="48" height="48" alt="WhyBusyy" title="WhyBusyy" /></a>
+  <a href="https://github.com/Sthreal"><img src="https://avatars.githubusercontent.com/u/297435533?s=96&amp;v=4" width="48" height="48" alt="Sthreal" title="Sthreal" /></a>
+  <a href="https://github.com/KennyMcSimpson"><img src="https://avatars.githubusercontent.com/u/70093673?s=96&amp;v=4" width="48" height="48" alt="KennyMcSimpson" title="KennyMcSimpson" /></a>
+  <a href="https://github.com/MakerFlyFly"><img src="https://avatars.githubusercontent.com/u/223868679?s=96&amp;v=4" width="48" height="48" alt="MakerFlyFly" title="MakerFlyFly" /></a>
+  <a href="https://github.com/claude"><img src="https://avatars.githubusercontent.com/u/81847?s=96&amp;v=4" width="48" height="48" alt="claude" title="claude" /></a>
+</p>
+<!-- CONTRIBUTORS:END -->
+
+<p align="center">
+  <a href="https://github.com/Tencent/BrowserSkill/graphs/contributors">See contributions on GitHub</a> ·
+  <a href="https://github.com/Tencent/BrowserSkill/issues">Share an issue or idea</a>
+</p>
 
 ## License
 

@@ -20,6 +20,7 @@ import type {
   UserAgentMetadata,
 } from "@/transport/types";
 import {
+  type CdpRunner,
   type ChromeTabsApi,
   chromeTabsApi,
   enforceAgentWindow,
@@ -34,6 +35,7 @@ import {
  * test doubles need not implement it.
  */
 export interface EmulateCdpRunner {
+  beginDomMutation?: CdpRunner["beginDomMutation"];
   setDeviceMetricsOverride(tabId: number, metrics: DeviceMetricsOverride): Promise<void>;
   clearDeviceMetricsOverride(tabId: number): Promise<void>;
   setUserAgentOverride(tabId: number, override: UserAgentOverride): Promise<void>;
@@ -226,6 +228,7 @@ export async function handleEmulate(
     try {
       if (deps.signal?.aborted) return { code: "cancelled", message: "emulate aborted" };
       deps.cdp.trackSessionTab?.(ctx.sessionId, target.tabId);
+      await deps.cdp.beginDomMutation?.();
       await deps.cdp.clearDeviceMetricsOverride(target.tabId);
       if (deps.signal?.aborted) {
         return { code: "cancelled", message: "emulate aborted after clearing device metrics" };
@@ -254,12 +257,18 @@ export async function handleEmulate(
   // values; the merged state is what gets applied (and echoed back).
   const states = sessionEmulationStates.get(ctx) ?? new Map<number, EmulationState>();
   const stored = states.get(target.tabId);
+  const attachmentId = deps.cdp.getAttachmentId?.(target.tabId);
+  // A request-scoped guard can wrap the same driver. The attachment UUID is
+  // its durable identity; runners without one retain the object-identity check.
   const current =
-    stored?.cdp === deps.cdp && stored.attachmentId === deps.cdp.getAttachmentId?.(target.tabId);
+    stored &&
+    stored.attachmentId === attachmentId &&
+    (attachmentId !== undefined || stored.cdp === deps.cdp);
   const merged = mergeEmulateOverrides(current ? stored.overrides : undefined, overrides);
   try {
     if (deps.signal?.aborted) return { code: "cancelled", message: "emulate aborted" };
     deps.cdp.trackSessionTab?.(ctx.sessionId, target.tabId);
+    await deps.cdp.beginDomMutation?.();
     if (merged.width !== undefined && merged.height !== undefined) {
       await deps.cdp.setDeviceMetricsOverride(target.tabId, {
         width: merged.width,

@@ -1,0 +1,119 @@
+# Import into the internal BK-CI project, replace placeholders, then add the
+# GitHub Create Branch Or Tag trigger in the UI LAST (Tencent/BrowserSkill, cli-v*).
+# Keep Apple credentials and the signing keychain exclusively on the Mac node.
+version: v3.0
+name: BrowserSkill Mac signing
+'on':
+  manual: enabled
+variables:
+  release_tag:
+    value: ''
+    allow-modify-at-startup: true
+    props:
+      type: vuex-input
+      description: Existing CLI tag for manual recovery or verification
+      required: false
+  source_run_id:
+    value: ''
+    allow-modify-at-startup: true
+    props:
+      type: vuex-input
+      description: Exact successful GitHub Release CLI run ID
+      required: false
+  verification_only:
+    value: 'false'
+    allow-modify-at-startup: true
+    props:
+      type: vuex-input
+      description: Set true to sign and notarize without modifying any GitHub release
+      required: true
+stages:
+- name: Sign and notarize Mac executables
+  jobs:
+    sign_macos:
+      name: Mac Developer ID signing and Apple notarization
+      mutex:
+        label: BrowserSkill_macos_signing
+      runs-on:
+        self-hosted: true
+        node-name: MAC_SIGNING_NODE
+        agent-selector: [macos]
+      timeout-minutes: 180
+      steps:
+      - name: Download pinned helpers and validate GitHub artifacts
+        uses: linuxScript@1.*
+        timeout-minutes: 65
+        env:
+          BSK_MANUAL_TAG: '${{variables.release_tag}}'
+          BSK_SOURCE_RUN_ID: '${{variables.source_run_id}}'
+          BSK_VERIFY_ONLY: '${{variables.verification_only}}'
+        with:
+          script: |
+            #!/usr/bin/env bash
+            set -euo pipefail
+            set +x
+            export GH_TOKEN='${{settings.GITHUB_RELEASE_CREDENTIAL.access_token}}'
+            cd '${{ci.workspace}}'
+            SCRIPT_COMMIT=REVIEWED_COMMIT_SHA
+            for script in windows-release.py macos-release.py; do
+              curl --fail --silent --show-error --location --retry 3 --max-time 180 \
+                "https://raw.githubusercontent.com/Tencent/BrowserSkill/$SCRIPT_COMMIT/scripts/$script" --output "$script"
+            done
+            export BSK_RELEASE_TAG="${BK_CI_REPO_GITHUB_WEBHOOK_CREATE_REF_NAME:-${BSK_MANUAL_TAG:-}}"
+            if [[ -n "${BK_CI_REPO_GITHUB_WEBHOOK_CREATE_REF_TYPE:-}" && "$BK_CI_REPO_GITHUB_WEBHOOK_CREATE_REF_TYPE" != tag ]]; then
+              echo 'Only tag creation events may request signing'; exit 1
+            fi
+            args=(prepare --timeout 3600)
+            if [[ -n "${BSK_SOURCE_RUN_ID:-}" ]]; then args+=(--run-id "$BSK_SOURCE_RUN_ID"); fi
+            case "$BSK_VERIFY_ONLY" in
+              true) args+=(--verification-only) ;;
+              false) ;;
+              *) echo 'verification_only must be true or false'; exit 1 ;;
+            esac
+            python3 macos-release.py "${args[@]}"
+      - name: Sign both architectures and submit to Apple notarization
+        uses: linuxScript@1.*
+        timeout-minutes: 70
+        with:
+          script: |
+            #!/usr/bin/env bash
+            set -euo pipefail
+            set +x
+            export APPLE_ID='${{settings.APPLE_ACCOUNT_CREDENTIAL.username}}'
+            export APPLE_PASSWORD='${{settings.APPLE_ACCOUNT_CREDENTIAL.password}}'
+            export APPLE_TEAM_ID='${{settings.APPLE_TEAM_CREDENTIAL.password}}'
+            cd '${{ci.workspace}}'
+            helper="$PWD/macos-release.py"
+            workspace="$PWD"
+            cd "$(cat macos-workdir.txt)"
+            python3 "$helper" sign --timeout 3600
+            mkdir -p "$workspace/evidence"
+            cp signed-macos.zip macos-signing.json signing-state.json notary-submission.json notary-log.json "$workspace/evidence/"
+      - name: Return verified result to the existing GitHub draft
+        uses: linuxScript@1.*
+        timeout-minutes: 35
+        env:
+          BSK_VERIFY_ONLY: '${{variables.verification_only}}'
+        with:
+          script: |
+            #!/usr/bin/env bash
+            set -euo pipefail
+            set +x
+            if [[ "$BSK_VERIFY_ONLY" == true ]]; then
+              echo 'Verification-only run: no GitHub release is modified.'
+              exit 0
+            fi
+            export GH_TOKEN='${{settings.GITHUB_RELEASE_CREDENTIAL.access_token}}'
+            cd '${{ci.workspace}}'
+            helper="$PWD/macos-release.py"
+            cd "$(cat macos-workdir.txt)"
+            python3 "$helper" return-signed --timeout 1800
+      - name: Archive signed binaries and notarization evidence
+        uses: UploadArtifactory@8.*
+        timeout-minutes: 5
+        with:
+          filePath: evidence/*
+concurrency:
+  queue-timeout-minutes: 30
+syntax-dialect: INHERIT
+cancel-policy: RESTRICTED

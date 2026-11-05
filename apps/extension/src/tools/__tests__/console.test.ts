@@ -32,7 +32,7 @@ function makeDeps(
       next_since: 0,
       truncated: false,
     } satisfies ConsoleResult);
-  const ensureConsoleCapture = vi.fn(async () => {});
+  const ensureConsoleCapture = vi.fn(async (_tabId: number, _signal?: AbortSignal) => {});
   const consoleEntriesSince = vi.fn(() => result);
   const cdp = {
     send: vi.fn(),
@@ -68,7 +68,7 @@ describe("handleConsole", () => {
 
     if ("code" in res) throw new Error(`unexpected error: ${JSON.stringify(res)}`);
     expect(res.entries[0].text).toBe("hello");
-    expect(deps.ensureConsoleCapture).toHaveBeenCalledWith(7);
+    expect(deps.ensureConsoleCapture).toHaveBeenCalledWith(7, undefined);
     expect(deps.consoleEntriesSince).toHaveBeenCalledWith(7, undefined, 50, 1000, false);
   });
 
@@ -92,7 +92,7 @@ describe("handleConsole", () => {
       deps,
     );
 
-    expect(deps.ensureConsoleCapture).toHaveBeenCalledWith(9);
+    expect(deps.ensureConsoleCapture).toHaveBeenCalledWith(9, undefined);
     expect(deps.consoleEntriesSince).toHaveBeenCalledWith(9, 12, 75, 1500, true);
   });
 
@@ -108,5 +108,23 @@ describe("handleConsole", () => {
 
     expect(res).toMatchObject({ code: "not_found" });
     expect(deps.ensureConsoleCapture).not.toHaveBeenCalled();
+  });
+
+  it("propagates cancellation during console setup", async () => {
+    const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
+    await sm.start("aa11");
+    const deps = makeDeps();
+    const abort = new AbortController();
+    deps.ensureConsoleCapture.mockImplementation(
+      async (_tabId?: number, signal?: AbortSignal) =>
+        new Promise<void>((_, reject) => {
+          signal?.addEventListener("abort", () => reject(signal.reason), { once: true });
+        }),
+    );
+    const result = handleConsole(sm, { session_id: "aa11" }, deps, abort.signal);
+    await vi.waitFor(() => expect(deps.ensureConsoleCapture).toHaveBeenCalled());
+    abort.abort();
+    expect(await result).toMatchObject({ code: "cancelled" });
+    expect(deps.consoleEntriesSince).not.toHaveBeenCalled();
   });
 });

@@ -58,7 +58,7 @@ export function validateSkillDirectory(directory, { maxEntryBytes, browserTools 
         !/```(?:bash|sh|shell)\b/i.test(content),
         `DSH skill contains shell commands: ${file}`,
       );
-      for (const tool of content.match(/\bbrowser_[a-z][a-z_]*\b/g) ?? []) {
+      for (const tool of content.match(/\b(?:bsk|browser)_[a-z][a-z_]*\b/g) ?? []) {
         assert(browserTools.includes(tool), `Unsupported DSH tool ${tool} in ${file}`);
         mentionedTools.add(tool);
       }
@@ -73,11 +73,7 @@ export function validateSkillDirectory(directory, { maxEntryBytes, browserTools 
   return { name, description, content: `${source.slice(frontmatter[0].length).trim()}\n`, files };
 }
 
-export const DSH_BROWSER_TOOLS = [
-  "browser_session",
-  "browser_page",
-  "browser_inspect",
-  "browser_interact",
-  "browser_tabs",
-  "browser_assist",
-];
+// Host schemas, client toolviews, and packaged instructions share one contract.
+export const DSH_BROWSER_TOOLS = Object.values(
+  JSON.parse(readFileSync(new URL("../src/tool-names.json", import.meta.url), "utf8")),
+);

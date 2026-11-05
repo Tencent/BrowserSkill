@@ -72,7 +72,14 @@ describe("dispose cleanup ownership", () => {
     const tools = new Map<string, ToolDefinition>();
     const disposers: Array<() => Promise<void>> = [];
     const ctx = {
-      tools: { register: (def: ToolDefinition) => tools.set(def.name, def) },
+      tools: {
+        register: (def: ToolDefinition) => {
+          tools.set(def.name, def);
+          return () => {
+            tools.delete(def.name);
+          };
+        },
+      },
       get: () => undefined,
       // No webServer in this harness: the inject callback never runs.
       inject: () => {},
@@ -86,8 +93,8 @@ describe("dispose cleanup ownership", () => {
       { runnerFactory: () => runner, startJournal: memoryStartJournal() },
     );
 
-    const session = tools.get("browser_session");
-    const inspect = tools.get("browser_inspect");
+    const session = tools.get("bsk_session");
+    const inspect = tools.get("bsk_inspect");
     if (session === undefined || inspect === undefined) throw new Error("tools not registered");
     await session.execute({ action: "start" }, makeExec());
     await session.execute({ action: "start" }, makeExec());

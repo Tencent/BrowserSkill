@@ -1,4 +1,28 @@
 {
+  "cooperation": {
+    "yielding": "Agent attend",
+    "label": "Contrôle partagé du navigateur",
+    "ready": "Agent est prêt",
+    "acting": "Agent travaille",
+    "human": "Vous avez la main",
+    "editing": "Vous modifiez la page",
+    "held": "Agent est en pause",
+    "syncing": "Agent synchronise",
+    "unavailable": "Page indisponible",
+    "hold": "Mettre Agent en pause",
+    "resume": "Rendre la main à Agent",
+    "stop": "Arrêter la tâche",
+    "hints": {
+      "ready": "Vous pouvez intervenir à tout moment",
+      "acting": "Vous pouvez intervenir à tout moment",
+      "human": "Agent reprend quand vous cessez d’interagir",
+      "editing": "Rendez la main à Agent quand vous êtes prêt",
+      "held": "Rendez la main à Agent quand vous êtes prêt",
+      "yielding": "L’action en cours doit se terminer",
+      "syncing": "Lecture de l’état actuel de la page",
+      "unavailable": "Agent a cessé d’interagir"
+    }
+  },
   "popup": {
     "interactionCompatibilityWarning": "Connecté à un daemon plus ancien (protocole v{{cliProtocol}}). Mettez à jour le CLI et le daemon pour profiter pleinement des paramètres d'automatisation.",
     "brandCategory": "Automatisation du navigateur",
@@ -133,9 +157,27 @@
       "promptTemplate": "Pour cette tâche, utilise BrowserSkill dans le navigateur {{name}} (ID d’instance : {{instanceId}}). Démarre chaque nouvelle session de cette tâche avec l'interface appropriée :\nCLI : {{command}}\nDeepSeek Harness : {{toolCall}}\nDans DeepSeek Harness, appelle l'outil sans exécuter séparément la commande CLI.\nSi cette instance n'est pas connectée, arrête-toi et demande-moi de reconnecter ce profil. N'omets pas --browser / browser et ne passe pas à une autre instance.",
       "title": "Navigateur actuel",
       "unnamed": "Navigateur sans nom"
+    },
+    "daemonUpgrade": {
+      "title": "Mettez à jour le service de navigateur bsk",
+      "description": "Le service bsk (daemon) en cours d’exécution est trop ancien. Les tâches de navigateur nécessitent sa mise à jour.",
+      "runCommand": "Ouvrez un terminal sur l’ordinateur qui exécute ce service et lancez :",
+      "restart": "Si cet avis persiste après la mise à jour, redémarrez le service depuis le terminal ou l’application hôte qui l’a lancé.",
+      "copyButton": "Copier la commande",
+      "copyFailed": "Échec de la copie. Copiez manuellement la commande ci-dessus.",
+      "details": "Détails techniques",
+      "protocols": "Protocole du service : {{actual}}. L’extension nécessite {{required}} ou un protocole compatible plus récent.",
+      "version": "Version en cours d’exécution : bsk {{version}}",
+      "notificationMessage": "Les tâches de navigateur sont indisponibles. Mettez à jour bsk sur l’ordinateur qui exécute le service et vérifiez que le service en cours d’exécution est également à jour.",
+      "toolbarTitle": "BrowserSkill : mise à jour du service de navigateur bsk requise",
+      "notificationButton": "Voir les étapes de mise à jour"
     }
   },
   "controlOverlay": {
+    "project": "Projet",
+    "session": "Session",
+    "holdController": "Mettre {{name}} en pause",
+    "resumeController": "Reprendre {{name}}",
     "status": "L'Agent contrôle",
     "interrupt": "Interrompre",
     "interrupting": "Interruption…"
@@ -291,6 +333,7 @@
       "press": "Appuyer sur une touche",
       "select": "Sélectionner une option",
       "hover": "Survoler",
+      "drag": "Glisser",
       "focus": "Mettre le focus",
       "blur": "Retirer le focus",
       "scroll": "Faire défiler",

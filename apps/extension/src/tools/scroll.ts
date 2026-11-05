@@ -5,6 +5,7 @@ import type { RpcError, ScrollToParams, ScrollToResult } from "@/transport/types
 import { attachDialogs, markDialogCursor } from "./dialogs";
 import { cdpError, rpcError } from "./errors";
 import { scrollElementAndFramesIntoView } from "./frame-geometry";
+import { withInputReady } from "./input-readiness";
 import { resolveBackendNode } from "./interaction";
 import { scrollVisibleBounds } from "./scroll-visibility";
 import {
@@ -90,37 +91,39 @@ export async function handleScrollTo(
     checkActive();
     if (isRpcError(node)) return node;
     deps.cdp.trackSessionTab?.(ctx.sessionId, target.tabId);
-    const scrollError = await scrollElementAndFramesIntoView(
-      cdp,
-      target.tabId,
-      node.cdpTarget,
-      node.backendNodeId,
-      node.frameId,
-    );
-    checkActive();
-    if (scrollError) return scrollError;
-    const bounds = await scrollVisibleBounds(
-      cdp,
-      target.tabId,
-      {
-        target: node.cdpTarget,
-        backendNodeId: node.backendNodeId,
-        frameId: node.frameId,
-      },
-      deadline,
-    );
-    checkActive();
-    if (!bounds)
-      return rpcError(
-        "permission_denied",
-        "element_not_visible",
-        "scroll-to target has no visible area",
+    return await withInputReady(ctx, target.tabId, { ...deps, deadline }, async () => {
+      const scrollError = await scrollElementAndFramesIntoView(
+        cdp,
+        target.tabId,
+        node.cdpTarget,
+        node.backendNodeId,
+        node.frameId,
       );
-    return attachDialogs(deps.cdp, target.tabId, dialogCursor, {
-      tab_id: target.tabId,
-      used_ref: node.usedRef,
-      used_selector: node.usedSelector,
-      ...bounds,
+      checkActive();
+      if (scrollError) return scrollError;
+      const bounds = await scrollVisibleBounds(
+        cdp,
+        target.tabId,
+        {
+          target: node.cdpTarget,
+          backendNodeId: node.backendNodeId,
+          frameId: node.frameId,
+        },
+        deadline,
+      );
+      checkActive();
+      if (!bounds)
+        return rpcError(
+          "permission_denied",
+          "element_not_visible",
+          "scroll-to target has no visible area",
+        );
+      return attachDialogs(deps.cdp, target.tabId, dialogCursor, {
+        tab_id: target.tabId,
+        used_ref: node.usedRef,
+        used_selector: node.usedSelector,
+        ...bounds,
+      });
     });
   } catch (error) {
     if (deps.signal?.aborted) return { code: "cancelled", message: "scroll-to aborted" };

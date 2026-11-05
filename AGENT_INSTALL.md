@@ -131,7 +131,7 @@ For CLI harnesses, start with `bsk session start --no-focus --json`, retain the
 returned session ID, then navigate and observe using `--session <id>`. Stop that
 session with `bsk session stop <id>` on success or failure. With multiple browsers,
 use `bsk browsers` and add `--browser <id>` when starting the session.
-For dsh, use its injected `browser_*` tools instead.
+For dsh, use its injected `bsk_*` tools instead.
 
 For the WorkBuddy/CodeBuddy or child-reaping-host workflow, use separate tool
 calls for startup, status, session creation, navigation/observation and final

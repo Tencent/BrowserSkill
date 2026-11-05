@@ -145,6 +145,94 @@ export function registerPhaseOneSupportTools(
 ): void {
   const { registry } = deps;
 
+  for (const action of [
+    "dialog-status",
+    "dialog-accept",
+    "dialog-dismiss",
+    "operation-await",
+    "operation-cancel",
+  ] as const) {
+    register(
+      defineTool({
+        name: `assist.${action}`,
+        description:
+          "Decide a native JS modal or retrieve the ORIGINAL suspended operation. Never repeat a dispatched action after dialog_pending.",
+        parameters: {
+          session: SESSION_PARAM,
+          dialogId: {
+            type: "string",
+            description: "Pending dialog id, required for accept/dismiss.",
+          },
+          operationId: {
+            type: "string",
+            description: "Original operation id, required for await/cancel.",
+          },
+          text: {
+            type: "string",
+            description: "Exact prompt input, only for dialog-accept; an empty string is valid.",
+          },
+          waitMs: { type: "integer", description: "operation-await wait, 0..60000 ms." },
+          output: {
+            type: "string",
+            description: "operation-await: save a retained download to this local path.",
+          },
+          overwrite: {
+            type: "boolean",
+            description: "Allow replacing operation-await's download destination.",
+          },
+        },
+        output: {
+          schema: { type: "json" },
+          render: (_args, value) => [{ type: "text", text: JSON.stringify(value) }],
+        },
+        async execute(args, exec) {
+          const session = registry.resolve(args.session, `browser_assist(action=${action})`);
+          const [group, verb] = action.split("-");
+          const cmd = [group, verb];
+          if (group === "dialog" && verb !== "status") {
+            if (!args.dialogId)
+              throw new Error("dialogId is required; obtain it from dialog-status");
+            cmd.push(args.dialogId);
+          }
+          if (group === "operation") {
+            if (!args.operationId)
+              throw new Error("operationId is required; use the original dialog_pending receipt");
+            cmd.push(args.operationId);
+          }
+          cmd.push("--session", session);
+          if (args.text !== undefined) {
+            if (action !== "dialog-accept") throw new Error("text is only valid for dialog-accept");
+            cmd.push("--text", args.text);
+          }
+          if (args.waitMs !== undefined) {
+            if (action !== "operation-await" || args.waitMs < 0 || args.waitMs > 60000)
+              throw new Error("waitMs is only valid for operation-await and must be 0..60000");
+            cmd.push("--wait-ms", String(args.waitMs));
+          }
+          if (args.output !== undefined) {
+            if (action !== "operation-await")
+              throw new Error("output is only valid for operation-await");
+            requireNonEmpty(args.output, "output");
+            cmd.push("--out", args.output);
+          }
+          if (args.overwrite) {
+            if (action !== "operation-await" || args.output === undefined)
+              throw new Error("overwrite requires operation-await output");
+            cmd.push("--overwrite");
+          }
+          return (await runtime.run(
+            exec,
+            cmd,
+            action,
+            session,
+            runnerTimeout(deps, args.waitMs),
+          )) as never;
+        },
+        presentResult: runtime.presentTerminalResult,
+      }),
+    );
+  }
+
   register(
     defineTool({
       name: "assist.request-help",
@@ -238,7 +326,7 @@ export function registerPhaseOneSupportTools(
         if (criteria?.stableForMs !== undefined && criteria.stableForMs < 0) {
           throw new Error("completionCriteria.stableForMs must be zero or greater");
         }
-        const sessionId = registry.resolve(args.session, "browser_assist(action=request-help)");
+        const sessionId = registry.resolve(args.session, "bsk_assist(action=request-help)");
         const timeoutMs = args.timeoutMs ?? 300_000;
         const cmdArgs = [
           "request-help",
@@ -293,7 +381,7 @@ export function registerPhaseOneSupportTools(
       name: "inspect.html",
       description:
         "Read raw DOM HTML from the active Agent Window tab, optionally scoped to a fresh " +
-        "snapshot ref. Use only when browser_inspect observe/snapshot cannot answer the question.",
+        "snapshot ref. Use only when bsk_inspect observe/snapshot cannot answer the question.",
       parameters: {
         session: SESSION_PARAM,
         tabId: TAB_ID_PARAM,
@@ -331,7 +419,7 @@ export function registerPhaseOneSupportTools(
           if (!isSnapshotRef(args.ref)) throw new Error("ref must be a snapshot ref such as @e3");
         }
         requirePositive(args.maxBytes, "maxBytes");
-        const sessionId = registry.resolve(args.session, "browser_inspect(action=html)");
+        const sessionId = registry.resolve(args.session, "bsk_inspect(action=html)");
         const cmdArgs = ["get-html", "--session", sessionId];
         appendTabId(cmdArgs, args.tabId);
         if (args.ref !== undefined) cmdArgs.push("--ref", args.ref);
@@ -453,7 +541,7 @@ export function registerPhaseOneSupportTools(
       isConcurrencySafe: () => true,
       async execute(args, exec) {
         validateDebugArgs(args);
-        const sessionId = registry.resolve(args.session, "browser_inspect(action=console)");
+        const sessionId = registry.resolve(args.session, "bsk_inspect(action=console)");
         const cmdArgs = ["console", "--session", sessionId];
         appendDebugOptions(cmdArgs, args);
         if (args.includeStack === true) cmdArgs.push("--include-stack");
@@ -557,7 +645,7 @@ export function registerPhaseOneSupportTools(
       isConcurrencySafe: () => true,
       async execute(args, exec) {
         validateDebugArgs(args);
-        const sessionId = registry.resolve(args.session, "browser_inspect(action=network)");
+        const sessionId = registry.resolve(args.session, "bsk_inspect(action=network)");
         const cmdArgs = ["network", "--session", sessionId];
         appendDebugOptions(cmdArgs, args);
         const reply = (await runtime.run(exec, cmdArgs, "network", sessionId)) as {
@@ -634,7 +722,7 @@ export function registerPhaseOneSupportTools(
         if (args.width < 100 || args.width > 7680 || args.height < 100 || args.height > 7680) {
           throw new Error("width and height must each be in the range 100..=7680");
         }
-        const sessionId = registry.resolve(args.session, "browser_assist(action=resize)");
+        const sessionId = registry.resolve(args.session, "bsk_assist(action=resize)");
         const reply = (await runtime.run(
           exec,
           [

@@ -3,27 +3,45 @@ import type { InteractionDeps } from "./interaction";
 import { type CdpRunner, sendToCdpTarget } from "./shared";
 import { waitBounded } from "./transfer-transaction";
 
-/** A retired download click must never resume input when a CDP reply arrives late. */
-export function downloadTriggerDeps(deps: InteractionDeps, signal: AbortSignal) {
+/** A retired pointer transaction must never resume input when a CDP reply arrives late. */
+export function pointerTransactionDeps(
+  deps: InteractionDeps,
+  signal?: AbortSignal,
+  cancelDragging = false,
+) {
   let retired = false;
   let release: { tabId: number; params: object; attachmentId?: string } | undefined;
   let releasing = false;
+  let movedWhilePressed = false;
   const clickCleanups = new Set<() => Promise<void>>();
   const check = () => {
-    if (retired || signal.aborted) throw new DOMException("download trigger aborted", "AbortError");
+    if (retired || signal?.aborted)
+      throw new DOMException("pointer transaction aborted", "AbortError");
   };
   const send = async <T>(target: CdpTarget, method: string, params?: object): Promise<T> => {
     check();
     const mouse = params as { type?: string } | undefined;
     const onDispatch = () => {
       check();
+      if (
+        release?.attachmentId !== undefined &&
+        deps.cdp.getAttachmentId?.(target.tabId) !== release.attachmentId
+      )
+        throw new Error("pointer attachment changed");
       if (method === "Input.dispatchMouseEvent") {
         if (mouse?.type === "mousePressed") {
           release = {
             tabId: target.tabId,
-            params: { ...params, type: "mouseReleased" },
+            params: { ...params, type: "mouseReleased", buttons: 0 },
             attachmentId: deps.cdp.getAttachmentId?.(target.tabId),
           };
+        } else if (mouse?.type === "mouseMoved" && release) {
+          release.params = {
+            ...release.params,
+            x: (params as { x: number }).x,
+            y: (params as { y: number }).y,
+          };
+          movedWhilePressed = true;
         } else if (mouse?.type === "mouseReleased") {
           releasing = true;
         }
@@ -32,10 +50,7 @@ export function downloadTriggerDeps(deps: InteractionDeps, signal: AbortSignal) 
     const result = deps.cdp.sendGuarded
       ? await deps.cdp.sendGuarded<T>(target, method, params, {
           signal,
-          attachmentId:
-            method === "Input.dispatchMouseEvent" && mouse?.type === "mouseReleased"
-              ? release?.attachmentId
-              : undefined,
+          attachmentId: release?.attachmentId,
           onDispatch,
         })
       : await (() => {
@@ -52,6 +67,7 @@ export function downloadTriggerDeps(deps: InteractionDeps, signal: AbortSignal) 
     send: (tabId, method, params) => send({ tabId }, method, params),
     sendToTarget: send,
     trackSessionTab: deps.cdp.trackSessionTab?.bind(deps.cdp),
+    verifyPointerTarget: deps.cdp.verifyPointerTarget?.bind(deps.cdp),
     dialogCursor: deps.cdp.dialogCursor?.bind(deps.cdp),
     dialogsSince: deps.cdp.dialogsSince?.bind(deps.cdp),
     getAttachmentId: deps.cdp.getAttachmentId?.bind(deps.cdp),
@@ -77,6 +93,30 @@ export function downloadTriggerDeps(deps: InteractionDeps, signal: AbortSignal) 
     };
     if (!ownsAttachment()) return;
     try {
+      // Native HTML drag state also belongs to this gesture. Cancel it before releasing;
+      // a plain release could otherwise commit the pending drop after cancellation.
+      if (
+        cancelDragging &&
+        movedWhilePressed &&
+        (pending.params as { button?: string }).button === "left" &&
+        !releasing
+      ) {
+        const cancel = deps.cdp.sendGuarded
+          ? deps.cdp.sendGuarded(
+              { tabId: pending.tabId },
+              "Input.cancelDragging",
+              {},
+              { attachmentId: pending.attachmentId },
+            )
+          : deps.cdp.send(pending.tabId, "Input.cancelDragging", {});
+        await waitBounded(
+          cancel,
+          Math.min(deadline, Date.now() + 300),
+          undefined,
+          "drag cancellation timed out",
+        );
+      }
+      if (!ownsAttachment()) return;
       // Never replay an in-flight release or send cleanup on a new attachment.
       const cleanup = releasing
         ? detach()
@@ -90,8 +130,8 @@ export function downloadTriggerDeps(deps: InteractionDeps, signal: AbortSignal) 
               },
             )
           : deps.cdp.send(pending.tabId, "Input.dispatchMouseEvent", pending.params);
-      if (!cleanup) throw new Error("download input cleanup unavailable");
-      await waitBounded(cleanup, deadline, undefined, "download input cleanup timed out");
+      if (!cleanup) throw new Error("pointer input cleanup unavailable");
+      await waitBounded(cleanup, deadline, undefined, "pointer input cleanup timed out");
     } catch (error) {
       // Replacement may happen while release is pending. Recheck ownership,
       // and have the driver enforce it again when executing the fallback.
@@ -120,11 +160,12 @@ export function downloadTriggerDeps(deps: InteractionDeps, signal: AbortSignal) 
     async cleanup(deadline: number): Promise<void> {
       retired = true;
       const cleanups = [cleanupInput(deadline), ...[...clickCleanups].map((cleanup) => cleanup())];
+      clickCleanups.clear();
       const results = await waitBounded(
         Promise.allSettled(cleanups),
         deadline,
         undefined,
-        "download trigger cleanup timed out",
+        "pointer transaction cleanup timed out",
       );
       for (const result of results) if (result.status === "rejected") throw result.reason;
     },

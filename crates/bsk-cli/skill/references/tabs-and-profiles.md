@@ -21,6 +21,19 @@ report it; never omit the selector or substitute another instance to recover.
 Opening another Chrome profile does not retarget an existing session. After an
 extension reinstall or storage reset, obtain the instance mapping again.
 
+## Incognito tasks
+
+When temporary login isolation from ordinary browsing is required, use
+`bsk session start --incognito --browser <instance-id> --json`. The extension must
+have **Allow in incognito** enabled; daemon and extension protocol 1.4+ are required.
+Report a permission or compatibility error instead of retrying in normal mode.
+
+Incognito sessions cannot borrow tabs, and normal sessions cannot borrow incognito
+tabs. Create tabs in the task window. All incognito windows in one profile share
+login state with each other; they are separate from the profile's ordinary windows.
+Website data persists until every incognito window closes. Session stop preserves
+user tabs and protected popups, so it does not guarantee immediate data removal.
+
 ## Borrowing and browser settings
 
 List before borrowing, and return the tab as soon as the relevant step ends:
@@ -46,8 +59,26 @@ A viewport screenshot does not issue a Canvas `capture_id`; use the existing
 Never invent tab IDs or keep a user tab across unrelated work. Do not repeat
 pending, denied or timed-out borrows. For `borrow_outcome_unknown`, inspect tab/
 session state first: the tab may already have moved. Do not bypass an outcome
-through another browser backend. `tab borrow --timeout 120s` changes only the
-confirmation wait (default 60s); custom waits require daemon and extension protocol 1.2+.
+through another browser backend.
+
+For a borrow that returns `not_found`, inspect the error: the session or target
+tab may be unavailable. If the session is missing, verify the session ID and
+browser instance; recover the session or report that it is unavailable before
+proceeding. If the target tab is missing, list user tabs again. When it is no longer
+visible and the task depends on its state, ask the user to restore or reopen it in
+a user window of the same profile rather than silently substituting a new tab.
+Re-list tabs and identify the current ID before borrowing; ask the user if the
+target is ambiguous. After borrowing, verify the expected account and required page
+state. Reopening a page may not restore unsaved state.
+
+`confirmation_ui_unavailable` means the confirmation could not be shown. One
+possible cause is that no eligible user window has an ordinary http(s) page selected.
+Ask the user to select such a page, excluding extension stores, in a normal
+non-Agent window of the same browser profile, then retry once. Task tabs in the
+Agent Window cannot host the prompt. If it still fails, stop and report the error.
+
+`tab borrow --timeout 120s` changes only the confirmation wait (default 60s);
+custom waits require daemon and extension protocol 1.2+.
 
 The extension's saved Automation settings control borrow confirmation and human
 help independently; both default on and apply to existing sessions too. Read
@@ -68,7 +99,7 @@ are unsupported; screenshots work.
 This guidance applies to the `bsk` CLI skill; the DSH plugin is a separate
 skill with plugin-owned session visibility.
 
-Sessions started in the same browser profile share one cookie jar and one set
+Normal sessions started in the same browser profile share one cookie jar and one set
 of site state. Two tasks operating on the same logged-in site - or switching
 accounts/tenants there - can overwrite each other's login state with no error
 and no obvious trace. Treat a domain overlap as a signal to assess that risk;

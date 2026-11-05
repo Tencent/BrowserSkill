@@ -2,19 +2,307 @@
 
 All notable changes to BrowserSkill will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
+See the [Chinese changelog](CHANGELOG.zh-CN.md). Update both versions in the same PR.
 
 Starting from 0.2.0, CLI / Extension / DSH Plugin share the same version number.
 
 ## [Unreleased]
 
+### Added
+
+- `bsk mcp` lets MCP clients control BrowserSkill over stdio using the existing
+  daemon and browser extension. `bsk install-skill --mcp` can configure Codex,
+  Claude Code, and Cursor.
+
+### Changed
+
+- CLI and daemon updates prefer the official website's domestic download source,
+  falling back to GitHub for failed manifest or archive requests and verification.
+  Archive fallback stays on the selected version with SHA256 verification; if both
+  sources fail, the error includes each URL and cause. Explicit manifest overrides
+  continue to use only the configured source.
+
 ### Fixed
 
+- CLI cancellation keeps the original RPC progressing and retries cancellation
+  that arrives before daemon registration, reducing background screenshots that
+  keep a session busy after the caller stops. Confirmation and response waiting
+  share a two-second budget, including MCP cancellation; transfer cleanup keeps
+  its separate bounded budget. Requests registered after that deadline still
+  require daemon-side cancellation tracking
+  ([#419](https://github.com/Tencent/BrowserSkill/pull/419)).
+- Saved HTML debug captures redact sensitive input values when `autocomplete`
+  contains surrounding whitespace or multiple tokens, such as
+  `section-login one-time-code` or `section-checkout billing cc-number`.
+  Non-sensitive token lists such as `section-login email` remain unchanged
+  ([#566](https://github.com/Tencent/BrowserSkill/pull/566)).
+- Pages that handle the legacy `mousewheel` event, such as Bilibili's player volume,
+  receive wheel input again. The extension listened for `wheel` on every page even
+  without a shared-control session, which made Chromium skip those handlers; it now
+  listens only while collecting, on `window`.
+- Commands no longer wait until their timeout when truncated page text cuts an
+  emoji in half, for example `bsk console --max-text-chars 4` on `Hi 🚀 there`.
+  The lone surrogate left by the cut made the daemon drop the extension's whole
+  reply; the extension now sends it as `U+FFFD`.
+- Shared control keeps running during scrolling and ineffective key presses. Completed
+  page clicks, keyboard activation and actual field edits yield to the person. Pending
+  gestures wait at dispatch without revoking control, and coordinate input waits for
+  scrolling to settle. Focusing a text field alone no longer holds editing control.
+
+- With target control, a carousel, video embed or ad refreshing an iframe no
+  longer revokes actions whose targets and preconditions are all in the main
+  document. Actions involving iframe refs or a strict observation require a
+  fresh sync when the frame documents change.
+- Values in one-time-code, card and password fields marked by `autocomplete`
+  (`one-time-code`, `cc-*`, `current-password`, `new-password`), which observations
+  already hide, are also kept out of shared-control field state, `expect` failure
+  details, structured extraction and recorded fill steps. Every check matches each
+  `autocomplete` token, so `section-login current-password` or `billing cc-number`
+  values stay hidden too. Password fields that a "show password" toggle switches to
+  `type=text` also stay masked across shared-control field state and recorded steps
+  and state observations.
+- On Windows, pairing, rotating or revoking a remote browser no longer fails with
+  `replace authorization snapshot: Access is denied` when another request is
+  reading the authorization store at the same moment.
+- Window resize verifies the browser's resulting bounds and the target tab's
+  layout viewport. It reports constrained bounds, inactive tabs and viewports
+  that did not follow the resize instead of echoing the requested size as success.
+  A dispatched resize also forces the next shared-control sync to recapture the
+  page, even when no DOM mutation recorded the layout change.
+- Shared-control synchronization skips failed child frames and inactive documents,
+  reporting them in `frame_gaps` with only HTTP(S) origins and paths or other URL schemes,
+  and repairs missing interaction collectors immediately once per current
+  document. Active frames without coverage still block actions with
+  `frame_unobservable`; a failed main page reports `page_load_failed`.
+- `cooperate sync --settle` continues bounded retries when a wait reports unavailable
+  coverage, returning the last sync error if all attempts fail instead of a
+  successful `not_ready` reply or an invented permanent frame failure. Temporary
+  human control retains the existing `not_ready` behavior, including explicit
+  holds during navigation. Status and wait report
+  `control_policy: null` until the first successful policy negotiation.
+- Shared control: the `observation_required` recovery, the target-policy sync
+  guidance and the skill references now say to pass the sync reply's top-level
+  `observation_id`. The reply also carries `observation.observation_id` for its
+  ref map, and passing that one was refused with a hint that did not say which
+  of the two ids to use.
+
+## [0.4.1] - 2026-11-02
+
+### Changed
+
+- **Shared-control default:** new CLI and DSH sync calls select `target` policy.
+  DOM actions can reuse the returned control context across completed actions
+  and supplementary reads; unrelated page updates no longer require a full-page
+  resync. Human intervention or navigation revokes control. Use `--expect` / DSH
+  `expect` to protect observed business facts. Scripts, untargeted keys and visual
+  actions still require the sync's `--observation` / `observationId` and strict
+  observation checks. Select `--policy strict` / `policy: "strict"` on the first
+  sync to retain the one-action-per-context workflow; later syncs and steps
+  preserve that session's policy.
+- CLI/daemon and extension now use protocol 1.8. The new target policy requires
+  both peers to support 1.8; update the CLI, running daemon, extension and DSH
+  plugin together rather than relying on a successful mixed-version connection.
+- DOM references remain attached to the same nodes across supplementary
+  observations. Removed nodes are not silently replaced, and navigation
+  invalidates the document's refs. DOM actions can wait for an existing target
+  to become ready within their timeout without replaying input.
+
+### Fixed
+
+- Interaction capture initializes on ordinary HTTP intranet pages and their
+  child frames when `crypto.randomUUID()` is unavailable. A compatible UUID
+  fallback restores the frame coverage needed for shared control.
+- Shared-control synchronization waits for cancelled observation thumbnails to
+  settle. Viewport capture reads have a 10-second deadline with separate bounded
+  cleanup; reaching that deadline returns `timeout` (exit 4) with screenshot-specific
+  guidance. Browser/CDP capture failures remain `cdp_failed` (exit 3).
+- Completed inputs retain their successful receipts when they navigate, including
+  clicks, Enter submissions, drag submissions, and forms submitted after filling
+  or selecting a value. After navigation, synchronize before the next action.
+- CLI cancellation is armed before sending a browser command, so an immediate
+  Ctrl-C can cancel the operation and return its outcome instead of terminating silently.
+- Pointer hit tests stay within the target's document, and human input during
+  frame changes continues to revoke control without discarding completed actions.
+- Windows daemon startup errors distinguish verified Job Object restrictions,
+  unverified breakaway failures, executable access failures, partial breakaway
+  and resume failures, with recovery guidance for the actual failure stage.
+- DSH-injected messages use native durable-format v4 plugin sources while
+  retaining the legacy source shape for older formats.
+
+### Removed
+
+- Automatic native Agent Window tab groups and the `tabGroups` permission, to
+  prevent new `BrowserSkill` groups from accumulating across browsers through
+  Chrome sync. Existing saved groups are not deleted; page control indicators,
+  background window behavior and user-tab routing remain available.
+
+### Upgrade
+
+1. Finish active tasks, install CLI 0.4.1 and restart the running daemon.
+2. Install extension 0.4.1 before upgrading the DSH plugin to 0.4.1. Store review
+   can delay availability; verify the installed extension, not just its submission.
+3. Restart the DSH profile and invoke `/browser-skill` again, or start a new CLI
+   agent conversation to load the updated skill. Custom tool integrations need
+   the new observation and expectation fields for target-policy actions.
+4. Check `bsk --version`, `bsk status` and `bsk doctor`; the running daemon and
+   extension should both report protocol 1.8.
+
+## [0.4.0] - 2026-10-30
+
+### Changed
+
+- **Breaking — extension compatibility:** the extension now requires daemon
+  protocol 1.6 or later; CLI/daemon 0.3.3 uses protocol 1.3 and cannot connect.
+  Update the CLI and restart the running daemon before updating the extension,
+  then update the DSH plugin. CLI/daemon and extension 0.4.0 use protocol 1.7.
+- **Breaking — shared browser control:** new sessions and their task tabs enable
+  human/agent collaboration automatically. After initial navigation, synchronize
+  with `bsk cooperate sync` and pass its single-use `--context` to each action;
+  DSH uses `bsk_session action:sync` and `contextId`. Human input or changed page
+  evidence can revoke a pending action; synchronize and reconsider the result
+  instead of replaying it. Reload the updated skill in existing conversations.
+- Moving any controlled tab out of its original Agent Window ends the whole
+  session, preserves pages in place and removes control indicators. Moving the
+  tab back does not restart the task. Normal session stop preserves pages with
+  human participation and cleans up untouched task-created pages.
+- macOS CLI releases require Developer ID signing and Apple notarization for
+  both architectures, alongside the existing Windows EV signature checks.
+  `Publish CLI` verifies both platforms before publishing the complete release;
+  archive names and installation commands remain unchanged.
+- English and Chinese privacy policies cover shared-control observations,
+  explicitly saved observation files, incognito tasks and `tabGroups`. Upgrade
+  and publishing instructions use CLI-first rollout for this compatibility change.
+
+### Added
+
+- Human/agent collaboration with visible control indicators, manual hold and
+  resume, bounded activity evidence, page-change guards and explicit decision
+  regions. Native JavaScript dialogs participate in control and recovery.
+- Native drag interactions, including cross-origin frame targets, and a
+  click–move–click mode for selecting ranges. CLI and DSH expose the new actions.
+- `bsk step` executes one chosen action, optionally waits for an element and then
+  synchronizes, preserving the action receipt if a later stage fails. Explicit
+  observation saving, baseline reuse and `bsk view` let agents read and search
+  historical evidence locally without another browser call. DSH exposes these
+  through `step`, `view`, `saveFull` and baseline options.
+- Incognito Agent Windows through `session start --incognito`, with explicit
+  browser incognito permission and no borrowing of ordinary tabs. Incognito
+  windows in one profile share their incognito login state.
+- Orange BrowserSkill tab groups mark controlled Agent Window tabs using the
+  new `tabGroups` permission; grouping is removed when the task ends.
+
+### Fixed
+
+- Browser interactions retain current element references for dynamic menus,
+  dispatch shadow-DOM input events correctly, handle plus-key chords, and reject
+  select controls that become disabled during focus. Extraction respects
+  `content-visibility`, and observation token estimates and evidence scope are
+  more consistent.
+- Website debugging preserves failed request-body metadata and primitive console
+  exceptions. Video capture respects human control, and playback regressions wait
+  for decoded frames before checking colors.
+- Windows DSH child-process cancellation preserves its termination grace period;
+  remote authorization handles a busy store, and WebSocket connection limits
+  bound incoming peers. Foreground daemon consoles remain visible.
+- Browser evaluation scaffolding handles Windows cross-drive paths, relative
+  import URLs and long run IDs; child output preserves UTF-8. Extension types are
+  prepared during dependency installation.
+- Extension: explain when the running bsk daemon is too old to connect, with
+  its version, a copyable update command and restart guidance in the popup.
+  A toolbar warning and a notification make the problem visible before opening
+  the popup; repeated reconnects do not repeat the notification.
+- CLI: argument parsing failures now honor `--json`, returning an
+  `invalid_params` error on stdout with `data.reason: "cli_parse_error"`
+  instead of leaving stdout empty. A misplaced `--session` / `--tab-id` now
+  explains that it belongs after a supporting subcommand, replacing the
+  misleading `--version` suggestion and usage line
+  ([#387](https://github.com/Tencent/BrowserSkill/issues/387)).
+- DSH Plugin: the right-sidebar observation tab auto-opens again on DSH
+  0.2.0+, which removed `current` from the `sessions.list` snapshot. The
+  auto-open target now falls back to the `uiSession` main binding (exposed by
+  DSH 0.1.5 and 0.2.x alike), and conversation switches on 0.2.x hosts keep
+  re-triggering it
+  ([#484](https://github.com/Tencent/BrowserSkill/issues/484)).
+- Extension: shared-control actions no longer refuse forever on pages with
+  self-updating text such as clocks or counters. The first change is reported
+  with its before/after text and requires a sync; after that, changes to that
+  text stop blocking actions on a ref or selector unless it shares a form,
+  list, dialog, panel or other container with the target. Actions without a
+  target, form values, modal layers and `--depends-on` regions stay exact,
+  and a refused context can no longer be retried
+  ([#495](https://github.com/Tencent/BrowserSkill/issues/495)).
+
+## [0.3.3] - 2026-10-14
+
+### Changed
+
+- **Breaking — DSH Plugin:** replace `browser_session`, `browser_page`,
+  `browser_inspect`, `browser_interact`, `browser_tabs`, and `browser_assist` with
+  the corresponding `bsk_*` names to coexist with other browser plugins.
+  The tool-name migration leaves actions, arguments, results and the
+  `browser-skill` skill name unchanged.
+  Old tool names are not registered as aliases. Upgrade the CLI and extension
+  to the coordinated 0.3.3 release before upgrading the plugin.
+  Update hardcoded calls and tool policies, restart the host, and reload the skill
+  in existing conversations. See the [migration guide](packages/dsh-plugin-browserskill/README.md#breaking-tool-api-migration-033).
+- CLI releases require verified Windows EV signing before publication. Builds,
+  internal signing and final publication are separate stages. Windows archives
+  contain the verified signed executable, and `version.json` hashes the final archives.
+- External links and manually created tabs that land in a background Agent Window
+  are routed to a normal user window, preserving task popups and human-assistance
+  or recording flows. Pending external tabs are excluded from default tool targeting.
+- English and Chinese privacy policies describe task video capture, the
+  `offscreen` permission, browser-local retention, authorized video exports and
+  deletion. The main READMEs document video recording and the DSH migration.
+
+### Added
+
+- [Task video recording](docs/video-recording.md): opt-in, silent H.264 MP4 capture
+  of one authorized tab through CLI, DSH or extension controls, with preview,
+  export, deletion and recovery of playable partial recordings. Recordings have
+  a 10-minute duration limit, a 256 MiB size limit and 24-hour retention.
+- [Structured extraction](docs/structured-extraction.md): discover and export
+  loaded tables and lists as JSON/CSV, retaining column order, page/frame sources,
+  merged-cell metadata and explicit completeness information. DSH bounds rows
+  returned to the model context.
+- [Element condition waits](docs/wait-for-element.md) in the CLI, extension and
+  DSH `bsk_page` tool, with explicit deadlines and recovery guidance.
+- CLI browser-selector errors list connected browsers when no instance matches.
+
+### Fixed
+
+- DSH Plugin: roll back incomplete tool registration, surface activation failures,
+  and retry at skill/session lifecycle boundaries without leaving a partial suite.
+  Include tool schemas in the first `/browser-skill` request, and keep failure and
+  recovery notices synchronized with model skill results
+  ([#444](https://github.com/Tencent/BrowserSkill/issues/444)).
 - Extension: input to a background Agent Window tab no longer keeps failing with
   `input_not_ready` after Chrome drops the session's focus override without a detach
   ([#355](https://github.com/Tencent/BrowserSkill/issues/355)). The session's
   background-execution lease resends the override and waits for a rendered frame; the
   input is sent only once the page reports `visible`, and otherwise still fails before
   dispatch.
+- Extension: an agent session no longer keeps the browser's GPU and CPU busy while the
+  agent is idle ([#391](https://github.com/Tencent/BrowserSkill/issues/391)). The control
+  glow is painted once and pulses only its opacity, twice, instead of repainting the
+  viewport every frame, and stays still under reduced motion. Observation disables
+  Chrome's Accessibility domain again once it has read the accessibility trees.
+- Fill editable controls and editor paragraphs through their editing host while
+  preserving the target paragraph's scope; reject noneditable targets and use a
+  consistent line model for reading editor text.
+- Downloads detect when the browser ignores the requested transfer directory and
+  validate the final path before importing a file.
+- Element waits enforce state and deadline contracts, treat absent elements as
+  hidden, and retry selectors after stale-node lookups.
+- Structured extraction preserves DOM values and bounded partial results, keeps
+  split grid rows together, and respects nested row ownership and frame visibility.
+- CLI navigation exits with code 4 when its lifecycle wait times out; DSH retains
+  the created session when start-with-URL navigation times out.
+- Video recording keeps startup cancellable, bounds capture waits, recovers from
+  navigation and transient overlay-discovery failures, prevents control-overlay
+  flashes, and selects an H.264 level appropriate for larger frames.
+- Avoid unnecessary debugger cancellation and incomplete tab cleanup in Yandex;
+  preserve task-popup provenance and recover transient focus changes.
 
 ## [0.3.2] - 2026-09-30
 

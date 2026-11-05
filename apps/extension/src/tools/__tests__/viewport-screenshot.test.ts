@@ -93,6 +93,84 @@ describe("controlled viewport capture", () => {
     expect(f.bridge.mock.calls.at(-1)?.[1].phase).toBe("end");
   });
 
+  it.each([
+    "Page.getFrameTree",
+    "Page.createIsolatedWorld",
+    "Runtime.evaluate",
+    "Page.captureScreenshot",
+  ])("cancels a pending %s without waiting for Chrome's reply", async (method) => {
+    const f = fixture();
+    let release!: () => void;
+    const pending = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    f.hook.command = async (name) => {
+      if (name === method) await pending;
+    };
+    const abort = new AbortController();
+    const result = f.run(abort.signal);
+    await vi.waitFor(() =>
+      expect(f.send.mock.calls.some(([, name]) => name === method)).toBe(true),
+    );
+    abort.abort();
+    try {
+      await expect(result).resolves.toMatchObject({ code: "cancelled" });
+      const commands = f.send.mock.calls.length;
+      release();
+      await Promise.resolve();
+      expect(f.send.mock.calls).toHaveLength(commands);
+      if (method === "Page.captureScreenshot")
+        expect(f.bridge.mock.calls.at(-1)?.[1].phase).toBe("end");
+      f.hook.command = async () => {};
+      expect(await f.run()).toMatchObject({ image_base64: PNG });
+    } finally {
+      release();
+    }
+  });
+  it.each([
+    "screenshot",
+    "before-capture identity",
+    "after-capture identity",
+  ])("times out hung %s and bounds overlay restoration", async (stage) => {
+    vi.useFakeTimers();
+    const f = fixture();
+    let identities = 0;
+    f.hook.command = async (method) => {
+      if (method === "Runtime.evaluate") identities++;
+      if (
+        (stage === "screenshot" && method === "Page.captureScreenshot") ||
+        (method === "Runtime.evaluate" &&
+          identities ===
+            (stage === "before-capture identity" ? 2 : stage === "after-capture identity" ? 3 : 0))
+      )
+        await new Promise(() => {});
+    };
+    f.hook.bridge = async (phase) => {
+      if (phase === "end") await new Promise(() => {});
+    };
+    try {
+      const result = f.run();
+      const assertion = expect(result).resolves.toMatchObject({ code: "timeout" });
+      await vi.advanceTimersByTimeAsync(11_000);
+      await assertion;
+      expect(f.bridge.mock.calls.at(-1)?.[1].phase).toBe("end");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+  it("cancels a pending overlay begin and restores it without capturing", async () => {
+    const f = fixture();
+    f.hook.bridge = async (phase) => {
+      if (phase === "begin") await new Promise(() => {});
+    };
+    const abort = new AbortController();
+    const result = f.run(abort.signal);
+    await vi.waitFor(() => expect(f.bridge).toHaveBeenCalled());
+    abort.abort();
+    await expect(result).resolves.toMatchObject({ code: "cancelled" });
+    expect(f.bridge.mock.calls.map(([, message]) => message.phase)).toEqual(["begin", "end"]);
+    expect(f.send.mock.calls.some(([, method]) => method === "Page.captureScreenshot")).toBe(false);
+  });
   it("reports capture failure without retrying another target or backend", async () => {
     const f = fixture();
     f.hook.command = async (method) => {

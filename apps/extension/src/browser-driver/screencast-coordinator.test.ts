@@ -1,6 +1,7 @@
 import { expect, it, vi } from "vitest";
+import { guardedRunner } from "@/cooperation/action-guard";
 import type { CdpRunner } from "@/tools/shared";
-import { ScreencastCoordinator } from "./screencast-coordinator";
+import { ScreencastCoordinator, screencasts } from "./screencast-coordinator";
 
 it("shares one stream and ACK, restores remaining consumers and never stops a replacement attachment", async () => {
   let event!: Parameters<NonNullable<CdpRunner["onEvent"]>>[0];
@@ -13,7 +14,7 @@ it("shares one stream and ACK, restores remaining consumers and never stops a re
       return { dispose: vi.fn() };
     },
   };
-  const coordinator = new ScreencastCoordinator(cdp);
+  const coordinator = screencasts(cdp);
   const frames = vi.fn();
   const video = await coordinator.acquire(7, {
     format: "jpeg",
@@ -21,7 +22,11 @@ it("shares one stream and ACK, restores remaining consumers and never stops a re
     maxHeight: 1280,
     frame: frames,
   });
-  const screenshot = await coordinator.acquire(7, { format: "png", maxWidth: 32, maxHeight: 32 });
+  const screenshot = await screencasts(guardedRunner(cdp)).acquire(7, {
+    format: "png",
+    maxWidth: 32,
+    maxHeight: 32,
+  });
   expect(
     vi.mocked(cdp.send).mock.calls.filter(([, method]) => method === "Page.startScreencast"),
   ).toHaveLength(1);

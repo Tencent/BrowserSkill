@@ -12,13 +12,13 @@
 //!   normal `CliError` path with the usual non-zero exit codes.
 
 use std::path::PathBuf;
-use std::time::Duration;
 
 use anyhow::Context;
 use bsk_protocol::Method;
 use bsk_protocol::tools::{EvaluateParams, EvaluateResult};
 use clap::Args;
 
+use crate::cli::business_rpc::ipc_timeout;
 use crate::cli::dialogs::print_dialog_summaries;
 use crate::cli::ensure_daemon::ensure_daemon;
 use crate::cli::error::{CliError, Format};
@@ -81,12 +81,6 @@ fn call(
         Some(params),
         ipc_timeout(timeout_ms),
     )
-}
-
-fn ipc_timeout(timeout_ms: u32) -> Duration {
-    Duration::from_millis(u64::from(timeout_ms))
-        .checked_add(Duration::from_secs(15))
-        .unwrap_or(Duration::from_secs(u64::from(timeout_ms / 1_000) + 15))
 }
 
 fn render(reply: &EvaluateResult, format: Format) -> Result<(), CliError> {

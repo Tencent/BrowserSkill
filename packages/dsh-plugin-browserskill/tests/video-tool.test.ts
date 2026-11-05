@@ -23,7 +23,7 @@ const result = (value: unknown, code = 0): BskRunResult => ({
   aborted: false,
 });
 const exec = (signal = new AbortController().signal) =>
-  ({ callId: "video-call", name: "browser_inspect", signal }) as ToolRunContext;
+  ({ callId: "video-call", name: "bsk_inspect", signal }) as ToolRunContext;
 
 function setup(
   respond: (args: string[], options?: BskRunOptions) => Promise<BskRunResult> = async () =>
@@ -31,7 +31,14 @@ function setup(
 ) {
   const tools = new Map<string, ToolDefinition>();
   const ctx = {
-    tools: { register: (tool: ToolDefinition) => tools.set(tool.name, tool) },
+    tools: {
+      register: (tool: ToolDefinition) => {
+        tools.set(tool.name, tool);
+        return () => {
+          tools.delete(tool.name);
+        };
+      },
+    },
     get: () => undefined,
   } as never;
   const run = vi.fn(respond);
@@ -68,7 +75,7 @@ function setup(
       lazyTools: false,
     },
   });
-  const tool = tools.get("browser_inspect")!;
+  const tool = tools.get("bsk_inspect")!;
   const call = (args: Record<string, unknown>, context = exec()) =>
     tool.execute({ action: "video", ...args }, context);
   return { call, tool, run, registry, queue };

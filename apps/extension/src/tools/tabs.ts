@@ -10,10 +10,14 @@ import {
 } from "@/lib/overlay-bridge";
 import { nextOverlayVersion } from "@/lib/overlay-version";
 import {
+  type BorrowedTab,
+  type BorrowedTabGroupMetadata,
   isAgentControlledTab,
   type SessionContext,
   type SessionManager,
 } from "@/session-manager/manager";
+import { beginTabCreation } from "@/session-manager/tab-creation";
+import { expectedTabMoves } from "@/session-manager/tab-moves";
 import { detectBrowserMeta } from "@/transport/handshake";
 import type { RpcError } from "@/transport/types";
 import { rpcError } from "./errors";
@@ -145,6 +149,8 @@ export interface TabMutationApi {
     tabId: number,
     moveProps: chrome.tabs.MoveProperties,
   ): Promise<chrome.tabs.Tab | chrome.tabs.Tab[]>;
+  query?(queryInfo: chrome.tabs.QueryInfo): Promise<chrome.tabs.Tab[]>;
+  group?(options: chrome.tabs.GroupOptions): Promise<number>;
 }
 
 export const chromeTabMutationApi: TabMutationApi = {
@@ -153,7 +159,38 @@ export const chromeTabMutationApi: TabMutationApi = {
   update: (id, p) => chrome.tabs.update(id, p),
   get: (id) => chrome.tabs.get(id),
   move: (id, p) => chrome.tabs.move(id, p),
+  query: (q) => chrome.tabs.query(q),
+  group: (opts) => chrome.tabs.group(opts),
 };
+
+async function moveExpectedTab(
+  tabs: TabMutationApi,
+  tabId: number,
+  properties: chrome.tabs.MoveProperties,
+  signal?: AbortSignal,
+  isLive?: () => boolean,
+  mutate?: CdpRunner["runBrowserMutation"],
+): Promise<chrome.tabs.Tab | chrome.tabs.Tab[]> {
+  const current = await tabs.get(tabId);
+  const move = () => {
+    if (signal?.aborted || isLive?.() === false) {
+      const error = new Error("Tab move aborted before browser mutation");
+      error.name = "AbortError";
+      throw error;
+    }
+    return expectedTabMoves.run(
+      {
+        tabId,
+        fromWindowId: current.windowId,
+        toWindowId: properties.windowId ?? current.windowId,
+      },
+      () => tabs.move(tabId, properties),
+    );
+  };
+  // Finish browser reads before the final authority check. Registration and
+  // native dispatch must then run together without another asynchronous gap.
+  return mutate ? mutate(move) : move();
+}
 
 /**
  * Subset of `chrome.windows` we use for tab_return's fallback path
@@ -181,6 +218,11 @@ export interface AgentOverlayResetApi {
 
 export const chromeAgentOverlayResetApi: AgentOverlayResetApi = {
   async resetAgentOverlays(tabId, sessionId) {
+    // Teardown is best-effort and also runs outside the extension runtime (unit
+    // tests, scripted tooling), where there is no chrome.tabs to message.
+    if (typeof chrome === "undefined" || typeof chrome.tabs?.sendMessage !== "function") {
+      return;
+    }
     const message: OverlayAgentOverlayResetMessage = {
       type: OVERLAY_AGENT_OVERLAY_RESET,
       sessionId,
@@ -284,19 +326,30 @@ export async function handleTabList(
 // Shared deps shape for the management handlers
 // ---------------------------------------------------------------------------
 
+export interface ChromeTabGroupsApi {
+  get(groupId: number): Promise<chrome.tabGroups.TabGroup>;
+  update(
+    groupId: number,
+    updateProperties: chrome.tabGroups.UpdateProperties,
+  ): Promise<chrome.tabGroups.TabGroup | undefined>;
+}
+
 export interface TabManagementDeps {
   tabs?: TabMutationApi;
   /** Read-only window membership checks before closing a tab. */
   tabsQuery?: ChromeTabsApi;
   windows?: ChromeWindowsApi;
+  tabGroups?: ChromeTabGroupsApi;
   /** Abort hook (M10 will wire the full chain). */
   signal?: AbortSignal;
+  /** Released sessions must not move or close pages during transaction cleanup. */
+  isSessionLive?: () => boolean;
   /** Browser-policy approver. Missing wiring must never silently approve a borrow. */
   approveBorrow?: BorrowConfirmationApprover;
   /** Clears Agent-scoped overlays after a borrowed tab is returned. */
   agentOverlayReset?: AgentOverlayResetApi;
   /** Releases this session's CDP claim after a borrowed tab is returned. */
-  cdp?: Pick<CdpRunner, "acquireBackgroundExecution" | "releaseSessionTab">;
+  cdp?: Pick<CdpRunner, "acquireBackgroundExecution" | "releaseSessionTab" | "runBrowserMutation">;
   /** Runs after tab_return validation, before moving the borrowed tab. */
   beforeReturn?: (sessionId: string, tabId: number) => Promise<void>;
   /**
@@ -311,12 +364,31 @@ export interface TabManagementDeps {
   isAgentWindowId?: (windowId: number) => boolean;
 }
 
+function mutateBrowser<T>(deps: TabManagementDeps, operation: () => Promise<T>): Promise<T> {
+  return deps.cdp?.runBrowserMutation ? deps.cdp.runBrowserMutation(operation) : operation();
+}
+
 function getTabsApi(deps: TabManagementDeps): TabMutationApi {
   return deps.tabs ?? chromeTabMutationApi;
 }
 
 function getWindowsApi(deps: TabManagementDeps): ChromeWindowsApi {
   return deps.windows ?? chromeWindowsApi;
+}
+
+function getTabGroupsApi(deps: TabManagementDeps): ChromeTabGroupsApi | undefined {
+  if (deps.tabGroups) return deps.tabGroups;
+  if (
+    typeof chrome !== "undefined" &&
+    typeof chrome.tabGroups?.get === "function" &&
+    typeof chrome.tabGroups?.update === "function"
+  ) {
+    return {
+      get: (groupId) => chrome.tabGroups.get(groupId),
+      update: (groupId, props) => chrome.tabGroups.update(groupId, props),
+    };
+  }
+  return undefined;
 }
 
 function getIsAgentWindowId(deps: TabManagementDeps): (windowId: number) => boolean {
@@ -327,8 +399,14 @@ function getAgentOverlayResetApi(deps: TabManagementDeps): AgentOverlayResetApi 
   return deps.agentOverlayReset ?? chromeAgentOverlayResetApi;
 }
 
-function aborted(signal: AbortSignal | undefined, tool: string): RpcError | null {
-  return signal?.aborted ? { code: "cancelled", message: `${tool} aborted` } : null;
+function aborted(
+  signal: AbortSignal | undefined,
+  tool: string,
+  isLive?: () => boolean,
+): RpcError | null {
+  return signal?.aborted || isLive?.() === false
+    ? { code: "cancelled", message: `${tool} aborted` }
+    : null;
 }
 
 function validatePositiveInt(name: string, value: unknown): RpcError | null {
@@ -385,10 +463,29 @@ async function createTabAndCleanup(
   deps: TabManagementDeps,
   createProps: chrome.tabs.CreateProperties,
 ): Promise<CreatedChromeTab | RpcError> {
+  const finishCreation = beginTabCreation(ctx);
+  try {
+    return await createAndClaimTab(ctx, deps, createProps);
+  } finally {
+    finishCreation();
+  }
+}
+
+async function createAndClaimTab(
+  ctx: SessionContext,
+  deps: TabManagementDeps,
+  createProps: chrome.tabs.CreateProperties,
+): Promise<CreatedChromeTab | RpcError> {
   let tab: chrome.tabs.Tab;
   try {
-    tab = await getTabsApi(deps).create(createProps);
+    tab = await mutateBrowser(deps, () => {
+      if (aborted(deps.signal, "tab_create", deps.isSessionLive))
+        throw new Error("tab_create aborted before browser mutation");
+      return getTabsApi(deps).create(createProps);
+    });
   } catch (err) {
+    const cancelled = aborted(deps.signal, "tab_create", deps.isSessionLive);
+    if (cancelled) return cancelled;
     return {
       code: "protocol_error",
       message: err instanceof Error ? err.message : String(err),
@@ -396,6 +493,9 @@ async function createTabAndCleanup(
   }
   if (typeof tab.id !== "number") {
     return { code: "protocol_error", message: "chrome.tabs.create returned no tab id" };
+  }
+  if (deps.isSessionLive?.() === false) {
+    return { code: "cancelled", message: "tab_create session ended" };
   }
   // Claim the concrete id returned by Chrome. Ownership never depends on
   // matching this request to an asynchronous onCreated event.
@@ -436,7 +536,8 @@ export async function handleTabCreate(
   const ctxOrErr = lookupSession(manager, params, "tab_create");
   if (isRpcError(ctxOrErr)) return ctxOrErr;
   const ctx = ctxOrErr;
-  const ab = aborted(deps.signal, "tab_create");
+  const isLive = () => manager.get(ctx.sessionId) === ctx && deps.isSessionLive?.() !== false;
+  const ab = aborted(deps.signal, "tab_create", isLive);
   if (ab) return ab;
 
   const paramErr = validateTabCreateParams(params);
@@ -449,24 +550,22 @@ export async function handleTabCreate(
   const prepare = deps.cdp?.acquireBackgroundExecution && !cdpBlockedUrlReason(props.url);
   const tab = await createTabAndCleanup(
     ctx,
-    deps,
+    { ...deps, isSessionLive: isLive },
     prepare ? { ...props, url: "about:blank" } : props,
   );
   if (isRpcError(tab)) return tab;
+  if (!isLive()) return { code: "cancelled", message: "tab_create session ended" };
   if (prepare) {
     try {
       await deps.cdp!.acquireBackgroundExecution!(ctx.sessionId, tab.id);
-      if (
-        deps.signal?.aborted ||
-        manager.get(ctx.sessionId) !== ctx ||
-        !isAgentControlledTab(ctx, tab.id)
-      ) {
+      if (deps.signal?.aborted || !isLive() || !isAgentControlledTab(ctx, tab.id)) {
         throw new Error("Tab creation cancelled during background execution setup");
       }
       // Preserve create's no-load-wait contract. The destination script cannot run
       // before the blank document's execution policy has been acknowledged.
       if (props.url !== "about:blank") await getTabsApi(deps).update(tab.id, { url: props.url });
-      if (deps.signal?.aborted) throw new Error("Tab creation cancelled during navigation");
+      if (deps.signal?.aborted || !isLive())
+        throw new Error("Tab creation cancelled during navigation");
     } catch (error) {
       const cleanupErrors: string[] = [];
       try {
@@ -474,6 +573,7 @@ export async function handleTabCreate(
       } catch (cleanupError) {
         cleanupErrors.push(`release: ${describeError(cleanupError)}`);
       }
+      if (!isLive()) return { code: "cancelled", message: "tab_create session ended" };
       try {
         await getTabsApi(deps).remove(tab.id);
         ctx.agentCreatedTabs.delete(tab.id);
@@ -606,13 +706,12 @@ export async function handleTabClose(
       }
       closeWindow = tabs.length === 1 && tabs[0]?.id === params.tab_id;
     }
-    if (closeWindow) {
-      // Yandex cancels later debugger attachments if tabs.remove closes a
-      // window's final tab (issue #272). Keep the normal onRemoved lifecycle.
-      await getWindowsApi(deps).remove(ctx.agentWindowId);
-    } else {
-      await getTabsApi(deps).remove(params.tab_id);
-    }
+    // Yandex needs windows.remove for the last tab (issue #272).
+    const close = () =>
+      closeWindow
+        ? getWindowsApi(deps).remove(ctx.agentWindowId)
+        : getTabsApi(deps).remove(params.tab_id);
+    await mutateBrowser(deps, close);
     // Keep the tracking set accurate so session_stop won't try to close a
     // tab that's already gone (design §3.1).
     ctx.agentCreatedTabs.delete(params.tab_id);
@@ -655,7 +754,7 @@ export async function handleTabSelect(
     return { code: "cancelled", message: "tab_select aborted" };
   }
   try {
-    await getTabsApi(deps).update(params.tab_id, { active: true });
+    await mutateBrowser(deps, () => getTabsApi(deps).update(params.tab_id, { active: true }));
   } catch (err) {
     return {
       code: "protocol_error",
@@ -683,13 +782,162 @@ interface ExecuteBorrowCoreParams {
   tabId: number;
   confirmationTimeoutMs?: number;
   tabsApi: TabMutationApi;
+  tabsQuery?: ChromeTabsApi;
+  tabGroupsApi?: ChromeTabGroupsApi;
   approveBorrow: BorrowConfirmationApprover;
   signal?: AbortSignal;
+  mutate?: CdpRunner["runBrowserMutation"];
 }
 
 interface ExecuteBorrowCoreOk {
   originalWindowId: number;
   originalIndex: number;
+  leftNeighborTabId?: number;
+  rightNeighborTabId?: number;
+  leftNeighborTabIds?: number[];
+  rightNeighborTabIds?: number[];
+  originalGroupId?: number;
+  originalGroup?: BorrowedTabGroupMetadata;
+  originalPinned?: boolean;
+}
+
+function getLeftNeighbors(entry: BorrowedTab): number[] {
+  if (entry.leftNeighborTabIds && entry.leftNeighborTabIds.length > 0) {
+    return entry.leftNeighborTabIds;
+  }
+  return entry.leftNeighborTabId !== undefined ? [entry.leftNeighborTabId] : [];
+}
+
+function getRightNeighbors(entry: BorrowedTab): number[] {
+  if (entry.rightNeighborTabIds && entry.rightNeighborTabIds.length > 0) {
+    return entry.rightNeighborTabIds;
+  }
+  return entry.rightNeighborTabId !== undefined ? [entry.rightNeighborTabId] : [];
+}
+
+function insertBorrowedIntoVirtualOrder(order: number[], entry: BorrowedTab): void {
+  if (order.includes(entry.tabId)) return;
+  for (const leftId of getLeftNeighbors(entry)) {
+    const idx = order.indexOf(leftId);
+    if (idx !== -1) {
+      order.splice(idx + 1, 0, entry.tabId);
+      return;
+    }
+  }
+  for (const rightId of getRightNeighbors(entry)) {
+    const idx = order.indexOf(rightId);
+    if (idx !== -1) {
+      order.splice(idx, 0, entry.tabId);
+      return;
+    }
+  }
+  order.splice(Math.min(Math.max(0, entry.originalIndex), order.length), 0, entry.tabId);
+}
+
+async function queryWindowTabs(
+  tabsApi: TabMutationApi,
+  tabsQuery: ChromeTabsApi | undefined,
+  windowId: number,
+): Promise<chrome.tabs.Tab[] | null> {
+  const query =
+    tabsApi.query?.bind(tabsApi) ??
+    tabsQuery?.query?.bind(tabsQuery) ??
+    (typeof chrome !== "undefined" && typeof chrome.tabs?.query === "function"
+      ? (q: chrome.tabs.QueryInfo) => chrome.tabs.query(q)
+      : undefined);
+  if (!query) return null;
+  try {
+    const raw = await query({ windowId });
+    return Array.isArray(raw) ? raw.filter((t) => t.windowId === windowId) : null;
+  } catch {
+    return null;
+  }
+}
+
+async function queryAllTabs(
+  tabsApi: TabMutationApi,
+  tabsQuery: ChromeTabsApi | undefined,
+): Promise<chrome.tabs.Tab[] | null> {
+  const query =
+    tabsApi.query?.bind(tabsApi) ??
+    tabsQuery?.query?.bind(tabsQuery) ??
+    (typeof chrome !== "undefined" && typeof chrome.tabs?.query === "function"
+      ? (q: chrome.tabs.QueryInfo) => chrome.tabs.query(q)
+      : undefined);
+  if (!query) return null;
+  try {
+    const raw = await query({});
+    return Array.isArray(raw) ? raw : null;
+  } catch {
+    return null;
+  }
+}
+
+async function captureBorrowSnapshot(
+  manager: SessionManager,
+  tabsApi: TabMutationApi,
+  tabsQuery: ChromeTabsApi | undefined,
+  tabGroupsApi: ChromeTabGroupsApi | undefined,
+  currentTab: chrome.tabs.Tab,
+  tabId: number,
+  originalWindowId: number,
+  originalIndex: number,
+): Promise<ExecuteBorrowCoreOk> {
+  const originalGroupId =
+    typeof currentTab.groupId === "number" && currentTab.groupId >= 0
+      ? currentTab.groupId
+      : undefined;
+  let originalGroup: BorrowedTabGroupMetadata | undefined;
+  if (originalGroupId !== undefined && tabGroupsApi?.get) {
+    try {
+      const group = await tabGroupsApi.get(originalGroupId);
+      if (group && typeof group === "object") {
+        originalGroup = {
+          ...(typeof group.title === "string" ? { title: group.title } : {}),
+          ...(typeof group.color === "string" ? { color: group.color } : {}),
+          ...(typeof group.collapsed === "boolean" ? { collapsed: group.collapsed } : {}),
+        };
+      }
+    } catch {
+      /* Ignore group lookup failures; groupId alone will still be attempted on return. */
+    }
+  }
+  const snapshot: ExecuteBorrowCoreOk = {
+    originalWindowId,
+    originalIndex,
+    ...(currentTab.pinned === true ? { originalPinned: true } : {}),
+    ...(originalGroupId !== undefined ? { originalGroupId } : {}),
+    ...(originalGroup ? { originalGroup } : {}),
+  };
+  const windowTabs = await queryWindowTabs(tabsApi, tabsQuery, originalWindowId);
+  if (!windowTabs || windowTabs.length === 0) return snapshot;
+  const sorted = [...windowTabs]
+    .filter(
+      (t): t is chrome.tabs.Tab & { id: number; index: number } =>
+        typeof t.id === "number" && typeof t.index === "number",
+    )
+    .sort((a, b) => a.index - b.index);
+  const virtualOrder = sorted.map((t) => t.id);
+  for (const session of manager.list()) {
+    for (const borrowed of session.borrowedTabs.values()) {
+      if (borrowed.originalWindowId === originalWindowId && borrowed.tabId !== tabId) {
+        insertBorrowedIntoVirtualOrder(virtualOrder, borrowed);
+      }
+    }
+  }
+  const pos = virtualOrder.indexOf(tabId);
+  if (pos === -1) return snapshot;
+  const leftIds = virtualOrder.slice(0, pos).reverse();
+  const rightIds = virtualOrder.slice(pos + 1);
+  if (leftIds.length > 0) {
+    snapshot.leftNeighborTabId = leftIds[0];
+    snapshot.leftNeighborTabIds = leftIds;
+  }
+  if (rightIds.length > 0) {
+    snapshot.rightNeighborTabId = rightIds[0];
+    snapshot.rightNeighborTabIds = rightIds;
+  }
+  return snapshot;
 }
 
 /**
@@ -718,6 +966,13 @@ async function validateBorrowTarget(
   if (typeof tab.id !== "number" || typeof tab.windowId !== "number") {
     return { code: "not_found", message: `tab ${tabId} not found` };
   }
+  if (tab.incognito) {
+    return rpcError(
+      "permission_denied",
+      "incognito_borrow_disabled",
+      "Incognito tabs cannot be borrowed. Create a new tab in the session instead.",
+    );
+  }
   const owner = manager.findControllingSession(tabId);
   if (owner)
     return rpcError(
@@ -726,13 +981,20 @@ async function validateBorrowTarget(
       `tab_borrow: tab ${tabId} is already controlled by session ${owner}`,
     );
   if (tab.windowId === ctx.agentWindowId) {
-    return {
-      code: "invalid_params",
-      message:
-        ctx.remote && !isAgentControlledTab(ctx, tabId)
-          ? `tab_borrow: tab ${tabId} is not authorized and already lives in the Agent Window; move it to a regular browser window, then borrow it`
-          : `tab_borrow: tab ${tabId} already lives in the Agent Window`,
-    };
+    // Issue #465 §6: both branches mean "already inside an Agent Window",
+    // which the reference docs describe as needing a user move to a user
+    // window before borrowing; a tab the session itself opened is already
+    // controlled, so no borrow is needed at all. The stable reason lets
+    // the CLI render this instead of the generic invalid-parameters copy.
+    const lives =
+      ctx.remote && !isAgentControlledTab(ctx, tabId)
+        ? "not authorized and already lives in the Agent Window; a user must move it to a regular browser window, then borrow it"
+        : "already lives in the Agent Window — an unowned tab needs a user move to a user window before borrowing; a tab this session opened is already controlled and needs no borrow";
+    return rpcError(
+      "invalid_params",
+      "borrow_agent_window_tab",
+      `tab_borrow: tab ${tabId} ${lives}`,
+    );
   }
   for (const s of manager.list()) {
     if (s.sessionId !== ctx.sessionId && s.agentWindowId === tab.windowId) {
@@ -792,20 +1054,39 @@ async function moveTabForBorrow(
   agentWindowId: number,
   originalWindowId: number,
   originalIndex: number,
+  isLive: () => boolean,
   signal?: AbortSignal,
+  mutate?: CdpRunner["runBrowserMutation"],
 ): Promise<RpcError | null> {
   try {
-    await tabsApi.move(tabId, { windowId: agentWindowId, index: -1 });
+    await moveExpectedTab(
+      tabsApi,
+      tabId,
+      { windowId: agentWindowId, index: -1 },
+      signal,
+      isLive,
+      mutate,
+    );
   } catch (err) {
+    const cancelled = aborted(signal, "tab_borrow", isLive);
+    if (cancelled) return cancelled;
     return {
       code: "cdp_failed",
       message: `tab_borrow: chrome.tabs.move failed: ${err instanceof Error ? err.message : String(err)}`,
     };
   }
+  if (!isLive()) return { code: "cancelled", message: "tab_borrow session ended" };
   if (aborted(signal, "tab_borrow")) {
     try {
-      await tabsApi.move(tabId, { windowId: originalWindowId, index: originalIndex });
+      await moveExpectedTab(
+        tabsApi,
+        tabId,
+        { windowId: originalWindowId, index: originalIndex },
+        undefined,
+        isLive,
+      );
     } catch (rollbackErr) {
+      if (!isLive()) return { code: "cancelled", message: "tab_borrow session ended" };
       return rpcError(
         "protocol_error",
         "borrow_outcome_unknown",
@@ -851,17 +1132,32 @@ async function executeBorrowCore(
 
   const originalWindowId = currentTab.windowId;
   const originalIndex = typeof currentTab.index === "number" ? currentTab.index : 0;
+  const snapshot = await captureBorrowSnapshot(
+    p.manager,
+    p.tabsApi,
+    p.tabsQuery,
+    p.tabGroupsApi,
+    currentTab,
+    p.tabId,
+    originalWindowId,
+    originalIndex,
+  );
+  if (p.manager.get(p.ctx.sessionId) !== p.ctx || aborted(p.signal, "tab_borrow")) {
+    return { code: "cancelled", message: "tab_borrow session ended" };
+  }
   const moveErr = await moveTabForBorrow(
     p.tabsApi,
     p.tabId,
     p.ctx.agentWindowId,
     originalWindowId,
     originalIndex,
+    () => p.manager.get(p.ctx.sessionId) === p.ctx,
     p.signal,
+    p.mutate,
   );
   if (moveErr) return moveErr;
 
-  return { originalWindowId, originalIndex };
+  return snapshot;
 }
 
 export async function handleTabBorrow(
@@ -872,6 +1168,13 @@ export async function handleTabBorrow(
   const ctxOrErr = lookupSession(manager, params, "tab_borrow");
   if (isRpcError(ctxOrErr)) return ctxOrErr;
   const ctx = ctxOrErr;
+  if (ctx.incognito) {
+    return rpcError(
+      "permission_denied",
+      "incognito_borrow_disabled",
+      "Incognito sessions cannot borrow tabs. Create a new tab in the session instead.",
+    );
+  }
   const bad = validatePositiveInt("tab_id", params.tab_id);
   if (bad) return bad;
   if (aborted(deps.signal, "tab_borrow")) {
@@ -942,25 +1245,34 @@ export async function handleTabBorrow(
       tabId: params.tab_id,
       confirmationTimeoutMs: params.confirmation_timeout_ms,
       tabsApi,
+      tabsQuery: deps.tabsQuery,
+      tabGroupsApi: getTabGroupsApi(deps),
       approveBorrow: approve,
       signal: deps.signal,
+      mutate: deps.cdp?.runBrowserMutation,
     });
     if (isRpcError(coreResult)) return coreResult;
 
     try {
       reservation.commit({
         tabId: params.tab_id,
-        originalWindowId: coreResult.originalWindowId,
-        originalIndex: coreResult.originalIndex,
+        ...coreResult,
       });
       committed = true;
     } catch (err) {
+      if (manager.get(ctx.sessionId) !== ctx)
+        return { code: "cancelled", message: "tab_borrow session ended" };
       try {
-        await tabsApi.move(params.tab_id, {
-          windowId: coreResult.originalWindowId,
-          index: coreResult.originalIndex,
-        });
+        await moveExpectedTab(
+          tabsApi,
+          params.tab_id,
+          { windowId: coreResult.originalWindowId, index: coreResult.originalIndex },
+          undefined,
+          () => manager.get(ctx.sessionId) === ctx,
+        );
       } catch (rollbackError) {
+        if (manager.get(ctx.sessionId) !== ctx)
+          return { code: "cancelled", message: "tab_borrow session ended" };
         return rpcError(
           "protocol_error",
           "borrow_outcome_unknown",
@@ -978,20 +1290,28 @@ export async function handleTabBorrow(
     // user tab switches; selecting a tab does not focus its window.
     try {
       const tab = await tabsApi.get(params.tab_id);
+      if (deps.signal?.aborted || manager.get(ctx.sessionId) !== ctx) {
+        throw new Error("Borrow cancelled during background execution setup");
+      }
       if (!cdpBlockedUrlReason(tab.url)) {
         await deps.cdp?.acquireBackgroundExecution?.(ctx.sessionId, params.tab_id);
       }
       if (deps.signal?.aborted || manager.get(ctx.sessionId) !== ctx) {
         throw new Error("Borrow cancelled during background execution setup");
       }
-      await tabsApi.update(params.tab_id, { active: true });
+      await mutateBrowser(deps, () => tabsApi.update(params.tab_id, { active: true }));
       if (deps.signal?.aborted || manager.get(ctx.sessionId) !== ctx) {
         throw new Error("Borrow cancelled during background execution setup");
       }
     } catch (error) {
+      if (manager.get(ctx.sessionId) !== ctx)
+        return { code: "cancelled", message: "tab_borrow session ended" };
       const rollback = await returnBorrowedTab(ctx, params.tab_id, {
         ...deps,
+        // Returning an already moved tab is this transaction's rollback, not new input.
+        cdp: { releaseSessionTab: deps.cdp?.releaseSessionTab?.bind(deps.cdp) },
         signal: undefined,
+        isSessionLive: () => manager.get(ctx.sessionId) === ctx,
         isAgentWindowId: (id) => manager.findByWindowId(id) !== null,
       });
       if (isRpcError(rollback)) return rollback;
@@ -1038,11 +1358,13 @@ async function chooseFallbackWindow(
   windowsApi: ChromeWindowsApi,
   isAgentWindowId: (windowId: number) => boolean,
   signal?: AbortSignal,
+  mutate?: CdpRunner["runBrowserMutation"],
+  isLive?: () => boolean,
 ): Promise<FallbackWindowTarget | RpcError> {
   let lastFocusedError: unknown;
   try {
     const last = await windowsApi.getLastFocused({ windowTypes: ["normal"] });
-    const cancelled = aborted(signal, "tab_return");
+    const cancelled = aborted(signal, "tab_return", isLive);
     if (cancelled) return cancelled;
     const lastId = typeof last?.id === "number" ? last.id : null;
     // Never relocate a user tab into *any* session's Agent Window: this
@@ -1052,28 +1374,38 @@ async function chooseFallbackWindow(
     // returned tab in another session's Agent Window would let that
     // session write to it and, worse, see it destroyed when that session
     // stops and closes its window.
-    if (lastId !== null && lastId !== ctx.agentWindowId && !isAgentWindowId(lastId)) {
+    // Incognito windows also have type "normal", but cannot receive the
+    // non-incognito tabs accepted by tab_borrow.
+    if (
+      lastId !== null &&
+      !last.incognito &&
+      lastId !== ctx.agentWindowId &&
+      !isAgentWindowId(lastId)
+    ) {
       return { windowId: lastId, index: -1, created: false };
     }
   } catch (err) {
     lastFocusedError = err;
   }
 
-  const cancelled = aborted(signal, "tab_return");
+  const cancelled = aborted(signal, "tab_return", isLive);
   if (cancelled) return cancelled;
 
   try {
-    const created = await windowsApi.create({
-      url: NEW_TAB_DEFAULT_URL,
-      focused: false,
-    });
+    const create = () => {
+      if (aborted(signal, "tab_return", isLive))
+        throw new Error("tab_return aborted before fallback window creation");
+      return windowsApi.create({ url: NEW_TAB_DEFAULT_URL, focused: false, incognito: false });
+    };
+    const created = await (mutate ? mutate(create) : create());
     if (typeof created?.id !== "number") {
       return {
         code: "protocol_error",
         message: "tab_return: failed to create fallback window",
       };
     }
-    if (aborted(signal, "tab_return")) {
+    if (isLive?.() === false) return { code: "cancelled", message: "tab_return session ended" };
+    if (aborted(signal, "tab_return", isLive)) {
       try {
         await windowsApi.remove(created.id);
       } catch (cleanupErr) {
@@ -1088,6 +1420,8 @@ async function chooseFallbackWindow(
     }
     return { windowId: created.id, index: 0, created: true };
   } catch (err) {
+    const cancelled = aborted(signal, "tab_return", isLive);
+    if (cancelled) return cancelled;
     const suffix = lastFocusedError
       ? ` (after getLastFocused failed: ${describeError(lastFocusedError)})`
       : "";
@@ -1102,8 +1436,9 @@ async function cleanupUnusedFallbackWindow(
   windowsApi: ChromeWindowsApi,
   target: FallbackWindowTarget,
   reason: string,
+  isLive?: () => boolean,
 ): Promise<RpcError | null> {
-  if (!target.created) return null;
+  if (!target.created || isLive?.() === false) return null;
   try {
     await windowsApi.remove(target.windowId);
     return null;
@@ -1133,6 +1468,312 @@ async function releaseReturnedTabState(
     // A successful move must not be retried because debugger cleanup failed.
     console.debug("[bsk tab_return] CDP release failed", err);
   }
+}
+
+interface ReturnMovePlan {
+  targetIndex: number;
+  initialMoveIndex: number;
+  hasWindowTabs: boolean;
+}
+
+async function resolveOriginalReturnWindow(
+  ctx: SessionContext,
+  entry: BorrowedTab,
+  tabsApi: TabMutationApi,
+  tabsQuery: ChromeTabsApi | undefined,
+  windowsApi: ChromeWindowsApi,
+  tabGroupsApi: ChromeTabGroupsApi | undefined,
+  isAgentWindowId: (windowId: number) => boolean,
+): Promise<number | null> {
+  const isEligibleUserWindow = async (windowId: number): Promise<boolean> => {
+    if (windowId === ctx.agentWindowId || isAgentWindowId(windowId)) return false;
+    try {
+      const win = await windowsApi.get(windowId);
+      return !win?.incognito;
+    } catch {
+      return false;
+    }
+  };
+
+  if (typeof entry.originalGroupId === "number" && entry.originalGroupId >= 0) {
+    const origTabs = await queryWindowTabs(tabsApi, tabsQuery, entry.originalWindowId);
+    const stillInOriginalWindow = origTabs?.some(
+      (t) => t.id !== entry.tabId && t.groupId === entry.originalGroupId,
+    );
+    if (!stillInOriginalWindow) {
+      if (tabGroupsApi?.get) {
+        try {
+          const group = await tabGroupsApi.get(entry.originalGroupId);
+          if (
+            typeof group?.windowId === "number" &&
+            group.windowId !== entry.originalWindowId &&
+            (await isEligibleUserWindow(group.windowId))
+          ) {
+            return group.windowId;
+          }
+        } catch {
+          /* Fall through to tab query or originalWindowId check. */
+        }
+      }
+      const allTabs = await queryAllTabs(tabsApi, tabsQuery);
+      const movedGroupMember = allTabs?.find(
+        (t) =>
+          t.id !== entry.tabId &&
+          t.groupId === entry.originalGroupId &&
+          typeof t.windowId === "number" &&
+          t.windowId !== entry.originalWindowId,
+      );
+      if (
+        typeof movedGroupMember?.windowId === "number" &&
+        (await isEligibleUserWindow(movedGroupMember.windowId))
+      ) {
+        return movedGroupMember.windowId;
+      }
+    }
+  }
+
+  try {
+    await windowsApi.get(entry.originalWindowId);
+    return entry.originalWindowId;
+  } catch (err) {
+    console.debug("[bsk tab_return] original window gone, falling back", err);
+    return null;
+  }
+}
+
+async function resolveReturnPlan(
+  entry: BorrowedTab,
+  targetWindowId: number,
+  tabsApi: TabMutationApi,
+  tabsQuery: ChromeTabsApi | undefined,
+): Promise<ReturnMovePlan> {
+  const windowTabs = await queryWindowTabs(tabsApi, tabsQuery, targetWindowId);
+  const sorted = (windowTabs ?? [])
+    .filter(
+      (t): t is chrome.tabs.Tab & { id: number; index: number } =>
+        typeof t.id === "number" && typeof t.index === "number" && t.id !== entry.tabId,
+    )
+    .sort((a, b) => a.index - b.index);
+  if (sorted.length === 0) {
+    return {
+      targetIndex: entry.originalIndex,
+      initialMoveIndex: entry.originalIndex,
+      hasWindowTabs: false,
+    };
+  }
+
+  const leftIds = getLeftNeighbors(entry);
+  const rightIds = getRightNeighbors(entry);
+
+  if (entry.originalPinned) {
+    const pinnedTabs = sorted.filter((t) => t.pinned === true);
+    let rawIndex: number | undefined;
+    for (const id of leftIds) {
+      const left = pinnedTabs.find((t) => t.id === id);
+      if (left) {
+        rawIndex = left.index + 1;
+        break;
+      }
+    }
+    if (rawIndex === undefined) {
+      for (const id of rightIds) {
+        const right = pinnedTabs.find((t) => t.id === id);
+        if (right) {
+          rawIndex = right.index;
+          break;
+        }
+      }
+    }
+    if (rawIndex === undefined) {
+      for (const id of leftIds) {
+        const left = sorted.find((t) => t.id === id);
+        if (left) {
+          rawIndex = left.index + 1;
+          break;
+        }
+      }
+    }
+    if (rawIndex === undefined) {
+      for (const id of rightIds) {
+        const right = sorted.find((t) => t.id === id);
+        if (right) {
+          rawIndex = right.index;
+          break;
+        }
+      }
+    }
+    const targetIndex =
+      pinnedTabs.length > 0
+        ? Math.max(0, Math.min(rawIndex ?? entry.originalIndex, pinnedTabs.length))
+        : (rawIndex ?? entry.originalIndex);
+    return { targetIndex, initialMoveIndex: targetIndex, hasWindowTabs: true };
+  }
+
+  if (typeof entry.originalGroupId === "number" && entry.originalGroupId >= 0) {
+    const groupTabs = sorted.filter((t) => t.groupId === entry.originalGroupId);
+    if (groupTabs.length > 0) {
+      let targetIndex: number | undefined;
+      for (const id of leftIds) {
+        const left = groupTabs.find((t) => t.id === id);
+        if (left) {
+          targetIndex = left.index + 1;
+          break;
+        }
+      }
+      if (targetIndex === undefined) {
+        for (const id of rightIds) {
+          const right = groupTabs.find((t) => t.id === id);
+          if (right) {
+            targetIndex = right.index;
+            break;
+          }
+        }
+      }
+      if (targetIndex === undefined) {
+        targetIndex = groupTabs.at(-1)!.index + 1;
+      }
+      const prevTab = sorted.find((t) => t.index === targetIndex - 1);
+      const nextTab = sorted.find((t) => t.index === targetIndex);
+      const splitsGroup =
+        prevTab !== undefined &&
+        nextTab !== undefined &&
+        typeof prevTab.groupId === "number" &&
+        prevTab.groupId >= 0 &&
+        prevTab.groupId === nextTab.groupId;
+      const initialMoveIndex = splitsGroup ? groupTabs.at(-1)!.index + 1 : targetIndex;
+      return { targetIndex, initialMoveIndex, hasWindowTabs: true };
+    }
+  }
+
+  let rawIndex: number | undefined;
+  for (const id of leftIds) {
+    const left = sorted.find((t) => t.id === id);
+    if (left) {
+      rawIndex = left.index + 1;
+      break;
+    }
+  }
+  if (rawIndex === undefined) {
+    for (const id of rightIds) {
+      const right = sorted.find((t) => t.id === id);
+      if (right) {
+        rawIndex = right.index;
+        break;
+      }
+    }
+  }
+  const pinnedCount = sorted.filter((t) => t.pinned === true).length;
+  let targetIndex = Math.max(pinnedCount, rawIndex ?? entry.originalIndex);
+  const prevTab = sorted.find((t) => t.index === targetIndex - 1);
+  const nextTab = sorted.find((t) => t.index === targetIndex);
+  if (
+    prevTab !== undefined &&
+    nextTab !== undefined &&
+    typeof prevTab.groupId === "number" &&
+    prevTab.groupId >= 0 &&
+    prevTab.groupId === nextTab.groupId
+  ) {
+    const lastInGroup = sorted.filter((t) => t.groupId === prevTab.groupId).at(-1);
+    if (lastInGroup) targetIndex = lastInGroup.index + 1;
+  }
+  return { targetIndex, initialMoveIndex: targetIndex, hasWindowTabs: true };
+}
+
+async function restoreReturnedTabAttributes(
+  ctx: SessionContext,
+  entry: BorrowedTab,
+  targetWindowId: number,
+  plan: ReturnMovePlan,
+  movedTab: chrome.tabs.Tab | undefined,
+  tabsApi: TabMutationApi,
+  deps: TabManagementDeps,
+): Promise<number | undefined> {
+  if (entry.originalPinned) {
+    try {
+      const updated = await tabsApi.update(entry.tabId, { pinned: true });
+      const currentIdx =
+        typeof updated?.index === "number"
+          ? updated.index
+          : typeof movedTab?.index === "number"
+            ? movedTab.index
+            : undefined;
+      if (currentIdx !== undefined && currentIdx !== plan.targetIndex) {
+        const repositioned = await tabsApi.move(entry.tabId, { index: plan.targetIndex });
+        const repTab = Array.isArray(repositioned) ? repositioned[0] : repositioned;
+        return typeof repTab?.index === "number" ? repTab.index : plan.targetIndex;
+      }
+      return currentIdx ?? plan.targetIndex;
+    } catch (err) {
+      console.debug("[bsk tab_return] pinned state restore failed", err);
+      return undefined;
+    }
+  }
+  if (typeof entry.originalGroupId === "number" && entry.originalGroupId >= 0) {
+    const groupFn =
+      tabsApi.group?.bind(tabsApi) ??
+      (typeof chrome !== "undefined" && typeof chrome.tabs?.group === "function"
+        ? (opts: chrome.tabs.GroupOptions) => chrome.tabs.group(opts)
+        : undefined);
+    if (!groupFn) return undefined;
+    const tabGroupsApi = getTabGroupsApi(deps);
+    let joinedExistingGroup = false;
+    try {
+      await groupFn({ tabIds: [entry.tabId], groupId: entry.originalGroupId });
+      joinedExistingGroup = true;
+    } catch {
+      try {
+        const newGroupId = await groupFn({
+          tabIds: [entry.tabId],
+          createProperties: { windowId: targetWindowId },
+        });
+        if (typeof newGroupId === "number" && newGroupId >= 0) {
+          for (const other of ctx.borrowedTabs.values()) {
+            if (other.tabId !== entry.tabId && other.originalGroupId === entry.originalGroupId) {
+              other.originalGroupId = newGroupId;
+            }
+          }
+          if (entry.originalGroup && tabGroupsApi?.update) {
+            await tabGroupsApi
+              .update(newGroupId, {
+                ...(entry.originalGroup.title !== undefined
+                  ? { title: entry.originalGroup.title }
+                  : {}),
+                ...(entry.originalGroup.color !== undefined
+                  ? { color: entry.originalGroup.color }
+                  : {}),
+                ...(entry.originalGroup.collapsed !== undefined
+                  ? { collapsed: entry.originalGroup.collapsed }
+                  : {}),
+              })
+              .catch((err) => {
+                console.debug("[bsk tab_return] tab group metadata restore failed", err);
+              });
+          }
+        }
+      } catch (recreateErr) {
+        console.debug("[bsk tab_return] tab group recreate failed", recreateErr);
+      }
+    }
+    if (joinedExistingGroup) {
+      try {
+        const needReposition =
+          plan.initialMoveIndex !== plan.targetIndex ||
+          (plan.hasWindowTabs &&
+            (await tabsApi
+              .get(entry.tabId)
+              .then((t) => typeof t?.index === "number" && t.index !== plan.targetIndex)
+              .catch(() => false)));
+        if (needReposition) {
+          const repositioned = await tabsApi.move(entry.tabId, { index: plan.targetIndex });
+          const repTab = Array.isArray(repositioned) ? repositioned[0] : repositioned;
+          return typeof repTab?.index === "number" ? repTab.index : plan.targetIndex;
+        }
+      } catch (moveErr) {
+        console.debug("[bsk tab_return] grouped tab reposition failed", moveErr);
+      }
+    }
+  }
+  return undefined;
 }
 
 /**
@@ -1166,41 +1807,62 @@ async function returnBorrowedTabCore(
   }
   const tabsApi = getTabsApi(deps);
   const windowsApi = getWindowsApi(deps);
+  const tabGroupsApi = getTabGroupsApi(deps);
   const isAgentWindowId = getIsAgentWindowId(deps);
-  const alreadyCancelled = aborted(deps.signal, "tab_return");
+  const alreadyCancelled = aborted(deps.signal, "tab_return", deps.isSessionLive);
   if (alreadyCancelled) return alreadyCancelled;
 
   let targetWindowId = entry.originalWindowId;
-  let targetIndex = entry.originalIndex;
+  let plan: ReturnMovePlan = {
+    targetIndex: entry.originalIndex,
+    initialMoveIndex: entry.originalIndex,
+    hasWindowTabs: false,
+  };
   let fallback = false;
   let fallbackTarget: FallbackWindowTarget | null = null;
 
-  // Check the original window is still around.
-  let originalAlive = true;
-  try {
-    await windowsApi.get(entry.originalWindowId);
-  } catch (err) {
-    console.debug("[bsk tab_return] original window gone, falling back", err);
-    originalAlive = false;
-  }
-  const cancelledAfterLookup = aborted(deps.signal, "tab_return");
+  const resolvedWindowId = await resolveOriginalReturnWindow(
+    ctx,
+    entry,
+    tabsApi,
+    deps.tabsQuery,
+    windowsApi,
+    tabGroupsApi,
+    isAgentWindowId,
+  );
+  const cancelledAfterLookup = aborted(deps.signal, "tab_return", deps.isSessionLive);
   if (cancelledAfterLookup) return cancelledAfterLookup;
-  if (!originalAlive) {
+  if (resolvedWindowId === null) {
     fallback = true;
-    const target = await chooseFallbackWindow(ctx, windowsApi, isAgentWindowId, deps.signal);
+    const target = await chooseFallbackWindow(
+      ctx,
+      windowsApi,
+      isAgentWindowId,
+      deps.signal,
+      deps.cdp?.runBrowserMutation,
+      deps.isSessionLive,
+    );
     if ("code" in target) return target;
     fallbackTarget = target;
     targetWindowId = target.windowId;
-    targetIndex = target.index;
+    plan = {
+      targetIndex: target.index,
+      initialMoveIndex: target.index,
+      hasWindowTabs: false,
+    };
+  } else {
+    targetWindowId = resolvedWindowId;
+    plan = await resolveReturnPlan(entry, targetWindowId, tabsApi, deps.tabsQuery);
   }
 
-  const cancelledBeforeMove = aborted(deps.signal, "tab_return");
+  const cancelledBeforeMove = aborted(deps.signal, "tab_return", deps.isSessionLive);
   if (cancelledBeforeMove) {
     if (fallbackTarget) {
       const cleanupError = await cleanupUnusedFallbackWindow(
         windowsApi,
         fallbackTarget,
         "tab_return aborted before moving the borrowed tab",
+        deps.isSessionLive,
       );
       if (cleanupError) return cleanupError;
     }
@@ -1208,12 +1870,32 @@ async function returnBorrowedTabCore(
   }
 
   try {
-    const moved = await tabsApi.move(tabId, {
-      windowId: targetWindowId,
-      index: targetIndex,
-    });
+    const moved = await moveExpectedTab(
+      tabsApi,
+      tabId,
+      { windowId: targetWindowId, index: plan.initialMoveIndex },
+      deps.signal,
+      deps.isSessionLive,
+      deps.cdp?.runBrowserMutation,
+    );
     const movedTab = Array.isArray(moved) ? moved[0] : moved;
-    const finalIndex = typeof movedTab?.index === "number" ? movedTab.index : targetIndex;
+    const restoredIndex = !fallback
+      ? await restoreReturnedTabAttributes(
+          ctx,
+          entry,
+          targetWindowId,
+          plan,
+          movedTab,
+          tabsApi,
+          deps,
+        )
+      : undefined;
+    const finalIndex =
+      typeof restoredIndex === "number"
+        ? restoredIndex
+        : typeof movedTab?.index === "number"
+          ? movedTab.index
+          : plan.targetIndex;
     await releaseReturnedTabState(ctx, tabId, deps);
     return {
       tabId,
@@ -1227,33 +1909,46 @@ async function returnBorrowedTabCore(
         windowsApi,
         fallbackTarget,
         `tab_return could not move tab ${tabId}`,
+        deps.isSessionLive,
       );
       if (cleanupError) return cleanupError;
     }
-    const cancelledAfterMoveFailure = aborted(deps.signal, "tab_return");
+    const cancelledAfterMoveFailure = aborted(deps.signal, "tab_return", deps.isSessionLive);
     if (cancelledAfterMoveFailure) return cancelledAfterMoveFailure;
     if (!fallback) {
-      const target = await chooseFallbackWindow(ctx, windowsApi, isAgentWindowId, deps.signal);
+      const target = await chooseFallbackWindow(
+        ctx,
+        windowsApi,
+        isAgentWindowId,
+        deps.signal,
+        deps.cdp?.runBrowserMutation,
+        deps.isSessionLive,
+      );
       if ("code" in target) {
         return {
           code: "cdp_failed",
           message: `tab_return: chrome.tabs.move failed: ${describeError(err)}; fallback failed: ${target.message}`,
         };
       }
-      const cancelledBeforeFallbackMove = aborted(deps.signal, "tab_return");
+      const cancelledBeforeFallbackMove = aborted(deps.signal, "tab_return", deps.isSessionLive);
       if (cancelledBeforeFallbackMove) {
         const cleanupError = await cleanupUnusedFallbackWindow(
           windowsApi,
           target,
           "tab_return aborted before fallback move",
+          deps.isSessionLive,
         );
         return cleanupError ?? cancelledBeforeFallbackMove;
       }
       try {
-        const moved = await tabsApi.move(tabId, {
-          windowId: target.windowId,
-          index: target.index,
-        });
+        const moved = await moveExpectedTab(
+          tabsApi,
+          tabId,
+          { windowId: target.windowId, index: target.index },
+          deps.signal,
+          deps.isSessionLive,
+          deps.cdp?.runBrowserMutation,
+        );
         const movedTab = Array.isArray(moved) ? moved[0] : moved;
         const finalIndex = typeof movedTab?.index === "number" ? movedTab.index : target.index;
         await releaseReturnedTabState(ctx, tabId, deps);
@@ -1268,8 +1963,11 @@ async function returnBorrowedTabCore(
           windowsApi,
           target,
           `tab_return fallback move for tab ${tabId} failed`,
+          deps.isSessionLive,
         );
         if (cleanupError) return cleanupError;
+        const cancelled = aborted(deps.signal, "tab_return", deps.isSessionLive);
+        if (cancelled) return cancelled;
         return {
           code: "cdp_failed",
           message: `tab_return: chrome.tabs.move failed: ${describeError(err)}; fallback move failed: ${describeError(fallbackErr)}`,
@@ -1305,6 +2003,7 @@ export async function handleTabReturn(
   await deps.beforeReturn?.(ctx.sessionId, params.tab_id);
   const outcome = await returnBorrowedTab(ctx, params.tab_id, {
     ...deps,
+    isSessionLive: () => manager.get(ctx.sessionId) === ctx && deps.isSessionLive?.() !== false,
     isAgentWindowId:
       deps.isAgentWindowId ?? ((windowId) => manager.findByWindowId(windowId) !== null),
   });

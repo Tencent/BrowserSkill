@@ -221,6 +221,28 @@ describe("handleEvaluate", () => {
     expect(res.error?.column).toBe(8);
   });
 
+  it.each([
+    [{ type: "string", value: "connection token expired" }, "Uncaught connection token expired"],
+    [{ type: "boolean", value: false }, "Uncaught false"],
+    [{ type: "object", subtype: "null", value: null }, "Uncaught null"],
+    [{ type: "number", value: 0, description: "0" }, "0"],
+  ])("preserves a thrown primitive %j ahead of the generic header", async (exception, text) => {
+    const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
+    await sm.start("aa11");
+    const fake = makeFakeCdp({
+      evaluate: () => ({
+        result: exception,
+        exceptionDetails: { text: "Uncaught", lineNumber: 0, columnNumber: 0, exception },
+      }),
+    });
+    const res = await handleEvaluate(
+      sm,
+      { session_id: "aa11", expression: "throw value" },
+      { cdp: fake.cdp, tabsApi: fake.tabsApi },
+    );
+    expect(res).toMatchObject({ ok: false, error: { text, line: 1, column: 0 } });
+  });
+
   it("stringifies unserializableValue (Infinity / NaN / BigInt)", async () => {
     const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
     await sm.start("aa11");

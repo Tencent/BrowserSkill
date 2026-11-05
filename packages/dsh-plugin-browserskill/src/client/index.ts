@@ -1,5 +1,5 @@
 /**
- * dsh-plugin-browserskill browser half: the `browser_inspect` keyed toolview
+ * dsh-plugin-browserskill browser half: the `bsk_inspect` keyed toolview
  * plus the observation overlay (live thumbnails + interrupt). The
  * native right Sidebar is preferred when the host provides it; older hosts
  * keep the floating card. The user may switch to floating for this page.
@@ -20,6 +20,7 @@ import { createElement, useCallback } from "react";
 // <style> tags; selectors stay unhashed so `cn(..., "bsk-obs")` roots match).
 import "./bsk-tokens.nomodule.css";
 import "./bsk-ui.nomodule.css";
+import toolNames from "../tool-names.json";
 import { BrowserInspectToolView } from "./BrowserInspectToolView";
 import { ObservationOverlay } from "./ObservationOverlay";
 import { type NativeSidebarHost, registerObservationSidebar } from "./observation-sidebar";
@@ -69,7 +70,7 @@ export function apply(ctx: ClientContext): void {
   const sessions = ctx.get("sessions") as unknown as ISessions;
   ctx.slots.inject("tool.call.toolview", () =>
     ctx.slots.register(
-      { name: "tool.call.toolview", key: "browser_inspect" },
+      { name: "tool.call.toolview", key: toolNames.inspect },
       function BrowserInspectSessionView(props: ToolCallViewProps) {
         const loadImage = useCallback(
           (attachment: ImageAttachmentRef) =>

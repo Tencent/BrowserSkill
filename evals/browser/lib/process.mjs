@@ -21,11 +21,11 @@ export function runProcess(command, args, { cwd, env, timeoutMs = 300_000 } = {}
       stdio: ["ignore", "pipe", "pipe"],
     });
 
-    child.stdout.on("data", (chunk) => {
-      stdout = appendCaptured(stdout, chunk.toString());
+    child.stdout.setEncoding("utf8").on("data", (chunk) => {
+      stdout = appendCaptured(stdout, chunk);
     });
-    child.stderr.on("data", (chunk) => {
-      stderr = appendCaptured(stderr, chunk.toString());
+    child.stderr.setEncoding("utf8").on("data", (chunk) => {
+      stderr = appendCaptured(stderr, chunk);
     });
 
     const timeout = setTimeout(() => {

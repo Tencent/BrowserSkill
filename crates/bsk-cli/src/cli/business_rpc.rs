@@ -16,6 +16,7 @@
 //! "kill the CLI process" behaviour for short status reads.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use anyhow::Context;
@@ -34,6 +35,110 @@ pub const CANCEL_RESPONSE_GRACE: Duration = Duration::from_secs(2);
 
 const CANCEL_RETRY_INITIAL: Duration = Duration::from_millis(10);
 const CANCEL_RETRY_MAX: Duration = Duration::from_millis(250);
+
+/// Keep the IPC connection alive long enough to receive the tool's timeout.
+pub(crate) fn ipc_timeout(timeout_ms: u32) -> Duration {
+    Duration::from_millis(u64::from(timeout_ms) + 15_000)
+}
+
+static OBSERVATION_DEPENDENCIES: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+
+static OBSERVATION_CONTEXT: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+static ACTION_EVIDENCE: std::sync::OnceLock<(Option<String>, Option<serde_json::Value>)> =
+    std::sync::OnceLock::new();
+static TARGET_POLICY_REQUESTED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+
+// Keep the user's stop request even if the in-flight RPC finishes successfully.
+// One CLI process is one command, including its follow-up reads.
+static CANCEL_REQUESTED: AtomicBool = AtomicBool::new(false);
+
+pub(super) fn cancel_requested() -> bool {
+    CANCEL_REQUESTED.load(Ordering::Relaxed)
+}
+
+/// A CLI process represents one explicit caller operation. Never fill this from cached state.
+pub fn set_context(context: Option<String>) {
+    let _ = OBSERVATION_CONTEXT.set(context);
+}
+
+pub fn set_dependencies(dependencies: Vec<String>) {
+    let _ = OBSERVATION_DEPENDENCIES.set(dependencies);
+}
+
+pub fn set_action_evidence(observation: Option<String>, expect: Option<serde_json::Value>) {
+    let _ = ACTION_EVIDENCE.set((observation, expect));
+}
+
+pub fn set_target_policy_requested() {
+    let _ = TARGET_POLICY_REQUESTED.set(true);
+}
+
+/// Use the status already read during discovery, before any guarded action can be forwarded.
+pub(super) fn check_daemon_protocol(protocol: &str) -> anyhow::Result<()> {
+    require_target_control(
+        protocol,
+        TARGET_POLICY_REQUESTED.get().copied().unwrap_or(false),
+        ACTION_EVIDENCE
+            .get()
+            .is_some_and(|(observation, expect)| observation.is_some() || expect.is_some()),
+    )
+}
+
+/// Reject target policy or action evidence when the daemon could silently discard them.
+pub(crate) fn require_target_control(
+    protocol: &str,
+    target_policy: bool,
+    evidence: bool,
+) -> anyhow::Result<()> {
+    if target_policy {
+        anyhow::ensure!(
+            bsk_protocol::tools::supports_target_control(protocol),
+            "--policy target requires daemon protocol 1.8 or a later compatible 1.x version; update the CLI and restart its daemon (running protocol {protocol})"
+        );
+    }
+    if evidence {
+        anyhow::ensure!(
+            bsk_protocol::tools::supports_target_control(protocol),
+            "--expect and --observation require daemon protocol 1.8 or a later compatible 1.x version; update the CLI and restart its daemon (running protocol {protocol}). Conditions are never silently discarded"
+        );
+    }
+    Ok(())
+}
+
+pub(crate) fn with_context<P: Serialize>(
+    params: Option<P>,
+    context: Option<&str>,
+    dependencies: &[String],
+    observation: Option<&str>,
+    expect: Option<&serde_json::Value>,
+) -> anyhow::Result<Option<serde_json::Value>> {
+    params
+        .map(|p| {
+            let mut value = serde_json::to_value(p)?;
+            if let (Some(context), Some(object)) = (context, value.as_object_mut()) {
+                object.insert("context_id".into(), context.into());
+                if !dependencies.is_empty() {
+                    object.insert("depends_on".into(), serde_json::to_value(dependencies)?);
+                }
+            }
+            if let Some(object) = value.as_object_mut() {
+                if let Some(observation) = observation {
+                    anyhow::ensure!(
+                        object
+                            .get("observation_id")
+                            .is_none_or(|existing| existing == observation),
+                        "--observation conflicts with the action's observation_id"
+                    );
+                    object.insert("observation_id".into(), observation.into());
+                }
+                if let Some(expect) = expect {
+                    object.insert("expect".into(), expect.clone());
+                }
+            }
+            Ok(value)
+        })
+        .transpose()
+}
 
 /// Issue a business RPC against the daemon with SIGINT-driven
 /// cancellation.
@@ -71,30 +176,46 @@ where
     R: DeserializeOwned + Send + 'static,
 {
     let parent_cancel = stdin_cancellation();
-    if parent_cancel.as_ref().is_some_and(|rx| *rx.borrow()) {
+    if cancel_requested() || parent_cancel.as_ref().is_some_and(|rx| *rx.borrow()) {
+        CANCEL_REQUESTED.store(true, Ordering::Relaxed);
         return Err(CliError::from_rpc(RpcError {
             code: ErrorCode::Cancelled,
-            message: "parent closed the cancellation pipe".into(),
+            message: "command cancelled before dispatch".into(),
             data: Some(serde_json::json!({"reason": "cancelled_before_dispatch"})),
         }));
     }
     let rpc_id: RpcId = format!("{}-{}", rpc_id_prefix, random_short_id());
+    let params = with_context(
+        params,
+        OBSERVATION_CONTEXT.get().and_then(|c| c.as_deref()),
+        OBSERVATION_DEPENDENCIES
+            .get()
+            .map(Vec::as_slice)
+            .unwrap_or_default(),
+        ACTION_EVIDENCE
+            .get()
+            .and_then(|(observation, _)| observation.as_deref()),
+        ACTION_EVIDENCE
+            .get()
+            .and_then(|(_, expect)| expect.as_ref()),
+    )?;
     let mut client = IpcClient::connect(sock.clone()).await?;
     let rpc_id_for_call = rpc_id.clone();
     let rpc_id_for_cancel = rpc_id.clone();
 
     let main_fut = async move {
         client
-            .call_with_id::<P, R>(rpc_id_for_call, method, params, call_timeout)
+            .call_with_id::<serde_json::Value, R>(rpc_id_for_call, method, params, call_timeout)
             .await
     };
     tokio::pin!(main_fut);
 
     let outcome = tokio::select! {
         biased;
-        res = &mut main_fut => res?,
+        // Arm cancellation before the RPC can dispatch browser input.
         sig = wait_for_cancel(parent_cancel) => {
             sig.context("wait for cancellation").map_err(CliError::Local)?;
+            CANCEL_REQUESTED.store(true, Ordering::Relaxed);
             debug!(rpc_id = %rpc_id_for_cancel, "forwarding cancel to daemon");
             // Separate IPC connections can deliver cancel before the business
             // request is registered. Keep polling that request while confirming
@@ -127,6 +248,7 @@ where
                 }
             }
         }
+        res = &mut main_fut => res?,
     };
 
     outcome.map_err(CliError::from_rpc)
@@ -179,7 +301,11 @@ pub fn release_transfers<'a>(
 /// register this method, so retries must not extend the caller's grace period.
 /// This bounds the registration race; it cannot cancel a request that arrives
 /// after the deadline without daemon-side cancellation tracking.
-async fn send_cancel(sock: &Path, rpc_id: &str, deadline: Instant) -> anyhow::Result<()> {
+pub(crate) async fn send_cancel(
+    sock: &Path,
+    rpc_id: &str,
+    deadline: Instant,
+) -> anyhow::Result<()> {
     timeout_at(deadline, async {
         let mut client = IpcClient::connect(sock).await?;
         let mut retry_delay = CANCEL_RETRY_INITIAL;
@@ -206,7 +332,7 @@ async fn send_cancel(sock: &Path, rpc_id: &str, deadline: Instant) -> anyhow::Re
     .context("daemon did not confirm cancellation before the response deadline")?
 }
 
-fn random_short_id() -> String {
+pub(crate) fn random_short_id() -> String {
     use rand::Rng;
     let mut rng = rand::thread_rng();
     let mut bytes = [0u8; 4];
@@ -271,7 +397,7 @@ async fn wait_for_sigint() -> anyhow::Result<()> {
 }
 
 #[cfg(all(test, windows))]
-mod tests {
+mod windows_tests {
     use super::*;
     use tokio::net::windows::named_pipe::{ClientOptions, ServerOptions};
 
@@ -306,5 +432,62 @@ mod tests {
                 .contains("response deadline")
         );
         assert!(start.elapsed() < Duration::from_secs(1));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ipc_timeout, with_context};
+    use serde_json::json;
+    use std::time::Duration;
+
+    #[test]
+    fn ipc_timeout_preserves_grace_at_the_largest_tool_timeout() {
+        assert_eq!(ipc_timeout(60_000), Duration::from_secs(75));
+        assert_eq!(ipc_timeout(u32::MAX).as_millis(), u32::MAX as u128 + 15_000);
+    }
+
+    #[test]
+    fn context_is_explicit_and_does_not_change_action_parameters() {
+        let params = json!({"session_id":"s1", "ref":"e1", "value":"Shanghai"});
+        assert_eq!(
+            with_context(Some(&params), None, &[], None, None).unwrap(),
+            Some(params.clone())
+        );
+        let framed = with_context(
+            Some(&params),
+            Some("observed-context"),
+            &["@e2".into()],
+            None,
+            None,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(framed["context_id"], "observed-context");
+        assert_eq!(framed["depends_on"], json!(["@e2"]));
+        assert_eq!(framed["value"], "Shanghai");
+        assert!(params.get("context_id").is_none());
+    }
+    #[test]
+    fn explicit_conditions_survive_without_implicit_context() {
+        let params = json!({"session_id":"s1", "ref":"e1"});
+        let checks = json!([{ "target":"#price", "field":"text", "equals":"$12" }]);
+        let framed = with_context(Some(&params), None, &[], Some("observed"), Some(&checks))
+            .unwrap()
+            .unwrap();
+        assert_eq!(framed["observation_id"], "observed");
+        assert_eq!(framed["expect"], checks);
+        assert!(framed.get("context_id").is_none());
+        assert_eq!(params, json!({"session_id":"s1", "ref":"e1"}));
+    }
+
+    #[test]
+    fn conflicting_visual_and_action_observations_are_rejected() {
+        let params = json!({"session_id":"s1", "observation_id":"visual"});
+        assert!(with_context(Some(&params), None, &[], Some("other"), None).is_err());
+        assert_eq!(
+            with_context(Some(&params), None, &[], Some("visual"), None).unwrap(),
+            Some(params)
+        );
     }
 }

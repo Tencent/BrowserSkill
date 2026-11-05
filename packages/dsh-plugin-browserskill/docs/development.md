@@ -11,13 +11,27 @@ extension perform the browser operations. The published package name is also the
 Cordis plugin id, client bundle registration id, and `cordis.patch.yml` plugin name.
 Keep these identifiers aligned so dsh can load both halves of the plugin.
 
+## Tool registration contract
+
+`src/tool-names.json` is the shared public-name contract for host registration,
+client toolviews, and skill validation. Actions still dispatch to private operation
+names such as `session.start`; keep those routes and the existing ownership,
+cancellation, and observation behavior unchanged when editing schemas.
+
+The suite belongs to the plugin's global scope. Agent-scoped registration would
+shadow another plugin's tools rather than make the tools coexist. All definitions
+are built before the first registration. A registration failure disposes this
+attempt's entries in reverse order and retains the failing name and cause. This
+is rollback, not atomic publication: DSH emits `tools/change` for each entry.
+Disposal attempts every owned release and is idempotent.
+
 ## Agent skill
 
 Beyond the tools, the plugin publishes the **`browser-skill` agent skill** through the harness's
 official skill seam (`ctx.skills.register`): the catalog entry (name + routing description) is
 resident in `<available_skills>`, and the body is loaded only when the model invokes the `skill`
 tool. Its source is the DSH-specific `skill/` directory: a compact `SKILL.md` plus
-conditional details in `references/`. Both document only structured `browser_*` calls
+conditional details in `references/`. Both document only structured `bsk_*` calls
 and their plugin semantics. The crate-local CLI skill is intentionally not
 concatenated: its command examples belong to a different execution interface and would bypass
 the plugin's ownership, live observation UI, cancellation, and cleanup path if followed directly.
@@ -48,6 +62,16 @@ at startup are discovered through service readiness or their first later event.
 Failed registration retains the invocation proof and retries on the next turn,
 session entry, service discovery, or successful skill invocation. Streaming
 events continue to fold without repeated registration attempts or warnings.
+
+The live model trigger uses `tools/post-execute`, before final materialization,
+and preserves errors, cancellations, and existing blocked decisions. Failed suite
+activation blocks that skill result with recovery guidance. `agent/pre-step`
+wraps the official skill injection to report gesture/restore failures in the
+requesting conversation only. The later durable append of the same gesture does
+not retry it. Notices are deduplicated per session and followed by a recovery
+notice when activation succeeds; host errors are deduplicated until recovery.
+Cleanup ownership is installed before eager registration so a failed startup
+also disposes the start journal, runner, and observation service.
 
 ## Observation subscriptions and routes
 
@@ -113,7 +137,7 @@ events continue to fold without repeated registration attempts or warnings.
   card). Screenshots additionally attach the image itself when the host mounts an attachment store
   and the active model route declares image input; otherwise the PNG path is returned.
 - **Web UI toolview (browser half)**: the package is dual-face. `dsh.client` (platform `web`) ships
-  `lib/client.cjs`, which registers a keyed `tool.call.toolview` view for `browser_inspect`. The
+  `lib/client.cjs`, which registers a keyed `tool.call.toolview` view for `bsk_inspect`. The
   custom view keeps a terminal block for every inspect action and, when a screenshot result carries
   an image block, resolves the durable attachment through the client session's authorized
   `readAttachment` RPC and renders it with the plugin-owned `ScreenshotImage` thumbnail and

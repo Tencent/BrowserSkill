@@ -92,8 +92,8 @@ describe("SessionRegistry", () => {
 
   it("resolve throws actionable guidance when no session exists", () => {
     const registry = new SessionRegistry(5);
-    expect(() => registry.resolve(undefined, "browser_interact(action=click)")).toThrow(
-      /browser_session action=start/,
+    expect(() => registry.resolve(undefined, "bsk_interact(action=click)")).toThrow(
+      /bsk_session action=start/,
     );
   });
 

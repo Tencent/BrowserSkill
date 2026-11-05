@@ -3,7 +3,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { SCREENSHOT_CHUNK_BYTES, ScreenshotExports } from "./exports";
 import { removeTiledScreenshot } from "./tiles";
 
-vi.mock("./tiles", () => ({ removeTiledScreenshot: vi.fn(async () => {}) }));
+vi.mock("./tiles", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./tiles")>()),
+  removeTiledScreenshot: vi.fn(async () => {}),
+}));
 
 let store: ScreenshotExports;
 let live: Set<string>;

@@ -4,6 +4,7 @@
 // sides without extra adapters.
 
 export type RpcId = string;
+export type { ExtractParams, ExtractResult } from "@/tools/extract/types";
 
 export type ErrorCode =
   | "unknown_method"
@@ -12,15 +13,45 @@ export type ErrorCode =
   | "not_found"
   | "permission_denied"
   | "timeout"
+  | "dialog_pending"
   | "cdp_failed"
   | "protocol_error"
   | "cancelled"
+  | "user_aborted"
   | "version_too_old"
   | "multiple_browsers_online"
   | "no_browser_connected";
 
 /** Stable `RpcError.data.reason` values for CLI hint selection. */
 export type RpcErrorReason =
+  | "user_moved_tab"
+  | "cooperation_sync_required"
+  | "frame_unobservable"
+  | "page_load_failed"
+  | "control_authority_required"
+  | "control_context_invalid"
+  | "human_intervention"
+  | "control_held"
+  | "document_changed"
+  | "observation_required"
+  | "observation_changed"
+  | "precondition_invalid"
+  | "precondition_failed"
+  | "target_detached"
+  | "target_hidden"
+  | "target_disabled"
+  | "target_readonly"
+  | "target_focus_lost"
+  | "target_moved"
+  | "target_covered"
+  | "extract_params_invalid"
+  | "extract_target_stale"
+  | "extract_target_ambiguous"
+  | "extract_target_hidden"
+  | "extract_selector_invalid"
+  | "extract_structure_invalid"
+  | "extract_field_ambiguous"
+  | "extract_limit"
   | "ui_lookup_failed"
   | "task_unavailable"
   | "target_unavailable"
@@ -51,9 +82,16 @@ export type RpcErrorReason =
   | "option_not_found"
   | "single_select_value_count"
   | "tab_not_active"
+  | "window_resize_inactive_tab"
+  | "window_resize_constrained"
+  | "window_resize_unconfirmed"
+  | "window_resize_viewport_unchanged"
   | "restricted_tab_url"
   | "cdp_extension_access_denied"
+  | "observe_identity_reload_loop"
+  | "borrow_agent_window_tab"
   | "borrow_conflict"
+  | "incognito_borrow_disabled"
   | "borrow_in_progress"
   | "user_denied"
   | "confirmation_timeout"
@@ -117,6 +155,16 @@ export type ResponseFrame = OkResponseFrame | ErrResponseFrame;
 export interface EventFrame {
   event: string;
   payload?: unknown;
+}
+
+/** Terminal user action: pages stay open, but the session cannot resume. */
+export interface SessionEndedEvent extends EventFrame {
+  event: "session.ended";
+  payload: {
+    session_id: string;
+    reason: "user_moved_tab";
+    tab_id: number;
+  };
 }
 
 export type ProtocolFrame = RequestFrame | ResponseFrame | EventFrame;
@@ -183,6 +231,28 @@ export type ConnectionState = "disconnected" | "connecting" | "connected" | "ver
 
 export type JavaScriptDialogType = "alert" | "confirm" | "prompt" | "beforeunload";
 export type JavaScriptDialogHandledAction = "accepted" | "dismissed";
+
+export interface PendingJavaScriptDialog {
+  id: string;
+  tab_id: number;
+  type: JavaScriptDialogType;
+  message: string;
+  url?: string;
+  default_prompt?: string;
+  sequence: number;
+  decision_deadline: number;
+}
+
+export interface DialogStatusParams {
+  session_id: string;
+  tab_id?: number;
+}
+
+export interface DialogHandleParams {
+  session_id: string;
+  dialog_id: string;
+  text?: string;
+}
 
 export interface JavaScriptDialogInfo {
   tab_id: number;
@@ -403,6 +473,7 @@ export interface SnapshotParams {
 }
 
 export interface SnapshotResult {
+  observation_id?: string;
   text: string;
   ref_count: number;
   tab_id: number;
@@ -545,6 +616,37 @@ export interface HoverResult {
   used_selector?: string;
   x: number;
   y: number;
+  dialogs?: JavaScriptDialogInfo[];
+}
+
+export interface DragPoint {
+  x: number;
+  y: number;
+}
+export interface DragTarget {
+  ref?: string;
+  selector?: string;
+  offset?: DragPoint;
+}
+export type DragMode = "press-move-release" | "click-move-click";
+export interface DragParams {
+  session_id: string;
+  tab_id?: number;
+  source: DragTarget;
+  mode?: DragMode;
+  target?: DragTarget;
+  delta?: DragPoint;
+  button?: MouseButton;
+  modifiers?: KeyModifier[];
+  hold_ms?: number;
+  duration_ms?: number;
+  timeout_ms?: number;
+  observation_id?: string;
+}
+export interface DragResult {
+  tab_id: number;
+  source: DragPoint;
+  target: DragPoint;
   dialogs?: JavaScriptDialogInfo[];
 }
 

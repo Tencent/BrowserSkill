@@ -41,6 +41,30 @@ function document(
 }
 
 describe("semantic VOM graph", () => {
+  it.each<Record<string, string>>([
+    { hidden: "" },
+    { inert: "" },
+    { "aria-hidden": "true" },
+  ])("does not recover clickable DOM fallbacks inside excluded subtrees: %j", (attrs) => {
+    const scene = buildSemanticVomScene({
+      viewport: { width: 800, height: 600 },
+      rootFrameId: "main",
+      documents: [
+        document(
+          "main",
+          [],
+          [
+            { ...dom(3, 2, "div", {}, "Blocked action"), clickable: true },
+            dom(2, 1, "div"),
+            dom(1, null, "div", attrs),
+            { ...dom(4, null, "div", {}, "Available action"), clickable: true },
+          ],
+        ),
+      ],
+    });
+    expect(renderVom(scene).refs.map((ref) => ref.backendNodeId)).toEqual([4]);
+  });
+
   it.each([
     { tag: "dialog", role: "dialog", axModal: true, expected: true },
     { tag: "dialog", role: "dialog", axModal: false, expected: false },
@@ -929,4 +953,85 @@ describe("semantic VOM graph", () => {
     expect(groups.map((node) => node.backendNodeId)).toEqual([3]);
     expect(scene.nodes.find((node) => node.backendNodeId === 6)?.parentId).not.toBe(groups[0]?.id);
   });
+});
+
+it("retains browser focus on semantic nodes without trusting a DOM focused attribute", () => {
+  const scene = buildSemanticVomScene({
+    viewport: { width: 800, height: 600 },
+    rootFrameId: "main",
+    documents: [
+      document(
+        "main",
+        [
+          {
+            nodeId: "buy",
+            backendDOMNodeId: 2,
+            role: { type: "role", value: "button" },
+            name: { type: "computedString", value: "Buy" },
+            properties: [{ name: "focused", value: { value: true } }],
+          },
+          {
+            nodeId: "pause",
+            backendDOMNodeId: 3,
+            role: { type: "role", value: "button" },
+            name: { type: "computedString", value: "Pause" },
+            properties: [{ name: "focused", value: { value: false } }],
+          },
+        ],
+        [dom(2, null, "button"), dom(3, null, "button", { focused: "true" })],
+      ),
+    ],
+  });
+  expect(scene.nodes.find((node) => node.backendNodeId === 2)?.focused).toBe(true);
+  expect(scene.nodes.find((node) => node.backendNodeId === 3)?.focused).toBeUndefined();
+});
+
+it.each([
+  "none",
+  "presentation",
+])("retains native form membership when the %s form is omitted", (role) => {
+  const scene = buildSemanticVomScene({
+    viewport: { width: 800, height: 600 },
+    rootFrameId: "main",
+    documents: [
+      document(
+        "main",
+        [],
+        [
+          dom(1, null, "main"),
+          dom(2, 1, "form", { role }),
+          {
+            ...dom(3, 2, "input", { type: "range", "aria-label": "Playback progress" }),
+            formValue: "0",
+            inForm: true,
+          },
+        ],
+      ),
+    ],
+  });
+  expect(scene.nodes.some((n) => n.tag === "form")).toBe(false);
+  expect(scene.nodes.find((n) => n.backendNodeId === 3)?.inForm).toBe(true);
+});
+
+it.each([true, false])("retains AX selected=%s over styling hints", (selected) => {
+  const scene = buildSemanticVomScene({
+    viewport: { width: 800, height: 600 },
+    rootFrameId: "main",
+    documents: [
+      document(
+        "main",
+        [
+          {
+            nodeId: "1",
+            backendDOMNodeId: 1,
+            role: { type: "role", value: "option" },
+            name: { type: "computedString", value: "Choice" },
+            properties: [{ name: "selected", value: { value: selected } }],
+          },
+        ],
+        [dom(1, null, "div", { class: "selected" })],
+      ),
+    ],
+  });
+  expect(renderVom(scene).text).toContain(selected ? "[selected]" : "[unselected]");
 });

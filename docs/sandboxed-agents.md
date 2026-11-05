@@ -120,6 +120,21 @@ If using the existing default directory, omit only the `BSK_HOME` assignment.
 Use the verified executable path if `bsk` is not on PATH. PowerShell's `&` call
 operator for a quoted executable path is distinct from a Unix trailing `&`.
 
+### Windows GUI hosts
+
+`bsk daemon start --foreground` runs the daemon in that same `bsk` process, so
+BrowserSkill cannot apply Windows child-process creation flags after the host has
+launched it. A GUI host's managed background-task implementation must therefore
+start this console executable without allocating a visible console window (for
+example, Node's `child_process.spawn` with `windowsHide: true`, or its equivalent
+in the host runtime), while keeping the process and its `BSK_HOME` persistent.
+
+Do not replace the managed task with `Start-Process` merely to hide a window: that
+changes the ownership/lifetime contract this guide relies on. If the host cannot
+keep a hidden persistent console task, the host needs to add that capability; no
+`bsk daemon start --foreground` flag can hide a console that the host already
+created.
+
 Keep the returned task ID and leave the task running. Inspect status/output with
 `TaskOutput` or its equivalent without waiting for daemon completion. Do not use
 `nohup`, `setsid`, `Start-Process`, trailing `&`, or a long sleep as a substitute
@@ -221,6 +236,37 @@ leaving the variable unset or setting it to `1` retains normal automatic startup
 Explicit `bsk daemon start`, `stop`, `restart`, and update operations retain their
 existing management behavior; the variable is not a prohibition on those commands.
 Doctor retains its existing directory preparation and skill checks.
+
+## Windows sandbox users (access denied on the pipe)
+
+Symptom: `bsk status --json` inside the agent fails with
+`connect IPC named pipe \\.\pipe\bsk-daemon-<hash>` and `os error 5`
+(access denied), while the same command works in your own PowerShell.
+
+The daemon creates its pipe with Windows' default security descriptor, so only
+the account that started the daemon (plus administrators and SYSTEM) can open it
+for reading and writing. Local IPC has no separate login: the pipe's ACL is the
+access control, and anyone who can open it can drive your signed-in browser
+sessions. Agent sandboxes that run commands as a different account, such as
+Codex's elevated Windows sandbox (`CodexSandboxOffline` / `CodexSandboxOnline`),
+or under a restricted token, are therefore refused. Neither `BSK_HOME` nor
+`BSK_AUTO_START=0` changes this, and a daemon that is running and connected to
+the extension ("已连接") is not evidence the sandboxed client can reach it.
+
+There is currently no supported setting that grants a sandbox account access to
+the pipe, and BrowserSkill does not widen the pipe's ACL by default. Options:
+
+- **Keep the sandbox intact:** run the browser commands from a context that
+  is not sandboxed as another account, for example your own terminal, or the
+  host's per-command exception for those commands only. Do not disable the
+  sandbox globally for this.
+- **Grant the account access yourself:** this is a deliberate security
+  decision outside BrowserSkill. It lets that account control your browser
+  sessions, and the pipe name changes whenever the daemon restarts under a
+  different `BSK_HOME`.
+
+Report which host and sandbox mode you use if you need first-class support, so
+an explicit opt-in grant can be designed for it.
 
 ## Diagnostics and recovery
 

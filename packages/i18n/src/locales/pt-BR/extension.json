@@ -1,4 +1,28 @@
 {
+  "cooperation": {
+    "yielding": "Agent está aguardando",
+    "label": "Controle compartilhado do navegador",
+    "ready": "Agent está pronto",
+    "acting": "Agent está trabalhando",
+    "human": "Você está no controle",
+    "editing": "Você está editando",
+    "held": "Agent está pausado",
+    "syncing": "Agent está sincronizando",
+    "unavailable": "Página indisponível",
+    "hold": "Pausar Agent",
+    "resume": "Devolver ao Agent",
+    "stop": "Parar tarefa",
+    "hints": {
+      "ready": "Você pode assumir a qualquer momento",
+      "acting": "Você pode assumir a qualquer momento",
+      "human": "Agent continua quando você para de interagir",
+      "editing": "Devolva o controle ao Agent quando terminar",
+      "held": "Devolva o controle ao Agent quando estiver pronto",
+      "yielding": "Esperando a ação atual terminar",
+      "syncing": "Lendo o estado atual da página",
+      "unavailable": "Agent parou de interagir"
+    }
+  },
   "popup": {
     "interactionCompatibilityWarning": "Conectado a um daemon mais antigo (protocolo v{{cliProtocol}}). Atualize a CLI e o daemon para ter suporte completo às configurações de automação.",
     "brandCategory": "Automação do navegador",
@@ -133,9 +157,27 @@
       "promptTemplate": "Para esta tarefa, use o BrowserSkill no navegador {{name}} (ID da instância: {{instanceId}}). Inicie cada nova sessão desta tarefa com a interface apropriada:\nCLI: {{command}}\nDeepSeek Harness: {{toolCall}}\nNo DeepSeek Harness, chame a ferramenta sem executar o comando CLI separadamente.\nSe esta instância não estiver conectada, pare e peça que eu reconecte este perfil. Não omita --browser / browser nem mude para outra instância.",
       "title": "Navegador atual",
       "unnamed": "Navegador sem nome"
+    },
+    "daemonUpgrade": {
+      "title": "Atualize o serviço de navegador bsk",
+      "description": "O serviço bsk (daemon) em execução é muito antigo. As tarefas do navegador dependem da atualização dele.",
+      "runCommand": "Abra um terminal no computador que executa este serviço e execute:",
+      "restart": "Se este aviso continuar após a atualização, reinicie o serviço pelo terminal ou aplicativo host que o iniciou.",
+      "copyButton": "Copiar comando",
+      "copyFailed": "Não foi possível copiar. Copie manualmente o comando acima.",
+      "details": "Detalhes técnicos",
+      "protocols": "Protocolo do serviço: {{actual}}. A extensão requer {{required}} ou um protocolo compatível mais recente.",
+      "version": "Em execução: bsk {{version}}",
+      "notificationMessage": "As tarefas do navegador estão indisponíveis. Atualize o bsk no computador que executa o serviço de navegador e verifique se o serviço em execução também foi atualizado.",
+      "toolbarTitle": "BrowserSkill: atualize o serviço de navegador bsk",
+      "notificationButton": "Ver como atualizar"
     }
   },
   "controlOverlay": {
+    "project": "Projeto",
+    "session": "Sessão",
+    "holdController": "Pausar {{name}}",
+    "resumeController": "Retomar {{name}}",
     "status": "O agente está no controle",
     "interrupt": "Interromper",
     "interrupting": "Interrompendo…"
@@ -291,6 +333,7 @@
       "press": "Pressionar tecla",
       "select": "Selecionar opção",
       "hover": "Passar o mouse",
+      "drag": "Arrastar",
       "focus": "Focar",
       "blur": "Remover foco",
       "scroll": "Rolar",

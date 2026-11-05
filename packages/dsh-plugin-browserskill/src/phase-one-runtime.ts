@@ -1,4 +1,5 @@
 import type { ToolDefinition, ToolResult, ToolRunContext } from "@deepseek-ai/dsh-tools";
+import type { ParseBskJsonOptions } from "./runner";
 import type { ToolDeps } from "./tools";
 
 export type ToolRegistrar = (definition: ToolDefinition) => void;
@@ -13,6 +14,7 @@ export interface PhaseOneRuntime {
     label: string,
     observeSession?: string,
     runnerTimeoutMs?: number,
+    parseOptions?: ParseBskJsonOptions,
   ): Promise<unknown>;
   commandLine(args: string[]): string;
   presentTerminalResult: (_args: never, result: ToolResult) => TerminalPresentation;

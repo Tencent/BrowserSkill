@@ -1,4 +1,28 @@
 {
+  "cooperation": {
+    "yielding": "Agent가 대기 중",
+    "label": "브라우저 공동 제어",
+    "ready": "Agent 준비 완료",
+    "acting": "Agent 작업 중",
+    "human": "직접 조작 중",
+    "editing": "편집 중",
+    "held": "Agent 일시 중지됨",
+    "syncing": "Agent 동기화 중",
+    "unavailable": "페이지를 확인할 수 없음",
+    "hold": "Agent 일시 중지",
+    "resume": "Agent에 넘기기",
+    "stop": "작업 중지",
+    "hints": {
+      "ready": "언제든 직접 조작할 수 있습니다",
+      "acting": "언제든 직접 조작할 수 있습니다",
+      "human": "조작을 멈추면 Agent가 계속합니다",
+      "editing": "완료되면 Agent에게 넘겨주세요",
+      "held": "준비되면 Agent에게 넘겨주세요",
+      "yielding": "현재 작업이 끝나기를 기다립니다",
+      "syncing": "최신 페이지 상태를 읽고 있습니다",
+      "unavailable": "Agent가 조작을 멈췄습니다"
+    }
+  },
   "popup": {
     "interactionCompatibilityWarning": "이전 Daemon에 연결되었습니다(프로토콜 v{{cliProtocol}}). 자동화 설정을 완전히 지원하려면 CLI와 Daemon을 업데이트하세요.",
     "brandCategory": "브라우저 자동화",
@@ -133,9 +157,27 @@
       "promptTemplate": "이 작업에는 브라우저 {{name}}(인스턴스 ID: {{instanceId}})의 BrowserSkill을 사용하세요. 이 작업의 새 세션을 시작할 때마다 해당 인터페이스를 사용하세요:\nCLI: {{command}}\nDeepSeek Harness: {{toolCall}}\nDeepSeek Harness에서는 CLI 명령을 별도로 실행하지 말고 도구 호출을 사용하세요.\n이 인스턴스가 연결되어 있지 않으면 중단하고 이 프로필을 다시 연결해 달라고 요청하세요. --browser / browser를 생략하거나 다른 인스턴스로 전환하지 마세요.",
       "title": "현재 브라우저",
       "unnamed": "이름 없는 브라우저"
+    },
+    "daemonUpgrade": {
+      "title": "bsk 브라우저 서비스를 업데이트하세요",
+      "description": "실행 중인 bsk 서비스(daemon)가 오래되었습니다. 업데이트할 때까지 브라우저 작업을 실행할 수 없습니다.",
+      "runCommand": "이 서비스가 실행 중인 컴퓨터에서 터미널을 열고 다음을 실행하세요:",
+      "restart": "업데이트 후에도 이 안내가 표시되면 서비스를 시작한 터미널이나 호스트 앱에서 서비스를 다시 시작하세요.",
+      "copyButton": "명령 복사",
+      "copyFailed": "복사하지 못했습니다. 위 명령을 직접 복사하세요.",
+      "details": "기술 세부 정보",
+      "protocols": "서비스 프로토콜: {{actual}}. 확장 프로그램에는 {{required}} 이상의 호환 프로토콜이 필요합니다.",
+      "version": "현재 실행 중: bsk {{version}}",
+      "notificationMessage": "브라우저 작업을 사용할 수 없습니다. 브라우저 서비스가 실행 중인 컴퓨터에서 bsk를 업데이트하고 실행 중인 서비스도 업데이트되었는지 확인하세요.",
+      "toolbarTitle": "BrowserSkill: bsk 브라우저 서비스 업데이트 필요",
+      "notificationButton": "업데이트 방법 보기"
     }
   },
   "controlOverlay": {
+    "project": "프로젝트",
+    "session": "세션",
+    "holdController": "{{name}} 일시 중지",
+    "resumeController": "{{name}} 재개",
     "status": "에이전트가 제어 중",
     "interrupt": "중단",
     "interrupting": "중단 중…"
@@ -291,6 +333,7 @@
       "press": "키 누르기",
       "select": "옵션 선택",
       "hover": "마우스 올리기",
+      "drag": "드래그",
       "focus": "초점 맞추기",
       "blur": "초점 해제",
       "scroll": "스크롤",

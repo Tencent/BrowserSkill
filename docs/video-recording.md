@@ -179,7 +179,7 @@ BSK_VIDEO_CHROME=/path/to/chrome BSK_VIDEO_BSK=../../target/debug/bsk \
 ```
 
 The extension's minimum Chrome version remains 125. Codec support is validated at
-runtime. DSH uses `browser_inspect(action=video)` with `videoAction` set to start, status,
+runtime. DSH uses `bsk_inspect(action=video)` with `videoAction` set to start, status,
 stop, save, list, or discard. Its six public tool schemas are retained. Start
 follows the session queue; artifact operations bypass that queue so status/stop
 remain available during human help. A plugin-local allowlist of returned recording
@@ -190,11 +190,11 @@ this allowlist; the extension library remains available for recovery. CLI partia
 stop/save errors retain their recording metadata and saved path in the tool error.
 
 ```text
-browser_inspect({ action: "video", videoAction: "start", session: "<task>", durationMs: 60000 })
+bsk_inspect({ action: "video", videoAction: "start", session: "<task>", durationMs: 60000 })
 // Execute task operations after state=recording.
-browser_inspect({ action: "video", videoAction: "stop", recordingId: "<recording_id>" })
+bsk_inspect({ action: "video", videoAction: "stop", recordingId: "<recording_id>" })
 // End the task. Preview and Save As remain available in the extension.
-browser_inspect({ action: "video", videoAction: "save", recordingId: "<recording_id>", output: "<explicit-path.mp4>" })
+bsk_inspect({ action: "video", videoAction: "save", recordingId: "<recording_id>", output: "<explicit-path.mp4>" })
 ```
 
 

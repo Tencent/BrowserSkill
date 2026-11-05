@@ -6,7 +6,11 @@ import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
-import { attachVideoBackground, type BrowserSend as Send } from "./browser-fixture";
+import {
+  attachVideoBackground,
+  type BrowserSend as Send,
+  saveVideoEvidence,
+} from "./browser-fixture";
 
 const entry = `
 import { BrowserVideoHost } from '@/video/host';
@@ -40,17 +44,23 @@ globalThis.runEncoder = async (crash = false, width = 320, height = 180, quality
 
 const player = `
 import { VideoArtifactStore } from '@/video/store';
+import { readVideoPixels, videoFrameTargets } from '@/video/playback-fixture';
+globalThis.exportVideo=async(id)=>{
+  const bytes=new Uint8Array(await (await new VideoArtifactStore().file(id)).arrayBuffer());
+  let binary='';for(let i=0;i<bytes.length;i+=8192)binary+=String.fromCharCode(...bytes.subarray(i,i+8192));
+  return btoa(binary);
+};
 globalThis.inspectVideo=async(id)=>{
   const file=await new VideoArtifactStore().file(id);
   const video=document.createElement('video');video.muted=true;document.body.append(video);
   const url=URL.createObjectURL(file);video.src=url;
   await new Promise((resolve,reject)=>{video.onloadeddata=resolve;video.onerror=()=>reject(Error('MP4 playback failed'));});
-  const pixels=[];
-  const canvas=document.createElement('canvas');canvas.width=320;canvas.height=180;const ctx=canvas.getContext('2d');
-  for(const time of [.2,video.duration-.2]){
-    video.currentTime=time;await new Promise(resolve=>video.onseeked=resolve);
-    ctx.drawImage(video,0,0);pixels.push(Array.from(ctx.getImageData(160,90,1,1).data));
-  }
+  // Exercise a no-op seek at the initial position, repeated targets and two
+  // requested times within one sparse frame in the real browser too.
+  const targets=await videoFrameTargets(file,[0,0,.2,.2,video.duration-.2]);
+  const samples=await readVideoPixels(video,targets);
+  if(JSON.stringify(samples[0])!==JSON.stringify(samples[1])||JSON.stringify(samples[2])!==JSON.stringify(samples[3]))throw Error('Repeated frame samples disagree');
+  const pixels=[samples[2],samples[4]];
   const result={duration:video.duration,width:video.videoWidth,height:video.videoHeight,pixels};
   URL.revokeObjectURL(url);video.remove();return result;
 };
@@ -164,12 +174,30 @@ describe.skipIf(!process.env.BSK_VIDEO_CHROME)("video encoder browser regression
               timeout: 10_000,
             })
             .toBe(true);
-          const result = await evaluate<{
-            duration: number;
-            width: number;
-            height: number;
-            pixels: number[][];
-          }>(attached.sessionId, `inspectVideo(${JSON.stringify(done.value.id)})`);
+          const version = await send("Browser.getVersion");
+          const inspect = async (id: string, name: string, recording: unknown) => {
+            if (process.env.BSK_VIDEO_ARTIFACTS) {
+              // Persist the file and initial metadata before playback; update
+              // the JSON below only after sampling succeeds. Failed playback
+              // must still leave the original MP4 and recording details.
+              await saveVideoEvidence(name, { version, recording }, async () => {
+                const data = await evaluate<string>(
+                  attached.sessionId,
+                  `exportVideo(${JSON.stringify(id)})`,
+                );
+                return Buffer.from(data, "base64");
+              });
+            }
+            const playback = await evaluate<{
+              duration: number;
+              width: number;
+              height: number;
+              pixels: number[][];
+            }>(attached.sessionId, `inspectVideo(${JSON.stringify(id)})`);
+            await saveVideoEvidence(name, { version, recording, playback });
+            return playback;
+          };
+          const result = await inspect(done.value.id, "encoder-standard", done.value.result);
           expect(result.width).toBe(320);
           expect(result.height).toBe(180);
           expect(result.duration).toBeGreaterThanOrEqual(2.3);
@@ -205,9 +233,10 @@ describe.skipIf(!process.env.BSK_VIDEO_CHROME)("video encoder browser regression
             stop_reason: "browser_restarted",
           });
           expect(recovered.value.result.byte_size).toBeGreaterThan(0);
-          const salvaged = await evaluate<{ duration: number }>(
-            attached.sessionId,
-            `inspectVideo(${JSON.stringify(recovered.value.id)})`,
+          const salvaged = await inspect(
+            recovered.value.id,
+            "encoder-recovered",
+            recovered.value.result,
           );
           expect(salvaged.duration).toBeGreaterThan(0);
 
@@ -224,9 +253,10 @@ describe.skipIf(!process.env.BSK_VIDEO_CHROME)("video encoder browser regression
             }>(background.sessionId, `runEncoder(false, ${width}, ${height}, 'clear')`);
             expect(recorded.result.error).toBeUndefined();
             expect(recorded.result).toMatchObject({ state: "ready", completeness: "complete" });
-            const playback = await evaluate<typeof result>(
-              attached.sessionId,
-              `inspectVideo(${JSON.stringify(recorded.id)})`,
+            const playback = await inspect(
+              recorded.id,
+              `encoder-${width}x${height}`,
+              recorded.result,
             );
             expect(playback).toMatchObject({ width, height });
             expect(playback.duration).toBeGreaterThanOrEqual(2.3);

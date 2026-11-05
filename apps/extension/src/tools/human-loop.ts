@@ -101,6 +101,10 @@ interface ActiveHelpRequest {
 }
 
 const activeHelpRequests = new Map<string, ActiveHelpRequest>();
+
+export function hasActiveHelp(sessionId: string): boolean {
+  return [...activeHelpRequests.values()].some((help) => help.ctx.sessionId === sessionId);
+}
 const helpRearmTimers = new Map<number, ReturnType<typeof setTimeout>>();
 
 let defaultDeps: RequestHelpDeps | null = null;

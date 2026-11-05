@@ -1,5 +1,5 @@
 // @vitest-environment happy-dom
-// browser_inspect keyed toolview: view-model derivation from frozen blocks,
+// bsk_inspect keyed toolview: view-model derivation from frozen blocks,
 // image/path-only/running/error rendering, the registration key, and the
 // session-bound attachment loader.
 
@@ -25,7 +25,7 @@ const ATTACHMENT = {
 function runningBlock(argsRaw: string): RunningToolCall {
   return {
     callId: "c1",
-    name: "browser_inspect",
+    name: "bsk_inspect",
     argsRaw,
     turn: 1,
     step: 1,
@@ -41,7 +41,7 @@ function settledBlock(argsRaw: string, content: unknown[], isError = false): Too
     seq: 1,
     time: 0,
     callId: "c1",
-    call: { name: "browser_inspect", argsRaw },
+    call: { name: "bsk_inspect", argsRaw },
     callTime: 0,
     content,
     isError,
@@ -58,9 +58,9 @@ afterEach(cleanup);
 
 describe("viewModelOf", () => {
   it("keeps a DSH 0.2 preparing call renderable before arguments exist", () => {
-    const model = viewModelOf({ callId: "c1", name: "browser_inspect" } as never);
+    const model = viewModelOf({ callId: "c1", name: "bsk_inspect" } as never);
     expect(model.state).toBe("running");
-    expect(model.command).toBe("browser_inspect (c1)");
+    expect(model.command).toBe("bsk_inspect (c1)");
     expect(model.image).toBeNull();
     expect(model.output).toBeNull();
   });
@@ -121,10 +121,51 @@ describe("viewModelOf", () => {
       "bsk console --session s1 --tab-id 7 --since 4 --limit 20 --max-text-chars 500 --include-stack",
     );
   });
+
+  it("shows saved views as local file reads without browser authority", () => {
+    const model = viewModelOf(
+      runningBlock(
+        JSON.stringify({
+          action: "view",
+          file: "/tmp/saved observation.json",
+          find: "Today's price",
+          startLine: 20,
+          lineCount: 5,
+          session: "stale-session",
+          contextId: "stale-context",
+          tabId: 7,
+        }),
+      ),
+    );
+    expect(model.title).toBe("Saved observation");
+    expect(model.command).toBe(
+      "bsk view --find='Today'\\''s price' --start-line 20 --line-count 5 -- '/tmp/saved observation.json'",
+    );
+    expect(model.command).not.toMatch(/--session|--context|--tab-id/);
+    expect(model.state).toBe("running");
+  });
+
+  it.each(["-pending", "--help"])("preserves %s as literal saved-view search text", (find) => {
+    const model = viewModelOf(
+      runningBlock(JSON.stringify({ action: "view", file: "/tmp/saved.json", find })),
+    );
+    expect(model.command).toBe(`bsk view --find=${find} -- /tmp/saved.json`);
+  });
+
+  it("keeps a leading-dash saved filename positional in replayed cards", () => {
+    const output = "Historical observation; browser_calls: 0";
+    const model = viewModelOf(
+      settledBlock('{"action":"view","file":"--saved.json"}', [{ type: "text", text: output }]),
+    );
+    expect(model.command).toBe("bsk view -- --saved.json");
+    expect(model.title).toBe("Saved observation");
+    expect(model.output).toBe(output);
+    expect(model.image).toBeNull();
+  });
 });
 
 describe("BrowserInspectToolView", () => {
-  const baseProps = { callId: "c1", toolName: "browser_inspect", openFile: () => {} };
+  const baseProps = { callId: "c1", toolName: "bsk_inspect", openFile: () => {} };
   const renderView = (
     block: BrowserInspectToolViewProps["block"],
     loadImage: BrowserInspectToolViewProps["loadImage"],
@@ -164,10 +205,23 @@ describe("BrowserInspectToolView", () => {
     expect(screen.getByText("bsk screenshot --session (current)")).toBeTruthy();
     expect(loadImage).not.toHaveBeenCalled();
   });
+
+  it("renders saved observation output without loading an attachment", async () => {
+    const loadImage = vi.fn();
+    const output = "Historical observation; browser_calls: 0\n@e3 button Save";
+    renderView(
+      settledBlock('{"action":"view","file":"/tmp/saved.json"}', [{ type: "text", text: output }]),
+      loadImage,
+    );
+    screen.getByRole("button", { name: /saved observation/i }).click();
+    await screen.findByText("bsk view -- /tmp/saved.json");
+    expect(screen.getByText(/@e3 button Save/)).toBeTruthy();
+    expect(loadImage).not.toHaveBeenCalled();
+  });
 });
 
 describe("client plugin registration", () => {
-  it("registers the browser_inspect toolview and the shell observation overlay", () => {
+  it("registers the bsk_inspect toolview and the shell observation overlay", () => {
     const registrations: { name: string; key?: string; id?: string }[] = [];
     const sessions = { binding: () => undefined };
     const ctx = {
@@ -185,7 +239,7 @@ describe("client plugin registration", () => {
     };
     apply(ctx as never);
     expect(registrations).toEqual([
-      { name: "tool.call.toolview", key: "browser_inspect" },
+      { name: "tool.call.toolview", key: "bsk_inspect" },
       { name: "shell.overlay", id: "bsk-observation" },
     ]);
   });

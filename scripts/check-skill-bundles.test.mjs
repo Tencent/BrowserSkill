@@ -92,11 +92,17 @@ test("enforces entry point budget independently of reference size", (t) => {
 });
 
 test("checks the DSH tool contract in deferred files as well as the entry point", (t) => {
-  for (const reference of ["Run bsk click", "```sh\ncommand\n```", "browser_unknown({})"]) {
+  for (const reference of [
+    "Run bsk click",
+    "```sh\ncommand\n```",
+    "browser_unknown({})",
+    "browser_session({})",
+    "bsk_unknown({})",
+  ]) {
     const root = fixture(t, {
-      "SKILL.md": `${metadata}browser_session [details](references/details.md)`,
+      "SKILL.md": `${metadata}bsk_session [details](references/details.md)`,
       "references/details.md": reference,
     });
-    assert.throws(() => validateSkillDirectory(root, { browserTools: ["browser_session"] }));
+    assert.throws(() => validateSkillDirectory(root, { browserTools: ["bsk_session"] }));
   }
 });

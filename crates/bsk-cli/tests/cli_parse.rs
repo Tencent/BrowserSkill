@@ -15,7 +15,52 @@ fn parse(args: &[&str]) -> Cli {
 }
 
 #[test]
-fn parses_unattended_session_without_changing_normal_defaults() {
+fn global_output_flags_work_before_and_after_the_command() {
+    for args in [
+        vec![
+            "bsk",
+            "--json",
+            "--quiet",
+            "click",
+            "--session",
+            "s1",
+            "--tab-id",
+            "7",
+        ],
+        vec![
+            "bsk",
+            "click",
+            "--session",
+            "s1",
+            "--tab-id",
+            "7",
+            "--json",
+            "--quiet",
+        ],
+    ] {
+        let cli = parse(&args);
+        assert!(cli.flags.json);
+        assert!(cli.flags.quiet);
+        let Command::Click(click) = cli.command else {
+            panic!("expected click");
+        };
+        assert_eq!(click.session, "s1");
+        assert_eq!(click.tab_id, Some(7));
+    }
+    for args in [
+        vec!["bsk", "--json", "--quiet", "tab", "list", "--session", "s1"],
+        vec!["bsk", "tab", "--json", "--quiet", "list", "--session", "s1"],
+        vec!["bsk", "tab", "list", "--session", "s1", "--json", "--quiet"],
+    ] {
+        let cli = parse(&args);
+        assert!(cli.flags.json);
+        assert!(cli.flags.quiet);
+        assert!(matches!(cli.command, Command::Tab(_)));
+    }
+}
+
+#[test]
+fn parses_background_sessions_and_legacy_no_focus() {
     for unattended in [false, true] {
         let mut argv = vec!["bsk", "session", "start"];
         if unattended {
@@ -29,7 +74,20 @@ fn parses_unattended_session_without_changing_normal_defaults() {
         };
         assert_eq!(args.unattended, unattended);
         assert_eq!(args.no_focus, unattended);
+        assert!(!args.focus);
     }
+}
+
+#[test]
+fn parses_explicit_foreground_session_and_rejects_conflicting_focus_flags() {
+    let Command::Session(SessionCmd {
+        sub: SessionSub::Start(args),
+    }) = parse(&["bsk", "session", "start", "--focus"]).command
+    else {
+        panic!("expected session start");
+    };
+    assert!(args.focus);
+    assert!(Cli::try_parse_from(["bsk", "session", "start", "--focus", "--no-focus"]).is_err());
 }
 
 #[test]

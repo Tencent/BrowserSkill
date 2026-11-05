@@ -369,10 +369,6 @@
   border-color: var(--destructive);
 }
 
-.strip-item[data-state="dead"] {
-  opacity: 0.45;
-}
-
 .strip-main {
   display: flex;
   align-items: center;

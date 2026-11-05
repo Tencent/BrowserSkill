@@ -39,6 +39,7 @@ export interface FileInputTransactionOptions {
   timeoutMs: number;
   signal?: AbortSignal;
   trigger(): Promise<ClickResult | RpcError>;
+  cleanupTrigger?(deadline: number): Promise<void>;
 }
 
 export interface FileInputTransactionResult {
@@ -383,11 +384,24 @@ export async function uploadThroughActivatedFileInput(
   } finally {
     chooserSubscription?.dispose();
     let cleanupFailed = false;
+    if (options.cleanupTrigger) {
+      const cleanupDeadline = Date.now() + CLEANUP_TIMEOUT_MS;
+      try {
+        await waitBounded(
+          options.cleanupTrigger(cleanupDeadline),
+          cleanupDeadline,
+          undefined,
+          "upload trigger cleanup timed out",
+        );
+      } catch {
+        cleanupFailed = true;
+      }
+    }
     if (probeArmed && triggerObjectId) {
       try {
         await waitBounded(
           callOnTrigger(
-            options,
+            { ...options, cdp: options.cdp.resourceCleanup ?? options.cdp },
             triggerObjectId,
             `function(key) {
               const owner = this.ownerDocument.defaultView;

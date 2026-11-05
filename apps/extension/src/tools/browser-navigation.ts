@@ -73,13 +73,20 @@ export async function navigateWithBrowserApi(
   waitUntil: WaitUntil,
   timeoutMs: number,
   signal?: AbortSignal,
-  afterCommit?: (event: NavigationEvent, signal: AbortSignal) => Promise<boolean | void>,
+  afterCommit?: (
+    event: NavigationEvent,
+    signal: AbortSignal,
+    sameDocument: boolean,
+  ) => Promise<boolean | void>,
   requestedUrl?: string,
+  allowSameDocument = false,
 ): Promise<NavigationOutcome> {
   if (signal?.aborted) return { reached: "cancelled" };
   if (timeoutMs <= 0) return { reached: "timeout" };
   const controller = new AbortController();
   let started = false;
+  let actionStarted = false;
+  let departingDocumentId: string | undefined;
   const document = new NavigationDocument();
   let handoff = new AbortController();
   let acceptedCommit = false;
@@ -133,24 +140,14 @@ export async function navigateWithBrowserApi(
     pendingUrl = details.url;
     navigationRevision += 1;
   };
-  const onCommitted = (details: NavigationEvent) => {
-    if (!isMainFrame(details) || settled || document.isRetired(details.documentId)) return;
-    if (
-      !acceptedCommit &&
-      (!started ||
-        (!matchesStart(details) && !details.transitionQualifiers?.includes("server_redirect")))
-    ) {
-      document.retire(details.documentId);
-      return;
-    }
-    if (!document.commit(details.documentId)) return;
+  const prepareDocument = (details: NavigationEvent, sameDocument = false) => {
     acceptedCommit = true;
     pendingUrl = undefined;
     navigationRevision += 1;
     resetReadiness();
     committedUrl = details.url;
     lastLifecycle = "commit";
-    matched = waitUntil === "commit" || waitUntil === "networkidle";
+    matched = sameDocument || waitUntil === "commit" || waitUntil === "networkidle";
     const version = document.version;
     const signal = handoff.signal;
     // A successor invalidates this handoff without ending the operation.
@@ -158,7 +155,7 @@ export async function navigateWithBrowserApi(
     void Promise.resolve()
       .then(() => {
         signal.throwIfAborted();
-        return afterCommit?.(details, signal);
+        return afterCommit?.(details, signal, sameDocument);
       })
       .then(
         (ready) => {
@@ -175,6 +172,19 @@ export async function navigateWithBrowserApi(
           );
         },
       );
+  };
+  const onCommitted = (details: NavigationEvent) => {
+    if (!isMainFrame(details) || settled || document.isRetired(details.documentId)) return;
+    if (
+      !acceptedCommit &&
+      (!started ||
+        (!matchesStart(details) && !details.transitionQualifiers?.includes("server_redirect")))
+    ) {
+      document.retire(details.documentId);
+      return;
+    }
+    if (!document.commit(details.documentId)) return;
+    prepareDocument(details);
   };
   const onDOMContentLoaded = (details: NavigationEvent) => {
     if (!isDocument(details)) return;
@@ -209,6 +219,20 @@ export async function navigateWithBrowserApi(
     }
   };
   const onSameDocument = (details: NavigationEvent) => {
+    if (!isMainFrame(details) || settled) return;
+    if (
+      !acceptedCommit &&
+      allowSameDocument &&
+      afterCommit &&
+      actionStarted &&
+      details.documentId === departingDocumentId &&
+      matchesStart(details) &&
+      document.reuseInitial(details.documentId)
+    ) {
+      started = true;
+      prepareDocument(details, true);
+      return;
+    }
     if (isDocument(details) && document.pending) void resumeCurrentDocument();
   };
   const onError = (details: NavigationEvent) => {
@@ -253,8 +277,10 @@ export async function navigateWithBrowserApi(
     void Promise.resolve()
       .then(async () => {
         const departing = await api.getFrame(tabId);
-        document.retire(departing?.documentId);
+        departingDocumentId = departing?.documentId;
+        document.retire(departingDocumentId);
         controller.signal.throwIfAborted();
+        actionStarted = true;
         return action();
       })
       .then(

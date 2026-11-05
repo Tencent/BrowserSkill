@@ -31,6 +31,13 @@ export class NavigationDocument {
     return true;
   }
 
+  /** A matching same-document navigation keeps the operation's departing document. */
+  reuseInitial(id: string | undefined): boolean {
+    if (!id || this.id || !this.isRetired(id)) return false;
+    this.retired.delete(id);
+    return this.commit(id);
+  }
+
   isCurrent(version: number): boolean {
     return this.version === version;
   }

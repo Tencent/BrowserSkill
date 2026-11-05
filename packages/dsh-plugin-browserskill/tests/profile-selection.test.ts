@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { BskRunResult } from "../src/runner";
 import { harness, ok } from "./session-lifecycle-harness";
 
-describe("profile selection through browser_session", () => {
+describe("profile selection through bsk_session", () => {
   it.each([
     "a1b2c3d4",
     "Required Profile A",

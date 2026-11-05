@@ -7,6 +7,8 @@ export interface InputReadinessDeps {
   cdp: CdpRunner;
   signal?: AbortSignal;
   deadline?: number;
+  /** The containing transaction owns cleanup, including replies that outlive the click. */
+  registerCleanup?: (cleanup: () => Promise<void>) => () => void;
 }
 
 export interface ReadyInput {
@@ -63,31 +65,6 @@ function waitForInputReply<T>(
       },
     );
   });
-}
-
-/** A surface read forces a compositor frame; rAF alone can remain suspended in a hidden window.
- * Discard the low-quality image. No file, tab activation, device metrics or viewport changes. */
-export async function flushInputRendering(
-  cdp: CdpRunner,
-  tabId: number,
-  signal?: AbortSignal,
-  deadline?: number,
-): Promise<void> {
-  if (signal?.aborted) throw new DOMException("input aborted", "AbortError");
-  // Read the viewport surface without a document-space clip, which can become
-  // stale if a previously requested scroll has not yet reached the compositor.
-  const shot = await waitForInputReply(
-    cdp.send<{ data?: string }>(tabId, "Page.captureScreenshot", {
-      format: "jpeg",
-      quality: 0,
-      fromSurface: true,
-      captureBeyondViewport: false,
-    }),
-    signal,
-    5000,
-    deadline,
-  );
-  if (!shot.data) throw new Error("Renderer did not produce an input readiness frame");
 }
 
 /** Two animation frames on a visible page: the renderer completed a rendering update. */
@@ -213,6 +190,28 @@ export async function withInputReady<T extends object>(
   };
   let result: T | RpcError;
   let cleanupError: string | undefined;
+  let cleanupPromise: Promise<void> | undefined;
+  const releaseFocus = () => {
+    if (!cleanupPromise)
+      cleanupPromise = (async () => {
+        // Detaching clears the override. Never reattach a replaced target for cleanup.
+        if (attachmentId !== undefined && deps.cdp.getAttachmentId?.(tabId) !== attachmentId)
+          return;
+        await deps.cdp.send(tabId, "Emulation.setFocusEmulationEnabled", { enabled: false });
+      })();
+    return cleanupPromise;
+  };
+  const cleanupFocus = async () => {
+    try {
+      await waitForInputReply(releaseFocus(), undefined, 1000);
+    } catch (error) {
+      // A timed-out reply does not prove the override is gone. Fence the owned
+      // attachment so a later operation cannot inherit or be disabled by it.
+      if (attachmentId !== undefined && deps.cdp.getAttachmentId?.(tabId) === attachmentId)
+        void deps.cdp.detach?.(tabId, attachmentId).catch(() => {});
+      throw error;
+    }
+  };
   try {
     checkActive();
     deps.cdp.trackSessionTab?.(ctx.sessionId, tabId);
@@ -231,14 +230,30 @@ export async function withInputReady<T extends object>(
       attachmentId = deps.cdp.getAttachmentId?.(tabId);
       // Mark ownership before awaiting: a failed reply may still have enabled it.
       restoreFocus = true;
+      deps.registerCleanup?.(cleanupFocus);
       await waitForInputReply(
-        deps.cdp.send(tabId, "Emulation.setFocusEmulationEnabled", { enabled: true }),
+        deps.cdp.sendGuarded
+          ? deps.cdp.sendGuarded(
+              { tabId },
+              "Emulation.setFocusEmulationEnabled",
+              { enabled: true },
+              { signal: deps.signal, onDispatch: checkActive },
+            )
+          : deps.cdp.send(tabId, "Emulation.setFocusEmulationEnabled", { enabled: true }),
         deps.signal,
         5000,
         deps.deadline,
       );
       checkActive();
-      await flushInputRendering(deps.cdp, tabId, deps.signal, deps.deadline);
+      // Focus emulation resumes renderer frames even in a minimized window,
+      // where a compositor screenshot may never complete.
+      await waitForRendererFrames(
+        deps.cdp,
+        tabId,
+        "Renderer did not produce a frame after preparing hidden input",
+        deps.signal,
+        deps.deadline,
+      );
     } else if (visibility !== "visible") {
       throw new Error("Could not determine input target visibility");
     }
@@ -283,20 +298,18 @@ export async function withInputReady<T extends object>(
       },
     };
   } finally {
-    // Detaching clears the override. Do not reattach a closed/replaced target to clean up.
-    if (
-      restoreFocus &&
-      (attachmentId === undefined || deps.cdp.getAttachmentId?.(tabId) === attachmentId)
-    ) {
-      try {
-        await waitForInputReply(
-          deps.cdp.send(tabId, "Emulation.setFocusEmulationEnabled", { enabled: false }),
-          undefined,
-          // Leave room within the daemon's 2s cancellation grace for other cleanup and transport.
-          1000,
-        );
-      } catch (error) {
-        cleanupError = error instanceof Error ? error.message : String(error);
+    if (restoreFocus) {
+      if (deps.registerCleanup) {
+        // Navigation to an attachment may delay this reply until Chrome creates
+        // the download. Restore immediately, but let the transfer own the wait:
+        // a cleanup timeout here would retire its listeners before that event.
+        void releaseFocus().catch(() => {});
+      } else {
+        try {
+          await cleanupFocus();
+        } catch (error) {
+          cleanupError = error instanceof Error ? error.message : String(error);
+        }
       }
     }
   }

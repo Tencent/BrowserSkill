@@ -1,4 +1,6 @@
 import { isAgentControlledTab, type SessionManager } from "./manager";
+import { watchPopupFocus } from "./popup-focus";
+import { beginTabCreation } from "./tab-creation";
 
 const INPUT_WINDOW_MS = 100;
 const CANDIDATE_BUDGET_MS = 500;
@@ -17,6 +19,9 @@ export async function withTaskPopups<T>(
   const task = params.session_id ? manager.get(params.session_id) : null;
   const targets = globalThis.chrome?.webNavigation?.onCreatedNavigationTarget;
   if (!task || !targets || signal?.aborted) return run(() => {});
+  const focus = watchPopupFocus(task.agentWindowId);
+  let observedPopup = false;
+  let finishCreation: (() => void) | undefined;
   let active = true;
   let listening = false;
   let observationEnded = Promise.resolve();
@@ -69,6 +74,7 @@ export async function withTaskPopups<T>(
           return false;
         // Non-destructive authority: stop releases this tab and preserves its window.
         (task.observedTabs ??= new Set()).add(tabId);
+        observedPopup = true;
         onClaimed?.(tabId, tab.windowId);
         return true;
       })
@@ -96,6 +102,8 @@ export async function withTaskPopups<T>(
   const inputSent = (tabId: number) => {
     if (!live()) return;
     if (params.tab_id !== undefined && tabId !== params.tab_id) return;
+    focus.arm();
+    finishCreation ??= beginTabCreation(task);
     candidates.set(tabId, Promise.resolve(true));
     if (!listening) {
       observationEnded = new Promise<void>((resolve) => {
@@ -118,10 +126,12 @@ export async function withTaskPopups<T>(
     await observationEnded;
     stopListening();
     await settleOrExpire(Promise.all(candidates.values()), signal);
+    await focus.finish(() => observedPopup && live());
     active = false;
     signal?.removeEventListener("abort", abort);
     chrome.tabs.onRemoved?.removeListener(invalidate);
     chrome.tabs.onDetached?.removeListener(invalidate);
+    finishCreation?.();
   }
 }
 

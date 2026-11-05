@@ -158,10 +158,11 @@ describe("handleWheel", () => {
     let finish: ((value: object) => void) | undefined;
     f.hooks.reply = (call) => {
       if (call.method === "Emulation.setFocusEmulationEnabled") return {};
-      if (call.method === "Page.captureScreenshot") return { data: "frame" };
       if (call.method === "Runtime.evaluate") {
         if (call.params?.expression === "document.visibilityState")
           return { result: { value: "hidden" } };
+        if (!f.calls.some((c) => c.params?.type === "mouseWheel"))
+          return { result: { value: true } };
         return new Promise<object>((resolve) => {
           finish = resolve;
         });
@@ -194,10 +195,11 @@ describe("handleWheel", () => {
       const f = await fixture();
       f.hooks.reply = (call) => {
         if (call.method === "Emulation.setFocusEmulationEnabled") return {};
-        if (call.method === "Page.captureScreenshot") return { data: "frame" };
         if (call.method === "Runtime.evaluate") {
           if (call.params?.expression === "document.visibilityState")
             return { result: { value: "hidden" } };
+          if (!f.calls.some((c) => c.params?.type === "mouseWheel"))
+            return { result: { value: true } };
           return new Promise(() => {});
         }
       };

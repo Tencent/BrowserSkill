@@ -177,3 +177,8 @@ export function screencasts(cdp: CdpRunner): ScreencastCoordinator {
   }
   return coordinator;
 }
+
+/** Request wrappers must reuse the driver's stream and cleanup ownership. */
+export function shareScreencasts(owner: CdpRunner, wrapper: CdpRunner): void {
+  coordinators.set(wrapper, screencasts(owner));
+}

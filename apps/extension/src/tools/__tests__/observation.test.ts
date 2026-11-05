@@ -1426,7 +1426,13 @@ describe("buildFrameVomScene", () => {
     expect(rendered).toContain('      @e2 textbox "验证码"');
   });
 
-  it("marks current-password autocomplete as sensitive even for text inputs", () => {
+  it.each([
+    "current-password",
+    "section-login current-password",
+    " one-time-code ",
+    "billing cc-number",
+    "CURRENT-PASSWORD webauthn",
+  ])("marks autocomplete %j as sensitive even for text inputs", (autocomplete) => {
     const axNodes: CdpAxNode[] = [
       {
         nodeId: "1",
@@ -1447,7 +1453,7 @@ describe("buildFrameVomScene", () => {
             type: "text",
             name: "password_hint",
             placeholder: "Enter password recovery email",
-            autocomplete: "current-password",
+            autocomplete,
           },
           rect: { x: 10, y: 10, w: 200, h: 30 },
           paintOrder: 1,
@@ -3037,6 +3043,57 @@ describe("handleSnapshot", () => {
     await handleSnapshot(sm, { session_id: "aa11" }, deps);
     expect(ctx.refStore.resolve("e9")).toBeNull();
     expect(ctx.refStore.resolve("e1")).toBeNull();
+  });
+
+  it("keeps negotiated DOM refs across reordering, supplementary reads and document replacement", async () => {
+    const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
+    const ctx = await sm.start("aa11");
+    ctx.refStore.enableStableRefs();
+    const root: CdpAxNode = {
+      nodeId: "1",
+      role: { type: "role", value: "RootWebArea" },
+      backendDOMNodeId: 100,
+      childIds: ["2", "3"],
+    };
+    const button = (id: number, name: string): CdpAxNode => ({
+      nodeId: String(id),
+      parentId: "1",
+      role: { type: "role", value: "button" },
+      name: { type: "computedString", value: name },
+      backendDOMNodeId: id * 100,
+    });
+    const save = button(2, "Save");
+    const cancel = button(3, "Cancel");
+    const nodes = [root, save, cancel];
+    const deps = makeDeps(nodes);
+    const read = async () => {
+      const result = await handleSnapshot(sm, { session_id: "aa11" }, deps);
+      if ("code" in result) throw new Error(JSON.stringify(result));
+      return result;
+    };
+    const first = await read();
+    expect(first.text).toContain('@e1 button "Save"');
+    expect(first.text).toContain('@e2 button "Cancel"');
+
+    root.childIds = ["4", "3", "2"];
+    nodes.splice(1, 2, button(4, "Inserted"), cancel, save);
+    const reordered = await read();
+    expect(reordered.text).toContain('@e3 button "Inserted"');
+    expect(reordered.text).toContain('@e1 button "Save"');
+    expect(reordered.text).toContain('@e2 button "Cancel"');
+    expect(reordered.observation_id).not.toBe(first.observation_id);
+
+    root.childIds = ["3"];
+    nodes.splice(1, 3, cancel);
+    expect((await read()).text).not.toContain('button "Save"');
+    expect(ctx.refStore.resolve("e1")).toBe(200);
+    expect(ctx.refStore.resolve("e3")).toBe(400);
+
+    ctx.refStore.invalidateTab(4);
+    const navigated = await read();
+    expect(ctx.refStore.resolve("e1")).toBeNull();
+    expect(ctx.refStore.resolve("e2")).toBeNull();
+    expect(navigated.text).toContain('@e4 button "Cancel"');
   });
 
   it("keeps the previous RefStore when cancellation lands during DOM capture", async () => {

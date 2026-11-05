@@ -8,6 +8,17 @@ use crate::ErrorCode;
 /// Protocol 1.3 makes browser Automation settings authoritative.
 pub const INTERACTION_POLICY_PROTOCOL: &str = "1.3";
 
+/// Protocol 1.4 supports explicitly requested incognito Agent Windows.
+pub const INCOGNITO_SESSION_PROTOCOL: &str = "1.4";
+
+pub fn supports_incognito_sessions(protocol: &str) -> bool {
+    crate::system::compare_protocol(protocol, "2.0") == Some(std::cmp::Ordering::Less)
+        && matches!(
+            crate::system::compare_protocol(protocol, INCOGNITO_SESSION_PROTOCOL),
+            Some(std::cmp::Ordering::Equal | std::cmp::Ordering::Greater)
+        )
+}
+
 /// Stay within protocol major 1, matching handshake compatibility. A future
 /// major version must explicitly establish support rather than inherit it.
 pub fn supports_interaction_policy(protocol: &str) -> bool {
@@ -41,6 +52,12 @@ pub struct InteractionPolicy {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct SessionStartParams {
     pub session_id: String,
+    /// Caller-supplied display labels, not an authenticated identity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub controller: Option<ControllerInfo>,
+    /// Use Chrome's shared incognito browsing session. Omitted means normal.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub incognito: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub browser_instance_id: Option<String>,
     /// Optional Agent Window outer width in CSS pixels (100..=7680).
@@ -50,13 +67,57 @@ pub struct SessionStartParams {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub height: Option<u32>,
     /// Whether the new Agent Window should take focus. Omitted means the
-    /// extension's default (`true`) for compatibility with older clients.
+    /// extension's default (`false`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub focused: Option<bool>,
     /// Legacy input, ignored. Browser settings decide both prompts for every session.
     #[serde(default, skip_serializing)]
     #[schemars(skip)]
     pub unattended: bool,
+}
+
+/// Display identity of the agent controlling a session. Never an authorization claim.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ControllerInfo {
+    #[schemars(length(min = 1, max = 80))]
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(length(min = 1, max = 120))]
+    pub project: Option<String>,
+    /// Optional six-digit hex color. Omitted colors are derived from the session ID.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(regex(pattern = r"^#[0-9a-fA-F]{6}$"))]
+    pub color: Option<String>,
+}
+
+impl ControllerInfo {
+    /// Check display bounds at ingress, before creating any browser resources.
+    pub fn validate(&self) -> Result<(), String> {
+        for (field, value, max) in [
+            ("name", Some(self.name.as_str()), 80),
+            ("project", self.project.as_deref(), 120),
+        ] {
+            if let Some(value) = value
+                && (value
+                    .trim_matches(|c: char| c.is_whitespace() || c == '\u{feff}')
+                    .is_empty()
+                    || value.chars().count() > max
+                    || value.chars().any(char::is_control))
+            {
+                return Err(format!(
+                    "controller.{field} must contain 1..={max} characters without control characters"
+                ));
+            }
+        }
+        if let Some(color) = &self.color
+            && (color.len() != 7
+                || !color.starts_with('#')
+                || !color.as_bytes()[1..].iter().all(u8::is_ascii_hexdigit))
+        {
+            return Err("controller.color must be a six-digit hex color (#RRGGBB)".into());
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -91,6 +152,83 @@ pub struct SessionStopResult {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn controller_is_optional_and_round_trips_in_session_start() {
+        let legacy: SessionStartParams =
+            serde_json::from_value(json!({"session_id":"abcd"})).unwrap();
+        assert_eq!(legacy.controller, None);
+        assert!(
+            serde_json::to_value(legacy)
+                .unwrap()
+                .get("controller")
+                .is_none()
+        );
+        let wire = json!({"session_id":"abcd", "controller": {
+            "name":"Codex", "project":"知识库", "color":"#2563eb"
+        }});
+        let params: SessionStartParams = serde_json::from_value(wire.clone()).unwrap();
+        params.controller.as_ref().unwrap().validate().unwrap();
+        assert_eq!(serde_json::to_value(params).unwrap(), wire);
+    }
+
+    #[test]
+    fn controller_validation_bounds_labels_and_colors() {
+        for value in [
+            json!({"name":""}),
+            json!({"name":"   "}),
+            json!({"name":"\u{feff}"}),
+            json!({"name":"a".repeat(81)}),
+            json!({"name":"Agent\nOther"}),
+            json!({"name":"Agent", "project":"x".repeat(121)}),
+            json!({"name":"Agent", "project":"\u{0085}"}),
+            json!({"name":"Agent", "color":"red"}),
+            json!({"name":"Agent", "color":"#fff"}),
+            json!({"name":"Agent", "color":"#12345g"}),
+        ] {
+            let info: ControllerInfo = serde_json::from_value(value).unwrap();
+            assert!(info.validate().is_err(), "{info:?}");
+        }
+        let unicode = ControllerInfo {
+            name: "🦀".repeat(80),
+            project: Some("项目".repeat(60)),
+            color: None,
+        };
+        unicode.validate().unwrap();
+    }
+
+    #[test]
+    fn incognito_is_opt_in_and_requires_protocol_1_4() {
+        let legacy: SessionStartParams =
+            serde_json::from_value(json!({"session_id":"aa11"})).unwrap();
+        assert!(!legacy.incognito);
+        for incognito in [false, true] {
+            let params: SessionStartParams = serde_json::from_value(json!({
+                "session_id":"aa11", "incognito":incognito,
+            }))
+            .unwrap();
+            assert_eq!(params.incognito, incognito);
+            let encoded = serde_json::to_value(params).unwrap();
+            assert_eq!(
+                encoded
+                    .get("incognito")
+                    .and_then(serde_json::Value::as_bool),
+                incognito.then_some(true)
+            );
+        }
+        assert!(
+            serde_json::from_value::<SessionStartParams>(
+                json!({"session_id":"aa11","incognito":null})
+            )
+            .is_err()
+        );
+        for protocol in ["1.0", "1.3", "2.0", "invalid"] {
+            assert!(!supports_incognito_sessions(protocol), "{protocol}");
+        }
+        for protocol in ["1.4", "1.5"] {
+            assert!(supports_incognito_sessions(protocol), "{protocol}");
+        }
+    }
 
     #[test]
     fn legacy_unattended_is_accepted_but_never_forwarded() {

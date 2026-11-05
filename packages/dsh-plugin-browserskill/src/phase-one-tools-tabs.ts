@@ -7,7 +7,7 @@ import type { ToolDeps } from "./tools";
 const TAB_ID_REQUIRED = {
   type: "integer",
   required: true,
-  description: "Chrome tab id returned by browser_tabs list or create.",
+  description: "Chrome tab id returned by bsk_tabs list or create.",
 } as const;
 
 interface RawTabInfo {
@@ -83,7 +83,7 @@ export function registerPhaseOneTabTools(
       },
       isConcurrencySafe: () => true,
       async execute(args, exec) {
-        const sessionId = registry.resolve(args.session, "browser_tabs(action=list)");
+        const sessionId = registry.resolve(args.session, "bsk_tabs(action=list)");
         const cmdArgs = ["tab", "list", "--session", sessionId];
         if (args.scope !== undefined) cmdArgs.push("--scope", args.scope);
         const reply = (await runtime.run(exec, cmdArgs, "tab list", sessionId)) as {
@@ -148,7 +148,7 @@ export function registerPhaseOneTabTools(
       },
       async execute(args, exec) {
         if (args.url !== undefined) requireNonEmpty(args.url, "url");
-        const sessionId = registry.resolve(args.session, "browser_tabs(action=create)");
+        const sessionId = registry.resolve(args.session, "bsk_tabs(action=create)");
         const cmdArgs = ["tab", "create", "--session", sessionId];
         if (args.url !== undefined) cmdArgs.push("--url", args.url);
         if (args.active === false) cmdArgs.push("--no-active");
@@ -202,7 +202,7 @@ export function registerPhaseOneTabTools(
         ],
       },
       async execute(args, exec) {
-        const sessionId = registry.resolve(args.session, "browser_tabs(action=close)");
+        const sessionId = registry.resolve(args.session, "bsk_tabs(action=close)");
         const reply = (await runtime.run(
           exec,
           ["tab", "close", String(args.tabId), "--session", sessionId],
@@ -249,7 +249,7 @@ export function registerPhaseOneTabTools(
         ],
       },
       async execute(args, exec) {
-        const sessionId = registry.resolve(args.session, "browser_tabs(action=select)");
+        const sessionId = registry.resolve(args.session, "bsk_tabs(action=select)");
         const reply = (await runtime.run(
           exec,
           ["tab", "select", String(args.tabId), "--session", sessionId],
@@ -278,7 +278,7 @@ export function registerPhaseOneTabTools(
       name: "tabs.borrow",
       description:
         "Move a user-window tab into the owned session's Agent Window for controlled interaction. " +
-        "Return it with browser_tabs action=return; stopping the session also auto-returns it.",
+        "Return it with bsk_tabs action=return; stopping the session also auto-returns it.",
       parameters: { tabId: TAB_ID_REQUIRED, session: SESSION_PARAM },
       output: {
         schema: {
@@ -302,7 +302,7 @@ export function registerPhaseOneTabTools(
         ],
       },
       async execute(args, exec) {
-        const sessionId = registry.resolve(args.session, "browser_tabs(action=borrow)");
+        const sessionId = registry.resolve(args.session, "bsk_tabs(action=borrow)");
         const reply = (await runtime.run(
           exec,
           ["tab", "borrow", String(args.tabId), "--session", sessionId],
@@ -365,7 +365,7 @@ export function registerPhaseOneTabTools(
         ],
       },
       async execute(args, exec) {
-        const sessionId = registry.resolve(args.session, "browser_tabs(action=return)");
+        const sessionId = registry.resolve(args.session, "bsk_tabs(action=return)");
         const reply = (await runtime.run(
           exec,
           ["tab", "return", String(args.tabId), "--session", sessionId],

@@ -21,6 +21,8 @@ pub enum MethodEffect {
 /// Namespaced method string (`system.handshake`, `tool.tab_list`, …).
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Method {
+    #[serde(rename = "tool.cooperate")]
+    ToolCooperate,
     #[serde(rename = "tool.video")]
     ToolVideo,
     /// Extension-only local history API; browser identity comes from the peer.
@@ -82,6 +84,8 @@ pub enum Method {
     ToolClick,
     #[serde(rename = "tool.hover")]
     ToolHover,
+    #[serde(rename = "tool.drag")]
+    ToolDrag,
     #[serde(rename = "tool.wheel")]
     ToolWheel,
     #[serde(rename = "tool.scroll_to")]
@@ -106,6 +110,8 @@ pub enum Method {
     ToolObserve,
     #[serde(rename = "tool.get_html")]
     ToolGetHtml,
+    #[serde(rename = "tool.extract")]
+    ToolExtract,
     #[serde(rename = "tool.screenshot")]
     ToolScreenshot,
     #[serde(rename = "tool.screenshot_full_page")]
@@ -122,6 +128,16 @@ pub enum Method {
     ToolNetwork,
     #[serde(rename = "tool.evaluate")]
     ToolEvaluate,
+    #[serde(rename = "tool.dialog_status")]
+    ToolDialogStatus,
+    #[serde(rename = "tool.dialog_accept")]
+    ToolDialogAccept,
+    #[serde(rename = "tool.dialog_dismiss")]
+    ToolDialogDismiss,
+    #[serde(rename = "tool.operation_await")]
+    ToolOperationAwait,
+    #[serde(rename = "tool.operation_cancel")]
+    ToolOperationCancel,
     #[serde(rename = "tool.wait_for_navigation")]
     ToolWaitForNavigation,
     #[serde(rename = "tool.wait_for_element")]
@@ -196,6 +212,7 @@ impl Method {
             | Method::ToolNavigateForward
             | Method::ToolReload
             | Method::ToolClick
+            | Method::ToolDrag
             | Method::ToolWheel
             | Method::ToolScrollTo
             | Method::ToolFocus
@@ -206,6 +223,7 @@ impl Method {
             | Method::ToolUpload
             | Method::ToolDownload
             | Method::ToolEvaluate
+            | Method::ToolDialogAccept
             // May navigate via optional `url` and changes Agent Window
             // chrome; gate behind pending-interrupt like other writes.
             | Method::ToolRecordStart => MethodEffect::BrowserMutation,
@@ -221,6 +239,7 @@ impl Method {
             Method::ToolTabList
             | Method::ToolSnapshot
             | Method::ToolGetHtml
+            | Method::ToolExtract
             | Method::ToolScreenshot
             | Method::ToolScreenshotRead
             | Method::ToolConsole
@@ -231,6 +250,10 @@ impl Method {
             | Method::ToolRequestHelp
             | Method::ToolRecordStop
             | Method::ToolRecordAwait => MethodEffect::PassiveRead,
+
+            Method::ToolDialogStatus | Method::ToolOperationAwait => MethodEffect::PassiveRead,
+            // Rejecting a modal / cancelling an operation must remain possible after stop.
+            Method::ToolDialogDismiss | Method::ToolOperationCancel => MethodEffect::ControlPlane,
 
             // Session lifecycle — not gated.
             Method::SessionStart
@@ -243,7 +266,8 @@ impl Method {
             | Method::ToolSessionStop => MethodEffect::ControlPlane,
 
             // System / control — not gated.
-            Method::ToolDebug
+            Method::ToolCooperate
+            | Method::ToolDebug
             | Method::ToolVideo
             | Method::AuditRequest
             | Method::SystemHandshake
@@ -396,6 +420,8 @@ mod tests {
         assert!(!Method::ToolHover.is_mutating());
         assert!(!Method::ToolObserve.is_mutating());
         assert!(!Method::ToolGetHtml.is_mutating());
+        assert_eq!(Method::ToolExtract.effect(), MethodEffect::PassiveRead);
+        assert!(!Method::ToolExtract.is_mutating());
         assert!(!Method::ToolScreenshot.is_mutating());
         assert!(!Method::ToolConsole.is_mutating());
         assert!(!Method::ToolNetwork.is_mutating());
@@ -464,6 +490,7 @@ mod tests {
         assert_eq!(Method::ToolHover.effect(), MethodEffect::TransientInput);
         assert_eq!(Method::ToolObserve.effect(), MethodEffect::TransientInput);
         assert_eq!(Method::ToolClick.effect(), MethodEffect::BrowserMutation);
+        assert_eq!(Method::ToolDrag.effect(), MethodEffect::BrowserMutation);
         assert_eq!(Method::ToolWheel.effect(), MethodEffect::BrowserMutation);
         assert_eq!(Method::ToolScrollTo.effect(), MethodEffect::BrowserMutation);
         assert_eq!(Method::ToolFocus.effect(), MethodEffect::BrowserMutation);

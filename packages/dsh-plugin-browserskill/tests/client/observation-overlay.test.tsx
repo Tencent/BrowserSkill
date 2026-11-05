@@ -576,22 +576,6 @@ describe("ObservationOverlay", () => {
     );
   });
 
-  it("greys out a dead session in the strip and skips it for focus", async () => {
-    const s1: SessionObservation = { sessionId: "s1", action: "idle", since: Date.now() - 20000 };
-    const s2: SessionObservation = { sessionId: "s2", action: "idle", since: Date.now() - 10000 };
-    const h = makeHarness([s1, s2]);
-    render(<ObservationOverlay store={h.store} />);
-    await screen.findByText(/s2 · idle/);
-    h.push([{ ...s1, dead: true, since: Date.now() }, s2]);
-    await waitFor(() =>
-      expect(
-        screen.getByRole("button", { name: "Pin session s1" }).closest("[data-state]"),
-      ).toHaveProperty("dataset", expect.objectContaining({ state: "dead" })),
-    );
-    // Dead sessions never take the stage.
-    expect(screen.getByText(/s2 · idle/)).toBeTruthy();
-  });
-
   it("interrupts a strip session directly on hover without focusing it", async () => {
     const s1: SessionObservation = {
       sessionId: "s1",

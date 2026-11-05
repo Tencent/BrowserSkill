@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { copyFile, mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import test from "node:test";
+import { pathToFileURL } from "node:url";
 
 import { runCommandTask } from "../lib/agent-runner.mjs";
 import { loadCaseManifests, validateCaseManifest } from "../lib/case-loader.mjs";
@@ -41,23 +42,26 @@ test("case manifests are discovered, ordered, and grouped into suites", () => {
       "diagnostics",
       "mobile-emulation",
       "generated-form",
+      "drag-interactions",
+      "fill-editor-roots",
       "oopif-scrollbars",
+      "range-selection",
       "snapshot-coordinates",
     ],
   );
   assert.deepEqual(repositorySummary(cases, fixtureRegistry).suites, {
     core: 6,
     matrix: 1,
-    regression: 2,
+    regression: 5,
   });
 });
 
 test("repository validation links every case to a fixture and valid workflow evidence", () => {
   assert.deepEqual(validateRepositoryCases(cases, fixtureRegistry), []);
   const summary = repositorySummary(cases, fixtureRegistry);
-  assert.equal(summary.cases, 9);
-  assert.equal(summary.fixtureModules, 10);
-  assert.equal(summary.fixtureRoutes, 18);
+  assert.equal(summary.cases, 12);
+  assert.equal(summary.fixtureModules, 13);
+  assert.equal(summary.fixtureRoutes, 21);
 });
 
 test("manifest validation rejects unknown operations and incomplete workflow steps", () => {
@@ -200,6 +204,52 @@ test("command adapter carries a run from process launch through oracle verificat
   });
 });
 
+test("command adapter keeps long run names valid for the event server", async () => {
+  await withServer(async (server, serverInfo) => {
+    const script = `
+      const [baseUrl, runId] = process.argv.slice(1);
+      const response = await fetch(baseUrl + "/api/events", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ runId, type: "completed" }),
+      });
+      if (response.status !== 202) process.exitCode = 1;
+    `;
+    const task = {
+      ...getTask("navigation-history", cases),
+      id: "long-case-name-".repeat(4),
+      siteAssertions: [{ label: "completion", type: "completed", minCount: 1 }],
+      responseAssertions: [],
+      adapterAssertions: [],
+    };
+    const options = {
+      server,
+      serverInfo,
+      task,
+      adapter: {
+        command: process.execPath,
+        args: ["--input-type=module", "-e", script, "{baseUrl}", "{runId}"],
+        variant: "long-variant-name-".repeat(4),
+      },
+      adapterName: "long-agent-name-".repeat(4),
+      configDirectory: process.cwd(),
+      iteration: 123,
+      locale: "en",
+      timeoutMs: 5_000,
+    };
+    const first = await runCommandTask(options);
+    const second = await runCommandTask(options);
+    for (const result of [first, second]) {
+      assert.equal(result.execution.exitCode, 0);
+      assert.match(result.runId, /^[A-Za-z0-9._-]{1,120}$/);
+      assert.match(result.runId, /-123-[a-f0-9]{8}$/);
+      assert.equal(result.verification.status, "passed");
+      assert.equal(result.eventCount, 1);
+    }
+    assert.notEqual(first.runId, second.runId);
+  });
+});
+
 test("report summary keeps partial verification distinct from full verification", () => {
   const rows = summarizeReports([
     {
@@ -228,11 +278,11 @@ test("report summary keeps partial verification distinct from full verification"
   assert.equal(rows[0].errors, 1);
 });
 
-test("coverage inventory contains all 28 operations and three manual lanes", () => {
+test("coverage inventory contains all 30 operations and three manual lanes", () => {
   const coverage = buildOperationCoverage(cases);
   const operations = coverage.map(({ operation }) => operation);
-  assert.equal(operations.length, 28);
-  assert.equal(new Set(operations).size, 28);
+  assert.equal(operations.length, 30);
+  assert.equal(new Set(operations).size, 30);
   assert.deepEqual(
     coverage.filter(({ directSmoke }) => !directSmoke).map(({ operation }) => operation),
     ["tabs.borrow", "tabs.return", "assist.request-help"],
@@ -240,6 +290,7 @@ test("coverage inventory contains all 28 operations and three manual lanes", () 
   assert.deepEqual(coverage.find(({ operation }) => operation === "interact.fill").smokeCases, [
     "form-controls",
     "generated-form",
+    "fill-editor-roots",
   ]);
 });
 
@@ -277,13 +328,41 @@ test("badcase scaffold creates a loadable, escaped, self-contained case", async 
   }
 });
 
+test("badcase scaffold escapes URL characters in relative fixture imports", async () => {
+  const temporaryRoot = await mkdtemp(join(tmpdir(), "browser-eval-import-"));
+  try {
+    const directoryNames = ["checkout#fragment", "checkout%20literal"];
+    if (process.platform !== "win32") directoryNames.push("checkout?query");
+    for (const directoryName of directoryNames) {
+      const helpers = join(temporaryRoot, directoryName, "lib");
+      await mkdir(helpers, { recursive: true });
+      for (const name of ["scaffold-case.mjs", "paths.mjs", "fixtures.mjs"]) {
+        await copyFile(new URL(`../lib/${name}`, import.meta.url), join(helpers, name));
+      }
+      const { scaffoldCase: scaffold } = await import(
+        pathToFileURL(join(helpers, "scaffold-case.mjs")).href
+      );
+      const result = await scaffold({
+        id: "escaped-import",
+        rootCasesDirectory: join(temporaryRoot, `cases-${directoryName}`),
+      });
+      const source = await readFile(result.files.fixture, "utf8");
+      assert.match(source, /from "\.\.\//);
+      const { default: fixture } = await import(pathToFileURL(result.files.fixture).href);
+      assert.match(fixture.render(), /CASE-ESCAPED_IMPORT/);
+    }
+  } finally {
+    await rm(temporaryRoot, { recursive: true, force: true });
+  }
+});
+
 test("CLI accepts pnpm separator and supports suite and tag filters", async () => {
   const cli = resolve("evals/browser/cli.mjs");
   const coverageResult = await runProcess(process.execPath, [cli, "--", "coverage", "--json"], {
     timeoutMs: 5_000,
   });
   assert.equal(coverageResult.exitCode, 0, coverageResult.stderr);
-  assert.equal(JSON.parse(coverageResult.stdout).length, 28);
+  assert.equal(JSON.parse(coverageResult.stdout).length, 30);
 
   const coreResult = await runProcess(
     process.execPath,

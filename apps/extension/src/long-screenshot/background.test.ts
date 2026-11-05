@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { attachLongScreenshot } from "./background";
 import { capturePage } from "./capture";
 import { captureManual } from "./manual";
+import { pruneScreenshots } from "./retention";
 import { removeTiledScreenshot, TileWriter } from "./tiles";
 import {
   type CaptureReply,
@@ -16,6 +17,7 @@ vi.mock("./source", () => ({
   openScreenshotSource: vi.fn(async () => ({ capture: vi.fn(), close: vi.fn() })),
 }));
 vi.mock("./manual", () => ({ captureManual: vi.fn() }));
+vi.mock("./retention", () => ({ pruneScreenshots: vi.fn(async () => {}) }));
 vi.mock("./tiles", () => ({
   TileWriter: vi.fn(
     class {
@@ -115,6 +117,7 @@ beforeEach(() => {
     );
   vi.mocked(TileWriter).mockClear();
   vi.mocked(removeTiledScreenshot).mockClear();
+  vi.mocked(pruneScreenshots).mockReset().mockResolvedValue(undefined);
   vi.mocked(captureManual)
     .mockReset()
     .mockImplementation(
@@ -139,6 +142,101 @@ describe("independent screenshot jobs", () => {
     width: 800,
     height: 2600,
   };
+
+  it("prunes on startup while protecting the restored result and open previews", async () => {
+    const { api, call } = setup(completed);
+    const [tab] = await api.tabs.query();
+    const pendingPreview = {
+      ...tab,
+      id: 9,
+      url: "about:blank",
+      pendingUrl: "chrome-extension://extension/long-screenshot.html?id=pending-preview",
+    };
+    api.tabs.query.mockResolvedValue([
+      tab,
+      { ...tab, id: 8, url: "chrome-extension://extension/long-screenshot.html?id=open-preview" },
+      pendingPreview,
+    ]);
+    await call("status");
+    const keep = vi.mocked(pruneScreenshots).mock.calls[0][0];
+    expect(await keep(completed.id)).toBe(true);
+    expect(await keep("open-preview")).toBe(true);
+    expect(await keep("pending-preview")).toBe(true);
+    expect(await keep("unused")).toBe(false);
+  });
+
+  it("prunes again when previews close, releasing their protection", async () => {
+    const { api, call } = setup();
+    const [tab] = await api.tabs.query();
+    api.tabs.query.mockResolvedValue([
+      tab,
+      { ...tab, id: 8, url: "chrome-extension://extension/long-screenshot.html?id=preview" },
+    ]);
+    await call("status");
+    expect(await vi.mocked(pruneScreenshots).mock.calls.at(-1)![0]("preview")).toBe(true);
+    api.tabs.query.mockResolvedValue([tab]);
+    api.tabs.onRemoved.emit(8);
+    await vi.waitFor(() => expect(pruneScreenshots).toHaveBeenCalledTimes(2));
+    expect(await vi.mocked(pruneScreenshots).mock.calls.at(-1)![0]("preview")).toBe(false);
+  });
+
+  it("protects previews opened during a sweep and their loaded document during pending navigation", async () => {
+    const { api, call } = setup();
+    await call("status");
+    const keep = vi.mocked(pruneScreenshots).mock.calls[0][0];
+    expect(await keep("late-preview")).toBe(false);
+    const [tab] = await api.tabs.query();
+    const preview = {
+      ...tab,
+      id: 8,
+      url: "chrome-extension://extension/long-screenshot.html?id=late-preview",
+      pendingUrl: "https://example.com/next",
+    };
+    api.tabs.query.mockResolvedValue([tab, preview]);
+    expect(await keep("late-preview")).toBe(true);
+    api.tabs.query.mockResolvedValue([tab]);
+    api.tabs.onUpdated.emit(8, { url: "https://example.com/next" });
+    await vi.waitFor(() => expect(pruneScreenshots).toHaveBeenCalledTimes(2));
+    expect(await vi.mocked(pruneScreenshots).mock.calls.at(-1)![0]("late-preview")).toBe(false);
+  });
+
+  it("protects a preview still being created while a new capture replaces the result", async () => {
+    const { api, call } = setup(completed);
+    await call("status");
+    let created!: () => void;
+    api.tabs.create.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          created = () => resolve({});
+        }),
+    );
+    const opening = call("preview", { id: completed.id });
+    await vi.waitFor(() => expect(api.tabs.create).toHaveBeenCalledOnce());
+    await call("start");
+    await vi.waitFor(() => expect(capturePage).toHaveBeenCalledOnce());
+    const keep = vi.mocked(pruneScreenshots).mock.calls.at(-1)![0];
+    expect(await keep(completed.id)).toBe(true);
+    created();
+    await opening;
+    expect(await keep(completed.id)).toBe(false);
+    resolveCapture({ width: 0, height: 0, blob: new Blob() });
+    await vi.waitFor(async () =>
+      expect(await call("status")).toMatchObject({ state: { phase: "error" } }),
+    );
+  });
+
+  it("keeps captures usable when retention storage temporarily fails", async () => {
+    vi.mocked(pruneScreenshots).mockRejectedValue(new Error("Storage busy"));
+    vi.mocked(capturePage).mockImplementationOnce(async (deps) => {
+      await deps.write({} as ImageBitmap, 800, 0, 0, 512);
+      return { width: 800, height: 512 };
+    });
+    const { api, call } = setup();
+    await call("start");
+    await vi.waitFor(() => expect(api.tabs.create).toHaveBeenCalledOnce());
+    expect(await call("status")).toMatchObject({ state: { phase: "complete" } });
+    expect(pruneScreenshots).toHaveBeenCalledTimes(3);
+  });
 
   it("retains the result when the popup reopens on its source page or its own preview", async () => {
     const { api, call } = setup(completed);

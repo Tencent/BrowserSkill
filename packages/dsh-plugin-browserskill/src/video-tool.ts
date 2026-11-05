@@ -123,7 +123,7 @@ export function registerVideoTool(
             throw new Error("tabId must be a nonnegative integer");
           const requestId = args.requestId ?? randomUUID();
           if (!/^[a-zA-Z0-9_-]{8,80}$/.test(requestId)) throw new Error("invalid video requestId");
-          const session = deps.registry.resolve(args.session, "browser_inspect(action=video)");
+          const session = deps.registry.resolve(args.session, "bsk_inspect(action=video)");
           const tracked = deps.registry.list().find((value) => value.sessionId === session);
           const browser = tracked?.browserInstanceId;
           if (!browser) throw new Error("The owned session has no browser instance identity");

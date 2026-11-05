@@ -20,7 +20,7 @@ export function ProfileInstructions({
     name: JSON.stringify(label || t("popup.profile.unnamed")),
     instanceId,
     command: `bsk session start --browser ${instanceId} --json`,
-    toolCall: `browser_session({ action: "start", browser: ${JSON.stringify(instanceId)} })`,
+    toolCall: `bsk_session({ action: "start", browser: ${JSON.stringify(instanceId)} })`,
   });
 
   useEffect(() => {

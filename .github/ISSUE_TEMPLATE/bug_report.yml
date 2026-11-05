@@ -1,0 +1,140 @@
+name: Bug Report
+description: Report an issue or unexpected behavior in BrowserSkill.
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report an issue!
+        Please fill out this form as completely as possible to help us diagnose and resolve the issue quickly.
+  - type: checkboxes
+    id: prerequisites
+    attributes:
+      label: Prerequisites
+      description: Please verify the following before submitting.
+      options:
+        - label: I have searched existing [open and closed issues](https://github.com/Tencent/BrowserSkill/issues) to ensure this is not a duplicate.
+          required: true
+        - label: I have verified that all sensitive data (passwords, tokens, API keys, private URLs, personal info) have been redacted from logs and snippets.
+          required: true
+  - type: input
+    id: version
+    attributes:
+      label: BrowserSkill Version or Commit
+      description: Output of `bsk --version` or git commit SHA (e.g. `0.3.3`, `d9a78ae`).
+      placeholder: e.g., 0.3.3
+    validations:
+      required: true
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating System
+      description: The OS where `bsk` is running.
+      options:
+        - Windows 11
+        - Windows 10
+        - macOS (Apple Silicon)
+        - macOS (Intel)
+        - Linux (x86_64)
+        - Linux (aarch64)
+        - Other (specify in description)
+    validations:
+      required: true
+  - type: input
+    id: arch
+    attributes:
+      label: OS Details and Architecture
+      description: Exact OS release and CPU architecture (e.g., Ubuntu 24.04 x86_64, Windows 11 23H2 x64, macOS 15.0 arm64).
+      placeholder: e.g., Windows 11 Build 22631 x64
+    validations:
+      required: true
+  - type: dropdown
+    id: install_method
+    attributes:
+      label: Installation Method
+      description: How was BrowserSkill installed?
+      options:
+        - Official installer script (AGENT_INSTALL.md)
+        - Prebuilt binary release from GitHub Releases
+        - Built from source (`cargo build`)
+        - Package manager (e.g. brew / winget / npm / other)
+        - Other
+    validations:
+      required: true
+  - type: input
+    id: browser_version
+    attributes:
+      label: Browser and Browser Extension Version
+      description: Which browser (Chrome, Edge, Chromium, etc.) and BrowserSkill extension version (if applicable).
+      placeholder: e.g., Google Chrome 130.0.6723.70 / Extension 0.3.3
+    validations:
+      required: true
+  - type: textarea
+    id: command
+    attributes:
+      label: Exact Command or API Call
+      description: The exact command, script invocation, or MCP/RPC tool call that triggered the problem.
+      placeholder: e.g., bsk click @e2 --session s1
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Minimal Reproduction Steps
+      description: Step-by-step instructions to reproduce the bug.
+      placeholder: |
+        1. Start daemon with `bsk daemon start`
+        2. Navigate to `https://example.com`
+        3. Run `bsk observe --session s1`
+        4. See error ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected Behavior
+      description: What did you expect to happen?
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual Behavior
+      description: What actually happened?
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant Logs / Diagnostics Output
+      description: Relevant output from `bsk logs`, `bsk doctor`, or stderr/stdout (optional, if available; ensure secrets and credentials are fully redacted).
+      placeholder: Paste any relevant logs, terminal output, or diagnostic info here (leave blank or enter "N/A" if not applicable).
+      render: shell
+    validations:
+      required: false
+  - type: dropdown
+    id: regression
+    attributes:
+      label: Is this a regression?
+      description: Did this behavior work in a previous version of BrowserSkill?
+      options:
+        - "No / Not sure"
+        - "Yes (please specify the last known working version below)"
+    validations:
+      required: true
+  - type: input
+    id: regression_version
+    attributes:
+      label: Last Known Working Version (if regression)
+      placeholder: e.g., 0.3.2
+    validations:
+      required: false
+  - type: textarea
+    id: additional_context
+    attributes:
+      label: Additional Context
+      description: Any other context, screenshots, or configuration files (e.g. `daemon.json`, `~/.bsk/`).
+    validations:
+      required: false

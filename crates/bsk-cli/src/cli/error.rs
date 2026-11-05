@@ -9,11 +9,15 @@
 //! Exit codes are documented in [`super::render_error`] and
 //! design §3.1.
 
+use std::ffi::OsString;
 use std::io::Write;
+use std::path::Path;
 use std::process::ExitCode;
 
 use anyhow::Error;
 use bsk_protocol::{ErrorCode, RpcError};
+use clap::CommandFactory;
+use clap::error::{ContextKind, ContextValue, ErrorKind};
 use serde::Serialize;
 use thiserror::Error;
 
@@ -107,6 +111,134 @@ pub enum Format {
     Json,
 }
 
+/// Guidance for `--session` / `--tab-id` given before the subcommand.
+const MISPLACED_COMMAND_OPTION_HINT: &str = "--session and --tab-id are command-specific \
+     options; place them after a subcommand that supports them, e.g. `bsk click --session <id> \
+     --tab-id <tab> --selector '#submit'`; run `bsk <cmd> --help` for supported options";
+
+/// Render clap failures for `args` (the full argv clap parsed) using the
+/// CLI's error contract, while preserving successful help/version output
+/// and the existing usage-error exit code.
+pub fn render_parse_error(err: clap::Error, args: &[OsString]) -> ExitCode {
+    if !err.use_stderr() {
+        let _ = err.print();
+        return ExitCode::SUCCESS;
+    }
+
+    // Parsing can fail before clap reaches --json. Only standalone flags
+    // before `--` select the error format; values stay literal.
+    let json = args
+        .iter()
+        .skip(1)
+        .take_while(|arg| *arg != "--")
+        .any(|arg| arg == "--json");
+    let format = if json { Format::Json } else { Format::Human };
+    let (err, hint) = match misplaced_command_option_error(&err, args) {
+        Some(rebuilt) => (rebuilt, Some(MISPLACED_COMMAND_OPTION_HINT)),
+        None => (err, None),
+    };
+    let exit = exit_code_for(ErrorCode::InvalidParams);
+    match format {
+        Format::Json => {
+            let rendered = err.to_string();
+            let error = CliError::Rpc {
+                code: ErrorCode::InvalidParams,
+                message: parse_error_summary(&err, &rendered),
+                data: Some(serde_json::json!({
+                    "reason": "cli_parse_error",
+                    "details": rendered.trim_end(),
+                })),
+                source: None,
+            };
+            let hint = hint.or_else(|| render_error::hint_for_code(ErrorCode::InvalidParams));
+            println!("{}", json_error_string(&error, exit, hint));
+        }
+        Format::Human => {
+            let _ = err.print();
+        }
+    }
+    ExitCode::from(exit)
+}
+
+/// A misplaced command option can resemble an unrelated global flag. Rebuild
+/// that suggestion using the actual command scope, while retaining useful local
+/// corrections such as daemon's `--session-idle`.
+fn misplaced_command_option_error(err: &clap::Error, args: &[OsString]) -> Option<clap::Error> {
+    let arg = match (err.kind(), err.get(ContextKind::InvalidArg)) {
+        (ErrorKind::UnknownArgument, Some(ContextValue::String(arg)))
+            if matches!(arg.as_str(), "--session" | "--tab-id") =>
+        {
+            arg.clone()
+        }
+        _ => return None,
+    };
+    let mut cmd = super::Cli::command();
+    // Like clap, name the binary after argv[0], e.g. `bsk.exe` on Windows.
+    if let Some(name) = args
+        .first()
+        .and_then(|arg0| Path::new(arg0).file_name())
+        .and_then(|name| name.to_str())
+    {
+        cmd = cmd.bin_name(name);
+    }
+    let partial = cmd.clone().ignore_errors(true);
+    cmd.build();
+    if let Some(ContextValue::String(suggested)) = err.get(ContextKind::SuggestedArg)
+        && !cmd.get_arguments().any(|option| {
+            option
+                .get_long()
+                .is_some_and(|long| suggested.strip_prefix("--") == Some(long))
+        })
+    {
+        // This is a command-local correction, not a misleading global suggestion.
+        return None;
+    }
+    let invalid_index = args.iter().position(|value| {
+        value
+            .to_str()
+            .is_some_and(|value| value.split('=').next() == Some(arg.as_str()))
+    })?;
+    // Let clap distinguish subcommands from option values; a context named "tab"
+    // must not change the usage scope. Only parse the already accepted prefix.
+    let matches = partial.try_get_matches_from(&args[..invalid_index]).ok()?;
+    let mut matches = &matches;
+    let mut scope = &mut cmd;
+    while let Some((name, nested)) = matches.subcommand() {
+        scope = scope.find_subcommand_mut(name)?;
+        matches = nested;
+    }
+    let usage = scope.render_usage();
+    let mut rebuilt = clap::Error::new(ErrorKind::UnknownArgument).with_cmd(&cmd);
+    rebuilt.insert(ContextKind::InvalidArg, ContextValue::String(arg));
+    rebuilt.insert(
+        ContextKind::Suggested,
+        ContextValue::StyledStrs(vec![MISPLACED_COMMAND_OPTION_HINT.into()]),
+    );
+    rebuilt.insert(ContextKind::Usage, ContextValue::StyledStr(usage));
+    Some(rebuilt)
+}
+
+/// One-line `message` for JSON callers. clap renders `error: <summary>`
+/// followed by blank-line separated tips and usage, which stay in
+/// `data.details`. The summary can wrap, e.g. a missing required argument
+/// or the possible values for an invalid one, so join its lines.
+fn parse_error_summary(err: &clap::Error, rendered: &str) -> String {
+    // A bare subcommand group renders its help page instead of an error.
+    if err.kind() == ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand {
+        return "a subcommand is required but one was not provided".into();
+    }
+    let rendered = rendered.strip_prefix("error: ").unwrap_or(rendered);
+    rendered
+        .split("\n\n")
+        .next()
+        .unwrap_or_default()
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 /// `--json` error shape. Top-level fields (review I2 fix to round-1):
 /// `{ code, message, hint, exit_code, data }`. The previous shape
 /// nested everything under an `"error"` key — design §10 / §3.1
@@ -115,10 +247,10 @@ pub enum Format {
 /// indirection is a leftover from M3.5 that was easy to script
 /// against.
 #[derive(Debug, Serialize)]
-struct JsonError {
+struct JsonError<'a> {
     code: Option<ErrorCode>,
     message: String,
-    hint: Option<&'static str>,
+    hint: Option<&'a str>,
     exit_code: u8,
     #[serde(skip_serializing_if = "Option::is_none")]
     data: Option<serde_json::Value>,
@@ -127,7 +259,7 @@ struct JsonError {
 /// Build the `--json` payload for a [`CliError`]. Pulled out of
 /// [`render`] so the JSON shape can be unit-tested without capturing
 /// stdout (review I2 fix to round-1).
-fn json_error_string(err: &CliError, exit: u8, hint: Option<&'static str>) -> String {
+fn json_error_string(err: &CliError, exit: u8, hint: Option<&str>) -> String {
     let body = JsonError {
         code: err.code(),
         message: err.to_string(),
@@ -137,6 +269,21 @@ fn json_error_string(err: &CliError, exit: u8, hint: Option<&'static str>) -> St
     };
     serde_json::to_string_pretty(&body)
         .unwrap_or_else(|_| "{\"message\":\"failed to encode error\"}".into())
+}
+
+/// The same `{ code, message, hint, exit_code, data }` payload `--json`
+/// prints, for callers that return errors as data (the MCP server).
+pub(crate) fn json_error_value(err: &CliError) -> serde_json::Value {
+    let render_info = render_info_for(err);
+    let body = JsonError {
+        code: err.code(),
+        message: err.to_string(),
+        hint: hint_for(err, render_info.as_ref()),
+        exit_code: err.exit_code(),
+        data: err.data().cloned(),
+    };
+    serde_json::to_value(&body)
+        .unwrap_or_else(|_| serde_json::json!({"message": "failed to encode error"}))
 }
 
 /// Renderer extension hook for commands that want to inject a
@@ -173,17 +320,24 @@ fn render_info_for(err: &CliError) -> Option<render_error::RenderInfo> {
 
 /// Hint line for human / JSON rendering, including the local-failure
 /// fallback when there is no daemon [`ErrorCode`].
-fn hint_for(
-    err: &CliError,
+fn hint_for<'a>(
+    err: &'a CliError,
     render_info: Option<&render_error::RenderInfo>,
-) -> Option<&'static str> {
-    render_info
-        .and_then(|info| info.hint)
-        .or_else(|| match err {
-            CliError::Local(error) => recovery_hint(error).or(Some(
-                "is the daemon running? try `bsk daemon start` or `bsk status`",
-            )),
-            _ => None,
+) -> Option<&'a str> {
+    err.data()
+        .and_then(|data| data.get("recovery"))
+        .and_then(serde_json::Value::as_str)
+        .or_else(|| {
+            render_info
+                .and_then(|info| info.hint)
+                .or_else(|| match err {
+                    CliError::Local(error) => recovery_hint(error)
+                        .or_else(|| super::update::source_recovery_hint(error))
+                        .or(Some(
+                            "is the daemon running? try `bsk daemon start` or `bsk status`",
+                        )),
+                    _ => None,
+                })
         })
 }
 
@@ -246,6 +400,15 @@ pub fn render_with_extras(
             // whatever the wrapped error renders for transport /
             // setup failures that have no `ErrorCode`.
             let _ = writeln!(out, "error: {summary}");
+            if err.code() == Some(ErrorCode::DialogPending)
+                && let Some(data) = err.data()
+            {
+                let _ = writeln!(
+                    out,
+                    "{}",
+                    serde_json::to_string_pretty(data).unwrap_or_default()
+                );
+            }
             if let Some(extras) = extras
                 && let Err(e) = extras.write_extras(&mut out)
             {
@@ -442,6 +605,19 @@ mod tests {
                 DaemonStartFailure::IndependentStartFailed,
                 "use `bsk daemon start --foreground` in a persistent host task",
             ),
+            (
+                DaemonStartFailure::BreakawayUnverified,
+                "check access to the bsk executable",
+            ),
+            (
+                DaemonStartFailure::ProcessCreationDenied,
+                "check access to the bsk executable",
+            ),
+            (
+                DaemonStartFailure::PartialBreakaway,
+                "use `bsk daemon start --foreground` in a persistent host task",
+            ),
+            (DaemonStartFailure::ResumeFailed, "retry `bsk daemon start`"),
         ] {
             let error = anyhow::Error::new(std::io::Error::new(
                 std::io::ErrorKind::PermissionDenied,
@@ -608,5 +784,26 @@ mod tests {
         .unwrap();
         assert_eq!(json["message"], message);
         assert_eq!(json["data"]["effect_state"], "unknown");
+    }
+    #[test]
+    fn action_recovery_overrides_the_generic_permission_hint() {
+        let error = CliError::from_rpc(bsk_protocol::RpcError {
+            code: ErrorCode::PermissionDenied,
+            message: "Expected price $12; found $15".into(),
+            data: Some(serde_json::json!({
+                "reason": "precondition_failed", "phase": "preflight", "effect_state": "none",
+                "target": "#price", "field": "text", "expected": "$12", "actual": "$15",
+                "recovery": "Read the changed price and decide whether to continue."
+            })),
+        });
+        let hint = hint_for(&error, render_info_for(&error).as_ref());
+        assert_eq!(
+            hint,
+            Some("Read the changed price and decide whether to continue.")
+        );
+        let rendered: serde_json::Value =
+            serde_json::from_str(&json_error_string(&error, 1, hint)).unwrap();
+        assert_eq!(rendered["data"]["expected"], "$12");
+        assert_eq!(rendered["data"]["effect_state"], "none");
     }
 }

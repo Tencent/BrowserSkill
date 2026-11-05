@@ -28,6 +28,7 @@ export async function withClickOverlay<T>(
   deps: ClickOverlayDeps,
   click: (beforePress: () => Promise<RpcError | null>) => Promise<T>,
   alwaysBypass = false,
+  inputBudgetMs = 1_000,
 ): Promise<T | RpcError> {
   const send = deps.sendInputPassthrough ?? sendInputPassthrough;
   let bypass = false;
@@ -56,8 +57,8 @@ export async function withClickOverlay<T>(
   const unregisterCleanup = deps.registerClickCleanup?.(cleanup);
   let passthroughExpiresAt = Infinity;
   const expired = () => Date.now() >= passthroughExpiresAt;
-  // Reserve one second for input delivery; completed clicks still use the full lease.
-  const pressDeadlineReached = () => Date.now() >= passthroughExpiresAt - 1_000;
+  // Reserve enough lease for the gesture; slow delivery still reports an unknown outcome.
+  const pressDeadlineReached = () => Date.now() >= passthroughExpiresAt - inputBudgetMs;
   const notReady = () =>
     rpcError(
       "cdp_failed",

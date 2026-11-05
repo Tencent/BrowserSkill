@@ -1,7 +1,7 @@
 # Video recording
 
 When the user asks to record a task, control recording yourself through
-`browser_inspect` with `action: "video"`. The user does not need to race to the
+`bsk_inspect` with `action: "video"`. The user does not need to race to the
 extension's Start button. Record only when requested. Video is separate from
 semantic interaction recording, which remains unsupported by these tools.
 
@@ -22,13 +22,13 @@ semantic interaction recording, which remains unsupported by these tools.
    `state`, `completeness`, `stop_reason` and `error`, then report the result.
 
 ```text
-browser_session({ action: "start" })
-browser_inspect({ action: "video", videoAction: "start", session: "<sessionId>", durationMs: 60000, quality: "standard" })
+bsk_session({ action: "start" })
+bsk_inspect({ action: "video", videoAction: "start", session: "<sessionId>", durationMs: 60000, quality: "standard" })
 // Retain recording.recording_id. Navigate and perform the task only after start succeeds.
-browser_inspect({ action: "video", videoAction: "status", recordingId: "<recording_id>" })
+bsk_inspect({ action: "video", videoAction: "status", recordingId: "<recording_id>" })
 // Wait for navigation and the expected final page state before stopping.
-browser_inspect({ action: "video", videoAction: "stop", recordingId: "<recording_id>" })
-browser_session({ action: "stop", session: "<sessionId>" })
+bsk_inspect({ action: "video", videoAction: "stop", recordingId: "<recording_id>" })
+bsk_session({ action: "stop", session: "<sessionId>" })
 ```
 
 The result is a silent H.264 MP4. Default limit: 60 seconds; range: 1 second to
@@ -49,7 +49,7 @@ start recording or keep its result for preview.
 Export through the tool only when the user specifies a destination; ask if needed:
 
 ```text
-browser_inspect({ action: "video", videoAction: "save", recordingId: "<recording_id>", output: "<explicit-path.mp4>" })
+bsk_inspect({ action: "video", videoAction: "save", recordingId: "<recording_id>", output: "<explicit-path.mp4>" })
 ```
 
 Tool export writes on the harness host, which may be remote. The extension's Save

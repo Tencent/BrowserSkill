@@ -7,7 +7,7 @@
  *
  * Strict ownership boundary (the bsk daemon may be shared with other agents,
  * terminals, or dsh instances): the registry ONLY ever holds sessions created
- * by this plugin's browser_session start action. Tools cannot see or act on any
+ * by this plugin's bsk_session start action. Tools cannot see or act on any
  * other session — an explicit `session` argument naming a foreign id is an
  * error, the list tool shows owned sessions only, and stop/unload cleanup
  * can never touch a session this plugin did not create.
@@ -53,7 +53,7 @@ export class SessionRegistry {
     if (this.sessions.size + this.pendingStarts + recoveredPending >= this.maxSessions) {
       throw new Error(
         `session limit reached (${this.maxSessions} concurrent sessions); ` +
-          "stop one with browser_session action=stop before starting another",
+          "stop one with bsk_session action=stop before starting another",
       );
     }
     this.pendingStarts += 1;
@@ -80,7 +80,7 @@ export class SessionRegistry {
     if (!this.sessions.has(session.sessionId) && this.sessions.size >= this.maxSessions) {
       throw new Error(
         `session limit reached (${this.maxSessions} concurrent sessions); ` +
-          "stop one with browser_session action=stop before starting another",
+          "stop one with bsk_session action=stop before starting another",
       );
     }
     this.sessions.set(session.sessionId, { ...session, owned: true, state });
@@ -202,7 +202,7 @@ export class SessionRegistry {
   private foreignError(sessionId: string, toolName: string): Error {
     return new Error(
       `${toolName}: session "${sessionId}" does not belong to this plugin — only sessions ` +
-        "created by browser_session action=start are visible and operable here",
+        "created by bsk_session action=start are visible and operable here",
     );
   }
 
@@ -221,7 +221,7 @@ export class SessionRegistry {
     const current = this.current();
     if (current === undefined) {
       throw new Error(
-        `${toolName} needs a session but none is active — use browser_session action=start`,
+        `${toolName} needs a session but none is active — use bsk_session action=start`,
       );
     }
     this.touch(current);
@@ -240,11 +240,10 @@ export class SessionRegistry {
         : (this.current() ?? this.list().at(-1)?.sessionId);
     if (candidate === undefined) {
       throw new Error(
-        "browser_session action=stop needs a session but none is active — use action=start first",
+        "bsk_session action=stop needs a session but none is active — use action=start first",
       );
     }
-    if (!this.isOwned(candidate))
-      throw this.foreignError(candidate, "browser_session(action=stop)");
+    if (!this.isOwned(candidate)) throw this.foreignError(candidate, "bsk_session(action=stop)");
     return candidate;
   }
 }

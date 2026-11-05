@@ -1,4 +1,28 @@
 {
+  "cooperation": {
+    "yielding": "Agent が待機中",
+    "label": "ブラウザーの共同操作",
+    "ready": "Agent は準備完了",
+    "acting": "Agent が操作中",
+    "human": "あなたが操作中",
+    "editing": "編集中",
+    "held": "Agent は一時停止中",
+    "syncing": "Agent が同期中",
+    "unavailable": "ページを確認できません",
+    "hold": "Agent を一時停止",
+    "resume": "Agent に戻す",
+    "stop": "タスクを停止",
+    "hints": {
+      "ready": "いつでも操作を引き継げます",
+      "acting": "いつでも操作を引き継げます",
+      "human": "操作が止まると Agent が再開します",
+      "editing": "完了したら Agent に戻してください",
+      "held": "準備ができたら Agent に戻してください",
+      "yielding": "現在の操作が終わるのを待っています",
+      "syncing": "最新のページ状態を確認しています",
+      "unavailable": "Agent は操作を停止しています"
+    }
+  },
   "popup": {
     "interactionCompatibilityWarning": "古いバージョンのデーモンに接続しています(プロトコル v{{cliProtocol}})。自動化設定を完全にサポートするには、CLI とデーモンを更新してください。",
     "brandCategory": "ブラウザ自動化",
@@ -133,9 +157,27 @@
       "promptTemplate": "このタスクでは、ブラウザ {{name}}（インスタンス ID: {{instanceId}}）の BrowserSkill を使用してください。このタスクの新しいセッションを開始するたびに、利用するインターフェースに応じて次のいずれかを実行してください:\nCLI: {{command}}\nDeepSeek Harness: {{toolCall}}\nDeepSeek Harness ではツールを呼び出し、CLI コマンドを別途実行しないでください。\nこのインスタンスが未接続の場合は、作業を止め、このプロファイルの再接続を私に依頼してください。--browser / browser を省略したり、別のインスタンスに切り替えたりしないでください。",
       "title": "現在のブラウザ",
       "unnamed": "名前のないブラウザ"
+    },
+    "daemonUpgrade": {
+      "title": "bsk ブラウザーサービスの更新が必要です",
+      "description": "実行中の bsk サービス（daemon）が古いため、更新するまでブラウザータスクを実行できません。",
+      "runCommand": "このサービスを実行しているコンピューターでターミナルを開き、次を実行してください：",
+      "restart": "更新後もこの通知が表示される場合は、サービスを起動したターミナルまたはホストアプリから再起動してください。",
+      "copyButton": "コマンドをコピー",
+      "copyFailed": "コピーできませんでした。上のコマンドを手動でコピーしてください。",
+      "details": "技術的な詳細",
+      "protocols": "サービスのプロトコル：{{actual}}。拡張機能には {{required}} 以降の互換プロトコルが必要です。",
+      "version": "現在実行中：bsk {{version}}",
+      "notificationMessage": "ブラウザータスクを実行できません。ブラウザーサービスを実行しているコンピューターで bsk を更新し、実行中のサービスも更新されていることを確認してください。",
+      "toolbarTitle": "BrowserSkill：bsk ブラウザーサービスの更新が必要です",
+      "notificationButton": "更新手順を見る"
     }
   },
   "controlOverlay": {
+    "project": "プロジェクト",
+    "session": "セッション",
+    "holdController": "{{name}} を一時停止",
+    "resumeController": "{{name}} を再開",
     "status": "エージェントが操作中",
     "interrupt": "中断",
     "interrupting": "中断中…"
@@ -291,6 +333,7 @@
       "press": "キーを押す",
       "select": "オプションを選択",
       "hover": "ホバー",
+      "drag": "ドラッグ",
       "focus": "フォーカス",
       "blur": "フォーカス解除",
       "scroll": "スクロール",

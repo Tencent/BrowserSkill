@@ -20,6 +20,7 @@ use futures_util::{SinkExt, StreamExt};
 use semver::Version;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Notify;
+use tokio::sync::Semaphore;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio_tungstenite::WebSocketStream;
@@ -93,6 +94,7 @@ pub struct WsHandle {
 
 async fn run_accept_loop(state: Arc<DaemonState>, listener: TcpListener, shutdown: Arc<Notify>) {
     info!(addr = %listener.local_addr().unwrap(), "ws server listening");
+    let connections = Arc::new(Semaphore::new(MAX_LOCAL_WS_CONNECTIONS));
     loop {
         tokio::select! {
             _ = shutdown.notified() => {
@@ -102,8 +104,18 @@ async fn run_accept_loop(state: Arc<DaemonState>, listener: TcpListener, shutdow
             accept = listener.accept() => {
                 match accept {
                     Ok((stream, peer)) => {
+                        // Each spawned task pins a slot until the connection
+                        // closes — including a client that never completes
+                        // the HTTP Upgrade. At the cap, close the fresh TCP
+                        // stream right away instead of queueing another
+                        // task (#421).
+                        let Ok(permit) = Arc::clone(&connections).try_acquire_owned() else {
+                            warn!(%peer, "ws connection limit reached; rejecting connection");
+                            continue;
+                        };
                         let state = Arc::clone(&state);
                         tokio::spawn(async move {
+                            let _permit = permit;
                             if let Err(err) = handle_connection(state, stream, peer).await {
                                 warn!(error = %err, "ws connection error");
                             }
@@ -117,6 +129,18 @@ async fn run_accept_loop(state: Arc<DaemonState>, listener: TcpListener, shutdow
         }
     }
 }
+
+/// Cap on concurrently alive local WebSocket connections, TCP accept
+/// through full close. Each one holds a tokio task and a socket FD; a
+/// local client that keeps opening connections must not exhaust them
+/// (#421). The extension and concurrent CLI clients need only a handful.
+const MAX_LOCAL_WS_CONNECTIONS: usize = 64;
+
+/// Bound on the HTTP Upgrade phase: a client that opens a TCP connection
+/// but stalls before finishing the upgrade must release its task and FD
+/// like any other dead connection (#421). Aligned with the post-upgrade
+/// first-frame timeout below.
+const WS_UPGRADE_TIMEOUT: Duration = Duration::from_secs(5);
 
 async fn handle_connection(
     state: Arc<DaemonState>,
@@ -152,10 +176,23 @@ async fn handle_connection(
         Ok(resp)
     };
 
-    let ws = match tokio_tungstenite::accept_hdr_async(stream, callback).await {
-        Ok(ws) => ws,
-        Err(err) => {
+    let ws = match tokio::time::timeout(
+        WS_UPGRADE_TIMEOUT,
+        tokio_tungstenite::accept_hdr_async(stream, callback),
+    )
+    .await
+    {
+        Ok(Ok(ws)) => ws,
+        Ok(Err(err)) => {
             debug!(?peer, %err, "ws handshake rejected");
+            return Ok(());
+        }
+        Err(_) => {
+            debug!(
+                ?peer,
+                timeout_secs = WS_UPGRADE_TIMEOUT.as_secs(),
+                "ws upgrade timed out; dropping connection"
+            );
             return Ok(());
         }
     };
@@ -316,12 +353,11 @@ pub(super) async fn drive_connection<S: tokio::io::AsyncRead + tokio::io::AsyncW
     // them before replacing the browser registration; otherwise an old WS
     // cleanup racing with this handshake can preserve rows that no longer
     // have an Agent Window on the extension side.
-    for session in state.sessions.purge_browser(&browser_id) {
-        state.tool_queues.remove(&session.id);
-        state.session_interrupts.drop_session(&session.id);
-        state.transfers.release_session(&session.id.0);
-        debug!(session = %session.id, "purged stale session before browser reconnect");
-    }
+    state.purge_sessions_of_browser(
+        &browser_id,
+        crate::rpc_reason::BROWSER_DISCONNECTED,
+        "purged stale session before browser reconnect",
+    );
     let (tx, mut rx) = mpsc::unbounded_channel::<Frame>();
     let generation = super::browsers::next_browser_generation();
     let connected_at_ms = std::time::SystemTime::now()
@@ -453,12 +489,11 @@ pub(super) async fn drive_connection<S: tokio::io::AsyncRead + tokio::io::AsyncW
         .is_some()
     {
         info!(id = %browser_id, generation, "browser disconnected");
-        for s in state.sessions.purge_browser(&browser_id) {
-            state.tool_queues.remove(&s.id);
-            state.session_interrupts.drop_session(&s.id);
-            state.transfers.release_session(&s.id.0);
-            debug!(session = %s.id, "purged session on browser disconnect");
-        }
+        state.purge_sessions_of_browser(
+            &browser_id,
+            crate::rpc_reason::BROWSER_DISCONNECTED,
+            "purged session on browser disconnect",
+        );
     } else {
         info!(
             id = %browser_id,
@@ -486,12 +521,44 @@ async fn handle_inbound_text(state: &Arc<DaemonState>, client: &Arc<BrowserClien
         }
         Frame::Event(ev) => match ev.event {
             bsk_protocol::EventKind::AuditContext => state.audit.context(&client.id.0, &ev.payload),
+            bsk_protocol::EventKind::DialogChanged => {
+                if let Some(sid) = ev.payload["session_id"].as_str()
+                    && state
+                        .sessions
+                        .get(&super::sessions::SessionId(sid.into()))
+                        .is_some_and(|s| s.browser_id == client.id)
+                {
+                    state.dialog_operations.dialog_changed(&ev.payload);
+                    if let Some(id) = ev.payload["operation_id"].as_str()
+                        && let Some(operation) = state.dialog_operations.get(sid, id)
+                        && let Some(inflight) = state.tool_inflight.get(&operation.cli_rpc_id)
+                    {
+                        inflight
+                            .dialog_pending
+                            .send_replace(ev.payload["dialog"].is_object());
+                    }
+                }
+            }
             bsk_protocol::EventKind::SystemHeartbeat => {
                 // `touch()` already ran for this frame in the read loop;
                 // additionally opt this browser in to liveness reaping now
                 // that we know it speaks the heartbeat.
                 client.mark_heartbeat_seen();
                 debug!(id = %client.id, "heartbeat");
+            }
+            bsk_protocol::EventKind::SessionActivity => {
+                #[derive(serde::Deserialize)]
+                struct Activity {
+                    session_id: String,
+                    idle_protected: bool,
+                }
+                if let Ok(activity) = serde_json::from_value::<Activity>(ev.payload) {
+                    state.sessions.update_activity(
+                        &super::sessions::SessionId(activity.session_id),
+                        &client.id,
+                        activity.idle_protected,
+                    );
+                }
             }
             bsk_protocol::EventKind::SessionInteractionChanged => {
                 #[derive(serde::Deserialize)]
@@ -509,6 +576,9 @@ async fn handle_inbound_text(state: &Arc<DaemonState>, client: &Arc<BrowserClien
             }
             bsk_protocol::EventKind::SessionWindowClosed => {
                 handle_session_window_closed(state, &client.id, &ev.payload);
+            }
+            bsk_protocol::EventKind::SessionEnded => {
+                handle_session_ended(state, &client.id, &ev.payload);
             }
             bsk_protocol::EventKind::SessionUserInterrupt => {
                 handle_session_user_interrupt(state, &client.id, &ev.payload);
@@ -630,13 +700,7 @@ fn handle_session_window_closed(
         );
         return;
     }
-    if super::sessions::forget_session(
-        &state.sessions,
-        &state.tool_queues,
-        &state.session_interrupts,
-        &session_id,
-    ) {
-        state.transfers.release_session(&session_id.0);
+    if forget_browser_session(state, &session_id, crate::rpc_reason::SESSION_WINDOW_CLOSED) {
         info!(session = %session_id, "session removed: user closed Agent Window");
     } else {
         debug!(session = %session_id, "session.window_closed for unknown session id");
@@ -649,6 +713,79 @@ fn handle_session_window_closed(
             message = %failure.message,
             "borrowed tab could not be returned before Agent Window closed"
         );
+    }
+}
+
+/// Logical termination is independent of whether the browser window stays open.
+fn forget_browser_session(
+    state: &Arc<DaemonState>,
+    session_id: &super::sessions::SessionId,
+    reason: &'static str,
+) -> bool {
+    let removed = super::sessions::forget_session(
+        &state.sessions,
+        &state.tool_queues,
+        &state.session_interrupts,
+        session_id,
+        Some(reason),
+    );
+    if removed {
+        state.transfers.release_session(&session_id.0);
+        state.dialog_operations.remove_session(&session_id.0);
+    }
+    removed
+}
+
+fn handle_session_ended(state: &Arc<DaemonState>, sender: &BrowserId, payload: &serde_json::Value) {
+    #[derive(serde::Deserialize)]
+    struct Ended {
+        session_id: String,
+        reason: String,
+        tab_id: u64,
+    }
+    let Ok(ended) = serde_json::from_value::<Ended>(payload.clone()) else {
+        warn!("invalid session.ended payload");
+        return;
+    };
+    if ended.session_id.is_empty()
+        || ended.reason != crate::rpc_reason::SESSION_USER_MOVED_TAB
+        || ended.tab_id == 0
+    {
+        warn!("invalid session.ended reason or resource identity");
+        return;
+    }
+    let sid = super::sessions::SessionId(ended.session_id);
+    let Some(session) = state.sessions.get(&sid) else {
+        // Duplicates and late events must not cancel work for an unverified id.
+        debug!(session = %sid, "session.ended for unknown session id");
+        return;
+    };
+    if session.browser_id != *sender {
+        warn!(session = %sid, %sender, "ignoring session.ended from a browser that does not own this session");
+        return;
+    }
+
+    // Record the terminal cause on queued and forwarded calls before dropping
+    // the queue. This is not the resumable, one-shot user-interrupt marker.
+    cancel_session_tools(state, &sid, super::inflight::CancelReason::UserMovedTab);
+    if forget_browser_session(state, &sid, crate::rpc_reason::SESSION_USER_MOVED_TAB) {
+        info!(session = %sid, tab_id = ended.tab_id, "session ended: user moved a controlled tab");
+    }
+}
+
+fn cancel_session_tools(
+    state: &Arc<DaemonState>,
+    sid: &super::sessions::SessionId,
+    reason: super::inflight::CancelReason,
+) {
+    let snapshots = state.tool_inflight.cancel_session_with_reason(sid, reason);
+    for snap in snapshots {
+        if let (Some(browser_id), Some(ws_rpc_id)) = (snap.browser_id, snap.ws_rpc_id)
+            && let Err(err) =
+                super::cancel_forward::forward_cancel_to_browser(state, &browser_id, &ws_rpc_id)
+        {
+            warn!(%browser_id, %ws_rpc_id, %err, "failed to forward session cancellation to extension");
+        }
     }
 }
 
@@ -907,8 +1044,302 @@ mod session_user_interrupt_tests {
         );
     }
 
+    fn user_moved_tab_payload(sid: &SessionId) -> serde_json::Value {
+        serde_json::json!({ "session_id": sid.0, "reason": "user_moved_tab", "tab_id": 42 })
+    }
+
+    #[tokio::test]
+    async fn session_ended_cancels_running_and_queued_tools_and_retains_reason() {
+        use crate::daemon::browsers::{Liveness, next_browser_generation};
+        use crate::daemon::inflight::PromoteOutcome;
+        use bsk_protocol::{ErrorCode, Method};
+        use std::sync::Mutex;
+
+        let state = test_only_daemon_state();
+        let owner = BrowserId("owner-browser".into());
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let browser = Arc::new(BrowserClient {
+            id: owner.clone(),
+            browser_name: "test".into(),
+            browser_version: "1".into(),
+            extension_version: "1".into(),
+            extension_protocol_version: "1".into(),
+            label: "test".into(),
+            sink: BrowserSink { tx },
+            pending: Mutex::new(Pending::default()),
+            generation: next_browser_generation(),
+            connected_at_ms: 0,
+            version_skew: false,
+            liveness: Liveness::default(),
+        });
+        state.browsers.insert(Arc::clone(&browser));
+        let sid = state.sessions.reserve_id(owner.clone(), 8, || 0).unwrap();
+        state.tool_queues.spawn(sid.clone());
+        let running = state
+            .tool_inflight
+            .register("running".into(), sid.clone())
+            .unwrap();
+        let queued = state
+            .tool_inflight
+            .register("queued".into(), sid.clone())
+            .unwrap();
+        let unrelated = state
+            .tool_inflight
+            .register("other".into(), SessionId("other".into()))
+            .unwrap();
+        let queues = Arc::clone(&state.tool_queues);
+        let current_sid = sid.clone();
+        let current_entry = running.entry();
+        let command = tokio::spawn(async move {
+            queues
+                .dispatch(
+                    &current_sid,
+                    Method::ToolTabList,
+                    serde_json::json!({ "session_id": current_sid.0 }),
+                    Duration::from_secs(5),
+                    Some(current_entry),
+                )
+                .await
+        });
+        let Frame::Request(request) = tokio::time::timeout(Duration::from_secs(1), rx.recv())
+            .await
+            .unwrap()
+            .unwrap()
+        else {
+            panic!("tool request expected");
+        };
+        assert_eq!(request.method, Method::ToolTabList);
+
+        handle_session_ended(&state, &owner, &user_moved_tab_payload(&sid));
+        assert_eq!(
+            running.entry().cancel_reason(),
+            Some(CancelReason::UserMovedTab)
+        );
+        assert_eq!(
+            queued.entry().cancel_reason(),
+            Some(CancelReason::UserMovedTab)
+        );
+        assert!(!unrelated.entry().is_cancelled());
+        assert_eq!(
+            queued
+                .entry()
+                .promote_to_forwarded_with(owner.clone(), "never".into(), || panic!(
+                    "queued work must not reach Chrome"
+                )),
+            PromoteOutcome::Cancelled
+        );
+        assert!(state.sessions.get(&sid).is_none());
+        assert!(!state.tool_queues.is_accepting(&sid));
+        assert!(!state.session_interrupts.try_consume(&sid));
+        let ended = state.sessions.end_info(&sid).unwrap();
+        assert_eq!(ended.reason, crate::rpc_reason::SESSION_USER_MOVED_TAB);
+
+        let Frame::Request(cancel) = rx.recv().await.unwrap() else {
+            panic!("cancel expected")
+        };
+        assert_eq!(cancel.method, Method::Cancel);
+        assert_eq!(cancel.params.unwrap()["rpc_id"], request.id);
+        browser.pending.lock().unwrap().resolve(ResponseFrame {
+            id: request.id,
+            body: ResponseBody::Err(RpcError {
+                code: ErrorCode::Cancelled,
+                message: "stopped".into(),
+                data: None,
+            }),
+        });
+        let error = command.await.unwrap().unwrap_err().into_rpc();
+        assert_eq!(error.code, ErrorCode::UserAborted);
+        assert_eq!(
+            error.data.unwrap()["reason"],
+            crate::rpc_reason::SESSION_USER_MOVED_TAB
+        );
+
+        let later = state
+            .tool_queues
+            .dispatch(
+                &sid,
+                Method::ToolTabList,
+                serde_json::json!({ "session_id": sid.0 }),
+                Duration::from_secs(1),
+                None,
+            )
+            .await
+            .unwrap_err()
+            .into_rpc();
+        assert_eq!(later.code, ErrorCode::NotFound);
+        assert_eq!(
+            later.data.unwrap()["reason"],
+            crate::rpc_reason::SESSION_USER_MOVED_TAB
+        );
+        handle_session_ended(&state, &owner, &user_moved_tab_payload(&sid));
+        assert_eq!(
+            state.sessions.end_info(&sid).unwrap().ended_unix_ms,
+            ended.ended_unix_ms
+        );
+        assert!(state.sessions.get(&sid).is_none());
+    }
+
+    #[test]
+    fn session_ended_rejects_foreign_browser_and_invalid_payloads() {
+        let state = test_only_daemon_state();
+        let owner = BrowserId("owner-browser".into());
+        let sid = state.sessions.reserve_id(owner.clone(), 8, || 0).unwrap();
+        let guard = state
+            .tool_inflight
+            .register("pending".into(), sid.clone())
+            .unwrap();
+        handle_session_ended(
+            &state,
+            &BrowserId("foreign".into()),
+            &user_moved_tab_payload(&sid),
+        );
+        for payload in [
+            serde_json::json!({ "session_id": sid.0, "reason": "unknown", "tab_id": 42 }),
+            serde_json::json!({ "session_id": sid.0, "reason": "user_moved_tab", "tab_id": 0 }),
+            serde_json::json!({ "session_id": sid.0, "reason": "user_moved_tab" }),
+        ] {
+            handle_session_ended(&state, &owner, &payload);
+        }
+        assert!(state.sessions.get(&sid).is_some());
+        assert!(state.sessions.end_info(&sid).is_none());
+        assert!(!guard.entry().is_cancelled());
+        assert!(!state.session_interrupts.try_consume(&sid));
+    }
+
+    #[test]
+    fn session_ended_does_not_cancel_an_unknown_session() {
+        let state = test_only_daemon_state();
+        let sid = SessionId("unknown".into());
+        let guard = state
+            .tool_inflight
+            .register("pending".into(), sid.clone())
+            .unwrap();
+        handle_session_ended(
+            &state,
+            &BrowserId("sender".into()),
+            &user_moved_tab_payload(&sid),
+        );
+        assert!(!guard.entry().is_cancelled());
+        assert!(state.sessions.end_info(&sid).is_none());
+    }
+
     fn test_only_daemon_state() -> std::sync::Arc<DaemonState> {
         use crate::daemon::start::DaemonConfig;
         std::sync::Arc::new(DaemonState::new(DaemonConfig::new(0)))
+    }
+}
+
+#[cfg(test)]
+mod ws_connection_limit_tests {
+    use super::*;
+    use crate::daemon::start::DaemonConfig;
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+    use tokio_tungstenite::tungstenite::http::header::{HeaderName, HeaderValue};
+
+    fn extension_origin_request(url: &str) -> impl IntoClientRequest {
+        let mut request = url.into_client_request().expect("valid ws url");
+        request.headers_mut().insert(
+            HeaderName::from_static("origin"),
+            // MV3 extension ids are 32 a-p characters (see origin_allowed).
+            HeaderValue::from_static("chrome-extension://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaap"),
+        );
+        request
+    }
+
+    async fn bind_test_server() -> (WsHandle, std::sync::Arc<DaemonState>) {
+        let state = std::sync::Arc::new(DaemonState::new(DaemonConfig::new(0)));
+        let handle = WsServer::new(std::sync::Arc::clone(&state))
+            .bind("127.0.0.1:0".parse().expect("loopback addr"))
+            .await
+            .expect("bound test ws server");
+        (handle, state)
+    }
+
+    #[tokio::test]
+    async fn ws_upgrade_times_out_for_silent_clients() {
+        let (handle, _state) = bind_test_server().await;
+
+        // A client that connects but never starts the HTTP Upgrade pins a
+        // task + socket only until WS_UPGRADE_TIMEOUT, then the daemon
+        // drops it (#421).
+        let mut silent = tokio::net::TcpStream::connect(handle.local_addr)
+            .await
+            .expect("tcp connected");
+        let dropped = tokio::time::timeout(WS_UPGRADE_TIMEOUT + Duration::from_secs(5), {
+            let read_half = &mut silent;
+            async move {
+                let mut buf = [0u8; 64];
+                loop {
+                    match tokio::io::AsyncReadExt::read(read_half, &mut buf).await {
+                        Ok(0) => break true,
+                        Ok(_) => continue,
+                        Err(_) => break true,
+                    }
+                }
+            }
+        })
+        .await
+        .expect("connection dropped within upgrade timeout + slack");
+        assert!(dropped, "silent TCP client must eventually be dropped");
+        handle.shutdown.notify_one();
+    }
+
+    #[tokio::test]
+    async fn ws_connection_limit_rejects_then_releases_slots() {
+        let (handle, _state) = bind_test_server().await;
+        let url = format!("ws://{}/", handle.local_addr);
+
+        // Fill every slot with an upgraded client that stays silent after
+        // connecting (each sits in the 5s first-frame wait, holding its
+        // slot). Opened concurrently so the whole batch upgrades well
+        // within that first-frame window.
+        let mut held = Vec::new();
+        let mut pending = Vec::new();
+        for _ in 0..MAX_LOCAL_WS_CONNECTIONS {
+            pending.push(tokio_tungstenite::connect_async(extension_origin_request(
+                &url,
+            )));
+        }
+        for result in futures_util::future::join_all(pending).await {
+            let (ws, _resp) = result.expect("upgraded within the connection cap");
+            held.push(ws);
+        }
+
+        // The next connection must be closed by the daemon right away.
+        let mut rejected = tokio::net::TcpStream::connect(handle.local_addr)
+            .await
+            .expect("tcp connected");
+        let mut buf = [0u8; 64];
+        let rejected_closed = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                match tokio::io::AsyncReadExt::read(&mut rejected, &mut buf).await {
+                    Ok(0) => break true,
+                    Ok(_) => continue,
+                    Err(_) => break true,
+                }
+            }
+        })
+        .await
+        .expect("over-cap connection closed promptly");
+        assert!(
+            rejected_closed,
+            "connection beyond the cap must be rejected"
+        );
+
+        // Release every slot; a fresh client must get in again.
+        for mut ws in held {
+            ws.close(None).await.ok();
+        }
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                match tokio_tungstenite::connect_async(extension_origin_request(&url)).await {
+                    Ok(_) => break,
+                    Err(_) => tokio::time::sleep(Duration::from_millis(100)).await,
+                }
+            }
+        })
+        .await
+        .expect("slot released after clients closed");
+        handle.shutdown.notify_one();
     }
 }

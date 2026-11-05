@@ -18,7 +18,7 @@ data-driven and discovered automatically. Adding a case does not require editing
 - Privacy-safe: user badcases must be reduced to synthetic DOM and anonymized data before commit.
 
 The corpus currently has six stable `core` cases and one seeded `matrix` case. The operation
-inventory contains 28 browser operations; that count is capability coverage, not the number of
+inventory contains 30 browser operations; that count is capability coverage, not the number of
 cases. Cases can grow independently and many cases may cover the same operation under different
 page conditions.
 
@@ -132,6 +132,15 @@ screenshot/console/network, click/hover/fill/select/press, tabs, resize/emulatio
 ownership/help operations. A step may `saveAs` its JSON result and later reference values such as
 `{child.tab_id}`. A step may set `evidence` for an adapter assertion. See existing manifests for
 complete examples.
+
+Control receipts are explicit workflow data. After the initial navigation, use
+`{ "action": "sync", "saveAs": "control" }` and pass
+`"contextId": "{control.context_id}"` on DOM actions. Reuse it across supplementary reads
+and completed DOM actions. Navigation, resize, emulation and displacement-only drags also need
+`"observationId": "{control.observation_id}"` from a fresh sync; synchronize again after
+navigation before acting in the new document. The runner does not insert syncs, replace receipts
+or replay rejected actions. These scripted cases check capabilities; the dedicated cooperation
+regressions separately check dynamic content and control hand-back.
 
 ## Adding a normal case
 
@@ -254,6 +263,17 @@ execution failures/errors, and `bsk session list --json` must be `[]` afterward.
 oracle or replace a stable marker merely to make a regression pass; behavior changes should update
 the case and expected baseline in the same reviewed change.
 
-The direct smoke lane covers 25 of 28 operations. `tabs.borrow`, `tabs.return`, and
+The direct smoke lane covers 27 of 30 operations. `tabs.borrow`, `tabs.return`, and
 `assist.request-help` stay manual because they require a real user tab or human interaction and
 would make the default suite destructive or non-deterministic.
+
+### Fill regression workflow options
+
+A `fill` step accepts any string value, including `""` for clearing. Set
+`"noClear": true` to append through `--no-clear`. To check a rejected fill, use
+`"expectError": { "code": "invalid_params", "reason": "target_not_fillable" }`.
+Both fields must match a structured CLI error; timeouts, malformed output, and
+unexpected success fail the workflow. These options are limited to fill steps.
+
+See the [editor-root regression](cases/regression/fill-editor-roots/README.md)
+for the shared fixtures, browser assertions, and CLI smoke command.

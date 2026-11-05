@@ -149,6 +149,19 @@ describe("handleEmulate", () => {
     expect(result).toMatchObject({ applied: { ...fullOverrides, width: 500, height: 900 } });
   });
 
+  it("keeps partial updates across request wrappers of the same debugger attachment", async () => {
+    const sm = await makeManager();
+    const deps = makeDeps();
+    deps.cdp.getAttachmentId = () => "live-attachment";
+    await handleEmulate(sm, { session_id: "aa11", overrides: fullOverrides }, deps);
+    const result = await handleEmulate(
+      sm,
+      { session_id: "aa11", overrides: { width: 500, height: 900 } },
+      { ...deps, cdp: new Proxy(deps.cdp, {}) },
+    );
+    expect(result).toMatchObject({ applied: { ...fullOverrides, width: 500, height: 900 } });
+  });
+
   it("applies viewport, UA and touch overrides to the active tab", async () => {
     const sm = await makeManager();
     const deps = makeDeps();

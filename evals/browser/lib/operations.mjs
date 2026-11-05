@@ -2,6 +2,7 @@ export const OPERATION_CATALOG = [
   { operation: "session.start" },
   { operation: "session.stop" },
   { operation: "session.list" },
+  { operation: "session.sync" },
   { operation: "page.navigate" },
   { operation: "page.back" },
   { operation: "page.forward" },
@@ -15,6 +16,7 @@ export const OPERATION_CATALOG = [
   { operation: "inspect.network" },
   { operation: "interact.click" },
   { operation: "interact.hover" },
+  { operation: "interact.drag" },
   { operation: "interact.fill" },
   { operation: "interact.select" },
   { operation: "interact.press" },
@@ -33,6 +35,7 @@ export const OPERATION_CATALOG = [
 ];
 
 export const WORKFLOW_ACTION_OPERATIONS = {
+  sync: "session.sync",
   navigate: "page.navigate",
   back: "page.back",
   forward: "page.forward",
@@ -46,6 +49,7 @@ export const WORKFLOW_ACTION_OPERATIONS = {
   network: "inspect.network",
   click: "interact.click",
   hover: "interact.hover",
+  drag: "interact.drag",
   fill: "interact.fill",
   select: "interact.select",
   press: "interact.press",

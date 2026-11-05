@@ -7,6 +7,7 @@
     "eval:browser": "node evals/browser/cli.mjs",
     "eval:browser:check": "node evals/browser/cli.mjs validate && node --test evals/browser/tests/*.test.mjs",
     "eval:browser:test": "node --test evals/browser/tests/*.test.mjs",
+    "eval:browser:cooperation": "node evals/browser/cases/regression/cooperation/run.mjs",
     "ext:build": "pnpm --filter @browser-skill/extension build",
     "ext:build:zip": "pnpm --filter @browser-skill/extension zip",
     "ext:dev": "pnpm --filter @browser-skill/extension dev",

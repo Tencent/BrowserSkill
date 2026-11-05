@@ -683,11 +683,11 @@ async fn dispatch_returns_session_not_found_for_unknown_session() {
         )
         .await;
     match result {
-        Err(DispatchError::SessionNotFound) => {}
+        Err(DispatchError::SessionNotFound { .. }) => {}
         other => panic!("expected SessionNotFound, got {other:?}"),
     }
     // And the surfaced RpcError carries `not_found`.
-    let rpc = DispatchError::SessionNotFound.into_rpc();
+    let rpc = DispatchError::SessionNotFound { ended: None }.into_rpc();
     assert_eq!(rpc.code, ErrorCode::NotFound);
     handle.shutdown().await;
 }
@@ -807,6 +807,512 @@ async fn native_input_effect_survives_deadline_and_user_cancellation() {
             }
         }
     }
+}
+
+async fn next_request(ws: &mut Ws) -> RequestFrame {
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if let Message::Text(text) = ws.next().await.unwrap().unwrap()
+                && let Frame::Request(request) = serde_json::from_str(&text).unwrap()
+            {
+                return request;
+            }
+        }
+    })
+    .await
+    .expect("expected a request from the daemon")
+}
+
+async fn end_session_after_tab_move(ws: &mut Ws, session_id: &str, rpc_id: &str) {
+    ws.send(Message::Text(
+        json!({
+            "event": "session.ended",
+            "payload": {"session_id": session_id, "reason": "user_moved_tab", "tab_id": 42},
+        })
+        .to_string(),
+    ))
+    .await
+    .unwrap();
+    let cancel = next_request(ws).await;
+    assert_eq!(cancel.method, Method::Cancel);
+    assert_eq!(cancel.params.unwrap()["rpc_id"], rpc_id);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_input_retains_terminal_reason_after_user_moves_tab() {
+    let (handle, _sock) = spawn_daemon().await;
+    let mut ws = connect_ext(handle.ws_addr()).await;
+    let _ = handshake_as_ext(&mut ws).await;
+    let state = handle.state();
+    for method in [Method::ToolClick, Method::ToolPress, Method::ToolWheel] {
+        for (deadline_first, cleanup_effect) in [
+            (false, Some("none")),
+            (false, Some("unknown")),
+            (false, None),
+            (true, Some("none")),
+            (true, None),
+        ] {
+            if deadline_first && method != Method::ToolClick {
+                continue;
+            }
+            let sid = state
+                .sessions
+                .reserve_id(
+                    bsk::daemon::browsers::BrowserId(TEST_EXT_ID.into()),
+                    8,
+                    || 0,
+                )
+                .unwrap();
+            state.tool_queues.spawn(sid.clone());
+            let guard = state
+                .tool_inflight
+                .register("input".into(), sid.clone())
+                .unwrap();
+            let task = {
+                let queues = Arc::clone(&state.tool_queues);
+                let sid = sid.clone();
+                let method = method.clone();
+                let inflight = guard.entry();
+                tokio::spawn(async move {
+                    queues
+                        .dispatch(
+                            &sid,
+                            method,
+                            json!({"session_id": sid.0, "tab_id": 42}),
+                            Duration::from_millis(if deadline_first { 20 } else { 5000 }),
+                            Some(inflight),
+                        )
+                        .await
+                })
+            };
+            let request = next_request(&mut ws).await;
+            assert_eq!(request.method, method);
+            if deadline_first {
+                let cancel = next_request(&mut ws).await;
+                assert_eq!(cancel.method, Method::Cancel);
+                assert_eq!(cancel.id, format!("deadline-cancel-{}", request.id));
+                assert_eq!(guard.entry().cancel_reason(), None);
+            }
+            end_session_after_tab_move(&mut ws, &sid.0, &request.id).await;
+            let mut data = json!({"effect_state": cleanup_effect.unwrap_or("unknown")});
+            if let Some(effect) = cleanup_effect {
+                data["cleanup_error"] = json!("focus cleanup failed");
+                if effect == "unknown" {
+                    data["reason"] = json!("input_outcome_unknown");
+                }
+                ws.send(Message::Text(
+                    serde_json::to_string(&ResponseFrame {
+                        id: request.id,
+                        body: ResponseBody::Err(bsk_protocol::RpcError {
+                            code: ErrorCode::Cancelled,
+                            message: "input aborted".into(),
+                            data: Some(data.clone()),
+                        }),
+                    })
+                    .unwrap(),
+                ))
+                .await
+                .unwrap();
+            }
+            let error = tokio::time::timeout(Duration::from_secs(4), task)
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap_err()
+                .into_rpc();
+            if deadline_first {
+                assert_eq!(error.code, ErrorCode::Timeout);
+                assert_eq!(
+                    error.message,
+                    if cleanup_effect.is_some() {
+                        "tool RPC timed out after 20ms"
+                    } else {
+                        "input timed out and extension cleanup could not be confirmed"
+                    }
+                );
+            } else if cleanup_effect.is_some() {
+                assert_eq!(error.code, ErrorCode::UserAborted);
+            } else {
+                assert_eq!(error.code, ErrorCode::Timeout);
+                assert_eq!(
+                    error.message,
+                    "cancelled tool did not finish cleanup within 2s"
+                );
+            }
+            data["reason"] = json!(bsk::rpc_reason::SESSION_USER_MOVED_TAB);
+            assert_eq!(
+                error.data,
+                Some(data),
+                "{method:?}, deadline_first={deadline_first}, cleanup_effect={cleanup_effect:?}"
+            );
+            let rendered = bsk::cli::render_error::info_for_error(error.code, error.data.as_ref());
+            assert!(
+                rendered
+                    .hint
+                    .unwrap()
+                    .contains("this session cannot resume")
+            );
+            assert_eq!(
+                state.sessions.end_info(&sid).unwrap().reason,
+                "user_moved_tab"
+            );
+        }
+    }
+    drop(ws);
+    handle.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn snapshot_outer_timeout_preserves_terminal_reason_without_extending_wait() {
+    let (handle, _sock) = spawn_daemon().await;
+    let mut ws = connect_ext(handle.ws_addr()).await;
+    let _ = handshake_as_ext(&mut ws).await;
+    let state = handle.state();
+    let browser_id = bsk::daemon::browsers::BrowserId(TEST_EXT_ID.into());
+    for end_session in [false, true] {
+        let sid = state
+            .sessions
+            .reserve_id(browser_id.clone(), 8, || 0)
+            .unwrap();
+        state.tool_queues.spawn(sid.clone());
+        let guard = state
+            .tool_inflight
+            .register("snapshot".into(), sid.clone())
+            .unwrap();
+        let task = {
+            let queues = Arc::clone(&state.tool_queues);
+            let sid = sid.clone();
+            let inflight = guard.entry();
+            tokio::spawn(async move {
+                queues
+                    .dispatch(
+                        &sid,
+                        Method::ToolSnapshot,
+                        json!({"session_id": sid.0, "tab_id": 42}),
+                        Duration::from_millis(1500),
+                        Some(inflight),
+                    )
+                    .await
+            })
+        };
+        let request = next_request(&mut ws).await;
+        assert_eq!(request.method, Method::ToolSnapshot);
+        // Cancellation at 1.2s pushes worker cleanup to ~3.2s, past the
+        // ordinary outer dispatch deadline of 1.5s + 1s.
+        tokio::time::sleep(Duration::from_millis(1200)).await;
+        assert!(
+            !task.is_finished(),
+            "cancel must precede the worker's deadline"
+        );
+        if end_session {
+            end_session_after_tab_move(&mut ws, &sid.0, &request.id).await;
+        } else {
+            ws.send(Message::Text(
+                json!({
+                    "event": "session.user_interrupt",
+                    "payload": {"session_id": sid.0},
+                })
+                .to_string(),
+            ))
+            .await
+            .unwrap();
+            let cancel = next_request(&mut ws).await;
+            assert_eq!(cancel.method, Method::Cancel);
+            assert_eq!(cancel.params.unwrap()["rpc_id"], request.id);
+        }
+        let error = tokio::time::timeout(Duration::from_secs(5), task)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap_err()
+            .into_rpc();
+        assert_eq!(error.code, ErrorCode::Timeout);
+        assert_eq!(error.message, "tool dispatch timed out");
+        // An outstanding extension waiter proves dispatch returned before
+        // worker cleanup. Resolve it now instead of using a narrow elapsed bound.
+        assert!(
+            state
+                .browsers
+                .get(&browser_id)
+                .unwrap()
+                .pending
+                .lock()
+                .unwrap()
+                .resolve(ResponseFrame {
+                    id: request.id,
+                    body: ResponseBody::Err(bsk_protocol::RpcError {
+                        code: ErrorCode::Cancelled,
+                        message: "snapshot cleanup completed".into(),
+                        data: None,
+                    }),
+                }),
+            "the outer timeout must not wait for the worker's cleanup deadline"
+        );
+        let rendered = bsk::cli::render_error::info_for_error(error.code, error.data.as_ref());
+        if end_session {
+            assert_eq!(
+                error.data,
+                Some(json!({"reason": bsk::rpc_reason::SESSION_USER_MOVED_TAB}))
+            );
+            assert!(
+                rendered
+                    .hint
+                    .unwrap()
+                    .contains("this session cannot resume")
+            );
+            assert_eq!(
+                state.sessions.end_info(&sid).unwrap().reason,
+                "user_moved_tab"
+            );
+            assert!(state.sessions.get(&sid).is_none());
+        } else {
+            assert!(error.data.is_none());
+            assert!(!rendered.hint.unwrap_or_default().contains("cannot resume"));
+            assert!(state.sessions.end_info(&sid).is_none());
+            assert!(state.sessions.get(&sid).is_some());
+        }
+    }
+    drop(ws);
+    handle.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn evaluate_cleanup_timeout_preserves_session_termination() {
+    let (handle, _sock) = spawn_daemon().await;
+    let mut ws = connect_ext(handle.ws_addr()).await;
+    let _ = handshake_as_ext(&mut ws).await;
+    let state = handle.state();
+    for (deadline_first, end_session) in [(true, false), (false, true), (true, true)] {
+        let sid = state
+            .sessions
+            .reserve_id(
+                bsk::daemon::browsers::BrowserId(TEST_EXT_ID.into()),
+                8,
+                || 0,
+            )
+            .unwrap();
+        state.tool_queues.spawn(sid.clone());
+        let guard = state
+            .tool_inflight
+            .register("evaluate".into(), sid.clone())
+            .unwrap();
+        let task = {
+            let queues = Arc::clone(&state.tool_queues);
+            let sid = sid.clone();
+            let inflight = guard.entry();
+            tokio::spawn(async move {
+                let timeout_ms = if deadline_first { 20 } else { 5000 };
+                queues
+                    .dispatch(
+                        &sid,
+                        Method::ToolEvaluate,
+                        json!({
+                            "session_id": sid.0,
+                            "tab_id": 42,
+                            "expression": "new Promise(() => {})",
+                            "await_promise": true,
+                            "timeout_ms": timeout_ms,
+                        }),
+                        Duration::from_millis(timeout_ms),
+                        Some(inflight),
+                    )
+                    .await
+            })
+        };
+        let request = next_request(&mut ws).await;
+        assert_eq!(request.method, Method::ToolEvaluate);
+        assert_eq!(
+            request.params.as_ref().unwrap()["expression"],
+            "new Promise(() => {})"
+        );
+        assert_eq!(request.params.as_ref().unwrap()["await_promise"], true);
+        if deadline_first {
+            let cancel = next_request(&mut ws).await;
+            assert_eq!(cancel.method, Method::Cancel);
+            assert_eq!(cancel.id, format!("deadline-cancel-{}", request.id));
+            assert_eq!(guard.entry().cancel_reason(), None);
+        }
+        if end_session {
+            end_session_after_tab_move(&mut ws, &sid.0, &request.id).await;
+        }
+        // Keep the connection open without replying, so the actual cleanup deadline expires.
+        let error = tokio::time::timeout(Duration::from_secs(4), task)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap_err()
+            .into_rpc();
+        assert_eq!(error.code, ErrorCode::Timeout);
+        assert_eq!(
+            error.message,
+            if deadline_first {
+                "page operation timed out and extension cleanup could not be confirmed; page effects may have occurred"
+            } else {
+                "cancelled tool did not finish cleanup within 2s"
+            }
+        );
+        let mut expected = json!({"reason": if end_session {
+            bsk::rpc_reason::SESSION_USER_MOVED_TAB
+        } else {
+            "cancel_cleanup_timeout"
+        }});
+        if deadline_first {
+            expected["effect_state"] = json!("unknown");
+        }
+        assert_eq!(
+            error.data,
+            Some(expected),
+            "deadline_first={deadline_first}, end_session={end_session}"
+        );
+        let rendered = bsk::cli::render_error::info_for_error(error.code, error.data.as_ref());
+        let hint = rendered.hint.unwrap();
+        if end_session {
+            assert!(hint.contains("this session cannot resume"));
+            assert_eq!(
+                state.sessions.end_info(&sid).unwrap().reason,
+                "user_moved_tab"
+            );
+            assert!(state.sessions.get(&sid).is_none());
+        } else {
+            assert!(hint.contains("observe the page before deciding whether to retry"));
+            assert!(!hint.contains("cannot resume"));
+            assert!(state.sessions.end_info(&sid).is_none());
+            assert!(state.sessions.get(&sid).is_some());
+        }
+    }
+    drop(ws);
+    handle.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn session_end_preserves_cleanup_details_and_transfer_results() {
+    let (handle, _sock) = spawn_daemon().await;
+    let mut ws = connect_ext(handle.ws_addr()).await;
+    let _ = handshake_as_ext(&mut ws).await;
+    let state = handle.state();
+    let evaluate_params = json!({"expression": "new Promise(() => {})", "await_promise": true});
+    for (method, mut params, reply) in [
+        (
+            Method::ToolEvaluate,
+            evaluate_params.clone(),
+            ResponseBody::Err(bsk_protocol::RpcError {
+                code: ErrorCode::CdpFailed,
+                message: "evaluate cleanup failed".into(),
+                data: Some(json!({
+                    "reason": "evaluate_cleanup_failed",
+                    "effect_state": "unknown",
+                    "cleanup_error": "debugger command did not settle",
+                })),
+            }),
+        ),
+        (
+            Method::ToolEvaluate,
+            evaluate_params,
+            ResponseBody::Err(bsk_protocol::RpcError {
+                code: ErrorCode::CdpFailed,
+                message: "evaluate cleanup failed".into(),
+                data: Some(json!("extension cleanup diagnostic")),
+            }),
+        ),
+        (
+            Method::ToolUpload,
+            json!({"selector": "input[type=file]", "files": [{"transfer_id": "upload-ready", "name": "report.txt"}]}),
+            ResponseBody::Ok(
+                json!({"tab_id": 42, "used_selector": "input[type=file]", "file_names": ["report.txt"]}),
+            ),
+        ),
+        (
+            Method::ToolDownload,
+            json!({"selector": "#download"}),
+            ResponseBody::Err(bsk_protocol::RpcError {
+                code: ErrorCode::Cancelled,
+                message: "download cleanup incomplete".into(),
+                data: Some(json!({
+                    "reason": "transfer_outcome_unknown",
+                    "effect_state": "unknown",
+                    "phase": "cleanup",
+                    "cleanup_error": "download cancellation was not acknowledged",
+                })),
+            }),
+        ),
+    ] {
+        let sid = state
+            .sessions
+            .reserve_id(
+                bsk::daemon::browsers::BrowserId(TEST_EXT_ID.into()),
+                8,
+                || 0,
+            )
+            .unwrap();
+        state.tool_queues.spawn(sid.clone());
+        let guard = state
+            .tool_inflight
+            .register("cleanup".into(), sid.clone())
+            .unwrap();
+        params["session_id"] = json!(sid.0);
+        params["tab_id"] = json!(42);
+        let task = {
+            let queues = Arc::clone(&state.tool_queues);
+            let sid = sid.clone();
+            let inflight = guard.entry();
+            let method = method.clone();
+            tokio::spawn(async move {
+                queues
+                    .dispatch(&sid, method, params, Duration::from_secs(5), Some(inflight))
+                    .await
+            })
+        };
+        let request = next_request(&mut ws).await;
+        assert_eq!(request.method, method);
+        end_session_after_tab_move(&mut ws, &sid.0, &request.id).await;
+        ws.send(Message::Text(
+            serde_json::to_string(&ResponseFrame {
+                id: request.id,
+                body: reply.clone(),
+            })
+            .unwrap(),
+        ))
+        .await
+        .unwrap();
+        let result = tokio::time::timeout(Duration::from_secs(2), task)
+            .await
+            .unwrap()
+            .unwrap();
+        match reply {
+            ResponseBody::Ok(expected) => assert_eq!(result.unwrap(), expected),
+            ResponseBody::Err(expected) => {
+                let actual = result.unwrap_err().into_rpc();
+                assert_eq!(actual.code, expected.code);
+                assert_eq!(actual.message, expected.message);
+                let data = actual.data.as_ref().unwrap();
+                assert_eq!(data["reason"], bsk::rpc_reason::SESSION_USER_MOVED_TAB);
+                match expected.data.unwrap() {
+                    serde_json::Value::Object(fields) => {
+                        for (key, value) in fields {
+                            if key != "reason" {
+                                assert_eq!(data[&key], value, "{method:?}, field={key}");
+                            }
+                        }
+                    }
+                    diagnostic => assert_eq!(data["details"], diagnostic),
+                }
+                let rendered =
+                    bsk::cli::render_error::info_for_error(actual.code, actual.data.as_ref());
+                assert!(
+                    rendered
+                        .hint
+                        .unwrap()
+                        .contains("this session cannot resume")
+                );
+            }
+        }
+        assert_eq!(
+            state.sessions.end_info(&sid).unwrap().reason,
+            "user_moved_tab"
+        );
+    }
+    drop(ws);
+    handle.shutdown().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

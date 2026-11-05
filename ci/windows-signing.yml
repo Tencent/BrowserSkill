@@ -1,0 +1,101 @@
+# Internal BK-CI template. Replace the three credential/application placeholders
+# and pin SCRIPT_COMMIT to the reviewed deployment commit before enabling it.
+# Add the GitHub Create Branch Or Tag trigger in the UI AFTER importing YAML:
+# repository Tencent/BrowserSkill; include cli-v*; do not convert back to YAML.
+# Some internal BK-CI versions drop that event during UI -> YAML conversion.
+version: v3.0
+name: BrowserSkill Windows signing
+on:
+  manual: enabled
+variables:
+  release_tag:
+    value: ''
+    allow-modify-at-startup: true
+    props:
+      type: vuex-input
+      description: CLI release tag for manual recovery (cli-v<version>)
+      required: false
+  source_run_id:
+    value: ''
+    allow-modify-at-startup: true
+    props:
+      type: vuex-input
+      description: Exact successful GitHub Release CLI run ID for manual recovery
+      required: false
+stages:
+- name: Sign Windows release
+  jobs:
+    sign_windows:
+      name: Validate, sign and return the Windows executable
+      runs-on:
+        pool-name: docker
+        hw-spec: Standard-S
+        container:
+          image-code: tlinux3_ci
+          image-version: 2.*
+      timeout-minutes: 90
+      steps:
+      - name: Download the trusted release helper and validate the build
+        id: prepare
+        uses: linuxScript@1.*
+        timeout-minutes: 65
+        env:
+          BSK_MANUAL_TAG: "${{variables.release_tag}}"
+          BSK_SOURCE_RUN_ID: "${{variables.source_run_id}}"
+        with:
+          script: |
+            #!/usr/bin/env bash
+            set -euo pipefail
+            set +x
+            export GH_TOKEN='${{settings.GITHUB_RELEASE_CREDENTIAL.access_token}}'
+            cd "${{ci.workspace}}"
+            SCRIPT_COMMIT=REVIEWED_COMMIT_SHA
+            curl --fail --silent --show-error --location --retry 3 --max-time 180 \
+              "https://raw.githubusercontent.com/Tencent/BrowserSkill/$SCRIPT_COMMIT/scripts/windows-release.py" \
+              --output windows-release.py
+            export BSK_RELEASE_TAG="${BK_CI_REPO_GITHUB_WEBHOOK_CREATE_REF_NAME:-${BSK_MANUAL_TAG:-}}"
+            if [[ -n "${BK_CI_REPO_GITHUB_WEBHOOK_CREATE_REF_TYPE:-}" && "$BK_CI_REPO_GITHUB_WEBHOOK_CREATE_REF_TYPE" != tag ]]; then
+              echo 'Only tag creation events may request signing'
+              exit 1
+            fi
+            args=(prepare --timeout 3600)
+            if [[ -n "${BSK_SOURCE_RUN_ID:-}" ]]; then args+=(--run-id "$BSK_SOURCE_RUN_ID"); fi
+            python3 windows-release.py "${args[@]}"
+      - name: Windows EV signing
+        id: sign
+        uses: windowCertSign@1.*
+        timeout-minutes: 15
+        with:
+          appIdType: select
+          appId: KEYSTORE_APPLICATION_ID
+          apiAuthorizationCredentialId: KEYSTORE_PROJECT_CREDENTIAL
+          certIdType: select
+          certId: Tencent Technology (Shenzhen) Company Limited
+          signType: EVMode
+          signatureOption: toKeystore
+          signOrBleach: [sign]
+          signatureReplace: replace
+          srcPath: "${{ci.workspace}}/unsigned/bsk.exe"
+          destPath: "${{ci.workspace}}/signed"
+      - name: Return signed result to the GitHub draft release
+        id: return_signed
+        uses: linuxScript@1.*
+        timeout-minutes: 10
+        with:
+          script: |
+            #!/usr/bin/env bash
+            set -euo pipefail
+            set +x
+            export GH_TOKEN='${{settings.GITHUB_RELEASE_CREDENTIAL.access_token}}'
+            cd "${{ci.workspace}}"
+            python3 windows-release.py return-signed
+      - name: Archive signing evidence
+        id: archive
+        uses: UploadArtifactory@8.*
+        timeout-minutes: 5
+        with:
+          filePath: "signed/bsk.exe,signed/signing.json,signing-state.json"
+concurrency:
+  queue-timeout-minutes: 10
+syntax-dialect: INHERIT
+cancel-policy: RESTRICTED

@@ -81,6 +81,7 @@ function setupClient() {
   let nextURL = 0;
   vi.spyOn(URL, "createObjectURL").mockImplementation(() => `blob:screenshot-${++nextURL}`);
   const revoke = vi.spyOn(URL, "revokeObjectURL").mockImplementation(() => {});
+  const toolViewKeys: string[] = [];
   let ToolView!: React.ComponentType<Record<string, unknown>>;
   client.apply({
     get: () => ({ binding }),
@@ -88,19 +89,21 @@ function setupClient() {
     slots: {
       inject: (_name: string, callback: () => void) => callback(),
       register: ({ key }: { key?: string }, view: typeof ToolView) => {
-        if (key === "browser_inspect") ToolView = view;
+        if (key !== undefined) toolViewKeys.push(key);
+        if (key === "bsk_inspect") ToolView = view;
       },
     },
   });
+  expect(toolViewKeys).toEqual(["bsk_inspect"]);
   const props = {
     sessionId: "owning-session",
     callId: "c1",
-    toolName: "browser_inspect",
+    toolName: "bsk_inspect",
     openFile() {},
     block: {
       kind: "tool-result",
       callId: "c1",
-      call: { name: "browser_inspect", argsRaw: '{"action":"screenshot"}' },
+      call: { name: "bsk_inspect", argsRaw: '{"action":"screenshot"}' },
       content: [
         { type: "text", text: "Screenshot captured" },
         { type: "image", attachment },

@@ -1,4 +1,28 @@
 {
+  "cooperation": {
+    "yielding": "Agent is yielding",
+    "label": "Shared browser control",
+    "ready": "Agent is ready",
+    "acting": "Agent is working",
+    "human": "You are in control",
+    "editing": "You are editing",
+    "held": "Agent is paused",
+    "syncing": "Agent is syncing",
+    "unavailable": "Page unavailable",
+    "hold": "Pause Agent",
+    "resume": "Hand back to Agent",
+    "stop": "Stop task",
+    "hints": {
+      "ready": "You can take over at any time",
+      "acting": "You can take over at any time",
+      "human": "Agent resumes when you stop interacting",
+      "editing": "Hand back to Agent when ready",
+      "held": "Hand back to Agent when ready",
+      "yielding": "Waiting for the current action to finish",
+      "syncing": "Reading the latest page state",
+      "unavailable": "Agent has stopped interacting"
+    }
+  },
   "popup": {
     "interactionCompatibilityWarning": "Connected to an older daemon (protocol v{{cliProtocol}}). Update the CLI and daemon for full support of Automation settings.",
     "brandCategory": "Browser Automation",
@@ -133,9 +157,27 @@
       "promptTemplate": "For this task, use BrowserSkill in browser {{name}} (instance ID: {{instanceId}}). Start every new session for this task with the appropriate interface:\nCLI: {{command}}\nDeepSeek Harness: {{toolCall}}\nIn DeepSeek Harness, use the tool call instead of running the CLI command separately.\nIf this instance is not connected, stop and ask me to reconnect this profile. Do not omit --browser / browser or switch to another instance.",
       "title": "Current browser",
       "unnamed": "Unnamed browser"
+    },
+    "daemonUpgrade": {
+      "title": "Update the bsk browser service",
+      "description": "The running bsk service (daemon) is too old. Browser tasks cannot run until it is updated.",
+      "runCommand": "Open a terminal on the computer running this service and run:",
+      "restart": "If this notice remains after updating, restart the service from the terminal or host application that started it.",
+      "copyButton": "Copy command",
+      "copyFailed": "Could not copy. Copy the command above manually.",
+      "details": "Technical details",
+      "protocols": "Service protocol: {{actual}}. The extension requires {{required}} or a newer compatible protocol.",
+      "version": "Currently running: bsk {{version}}",
+      "notificationMessage": "Browser tasks are unavailable. Update bsk on the computer running the browser service and make sure the running service is updated too.",
+      "toolbarTitle": "BrowserSkill: update the bsk browser service",
+      "notificationButton": "View update steps"
     }
   },
   "controlOverlay": {
+    "project": "Project",
+    "session": "Session",
+    "holdController": "Pause {{name}}",
+    "resumeController": "Resume {{name}}",
     "status": "Agent controlling",
     "interrupt": "Interrupt",
     "interrupting": "Interrupting…"
@@ -291,6 +333,7 @@
       "press": "Press key",
       "select": "Select option",
       "hover": "Hover",
+      "drag": "Drag",
       "focus": "Focus",
       "blur": "Blur",
       "scroll": "Scroll",

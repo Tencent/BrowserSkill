@@ -28,6 +28,165 @@ use support::{wait_for_browser_count, wait_for_no_sessions};
 
 const TEST_EXT_ID: &str = "abcdefghijklmnopabcdefghijklmnop";
 
+// Exercise the production IPC handler and WS transport without binding a
+// Unix-only test socket or sharing Windows' per-home named pipe.
+async fn controller_daemon() -> (daemon::DaemonHandle, daemon::ipc::RpcHandler) {
+    let handle = daemon::run(
+        DaemonConfig::new(0).with_extension_connect_wait(Duration::ZERO),
+        None,
+    )
+    .await
+    .unwrap();
+    let handler = daemon::ipc::full_handler(
+        daemon::ipc::DaemonStatus {
+            started_at: std::time::Instant::now(),
+            ws_port: handle.ws_addr().port(),
+            sock_path: PathBuf::new(),
+            daemon_version: bsk::daemon::state::DAEMON_VERSION,
+            protocol_version: bsk::daemon::state::PROTOCOL_VERSION,
+        },
+        handle.state(),
+    );
+    (handle, handler)
+}
+
+async fn controller_call(
+    handler: &daemon::ipc::RpcHandler,
+    id: &str,
+    method: Method,
+    params: serde_json::Value,
+) -> Result<serde_json::Value, RpcError> {
+    match handler(id.into(), method, params).await {
+        ResponseBody::Ok(value) => Ok(value),
+        ResponseBody::Err(error) => Err(error),
+    }
+}
+
+#[tokio::test]
+async fn controller_metadata_survives_overlapping_sessions_and_recoverable_retry() {
+    use serde_json::{Value, json};
+    let (handle, handler) = controller_daemon().await;
+    let mut ws = connect_ext(handle.ws_addr()).await;
+    handshake_as_ext(&mut ws).await;
+    let controllers = [
+        json!({"name":"Codex","project":"Search","color":"#2563eb"}),
+        json!({"name":"Claude","project":"Payments"}),
+    ];
+    let expected = controllers.clone();
+    let responder = tokio::spawn(async move {
+        for controller in expected {
+            let request = next_extension_request(&mut ws).await;
+            assert_eq!(request.method, Method::ToolSessionStart);
+            let actual = &request.params.as_ref().unwrap()["controller"];
+            assert_eq!(actual["name"], controller["name"]);
+            assert_eq!(actual["project"], controller["project"]);
+            assert!(actual["color"].as_str().unwrap().starts_with('#'));
+            if controller.get("color").is_some() {
+                assert_eq!(actual["color"], controller["color"]);
+            }
+            send_extension_response(
+                &mut ws,
+                ResponseFrame {
+                    id: request.id,
+                    body: ResponseBody::Ok(json!({"agent_window_id":4242})),
+                },
+            )
+            .await;
+        }
+        // Retain the browser connection until the assertions are finished.
+        std::future::pending::<()>().await;
+    });
+    let expiry = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis()
+        + 60_000;
+    let request_id = format!("{expiry}:{}", uuid::Uuid::new_v4());
+    controller_call(
+        &handler,
+        "prepare",
+        Method::SessionRequest,
+        json!({"request_id":request_id,"action":"prepare"}),
+    )
+    .await
+    .unwrap();
+    let mut ids = Vec::new();
+    for (index, controller) in controllers.iter().enumerate() {
+        let params = json!({"controller":controller,"request_id": if index == 0 { Some(&request_id) } else { None }});
+        let method = if index == 0 {
+            Method::SessionStartTracked
+        } else {
+            Method::SessionStart
+        };
+        let reply: Value = controller_call(
+            &handler,
+            &format!("identity-{index}"),
+            method.clone(),
+            params.clone(),
+        )
+        .await
+        .unwrap();
+        ids.push(reply["session_id"].as_str().unwrap().to_owned());
+        if index == 0 {
+            let retry: Value = controller_call(&handler, "retry", method.clone(), params.clone())
+                .await
+                .unwrap();
+            assert_eq!(retry["session_id"], reply["session_id"]);
+            let mut changed = params;
+            changed["controller"]["name"] = json!("Other agent");
+            let error = controller_call(&handler, "mismatch", method, changed)
+                .await
+                .unwrap_err();
+            assert_eq!(error.code, ErrorCode::InvalidParams);
+        }
+    }
+    let status: StatusResult = serde_json::from_value(
+        controller_call(&handler, "status", Method::SystemStatus, Value::Null)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    for (id, expected) in ids.iter().zip(&controllers) {
+        let entry = status
+            .sessions
+            .iter()
+            .find(|session| &session.session_id == id)
+            .unwrap();
+        let actual = serde_json::to_value(&entry.controller).unwrap();
+        assert_eq!(actual["name"], expected["name"]);
+        assert_eq!(actual["project"], expected["project"]);
+    }
+    assert_eq!(status.sessions.len(), 2);
+    assert_ne!(
+        status.sessions[0].controller.as_ref().unwrap().color,
+        status.sessions[1].controller.as_ref().unwrap().color
+    );
+    responder.abort();
+    handle.shutdown().await;
+}
+
+#[tokio::test]
+async fn invalid_controller_is_rejected_before_browser_selection() {
+    use serde_json::json;
+    let (handle, handler) = controller_daemon().await;
+    for controller in [
+        json!({"name":""}),
+        json!({"name":"Codex", "color":"url(file)"}),
+    ] {
+        let error = controller_call(
+            &handler,
+            "invalid",
+            Method::SessionStart,
+            json!({"controller":controller}),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.code, ErrorCode::InvalidParams);
+    }
+    assert!(handle.state().sessions.is_empty());
+    handle.shutdown().await;
+}
+
 type TestWs =
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 
@@ -242,6 +401,133 @@ async fn respond_to_aborted_stop(
         },
     )
     .await;
+}
+
+#[tokio::test]
+async fn cli_incognito_start_checks_extension_support_and_preserves_normal_starts() {
+    use bsk::cli::error::CliError;
+    use bsk::cli::session::{SessionStartOptions, start_session};
+
+    for protocol in ["1.3", bsk::daemon::state::PROTOCOL_VERSION] {
+        let (handle, sock) = spawn_daemon().await;
+        let mut ws = connect_ext(handle.ws_addr()).await;
+        handshake_with_protocol(&mut ws, protocol).await;
+
+        for incognito in [false, true] {
+            let path = sock.clone();
+            let start = tokio::task::spawn_blocking(move || {
+                start_session(
+                    path,
+                    SessionStartOptions {
+                        incognito,
+                        ..Default::default()
+                    },
+                )
+            });
+            if incognito && protocol == "1.3" {
+                let error = start.await.unwrap().unwrap_err();
+                assert!(matches!(
+                    error,
+                    CliError::Rpc {
+                        code: ErrorCode::Unsupported,
+                        ..
+                    }
+                ));
+                assert!(
+                    error
+                        .to_string()
+                        .contains("update the BrowserSkill extension")
+                );
+                assert!(
+                    tokio::time::timeout(
+                        Duration::from_millis(100),
+                        next_extension_request(&mut ws)
+                    )
+                    .await
+                    .is_err()
+                );
+                assert_eq!(handle.state().sessions.len(), 1);
+                continue;
+            }
+            let request = next_extension_request(&mut ws).await;
+            assert_eq!(request.method, Method::ToolSessionStart);
+            let params: SessionStartParams =
+                serde_json::from_value(request.params.unwrap()).unwrap();
+            assert_eq!(params.incognito, incognito);
+            send_extension_response(
+                &mut ws,
+                ResponseFrame {
+                    id: request.id,
+                    body: ResponseBody::Ok(serde_json::json!({"agent_window_id":4242})),
+                },
+            )
+            .await;
+            assert_eq!(start.await.unwrap().unwrap().agent_window_id, Some(4242));
+        }
+        drop(ws);
+        handle.shutdown().await;
+    }
+}
+
+#[tokio::test]
+async fn cli_incognito_start_refuses_an_old_daemon_before_dispatching_a_start() {
+    use bsk::cli::error::CliError;
+    use bsk::cli::session::{SessionStartOptions, start_session};
+    use bsk::daemon::ipc::{self, DaemonStatus};
+    use std::sync::Mutex;
+
+    let sock = tempfile_path("bsk-incognito-old-daemon");
+    let listener = ipc::bind(&sock).await.unwrap();
+    let system = ipc::system_handler(DaemonStatus {
+        started_at: std::time::Instant::now(),
+        ws_port: 0,
+        sock_path: sock.clone(),
+        daemon_version: "0.3.3",
+        protocol_version: "1.3",
+    });
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let recorded = Arc::clone(&calls);
+    let handler: ipc::RpcHandler = Arc::new(move |id, method, params| {
+        recorded.lock().unwrap().push(method.clone());
+        system(id, method, params)
+    });
+    let server = tokio::spawn(ipc::serve(
+        listener,
+        handler,
+        || {},
+        || {},
+        || {},
+        std::future::pending::<()>(),
+    ));
+    let path = sock.clone();
+    let error = tokio::task::spawn_blocking(move || {
+        start_session(
+            path,
+            SessionStartOptions {
+                incognito: true,
+                ..Default::default()
+            },
+        )
+    })
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert!(matches!(
+        error,
+        CliError::Rpc {
+            code: ErrorCode::Unsupported,
+            ..
+        }
+    ));
+    assert!(
+        error
+            .to_string()
+            .contains("update bsk and restart its daemon")
+    );
+    assert_eq!(*calls.lock().unwrap(), vec![Method::SystemStatus]);
+    server.abort();
+    let _ = server.await;
+    let _ = std::fs::remove_file(sock);
 }
 
 #[tokio::test]
@@ -623,6 +909,7 @@ async fn session_idle_timeout_stops_and_unregisters_session() {
     let state = handle.state();
     let session_id = bsk::daemon::sessions::SessionId("idle".into());
     state.sessions.insert(bsk::daemon::sessions::Session {
+        controller: None,
         interaction: None,
 
         id: session_id.clone(),
@@ -1047,6 +1334,7 @@ async fn session_window_closed_event_purges_session() {
     let _ = handshake_as_ext(&mut ws).await;
     let state = handle.state();
     let session = bsk::daemon::sessions::Session {
+        controller: None,
         interaction: None,
 
         id: bsk::daemon::sessions::SessionId("zzzz".into()),
@@ -1073,6 +1361,26 @@ async fn session_window_closed_event_purges_session() {
 
     wait_for_no_sessions(&state).await;
 
+    // Issue #465 (maintainer review): a dispatch against the ended id
+    // must surface why the session stopped, not a generic not-found.
+    let err = state
+        .tool_queues
+        .dispatch(
+            &bsk::daemon::sessions::SessionId("zzzz".into()),
+            Method::ToolTabList,
+            serde_json::json!({"session_id": "zzzz"}),
+            Duration::from_secs(1),
+            None,
+        )
+        .await
+        .expect_err("the dead session must reject dispatches")
+        .into_rpc();
+    assert_eq!(err.code, bsk_protocol::ErrorCode::NotFound);
+    assert_eq!(
+        err.data.unwrap()["reason"],
+        bsk::rpc_reason::SESSION_WINDOW_CLOSED
+    );
+
     let _ = ws.close(None).await;
     handle.shutdown().await;
 }
@@ -1086,6 +1394,7 @@ async fn browser_disconnect_purges_sessions() {
     // post-start state without bothering with the round-trip.
     let state = handle.state();
     let session = bsk::daemon::sessions::Session {
+        controller: None,
         interaction: None,
 
         id: bsk::daemon::sessions::SessionId("zzzz".into()),
@@ -1099,6 +1408,26 @@ async fn browser_disconnect_purges_sessions() {
     let _ = ws.close(None).await;
     drop(ws);
     wait_for_no_sessions(&state).await;
+
+    // Issue #465 (maintainer review, P2): the ordinary socket-cleanup
+    // purge must tombstone the same reason as the other disconnect paths.
+    let err = state
+        .tool_queues
+        .dispatch(
+            &bsk::daemon::sessions::SessionId("zzzz".into()),
+            Method::ToolTabList,
+            serde_json::json!({"session_id": "zzzz"}),
+            Duration::from_secs(1),
+            None,
+        )
+        .await
+        .expect_err("the dead session must reject dispatches")
+        .into_rpc();
+    assert_eq!(err.code, bsk_protocol::ErrorCode::NotFound);
+    assert_eq!(
+        err.data.unwrap()["reason"],
+        bsk::rpc_reason::BROWSER_DISCONNECTED
+    );
 
     handle.shutdown().await;
 }
@@ -1117,6 +1446,7 @@ async fn session_stop_self_heals_when_extension_reports_not_found() {
     // restart from the daemon's point of view).
     let state = handle.state();
     let session = bsk::daemon::sessions::Session {
+        controller: None,
         interaction: None,
 
         id: bsk::daemon::sessions::SessionId("yyyy".into()),
@@ -1218,6 +1548,7 @@ async fn reconnect_with_same_instance_id_purges_stale_sessions_but_keeps_new_bro
     let state = handle.state();
     // Pretend ext A registered a real session.
     let session = bsk::daemon::sessions::Session {
+        controller: None,
         interaction: None,
 
         id: bsk::daemon::sessions::SessionId("xxxx".into()),
@@ -1251,6 +1582,27 @@ async fn reconnect_with_same_instance_id_purges_stale_sessions_but_keeps_new_bro
         state.sessions.len(),
         0,
         "stale sessions must not survive reconnect"
+    );
+
+    // Issue #465 (maintainer review, P2): the same-instance reconnect
+    // purge must tombstone the same reason as the ordinary disconnect
+    // path, so a later dispatch explains instead of guessing.
+    let err = state
+        .tool_queues
+        .dispatch(
+            &bsk::daemon::sessions::SessionId("xxxx".into()),
+            Method::ToolTabList,
+            serde_json::json!({"session_id": "xxxx"}),
+            Duration::from_secs(1),
+            None,
+        )
+        .await
+        .expect_err("the dead session must reject dispatches")
+        .into_rpc();
+    assert_eq!(err.code, bsk_protocol::ErrorCode::NotFound);
+    assert_eq!(
+        err.data.unwrap()["reason"],
+        bsk::rpc_reason::BROWSER_DISCONNECTED
     );
 
     let _ = ws_b.close(None).await;
@@ -1447,6 +1799,7 @@ fn interaction_updates_follow_the_owning_browser_in_both_directions() {
     let owner = BrowserId("owner".into());
     let id = SessionId("existing".into());
     registry.insert(Session {
+        controller: None,
         id: id.clone(),
         browser_id: owner.clone(),
         agent_window_id: Some(100),
@@ -1487,6 +1840,7 @@ async fn borrow_deadline_cancels_the_extension_and_preserves_a_committed_result(
         let state = handle.state();
         let session_id = SessionId("borrow-deadline".into());
         state.sessions.insert(Session {
+            controller: None,
             id: session_id.clone(),
             browser_id: bsk::daemon::browsers::BrowserId(TEST_EXT_ID.into()),
             agent_window_id: Some(100),
@@ -1558,6 +1912,7 @@ async fn borrow_reports_unknown_outcome_when_cancel_cleanup_never_finishes() {
     let state = handle.state();
     let sid = SessionId("borrow-unknown".into());
     state.sessions.insert(Session {
+        controller: None,
         id: sid.clone(),
         browser_id: bsk::daemon::browsers::BrowserId(TEST_EXT_ID.into()),
         agent_window_id: Some(100),
@@ -1728,6 +2083,7 @@ mod recoverable_starts {
             .unwrap();
         assert_eq!(conflicting.unwrap_err().code, ErrorCode::InvalidParams);
         let foreign = bsk::daemon::sessions::Session {
+            controller: None,
             id: bsk::daemon::sessions::SessionId("foreign".into()),
             browser_id: bsk::daemon::browsers::BrowserId(TEST_EXT_ID.into()),
             agent_window_id: Some(999),
@@ -2103,4 +2459,85 @@ mod recoverable_starts {
         assert_eq!(status["state"], "closed");
         daemon.shutdown().await;
     }
+}
+
+#[tokio::test]
+async fn shared_session_survives_idle_then_releases_protection_over_websocket() {
+    let (handle, _sock) = spawn_daemon_with_session_idle(Duration::from_millis(150)).await;
+    let mut ws = connect_ext(handle.ws_addr()).await;
+    let _ = handshake_as_ext(&mut ws).await;
+    let state = handle.state();
+    let id = bsk::daemon::sessions::SessionId("live".into());
+    let browser = bsk::daemon::browsers::BrowserId(TEST_EXT_ID.into());
+    state.sessions.insert(bsk::daemon::sessions::Session {
+        controller: None,
+        interaction: None,
+        id: id.clone(),
+        browser_id: browser.clone(),
+        agent_window_id: Some(7),
+        created_at_ms: 0,
+    });
+    state.tool_queues.spawn(id.clone());
+    let activity = |protected: bool| {
+        Message::Text(serde_json::json!({
+        "event":"session.activity", "payload":{"session_id":"live", "idle_protected":protected}
+    }).to_string())
+    };
+    ws.send(activity(true)).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(80)).await;
+    // Tool completion must not discard protection, nor can another browser clear it.
+    state.sessions.touch(&id);
+    state.sessions.update_activity(
+        &id,
+        &bsk::daemon::browsers::BrowserId("foreign".into()),
+        false,
+    );
+    assert!(
+        tokio::time::timeout(Duration::from_millis(450), ws.next())
+            .await
+            .is_err(),
+        "shared session was reaped while awaiting a person"
+    );
+    assert!(state.sessions.get(&id).is_some());
+    ws.send(activity(false)).await.unwrap();
+    let message = tokio::time::timeout(Duration::from_secs(2), ws.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    let Message::Text(text) = message else {
+        panic!("expected stop request")
+    };
+    let request: RequestFrame = serde_json::from_str(&text).unwrap();
+    assert_eq!(request.method, Method::ToolSessionStop);
+    ws.send(Message::Text(
+        serde_json::to_string(&ResponseFrame {
+            id: request.id,
+            body: ResponseBody::Ok(serde_json::to_value(SessionStopResult::default()).unwrap()),
+        })
+        .unwrap(),
+    ))
+    .await
+    .unwrap();
+    wait_for_no_sessions(&state).await;
+    // Reuse of an identifier must not inherit its old lifetime protection.
+    state.sessions.insert(bsk::daemon::sessions::Session {
+        controller: None,
+        interaction: None,
+        id: id.clone(),
+        browser_id: browser,
+        agent_window_id: Some(8),
+        created_at_ms: 0,
+    });
+    assert!(
+        state
+            .sessions
+            .idle_ids_at(
+                Duration::from_secs(1),
+                std::time::Instant::now() + Duration::from_secs(2)
+            )
+            .contains(&id)
+    );
+    state.sessions.remove(&id);
+    handle.shutdown().await;
 }

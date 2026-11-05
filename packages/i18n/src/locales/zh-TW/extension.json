@@ -1,4 +1,28 @@
 {
+  "cooperation": {
+    "yielding": "Agent 正在停手",
+    "label": "人機協作",
+    "ready": "Agent 已就緒",
+    "acting": "Agent 正在操作",
+    "human": "現在由你操作",
+    "editing": "你正在編輯",
+    "held": "Agent 已暫停",
+    "syncing": "Agent 正在同步",
+    "unavailable": "暫時無法觀察頁面",
+    "hold": "暫停 Agent",
+    "resume": "交給 Agent",
+    "stop": "停止任務",
+    "hints": {
+      "ready": "你可以隨時接手",
+      "acting": "你可以隨時接手",
+      "human": "停止操作後，Agent 會繼續",
+      "editing": "完成編輯後交給 Agent",
+      "held": "準備好後交給 Agent",
+      "yielding": "等待目前操作結束",
+      "syncing": "正在讀取最新頁面狀態",
+      "unavailable": "Agent 已停手"
+    }
+  },
   "popup": {
     "interactionCompatibilityWarning": "已連線至舊版 Daemon（通訊協定 v{{cliProtocol}}）。部分自動化設定需要更新 CLI 和 Daemon 才能完整生效。",
     "brandCategory": "Browser Automation",
@@ -133,9 +157,27 @@
       "promptTemplate": "本次工作使用 BrowserSkill 的瀏覽器 {{name}}（實例 ID：{{instanceId}}）。每次為本工作建立新工作階段時，請依使用的介面執行：\nCLI：{{command}}\nDeepSeek Harness：{{toolCall}}\n使用 DeepSeek Harness 時，請呼叫上述工具，不要另外執行 CLI 指令。\n若此實例未連線，請停止並要求我重新連線此設定檔。請勿省略 --browser / browser，也不要切換至其他實例。",
       "title": "目前瀏覽器",
       "unnamed": "未命名瀏覽器"
+    },
+    "daemonUpgrade": {
+      "title": "需要升級 bsk 瀏覽器服務",
+      "description": "正在執行的 bsk 服務（daemon）版本過舊，暫時無法執行瀏覽器任務。",
+      "runCommand": "請在執行該服務的電腦上開啟終端機，執行：",
+      "restart": "若已更新仍出現此提示，請透過啟動該服務的終端機或宿主應用程式重新啟動服務。",
+      "copyButton": "複製指令",
+      "copyFailed": "複製失敗，請手動複製上方指令。",
+      "details": "查看技術詳情",
+      "protocols": "服務協定：{{actual}}；擴充功能要求：{{required}} 或更新的相容協定。",
+      "version": "目前執行：bsk {{version}}",
+      "notificationMessage": "暫時無法執行瀏覽器任務。請在執行 bsk 瀏覽器服務的電腦上升級 bsk，並確認正在執行的服務也已更新。",
+      "toolbarTitle": "BrowserSkill：需要升級 bsk 瀏覽器服務",
+      "notificationButton": "查看升級步驟"
     }
   },
   "controlOverlay": {
+    "project": "專案",
+    "session": "工作階段",
+    "holdController": "暫停 {{name}}",
+    "resumeController": "交給 {{name}}",
     "status": "Agent 正在控制",
     "interrupt": "中斷",
     "interrupting": "中斷中…"
@@ -291,6 +333,7 @@
       "press": "按鍵",
       "select": "選擇選項",
       "hover": "懸停",
+      "drag": "拖曳",
       "focus": "聚焦",
       "blur": "移開焦點",
       "scroll": "捲動",
