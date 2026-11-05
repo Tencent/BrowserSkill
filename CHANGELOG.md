@@ -24,6 +24,10 @@ Starting from 0.2.0, CLI / Extension / DSH Plugin share the same version number.
 
 ### Fixed
 
+- When the click overlay guard cannot clear the extension overlay, `input_not_ready`
+  now reports the click point and which step failed (hit-test result, overlay
+  bypass, passthrough, deadline) in `data` and in the message. Previously it only
+  said the overlay could not be cleared.
 - CLI cancellation keeps the original RPC progressing and retries cancellation
   that arrives before daemon registration, reducing background screenshots that
   keep a session busy after the caller stops. Confirmation and response waiting

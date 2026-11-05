@@ -12,14 +12,17 @@ import { type CdpRunner, isRpcError } from "./shared";
 export interface ClickOverlayDeps {
   cdp: CdpRunner;
   signal?: AbortSignal;
-  /** Acquire/release only this operation's automation bypass reference. */
-  bypassOverlay?: (tabId: number, enabled: boolean) => Promise<void>;
+  /** Acquire/release only this operation's automation bypass reference. Resolves
+   * `false` when the content script did not receive the request. */
+  bypassOverlay?: (tabId: number, enabled: boolean) => Promise<boolean | void>;
   sendInputPassthrough?: InputPassthroughSendToTab;
   /** Let a bounded operation release these resources without waiting for input replies. */
   registerClickCleanup?: (cleanup: () => Promise<void>) => () => void;
 }
 
 type OverlayHit = "absent" | "clear" | "covered" | "unknown";
+type BypassState = "not_needed" | "enabled" | "undelivered" | "failed" | "unavailable";
+type PassthroughState = "not_needed" | "sent" | "failed";
 
 /** Prepare before mouseMoved, then check again before every press. */
 export async function withClickOverlay<T>(
@@ -59,16 +62,31 @@ export async function withClickOverlay<T>(
   const expired = () => Date.now() >= passthroughExpiresAt;
   // Reserve enough lease for the gesture; slow delivery still reports an unknown outcome.
   const pressDeadlineReached = () => Date.now() >= passthroughExpiresAt - inputBudgetMs;
-  const notReady = () =>
-    rpcError(
+  // Diagnostics for input_not_ready: which layer stayed in the way and why (#556).
+  let lastHit: OverlayHit = "unknown";
+  let bypassState: BypassState = "not_needed";
+  let passthroughState: PassthroughState = "not_needed";
+  const notReady = () => {
+    const overlay = {
+      hit: lastHit,
+      bypass: bypassState,
+      passthrough: passthroughState,
+      deadline_reached: pressDeadlineReached(),
+    };
+    return rpcError(
       "cdp_failed",
       "input_not_ready",
-      "Could not clear the extension overlay from the click point",
+      `Could not clear the extension overlay from the click point (${point.x}, ${point.y}): ` +
+        `hit-test ${overlay.hit}, bypass ${overlay.bypass}, passthrough ${overlay.passthrough}` +
+        (overlay.deadline_reached ? ", input deadline reached" : ""),
       {
         effect_state: "none",
         pointer_moved: false,
+        point: { x: point.x, y: point.y },
+        overlay,
       },
     );
+  };
   const cancelled = (): RpcError => ({
     code: "cancelled",
     message: "click aborted",
@@ -90,25 +108,28 @@ export async function withClickOverlay<T>(
       });
       const value = hit.result?.value;
       if (!hit.exceptionDetails && (value === "absent" || value === "clear" || value === "covered"))
-        return value;
+        return (lastHit = value);
       console.debug("[bsk click] overlay hit-test returned no result", hit.exceptionDetails);
     } catch (error) {
       console.debug("[bsk click] overlay hit-test failed", error);
     }
-    return "unknown";
+    return (lastHit = "unknown");
   };
   try {
     if (retired || deps.signal?.aborted) return cancelled();
     let hit = await probe();
     let covered = hit === "covered";
     if (retired || deps.signal?.aborted) return cancelled();
+    if ((alwaysBypass || covered) && !deps.bypassOverlay) bypassState = "unavailable";
     if ((alwaysBypass || covered) && deps.bypassOverlay) {
       try {
-        bypassAcquisition = deps.bypassOverlay(tabId, true).then(() => {
+        bypassAcquisition = deps.bypassOverlay(tabId, true).then((delivered) => {
           bypass = true;
+          bypassState = delivered === false ? "undelivered" : "enabled";
         });
         await bypassAcquisition;
       } catch (error) {
+        bypassState = "failed";
         console.debug("[bsk click] overlay bypass enable failed", error);
       }
       // Enabling bypass can also render newly arrived control UI.
@@ -122,7 +143,9 @@ export async function withClickOverlay<T>(
       passthroughExpiresAt = Date.now() + INPUT_PASSTHROUGH_TTL_MS;
       try {
         await send(tabId, { type: INPUT_PASSTHROUGH, phase: "begin", id: passthroughId });
+        passthroughState = "sent";
       } catch (error) {
+        passthroughState = "failed";
         console.debug("[bsk click] overlay passthrough enable failed", error);
       }
       hit = await probe();

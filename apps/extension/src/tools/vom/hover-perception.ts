@@ -59,7 +59,7 @@ export class ProbeBudget {
   }
 }
 
-export type OverlayBypass = (tabId: number, enabled: boolean) => Promise<void>;
+export type OverlayBypass = (tabId: number, enabled: boolean) => Promise<boolean | void>;
 
 export interface OverlayBypassScopeOptions {
   /**

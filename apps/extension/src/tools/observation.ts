@@ -751,7 +751,7 @@ export interface SnapshotDeps {
     query(q: chrome.tabs.QueryInfo): Promise<chrome.tabs.Tab[]>;
   };
   conditionalSurfaceProbe?: boolean;
-  hoverProbeBypassOverlay?: (tabId: number, enabled: boolean) => Promise<void>;
+  hoverProbeBypassOverlay?: (tabId: number, enabled: boolean) => Promise<boolean | void>;
 }
 
 let defaultDeps: SnapshotDeps | null = null;
@@ -946,7 +946,7 @@ export interface CaptureVomObservationOptions extends VomOptions {
   onScene?: (scene: VomScene) => void;
   includeVisualFacts?: boolean;
   conditionalSurfaceProbe?: boolean;
-  hoverProbeBypassOverlay?: (tabId: number, enabled: boolean) => Promise<void>;
+  hoverProbeBypassOverlay?: (tabId: number, enabled: boolean) => Promise<boolean | void>;
   signal?: AbortSignal;
 }
 

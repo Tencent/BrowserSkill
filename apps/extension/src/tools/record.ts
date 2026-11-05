@@ -291,7 +291,7 @@ export interface RecordDeps {
     tabId: number,
     msg: RecordStartMessage | RecordStopMessage | RecordCancelMessage,
   ): Promise<unknown>;
-  bypassOverlay?: (tabId: number, enabled: boolean) => Promise<void>;
+  bypassOverlay?: (tabId: number, enabled: boolean) => Promise<boolean | void>;
   frameCoordinator?: Pick<
     RecordFrameCoordinator,
     "begin" | "armTab" | "sourceFor" | "stop" | "cancel"
