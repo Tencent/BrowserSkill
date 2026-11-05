@@ -26,6 +26,7 @@ pub mod install_skill;
 pub mod interaction;
 pub(crate) mod interaction_policy;
 pub mod logs;
+pub mod mcp;
 pub mod navigate;
 pub mod network;
 pub mod observation_view;
@@ -161,6 +162,9 @@ pub enum Command {
 
     /// Print (and optionally follow) the daemon log file.
     Logs(LogsCmd),
+
+    /// Serve BrowserSkill tools to MCP clients over stdio.
+    Mcp(mcp::McpArgs),
 
     /// Session lifecycle.
     Session(SessionCmd),
