@@ -22,8 +22,8 @@ export function collectExtractDom(this: Element, options: CollectorOptions): Raw
   let work = 0;
   let textBytes = 0;
   const encoder = new TextEncoder();
-  const tableSelector = 'table,[role="table"],[role="grid"],[role="treegrid"]';
-  const listSelector = 'ul,ol,[role="list"]';
+  const tableSelector = 'table,[role~="table"],[role~="grid"],[role~="treegrid"]';
+  const listSelector = 'ul,ol,[role~="list"]';
   const sensitiveInputSelector =
     'input[type="password"],input[type="hidden"],[data-bsk-record-password],[autocomplete~="current-password" i],[autocomplete~="new-password" i],[autocomplete~="one-time-code" i],[autocomplete^="cc-" i],[autocomplete*=" cc-" i]';
   const hiddenSubtrees = new WeakMap<Element, boolean>();
@@ -334,6 +334,16 @@ export function collectExtractDom(this: Element, options: CollectorOptions): Raw
     result.warnings.push(`invalid_${name}`);
     return undefined;
   };
+  // The role attribute is a space-separated token list; the first token is the
+  // element's effective role (WAI-ARIA). Exact comparisons miss multi-token
+  // values like role="table grid", and the ~= selectors above cannot express
+  // first-token semantics, so callers compare this value directly.
+  const ariaRole = (element: Element): string | null => {
+    const value = element.getAttribute("role");
+    if (value === null) return null;
+    const first = value.trim().split(/\s+/)[0];
+    return first || null;
+  };
   const locator = (element: Element): string => {
     const segments: string[] = [];
     let node: Element | null = element;
@@ -389,7 +399,7 @@ export function collectExtractDom(this: Element, options: CollectorOptions): Raw
           if (isHidden(element)) continue;
           if (
             element.matches(`${tableSelector},${listSelector}`) &&
-            !["presentation", "none"].includes(element.getAttribute("role") ?? "")
+            !["presentation", "none"].includes(ariaRole(element) ?? "")
           ) {
             found++;
             const candidates = element.matches(tableSelector) ? tables : lists;
@@ -399,19 +409,19 @@ export function collectExtractDom(this: Element, options: CollectorOptions): Raw
             }
             if (candidates.length < 32) {
               const columns: string[] = [];
-              for (const header of select(element, 'th,[role="columnheader"]')) {
+              for (const header of select(element, 'th,[role~="columnheader"]')) {
                 if (columns.length >= 8) break;
                 if (header.closest(tableSelector) !== element || isHidden(header)) continue;
-                const role = header.getAttribute("role");
+                const role = ariaRole(header);
                 const scope = header.getAttribute("scope") ?? "";
-                const row = header.closest('tr,[role="row"]');
+                const row = header.closest('tr,[role~="row"]');
                 const columnHeader =
                   role === "columnheader" ||
                   (role !== "rowheader" &&
                     !["row", "rowgroup"].includes(scope) &&
                     (header.closest("thead") !== null ||
                       ["col", "colgroup"].includes(scope) ||
-                      !row?.querySelector('td,[role="cell"],[role="gridcell"]')));
+                      !row?.querySelector('td,[role~="cell"],[role~="gridcell"]')));
                 if (columnHeader) columns.push(text(header));
               }
               const caption = element instanceof HTMLTableElement ? element.caption : null;
@@ -445,7 +455,7 @@ export function collectExtractDom(this: Element, options: CollectorOptions): Raw
       let selected: Element | undefined;
       for (const node of matches) {
         tick();
-        if (isHidden(node) || ["presentation", "none"].includes(node.getAttribute("role") ?? ""))
+        if (isHidden(node) || ["presentation", "none"].includes(ariaRole(node) ?? ""))
           continue;
         if (selected)
           fail("extract_target_ambiguous", "Multiple containers found; use discover or a selector");
@@ -469,7 +479,7 @@ export function collectExtractDom(this: Element, options: CollectorOptions): Raw
       ];
       const nodes = options.item_selector
         ? select(root, options.item_selector)
-        : select(root, 'li,[role="listitem"]');
+        : select(root, 'li,[role~="listitem"]');
       let sourceRow = 0;
       for (const item of nodes) {
         try {
@@ -553,7 +563,7 @@ export function collectExtractDom(this: Element, options: CollectorOptions): Raw
       fail("extract_structure_invalid", "Target is not an HTML or ARIA table/grid");
     const native = root instanceof HTMLTableElement;
     result.aria_rows = !native;
-    const rows = native ? (root as HTMLTableElement).rows : select(root, '[role="row"]');
+    const rows = native ? (root as HTMLTableElement).rows : select(root, '[role~="row"]');
     const groups = new Map<Element | null, number>();
     let dataRows = 0;
     const dataPositions = new Set<number>();
@@ -580,7 +590,7 @@ export function collectExtractDom(this: Element, options: CollectorOptions): Raw
           }
           // A later rowgroup (e.g. pinned columns) may still hold fragments of
           // accepted rows, so skip new data rows instead of stopping.
-          if (!element.querySelector('[role="columnheader"]')) {
+          if (!element.querySelector('[role~="columnheader"]')) {
             stop("row_limit");
             continue;
           }
@@ -590,17 +600,17 @@ export function collectExtractDom(this: Element, options: CollectorOptions): Raw
             ? element.cells
             : select(
                 element,
-                '[role="cell"],[role="gridcell"],[role="columnheader"],[role="rowheader"]',
+                '[role~="cell"],[role~="gridcell"],[role~="columnheader"],[role~="rowheader"]',
               );
         const cells: RawCell[] = [];
-        const groupElement = native ? element.parentElement : element.closest('[role="rowgroup"]');
+        const groupElement = native ? element.parentElement : element.closest('[role~="rowgroup"]');
         if (!groups.has(groupElement)) groups.set(groupElement, groups.size);
         const headerGroup = groupElement?.tagName === "THEAD";
         const footerGroup = groupElement?.tagName === "TFOOT";
         for (let cellIndex = 0; cellIndex < rowCells.length; cellIndex++) {
           tick();
           const cell = rowCells[cellIndex];
-          if (cell.closest(native ? "tr" : '[role="row"]') !== element) continue;
+          if (cell.closest(native ? "tr" : '[role~="row"]') !== element) continue;
           if (cells.length === options.max_columns) fail("extract_limit", "Column budget exceeded");
           const scope = cell.getAttribute("scope") ?? "";
           if (
@@ -609,7 +619,7 @@ export function collectExtractDom(this: Element, options: CollectorOptions): Raw
             scope.length > 128
           )
             fail("extract_limit", "Cell attributes exceed metadata budget");
-          const role = cell.getAttribute("role");
+          const role = ariaRole(cell);
           const header =
             role === "columnheader" ||
             ((headerGroup || cell.tagName === "TH") &&
