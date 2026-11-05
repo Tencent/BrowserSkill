@@ -1243,6 +1243,17 @@ describe("recorded user steps reach the exported trace", () => {
     expect("steps" in trace && trace.steps.map((step) => step.op)).toEqual(["click"]);
   });
 
+  it("rejects a start URL without a scheme", async () => {
+    const sendToTab = vi.fn();
+    const result = await handleRecordStart(
+      fakeManager(),
+      { session_id: "abcd", url: "example.com" },
+      { tabsApi: makeTabsApi(), sendToTab, cdp: makeFakeCdp() },
+    );
+    expect(result).toMatchObject({ code: "invalid_params", message: /absolute/ });
+    expect(sendToTab).not.toHaveBeenCalled();
+  });
+
   it("rejects unsupported trace_version values", async () => {
     const manager = fakeManager();
     const result = await handleRecordStart(

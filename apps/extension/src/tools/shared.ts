@@ -348,6 +348,27 @@ const CDP_BLOCKED_PROTOCOLS = new Set([
   "opera:",
 ]);
 
+/** Chrome resolves a relative tab URL against the extension, so `example.com`
+ * would open chrome-extension://<id>/example.com. Require an absolute URL. */
+export function relativeUrlError(tool: string, url: string | undefined): RpcError | null {
+  if (url === undefined) return null;
+  let parsed: URL | undefined;
+  try {
+    parsed = new URL(url);
+  } catch {}
+  // `localhost:3000` parses with "localhost:" as its scheme and "3000" as its path.
+  const hostAndPort =
+    parsed &&
+    !parsed.host &&
+    /^\d{1,5}(?:\/|$)/.test(parsed.pathname) &&
+    !["tel:", "sms:"].includes(parsed.protocol);
+  if (parsed && !hostAndPort) return null;
+  return {
+    code: "invalid_params",
+    message: `${tool} url must be absolute, including its scheme (for example https://example.com)`,
+  };
+}
+
 export function cdpBlockedUrlReason(url: string | undefined): string | null {
   if (!url) return null;
   let parsed: URL;

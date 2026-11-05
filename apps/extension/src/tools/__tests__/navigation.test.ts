@@ -270,6 +270,21 @@ describe("shouldTrustReadyStateProbe", () => {
 });
 
 describe("handleNavigate", () => {
+  it("rejects a URL without a scheme before touching the tab", async () => {
+    const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
+    await sm.start("aa11");
+    const fake = makeFakeCdp();
+    const update = vi.fn();
+    const res = await handleNavigate(
+      sm,
+      { session_id: "aa11", url: "example.com" },
+      { cdp: fake.cdp, tabsApi: fake.tabsApi, browserNavigation: { update } as never },
+    );
+    expect(res).toMatchObject({ code: "invalid_params", message: /absolute/ });
+    expect(fake.sent).toEqual([]);
+    expect(update).not.toHaveBeenCalled();
+  });
+
   it("waits for the beforeunload decision when Page.navigate reports ERR_ABORTED before the close event", async () => {
     const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
     await sm.start("aa11");
