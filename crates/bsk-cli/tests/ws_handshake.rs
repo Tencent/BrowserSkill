@@ -18,7 +18,8 @@ pub async fn spawn_daemon() -> daemon::DaemonHandle {
     // Bind to any free TCP port.
     let port = 0;
 
-    let config = DaemonConfig::new(port);
+    let config =
+        DaemonConfig::new(port).with_local_auth(bsk::daemon::local_auth::LocalAuthMode::TrustLocal);
     daemon::run(config, None).await.unwrap()
 }
 

@@ -209,9 +209,12 @@ async fn failed_record_stop_keeps_state_and_session_for_retry() {
     let sock = temp.path().join("daemon.sock");
     let output = temp.path().join("trace");
 
-    let daemon = daemon::run(DaemonConfig::new(0), Some(sock.clone()))
-        .await
-        .unwrap();
+    let daemon = daemon::run(
+        DaemonConfig::new(0).with_local_auth(bsk::daemon::local_auth::LocalAuthMode::TrustLocal),
+        Some(sock.clone()),
+    )
+    .await
+    .unwrap();
     bsk::daemon::info::write_to_path(
         &DaemonInfo::now(
             std::process::id(),
