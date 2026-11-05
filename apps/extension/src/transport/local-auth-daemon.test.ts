@@ -12,7 +12,7 @@ import WebSocket from "ws";
 import { EXTENSION_VERSION, PROTOCOL_VERSION } from "./handshake";
 import { authenticateLocal, createLocalAuthenticator, LocalAuthError } from "./local-auth";
 import * as localCredentials from "./local-credentials";
-import { initializeLocalMigration, readLocalState } from "./local-credentials";
+import { readLocalState } from "./local-credentials";
 import { verifyLocalPairing } from "./pairing-verifier";
 
 // Opt-in process tests: BSK_TEST_BINARY is a current build; BSK_TEST_OLD_BINARY
@@ -64,7 +64,9 @@ async function start(binary: string) {
   let port = 0;
   await vi.waitFor(
     async () => {
-      port = JSON.parse(await readFile(join(home, "daemon.json"), "utf8")).ws_port;
+      const info = JSON.parse(await readFile(join(home, "daemon.json"), "utf8"));
+      expect(info.pid).toBe(daemon!.pid);
+      port = info.ws_port;
       expect(port).toBeGreaterThan(0);
     },
     { timeout: 10_000 },
@@ -178,7 +180,7 @@ it.skipIf(!current)(
       // survive durable cleanup as well as an ordinary credential read.
       const clock = vi.spyOn(Date, "now").mockReturnValue(staged!.createdAt + 24 * 60 * 60_000);
       try {
-        await initializeLocalMigration();
+        await localCredentials.setSkipLocalVerification(false);
         const credentials = (await readLocalState()).credentials;
         expect(credentials).toEqual(before);
         const ws = await opened(url);
@@ -216,6 +218,67 @@ it.skipIf(!old)(
     const ws = await opened(url);
     await authenticate(browserSocket(ws), AbortSignal.timeout(5000));
     expect((await handshake(ws)).result).toBeDefined();
+  },
+  20_000,
+);
+
+it.skipIf(!current)(
+  "optional pairing: a rejected link preserves unpaired use and successful pairing verifies reconnects",
+  async () => {
+    const url = await start(current!);
+    const status = vi.fn();
+    const authenticate = createLocalAuthenticator({
+      instanceId: async () => instance,
+      origin,
+      status,
+    });
+    const unpaired = await opened(url);
+    await authenticate(browserSocket(unpaired), AbortSignal.timeout(5000));
+    expect(status).toHaveBeenLastCalledWith({ state: "unverified_local", reason: "unpaired" });
+    expect((await handshake(unpaired)).result).toBeDefined();
+    const link = await cli(current!, "daemon", "pair");
+    const badLink = link.replace(/[^.]+$/, "A".repeat(43));
+    await expect(
+      verifyLocalPairing(badLink, instance, origin, (address) => browserSocket(socket(address))),
+    ).rejects.toBeInstanceOf(LocalAuthError);
+    expect(unpaired.readyState).toBe(WebSocket.OPEN);
+    expect((await readLocalState()).credentials).toHaveLength(0);
+    const report = JSON.parse(await cli(current!, "--json", "status"));
+    expect(report.browsers).toHaveLength(1);
+
+    await verifyLocalPairing(link, instance, origin, (address) => browserSocket(socket(address)));
+    const paired = await opened(url);
+    await authenticate(browserSocket(paired), AbortSignal.timeout(5000));
+    expect(status).toHaveBeenLastCalledWith(expect.objectContaining({ state: "verified" }));
+    expect((await handshake(paired)).result).toBeDefined();
+  },
+  20_000,
+);
+it.skipIf(!current || !old)(
+  "paired profiles refuse a pre-pairing daemon after an independent CLI downgrade",
+  async () => {
+    await start(current!);
+    const link = await cli(current!, "daemon", "pair");
+    await verifyLocalPairing(link, instance, origin, (address) => browserSocket(socket(address)));
+    const stopped = once(daemon!, "exit");
+    daemon!.kill();
+    await stopped;
+    const url = await start(old!);
+    const status = vi.fn();
+    const authenticate = createLocalAuthenticator({
+      instanceId: async () => instance,
+      origin,
+      status,
+    });
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const ws = await opened(url);
+      await expect(
+        authenticate(browserSocket(ws), AbortSignal.timeout(5000)),
+      ).rejects.toBeInstanceOf(LocalAuthError);
+    }
+    expect(status.mock.calls.some(([value]) => value.state === "unverified_local")).toBe(false);
+    expect((await readLocalState()).credentials[0].role).toBe("active");
+    expect(JSON.parse(await cli(old!, "--json", "status")).browsers).toHaveLength(0);
   },
   20_000,
 );

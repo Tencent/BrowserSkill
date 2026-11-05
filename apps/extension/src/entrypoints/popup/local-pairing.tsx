@@ -6,7 +6,7 @@ import type { LocalAuthStatus } from "@/transport/local-auth";
 import { Switch } from "./switch";
 
 export interface LocalPairingInfo {
-  policy: { skip: boolean; everPaired: boolean; legacyCompat: boolean };
+  policy: { skip: boolean };
   devices: { daemonId: string; deviceId: string; endpoint: string }[];
 }
 export async function localPairingRequest(request: Record<string, unknown>) {

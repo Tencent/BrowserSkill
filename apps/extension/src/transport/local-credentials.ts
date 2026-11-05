@@ -2,8 +2,6 @@ import { openCredentialDatabase } from "./credential-db";
 import { decodeBytes } from "./local-auth-crypto";
 import type { Rotation } from "./local-auth-protocol";
 
-export const PAIRING_VERSION = "0.4.2";
-export const MIGRATION_EXIT_VERSION = "0.4.3";
 const STAGED_TTL_MS = 10 * 60_000;
 export interface LocalCredential {
   daemonId: string;
@@ -17,17 +15,14 @@ export interface LocalCredential {
 }
 export interface LocalPolicy {
   skip: boolean;
-  everPaired: boolean;
-  legacyCompat: boolean;
 }
 export interface LocalState {
   credentials: LocalCredential[];
   policy: LocalPolicy;
 }
-const defaultPolicy = (): LocalPolicy => ({ skip: false, everPaired: false, legacyCompat: false });
 
 /** No asynchronous work inside an IDB transaction. Resolve only on complete,
- * including strict persistence of candidates, promotion, and migration state. */
+ * including strict persistence of candidates, promotion, and explicit skip preferences. */
 async function access<T>(write: boolean, action: (state: LocalState) => T): Promise<T> {
   const database = await openCredentialDatabase();
   try {
@@ -49,7 +44,7 @@ async function access<T>(write: boolean, action: (state: LocalState) => T): Prom
         try {
           const state: LocalState = {
             credentials: records.result ?? [],
-            policy: policy.result ?? defaultPolicy(),
+            policy: { skip: policy.result?.skip ?? false },
           };
           // A saved candidate may already be committed by the daemon even if
           // its reply or our promotion was interrupted. Keep both keys until
@@ -174,8 +169,6 @@ export function promoteCandidate(
     state.credentials = state.credentials.filter(
       (c) => c.daemonId !== record.daemonId || c === record,
     );
-    state.policy.everPaired = true;
-    state.policy.legacyCompat = false;
     return record;
   });
 }
@@ -194,26 +187,5 @@ export function discardStaged(expected: LocalCredential): Promise<void> {
 export function setSkipLocalVerification(skip: boolean): Promise<void> {
   return access(true, (state) => {
     state.policy.skip = skip;
-  });
-}
-function before(version: string, bound: string): boolean {
-  const a = version.split(".").map(Number);
-  const b = bound.split(".").map(Number);
-  if (a.length !== 3 || a.some((part) => !Number.isSafeInteger(part) || part < 0)) return false;
-  return a[0] < b[0] || (a[0] === b[0] && (a[1] < b[1] || (a[1] === b[1] && a[2] < b[2])));
-}
-export function initializeLocalMigration(
-  details?: { reason: string; previousVersion?: string },
-  version = __BSK_EXT_VERSION__,
-): Promise<void> {
-  return access(true, ({ policy }) => {
-    if (!before(version, MIGRATION_EXIT_VERSION) || policy.everPaired) policy.legacyCompat = false;
-    else if (details?.reason === "install") policy.legacyCompat = false;
-    else if (
-      details?.reason === "update" &&
-      details.previousVersion &&
-      before(details.previousVersion, PAIRING_VERSION)
-    )
-      policy.legacyCompat = true;
   });
 }
