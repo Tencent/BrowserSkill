@@ -69,8 +69,12 @@ values. Checks run before input and are not an atomic transaction with the site'
 
 ## Human intervention and failures
 
-Human intervention or document replacement revokes the context. Editing, IME, held keys,
-dragging and manual hold keep the person in control. Use `wait-user` while they are active,
+Scrolling and keys that only move focus or the caret keep the agent's control context.
+A completed page click, keyboard activation, or actual field/editor change yields to the person.
+A press, composition start or cancelled edit waits before conflicting input without revoking
+control. Actual editing and dragging keep the person in control until they finish; merely
+focusing a text field does not create an editing hold. Human intervention or document
+replacement revokes the context. Use `wait-user` while the person is active,
 then sync and replan. While `ready` is false, do not issue page actions. `user_aborted` means
 stop the task, not wait or automatically resume.
 

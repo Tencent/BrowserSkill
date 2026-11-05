@@ -8,11 +8,24 @@ Starting from 0.2.0, CLI / Extension / DSH Plugin share the same version number.
 
 ## [Unreleased]
 
+### Changed
+
+- CLI and daemon updates prefer the official website's domestic download source,
+  falling back to GitHub for failed manifest or archive requests and verification.
+  Archive fallback stays on the selected version with SHA256 verification; if both
+  sources fail, the error includes each URL and cause. Explicit manifest overrides
+  continue to use only the configured source.
+
 ### Fixed
 
 - Debug network evidence classifies request and mock bodies by their raw
   `Content-Type`. Previously a value cut short by the header-evidence budget could
   let multipart bodies be retained, or skip form field redaction.
+- Shared control keeps running during scrolling and ineffective key presses. Completed
+  page clicks, keyboard activation and actual field edits yield to the person. Pending
+  gestures wait at dispatch without revoking control, and coordinate input waits for
+  scrolling to settle. Focusing a text field alone no longer holds editing control.
+
 - With target control, a carousel, video embed or ad refreshing an iframe no
   longer revokes actions whose targets and preconditions are all in the main
   document. Actions involving iframe refs or a strict observation require a
