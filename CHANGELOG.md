@@ -8,12 +8,25 @@ Starting from 0.2.0, CLI / Extension / DSH Plugin share the same version number.
 
 ## [Unreleased]
 
+### Changed
+
+- CLI and daemon updates prefer the official website's domestic download source,
+  falling back to GitHub for failed manifest or archive requests and verification.
+  Archive fallback stays on the selected version with SHA256 verification; if both
+  sources fail, the error includes each URL and cause. Explicit manifest overrides
+  continue to use only the configured source.
+
 ### Fixed
 
 - Commands no longer wait until their timeout when truncated page text cuts an
   emoji in half, for example `bsk console --max-text-chars 4` on `Hi 🚀 there`.
   The lone surrogate left by the cut made the daemon drop the extension's whole
   reply; the extension now sends it as `U+FFFD`.
+- Shared control keeps running during scrolling and ineffective key presses. Completed
+  page clicks, keyboard activation and actual field edits yield to the person. Pending
+  gestures wait at dispatch without revoking control, and coordinate input waits for
+  scrolling to settle. Focusing a text field alone no longer holds editing control.
+
 - With target control, a carousel, video embed or ad refreshing an iframe no
   longer revokes actions whose targets and preconditions are all in the main
   document. Actions involving iframe refs or a strict observation require a

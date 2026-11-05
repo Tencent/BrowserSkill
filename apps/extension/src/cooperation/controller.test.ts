@@ -161,6 +161,32 @@ afterEach(() => {
 });
 
 describe("renderer-independent control authority", () => {
+  it.each([
+    "pending",
+    "scrolling",
+  ] as const)("waits for %s at dispatch without reporting human control", async (field) => {
+    const f = await fixture();
+    f.change({ [field]: true, revision: 0 });
+    const action = f.act();
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    expect(f.native).not.toHaveBeenCalled();
+    expect(f.controller.view(7)?.mode).toBe("acting");
+    f.change({ [field]: false, revision: 0 });
+    expect(await action).not.toHaveProperty("code");
+    expect(f.native).toHaveBeenCalledOnce();
+  });
+  it("lets a confirmed human action win while native input is waiting for a gesture", async () => {
+    const f = await fixture();
+    f.change({ pending: true, revision: 0 });
+    const action = f.act();
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    f.change({ pending: false, human: 1, lastInput: 10000 });
+    expect(await action).toMatchObject({
+      code: "permission_denied",
+      data: { effect_state: "none" },
+    });
+    expect(f.native).not.toHaveBeenCalled();
+  });
   it("does not require an observation or query an unavailable renderer", async () => {
     const f = await fixture({ sync: false });
     f.readFrames.mockClear();
