@@ -3,6 +3,12 @@
 BrowserSkill 的重要变更记录于此，格式参考 [Keep a Changelog](https://keepachangelog.com/)。
 从 0.2.0 起，CLI、扩展和 DSH 插件使用统一版本号。更新日志的中英文版本须在同一 PR 中同步更新。
 
+## [Unreleased]
+
+### 修复
+
+- `extract` 对表格单元格、表头、列表字段和发现预览中的文本应用 CSS `uppercase` 与 `lowercase`，保留子元素样式覆盖和语言相关的大小写映射；转换后的文本仍受字节预算约束（[#597](https://github.com/Tencent/BrowserSkill/issues/597)）。
+
 ## [0.4.2] - 2026-11-05
 
 ### 新增

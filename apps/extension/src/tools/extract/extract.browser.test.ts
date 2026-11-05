@@ -53,6 +53,24 @@ const values = (outcome: Outcome) =>
   outcome.result!.rows.map((row) => outcome.result!.columns.map((column) => row[column.key]));
 
 const fixtures: Record<string, string> = {
+  textTransform: `<style>
+      #t { text-transform: uppercase; }
+      #t .lower { text-transform: lowercase; }
+      #t .literal { text-transform: none; }
+    </style><table id="t"><caption>orders</caption>
+      <thead><tr><th>status</th><th>lower</th><th>mixed</th><th>lines</th><th>literal</th></tr></thead>
+      <tbody><tr><td>paid</td><td class="lower">PAID</td>
+        <td>pa<span>id</span><span class="literal">MiXeD</span><span class="lower">DONE</span></td>
+        <td>first<br>second</td><td class="literal">PaId</td></tr></tbody></table>
+      <ul id="l" style="text-transform:lowercase"><li><a href="/Paid" data-status="PAID">PAID</a></li></ul>`,
+  caseLanguages: `<table id="t" lang="tr"><tr>
+      <td style="text-transform:uppercase">iı</td><td style="text-transform:lowercase">Iİ</td>
+      <td lang="de" style="text-transform:uppercase">straße</td>
+      <td lang="invalid_tag" style="text-transform:uppercase">paid</td></tr></table>`,
+  transformedSlot: `<table id="t"><tr><td><x-case>paid</x-case></td></tr></table>
+    <script>customElements.define("x-case", class extends HTMLElement {
+      constructor() { super(); this.attachShadow({ mode: "open" }).innerHTML = '<span style="text-transform:uppercase"><slot></slot></span>'; }
+    });</script>`,
   contentVisibility: `<table id="t"><tr><td>Visible<div style="content-visibility: hidden"><span style="content-visibility: visible; visibility: visible">Hidden text</span></div></td><td><div style="content-visibility: auto; position: absolute; top: 100000px">Offscreen text</div></td></tr></table>
     <div style="content-visibility: hidden"><table id="hiddenTable"><tr><td>Hidden table</td></tr></table><ul id="hiddenList"><li>Hidden item</li></ul></div>
     <ul id="l"><li>Visible item<div style="content-visibility: hidden"><a href="/hidden">Hidden link</a></div></li></ul>`,
@@ -271,6 +289,50 @@ describe.skipIf(!process.env.BSK_CLICK_CHROME)("real browser structured extracti
     expect(
       values(await extract("controls", { action: "table", selector: "#t" }))[0].slice(0, 4),
     ).toEqual(["Shipped", "42", "edited", "x"]);
+  });
+
+  it("applies CSS case transforms to rendered cell text and discovery previews", async () => {
+    const table = await extract("textTransform", { action: "table", selector: "#t" });
+    expect(table.result!.columns.map((column) => column.name)).toEqual([
+      "STATUS",
+      "LOWER",
+      "MIXED",
+      "LINES",
+      "LITERAL",
+    ]);
+    expect(values(table)).toEqual([["PAID", "paid", "PAIDMiXeDdone", "FIRST\nSECOND", "PaId"]]);
+    const discovery = await extract("textTransform", { action: "discover" });
+    expect(discovery.result!.targets![0]).toMatchObject({
+      name: "ORDERS",
+      columns: ["STATUS", "LOWER", "MIXED", "LINES", "LITERAL"],
+    });
+  });
+
+  it("applies CSS case transforms to list text while retaining URLs and attributes", async () => {
+    const list = await extract("textTransform", { action: "list", selector: "#l" });
+    expect(list.result!.rows[0].text).toBe("paid");
+    expect(list.result!.rows[0].url).toMatch(/\/Paid$/);
+    const fields = await extract("textTransform", {
+      action: "list",
+      selector: "#l",
+      fields: [
+        { key: "text", selector: "a", read: "text" },
+        { key: "raw", selector: "a", read: "attribute", attribute: "data-status" },
+      ],
+    });
+    expect(fields.result!.rows).toEqual([{ text: "paid", raw: "PAID" }]);
+  });
+
+  it("applies CSS case transforms with inherited and overridden languages", async () => {
+    expect(values(await extract("caseLanguages", { action: "table", selector: "#t" }))).toEqual([
+      ["İI", "ıi", "STRASSE", "PAID"],
+    ]);
+  });
+
+  it("applies CSS case transforms to slotted text in open shadow roots", async () => {
+    expect(values(await extract("transformedSlot", { action: "table", selector: "#t" }))).toEqual([
+      ["PAID"],
+    ]);
   });
 
   it("omits content-visibility hidden text without dropping auto offscreen content", async () => {
