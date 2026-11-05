@@ -24,6 +24,11 @@ Starting from 0.2.0, CLI / Extension / DSH Plugin share the same version number.
 
 ### Fixed
 
+- `wait-for-element` re-queries selectors when a matched node disappears during
+  resolution or the state probe, so `hidden` / `detached` waits do not report
+  success while a visible replacement still matches. Retries stay within the
+  existing timeout; waits using refs keep tracking the original node
+  ([#553](https://github.com/Tencent/BrowserSkill/pull/553)).
 - CLI cancellation keeps the original RPC progressing and retries cancellation
   that arrives before daemon registration, reducing background screenshots that
   keep a session busy after the caller stops. Confirmation and response waiting
