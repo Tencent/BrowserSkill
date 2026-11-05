@@ -135,7 +135,11 @@ export class WSTransport implements Transport {
     if (!this.socket || this.socket.readyState !== 1 /* OPEN */) {
       throw new Error("[WSTransport] cannot send while not connected");
     }
-    this.socket.send(JSON.stringify(msg));
+    const text = JSON.stringify(msg);
+    // Page text is cut by UTF-16 units, so a split emoji can leave a lone
+    // surrogate. The daemon's serde_json rejects it and drops the whole frame.
+    // JSON.stringify emits `\udXXX` only for lone surrogates (or literal backslash-u text).
+    this.socket.send(/\\u[dD][89a-fA-F]/.test(text) ? JSON.stringify(msg, wellFormed) : text);
   }
 
   onMessage(handler: FrameHandler): Disposable {
@@ -256,4 +260,8 @@ export class WSTransport implements Transport {
       }
     }
   }
+}
+
+function wellFormed(_key: string, value: unknown): unknown {
+  return typeof value === "string" ? value.toWellFormed() : value;
 }
