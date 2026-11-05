@@ -192,6 +192,7 @@ export function attachCooperationCapture() {
     if (editingTarget && (active !== editingTarget || !editable(editingTarget))) {
       editingTarget = undefined;
       state.editing = false;
+      composing = false;
       state.revision++;
     }
     state.focus = active ? id(active) : undefined;
@@ -459,6 +460,7 @@ export function attachCooperationCapture() {
         if (editingTarget !== activeElement()) {
           editingTarget = undefined;
           state.editing = false;
+          composing = false;
         }
         state.revision++;
         publish();
@@ -533,6 +535,7 @@ export function attachCooperationCapture() {
       if (editingTarget !== target) {
         editingTarget = undefined;
         state.editing = false;
+        composing = false;
       }
       humanInput(event, target);
     }

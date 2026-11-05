@@ -439,6 +439,24 @@ it("protects an unfinished composition without inventing an edit when it is canc
   }
 });
 
+it("releases composition protection when the person finishes editing with a page click", async () => {
+  document.body.innerHTML = "<input><button>Done</button>";
+  const read = collector();
+  read();
+  const target = document.querySelector("input")!;
+  target.focus();
+  const start = new CompositionEvent("compositionstart", { bubbles: true });
+  Object.defineProperty(start, "isTrusted", { value: true });
+  target.dispatchEvent(start);
+  edit(target, "上");
+  expect(read()).toMatchObject({ editing: true, busy: true });
+  // Some native cancellation/focus paths omit compositionend. The actual
+  // click ending the edit must release that stale composition state too.
+  pointer(document.querySelector("button")!, "click");
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  expect(read()).toMatchObject({ editing: false, busy: false, pending: false });
+});
+
 it("keeps a real drag held after Chrome cancels its pointer stream", () => {
   document.body.innerHTML = '<div draggable="true">Move</div>';
   const read = collector();
