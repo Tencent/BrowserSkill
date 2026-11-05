@@ -95,19 +95,18 @@ it("requires the dispatched native time as well as coordinates before attributin
       isTrusted: { value: true },
       timeStamp: { value: time - performance.timeOrigin },
     });
-    document.querySelector("input")!.dispatchEvent(event);
+    completeInput(document.querySelector("input")!, event);
   };
   read(COOPERATION_ARM, "first", { type: "pointerdown", ...point, timestamp });
   press(timestamp);
   expect(read()).toMatchObject({ human: 0, editing: false });
   read(COOPERATION_ARM, "first", { type: "pointerdown", ...point, timestamp });
   press(timestamp + 5);
-  expect(read()).toMatchObject({ human: 1, editing: true });
+  expect(read()).toMatchObject({ human: 1, editing: false });
 });
 
 it.each([
   "pointerdown",
-  "wheel",
 ] as const)("compares native %s in visual viewport coordinates after pinch zoom and pan", (type) => {
   document.body.innerHTML = "<button>Apply</button>";
   const timestamp = 1_790_000_000_000;
@@ -124,7 +123,7 @@ it.each([
       isTrusted: { value: true },
       timeStamp: { value: ticks },
     });
-    document.querySelector("button")!.dispatchEvent(event);
+    completeInput(document.querySelector("button")!, event);
   };
   read(COOPERATION_ARM, "first", input);
   dispatch(313, 179);
@@ -139,7 +138,7 @@ it.each([
 // can diverge from the wall clock used by CDP in a long-running browser.
 it.each(
   [-120_000, -8.8, -5, -3, -1.5, 0, 1.5, 3, 5, 8.8, 120_000].flatMap((skew) =>
-    (["pointerdown", "keydown", "wheel"] as const).map((type) => ({ skew, type })),
+    (["pointerdown", "keydown", "keypress"] as const).map((type) => ({ skew, type })),
   ),
 )("attributes $type with $skew ms of epoch drift without swallowing human input", ({
   skew,
@@ -156,14 +155,14 @@ it.each(
   const expected: InputExpectation = { type, timestamp: epoch, key: "", x: 10, y: 20 };
   const press = (timeStamp: number) => {
     const event =
-      type === "keydown"
+      type === "keydown" || type === "keypress"
         ? new KeyboardEvent(type, { bubbles: true, key: "" })
         : new MouseEvent(type, { bubbles: true, clientX: 10, clientY: 20 });
     Object.defineProperties(event, {
       isTrusted: { value: true },
       timeStamp: { value: timeStamp },
     });
-    document.querySelector("input")!.dispatchEvent(event);
+    completeInput(document.querySelector("input")!, event);
   };
   read(COOPERATION_ARM, "first", expected);
   press(ticks);
@@ -193,7 +192,7 @@ it("fails closed when clock sampling is interrupted rather than accepting a wide
     isTrusted: { value: true },
     timeStamp: { value: 120 },
   });
-  document.querySelector("button")!.dispatchEvent(event);
+  completeInput(document.querySelector("button")!, event);
   expect(read()).toMatchObject({ human: 1 });
 });
 
@@ -216,7 +215,7 @@ it.each([
     isTrusted: { value: true },
     timeStamp: { value: 1000 + rounding },
   });
-  document.querySelector("button")!.dispatchEvent(event);
+  completeInput(document.querySelector("button")!, event);
   expect(read()).toMatchObject({ human: 0, editing: false, busy: false });
 });
 
@@ -230,7 +229,7 @@ it("recognizes the recorded native key timestamp discrepancy but rejects nearby 
   const press = (timeStamp: number) => {
     const event = new KeyboardEvent("keydown", { bubbles: true, key: "" });
     Object.defineProperties(event, { isTrusted: { value: true }, timeStamp: { value: timeStamp } });
-    document.querySelector("input")!.dispatchEvent(event);
+    completeInput(document.querySelector("input")!, event);
   };
   read(COOPERATION_ARM, "first", input);
   press(804.8999996185303);
@@ -253,7 +252,7 @@ it("consumes a clock-matched expectation once and preserves the next same-positi
   const press = (timeStamp: number) => {
     const event = new MouseEvent("pointerdown", { bubbles: true });
     Object.defineProperties(event, { isTrusted: { value: true }, timeStamp: { value: timeStamp } });
-    document.querySelector("button")!.dispatchEvent(event);
+    completeInput(document.querySelector("button")!, event);
   };
   read(COOPERATION_ARM, "first", input);
   press(ticks);
@@ -269,7 +268,7 @@ it("consumes a clock-matched expectation once and preserves the next same-positi
 it.each([
   "pointerdown",
   "keydown",
-  "wheel",
+  "keypress",
 ] as const)("recognizes rounded native %s time at the epoch projection without swallowing later human input", (type) => {
   document.body.innerHTML = '<input aria-label="Target">';
   const read = collector();
@@ -284,14 +283,14 @@ it.each([
   const input: InputExpectation = { type, timestamp: epoch, x: 10, y: 20, key: "Enter" };
   const press = (timeStamp: number) => {
     const event =
-      type === "keydown"
+      type === "keydown" || type === "keypress"
         ? new KeyboardEvent(type, { bubbles: true, key: "Enter" })
         : new MouseEvent(type, { bubbles: true, clientX: 10, clientY: 20 });
     Object.defineProperties(event, {
       isTrusted: { value: true },
       timeStamp: { value: timeStamp },
     });
-    document.querySelector("input")!.dispatchEvent(event);
+    completeInput(document.querySelector("input")!, event);
   };
   read(COOPERATION_ARM, "first", input);
   press(5979.800000190735);
@@ -301,11 +300,247 @@ it.each([
   expect(read()).toMatchObject({ human: 1 });
 });
 
+function edit(target: HTMLInputElement | HTMLTextAreaElement, value: string) {
+  target.focus();
+  const before = new InputEvent("beforeinput", {
+    bubbles: true,
+    composed: true,
+    inputType: "insertText",
+    data: value,
+  });
+  Object.defineProperty(before, "isTrusted", { value: true });
+  target.dispatchEvent(before);
+  target.value = value;
+  const input = new InputEvent("input", {
+    bubbles: true,
+    composed: true,
+    inputType: "insertText",
+    data: value,
+  });
+  Object.defineProperty(input, "isTrusted", { value: true });
+  target.dispatchEvent(input);
+}
+
+function completeInput(target: Element, event: MouseEvent | KeyboardEvent) {
+  if (target instanceof HTMLElement) target.focus();
+  if (!event.isTrusted) Object.defineProperty(event, "isTrusted", { value: true });
+  target.dispatchEvent(event);
+  if (event.type === "pointerdown") {
+    pointer(target, "pointerup");
+    pointer(target, "click");
+  } else if (target instanceof HTMLInputElement) {
+    edit(target, target.value + "x");
+  }
+}
+
 function pointer(target: Element, type: string) {
   const event = new MouseEvent(type, { bubbles: true, composed: true });
   Object.defineProperty(event, "isTrusted", { value: true });
   target.dispatchEvent(event);
 }
+
+it("keeps scrolling and ineffective keys out of human control and its quiet clock", () => {
+  document.body.innerHTML = '<input aria-label="City">';
+  const read = collector();
+  read();
+  const target = document.querySelector("input")!;
+  for (const type of ["wheel", "scroll"]) pointer(target, type);
+  for (const key of ["Shift", "Tab", "ArrowLeft", "Backspace", "Escape"]) {
+    for (const type of ["keydown", "keyup"]) {
+      const event = new KeyboardEvent(type, { bubbles: true, key });
+      Object.defineProperty(event, "isTrusted", { value: true });
+      target.dispatchEvent(event);
+    }
+  }
+  expect(read()).toMatchObject({
+    human: 0,
+    lastInput: 0,
+    busy: false,
+    editing: false,
+    pending: false,
+  });
+});
+
+it("waits for a possible click without revoking control, and releases a cancelled gesture", () => {
+  document.body.innerHTML = "<button>Apply</button>";
+  const read = collector();
+  read();
+  const target = document.querySelector("button")!;
+  pointer(target, "pointerdown");
+  expect(read()).toMatchObject({ human: 0, busy: false, pending: true, lastInput: 0 });
+  pointer(target, "pointercancel");
+  expect(read()).toMatchObject({ human: 0, pending: false, lastInput: 0 });
+  pointer(target, "pointerdown");
+  pointer(target, "pointerup");
+  pointer(target, "click");
+  expect(read()).toMatchObject({
+    human: 1,
+    editing: false,
+    pending: false,
+    events: [{ type: "click" }],
+  });
+});
+
+it("ignores toolbar gestures while allowing them to finish a page-originated press", async () => {
+  document.body.innerHTML =
+    "<button>Apply</button><browser-skill-overlay><button>Pause</button></browser-skill-overlay>";
+  const read = collector();
+  const first = read()!;
+  const toolbar = document.querySelector("browser-skill-overlay button")!;
+  pointer(toolbar, "pointerdown");
+  pointer(toolbar, "pointerup");
+  pointer(toolbar, "click");
+  expect(read()).toMatchObject({ revision: first.revision, human: 0, pending: false });
+  pointer(document.querySelector("button")!, "pointerdown");
+  pointer(toolbar, "pointerup");
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  expect(read()).toMatchObject({ human: 0, pending: false });
+});
+
+it("confirms changed content and releases editing when the field becomes readonly", () => {
+  document.body.innerHTML = '<input aria-label="City" value="old">';
+  const read = collector();
+  read();
+  const target = document.querySelector("input")!;
+  edit(target, "old");
+  expect(read()?.human).toBe(0);
+  edit(target, "new");
+  expect(read()).toMatchObject({ human: 1, editing: true, fields: [{ value: "new" }] });
+  target.readOnly = true;
+  expect(read()?.editing).toBe(false);
+});
+
+it("keeps native file-selection notifications out of text editing and field values", () => {
+  document.body.innerHTML = '<input type="file">';
+  const read = collector();
+  read();
+  for (const type of ["input", "change"]) {
+    const event = new Event(type, { bubbles: true });
+    Object.defineProperty(event, "isTrusted", { value: true });
+    document.querySelector("input")!.dispatchEvent(event);
+  }
+  expect(read()).toMatchObject({ human: 0, editing: false, fields: [] });
+});
+
+it("protects an unfinished composition without inventing an edit when it is cancelled", () => {
+  document.body.innerHTML = "<input>";
+  const read = collector();
+  read();
+  const target = document.querySelector("input")!;
+  for (const type of ["compositionstart", "compositionend"]) {
+    const event = new CompositionEvent(type, { bubbles: true });
+    Object.defineProperty(event, "isTrusted", { value: true });
+    target.dispatchEvent(event);
+    expect(read()).toMatchObject({
+      human: 0,
+      pending: type === "compositionstart",
+      editing: false,
+    });
+  }
+});
+
+it("keeps a real drag held after Chrome cancels its pointer stream", () => {
+  document.body.innerHTML = '<div draggable="true">Move</div>';
+  const read = collector();
+  read();
+  const target = document.querySelector("div")!;
+  pointer(target, "pointerdown");
+  pointer(target, "dragstart");
+  pointer(target, "pointercancel");
+  expect(read()).toMatchObject({ human: 1, busy: true, pending: false });
+  pointer(target, "dragend");
+  expect(read()).toMatchObject({ human: 1, busy: false, pending: false });
+});
+
+it("retires native text attribution by command id and preserves subsequent human typing", async () => {
+  document.body.innerHTML = '<input type="password" aria-label="Password">';
+  const read = collector();
+  read();
+  const target = document.querySelector("input")!;
+  target.focus();
+  read(COOPERATION_ARM, "first", {
+    type: "beforeinput",
+    text: "private synthetic text",
+    id: "new",
+  });
+  read(COOPERATION_ARM, "first", { type: "clear", id: "old" });
+  edit(target, "private synthetic text");
+  expect(read()).toMatchObject({ human: 0, editing: false });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  read(COOPERATION_ARM, "first", {
+    type: "beforeinput",
+    text: "manual synthetic text",
+    id: "last",
+  });
+  read(COOPERATION_ARM, "first", { type: "clear", id: "last" });
+  edit(target, "manual synthetic text");
+  const state = read();
+  expect(state).toMatchObject({ human: 1, editing: true, fields: [] });
+  expect(JSON.stringify(state)).not.toMatch(/private synthetic text|manual synthetic text/);
+});
+
+it("clears text attribution when preparation fails before native dispatch", async () => {
+  document.body.innerHTML = "<input>";
+  const read = collector();
+  read();
+  const target = document.querySelector("input")!;
+  target.focus();
+  const native = vi.fn();
+  const runner = guardedRunner({ send: native } as CdpRunner, {
+    prepare: async (input) => {
+      read(COOPERATION_ARM, "first", input);
+      throw new Error("target changed");
+    },
+    finishInput: async (input) => {
+      read(COOPERATION_ARM, "first", { type: "clear", id: input.id });
+    },
+  });
+  await expect(runner.send(7, "Input.insertText", { text: "same text" })).rejects.toThrow(
+    "target changed",
+  );
+  expect(native).not.toHaveBeenCalled();
+  edit(target, "same text");
+  expect(read()).toMatchObject({ human: 1, editing: true });
+});
+
+it("prioritizes a human key even when its text matches a pending native insertion", () => {
+  document.body.innerHTML = "<input>";
+  const read = collector();
+  read();
+  const target = document.querySelector("input")!;
+  target.focus();
+  read(COOPERATION_ARM, "first", { type: "beforeinput", text: "x", id: "agent" });
+  const key = new KeyboardEvent("keydown", { bubbles: true, key: "x" });
+  Object.defineProperty(key, "isTrusted", { value: true });
+  target.dispatchEvent(key);
+  edit(target, "x");
+  expect(read()).toMatchObject({ human: 1, editing: true });
+});
+
+it("recognizes editing events retargeted from a closed shadow input", () => {
+  document.body.innerHTML = '<div id="host"></div>';
+  const host = document.querySelector<HTMLElement>("#host")!;
+  const root = host.attachShadow({ mode: "closed" });
+  root.innerHTML = '<input aria-label="Closed note">';
+  const read = collector((element) => (element === host ? root : null));
+  read();
+  const target = root.querySelector("input")!;
+  target.focus();
+  const dispatch = (type: string) => {
+    const event = new InputEvent(type, {
+      bubbles: true,
+      composed: true,
+      inputType: "insertText",
+      data: "human",
+    });
+    Object.defineProperty(event, "isTrusted", { value: true });
+    host.dispatchEvent(event);
+  };
+  dispatch("beforeinput");
+  target.value = "human";
+  dispatch("input");
+  expect(read()).toMatchObject({ human: 1, editing: true, fields: [{ value: "human" }] });
+});
 
 it.each([
   '<input readonly value="selected">',
@@ -320,6 +555,7 @@ it.each([
   const target = document.body.firstElementChild!;
   pointer(target, "pointerdown");
   pointer(target, "pointerup");
+  pointer(target, "click");
   expect(read()).toMatchObject({ human: 1, editing: false, busy: false });
 });
 
@@ -332,8 +568,8 @@ it("distinguishes identically labelled fields and observes open shadow controls"
   expect(first.fields).toHaveLength(2);
   expect(new Set(first.fields.map((f) => f.id)).size).toBe(2);
   expect(first.fieldsComplete).toBe(true);
-  pointer(shadow.querySelector("input")!, "pointerdown");
-  expect(read()).toMatchObject({ editing: true, events: [{ label: "Choice" }] });
+  edit(shadow.querySelector("input")!, "human note");
+  expect(read()).toMatchObject({ editing: true, events: [{ type: "input", label: "Choice" }] });
 });
 
 it("keeps native input attribution valid across renderer delay without accepting nearby human input", () => {
@@ -350,7 +586,10 @@ it("keeps native input attribution valid across renderer delay without accepting
   });
   document.querySelector("button")!.dispatchEvent(event);
   expect(read()).toMatchObject({ human: 0 });
-  pointer(document.querySelector("button")!, "pointerdown");
+  completeInput(
+    document.querySelector("button")!,
+    new MouseEvent("pointerdown", { bubbles: true }),
+  );
   expect(read()).toMatchObject({ human: 1 });
   vi.restoreAllMocks();
 });
@@ -365,7 +604,7 @@ it("attributes a keyless caret command to the Agent while preserving subsequent 
       isTrusted: { value: true },
       timeStamp: { value: timestamp - performance.timeOrigin },
     });
-    document.querySelector("input")!.dispatchEvent(event);
+    completeInput(document.querySelector("input")!, event);
   };
   const cdp = {
     send: vi.fn(async (_tabId, _method, params) => {
@@ -458,7 +697,7 @@ it("does not acquire an editing lease when scrolling over an input", () => {
   const read = collector();
   read();
   pointer(document.querySelector("input")!, "wheel");
-  expect(read()).toMatchObject({ human: 1, editing: false, busy: false });
+  expect(read()).toMatchObject({ human: 0, editing: false, busy: false });
 });
 
 it("preserves editing across a focus transition into a shadow field", async () => {
@@ -480,6 +719,7 @@ it("preserves editing across a focus transition into a shadow field", async () =
   focusout(outer, root.host);
   input.focus();
   pointer(input, "pointerup");
+  edit(input, "human note");
   await new Promise((resolve) => setTimeout(resolve, 5));
   expect(read()).toMatchObject({ editing: true, busy: false });
   focusout(input, document.querySelector("button")!);

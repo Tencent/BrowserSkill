@@ -401,6 +401,7 @@ try {
             scope,
             humanClick,
             humanPointer,
+            humanType: (text) => send("Input.insertText", { text }, userSession),
             evaluate,
             sync,
             wait,

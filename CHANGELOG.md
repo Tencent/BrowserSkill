@@ -10,6 +10,11 @@ Starting from 0.2.0, CLI / Extension / DSH Plugin share the same version number.
 
 ### Fixed
 
+- Shared control keeps running during scrolling and ineffective key presses. Completed
+  page clicks, keyboard activation and actual field edits yield to the person. Pending
+  gestures wait at dispatch without revoking control, and coordinate input waits for
+  scrolling to settle. Focusing a text field alone no longer holds editing control.
+
 - Values in one-time-code, card and password fields marked by `autocomplete`
   (`one-time-code`, `cc-*`, `current-password`, `new-password`), which observations
   already hide, are also kept out of shared-control field state, `expect` failure

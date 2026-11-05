@@ -7,6 +7,8 @@ BrowserSkill 的重要变更记录于此，格式参考 [Keep a Changelog](https
 
 ### 修复
 
+- 共享控制在滚动和无效按键期间继续执行，真实网页点击、键盘激活和有效字段编辑时向人工让路。待确认手势在输入发送前等待，取消后保留原控制上下文；依赖坐标的操作等待滚动稳定。仅聚焦文本框不再持续保持编辑控制。
+
 - 以 `autocomplete`（`one-time-code`、`cc-*`、`current-password`、`new-password`）标记的一次性验证码、银行卡和密码字段，其值此前已在观察结果中隐藏，现在也不会出现在共享控制字段状态、`expect` 失败详情、结构化提取和录制的填写步骤中。所有检查均逐个匹配 `autocomplete` 令牌，因此 `section-login current-password` 或 `billing cc-number` 的值同样会被隐藏。被“显示密码”切换为 `type=text` 的密码框，在共享控制字段状态以及录制步骤和状态观察中也保持隐藏。
 - 在 Windows 上，配对、轮换或撤销远程浏览器时，若另一请求正在读取授权存储，不再因 `replace authorization snapshot: Access is denied` 而失败。
 - 调整窗口大小时验证实际窗口边界和目标标签页的布局视口，并报告受限边界、非活动标签页及未随窗口变化的视口。已发送的调整操作还会使下一次共享控制同步重新采集页面。

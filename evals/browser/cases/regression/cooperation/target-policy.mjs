@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { createDshRegressionClient } from "./dsh-client.mjs";
+import { runIntentScenarios } from "./intent-signals.mjs";
 
 /** Exercise both shipped defaults through the installed extension, including real human input. */
 export async function runTargetPolicyScenarios({ send, bsk, cli, env, base }) {
@@ -103,6 +104,18 @@ export async function runTargetPolicyScenarios({ send, bsk, cli, env, base }) {
       assert.notEqual(fresh.context_id, first.context_id);
       await click(fresh.context_id);
       assert.equal(await read("applied"), 4);
+      const intentSignals = await runIntentScenarios({
+        client,
+        dsh,
+        bsk,
+        send,
+        scope,
+        session,
+        human,
+        read,
+        sync,
+        click,
+      });
       results.push({
         client,
         policy: "target",
@@ -110,6 +123,7 @@ export async function runTargetPolicyScenarios({ send, bsk, cli, env, base }) {
         stableRefAfterSnapshot: true,
         humanRevokedContext: true,
         finalClicks: 4,
+        intentSignals,
       });
     } finally {
       if (session) {
