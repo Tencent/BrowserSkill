@@ -61,6 +61,26 @@ describe("isOverlayAgentOverlayResetMessage", () => {
 });
 
 describe("isOverlayAgentStateMessage", () => {
+  it("validates controller metadata while accepting older messages", () => {
+    const message = {
+      type: OVERLAY_AGENT_STATE,
+      sessionId: "sess-1",
+      mode: "control",
+      epoch: "worker",
+      generation: 1,
+    };
+    expect(isOverlayAgentStateMessage(message)).toBe(true);
+    expect(
+      isOverlayAgentStateMessage({
+        ...message,
+        controller: { name: "Codex", project: "Search", color: "#2563eb" },
+      }),
+    ).toBe(true);
+    expect(isOverlayAgentStateMessage({ ...message, controller: { name: 42 } })).toBe(false);
+    expect(
+      isOverlayAgentStateMessage({ ...message, controller: { name: "Codex", color: "url(x)" } }),
+    ).toBe(false);
+  });
   it("requires a version", () => {
     const message = { type: OVERLAY_AGENT_STATE, sessionId: "sess-1", mode: "control" };
     expect(isOverlayAgentStateMessage({ ...message, epoch: "worker", generation: 1 })).toBe(true);

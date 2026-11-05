@@ -3,15 +3,23 @@ import { type JsonSource, parseJsonSource } from "./json-source";
 /** Redact before retaining evidence, including URLs and JSON/form values. */
 const SECRET =
   /^(?:authorization|proxy-authorization|cookie|set-cookie|password|passwd|pwd|secret|client[_-]?secret|(?:(?:access|refresh|id|auth|csrf|xsrf)[_-]?)?token|api[_-]?key|x-api-key|x-auth-token|x-csrf-token|x-xsrf-token|session[_-]?(?:id|key)|credentials?)$/i;
+// Exact vendor credential names. A generic `*token` suffix would also hide
+// pagination cursors such as pageToken (#555), so each name is listed.
+const VENDOR_SECRET =
+  /^(?:private-token|x-goog-api-key|x-amz-security-token|ocp-apim-subscription-key|x-vault-token|x-access-token|x-csrftoken|x-shopify-access-token|x-hasura-admin-secret)$/i;
 const MASK = "[redacted]";
 export const BODY_CHARS = 64 * 1024;
 export const URL_CHARS = 2048;
+
+function secretName(name: string): boolean {
+  return SECRET.test(name) || VENDOR_SECRET.test(name.replaceAll("_", "-"));
+}
 
 function secretField(key: string): boolean {
   return key
     .replace(/([a-z0-9])([A-Z])/g, "$1_$2")
     .split(/[.[\]]+/)
-    .some((part) => SECRET.test(part) || /(?:^|[_-])(?:password|passwd|pwd)(?:[_-]|$)/i.test(part));
+    .some((part) => secretName(part) || /(?:^|[_-])(?:password|passwd|pwd)(?:[_-]|$)/i.test(part));
 }
 
 const HTML_FIELD_SEPARATORS: Record<string, string> = {
@@ -97,7 +105,7 @@ export function redactHeaderEvidence(value: unknown): {
   let remaining = 4 * 1024;
   for (const [key, raw] of entries.slice(0, 80)) {
     const name = key.slice(0, 128).toLowerCase();
-    const secret = SECRET.test(name);
+    const secret = secretName(name);
     const original = String(raw);
     const redacted = secret ? MASK : redactText(original, 2048);
     const limit = Math.max(0, Math.min(2048, remaining - name.length));

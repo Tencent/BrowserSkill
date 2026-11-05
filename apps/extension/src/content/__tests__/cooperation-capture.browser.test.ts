@@ -34,12 +34,9 @@ describe.skipIf(!process.env.BSK_COOP_CHROME)("frame interaction coverage", () =
             : request.url === "/wheel"
               ? // A legacy handler, as Bilibili uses for volume (#550).
                 '<!doctype html><div style="height:400px"></div><script>window.counts={mousewheel:0};document.addEventListener("mousewheel",()=>counts.mousewheel++)</script>'
-              : request.url === "/wheel-stop"
-                ? // Registered while parsing, before cooperation starts.
-                  '<!doctype html><div style="height:400px"></div><script>window.counts={wheel:0};document.addEventListener("wheel",e=>{counts.wheel++;e.stopImmediatePropagation()},true)</script>'
-                : request.url === "/frame" || request.url === "/delayed"
-                  ? '<!doctype html><input aria-label="Frame" value="child">'
-                  : '<!doctype html><input aria-label="Page" value="top"><iframe src="/frame"></iframe>',
+              : request.url === "/frame" || request.url === "/delayed"
+                ? '<!doctype html><input aria-label="Frame" value="child">'
+                : '<!doctype html><input aria-label="Page" value="top"><iframe src="/frame"></iframe>',
       );
     });
     try {
@@ -331,8 +328,7 @@ globalThis.httpCooperationReady = true;`,
           executeScript.mockClear();
 
           // Chromium skips a node's `mousewheel` listeners when that node has a
-          // `wheel` listener, and a page's capture listener on document can stop
-          // later ones there. Wheel capture must avoid both (#550, #568).
+          // `wheel` listener. Wheel capture must keep page handlers running (#550).
           // Passive wheel events reach page script after the input is acknowledged.
           const wheel = async (route: string, counts: Record<string, number>) => {
             const { targetInfos } = await send<{
@@ -369,20 +365,14 @@ globalThis.httpCooperationReady = true;`,
               await send("Target.detachFromTarget", { sessionId: human });
             }
           };
-          const stopping = await createTab("/wheel-stop");
-          await collectCooperationFrames(stopping.id, COOPERATION_READ, "wheel");
-          await wheel("/wheel-stop", { wheel: 1 });
-          expect(
-            (await collectCooperationFrames(stopping.id, COOPERATION_READ, "wheel")).frames.get(0),
-          ).toMatchObject({ human: 1 });
-          await evaluate(`chrome.tabs.remove(${stopping.id})`);
           const legacy = await createTab("/wheel");
           await wheel("/wheel", { mousewheel: 1 });
           await collectCooperationFrames(legacy.id, COOPERATION_READ, "wheel");
           await wheel("/wheel", { mousewheel: 2 });
+          // Browsing never transfers control.
           expect(
             (await collectCooperationFrames(legacy.id, COOPERATION_READ, "wheel")).frames.get(0),
-          ).toMatchObject({ human: 1 });
+          ).toMatchObject({ human: 0 });
           await evaluate(`chrome.tabs.remove(${legacy.id})`);
           expect(executeScript).not.toHaveBeenCalled();
 
