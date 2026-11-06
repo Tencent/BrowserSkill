@@ -23,6 +23,16 @@ pub enum MethodEffect {
 pub enum Method {
     #[serde(rename = "tool.cooperate")]
     ToolCooperate,
+    #[serde(rename = "local_auth.pair")]
+    LocalAuthPair,
+    #[serde(rename = "local_auth.devices")]
+    LocalAuthDevices,
+    #[serde(rename = "local_auth.revoke")]
+    LocalAuthRevoke,
+    #[serde(rename = "local_auth.rotate")]
+    LocalAuthRotate,
+    #[serde(rename = "local_auth.set_mode")]
+    LocalAuthSetMode,
     #[serde(rename = "tool.video")]
     ToolVideo,
     /// Extension-only local history API; browser identity comes from the peer.
@@ -287,7 +297,12 @@ impl Method {
             | Method::TransferRead
             | Method::TransferRelease
             | Method::ToolScreenshotRelease
-            | Method::Cancel => MethodEffect::ControlPlane,
+            | Method::Cancel
+            | Method::LocalAuthPair
+            | Method::LocalAuthDevices
+            | Method::LocalAuthRevoke
+            | Method::LocalAuthRotate
+            | Method::LocalAuthSetMode => MethodEffect::ControlPlane,
         }
     }
 

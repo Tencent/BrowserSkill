@@ -54,3 +54,14 @@ For observation_changed while gathering data on a changing page, use the fixed
 read/extract path (inspect action=read/extract in MCP/DSH). Do not resubmit
 arbitrary evaluate in a sync loop. A refusal is known to have no effect only
 when effect_state=none; unknown results still require application inspection.
+
+## Local pairing
+
+On `pairing_required`, follow the [local setup guide](https://github.com/Tencent/BrowserSkill/blob/main/docs/local-pairing.md)
+with the intended daemon environment. Have the user paste the private pairing
+link into extension settings and wait for Connected / Verified before retrying
+the native session tool. Never include the link in logs or shared reports.
+`already_paired` preserves the current connection; replace it only when intended.
+`replace_mismatch` needs a normal link for a new profile; revoke an unused old
+device separately. Never enable verification skipping to bypass an error.
+Independent daemon homes require separate pairings.

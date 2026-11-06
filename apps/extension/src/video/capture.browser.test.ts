@@ -3,7 +3,7 @@
 // state belongs to temporary directories; no personal browser is contacted.
 import { execFile, spawn } from "node:child_process";
 import { type EventEmitter, once } from "node:events";
-import { cp, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -121,19 +121,18 @@ describe.skipIf(!process.env.BSK_VIDEO_CHROME || !process.env.BSK_VIDEO_BSK)(
             { timeout: 15_000 },
           )
           .toBeGreaterThan(0);
-        const extension = path.join(directory, "extension");
-        await cp(path.resolve("dist/chrome-mv3"), extension, { recursive: true });
+        const { copyPairingExtension, pairLocalBrowser } = await import(
+          new URL("../../../../evals/browser/local-pairing.mjs", import.meta.url).href
+        );
+        const extension = await copyPairingExtension(
+          path.resolve("dist/chrome-mv3"),
+          path.join(directory, "extension"),
+          port,
+        );
         const manifestPath = path.join(extension, "manifest.json");
         const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
         manifest.name = "BrowserSkill video integration";
         await writeFile(manifestPath, JSON.stringify(manifest));
-        const backgroundPath = path.join(extension, "background.js");
-        const background = await readFile(backgroundPath, "utf8");
-        expect(background).toContain("ws://127.0.0.1:52800");
-        await writeFile(
-          backgroundPath,
-          background.replaceAll("ws://127.0.0.1:52800", `ws://127.0.0.1:${port}`),
-        );
         // Only the fixture delays production content startup. onCompleted can
         // resume capture before its listener exists, and the video query arrives
         // after the ordinary overlay state. No production test hook is needed.
@@ -201,6 +200,18 @@ describe.skipIf(!process.env.BSK_VIDEO_CHROME || !process.env.BSK_VIDEO_BSK)(
             },
           },
           async (send: Send) => {
+            const workerSession = await attachVideoBackground(send, manifest.name);
+            const origin = workerSession.origin;
+            const evaluate = async <T>(sessionId: string, expression: string): Promise<T> => {
+              const result = await send<{ result: { value: T }; exceptionDetails?: unknown }>(
+                "Runtime.evaluate",
+                { expression, returnByValue: true, awaitPromise: true },
+                sessionId,
+              );
+              if (result.exceptionDetails) throw new Error(JSON.stringify(result.exceptionDetails));
+              return result.result.value;
+            };
+            await pairLocalBrowser(send, { executable, env, worker: workerSession });
             await expect
               .poll(async () => (await cli("browsers")).length, { timeout: 15_000 })
               .toBe(1);
@@ -224,17 +235,6 @@ describe.skipIf(!process.env.BSK_VIDEO_CHROME || !process.env.BSK_VIDEO_BSK)(
               context.observation_id,
               `http://127.0.0.1:${address.port}/blue`,
             );
-            const workerSession = await attachVideoBackground(send, manifest.name);
-            const origin = workerSession.origin;
-            const evaluate = async <T>(sessionId: string, expression: string): Promise<T> => {
-              const result = await send<{ result: { value: T }; exceptionDetails?: unknown }>(
-                "Runtime.evaluate",
-                { expression, returnByValue: true, awaitPromise: true },
-                sessionId,
-              );
-              if (result.exceptionDetails) throw new Error(JSON.stringify(result.exceptionDetails));
-              return result.result.value;
-            };
             await expect
               .poll(
                 () =>

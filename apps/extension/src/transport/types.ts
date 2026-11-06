@@ -20,6 +20,7 @@ export type ErrorCode =
   | "cancelled"
   | "user_aborted"
   | "version_too_old"
+  | "pairing_required"
   | "multiple_browsers_online"
   | "no_browser_connected";
 
