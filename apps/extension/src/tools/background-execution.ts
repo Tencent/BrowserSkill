@@ -15,6 +15,7 @@ const reads = new Set([
   "tool.observe",
   "tool.screenshot",
   "tool.get_html",
+  "tool.read",
   "tool.extract",
   "tool.evaluate",
   "tool.console",

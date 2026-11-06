@@ -23,6 +23,16 @@ pub enum MethodEffect {
 pub enum Method {
     #[serde(rename = "tool.cooperate")]
     ToolCooperate,
+    #[serde(rename = "local_auth.pair")]
+    LocalAuthPair,
+    #[serde(rename = "local_auth.devices")]
+    LocalAuthDevices,
+    #[serde(rename = "local_auth.revoke")]
+    LocalAuthRevoke,
+    #[serde(rename = "local_auth.rotate")]
+    LocalAuthRotate,
+    #[serde(rename = "local_auth.set_mode")]
+    LocalAuthSetMode,
     #[serde(rename = "tool.video")]
     ToolVideo,
     /// Extension-only local history API; browser identity comes from the peer.
@@ -48,6 +58,9 @@ pub enum Method {
     SessionStopAll,
     #[serde(rename = "session.list")]
     SessionList,
+    /// Daemon-local metadata of what a session did; recipes draft from it.
+    #[serde(rename = "session.run_log")]
+    SessionRunLog,
 
     #[serde(rename = "browser.list")]
     BrowserList,
@@ -110,6 +123,8 @@ pub enum Method {
     ToolObserve,
     #[serde(rename = "tool.get_html")]
     ToolGetHtml,
+    #[serde(rename = "tool.read")]
+    ToolRead,
     #[serde(rename = "tool.extract")]
     ToolExtract,
     #[serde(rename = "tool.screenshot")]
@@ -239,6 +254,7 @@ impl Method {
             Method::ToolTabList
             | Method::ToolSnapshot
             | Method::ToolGetHtml
+            | Method::ToolRead
             | Method::ToolExtract
             | Method::ToolScreenshot
             | Method::ToolScreenshotRead
@@ -262,6 +278,7 @@ impl Method {
             | Method::SessionStop
             | Method::SessionStopAll
             | Method::SessionList
+            | Method::SessionRunLog
             | Method::ToolSessionStart
             | Method::ToolSessionStop => MethodEffect::ControlPlane,
 
@@ -280,7 +297,12 @@ impl Method {
             | Method::TransferRead
             | Method::TransferRelease
             | Method::ToolScreenshotRelease
-            | Method::Cancel => MethodEffect::ControlPlane,
+            | Method::Cancel
+            | Method::LocalAuthPair
+            | Method::LocalAuthDevices
+            | Method::LocalAuthRevoke
+            | Method::LocalAuthRotate
+            | Method::LocalAuthSetMode => MethodEffect::ControlPlane,
         }
     }
 

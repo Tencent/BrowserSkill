@@ -1,6 +1,6 @@
 # BrowserSkill — Privacy Policy
 
-**Last updated:** October 30, 2026
+**Last updated:** November 2, 2026
 
 This Privacy Policy describes how the **BrowserSkill** browser extension (the "Extension") handles information when you install and use it. BrowserSkill is published as part of the open-source [BrowserSkill](https://github.com/Tencent/BrowserSkill) project. The source code is publicly auditable.
 
@@ -65,7 +65,7 @@ The Extension requests the following Chrome permissions. Each is used solely for
 - **`notifications`** — Request user approval before borrowing a user-owned tab when browser confirmation is enabled, alert the user when an active task requests human assistance when enabled, and notify the user when an incompatible running daemon prevents connection. Notifications support the user's browser task and are not used for advertising or promotional messages.
 - **`downloads`** — Save screenshots, including full-page captures, and recorded MP4 videos when the user explicitly exports them. Track the requested video's download to distinguish successful saves from canceled or failed saves and release its temporary download URL. Also correlate and route the one browser download initiated by an active `bsk download` command. If that claimed transaction fails, BrowserSkill cancels an in-progress file or removes its completed temporary browser file. It is not used to enumerate download history or alter unrelated downloads.
 - **`offscreen`** — Run the video encoder worker and manage temporary video download URLs in an extension-owned offscreen document, allowing explicitly started recording and MP4 finalization to continue when the popup closes. This does not capture other tabs, the desktop or audio.
-- **`storage`** — Persist a random instance ID, optional label, and feature preferences in `chrome.storage.local`, and track pending video exports in `chrome.storage.session`. Remote credentials, website debugging history and the video catalog are stored separately in extension-origin IndexedDB; video files and recovery fragments use the origin-private file system (OPFS).
+- **`storage`** — Persist a random instance ID, optional label, and feature preferences in `chrome.storage.local`, and track pending video exports in `chrome.storage.session`. Local and remote credentials, local verification settings, website debugging history and the video catalog are stored separately in extension-origin IndexedDB; video files and recovery fragments use the origin-private file system (OPFS).
 - **Host permission `<all_urls>`** — Inject a small status overlay (showing "Agent Active") on pages controlled by the agent, and enable automation across whatever sites the user directs the agent to. Remote connections also use this permission for the selected endpoint. Remote page-content access requires a task-created or explicitly borrowed tab.
 
 ## 6. Where Data Goes
@@ -98,7 +98,7 @@ When explicitly configured by the user or agent during an active capture, HTTP r
 
 - Operation audit is separate from website debugging and is off by default. When enabled, the selected daemon stores task and operation metadata in `BSK_HOME/audit` (by default `.bsk/audit` under the user home directory). Records include timestamps, tool types, website origins, element names with basic redaction, statuses, and error codes. Input values, page bodies, screenshots, scripts, and file contents are excluded from operation audit; these exclusions do not apply to website debugging history described above. Ended tasks are retained for 30 days and pruned when history is loaded, audit is enabled, a task starts, or the task list is queried. Users can export or delete ended tasks from the audit page. Exported copies are not automatically removed.
 
-- Remote endpoint and device credentials remain in extension-origin IndexedDB until the user selects Local connection, clears extension storage or uninstalls. The server retains device grants until revoked; expired grants cannot connect. Disconnecting does not delete results or audit records already held by a server.
+- Local and remote credentials remain in extension-origin IndexedDB when switching modes, until replaced, extension storage is cleared or the extension is uninstalled. Uncommitted staged local records expire after ten minutes. Local mode does not renew retained remote grants. The server retains device grants until revoked; expired grants cannot connect. Disconnecting does not delete results or audit records already held by a server.
 
 ## 8. User Control
 
@@ -122,7 +122,11 @@ The Extension is a developer tool and is not directed at children under 13.
 
 ## 10. Security
 
-Local mode trusts processes able to bind the configured loopback port. Remote mode requires explicit pairing and encrypted transport, except for loopback development. The built-in server stores credential hashes, validates connections, supports rotation and closes connections on revocation or expiration. Third-party gateways are responsible for implementing the same authorization lifecycle and isolating device routing.
+Paired local connections require mutual cryptographic proofs before browser control. Local keys and pending rotation candidates are stored in extension-origin IndexedDB, inaccessible to website content scripts; the daemon stores private local pairing records in its bsk home. Pairing-link secrets stay in the URL fragment and are never sent as request paths, query parameters or headers.
+
+Local pairing is optional for fresh installs and upgrades. Unpaired connections remain usable and show an identity warning; they retain the risk of local peer impersonation. Once paired, verification failures never automatically fall back to an unverified connection. Explicitly skipping verification is a separate user choice and keeps a warning visible. Pairing credentials survive mode switches, and retained remote grants are not renewed while using local mode. See [local pairing](../../docs/local-pairing.md).
+
+Remote mode requires explicit pairing and encrypted transport, except for loopback development. The built-in server stores credential hashes, validates connections, supports rotation and closes connections on revocation or expiration. Third-party gateways are responsible for implementing the same authorization lifecycle and isolating device routing.
 
 Remote page reads and operations require task-owned tabs; merely moving a user tab into an Agent Window does not authorize it. Borrowing follows the confirmation preference controlled in the browser. Treat a paired server as trusted to operate your browser profile and signed-in websites. Browser profile files, server data and TLS keys must remain private to trusted local users. See [remote browser connections](../../docs/remote-extension-connection.md) for deployment details.
 

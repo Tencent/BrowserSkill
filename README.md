@@ -128,7 +128,7 @@ If an already-running agent cannot find `bsk`, restart it to pick up the new PAT
 
 #### 2. Connect the extension
 
-Install it from the [Chrome Web Store](https://chromewebstore.google.com/detail/hhcmgoofomhgciiibhipgmgkgnoenaoi) or [Edge Add-ons](https://microsoftedge.microsoft.com/addons/detail/browserskill/emacgiaaaiojkkpkddmmdfhmokgmnikg). Open its popup, enable the local connection, and check its status after starting the CLI.
+Install it from the [Chrome Web Store](https://chromewebstore.google.com/detail/hhcmgoofomhgciiibhipgmgkgnoenaoi) or [Edge Add-ons](https://microsoftedge.microsoft.com/addons/detail/browserskill/emacgiaaaiojkkpkddmmdfhmokgmnikg), enable the connection and start using it. Local pairing is optional: an unpaired connection stays usable and shows an identity warning. To verify the connection, run `bsk daemon pair` and paste its link into **Connection settings → Pairing link**. Pairing is remembered across restarts and upgrades; a paired connection never automatically skips verification after a failure. See [local pairing](docs/local-pairing.md).
 
 #### 3. Install the skill for your agent
 
@@ -375,6 +375,8 @@ The CLI is built under `target/release/`; load `apps/extension/dist/chrome-mv3/`
 
 Run `cargo test --workspace --locked`, `pnpm ext:test`, and `pnpm lint` for the relevant checks. See the [browser evaluation guide](evals/browser/README.md) for reproducible browser cases. Bug reports and focused contributions are welcome through [GitHub Issues](https://github.com/Tencent/BrowserSkill/issues) and pull requests; remove sensitive data before attaching browser evidence.
 
+For substantial changes to browser interactions, observations, control policy, or CLI/extension communication, we recommend the optional [Agent-driven PR self-check](evals/browser/README.md#optional-agent-driven-pr-self-check) before opening a PR. It tests your current branch through Bsk and records end-to-end evidence. This is not a requirement for opening or merging a PR and does not replace the checks above.
+
 The extension interface supports English, Simplified and Traditional Chinese, Korean, Japanese, French, Italian, Spanish, German, and Brazilian Portuguese. See [localization](packages/i18n/README.md) to contribute translations.
 
 ## Contributors
@@ -438,3 +440,11 @@ Thank you to everyone who contributes code, documentation, translations, and fee
 ## License
 
 [MIT](LICENSE)
+
+### Reading dynamic pages (unreleased, protocol 1.9)
+
+Use `bsk read` for current DOM fields during animation, and `extract` for tables/
+lists. MCP and DSH expose it as `bsk_inspect(action=read)`. Arbitrary evaluate still
+requires a strict observation. Read results never renew action authority: protect
+business facts with expect. See [dynamic reading](docs/dynamic-reading.md) for
+query fields, safety boundaries, compatibility and reproducible browser tests.

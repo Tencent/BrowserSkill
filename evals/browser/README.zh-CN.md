@@ -44,6 +44,41 @@ Git 忽略的 `evals/browser/results/`。
 
 也可以写成 `pnpm run eval:browser -- coverage`；CLI 已兼容 pnpm 传入的前导 `--`。
 
+## 可选的 Agent PR 前自测
+
+对浏览器交互、页面观察、控制策略或 CLI／扩展通信等较大改动，推荐在提交 PR 前运行
+[BrowserSkill发版前测试](skills/browserskill-release-test/SKILL.md)。这项检查可选：未运行或遇到
+环境阻塞不影响提交或合并 PR，仍需执行与改动相关的现有检查。
+
+直接给有仓库与浏览器访问能力的 Agent 以下指令即可，不要求安装 Skill：
+
+```text
+阅读本 checkout 中的 evals/browser/skills/browserskill-release-test/SKILL.md。
+使用 Bsk 对当前分支 HEAD 执行可选端到端自测。
+CLI 与测试扩展从同一候选源码编译，逐步记录操作，
+如实报告测试范围、失败和阻塞，不把未执行的场景算作通过。
+```
+
+Skill 包含 69 个流程／回归 case，并从候选 CLI 动态发现命令覆盖 case；使用合成 HTML 与六个
+公网站点，覆盖每秒变化页、活动轮播上的 `evaluate`／`wheel` 等真实链路。它是单独的 Agent
+引导流程，不会自动加入 `core`、`pnpm eval:browser` 或 required CI checks。
+
+辅助脚本需要 Python 3.9+，仅使用标准库。全量执行还需要真实 Chromium 浏览器、候选 Bsk CLI
+及对应扩展；协作、录制等场景需真人参与。本地选择 runtime 路径、browser selector 和空闲端口。
+PR 自测固定当前分支 HEAD；发版测试再选择指定 main／release commit。未提交改动要明确记录，
+不能将其归为干净 commit 的结果。
+
+输出放在已被忽略的 `evals/browser/results/<unique-run>/`。PR 中可选说明候选 SHA、测试范围、
+失败／阻塞，并附相关脱敏证据。明确只测子集时标为部分覆盖；只有全部计划场景及发现的命令均
+通过才能称全量通过，该结论不是强制 PR 审批门槛。不要提交原始浏览日志、登录截图、生产 HTML、
+凭据或本机构建产物。
+
+辅助脚本自身的检查不打开浏览器：
+
+```sh
+python3 evals/browser/skills/browserskill-release-test/scripts/test_release_audit.py
+```
+
 ## Suite 与筛选
 
 | Suite | 用途 | 默认执行 |

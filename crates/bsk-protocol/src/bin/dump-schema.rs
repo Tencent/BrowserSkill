@@ -145,6 +145,8 @@ fn main() {
     dump!(ObserveResult, "tool_observe_result");
     dump!(GetHtmlParams, "tool_get_html_params");
     dump!(GetHtmlResult, "tool_get_html_result");
+    dump!(ReadParams, "tool_read_params");
+    dump!(ReadResult, "tool_read_result");
     dump!(ExtractParams, "tool_extract_params");
     dump!(ExtractResult, "tool_extract_result");
     dump!(ScreenshotParams, "tool_screenshot_params");

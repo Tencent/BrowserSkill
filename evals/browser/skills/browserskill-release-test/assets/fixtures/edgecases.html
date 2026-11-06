@@ -1,0 +1,20 @@
+<!doctype html><meta charset="utf-8"><title>BrowserSkill Edge Cases</title>
+<style>body{font:16px system-ui;padding:25px}button,input,textarea{font:inherit;margin:8px;padding:8px}.row{border:1px solid #abc;margin:8px;padding:8px}output{display:block;white-space:pre-wrap}#covered-wrap{position:relative;width:250px;height:70px}#cover{position:absolute;inset:0;z-index:3;background:#bbb}#closed{border:1px solid;padding:12px}</style>
+<h1>Guard, waits and stale refs</h1><label>Small field<input id="limited" maxlength="5" value="abc"></label><label>Read only<input id="ro" value="original" readonly></label><label>Disabled<input id="disabled" disabled value="disabled-value"></label>
+<label>Date<input id="date" type="date"></label><label>Time<input id="time" type="time"></label>
+<button id="enable">Enable delayed button</button><button id="delayed" disabled>Delayed action</button><output id="delayed-result"></output>
+<button id="replace">Replace target</button><button id="target">Original node</button><output id="target-result"></output>
+<div class="row" id="row" data-record-id="42"><span id="record-name">Record 42</span><button id="action">Save record</button></div><button id="recycle">Recycle row to 99</button><output id="row-result"></output>
+<div class="row">Candidate A <button class="duplicate" id="dup-a">Continue</button></div><div class="row">Candidate B <button class="duplicate" id="dup-b">Continue</button></div><output id="dup-result"></output>
+<div id="covered-wrap"><button id="covered">Covered button</button><div id="cover">Visible cover</div></div><button id="uncover">Remove cover</button>
+<div id="closed"></div><div class="mask" hidden>Hidden first matching mask</div><div class="mask">Visible second matching mask</div>
+<button id="log-object">Log object</button><button id="consume-fetch">Consume 500 body</button><button id="ignore-fetch">Ignore 500 body</button>
+<a id="newtab" href="/minimal" target="_blank">Open task child</a><output id="fetch-result"></output>
+<script>
+const $=s=>document.querySelector(s),emit=(type,data={})=>fetch('/event',{method:'POST',body:JSON.stringify({type,...data})});
+$('#enable').onclick=()=>setTimeout(()=>$('#delayed').disabled=false,500);$('#delayed').onclick=()=>{$('#delayed-result').textContent='Delayed action done';emit('delayed')};
+$('#target').onclick=()=>emit('original-target');$('#replace').onclick=()=>{let old=$('#target'),neo=old.cloneNode(true);neo.textContent='Replacement node';neo.onclick=()=>{$('#target-result').textContent='Replacement clicked';emit('replacement-target')};old.replaceWith(neo)};
+$('#recycle').onclick=()=>{$('#row').dataset.recordId='99';$('#record-name').textContent='Record 99'};$('#action').onclick=()=>{let id=$('#row').dataset.recordId;$('#row-result').textContent='Saved '+id;emit('row-save',{id})};for(let b of document.querySelectorAll('.duplicate'))b.onclick=()=>{$('#dup-result').textContent=b.id;emit('duplicate-click',{id:b.id})};$('#uncover').onclick=()=>$('#cover').remove();
+let s=$('#closed').attachShadow({mode:'closed'});s.innerHTML='<label>Closed shadow text<input></label><button>Save closed</button><output></output>';s.querySelector('button').onclick=()=>{let value=s.querySelector('input').value;s.querySelector('output').textContent=value;emit('closed-save',{value})};
+$('#log-object').onclick=()=>console.error('AUDIT object',{recordId:42,nested:{reason:'synthetic-reason'},list:[1,2]});$('#consume-fetch').onclick=async()=>{$('#fetch-result').textContent=JSON.stringify(await fetch('/api/fail').then(r=>r.json()))};$('#ignore-fetch').onclick=async()=>{$('#fetch-result').textContent='HTTP '+(await fetch('/api/fail')).status};
+</script>

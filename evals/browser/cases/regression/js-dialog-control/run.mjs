@@ -9,6 +9,11 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
+import {
+  attachPairingBackground,
+  copyPairingExtension,
+  pairLocalBrowser,
+} from "../../../local-pairing.mjs";
 import { withChrome } from "../snapshot-coordinates/chrome.mjs";
 
 const exec = promisify(execFile);
@@ -113,23 +118,19 @@ try {
       executable: chrome,
       deviceScale: 1,
       zoom: 1,
-      extensionPath: extension,
+      extensionPath: baseline
+        ? extension
+        : await copyPairingExtension(extension, join(bskHome, "extension"), port),
       extensionViaCdp: process.env.BSK_DIALOG_LOAD_CDP === "1",
       headless: false,
     },
     async (send) => {
       const version = await send("Browser.getVersion");
-      const worker = await eventually(async () => {
-        const targets = (await send("Target.getTargets")).targetInfos;
-        const target = targets.find(
-          (target) =>
-            target.type === "service_worker" &&
-            target.url.startsWith("chrome-extension://") &&
-            target.url.endsWith("/background.js"),
-        );
-        assert(target, "Built extension service worker not found");
-        return target;
-      });
+      // The pre-dialog baseline also predates local pairing.
+      if (!baseline) {
+        const worker = await attachPairingBackground(send, extension);
+        await pairLocalBrowser(send, { executable: bsk, env, worker });
+      }
       const browsers = await eventually(async () => {
         const reply = await cli(["browsers"]);
         assert.equal((Array.isArray(reply) ? reply : reply.browsers).length, 1);

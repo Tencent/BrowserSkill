@@ -12,16 +12,19 @@ import { attachDaemonUpgradeNotice } from "@/lib/daemon-upgrade-notice";
 import { startHeartbeat } from "@/lib/heartbeat";
 import {
   getConnectionEnabled,
+  getOrCreateInstanceId,
   setConnectionEnabled as persistConnectionEnabled,
   setLabel,
 } from "@/lib/instance-id";
 import { interactionPolicy, interactionPreferences } from "@/lib/interaction-preferences";
 import { startKeepalive } from "@/lib/keepalive";
+import { attachLocalPairing } from "@/lib/local-pairing-bridge";
 import {
   OVERLAY_AGENT_STATE,
   OVERLAY_AUTOMATION_BYPASS,
   OVERLAY_MSG_INTERRUPT,
   OVERLAY_MSG_READY,
+  OVERLAY_MSG_SET_MINIMIZED,
   OVERLAY_MSG_WHO_AM_I,
   type OverlayAgentStateMessage,
   type OverlayInterruptRequest,
@@ -61,6 +64,7 @@ import {
 import { cdpBlockedUrlReason, chromeTabsApi } from "@/tools/shared";
 import { chromeTabMutationApi } from "@/tools/tabs";
 import { detectBrowserMeta } from "@/transport/handshake";
+import { createLocalAuthenticator } from "@/transport/local-auth";
 import { watchRemoteAuthorization } from "@/transport/remote-authorization";
 import { type RemoteEndpoint, remoteSocket } from "@/transport/remote-endpoint";
 import type { Transport } from "@/transport/transport";
@@ -75,8 +79,25 @@ export default defineBackground(() => {
   let remoteEndpoint: RemoteEndpoint | null = null;
   let connectionPreferenceValid = false;
   let requestedConnection: { key: string; remote: boolean } | null = null;
+  const authenticateLocal = createLocalAuthenticator({
+    instanceId: () => getOrCreateInstanceId(),
+    origin: chrome.runtime.getURL("").replace(/\/$/, ""),
+    status: (status) => controller.setLocalAuth(status),
+  });
   const transport = new WSTransport({
     url: __BSK_DAEMON_WS_URL__,
+    onAuthenticationError: () => {
+      const state = controller.snapshot().localAuth?.state;
+      if (!remoteEndpoint && (state === "verifying" || state === "verified"))
+        controller.setLocalAuth({ state: "server_unverified" });
+    },
+    authenticate: (socket, signal) => {
+      if (remoteEndpoint) {
+        controller.setLocalAuth(null);
+        return;
+      }
+      return authenticateLocal(socket, signal);
+    },
     webSocketFactory: (url) => {
       if (!connectionPreferenceValid) throw new Error("Connection settings are unavailable");
       const socket = remoteSocket(url, remoteEndpoint);
@@ -214,7 +235,9 @@ export default defineBackground(() => {
   const sessionsLive = attachSessionsLiveFlag({ manager: sessions });
   const popupSnapshotRefreshers = new Set<() => void>();
   const controlModes = new Map<string, OverlayMode>();
+  const minimizedControlSessions = new Set<string>();
 
+  attachLocalPairing(controller, transport);
   watchRemoteAuthorization();
   const daemonPort = watchDaemonConnection(
     (url, remote) => {
@@ -271,6 +294,7 @@ export default defineBackground(() => {
       type: OVERLAY_AGENT_STATE,
       sessionId: ctx.sessionId,
       controller: ctx.controller,
+      ...(minimizedControlSessions.has(ctx.sessionId) ? { minimized: true } : {}),
       mode: controlModes.get(ctx.sessionId) ?? "control",
       ...nextOverlayVersion(),
     };
@@ -340,6 +364,9 @@ export default defineBackground(() => {
     const liveSessionIds = new Set(sessions.list().map((ctx) => ctx.sessionId));
     for (const sessionId of controlModes.keys()) {
       if (!liveSessionIds.has(sessionId)) controlModes.delete(sessionId);
+    }
+    for (const sessionId of minimizedControlSessions) {
+      if (!liveSessionIds.has(sessionId)) minimizedControlSessions.delete(sessionId);
     }
     pushAllAgentOverlayStates();
     for (const refresh of popupSnapshotRefreshers) refresh();
@@ -598,6 +625,26 @@ export default defineBackground(() => {
       if (typeof sender.tab?.id === "number") {
         void pushOverlayStateForTab(sender.tab.id, sender.tab.windowId);
       }
+      return false;
+    }
+
+    if (msg.kind === OVERLAY_MSG_SET_MINIMIZED) {
+      const ctx = sessions.get(msg.sessionId);
+      const tab = sender.tab;
+      if (
+        typeof msg.minimized !== "boolean" ||
+        !ctx ||
+        tab?.windowId !== ctx.agentWindowId ||
+        typeof tab.id !== "number" ||
+        !isAgentControlledTab(ctx, tab.id)
+      ) {
+        sendResponse({ ok: false });
+        return false;
+      }
+      if (msg.minimized) minimizedControlSessions.add(ctx.sessionId);
+      else minimizedControlSessions.delete(ctx.sessionId);
+      void pushOverlayStateForWindow(ctx.agentWindowId);
+      sendResponse({ ok: true });
       return false;
     }
 

@@ -1,9 +1,15 @@
-import { parseRemoteEndpoint, type RemoteEndpoint, readRemoteEndpoint } from "./remote-endpoint";
+import {
+  parseRemoteEndpoint,
+  type RemoteEndpoint,
+  readRemoteEndpoint,
+  remoteAuthorizationStatus,
+} from "./remote-endpoint";
 import {
   initializeRemoteStorage,
   REMOTE_CONNECTION_MODE,
   REMOTE_CONNECTION_REVISION,
   readRemoteConnection,
+  readSavedRemoteConnection,
   writeRemoteConnection,
 } from "./remote-storage";
 
@@ -84,6 +90,15 @@ export function updateRemoteConnection(pairing: string | null): Promise<string |
     return endpoint?.url ?? null;
   });
 }
+export function resumeRemoteConnection(): Promise<string> {
+  return serialized(async () => {
+    const endpoint = await readSavedRemoteConnection();
+    if (!endpoint || ["expired", "rejected"].includes(remoteAuthorizationStatus(endpoint)))
+      throw new Error("Remote authorization has expired; pair again");
+    await writeRemoteConnection(endpoint);
+    return endpoint.url;
+  });
+}
 let renewing = false;
 /** Persist the candidate before rotating. A lost HTTP response can be retried
  * using the same old/new pair after service-worker or server restart. */
@@ -120,24 +135,28 @@ async function renewRemote(): Promise<void> {
     renewalAttemptAt: new Date(Date.now()).toISOString(),
   };
   await writeRemoteConnection(pending);
+  const stillSelected = async () => {
+    const latest = await readRemoteConnection();
+    return (
+      latest?.url === endpoint.url &&
+      latest.token === endpoint.token &&
+      latest.deviceId === endpoint.deviceId &&
+      latest.pendingToken === nextToken
+    );
+  };
   let updated: RemoteEndpoint;
   try {
     updated = await authorize(endpoint, "renew", nextToken);
   } catch (error) {
-    await writeRemoteConnection({
-      ...pending,
-      renewalFailure: error instanceof AuthorizationRejected ? "rejected" : "unavailable",
-    });
+    if (await stillSelected())
+      await writeRemoteConnection({
+        ...pending,
+        renewalFailure: error instanceof AuthorizationRejected ? "rejected" : "unavailable",
+      });
     throw error;
   }
-  const latest = await readRemoteConnection();
   // A settings change during the request must not resurrect an old connection.
-  if (
-    latest?.url === endpoint.url &&
-    latest.token === endpoint.token &&
-    latest.deviceId === endpoint.deviceId &&
-    latest.pendingToken === nextToken
-  ) {
+  if (await stillSelected()) {
     await writeRemoteConnection(updated);
   }
 }
@@ -148,12 +167,15 @@ export function watchRemoteAuthorization() {
     if (
       sender.url !== chrome.runtime.getURL("popup.html") ||
       sender.id !== chrome.runtime.id ||
-      (message.pairing !== null && typeof message.pairing !== "string")
+      sender.tab !== undefined ||
+      (message.resume !== true && message.pairing !== null && typeof message.pairing !== "string")
     ) {
       reply({ error: "Invalid authorization request" });
       return false;
     }
-    void updateRemoteConnection(message.pairing).then(
+    void (
+      message.resume === true ? resumeRemoteConnection() : updateRemoteConnection(message.pairing)
+    ).then(
       (url) => reply({ url }),
       () => reply({ error: "Unable to pair; copy a new pairing link and try again" }),
     );

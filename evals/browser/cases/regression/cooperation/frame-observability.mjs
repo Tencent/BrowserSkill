@@ -29,6 +29,9 @@ export async function runFrameObservabilityScenarios({ send, bsk, base }) {
           ...scope,
         ]);
         assert.equal(value.value, "1");
+        const passive = await bsk(["read", "--selector", "#count", ...scope]);
+        assert.equal(passive.items[0].values.text, "1");
+        assert.equal(passive.scope, "current_dom");
 
         await send(
           "Runtime.evaluate",
@@ -67,6 +70,7 @@ export async function runFrameObservabilityScenarios({ send, bsk, base }) {
           failedChildSkipped: true,
           click: true,
           evaluate: true,
+          passiveReadAcrossFailedChild: true,
           failedMainRejected: true,
         });
       } finally {

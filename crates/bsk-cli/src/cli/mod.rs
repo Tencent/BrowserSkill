@@ -31,7 +31,10 @@ pub mod navigate;
 pub mod network;
 pub mod observation_view;
 pub mod observe;
+pub mod plan;
 pub(crate) mod protocol;
+pub mod read;
+pub mod recipe;
 pub mod record;
 pub mod record_recovery;
 pub mod record_state;
@@ -141,6 +144,11 @@ pub enum Command {
     Cooperate(cooperate::CooperateArgs),
     /// Execute one action, await a known condition, and return synchronized state.
     Step(step::StepArgs),
+    /// Run several decided actions in order, stop at the first failure, and return synchronized state.
+    Plan(plan::PlanArgs),
+    /// Replay a saved flow without a model turn per step (experimental: BSK_RECIPES=1).
+    #[command(hide = true)]
+    Recipe(recipe::RecipeCmd),
     /// Read a saved observation locally, without refreshing refs or contacting the browser.
     View(observation_view::ViewArgs),
     /// Manage the local `bsk` daemon process.
@@ -202,6 +210,8 @@ pub enum Command {
     /// Dump raw HTML for a tab or a snapshot ref.
     #[command(name = "get-html")]
     GetHtml(GetHtmlArgs),
+    /// Read current DOM fields safely across unrelated animation. No JavaScript.
+    Read(read::ReadArgs),
     /// Extract loaded tables/lists with column definitions and source metadata.
     Extract(extract::ExtractArgs),
 
@@ -256,7 +266,7 @@ pub enum Command {
     /// Capture one browser download and write it to a local path.
     Download(DownloadArgs),
 
-    /// Evaluate a JavaScript expression inside the Agent Window.
+    /// Execute arbitrary JavaScript (strict observation required). For passive DOM data use read/extract.
     Evaluate(EvaluateArgs),
 
     /// Wait for a page-lifecycle event.
