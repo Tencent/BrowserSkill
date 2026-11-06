@@ -1300,6 +1300,12 @@ export class CooperationController implements ControlAuthority {
     let actionTarget: ResolvedActionTarget | undefined;
     let destinationTarget: typeof actionTarget;
     let checkFailure: RpcError | undefined;
+    // Preparation such as scrolling counts as an effect, so a click can be `unknown`
+    // without having been pressed. Only that distinction makes it safe to try again.
+    const unpressed = (effect: unknown) =>
+      effect === "unknown" && req.method === "tool.click" && !nativeInputStarted
+        ? { press_sent: false }
+        : {};
     const reportFailure = (message: string, effect: "none" | "unknown" = "none"): RpcError => {
       if (!targetPolicy) return failure(message, effect);
       if (effect === "unknown") state.context = undefined;
@@ -1329,6 +1335,7 @@ export class CooperationController implements ControlAuthority {
         data: {
           ...issue.data,
           effect_state: effect,
+          ...unpressed(effect),
           ...(effect === "unknown"
             ? {
                 recovery:
@@ -1803,6 +1810,7 @@ export class CooperationController implements ControlAuthority {
           data: {
             ...result.data,
             effect_state: effect,
+            ...unpressed(effect),
             phase: result.data?.phase ?? "execution",
             recovery:
               result.data?.recovery ??
