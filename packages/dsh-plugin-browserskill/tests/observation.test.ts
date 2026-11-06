@@ -799,6 +799,58 @@ describe("HTTP/SSE interface", () => {
     service.dispose();
   });
 
+  it("accepts only the configured HTTPS authority through a local proxy", async () => {
+    const { service } = setup({});
+    const { routes, webServer } = routeHarness();
+    const dispose = registerObservationRoutes(
+      { get: () => webServer } as never,
+      service,
+      lifecycleFor(service),
+      "https://dsh.example.com",
+    );
+    const route = routes.get("/bsk-observation/state")!;
+    const getState = async (headers: Record<string, string>, remoteAddress = "127.0.0.1") => {
+      const response = fakeRes();
+      await route.handler(fakeReq({ headers, socket: { remoteAddress } }), response.res);
+      return response.res.status;
+    };
+    expect(await getState({ host: "dsh.example.com" })).toBe(200);
+    expect(await getState({ host: "dsh.example.com", origin: "https://dsh.example.com" })).toBe(
+      200,
+    );
+    expect(await getState({ host: "dsh.example.com" }, "192.168.1.10")).toBe(403);
+    expect(await getState({ host: "other.example.com" })).toBe(403);
+    expect(await getState({ host: "dsh.example.com", origin: "http://dsh.example.com" })).toBe(403);
+    expect(await getState({ host: "dsh.example.com", origin: "null" })).toBe(403);
+    expect(await getState({ host: "dsh.example.com", "sec-fetch-site": "cross-site" })).toBe(403);
+    expect(await getState({ host: "dsh.example.com", "sec-fetch-site": "same-site" })).toBe(403);
+    expect(await getState({ host: "127.0.0.1:3999" })).toBe(200);
+    dispose();
+    service.dispose();
+  });
+
+  it("rejects malformed or insecure public origins before registering routes", () => {
+    const { service } = setup({});
+    const { routes, webServer } = routeHarness();
+    for (const origin of [
+      "http://dsh.example.com",
+      "https://dsh.example.com/dsh/",
+      "https://user:pass@dsh.example.com",
+      "not a URL",
+    ]) {
+      expect(() =>
+        registerObservationRoutes(
+          { get: () => webServer } as never,
+          service,
+          lifecycleFor(service),
+          origin,
+        ),
+      ).toThrow(/observationPublicOrigin/);
+    }
+    expect(routes.size).toBe(0);
+    service.dispose();
+  });
+
   it("registers nothing when no webServer is mounted", () => {
     const { service } = setup({});
     const ctx = { get: () => undefined } as never;

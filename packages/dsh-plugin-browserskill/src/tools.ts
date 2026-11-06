@@ -55,6 +55,8 @@ export interface PluginConfig {
   defaultTimeoutMs: number;
   maxSessions: number;
   observationEnabled: boolean;
+  /** Explicit HTTPS origin allowed to read observation routes through a local reverse proxy. */
+  observationPublicOrigin?: string;
   thumbnailIntervalMs: number;
   idleIntervalMs: number;
   /**

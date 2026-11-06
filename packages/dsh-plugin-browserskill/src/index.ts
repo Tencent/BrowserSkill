@@ -48,6 +48,9 @@ export const Config = Schema.object({
   observationEnabled: Schema.boolean()
     .default(true)
     .description("Track per-session observation state (action/url/thumbnail) for the PiP overlay."),
+  observationPublicOrigin: Schema.string().description(
+    "Optional HTTPS origin for observation routes behind a local reverse proxy; the proxy must authenticate clients.",
+  ),
   thumbnailIntervalMs: Schema.number()
     .default(1500)
     .description("Thumbnail refresh cadence for active sessions (milliseconds)."),
@@ -81,6 +84,7 @@ export function apply(
     defaultTimeoutMs: config.defaultTimeoutMs ?? 120_000,
     maxSessions: config.maxSessions ?? 5,
     observationEnabled: config.observationEnabled ?? true,
+    observationPublicOrigin: config.observationPublicOrigin,
     thumbnailIntervalMs: config.thumbnailIntervalMs ?? 1500,
     idleIntervalMs: config.idleIntervalMs ?? 8000,
     lazyTools: config.lazyTools ?? true,
@@ -145,7 +149,12 @@ export function apply(
   // AFTER this plugin loads, and in headless compositions it never appears (the
   // callback simply never runs, leaving the rest of the plugin unaffected).
   ctx.inject(["webServer"], (injected) => {
-    return registerObservationRoutes(injected, observation, starts);
+    return registerObservationRoutes(
+      injected,
+      observation,
+      starts,
+      resolved.observationPublicOrigin,
+    );
   });
   // Reap a conversation's browsers when the conversation itself is archived:
   // archived sessions are hidden from every surface, so their Agent Windows
