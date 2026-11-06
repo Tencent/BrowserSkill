@@ -22,6 +22,7 @@ import {
   OVERLAY_AUTOMATION_BYPASS,
   OVERLAY_MSG_INTERRUPT,
   OVERLAY_MSG_READY,
+  OVERLAY_MSG_SET_MINIMIZED,
   OVERLAY_MSG_WHO_AM_I,
   type OverlayAgentStateMessage,
   type OverlayInterruptRequest,
@@ -214,6 +215,7 @@ export default defineBackground(() => {
   const sessionsLive = attachSessionsLiveFlag({ manager: sessions });
   const popupSnapshotRefreshers = new Set<() => void>();
   const controlModes = new Map<string, OverlayMode>();
+  const minimizedControlSessions = new Set<string>();
 
   watchRemoteAuthorization();
   const daemonPort = watchDaemonConnection(
@@ -271,6 +273,7 @@ export default defineBackground(() => {
       type: OVERLAY_AGENT_STATE,
       sessionId: ctx.sessionId,
       controller: ctx.controller,
+      ...(minimizedControlSessions.has(ctx.sessionId) ? { minimized: true } : {}),
       mode: controlModes.get(ctx.sessionId) ?? "control",
       ...nextOverlayVersion(),
     };
@@ -340,6 +343,9 @@ export default defineBackground(() => {
     const liveSessionIds = new Set(sessions.list().map((ctx) => ctx.sessionId));
     for (const sessionId of controlModes.keys()) {
       if (!liveSessionIds.has(sessionId)) controlModes.delete(sessionId);
+    }
+    for (const sessionId of minimizedControlSessions) {
+      if (!liveSessionIds.has(sessionId)) minimizedControlSessions.delete(sessionId);
     }
     pushAllAgentOverlayStates();
     for (const refresh of popupSnapshotRefreshers) refresh();
@@ -598,6 +604,26 @@ export default defineBackground(() => {
       if (typeof sender.tab?.id === "number") {
         void pushOverlayStateForTab(sender.tab.id, sender.tab.windowId);
       }
+      return false;
+    }
+
+    if (msg.kind === OVERLAY_MSG_SET_MINIMIZED) {
+      const ctx = sessions.get(msg.sessionId);
+      const tab = sender.tab;
+      if (
+        typeof msg.minimized !== "boolean" ||
+        !ctx ||
+        tab?.windowId !== ctx.agentWindowId ||
+        typeof tab.id !== "number" ||
+        !isAgentControlledTab(ctx, tab.id)
+      ) {
+        sendResponse({ ok: false });
+        return false;
+      }
+      if (msg.minimized) minimizedControlSessions.add(ctx.sessionId);
+      else minimizedControlSessions.delete(ctx.sessionId);
+      void pushOverlayStateForWindow(ctx.agentWindowId);
+      sendResponse({ ok: true });
       return false;
     }
 

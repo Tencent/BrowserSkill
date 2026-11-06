@@ -10,10 +10,17 @@ Starting from 0.2.0, CLI / Extension / DSH Plugin share the same version number.
 
 ### Added
 
+- The in-page control panel can minimize to a right-edge expand arrow. Its display
+  state is retained for the current task across status updates and navigation.
 - `bsk plan` and the MCP tool `bsk_plan` run several already-decided actions in one
   call, then return the synchronized state, so a form or a set of filters takes one
   model turn instead of one per action. Each step keeps the checks of its own command,
   and the first step that does not complete stops the plan without any retry.
+
+### Fixed
+
+- Cooperative status updates preserve an active click-passthrough lease, so the
+  control panel and its minimized arrow do not swallow automated page clicks.
 
 ## [0.4.2] - 2026-11-05
 
