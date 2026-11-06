@@ -1,4 +1,4 @@
-import { coverage, detectBlockingLayer, spansViewport } from "./layers";
+import { coverage, detectBlockingLayer, spansViewport, usesModalSubtree } from "./layers";
 import { estimateLineTokens, estimateTokens } from "./tokens";
 import type {
   ActiveScopeBlock,
@@ -1326,7 +1326,7 @@ export function prepareObservationRender(
   }
   const scopeNodes = [...recovered, ...visualTargets];
   const members = layer ? new Set(layer.members) : undefined;
-  if (members && layer) {
+  if (members && layer && !usesModalSubtree(recoveredById.get(layer.rootId)!)) {
     const blocker = recoveredById.get(layer.rootId)!;
     for (let i = 0; i < visualTargets.length; i++) {
       const target = visualTargets[i];
