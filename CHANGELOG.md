@@ -52,6 +52,8 @@ determines which versions can connect.
 
 ### Fixed
 
+- Structured extraction handles HTML `scope` keywords case-insensitively, preserving uppercase and mixed-case row headers as data and correcting discovered column previews.
+
 - Main-document SPA route changes, including away-and-back and hash routes,
   invalidate old control contexts and refs. Supplementary reads never renew them.
   This also covers passive reads of already loaded tabs and fresh debugger attachments.

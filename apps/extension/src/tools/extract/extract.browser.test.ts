@@ -90,6 +90,15 @@ const fixtures: Record<string, string> = {
           .join("")}</tr>`,
     )
     .join("")}</table>`,
+  scope: `${["ROW", "Row", "ROWGROUP", "RowGroup"]
+    .map(
+      (scope) => `<table id="${scope}"><tbody>
+        <tr><th scope="${scope}">North</th></tr>
+        <tr><th scope="${scope}">South</th></tr>
+      </tbody></table>`,
+    )
+    .join("")}
+    <table id="columns"><tr><th scope="COL">Region</th><th scope="ColGroup">Sales</th><td>Value</td></tr></table>`,
   theadCells:
     '<table id="t"><thead><tr><td>Order</td><td>Amount</td></tr></thead><tbody><tr><td>1</td><td>2</td></tr></tbody></table>',
   lenientSpans:
@@ -318,6 +327,27 @@ describe.skipIf(!process.env.BSK_CLICK_CHROME)("real browser structured extracti
     expect(values(await extract("lenientSpans", { action: "table", selector: "#t" }))).toEqual([
       ["1", "2", null],
       ["x", "y", "z"],
+    ]);
+  });
+
+  it("retains uppercase and mixed-case scope row headers as data", async () => {
+    for (const scope of ["ROW", "Row", "ROWGROUP", "RowGroup"]) {
+      const { result } = await extract("scope", { action: "table", selector: `#${scope}` });
+      expect(result!.rows).toEqual([{ c1: "North" }, { c1: "South" }]);
+      expect(result!.columns.map((column) => column.name)).toEqual(["Column 1"]);
+      expect(result!.coverage.truncated).toBe(false);
+      expect(result!.warnings).toEqual(["generated_column_names"]);
+    }
+  });
+
+  it("discovers columns using case-insensitive scope keywords", async () => {
+    const { result } = await extract("scope", { action: "discover" });
+    expect(result!.targets!.map((target) => [target.name, target.columns])).toEqual([
+      ["ROW", []],
+      ["Row", []],
+      ["ROWGROUP", []],
+      ["RowGroup", []],
+      ["columns", ["Region", "Sales"]],
     ]);
   });
 
