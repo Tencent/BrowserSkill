@@ -42,6 +42,13 @@ function extract(selector: string, patch: Partial<ExtractParams> = {}) {
 beforeEach(() => {
   document.head.innerHTML = "";
   document.body.innerHTML = "";
+  // happy-dom ships no UA stylesheet, so `[hidden]` would not hide anything and
+  // the collector would see a visible box where a browser sees none. Emulate the
+  // one UA rule that matters, first in document order so author rules still win
+  // exactly as they do in a browser.
+  const ua = document.createElement("style");
+  ua.textContent = "[hidden] { display: none; }";
+  document.head.appendChild(ua);
 });
 describe("structured extraction facts", () => {
   it.each(["hidden", "auto", "visible"])("respects content-visibility: %s", (visibility) => {
@@ -352,5 +359,28 @@ describe("structured extraction facts", () => {
         captured_at: "now",
       }).coverage.dataset_complete,
     ).toBe("unknown");
+  });
+
+  it("extracts a target that author CSS made visible despite hidden", () => {
+    document.body.innerHTML =
+      '<table id="t" hidden style="display:table"><tr><td>Inline</td></tr></table>';
+    expect(extract("#t").rows).toEqual([{ c1: "Inline" }]);
+
+    document.body.innerHTML =
+      '<style>#t { display: table; }</style><table id="t" hidden><tr><td>Sheet</td></tr></table>';
+    expect(extract("#t").rows).toEqual([{ c1: "Sheet" }]);
+
+    document.body.innerHTML = '<table id="t" hidden><tr><td>Secret</td></tr></table>';
+    expect(() => extract("#t")).toThrow("extract_target_hidden");
+  });
+
+  it("extracts content under a hidden ancestor that author CSS made visible", () => {
+    document.body.innerHTML =
+      '<style>#host { display: block; }</style><div id="host" hidden><table id="t"><tr><td>Visible</td></tr></table></div>';
+    expect(extract("#t").rows).toEqual([{ c1: "Visible" }]);
+
+    document.body.innerHTML =
+      '<div id="host" hidden><table id="t"><tr><td>Secret</td></tr></table></div>';
+    expect(() => extract("#t")).toThrow("extract_target_hidden");
   });
 });
