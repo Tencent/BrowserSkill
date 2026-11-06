@@ -164,6 +164,45 @@ export function collectExtractDom(this: Element, options: CollectorOptions): Raw
     "textPath",
     "foreignObject",
   ]);
+  const caseLocales = new WeakMap<Element, string>();
+  const caseLocaleOf = (element: Element): string => {
+    const chain: Element[] = [];
+    let current: Element | null = element;
+    let locale = "";
+    while (current) {
+      tick();
+      const known = caseLocales.get(current);
+      if (known !== undefined) {
+        locale = known;
+        break;
+      }
+      chain.push(current);
+      const language =
+        current.getAttribute("lang") ??
+        current.getAttributeNS("http://www.w3.org/XML/1998/namespace", "lang");
+      if (language !== null) {
+        // Use supported casing locales, with Unicode's default mapping for
+        // unknown/invalid tags rather than the browser's UI locale.
+        locale = /^(tr|az|lt|el)(?:-|$)/i.exec(language)?.[1].toLowerCase() ?? "";
+        break;
+      }
+      // Follow the rendered ancestry for slotted elements.
+      current =
+        current.assignedSlot ??
+        current.parentElement ??
+        ((current.getRootNode() as ShadowRoot).host || null);
+    }
+    for (const item of chain) caseLocales.set(item, locale);
+    return locale;
+  };
+  const caseText = (value: string, parent: Element): string => {
+    const transform = styleOf(parent).textTransform;
+    if (transform !== "uppercase" && transform !== "lowercase") return value;
+    const locale = caseLocaleOf(parent);
+    if (transform === "uppercase")
+      return locale ? value.toLocaleUpperCase(locale) : value.toUpperCase();
+    return locale ? value.toLocaleLowerCase(locale) : value.toLowerCase();
+  };
   const text = (root: Element): string => {
     if (isSubtreeHidden(root)) return "";
     const pieces: string[] = [];
@@ -204,12 +243,10 @@ export function collectExtractDom(this: Element, options: CollectorOptions): Raw
         if (collapsed.endsWith(" ")) pendingSpace = true;
       }
     };
-    type TextVisit = { node: Node; whiteSpace: string; visible: boolean; exit?: boolean };
-    const stack: TextVisit[] = [
-      { node: root, whiteSpace: styleOf(root).whiteSpace, visible: !isVisibilityHidden(root) },
-    ];
+    type TextVisit = { node: Node; parent: Element; visible: boolean; exit?: boolean };
+    const stack: TextVisit[] = [{ node: root, parent: root, visible: !isVisibilityHidden(root) }];
     while (stack.length) {
-      const { node, whiteSpace, visible, exit } = stack.pop()!;
+      const { node, parent, visible, exit } = stack.pop()!;
       if (node !== root) tick();
       if (exit) {
         pendingBreak = true;
@@ -217,7 +254,7 @@ export function collectExtractDom(this: Element, options: CollectorOptions): Raw
         continue;
       }
       if (node.nodeType === Node.TEXT_NODE) {
-        if (visible) append(node.nodeValue ?? "", whiteSpace);
+        if (visible) append(caseText(node.nodeValue ?? "", parent), styleOf(parent).whiteSpace);
         continue;
       }
       if (!(node instanceof Element)) continue;
@@ -242,7 +279,7 @@ export function collectExtractDom(this: Element, options: CollectorOptions): Raw
       if (block) {
         pendingBreak = true;
         pendingSpace = false;
-        stack.push({ node, whiteSpace, visible: nodeVisible, exit: true });
+        stack.push({ node, parent, visible: nodeVisible, exit: true });
       }
       if (node instanceof HTMLInputElement) {
         if (nodeVisible && !["checkbox", "radio", "file", "image"].includes(node.type))
@@ -264,7 +301,7 @@ export function collectExtractDom(this: Element, options: CollectorOptions): Raw
       }
       const children = childrenOf(node);
       for (let index = children.length - 1; index >= 0; index--)
-        stack.push({ node: children[index], whiteSpace: style.whiteSpace, visible: nodeVisible });
+        stack.push({ node: children[index], parent: node, visible: nodeVisible });
     }
     return pieces.join("");
   };

@@ -44,6 +44,69 @@ beforeEach(() => {
   document.body.innerHTML = "";
 });
 describe("structured extraction facts", () => {
+  it.each([
+    { transform: "uppercase", value: "paid", expected: "PAID" },
+    { transform: "lowercase", value: "PAID", expected: "paid" },
+    { transform: "none", value: "PaId", expected: "PaId" },
+  ])("applies text-transform: $transform to text nodes", ({ transform, value, expected }) => {
+    document.body.innerHTML = `<table id="t"><tr><td style="text-transform:${transform}">${value}</td></tr></table>`;
+    expect(extract("#t").rows).toEqual([{ c1: expected }]);
+  });
+
+  it("inherits CSS case transforms and respects nested overrides and line breaks", () => {
+    document.head.innerHTML = `<style>
+      #t { text-transform: uppercase; }
+      #t em { text-transform: lowercase; }
+      #t .literal { text-transform: none; }
+    </style>`;
+    document.body.innerHTML = `<table id="t"><thead><tr><th>status</th></tr></thead>
+      <tbody><tr><td>pa<span>id</span><em>DONE</em><span class="literal">MiXeD</span><br>new  line</td></tr></tbody></table>`;
+    const result = extract("#t");
+    expect(result.columns[0].name).toBe("STATUS");
+    expect(result.rows).toEqual([{ c1: "PAIDdoneMiXeD\nNEW LINE" }]);
+  });
+
+  it("transforms list text without changing attribute reads", () => {
+    document.body.innerHTML = `<ul id="l" style="text-transform:uppercase"><li><span data-status="paid">paid</span></li></ul>`;
+    const result = extract("#l", {
+      action: "list",
+      fields: [
+        { key: "text", selector: "span", read: "text" },
+        { key: "raw", selector: "span", read: "attribute", attribute: "data-status" },
+      ],
+    });
+    expect(result.rows).toEqual([{ text: "PAID", raw: "paid" }]);
+  });
+
+  it.each([
+    { language: "tr", transform: "uppercase", value: "iı", expected: "İI" },
+    { language: "tr", transform: "lowercase", value: "Iİ", expected: "ıi" },
+    { language: "de", transform: "uppercase", value: "straße", expected: "STRASSE" },
+    { language: "invalid_tag", transform: "uppercase", value: "paid", expected: "PAID" },
+  ])("uses $language case mappings for $transform", ({ language, transform, value, expected }) => {
+    document.body.innerHTML = `<table id="t" lang="${language}"><tr><td style="text-transform:${transform}">${value}</td></tr></table>`;
+    expect(extract("#t").rows).toEqual([{ c1: expected }]);
+  });
+
+  it("charges the byte budget for transformed Unicode text", () => {
+    const options = validateExtract({
+      session_id: "test",
+      action: "table",
+      selector: "#t",
+      max_bytes: 1024,
+    });
+    for (const transform of ["none", "uppercase"]) {
+      document.body.innerHTML = `<table id="t"><tr><td style="text-transform:${transform}">${"ŉ".repeat(400)}</td></tr></table>`;
+      const raw = collectExtractDom.call(document.documentElement, options);
+      if (transform === "none") expect(raw.error).toBeUndefined();
+      else
+        expect(raw.error).toMatchObject({
+          reason: "extract_limit",
+          message: "Text byte budget exceeded",
+        });
+    }
+  });
+
   it.each(["hidden", "auto", "visible"])("respects content-visibility: %s", (visibility) => {
     document.body.innerHTML = `<table id="t"><tr><td>Visible<div style="content-visibility: ${visibility}"><span style="content-visibility: visible; visibility: visible">Extra</span></div></td></tr></table>`;
     expect(extract("#t").rows).toEqual([

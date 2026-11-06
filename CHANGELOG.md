@@ -68,6 +68,15 @@ determines which versions can connect.
 - Cooperative status updates preserve an active click-passthrough lease, so the
   control panel and its minimized arrow do not swallow automated page clicks.
 
+## [Unreleased]
+
+### Fixed
+
+- `extract` applies CSS `uppercase` and `lowercase` to text in table cells,
+  headers, list fields and discovery previews, respecting nested style overrides
+  and language-specific casing. Transformed text remains subject to the byte
+  budget ([#597](https://github.com/Tencent/BrowserSkill/issues/597)).
+
 ## [0.4.2] - 2026-11-05
 
 ### Added
