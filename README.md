@@ -438,3 +438,11 @@ Thank you to everyone who contributes code, documentation, translations, and fee
 ## License
 
 [MIT](LICENSE)
+
+### Reading dynamic pages (unreleased, protocol 1.9)
+
+Use `bsk read` for current DOM fields during animation, and `extract` for tables/
+lists. MCP and DSH expose it as `bsk_inspect(action=read)`. Arbitrary evaluate still
+requires a strict observation. Read results never renew action authority: protect
+business facts with expect. See [dynamic reading](docs/dynamic-reading.md) for
+query fields, safety boundaries, compatibility and reproducible browser tests.

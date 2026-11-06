@@ -69,3 +69,18 @@ export function transferError(
     ...(options.cleanupState ? { cleanup_state: options.cleanupState } : {}),
   });
 }
+
+/** Recognize only CDP's explicit missing-node errors. A stale selector lookup
+ * must still be retried. Chrome's debugger API may encode the error as JSON. */
+export function isMissingNode(error: unknown): boolean {
+  let message = error instanceof Error ? error.message : String(error);
+  try {
+    const parsed = JSON.parse(message);
+    if (typeof parsed?.message === "string") message = parsed.message;
+  } catch {
+    // Plain debugger error message.
+  }
+  return (
+    message === "No node with given id found" || message === "Could not find node with given id"
+  );
+}

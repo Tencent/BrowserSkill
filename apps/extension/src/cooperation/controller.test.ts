@@ -1365,6 +1365,51 @@ describe("shared-tab dispatch fences", () => {
     expect(await f.command("wait")).toMatchObject({ ready: true });
     expect(await f.act()).toMatchObject({ code: "permission_denied" });
   });
+  it.each([
+    "loading",
+    "frame_unobservable",
+    "page_load_failed",
+  ] as const)("returns a pre-execution read error when context refresh fails with %s", async (reason) => {
+    const f = await fixture();
+    const frames = [{ frame_id: 3, url: "https://frame.test" }];
+    f.readFrames.mockRejectedValueOnce(
+      reason === "loading"
+        ? new Error("frame is loading")
+        : new FrameCollectionError(reason, frames),
+    );
+    const invoke = vi.fn(async () => ({ scope: "current_dom" }));
+    const request = {
+      id: "read",
+      method: "tool.read",
+      params: { session_id: "shared", tab_id: 7, context_id: f.first.context_id },
+    };
+    expect(await f.controller.run(request, f.cdp, f.abort.signal, invoke)).toMatchObject({
+      code: "permission_denied",
+      data: {
+        reason: reason === "loading" ? "control_context_invalid" : reason,
+        effect_state: "none",
+        ...(reason === "loading" ? { phase: "control" } : { frames }),
+      },
+    });
+    expect(f.controller.view(7)?.mode).toBe("unavailable");
+    expect(await f.controller.run(request, f.cdp, f.abort.signal, invoke)).toMatchObject({
+      data: { reason: "control_context_invalid", effect_state: "none" },
+    });
+    expect(invoke).not.toHaveBeenCalled();
+    expect(f.native).not.toHaveBeenCalled();
+    // A passive read remains possible, but cannot renew the revoked context.
+    f.readFrames.mockClear();
+    expect(
+      await f.controller.run(
+        { ...request, params: { session_id: "shared", tab_id: 7 } },
+        f.cdp,
+        f.abort.signal,
+        invoke,
+      ),
+    ).toEqual({ scope: "current_dom" });
+    expect(f.readFrames).not.toHaveBeenCalled();
+    expect(await f.act()).toMatchObject({ code: "permission_denied" });
+  });
   it("keeps an explicit human hold visible while navigation makes collection unavailable", async () => {
     const f = await fixture();
     await f.controller.control(7, f.controller.view(7)!.revision, "hold");

@@ -3,6 +3,7 @@ import {
   SENSITIVE_AUTOCOMPLETE_SELECTOR,
 } from "@/lib/sensitive-autocomplete";
 import type { SessionContext } from "@/session-manager/manager";
+import { isMissingNode } from "@/tools/errors";
 import { FOCUS_CHECK } from "@/tools/focus-state";
 import { type ResolvedActionTarget, resolveActionTarget } from "@/tools/interaction";
 import {
@@ -141,6 +142,9 @@ async function sample(
       );
     return reply.result.value;
   } catch (error) {
+    // CDP can collect an already removed node before it can be sampled. This is
+    // the same detached identity, not an unavailable browser or a new target.
+    if (isMissingNode(error)) return { connected: false };
     return actionError(
       "target_unavailable",
       error instanceof Error ? error.message : String(error),
@@ -186,7 +190,11 @@ export async function checkActionTarget(
       messages[reason],
       "target",
       "Inspect or wait for this target to become actionable. A new control context is not required unless control or the document changed.",
-      { target: target.usedRef ? `@${target.usedRef}` : target.usedSelector },
+      {
+        target: target.usedRef ? `@${target.usedRef}` : target.usedSelector,
+        backend_node_id: target.backendNodeId,
+        ...(target.frameId ? { frame_id: target.frameId } : {}),
+      },
     );
 }
 

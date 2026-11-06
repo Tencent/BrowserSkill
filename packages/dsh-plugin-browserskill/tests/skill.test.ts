@@ -60,6 +60,7 @@ describe("registerBskSkill", () => {
     expect([...new Set(references)].sort()).toEqual([
       "references/cooperation.md",
       "references/debugging.md",
+      "references/extraction.md",
       "references/help-and-recovery.md",
       "references/interaction-details.md",
       "references/native-dialogs.md",

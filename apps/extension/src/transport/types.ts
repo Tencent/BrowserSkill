@@ -1,3 +1,4 @@
+export type { ReadParams, ReadResult } from "@/tools/read/types";
 // Wire-protocol shapes mirroring bsk-protocol (see crates/bsk-protocol/schema/*.json). The
 // daemon serialises Rust structs via serde; these TS types intentionally
 // stay structural (interface, not class) so the same JSON parses on both
@@ -44,6 +45,11 @@ export type RpcErrorReason =
   | "target_focus_lost"
   | "target_moved"
   | "target_covered"
+  | "read_params_invalid"
+  | "read_target_stale"
+  | "read_selector_invalid"
+  | "read_field_ambiguous"
+  | "read_limit"
   | "extract_params_invalid"
   | "extract_target_stale"
   | "extract_target_ambiguous"

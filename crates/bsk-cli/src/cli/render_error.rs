@@ -358,7 +358,7 @@ pub fn info_for_error(code: ErrorCode, data: Option<&serde_json::Value>) -> Rend
         (_, "observation_required" | "observation_changed") => RenderInfo {
             summary: "this action needs an explicit current observation",
             hint: Some(
-                "synchronize and pass the reply's top-level observation_id with --observation; do not replay an uncertain action",
+                "for DOM data use read/extract without syncing again; actual scripts/visual actions require a fresh sync and explicit --observation. Never replay uncertain actions",
             ),
             ..base
         },

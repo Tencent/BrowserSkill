@@ -17,9 +17,10 @@ use bsk_protocol::tools::{
     DialogHandleParams, DialogStatusParams, ElementState, EvaluateParams, ExtractAction,
     ExtractField, ExtractParams, FocusParams, GetHtmlParams, HelpCompletionCriteria, HelpTarget,
     NavigateBackParams, NavigateForwardParams, NavigateParams, NetworkParams, ObserveParams,
-    OperationParams, ReloadParams, RequestHelpParams, ScreenshotParams, SnapshotParams,
-    TabBorrowParams, TabCloseParams, TabCreateParams, TabListParams, TabReturnParams, TabScope,
-    TabSelectParams, WaitForElementParams, WaitForNavigationParams, WaitUntil,
+    OperationParams, ReadField, ReadParams, ReloadParams, RequestHelpParams, ScreenshotParams,
+    SnapshotParams, TabBorrowParams, TabCloseParams, TabCreateParams, TabListParams,
+    TabReturnParams, TabScope, TabSelectParams, WaitForElementParams, WaitForNavigationParams,
+    WaitUntil,
 };
 use bsk_protocol::{ErrorCode, Method, RpcError};
 use schemars::JsonSchema;
@@ -89,7 +90,7 @@ pub(crate) fn definitions() -> Vec<Value> {
         tool::<InspectArgs>(
             "bsk_inspect",
             "Read the page",
-            "Inspect the page. observe returns semantic VOM text (continue with \
+            "Inspect the page. read safely samples current DOM fields (read_fields: key/read/optional selector/attribute; reads text, attribute, value, checked, exists) in a fixed synchronous isolated-world collector, tolerating unrelated animation. Use read for title/DOM data, extract for tables/lists, and explicit expect facts before input. No JavaScript, callbacks or delayed effects. Reads never renew control or observations. observe returns semantic VOM text (continue with \
              cursor when truncated), snapshot an accessibility tree, html markup (optionally one \
              ref), screenshot a PNG image (optionally cropped to a ref), console and network the \
              captured entries after since, and extract reads loaded table or list data with \
@@ -107,7 +108,7 @@ pub(crate) fn definitions() -> Vec<Value> {
              the latest context_id as context and protect decision facts with expect. Set \
              sync_after (optionally with until_visible) to get the synchronized state in the same \
              call. Never repeat an action whose effect_state is unknown or that reported \
-             dialog_pending. evaluate {expression} executes JavaScript in the page and may \
+             dialog_pending. For reading use bsk_inspect action=read or extract, not evaluate/sync retries on dynamic pages. evaluate {expression} executes JavaScript in the page and may \
              change it; it needs context and observation under shared target control.",
             Hints {
                 destructive: true,
@@ -483,7 +484,7 @@ fn unsupported(operation: &str, required: &str, actual: &str) -> CliError {
         ),
         data: Some(json!({
             "reason": "unsupported_feature", "operation": operation, "component": "daemon",
-            "required_protocol": required, "actual_protocol": actual, "effect_state": "none",
+            "required_protocol": required, "actual_protocol": actual, "effect_state": "none", "phase": "negotiate",
         })),
     })
 }
@@ -1011,6 +1012,7 @@ async fn page(
 #[derive(Debug, Clone, Copy, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 enum InspectAction {
+    Read,
     Observe,
     Snapshot,
     Html,
@@ -1041,10 +1043,10 @@ struct InspectArgs {
     /// observe: move the real cursor over a few controls to reveal hover-only menus. Slow, and
     /// leaves hover state changed.
     probe_hover: Option<bool>,
-    /// html: limit to one observed ref; screenshot: crop to it.
+    /// html: scope to a ref; screenshot: crop; read: exact frame/shadow DOM node.
     #[serde(rename = "ref")]
     ref_: Option<String>,
-    /// html: byte cap. Default 524288.
+    /// html byte cap: default 524288. read total JSON cap: default 262144, range 1024..1048576.
     max_bytes: Option<u32>,
     /// console, network: return entries after this sequence cursor (next_since of the last read).
     since: Option<u64>,
@@ -1062,6 +1064,12 @@ struct InspectArgs {
     /// extract list: item selector and optional named field definitions.
     item_selector: Option<String>,
     fields: Option<Vec<ExtractField>>,
+    /// read: bounded declarative fields (key/read/optional selector/attribute); no scripts.
+    #[schemars(length(min = 1, max = 32))]
+    read_fields: Option<Vec<ReadField>>,
+    /// read: maximum nodes, 1..1000 (default 100).
+    #[schemars(range(min = 1, max = 1000))]
+    max_nodes: Option<u32>,
     max_rows: Option<u32>,
     max_columns: Option<u32>,
     timeout_ms: Option<u32>,
@@ -1075,6 +1083,25 @@ async fn inspect(
 ) -> Result<Reply, CliError> {
     let session = &args.session;
     let (method, params, vom) = match args.action {
+        InspectAction::Read => {
+            let mut input = arguments.as_object().cloned().unwrap();
+            input.remove("action");
+            input.remove("session");
+            input.insert("session_id".into(), session.as_str().into());
+            if let Some(fields) = input.remove("read_fields") {
+                input.insert("fields".into(), fields);
+            }
+            // Keep extraction fields separate in the public schema; never accept them as read fields.
+            if arguments.get("fields").is_some() {
+                return Err(invalid("read uses read_fields, not extraction fields"));
+            }
+            let params = step::typed::<ReadParams>(&Value::Object(input))
+                .map_err(|e| invalid(format!("{e:#}")))?;
+            if args.ref_.is_some() && args.selector.is_some() {
+                return Err(invalid("read accepts ref or selector, not both"));
+            }
+            (Method::ToolRead, params, None)
+        }
         InspectAction::Observe => (
             Method::ToolObserve,
             protocol::<ObserveParams>(arguments, session, &[], &[])?,
@@ -1141,10 +1168,15 @@ async fn inspect(
             (Method::ToolExtract, params, None)
         }
     };
-    let value = connect(daemon, control)
-        .await?
-        .rpc(method, params, TOOL_IPC_TIMEOUT)
-        .await?;
+    let link = connect(daemon, control).await?;
+    if method == Method::ToolRead && !bsk_protocol::tools::supports_dom_read(&link.protocol) {
+        return Err(unsupported(
+            "read",
+            bsk_protocol::tools::DOM_READ_PROTOCOL,
+            &link.protocol,
+        ));
+    }
+    let value = link.rpc(method, params, TOOL_IPC_TIMEOUT).await?;
     Ok(Reply {
         image: matches!(args.action, InspectAction::Screenshot),
         vom,
@@ -1803,6 +1835,36 @@ mod tests {
             daemon.abort();
             let _ = daemon.await;
         }
+    }
+
+    #[tokio::test]
+    async fn read_never_degrades_to_script_on_old_daemon() {
+        let input = json!({"action":"read","session":"s","selector":"#x","read_fields":[{"key":"label","read":"text"}]});
+        let daemon = Daemon::Fixed {
+            sock: PathBuf::from("/nonexistent/read-test.sock"),
+            protocol: "1.8".into(),
+        };
+        let error = inspect(
+            &daemon,
+            &Arc::new(CallControl::default()),
+            parse(&input).unwrap(),
+            &input,
+        )
+        .await
+        .err()
+        .unwrap();
+        assert!(error.to_string().contains("protocol 1.9"));
+        for illegal in ["expression", "readonly", "context", "observation", "expect"] {
+            let mut bad = input.clone();
+            bad[illegal] = json!("unsafe");
+            assert!(parse::<InspectArgs>(&bad).is_err());
+        }
+        let definitions = definitions();
+        let read = definitions
+            .iter()
+            .find(|v| v["name"] == "bsk_inspect")
+            .unwrap();
+        assert!(read["inputSchema"].to_string().contains("read_fields"));
     }
 
     #[test]

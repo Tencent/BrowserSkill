@@ -1063,3 +1063,17 @@ describe("negotiated target control", () => {
     expect(f.send).not.toHaveBeenCalled();
   });
 });
+
+it("passive DOM reads do not revive contexts retained only as strict baselines", async () => {
+  const f = await fixture();
+  const invoke = vi.fn(async () => ({ scope: "current_dom" }));
+  f.controller.invalidate(7);
+  expect(await f.run({}, "tool.read", invoke)).toMatchObject({
+    data: { reason: "control_context_invalid", effect_state: "none" },
+  });
+  expect(invoke).not.toHaveBeenCalled();
+  expect(await f.run({ context_id: undefined }, "tool.read", invoke)).toEqual({
+    scope: "current_dom",
+  });
+  expect(invoke).toHaveBeenCalledOnce();
+});

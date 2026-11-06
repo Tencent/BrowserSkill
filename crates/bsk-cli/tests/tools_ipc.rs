@@ -71,10 +71,13 @@ async fn connect_ext(addr: std::net::SocketAddr) -> Ws {
 }
 
 async fn do_handshake(ws: &mut Ws) -> HandshakeResult {
+    do_handshake_protocol(ws, bsk::daemon::state::PROTOCOL_VERSION).await
+}
+async fn do_handshake_protocol(ws: &mut Ws, protocol: &str) -> HandshakeResult {
     let params = HandshakeParams {
         client: "browser-skill-extension".into(),
         version: "0.1.0-dev.0".parse().unwrap(),
-        protocol_version: bsk::daemon::state::PROTOCOL_VERSION.into(),
+        protocol_version: protocol.into(),
         instance_id: TEST_EXT_ID.into(),
         browser: BrowserPeerInfo {
             name: "chrome".into(),
@@ -717,5 +720,40 @@ async fn tool_dispatch_rejects_unknown_session() {
         .unwrap();
     let err = outcome.expect_err("expected not_found");
     assert_eq!(err.code, ErrorCode::NotFound);
+    handle.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn dom_read_is_never_forwarded_or_downgraded_on_an_old_extension() {
+    let (handle, sock) = spawn_daemon().await;
+    let mut ws = connect_ext(handle.ws_addr()).await;
+    do_handshake_protocol(&mut ws, "1.8").await;
+    let count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let seen = count.clone();
+    run_extension(ws, move |req| {
+        seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(req.method, Method::ToolSnapshot);
+        ResponseBody::Ok(json!({"text":"legacy read still works","tab_id":9,"truncated":false}))
+    });
+    let session_id = ipc_session_start(&sock).await;
+    let error = ipc_tool_call::<_, Value>(
+        &sock,
+        Method::ToolRead,
+        json!({"session_id":session_id,"selector":"#data"}),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.code, ErrorCode::Unsupported);
+    assert_eq!(error.data.as_ref().unwrap()["required_protocol"], "1.9");
+    assert_eq!(error.data.as_ref().unwrap()["effect_state"], "none");
+    assert_eq!(count.load(std::sync::atomic::Ordering::SeqCst), 0);
+    let result = ipc_tool_call::<_, Value>(
+        &sock,
+        Method::ToolSnapshot,
+        json!({"session_id":session_id}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(result["text"], "legacy read still works");
     handle.shutdown().await;
 }

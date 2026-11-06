@@ -332,3 +332,25 @@ describe("target actionability", () => {
     expect(await checkActionTarget(f.cdp, target, "tool.focus")).toBeUndefined();
   });
 });
+
+it.each([
+  "No node with given id found",
+  JSON.stringify({ code: -32000, message: "Could not find node with given id" }),
+])("classifies a collected node as detached without redirecting or entering input: %s", async (message) => {
+  const f = fixture();
+  f.sendToTarget.mockRejectedValueOnce(new Error(message));
+  expect(await checkActionTarget(f.cdp, target, "tool.click")).toMatchObject({
+    data: { reason: "target_detached", effect_state: "none", backend_node_id: 4 },
+  });
+  expect(f.sendToTarget.mock.calls.map((call) => call[1])).toEqual([
+    "DOM.resolveNode",
+    "Runtime.releaseObjectGroup",
+  ]);
+});
+it("keeps other CDP failures unavailable instead of declaring the node absent", async () => {
+  const f = fixture();
+  f.sendToTarget.mockRejectedValueOnce(new Error("Session disconnected"));
+  expect(await checkActionTarget(f.cdp, target, "tool.click")).toMatchObject({
+    data: { reason: "target_unavailable" },
+  });
+});
