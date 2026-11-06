@@ -1571,7 +1571,7 @@ describe("ChromiumCdp", () => {
 });
 
 describe("document-bound references", () => {
-  it("invalidates root document and attachment changes, not hash changes", async () => {
+  it("invalidates root documents, SPA routes and attachments, not child routes", async () => {
     const { api, onEvent, onDetach } = fakeApi();
     const changed = vi.fn();
     const cdp = new ChromiumCdp(api, { onDocumentChanged: changed });
@@ -1583,11 +1583,26 @@ describe("document-bound references", () => {
       expect(changed).toHaveBeenLastCalledWith(4);
     }
     expect(changed).toHaveBeenCalledTimes(3);
+    onEvent.fire({ tabId: 4 }, "Page.navigatedWithinDocument", { frameId: "child" });
+    onEvent.fire({ tabId: 4, sessionId: "child-session" }, "Page.navigatedWithinDocument", {
+      frameId: "root",
+    });
+    expect(changed).toHaveBeenCalledTimes(3);
+    // Every route event revokes, including away and back before the next observation.
+    onEvent.fire({ tabId: 4 }, "Page.navigatedWithinDocument", {
+      frameId: "root",
+      url: "https://site.test/other",
+    });
+    onEvent.fire({ tabId: 4 }, "Page.navigatedWithinDocument", {
+      frameId: "root",
+      url: "https://site.test/",
+    });
+    expect(changed).toHaveBeenCalledTimes(5);
     await cdp.detach(4);
-    expect(changed).toHaveBeenCalledTimes(4);
+    expect(changed).toHaveBeenCalledTimes(6);
     await cdp.ensureAttached(4);
     onDetach.fire({ tabId: 4 }, "target_closed");
-    expect(changed).toHaveBeenCalledTimes(5);
+    expect(changed).toHaveBeenCalledTimes(7);
     cdp.dispose();
   });
 

@@ -186,7 +186,15 @@ export function attachCooperationCapture() {
       if (nested) yield* controls(nested);
     }
   };
+  let documentUrl = location.href;
   const read = () => {
+    // SPA routes retain the DOM document, but cannot retain its action authority.
+    // This also covers child frames; root CDP route events catch away-and-back.
+    if (documentUrl !== location.href) {
+      documentUrl = location.href;
+      state.document = createRandomUuid();
+      state.revision++;
+    }
     mutations(observer.takeRecords());
     const active = activeElement();
     if (editingTarget && (active !== editingTarget || !editable(editingTarget))) {

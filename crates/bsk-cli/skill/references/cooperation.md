@@ -117,3 +117,14 @@ further input and cancels an uncompleted upload trigger. Once a browser download
 attributed, receipt collection continues within its original deadline; keep the result and reconcile.
 Explicit task stop, tab closure or command cancellation still cancels the transfer and releases
 only owned resources. Unknown outcomes require checking application state, never automatic retry.
+
+## Safe reads during page changes
+
+Use read/extract for current DOM fields and complex table/list data; see
+[extraction](extraction.md). Fixed isolated synchronous queries accept no caller
+JavaScript. Ordinary reads tolerate unrelated clocks, carousels, media and frame
+changes without consuming or replacing action evidence. A sample does not prove
+that business facts remain true: use exact expect checks before input. Main
+SPA route changes (including hash routes) revoke prior contexts and refs, even
+if the URL returns. Read current state without old context, then sync and decide
+again before input. Arbitrary evaluate keeps its strict observation checks.

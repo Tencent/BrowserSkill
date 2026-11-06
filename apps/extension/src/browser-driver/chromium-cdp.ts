@@ -150,6 +150,7 @@ interface NetworkRequestMeta {
 }
 
 interface FrameDiscoveryState {
+  rootFrameId?: string;
   sessions: Set<string>;
   pending: Set<Promise<void>>;
   generation: number;
@@ -478,7 +479,10 @@ export class ChromiumCdp {
       {},
       READ_TIMEOUT_MS,
     );
-    if (root.frameTree) sources.push({ target: { tabId }, tree: root.frameTree });
+    if (root.frameTree) {
+      this.frameDiscoveryState(tabId).rootFrameId = root.frameTree.frame.id;
+      sources.push({ target: { tabId }, tree: root.frameTree });
+    }
 
     const sessions = [...(this.frameDiscovery.get(tabId)?.sessions ?? [])];
     const childTrees = await Promise.all(
@@ -899,13 +903,24 @@ export class ChromiumCdp {
       const tabId = source.tabId;
       if (typeof tabId !== "number") return;
       const raw = (params ?? {}) as Record<string, unknown>;
-      const frame = raw.frame as { parentId?: string } | undefined;
+      const frame = raw.frame as { id?: string; parentId?: string } | undefined;
+      if (
+        !source.sessionId &&
+        frame?.id &&
+        !frame.parentId &&
+        ["Page.frameNavigated", "Page.documentOpened"].includes(method)
+      )
+        this.frameDiscoveryState(tabId).rootFrameId = frame.id;
+      const rootRouteChanged =
+        method === "Page.navigatedWithinDocument" &&
+        raw.frameId === this.frameDiscovery.get(tabId)?.rootFrameId;
       // A child navigation/detach does not replace the root document. Keep this
       // tab-wide invalidation limited to root changes; child lifetimes need
       // frame-scoped handling rather than discarding unrelated page refs.
       if (
         !source.sessionId &&
-        (method === "DOM.documentUpdated" ||
+        (rootRouteChanged ||
+          method === "DOM.documentUpdated" ||
           ((method === "Page.frameNavigated" || method === "Page.documentOpened") &&
             frame &&
             !frame.parentId))

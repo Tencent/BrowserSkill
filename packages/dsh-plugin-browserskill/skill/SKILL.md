@@ -59,7 +59,7 @@ bsk_interact({ action: "fill", session: "<id>", target: "@e3", value: "text", co
 
 DOM refs survive reads; navigation invalidates them. Use refs for frames/shadow roots;
 selectors search the main document.
-Select options by value, not visible label.
+Use bsk_inspect action=read for DOM fields during animation; see [extraction](references/extraction.md). Select options by value.
 
 Inspect unknown effects before retrying. On an error or two attempts without progress,
 read [human help and recovery](references/help-and-recovery.md) for `bsk_assist`.

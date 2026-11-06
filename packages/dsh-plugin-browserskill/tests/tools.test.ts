@@ -139,6 +139,7 @@ const ACTION_ROUTES: Record<string, readonly [string, string]> = {
   "inspect.network": ["bsk_inspect", "network"],
   "inspect.debug": ["bsk_inspect", "debug"],
   "inspect.extract": ["bsk_inspect", "extract"],
+  "inspect.read": ["bsk_inspect", "read"],
   "inspect.view": ["bsk_inspect", "view"],
   "interact.click": ["bsk_interact", "click"],
   "interact.hover": ["bsk_interact", "hover"],
@@ -432,6 +433,7 @@ const EXPECTED_ACTIONS = {
     "debug",
     "video",
     "extract",
+    "read",
     "view",
   ],
   bsk_interact: [
@@ -3317,5 +3319,41 @@ describe("script and file actions share the existing runtime", () => {
         .execute({ action: "evaluate", expression: "submit()", contextId: "observed" }, makeExec()),
     ).rejects.toMatchObject({ data: result.data });
     expect(calls.filter((call) => call.args[0] === "evaluate")).toHaveLength(1);
+  });
+});
+
+describe("bounded DOM read route", () => {
+  it("passes literal declarative data, without observation renewal or script fallback", async () => {
+    const answer = {
+      scope: "current_dom",
+      items: [{ ref: "@e4", values: { text: "A" } }],
+      truncated: false,
+    };
+    const { tools, calls } = setup({ "session start": START_REPLY("s1"), read: answer });
+    await startSession(tools);
+    const readFields = JSON.stringify([
+      { key: "text", read: "text", selector: '[data-x="$(literal)"]' },
+    ]);
+    const value = await tools
+      .get("bsk_inspect")!
+      .execute(
+        { action: "read", session: "s1", selector: "#rows", readFields, maxNodes: 5 },
+        makeExec(),
+      );
+    expect(value).toEqual(answer);
+    expect(calls.at(-1)?.args).toEqual([
+      "read",
+      "--session",
+      "s1",
+      "--selector",
+      "#rows",
+      "--fields-json",
+      readFields,
+      "--max-nodes",
+      "5",
+    ]);
+    expect(
+      calls.filter(({ args }) => args.includes("evaluate") || args.includes("sync")),
+    ).toHaveLength(0);
   });
 });

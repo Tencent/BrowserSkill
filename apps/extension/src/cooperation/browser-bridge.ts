@@ -128,6 +128,7 @@ export async function collectCooperationFrames(
   lease: string,
   input?: InputExpectation,
   repairs: FrameRepairs = new Map(),
+  replacementPass = false,
 ): Promise<CooperationFrames> {
   const frames = await chrome.webNavigation.getAllFrames({ tabId });
   const documents = new Set(frames?.map((frame) => frame.documentId));
@@ -157,6 +158,28 @@ export async function collectCooperationFrames(
     }),
   );
   const failures = results.filter((result) => result.status === "rejected");
+  if (failures.length && !replacementPass && kind !== COOPERATION_DISABLE) {
+    const failed = live.filter((_frame, i) => results[i].status === "rejected");
+    // A document-addressed message can race a child navigation after inventory.
+    // Recollect once only when every failed document is provably retired. Never
+    // hide an active unobservable document, a root replacement or further churn.
+    const current = await chrome.webNavigation.getAllFrames({ tabId });
+    if (
+      current?.find((frame) => frame.frameId === 0)?.documentId ===
+        frames.find((frame) => frame.frameId === 0)?.documentId &&
+      failed.every(
+        (old) =>
+          old.frameId !== 0 &&
+          !current?.some(
+            (frame) =>
+              frame.documentId === old.documentId &&
+              !frame.errorOccurred &&
+              (!frame.documentLifecycle || frame.documentLifecycle === "active"),
+          ),
+      )
+    )
+      return collectCooperationFrames(tabId, kind, lease, input, repairs, true);
+  }
   const unobservable = failures.flatMap((result) =>
     result.reason instanceof FrameCollectionError ? result.reason.frames : [],
   );

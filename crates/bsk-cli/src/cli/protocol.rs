@@ -22,6 +22,7 @@ pub(crate) fn require_daemon_support(
                 "reason": "unsupported_feature", "operation": operation,
                 "component": "daemon", "required_protocol": required_protocol,
                 "actual_protocol": status.protocol_version,
+                "phase": "negotiate", "effect_state": "none",
             })),
         }));
     }

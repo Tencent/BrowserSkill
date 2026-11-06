@@ -14,6 +14,22 @@ Starting from 0.2.0, CLI / Extension / DSH Plugin share the same version number.
   call, then return the synchronized state, so a form or a set of filters takes one
   model turn instead of one per action. Each step keeps the checks of its own command,
   and the first step that does not complete stops the plan without any retry.
+- `bsk read`, MCP and DSH `bsk_inspect(action=read)` sample bounded DOM fields
+  through fixed synchronous isolated-world queries. Agents can read current title,
+  URLs, text, attributes and control state across unrelated animation, then act
+  with explicit business conditions. No caller JavaScript, callbacks or delayed
+  effects are accepted; sensitive fields are masked.
+- DOM reads negotiate protocol 1.9 and reject older peers explicitly, without
+  script fallback. Arbitrary evaluate and visual/untargeted input retain strict guards.
+
+### Fixed
+
+- Main-document SPA route changes, including away-and-back and hash routes,
+  invalidate old control contexts and refs. Supplementary reads never renew them.
+- CLI, MCP, DSH and bundled skills direct dynamic-page data gathering to read/extract
+  instead of repeated sync/evaluate refusals.
+- Control-state sampling recollects once after the browser proves that a failed child document retired; an active unobservable frame still blocks input.
+- Removed nodes already collected by CDP report target_detached with node identity, consistently with detached nodes that remain inspectable; other CDP failures remain target_unavailable.
 
 ## [0.4.2] - 2026-11-05
 

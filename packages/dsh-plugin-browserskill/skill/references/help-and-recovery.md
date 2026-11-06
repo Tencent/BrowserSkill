@@ -49,3 +49,8 @@ backends to bypass limits. Borrow confirmation still applies.
 - Unconfirmed fill: read the field. Formatting may satisfy the goal; correct only a
   remaining difference instead of blindly refilling or requesting help.
 - Other errors: follow the hint; on unrecoverable failure, report and stop the owned session.
+
+For observation_changed while gathering data on a changing page, use the fixed
+read/extract path (inspect action=read/extract in MCP/DSH). Do not resubmit
+arbitrary evaluate in a sync loop. A refusal is known to have no effect only
+when effect_state=none; unknown results still require application inspection.

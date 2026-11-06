@@ -1,0 +1,75 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "ReadResult",
+  "type": "object",
+  "required": [
+    "captured_at",
+    "frame_id",
+    "frame_url",
+    "items",
+    "page_url",
+    "scope",
+    "tab_id",
+    "title",
+    "truncated"
+  ],
+  "properties": {
+    "captured_at": {
+      "type": "string"
+    },
+    "frame_id": {
+      "type": "string"
+    },
+    "frame_url": {
+      "type": "string"
+    },
+    "items": {
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/ReadItem"
+      }
+    },
+    "page_url": {
+      "type": "string"
+    },
+    "scope": {
+      "description": "A live sample, not an action authorization or a complete dataset.",
+      "type": "string"
+    },
+    "tab_id": {
+      "type": "integer",
+      "format": "int64"
+    },
+    "title": {
+      "type": "string"
+    },
+    "truncated": {
+      "type": "boolean"
+    }
+  },
+  "definitions": {
+    "ReadItem": {
+      "type": "object",
+      "required": [
+        "redacted",
+        "ref",
+        "values"
+      ],
+      "properties": {
+        "redacted": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "ref": {
+          "type": "string"
+        },
+        "values": {
+          "type": "object",
+          "additionalProperties": true
+        }
+      }
+    }
+  }
+}

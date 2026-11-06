@@ -135,6 +135,7 @@ const READS = new Set([
   "tool.screenshot",
   "tool.console",
   "tool.network",
+  "tool.read",
   "tool.extract",
   "tool.wait_for_element",
   "tool.wait_for_navigation",
@@ -918,7 +919,7 @@ export class CooperationController implements ControlAuthority {
             }),
           state: { ...this.view(state.tabId), mode: "ready" },
           guidance: targetPolicy
-            ? "Reuse this context for DOM-targeted actions and supplementary reads. Human intervention or main-document replacement requires sync. Actions using an iframe target or precondition require a fresh sync when frame documents change. Use explicit expect checks for business facts such as price, recipient or record ID. Scripts, untargeted keys and visual clicks require this sync's top-level observation_id (not observation.observation_id) and retain strict content checks. Never replay an uncertain action; inspect its result first."
+            ? "Reuse this context for DOM-targeted actions and supplementary reads. Human intervention or main-document replacement requires sync. Actions using an iframe target or precondition require a fresh sync when frame documents change. Use explicit expect checks for business facts such as price, recipient or record ID. Use read/extract for current DOM data even during animation; they never renew action evidence. Arbitrary scripts, untargeted keys and visual clicks require this sync's top-level observation_id (not observation.observation_id) and retain strict content checks. Never replay an uncertain action; inspect its result first."
             : "Continue toward the assigned goal using this current state. Incorporate helpful progress and correct recoverable mistakes. Page activity is not a change of goal. Each context authorizes one action; sync after it. By default the whole page is checked. Text that changes by itself (clocks, counters) is reported once; after the next sync it no longer blocks actions on a ref or selector unless it shares a form, list, dialog, panel or other container with the target. Keys without a ref or selector can use explicit dependencies, while their actual focused region stays protected; uncertain focus and other untargeted actions keep the exact whole-page check. To tolerate other unrelated updates, declare all observed decision regions with --depends-on refs/selectors (plugin: dependsOn); the target region and form values remain protected. Verify completion and prior submissions from application evidence.",
         };
       } finally {
@@ -1251,7 +1252,26 @@ export class CooperationController implements ControlAuthority {
         };
       return this.bootstrap(state, req.method, cdp, signal, invoke);
     }
-    if (read) return invoke(guardedRunner(cdp));
+    if (read) {
+      // Reads need no action authority. When a caller explicitly supplies a
+      // context, however, a retained strict baseline cannot validate a revoked
+      // control context after navigation/intervention. Never renew it by reading.
+      if (req.method === "tool.read" && params.context_id) {
+        await this.refresh(state);
+        if (
+          state.context?.id !== params.context_id ||
+          state.context.epoch !== state.epoch ||
+          this.controlError(session, state)
+        )
+          return actionError(
+            "control_context_invalid",
+            "This read supplied a revoked control context",
+            "control",
+            "Omit the old context to inspect current data; synchronize and reconsider before further input.",
+          );
+      }
+      return invoke(guardedRunner(cdp));
+    }
     if (state.working) return failure("Another operation is settling on this tab");
     const expectations = parseExpectations(params.expect);
     if (isRpcError(expectations)) return expectations;
@@ -1410,7 +1430,7 @@ export class CooperationController implements ControlAuthority {
             "observation_changed",
             "The strict observation changed before this action",
             "observation",
-            "Synchronize and reconsider this untargeted action, or use a DOM target with explicit business preconditions.",
+            "For data, use read/extract (fixed passive DOM queries) without another sync. For an actual script or visual action, synchronize and reconsider; use a DOM target with explicit expect facts when possible.",
             { observation_id: context.observationId },
           );
           return;

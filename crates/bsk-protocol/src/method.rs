@@ -110,6 +110,8 @@ pub enum Method {
     ToolObserve,
     #[serde(rename = "tool.get_html")]
     ToolGetHtml,
+    #[serde(rename = "tool.read")]
+    ToolRead,
     #[serde(rename = "tool.extract")]
     ToolExtract,
     #[serde(rename = "tool.screenshot")]
@@ -239,6 +241,7 @@ impl Method {
             Method::ToolTabList
             | Method::ToolSnapshot
             | Method::ToolGetHtml
+            | Method::ToolRead
             | Method::ToolExtract
             | Method::ToolScreenshot
             | Method::ToolScreenshotRead

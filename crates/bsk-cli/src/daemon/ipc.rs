@@ -288,6 +288,7 @@ pub fn full_handler(status: DaemonStatus, state: Arc<DaemonState>) -> RpcHandler
                 | Method::ToolObserve
                 | Method::ToolCooperate
                 | Method::ToolGetHtml
+                | Method::ToolRead
                 | Method::ToolExtract
                 | Method::ToolNavigate
                 | Method::ToolNavigateBack
@@ -693,6 +694,18 @@ async fn handle_tool_dispatch(
                 "effect_state": "none", "required_protocol": bsk_protocol::tools::CLICK_MOVE_CLICK_PROTOCOL,
                 "actual_protocol": browser.extension_protocol_version,
             })),
+        });
+    }
+    if method == Method::ToolRead
+        && let Some(session) = state.sessions.get(&session_id)
+        && let Some(browser) = state.browsers.get(&session.browser_id)
+        && !bsk_protocol::tools::supports_dom_read(&browser.extension_protocol_version)
+    {
+        return ResponseBody::Err(RpcError {
+            code: ErrorCode::Unsupported,
+            message: "DOM read requires extension protocol 1.9; update the extension. JavaScript fallback is never used".into(),
+            data: Some(serde_json::json!({"reason":"unsupported_feature","phase":"negotiate","effect_state":"none",
+                "required_protocol":bsk_protocol::tools::DOM_READ_PROTOCOL,"actual_protocol":browser.extension_protocol_version})),
         });
     }
     // Older extensions must never execute an action after silently ignoring its conditions.
