@@ -62,6 +62,7 @@ determines which versions can connect.
   instead of repeated sync/evaluate refusals.
 - Control-state sampling recollects once after the browser proves that a failed child document retired; an active unobservable frame still blocks input.
 - Removed nodes already collected by CDP report target_detached with node identity, consistently with detached nodes that remain inspectable; other CDP failures remain target_unavailable.
+- `bsk press` rejects combinations with multiple non-modifier keys instead of silently dispatching only the last key (for example, `a+b`).
 
 ### Fixed
 
