@@ -40,6 +40,7 @@ import {
   isOverlayAgentStateMessage,
   OVERLAY_AUTOMATION_BYPASS,
   OVERLAY_MSG_READY,
+  OVERLAY_MSG_SET_MINIMIZED,
   type OverlayAgentOverlayResetMessage,
   type OverlayAgentStateMessage,
   type OverlayAutomationBypassMessage,
@@ -192,8 +193,6 @@ export default defineContentScript({
       const controlVisible =
         videoOverlay.canRenderControl() && shouldShowAgentControlOverlay(overlayState);
       const controlOverlayVisible = controlVisible && !activeAgentState?.cooperation;
-      // Leaving control (including help/record UI) must not retain click leases.
-      if (!controlOverlayVisible) inputPassthrough.reset();
       const interactiveOverlayVisible =
         overlayState.borrowRequests.length > 0 ||
         overlayState.activeHelp !== null ||
@@ -202,6 +201,9 @@ export default defineContentScript({
       const cooperationState =
         controlVisible && !interactiveOverlayVisible ? activeAgentState?.cooperation : undefined;
       const cardVisible = controlOverlayVisible || !!cooperationState;
+      // Cooperative status updates and minimization keep the same click lease.
+      // Clear it only when control UI leaves or interactive overlays take over.
+      if (!cardVisible || interactiveOverlayVisible) inputPassthrough.reset();
       setOverlayHostHiddenFromAccessibility(!interactiveOverlayVisible && !cardVisible);
       setOverlaySurfaceState(
         controlOverlayVisible,
@@ -231,6 +233,8 @@ export default defineContentScript({
                 controller: overlayState.controller,
                 visible: cardVisible,
                 state: cooperationState,
+                minimized: activeAgentState?.minimized ?? false,
+                onMinimizedChange: handleMinimizedChange,
                 interrupting: overlayState.interrupting,
                 automationBypass: overlayState.automationBypassCount > 0,
                 onInterrupt: handleInterrupt,
@@ -290,6 +294,14 @@ export default defineContentScript({
       }
       activeRecordRequestId = null;
       renderAll();
+    }
+
+    function handleMinimizedChange(minimized: boolean) {
+      const sessionId = overlays.snapshot().activeSessionId;
+      if (!sessionId) return;
+      void chrome.runtime
+        .sendMessage({ kind: OVERLAY_MSG_SET_MINIMIZED, sessionId, minimized })
+        .catch((error) => console.debug("[bsk overlay] minimize update failed", error));
     }
 
     function handleInterrupt() {
