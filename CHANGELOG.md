@@ -52,6 +52,8 @@ determines which versions can connect.
 
 ### Fixed
 
+- The extension releases the browser's handle to a select element when the action finishes,
+  including when the requested option does not exist.
 - Main-document SPA route changes, including away-and-back and hash routes,
   invalidate old control contexts and refs. Supplementary reads never renew them.
   This also covers passive reads of already loaded tabs and fresh debugger attachments.

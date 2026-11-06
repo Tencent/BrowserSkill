@@ -1989,6 +1989,9 @@ export async function handleSelect(
       code: "cdp_failed",
       message: err instanceof Error ? err.message : String(err),
     };
+  } finally {
+    // Navigation may already have invalidated the handle.
+    await nodeCdp.send(target.tabId, "Runtime.releaseObject", { objectId }).catch(() => undefined);
   }
 }
 
