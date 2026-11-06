@@ -480,7 +480,6 @@ export class ChromiumCdp {
       READ_TIMEOUT_MS,
     );
     if (root.frameTree) {
-      this.frameDiscoveryState(tabId).rootFrameId = root.frameTree.frame.id;
       sources.push({ target: { tabId }, tree: root.frameTree });
     }
 
@@ -778,7 +777,7 @@ export class ChromiumCdp {
     );
   }
 
-  private command(
+  private async command(
     target: CdpDebuggee,
     method: string,
     params: object,
@@ -786,7 +785,14 @@ export class ChromiumCdp {
     beforeDispatch?: () => void,
     signal?: AbortSignal,
   ): Promise<unknown> {
-    return this.readGate.run(
+    const { tabId } = target;
+    const rootState =
+      method === "Page.getFrameTree" && !target.sessionId && typeof tabId === "number"
+        ? this.frameDiscoveryState(tabId)
+        : undefined;
+    const rootBefore = rootState?.rootFrameId;
+    const version = typeof tabId === "number" ? (this.attachmentVersions.get(tabId) ?? 0) : 0;
+    const result = await this.readGate.run(
       target,
       method,
       () => {
@@ -796,6 +802,21 @@ export class ChromiumCdp {
       readTimeoutMs,
       signal,
     );
+    // Page.enable does not replay navigation for an already loaded tab. Learn
+    // its root from every tree-read path, including guarded passive reads.
+    // A delayed reply must not overwrite a newer attachment or root event.
+    if (
+      rootState &&
+      typeof tabId === "number" &&
+      this.frameDiscovery.get(tabId) === rootState &&
+      (this.attachmentVersions.get(tabId) ?? 0) === version &&
+      rootState.rootFrameId === rootBefore
+    ) {
+      const frame = (result as { frameTree?: CdpFrameTreeNode } | undefined)?.frameTree?.frame;
+      if (typeof frame?.id === "string" && frame.id && !frame.parentId)
+        rootState.rootFrameId = frame.id;
+    }
+    return result;
   }
 
   private async enablePageDomain(tabId: number): Promise<void> {

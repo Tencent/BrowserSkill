@@ -95,7 +95,7 @@ export async function handleRead(
       target: { tabId: tab.tabId },
     };
     check();
-    const rootDoc = await documentIdentity(cdp, root, attachmentId);
+    const rootDoc = await documentIdentity(cdp, root, attachmentId, stale);
     let frame = root;
     let backendNodeId: number | undefined;
     if (params.ref) {
@@ -112,7 +112,8 @@ export async function handleRead(
       }
       backendNodeId = ref.backendNodeId;
     }
-    const current = frame === root ? rootDoc : await documentIdentity(cdp, frame, attachmentId);
+    const current =
+      frame === root ? rootDoc : await documentIdentity(cdp, frame, attachmentId, stale);
     const group = `bsk-read-${crypto.randomUUID()}`;
     let node: Awaited<ReturnType<typeof resolveVerifiedNode>> | undefined;
     try {

@@ -98,6 +98,33 @@ After integrating main at 9d40afa7 (including plan), PR preparation reran:
 Raw local captures include website traffic and are not published with the source;
 the regression runner emits command arguments, results and errors for reproduction.
 
+## Review follow-up regressions
+
+Review identified three additional edges: a passive root-tree read did not seed
+SPA frame identity on a loaded attachment; context refresh exceptions escaped
+before read dispatch; and missing root/child elements used a generic CDP error.
+Before the fixes, eight newly added cases reproduced these failures. Afterward:
+
+- Driver tests exercise all three command entry points, detach/reattach, unrelated
+  child routes and delayed tree replies after attachment/root replacement.
+- Context-read tests preserve frame/load diagnostics with `effect_state: none`,
+  refuse the revoked context after recovery, and allow passive inspection without
+  renewing input authority.
+- Missing main/child document roots return `not_found / read_target_stale`, release
+  temporary objects and publish neither data nor new refs. The three targeted
+  unit files pass all 325 cases.
+- The full default extension suite passes 3741 cases with 426 conditional skips;
+  TypeScript, repository Biome and bilingual changelog validation pass.
+- Native Chromium starts with an already loaded document, attaches and reads
+  without sync or frame-graph discovery, changes a child route, then pushes the
+  main route away and back to the same URL. The child preserves the main ref;
+  the main route revokes it despite the node and final URL being unchanged.
+  This passes on both the first and a fresh attachment. Both native navigation
+  tests pass and now run in CI.
+- The delayed dynamic CLI/MCP/DSH and plan workflows pass again (59 commands).
+  These review rechecks use local fixtures; they do not claim another OceanEngine
+  run or new video-decoding coverage.
+
 ## Reproduce
 
 Build the CLI and DSH plugin, then build the extension with

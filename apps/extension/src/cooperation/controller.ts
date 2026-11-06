@@ -1257,18 +1257,28 @@ export class CooperationController implements ControlAuthority {
       // context, however, a retained strict baseline cannot validate a revoked
       // control context after navigation/intervention. Never renew it by reading.
       if (req.method === "tool.read" && params.context_id) {
-        await this.refresh(state);
-        if (
-          state.context?.id !== params.context_id ||
-          state.context.epoch !== state.epoch ||
-          this.controlError(session, state)
-        )
-          return actionError(
+        const invalidContext = () =>
+          actionError(
             "control_context_invalid",
             "This read supplied a revoked control context",
             "control",
             "Omit the old context to inspect current data; synchronize and reconsider before further input.",
           );
+        try {
+          await this.refresh(state);
+        } catch (error) {
+          // No read has been dispatched. Preserve permanent frame diagnostics;
+          // ordinary loading failures have already revoked the supplied context.
+          return error instanceof FrameCollectionError
+            ? error.toRpcError("none")
+            : invalidContext();
+        }
+        if (
+          state.context?.id !== params.context_id ||
+          state.context.epoch !== state.epoch ||
+          this.controlError(session, state)
+        )
+          return invalidContext();
       }
       return invoke(guardedRunner(cdp));
     }

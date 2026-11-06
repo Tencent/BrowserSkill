@@ -26,6 +26,10 @@ Starting from 0.2.0, CLI / Extension / DSH Plugin share the same version number.
 
 - Main-document SPA route changes, including away-and-back and hash routes,
   invalidate old control contexts and refs. Supplementary reads never renew them.
+  This also covers passive reads of already loaded tabs and fresh debugger attachments.
+- Context-bound reads preserve frame-collection diagnostics and report failures before
+  dispatch with `effect_state: none`. Missing root or child document elements report
+  `read_target_stale` instead of a generic CDP failure.
 - CLI, MCP, DSH and bundled skills direct dynamic-page data gathering to read/extract
   instead of repeated sync/evaluate refusals.
 - Control-state sampling recollects once after the browser proves that a failed child document retired; an active unobservable frame still blocks input.

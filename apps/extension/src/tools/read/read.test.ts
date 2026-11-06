@@ -95,7 +95,7 @@ async function fixture() {
   const rootReply = () => ({
     result: { deepSerializedValue: { type: "node", value: { backendNodeId: state.root } } },
   });
-  const send = vi.fn(async (_tab: number, method: string, args?: object) => {
+  const send = vi.fn(async (_tab: number, method: string, args?: object): Promise<unknown> => {
     if (method === "Page.getFrameTree")
       return { frameTree: { frame: { id: "root", url: tab.url } } };
     if (method === "Page.createIsolatedWorld") return { executionContextId: 3 };
@@ -138,6 +138,39 @@ async function fixture() {
   return { manager, state, tab, run, send, cdp };
 }
 describe("DOM read identity and lifecycle", () => {
+  it.each([
+    "root",
+    "child",
+  ] as const)("reports a missing %s document element as stale without publishing a read", async (frame) => {
+    const h = await fixture();
+    const original = h.send.getMockImplementation()!;
+    h.send.mockImplementation(async (tabId, method, args) => {
+      if (method === "Page.createIsolatedWorld")
+        return { executionContextId: (args as { frameId: string }).frameId === "child" ? 4 : 3 };
+      if (
+        method === "Runtime.evaluate" &&
+        (args as { contextId: number }).contextId === (frame === "child" ? 4 : 3)
+      )
+        return { result: { deepSerializedValue: { type: "null" } } };
+      return original(tabId, method, args);
+    });
+    const store = h.manager.get("s")!.refStore;
+    if (frame === "child") {
+      store.set("e1", 2, { tabId: 7, frameId: "child", cdpSessionId: "child-session" });
+      vi.mocked(h.cdp.getFrameGraph!).mockResolvedValue({
+        rootFrameId: "root",
+        frames: [{ frameId: "child", target: { tabId: 7, sessionId: "child-session" } }],
+      });
+    }
+    const size = store.size();
+    expect(await h.run(frame === "child" ? { ref: "@e1" } : {})).toMatchObject({
+      code: "not_found",
+      data: { reason: "read_target_stale", phase: "read", effect_state: "none" },
+    });
+    expect(store.size()).toBe(size);
+    expect(h.send).not.toHaveBeenCalledWith(7, "Runtime.callFunctionOn", expect.anything());
+    expect(h.send).toHaveBeenCalledWith(7, "Runtime.releaseObjectGroup", expect.anything());
+  });
   it("does not collect or depend on unrelated child renderers for a main-document read", async () => {
     const h = await fixture();
     vi.mocked(h.cdp.getFrameGraph!).mockRejectedValue(
