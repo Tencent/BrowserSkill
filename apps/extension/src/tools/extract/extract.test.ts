@@ -146,6 +146,27 @@ describe("structured extraction facts", () => {
       declared_columns: 4,
     });
   });
+  it("extracts a container whose role is a space-separated token list", () => {
+    // The role attribute is a token list; the first token is the effective
+    // role, so role="table grid" is a table (and its gridcell children, whose
+    // role is also a single token, still match).
+    document.body.innerHTML = `<div id="token-grid" role="table grid">
+      <div role="row"><span role="columnheader">品名</span><span role="columnheader">价格</span></div>
+      <div role="row"><span role="cell">苹果</span><span role="cell">3.00</span></div>
+    </div>`;
+    const result = extract("#token-grid");
+    expect(result.columns.map((column) => column.name)).toEqual(["品名", "价格"]);
+    expect(result.rows).toEqual([{ c1: "苹果", c2: "3.00" }]);
+  });
+  it("rejects a container whose first role token is not a table/grid role", () => {
+    // role="heading table": the first token "heading" is the effective role
+    // per WAI-ARIA, so this is NOT a table even though the list contains
+    // "table". A ~= selector would wrongly match it; effective-role does not.
+    document.body.innerHTML = `<div id="not-a-table" role="heading table">
+      <div role="row"><span role="cell">A</span></div>
+    </div>`;
+    expect(() => extract("#not-a-table")).toThrow(/extract_structure_invalid/);
+  });
   it("returns a valid zero-row table with its columns", () => {
     document.body.innerHTML =
       '<table id="empty"><thead><tr><th>编号</th><th>状态</th></tr></thead><tbody></tbody></table>';
