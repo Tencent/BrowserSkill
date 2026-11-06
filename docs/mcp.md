@@ -42,8 +42,8 @@ and [Codex MCP setup](https://learn.chatgpt.com/docs/extend/mcp?surface=cli).
 ## Tools and workflow
 
 The server exposes `bsk_session`, `bsk_page`, `bsk_inspect`, `bsk_interact`,
-`bsk_tabs`, and `bsk_assist`. Each tool has an `action` field; its schema and
-description list the available arguments. For example, use these MCP tool calls:
+`bsk_plan`, `bsk_tabs`, and `bsk_assist`. Each tool except `bsk_plan` has an
+`action` field; its schema and description list the available arguments. For example, use these MCP tool calls:
 
 1. `bsk_session` with `{"action":"browsers"}` to select the required browser
    profile, then `{"action":"start","browser":"<instance_id>"}`.
@@ -64,6 +64,10 @@ sync's top-level `observation_id`. Human intervention or document replacement
 requires a fresh sync. `sync_after` runs one action followed by a read-only sync;
 it never retries the action. A failed readiness check does not mean that the
 action failed. Never blindly repeat an action whose effect is unknown.
+
+When one sync already decides several actions, `bsk_plan` runs them in one call:
+`{"session":"<session_id>","context":"<context_id>","steps":[{"action":"fill","ref":"@e1","value":"Ada"},{"action":"click","ref":"@e2"}]}`.
+See [plan](plan.md) for its rules.
 
 `bsk_inspect` can return a screenshot as MCP image content, as well as bounded
 observations, HTML, console/network entries, and loaded-DOM extraction. Screenshots

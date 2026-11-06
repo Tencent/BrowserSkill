@@ -35,12 +35,19 @@ fn main() -> ExitCode {
 }
 
 fn dispatch(cli: Cli, format: Format) -> Result<(), CliError> {
-    cli::business_rpc::set_context(cli.flags.context.clone());
-    cli::business_rpc::set_dependencies(cli.flags.depends_on.clone());
-    cli::business_rpc::set_action_evidence(cli.flags.observation.clone(), cli.flags.expect.clone());
+    // A plan attaches evidence step by step, so it never goes on every request.
+    if !matches!(cli.command, Command::Plan(_)) {
+        cli::business_rpc::set_context(cli.flags.context.clone());
+        cli::business_rpc::set_dependencies(cli.flags.depends_on.clone());
+        cli::business_rpc::set_action_evidence(
+            cli.flags.observation.clone(),
+            cli.flags.expect.clone(),
+        );
+    }
     match cli.command {
         Command::Cooperate(args) => cli::cooperate::dispatch(args, format),
         Command::Step(args) => cli::step::dispatch(args, format),
+        Command::Plan(args) => cli::plan::dispatch(args, &cli.flags, format),
         Command::View(args) => cli::observation_view::dispatch(args, format),
         Command::Daemon(cmd) => cli::daemon::dispatch(cmd).map_err(CliError::Local),
         Command::Status => {

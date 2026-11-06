@@ -1,7 +1,8 @@
 //! The BrowserSkill MCP tools and their mapping onto daemon RPCs.
 //!
 //! Six coarse tools mirror the DSH plugin's grouping, each selecting an
-//! operation with `action`. Arguments use the CLI and protocol field names.
+//! operation with `action`, and `bsk_plan` runs several input actions in one call.
+//! Arguments use the CLI and protocol field names.
 //! Every call is validated against its action's protocol type before anything
 //! reaches the daemon, and guarded actions reuse the `bsk step` preparation and
 //! orchestration, so the daemon receives the requests the CLI would send.
@@ -30,7 +31,7 @@ use serde_json::{Map, Value, json};
 use super::server::Daemon;
 use crate::cli::business_rpc::{self, ipc_timeout};
 use crate::cli::error::{CliError, json_error_value};
-use crate::cli::{TOOL_IPC_TIMEOUT, cooperate, ensure_daemon, step};
+use crate::cli::{TOOL_IPC_TIMEOUT, cooperate, ensure_daemon, plan, step};
 use crate::ipc_client::IpcClient;
 
 const SESSION_START_TIMEOUT: Duration =
@@ -40,11 +41,12 @@ const DIALOG_TIMEOUT: Duration = Duration::from_secs(10);
 const IMAGE_MARKER: &str = "(image in the next content block)";
 const VOM_MARKER: &str = "(VOM text in the next content block)";
 
-const TOOL_NAMES: [&str; 6] = [
+const TOOL_NAMES: [&str; 7] = [
     "bsk_session",
     "bsk_page",
     "bsk_inspect",
     "bsk_interact",
+    "bsk_plan",
     "bsk_tabs",
     "bsk_assist",
 ];
@@ -107,6 +109,23 @@ pub(crate) fn definitions() -> Vec<Value> {
              call. Never repeat an action whose effect_state is unknown or that reported \
              dialog_pending. evaluate {expression} executes JavaScript in the page and may \
              change it; it needs context and observation under shared target control.",
+            Hints {
+                destructive: true,
+                ..Hints::default()
+            },
+        ),
+        tool::<PlanArgs>(
+            "bsk_plan",
+            "Run decided actions",
+            "Run several input actions already decided from one sync, in order, in one call, then \
+             return the synchronized state. Under target policy, use it for supported actions that \
+             can share one context, such as filling a form or setting filters. Use separate \
+             bsk_interact calls for strict policy or unsupported actions such as focus and blur. \
+             The first step that fails stops the plan: later steps do not \
+             run and nothing is retried. stopped names that step and its effect_state; never \
+             repeat a step whose effect_state is unknown. Leave out steps that depend on what an \
+             earlier step reveals, and send an irreversible action such as submit or pay in its \
+             own call after reading the state, unless expect protects it.",
             Hints {
                 destructive: true,
                 ..Hints::default()
@@ -409,6 +428,10 @@ async fn run(
         "bsk_interact" => {
             let prepared = interact_prepare(parse(&arguments)?)?;
             interact(&connect(daemon, control).await?, prepared).await
+        }
+        "bsk_plan" => {
+            let prepared = plan_prepare(parse(&arguments)?)?;
+            run_plan(&connect(daemon, control).await?, prepared).await
         }
         "bsk_tabs" => tabs(daemon, control, parse(&arguments)?, &arguments).await,
         "bsk_assist" => assist(daemon, control, parse(&arguments)?, &arguments).await,
@@ -1351,6 +1374,59 @@ fn require_drag_mode(link: &Link, method: &Method, params: &Value) -> Result<(),
         ));
     }
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// bsk_plan
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct PlanArgs {
+    /// Session id.
+    session: String,
+    /// Task tab; defaults to the session's current task tab.
+    tab_id: Option<i64>,
+    /// 1-20 steps in order. A step is an action with bsk_interact's params fields beside it:
+    /// {"action":"fill","ref":"@e3","value":"text"}, {"action":"select","ref":"@e4","values":["a"]},
+    /// {"action":"click","ref":"@e5","expect":[...]}. Actions: click, fill, select, press, hover,
+    /// scroll_to, wheel, drag, and wait_for_element (ref or selector, state, timeout_ms) for a
+    /// condition later steps need. Only the first step may be untargeted.
+    steps: Vec<Map<String, Value>>,
+    /// context_id from the latest sync.
+    context: Option<String>,
+    /// observation_id from the latest sync. Required when the first step is untargeted.
+    observation: Option<String>,
+    /// Main-document CSS selector expected to become visible after the last step.
+    until_visible: Option<String>,
+    /// Readiness budget for until_visible, 1-25000 ms. Default 5000.
+    wait_timeout_ms: Option<u32>,
+}
+
+/// Validate a plan completely before connecting to the daemon.
+fn plan_prepare(args: PlanArgs) -> Result<plan::Plan, CliError> {
+    let wait_timeout_ms = args.wait_timeout_ms.unwrap_or(5000);
+    if !(1..=25_000).contains(&wait_timeout_ms) {
+        return Err(invalid("wait_timeout_ms must be 1..=25000"));
+    }
+    step::check_follow_args(args.until_visible.as_deref(), &[])
+        .map_err(|err| invalid(format!("{err:#}")))?;
+    let steps = Value::Array(args.steps.into_iter().map(Value::Object).collect());
+    let mut prepared = plan::Plan::prepare(args.session, &steps, args.context, args.observation)
+        .map_err(|err| invalid(format!("{err:#}")))?;
+    prepared.tab_id = args.tab_id;
+    prepared.until_visible = args.until_visible;
+    prepared.wait_timeout_ms = wait_timeout_ms;
+    Ok(prepared)
+}
+
+async fn run_plan(link: &Link, prepared: plan::Plan) -> Result<Reply, CliError> {
+    plan::check_protocol(&link.protocol).map_err(CliError::Local)?;
+    let (value, exit) = link.blocking(move |rpc| plan::run(&prepared, rpc)).await?;
+    Ok(Reply {
+        is_error: exit != 0,
+        ..Reply::vom(value, "/post/observation/text")
+    })
 }
 
 // ---------------------------------------------------------------------------

@@ -31,6 +31,7 @@ pub mod navigate;
 pub mod network;
 pub mod observation_view;
 pub mod observe;
+pub mod plan;
 pub(crate) mod protocol;
 pub mod record;
 pub mod record_recovery;
@@ -141,6 +142,8 @@ pub enum Command {
     Cooperate(cooperate::CooperateArgs),
     /// Execute one action, await a known condition, and return synchronized state.
     Step(step::StepArgs),
+    /// Run several decided actions in order, stop at the first failure, and return synchronized state.
+    Plan(plan::PlanArgs),
     /// Read a saved observation locally, without refreshing refs or contacting the browser.
     View(observation_view::ViewArgs),
     /// Manage the local `bsk` daemon process.

@@ -11,6 +11,7 @@ import { attachExtensionWorker, runCompatibilityScenarios } from "./compatibilit
 import { runLegacyStrictDshScenario } from "./dsh-client.mjs";
 import { runFrameObservabilityScenarios } from "./frame-observability.mjs";
 import { runLifetimeScenario } from "./lifetime.mjs";
+import { runPlanScenarios } from "./plan.mjs";
 import { runGenericScenarios } from "./scenarios.mjs";
 import { runTargetPolicyScenarios } from "./target-policy.mjs";
 
@@ -135,6 +136,7 @@ const server = createServer(async (req, res) => {
 let browserVersion;
 let compatibility;
 let targetPolicy;
+let plan;
 let frameObservability;
 let daemon;
 let daemonOutput = "";
@@ -216,8 +218,10 @@ try {
       if (!compatibilityOnly && !targetOnly)
         frameObservability = await runFrameObservabilityScenarios({ send, bsk: runBsk, base });
       if (framesOnly) return;
-      if (!compatibilityOnly)
+      if (!compatibilityOnly) {
         targetPolicy = await runTargetPolicyScenarios({ send, bsk: runBsk, cli, env, base });
+        plan = await runPlanScenarios({ send, bsk: runBsk, cli, env, base });
+      }
       if (targetOnly) return;
       for (const seed of compatibilityOnly ? [] : [4, 7, 14]) {
         const { session_id: session } = await bsk(["session", "start"]);
@@ -893,6 +897,7 @@ try {
     ...(!targetOnly && !framesOnly ? { closedTaskTabFailsClosed: true, legacyStrict: true } : {}),
     frameObservability,
     targetPolicy,
+    plan,
     compatibility,
     submissions,
     evidence,
