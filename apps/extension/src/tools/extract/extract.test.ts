@@ -89,6 +89,48 @@ describe("structured extraction facts", () => {
     ]);
     expect(result.rows[0]).toEqual({ c1: "华东", c2: "12,000", c3: "10,500", c4: "80" });
   });
+  describe.each(["row", "ROW", "Row", "rowgroup", "ROWGROUP", "RowGroup"])("scope=%s", (scope) => {
+    beforeEach(() => {
+      document.body.innerHTML = `<table id="t"><tbody>
+          <tr><th scope="${scope}">North</th></tr>
+          <tr><th scope="${scope}">South</th></tr>
+        </tbody></table>`;
+    });
+
+    it("retains row headers as data instead of consuming them as column headers", () => {
+      const result = extract("#t");
+      expect(result.rows).toEqual([{ c1: "North" }, { c1: "South" }]);
+      expect(result.columns.map((column) => column.name)).toEqual(["Column 1"]);
+      expect(result.row_sources.map((source) => source.row_kind)).toEqual(["data", "data"]);
+      expect(result.coverage.truncated).toBe(false);
+      expect(result.warnings).toEqual(["generated_column_names"]);
+    });
+
+    it("does not advertise row headers as discovered columns", () => {
+      const options = validateExtract({ session_id: "test", action: "discover" });
+      const result = collectExtractDom.call(document.documentElement, options);
+      expect(result.error).toBeUndefined();
+      expect(result.targets).toHaveLength(1);
+      expect(result.targets![0].columns).toEqual([]);
+    });
+  });
+
+  it.each([
+    "col",
+    "COL",
+    "Col",
+    "colgroup",
+    "COLGROUP",
+    "ColGroup",
+  ])("discovers explicit scope=%s column headers alongside data cells", (scope) => {
+    document.body.innerHTML = `<table id="t"><tr><th scope="${scope}">Region</th><td>Value</td></tr></table>`;
+    const options = validateExtract({ session_id: "test", action: "discover" });
+    const result = collectExtractDom.call(document.documentElement, options);
+    expect(result.error).toBeUndefined();
+    expect(result.targets).toHaveLength(1);
+    expect(result.targets![0].columns).toEqual(["Region"]);
+  });
+
   it("retains merged cell anchors and spans without multiplying values", () => {
     document.body.innerHTML = `<table id="merged">
       <thead><tr><th>订单</th><th>商品</th><th>数量</th></tr></thead>

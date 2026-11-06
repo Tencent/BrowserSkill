@@ -403,7 +403,7 @@ export function collectExtractDom(this: Element, options: CollectorOptions): Raw
                 if (columns.length >= 8) break;
                 if (header.closest(tableSelector) !== element || isHidden(header)) continue;
                 const role = header.getAttribute("role");
-                const scope = header.getAttribute("scope") ?? "";
+                const scope = (header.getAttribute("scope") ?? "").toLowerCase();
                 const row = header.closest('tr,[role="row"]');
                 const columnHeader =
                   role === "columnheader" ||
@@ -602,7 +602,7 @@ export function collectExtractDom(this: Element, options: CollectorOptions): Raw
           const cell = rowCells[cellIndex];
           if (cell.closest(native ? "tr" : '[role="row"]') !== element) continue;
           if (cells.length === options.max_columns) fail("extract_limit", "Column budget exceeded");
-          const scope = cell.getAttribute("scope") ?? "";
+          const scope = (cell.getAttribute("scope") ?? "").toLowerCase();
           if (
             cell.id.length > 2048 ||
             (cell.getAttribute("headers")?.length ?? 0) > 8192 ||
