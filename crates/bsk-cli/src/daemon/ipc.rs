@@ -231,10 +231,21 @@ pub fn full_handler(status: DaemonStatus, state: Arc<DaemonState>) -> RpcHandler
                     Value::String(ticket.operation_id.clone()),
                 );
             }
+            let logged = serde_json::to_value(&method)
+                .ok()
+                .and_then(|name| name.as_str().map(|name| name.starts_with("tool.")))
+                .unwrap_or(false)
+                .then(|| (method.clone(), params.clone()));
             let body = match method {
                 Method::SystemPing => {
                     let result = PingResult { pong: true };
                     ResponseBody::Ok(serde_json::to_value(result).unwrap_or(Value::Null))
+                }
+                Method::SessionRunLog => {
+                    let session = params["session_id"].as_str().unwrap_or_default();
+                    ResponseBody::Ok(
+                        serde_json::to_value(state.run_logs.read(session)).unwrap_or(Value::Null),
+                    )
                 }
                 Method::SystemStatus => match handle_status(&status, &state, params).await {
                     Ok(v) => ResponseBody::Ok(v),
@@ -337,6 +348,14 @@ pub fn full_handler(status: DaemonStatus, state: Arc<DaemonState>) -> RpcHandler
             };
             if let Some(ticket) = ticket {
                 state.audit.finish(ticket, &body);
+            }
+            if let Some((method, params)) = logged {
+                state.run_logs.record(
+                    |id| state.sessions.get(&SessionId(id.to_owned())).is_some(),
+                    &method,
+                    &params,
+                    &body,
+                );
             }
             body
         })

@@ -48,6 +48,9 @@ pub enum Method {
     SessionStopAll,
     #[serde(rename = "session.list")]
     SessionList,
+    /// Daemon-local metadata of what a session did; recipes draft from it.
+    #[serde(rename = "session.run_log")]
+    SessionRunLog,
 
     #[serde(rename = "browser.list")]
     BrowserList,
@@ -262,6 +265,7 @@ impl Method {
             | Method::SessionStop
             | Method::SessionStopAll
             | Method::SessionList
+            | Method::SessionRunLog
             | Method::ToolSessionStart
             | Method::ToolSessionStop => MethodEffect::ControlPlane,
 

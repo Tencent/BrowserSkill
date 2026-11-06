@@ -14,6 +14,11 @@ Starting from 0.2.0, CLI / Extension / DSH Plugin share the same version number.
   call, then return the synchronized state, so a form or a set of filters takes one
   model turn instead of one per action. Each step keeps the checks of its own command,
   and the first step that does not complete stops the plan without any retry.
+- `bsk recipe` and the MCP tool `bsk_recipe` (experimental, `BSK_RECIPES=1`) save a
+  verified flow as a local file and replay it, returning its outputs without a model
+  turn per step. Targets match exactly by role, name and context, and a run stops at the
+  first deviation and hands the page back. This version replays only read and reversible
+  steps. See `docs/recipes.md`.
 
 ## [0.4.2] - 2026-11-05
 
