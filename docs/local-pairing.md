@@ -147,9 +147,8 @@ record protocol and key exchange to address.
 
 ## Release validation
 
-Extension 0.4.2 introduces optional pairing. The 0.4.3 cleanup removes obsolete
-migration state without withdrawing unpaired access. These are extension release
-versions; CLI and extension updates do not need to arrive together.
+Extension 0.4.3 introduces optional pairing and removes obsolete migration state
+while retaining unpaired access. CLI and extension updates can arrive independently.
 
 Before release, verify new and upgraded profiles against both pre-pairing and
 current daemons, plus paired reconnect, candidate recovery, revocation and explicit
