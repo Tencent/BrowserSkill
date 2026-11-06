@@ -58,6 +58,8 @@ pub struct DaemonState {
     /// Operation-scoped local file staging. The extension only sees paths
     /// minted here; agent-facing RPCs use opaque transfer ids.
     pub transfers: Arc<TransferRegistry>,
+    /// What each live session did, for recipe drafts. Metadata only, in memory.
+    pub run_logs: super::run_log::RunLogs,
 }
 
 impl DaemonState {
@@ -116,6 +118,7 @@ impl DaemonState {
             dialog_operations: Default::default(),
             session_interrupts,
             transfers,
+            run_logs: Default::default(),
         }
     }
 }

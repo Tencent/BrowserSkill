@@ -34,6 +34,7 @@ pub mod observe;
 pub mod plan;
 pub(crate) mod protocol;
 pub mod read;
+pub mod recipe;
 pub mod record;
 pub mod record_recovery;
 pub mod record_state;
@@ -145,6 +146,9 @@ pub enum Command {
     Step(step::StepArgs),
     /// Run several decided actions in order, stop at the first failure, and return synchronized state.
     Plan(plan::PlanArgs),
+    /// Replay a saved flow without a model turn per step (experimental: BSK_RECIPES=1).
+    #[command(hide = true)]
+    Recipe(recipe::RecipeCmd),
     /// Read a saved observation locally, without refreshing refs or contacting the browser.
     View(observation_view::ViewArgs),
     /// Manage the local `bsk` daemon process.

@@ -5,7 +5,12 @@ import { scrollNodeIntoView } from "@/tools/element-geometry";
 import { resolveActionTarget } from "@/tools/interaction";
 import { captureVomObservation, handleSnapshot } from "@/tools/observation";
 import type { CdpRunner } from "@/tools/shared";
-import { checkActionTarget, checkExpectations } from "./action-checks";
+import {
+  ActionCheckError,
+  actionError,
+  checkActionTarget,
+  checkExpectations,
+} from "./action-checks";
 import { CooperationController, type CooperationDeps } from "./controller";
 import type { FrameState } from "./types";
 
@@ -1061,6 +1066,51 @@ describe("negotiated target control", () => {
       data: { reason: "human_intervention", effect_state: "none" },
     });
     expect(f.send).not.toHaveBeenCalled();
+  });
+});
+
+describe("whether a click was pressed", () => {
+  const covered = () =>
+    new ActionCheckError(
+      actionError("target_covered", "covered", "target", "Synchronize before clicking."),
+    );
+
+  it("says so when a click failed after only preparing to press", async () => {
+    const f = await fixture();
+    const result = await f.run({}, "tool.click", async (runner) => {
+      await runner.send(7, "DOM.scrollIntoViewIfNeeded", { backendNodeId: 4 });
+      await runner.send(7, "Input.dispatchMouseEvent", { type: "mouseMoved", x: 10, y: 20 });
+      throw covered();
+    });
+    expect(result).toMatchObject({
+      data: { reason: "target_covered", effect_state: "unknown", press_sent: false },
+    });
+  });
+
+  it("makes no such claim once the press was sent", async () => {
+    const f = await fixture();
+    const result = (await f.run({}, "tool.click", async (runner) => {
+      await runner.send(7, "DOM.scrollIntoViewIfNeeded", { backendNodeId: 4 });
+      await runner.send(7, "Input.dispatchMouseEvent", {
+        type: "mousePressed",
+        button: "left",
+        x: 10,
+        y: 20,
+      });
+      throw covered();
+    })) as { data: Record<string, unknown> };
+    expect(result.data.effect_state).toBe("unknown");
+    expect(result.data).not.toHaveProperty("press_sent");
+  });
+
+  it("makes no such claim for an action whose effect is not a press", async () => {
+    const f = await fixture();
+    const result = (await f.run({ ref: "e1" }, "tool.fill", async (runner) => {
+      await runner.send(7, "DOM.scrollIntoViewIfNeeded", { backendNodeId: 4 });
+      throw covered();
+    })) as { data: Record<string, unknown> };
+    expect(result.data.effect_state).toBe("unknown");
+    expect(result.data).not.toHaveProperty("press_sent");
   });
 });
 

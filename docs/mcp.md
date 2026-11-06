@@ -69,6 +69,11 @@ When one sync already decides several actions, `bsk_plan` runs them in one call:
 `{"session":"<session_id>","context":"<context_id>","steps":[{"action":"fill","ref":"@e1","value":"Ada"},{"action":"click","ref":"@e2"}]}`.
 See [plan](plan.md) for its rules.
 
+With `BSK_RECIPES=1` in the server's environment, `bsk_recipe` also appears. It replays a
+saved flow by name and returns its outputs, so a repeated task takes about two turns. See
+[recipes](recipes.md). The tool stays out of `tools/list` otherwise, so clients pay nothing
+for it.
+
 `bsk_inspect` can return a screenshot as MCP image content, as well as bounded
 observations, HTML, console/network entries, and loaded-DOM extraction. Screenshots
 retain their original pixel dimensions; this version does not downscale them.
