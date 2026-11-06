@@ -283,3 +283,46 @@ async fn current_daemon_receives_exact_conditions_without_extra_status_calls() {
         serde_json::from_str::<Value>(&checks).unwrap()
     );
 }
+
+#[tokio::test]
+async fn dom_read_requires_new_daemon_and_never_falls_back_to_evaluate() {
+    let result = json!({"tab_id":7,"page_url":"https://example.test/","frame_url":"https://example.test/",
+        "frame_id":"root","title":"Test","captured_at":"now","scope":"current_dom","items":[],"truncated":false});
+    for protocol in ["1.8", "1.9"] {
+        let (output, calls) = run_cli(
+            protocol,
+            &["read", "--session", "s", "--selector", "#data", "--json"],
+            result.clone(),
+        )
+        .await;
+        let data: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(output.status.success(), protocol == "1.9", "{data}");
+        assert!(!calls.iter().any(|c| c["method"] == "tool.evaluate"));
+        assert_eq!(
+            calls.iter().filter(|c| c["method"] == "tool.read").count(),
+            usize::from(protocol == "1.9")
+        );
+        if protocol == "1.8" {
+            assert_eq!(data["data"]["reason"], "unsupported_feature");
+        }
+    }
+    let (output, calls) = run_cli(
+        "1.9",
+        &[
+            "read",
+            "--session",
+            "s",
+            "--fields-json",
+            r#"[{"key":"x","read":"text","expression":"setTimeout(()=>fetch('/write'),0)"}]"#,
+            "--json",
+        ],
+        result,
+    )
+    .await;
+    assert!(!output.status.success());
+    assert!(
+        !calls
+            .iter()
+            .any(|c| c["method"] == "tool.read" || c["method"] == "tool.evaluate")
+    );
+}

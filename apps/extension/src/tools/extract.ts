@@ -2,6 +2,7 @@ import { ChromiumCdp } from "@/browser-driver/chromium-cdp";
 import type { CdpFrame, CdpFrameGraph, CdpTarget } from "@/browser-driver/frame-graph";
 import type { SessionContext, SessionManager } from "@/session-manager/manager";
 import type { RpcError } from "@/transport/types";
+import { documentIdentity, type RuntimeReply, SERIALIZATION, unwrap } from "./dom-read-runtime";
 import { collectExtractDom } from "./extract/collector";
 import { fitExtractBudget, normalizeExtract } from "./extract/normalize";
 import type { CollectorOptions, ExtractParams, ExtractResult, RawCapture } from "./extract/types";
@@ -29,42 +30,7 @@ interface RetainedTarget {
 // Weak ownership releases all entries when the session context is discarded.
 const targets = new WeakMap<SessionContext, Map<string, RetainedTarget>>();
 const TARGET_TTL_MS = 300_000;
-const SERIALIZATION = {
-  serialization: "deep",
-  additionalParameters: { maxNodeDepth: 0, includeShadowTree: "none" },
-};
-interface DeepValue {
-  type: string;
-  value?: unknown;
-}
-interface RuntimeReply {
-  result?: { value?: unknown; deepSerializedValue?: DeepValue };
-  exceptionDetails?: { text?: string; exception?: { description?: string } };
-}
-function decode(value: DeepValue, depth = 0): unknown {
-  if (depth > 32) throw new Error("Extraction serialization exceeded nesting limit");
-  if (value.type === "node") return value.value;
-  if (value.type === "null" || value.type === "undefined") return null;
-  if (value.type === "array")
-    return (value.value as DeepValue[]).map((item) => decode(item, depth + 1));
-  if (value.type === "object")
-    return Object.fromEntries(
-      (value.value as [string, DeepValue][]).map(([key, item]) => [key, decode(item, depth + 1)]),
-    );
-  if (["string", "boolean", "number"].includes(value.type)) return value.value;
-  throw new Error(`Unsupported extraction serialization: ${value.type}`);
-}
-function unwrap(reply: RuntimeReply): unknown {
-  if (reply.exceptionDetails)
-    throw new Error(
-      reply.exceptionDetails.exception?.description ??
-        reply.exceptionDetails.text ??
-        "DOM extraction failed",
-    );
-  return reply.result?.deepSerializedValue
-    ? decode(reply.result.deepSerializedValue)
-    : reply.result?.value;
-}
+
 function stale(): never {
   throw new ExtractionFailure(
     "extract_target_stale",
@@ -84,46 +50,7 @@ function registry(ctx: SessionContext): Map<string, RetainedTarget> {
 export function extractTargetTab(ctx: SessionContext, targetId: string): number | undefined {
   return registry(ctx).get(targetId)?.identity.target.tabId;
 }
-async function documentIdentity(
-  cdp: CdpRunner,
-  frame: CdpFrame,
-  attachmentId: string,
-): Promise<{ identity: DocumentIdentity; contextId: number }> {
-  const world = await sendToCdpTarget<{ executionContextId: number }>(
-    cdp,
-    frame.target,
-    "Page.createIsolatedWorld",
-    {
-      frameId: frame.frameId,
-      worldName: "bsk-extract",
-    },
-  );
-  const group = `bsk-extract-root-${crypto.randomUUID()}`;
-  try {
-    const root = unwrap(
-      await sendToCdpTarget<RuntimeReply>(cdp, frame.target, "Runtime.evaluate", {
-        expression: "document.documentElement",
-        contextId: world.executionContextId,
-        objectGroup: group,
-        serializationOptions: SERIALIZATION,
-      }),
-    ) as { backendNodeId?: number } | null;
-    if (!root?.backendNodeId) stale();
-    return {
-      identity: {
-        attachmentId,
-        target: frame.target,
-        frameId: frame.frameId,
-        documentElementBackendNodeId: root.backendNodeId,
-      },
-      contextId: world.executionContextId,
-    };
-  } finally {
-    await sendToCdpTarget(cdp, frame.target, "Runtime.releaseObjectGroup", {
-      objectGroup: group,
-    }).catch(() => {});
-  }
-}
+
 async function capture(
   cdp: CdpRunner,
   identity: DocumentIdentity,
@@ -209,7 +136,7 @@ async function frameVisible(
       throw new ExtractionFailure("extract_limit", "Extraction deadline exceeded");
     const parent = graph.frames.find((candidate) => candidate.frameId === frame.parentFrameId);
     if (!parent || frame.ownerBackendNodeId === undefined) stale();
-    const { identity } = await documentIdentity(cdp, parent, attachmentId);
+    const { identity } = await documentIdentity(cdp, parent, attachmentId, stale);
     const owner = await resolveVerifiedNode(cdp, identity, frame.ownerBackendNodeId, signal);
     if (owner.status !== "current") stale();
     try {
@@ -301,7 +228,7 @@ export async function handleExtract(
         code: "unsupported",
         message: "Could not establish the target document's frame identity",
       };
-    const rootDoc = await documentIdentity(cdp, root, attachmentId);
+    const rootDoc = await documentIdentity(cdp, root, attachmentId, stale);
     let selectedFrame = root;
     let backendNodeId: number | undefined;
     let expectedIdentity: DocumentIdentity | undefined;
@@ -353,7 +280,7 @@ export async function handleExtract(
         const current =
           frame.frameId === root.frameId
             ? rootDoc
-            : await documentIdentity(cdp, frame, attachmentId);
+            : await documentIdentity(cdp, frame, attachmentId, stale);
         if (
           expectedIdentity &&
           (await verifyDocumentIdentity(cdp, expectedIdentity, signal)) !== "current"

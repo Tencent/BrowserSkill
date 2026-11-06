@@ -1,3 +1,4 @@
+import { isMissingNode } from "./errors";
 // `tool.wait_for_navigation` — subscribe to CDP `Page.lifecycleEvent`
 // on the target tab and wait until the requested phase fires. Design
 // §4 / §7, plan M9.2.
@@ -233,21 +234,6 @@ async function beforeDeadline<T>(
     clearTimeout(timer);
     if (onAbort) signal?.removeEventListener("abort", onAbort);
   }
-}
-
-/** Recognize only CDP's explicit missing-node errors. A stale selector lookup
- * must still be retried. Chrome's debugger API may encode the error as JSON. */
-function isMissingNode(error: unknown): boolean {
-  let message = error instanceof Error ? error.message : String(error);
-  try {
-    const parsed = JSON.parse(message);
-    if (typeof parsed?.message === "string") message = parsed.message;
-  } catch {
-    // Plain debugger error message.
-  }
-  return (
-    message === "No node with given id found" || message === "Could not find node with given id"
-  );
 }
 
 /** Does an observation of `(attached, visible)` satisfy `state`? */

@@ -10,6 +10,8 @@ Starting from 0.2.0, CLI / Extension / DSH Plugin share the same version number.
 
 ### Added
 
+- The in-page control panel can minimize to a right-edge expand arrow. Its display
+  state is retained for the current task across status updates and navigation.
 - `bsk plan` and the MCP tool `bsk_plan` run several already-decided actions in one
   call, then return the synchronized state, so a form or a set of filters takes one
   model turn instead of one per action. Each step keeps the checks of its own command,
@@ -19,6 +21,31 @@ Starting from 0.2.0, CLI / Extension / DSH Plugin share the same version number.
   turn per step. Targets match exactly by role, name and context, and a run stops at the
   first deviation and hands the page back. This version replays only read and reversible
   steps. See `docs/recipes.md`.
+- `bsk read`, MCP and DSH `bsk_inspect(action=read)` sample bounded DOM fields
+  through fixed synchronous isolated-world queries. Agents can read current title,
+  URLs, text, attributes and control state across unrelated animation, then act
+  with explicit business conditions. No caller JavaScript, callbacks or delayed
+  effects are accepted; sensitive fields are masked.
+- DOM reads negotiate protocol 1.9 and reject older peers explicitly, without
+  script fallback. Arbitrary evaluate and visual/untargeted input retain strict guards.
+
+### Fixed
+
+- Main-document SPA route changes, including away-and-back and hash routes,
+  invalidate old control contexts and refs. Supplementary reads never renew them.
+  This also covers passive reads of already loaded tabs and fresh debugger attachments.
+- Context-bound reads preserve frame-collection diagnostics and report failures before
+  dispatch with `effect_state: none`. Missing root or child document elements report
+  `read_target_stale` instead of a generic CDP failure.
+- CLI, MCP, DSH and bundled skills direct dynamic-page data gathering to read/extract
+  instead of repeated sync/evaluate refusals.
+- Control-state sampling recollects once after the browser proves that a failed child document retired; an active unobservable frame still blocks input.
+- Removed nodes already collected by CDP report target_detached with node identity, consistently with detached nodes that remain inspectable; other CDP failures remain target_unavailable.
+
+### Fixed
+
+- Cooperative status updates preserve an active click-passthrough lease, so the
+  control panel and its minimized arrow do not swallow automated page clicks.
 
 ## [0.4.2] - 2026-11-05
 

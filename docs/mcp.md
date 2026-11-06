@@ -95,3 +95,16 @@ This adapter currently covers the operations in its tool schemas. It does not
 yet expose every CLI operation, including file upload/download, recording or
 full-page screenshot export. Sensitive-value/keychain input is not implemented;
 avoid passing credentials in tool arguments when the client logs them.
+
+## Dynamic page reads (protocol 1.9)
+
+Use `bsk_inspect` with action=read, selector (main document) or ref (exact frame/
+shadow node), and optional read_fields, e.g.
+`[{"key":"index","read":"attribute","attribute":"data-swiper-slide-index"}]`.
+Fields read text/attribute/value/checked/exists with optional relative selector.
+Fixed synchronous isolated-world code accepts no JavaScript or deferred work.
+Returns current title/URLs, refs/values, redactions and truncation. max_nodes
+is 100 by default, at most 1000; max_bytes is 262144 by default, at most 1048576.
+Reads never renew contexts or observations; use explicit expect before input.
+Old peers fail explicitly; evaluate keeps strict guards. See
+[dynamic reading](dynamic-reading.md).

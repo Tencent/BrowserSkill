@@ -104,7 +104,7 @@ Prefer refs for iframe/shadow-root targets; CSS selectors search the main docume
 
 - `select` uses the option's value, not its visible label.
 
-Read accessibility with `snapshot`, markup with `get-html`, or screenshots.
+Read DOM fields with `read` and tables/lists with `extract` ([guide](references/extraction.md)); use these during animation instead of evaluate/sync loops.
 Inspect unknown effects before retrying.
 
 ## Native dialogs

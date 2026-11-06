@@ -33,6 +33,7 @@ pub mod observation_view;
 pub mod observe;
 pub mod plan;
 pub(crate) mod protocol;
+pub mod read;
 pub mod recipe;
 pub mod record;
 pub mod record_recovery;
@@ -209,6 +210,8 @@ pub enum Command {
     /// Dump raw HTML for a tab or a snapshot ref.
     #[command(name = "get-html")]
     GetHtml(GetHtmlArgs),
+    /// Read current DOM fields safely across unrelated animation. No JavaScript.
+    Read(read::ReadArgs),
     /// Extract loaded tables/lists with column definitions and source metadata.
     Extract(extract::ExtractArgs),
 
@@ -263,7 +266,7 @@ pub enum Command {
     /// Capture one browser download and write it to a local path.
     Download(DownloadArgs),
 
-    /// Evaluate a JavaScript expression inside the Agent Window.
+    /// Execute arbitrary JavaScript (strict observation required). For passive DOM data use read/extract.
     Evaluate(EvaluateArgs),
 
     /// Wait for a page-lifecycle event.

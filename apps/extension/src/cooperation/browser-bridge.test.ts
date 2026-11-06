@@ -375,3 +375,45 @@ it("invalidates control for a root navigation but not for a subframe navigation"
   });
   expect(invalidate).toHaveBeenCalledExactlyOnceWith(7);
 });
+
+it("recollects a proven child document replacement once and retains new human input", async () => {
+  const child = { ...main, frameId: 2, documentId: "old-child" };
+  const send = vi.fn(async (_tab, _message, target) => {
+    if (target.documentId === "old-child")
+      throw new FrameCollectionError("frame_unobservable", [{ frame_id: 2, url: main.url }]);
+    return frame(target.documentId === "new-child" ? 1 : 0);
+  });
+  bridge(send, [main, child]);
+  vi.mocked(chrome.webNavigation).getAllFrames = vi
+    .fn()
+    .mockResolvedValueOnce([main, child])
+    .mockResolvedValue([main, { ...child, documentId: "new-child" }]);
+  const result = await collectCooperationFrames(7, COOPERATION_READ, "lease");
+  expect(result.frames.get(2)?.human).toBe(1);
+  expect(send.mock.calls.filter((call) => call[2].documentId === "old-child")).toHaveLength(1);
+  expect(send.mock.calls.filter((call) => call[2].documentId === "new-child")).toHaveLength(1);
+});
+
+it("bounds replacement collection and does not conceal an active unobservable frame", async () => {
+  const child = { ...main, frameId: 2, documentId: "child" };
+  const send = vi.fn(async (_tab, _message, target) => {
+    if (target.documentId !== main.documentId)
+      throw new FrameCollectionError("frame_unobservable", [{ frame_id: 2, url: main.url }]);
+    return frame();
+  });
+  bridge(send, [main, child]);
+  await expect(collectCooperationFrames(7, COOPERATION_READ, "lease")).rejects.toMatchObject({
+    reason: "frame_unobservable",
+  });
+  expect(send).toHaveBeenCalledTimes(2);
+  send.mockClear();
+  vi.mocked(chrome.webNavigation).getAllFrames = vi
+    .fn()
+    .mockResolvedValueOnce([main, child])
+    .mockResolvedValueOnce([main, { ...child, documentId: "new" }])
+    .mockResolvedValue([main, { ...child, documentId: "newer" }]);
+  await expect(collectCooperationFrames(7, COOPERATION_READ, "lease")).rejects.toMatchObject({
+    reason: "frame_unobservable",
+  });
+  expect(send).toHaveBeenCalledTimes(4);
+});
