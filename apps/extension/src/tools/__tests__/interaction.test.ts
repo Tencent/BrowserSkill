@@ -2147,6 +2147,9 @@ describe("handleSelect", () => {
     if ("code" in res) throw new Error(`unexpected error: ${JSON.stringify(res)}`);
     expect(res.multiple).toBe(false);
     expect(res.selected_values).toEqual(["us"]);
+    expect(fake.sent.filter((c) => c.method === "Runtime.releaseObject")).toEqual([
+      { tabId: 4, method: "Runtime.releaseObject", params: { objectId: "obj-sel" } },
+    ]);
   });
 
   it("returns option_not_found when a value is missing", async () => {
@@ -2169,6 +2172,9 @@ describe("handleSelect", () => {
       code: "invalid_params",
       data: { reason: "option_not_found" },
     });
+    expect(fake.sent.filter((c) => c.method === "Runtime.releaseObject")).toEqual([
+      { tabId: 4, method: "Runtime.releaseObject", params: { objectId: "obj-sel" } },
+    ]);
   });
 
   it.each([
