@@ -375,6 +375,8 @@ The CLI is built under `target/release/`; load `apps/extension/dist/chrome-mv3/`
 
 Run `cargo test --workspace --locked`, `pnpm ext:test`, and `pnpm lint` for the relevant checks. See the [browser evaluation guide](evals/browser/README.md) for reproducible browser cases. Bug reports and focused contributions are welcome through [GitHub Issues](https://github.com/Tencent/BrowserSkill/issues) and pull requests; remove sensitive data before attaching browser evidence.
 
+For substantial changes to browser interactions, observations, control policy, or CLI/extension communication, we recommend the optional [Agent-driven PR self-check](evals/browser/README.md#optional-agent-driven-pr-self-check) before opening a PR. It tests your current branch through Bsk and records end-to-end evidence. This is not a requirement for opening or merging a PR and does not replace the checks above.
+
 The extension interface supports English, Simplified and Traditional Chinese, Korean, Japanese, French, Italian, Spanish, German, and Brazilian Portuguese. See [localization](packages/i18n/README.md) to contribute translations.
 
 ## Contributors

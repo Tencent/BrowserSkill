@@ -1,0 +1,13 @@
+<!doctype html><meta charset="utf-8"><title>Minimal upload & controls</title>
+<style>body{font:16px system-ui;padding:30px}input,button{padding:12px;margin:8px}#drop{border:2px dashed;padding:30px}#result{white-space:pre-wrap}</style>
+<h1>Minimal upload</h1><label>Unsaved draft<input id="draft" value="initial"></label>
+<label>Attachment<input type="file" id="file" multiple></label><div id="drop" role="button" tabindex="0">Drop attachment</div>
+<output id="result"></output><button id="plain">Plain action</button><output id="plain-result"></output>
+<button id="spa">SPA route</button><button id="back">Back</button>
+<table id="table"><tr><th>ID</th><th>Name</th></tr><tr><td>1</td><td>minimal</td></tr></table>
+<script>
+let boot=String(Date.now());fetch('/event',{method:'POST',body:JSON.stringify({type:'minimal-boot',boot})});
+async function receive(files){let rows=await Promise.all([...files].map(async f=>({name:f.name,size:f.size,text:await f.text()})));document.querySelector('#result').textContent=JSON.stringify(rows);fetch('/event',{method:'POST',body:JSON.stringify({type:'minimal-upload',boot,draft:document.querySelector('#draft').value,files:rows})})};
+document.querySelector('#file').onchange=e=>receive(e.target.files);document.querySelector('#drop').ondragover=e=>e.preventDefault();document.querySelector('#drop').ondrop=e=>{e.preventDefault();receive(e.dataTransfer.files)};
+document.querySelector('#plain').onclick=()=>document.querySelector('#plain-result').textContent='clicked';document.querySelector('#spa').onclick=()=>{history.pushState({},'', '/minimal?view=orders#detail');document.querySelector('#plain-result').textContent='SPA route changed'};document.querySelector('#back').onclick=()=>history.back();
+</script>

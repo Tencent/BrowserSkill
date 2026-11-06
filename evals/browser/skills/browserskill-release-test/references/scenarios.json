@@ -1,0 +1,627 @@
+[
+  {
+    "id": "ENV-CANDIDATE",
+    "kind": "workflow",
+    "page_type": "environment",
+    "goal": "记录测试目的、候选分支/完整SHA/dirty状态及可复查源码、CLI二进制/扩展全文件哈希、扩展独立名称/ID、Chrome/协议/build。以status+browsers+debug capabilities证明同一候选构建；PR自测包含当前分支改动，不可只测未含改动的main。测试安装按用户约定保留。",
+    "required_commands": ["status", "browsers", "debug capabilities", "doctor"]
+  },
+  {
+    "id": "LIFE-SESSION",
+    "kind": "workflow",
+    "page_type": "lifecycle",
+    "goal": "显式 browser 启动/列出 session，检查隔离 Agent Window，request 会话权限路径及边界；结束只停止本轮 session，确认无遗留。",
+    "required_commands": ["session start", "session list", "session request", "session stop"]
+  },
+  {
+    "id": "LIFE-TABS",
+    "kind": "workflow",
+    "page_type": "lifecycle",
+    "goal": "创建两个任务标签→列出→切换→关闭自建子页；借用专为本轮创建的普通标签→操作→归还，核对原窗口/标签状态。不得借用户其他工作页。",
+    "required_commands": [
+      "tab create",
+      "tab list",
+      "tab select",
+      "tab close",
+      "tab borrow",
+      "tab return"
+    ]
+  },
+  {
+    "id": "COOP-TARGET",
+    "kind": "workflow",
+    "page_type": "cooperation",
+    "goal": "target 会话执行 enable/status/sync/wait，保存原始 observation_id/context，稳定输入连续两次合法操作。无需页面变化的等待不得排队锁死。",
+    "required_commands": [
+      "cooperate enable",
+      "cooperate status",
+      "cooperate sync",
+      "cooperate wait",
+      "fill"
+    ]
+  },
+  {
+    "id": "COOP-STRICT",
+    "kind": "workflow",
+    "page_type": "cooperation",
+    "goal": "独立 strict 会话：每步重新 sync 再动作；一次成功操作后复用旧 context 应拒绝，负例独立归 NEG-STRICT；不在同一会话切换政策。",
+    "required_commands": ["cooperate sync", "click"]
+  },
+  {
+    "id": "NEG-STRICT",
+    "kind": "workflow",
+    "page_type": "cooperation",
+    "goal": "已消费 strict context 的再次动作明确拒绝，验证 reason/code/effect_state 和 once 计数未增加。",
+    "required_commands": ["click"],
+    "negative": true
+  },
+  {
+    "id": "NEG-RECYCLED",
+    "kind": "workflow",
+    "page_type": "dynamic-guard",
+    "goal": "保存 row 42 目标及 expect，然后通过 fixture 自带 recycle 按钮变成 99；旧业务意图必须被拒绝，/events 不得出现误保存 99。",
+    "required_commands": ["click"],
+    "negative": true
+  },
+  {
+    "id": "NEG-COVERED",
+    "kind": "workflow",
+    "page_type": "dynamic-guard",
+    "goal": "被可见遮挡层覆盖的按钮应拒绝，证明未触发处理器；移除遮挡后的成功单列 FORM-BASIC。",
+    "required_commands": ["click"],
+    "negative": true
+  },
+  {
+    "id": "NEG-STALE",
+    "kind": "workflow",
+    "page_type": "dynamic-guard",
+    "goal": "文档或目标替换后使用旧 ref/context 应按合同拒绝；核对未产生副作用，不能仅凭非零退出。",
+    "required_commands": ["click"],
+    "negative": true
+  },
+  {
+    "id": "FORM-BASIC",
+    "kind": "workflow",
+    "page_type": "forms",
+    "goal": "workbench/minimal：中文 emoji 引号换行输入/textarea/清空/contenteditable；checkbox/radio、single/multi-select，真实提交并核对 DOM+服务器事件 exact value/count；同时覆盖 ref 和 CSS 目标。",
+    "required_commands": ["fill", "press", "click", "select", "focus", "blur"]
+  },
+  {
+    "id": "FORM-TEMPORAL",
+    "kind": "workflow",
+    "page_type": "forms",
+    "goal": "extra：date/time 秒/datetime-local/month/week 五种输入逐项填入合法值并提交，五值均精确匹配；不能改 type 或通过 evaluate 代填。",
+    "required_commands": ["fill", "click"]
+  },
+  {
+    "id": "FORM-FOCUS",
+    "kind": "workflow",
+    "page_type": "forms",
+    "goal": "extra：focus→键入→blur，核对焦点、input/change/focus/blur 事件与保存值。",
+    "required_commands": ["focus", "press", "blur", "click"]
+  },
+  {
+    "id": "FORM-READONLY",
+    "kind": "workflow",
+    "page_type": "forms",
+    "goal": "readonly/disabled 在 observation 中语义明确，值保持不变；maxlength 输入的最终值按浏览器合同截断或明确拒绝。禁止报告成功却无值。",
+    "required_commands": ["observe", "snapshot"]
+  },
+  {
+    "id": "WIDGETS",
+    "kind": "workflow",
+    "page_type": "widgets",
+    "goal": "workbench：hover 菜单、slider/拖拽/滚动容器，检查 hover 可见项及拖后位置/业务输出，含 ref→ref 和相对偏移两种 drag。",
+    "required_commands": ["hover", "drag", "wheel", "scroll-to"]
+  },
+  {
+    "id": "NAV-NATIVE",
+    "kind": "workflow",
+    "page_type": "navigation",
+    "goal": "pointer-semantic/minimal：click 与 Enter 分别触发原生链接，核对最终 URL/正文/一次事件；navigate back/forward 与旧 aliases 均返回预期页，reload 后可继续操作。",
+    "required_commands": [
+      "navigate",
+      "navigate back",
+      "navigate forward",
+      "navigate-back",
+      "navigate-forward",
+      "reload",
+      "click",
+      "press"
+    ]
+  },
+  {
+    "id": "NAV-WAIT",
+    "kind": "workflow",
+    "page_type": "navigation",
+    "goal": "独立页上的延迟导航、DOMContentLoaded/load/commit 等支持阶段按帮助逐项测试，验证 URL 与最终页面内容，未触发导航的负例独立记录。",
+    "required_commands": ["wait-for-navigation", "navigate"]
+  },
+  {
+    "id": "NEG-WAIT-ELEMENT",
+    "kind": "workflow",
+    "page_type": "navigation",
+    "goal": "不存在元素等待返回 satisfied:false（可能 exit 0），检查真实输出字段；不能当成正例等待成功。",
+    "required_commands": ["wait-for-element"],
+    "negative": true,
+    "check_effect": false,
+    "allow_zero_rejection": true
+  },
+  {
+    "id": "WAIT-DYNAMIC",
+    "kind": "workflow",
+    "page_type": "dynamic-dom",
+    "goal": "extra 的节点替换 visible/hidden，加上 attached/detached 和 edgecases delayed enabled；逐项确认实际满足条件，timeout satisfied:false 不算正例通过。",
+    "required_commands": ["wait-for-element", "wait-ms", "step"]
+  },
+  {
+    "id": "NEG-INVALID",
+    "kind": "workflow",
+    "page_type": "cli-contract",
+    "goal": "无效参数/空文件路径在输入前拒绝，reason/action phase/effect_state 可解释；本地校验失败不应使原合法 context 失效。",
+    "required_commands": ["upload"],
+    "negative": true,
+    "check_effect": false
+  },
+  {
+    "id": "OBS-READ",
+    "kind": "workflow",
+    "page_type": "semantic-dom",
+    "goal": "workbench/minimal：snapshot、observe、sync、get-html 全页/元素；语义含真实标签/值/状态，无脚本/CSS 垃圾；view saved.json/find 是本地读取且不刷新 ref。",
+    "required_commands": ["snapshot", "observe", "cooperate sync", "view", "get-html"]
+  },
+  {
+    "id": "SHADOW-OPEN",
+    "kind": "workflow",
+    "page_type": "shadow-dom",
+    "goal": "workbench 和 pointer-semantic 的 open Shadow/Lit：观测并操作真实控件，文本不掺 comments/style，exact business value/handler 匹配。",
+    "required_commands": ["snapshot", "observe", "fill", "click", "get-html"]
+  },
+  {
+    "id": "SHADOW-CLOSED",
+    "kind": "workflow",
+    "page_type": "shadow-dom",
+    "goal": "edgecases closed shadow：检查能力边界及可见感知；在支持的视觉路径点击并验证事件，不能声称 DOM ref 可穿透 closed root。不可执行则 blocked。",
+    "required_commands": ["observe", "screenshot", "click"]
+  },
+  {
+    "id": "FRAME-SAME",
+    "kind": "workflow",
+    "page_type": "iframe",
+    "goal": "workbench 同源 iframe 中发现/填写/提交/抽表，核对 frame source 与服务器 frame-save host/value。",
+    "required_commands": ["observe", "fill", "click", "extract table"]
+  },
+  {
+    "id": "FRAME-CROSS",
+    "kind": "workflow",
+    "page_type": "iframe",
+    "goal": "workbench localhost 跨源 iframe 与 127.0.0.1 主页面：按实际 frame 证据操作、提取，核对字段未混入主文档。",
+    "required_commands": ["observe", "fill", "click", "extract table"]
+  },
+  {
+    "id": "FRAME-REPLACE",
+    "kind": "workflow",
+    "page_type": "iframe",
+    "goal": "extra refresh-frame 只刷新子文档后，主文档合法目标仍按合同可用；子文档旧 refs 拒绝归独立负例，不混用两类 epoch。",
+    "required_commands": ["cooperate sync", "click"]
+  },
+  {
+    "id": "DATA-TABLE",
+    "kind": "workflow",
+    "page_type": "structured-data",
+    "goal": "workbench/minimal 真实表格：discover→table；精确行数、列头、中文金额/链接、source/frame 验证，并核对筛选/分页状态。",
+    "required_commands": ["extract discover", "extract table", "get-html"]
+  },
+  {
+    "id": "DATA-LIST",
+    "kind": "workflow",
+    "page_type": "structured-data",
+    "goal": "卡片/列表 discover→list，检查每条标题/链接/图片关系，不能把页面杂项混为一条，保留 provenance。",
+    "required_commands": ["extract discover", "extract list"]
+  },
+  {
+    "id": "VISUAL-SCREEN",
+    "kind": "workflow",
+    "page_type": "visual",
+    "goal": "截图 viewport/full-page/element/canvas 四种，验证 PNG 可打开、尺寸/裁剪/目标内容正确，长页到底后截图仍完整。",
+    "required_commands": ["screenshot"],
+    "required_argv": [
+      {
+        "command": "screenshot",
+        "args": ["--full-page"]
+      }
+    ]
+  },
+  {
+    "id": "VISUAL-CANVAS",
+    "kind": "workflow",
+    "page_type": "canvas",
+    "goal": "canvas-test 先截图定位再视觉坐标点绿色目标，验证网页事件/输出，两个 canvas 分别测试；DOM ref 不能替代 canvas 内目标。",
+    "required_commands": ["observe", "screenshot", "click"]
+  },
+  {
+    "id": "VISUAL-OVERLAY",
+    "kind": "workflow",
+    "page_type": "visual",
+    "goal": "pointer-semantic 固定右下/左下 CTA 和原生媒体右侧 controls：BrowserSkill 自身浮层不能挡点击/滚动/resize 后目标。",
+    "required_commands": ["click", "window resize", "screenshot"]
+  },
+  {
+    "id": "LONG-SCROLL",
+    "kind": "workflow",
+    "page_type": "long-page",
+    "goal": "workbench long/extra 二维滚动：wheel 正负、横向、nested、scroll-to far corner，验证 scrollTop/Left 和最终目标可见。",
+    "required_commands": ["wheel", "scroll-to", "screenshot"]
+  },
+  {
+    "id": "MOBILE",
+    "kind": "workflow",
+    "page_type": "responsive",
+    "goal": "emulate 使用帮助支持的设备或自定义 UA/viewport/touch，resize 两尺寸；核对实际 viewport/DPR/UA/触摸与交互，再按合同恢复本轮页。",
+    "required_commands": ["emulate", "window resize", "evaluate", "screenshot"]
+  },
+  {
+    "id": "FILE-UPLOAD",
+    "kind": "workflow",
+    "page_type": "files",
+    "goal": "单文件/多文件/中文路径/空文件/隐藏 input 触发/显式 drop target；通过 Bsk upload 后核对浏览器 files 名称/size/hash/事件来源，不使用 JS 构造 File 代传。",
+    "required_commands": ["upload", "click"]
+  },
+  {
+    "id": "FILE-DOWNLOAD",
+    "kind": "workflow",
+    "page_type": "files",
+    "goal": "download 本地 CSV 保存到新路径，核对 UTF-8 文件名/内容/sha256 与服务端 download 事件，artifact 不仅存在还要 exact bytes。",
+    "required_commands": ["download"]
+  },
+  {
+    "id": "NEG-OUTPUT-EXISTS",
+    "kind": "workflow",
+    "page_type": "files",
+    "goal": "已有输出路径的 download/video/export 按合同明确拒绝且文件 hash 不变，code 不为 null，恢复提示对应实际错误。至少覆盖 download。",
+    "required_commands": ["download"],
+    "negative": true,
+    "check_effect": false
+  },
+  {
+    "id": "DEBUG-NETWORK",
+    "kind": "workflow",
+    "page_type": "debugging",
+    "goal": "debug start 前后控制请求：成功、500 consumed/ignored、延迟、重复、重定向；network/console 和 debug request metadata/request/response/headers/timing、body pointer/redaction/截断分页逐项核对。",
+    "required_commands": [
+      "debug start",
+      "debug status",
+      "debug requests",
+      "debug request",
+      "network",
+      "console",
+      "debug console",
+      "debug pages"
+    ]
+  },
+  {
+    "id": "DEBUG-ANALYSIS",
+    "kind": "workflow",
+    "page_type": "debugging",
+    "goal": "performance/aggregate/duplicates 对照已知请求数/slow 阈值/重复窗口；默认与 include-controlled 结果解释一致，无静默丢失。",
+    "required_commands": ["debug performance", "debug aggregate", "debug duplicates"]
+  },
+  {
+    "id": "DEBUG-RULES",
+    "kind": "workflow",
+    "page_type": "debugging",
+    "goal": "仅 fixture 请求：规则 add→list→disable→enable→one-match 命中→remove，验证响应/命中次数；重放只读 synthetic GET，用唯一 key 两次核对只发一次。",
+    "required_commands": [
+      "debug rule_add",
+      "debug rules",
+      "debug rule_disable",
+      "debug rule_enable",
+      "debug rule_remove",
+      "debug replay"
+    ]
+  },
+  {
+    "id": "DEBUG-OPS",
+    "kind": "workflow",
+    "page_type": "debugging",
+    "goal": "debug operations/operation/activity/wait/pin/unpin：用真实 command_id/request_id，wait 只等原操作不重发，session 空闲和运行中均验证。",
+    "required_commands": [
+      "debug operations",
+      "debug operation",
+      "debug activity",
+      "debug wait",
+      "debug pin",
+      "debug unpin"
+    ]
+  },
+  {
+    "id": "DEBUG-RETENTION",
+    "kind": "workflow",
+    "page_type": "debugging",
+    "goal": "extra burst 260，请求列表走完所有 cursors；debug stop 计数与 export、实际服务器 distinct 请求数一致，不得以默认分页上限当总量。",
+    "required_commands": ["debug requests", "debug stop", "debug export"]
+  },
+  {
+    "id": "DEBUG-SOURCE",
+    "kind": "workflow",
+    "page_type": "debugging",
+    "goal": "本轮 Agent 的 click/upload/download debug 操作来源必须为 agent；真正人类输入单独确认 human，不能用代理事件模拟真人。",
+    "required_commands": ["debug operations", "upload", "download"]
+  },
+  {
+    "id": "DIALOG-ALERT",
+    "kind": "workflow",
+    "page_type": "native-dialog",
+    "goal": "workbench alert：触发→status→accept→operation await 原 operation，确认只执行一次且保存返回结果。",
+    "required_commands": ["dialog status", "dialog accept", "operation await", "click"],
+    "allow_dialog_pending": true
+  },
+  {
+    "id": "DIALOG-CONFIRM",
+    "kind": "workflow",
+    "page_type": "native-dialog",
+    "goal": "confirm accept 与 dismiss 两支，核对页面布尔结果和 operation final state。",
+    "required_commands": ["dialog accept", "dialog dismiss", "operation await", "click"],
+    "allow_dialog_pending": true
+  },
+  {
+    "id": "DIALOG-PROMPT",
+    "kind": "workflow",
+    "page_type": "native-dialog",
+    "goal": "prompt 文本/取消与 beforeunload 离开/停留按帮助支持路径逐项验证。缺 beforeunload fixture 时创建合成页再由 Bsk 打开，不能省略。",
+    "required_commands": ["dialog accept", "dialog dismiss", "navigate"],
+    "allow_dialog_pending": true
+  },
+  {
+    "id": "DIALOG-CANCEL",
+    "kind": "workflow",
+    "page_type": "native-dialog",
+    "goal": "独立操作挂起→operation cancel，确认取消不自动继续输入、不重复 once 计数，异步 alert 可查询。",
+    "required_commands": ["operation cancel", "dialog status"],
+    "allow_dialog_pending": true
+  },
+  {
+    "id": "VIDEO-BASELINE",
+    "kind": "workflow",
+    "page_type": "media",
+    "goal": "media baseline MP4：原生控件 play/pause/seek，evaluate 只读验证 currentTime/paused/duration/readyState；截图确认真实视频内容。",
+    "required_commands": ["click", "evaluate", "screenshot"]
+  },
+  {
+    "id": "VIDEO-RECORD",
+    "kind": "workflow",
+    "page_type": "media",
+    "goal": "canvas-test 新录制：start→status→stop→list→save；新 MP4 非空且可解码/帧数时长合理，再放入本轮 fixtures/new-video.mp4 用 new-media 经 Bsk 播放验证；另录一段 discard，状态/残留正确。",
+    "required_commands": [
+      "video start",
+      "video status",
+      "video stop",
+      "video list",
+      "video save",
+      "video discard"
+    ]
+  },
+  {
+    "id": "CAROUSEL-LOCAL",
+    "kind": "workflow",
+    "page_type": "carousel",
+    "goal": "本地 /carousel 持续400ms切换，禁止暂停：3次 fresh sync→只读 evaluate 均成功且有真实 slide/image 变化；随后填 stable-input/save 无错点，核对事件。 另做一次自然规划延迟对照：sync 后通过 Bsk wait-ms 跨越一次可证明的轮播切换，再用原 receipt 只读 evaluate；保存 guard 结果。拒绝时此正向场景不通过，报告区分合同内保守限制与实现偏差，不能改成负例洗成100%。",
+    "required_commands": ["cooperate sync", "evaluate", "screenshot", "fill", "click"],
+    "required_command_counts": {
+      "evaluate": 4
+    }
+  },
+  {
+    "id": "CAROUSEL-CONTROL",
+    "kind": "workflow",
+    "page_type": "carousel",
+    "goal": "单独 /carousel 暂停按钮控制组，记录暂停前后 slide；对照 active 结果不能替代 active 必测项。",
+    "required_commands": ["click", "evaluate"]
+  },
+  {
+    "id": "PUBLIC-OCEAN-CAROUSEL",
+    "kind": "workflow",
+    "page_type": "public-carousel",
+    "goal": "https://www.oceanengine.com/：按 public-sites.md 验证轮播持续变化时3次 fresh sync→evaluate，保存全部 guard/DOM/视觉证据。 另做一次自然规划延迟对照：sync 后通过 Bsk wait-ms 跨越一次可证明的轮播切换，再用原 receipt 只读 evaluate；保存 guard 结果。拒绝时此正向场景不通过，报告区分合同内保守限制与实现偏差，不能改成负例洗成100%。",
+    "required_commands": [
+      "navigate",
+      "cooperate sync",
+      "evaluate",
+      "observe",
+      "screenshot",
+      "get-html"
+    ],
+    "required_command_counts": {
+      "evaluate": 4
+    }
+  },
+  {
+    "id": "PUBLIC-OCEAN-NAV",
+    "kind": "workflow",
+    "page_type": "public-carousel",
+    "goal": "巨量引擎：公开导航/下拉/轮播前后或指示器/滚动/公开产品页浏览/返回，校验目标标题和 URL；不提交销售线索。",
+    "required_commands": ["hover", "click", "wheel", "navigate back"]
+  },
+  {
+    "id": "PUBLIC-TAOBAO-CAROUSEL",
+    "kind": "workflow",
+    "page_type": "image-commerce",
+    "goal": "出现可关闭登录层先用 Bsk 定位关闭 icon→click→fresh sync 验证 modal 消失，再继续；不能仅因出现弹层跳过。https://www.taobao.com/：同样3次 active carousel evaluate，新鲜 receipt+真实 slide 变化。不可用淘宝登录页当主页测试通过。 另做一次自然规划延迟对照：sync 后通过 Bsk wait-ms 跨越一次可证明的轮播切换，再用原 receipt 只读 evaluate；保存 guard 结果。拒绝时此正向场景不通过，报告区分合同内保守限制与实现偏差，不能改成负例洗成100%。",
+    "required_commands": [
+      "navigate",
+      "cooperate sync",
+      "evaluate",
+      "observe",
+      "screenshot",
+      "get-html",
+      "click"
+    ],
+    "required_command_counts": {
+      "evaluate": 4
+    }
+  },
+  {
+    "id": "PUBLIC-TAOBAO-CARDS",
+    "kind": "workflow",
+    "page_type": "image-commerce",
+    "goal": "出现可关闭登录层先用 Bsk 定位关闭 icon→click→fresh sync 验证 modal 消失，再继续；不能仅因出现弹层跳过。淘宝至少10个当前可见商品标题/图片/展示价/链接关系正确，2批滚动验证 lazy-load naturalWidth/src/srcset；进入一条公开详情再返回，无收藏/订单。",
+    "required_commands": [
+      "extract discover",
+      "extract list",
+      "wheel",
+      "scroll-to",
+      "click",
+      "navigate back",
+      "evaluate"
+    ]
+  },
+  {
+    "id": "PUBLIC-MDN",
+    "kind": "workflow",
+    "page_type": "documentation",
+    "goal": "MDN 中文主页搜索→结果→具体文档→返回，核对搜索词/最终 h1/URL/代码正文，长文滚动与截图。",
+    "required_commands": ["navigate", "fill", "press", "click", "observe", "get-html", "scroll-to"]
+  },
+  {
+    "id": "PUBLIC-GITHUB",
+    "kind": "workflow",
+    "page_type": "public-spa",
+    "goal": "GitHub Tencent/BrowserSkill 真实 SPA 仓库导航/README/公开文件→返回，等待最终内容，不以中间骨架算成功。",
+    "required_commands": ["navigate", "click", "wait-for-element", "get-html", "observe"]
+  },
+  {
+    "id": "PUBLIC-BOOKS",
+    "kind": "workflow",
+    "page_type": "public-pagination",
+    "goal": "Books to Scrape 至少2页共40条去重书名/price/链接，验证分页前后 URL 和同一卡片字段对应、图片已加载。",
+    "required_commands": ["navigate", "extract list", "click", "evaluate"]
+  },
+  {
+    "id": "PUBLIC-HN",
+    "kind": "workflow",
+    "page_type": "public-list",
+    "goal": "Hacker News 首页30条排名/标题/链接/评分(页面实际有的字段)，核对缺失字段不串行，打开一条公开讨论并返回。",
+    "required_commands": ["navigate", "extract list", "click", "navigate back"]
+  },
+  {
+    "id": "HUMAN-HANDOFF",
+    "kind": "workflow",
+    "page_type": "human-cooperation",
+    "goal": "专用合成页 request-help→真实用户输入/完成→cooperate wait→fresh sync；用户接管期间 Agent 无输入，超时不自动解除。无人参与则 blocked，不许伪造。",
+    "required_commands": ["request-help", "cooperate wait", "cooperate sync"]
+  },
+  {
+    "id": "HUMAN-RECORD",
+    "kind": "workflow",
+    "page_type": "human-cooperation",
+    "goal": "record start 后真实用户完成合成中文输入/点击→record stop，trace.json 文本/顺序/目标/来源匹配；Agent 自己执行不能冒充用户动作。",
+    "required_commands": ["record start", "record stop"]
+  },
+  {
+    "id": "ADMIN-LIFECYCLE",
+    "kind": "workflow",
+    "page_type": "admin",
+    "goal": "隔离 admin-runtime 与独立端口实际 start/status/logs/restart/stop，再 server mode pair/devices/revoke 临时设备；不能重启用户共享或测试浏览器 runtime。配对 token 仅本地保存，报告脱敏。",
+    "required_commands": [
+      "daemon start",
+      "status",
+      "logs",
+      "daemon restart",
+      "daemon stop",
+      "daemon pair",
+      "daemon devices",
+      "daemon revoke"
+    ]
+  },
+  {
+    "id": "ADMIN-TOOLS",
+    "kind": "workflow",
+    "page_type": "admin",
+    "goal": "update --check 与 install-skill --list 真实执行并校验结构/文案/目标。无需更新候选或覆盖任何用户技能；安装/更新写入路径如需另测必须隔离。",
+    "required_commands": ["update", "install-skill", "help"]
+  },
+  {
+    "id": "MCP-PARITY",
+    "kind": "workflow",
+    "page_type": "mcp",
+    "goal": "本候选 bsk mcp stdio initialize/tools/list，每个 advertised tool 及其 schema 的 action/mode 枚举分支 按当前 schema 做成功调用；参数/错误/cancel parity、长操作和显式 browser 绑定；保留入出 NDJSON 与每个 request id。shell 仅驱动 stdio，不用其他浏览器 MCP。",
+    "required_commands": ["mcp"]
+  },
+  {
+    "id": "FINAL-CLEANUP",
+    "kind": "workflow",
+    "page_type": "lifecycle",
+    "goal": "所有本轮 session、debug、录制、pair grant 已按合同结束，任务 tab 已归还；测试版扩展/CLI/固定安装目录保留，列出可人工测试入口。",
+    "required_commands": ["session list", "status", "browsers"]
+  },
+  {
+    "id": "DYNAMIC-SECOND-EVALUATE",
+    "kind": "workflow",
+    "page_type": "per-second-dynamic",
+    "goal": "/live-update：1000ms文字/时间/价格持续更新，3次即时fresh sync→只读evaluate，加1次sync后跨至少两次更新的规划延迟求值；校验tick/时间递增、记录42价格与tick公式一致。四次均需内部ok:true及业务值正确；不暂停或重同步替换延迟组原receipt。",
+    "required_commands": ["cooperate sync", "evaluate"],
+    "required_command_counts": {
+      "evaluate": 4
+    },
+    "recipe": "references/dynamic-pages.md"
+  },
+  {
+    "id": "DYNAMIC-SECOND-WHEEL",
+    "kind": "workflow",
+    "page_type": "per-second-dynamic",
+    "goal": "/live-update：更新持续运行时分别测试页面向下/向上、指定nested容器纵向/横向wheel；每次前后记录tick、scrollY/scrollTop/scrollLeft、wheel事件及截图，确认真实滚动且未冻结更新；含一次sync后跨至少两次更新再wheel的规划延迟变体。",
+    "required_commands": ["cooperate sync", "evaluate", "wheel"],
+    "required_command_counts": {
+      "wheel": 4,
+      "evaluate": 8
+    },
+    "recipe": "references/dynamic-pages.md"
+  },
+  {
+    "id": "CAROUSEL-EVALUATE-DRIFT",
+    "kind": "workflow",
+    "page_type": "carousel",
+    "goal": "/carousel：400ms轮播持续运行，3次即时fresh sync→只读evaluate，加1次跨真实slide切换的规划延迟求值。四次核对内部ok、slide/image对应和真实递增，不点击pause；参照dynamic-pages.md逐项保留证据。",
+    "required_commands": ["cooperate sync", "evaluate"],
+    "required_command_counts": {
+      "evaluate": 4
+    },
+    "recipe": "references/dynamic-pages.md"
+  },
+  {
+    "id": "CAROUSEL-WHEEL",
+    "kind": "workflow",
+    "page_type": "carousel",
+    "goal": "/carousel：活动轮播下执行页面下/上与nested容器纵/横wheel；含跨slide切换的规划延迟变体。每次分别核对实际滚动与slide继续前进，wheel前后均通过Bsk只读evaluate和截图取证，不用scroll-to或JS滚动代替。",
+    "required_commands": ["cooperate sync", "evaluate", "wheel"],
+    "required_command_counts": {
+      "wheel": 4,
+      "evaluate": 8
+    },
+    "recipe": "references/dynamic-pages.md"
+  },
+  {
+    "id": "PUBLIC-OCEAN-WHEEL",
+    "kind": "workflow",
+    "page_type": "public-carousel",
+    "goal": "巨量引擎真实首页，保持轮播运行，至少4次wheel：小幅下/上/下及一次跨轮播周期的规划延迟调用。避免滚动边界，保留轮播至少部分可见；核对真实scrollY/前后截图、slide/image变化与guard结果，不能用静态页替代。",
+    "required_commands": ["cooperate sync", "evaluate", "wheel"],
+    "required_command_counts": {
+      "wheel": 4,
+      "evaluate": 8
+    },
+    "recipe": "references/dynamic-pages.md"
+  },
+  {
+    "id": "PUBLIC-TAOBAO-WHEEL",
+    "kind": "workflow",
+    "page_type": "image-commerce",
+    "goal": "淘宝先关闭全部可关闭登录层并确认主页可操作，活动轮播下至少4次wheel：小幅下/上/下及一次跨轮播周期的规划延迟调用。逐次核对滚动、轮播变化、可见商品/懒加载；不得在遮挡登录层背后取值后算通过。",
+    "required_commands": ["cooperate sync", "evaluate", "wheel"],
+    "required_command_counts": {
+      "wheel": 4,
+      "evaluate": 8
+    },
+    "recipe": "references/dynamic-pages.md"
+  }
+]
