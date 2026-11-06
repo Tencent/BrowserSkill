@@ -47,9 +47,10 @@ action result, never as evidence that the action did not occur.
 
 ## Several decided actions
 
-When one sync already tells you every action, such as a form's fields or a report's
-filters, send them together. `plan` runs them in order and then synchronizes, so one
-model turn replaces one turn per action.
+Under target policy, send supported actions already decided from one sync, such as
+a form's fields or a report's filters, together with `plan` when they can share one
+context. `plan` runs them in order and then synchronizes, so one model turn replaces
+one turn per action. Use separate calls in the cases below.
 
 ```sh
 bsk plan --session SID --context CURRENT --until-visible '#summary' --steps '[
@@ -64,8 +65,9 @@ bsk plan --session SID --context CURRENT --until-visible '#summary' --steps '[
 A step is `action` plus the fields `step --params` takes for it, and optional `expect`.
 Actions are click, fill, select, press, hover, scroll-to, wheel and drag, plus
 `wait-for-element` (`ref` or `selector`, `state`, `timeout_ms`) for a condition later steps
-need. A plan holds up to 20 steps. Every step passes the same control, target and `expect`
-checks as its own command, immediately before its input.
+need. A plan holds up to 20 steps; split longer sequences into batches and inspect
+each batch's returned state before continuing. Every step passes the same control,
+target and `expect` checks as its own command, immediately before its input.
 
 - Include only what is already decided. A step that depends on what an earlier step
   reveals, or on a page that an earlier step replaces, belongs in the next call.
@@ -76,9 +78,11 @@ checks as its own command, immediately before its input.
   `effect_state` is `unknown`, or that reported `dialog_pending`.
 - Send an irreversible action such as submit or pay in its own call after reading the
   state, unless `expect` on that step protects the facts it depends on.
-- Only the first step may be untargeted, and it needs `--observation`. Navigation and
-  scripts run on their own. Under strict policy a context authorizes one action, so a plan
-  stops after its first step.
+- Only the first step may be untargeted, and it needs `--observation`. Before another
+  untargeted action, sync and inspect the page again. Navigation, scripts and actions
+  not supported by `plan` (such as focus and blur) run in separate calls.
+- Under strict policy, use one action followed by sync; do not batch inputs into a
+  plan, because each context authorizes only one action.
 
 ## View existing evidence locally
 

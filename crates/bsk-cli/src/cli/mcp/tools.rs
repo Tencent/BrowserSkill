@@ -118,8 +118,10 @@ pub(crate) fn definitions() -> Vec<Value> {
             "bsk_plan",
             "Run decided actions",
             "Run several input actions already decided from one sync, in order, in one call, then \
-             return the synchronized state. Prefer it to repeated bsk_interact calls when filling a \
-             form or setting filters. The first step that fails stops the plan: later steps do not \
+             return the synchronized state. Under target policy, use it for supported actions that \
+             can share one context, such as filling a form or setting filters. Use separate \
+             bsk_interact calls for strict policy or unsupported actions such as focus and blur. \
+             The first step that fails stops the plan: later steps do not \
              run and nothing is retried. stopped names that step and its effect_state; never \
              repeat a step whose effect_state is unknown. Leave out steps that depend on what an \
              earlier step reveals, and send an irreversible action such as submit or pay in its \
