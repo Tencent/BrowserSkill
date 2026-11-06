@@ -1572,9 +1572,10 @@ function normaliseModifier(token: string): KeyModifier | null {
  * an empty modifier list.
  *
  * The split is `+`-delimited; modifier matching is case-insensitive
- * and order-independent. Whitespace around tokens is trimmed.
+ * and order-independent. Whitespace around tokens is trimmed. Multiple
+ * non-modifier keys cannot be dispatched as a single press.
  */
-export function parseKeySpec(spec: string): { key: string; modifiers: KeyModifier[] } {
+export function parseKeySpec(spec: string): { key: string; modifiers: KeyModifier[] } | null {
   const parts = spec
     .split("+")
     .map((s) => s.trim())
@@ -1597,6 +1598,7 @@ export function parseKeySpec(spec: string): { key: string; modifiers: KeyModifie
     if (mod) {
       if (!mods.includes(mod)) mods.push(mod);
     } else {
+      if (baseKey !== null) return null;
       baseKey = part;
     }
   }
@@ -1717,6 +1719,12 @@ export async function handlePress(
   const dialogCursor = markDialogCursor(deps.cdp, target.tabId);
 
   const parsed = parseKeySpec(params.key);
+  if (!parsed) {
+    return {
+      code: "invalid_params",
+      message: "press: a key combination cannot contain multiple base keys",
+    };
+  }
   // Merge param `modifiers` with anything parsed from the compound
   // key string; de-duplicate.
   const mods: KeyModifier[] = [...parsed.modifiers];

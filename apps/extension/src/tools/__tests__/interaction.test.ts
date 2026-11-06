@@ -1819,10 +1819,12 @@ describe("handlePress", () => {
   it.each([
     "Crtl++",
     "Ctrl+Bogus++",
-  ])("rejects an unknown prefix in %s without dispatching keys", async (key) => {
+    "Ctrl+Bogus+a",
+    "a+b",
+  ])("rejects an invalid key expression %s without dispatching keys", async (key) => {
     const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
     await sm.start("aa11");
-    const fake = makeFakeCdp({});
+    const fake = makeFakeCdp({ "Input.dispatchKeyEvent": () => ({}) });
     const res = await handlePress(
       sm,
       { session_id: "aa11", key },
