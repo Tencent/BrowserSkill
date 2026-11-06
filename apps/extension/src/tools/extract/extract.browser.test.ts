@@ -15,6 +15,7 @@ type Send = <T = Record<string, unknown>>(
   sessionId?: string,
 ) => Promise<T>;
 type Outcome = { result?: ExtractResult; error?: string };
+type Anchor = { host: string; selector: string };
 
 const range = (count: number) => Array.from({ length: count }, (_, index) => index);
 const plainTable = (rows: number, columns: number) =>
@@ -100,6 +101,23 @@ const fixtures: Record<string, string> = {
     '<table id="t" aria-rowcount="3"><thead><tr aria-rowindex="1"><th>A</th></tr></thead><tbody><tr aria-rowindex="3"><td>k</td></tr><tr aria-rowindex="2"><td>j</td></tr></tbody></table>',
   listRecycled:
     '<ul id="l"><li aria-posinset="2" aria-setsize="2">second</li><li aria-posinset="1" aria-setsize="2">first</li></ul>',
+  plainList: '<ul id="l"><li>Alpha</li><li>Beta</li></ul>',
+  slottedList: `<div id="host"><li>Alpha</li><li>Beta</li></div><script>
+    document.querySelector('#host').attachShadow({mode: 'open'}).innerHTML = '<ul id="l"><slot></slot></ul>';
+  </script>`,
+  orderedSlots: `<div id="host"><li slot="second">Second</li><li slot="first">First</li><li slot="unused">Unassigned</li></div><script>
+    document.querySelector('#host').attachShadow({mode: 'open'}).innerHTML = '<ul id="l"><slot name="first"></slot><slot name="second"></slot><slot name="fallback"><li>Fallback</li></slot></ul>';
+  </script>`,
+  nestedSlottedList: `<div id="host"><li>Outer<ul id="inner"><li>Inner</li></ul></li><li>Second</li></div><script>
+    document.querySelector('#host').attachShadow({mode: 'open'}).innerHTML = '<ul id="l"><slot></slot></ul>';
+  </script>`,
+  hiddenSlottedItem: `<div id="host"><li style="display:none">Hidden</li><li>Visible</li></div><script>
+    document.querySelector('#host').attachShadow({mode: 'open'}).innerHTML = '<ul id="l"><slot></slot></ul>';
+  </script>`,
+  closedDetailsAria:
+    '<div id="l" role="list"><details><summary>More</summary><div role="listitem" aria-posinset="1" aria-setsize="2">Hidden</div></details><div role="listitem" aria-posinset="2" aria-setsize="2">Visible</div></div>',
+  closedDetailsDomOrder:
+    '<div id="l" role="list"><details><summary>More</summary><div role="listitem">Hidden</div></details><div role="listitem">Visible</div></div>',
   invalidAria:
     '<div id="g" role="grid"><div role="row" aria-rowindex=""><span role="columnheader" aria-colindex="first">A</span></div><div role="row" aria-rowindex="2"><span role="gridcell">1</span></div></div><ul id="l"><li aria-setsize="unknown" aria-posinset="x">a</li></ul>',
   pinned: pinnedGrid(
@@ -124,7 +142,11 @@ const fixtures: Record<string, string> = {
 };
 
 describe.skipIf(!process.env.BSK_CLICK_CHROME)("real browser structured extraction", () => {
-  let extract: (fixture: string, params: Omit<ExtractParams, "session_id">) => Promise<Outcome>;
+  let extract: (
+    fixture: string,
+    params: Omit<ExtractParams, "session_id">,
+    anchor?: Anchor,
+  ) => Promise<Outcome>;
   let finish: () => Promise<void>;
 
   beforeAll(async () => {
@@ -161,7 +183,7 @@ describe.skipIf(!process.env.BSK_CLICK_CHROME)("real browser structured extracti
         });
         const local: Send = (method, params) => send(method, params, sessionId);
         await local("Page.enable");
-        extract = async (fixture, params) => {
+        extract = async (fixture, params, anchor) => {
           await local("Page.navigate", { url: `${origin}/${fixture}` });
           await expect
             .poll(async () => {
@@ -180,11 +202,20 @@ describe.skipIf(!process.env.BSK_CLICK_CHROME)("real browser structured extracti
             worldName: "bsk-extract",
           });
           const options = validateExtract({ session_id: "s", ...params });
+          const target = anchor
+            ? await local<{ result: { objectId: string } }>("Runtime.evaluate", {
+                contextId: world.executionContextId,
+                expression: `document.querySelector(${JSON.stringify(anchor.host)}).shadowRoot.querySelector(${JSON.stringify(anchor.selector)})`,
+              })
+            : undefined;
+          if (target) expect(target.result.objectId).toBeTruthy();
           const reply = await local<{
             result: { value: RawCapture };
             exceptionDetails?: unknown;
           }>("Runtime.callFunctionOn", {
-            executionContextId: world.executionContextId,
+            ...(target
+              ? { objectId: target.result.objectId }
+              : { executionContextId: world.executionContextId }),
             functionDeclaration: collectExtractDom.toString(),
             arguments: [{ value: options }],
             returnByValue: true,
@@ -234,6 +265,79 @@ describe.skipIf(!process.env.BSK_CLICK_CHROME)("real browser structured extracti
 
   afterAll(async () => {
     await finish?.();
+  });
+
+  it.each(["plainList", "slottedList"])("extracts semantic list items from %s", async (fixture) => {
+    const shadow = fixture === "slottedList";
+    const { result } = await extract(
+      fixture,
+      { action: "list", ...(shadow ? { ref: "list" } : { selector: "#l" }) },
+      shadow ? { host: "#host", selector: "#l" } : undefined,
+    );
+    expect(result!.rows).toEqual([
+      { text: "Alpha", url: null },
+      { text: "Beta", url: null },
+    ]);
+    expect(result!.warnings).toEqual([]);
+  });
+
+  it("follows slot order and fallback content without including unassigned items", async () => {
+    const { result } = await extract(
+      "orderedSlots",
+      { action: "list", ref: "list" },
+      { host: "#host", selector: "#l" },
+    );
+    expect(result!.rows.map((row) => row.text)).toEqual(["First", "Second", "Fallback"]);
+    expect(result!.row_sources.map((source) => source.source_row)).toEqual([1, 2, 3]);
+  });
+
+  it("keeps nested list items out of the slotted outer list", async () => {
+    const outer = await extract(
+      "nestedSlottedList",
+      { action: "list", ref: "list" },
+      { host: "#host", selector: "#l" },
+    );
+    expect(outer.result!.rows).toHaveLength(2);
+    expect(outer.result!.rows[0].text).toContain("Outer");
+    expect(outer.result!.rows[1].text).toBe("Second");
+    expect(outer.result!.row_sources.map((source) => source.source_row)).toEqual([1, 2]);
+    const inner = await extract("nestedSlottedList", { action: "list", selector: "#inner" });
+    expect(inner.result!.rows).toEqual([{ text: "Inner", url: null }]);
+  });
+
+  it("omits hidden slotted items while preserving their source positions", async () => {
+    const { result } = await extract(
+      "hiddenSlottedItem",
+      { action: "list", ref: "list" },
+      { host: "#host", selector: "#l" },
+    );
+    expect(result!.rows).toEqual([{ text: "Visible", url: null }]);
+    expect(result!.row_sources[0].source_row).toBe(2);
+    expect(result!.warnings).toContain("hidden_rows_omitted");
+  });
+
+  it("reports truncation when slotted list items exceed the row cap", async () => {
+    const { result } = await extract(
+      "orderedSlots",
+      { action: "list", ref: "list", max_rows: 1 },
+      { host: "#host", selector: "#l" },
+    );
+    expect(result!.rows).toEqual([{ text: "First", url: null }]);
+    expect(result!.coverage).toMatchObject({ truncated: true, stop_reason: "row_limit" });
+  });
+
+  it.each([
+    "closedDetailsAria",
+    "closedDetailsDomOrder",
+  ])("preserves hidden list positions inside closed details (%s)", async (fixture) => {
+    const { result } = await extract(fixture, { action: "list", selector: "#l" });
+    expect(result!.rows).toEqual([{ text: "Visible", url: null }]);
+    expect(result!.row_sources[0].source_row).toBe(2);
+    expect(result!.warnings).toEqual(["hidden_rows_omitted"]);
+    expect(result!.coverage).toMatchObject({
+      truncated: false,
+      dataset_complete: "unknown",
+    });
   });
 
   it("reaches the row cap for long and wide tables without row ids", async () => {
