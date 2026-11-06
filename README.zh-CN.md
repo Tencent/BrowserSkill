@@ -366,6 +366,8 @@ CLI 产物位于 `target/release/`；将 `apps/extension/dist/chrome-mv3/` 作�
 
 相关检查包括 `cargo test --workspace --locked`、`pnpm ext:test` 和 `pnpm lint`。可复现的浏览器用例见[评测指南](evals/browser/README.zh-CN.md)。欢迎通过 [GitHub Issues](https://github.com/Tencent/BrowserSkill/issues) 报告问题，或提交聚焦的 PR；附上浏览器证据前，请移除敏感数据。
 
+对浏览器交互、页面观察、控制策略或 CLI／扩展通信等较大改动，推荐在提交 PR 前使用[可选的 Agent 端到端自测 Skill](evals/browser/README.zh-CN.md#可选的-agent-pr-前自测)，通过 Bsk 测试当前分支并记录真实链路证据。这不是提交或合并 PR 的强制要求，也不替代上述检查。
+
 扩展界面支持英语、简体中文、繁体中文、韩语、日语、法语、意大利语、西班牙语、德语和巴西葡萄牙语。翻译贡献见[多语言说明](packages/i18n/README.md)。
 
 ## 贡献者

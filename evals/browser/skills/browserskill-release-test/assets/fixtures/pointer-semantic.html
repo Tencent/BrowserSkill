@@ -1,0 +1,9 @@
+<!doctype html><meta charset="utf-8"><title>Pointer and semantic minimal reproduction</title>
+<style>body{font:16px system-ui;margin:25px}button,a{font:inherit;padding:8px}header{padding:8px;background:#eef}#edge-right{position:fixed;right:45px;bottom:50px}#edge-left{position:fixed;left:45px;bottom:50px}output{display:block}</style>
+<header><nav><audit-menu></audit-menu><button id="top">Top action</button></nav></header>
+<h1>Pointer regions</h1><p>All three buttons should be directly clickable.</p><a id="native-nav" href="/minimal">Native navigation to minimal</a><output id="result"></output>
+<button id="edge-right">Fixed Next</button><button id="edge-left">Fixed Left</button>
+<script>
+let shadow=document.querySelector('audit-menu').attachShadow({mode:'open'});shadow.innerHTML='<!--lit-part AUDIT-TEMPLATE--><style>:host{display:inline-block}.audit-source-only{color:rgb(18,52,86);padding:13px}</style><!--?lit$424242$--><button>Shadow menu</button><!--/lit-part-->';
+for(let b of document.querySelectorAll('button'))b.onclick=()=>{document.querySelector('output').textContent='Clicked '+b.id;fetch('/event',{method:'POST',body:JSON.stringify({type:'pointer-region',id:b.id})})};
+</script>
