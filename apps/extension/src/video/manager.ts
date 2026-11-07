@@ -618,7 +618,7 @@ export class VideoManager {
   async exported(id: string): Promise<void> {
     const value = await this.get(id);
     if (value.state !== "ready") throw new Error("Video is not ready to save");
-    await this.store.put({ ...value, exported: true });
+    await this.store.markExported(id);
     this.deps.changed?.();
   }
 

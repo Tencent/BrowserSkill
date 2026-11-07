@@ -52,6 +52,21 @@ export class VideoArtifactStore {
     await transaction("readwrite", (store) => store.put(value));
   }
 
+  async markExported(id: string): Promise<void> {
+    if (!isVideoId(id)) throw new Error("Invalid recording ID");
+    // Download completion may race deletion or expiry. Read and update in one
+    // transaction so a stale manager snapshot cannot recreate a removed video.
+    await transaction("readwrite", (store) => {
+      const request = store.get(id);
+      request.onsuccess = () => {
+        const value = request.result as StoredVideo | undefined;
+        if (value?.state === "ready" && value.expires_at > Date.now())
+          store.put({ ...value, exported: true });
+      };
+      return request;
+    });
+  }
+
   async file(id: string): Promise<File> {
     const directory = await videoDirectory(id);
     return (await directory.getFileHandle("video.mp4")).getFile();
