@@ -6,7 +6,7 @@ import { attachDialogs, markDialogCursor } from "./dialogs";
 import { cdpError, rpcError } from "./errors";
 import { resolveNodeGeometry } from "./frame-geometry";
 import { clipPolygon, polygonArea, polygonCentroid, rectPolygon } from "./geometry";
-import { waitForInputPaint, withInputReady } from "./input-readiness";
+import { waitForInputPaint, waitForInputReply, withInputReady } from "./input-readiness";
 import { modifiersBitfield, resolveBackendNode } from "./interaction";
 import { scrollVisibleBounds } from "./scroll-visibility";
 import {
@@ -86,15 +86,28 @@ export async function handleWheel(
   // Own fallback scrolling and visibility objects, even if allocation is cancelled.
   const objectGroup = `bsk-wheel-${crypto.randomUUID()}`;
   const objectTargets = new Map<string, CdpTarget>();
+  let finished = false;
+  const release = (target: CdpTarget) => {
+    void sendToCdpTarget(deps.cdp, target, "Runtime.releaseObjectGroup", { objectGroup }).catch(
+      () => {},
+    );
+  };
   const send = async <T>(target: CdpTarget, method: string, args?: object): Promise<T> => {
     checkActive();
     if (method === "DOM.resolveNode") objectTargets.set(cdpTargetKey(target), target);
-    const result = await sendToCdpTarget<T>(
-      deps.cdp,
-      target,
-      method,
-      method === "DOM.resolveNode" ? { ...args, objectGroup } : args,
-    );
+    const params = method === "DOM.resolveNode" ? { ...args, objectGroup } : args;
+    const pending = (
+      deps.cdp.sendGuarded
+        ? deps.cdp.sendGuarded<T>(target, method, params, {
+            signal: deps.signal,
+            onDispatch: checkActive,
+          })
+        : sendToCdpTarget<T>(deps.cdp, target, method, params)
+    ).finally(() => {
+      // A late resolve can allocate a handle after the first cleanup dispatch.
+      if (finished && method === "DOM.resolveNode") release(target);
+    });
+    const result = await waitForInputReply(pending, deps.signal, timeout, deadline);
     checkActive();
     return result;
   };
@@ -107,7 +120,7 @@ export async function handleWheel(
       ? async (tabId) => {
           checkActive();
           graph ??= deps.cdp.getFrameGraph!(tabId);
-          const result = await graph;
+          const result = await waitForInputReply(graph, deps.signal, timeout, deadline);
           checkActive();
           return result;
         }
@@ -117,7 +130,12 @@ export async function handleWheel(
 
   try {
     checkActive();
-    const target = await resolveTargetTab(manager, ctx, params.tab_id, deps.tabsApi);
+    const target = await waitForInputReply(
+      resolveTargetTab(manager, ctx, params.tab_id, deps.tabsApi),
+      deps.signal,
+      timeout,
+      deadline,
+    );
     checkActive();
     if (isRpcError(target)) return target;
     const denied = enforceAgentWindow(ctx, target, "wheel");
@@ -182,11 +200,8 @@ export async function handleWheel(
         console.debug("[bsk wheel] overlay bypass disable failed", error);
       }
     }
-    for (const target of objectTargets.values()) {
-      await sendToCdpTarget(deps.cdp, target, "Runtime.releaseObjectGroup", { objectGroup }).catch(
-        () => {},
-      );
-    }
+    finished = true;
+    for (const target of objectTargets.values()) release(target);
   }
 }
 
