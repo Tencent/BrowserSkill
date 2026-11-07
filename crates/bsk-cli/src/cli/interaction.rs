@@ -5,6 +5,7 @@
 //! `e3`) or a CSS selector. Use `--ref` / `--selector` explicitly when
 //! the value is ambiguous.
 
+use std::io::Read;
 use std::path::PathBuf;
 
 use anyhow::Context;
@@ -417,8 +418,16 @@ pub struct FillArgs {
     pub target: Option<String>,
 
     /// Text to type into the element.
+    #[arg(
+        long,
+        required_unless_present = "value_stdin",
+        conflicts_with = "value_stdin"
+    )]
+    pub value: Option<String>,
+
+    /// Read UTF-8 text from stdin until EOF, preserving whitespace and newlines.
     #[arg(long)]
-    pub value: String,
+    pub value_stdin: bool,
 
     #[arg(long = "ref")]
     pub ref_: Option<String>,
@@ -441,15 +450,30 @@ pub struct FillArgs {
 }
 
 pub fn dispatch_fill(args: FillArgs, format: Format) -> Result<(), CliError> {
-    let info = ensure_daemon().context("ensure daemon is running")?;
     let (ref_, selector) = split_target(
         args.target.clone(),
         args.ref_.clone(),
         args.selector.clone(),
     )?;
+    let value = if args.value_stdin {
+        if std::env::var("BSK_CANCEL_ON_STDIN_CLOSE").as_deref() == Ok("1") {
+            return Err(CliError::Local(anyhow::anyhow!(
+                "--value-stdin cannot be used with BSK_CANCEL_ON_STDIN_CLOSE=1: stdin is reserved for cancellation"
+            )));
+        }
+        let mut value = String::new();
+        std::io::stdin()
+            .lock()
+            .read_to_string(&mut value)
+            .context("read UTF-8 fill value from stdin")?;
+        value
+    } else {
+        args.value.context("missing --value or --value-stdin")?
+    };
+    let info = ensure_daemon().context("ensure daemon is running")?;
     let params = FillParams {
         session_id: args.session.clone(),
-        value: args.value.clone(),
+        value,
         ref_,
         selector,
         tab_id: args.tab_id,
@@ -736,7 +760,8 @@ mod tests {
             Wrapper::try_parse_from(["fill", "@e138", "--value", "deepseek", "--session", "ohli"])
                 .expect("fill args should parse");
         assert_eq!(parsed.args.target.as_deref(), Some("@e138"));
-        assert_eq!(parsed.args.value, "deepseek");
+        assert_eq!(parsed.args.value.as_deref(), Some("deepseek"));
+        assert!(!parsed.args.value_stdin);
         assert_eq!(parsed.args.session, "ohli");
     }
 
