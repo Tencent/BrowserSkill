@@ -1696,6 +1696,30 @@ describe("resolveKeyDescriptor", () => {
     expect(resolveKeyDescriptor("arrowdown")).toMatchObject({ code: "ArrowDown" });
     expect(resolveKeyDescriptor("space")).toMatchObject({ key: " ", code: "Space" });
   });
+  // A code-less descriptor makes Chromium report `code: ""`/`keyCode: 0`,
+  // so `Ctrl+/` never reaches a handler that keys off `event.code`.
+  it("maps common punctuation to its physical code and virtual key code", () => {
+    expect(resolveKeyDescriptor("/")).toEqual({
+      key: "/",
+      code: "Slash",
+      text: "/",
+      windowsVirtualKeyCode: 191,
+    });
+    expect(resolveKeyDescriptor("-")).toMatchObject({ code: "Minus", windowsVirtualKeyCode: 189 });
+    expect(resolveKeyDescriptor("=")).toMatchObject({ code: "Equal", windowsVirtualKeyCode: 187 });
+    expect(resolveKeyDescriptor(";")).toMatchObject({
+      code: "Semicolon",
+      windowsVirtualKeyCode: 186,
+    });
+    // Shifted glyphs live on the same physical key.
+    expect(resolveKeyDescriptor("?")).toEqual({
+      key: "?",
+      code: "Slash",
+      text: "?",
+      windowsVirtualKeyCode: 191,
+    });
+    expect(resolveKeyDescriptor(":")).toMatchObject({ code: "Semicolon" });
+  });
 });
 
 // PressResult also has a `code` field (the CDP keyboard code), so
@@ -1849,6 +1873,31 @@ describe("handlePress", () => {
         (call.params as { type?: string }).type === "rawKeyDown",
     );
     expect(keyDown?.params).toMatchObject({ key: "A", code: "KeyA", modifiers: 2 });
+  });
+
+  it("dispatches Ctrl+/ with a Slash code and key code", async () => {
+    const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
+    await sm.start("aa11");
+    const fake = makeFakeCdp({ "Input.dispatchKeyEvent": () => ({}) });
+    const res = await handlePress(
+      sm,
+      { session_id: "aa11", key: "Ctrl+/" },
+      { cdp: fake.cdp, tabsApi: fake.tabsApi },
+    );
+    expectPressOk(res);
+    expect(res).toMatchObject({ key: "/", code: "Slash", modifiers: ["ctrl"] });
+    const keyDown = fake.sent.find(
+      (call) =>
+        call.method === "Input.dispatchKeyEvent" &&
+        (call.params as { type?: string }).type === "rawKeyDown",
+    );
+    expect(keyDown?.params).toMatchObject({
+      key: "/",
+      code: "Slash",
+      windowsVirtualKeyCode: 191,
+      modifiers: 2,
+    });
+    expect(keyDown?.params).not.toHaveProperty("text");
   });
 
   it("focuses an optional target before dispatch", async () => {

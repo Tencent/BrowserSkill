@@ -1636,6 +1636,43 @@ for (let i = 1; i <= 12; i++) {
 }
 
 /**
+ * Physical keys for the ASCII punctuation that has no `Key*`/`Digit*` code,
+ * in the US layout that `Input.dispatchKeyEvent` assumes. The virtual key
+ * codes match Playwright's `USKeyboardLayout`.
+ *
+ * Without them the descriptor carries `code: ""` and no
+ * `windowsVirtualKeyCode`; Chromium does NOT derive either from `text` (the
+ * old comment here claimed it did), and `text` is suppressed whenever
+ * ctrl/meta/alt is held, so `Ctrl+/` reached the page as
+ * `{key: "/", code: "", keyCode: 0}` and never matched a handler that keys
+ * off `event.code === "Slash"`.
+ */
+const PUNCTUATION_KEYMAP: Record<string, { code: string; windowsVirtualKeyCode: number }> = {
+  "`": { code: "Backquote", windowsVirtualKeyCode: 192 },
+  "~": { code: "Backquote", windowsVirtualKeyCode: 192 },
+  "-": { code: "Minus", windowsVirtualKeyCode: 189 },
+  _: { code: "Minus", windowsVirtualKeyCode: 189 },
+  "=": { code: "Equal", windowsVirtualKeyCode: 187 },
+  "+": { code: "Equal", windowsVirtualKeyCode: 187 },
+  "[": { code: "BracketLeft", windowsVirtualKeyCode: 219 },
+  "{": { code: "BracketLeft", windowsVirtualKeyCode: 219 },
+  "]": { code: "BracketRight", windowsVirtualKeyCode: 221 },
+  "}": { code: "BracketRight", windowsVirtualKeyCode: 221 },
+  "\\": { code: "Backslash", windowsVirtualKeyCode: 220 },
+  "|": { code: "Backslash", windowsVirtualKeyCode: 220 },
+  ";": { code: "Semicolon", windowsVirtualKeyCode: 186 },
+  ":": { code: "Semicolon", windowsVirtualKeyCode: 186 },
+  "'": { code: "Quote", windowsVirtualKeyCode: 222 },
+  '"': { code: "Quote", windowsVirtualKeyCode: 222 },
+  ",": { code: "Comma", windowsVirtualKeyCode: 188 },
+  "<": { code: "Comma", windowsVirtualKeyCode: 188 },
+  ".": { code: "Period", windowsVirtualKeyCode: 190 },
+  ">": { code: "Period", windowsVirtualKeyCode: 190 },
+  "/": { code: "Slash", windowsVirtualKeyCode: 191 },
+  "?": { code: "Slash", windowsVirtualKeyCode: 191 },
+};
+
+/**
  * Translate a logical key name (`Enter`, `a`, `3`, `F5`, `ArrowDown`)
  * into the CDP `Input.dispatchKeyEvent` descriptor. Returns `null`
  * for keys we don't recognise (caller surfaces `invalid_params`).
@@ -1669,8 +1706,11 @@ export function resolveKeyDescriptor(key: string): KeyDescriptor | null {
         windowsVirtualKeyCode: ch.charCodeAt(0),
       };
     }
-    // Common punctuation falls back to `text` only. Browsers
-    // synthesise the right code from `text` when CDP can't find one.
+    const punctuation = PUNCTUATION_KEYMAP[ch];
+    if (punctuation) return { key: ch, text: ch, ...punctuation };
+    // Anything else (non-ASCII, characters with no known physical key) still
+    // goes out as text only; a caller that needs `code` semantics should
+    // pass a key from the tables above.
     return { key: ch, code: "", text: ch };
   }
   return null;
