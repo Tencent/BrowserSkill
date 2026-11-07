@@ -178,6 +178,114 @@ pub struct TabReturnResult {
     pub fallback: bool,
 }
 
+// ---------------------------------------------------------------------------
+// tab_group_create / tab_group_update / tab_group_list / tab_group_ungroup
+// ---------------------------------------------------------------------------
+
+/// Mirrors `chrome.tabGroups.ColorEnum`. Chrome assigns an arbitrary color
+/// from this set when a group is created without one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum TabGroupColor {
+    Grey,
+    Blue,
+    Red,
+    Yellow,
+    Green,
+    Pink,
+    Purple,
+    Cyan,
+    Orange,
+}
+
+/// A single tab group entry, as reported by `tool.tab_group_list`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct TabGroupInfo {
+    pub group_id: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    pub color: TabGroupColor,
+    pub collapsed: bool,
+    /// Tab ids currently in this group, in tab-strip order.
+    pub tab_ids: Vec<i64>,
+}
+
+/// Params for `tool.tab_group_create`. Groups one or more tabs from the
+/// requesting session's Agent Window into a new tab group, or adds them
+/// to an existing group in that window when `group_id` is given (mirrors
+/// `chrome.tabs.group`'s own create-or-add behavior).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct TabGroupCreateParams {
+    pub session_id: String,
+    /// Tabs to group. Every tab must already be in the session's Agent
+    /// Window (own tab or borrowed tab) — same sandbox rule as `tab_close`
+    /// / `tab_select`.
+    pub tab_ids: Vec<i64>,
+    /// Add to this existing group instead of creating a new one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group_id: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<TabGroupColor>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct TabGroupCreateResult {
+    pub group_id: i64,
+    pub title: Option<String>,
+    pub color: TabGroupColor,
+    pub tab_ids: Vec<i64>,
+}
+
+/// Params for `tool.tab_group_update`. Only the Agent Window's own
+/// groups are addressable (enforced extension-side against
+/// `chrome.tabGroups.query({ windowId })`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct TabGroupUpdateParams {
+    pub session_id: String,
+    pub group_id: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<TabGroupColor>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub collapsed: Option<bool>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct TabGroupUpdateResult {
+    pub group_id: i64,
+    pub title: Option<String>,
+    pub color: TabGroupColor,
+    pub collapsed: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct TabGroupListParams {
+    pub session_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct TabGroupListResult {
+    pub groups: Vec<TabGroupInfo>,
+}
+
+/// Params for `tool.tab_group_ungroup`. Removes every tab currently in
+/// `group_id` from that group; the tabs themselves are left open in
+/// place. `group_id` must resolve to a group in the session's Agent
+/// Window.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct TabGroupUngroupParams {
+    pub session_id: String,
+    pub group_id: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct TabGroupUngroupResult {
+    pub tab_ids: Vec<i64>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -305,5 +413,72 @@ mod tests {
         };
         let v2 = serde_json::to_value(&r2).unwrap();
         assert_eq!(v2["fallback"], true);
+    }
+
+    #[test]
+    fn tab_group_color_renders_as_lowercase() {
+        let v = serde_json::to_value(TabGroupColor::Cyan).unwrap();
+        assert_eq!(v, "cyan");
+        let round: TabGroupColor = serde_json::from_value(v).unwrap();
+        assert_eq!(round, TabGroupColor::Cyan);
+    }
+
+    #[test]
+    fn tab_group_create_params_optional_fields_omitted_by_default() {
+        let v = json!({ "session_id": "aa11", "tab_ids": [1, 2] });
+        let p: TabGroupCreateParams = serde_json::from_value(v).unwrap();
+        assert_eq!(p.tab_ids, vec![1, 2]);
+        assert!(p.group_id.is_none());
+        assert!(p.title.is_none());
+        assert!(p.color.is_none());
+    }
+
+    #[test]
+    fn tab_group_create_result_round_trip() {
+        let r = TabGroupCreateResult {
+            group_id: 42,
+            title: Some("Research".into()),
+            color: TabGroupColor::Blue,
+            tab_ids: vec![1, 2, 3],
+        };
+        let v = serde_json::to_value(&r).unwrap();
+        assert_eq!(v["group_id"], 42);
+        assert_eq!(v["color"], "blue");
+        let round: TabGroupCreateResult = serde_json::from_value(v).unwrap();
+        assert_eq!(round, r);
+    }
+
+    #[test]
+    fn tab_group_update_params_all_optional_except_ids() {
+        let p: TabGroupUpdateParams =
+            serde_json::from_value(json!({ "session_id": "aa11", "group_id": 7 })).unwrap();
+        assert!(p.title.is_none());
+        assert!(p.color.is_none());
+        assert!(p.collapsed.is_none());
+    }
+
+    #[test]
+    fn tab_group_info_round_trip() {
+        let info = TabGroupInfo {
+            group_id: 7,
+            title: None,
+            color: TabGroupColor::Grey,
+            collapsed: true,
+            tab_ids: vec![10, 11],
+        };
+        let v = serde_json::to_value(&info).unwrap();
+        assert!(v.get("title").is_none());
+        let round: TabGroupInfo = serde_json::from_value(v).unwrap();
+        assert_eq!(round, info);
+    }
+
+    #[test]
+    fn tab_group_ungroup_result_round_trip() {
+        let r = TabGroupUngroupResult {
+            tab_ids: vec![1, 2],
+        };
+        let v = serde_json::to_value(&r).unwrap();
+        let round: TabGroupUngroupResult = serde_json::from_value(v).unwrap();
+        assert_eq!(round, r);
     }
 }
