@@ -1963,6 +1963,23 @@ describe("handlePress", () => {
     expect(res).toMatchObject({ code: "invalid_params" });
   });
 
+  it.each([
+    "constructor",
+    "toString",
+    "__proto__",
+  ])("rejects inherited object property %s without dispatching a key event", async (key) => {
+    const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
+    await sm.start("aa11");
+    const fake = makeFakeCdp({ "Input.dispatchKeyEvent": () => ({}) });
+    const res = await handlePress(
+      sm,
+      { session_id: "aa11", key },
+      { cdp: fake.cdp, tabsApi: fake.tabsApi },
+    );
+    expect(res).toMatchObject({ code: "invalid_params" });
+    expect(fake.sent.filter((call) => call.method === "Input.dispatchKeyEvent")).toHaveLength(0);
+  });
+
   it("holds the key for hold_ms between keyDown and keyUp", async () => {
     const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
     await sm.start("aa11");
