@@ -62,6 +62,8 @@ determines which versions can connect.
   instead of repeated sync/evaluate refusals.
 - Control-state sampling recollects once after the browser proves that a failed child document retired; an active unobservable frame still blocks input.
 - Removed nodes already collected by CDP report target_detached with node identity, consistently with detached nodes that remain inspectable; other CDP failures remain target_unavailable.
+- Recording captures option changes on native `<select>` controls inside open shadow roots,
+  whose `change` events do not reach the document.
 
 ### Fixed
 

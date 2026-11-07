@@ -34,6 +34,7 @@ CLI、扩展和 DSH 插件可以分别发布，能否连接由协议兼容性决
 - CLI、MCP、DSH 及内置 skill 引导动态页面的数据读取使用 read/extract，避免反复 sync/evaluate 拒绝。
 - 控制状态采样在浏览器证实失败的子文档已退出后有界重新收集一次；仍存在但不可观测的框架继续阻止输入。
 - 已被 CDP 回收的移除节点与仍可检查的脱离节点统一返回 target_detached，并保留节点身份；其他 CDP 故障仍返回 target_unavailable。
+- 录制捕获 open shadow root 内原生 `<select>` 的选项变化；这类控件的 `change` 事件不会到达 document。
 
 ### 修复
 
