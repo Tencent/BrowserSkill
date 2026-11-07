@@ -5,6 +5,7 @@ import {
   resolveClickableElement,
   resolveHoverElement,
 } from "@/lib/describe-target";
+import { readFillableValue } from "@/lib/fillable-value";
 import {
   evaluateHoverTrigger,
   type HoverTriggerDecision,
@@ -142,10 +143,7 @@ function geometryForEventTarget(
 }
 
 function fillableValue(el: FillableElement): string {
-  if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) {
-    return el.value;
-  }
-  return el.textContent ?? "";
+  return readFillableValue.call(el);
 }
 
 function hoverTriggerAttrs(el: Element): Record<string, string | undefined> {

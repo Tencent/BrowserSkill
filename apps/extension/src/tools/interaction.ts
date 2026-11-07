@@ -2,6 +2,7 @@ import { withInputReady } from "./input-readiness";
 import { consumeVisualCapture, isVisualPointRequest } from "./visual-capture";
 import { resolveVisualRegionNow, sameVisualMapping, verifyVisualHit } from "./visual-target";
 import { isAbortError } from "./vom/capture-abort";
+
 // DOM interaction tools — click, hover, focus/blur, fill, press, and select.
 //
 // All interaction tools:
@@ -15,6 +16,7 @@ import { isAbortError } from "./vom/capture-abort";
 
 import { ChromiumCdp } from "@/browser-driver/chromium-cdp";
 import type { CdpTarget } from "@/browser-driver/frame-graph";
+import { readFillableValue } from "@/lib/fillable-value";
 import type { SessionContext, SessionManager } from "@/session-manager/manager";
 import type {
   BlurParams,
@@ -997,44 +999,7 @@ const FILL_EDITABLE_FUNCTION = `function() {
 // line edges is source formatting rather than text.
 const FILL_COLLAPSES_WHITESPACE = `['normal', 'nowrap'].includes(getComputedStyle(this).whiteSpace)`;
 
-// Typing produces text nodes, <br>, and direct <div> lines. Read that layout
-// literally: innerText collapses whitespace and counts the <br> that only holds
-// a line open. Other rich structures keep their rendered text. Normalize NBSP
-// only in the read value; never rewrite the user's DOM characters.
-const FILL_VALUE_FUNCTION = `function() {
-  if (this.matches('input,textarea')) return this.value;
-  const collapses = ${FILL_COLLAPSES_WHITESPACE};
-  const isInline = node => node.nodeType === Node.TEXT_NODE || node.nodeName === 'BR';
-  const isLine = node => node.nodeName === 'DIV' && getComputedStyle(node).display === 'block' &&
-    [...node.childNodes].every(isInline);
-  const nodes = [...this.childNodes];
-  let value;
-  if (nodes.every(node => isInline(node) || isLine(node))) {
-    const lines = [];
-    let open;
-    for (const node of nodes) {
-      if (isLine(node)) {
-        lines.push([...node.childNodes]);
-        open = undefined;
-      } else {
-        if (!open) lines.push(open = []);
-        open.push(node);
-      }
-    }
-    value = lines.flatMap(line => {
-      let text = line.map((node, index) => node.nodeName !== 'BR' ? node.data :
-        index < line.length - 1 ? '\\n' : '').join('');
-      if (collapses) text = text.replace(/^[ \\t\\r\\n]+|[ \\t\\r\\n]+$/g, '');
-      // Without a <br>, an empty line has no height.
-      return text === '' && !line.some(node => node.nodeName === 'BR') ? [] : [text];
-    }).join('\\n');
-  } else {
-    // An editor holding only an empty line, such as <p><br></p>, is empty.
-    const rendered = this.innerText;
-    value = rendered === '\\n' && this.textContent === '' ? '' : rendered;
-  }
-  return collapses ? value.replace(/\\u00a0/g, ' ') : value;
-}`;
+const FILL_VALUE_FUNCTION = readFillableValue.toString();
 
 // Read-only validation shared by preflight and the final check before clearing.
 // Recompute after focus handlers: the target or its constraints may have changed.

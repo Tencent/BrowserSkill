@@ -178,6 +178,10 @@ determines which versions can connect.
   ref map, and passing that one was refused with a hint that did not say which
   of the two ids to use.
 
+- Recorded contenteditable fills preserve line breaks, including blank and trailing
+  lines. Recording and fill verification share the same value reader so caret
+  placeholder breaks are not recorded as extra content.
+
 ## [0.4.1] - 2026-11-02
 
 ### Changed
