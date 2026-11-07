@@ -1038,6 +1038,40 @@ describe("negotiated target control", () => {
     expect(f.send).not.toHaveBeenCalled();
   });
 
+  it("keeps an upload refusal when the frame stops reporting right after it", async () => {
+    const f = await fixture();
+    const refusal = {
+      code: "permission_denied",
+      message: "Not allowed to load local resource",
+      data: { reason: "set_file_input_failed", effect_state: "unknown", phase: "set_files" },
+    };
+    const result = await f.run({ selector: "#file" }, "tool.upload", async (runner) => {
+      await runner.send(7, "DOM.setFileInputFiles", {
+        files: ["/staged/example.txt"],
+        backendNodeId: 4,
+      });
+      // The page stops answering once the file was refused; the receipt collected
+      // before that still describes the refusal.
+      f.readFrames.mockRejectedValueOnce(new Error("Collector unavailable"));
+      return refusal;
+    });
+    expect(result).toMatchObject({
+      code: "permission_denied",
+      message: "Not allowed to load local resource",
+      data: {
+        reason: "set_file_input_failed",
+        phase: "set_files",
+        effect_state: "unknown",
+        recovery: expect.stringContaining("synchronize"),
+      },
+    });
+    expect(f.send).toHaveBeenCalledOnce();
+    // An unconfirmed assignment still requires a fresh context before more input.
+    expect(await f.run({ selector: "#file", ref: undefined }, "tool.upload")).toMatchObject({
+      data: { reason: "control_context_invalid" },
+    });
+  });
+
   it("keeps business expectations immediate instead of waiting for a price to change back", async () => {
     const f = await fixture();
     vi.mocked(checkExpectations).mockResolvedValueOnce({

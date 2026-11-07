@@ -1806,7 +1806,13 @@ export class CooperationController implements ControlAuthority {
         sent &&
         !isRpcError(result) &&
         (req.method !== "tool.evaluate" || (result as { ok?: boolean })?.ok === true);
-      if (["tool.evaluate", "tool.upload"].includes(req.method)) {
+      // A handler that failed already reported what reached the page. Refreshing
+      // afterwards would let a frame this tab can no longer observe replace that
+      // receipt with a control-context error, hiding the real cause (#636). The
+      // failure still revokes the context below when its effect is unknown, and
+      // the next action refreshes before it runs.
+      const reported = isRpcError(result) ? result : undefined;
+      if (["tool.evaluate", "tool.upload"].includes(req.method) && !reported) {
         try {
           await this.refresh(state);
         } catch (error) {
