@@ -99,8 +99,19 @@ function fillableFromTarget(target: EventTarget | null): FillableElement | null 
   if (!(target instanceof Element)) return null;
   if (isTextFillable(target)) return target;
   const el = target.closest('input,textarea,[contenteditable]:not([contenteditable="false"])');
-  if (el && isTextFillable(el)) return el;
-  return null;
+  if (!el || !isTextFillable(el) || isControlInNonEditableRegion(target, el)) return null;
+  return el;
+}
+
+/**
+ * Buttons and links inside a contenteditable="false" region of an editor, such
+ * as attachment or embed actions, are page actions rather than editor text.
+ */
+function isControlInNonEditableRegion(target: Element, editor: Element): boolean {
+  const region = target.closest('[contenteditable="false"]');
+  if (!region || !editor.contains(region)) return false;
+  const control = resolveClickableElement(target);
+  return control !== null && region.contains(control);
 }
 
 /** Clicks on search chrome that only focus the nearby input should not become steps. */
