@@ -114,6 +114,13 @@ const fixtures: Record<string, string> = {
   ),
   hiddenRow:
     '<table id="t"><tr><th>A</th></tr><tr><td>1</td></tr><tr style="display:none"><td>detail</td></tr><tr><td>2</td></tr></table>',
+  hiddenTarget: '<table id="t" hidden><tr><td>Secret</td></tr></table>',
+  hiddenInlineOverride:
+    '<table id="t" hidden style="display:table"><tr><td>Visible</td></tr></table>',
+  hiddenSheetOverride:
+    '<style>#t { display: table; }</style><table id="t" hidden><tr><td>Visible</td></tr></table>',
+  hiddenAncestorOverride:
+    '<style>#host { display: block; }</style><div id="host" hidden><table id="t"><tr><td>Visible</td></tr></table></div>',
   discovery: `${range(40)
     .map((index) => `<ul><li><a href="/n${index}">nav ${index}</a></li></ul>`)
     .join(
@@ -292,6 +299,24 @@ describe.skipIf(!process.env.BSK_CLICK_CHROME)("real browser structured extracti
         /^extract_target_hidden:/,
       );
     }
+  });
+
+  it("treats computed rendering as authoritative for the hidden attribute", async () => {
+    expect((await extract("hiddenTarget", { action: "table", selector: "#t" })).error).toMatch(
+      /^extract_target_hidden:/,
+    );
+    expect(
+      values(await extract("hiddenInlineOverride", { action: "table", selector: "#t" })),
+    ).toEqual([["Visible"]]);
+    expect(
+      values(await extract("hiddenSheetOverride", { action: "table", selector: "#t" })),
+    ).toEqual([["Visible"]]);
+  });
+
+  it("extracts a target under a hidden ancestor that author CSS restored", async () => {
+    expect(
+      values(await extract("hiddenAncestorOverride", { action: "table", selector: "#t" })),
+    ).toEqual([["Visible"]]);
   });
 
   it("keeps text where content-visibility does not apply to the display type", async () => {

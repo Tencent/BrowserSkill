@@ -65,6 +65,12 @@ export function collectExtractDom(this: Element, options: CollectorOptions): Raw
       element !== parent.querySelector(":scope > summary")
     );
   };
+  // `[hidden]` is only a UA-stylesheet default, so the attribute says nothing
+  // about what actually renders: author CSS can restore the box, from an inline
+  // declaration or from any stylesheet rule. Chromium has already resolved that
+  // cascade by the time we read computed style, which makes the display check
+  // below the authority. hidden="until-found" is the exception, because its
+  // hiding is content-visibility rather than display.
   const isSubtreeHidden = (node: Element): boolean => {
     const cached = hiddenSubtrees.get(node);
     if (cached !== undefined) return cached;
@@ -83,7 +89,7 @@ export function collectExtractDom(this: Element, options: CollectorOptions): Raw
       // Chromium ignores content-visibility on ordinary inline, boxless and
       // non-cell table boxes. Keep their rendered contents extractable.
       if (
-        current.hasAttribute("hidden") ||
+        current.getAttribute("hidden") === "until-found" ||
         current.hasAttribute("data-bsk-overlay") ||
         current.hasAttribute("data-bsk-overlay-host") ||
         current.tagName.toLowerCase() === "browser-skill-overlay" ||
