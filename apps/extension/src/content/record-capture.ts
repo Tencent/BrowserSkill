@@ -930,6 +930,16 @@ export function startRecordCapture(
     });
   };
 
+  // Preserve the pre-edit value when recording starts in an already focused editor.
+  let focusedElement = document.activeElement;
+  while (focusedElement?.shadowRoot?.activeElement) {
+    focusedElement = focusedElement.shadowRoot.activeElement;
+  }
+  if (!isOverlayTarget(focusedElement)) {
+    const fillable = fillableFromTarget(focusedElement);
+    if (fillable) ensureFillSession(fillable);
+  }
+
   document.addEventListener("click", onClick, true);
   document.addEventListener("mouseover", onMouseOver, true);
   document.addEventListener("focusin", onFocusIn, true);

@@ -94,6 +94,107 @@ describe("record-capture semantic", () => {
     expect(steps.some((s) => "selector" in s)).toBe(false);
   });
 
+  it.each([
+    "input",
+    "textarea",
+    "contenteditable",
+    "shadow input",
+  ])("records the first input without keydown in an already focused %s", (kind: string) => {
+    const root =
+      kind === "shadow input"
+        ? document.body.appendChild(document.createElement("div")).attachShadow({ mode: "open" })
+        : document.body;
+    root.innerHTML =
+      kind === "contenteditable"
+        ? '<div contenteditable="true" tabindex="0" aria-label="Message">Draft</div>'
+        : kind === "textarea"
+          ? '<textarea aria-label="Message">Draft</textarea>'
+          : '<input aria-label="Message" value="Draft">';
+    const editor = root.firstElementChild as HTMLElement;
+    if (kind === "contenteditable") {
+      Object.defineProperty(editor, "isContentEditable", { value: true });
+    }
+    editor.focus();
+    const capture = startRecordCapture("rec-initial-focus", (step) => steps.push(step));
+    if (editor instanceof HTMLInputElement || editor instanceof HTMLTextAreaElement) {
+      editor.value = "Draft你好";
+    } else {
+      editor.textContent = "Draft你好";
+    }
+    editor.dispatchEvent(new Event("input", { bubbles: true, composed: true }));
+    editor.blur();
+    capture.dispose();
+
+    expect(steps).toEqual([
+      expect.objectContaining({
+        op: "fill",
+        value: "Draft你好",
+        target: expect.objectContaining({ tag: editor.tagName.toLowerCase(), name: "Message" }),
+        commit: "blur",
+      }),
+    ]);
+  });
+
+  it("does not record an unchanged field and resets the baseline for each recording", () => {
+    const input = document.querySelector("input")!;
+    input.value = "Draft";
+    input.focus();
+    startRecordCapture("rec-unchanged", (step) => steps.push(step)).dispose();
+    expect(steps).toEqual([]);
+
+    const capture = startRecordCapture("rec-clear", (step) => steps.push(step));
+    input.value = "";
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    capture.dispose();
+    expect(steps).toEqual([expect.objectContaining({ op: "fill", value: "" })]);
+
+    startRecordCapture("rec-cleared-unchanged", (step) => steps.push(step)).dispose();
+    expect(steps).toHaveLength(1);
+  });
+
+  it("merges successive inputs in an already focused field", () => {
+    const input = document.querySelector("input")!;
+    input.focus();
+    const capture = startRecordCapture("rec-initial-multiple", (step) => steps.push(step));
+    for (const value of ["你", "你好"]) {
+      input.value = value;
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    }
+    input.blur();
+    capture.dispose();
+
+    expect(steps).toEqual([expect.objectContaining({ op: "fill", value: "你好" })]);
+  });
+
+  it.each([
+    "password",
+    "one-time-code",
+  ])("masks the first edit in an already focused %s field", (kind: string) => {
+    const input = document.querySelector("input")!;
+    if (kind === "password") input.type = "password";
+    else input.setAttribute("autocomplete", kind);
+    input.focus();
+    const capture = startRecordCapture("rec-initial-sensitive", (step) => steps.push(step));
+    input.value = "BSK_SYNTHETIC_SECRET";
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    capture.dispose();
+
+    expect(steps).toEqual([expect.objectContaining({ op: "fill", value: "***", redacted: true })]);
+    expect(JSON.stringify(steps)).not.toContain("BSK_SYNTHETIC_SECRET");
+  });
+
+  it("does not initialize a fill session for the recording overlay", () => {
+    document.body.innerHTML = '<div data-bsk-overlay><input value="Draft"></div>';
+    const input = document.querySelector("input")!;
+    input.focus();
+    const capture = startRecordCapture("rec-initial-overlay", (step) => steps.push(step));
+    input.value = "Overlay draft";
+    input.blur();
+    capture.dispose();
+
+    expect(steps).toEqual([]);
+  });
+
   it("masks codes and card numbers typed into a recorded field", () => {
     document.querySelector("input")!.setAttribute("autocomplete", "billing cc-number");
     const capture = startRecordCapture("rec-1", (step) => steps.push(step));

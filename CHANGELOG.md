@@ -52,6 +52,9 @@ determines which versions can connect.
 
 ### Fixed
 
+- Recording no longer drops the first edit made without a key press, such as inserted text,
+  in a field that was already focused when recording started. The field's value at the
+  start of recording is now the baseline for that edit.
 - `press` maps US-layout punctuation to its physical `code` and virtual key code,
   so shortcuts such as `Ctrl+/` reach handlers that check `event.code`.
 - Main-document SPA route changes, including away-and-back and hash routes,
