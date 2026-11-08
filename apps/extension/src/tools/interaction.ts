@@ -1307,8 +1307,33 @@ export async function handleFill(
             if (this.getRootNode().activeElement !== this) return 'fill_focus_lost';
             if (verifyCaret) {
               const selection = this.ownerDocument.getSelection();
-              if (!selection || !selection.isCollapsed || selection.anchorNode !== this ||
-                  selection.anchorOffset !== this.childNodes.length) return 'fill_focus_lost';
+              if (!selection?.isCollapsed || !this.contains(selection.anchorNode)) return 'fill_focus_lost';
+              // Editors can normalize the same end caret into their last paragraph/text node.
+              // Follow that boundary to the host; empty text alone would also skip images/atoms.
+              let node = selection.anchorNode;
+              let offset = selection.anchorOffset;
+              let paddingBreak = false;
+              for (;;) {
+                if (node.nodeType === Node.TEXT_NODE) {
+                  if (offset !== node.length) return 'fill_focus_lost';
+                } else if (node.nodeType === Node.ELEMENT_NODE) {
+                  if (!node.isContentEditable || node.matches('input,textarea,select,button,img,br,hr,iframe,object,embed,canvas,video,audio')) return 'fill_focus_lost';
+                  if (offset !== node.childNodes.length) {
+                    // One BR may hold an empty paragraph or the host's final inline line open.
+                    // Do not cross a real line break or an independent block after the caret.
+                    const inlineHost = node === this && [...node.childNodes].every(child =>
+                      child.nodeType === Node.TEXT_NODE || child.nodeName === 'BR');
+                    if (paddingBreak || offset !== node.childNodes.length - 1 ||
+                        node.lastChild?.nodeName !== 'BR' ||
+                        (node.childNodes.length !== 1 && !inlineHost)) return 'fill_focus_lost';
+                    paddingBreak = true;
+                  }
+                } else return 'fill_focus_lost';
+                if (node === this) break;
+                const parent = node.parentNode;
+                offset = [...parent.childNodes].indexOf(node) + 1;
+                node = parent;
+              }
             }
             if (placeCaret) {
               const selection = this.ownerDocument.getSelection();
