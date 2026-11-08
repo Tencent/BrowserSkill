@@ -347,7 +347,10 @@ const BROWSER_TOOL_SPECS: BrowserToolSpec[] = [
         items: { type: "string", enum: ["alt", "ctrl", "meta", "shift"] },
         description: "Modifiers held during hover, wheel, or drag input.",
       },
-      settleMs: { type: "integer", description: "Hover settle delay." },
+      settleMs: {
+        type: "integer",
+        description: "Hover settle delay in milliseconds; 0 disables the extra wait.",
+      },
       deltaX: {
         type: "number",
         description: "Horizontal wheel input or drag displacement in CSS pixels; defaults to 0.",

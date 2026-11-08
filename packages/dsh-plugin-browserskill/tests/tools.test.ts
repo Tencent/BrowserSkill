@@ -1702,6 +1702,58 @@ describe("interaction tools", () => {
     );
   });
 
+  it.each([
+    { settleMs: undefined, settleArgs: [] },
+    { settleMs: 0, settleArgs: ["--settle", "0ms"] },
+    { settleMs: 1, settleArgs: ["--settle", "1ms"] },
+    { settleMs: 250, settleArgs: ["--settle", "250ms"] },
+  ])("interact.hover forwards settleMs=$settleMs", async ({ settleMs, settleArgs }) => {
+    const { tools, calls } = setup({
+      "session start": START_REPLY("s1"),
+      hover: { tab_id: 7, x: 12, y: 24 },
+    });
+    await startSession(tools);
+    await expect(
+      tools
+        .get("interact.hover")!
+        .execute({ target: "#a", ...(settleMs === undefined ? {} : { settleMs }) }, makeExec()),
+    ).resolves.toMatchObject({ session: "s1", tabId: 7, x: 12, y: 24 });
+    const actions = calls.filter((call) => call.args[0] === "hover");
+    expect(actions).toHaveLength(1);
+    expect(actions[0].args).toEqual(["hover", "--session", "s1", ...settleArgs, "#a"]);
+  });
+
+  it.each([
+    -1,
+    -100,
+    0.5,
+    Number.NaN,
+    Number.POSITIVE_INFINITY,
+    Number.NEGATIVE_INFINITY,
+  ])("interact.hover rejects invalid settleMs=%s before dispatch", async (settleMs) => {
+    const { tools, calls } = setup({
+      "session start": START_REPLY("s1"),
+      hover: { tab_id: 7, x: 12, y: 24 },
+    });
+    await startSession(tools);
+    await expect(
+      tools.get("interact.hover")!.execute({ target: "#a", settleMs }, makeExec()),
+    ).rejects.toThrow();
+    expect(calls.filter((call) => call.args[0] === "hover")).toHaveLength(0);
+  });
+
+  it("interact.hover still rejects a zero timeout when settleMs is zero", async () => {
+    const { tools, calls } = setup({
+      "session start": START_REPLY("s1"),
+      hover: { tab_id: 7, x: 12, y: 24 },
+    });
+    await startSession(tools);
+    await expect(
+      tools.get("interact.hover")!.execute({ target: "#a", settleMs: 0, timeoutMs: 0 }, makeExec()),
+    ).rejects.toThrow(/timeoutMs/);
+    expect(calls.filter((call) => call.args[0] === "hover")).toHaveLength(0);
+  });
+
   it("interact.hover and interact.select map their structured arguments", async () => {
     const { tools, calls } = setup({
       "session start": START_REPLY("s1"),

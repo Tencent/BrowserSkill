@@ -142,7 +142,8 @@ export function registerPhaseOneInteractionTools(
         },
         settleMs: {
           type: "integer",
-          description: "Milliseconds to wait for hover-triggered UI to settle (default: 200).",
+          description:
+            "Hover settle delay in milliseconds; 0 disables the extra wait (default: 200).",
         },
         timeoutMs: TIMEOUT_MS_PARAM,
       },
@@ -167,7 +168,12 @@ export function registerPhaseOneInteractionTools(
       async execute(args, exec) {
         requireNonEmpty(args.target, "target");
         requirePositive(args.timeoutMs, "timeoutMs");
-        requirePositive(args.settleMs, "settleMs");
+        if (
+          args.settleMs !== undefined &&
+          (!Number.isInteger(args.settleMs) || args.settleMs < 0)
+        ) {
+          throw new Error("settleMs must be a non-negative integer");
+        }
         const sessionId = registry.resolve(args.session, "bsk_interact(action=hover)");
         const cmdArgs = ["hover", "--session", sessionId];
         appendTabId(cmdArgs, args.tabId);

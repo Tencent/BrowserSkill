@@ -52,6 +52,9 @@ determines which versions can connect.
 
 ### Fixed
 
+- DSH hover accepts `settleMs: 0` and forwards `--settle 0ms` to disable the
+  additional settle delay. Negative and non-integer values remain rejected
+  ([#647](https://github.com/Tencent/BrowserSkill/issues/647)).
 - `press` maps US-layout punctuation to its physical `code` and virtual key code,
   so shortcuts such as `Ctrl+/` reach handlers that check `event.code`.
 - Main-document SPA route changes, including away-and-back and hash routes,
