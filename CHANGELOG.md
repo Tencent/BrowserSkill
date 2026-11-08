@@ -52,6 +52,8 @@ determines which versions can connect.
 
 ### Fixed
 
+- `press` maps US-layout punctuation to its physical `code` and virtual key code,
+  so shortcuts such as `Ctrl+/` reach handlers that check `event.code`.
 - Main-document SPA route changes, including away-and-back and hash routes,
   invalidate old control contexts and refs. Supplementary reads never renew them.
   This also covers passive reads of already loaded tabs and fresh debugger attachments.
