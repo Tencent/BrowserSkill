@@ -944,7 +944,7 @@ type SelectMutationResult =
     }
   | {
       ok: false;
-      reason: "option_not_found" | "target_disabled";
+      reason: "option_not_found" | "target_disabled" | "target_detached";
       missing?: string;
     };
 
@@ -1939,6 +1939,7 @@ export async function handleSelect(
   const node = await resolveBackendNode(deps.cdp, ctx, target, params, "select");
   if (isRpcError(node)) return node;
   const nodeCdp = cdpRunnerForTarget(deps.cdp, node.cdpTarget);
+  let objectId: string;
 
   try {
     deps.cdp.trackSessionTab?.(ctx.sessionId, target.tabId);
@@ -1965,6 +1966,13 @@ export async function handleSelect(
         "single-select <select> requires exactly one value",
       );
     }
+    // Pin the original realm before scrolling/focus can adopt or replace the node.
+    const objectIdOrErr = await backendNodeToObject(nodeCdp, target.tabId, node.backendNodeId);
+    if (isRpcError(objectIdOrErr)) return objectIdOrErr;
+    objectId = objectIdOrErr;
+    if (throwIfAborted(deps.signal)) {
+      return { code: "cancelled", message: "select aborted" };
+    }
     const scrollErr = await scrollElementAndFramesIntoView(
       deps.cdp,
       target.tabId,
@@ -1988,10 +1996,6 @@ export async function handleSelect(
     return { code: "cancelled", message: "select aborted" };
   }
 
-  const objectIdOrErr = await backendNodeToObject(nodeCdp, target.tabId, node.backendNodeId);
-  if (isRpcError(objectIdOrErr)) return objectIdOrErr;
-  const objectId = objectIdOrErr;
-
   try {
     await deps.cdp.beginDomMutation?.();
     const evaluated = await nodeCdp.send<{
@@ -2000,6 +2004,10 @@ export async function handleSelect(
       objectId,
       functionDeclaration: `function(values) {
         const select = this;
+        // Focus handlers can replace or adopt the original node before this call.
+        if (!select.isConnected || select.ownerDocument !== document) {
+          return { ok: false, reason: 'target_detached' };
+        }
         if (select.matches(':disabled')) {
           return { ok: false, reason: 'target_disabled' };
         }
@@ -2029,6 +2037,14 @@ export async function handleSelect(
     });
     const mutation = evaluated.result?.value;
     if (!mutation?.ok) {
+      if (mutation?.reason === "target_detached") {
+        return rpcError(
+          "cdp_failed",
+          "target_detached",
+          "select target was removed or moved to another document before selection",
+          { effect_state: "none" },
+        );
+      }
       if (mutation?.reason === "target_disabled") {
         return { code: "invalid_params", message: "select requires an enabled <select>" };
       }

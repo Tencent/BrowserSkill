@@ -14,8 +14,9 @@ type Send = <T = Record<string, unknown>>(
 let send: Send;
 let close: (() => void) | undefined;
 let browserRun: Promise<void> | undefined;
+const chromeExecutable = process.env.BSK_SELECT_CHROME;
 
-if (process.env.BSK_SELECT_CHROME) {
+if (chromeExecutable) {
   beforeAll(async () => {
     const { withChrome } = await import(
       new URL(
@@ -27,7 +28,7 @@ if (process.env.BSK_SELECT_CHROME) {
     const closed = Promise.withResolvers<void>();
     close = () => closed.resolve();
     browserRun = withChrome(
-      { executable: process.env.BSK_SELECT_CHROME, deviceScale: 1, zoom: 1 },
+      { executable: chromeExecutable, deviceScale: 1, zoom: 1 },
       async (command: Send) => {
         ready.resolve(command);
         await closed.promise;
@@ -42,7 +43,7 @@ if (process.env.BSK_SELECT_CHROME) {
   }, 30_000);
 }
 
-describe.skipIf(!process.env.BSK_SELECT_CHROME)("select disabled state in Chrome", () => {
+describe.skipIf(!chromeExecutable)("select disabled state in Chrome", () => {
   it.each([
     { name: "directly disabled", markup: "<select disabled></select>", disabled: true },
     {
@@ -139,4 +140,124 @@ describe.skipIf(!process.env.BSK_SELECT_CHROME)("select disabled state in Chrome
       await send("Target.closeTarget", { targetId });
     }
   });
+});
+
+describe.skipIf(!chromeExecutable)("select target lifetime in Chrome", () => {
+  it.each([
+    ["unchanged", false],
+    ["replaced during focus", true],
+    ["removed during focus", true],
+    ["adopted during focus", true],
+    ["adopted during scrolling", true],
+    ["moved within the document", false],
+    ["shadow root", false],
+    ["iframe", false],
+  ] as const)(
+    "handles a select %s",
+    async (mode: string, stale: boolean) => {
+      const { targetId } = await send<{ targetId: string }>("Target.createTarget", {
+        url: "about:blank",
+      });
+      try {
+        const { sessionId } = await send<{ sessionId: string }>("Target.attachToTarget", {
+          targetId,
+          flatten: true,
+        });
+        const evaluate = async (expression: string) => {
+          const reply = await send<{ result: { value: unknown }; exceptionDetails?: unknown }>(
+            "Runtime.evaluate",
+            { expression, returnByValue: true },
+            sessionId,
+          );
+          expect(reply.exceptionDetails).toBeUndefined();
+          return reply.result.value;
+        };
+        await evaluate(`(() => {
+        const mode = ${JSON.stringify(mode)};
+        document.body.innerHTML = '<div id="container"></div><iframe></iframe>';
+        let root = document.querySelector('#container');
+        if (mode === 'shadow root') root = root.attachShadow({mode:'open'});
+        if (mode === 'iframe') root = document.querySelector('iframe').contentDocument.body;
+        root.innerHTML = '<select><option value="a">Alpha</option><option value="b">Beta</option></select>';
+        const select = root.querySelector('select');
+        window.oldSelect = select;
+        window.originalOwner = select.ownerDocument;
+        window.liveRoot = root;
+        window.events = [];
+        for (const type of ['input', 'change']) select.addEventListener(type, () => window.events.push(type));
+        select.addEventListener('focus', () => {
+          if (mode === 'replaced during focus') select.replaceWith(select.cloneNode(true));
+          if (mode === 'removed during focus') select.remove();
+          if (mode === 'adopted during focus') document.querySelector('iframe').contentDocument.body.append(select);
+          if (mode === 'moved within the document') document.body.append(select);
+        }, {once:true});
+      })()`);
+        const { result } = await send<{ result: { objectId: string } }>(
+          "Runtime.evaluate",
+          { expression: "window.oldSelect" },
+          sessionId,
+        );
+        const { node } = await send<{ node: { backendNodeId: number } }>(
+          "DOM.describeNode",
+          { objectId: result.objectId },
+          sessionId,
+        );
+        await send("Runtime.releaseObject", { objectId: result.objectId }, sessionId);
+        const manager = new SessionManager({
+          agentWindow: {
+            create: async () => ({ windowId: 100, initialTabIds: [] }),
+            remove: async () => {},
+            ensureActiveTab: async () => 4,
+          },
+        });
+        const ctx = await manager.start("aa11");
+        ctx.refStore.set("e1", node.backendNodeId, { tabId: 4 });
+        const cdp: CdpRunner = {
+          send: async (_tabId, method, params) => {
+            const result = await send(method, params, sessionId);
+            // A scroll callback can adopt the node before the caller resumes.
+            if (mode === "adopted during scrolling" && method === "DOM.scrollIntoViewIfNeeded")
+              await evaluate(
+                "document.querySelector('iframe').contentDocument.body.append(window.oldSelect)",
+              );
+            return result as never;
+          },
+        };
+        const reply = await handleSelect(
+          manager,
+          { session_id: "aa11", ref: "e1", values: ["b"] },
+          {
+            cdp,
+            tabsApi: {
+              get: async (id) => ({ id, windowId: 100, active: true }) as chrome.tabs.Tab,
+              query: async () => [{ id: 4, windowId: 100, active: true } as chrome.tabs.Tab],
+            },
+          },
+        );
+        const state = await evaluate(`({
+        oldValue: window.oldSelect.value,
+        connected: window.oldSelect.isConnected,
+        sameDocument: window.oldSelect.ownerDocument === window.originalOwner,
+        liveValue: window.liveRoot.querySelector('select')?.value,
+        events: window.events
+      })`);
+        expect(reply, JSON.stringify({ mode, reply, state })).toMatchObject(
+          stale
+            ? { code: "cdp_failed", data: { reason: "target_detached", effect_state: "none" } }
+            : { selected_values: ["b"] },
+        );
+        expect(state).toMatchObject({
+          oldValue: stale ? "a" : "b",
+          events: stale ? [] : ["input", "change"],
+        });
+        if (mode === "replaced during focus")
+          expect(state).toMatchObject({ connected: false, liveValue: "a" });
+        if (mode.startsWith("adopted"))
+          expect(state).toMatchObject({ connected: true, sameDocument: false });
+      } finally {
+        await send("Target.closeTarget", { targetId });
+      }
+    },
+    30_000,
+  );
 });

@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   INPUT_PASSTHROUGH,
   INPUT_PASSTHROUGH_TTL_MS,
@@ -2050,6 +2050,8 @@ describe("handlePress", () => {
 });
 
 describe("handleSelect", () => {
+  afterEach(() => document.body.replaceChildren());
+
   const selectHandlers = (mutation: {
     ok: boolean;
     reason?: string;
@@ -2077,6 +2079,7 @@ describe("handleSelect", () => {
   ])("respects the disabled state of a $name select", async ({ markup, disabled }) => {
     const host = document.createElement("div");
     host.innerHTML = markup;
+    document.body.append(host);
     const select = host.querySelector("select")!;
     select.innerHTML =
       '<option value="us">United States</option><option value="ca">Canada</option>';
@@ -2254,6 +2257,7 @@ describe("handleSelect", () => {
     const select = document.createElement("select");
     select.multiple = values.length > 1;
     select.innerHTML = options;
+    document.body.append(select);
     const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
     const ctx = await sm.start("aa11");
     ctx.refStore.set("e1", 555, { tabId: 4 });
