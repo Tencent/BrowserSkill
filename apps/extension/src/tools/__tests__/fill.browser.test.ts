@@ -798,6 +798,159 @@ describe.skipIf(!process.env.BSK_FILL_CHROME)("date-like fill regressions", () =
 });
 
 describe.skipIf(!process.env.BSK_FILL_CHROME)("fill caret validation", () => {
+  it.each([
+    [
+      "nested text",
+      "<p><strong>old</strong></p>",
+      "editor.querySelector('strong').firstChild",
+      "3",
+      "old",
+    ],
+    ["empty paragraph", "<p><br></p>", "editor.firstChild", "0", ""],
+    ["inline padding break", "old<br>", "editor.firstChild", "3", "old"],
+  ])(
+    "appends after an editor normalizes its end caret into %s",
+    async (_name: string, content: string, node: string, offset: string, before: string) => {
+      await withFillBrowser(
+        {
+          background: false,
+          markup:
+            guard +
+            `<div id="target" contenteditable="true" style="white-space:pre-wrap">${content}</div>`,
+        },
+        async (h) => {
+          await h.ref("document.querySelector('#target')");
+          h.afterCommand(async (method, params) => {
+            const script = params as {
+              functionDeclaration?: string;
+              arguments?: { value: unknown }[];
+            };
+            if (
+              method === "Runtime.callFunctionOn" &&
+              script.functionDeclaration?.startsWith("function(before, placeCaret") &&
+              script.arguments?.[1].value === true
+            ) {
+              await h.evaluate(`(() => {
+              const editor = document.querySelector('#target');
+              document.getSelection().collapse(${node}, ${offset});
+            })()`);
+            }
+          });
+          expect(await h.fill("hello", false)).toMatchObject({ value_length: before.length + 5 });
+          expect(await h.evaluate("document.querySelector('#target').textContent")).toBe(
+            `${before}hello`,
+          );
+          expect(await h.evaluate("document.querySelector('#guard').value")).toBe("untouched");
+          expect(h.calls.filter((method) => method === "Input.insertText")).toHaveLength(1);
+        },
+      );
+    },
+    30_000,
+  );
+
+  it("replaces a draft after selection synchronization in an empty rich-text paragraph", async () => {
+    const value = "A long message for the editor. ".repeat(40);
+    await withFillBrowser(
+      {
+        background: false,
+        markup:
+          guard +
+          '<div id="target" contenteditable="true" style="white-space:pre-wrap"><p>existing draft</p></div>',
+      },
+      async (h) => {
+        await h.ref("document.querySelector('#target')");
+        await h.evaluate(`(() => {
+          const editor = document.querySelector('#target');
+          editor.addEventListener('input', () => {
+            if (!editor.textContent) editor.innerHTML = '<p><br></p>';
+          });
+          document.addEventListener('selectionchange', () => {
+            const selection = document.getSelection();
+            if (selection?.isCollapsed && selection.anchorNode === editor &&
+                selection.anchorOffset === editor.childNodes.length && !editor.textContent)
+              selection.collapse(editor.firstChild, 0);
+          });
+        })()`);
+        h.afterCommand(async (method, params) => {
+          const script = params as {
+            functionDeclaration?: string;
+            arguments?: { value: unknown }[];
+          };
+          if (
+            method === "Runtime.callFunctionOn" &&
+            script.functionDeclaration?.startsWith("function(before, placeCaret") &&
+            script.arguments?.[1].value === true
+          )
+            await new Promise((resolve) => setTimeout(resolve, 20));
+        });
+        expect(await h.fill(value)).toMatchObject({ value_length: value.length });
+        expect(await h.evaluate("document.querySelector('#target').textContent")).toBe(value);
+        expect(await h.evaluate("document.querySelector('#guard').value")).toBe("untouched");
+        expect(h.calls.filter((method) => method === "Input.insertText")).toHaveLength(1);
+      },
+    );
+  }, 30_000);
+
+  it.each([
+    ["text in the middle", "<p>old</p>", "editor.firstChild.firstChild", "1"],
+    ["before an image", '<p>old<img alt=""></p>', "editor.firstChild.firstChild", "3"],
+    ["inside an image", '<p>old<img alt=""></p>', "editor.querySelector('img')", "0"],
+    ["before two line breaks", "<p>old<br><br></p>", "editor.firstChild.firstChild", "3"],
+    ["before another block", "<p>old</p><p><br></p>", "editor.firstChild.firstChild", "3"],
+    ["before a separate break", "<p>old</p><br>", "editor.firstChild.firstChild", "3"],
+    [
+      "inside a noneditable atom",
+      '<p>old<span contenteditable="false">atom</span></p>',
+      "editor.querySelector('span').firstChild",
+      "4",
+    ],
+    [
+      "inside an independent editing host",
+      '<p>old<span contenteditable="false"><span contenteditable="true">inner</span></span></p>',
+      "editor.querySelector('[contenteditable=true]').firstChild",
+      "5",
+    ],
+  ])(
+    "refuses an editor caret moved %s",
+    async (_name: string, content: string, node: string, offset: string) => {
+      await withFillBrowser(
+        {
+          background: false,
+          markup:
+            guard +
+            `<div id="target" contenteditable="true" style="white-space:pre-wrap">${content}</div>`,
+        },
+        async (h) => {
+          await h.ref("document.querySelector('#target')");
+          const before = await h.evaluate("document.querySelector('#target').innerHTML");
+          h.afterCommand(async (method, params) => {
+            const script = params as {
+              functionDeclaration?: string;
+              arguments?: { value: unknown }[];
+            };
+            if (
+              method === "Runtime.callFunctionOn" &&
+              script.functionDeclaration?.startsWith("function(before, placeCaret") &&
+              script.arguments?.[1].value === true
+            ) {
+              await h.evaluate(`(() => {
+              const editor = document.querySelector('#target');
+              document.getSelection().collapse(${node}, ${offset});
+            })()`);
+            }
+          });
+          expect(await h.fill("hello", false)).toMatchObject({
+            data: { reason: "fill_focus_lost" },
+          });
+          expect(await h.evaluate("document.querySelector('#target').innerHTML")).toBe(before);
+          expect(await h.evaluate("document.querySelector('#guard').value")).toBe("untouched");
+          expect(h.calls).not.toContain("Input.insertText");
+        },
+      );
+    },
+    30_000,
+  );
+
   it("stops if page code moves the caret within the same editor", async () => {
     await withFillBrowser(
       { background: false, markup: guard + '<div id="target" contenteditable="true">old</div>' },
