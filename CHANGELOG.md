@@ -74,6 +74,15 @@ determines which versions can connect.
 - Recording keeps clicks on buttons and links inside an editor's `contenteditable="false"`
   regions, such as attachment actions, instead of treating them as editor input.
 
+## [Unreleased]
+
+### Fixed
+
+- `extract` applies CSS `uppercase` and `lowercase` to text in table cells,
+  headers, list fields and discovery previews, respecting nested style overrides
+  and language-specific casing. Transformed text remains subject to the byte
+  budget ([#597](https://github.com/Tencent/BrowserSkill/issues/597)).
+
 ## [0.4.2] - 2026-11-05
 
 ### Added
