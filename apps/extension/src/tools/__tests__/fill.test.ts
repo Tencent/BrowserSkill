@@ -661,6 +661,20 @@ describe("fill result verification", () => {
     expect(await h.fill("one\n")).toMatchObject({ value_length: 4 });
   });
 
+  it("accepts the NBSP edges Chrome types into a pre-line editor", async () => {
+    const h = await setup(
+      '<div contenteditable="true" tabindex="0" style="white-space: pre-line"></div>',
+    );
+    Object.defineProperty(h.element, "isContentEditable", { get: () => true });
+    // Pre-line editors keep authored line breaks and still fold runs of spaces,
+    // so Chrome types an edge space as NBSP here as well.
+    h.insert.mockImplementation(async (text: string) => {
+      h.element.textContent = text.replace(/ /g, "\u00a0");
+    });
+    expect(await h.fill(" A ")).toMatchObject({ value_length: 3 });
+    expect(h.insert).toHaveBeenCalledWith(" A ");
+  });
+
   it.each([
     [0, 0],
     [1, 1],

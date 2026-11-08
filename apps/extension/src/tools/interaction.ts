@@ -994,8 +994,9 @@ const FILL_EDITABLE_FUNCTION = `function() {
 }`;
 
 // In these modes Chrome types NBSP for spaces at line edges, and whitespace at
-// line edges is source formatting rather than text.
-const FILL_COLLAPSES_WHITESPACE = `['normal', 'nowrap'].includes(getComputedStyle(this).whiteSpace)`;
+// line edges is source formatting rather than text. pre-line collapses spaces
+// too, so a typed edge space comes back as NBSP for the same reason.
+const FILL_COLLAPSES_WHITESPACE = `['normal', 'nowrap', 'pre-line'].includes(getComputedStyle(this).whiteSpace)`;
 
 // Typing produces text nodes, <br>, and direct <div> lines. Read that layout
 // literally: innerText collapses whitespace and counts the <br> that only holds
