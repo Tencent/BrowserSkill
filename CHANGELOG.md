@@ -71,6 +71,8 @@ determines which versions can connect.
 
 - Cooperative status updates preserve an active click-passthrough lease, so the
   control panel and its minimized arrow do not swallow automated page clicks.
+- Recording keeps clicks on buttons and links inside an editor's `contenteditable="false"`
+  regions, such as attachment actions, instead of treating them as editor input.
 
 ## [0.4.2] - 2026-11-05
 
