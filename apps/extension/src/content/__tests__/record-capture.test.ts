@@ -177,6 +177,38 @@ describe("record-capture semantic", () => {
     history.replaceState({}, "", originalUrl);
   });
 
+  it.each([
+    ["an open shadow root", true],
+    ["the light DOM", false],
+  ])("records one select step for a native select in %s", (_name, shadow) => {
+    document.body.innerHTML = `<div id="host"></div>`;
+    const host = document.querySelector("#host")!;
+    const root = shadow ? host.attachShadow({ mode: "open" }) : host;
+    root.innerHTML = `
+      <select aria-label="Choice">
+        <option value="a">Alpha</option>
+        <option value="b">Beta</option>
+      </select>
+    `;
+    const select = root.querySelector("select")!;
+    const capture = startRecordCapture("rec-shadow-select", (step) => steps.push(step));
+
+    // Native user selection: a composed input, then a non-composed change.
+    select.value = "b";
+    select.dispatchEvent(new Event("input", { bubbles: true, composed: true }));
+    select.dispatchEvent(new Event("change", { bubbles: true }));
+    capture.dispose();
+
+    expect(steps).toEqual([
+      expect.objectContaining({
+        op: "select",
+        target: expect.objectContaining({ role: "combobox", name: "Choice" }),
+        values: ["b"],
+        labels: ["Beta"],
+      }),
+    ]);
+  });
+
   it("does not record clicks on anonymous layout divs", () => {
     document.body.innerHTML = `
       <div id="chrome">page chrome</div>

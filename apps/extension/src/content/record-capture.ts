@@ -817,7 +817,14 @@ export function startRecordCapture(
   };
 
   const onInput = (event: Event) => {
-    const target = fillableFromTarget(eventTarget(event));
+    const rawTarget = eventTarget(event);
+    // A native <select> in a shadow root fires a non-composed `change` that
+    // never reaches the document; its composed `input` does.
+    if (rawTarget instanceof HTMLSelectElement && rawTarget.getRootNode() instanceof ShadowRoot) {
+      recordSelect(rawTarget);
+      return;
+    }
+    const target = fillableFromTarget(rawTarget);
     if (!target) return;
     if (composing) return;
     ensureFillSession(target);
@@ -837,25 +844,31 @@ export function startRecordCapture(
     }
   };
 
-  const onChange = (event: Event) => {
+  const recordSelect = (target: HTMLSelectElement) => {
     commitFillSession();
+    emitHoverCandidateBeforeAction(target);
+    const values = Array.from(target.selectedOptions).map((opt) => opt.value);
+    const labels = Array.from(target.selectedOptions).map((opt) =>
+      (opt.label || opt.textContent || opt.value).trim(),
+    );
+    const desc = describeTarget(target);
+    markNavigationAction();
+    emitStep({
+      op: "select",
+      target: desc,
+      geometry: captureGeometry(target),
+      values,
+      labels,
+      expects_navigation: true,
+    });
+  };
+
+  const onChange = (event: Event) => {
     const target = eventTarget(event);
     if (target instanceof HTMLSelectElement) {
-      emitHoverCandidateBeforeAction(target);
-      const values = Array.from(target.selectedOptions).map((opt) => opt.value);
-      const labels = Array.from(target.selectedOptions).map((opt) =>
-        (opt.label || opt.textContent || opt.value).trim(),
-      );
-      const desc = describeTarget(target);
-      markNavigationAction();
-      emitStep({
-        op: "select",
-        target: desc,
-        geometry: captureGeometry(target),
-        values,
-        labels,
-        expects_navigation: true,
-      });
+      recordSelect(target);
+    } else {
+      commitFillSession();
     }
   };
 
