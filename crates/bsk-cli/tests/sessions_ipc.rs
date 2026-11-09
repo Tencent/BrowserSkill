@@ -187,6 +187,23 @@ async fn invalid_controller_is_rejected_before_browser_selection() {
     handle.shutdown().await;
 }
 
+/// An empty log would read as a session that did nothing, so `recipe draft` and
+/// `recipe run` would report the wrong problem.
+#[tokio::test]
+async fn the_run_log_of_a_session_that_does_not_exist_is_not_found() {
+    let (handle, handler) = controller_daemon().await;
+    let error = controller_call(
+        &handler,
+        "log",
+        Method::SessionRunLog,
+        serde_json::json!({"session_id":"never-started"}),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.code, ErrorCode::NotFound);
+    handle.shutdown().await;
+}
+
 type TestWs =
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 

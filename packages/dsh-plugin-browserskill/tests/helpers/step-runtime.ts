@@ -82,6 +82,7 @@ export async function createStepRuntime(run: BskRunner["run"], mode: "native" | 
       thumbnailIntervalMs: 1500,
       idleIntervalMs: 8000,
       lazyTools: false,
+      recipes: true,
     },
   });
   let sequence = 0;

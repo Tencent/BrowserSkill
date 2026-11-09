@@ -91,6 +91,7 @@ Prefer refs for iframe/shadow-root targets; CSS selectors search the main docume
 | Need | Command |
 | --- | --- |
 | Several decided actions | `bsk plan --session <id> --context ID --steps '[...]'` |
+| Replay a reviewed flow | `bsk recipe run <name> --session <id> --param key=value` ([guide](references/recipes.md)) |
 | Click | `bsk click @e3 --session <id> --context ID` |
 | Fill text/date/time | `bsk fill @e3 --value "text" --session <id> --context ID` |
 | Select an option | `bsk select @e3 --value "option-value" --session <id> --context ID` |

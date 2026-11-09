@@ -146,6 +146,13 @@ const ACTION_ROUTES: Record<string, readonly [string, string]> = {
   "interact.wheel": ["bsk_interact", "wheel"],
   "interact.drag": ["bsk_interact", "drag"],
   "interact.step": ["bsk_interact", "step"],
+  "interact.plan": ["bsk_interact", "plan"],
+  "recipe.list": ["bsk_recipe", "list"],
+  "recipe.show": ["bsk_recipe", "show"],
+  "recipe.run": ["bsk_recipe", "run"],
+  "recipe.draft": ["bsk_recipe", "draft"],
+  "recipe.save": ["bsk_recipe", "save"],
+  "recipe.rm": ["bsk_recipe", "rm"],
   "interact.scroll-to": ["bsk_interact", "scroll-to"],
   "interact.focus": ["bsk_interact", "focus"],
   "interact.blur": ["bsk_interact", "blur"],
@@ -226,11 +233,12 @@ function setup(
   responses: Record<string, unknown>,
   services: Record<string, unknown> = {},
   maxSessions = 5,
+  overrides: Partial<PluginConfig> = {},
 ) {
   const { ctx, tools } = makeCtx(services);
   const { runner, calls } = fakeRunner(responses);
   const registry = new SessionRegistry(maxSessions);
-  const config = { ...CONFIG, maxSessions };
+  const config = { ...CONFIG, maxSessions, ...overrides };
   registerBrowserTools({
     ctx: ctx as never,
     runner: runner as BskRunner,
@@ -442,6 +450,7 @@ const EXPECTED_ACTIONS = {
     "wheel",
     "drag",
     "step",
+    "plan",
     "scroll-to",
     "focus",
     "blur",
@@ -464,6 +473,191 @@ const EXPECTED_ACTIONS = {
     "operation-cancel",
   ],
 } as const;
+
+describe("plan", () => {
+  const STEPS = [
+    { action: "fill", ref: "@e1", value: "Ada" },
+    {
+      action: "click",
+      ref: "@e2",
+      expect: [{ target: "@e9", field: "text", equals: "$12" }],
+    },
+  ];
+  const planReply = (body: Record<string, unknown>, code: number) => ({
+    __result: { code, stdout: JSON.stringify(body), stderr: "", timedOut: false, aborted: false },
+  });
+
+  it("sends decided steps in one plan call with the caller's context", async () => {
+    const reply = {
+      ok: true,
+      completed: 2,
+      total: 2,
+      post: { tab_id: 7, context_id: "next" },
+      elapsed_ms: 40,
+    };
+    const { tools, calls } = setup({ "session start": START_REPLY("s1"), plan: reply });
+    await startSession(tools);
+    const result = await tools
+      .get("interact.plan")!
+      .execute(
+        { steps: STEPS, untilVisible: "#done", contextId: "ctx", observationId: "obs" },
+        makeExec(),
+      );
+    expect(result).toMatchObject({ ok: true, completed: 2 });
+    const plans = calls.filter((call) => call.args[0] === "plan");
+    expect(plans).toHaveLength(1);
+    expect(plans[0].args).toEqual([
+      "plan",
+      "--session",
+      "s1",
+      "--steps",
+      JSON.stringify(STEPS),
+      "--until-visible",
+      "#done",
+      "--context",
+      "ctx",
+      "--observation",
+      "obs",
+    ]);
+    expect(plans[0].options.timeoutMs).toBeGreaterThan(120_000 + 35_000);
+  });
+
+  it("keeps a stopped plan's receipt and never sends it again", async () => {
+    const stopped = {
+      ok: false,
+      completed: 1,
+      total: 2,
+      stopped: { index: 1, action: "click", effect_state: "unknown", error: { message: "lost" } },
+      not_run: [],
+      elapsed_ms: 40,
+    };
+    const { tools, calls } = setup({
+      "session start": START_REPLY("s1"),
+      plan: planReply(stopped, 4),
+    });
+    await startSession(tools);
+    const failure = tools
+      .get("interact.plan")!
+      .execute({ steps: STEPS, contextId: "ctx" }, makeExec());
+    await expect(failure).rejects.toMatchObject({ code: "BSK_STEP_NEEDS_ATTENTION" });
+    await expect(failure).rejects.toThrow(/Browser plan needs attention.*Do not replay the plan/s);
+    expect(calls.filter((call) => call.args[0] === "plan")).toHaveLength(1);
+  });
+
+  it("rejects a reply whose steps and exit status disagree", async () => {
+    const wrong = { ok: true, completed: 1, total: 2, elapsed_ms: 40 };
+    const { tools } = setup({ "session start": START_REPLY("s1"), plan: wrong });
+    await startSession(tools);
+    await expect(tools.get("interact.plan")!.execute({ steps: STEPS }, makeExec())).rejects.toThrow(
+      "did not produce a valid plan result",
+    );
+  });
+
+  it.each([
+    { steps: [] },
+    { steps: Array.from({ length: 21 }, () => ({ action: "click", ref: "@e1" })) },
+    { steps: [{ ref: "@e1" }] },
+    { steps: [{ action: "click", ref: "@e1", context_id: "old" }] },
+    { steps: [{ action: "click", ref: "@e1", session_id: "foreign" }] },
+    { steps: STEPS, expect: [{ target: "@e1", field: "text", equals: "x" }] },
+    { steps: STEPS, dependsOn: ["@e1"] },
+    { steps: STEPS, waitTimeoutMs: 30_000 },
+  ])("rejects an invalid plan before dispatch: %j", async (args) => {
+    const { tools, calls } = setup({ "session start": START_REPLY("s1") });
+    await startSession(tools);
+    await expect(tools.get("interact.plan")!.execute(args, makeExec())).rejects.toThrow();
+    expect(calls.filter((call) => call.args[0] === "plan")).toHaveLength(0);
+  });
+});
+
+describe("recipes", () => {
+  const withRecipes = (responses: Record<string, unknown>) =>
+    setup(responses, {}, 5, { recipes: true });
+  const result = (body: Record<string, unknown>, code: number) => ({
+    __result: { code, stdout: JSON.stringify(body), stderr: "", timedOut: false, aborted: false },
+  });
+
+  it("stays out of the tool list unless the host opts in", () => {
+    expect(setup({}).tools.has("bsk_recipe")).toBe(false);
+    const { tools } = withRecipes({});
+    const recipe = tools.get("bsk_recipe")!;
+    const properties = recipe.parameters.properties as Record<string, unknown>;
+    expect(properties.action).toMatchObject({
+      enum: ["list", "show", "run", "draft", "save", "rm"],
+    });
+    // A run synchronizes for itself, so it takes no caller evidence.
+    for (const key of ["contextId", "observationId", "expect", "dependsOn"])
+      expect(properties[key]).toBeUndefined();
+    expect(recipe.description).toMatch(/approval_required/);
+  });
+
+  it("runs in the owned session and keeps a handoff's receipt without running it again", async () => {
+    const handoff = {
+      status: "handoff",
+      reason: "target_not_found",
+      effects: { steps_done: 0, last_effect_state: "none" },
+      remaining: [{ segment: "query", action: "click" }],
+      run_id: "r-2",
+    };
+    const { tools, calls } = withRecipes({
+      "session start": START_REPLY("s1"),
+      "recipe run": result(handoff, 1),
+    });
+    await startSession(tools);
+    const failure = tools
+      .get("recipe.run")!
+      .execute({ name: "sales", params: { region: "East=1" }, checked: "r-1" }, makeExec());
+    await expect(failure).rejects.toMatchObject({ code: "BSK_STEP_NEEDS_ATTENTION" });
+    await expect(failure).rejects.toThrow(/Browser recipe needs attention/);
+    const runs = calls.filter((call) => call.args[0] === "recipe");
+    expect(runs).toHaveLength(1);
+    expect(runs[0].args).toEqual([
+      "recipe",
+      "run",
+      "sales",
+      "--param",
+      "region=East=1",
+      "--session",
+      "s1",
+      "--checked",
+      "r-1",
+    ]);
+    expect(runs[0].options.timeoutMs).toBeGreaterThan(120_000);
+  });
+
+  it("returns a completed run's outputs", async () => {
+    const done = { status: "completed", outputs: { total: "42" }, run_id: "r-3" };
+    const { tools } = withRecipes({ "session start": START_REPLY("s1"), "recipe run": done });
+    await startSession(tools);
+    expect(await tools.get("recipe.run")!.execute({ name: "sales" }, makeExec())).toMatchObject({
+      outputs: { total: "42" },
+    });
+  });
+
+  it("saves a document through a private file that is gone afterwards", async () => {
+    const { tools, calls } = withRecipes({ "recipe save": { saved: true, revision: 1 } });
+    const document = { recipe_version: 1, name: "sales" };
+    expect(await tools.get("recipe.save")!.execute({ recipe: document }, makeExec())).toMatchObject(
+      { saved: true },
+    );
+    const command = calls.find((call) => call.args[1] === "save")!.args;
+    expect(command.slice(0, 3)).toEqual(["recipe", "save", "--file"]);
+    expect(existsSync(command[3])).toBe(false);
+  });
+
+  it.each([
+    { action: "recipe.run", args: { name: "sales", params: { region: 1 } } },
+    { action: "recipe.run", args: { name: "sales", params: { "bad key": "x" } } },
+    { action: "recipe.run", args: { name: "sales", site: "https://a.test" } },
+    { action: "recipe.list", args: { name: "sales" } },
+    { action: "recipe.save", args: { recipe: [] } },
+  ])("rejects $args for $action before anything runs", async ({ action, args }) => {
+    const { tools, calls } = withRecipes({ "session start": START_REPLY("s1") });
+    await startSession(tools);
+    await expect(tools.get(action)!.execute(args, makeExec())).rejects.toThrow();
+    expect(calls.filter((call) => call.args[0] === "recipe")).toHaveLength(0);
+  });
+});
 
 describe("gesture and saved observation actions", () => {
   it("routes drag through the owned session with the caller's context and gesture options", async () => {
