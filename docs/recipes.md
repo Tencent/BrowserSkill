@@ -175,9 +175,17 @@ happened.
 ## Risk
 
 Each step is `read`, `reversible` or `commit`. Hover and scroll-to read. Fill and select are
-reversible. A click or key press is `commit` when the control's name suggests submitting,
-paying, sending, deleting, publishing or similar, in English or Chinese, and pressing Enter
-counts too, because it can submit a form. Over-marking is deliberate. If a step really can be
+reversible. A click is `commit` when the control's name, in English or Chinese, suggests paying,
+ordering, submitting, sending, publishing, agreeing, registering, booking, deleting or
+archiving, or answers yes, as in "OK" or "是". A verb that is harmless alone counts with what
+it ends: "Cancel" and "取消" close a dialog, but "Cancel subscription", "Reset password" and
+"取消订单" are commits. Only the word itself counts, because "Saved", "Approved" or "Orders"
+usually name a filter or a list.
+
+A key press is reversible only when it moves or edits: Tab, the arrow keys, Home, End, Page Up,
+Page Down, Escape and Space, and Backspace, Delete or a single character in a text field. Enter,
+any key with Ctrl, Alt or Meta, and any other key are `commit`, because a shortcut can do
+anything, and so is a key pressed on a control whose name commits. Over-marking is deliberate. If a step really can be
 undone, declare `"risk": "reversible"`; `save` and `show` list every lowered risk. A declaration
 does not cover a control named by a parameter, which is classified again after substitution.
 

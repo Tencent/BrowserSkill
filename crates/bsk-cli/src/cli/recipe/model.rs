@@ -20,37 +20,206 @@ const MAX_TEXT: usize = 1024;
 const MAX_VALUE: usize = 64 * 1024;
 /// Dialogs and banners. An interrupt must not become general page control.
 const INTERRUPT_ROLES: [&str; 4] = ["dialog", "alertdialog", "alert", "banner"];
-/// Words in a control's name that suggest an effect that cannot be taken back.
-const COMMIT_WORDS: [&str; 23] = [
-    "submit",
+/// Words in a control's name that suggest an effect that cannot be taken back. Only
+/// the word itself counts: "Saved", "Shared" or "Approved" usually name a list or a
+/// filter, and a plural such as "Orders" usually opens one.
+const COMMIT_WORDS: &[&str] = &[
+    // Money.
     "pay",
     "payment",
     "purchase",
     "buy",
     "order",
     "checkout",
+    "transfer",
+    "refund",
+    "withdraw",
+    "deposit",
+    "recharge",
+    "donate",
+    "redeem",
+    "claim",
+    "bid",
+    "renew",
+    "upgrade",
+    // Sending and publishing.
+    "submit",
     "send",
-    "delete",
-    "remove",
     "publish",
     "post",
+    "share",
+    "invite",
+    "upload",
+    "import",
+    // Agreeing and deciding.
     "confirm",
     "approve",
     "reject",
-    "transfer",
-    "save",
+    "accept",
+    "agree",
+    "authorize",
+    "authorise",
+    "consent",
+    "grant",
     "sign",
+    "vote",
+    "ok",
+    "yes",
+    // Accounts, subscriptions and bookings.
     "subscribe",
     "unsubscribe",
-    "refund",
-    "withdraw",
-    "ok",
+    "register",
+    "enroll",
+    "enrol",
+    "signup",
+    "apply",
+    "book",
+    "reserve",
+    "activate",
+    "deactivate",
+    "logout",
+    "unbind",
+    "unlink",
+    // Losing or replacing data.
+    "save",
+    "delete",
+    "remove",
+    "archive",
+    "discard",
+    "erase",
+    "purge",
+    "revoke",
+    "terminate",
+    "trash",
+    "void",
+    "wipe",
+    "deploy",
+    "merge",
+    "execute",
 ];
-const COMMIT_TEXT: [&str; 29] = [
-    "提交", "支付", "付款", "购买", "下单", "结算", "发送", "删除", "移除", "发布", "确认", "确定",
-    "同意", "批准", "审批", "拒绝", "驳回", "转账", "充值", "提现", "退款", "保存", "注销", "签署",
-    "授权", "订阅", "退订", "上架", "下架",
+const COMMIT_TEXT: &[&str] = &[
+    "提交",
+    "支付",
+    "付款",
+    "购买",
+    "下单",
+    "结算",
+    "发送",
+    "删除",
+    "移除",
+    "发布",
+    "发表",
+    "确认",
+    "确定",
+    "同意",
+    "接受",
+    "批准",
+    "审批",
+    "审核",
+    "拒绝",
+    "驳回",
+    "转账",
+    "充值",
+    "提现",
+    "退款",
+    "保存",
+    "注销",
+    "签署",
+    "签约",
+    "授权",
+    "订阅",
+    "退订",
+    "上架",
+    "下架",
+    "申请",
+    "注册",
+    "报名",
+    "预订",
+    "预约",
+    "开通",
+    "续费",
+    "升级",
+    "绑定",
+    "解绑",
+    "退出登录",
+    "清空",
+    "放弃",
+    "作废",
+    "撤销",
+    "撤回",
+    "终止",
+    "解约",
+    "销户",
+    "领取",
+    "兑换",
+    "出价",
+    "打赏",
+    "捐款",
+    "捐赠",
+    "投票",
+    "分享",
+    "邀请",
+    "举报",
+    "上传",
+    "导入",
+    "归档",
+    "部署",
+    "合并",
+    "执行",
 ];
+/// Harmless alone, such as "Cancel" or "Close" on a dialog, but lasting when they
+/// end or reset one of [`LASTING_THINGS`], such as "Cancel subscription".
+const ENDING_WORDS: &[&str] = &["cancel", "close", "end", "stop", "reset", "clear", "empty"];
+const LASTING_THINGS: &[&str] = &[
+    "subscription",
+    "account",
+    "membership",
+    "plan",
+    "booking",
+    "reservation",
+    "appointment",
+    "contract",
+    "policy",
+    "renewal",
+    "autorenew",
+    "trial",
+    "password",
+    "cart",
+    "basket",
+    "history",
+    "data",
+];
+const ENDING_TEXT: &[&str] = &["取消", "关闭", "停止", "重置", "清除"];
+const LASTING_TEXT: &[&str] = &[
+    "订单",
+    "会员",
+    "账户",
+    "账号",
+    "合同",
+    "密码",
+    "服务",
+    "购物车",
+    "记录",
+    "数据",
+];
+/// A whole name that answers yes to whatever the page asked, like "OK" or "Yes".
+const AFFIRMATIONS: &[&str] = &["是", "是的", "好", "好的"];
+/// Keys that only move focus, the caret, the selection or the view.
+const NAVIGATION_KEYS: &[&str] = &[
+    "tab",
+    "arrowup",
+    "arrowdown",
+    "arrowleft",
+    "arrowright",
+    "home",
+    "end",
+    "pageup",
+    "pagedown",
+    "escape",
+    "esc",
+];
+/// Roles whose text a key edits instead of triggering a shortcut.
+const EDITABLE_ROLES: &[&str] = &["textbox", "searchbox", "combobox", "spinbutton", "textarea"];
 /// Fields whose values must never be replayed from a file.
 const SENSITIVE_WORDS: [&str; 10] = [
     "password", "passcode", "passwd", "pwd", "otp", "cvv", "cvc", "ssn", "pin", "2fa",
@@ -390,10 +559,56 @@ fn words(text: &str) -> Vec<String> {
 }
 
 fn names_commit(name: &str) -> bool {
-    words(name)
-        .iter()
-        .any(|word| COMMIT_WORDS.contains(&word.as_str()))
-        || COMMIT_TEXT.iter().any(|text| name.contains(text))
+    let words = words(name);
+    let has = |list: &[&str]| words.iter().any(|word| list.contains(&word.as_str()));
+    let contains = |list: &[&str]| list.iter().any(|text| name.contains(text));
+    has(COMMIT_WORDS)
+        || (has(ENDING_WORDS) && has(LASTING_THINGS))
+        || (has(&["log"]) && has(&["out", "off"]))
+        || contains(COMMIT_TEXT)
+        || (contains(ENDING_TEXT) && contains(LASTING_TEXT))
+        || AFFIRMATIONS.contains(&name.trim())
+}
+
+/// The base key of a press, lowercased, and whether Ctrl, Alt or Meta is held.
+/// Mirrors how the extension splits a combination such as `Ctrl+Shift+P`.
+fn key_press(key: &str, modifiers: Option<&[Value]>) -> (String, bool) {
+    let shortcut = |token: &str| {
+        matches!(
+            token.trim().to_ascii_lowercase().as_str(),
+            "ctrl" | "control" | "alt" | "option" | "opt" | "meta" | "cmd" | "command" | "super"
+        )
+    };
+    let modifier = |token: &str| shortcut(token) || token.trim().eq_ignore_ascii_case("shift");
+    let parts: Vec<&str> = key
+        .split('+')
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .collect();
+    // A '+' after modifiers, as in `Ctrl++`, is the plus key itself.
+    let plus = key.trim_end().ends_with("++");
+    let combination = parts.len() > 1 || plus;
+    let held = modifiers
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .any(shortcut)
+        || (combination && parts.iter().any(|part| shortcut(part)));
+    let base = if combination {
+        parts
+            .iter()
+            .rev()
+            .find(|part| !modifier(part))
+            .copied()
+            .unwrap_or(if plus {
+                "+"
+            } else {
+                parts.last().copied().unwrap_or_default()
+            })
+    } else {
+        key.trim()
+    };
+    (base.to_ascii_lowercase(), held)
 }
 
 /// Whether a field's name says it holds a secret. The renderer's mask catches the
@@ -427,12 +642,23 @@ impl Step {
         match self.action {
             Action::Hover | Action::ScrollTo => Risk::Read,
             Action::Fill | Action::Select => Risk::Reversible,
+            // Only keys known to move or edit are reversible: a shortcut, Enter, or a
+            // key that deletes or types outside a text field can do anything.
             Action::Press => {
-                let submits = self.key.as_deref().is_some_and(|key| {
-                    let key = key.to_ascii_lowercase();
-                    key == "enter" || key.ends_with("+enter") || key == "numpadenter"
-                });
-                if submits || names_commit(&self.target.name) {
+                let (key, shortcut) = key_press(
+                    self.key.as_deref().unwrap_or_default(),
+                    self.modifiers.as_deref(),
+                );
+                let editable = EDITABLE_ROLES
+                    .iter()
+                    .any(|role| self.target.role.eq_ignore_ascii_case(role));
+                let reversible = match key.as_str() {
+                    key if NAVIGATION_KEYS.contains(&key) => true,
+                    " " | "space" | "spacebar" => true,
+                    "backspace" | "delete" | "del" => editable,
+                    key => editable && key.chars().count() == 1,
+                };
+                if shortcut || !reversible || names_commit(&self.target.name) {
                     Risk::Commit
                 } else {
                     Risk::Reversible
@@ -1115,6 +1341,128 @@ pub(crate) mod tests {
             .unwrap();
             assert_eq!(step.risk() == Risk::Commit, name == "Sales order", "{name}");
         }
+    }
+
+    fn click_risk(name: &str) -> Risk {
+        serde_json::from_value::<Step>(json!(
+            {"action":"click","target":{"role":"button","name":name}}))
+        .unwrap()
+        .risk()
+    }
+
+    fn press_risk(role: &str, key: &str, modifiers: Option<Value>) -> Risk {
+        let mut step = json!({"action":"press","target":{"role":role,"name":"Field"},"key":key});
+        if let Some(modifiers) = modifiers {
+            step["modifiers"] = modifiers;
+        }
+        serde_json::from_value::<Step>(step).unwrap().risk()
+    }
+
+    #[test]
+    fn agreeing_booking_and_ending_something_lasting_are_commits_in_both_languages() {
+        for name in [
+            "Cancel subscription",
+            "Close account",
+            "Reset password",
+            "Empty trash",
+            "Log out",
+            "Agree",
+            "I agree",
+            "Accept all",
+            "Yes",
+            "Register",
+            "Book now",
+            "Apply",
+            "Archive",
+            "Deactivate account",
+            "Upload",
+            "Share",
+            "Deploy",
+            "取消订单",
+            "取消预约",
+            "关闭自动续费",
+            "重置密码",
+            "退出登录",
+            "申请",
+            "注册",
+            "立即预订",
+            "解绑",
+            "清空购物车",
+            "接受",
+            "是",
+            "好的",
+        ] {
+            assert_eq!(click_risk(name), Risk::Commit, "{name}");
+        }
+        // Closing a dialog, clearing filters or opening a list changes nothing lasting.
+        for name in [
+            "Cancel",
+            "Close",
+            "Reset filters",
+            "Clear filters",
+            "Next",
+            "Orders",
+            "Saved",
+            "Shared with me",
+            "Approved",
+            "Billing",
+            "取消",
+            "关闭",
+            "重置筛选",
+            "我的订单",
+            "取消关注",
+            "是否显示",
+        ] {
+            assert_eq!(click_risk(name), Risk::Reversible, "{name}");
+        }
+    }
+
+    #[test]
+    fn key_presses_are_reversible_only_when_they_move_or_edit_text() {
+        for (role, key, modifiers) in [
+            ("button", "Tab", None),
+            ("button", "Shift+Tab", None),
+            ("listbox", "ArrowDown", None),
+            ("grid", "PageDown", None),
+            ("dialog", "Escape", None),
+            ("checkbox", "Space", None),
+            ("textbox", "Backspace", None),
+            ("searchbox", "Delete", None),
+            ("textbox", "a", None),
+            ("combobox", "ArrowDown", Some(json!(["shift"]))),
+        ] {
+            assert_eq!(
+                press_risk(role, key, modifiers),
+                Risk::Reversible,
+                "{role} {key}"
+            );
+        }
+        for (role, key, modifiers) in [
+            ("textbox", "Enter", None),
+            ("textbox", "NumpadEnter", None),
+            ("row", "Delete", None),
+            ("listitem", "Backspace", None),
+            ("main", "#", None),
+            ("main", "e", None),
+            ("textbox", "Control+s", None),
+            ("textbox", "Meta+S", None),
+            ("textbox", "Cmd+Enter", None),
+            ("textbox", "Ctrl++", None),
+            ("textbox", "s", Some(json!(["ctrl"]))),
+            ("button", "F5", None),
+        ] {
+            assert_eq!(
+                press_risk(role, key, modifiers),
+                Risk::Commit,
+                "{role} {key}"
+            );
+        }
+        // A key pressed on a control that commits is that control's commit.
+        let step: Step = serde_json::from_value(
+            json!({"action":"press","target":{"role":"button","name":"Pay now"},"key":"Space"}),
+        )
+        .unwrap();
+        assert_eq!(step.risk(), Risk::Commit);
     }
 
     #[test]
