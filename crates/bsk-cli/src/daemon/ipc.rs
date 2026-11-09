@@ -41,7 +41,7 @@ use tokio::task::JoinHandle;
 use tracing::{debug, warn};
 
 use super::abort::AbortRegistry;
-use super::queue::{DEFAULT_TOOL_TIMEOUT, DispatchError};
+use super::queue::{DEFAULT_TOOL_TIMEOUT, DispatchError, RECORD_START_TIMEOUT_MS};
 use super::sessions::{
     AgentWindowOptions, SessionId, StartSessionError, StopSessionError, snapshot_status_entries,
     stop_session,
@@ -1180,6 +1180,8 @@ fn tool_dispatch_transport_timeout(method: &Method, params: &Value) -> Result<Du
     let timeout = if *method == Method::ToolScreenshotFullPage && params.get("timeout_ms").is_none()
     {
         Ok(Duration::from_secs(120))
+    } else if *method == Method::ToolRecordStart && params.get("timeout_ms").is_none() {
+        Ok(Duration::from_millis(u64::from(RECORD_START_TIMEOUT_MS)))
     } else {
         tool_dispatch_timeout(params)
     };
@@ -2252,6 +2254,22 @@ mod tests {
             .unwrap_err();
             assert_eq!(err.code, ErrorCode::InvalidParams);
         }
+    }
+
+    #[test]
+    fn record_start_deadline_covers_its_navigate_and_first_capture() {
+        let deadline = tool_dispatch_transport_timeout(
+            &Method::ToolRecordStart,
+            &serde_json::json!({"session_id": "abcd", "url": "https://example.com/"}),
+        )
+        .unwrap();
+        assert_eq!(
+            deadline,
+            Duration::from_millis(u64::from(RECORD_START_TIMEOUT_MS))
+        );
+        // The start navigate alone may take the whole 30s default, then the
+        // tab-ready wait adds up to 10s more.
+        assert!(deadline > DEFAULT_TOOL_TIMEOUT + Duration::from_secs(10));
     }
 
     #[test]
