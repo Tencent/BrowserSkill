@@ -102,7 +102,14 @@ function compactLinkName(el: Element): string | null {
     junk.remove();
   }
   const text = normalizeWhitespace(clone.textContent ?? "");
-  if (!text) return null;
+  if (!text) {
+    // A decorative alt="" icon can come before the image that names the link, as in
+    // Wikipedia's logo.
+    const named = [...el.querySelectorAll("img[alt]")]
+      .map((image) => normalizeWhitespace(image.getAttribute("alt") ?? ""))
+      .find(Boolean);
+    return named ? truncate(named) : null;
+  }
   const withoutUrl = text.replace(/https?:\/\/\S+/g, "").trim();
   return truncate(withoutUrl || text);
 }

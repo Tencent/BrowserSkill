@@ -64,6 +64,8 @@ determines which versions can connect.
 
 ### Fixed
 
+- Recording keeps clicks on image links whose name is on a later image, such as the
+  Wikipedia logo, where a decorative image with an empty `alt` comes first.
 - Window blur releases completed text-editing holds, and new task synchronizations
   after an idle gap automatically resume paused or editing tabs when no gesture or
   recent input is active, avoiding unnecessary manual hand-back prompts between tasks.

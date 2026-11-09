@@ -46,6 +46,24 @@ describe("describeTarget", () => {
     `;
     expect(describeTarget(document.querySelector("a")!).name).toBe("Tencent 腾讯");
   });
+
+  it("names an image link by its first non-empty alt when a decorative icon comes first", () => {
+    document.body.innerHTML = `
+      <a id="logo" href="/wiki/Main_Page">
+        <img id="icon" alt="" aria-hidden="true">
+        <span><img alt="Wikipedia"><img alt="The Free Encyclopedia"></span>
+      </a>
+      <a id="text" href="/docs"><img alt=""> Docs <img alt="(external)"></a>
+      <a id="bare" href="/"><img alt=""><img alt=" "></a>
+    `;
+    expect(describeEventTarget(document.querySelector("#icon"))).toEqual({
+      tag: "a",
+      role: "link",
+      name: "Wikipedia",
+    });
+    expect(describeTarget(document.querySelector("#text")!).name).toBe("Docs");
+    expect(describeEventTarget(document.querySelector("#bare"))).toBeNull();
+  });
 });
 
 describe("LLM textbook click targets", () => {
