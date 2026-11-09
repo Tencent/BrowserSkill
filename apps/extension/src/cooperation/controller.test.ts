@@ -8,7 +8,7 @@ import { captureVomObservation, handleSnapshot } from "@/tools/observation";
 import type { CdpRunner } from "@/tools/shared";
 import { handleTabBorrow, handleTabCreate, handleTabReturn, handleTabSelect } from "@/tools/tabs";
 import { CooperationController } from "./controller";
-import { FrameCollectionError } from "./frame-error";
+import { FrameCollectionError, FrameUnresponsiveError } from "./frame-error";
 import type { CooperationFrames, FrameState } from "./types";
 
 vi.mock("@/tools/observation", () => ({
@@ -1439,6 +1439,46 @@ describe("shared-tab dispatch fences", () => {
     expect(await f.act()).toMatchObject({ data: { reason, effect_state: "none" } });
     expect(f.controller.view(7)?.mode).toBe("unavailable");
     expect(f.native).not.toHaveBeenCalled();
+  });
+  it("names a silent frame on action, sync and tab refusals while keeping them retryable", async () => {
+    const f = await fixture();
+    const collect = f.readFrames.getMockImplementation()!;
+    const silent = { frame_id: 3, url: "https://frame.test/widget" };
+    const retryable = {
+      reason: "cooperation_sync_required",
+      effect_state: "none",
+      recovery: expect.stringContaining("stop the session, which also returns borrowed tabs"),
+    };
+    f.readFrames.mockRejectedValue(new FrameUnresponsiveError([silent]));
+    expect(await f.act()).toMatchObject({ data: { effect_state: "none", frames: [silent] } });
+    expect(await f.command("sync")).toMatchObject({
+      code: "permission_denied",
+      message: "A page frame is not responding: 3 (https://frame.test/widget)",
+      data: { ...retryable, frames: [silent] },
+    });
+    // Unlike a permanent frame failure, wait keeps polling a frame that may be busy.
+    expect(await f.command("wait")).toMatchObject({ ready: false, state: { mode: "unavailable" } });
+    const invoke = vi.fn();
+    expect(
+      await f.controller.run(
+        { id: "return", method: "tool.tab_return", params: { session_id: "shared", tab_id: 7 } },
+        f.cdp,
+        f.abort.signal,
+        invoke,
+      ),
+    ).toMatchObject({
+      code: "permission_denied",
+      data: { ...retryable, frames: [{ tab_id: 7, ...silent }] },
+    });
+    expect(invoke).not.toHaveBeenCalled();
+    expect(f.native).not.toHaveBeenCalled();
+    // A successful collection forgets the silent frame.
+    f.readFrames.mockImplementation(collect);
+    expect(await f.command("sync")).toHaveProperty("context_id");
+    f.readFrames.mockRejectedValueOnce(new Error("frame is loading"));
+    const loading = await f.command("sync");
+    expect(loading).toMatchObject({ data: { reason: "cooperation_sync_required" } });
+    expect(loading.data).not.toHaveProperty("frames");
   });
   it("exposes skipped frame gaps and leaves the policy unset until a successful sync", async () => {
     const f = await fixture({ sync: false });
