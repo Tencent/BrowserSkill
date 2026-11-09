@@ -337,6 +337,54 @@ describe("shared-tab dispatch fences", () => {
     expect(f.controller.view(7)?.mode).toBe("held");
     expect(f.resumeFrames).not.toHaveBeenCalled();
   });
+  it.each([
+    "held",
+    "editing",
+  ] as const)("automatically resumes %s control on sync after an idle gap between tasks", async (mode) => {
+    const f = await fixture();
+    if (mode === "held") {
+      await f.controller.control(7, f.controller.view(7)!.revision, "hold");
+      expect(f.controller.view(7)?.mode).toBe("held");
+    } else {
+      f.change({
+        human: 1,
+        editing: true,
+        lastInput: 10000,
+        fields: [{ label: "City", value: "Beijing" }],
+      });
+      expect(f.controller.view(7)?.mode).toBe("human");
+    }
+    // After the user finishes manual edits between tasks and sends a new prompt,
+    // a rejected stale action does not block the follow-up sync from resuming control.
+    f.advance(5000);
+    expect(await f.act()).toMatchObject({
+      code: "permission_denied",
+      data: { effect_state: "none" },
+    });
+    const synced = await f.command("sync");
+    expect(synced).toMatchObject({
+      context_id: expect.any(String),
+      state: { mode: "ready" },
+    });
+    expect(f.resumeFrames).toHaveBeenCalledOnce();
+    expect(f.controller.view(7)?.mode).toBe("ready");
+    expect(await f.act(synced.context_id)).not.toHaveProperty("code");
+    expect(f.native).toHaveBeenCalledOnce();
+  });
+  it("does not auto-resume on sync while the user is actively dragging or typing within the quiet window, then resumes once quiet", async () => {
+    const f = await fixture();
+    f.advance(5000);
+    f.change({ human: 1, editing: true, lastInput: 14500 });
+    expect(await f.command("sync")).toMatchObject({ code: "permission_denied" });
+    expect(await f.command("wait")).toMatchObject({ ready: false });
+    expect(f.resumeFrames).not.toHaveBeenCalled();
+    f.advance(2000);
+    expect(await f.command("sync")).toMatchObject({
+      context_id: expect.any(String),
+      state: { mode: "ready" },
+    });
+    expect(f.resumeFrames).toHaveBeenCalledOnce();
+  });
   it("reports uncertain input and releases only the button pressed by that action", async () => {
     const f = await fixture();
     const result = await f.act(f.first.context_id, async (runner) => {
