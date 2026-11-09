@@ -53,6 +53,12 @@ determines which versions can connect.
 
 ### Changed
 
+- `bsk plan` and `bsk recipe` are documented standard CLI workflows, with packaged
+  guidance for batching and replay; recipe schemas remain opt-in in MCP and DSH.
+- Recipe execution and edits share an exclusive lock. Replay refuses unreadable
+  safety state or an unwritable run marker, and retains interrupted-run holds even
+  when the host process remains alive. DSH drains cancelled plan and recipe receipts.
+
 - Extension 0.4.3 removes obsolete migration flags and version gates while keeping
   pairing optional. There is no automatic enforcement deadline.
 

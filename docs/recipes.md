@@ -2,8 +2,8 @@
 
 A recipe stores one verified, repeated flow, such as a daily report query, in a local
 file. `bsk recipe run` replays it and hands the page back to the caller only when the
-page deviates. A chat agent spends about two turns: one to call the recipe and one to
-answer. A script spends none.
+page deviates. A successful agent replay can use one tool call followed by its answer;
+preparation and handoffs add work. A script needs no model calls for replay.
 
 A recipe replays confirmed decisions, not a recording. Every step is the request its
 own command would send, so the extension still checks control, the target and `expect`
@@ -63,7 +63,9 @@ bsk recipe run sales-report --param region=East --param quarter=Q3
 Without `--session`, a run opens its own session named `recipe:<name>`, and stops it after
 completing unless you pass `--keep-session`. With `--session`, it runs on that session's
 current tab, opens the start page if it is elsewhere on the site, and leaves the session
-open. Borrowed user tabs are refused. A session runs one recipe at a time.
+open. Borrowed user tabs are refused. A session runs one recipe at a time, and a recipe
+runs in only one session at a time. Saving, approving and removing that recipe are refused
+while an operation holds it; contention returns `recipe_busy` without waiting or retrying.
 
 | `status` | Meaning | What to do | Exit |
 | --- | --- | --- | --- |
@@ -97,10 +99,11 @@ For `handoff`, `reason` is one of `target_not_found`, `target_ambiguous`, `requi
 `session_unavailable`, `budget_exceeded` and `cancelled`. For `uncertain`, it is `effect_unknown`
 or, with `operation_id`, `dialog_pending`. For `refused`, it names what failed, such as
 `invalid_params`, `recipe_not_found`, `approval_required`, `effect_unchecked`, `session_unavailable`,
-`unsupported_version`, `borrowed_tab` or `session_busy`, and `message` says how to fix it.
+`unsupported_version`, `borrowed_tab`, `recipe_busy`, `storage_unavailable` or `session_busy`,
+and `message` says how to fix it.
 `session_unavailable` means the session or its tab is gone, for example a mistyped ID or a closed
-Agent Window. Worst case, a handoff costs one observation plus the turns for the remaining
-steps, so it is never more expensive than doing the flow by hand.
+Agent Window. A handoff includes an observation and the remaining steps; inspect those
+before deciding how to continue.
 
 ## The file
 
@@ -212,8 +215,10 @@ bsk recipe approve sales-report
 ```
 
 `approve` lists each lowered step and asks the person to type the recipe's name. It needs a
-terminal and refuses piped input, and MCP and DSH have no such action, so an agent cannot approve
-a risk it lowered. The approval covers the recipe as reviewed: rewording the description keeps it,
+terminal and refuses piped input; MCP and DSH have no such action. Agents must never invoke or
+simulate it. This is a manual review workflow, not proof of human identity: a process with
+terminal and local file access remains trusted. The approval covers the recipe as reviewed:
+rewording the description keeps it,
 and any other change needs approving again. A declaration does not cover a control named by a
 parameter, which is classified again after substitution.
 
@@ -245,7 +250,10 @@ the same step mark it `stale`, which `list` shows without deleting anything. Onl
 deviates counts: a person stepping in, a cancelled run, the budget or a session that is gone say
 nothing about the site. `list` also notes
 recipes with no successful run in 90 days. Run logs keep the latest 50 runs, for at most 30 days.
-If `BSK_HOME` is read-only, `run` still works and other writes report the error.
+Replay requires readable safety state, a writable run marker and an exclusive lock. If these
+cannot be stored, including when `BSK_HOME` is read-only, it refuses with `storage_unavailable`
+before input. Run history and counters remain best effort. If recording the final safety state
+fails, `storage_error` preserves the original result and the retained marker holds the next run.
 
 ## Limits
 
