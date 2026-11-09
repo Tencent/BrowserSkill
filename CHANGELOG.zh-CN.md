@@ -28,6 +28,7 @@ CLI、扩展和 DSH 插件可以分别发布，能否连接由协议兼容性决
 
 ### 修复
 
+- 调试网络录制支持 `application/*+xml` 响应正文（含 SOAP XML），沿用现有脱敏与正文大小限制，避免误标为 `non_text` 而丢弃（[#648](https://github.com/Tencent/BrowserSkill/issues/648)）。
 - `press` 为美式键盘标点补上物理 `code` 与虚拟键码，`Ctrl+/` 这类快捷键能够触发依据 `event.code` 判断的处理器。
 - 主文档 SPA 路由变化（包括切走后恢复原 URL 和 hash 路由）撤销旧控制上下文和 ref；补充读取不会更新这些凭证。
   已加载标签页的被动读取和新建 debugger 连接同样受到保护。

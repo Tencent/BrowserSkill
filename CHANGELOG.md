@@ -52,6 +52,9 @@ determines which versions can connect.
 
 ### Fixed
 
+- Debug network recording captures `application/*+xml` response bodies, including
+  SOAP XML, using the existing redaction and body-size limits instead of omitting
+  them as `non_text` ([#648](https://github.com/Tencent/BrowserSkill/issues/648)).
 - `press` maps US-layout punctuation to its physical `code` and virtual key code,
   so shortcuts such as `Ctrl+/` reach handlers that check `event.code`.
 - Main-document SPA route changes, including away-and-back and hash routes,

@@ -309,7 +309,7 @@ export class DebugNetworkStore {
         else if (entry.intervention?.type === "mock" && entry.response_body.state !== "pending") {
           /* Mock body was retained directly. */
         } else if (
-          !/^(?:text\/|application\/(?:[\w.+-]*json|javascript|xml|x-www-form-urlencoded))/i.test(
+          !/^(?:text\/|application\/(?:[\w.+-]*json|javascript|xml|x-www-form-urlencoded|[^/;\s]+\+xml(?:\s*;|$)))/i.test(
             entry.mime_type ?? "",
           )
         )

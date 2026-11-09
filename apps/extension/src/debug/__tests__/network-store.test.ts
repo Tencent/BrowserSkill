@@ -316,6 +316,71 @@ describe("debug network evidence", () => {
     expect(f.store.list()[1].response_body.reason).toBe("request_failed");
   });
 
+  it.each([
+    "application/xml",
+    "text/xml",
+    "application/soap+xml",
+    "application/atom+xml",
+    "application/rss+xml",
+    "application/vnd.example+xml",
+    "Application/SOAP+XML",
+    "application/soap+xml; charset=utf-8",
+  ])("captures XML response bodies for %s", async (mimeType) => {
+    const body = '<?xml version="1.0"?><response><status>ok</status></response>';
+    const f = fixture(vi.fn(async () => ({ body })));
+    f.request();
+    f.response({ response: { status: 200, mimeType } });
+    f.finish();
+    await settle();
+    expect(f.store.list()[0].response_body).toMatchObject({ state: "available", text: body });
+    expect(f.send).toHaveBeenCalledWith(7, "Network.getResponseBody", { requestId: "raw" });
+  });
+
+  it.each([
+    "application/octet-stream",
+    "image/png",
+    "application/soap+xml-binary",
+    "application/soap+xmlx",
+  ])("does not classify %s as XML text", async (mimeType) => {
+    const f = fixture();
+    f.request();
+    f.response({ response: { status: 200, mimeType } });
+    f.finish();
+    await settle();
+    expect(f.store.list()[0].response_body).toEqual({ state: "omitted", reason: "non_text" });
+    expect(f.send).not.toHaveBeenCalled();
+  });
+
+  it("redacts XML suffix response bodies before retaining them", async () => {
+    const secret = "BSK_XML_SECRET_648";
+    const snapshots: string[] = [];
+    const f = fixture(
+      vi.fn(async () => ({ body: `<response password="${secret}">ok</response>` })),
+      (entry) => snapshots.push(JSON.stringify(entry)),
+    );
+    f.request();
+    f.response({ response: { status: 200, mimeType: "application/soap+xml" } });
+    f.finish();
+    await settle();
+    expect(f.store.list()[0].response_body).toMatchObject({
+      state: "available",
+      redacted: true,
+      replay_safe: false,
+    });
+    expect(snapshots.join("\n")).not.toContain(secret);
+  });
+
+  it("keeps the existing response size limit for XML suffix types", async () => {
+    const f = fixture();
+    f.request();
+    f.response({ response: { status: 200, mimeType: "application/soap+xml" } });
+    f.event("dataReceived", { dataLength: BODY_CHARS * 4 + 1 });
+    f.finish();
+    await settle();
+    expect(f.store.list()[0].response_body).toEqual({ state: "omitted", reason: "body_limit" });
+    expect(f.send).not.toHaveBeenCalled();
+  });
+
   it("records cached/service-worker responses, skips binary and empty bodies", async () => {
     const f = fixture();
     f.request();
