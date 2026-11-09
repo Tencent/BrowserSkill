@@ -55,6 +55,8 @@ pub enum RecipeCommand {
         #[arg(long)]
         file: PathBuf,
     },
+    /// Approve, as a person at a terminal, the steps whose risk a recipe lowers.
+    Approve { name: String },
     /// Draft a recipe from what a session just did. Run this before stopping it.
     Draft(DraftArgs),
     /// Replay a recipe. Stops at the first deviation and hands the page back.
@@ -124,6 +126,108 @@ fn refused(recipe: &str, refusal: &Refusal) -> (Value, u8) {
     )
 }
 
+/// A lowered risk is a person's decision, never the author's alone.
+fn unapproved(store: &Store, recipe: &model::Recipe) -> Option<Refusal> {
+    let lowered = recipe.downgrades().len();
+    (!store.approved(recipe)).then(|| {
+        Refusal::new(
+            "approval_required",
+            format!(
+                "This recipe lowers the risk of {lowered} step(s), so it runs only after a person \
+                 reviews them and runs `bsk recipe approve {}` in a terminal. An agent must never \
+                 approve them.",
+                recipe.name
+            ),
+        )
+    })
+}
+
+/// Shows a person what a recipe lowers and records their confirmation. It needs a
+/// terminal, so an agent running commands cannot approve its own downgrades.
+fn approve(name: &str) -> Result<(), CliError> {
+    use std::io::{BufRead, IsTerminal, Write};
+    let store = Store::open().map_err(CliError::Local)?;
+    let recipe = match store.load(name) {
+        Ok(recipe) => recipe,
+        Err(refusal) => {
+            let (reply, exit) = refused(name, &refusal);
+            return print(&reply, exit);
+        }
+    };
+    let downgrades = recipe.downgrades();
+    if downgrades.is_empty() {
+        return print(
+            &json!({"name":name,"revision":recipe.revision,"approval_required":false}),
+            0,
+        );
+    }
+    if !(std::io::stdin().is_terminal() && std::io::stderr().is_terminal()) {
+        let (reply, exit) = refused(
+            name,
+            &Refusal::new(
+                "approval_needs_person",
+                "approve asks a person at a terminal to confirm each lowered risk; an agent must \
+                 not approve them",
+            ),
+        );
+        return print(&reply, exit);
+    }
+    let prompt = || -> std::io::Result<String> {
+        let mut out = std::io::stderr().lock();
+        writeln!(
+            out,
+            "Recipe {name}, revision {}: {}",
+            recipe.revision, recipe.description
+        )?;
+        writeln!(out, "Site: {}", recipe.site.origins.join(", "))?;
+        writeln!(
+            out,
+            "These steps look irreversible, but the recipe declares them reversible:"
+        )?;
+        for step in &downgrades {
+            let key = step["key"]
+                .as_str()
+                .map(|key| format!(" {key} on"))
+                .unwrap_or_default();
+            writeln!(
+                out,
+                "  {}/{}: {}{key} {} \"{}\"",
+                step["segment"].as_str().unwrap_or_default(),
+                step["step"],
+                step["action"].as_str().unwrap_or_default(),
+                step["target"]["role"].as_str().unwrap_or_default(),
+                step["target"]["name"].as_str().unwrap_or_default(),
+            )?;
+        }
+        write!(
+            out,
+            "Approve only if each one can be undone. Type the recipe name to approve: "
+        )?;
+        out.flush()?;
+        let mut line = String::new();
+        std::io::stdin().lock().read_line(&mut line)?;
+        Ok(line)
+    };
+    let answer = prompt()
+        .context("ask for approval")
+        .map_err(CliError::Local)?;
+    if answer.trim() != name {
+        return print(
+            &json!({"approved":false,"name":name,"reason":"not_confirmed"}),
+            1,
+        );
+    }
+    store
+        .approve(&recipe)
+        .context("record the approval")
+        .map_err(CliError::Local)?;
+    print(
+        &json!({"approved":true,"name":name,"revision":recipe.revision,
+            "steps":downgrades.len()}),
+        0,
+    )
+}
+
 /// Replays a recipe. `call` reaches the daemon, so the CLI and MCP share this.
 pub(crate) fn run(
     request: &RunRequest,
@@ -143,6 +247,9 @@ pub(crate) fn run(
         Ok(recipe) => recipe,
         Err(refusal) => return refused(name, &refusal),
     };
+    if let Some(refusal) = unapproved(&store, &recipe) {
+        return refused(name, &refusal);
+    }
     let bound = recipe
         .resolve_params(&request.params)
         .and_then(|values| Ok((recipe.bind(&values)?, store::params_digest(&values))));
@@ -415,6 +522,7 @@ pub fn dispatch(cmd: RecipeCmd, flags: &GlobalFlags, _format: Format) -> Result<
             let (reply, exit) = remove(&name);
             print(&reply, exit)
         }
+        RecipeCommand::Approve { name } => approve(&name),
         RecipeCommand::Save { file } => {
             let bytes = std::fs::read(&file)
                 .with_context(|| format!("read {}", file.display()))
@@ -453,12 +561,16 @@ pub fn dispatch(cmd: RecipeCmd, flags: &GlobalFlags, _format: Format) -> Result<
                 browser: args.browser,
                 keep_session: args.keep_session,
             };
-            // A missing file or bad parameter needs no daemon.
-            if let Ok(store) = Store::open()
-                && let Err(refusal) = store.load(&request.name)
-            {
-                let (reply, exit) = refused(&request.name, &refusal);
-                return print(&reply, exit);
+            // A missing file or an unapproved risk needs no daemon.
+            if let Ok(store) = Store::open() {
+                let refusal = match store.load(&request.name) {
+                    Ok(recipe) => unapproved(&store, &recipe),
+                    Err(refusal) => Some(refusal),
+                };
+                if let Some(refusal) = refusal {
+                    let (reply, exit) = refused(&request.name, &refusal);
+                    return print(&reply, exit);
+                }
             }
             let (daemon, protocol) =
                 ensure_daemon::ensure_daemon_with_protocol().context("ensure daemon is running")?;

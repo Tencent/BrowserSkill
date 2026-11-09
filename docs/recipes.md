@@ -11,7 +11,7 @@ immediately before each input.
 
 | Entry point | Name |
 | --- | --- |
-| CLI | `bsk recipe list`, `show`, `run`, `draft`, `save`, `rm` |
+| CLI | `bsk recipe list`, `show`, `run`, `draft`, `save`, `approve`, `rm` |
 | MCP | `bsk_recipe` |
 | Wire protocol | None for replay; `session.run_log` is local to the daemon |
 
@@ -83,8 +83,8 @@ For `handoff`, `reason` is one of `target_not_found`, `target_ambiguous`, `requi
 `origin_mismatch`, `until_timeout`, `output_missing`, `human_intervention`, `step_refused`,
 `budget_exceeded` and `cancelled`. For `uncertain`, it is `effect_unknown` or, with
 `operation_id`, `dialog_pending`. For `refused`, it names what failed, such as `invalid_params`,
-`recipe_not_found`, `unsupported_version`, `borrowed_tab` or `session_busy`, and `message` says
-how to fix it. Worst case, a handoff costs one observation plus the turns for the remaining
+`recipe_not_found`, `approval_required`, `unsupported_version`, `borrowed_tab` or `session_busy`,
+and `message` says how to fix it. Worst case, a handoff costs one observation plus the turns for the remaining
 steps, so it is never more expensive than doing the flow by hand.
 
 ## The file
@@ -185,9 +185,20 @@ usually name a filter or a list.
 A key press is reversible only when it moves or edits: Tab, the arrow keys, Home, End, Page Up,
 Page Down, Escape and Space, and Backspace, Delete or a single character in a text field. Enter,
 any key with Ctrl, Alt or Meta, and any other key are `commit`, because a shortcut can do
-anything, and so is a key pressed on a control whose name commits. Over-marking is deliberate. If a step really can be
-undone, declare `"risk": "reversible"`; `save` and `show` list every lowered risk. A declaration
-does not cover a control named by a parameter, which is classified again after substitution.
+anything, and so is a key pressed on a control whose name commits. Over-marking is deliberate.
+
+If a step really can be undone, declare `"risk": "reversible"`; `save`, `show` and `list` report
+every lowered risk. A recipe that lowers any risk does not run until a person approves it:
+
+```sh
+bsk recipe approve sales-report
+```
+
+`approve` lists each lowered step and asks the person to type the recipe's name. It needs a
+terminal and refuses piped input, and MCP and DSH have no such action, so an agent cannot approve
+a risk it lowered. The approval covers the recipe as reviewed: rewording the description keeps it,
+and any other change needs approving again. A declaration does not cover a control named by a
+parameter, which is classified again after substitution.
 
 `draft` warns about requests in the session that were not GET, HEAD or OPTIONS, without their
 query strings. It cannot attribute them to a particular step, so deciding which step caused a

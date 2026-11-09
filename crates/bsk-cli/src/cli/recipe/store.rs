@@ -52,6 +52,50 @@ pub struct State {
     #[serde(default)]
     pub handoff_streak: u32,
     pub created_ms: i64,
+    /// A person's approval of the risks the recipe lowers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approval: Option<Approval>,
+}
+
+/// What a person approved at a terminal, so a later change needs approving again.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Approval {
+    /// Digest of the recipe as reviewed, without its description and revision.
+    pub digest: String,
+    pub revision: u32,
+    pub approved_ms: i64,
+}
+
+/// `required` until a person approves the risks a recipe lowers, then `approved`.
+fn approval_note(recipe: &Recipe, state: &State) -> Option<&'static str> {
+    if recipe.downgrades().is_empty() {
+        return None;
+    }
+    let digest = approval_digest(recipe);
+    Some(
+        if state
+            .approval
+            .as_ref()
+            .is_some_and(|approval| approval.digest == digest)
+        {
+            "approved"
+        } else {
+            "required"
+        },
+    )
+}
+
+/// Covers what a run does. Rewording the description changes nothing a person approved.
+pub(crate) fn approval_digest(recipe: &Recipe) -> String {
+    let mut reviewed = recipe.clone();
+    reviewed.description.clear();
+    reviewed.revision = 0;
+    let bytes = serde_json::to_vec(&reviewed).expect("serializable recipe");
+    Sha256::digest(bytes)
+        .iter()
+        .take(16)
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
 }
 
 #[derive(Debug, Clone)]
@@ -294,10 +338,28 @@ impl Store {
         }
         write_private(&path, &serde_json::to_vec_pretty(&recipe)?)?;
         self.write_state(&recipe.name, &state)?;
-        Ok(
-            json!({"saved":true,"name":recipe.name,"revision":recipe.revision,
-            "status":state.status,"path":path,"summary":recipe.summary()}),
-        )
+        let mut reply = json!({"saved":true,"name":recipe.name,"revision":recipe.revision,
+            "status":state.status,"path":path,"summary":recipe.summary()});
+        if let Some(approval) = approval_note(&recipe, &state) {
+            reply["approval"] = approval.into();
+        }
+        Ok(reply)
+    }
+
+    /// Whether the recipe may run: nothing lowered, or a person approved exactly this.
+    pub(crate) fn approved(&self, recipe: &Recipe) -> bool {
+        approval_note(recipe, &self.state(&recipe.name)) != Some("required")
+    }
+
+    /// Records a person's approval of the recipe as they reviewed it.
+    pub(crate) fn approve(&self, recipe: &Recipe) -> anyhow::Result<()> {
+        let mut state = self.state(&recipe.name);
+        state.approval = Some(Approval {
+            digest: approval_digest(recipe),
+            revision: recipe.revision,
+            approved_ms: now_ms(),
+        });
+        self.write_state(&recipe.name, &state)
     }
 
     pub(crate) fn remove(&self, name: &str) -> anyhow::Result<bool> {
@@ -324,6 +386,9 @@ impl Store {
                 state.handoff_at.as_deref().unwrap_or("unknown")
             )
             .into();
+        }
+        if let Some(approval) = approval_note(recipe, state) {
+            entry["approval"] = approval.into();
         }
         entry
     }
@@ -368,7 +433,11 @@ impl Store {
     pub(crate) fn show(&self, name: &str) -> Result<Value, Refusal> {
         let recipe = self.load(name)?;
         let state = self.state(name);
-        Ok(json!({"recipe":recipe,"state":state,"summary":recipe.summary()}))
+        let mut reply = json!({"recipe":recipe,"state":state,"summary":recipe.summary()});
+        if let Some(approval) = approval_note(&recipe, &state) {
+            reply["approval"] = approval.into();
+        }
+        Ok(reply)
     }
 
     /// A log nobody can write is not a reason to stop a run.
@@ -534,6 +603,42 @@ mod tests {
         changed["segments"][0]["steps"][2]["target"]["name"] = "Find".into();
         store.save(parsed(changed).unwrap(), false).unwrap();
         assert_eq!(store.state("sales-report").status, Status::Draft);
+    }
+
+    #[test]
+    fn an_approval_covers_exactly_the_steps_a_person_reviewed() {
+        let (_dir, store) = store();
+        let mut lowered = report();
+        lowered["segments"][0]["steps"][2]["target"]["name"] = "Save filters".into();
+        lowered["segments"][0]["steps"][2]["risk"] = "reversible".into();
+        let saved = store.save(parsed(lowered.clone()).unwrap(), false).unwrap();
+        assert_eq!(saved["approval"], "required");
+        let recipe = store.load("sales-report").unwrap();
+        assert!(!store.approved(&recipe));
+        store.approve(&recipe).unwrap();
+        assert!(store.approved(&recipe));
+        assert_eq!(store.show("sales-report").unwrap()["approval"], "approved");
+        assert_eq!(
+            store.list(None).unwrap()["recipes"][0]["approval"],
+            "approved"
+        );
+        // Rewording the description changes nothing a person approved.
+        let mut reworded = lowered.clone();
+        reworded["description"] = "Reworded".into();
+        let saved = store.save(parsed(reworded).unwrap(), false).unwrap();
+        assert_eq!(saved["approval"], "approved");
+        // Anything else needs approving again.
+        let mut changed = lowered;
+        changed["segments"][0]["until"]["timeout_ms"] = 2000.into();
+        let saved = store.save(parsed(changed).unwrap(), false).unwrap();
+        assert_eq!(saved["approval"], "required");
+        assert!(!store.approved(&store.load("sales-report").unwrap()));
+
+        // A recipe that lowers nothing needs no approval.
+        let (_other, plain) = self::store();
+        let saved = plain.save(parsed(report()).unwrap(), false).unwrap();
+        assert!(saved.get("approval").is_none());
+        assert!(plain.approved(&plain.load("sales-report").unwrap()));
     }
 
     #[test]

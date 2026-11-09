@@ -286,6 +286,48 @@ async fn an_invalid_file_is_refused_with_the_cause() {
 }
 
 #[tokio::test]
+async fn a_lowered_risk_runs_only_after_a_person_approves_it_at_a_terminal() {
+    let home = Home::new();
+    let mut lowered = recipe();
+    lowered["segments"][0]["steps"][1]["target"]["name"] = "Save filters".into();
+    lowered["segments"][0]["steps"][1]["risk"] = "reversible".into();
+    let file = home.write("lowered.json", &lowered);
+    let (output, saved) = home.local(&["recipe", "save", "--file", &file]).await;
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(saved["approval"], "required");
+    assert_eq!(saved["summary"]["risk_downgrades"][0]["inferred"], "commit");
+    assert_eq!(
+        home.local(&["recipe", "list"]).await.1["recipes"][0]["approval"],
+        "required"
+    );
+
+    // Refused before any daemon or session is involved.
+    let (output, reply) = home
+        .local(&["recipe", "run", "sales", "--param", "region=East"])
+        .await;
+    assert_eq!(output.status.code(), Some(2), "{output:?}");
+    assert_eq!(reply["reason"], "approval_required");
+    let message = reply["message"].as_str().unwrap();
+    assert!(message.contains("bsk recipe approve sales"), "{message}");
+
+    // An agent's piped input is not a person at a terminal, whatever it types.
+    let mut command = home.command(&["recipe", "approve", "sales"]);
+    command.stdin(Stdio::piped());
+    let mut child = command.spawn().unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    stdin.write_all(b"sales\n").await.unwrap();
+    drop(stdin);
+    let output = child.wait_with_output().await.unwrap();
+    assert_eq!(output.status.code(), Some(2), "{output:?}");
+    let reply: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(reply["reason"], "approval_needs_person");
+    assert_eq!(
+        home.local(&["recipe", "show", "sales"]).await.1["approval"],
+        "required"
+    );
+}
+
+#[tokio::test]
 async fn a_run_opens_its_own_session_replays_once_and_closes_it() {
     let home = Home::new();
     home.save();
@@ -648,6 +690,8 @@ async fn mcp_clients_get_the_same_recipes_when_the_switch_is_on() {
                 8,
                 json!({"action":"run","name":"sales","session":"s","browser":"b"}),
             ),
+            // Only a person at a terminal approves a lowered risk.
+            tool_call(9, json!({"action":"approve","name":"sales"})),
         ],
     )
     .await;

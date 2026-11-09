@@ -1085,22 +1085,38 @@ impl Recipe {
         Ok(bound)
     }
 
+    /// Steps whose declared risk is lower than the one inferred from their action and
+    /// name. A recipe with any runs only after a person approves them.
+    pub(crate) fn downgrades(&self) -> Vec<Value> {
+        let mut downgrades = Vec::new();
+        for segment in &self.segments {
+            for (index, step) in segment.steps.iter().enumerate() {
+                if step.risk() < step.inferred_risk() {
+                    let mut entry = json!({"segment":segment.id,"step":index,
+                        "action":step.action,"target":step.target,
+                        "inferred":step.inferred_risk(),"declared":step.risk()});
+                    if let Some(key) = &step.key {
+                        entry["key"] = key.as_str().into();
+                    }
+                    downgrades.push(entry);
+                }
+            }
+        }
+        downgrades
+    }
+
     /// What a person reviewing the saved recipe should look at.
     pub(crate) fn summary(&self) -> Value {
         let mut steps = Vec::new();
-        let mut downgrades = Vec::new();
         for segment in &self.segments {
             for (index, step) in segment.steps.iter().enumerate() {
                 steps.push(
                     json!({"segment":segment.id,"step":index,"action":step.action,
                     "target":step.target,"risk":step.risk()}),
                 );
-                if step.risk() < step.inferred_risk() {
-                    downgrades.push(json!({"segment":segment.id,"step":index,
-                        "target":step.target,"inferred":step.inferred_risk(),"declared":step.risk()}));
-                }
             }
         }
+        let downgrades = self.downgrades();
         let mut hints = BTreeSet::new();
         for target in self.targets() {
             for text in [Some(target.name.as_str()), target.ctx.as_deref()]

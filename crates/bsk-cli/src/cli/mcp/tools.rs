@@ -77,7 +77,8 @@ fn recipe_definition() -> Value {
          when its description matches the task. status tells you what to do next: completed \
          means answer from outputs; handoff means continue from post and remaining, by hand; \
          uncertain means a step's effect is unknown, so check the application's records and \
-         never run it again; refused means nothing ran. A run started without session keeps its \
+         never run it again; refused means nothing ran, and approval_required means a person \
+         must approve the recipe's lowered risks in a terminal first. A run started without session keeps its \
          session open for you after handoff or uncertain: stop it when done. After finishing a \
          flow by hand, and only if the user agrees, draft turns the session's actions into a \
          recipe (before stopping that session), and save stores your reviewed copy. Outputs are \
