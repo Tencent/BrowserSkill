@@ -63,9 +63,13 @@ Build the CLI and test extension from the same candidate source, record each ope
 and report the tested scope, failures, and blockers without claiming untested cases passed.
 ```
 
-The skill includes 69 workflow/regression cases and discovers additional command coverage cases
-from the candidate CLI. It exercises synthetic HTML and six public sites, including active
-carousels and per-second updates with `evaluate`/`wheel`. It is a separate Agent-guided workflow;
+The skill includes 90 workflow/edge/regression cases and discovers additional command coverage cases
+(including `bsk plan`, `bsk recipe`, and `bsk read`) from the candidate CLI. It exercises synthetic
+HTML (including plan/recipe drift labs, a local video portal, and a developer forum hub) and eight
+public sites (OceanEngine, Taobao, Bilibili video site, V2EX forum site, MDN, GitHub, Books to
+Scrape, and Hacker News), including active carousels and per-second updates with
+`evaluate`/`read`/`wheel`, while recording benchmark metrics (success rate, interaction turns,
+actions-per-turn compression ratio, and P50/P95 latency). It is a separate Agent-guided workflow;
 it is not automatically added to the `core` suite, `pnpm eval:browser`, or required CI checks.
 
 The Python helpers need Python 3.9+ and only the standard library. Full execution also needs

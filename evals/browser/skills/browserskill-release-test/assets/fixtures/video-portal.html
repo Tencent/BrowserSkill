@@ -1,0 +1,203 @@
+<!doctype html>
+<html lang="zh-CN">
+<meta charset="utf-8">
+<title>合成视频门户 · Video Portal Benchmark</title>
+<style>
+  * { box-sizing: border-box; }
+  body { font: 15px system-ui, sans-serif; margin: 0; background: #0f172a; color: #e2e8f0; }
+  header { position: sticky; top: 0; z-index: 20; background: #1e293b; padding: 12px 24px; display: flex; justify-content: space-between; align-items: center; }
+  main { max-width: 1200px; margin: auto; padding: 20px; display: grid; grid-template-columns: 2fr 1fr; gap: 20px; }
+  .panel { background: #1e293b; border-radius: 10px; padding: 16px; border: 1px solid #334155; }
+  .controls { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; margin-top: 10px; }
+  button, select, input { font: inherit; padding: 6px 12px; border-radius: 6px; border: 1px solid #475569; background: #334155; color: #f8fafc; cursor: pointer; }
+  output { display: block; background: #020617; color: #38bdf8; padding: 10px; border-radius: 6px; margin-top: 10px; white-space: pre-wrap; }
+  .video-card { display: grid; grid-template-columns: 110px 1fr; gap: 10px; padding: 10px; border-bottom: 1px solid #334155; }
+  .thumb { background: #38bdf8; color: #020617; font-weight: bold; display: flex; align-items: center; justify-content: center; height: 64px; border-radius: 6px; }
+  .modal-backdrop { position: fixed; inset: 0; background: rgba(2, 6, 23, 0.82); display: flex; align-items: center; justify-content: center; z-index: 50; }
+  .modal-backdrop[hidden] { display: none; }
+  .modal-card { background: #1e293b; border: 2px solid #38bdf8; padding: 24px; border-radius: 12px; width: 420px; }
+</style>
+<header>
+  <strong>合成视频门户 · Bsk Video Benchmark</strong>
+  <div>
+    <button type="button" id="open-stacked-modals">触发双层弹层遮罩</button>
+    <button type="button" id="refresh-feed">换一换推荐流</button>
+  </div>
+</header>
+<main>
+  <section class="panel" id="player-panel">
+    <h1 id="video-title">【深度解析】BrowserSkill 视觉对象模型与人机共驾架构</h1>
+    <div id="video-meta" data-bvid="BV1bsk2026" data-views="128400" data-danmaku="842">
+      <span id="up-author">UP主：架构实验室</span> ·
+      <span id="view-count">12.8万播放</span> ·
+      <span id="danmaku-count">842弹幕</span>
+    </div>
+    <video id="portal-video" src="/canvas-demo.mp4" width="640" preload="auto" muted></video>
+    <div class="controls" role="toolbar" aria-label="播放器控制栏">
+      <button type="button" id="btn-play-toggle">播放/暂停</button>
+      <button type="button" id="btn-mute-toggle" aria-pressed="true">取消静音</button>
+      <label>倍速
+        <select id="playback-rate" aria-label="倍速">
+          <option value="1">1.0x</option>
+          <option value="1.5">1.5x</option>
+          <option value="2">2.0x</option>
+        </select>
+      </label>
+      <label><input type="checkbox" id="danmaku-switch" checked> 开启弹幕</label>
+      <button type="button" id="chapter-2">跳至章节2 (0.8s)</button>
+      <button type="button" id="toggle-desc" aria-expanded="false">展开简介</button>
+    </div>
+    <div id="video-desc" hidden>
+      本视频演示真实 Chromium 下的 VOM 几何对齐、步骤级 expect 守卫、bsk plan 批量执行与 bsk recipe 零轮次回放。
+    </div>
+    <output id="player-state"></output>
+
+    <h2>弹幕与热门评论</h2>
+    <ul id="comment-list" role="list">
+      <li role="listitem" data-floor="1"><strong class="user">极客A</strong>：<span class="content">人机共驾的 effect_state 三态非常关键！</span> <span class="likes">👍 96</span></li>
+      <li role="listitem" data-floor="2"><strong class="user">开发者B</strong>：<span class="content">bsk plan 一次提交把多步表单轮次降到了 1 轮。</span> <span class="likes">👍 64</span></li>
+      <li role="listitem" data-floor="3"><strong class="user">测试员C</strong>：<span class="content">求更新真实视频与论坛网站的 Benchmark 数据！</span> <span class="likes">👍 51</span></li>
+    </ul>
+    <button type="button" id="load-more-comments">加载更多评论</button>
+  </section>
+
+  <aside class="panel" id="recommend-panel">
+    <h2>相关推荐视频</h2>
+    <div id="recommend-list" role="list"></div>
+  </aside>
+</main>
+
+<!-- 初始或可触发的双层遮罩：用于测试 EDGE-STACKED-MODALS 与视频站登录弹层关闭 -->
+<div class="modal-backdrop" id="modal-layer-1" role="dialog" aria-label="高清画质登录引导" hidden>
+  <div class="modal-card">
+    <h3>登录即可体验 4K 超清画质</h3>
+    <p>未登录用户仍可关闭此弹层继续观看公开视频。</p>
+    <button type="button" id="close-modal-1">关闭登录引导</button>
+  </div>
+</div>
+<div class="modal-backdrop" id="modal-layer-2" role="dialog" aria-label="青少年模式提示" style="z-index: 60" hidden>
+  <div class="modal-card">
+    <h3>青少年守护提示（顶层弹窗）</h3>
+    <p>请先关闭最上层提示，再操作下层页面。</p>
+    <button type="button" id="close-modal-2">我知道了（关闭顶层）</button>
+  </div>
+</div>
+
+<script>
+  const $ = (s) => document.querySelector(s);
+  const video = $('#portal-video');
+  const emit = (type, data = {}) => fetch('/event', { method: 'POST', body: JSON.stringify({ type, ...data }) });
+  const search = new URLSearchParams(location.search);
+
+  let batch = 0;
+  function renderRecommendations() {
+    batch++;
+    const items = [
+      { id: `BV-10${batch}`, title: `BrowserSkill 架构剖析 第${batch}期`, up: '深海工程师', views: `${10 + batch}.2万`, duration: '14:20', url: `/video-portal?vid=BV-10${batch}` },
+      { id: `BV-20${batch}`, title: `CDP 跨源 OOPIF 坐标对齐实战 #${batch}`, up: '前端内幕', views: `${6 + batch}.5万`, duration: '09:45', url: `/video-portal?vid=BV-20${batch}` },
+      { id: `BV-30${batch}`, title: `零模型轮次 Recipe 回放与漂移自检 #${batch}`, up: '自动化周刊', views: `${4 + batch}.8万`, duration: '18:10', url: `/video-portal?vid=BV-30${batch}` },
+      { id: `BV-40${batch}`, title: `高并发单飞队列与取消线序验证 #${batch}`, up: 'Rust系统组', views: `${3 + batch}.1万`, duration: '11:05', url: `/video-portal?vid=BV-40${batch}` },
+    ];
+    $('#recommend-list').innerHTML = items.map((item) => `
+      <article class="video-card" role="listitem" data-vid="${item.id}">
+        <div class="thumb">${item.duration}</div>
+        <div>
+          <h3><a href="${item.url}">${item.title}</a></h3>
+          <div class="up">${item.up}</div>
+          <div class="stats">${item.views}播放</div>
+        </div>
+      </article>
+    `).join('');
+  }
+  renderRecommendations();
+
+  function syncPlayerState(trigger = 'state') {
+    const state = {
+      trigger,
+      paused: video.paused,
+      muted: video.muted,
+      playbackRate: video.playbackRate,
+      currentTime: Number(video.currentTime.toFixed(2)),
+      readyState: video.readyState,
+      danmaku: $('#danmaku-switch').checked,
+      descExpanded: !$('#video-desc').hidden,
+      batch,
+    };
+    $('#player-state').textContent = JSON.stringify(state);
+    return state;
+  }
+
+  for (const ev of ['loadedmetadata', 'play', 'pause', 'ratechange', 'volumechange', 'seeked']) {
+    video.addEventListener(ev, () => syncPlayerState(ev));
+  }
+
+  $('#btn-play-toggle').onclick = async () => {
+    if (video.paused) {
+      try { await video.play(); } catch {}
+    } else {
+      video.pause();
+    }
+    emit('video-play-toggle', syncPlayerState('play-toggle'));
+  };
+  $('#btn-mute-toggle').onclick = () => {
+    video.muted = !video.muted;
+    $('#btn-mute-toggle').setAttribute('aria-pressed', String(!video.muted));
+    $('#btn-mute-toggle').textContent = video.muted ? '取消静音' : '已开启声音';
+    emit('video-mute-toggle', syncPlayerState('mute-toggle'));
+  };
+  $('#playback-rate').onchange = () => {
+    video.playbackRate = Number($('#playback-rate').value);
+    emit('video-rate-change', syncPlayerState('rate-change'));
+  };
+  $('#danmaku-switch').onchange = () => {
+    emit('video-danmaku-toggle', syncPlayerState('danmaku-toggle'));
+  };
+  $('#chapter-2').onclick = () => {
+    video.currentTime = 0.8;
+    emit('video-chapter-seek', syncPlayerState('chapter-seek'));
+  };
+  $('#toggle-desc').onclick = () => {
+    const hidden = !$('#video-desc').hidden;
+    $('#video-desc').hidden = hidden;
+    $('#toggle-desc').setAttribute('aria-expanded', String(!hidden));
+    $('#toggle-desc').textContent = hidden ? '展开简介' : '收起简介';
+    emit('video-desc-toggle', syncPlayerState('desc-toggle'));
+  };
+  $('#refresh-feed').onclick = () => {
+    renderRecommendations();
+    emit('video-feed-refreshed', syncPlayerState('feed-refresh'));
+  };
+  $('#load-more-comments').onclick = () => {
+    const ul = $('#comment-list');
+    const nextFloor = ul.children.length + 1;
+    const li = document.createElement('li');
+    li.setAttribute('role', 'listitem');
+    li.dataset.floor = String(nextFloor);
+    li.innerHTML = `<strong class="user">新观众${nextFloor}</strong>：<span class="content">新增异步评论第 ${nextFloor} 楼</span> <span class="likes">👍 ${10 + nextFloor}</span>`;
+    ul.append(li);
+    emit('video-comments-loaded', { count: ul.children.length });
+  };
+
+  $('#open-stacked-modals').onclick = () => {
+    $('#modal-layer-1').hidden = false;
+    $('#modal-layer-2').hidden = false;
+    emit('stacked-modals-opened');
+  };
+  $('#close-modal-2').onclick = () => {
+    $('#modal-layer-2').hidden = true;
+    emit('modal-layer-2-closed');
+  };
+  $('#close-modal-1').onclick = () => {
+    $('#modal-layer-1').hidden = true;
+    emit('modal-layer-1-closed');
+  };
+
+  if (search.get('modal') === '1') {
+    $('#modal-layer-1').hidden = false;
+  } else if (search.get('modal') === '2') {
+    $('#modal-layer-1').hidden = false;
+    $('#modal-layer-2').hidden = false;
+  }
+  syncPlayerState('init');
+</script>
+</html>

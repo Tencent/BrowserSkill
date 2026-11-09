@@ -59,8 +59,7 @@ CLI 与测试扩展从同一候选源码编译，逐步记录操作，
 如实报告测试范围、失败和阻塞，不把未执行的场景算作通过。
 ```
 
-Skill 包含 69 个流程／回归 case，并从候选 CLI 动态发现命令覆盖 case；使用合成 HTML 与六个
-公网站点，覆盖每秒变化页、活动轮播上的 `evaluate`／`wheel` 等真实链路。它是单独的 Agent
+Skill 包含 90 个流程／边缘／回归 case，并从候选 CLI 动态发现命令覆盖 case（含 `bsk plan`、`bsk recipe`、`bsk read` 等新命令）；使用合成 HTML（含计划／Recipe 实验室、本地视频门户、开发者论坛、双层遮罩、虚拟列表等）与八个公网站点（巨量引擎、淘宝、哔哩哔哩视频站、V2EX 论坛站、MDN、GitHub、Books、HN），覆盖每秒变化页、活动轮播上的 `evaluate`／`read`／`wheel` 等真实链路，并以 Benchmark 形式自动统计成功率、交互轮次、每轮动作压缩比与耗时分布。它是单独的 Agent
 引导流程，不会自动加入 `core`、`pnpm eval:browser` 或 required CI checks。
 
 辅助脚本需要 Python 3.9+，仅使用标准库。全量执行还需要真实 Chromium 浏览器、候选 Bsk CLI

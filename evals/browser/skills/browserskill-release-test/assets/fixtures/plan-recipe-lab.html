@@ -1,0 +1,264 @@
+<!doctype html>
+<html lang="zh-CN">
+<meta charset="utf-8">
+<title>Plan & Recipe Benchmark Lab</title>
+<style>
+  body { font: 16px system-ui, sans-serif; padding: 28px; color: #172b4d; background: #f7f9fc; }
+  main { max-width: 980px; margin: auto; display: grid; gap: 20px; }
+  section { background: #fff; border: 1px solid #d8e2ef; border-radius: 10px; padding: 20px; }
+  label { display: block; margin: 8px 0; }
+  input, select, button { font: inherit; padding: 8px 10px; margin: 4px; }
+  output { display: block; background: #eef5ff; padding: 10px; margin-top: 8px; white-space: pre-wrap; }
+  dialog[open], .modal {
+    position: fixed; inset: 15% 20%; margin: 0; background: #fff;
+    border: 2px solid #253858; border-radius: 8px; padding: 24px; z-index: 30;
+  }
+  .row { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+</style>
+<main>
+  <section id="plan-section">
+    <h1>批量计划工作台（bsk plan）</h1>
+    <p id="quote-banner">当前席位单价：<strong id="unit-price">¥120</strong>（库存状态：<span id="stock-tag">充足</span>）</p>
+    <div class="row">
+      <button type="button" id="drift-price">模拟席位涨价为 ¥260</button>
+      <button type="button" id="human-intervene">模拟人工点击干预</button>
+    </div>
+    <form id="plan-form">
+      <label for="applicant">申请人 <input id="applicant" name="applicant" placeholder="如：林晓"></label>
+      <label for="province">省份
+        <select id="province" name="province">
+          <option value="">请选择省份</option>
+          <option value="ZJ">浙江</option>
+          <option value="JS">江苏</option>
+        </select>
+      </label>
+      <label for="city">城市
+        <select id="city" name="city">
+          <option value="">请先选择省份</option>
+        </select>
+      </label>
+      <label for="tier">套餐档位
+        <select id="tier" name="tier">
+          <option value="standard">标准版</option>
+          <option value="enterprise">企业版</option>
+        </select>
+      </label>
+      <label><input type="checkbox" id="confirm-terms" name="confirm"> 确认配置无误</label>
+      <button type="button" id="apply-plan">生成批处理回执</button>
+    </form>
+    <div id="plan-summary" hidden role="region" aria-label="批处理摘要"></div>
+    <output id="plan-output">等待执行 plan</output>
+  </section>
+
+  <section id="recipe-app"></section>
+</main>
+<script>
+  const $ = (s) => document.querySelector(s);
+  const search = new URLSearchParams(location.search);
+  const drift = search.get('drift') || 'none';
+  const view = search.get('view') || (location.pathname.endsWith('/form') ? 'form' : location.pathname.endsWith('/login') ? 'login' : 'report');
+  const delay = Number(search.get('delay') || (drift === 'slow' ? 5000 : 120));
+  const emit = (type, data = {}) => fetch('/event', { method: 'POST', body: JSON.stringify({ type, ...data }) });
+  const postRecipe = (path, body) => fetch(path, { method: 'POST', body: JSON.stringify(body) });
+
+  window.planAppliedCount = 0;
+  window.humanIntervened = false;
+
+  $('#drift-price').onclick = () => {
+    $('#unit-price').textContent = '¥260';
+    $('#stock-tag').textContent = '紧张';
+    emit('plan-price-drifted', { price: '¥260' });
+  };
+  $('#human-intervene').onclick = () => {
+    window.humanIntervened = true;
+    emit('plan-human-intervene');
+  };
+
+  const cityMap = {
+    ZJ: [{ value: 'HZ', label: '杭州' }, { value: 'NB', label: '宁波' }],
+    JS: [{ value: 'NJ', label: '南京' }, { value: 'SZ', label: '苏州' }],
+  };
+  $('#province').addEventListener('change', () => {
+    const val = $('#province').value;
+    const city = $('#city');
+    city.innerHTML = '<option value="">加载中...</option>';
+    setTimeout(() => {
+      city.innerHTML = '<option value="">请选择城市</option>';
+      for (const item of cityMap[val] || []) {
+        const opt = document.createElement('option');
+        opt.value = item.value;
+        opt.textContent = item.label;
+        city.append(opt);
+      }
+      emit('plan-cities-loaded', { province: val });
+    }, 120);
+  });
+
+  $('#apply-plan').onclick = () => {
+    window.planAppliedCount++;
+    const payload = {
+      applicant: $('#applicant').value,
+      province: $('#province').value,
+      city: $('#city').value,
+      tier: $('#tier').value,
+      confirmed: $('#confirm-terms').checked,
+      price: $('#unit-price').textContent,
+      count: window.planAppliedCount,
+    };
+    const summary = $('#plan-summary');
+    summary.hidden = false;
+    summary.textContent = `批处理完成 #${payload.count}: ${payload.applicant} (${payload.province}/${payload.city}/${payload.tier}) @ ${payload.price}`;
+    $('#plan-output').textContent = JSON.stringify(payload);
+    emit('plan-applied', payload);
+  };
+
+  // Recipe surface supporting drift modes and multi-segment flows
+  const app = $('#recipe-app');
+  const dynId = (name) => (drift === 'ids' ? `r_${Math.random().toString(36).slice(2, 8)}` : name);
+
+  function mkField(label, control) {
+    const w = document.createElement('label');
+    w.textContent = label + ' ';
+    w.append(control);
+    return w;
+  }
+  function mkSelect(values) {
+    const c = document.createElement('select');
+    c.id = dynId('recipe-select');
+    for (const v of ['', ...values]) {
+      const o = document.createElement('option');
+      o.value = v;
+      o.textContent = v || '请选择';
+      c.append(o);
+    }
+    return c;
+  }
+  function mkButton(label, onclick) {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.id = dynId('recipe-btn');
+    b.textContent = label;
+    b.onclick = onclick;
+    return b;
+  }
+  function mkHeading(text) {
+    const h = document.createElement('h2');
+    h.textContent = text;
+    return h;
+  }
+
+  function renderLogin() {
+    document.title = '登录验证';
+    const user = document.createElement('input');
+    app.replaceChildren(mkHeading('登录'), mkField('账号', user), mkButton('登录', () => {}));
+  }
+
+  function renderReport() {
+    const region = mkSelect(['east', 'north']);
+    const quarter = mkSelect(['Q1', 'Q2', 'Q3', 'Q4']);
+    const status = document.createElement('output');
+    status.id = 'recipe-status';
+    status.setAttribute('role', 'status');
+    const fields = [
+      mkField('地区', region),
+      mkField(drift === 'label' ? '统计周期' : '季度', quarter),
+    ];
+    if (drift === 'order') fields.reverse();
+    const requiredDept = document.createElement('input');
+    const runQuery = async () => {
+      if (drift === 'required' && !requiredDept.value) {
+        status.textContent = '请填写部门';
+        return;
+      }
+      window.recipeQueries = (window.recipeQueries || 0) + 1;
+      await postRecipe('/recipe/query', { region: region.value, quarter: quarter.value, drift });
+      await new Promise((r) => setTimeout(r, delay));
+      const total = 100 * (quarter.selectedIndex + (region.value === 'north' ? 10 : 0));
+      status.textContent = `合计金额 ¥${total}`;
+      if (!app.querySelector('[data-export]')) {
+        const exp = mkButton('导出', () => postRecipe('/recipe/export', { total }));
+        exp.dataset.export = '1';
+        app.append(exp);
+      }
+    };
+
+    const nodes = [mkHeading('销售报表')];
+    if (drift === 'order') {
+      const note = document.createElement('p');
+      note.textContent = '报表周期说明：不影响业务字段语义。';
+      nodes.push(note, mkButton('帮助说明', () => {}));
+    }
+    nodes.push(...fields);
+    if (drift === 'required') nodes.push(mkField('部门', requiredDept));
+    if (drift === 'semantics') {
+      nodes.push(mkButton('保存草稿', () => postRecipe('/recipe/draft', {})));
+    } else {
+      const go = mkButton('查询', runQuery);
+      nodes.push(go);
+      if (drift === 'rerender') {
+        let current = go;
+        quarter.addEventListener('change', () => setTimeout(() => {
+          const next = mkButton('查询', runQuery);
+          current.replaceWith(next);
+          current = next;
+        }, 0), { once: true });
+      }
+    }
+    if (drift === 'duplicate') {
+      nodes.push(mkButton('查询', () => postRecipe('/recipe/wrong', { reason: 'duplicate' })));
+    }
+    // Irreversible commit button for testing recipe risk refusal
+    nodes.push(mkButton('立即支付提交', () => postRecipe('/recipe/wrong', { reason: 'commit' })));
+    nodes.push(status);
+    app.replaceChildren(...nodes);
+
+    if (drift === 'popup' || drift === 'unknown-popup') {
+      const dlg = document.createElement('dialog');
+      dlg.setAttribute('aria-label', drift === 'popup' ? '订阅优惠' : '未知调查问卷');
+      dlg.append(mkButton(drift === 'popup' ? '关闭' : '稍后填写', () => dlg.close()));
+      app.append(dlg);
+      dlg.showModal();
+    }
+  }
+
+  function renderForm() {
+    const nodes = [mkHeading('开户申请')];
+    for (const label of ['公司名称', '联系人', '手机号', '邮箱']) {
+      const inp = document.createElement('input');
+      inp.dataset.field = label;
+      nodes.push(mkField(label, inp));
+    }
+    const prov = mkSelect(['浙江', '江苏']);
+    const city = mkSelect(['杭州', '南京']);
+    const ind = mkSelect(['制造', '零售']);
+    const agree = document.createElement('input');
+    agree.type = 'checkbox';
+    const preview = document.createElement('output');
+    preview.id = 'recipe-form-preview';
+    preview.setAttribute('role', 'status');
+    nodes.push(
+      mkField('省份', prov),
+      mkField('城市', city),
+      mkField('行业', ind),
+      mkField('我已阅读说明', agree),
+      mkButton('预览', () => {
+        const vals = [...app.querySelectorAll('input[data-field]')].map((i) => i.value);
+        const text = `预览 ${vals.join('/')} ${prov.value}/${city.value}/${ind.value} ${agree.checked}`;
+        preview.textContent = text;
+        emit('recipe-form-preview', { preview: text });
+      }),
+      preview,
+    );
+    app.replaceChildren(...nodes);
+  }
+
+  function bootRecipeSurface() {
+    if (view === 'login' || drift === 'login') renderLogin();
+    else if (view === 'form') renderForm();
+    else if (drift === 'redirect') location.replace(search.get('to') || '/minimal');
+    else renderReport();
+  }
+  if (drift === 'late') setTimeout(bootRecipeSurface, 700);
+  else bootRecipeSurface();
+</script>
+</html>
