@@ -262,6 +262,48 @@ describe("record-capture semantic", () => {
     });
   });
 
+  it("records controls that share a form with a search field", () => {
+    // Shape of gov.uk/search: results and filters live in the form that holds the search box.
+    document.body.innerHTML = `
+      <form id="finder">
+        <input type="search" name="keywords" aria-label="Search GOV.UK" />
+        <span id="decor">magnifier</span>
+        <button type="button">Filter and sort</button>
+        <details><summary>Filter by Type</summary>
+          <input type="checkbox" id="services" aria-label="Services" />
+        </details>
+        <div role="button" tabindex="0" aria-label="Search using an image">img</div>
+        <ul><li><a href="#renew">Renew or replace your adult passport</a></li></ul>
+      </form>
+    `;
+    const capture = startRecordCapture("rec-search-form", (step) => steps.push(step));
+    for (const selector of ["#decor", "button", "summary", "#services", "[role=button]", "a"]) {
+      click(document.querySelector(selector)!);
+    }
+    capture.dispose();
+
+    expect(steps.filter((s) => s.op === "click").map((s) => s.target?.name)).toEqual([
+      "Filter and sort",
+      "Filter by Type",
+      "Services",
+      "Search using an image",
+      "Renew or replace your adult passport",
+    ]);
+  });
+
+  it("still treats clicks on the search field's own wrapper as focus chrome", () => {
+    document.body.innerHTML = `
+      <div class="search-box"><div role="combobox" aria-label="Search">
+        <span id="pad"></span><input name="q" />
+      </div></div>
+    `;
+    const capture = startRecordCapture("rec-search-chrome", (step) => steps.push(step));
+    click(document.querySelector("#pad")!);
+    capture.dispose();
+
+    expect(steps.filter((s) => s.op === "click")).toEqual([]);
+  });
+
   it("records a hover trigger before clicking its revealed menu item", () => {
     document.body.innerHTML = `
       <button type="button" aria-label="Open user navigation menu">avatar</button>

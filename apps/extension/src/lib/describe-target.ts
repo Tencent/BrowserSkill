@@ -155,7 +155,7 @@ export function accessibleName(el: Element): string | undefined {
   return undefined;
 }
 
-const INTERACTIVE_SELECTOR = [
+export const INTERACTIVE_SELECTOR = [
   "a[href]",
   "button",
   "summary",
