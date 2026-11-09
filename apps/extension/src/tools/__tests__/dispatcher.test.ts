@@ -168,6 +168,51 @@ describe("ToolDispatcher", () => {
     dispatcher.stop();
   });
 
+  it("marks a request refused behind a settling operation as retryable", async () => {
+    const { transport, sent, deliver } = fakeTransport();
+    const sessions = new SessionManager({
+      agentWindow: {
+        create: vi.fn(async () => ({ windowId: 42, initialTabIds: [7] })),
+        remove: vi.fn(),
+        ensureActiveTab: vi.fn(),
+      },
+    });
+    await sessions.start("owner");
+    const cdp = { send: vi.fn(), pendingDialogs: () => [] } as unknown as TestDispatcherCdp;
+    // The first operation (for example a cancelled screenshot) has not settled.
+    const debug = { before: vi.fn(() => new Promise(() => {})), after: vi.fn(), dispose: vi.fn() };
+    const dispatcher = new ToolDispatcher({ transport, sessions, cdp, debug: debug as never });
+    dispatcher.start();
+    deliver({
+      id: "capture",
+      method: "tool.screenshot",
+      params: { session_id: "owner", _operation_id: "op-1" },
+    });
+    await vi.waitFor(() => expect(debug.before).toHaveBeenCalled());
+    deliver({
+      id: "sync",
+      method: "tool.cooperate",
+      params: { session_id: "owner", action: "sync", _operation_id: "op-2" },
+    });
+    await vi.waitFor(() => expect(sent).toHaveLength(1));
+    expect(sent[0]).toMatchObject({
+      id: "sync",
+      error: {
+        code: "cdp_failed",
+        message: "Previous operation is still settling; this action was not dispatched",
+        data: {
+          dispatched: false,
+          reason: "operation_settling",
+          retryable: true,
+          retry_after_ms: 1000,
+          settling_method: "tool.screenshot",
+        },
+      },
+    });
+    expect(cdp.send).not.toHaveBeenCalled();
+    dispatcher.stop();
+  });
+
   afterEach(() => {
     resetBrowserObservationForTests();
     vi.unstubAllGlobals();

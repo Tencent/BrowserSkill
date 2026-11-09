@@ -5,6 +5,9 @@ pub mod daemon;
 pub mod ipc_client;
 pub mod rpc_reason {
     pub const SESSION_BUSY: &str = "session_busy";
+    /// Extension-side: an earlier operation on the session has not released
+    /// the browser yet, so this request was not dispatched and can be retried.
+    pub const OPERATION_SETTLING: &str = "operation_settling";
     /// Stable `RpcError.data.reason` values the daemon attaches when a
     /// dispatch hits a session id that already ended, so the CLI can
     /// render why it vanished instead of a generic not-found.

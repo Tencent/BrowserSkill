@@ -66,6 +66,22 @@ determines which versions can connect.
 - Removed nodes already collected by CDP report target_detached with node identity, consistently with detached nodes that remain inspectable; other CDP failures remain target_unavailable.
 - Recording captures option changes on native `<select>` controls inside open shadow roots,
   whose `change` events do not reach the document.
+- Strict shared-control actions no longer refuse themselves after their own preparation.
+  Once an action has scrolled, focused or hovered its target, a re-check compares only target
+  presence, form values, checked states, modal layers and media. A counter hidden by blurring
+  the previous field, or helper text shown by a hover, no longer loops `fill` and `click` on
+  "observed content changed" ([#540](https://github.com/Tencent/BrowserSkill/issues/540)).
+- A targeted strict action without `--depends-on` tolerates a positively identified media
+  timeline elsewhere on the page, as it already did with dependencies. Unnamed, submitted and
+  in-form sliders, and untargeted actions, stay exact.
+- Evidence refusals report `observed_change` (the first differing node, field and check, and
+  whether it happened before or during preparation) without values or sensitive text. Strict
+  click refusals after preparation also report `press_sent: false`.
+- A request refused because an earlier command on the session is still settling (for
+  example a cancelled observation screenshot) now carries `reason: operation_settling`,
+  `retryable` and `retry_after_ms`. `cooperate sync --settle` pauses and syncs again
+  (up to 5 s, also for older extensions), and the CLI no longer suggests a reload that needs
+  the same sync ([#527](https://github.com/Tencent/BrowserSkill/issues/527)).
 
 ### Fixed
 
