@@ -64,6 +64,8 @@ determines which versions can connect.
 
 ### Fixed
 
+- Recording keeps clicks on buttons and links whose name is longer than 48 characters,
+  such as GOV.UK step-by-step sections and long news headlines.
 - Recording keeps clicks on links, filter disclosures, checkboxes and other controls
   that share a form with a search field, such as GOV.UK search results and filters.
 - Recipe save refuses oversized input and formatted documents before publishing a
