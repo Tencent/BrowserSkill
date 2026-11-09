@@ -52,7 +52,7 @@ import {
   requestBorrowConfirmation,
 } from "@/tools/borrow-confirmation";
 import { ToolDispatcher } from "@/tools/dispatcher";
-import { hasActiveHelp } from "@/tools/human-loop";
+import { clearHelpForSession, hasActiveHelp } from "@/tools/human-loop";
 import {
   attachRecordFinishListener,
   attachRecordQueryListener,
@@ -123,7 +123,10 @@ export default defineBackground(() => {
     onSessionReleased: (ctx) => {
       dispatcher.cancelSession(ctx.sessionId);
       cooperation.release(ctx.sessionId);
+      debug.releaseSession(ctx.sessionId);
+      void video.stopSession(ctx.sessionId).catch(() => {});
       clearRecordingForSession(ctx.sessionId);
+      clearHelpForSession(ctx.sessionId);
     },
     onSessionsChanged: onOverlaySessionStateChanged,
   });
@@ -368,6 +371,9 @@ export default defineBackground(() => {
     for (const sessionId of minimizedControlSessions) {
       if (!liveSessionIds.has(sessionId)) minimizedControlSessions.delete(sessionId);
     }
+    void cdp.syncSessions?.(liveSessionIds)?.catch((error) => {
+      console.debug("[bsk] session CDP sync failed", error);
+    });
     pushAllAgentOverlayStates();
     for (const refresh of popupSnapshotRefreshers) refresh();
   }
@@ -416,6 +422,7 @@ export default defineBackground(() => {
     void video.stopTab(tabId, "tab_closed").catch(() => {});
     debug.stopTab(tabId, "tab_closed");
     sessions.forgetClosedTab(tabId, { isWindowClosing: removeInfo.isWindowClosing });
+    cdp.forgetClosedTab?.(tabId);
     debug.sync();
   });
   // Re-sync the storage.session flag on SW startup so a previous SW's

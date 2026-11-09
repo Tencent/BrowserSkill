@@ -158,6 +158,19 @@ JSON string using that action's CLI protocol fields. It executes once, optionall
 waits for `untilVisible`, then synchronizes. Read action, readiness and sync outcomes
 separately; a failed follow-up does not mean the action should be repeated.
 
+Use `bsk_interact` with `action: "plan"` and a `steps` array for 1–20 actions
+already decided from one sync. It stops at the first failure, preserves completed
+steps and returns the final synchronized state. Put expectations on individual
+steps; never repeat a step with unknown effects. See [plans](../../docs/plan.md).
+
+The optional `bsk_recipe` tool lists, reviews and replays saved flows. Enable the
+plugin's `recipes: true` option or start DSH with `BSK_RECIPES=1`; activation remains
+scoped to conversations using the browser skill. `run` and `draft` use owned
+sessions. Read `status`, `effects` and `remaining` before continuing a handoff;
+uncertain runs require checking the application's records before passing `checked`.
+Risk approval is a person's CLI action and is never exposed by the plugin.
+See [recipes](../../docs/recipes.md).
+
 Save complete observations with `saveFull` on `bsk_session action: "sync"` or
 `bsk_interact action: "step"`. Use `bsk_inspect action: "view"` with `file` and
 optional `find`, `startLine` or `lineCount` to inspect the saved file locally, even

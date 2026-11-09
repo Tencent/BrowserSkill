@@ -6,7 +6,9 @@ import { registerPhaseOneInteractionTools } from "./phase-one-tools-interaction"
 import { registerPhaseOneNavigationTools } from "./phase-one-tools-navigation";
 import { registerPhaseOneSupportTools } from "./phase-one-tools-support";
 import { registerPhaseOneTabTools } from "./phase-one-tools-tabs";
+import { registerPlanTool } from "./plan-tool";
 import { registerReadTool } from "./read-tool";
+import { registerRecipeTool } from "./recipe-tool";
 import { registerScriptFileTools } from "./script-file-tools";
 import type { ToolDeps } from "./tools";
 import { registerVideoTool } from "./video-tool";
@@ -27,4 +29,7 @@ export function registerPhaseOneTools(
   registerReadTool(deps, register, runtime);
   registerScriptFileTools(deps, register, runtime);
   registerGestureObservationTools(deps, register, runtime);
+  registerPlanTool(deps, register, runtime);
+  // Opt-in like MCP's bsk_recipe, so hosts that never replay pay nothing for its schema.
+  if (deps.config?.recipes) registerRecipeTool(deps, register, runtime);
 }

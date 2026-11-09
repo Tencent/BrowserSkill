@@ -336,6 +336,8 @@ dsh plugin --profile web update @wxg-prc-cpg/browser-skill-dsh-plugin --latest
 | 录制并保存任务视频 | [任务视频录制](docs/video-recording.md) |
 | 导出表格或列表 | [结构化提取](docs/structured-extraction.md) |
 | 等待元素条件 | [元素等待](docs/wait-for-element.md) |
+| 一次执行多个已决定的动作 | [Plan 命令](docs/plan.md) |
+| 保存并回放已审阅的流程 | [Recipe 命令](docs/recipes.md) |
 | 使用指定账号或 Profile | [浏览器 Profile](docs/browser-profiles.md) |
 | 连接服务器上的 Agent | [远程浏览器连接](docs/remote-extension-connection.md) |
 | 在沙盒中使用 | [沙盒环境配置](docs/sandboxed-agents.md) |

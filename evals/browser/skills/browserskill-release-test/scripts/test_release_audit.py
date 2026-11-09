@@ -355,6 +355,7 @@ else:print('Usage: bsk '+' '.join(p))
 
     def test_server_routes_and_event_oracle(self):
         root = self.skill / "assets/fixtures"
+        (root / "plan-recipe-lab.html").write_text("<title>plan-recipe-lab</title>")
         server = serve.make_server(root, 0)
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
@@ -362,6 +363,8 @@ else:print('Usage: bsk '+' '.join(p))
         try:
             with urllib.request.urlopen(url + "/minimal") as r:
                 self.assertIn(b"synthetic", r.read())
+            with urllib.request.urlopen(url + "/recipe/report?drift=none") as r:
+                self.assertIn(b"plan-recipe-lab", r.read())
             with urllib.request.urlopen(
                 urllib.request.Request(
                     url + "/event", data=b'{"type":"test"}', method="POST"
@@ -376,6 +379,261 @@ else:print('Usage: bsk '+' '.join(p))
             server.shutdown()
             server.server_close()
             thread.join()
+
+    def test_hidden_recipe_discovery_and_plan_recipe_benchmark(self):
+        body = """#!/usr/bin/env python3
+import json, sys
+args = sys.argv[1:]
+if '--help' in args:
+    p = args[:-1]
+    if not p:
+        print('Usage: bsk <COMMAND>\\n\\nCommands:\\n  status  Status\\n  plan    Batch plan\\n\\nOptions:\\n  --help Help')
+    elif p == ['recipe']:
+        print('Usage: bsk recipe <COMMAND>\\n\\nCommands:\\n  run   Replay\\n  save  Save\\n\\nOptions:\\n  --help Help')
+    else:
+        print('Usage: bsk ' + ' '.join(p))
+elif args[:1] == ['plan']:
+    if '--fail-plan' in args:
+        print(json.dumps({'ok': False, 'completed': 1, 'total': 3, 'stopped': {'index': 1, 'action': 'click', 'effect_state': 'none', 'reason': 'wait_unsatisfied'}}))
+        sys.exit(1)
+    print(json.dumps({'ok': True, 'completed': 5, 'total': 5, 'elapsed_ms': 42, 'post': {'context_id': 'c2', 'kind': 'baseline', 'observation': {'text': '@vom 1\\nL1 page'}}}))
+elif args[:2] == ['recipe', 'run']:
+    if '--handoff' in args:
+        print(json.dumps({'status': 'handoff', 'reason': 'target_not_found', 'effects': {'steps_done': 0, 'last_effect_state': 'none'}}))
+        sys.exit(1)
+    print(json.dumps({'status': 'completed', 'outputs': {'total': '1300'}, 'effects': {'steps_done': 4, 'last_effect_state': 'committed'}, 'elapsed_ms': 85}))
+elif args[:2] == ['recipe', 'save']:
+    print(json.dumps({'saved': True, 'revision': 1, 'status': 'draft'}))
+else:
+    print(json.dumps({'ok': True, 'value': 'synthetic'}))
+"""
+        self.binary.write_text(body)
+        inv = audit.discover(str(self.binary), self.base / "help")
+        self.assertEqual(
+            set(inv["commands"]),
+            {"help", "status", "plan", "recipe run", "recipe save"},
+        )
+        self.init(
+            [
+                {
+                    "id": "PLAN-FLOW",
+                    "kind": "workflow",
+                    "page_type": "batch-plan",
+                    "required_commands": ["plan"],
+                },
+                {
+                    "id": "NEG-PLAN",
+                    "kind": "workflow",
+                    "page_type": "batch-plan",
+                    "required_commands": ["plan"],
+                    "negative": True,
+                    "allow_plan_stopped": True,
+                },
+                {
+                    "id": "RECIPE-FLOW",
+                    "kind": "workflow",
+                    "page_type": "recipe",
+                    "required_commands": ["recipe save", "recipe run"],
+                },
+                {
+                    "id": "NEG-RECIPE",
+                    "kind": "workflow",
+                    "page_type": "recipe",
+                    "required_commands": ["recipe run"],
+                    "negative": True,
+                    "check_effect": False,
+                    "allow_recipe_handoff": True,
+                },
+            ]
+        )
+        r_status = self.execute(["status"], "FLOW")
+        r_help = self.execute(["help"], "CMD-help")
+        r_plan_ok = self.execute(["plan", "--steps", "[]"], "PLAN-FLOW")
+        r_plan_neg = self.execute(["plan", "--fail-plan"], "NEG-PLAN")
+        r_rec_save = self.execute(["recipe", "save"], "RECIPE-FLOW")
+        r_rec_run = self.execute(["recipe", "run", "sales"], "RECIPE-FLOW")
+        r_rec_neg = self.execute(["recipe", "run", "sales", "--handoff"], "NEG-RECIPE")
+
+        cases = [
+            self.passed(r_status, "FLOW"),
+            self.passed(r_status, "CMD-status"),
+            self.passed(r_help, "CMD-help"),
+            self.passed(r_plan_ok, "PLAN-FLOW"),
+            self.passed(r_plan_ok, "CMD-plan"),
+            self.passed(
+                r_plan_neg,
+                "NEG-PLAN",
+                [
+                    {
+                        "record": r_plan_neg,
+                        "pointer": "/json/stopped/reason",
+                        "op": "eq",
+                        "value": "wait_unsatisfied",
+                    },
+                    {
+                        "record": r_plan_neg,
+                        "pointer": "/json/stopped/effect_state",
+                        "op": "eq",
+                        "value": "none",
+                    },
+                ],
+            ),
+            {
+                "id": "RECIPE-FLOW",
+                "status": "passed",
+                "records": [r_rec_save, r_rec_run],
+                "oracle_summary": "Recipe saved and replayed",
+                "checks": [
+                    {
+                        "record": r_rec_save,
+                        "pointer": "/json/saved",
+                        "op": "eq",
+                        "value": True,
+                    },
+                    {
+                        "record": r_rec_run,
+                        "pointer": "/json/status",
+                        "op": "eq",
+                        "value": "completed",
+                    },
+                ],
+            },
+            self.passed(
+                r_rec_save,
+                "CMD-recipe__save",
+                [
+                    {
+                        "record": r_rec_save,
+                        "pointer": "/json/saved",
+                        "op": "eq",
+                        "value": True,
+                    }
+                ],
+            ),
+            self.passed(
+                r_rec_run,
+                "CMD-recipe__run",
+                [
+                    {
+                        "record": r_rec_run,
+                        "pointer": "/json/status",
+                        "op": "eq",
+                        "value": "completed",
+                    }
+                ],
+            ),
+            self.passed(
+                r_rec_neg,
+                "NEG-RECIPE",
+                [
+                    {
+                        "record": r_rec_neg,
+                        "pointer": "/json/status",
+                        "op": "eq",
+                        "value": "handoff",
+                    },
+                    {
+                        "record": r_rec_neg,
+                        "pointer": "/json/reason",
+                        "op": "eq",
+                        "value": "target_not_found",
+                    },
+                ],
+            ),
+        ]
+        audit.write(self.root / "results.json", {"cases": cases})
+        code, report = self.gate()
+        self.assertEqual(code, 0, report.get("errors"))
+        self.assertTrue(report["release_ready"])
+        self.assertIn("benchmark_summary", report)
+        self.assertEqual(report["execution_modes"]["plan"]["actions_executed"], 5)
+        self.assertEqual(report["execution_modes"]["plan"]["avg_actions_per_turn"], 5.0)
+        self.assertEqual(report["execution_modes"]["plan"]["success_rate"], 1.0)
+        self.assertEqual(
+            report["execution_modes"]["plan"]["negative_guard_invocations"], 1
+        )
+        self.assertEqual(report["execution_modes"]["recipe"]["actions_executed"], 4)
+        self.assertEqual(
+            report["execution_modes"]["recipe"]["avg_actions_per_turn"], 4.0
+        )
+        self.assertEqual(report["execution_modes"]["recipe"]["success_rate"], 1.0)
+        self.assertEqual(
+            report["execution_modes"]["recipe"]["negative_guard_invocations"], 1
+        )
+        self.assertEqual(
+            report["execution_modes"]["recipe_mgmt"]["actions_executed"], 0
+        )
+        self.assertTrue((self.root / "benchmark.json").exists())
+        self.assertTrue((self.root / "benchmark.md").exists())
+
+        # Verify step error vs result action counting and semantic checks
+        m_step_err = audit.extract_metrics(
+            "step", 1, {"ok": False, "action": {"error": {"code": "refused"}}}, 12.0
+        )
+        self.assertEqual(m_step_err["actions_executed"], 0)
+        m_step_ok = audit.extract_metrics(
+            "step", 0, {"ok": True, "action": {"result": {"tab_id": 1}}}, 15.0
+        )
+        self.assertEqual(m_step_ok["actions_executed"], 1)
+        self.assertIsNotNone(
+            audit.semantic_failure(
+                {"command": "recipe draft"}, {"json": {"errors": ["ambiguous"]}}
+            )
+        )
+        self.assertIsNone(
+            audit.semantic_failure(
+                {"command": "recipe approve"},
+                {"json": {"name": "sales", "approval_required": False}},
+            )
+        )
+        self.assertIsNotNone(
+            audit.semantic_failure(
+                {"command": "read"}, {"json": {"ok": True}}
+            )
+        )
+        self.assertIsNone(
+            audit.semantic_failure(
+                {"command": "read"}, {"json": {"items": [{"text": "hello"}]}}
+            )
+        )
+
+        # Multi-run aggregation
+        agg = audit.aggregate_multi_run_benchmarks([self.root, self.root])
+        self.assertEqual(agg["runs_count"], 2)
+        self.assertEqual(agg["summary"]["full_pass_runs"], 2)
+        self.assertEqual(agg["summary"]["mean_success_rate"], 1.0)
+        md = audit.render_multi_run_markdown(agg)
+        self.assertIn("PLAN-FLOW", md)
+        self.assertIn("RECIPE-FLOW", md)
+
+    def test_shipped_scenarios_and_fixture_manifest_integrity(self):
+        real_skill = Path(__file__).resolve().parents[1]
+        scenarios = audit.load(real_skill / "references/scenarios.json")
+        self.assertGreaterEqual(len(scenarios), 90)
+        ids = [s["id"] for s in scenarios]
+        self.assertEqual(len(ids), len(set(ids)))
+        for required_id in [
+            "PLAN-BATCH-FORM",
+            "NEG-PLAN-MIDSTEP-EXPECT",
+            "RECIPE-LIFECYCLE",
+            "RECIPE-DRIFT-RESILIENCE",
+            "NEG-RECIPE-HANDOFF",
+            "READ-DYNAMIC-BOUNDED",
+            "EDGE-VIRTUAL-LIST-RECYCLE",
+            "EDGE-STACKED-MODALS",
+            "LOCAL-VIDEO-PORTAL",
+            "LOCAL-FORUM-HUB",
+            "PUBLIC-BILIBILI-FEED",
+            "PUBLIC-BILIBILI-PLAYER",
+            "PUBLIC-FORUM-TOPICS",
+            "PUBLIC-FORUM-THREAD",
+        ]:
+            self.assertIn(required_id, ids)
+        manifest = audit.load(real_skill / "references/fixture-manifest.json")
+        for rel, expected_sha in manifest.items():
+            full = real_skill / "assets" / rel
+            self.assertTrue(full.is_file(), f"Missing fixture {rel}")
+            self.assertEqual(audit.digest(full), expected_sha, f"Hash mismatch for {rel}")
 
 
 if __name__ == "__main__":
