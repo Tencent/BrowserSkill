@@ -174,6 +174,12 @@ fn read_limited(path: &Path) -> anyhow::Result<Vec<u8>> {
 
 /// Parses a recipe file, or what MCP sent instead of one.
 pub(crate) fn parse_document(bytes: &[u8]) -> Result<Recipe, Refusal> {
+    if bytes.len() as u64 > MAX_FILE_BYTES {
+        return Err(Refusal::new(
+            "invalid_recipe",
+            format!("recipe exceeds {MAX_FILE_BYTES} bytes"),
+        ));
+    }
     let value: Value = serde_json::from_slice(bytes)
         .map_err(|error| Refusal::new("invalid_recipe", format!("recipe is not JSON: {error}")))?;
     model::from_value(value)
@@ -407,6 +413,14 @@ impl Store {
             }
         }
         let bytes = serde_json::to_vec_pretty(&recipe).expect("serializable recipe");
+        if bytes.len() as u64 > MAX_FILE_BYTES {
+            return Err(Refusal::new(
+                "invalid_recipe",
+                format!(
+                    "saved recipe exceeds {MAX_FILE_BYTES} bytes after formatting; shorten constants or split the flow"
+                ),
+            ));
+        }
         write_private(&path, &bytes).map_err(storage)?;
         self.write_state(&recipe.name, &state).map_err(storage)?;
         let mut reply = json!({"saved":true,"name":recipe.name,"revision":recipe.revision,
@@ -774,6 +788,31 @@ mod tests {
         let reply = put(&store, next);
         assert_eq!(reply["revision"], 2);
         assert!(store.root.join("sales-report/revisions/1.json").is_file());
+    }
+
+    #[test]
+    fn saving_never_publishes_a_document_larger_than_the_reader_accepts() {
+        let (_dir, store) = store();
+        store.save(parsed(report()).unwrap(), false).unwrap();
+        assert!(
+            parse_document(&vec![b' '; MAX_FILE_BYTES as usize + 1])
+                .unwrap_err()
+                .message
+                .contains("exceeds")
+        );
+        let mut large = report();
+        large["revision"] = 1.into();
+        large["segments"][0]["steps"][0]["values"] = json!([""]);
+        let overhead = serde_json::to_vec(&large).unwrap().len();
+        large["segments"][0]["steps"][0]["values"][0] =
+            "x".repeat(MAX_FILE_BYTES as usize - overhead - 1).into();
+        // The compact input fits; the canonical pretty-printed document does not.
+        let input = serde_json::to_vec(&large).unwrap();
+        let recipe = parse_document(&input).unwrap();
+        assert!(serde_json::to_vec_pretty(&recipe).unwrap().len() > MAX_FILE_BYTES as usize);
+        let refusal = store.save(recipe, true).unwrap_err();
+        assert_eq!(refusal.reason, "invalid_recipe");
+        assert_eq!(store.load("sales-report").unwrap().revision, 1);
     }
 
     #[test]

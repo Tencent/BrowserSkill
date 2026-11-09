@@ -665,6 +665,18 @@ async fn an_unwritable_run_marker_refuses_input_and_closes_the_new_session() {
 }
 
 #[tokio::test]
+async fn oversized_documents_are_refused_before_saving() {
+    let home = Home::new();
+    let mut large = recipe();
+    large["segments"][0]["steps"][0]["values"][0] = "x".repeat(256 * 1024).into();
+    let file = home.write("large.json", &large);
+    let (output, reply) = home.local(&["recipe", "save", "--file", &file]).await;
+    assert_eq!(output.status.code(), Some(2), "{output:?}");
+    assert_eq!(reply["reason"], "invalid_recipe", "{reply}");
+    assert!(!home.dir.path().join("recipes/sales/recipe.json").exists());
+}
+
+#[tokio::test]
 async fn an_old_daemon_is_rejected_before_any_step() {
     let home = Home::new();
     home.save();

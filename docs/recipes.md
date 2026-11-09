@@ -233,6 +233,8 @@ their name or by the extension's mask on their value.
 
 Recipes live in `$BSK_HOME/recipes/` and never leave the machine. Directories are `0700` and files
 `0600`, or the current account's defaults on Windows.
+Recipe files, including their canonical saved representation, are limited to 256 KiB;
+oversized documents are refused before replacing the current revision.
 
 ```text
 sales-report/

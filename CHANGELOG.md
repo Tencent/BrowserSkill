@@ -64,6 +64,9 @@ determines which versions can connect.
 
 ### Fixed
 
+- Recipe save refuses oversized input and formatted documents before publishing a
+  revision that its own reader could not open.
+
 - `press` maps US-layout punctuation to its physical `code` and virtual key code,
   so shortcuts such as `Ctrl+/` reach handlers that check `event.code`.
 - Main-document SPA route changes, including away-and-back and hash routes,
