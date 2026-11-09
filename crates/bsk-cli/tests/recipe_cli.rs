@@ -47,6 +47,8 @@ struct Script {
     die_on: Option<&'static str>,
     /// Answer this method as a daemon that does not know it.
     rejects: Option<&'static str>,
+    /// Answer this method as a daemon whose session is gone.
+    missing: Option<&'static str>,
     run_log: Value,
 }
 
@@ -57,6 +59,7 @@ impl Default for Script {
             pages: vec![FORM, DONE],
             die_on: None,
             rejects: None,
+            missing: None,
             run_log: json!({"steps":[],"observations":0,"truncated":false,"borrowed_tabs":[]}),
         }
     }
@@ -179,6 +182,14 @@ async fn serve(
             write.write_all(&response).await.unwrap();
             continue;
         }
+        if script.missing == Some(method) {
+            let frame = json!({"id":request["id"],"error":{"code":"not_found",
+                "message":"session not registered or already stopped"}});
+            let mut response = serde_json::to_vec(&frame).unwrap();
+            response.push(b'\n');
+            write.write_all(&response).await.unwrap();
+            continue;
+        }
         let result = match method {
             "system.status" => json!({"daemon_version":"0.4.0","protocol_version":script.protocol,
                 "pid":std::process::id(),"uptime_secs":0,"ws_port":0,"sock_path":sock,
@@ -283,6 +294,55 @@ async fn an_invalid_file_is_refused_with_the_cause() {
         home.local(&["recipe", "list"]).await.1["recipes"],
         json!([])
     );
+}
+
+#[tokio::test]
+async fn a_session_that_is_gone_is_refused_and_never_makes_a_recipe_stale() {
+    let home = Home::new();
+    home.save();
+    let args = [
+        "recipe",
+        "run",
+        "sales",
+        "--param",
+        "region=East",
+        "--session",
+        "gone",
+    ];
+    // Whether the daemon or the browser no longer knows the session.
+    for missing in [
+        "session.run_log",
+        "tool.tab_list",
+        "tool.tab_list",
+        "tool.tab_list",
+    ] {
+        let script = Script {
+            missing: Some(missing),
+            ..Script::default()
+        };
+        let (output, reply, requests) = home.with_daemon(script, &args).await;
+        assert_eq!(output.status.code(), Some(2), "{output:?}");
+        assert_eq!(reply["status"], "refused", "{reply}");
+        assert_eq!(reply["reason"], "session_unavailable");
+        let message = reply["message"].as_str().unwrap();
+        assert!(!message.contains("restart"), "{message}");
+        assert!(inputs(&requests).is_empty());
+    }
+    let (_, shown) = home.local(&["recipe", "show", "sales"]).await;
+    assert_eq!(shown["state"]["status"], "draft");
+    assert_eq!(shown["state"]["handoff_streak"], 0);
+
+    // A draft from a session that is gone says so, rather than "recorded no action".
+    let script = Script {
+        missing: Some("session.run_log"),
+        ..Script::default()
+    };
+    let args = ["recipe", "draft", "--session", "gone", "--name", "fresh"];
+    let (output, _, _) = home.with_daemon(script, &args).await;
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("session not registered"), "{stderr}");
+    assert!(!stderr.contains("restart"), "{stderr}");
 }
 
 #[tokio::test]

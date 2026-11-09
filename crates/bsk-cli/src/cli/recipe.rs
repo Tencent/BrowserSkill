@@ -118,6 +118,31 @@ pub(crate) struct RunRequest {
 
 /// A daemon older than this CLI cannot even parse the request for a session's log.
 const RUN_LOG_HINT: &str = "If the daemon is older than this CLI, restart it";
+/// Reasons that say the site no longer matches the recipe. A person, the caller, the
+/// budget or a session that is gone says nothing about that.
+const DRIFT: [&str; 7] = [
+    "target_not_found",
+    "target_ambiguous",
+    "requires_failed",
+    "origin_mismatch",
+    "until_timeout",
+    "output_missing",
+    "step_refused",
+];
+
+/// Whether a run's ending counts toward marking its recipe stale.
+fn drifted(reason: Option<&str>) -> bool {
+    reason.is_some_and(|reason| DRIFT.contains(&reason))
+}
+
+/// A missing session is the caller's to fix; only an unknown request needs a restart.
+fn run_log_failure(error: CliError) -> CliError {
+    if runner::session_gone(&error) {
+        error
+    } else {
+        CliError::Local(anyhow::anyhow!("{error}. {RUN_LOG_HINT}."))
+    }
+}
 
 fn refused(recipe: &str, refusal: &Refusal) -> (Value, u8) {
     (
@@ -280,7 +305,7 @@ pub(crate) fn run(
             Err(error) => {
                 return refused(
                     name,
-                    &Refusal::new("session_unavailable", format!("{error}. {RUN_LOG_HINT}.")),
+                    &Refusal::new("session_unavailable", run_log_failure(error).to_string()),
                 );
             }
         }
@@ -327,11 +352,7 @@ pub(crate) fn run(
         json!({"status":outcome.status,"reason":outcome.reply["reason"],"at":outcome.at,
             "effects":outcome.reply["effects"],"elapsed_ms":outcome.reply["elapsed_ms"]}),
     );
-    // A person or caller ending the run says nothing about whether the site changed.
-    let deviated = !matches!(
-        outcome.reply["reason"].as_str(),
-        Some("human_intervention" | "cancelled")
-    );
+    let deviated = drifted(outcome.reply["reason"].as_str());
     store.record_outcome(
         name,
         outcome.status,
@@ -371,7 +392,7 @@ pub(crate) fn draft(
             json!({"session_id":session}),
             Duration::from_secs(5),
         )
-        .map_err(|error| CliError::Local(anyhow::anyhow!("{error}. {RUN_LOG_HINT}.")))?;
+        .map_err(run_log_failure)?;
         serde_json::from_value(value)
             .context("read the session's run log")
             .map_err(CliError::Local)?
@@ -601,6 +622,23 @@ mod tests {
     struct Command {
         #[command(subcommand)]
         recipe: RecipeCommand,
+    }
+
+    #[test]
+    fn only_a_page_that_deviates_counts_toward_a_stale_recipe() {
+        for reason in ["target_not_found", "requires_failed", "until_timeout"] {
+            assert!(drifted(Some(reason)), "{reason}");
+        }
+        for reason in [
+            Some("session_unavailable"),
+            Some("human_intervention"),
+            Some("cancelled"),
+            Some("budget_exceeded"),
+            Some("effect_unknown"),
+            None,
+        ] {
+            assert!(!drifted(reason), "{reason:?}");
+        }
     }
 
     #[test]

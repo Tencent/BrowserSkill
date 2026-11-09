@@ -81,10 +81,12 @@ open. Borrowed user tabs are refused. A session runs one recipe at a time.
 
 For `handoff`, `reason` is one of `target_not_found`, `target_ambiguous`, `requires_failed`,
 `origin_mismatch`, `until_timeout`, `output_missing`, `human_intervention`, `step_refused`,
-`budget_exceeded` and `cancelled`. For `uncertain`, it is `effect_unknown` or, with
-`operation_id`, `dialog_pending`. For `refused`, it names what failed, such as `invalid_params`,
-`recipe_not_found`, `approval_required`, `unsupported_version`, `borrowed_tab` or `session_busy`,
-and `message` says how to fix it. Worst case, a handoff costs one observation plus the turns for the remaining
+`session_unavailable`, `budget_exceeded` and `cancelled`. For `uncertain`, it is `effect_unknown`
+or, with `operation_id`, `dialog_pending`. For `refused`, it names what failed, such as
+`invalid_params`, `recipe_not_found`, `approval_required`, `session_unavailable`,
+`unsupported_version`, `borrowed_tab` or `session_busy`, and `message` says how to fix it.
+`session_unavailable` means the session or its tab is gone, for example a mistyped ID or a closed
+Agent Window. Worst case, a handoff costs one observation plus the turns for the remaining
 steps, so it is never more expensive than doing the flow by hand.
 
 ## The file
@@ -222,7 +224,9 @@ sales-report/
 
 A new recipe is `draft` until a run completes, then `verified`. Changing what it does returns it
 to `draft`, and saving a file based on an older revision is rejected. Three handoffs in a row at
-the same step mark it `stale`, which `list` shows without deleting anything. `list` also notes
+the same step mark it `stale`, which `list` shows without deleting anything. Only a page that
+deviates counts: a person stepping in, a cancelled run, the budget or a session that is gone say
+nothing about the site. `list` also notes
 recipes with no successful run in 90 days. Run logs keep the latest 50 runs, for at most 30 days.
 If `BSK_HOME` is read-only, `run` still works and other writes report the error.
 
