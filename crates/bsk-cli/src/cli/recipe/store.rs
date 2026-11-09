@@ -24,6 +24,8 @@ const MAX_REVISIONS: usize = 10;
 const MAX_RUNS: usize = 50;
 const RUN_RETENTION: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 const STALE_AFTER_HANDOFFS: u32 = 3;
+/// Far beyond a run's budget plus starting and stopping its session.
+const RUN_LIFETIME_MS: i64 = 10 * 60 * 1000;
 const UNUSED_NOTICE_MS: i64 = 90 * 24 * 60 * 60 * 1000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -55,6 +57,31 @@ pub struct State {
     /// A person's approval of the risks the recipe lowers.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub approval: Option<Approval>,
+    /// A run whose effect nobody has checked. The recipe does not run again until the
+    /// caller names it: repeating an unknown effect can double it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unchecked: Option<Unchecked>,
+    /// Runs in progress, so one that dies without reporting is not taken for a clean one.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub running: Vec<Running>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Unchecked {
+    pub run_id: String,
+    /// `effect_unknown` or `dialog_pending`, or `interrupted` for a run that never reported.
+    pub reason: String,
+    /// Where it stopped, such as `query/2`, when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub at: Option<String>,
+    pub since_ms: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Running {
+    pub run_id: String,
+    pub pid: u32,
+    pub started_ms: i64,
 }
 
 /// What a person approved at a terminal, so a later change needs approving again.
@@ -418,6 +445,15 @@ impl Store {
         if let Some(approval) = approval_note(recipe, state) {
             entry["approval"] = approval.into();
         }
+        if let Some(unchecked) = &state.unchecked {
+            entry["unchecked_run"] = unchecked.run_id.as_str().into();
+            entry["notice"] = format!(
+                "Run {} ended with an effect nobody has checked. Check the application's \
+                 records, then run again with checked set to that run.",
+                unchecked.run_id
+            )
+            .into();
+        }
         entry
     }
 
@@ -519,6 +555,67 @@ impl Store {
             _ => {}
         }
         let _ = self.write_state(name, &state);
+    }
+
+    /// Marks a run as started. One that dies before [`Self::finish_run`], with its
+    /// process, is taken as unchecked: it may have sent input nobody saw the result of.
+    pub(crate) fn start_run(&self, name: &str, run_id: &str) {
+        let mut state = self.state(name);
+        state.running.push(Running {
+            run_id: run_id.to_owned(),
+            pid: std::process::id(),
+            started_ms: now_ms(),
+        });
+        let _ = self.write_state(name, &state);
+    }
+
+    /// Clears the run's marker and, for a run whose effect is unknown, holds the
+    /// recipe until the caller says it was checked.
+    pub(crate) fn finish_run(&self, name: &str, run_id: &str, unchecked: Option<Unchecked>) {
+        let mut state = self.state(name);
+        state.running.retain(|run| run.run_id != run_id);
+        if let Some(unchecked) = unchecked {
+            state.unchecked = Some(Unchecked {
+                since_ms: now_ms(),
+                ..unchecked
+            });
+        }
+        let _ = self.write_state(name, &state);
+    }
+
+    /// The run that holds the recipe, counting runs whose process died first.
+    pub(crate) fn unchecked(&self, name: &str) -> Option<Unchecked> {
+        let mut state = self.state(name);
+        let now = now_ms();
+        let (dead, alive): (Vec<_>, Vec<_>) = state.running.drain(..).partition(|run| {
+            now - run.started_ms > RUN_LIFETIME_MS
+                || (run.pid != std::process::id() && !crate::daemon::lockfile::pid_alive(run.pid))
+        });
+        state.running = alive;
+        if let Some(run) = dead.first() {
+            state.unchecked.get_or_insert_with(|| Unchecked {
+                run_id: run.run_id.clone(),
+                reason: "interrupted".into(),
+                at: None,
+                since_ms: run.started_ms,
+            });
+            let _ = self.write_state(name, &state);
+        }
+        state.unchecked
+    }
+
+    /// Releases the hold once the caller names the run whose effect they checked.
+    pub(crate) fn release(&self, name: &str, run_id: &str) -> bool {
+        let mut state = self.state(name);
+        if state
+            .unchecked
+            .as_ref()
+            .is_none_or(|unchecked| unchecked.run_id != run_id)
+        {
+            return false;
+        }
+        state.unchecked = None;
+        self.write_state(name, &state).is_ok()
     }
 
     /// One recipe at a time per session; the lock ends with the process.
@@ -772,6 +869,55 @@ mod tests {
         }
         let runs = fs::read_dir(store.root.join("sales-report/runs")).unwrap();
         assert!(runs.count() <= MAX_RUNS + 1);
+    }
+
+    #[test]
+    fn an_unknown_effect_holds_the_recipe_until_the_caller_names_the_run() {
+        let (_dir, store) = store();
+        store.save(parsed(report()).unwrap(), false).unwrap();
+        store.start_run("sales-report", "r-clean");
+        assert!(
+            store.unchecked("sales-report").is_none(),
+            "this process is alive"
+        );
+        store.finish_run("sales-report", "r-clean", None);
+        assert!(store.state("sales-report").running.is_empty());
+
+        store.start_run("sales-report", "r-1");
+        store.finish_run(
+            "sales-report",
+            "r-1",
+            Some(Unchecked {
+                run_id: "r-1".into(),
+                reason: "effect_unknown".into(),
+                at: Some("query/2".into()),
+                since_ms: 0,
+            }),
+        );
+        let held = store.unchecked("sales-report").unwrap();
+        assert_eq!(
+            (held.run_id.as_str(), held.at.as_deref()),
+            ("r-1", Some("query/2"))
+        );
+        assert!(held.since_ms > 0);
+        assert!(!store.release("sales-report", "r-2"));
+        assert!(store.unchecked("sales-report").is_some());
+        assert!(store.release("sales-report", "r-1"));
+        assert!(store.unchecked("sales-report").is_none());
+
+        // A run whose process died, or that outlived any budget, never reported.
+        for running in [
+            json!({"run_id":"r-dead","pid":u32::MAX,"started_ms":now_ms()}),
+            json!({"run_id":"r-old","pid":std::process::id(),"started_ms":1}),
+        ] {
+            let mut state = store.state("sales-report");
+            state.running = vec![serde_json::from_value(running).unwrap()];
+            store.write_state("sales-report", &state).unwrap();
+            let held = store.unchecked("sales-report").unwrap();
+            assert_eq!(held.reason, "interrupted");
+            assert!(store.state("sales-report").running.is_empty());
+            assert!(store.release("sales-report", &held.run_id));
+        }
     }
 
     #[test]

@@ -96,6 +96,10 @@ pub struct RunArgs {
     /// Keep a session this run started open after it completes.
     #[arg(long, conflicts_with = "session")]
     pub keep_session: bool,
+    /// The run_id of an uncertain run whose effect you checked in the application's
+    /// records. Until then the recipe does not run again.
+    #[arg(long, value_name = "RUN_ID")]
+    pub checked: Option<String>,
 }
 
 fn parse_param(value: &str) -> Result<(String, String), String> {
@@ -114,6 +118,8 @@ pub(crate) struct RunRequest {
     pub(crate) tab_id: Option<i64>,
     pub(crate) browser: Option<String>,
     pub(crate) keep_session: bool,
+    /// The `run_id` of an uncertain run whose effect the caller has checked.
+    pub(crate) checked: Option<String>,
 }
 
 /// A daemon older than this CLI cannot even parse the request for a session's log.
@@ -165,6 +171,28 @@ fn unapproved(store: &Store, recipe: &model::Recipe) -> Option<Refusal> {
             ),
         )
     })
+}
+
+/// A run whose effect is unknown holds the recipe until the caller names it as checked.
+fn held(store: &Store, name: &str, checked: Option<&str>) -> Option<Refusal> {
+    let unchecked = store.unchecked(name)?;
+    if checked == Some(unchecked.run_id.as_str()) {
+        return None;
+    }
+    let what = match (unchecked.reason.as_str(), &unchecked.at) {
+        ("interrupted", _) => "its process ended before it reported".to_owned(),
+        (reason, Some(at)) => format!("{reason} at {at}"),
+        (reason, None) => reason.to_owned(),
+    };
+    Some(Refusal::new(
+        "effect_unchecked",
+        format!(
+            "Run {run} stopped with an effect nobody has checked ({what}), so repeating it could \
+             do it twice. Check the application's records for what it did, then run again with \
+             --checked {run} (checked in MCP and DSH).",
+            run = unchecked.run_id
+        ),
+    ))
 }
 
 /// Shows a person what a recipe lowers and records their confirmation. It needs a
@@ -275,6 +303,12 @@ pub(crate) fn run(
     if let Some(refusal) = unapproved(&store, &recipe) {
         return refused(name, &refusal);
     }
+    if let Some(refusal) = held(&store, name, request.checked.as_deref()) {
+        return refused(name, &refusal);
+    }
+    if let Some(checked) = &request.checked {
+        store.release(name, checked);
+    }
     let bound = recipe
         .resolve_params(&request.params)
         .and_then(|values| Ok((recipe.bind(&values)?, store::params_digest(&values))));
@@ -340,6 +374,7 @@ pub(crate) fn run(
     };
 
     let run_id = format!("r-{}", business_rpc::random_short_id());
+    store.start_run(name, &run_id);
     let mut log = store.run_log(name, &run_id);
     log.event(
         "start",
@@ -358,6 +393,17 @@ pub(crate) fn run(
         outcome.status,
         outcome.at.as_deref().filter(|_| deviated),
     );
+    // Nobody knows yet what this run did, so the next one waits until someone checks.
+    let unchecked = (outcome.status == "uncertain").then(|| store::Unchecked {
+        run_id: run_id.clone(),
+        reason: outcome.reply["reason"]
+            .as_str()
+            .unwrap_or("effect_unknown")
+            .to_owned(),
+        at: outcome.at.clone(),
+        since_ms: 0,
+    });
+    store.finish_run(name, &run_id, unchecked);
 
     let mut reply = outcome.reply;
     reply["run_id"] = run_id.into();
@@ -600,11 +646,13 @@ pub fn dispatch(cmd: RecipeCmd, flags: &GlobalFlags, _format: Format) -> Result<
                 tab_id: args.tab_id,
                 browser: args.browser,
                 keep_session: args.keep_session,
+                checked: args.checked,
             };
             // A missing file or an unapproved risk needs no daemon.
             if let Ok(store) = Store::open() {
                 let refusal = match store.load(&request.name) {
-                    Ok(recipe) => unapproved(&store, &recipe),
+                    Ok(recipe) => unapproved(&store, &recipe)
+                        .or_else(|| held(&store, &request.name, request.checked.as_deref())),
                     Err(refusal) => Some(refusal),
                 };
                 if let Some(refusal) = refusal {

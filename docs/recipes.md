@@ -67,8 +67,19 @@ open. Borrowed user tabs are refused. A session runs one recipe at a time.
 | --- | --- | --- | --- |
 | `completed` | Everything ran and `outputs` are usable | Answer from `outputs` | 0 |
 | `handoff` | Stopped at a deviation, with no uncertain effect | Continue from `post` and `remaining` | 1 |
-| `uncertain` | A step's effect is unknown | Check the application's records. **Never run it again** | the failing step's |
+| `uncertain` | A step's effect is unknown | Check the application's records. **Never repeat it blindly** | the failing step's |
 | `refused` | Parameters, version or permissions failed; nothing ran | Fix it and call again | 2 |
+
+An `uncertain` run holds its recipe, in its local state, so the next `run` is refused with
+`effect_unchecked`, even after the daemon or the caller restarts. Check what the run did, then
+pass its `run_id` to run again:
+
+```sh
+bsk recipe run sales-report --param region=East --param quarter=Q3 --checked r-7f3a12bc
+```
+
+A run whose process ended before it reported holds the recipe the same way, because it may have
+sent input nobody saw the result of. `list` shows the run that holds a recipe.
 
 ```json
 {"status":"handoff","reason":"target_not_found",
@@ -83,7 +94,7 @@ For `handoff`, `reason` is one of `target_not_found`, `target_ambiguous`, `requi
 `origin_mismatch`, `until_timeout`, `output_missing`, `human_intervention`, `step_refused`,
 `session_unavailable`, `budget_exceeded` and `cancelled`. For `uncertain`, it is `effect_unknown`
 or, with `operation_id`, `dialog_pending`. For `refused`, it names what failed, such as
-`invalid_params`, `recipe_not_found`, `approval_required`, `session_unavailable`,
+`invalid_params`, `recipe_not_found`, `approval_required`, `effect_unchecked`, `session_unavailable`,
 `unsupported_version`, `borrowed_tab` or `session_busy`, and `message` says how to fix it.
 `session_unavailable` means the session or its tab is gone, for example a mistyped ID or a closed
 Agent Window. Worst case, a handoff costs one observation plus the turns for the remaining

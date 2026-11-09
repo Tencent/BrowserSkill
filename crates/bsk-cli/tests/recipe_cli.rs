@@ -555,6 +555,32 @@ async fn a_daemon_dying_during_a_click_is_uncertain_and_the_click_is_never_repea
     let (_, shown) = home.local(&["recipe", "show", "sales"]).await;
     assert_eq!(shown["state"]["uncertain"], 1);
     assert_eq!(shown["state"]["status"], "draft");
+
+    // The recipe stays held, with no daemon running, until the caller names that run.
+    let run_id = reply["run_id"].as_str().unwrap().to_owned();
+    let (_, listed) = home.local(&["recipe", "list"]).await;
+    assert_eq!(listed["recipes"][0]["unchecked_run"], run_id.as_str());
+    for checked in [None, Some("r-someother")] {
+        let mut again = args.to_vec();
+        if let Some(checked) = checked {
+            again.extend(["--checked", checked]);
+        }
+        let (output, held) = home.local(&again).await;
+        assert_eq!(output.status.code(), Some(2), "{held}");
+        assert_eq!(held["reason"], "effect_unchecked");
+        let message = held["message"].as_str().unwrap();
+        assert!(
+            message.contains(&format!("--checked {run_id}")),
+            "{message}"
+        );
+    }
+    let mut checked = args.to_vec();
+    checked.extend(["--checked", &run_id]);
+    let (output, reply, _) = home.with_daemon(Script::default(), &checked).await;
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(reply["status"], "completed", "{reply}");
+    let (_, listed) = home.local(&["recipe", "list"]).await;
+    assert!(listed["recipes"][0].get("unchecked_run").is_none());
 }
 
 #[tokio::test]
