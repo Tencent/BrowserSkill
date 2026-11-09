@@ -198,21 +198,18 @@ describe("fill result verification", () => {
     ["append without clearing", '<input value="old">', "hello", false, ["oldhello"]],
     ["clear to empty", '<input value="old">', "", true, [""]],
     ["append empty to empty", "<input>", "", false, [""]],
-  ] as const)(
-    "dispatches one input per value change when it %s",
-    async (_name, markup, value, clearBefore, expected) => {
-      const h = await setup(markup);
-      const inputs: string[] = [];
-      let changes = 0;
-      h.element.addEventListener("input", () => inputs.push(h.element.value));
-      h.element.addEventListener("change", () => changes++);
-      expect(await h.fill(value, clearBefore)).toMatchObject({
-        value_length: expected.at(-1)!.length,
-      });
-      expect(inputs).toEqual(expected);
-      expect(changes).toBe(1);
-    },
-  );
+  ] as const)("dispatches one input per value change when it %s", async (_name, markup, value, clearBefore, expected) => {
+    const h = await setup(markup);
+    const inputs: string[] = [];
+    let changes = 0;
+    h.element.addEventListener("input", () => inputs.push(h.element.value));
+    h.element.addEventListener("change", () => changes++);
+    expect(await h.fill(value, clearBefore)).toMatchObject({
+      value_length: expected.at(-1)!.length,
+    });
+    expect(inputs).toEqual(expected);
+    expect(changes).toBe(1);
+  });
 
   it("flushes deferred background focus before a date value write", async () => {
     const h = await setup('<input type="date" value="">');
