@@ -104,6 +104,29 @@ describe("LLM textbook click targets", () => {
     expect(describeEventTarget(document.querySelector("#copy"))).toBeNull();
   });
 
+  it("records explicit controls whose own name is longer than a short label", () => {
+    document.body.innerHTML = `
+      <button type="button"><span id="step">Book and manage your theory test</span>
+        <span> , Show this section</span></button>
+      <a href="/story" id="story">Next-Concept Modeling: Fast, Parallel Coarse-to-Fine Text Generation</a>
+      <a href="/bare" id="bare">https://example.com/a/long/path/that/is/only/a/url</a>
+      <div class="btn" id="card" style="cursor: pointer">A long paragraph of card text that is not the name of any control</div>
+    `;
+    expect(describeEventTarget(document.querySelector("#step"))).toEqual({
+      tag: "button",
+      role: "button",
+      name: "Book and manage your theory test , Show this section",
+    });
+    expect(describeEventTarget(document.querySelector("#story"))).toEqual({
+      tag: "a",
+      role: "link",
+      name: "Next-Concept Modeling: Fast, Parallel Coarse-to-Fine Text Generation",
+    });
+    // Bare URLs and long text guessed from layout stay out of the textbook.
+    expect(describeEventTarget(document.querySelector("#bare"))).toBeNull();
+    expect(describeEventTarget(document.querySelector("#card"))).toBeNull();
+  });
+
   it("records custom button-like controls by their visible label", () => {
     document.body.innerHTML = `<div class="btn" id="pub" style="cursor: pointer">发布</div>`;
     expect(describeEventTarget(document.querySelector("#pub"))).toEqual(
