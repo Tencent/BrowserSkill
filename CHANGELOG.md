@@ -34,6 +34,9 @@ determines which versions can connect.
   and the first step that does not complete stops the plan without any retry.
 - The DSH plugin runs decided actions together with `bsk_interact(action=plan)`, with the
   same checks, stopping rule and receipt as `bsk plan`.
+- The DSH plugin offers `bsk_recipe` when its `recipes` option or `BSK_RECIPES=1` is set.
+  A run uses an owned session, keeps the receipt of a run that did not complete, and has
+  no approve action.
 - `bsk recipe` saves a verified flow as a local file and replays it, returning its
   outputs without a model turn per step; MCP lists `bsk_recipe` with `BSK_RECIPES=1`.
   Targets match exactly by role, name and context, and a run stops at the first deviation

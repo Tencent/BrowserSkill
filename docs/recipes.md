@@ -13,11 +13,13 @@ immediately before each input.
 | --- | --- |
 | CLI | `bsk recipe list`, `show`, `run`, `draft`, `save`, `approve`, `rm` |
 | MCP | `bsk_recipe` |
+| DSH plugin | `bsk_recipe`; `run` and `draft` use an owned session |
 | Wire protocol | None for replay; `session.run_log` is local to the daemon |
 
 `bsk recipe` is always available in the CLI. MCP clients see `bsk_recipe` only when the
-server's environment has `BSK_RECIPES=1`, so a client that never replays pays nothing for the
-tool's schema. This version replays **only read and reversible steps**. It refuses any step that
+server's environment has `BSK_RECIPES=1`, and DSH hosts only with the plugin's `recipes`
+option or the same variable, so a client that never replays pays nothing for the tool's
+schema. This version replays **only read and reversible steps**. It refuses any step that
 submits, pays, sends, deletes or publishes, unless a person approves a lowered risk.
 
 ## Create one

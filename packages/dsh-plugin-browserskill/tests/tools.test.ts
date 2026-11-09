@@ -147,6 +147,12 @@ const ACTION_ROUTES: Record<string, readonly [string, string]> = {
   "interact.drag": ["bsk_interact", "drag"],
   "interact.step": ["bsk_interact", "step"],
   "interact.plan": ["bsk_interact", "plan"],
+  "recipe.list": ["bsk_recipe", "list"],
+  "recipe.show": ["bsk_recipe", "show"],
+  "recipe.run": ["bsk_recipe", "run"],
+  "recipe.draft": ["bsk_recipe", "draft"],
+  "recipe.save": ["bsk_recipe", "save"],
+  "recipe.rm": ["bsk_recipe", "rm"],
   "interact.scroll-to": ["bsk_interact", "scroll-to"],
   "interact.focus": ["bsk_interact", "focus"],
   "interact.blur": ["bsk_interact", "blur"],
@@ -227,11 +233,12 @@ function setup(
   responses: Record<string, unknown>,
   services: Record<string, unknown> = {},
   maxSessions = 5,
+  overrides: Partial<PluginConfig> = {},
 ) {
   const { ctx, tools } = makeCtx(services);
   const { runner, calls } = fakeRunner(responses);
   const registry = new SessionRegistry(maxSessions);
-  const config = { ...CONFIG, maxSessions };
+  const config = { ...CONFIG, maxSessions, ...overrides };
   registerBrowserTools({
     ctx: ctx as never,
     runner: runner as BskRunner,
@@ -560,6 +567,95 @@ describe("plan", () => {
     await startSession(tools);
     await expect(tools.get("interact.plan")!.execute(args, makeExec())).rejects.toThrow();
     expect(calls.filter((call) => call.args[0] === "plan")).toHaveLength(0);
+  });
+});
+
+describe("recipes", () => {
+  const withRecipes = (responses: Record<string, unknown>) =>
+    setup(responses, {}, 5, { recipes: true });
+  const result = (body: Record<string, unknown>, code: number) => ({
+    __result: { code, stdout: JSON.stringify(body), stderr: "", timedOut: false, aborted: false },
+  });
+
+  it("stays out of the tool list unless the host opts in", () => {
+    expect(setup({}).tools.has("bsk_recipe")).toBe(false);
+    const { tools } = withRecipes({});
+    const recipe = tools.get("bsk_recipe")!;
+    const properties = recipe.parameters.properties as Record<string, unknown>;
+    expect(properties.action).toMatchObject({
+      enum: ["list", "show", "run", "draft", "save", "rm"],
+    });
+    // A run synchronizes for itself, so it takes no caller evidence.
+    for (const key of ["contextId", "observationId", "expect", "dependsOn"])
+      expect(properties[key]).toBeUndefined();
+    expect(recipe.description).toMatch(/approval_required/);
+  });
+
+  it("runs in the owned session and keeps a handoff's receipt without running it again", async () => {
+    const handoff = {
+      status: "handoff",
+      reason: "target_not_found",
+      effects: { steps_done: 0, last_effect_state: "none" },
+      remaining: [{ segment: "query", action: "click" }],
+      run_id: "r-2",
+    };
+    const { tools, calls } = withRecipes({
+      "session start": START_REPLY("s1"),
+      "recipe run": result(handoff, 1),
+    });
+    await startSession(tools);
+    const failure = tools
+      .get("recipe.run")!
+      .execute({ name: "sales", params: { region: "East=1" }, checked: "r-1" }, makeExec());
+    await expect(failure).rejects.toMatchObject({ code: "BSK_STEP_NEEDS_ATTENTION" });
+    await expect(failure).rejects.toThrow(/Browser recipe needs attention/);
+    const runs = calls.filter((call) => call.args[0] === "recipe");
+    expect(runs).toHaveLength(1);
+    expect(runs[0].args).toEqual([
+      "recipe",
+      "run",
+      "sales",
+      "--param",
+      "region=East=1",
+      "--session",
+      "s1",
+      "--checked",
+      "r-1",
+    ]);
+    expect(runs[0].options.timeoutMs).toBeGreaterThan(120_000);
+  });
+
+  it("returns a completed run's outputs", async () => {
+    const done = { status: "completed", outputs: { total: "42" }, run_id: "r-3" };
+    const { tools } = withRecipes({ "session start": START_REPLY("s1"), "recipe run": done });
+    await startSession(tools);
+    expect(await tools.get("recipe.run")!.execute({ name: "sales" }, makeExec())).toMatchObject({
+      outputs: { total: "42" },
+    });
+  });
+
+  it("saves a document through a private file that is gone afterwards", async () => {
+    const { tools, calls } = withRecipes({ "recipe save": { saved: true, revision: 1 } });
+    const document = { recipe_version: 1, name: "sales" };
+    expect(await tools.get("recipe.save")!.execute({ recipe: document }, makeExec())).toMatchObject(
+      { saved: true },
+    );
+    const command = calls.find((call) => call.args[1] === "save")!.args;
+    expect(command.slice(0, 3)).toEqual(["recipe", "save", "--file"]);
+    expect(existsSync(command[3])).toBe(false);
+  });
+
+  it.each([
+    { action: "recipe.run", args: { name: "sales", params: { region: 1 } } },
+    { action: "recipe.run", args: { name: "sales", params: { "bad key": "x" } } },
+    { action: "recipe.run", args: { name: "sales", site: "https://a.test" } },
+    { action: "recipe.list", args: { name: "sales" } },
+    { action: "recipe.save", args: { recipe: [] } },
+  ])("rejects $args for $action before anything runs", async ({ action, args }) => {
+    const { tools, calls } = withRecipes({ "session start": START_REPLY("s1") });
+    await startSession(tools);
+    await expect(tools.get(action)!.execute(args, makeExec())).rejects.toThrow();
+    expect(calls.filter((call) => call.args[0] === "recipe")).toHaveLength(0);
   });
 });
 

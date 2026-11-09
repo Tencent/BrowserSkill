@@ -5,19 +5,29 @@ import { browserSkillSource } from "./message-source";
 
 const STEP_NEEDS_ATTENTION = "BSK_STEP_NEEDS_ATTENTION";
 
+const ATTEMPTED = {
+  step: "The action may already have completed",
+  plan: "Steps before the stopped one may already have completed",
+  recipe: "Some of its steps may already have run; read status, reason, effects and remaining",
+} as const;
+
 /** Keep validated CLI evidence until the host has settled cancellation and policy. */
-export function createStepReceiptHandler(subject: "step" | "plan" = "step") {
-  const attempted =
-    subject === "plan"
-      ? "Steps before the stopped one may already have completed"
-      : "The action may already have completed";
+export function createStepReceiptHandler(subject: keyof typeof ATTEMPTED = "step") {
+  const attempted = ATTEMPTED[subject];
+  const what = subject === "step" ? "action" : subject;
+  const title = `${subject[0].toUpperCase()}${subject.slice(1)}`;
   // Public action dispatch clones exec, so use the SDK's immutable execution token.
   // The SDK calls finalizeContent exactly once for every outcome, including errors;
   // each entry is deleted there and only in-flight executions retain a receipt.
   const receipts = new Map<ToolExecution["token"], string>();
   return {
-    complete(exec: ToolRunContext, receipt: unknown): unknown {
-      const value = receipt as { ok: boolean; cancelled?: boolean };
+    /** `failed` defaults to the receipt's own `ok: false`. */
+    complete(
+      exec: ToolRunContext,
+      receipt: unknown,
+      failed = (receipt as { ok?: boolean }).ok === false,
+    ): unknown {
+      const value = receipt as { cancelled?: boolean };
       const serialized = JSON.stringify(receipt);
       // A direct invocation outside ToolRuntime has no SDK token or finalizer.
       if (typeof exec.token === "symbol") receipts.set(exec.token, serialized);
@@ -43,13 +53,13 @@ export function createStepReceiptHandler(subject: "step" | "plan" = "step") {
           }),
         );
       }
-      if (value.ok === false) {
+      if (failed) {
         const cancelled = value.cancelled === true || exec.signal.aborted;
         throw new HarnessError(
           `Browser ${subject} ${cancelled ? "was cancelled" : "needs attention"}. ` +
             `${attempted}; inspect the ${subject} receipt before continuing. ` +
-            `Do not replay the ${subject === "plan" ? "plan" : "action"} automatically.` +
-            (nested ? `\n${subject === "plan" ? "Plan" : "Step"} receipt:\n${serialized}` : ""),
+            `Do not replay the ${what} automatically.` +
+            (nested ? `\n${title} receipt:\n${serialized}` : ""),
           cancelled ? "ABORTED" : STEP_NEEDS_ATTENTION,
         );
       }

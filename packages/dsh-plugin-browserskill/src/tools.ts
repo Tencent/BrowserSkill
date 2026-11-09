@@ -65,6 +65,8 @@ export interface PluginConfig {
    * the suite is registered at apply time (legacy always-on behavior).
    */
   lazyTools: boolean;
+  /** Also register `bsk_recipe` for saved, reviewed flows (default false). */
+  recipes?: boolean;
 }
 
 export interface ToolDeps {

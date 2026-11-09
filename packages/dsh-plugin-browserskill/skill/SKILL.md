@@ -78,7 +78,7 @@ Resolve references from the harness skill directory. Read only the matching file
 | --- | --- |
 | Website failures, request/performance debugging or HTTP experiments | [Website debugging](references/debugging.md) |
 | Required profile, borrowing/returning user tabs with `bsk_tabs`, or remote tab ownership | [Tabs and profiles](references/tabs-and-profiles.md) |
-| Drag, step, plan, saved views, hover menus, scrolling, `nextCursor`, console/network, or window/device settings | [Interaction details](references/interaction-details.md) |
+| Drag, step, plan, recipes, saved views, hover menus, scrolling, `nextCursor`, console/network, or window/device settings | [Interaction details](references/interaction-details.md) |
 | Screenshot or `[visual:screenshot]`/Canvas interaction | [Screenshots and Canvas](references/screenshots-and-canvas.md) |
 | Video recording or MP4 export | [Video](references/video.md) |
 | Login/CAPTCHA/OTP/consent/payment confirmation, disabled help, failed operations, or interrupted cleanup | [Human help and recovery](references/help-and-recovery.md) |

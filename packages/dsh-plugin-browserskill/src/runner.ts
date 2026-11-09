@@ -413,11 +413,17 @@ export interface ParseBskJsonOptions {
   allowStepResult?: boolean;
   /** Preserve a validated plan reply, including a stopped plan, on the same terms. */
   allowPlanResult?: boolean;
+  /** Preserve a validated recipe run reply, whatever its status, on the same terms. */
+  allowRecipeResult?: boolean;
 }
 
 /** A composite result keeps its receipt and is never retried as a whole. */
 export function isCompositeResult(options: ParseBskJsonOptions): boolean {
-  return options.allowStepResult === true || options.allowPlanResult === true;
+  return (
+    options.allowStepResult === true ||
+    options.allowPlanResult === true ||
+    options.allowRecipeResult === true
+  );
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -576,6 +582,16 @@ function isPlanResultPayload(value: unknown, exitCode: number | null): boolean {
   return value.ok === (exitCode === 0);
 }
 
+const RECIPE_STATUSES = ["completed", "handoff", "uncertain", "refused"];
+
+/** Match the CLI's recipe run reply: only `completed` exits 0, and others say why. */
+function isRecipeResultPayload(value: unknown, exitCode: number | null): boolean {
+  if (!isRecord(value) || !RECIPE_STATUSES.includes(String(value.status)) || exitCode === null)
+    return false;
+  if (value.status === "completed") return exitCode === 0 && isRecord(value.outputs);
+  return exitCode !== 0 && typeof value.reason === "string";
+}
+
 /**
  * True when stdout is a navigation/history payload whose lifecycle wait
  * expired (`reached: "timeout"`). Used to distinguish that soft timeout from
@@ -614,17 +630,23 @@ export function parseBskJson(
     } catch {
       // Ordinary malformed-output handling below preserves the original error.
     }
-    const valid = options.allowPlanResult
-      ? isPlanResultPayload(payload, result.code)
-      : isStepResultPayload(payload, result.code);
-    if (valid && (!result.aborted || (isRecord(payload) && payload.cancelled === true)))
-      return payload;
+    const kind = options.allowRecipeResult ? "recipe" : options.allowPlanResult ? "plan" : "step";
+    const valid =
+      kind === "recipe"
+        ? isRecipeResultPayload(payload, result.code)
+        : kind === "plan"
+          ? isPlanResultPayload(payload, result.code)
+          : isStepResultPayload(payload, result.code);
+    // An aborted run must say it was cancelled; otherwise its reply may be partial.
+    const acknowledged =
+      isRecord(payload) &&
+      (payload.cancelled === true || (kind === "recipe" && payload.reason === "cancelled"));
+    if (valid && (!result.aborted || acknowledged)) return payload;
     if (result.aborted) throw abortError();
     if (result.code === 0)
-      throw new BskError(
-        `bsk ${commandLabel} did not produce a valid ${options.allowPlanResult ? "plan" : "step"} result`,
-        { exitCode: result.code },
-      );
+      throw new BskError(`bsk ${commandLabel} did not produce a valid ${kind} result`, {
+        exitCode: result.code,
+      });
   }
   // Killed by our own interrupt (SIGINT from killFor), not by the abort path:
   // say so instead of doubling the generic label into the message.
