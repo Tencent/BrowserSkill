@@ -3178,3 +3178,257 @@ it("rejects a document that becomes a specific keyboard recipient without changi
   });
   expect(f.native).not.toHaveBeenCalled();
 });
+
+describe("strict evidence around the action's own preparation", () => {
+  type Spec = Partial<VomNode> & Pick<VomNode, "id" | "parentId" | "tag" | "role">;
+  const build = (nodes: Spec[]): VomScene => ({
+    viewport: { width: 800, height: 600 },
+    nodes: nodes.map((node) => ({
+      name: "",
+      backendNodeId: node.id,
+      frameId: "frame",
+      rect: { x: 0, y: 0, w: 20, h: 20 },
+      paintOrder: 1,
+      position: "static",
+      pointerEvents: "auto",
+      ...node,
+    })),
+  });
+  /** The sync observes `scene()`; every later capture observes it again. */
+  const observe = (scene: () => VomScene) => {
+    vi.mocked(handleSnapshot).mockImplementation(async (_m, _p, options) => {
+      options!.onScene?.(scene());
+      return { text: "Form", ref_count: 1, tab_id: 7, truncated: false };
+    });
+    vi.mocked(captureVomObservation).mockImplementation(async (_c, _t, _u, options) => {
+      options?.onScene?.(scene());
+      return {} as Awaited<ReturnType<typeof captureVomObservation>>;
+    });
+  };
+  afterEach(() => {
+    vi.mocked(handleSnapshot).mockReset();
+    vi.mocked(captureVomObservation).mockReset();
+    vi.mocked(resolveActionTarget).mockReset();
+  });
+  const target = (backendNodeId: number) =>
+    vi.mocked(resolveActionTarget).mockResolvedValue({
+      backendNodeId,
+      frameId: "frame",
+      cdpTarget: { tabId: 7 },
+      tab: { tabId: 7 },
+    } as Awaited<ReturnType<typeof resolveActionTarget>>);
+  const run = (
+    f: Awaited<ReturnType<typeof fixture>>,
+    method: string,
+    ref: string,
+    invoke: (runner: CdpRunner) => Promise<unknown>,
+  ) =>
+    f.controller.run(
+      {
+        id: "prepared",
+        method,
+        params: { session_id: "shared", tab_id: 7, context_id: f.first.context_id, ref },
+      },
+      f.cdp,
+      f.abort.signal,
+      invoke,
+    ) as Promise<Record<string, any>>;
+  // A title counter is visible only while the title is focused (#540).
+  let titleFocused = true;
+  let helper = false;
+  let other = "";
+  const editor = () =>
+    build([
+      { id: 1, parentId: null, tag: "form", role: "form" },
+      {
+        id: 2,
+        parentId: 1,
+        tag: "input",
+        role: "textbox",
+        name: "Title",
+        value: "Chap",
+        inForm: true,
+      },
+      ...(titleFocused ? [{ id: 3, parentId: 1, tag: "span", role: "generic", text: "4/30" }] : []),
+      { id: 4, parentId: 1, tag: "div", role: "textbox", name: "Body", value: "", inForm: true },
+      { id: 5, parentId: 1, tag: "button", role: "button", name: "Publish" },
+      ...(helper
+        ? [{ id: 6, parentId: 1, tag: "div", role: "tooltip", text: "Publishes now" }]
+        : []),
+      {
+        id: 7,
+        parentId: 1,
+        tag: "input",
+        role: "textbox",
+        name: "Tags",
+        value: other,
+        inForm: true,
+      },
+    ]);
+  beforeEach(() => {
+    titleFocused = true;
+    helper = false;
+    other = "";
+  });
+
+  it("does not refuse a fill because its own focus removed a neighbouring counter", async () => {
+    observe(editor);
+    target(4);
+    const f = await fixture();
+    const result = await run(f, "tool.fill", "e4", async (runner) => {
+      await runner.send(7, "DOM.focus", { backendNodeId: 4 });
+      titleFocused = false;
+      f.change({ structure: 10 });
+      await runner.send(7, "Input.insertText", { text: "Once upon a time" });
+      return {};
+    });
+    expect(result).toEqual({});
+    expect(f.native).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not refuse a click because its own hover showed helper text", async () => {
+    observe(editor);
+    target(5);
+    const f = await fixture();
+    const result = await run(f, "tool.click", "e5", async (runner) => {
+      await runner.send(7, "Input.dispatchMouseEvent", { type: "mouseMoved", x: 1, y: 1 });
+      helper = true;
+      f.change({ structure: 10 });
+      await runner.send(7, "Input.dispatchMouseEvent", { type: "mousePressed", x: 1, y: 1 });
+      return {};
+    });
+    expect(result).toEqual({});
+    expect(f.native).toHaveBeenCalledTimes(2);
+  });
+
+  it("still refuses a business-state change during preparation and says what changed", async () => {
+    observe(editor);
+    target(5);
+    const f = await fixture();
+    const result = await run(f, "tool.click", "e5", async (runner) => {
+      await runner.send(7, "Input.dispatchMouseEvent", { type: "mouseMoved", x: 1, y: 1 });
+      other = "private tag";
+      f.change({ structure: 10 });
+      await runner.send(7, "Input.dispatchMouseEvent", { type: "mousePressed", x: 1, y: 1 });
+      return {};
+    });
+    expect(result).toMatchObject({
+      message: "The action's observed content changed; synchronize and replan",
+      data: {
+        reason: "cooperation_sync_required",
+        effect_state: "unknown",
+        press_sent: false,
+        observed_change: {
+          phase: "preparation",
+          scope: "target",
+          part: "form_state",
+          field: "value",
+          name: "Tags",
+        },
+      },
+    });
+    expect(JSON.stringify(result)).not.toContain("private tag");
+    // Only the hover was sent.
+    expect(f.native).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps the full check after a read-only probe", async () => {
+    observe(editor);
+    const f = await fixture();
+    const result = (await f.controller.run(
+      {
+        id: "probe",
+        method: "tool.press",
+        params: { session_id: "shared", tab_id: 7, context_id: f.first.context_id, key: "Enter" },
+      },
+      f.cdp,
+      f.abort.signal,
+      async (runner) => {
+        await runner.send(7, "Runtime.callFunctionOn", { functionDeclaration: "() => 1" });
+        helper = true;
+        f.change({ structure: 10 });
+        await runner.send(7, "Input.dispatchKeyEvent", { type: "rawKeyDown", key: "Enter" });
+        return {};
+      },
+    )) as Record<string, any>;
+    expect(result).toMatchObject({
+      data: {
+        observed_change: { phase: "decision", scope: "page", part: "region", change: "added" },
+      },
+    });
+    expect(f.native).toHaveBeenCalledTimes(1);
+  });
+
+  it("reports the first difference of a refused decision", async () => {
+    let count = "4/30";
+    observe(() =>
+      build([
+        { id: 1, parentId: null, tag: "form", role: "form" },
+        { id: 3, parentId: 1, tag: "span", role: "generic", text: count },
+        { id: 5, parentId: 1, tag: "button", role: "button", name: "Publish" },
+      ]),
+    );
+    target(5);
+    const f = await fixture();
+    count = "5/30";
+    f.change({ structure: 10 });
+    const result = await run(f, "tool.click", "e5", (runner) =>
+      runner.send(7, "Input.dispatchMouseEvent", { type: "mousePressed", x: 1, y: 1 }),
+    );
+    expect(result).toMatchObject({
+      data: {
+        effect_state: "none",
+        observed_change: {
+          phase: "decision",
+          scope: "target",
+          part: "region",
+          change: "changed",
+          field: "text",
+          before: "4/30",
+          after: "5/30",
+        },
+      },
+    });
+    expect(result.data).not.toHaveProperty("press_sent");
+    expect(f.native).not.toHaveBeenCalled();
+  });
+
+  it("lets a targeted click through an identified media timeline without dependencies", async () => {
+    let seconds = 1;
+    const player = (range: { name: string; inForm: boolean }) => () =>
+      build([
+        { id: 1, parentId: null, tag: "main", role: "main" },
+        { id: 2, parentId: 1, tag: "form", role: "form" },
+        { id: 5, parentId: 2, tag: "button", role: "button", name: "Publish" },
+        { id: 6, parentId: 1, tag: "video", role: "Video", attrs: { id: "v", src: "clip.mp4" } },
+        {
+          id: 8,
+          parentId: range.inForm ? 2 : 1,
+          tag: "input",
+          role: "slider",
+          name: range.name,
+          inForm: range.inForm,
+          value: String(seconds++),
+          attrs: { type: "range" },
+        },
+      ]);
+    for (const [range, allowed] of [
+      [{ name: "Playback progress", inForm: false }, true],
+      [{ name: "", inForm: false }, false],
+      [{ name: "Playback progress", inForm: true }, false],
+    ] as const) {
+      observe(player(range));
+      target(5);
+      const f = await fixture();
+      f.change({ structure: 10 });
+      const result = await run(f, "tool.click", "e5", (runner) =>
+        runner.send(7, "Input.dispatchMouseEvent", { type: "mousePressed", x: 1, y: 1 }),
+      );
+      if (allowed) expect(result).toEqual({});
+      else
+        expect(result).toMatchObject({
+          data: { observed_change: { part: expect.any(String), field: "value" } },
+        });
+    }
+  });
+});

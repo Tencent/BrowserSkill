@@ -21,6 +21,36 @@ export interface ContentChange {
   after: string;
 }
 
+export interface EvidenceOptions {
+  /**
+   * Also tolerate positively identified media timelines in a comparison
+   * without a target. Callers use this only for the whole-page part of an
+   * action whose resolved target region is checked separately. Untargeted
+   * actions keep the exact page.
+   */
+  incidentalMedia?: boolean;
+  /**
+   * `state` compares business state only: target presence, form values,
+   * checked and selected states, modal layers and media players. Text, derived
+   * names, visibility and layout are not compared. This is for checks after
+   * the action's own preparation (scroll, focus, hover), which can change text
+   * and layout without any new decision.
+   */
+  mode?: "full" | "state";
+}
+
+/** The first difference between two observations, for diagnostics only. */
+export interface ObservedChange {
+  part: "target" | "scope" | "region" | "form_state" | "modal" | "media";
+  change: "changed" | "added" | "removed";
+  role?: string;
+  name?: string;
+  field?: string;
+  /** Omitted for values and sensitive nodes. */
+  before?: string;
+  after?: string;
+}
+
 const scopes = new Set(["form", "dialog", "table", "list", "grid", "listbox", "menu"]);
 const regions = new Set(["main", "region", "section", "article"]);
 const semanticAttributes = [
@@ -50,6 +80,43 @@ const semanticAttributes = [
 const textRoles = new Set(["StaticText", "InlineTextBox", "ListMarker"]);
 // Attributes that self-updating widgets rewrite alongside their text.
 const contentAttributes = new Set(["aria-label", "title"]);
+// Attributes that describe a control's business state rather than its
+// presentation. Hover and focus may change the others (expanded, hidden).
+const stateAttributes = new Set([
+  "type",
+  "name",
+  "aria-selected",
+  "aria-checked",
+  "aria-pressed",
+  "aria-disabled",
+  "aria-valuemin",
+  "aria-valuemax",
+  "min",
+  "max",
+  "step",
+  "readonly",
+  "required",
+]);
+// Field names of facts(), in order, used to describe a difference.
+const factFields = [
+  "frame",
+  "node",
+  "role",
+  "tag",
+  "name",
+  "text",
+  "value",
+  "in_form",
+  "checked",
+  "selection",
+  "disabled",
+  "inert",
+  "modal",
+  "visible",
+  "pointer_events",
+  "attributes",
+  "src",
+] as const;
 // Stands in for learned text inside a derived name; HTML text never contains it.
 const LEARNED = "\u0000";
 
@@ -194,11 +261,23 @@ function withoutLearned(name: string | undefined, learned?: ReadonlySet<string>)
   return result;
 }
 
+type Part = ObservedChange["part"];
+interface Row {
+  node: VomNode;
+  facts: unknown[];
+}
+interface Signature {
+  scope: unknown;
+  parts: [Part, Row[]][];
+}
+
 function signature(
   evidence: ObservationEvidence,
   target?: EvidenceTarget,
   volatile?: ReadonlySet<string>,
-): string | undefined {
+  options: EvidenceOptions = {},
+): Signature | undefined {
+  const state = options.mode === "state";
   const nodes = evidence.nodes;
   const tree = new Tree(nodes);
   const anchor = target && nodes.find((node) => isTarget(node, target));
@@ -259,11 +338,13 @@ function signature(
   // dependency on the timeline, its player, or a containing element makes its
   // value exact; sharing the inferred region with a button does not.
   // Keep the original nodes intact: media controls cannot become learned text.
+  // Without a target this applies only when the caller checks a resolved
+  // action target separately; untargeted actions keep the exact page.
   const media = nodes.filter((node) => node.tag === "video" || node.tag === "audio");
   const ignoredProgress = new Map<VomNode, VomNode>();
   const explicitlyObserved = (node: VomNode) =>
     !!anchor && (tree.within(node, anchor) || (node.domAncestorIds ?? []).includes(anchor.id));
-  if (target)
+  if (target || options.incidentalMedia)
     for (const node of nodes) {
       if (explicitlyObserved(node) || node.value === undefined) continue;
       const owner = playbackProgressMedia(
@@ -280,6 +361,7 @@ function signature(
       if (owner && !explicitlyObserved(owner.node)) ignoredProgress.set(node, owner.node);
     }
   // Identity, structure, state and visibility of learned nodes remain checked.
+  // State mode keeps identity and business state only.
   const facts = (node: VomNode, relax: boolean) => {
     const tolerate = relax && tolerated(node);
     return [
@@ -287,12 +369,12 @@ function signature(
       node.backendNodeId,
       node.role,
       node.tag,
-      tolerate && textRoles.has(node.role ?? "")
+      state || (tolerate && textRoles.has(node.role ?? ""))
         ? undefined
         : relax
           ? withoutLearned(node.name, learnedText.get(node))
           : node.name,
-      tolerate ? undefined : node.text,
+      state || tolerate ? undefined : node.text,
       ignoredProgress.has(node) ? undefined : node.value,
       node.inForm,
       node.checked,
@@ -300,25 +382,51 @@ function signature(
       node.disabled,
       node.inert,
       node.modal,
-      !!node.rect && node.rect.w > 0 && node.rect.h > 0,
-      node.pointerEvents === "none",
+      state ? undefined : !!node.rect && node.rect.w > 0 && node.rect.h > 0,
+      state ? undefined : node.pointerEvents === "none",
       semanticAttributes.map((key) =>
-        tolerate && contentAttributes.has(key) ? undefined : node.attrs?.[key],
+        (state && !stateAttributes.has(key)) || (tolerate && contentAttributes.has(key))
+          ? undefined
+          : node.attrs?.[key],
       ),
     ];
   };
-  return JSON.stringify([
-    scope && [scope.frameId, scope.backendNodeId],
-    nodes.filter(inside).map((node) => facts(node, true)),
-    // Form state outside the action region can still determine its meaning.
-    nodes
-      .filter((node) => node.value !== undefined || node.checked !== undefined)
-      .map((node) => facts(node, false)),
-    nodes.filter((node) => node.modal).map((node) => facts(node, false)),
-    // Replacing the player or its source still invalidates the observation.
-    [...new Set(ignoredProgress.values())].map((node) => [...facts(node, false), node.attrs?.src]),
-  ]);
+  const rows = (list: VomNode[], relax: boolean): Row[] =>
+    list.map((node) => ({ node, facts: facts(node, relax) }));
+  return {
+    scope: scope && [scope.frameId, scope.backendNodeId],
+    parts: [
+      ["region", state ? [] : rows(nodes.filter(inside), true)],
+      // Form state outside the action region can still determine its meaning.
+      [
+        "form_state",
+        rows(
+          nodes.filter((node) => node.value !== undefined || node.checked !== undefined),
+          false,
+        ),
+      ],
+      [
+        "modal",
+        rows(
+          nodes.filter((node) => node.modal),
+          false,
+        ),
+      ],
+      // Replacing the player or its source still invalidates the observation.
+      [
+        "media",
+        [...new Set(ignoredProgress.values())].map((node) => ({
+          node,
+          facts: [...facts(node, false), node.attrs?.src],
+        })),
+      ],
+    ],
+  };
 }
+
+const serialize = (value?: Signature) =>
+  value &&
+  JSON.stringify([value.scope, value.parts.map(([, list]) => list.map((row) => row.facts))]);
 
 /**
  * `volatile` lists the stable identities (backend nodes, owning any virtual
@@ -335,9 +443,86 @@ export function sameObservationEvidence(
   after: ObservationEvidence,
   target?: EvidenceTarget,
   volatile?: ReadonlySet<string>,
+  options?: EvidenceOptions,
 ): boolean {
-  const a = signature(before, target, volatile);
-  return a !== undefined && a === signature(after, target, volatile);
+  const a = serialize(signature(before, target, volatile, options));
+  return a !== undefined && a === serialize(signature(after, target, volatile, options));
+}
+
+const MAX_REPORTED = 80;
+const shown = (value: unknown) => {
+  if (value === undefined || value === null) return undefined;
+  const text = clean(typeof value === "string" ? value : JSON.stringify(value));
+  return text.length > MAX_REPORTED ? `${text.slice(0, MAX_REPORTED - 1)}…` : text;
+};
+
+/** Describes the first fact that differs between two rows. */
+function describeRow(part: Part, before?: Row, after?: Row): ObservedChange {
+  const node = after?.node ?? before?.node;
+  const change: ObservedChange = {
+    part,
+    change: !before ? "added" : !after ? "removed" : "changed",
+    role: node?.role,
+    // A sensitive control's accessible name can repeat its content.
+    name: node?.sensitive ? undefined : shown(node?.name),
+  };
+  if (!before || !after) return change;
+  const index = before.facts.findIndex(
+    (fact, at) => JSON.stringify(fact) !== JSON.stringify(after.facts[at]),
+  );
+  let field: string = factFields[index] ?? "unknown";
+  let was = before.facts[index];
+  let now = after.facts[index];
+  if (field === "attributes") {
+    const at = semanticAttributes.findIndex(
+      (_key, i) => (was as unknown[])?.[i] !== (now as unknown[])?.[i],
+    );
+    field = `attribute:${semanticAttributes[at]}`;
+    was = (was as unknown[])?.[at];
+    now = (now as unknown[])?.[at];
+  }
+  change.field = field;
+  // Values may be private even when they are not marked sensitive.
+  if (field !== "value" && !before.node.sensitive && !after.node.sensitive) {
+    change.before = shown(was);
+    change.after = shown(now);
+  }
+  return change;
+}
+
+/**
+ * The first difference that makes sameObservationEvidence() false, with the
+ * same arguments. Returns undefined when the observations match.
+ */
+export function observedChange(
+  before: ObservationEvidence,
+  after: ObservationEvidence,
+  target?: EvidenceTarget,
+  volatile?: ReadonlySet<string>,
+  options?: EvidenceOptions,
+): ObservedChange | undefined {
+  const a = signature(before, target, volatile, options);
+  const b = signature(after, target, volatile, options);
+  if (!a || !b)
+    return target && (a || b) ? { part: "target", change: a ? "removed" : "added" } : undefined;
+  if (JSON.stringify(a.scope) !== JSON.stringify(b.scope))
+    return { part: "scope", change: "changed" };
+  for (let at = 0; at < a.parts.length; at++) {
+    const [part, old] = a.parts[at];
+    const next = b.parts[at][1];
+    for (let row = 0; row < Math.max(old.length, next.length); row++) {
+      const x = old[row];
+      const y = next[row];
+      if (x && y && JSON.stringify(x.facts) === JSON.stringify(y.facts)) continue;
+      // An inserted or removed node shifts the rest of the list. Report the
+      // node itself rather than its successor.
+      if (x && y && x.node.backendNodeId !== y.node.backendNodeId) {
+        const removed = !next.some((item) => item.node.backendNodeId === x.node.backendNodeId);
+        return removed ? describeRow(part, x) : describeRow(part, undefined, y);
+      }
+      return describeRow(part, x, y);
+    }
+  }
 }
 
 interface ContentGroup {
