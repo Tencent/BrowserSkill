@@ -224,3 +224,31 @@ describe("overlay state ordering", () => {
     expect(f.blocking()).toBe(false);
   });
 });
+
+it("mounts an exclusive surface with cooperation and restores it after the click lease ends", async () => {
+  const f = await fixture();
+  const exclusive = (inputLocked: boolean, mode = "ready") =>
+    f.send({
+      type: OVERLAY_AGENT_STATE,
+      ...f.version(),
+      sessionId: "one",
+      mode: "control",
+      lockInput: true,
+      inputLocked,
+      cooperation: { revision: 1, mode, editing: false },
+    });
+  exclusive(true);
+  expect(f.blocking()).toBe(true);
+  f.begin();
+  exclusive(true, "acting");
+  expect(f.active()).toBe(true);
+  f.send({ type: INPUT_PASSTHROUGH, phase: "end", id: "click-one" });
+  expect(f.active()).toBe(false);
+  expect(f.blocking()).toBe(true);
+  exclusive(false, "held");
+  expect(f.blocking()).toBe(false);
+  exclusive(true);
+  expect(f.blocking()).toBe(true);
+  f.reset("one");
+  expect(f.blocking()).toBe(false);
+});

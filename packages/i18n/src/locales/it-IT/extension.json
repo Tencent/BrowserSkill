@@ -13,6 +13,7 @@
     "resume": "Restituisci ad Agent",
     "stop": "Interrompi attività",
     "hints": {
+      "inputLocked": "L’input della pagina è bloccato. Metti in pausa l’Agent per riprendere il controllo.",
       "ready": "Puoi intervenire in qualsiasi momento",
       "acting": "Puoi intervenire in qualsiasi momento",
       "human": "Agent riprende quando smetti di interagire",

@@ -13,6 +13,7 @@
     "resume": "Rendre la main à Agent",
     "stop": "Arrêter la tâche",
     "hints": {
+      "inputLocked": "La saisie est verrouillée. Mettez l’Agent en pause pour reprendre la main.",
       "ready": "Vous pouvez intervenir à tout moment",
       "acting": "Vous pouvez intervenir à tout moment",
       "human": "Agent reprend quand vous cessez d’interagir",

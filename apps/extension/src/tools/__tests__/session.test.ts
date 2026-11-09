@@ -873,3 +873,37 @@ describe("handleSessionStop window release (issue #57)", () => {
     expect(sm.has("aa11")).toBe(false);
   });
 });
+
+describe("session input locking", () => {
+  it("is opt-in, session-scoped, and never leaks into window creation options", async () => {
+    const windows = fakeAgentWindow([100, 200, 300]);
+    const manager = new SessionManager({ agentWindow: windows });
+    for (const [session_id, lock_input] of [
+      ["shared", undefined],
+      ["exclusive", true],
+    ] as const) {
+      expect(await handleSessionStart(manager, { session_id, lock_input })).not.toHaveProperty(
+        "code",
+      );
+    }
+    expect(manager.get("shared")?.lockInput).toBe(false);
+    expect(manager.get("exclusive")?.lockInput).toBe(true);
+    for (const call of windows.create.mock.calls) expect(call[1]).not.toHaveProperty("lockInput");
+    manager.release("exclusive");
+    await handleSessionStart(manager, { session_id: "exclusive" });
+    expect(manager.get("exclusive")?.lockInput).toBe(false);
+  });
+
+  it.each([
+    "true",
+    1,
+    null,
+  ])("rejects invalid lock_input before creating a window: %j", async (lock_input) => {
+    const windows = fakeAgentWindow([100]);
+    const manager = new SessionManager({ agentWindow: windows });
+    expect(
+      await handleSessionStart(manager, { session_id: "task", lock_input } as never),
+    ).toMatchObject({ code: "invalid_params" });
+    expect(windows.create).not.toHaveBeenCalled();
+  });
+});

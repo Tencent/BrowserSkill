@@ -90,6 +90,20 @@ WXT / MV3 Chromium extension. Built with React popup and a service worker backgr
 Shared Rust types + JSON Schema generation. TypeScript mirrors frame shapes in
 `apps/extension/src/transport/types.ts` (kept in sync via tests and schema dumps).
 
+### Session input ownership
+
+Protocol 1.10 adds optional `lock_input` to `tool.session_start`, exposed by
+`bsk session start --lock-input`. CLI and daemon check peer support before dispatch.
+The session manager retains the option independently of `control_policy`; the background
+publishes the current lock only for owned tabs. Explicit hold, stop, help and recording
+release page input. Exclusive holds require an explicit hand-back, including after idle sync.
+
+The top-frame overlay supplies the hit-test surface and handover controls. Every frame's
+isolated-world collector cancels unmatched trusted input before page handlers or activity
+recording, while preserving existing native input attribution. Versioned overlay states and
+collector retirement prevent delayed state from re-locking a returned page. Click passthrough
+changes hit testing without disabling input attribution or widening the keyboard lease.
+
 ### Control policy and action evidence
 
 Protocol 1.8 adds explicit `control_policy` negotiation on `tool.cooperate` sync/enable.

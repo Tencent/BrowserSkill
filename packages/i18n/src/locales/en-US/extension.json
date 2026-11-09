@@ -13,6 +13,7 @@
     "resume": "Hand back to Agent",
     "stop": "Stop task",
     "hints": {
+      "inputLocked": "Page input is locked. Pause Agent to take over.",
       "ready": "You can take over at any time",
       "acting": "You can take over at any time",
       "human": "Agent resumes when you stop interacting",

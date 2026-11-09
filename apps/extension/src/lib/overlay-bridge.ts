@@ -85,6 +85,10 @@ export interface OverlayAgentStateMessage extends OverlayVersion {
   controller?: ControllerInfo;
   cooperation?: import("@/cooperation/types").CooperationView;
   minimized?: boolean;
+  /** Session opted in; keeps handover controls visible even when hints are hidden. */
+  lockInput?: boolean;
+  /** Authoritative current lock, cleared during human control and recording. */
+  inputLocked?: boolean;
   type: typeof OVERLAY_AGENT_STATE;
   sessionId: string | null;
   mode: OverlayMode;
@@ -180,11 +184,15 @@ export function isOverlayAgentStateMessage(message: unknown): message is Overlay
     generation?: unknown;
     controller?: unknown;
     minimized?: unknown;
+    lockInput?: unknown;
+    inputLocked?: unknown;
   };
   return (
     candidate.type === OVERLAY_AGENT_STATE &&
     (candidate.controller === undefined || isControllerInfo(candidate.controller)) &&
     (candidate.minimized === undefined || typeof candidate.minimized === "boolean") &&
+    (candidate.lockInput === undefined || typeof candidate.lockInput === "boolean") &&
+    (candidate.inputLocked === undefined || typeof candidate.inputLocked === "boolean") &&
     (typeof candidate.sessionId === "string" || candidate.sessionId === null) &&
     (candidate.mode === "control" ||
       candidate.mode === "interrupting" ||

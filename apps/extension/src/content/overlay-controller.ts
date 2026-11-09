@@ -169,11 +169,11 @@ export class OverlayController {
 }
 
 /** Control mask ("Agent 正在控制") must hide while help/record overlays own the chrome. */
-export function shouldShowAgentControlOverlay(state: OverlayState): boolean {
+export function shouldShowAgentControlOverlay(state: OverlayState, lockInput = false): boolean {
   return (
     state.controlVisible &&
-    !state.controlHintsHidden &&
-    !state.suppressControlAfterRecord &&
+    (!state.controlHintsHidden || lockInput) &&
+    (!state.suppressControlAfterRecord || lockInput) &&
     state.activeHelp === null &&
     state.activeRecord === null
   );

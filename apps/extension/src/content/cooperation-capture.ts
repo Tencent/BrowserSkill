@@ -13,8 +13,17 @@ import {
   type HumanActivity,
   type InputExpectation,
 } from "@/cooperation/types";
-import { OVERLAY_HOST_SELECTOR } from "@/lib/overlay-bridge";
+import {
+  isOverlayAgentOverlayResetMessage,
+  isOverlayAgentStateMessage,
+  OVERLAY_AUTOMATION_BYPASS,
+  OVERLAY_HOST_SELECTOR,
+  OVERLAY_MSG_READY,
+  type OverlayAgentStateMessage,
+  OverlayVersionGate,
+} from "@/lib/overlay-bridge";
 import { createRandomUuid } from "@/lib/random-uuid";
+import { isRecordStartMessage } from "@/lib/record-bridge";
 import { sensitiveAutocomplete } from "@/lib/sensitive-autocomplete";
 
 const MAX_CHANGES = 64;
@@ -25,6 +34,10 @@ const INPUT_CLOCK_PRECISION_MS = 1.5;
 /** Isolated-world collection also covers frames; no page-world control API is exposed. */
 export function attachCooperationCapture() {
   let enabled = false;
+  let inputLocked = false;
+  let automationBypassCount = 0;
+  let overlayState: OverlayAgentStateMessage | undefined;
+  const overlayVersions = new OverlayVersionGate();
   let lease: string | undefined;
   const retired = new Set<string>();
   const state: FrameState = {
@@ -371,13 +384,26 @@ export function attachCooperationCapture() {
     // Publish confirmed activity immediately. Native dispatch also pulls frame state.
     publish();
   };
+  // Cancelling at window capture keeps blocked input out of page handlers and
+  // cooperation activity. Native Agent input still uses the existing one-shot
+  // attribution, including inside child frames and during click passthrough.
+  const blockHuman = (event: Event) => {
+    if (!inputLocked) return false;
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    return true;
+  };
   const onEvent = (event: Event) => {
-    if (!enabled) return;
+    if (!enabled && !inputLocked) return;
     const release =
       (dragging && ["dragend", "drop"].includes(event.type)) ||
       (pointer && !pointer.released && ["pointerup", "pointercancel"].includes(event.type)) ||
       (event.type === "keyup" && keys.has((event as KeyboardEvent).key));
     if (!release && event.composedPath().some(overlay)) return;
+    if (!enabled) {
+      if (event.isTrusted) blockHuman(event);
+      return;
+    }
     let target = event.composedPath()[0] ?? event.target;
     // Closed shadow roots retarget editing events to their host. Resolve the
     // same deep focus used by collection and native text attribution.
@@ -442,6 +468,7 @@ export function attachCooperationCapture() {
     }
     if (!event.isTrusted) return;
     if (event.type === "dragend" || event.type === "drop") {
+      if (dragAgent !== true && blockHuman(event)) return;
       if (event.type === "drop") {
         eventAgent = dragAgent;
         clearTimeout(eventTimer);
@@ -468,6 +495,7 @@ export function attachCooperationCapture() {
         input.data === expected.text;
       const human = eventAgent === false || pointer?.agent === false;
       const agent = !human && (insert || (eventAgent ?? pointer?.agent ?? false));
+      if (!agent && blockHuman(event)) return;
       if (insert && agent) expectation = undefined;
       inputSource = { target, agent, before: inputValue(target) };
       clearTimeout(inputTimer);
@@ -494,13 +522,16 @@ export function attachCooperationCapture() {
       return;
     }
     if (event.type === "pointerdown") {
-      pointer = { agent: matches(event), released: false, confirmed: false };
+      const agent = matches(event);
+      if (!agent && blockHuman(event)) return;
+      pointer = { agent, released: false, confirmed: false };
       clearTimeout(pointerTimer);
       state.revision++;
       publish();
       return;
     }
     if (event.type === "pointerup" || event.type === "pointercancel") {
+      if (pointer?.agent !== true && blockHuman(event)) return;
       if (pointer) pointer.released = true;
       clearTimeout(pointerTimer);
       // The default click follows pointerup in the same browser task.
@@ -517,7 +548,9 @@ export function attachCooperationCapture() {
     if (event.type === "wheel") {
       // Browsing never transfers control. Retain only the source for a native
       // control whose wheel handler actually changes its value in this task.
-      eventAgent = matches(event);
+      const agent = matches(event);
+      if (!agent && blockHuman(event)) return;
+      eventAgent = agent;
       clearTimeout(eventTimer);
       eventTimer = setTimeout(() => {
         eventAgent = undefined;
@@ -526,7 +559,9 @@ export function attachCooperationCapture() {
     }
     if (event.type === "keydown" || event.type === "keypress" || event.type === "keyup") {
       const key = (event as KeyboardEvent).key;
-      eventAgent = event.type === "keyup" ? keys.get(key) : matches(event);
+      const agent = event.type === "keyup" ? keys.get(key) : matches(event);
+      if (agent !== true && blockHuman(event)) return;
+      eventAgent = agent;
       if (event.type === "keydown") keys.set(key, eventAgent ?? false);
       else if (event.type === "keyup") keys.delete(key);
       let releasedPending = false;
@@ -555,12 +590,26 @@ export function attachCooperationCapture() {
       return;
     }
     if (event.type === "compositionstart" || event.type === "compositionend") {
+      if (blockHuman(event)) return;
       composing = event.type === "compositionstart";
       state.revision++;
       publish();
       return;
     }
     if (event.type === "submit" && eventAgent !== false && pointer?.agent !== false) return;
+    if (["mousedown", "mouseup", "contextmenu", "dblclick"].includes(event.type)) {
+      if (pointer?.agent !== true && eventAgent !== true) blockHuman(event);
+      return;
+    }
+    if (["pointermove", "mousemove", "pointerover", "mouseover", "dragover"].includes(event.type)) {
+      if (pointer?.agent !== true && dragAgent !== true && automationBypassCount === 0)
+        blockHuman(event);
+      return;
+    }
+    if (["touchstart", "touchmove", "touchend", "paste", "cut"].includes(event.type)) {
+      if (pointer?.agent !== true && eventAgent !== true) blockHuman(event);
+      return;
+    }
     if (
       event.type === "click" ||
       event.type === "auxclick" ||
@@ -572,7 +621,7 @@ export function attachCooperationCapture() {
           ? (eventAgent ?? pointer?.agent ?? false)
           : (pointer?.agent ?? false);
       if (event.type === "dragstart") dragAgent = agent;
-      if (agent) return;
+      if (agent || blockHuman(event)) return;
       if (event.type === "dragstart") dragging = true;
       if (pointer) pointer.confirmed = true;
       if (
@@ -606,8 +655,45 @@ export function attachCooperationCapture() {
     "input",
     "change",
   ];
+  const lockedEvents = [
+    ...events,
+    "wheel",
+    "mousedown",
+    "mouseup",
+    "contextmenu",
+    "dblclick",
+    "pointermove",
+    "mousemove",
+    "pointerover",
+    "mouseover",
+    "dragover",
+    "touchstart",
+    "touchmove",
+    "touchend",
+    "paste",
+    "cut",
+  ];
+  const setInputLocked = (locked: boolean) => {
+    if (locked === inputLocked) return;
+    inputLocked = locked;
+    // Install wheel only while locked: even a passive listener changes Chrome's
+    // delivery of legacy mousewheel events on pages without an active session.
+    if (locked) window.addEventListener("wheel", onEvent, { capture: true, passive: false });
+    else window.removeEventListener("wheel", onEvent, true);
+  };
+  const onLockedEvent = (event: Event) => {
+    if (inputLocked) onEvent(event);
+  };
+  // Register before page scripts, so even page window-capture handlers cannot
+  // act on a blocked key/click before it is cancelled.
+  for (const event of lockedEvents)
+    if (event !== "wheel")
+      window.addEventListener(event, onLockedEvent, { capture: true, passive: false });
+  const onSharedEvent = (event: Event) => {
+    if (!inputLocked) onEvent(event);
+  };
   for (const event of events)
-    document.addEventListener(event, onEvent, { capture: true, passive: true });
+    document.addEventListener(event, onSharedEvent, { capture: true, passive: true });
   // Chromium skips a node's legacy `mousewheel` listeners whenever that node has a
   // `wheel` listener, even a passive one. Listen only while collecting so pages
   // without a session keep their mousewheel handlers. Window capture runs before
@@ -615,8 +701,8 @@ export function attachCooperationCapture() {
   // Agent wheel from attribution even though this listener is registered late.
   const listenWheel = (on: boolean) =>
     on
-      ? window.addEventListener("wheel", onEvent, { capture: true, passive: true })
-      : window.removeEventListener("wheel", onEvent, true);
+      ? window.addEventListener("wheel", onSharedEvent, { capture: true, passive: true })
+      : window.removeEventListener("wheel", onSharedEvent, true);
   const onScroll = () => {
     if (!enabled) return;
     const started = !state.scrolling;
@@ -659,7 +745,13 @@ export function attachCooperationCapture() {
   };
   window.addEventListener("blur", onWindowBlur);
   const onMessage = (
-    message: { kind?: string; input?: InputExpectation; lease?: string },
+    message: {
+      kind?: string;
+      type?: string;
+      enabled?: boolean;
+      input?: InputExpectation;
+      lease?: string;
+    },
     _sender: chrome.runtime.MessageSender,
     reply: (value: unknown) => void,
   ) => {
@@ -667,6 +759,32 @@ export function attachCooperationCapture() {
       // Layout facts for proving a child frame hidden. It grants nothing, so it
       // needs no lease and leaves collection state untouched.
       reply(describeFrameOwners(document, shadowRoot));
+      return false;
+    }
+    if (isOverlayAgentStateMessage(message)) {
+      if (overlayVersions.admit(message)) {
+        if (overlayState?.sessionId !== message.sessionId) automationBypassCount = 0;
+        overlayState = message;
+        setInputLocked(enabled && message.mode === "control" && message.inputLocked === true);
+      }
+      return false;
+    }
+    if (isOverlayAgentOverlayResetMessage(message)) {
+      if (overlayVersions.admit(message) && overlayState?.sessionId === message.sessionId) {
+        overlayState = undefined;
+        automationBypassCount = 0;
+        setInputLocked(false);
+      }
+      return false;
+    }
+    if (message.type === OVERLAY_AUTOMATION_BYPASS) {
+      automationBypassCount = Math.max(0, automationBypassCount + (message.enabled ? 1 : -1));
+      return false;
+    }
+    // Action recording hands the page to the person before its UI acknowledges.
+    // Session state refreshes keep this unlocked while recording is active.
+    if (isRecordStartMessage(message)) {
+      setInputLocked(false);
       return false;
     }
     if (typeof message.lease !== "string") return false;
@@ -693,6 +811,9 @@ export function attachCooperationCapture() {
     }
     if (message.kind === COOPERATION_DISABLE) {
       enabled = false;
+      overlayState = undefined;
+      automationBypassCount = 0;
+      setInputLocked(false);
       listenWheel(false);
       clearTimeout(focusTimer);
       clearTimeout(pointerTimer);
@@ -719,6 +840,7 @@ export function attachCooperationCapture() {
       reply({ ...state, busy: false, fields: [] });
     } else if (message.kind === COOPERATION_READ) {
       enabled = true;
+      setInputLocked(overlayState?.mode === "control" && overlayState.inputLocked === true);
       listenWheel(true);
       reply(read());
     } else if (message.kind === COOPERATION_ARM) {
@@ -777,6 +899,15 @@ export function attachCooperationCapture() {
   };
   chrome.runtime.onMessage.addListener(onMessage);
   void chrome.runtime.sendMessage({ kind: COOPERATION_READY }).catch(() => {});
+  // Also covers newly loaded child frames and tabs restored from the back/forward cache.
+  const requestInputState = () => {
+    void chrome.runtime.sendMessage({ kind: OVERLAY_MSG_READY }).catch(() => {});
+  };
+  const pageShow = (event: PageTransitionEvent) => {
+    if (event.persisted) requestInputState();
+  };
+  window.addEventListener("pageshow", pageShow);
+  requestInputState();
   return () => {
     clearTimeout(timer);
     clearTimeout(focusTimer);
@@ -788,7 +919,11 @@ export function attachCooperationCapture() {
     chrome.runtime.onMessage.removeListener(onMessage);
     window.removeEventListener("blur", onWindowBlur);
     document.removeEventListener("scroll", onScroll, true);
-    for (const event of events) document.removeEventListener(event, onEvent, true);
+    setInputLocked(false);
+    for (const event of lockedEvents)
+      if (event !== "wheel") window.removeEventListener(event, onLockedEvent, true);
+    window.removeEventListener("pageshow", pageShow);
+    for (const event of events) document.removeEventListener(event, onSharedEvent, true);
     listenWheel(false);
   };
 }

@@ -177,3 +177,23 @@ describe("OverlayController", () => {
     expect(shouldShowAgentControlOverlay(controller.snapshot())).toBe(false);
   });
 });
+
+it("retains handover controls for an exclusive session when ordinary control hints are hidden", () => {
+  const controller = new OverlayController();
+  controller.activateAgentSession("task");
+  controller.setControlHintsHidden(true);
+  expect(shouldShowAgentControlOverlay(controller.snapshot())).toBe(false);
+  expect(shouldShowAgentControlOverlay(controller.snapshot(), true)).toBe(true);
+  controller.applyAgentControlMode("task", "paused");
+  expect(shouldShowAgentControlOverlay(controller.snapshot(), true)).toBe(false);
+});
+
+it("keeps exclusive hand-back controls available after action recording finishes", () => {
+  const controller = new OverlayController();
+  controller.activateAgentSession("task");
+  controller.setAgentRecordRequest({ id: "record", onFinish() {} });
+  expect(shouldShowAgentControlOverlay(controller.snapshot(), true)).toBe(false);
+  controller.clearAgentRecordRequest("record");
+  expect(shouldShowAgentControlOverlay(controller.snapshot())).toBe(false);
+  expect(shouldShowAgentControlOverlay(controller.snapshot(), true)).toBe(true);
+});

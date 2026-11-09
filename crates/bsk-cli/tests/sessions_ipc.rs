@@ -2561,3 +2561,130 @@ async fn shared_session_survives_idle_then_releases_protection_over_websocket() 
     state.sessions.remove(&id);
     handle.shutdown().await;
 }
+
+#[tokio::test]
+async fn cli_lock_input_start_checks_extension_support_and_preserves_normal_starts() {
+    use bsk::cli::error::CliError;
+    use bsk::cli::session::{SessionStartOptions, start_session};
+
+    for protocol in ["1.9", bsk::daemon::state::PROTOCOL_VERSION] {
+        let (handle, sock) = spawn_daemon().await;
+        let mut ws = connect_ext(handle.ws_addr()).await;
+        handshake_with_protocol(&mut ws, protocol).await;
+
+        for lock_input in [false, true] {
+            let path = sock.clone();
+            let start = tokio::task::spawn_blocking(move || {
+                start_session(
+                    path,
+                    SessionStartOptions {
+                        lock_input,
+                        ..Default::default()
+                    },
+                )
+            });
+            if lock_input && protocol == "1.9" {
+                let error = start.await.unwrap().unwrap_err();
+                assert!(matches!(
+                    error,
+                    CliError::Rpc {
+                        code: ErrorCode::Unsupported,
+                        ..
+                    }
+                ));
+                assert!(
+                    error
+                        .to_string()
+                        .contains("update the BrowserSkill extension")
+                );
+                assert!(
+                    tokio::time::timeout(
+                        Duration::from_millis(100),
+                        next_extension_request(&mut ws)
+                    )
+                    .await
+                    .is_err()
+                );
+                assert_eq!(handle.state().sessions.len(), 1);
+                continue;
+            }
+            let request = next_extension_request(&mut ws).await;
+            assert_eq!(request.method, Method::ToolSessionStart);
+            let params: SessionStartParams =
+                serde_json::from_value(request.params.unwrap()).unwrap();
+            assert_eq!(params.lock_input, lock_input);
+            send_extension_response(
+                &mut ws,
+                ResponseFrame {
+                    id: request.id,
+                    body: ResponseBody::Ok(serde_json::json!({"agent_window_id":4242})),
+                },
+            )
+            .await;
+            assert_eq!(start.await.unwrap().unwrap().agent_window_id, Some(4242));
+        }
+        drop(ws);
+        handle.shutdown().await;
+    }
+}
+
+#[tokio::test]
+async fn cli_lock_input_start_refuses_an_old_daemon_before_dispatching_a_start() {
+    use bsk::cli::error::CliError;
+    use bsk::cli::session::{SessionStartOptions, start_session};
+    use bsk::daemon::ipc::{self, DaemonStatus};
+    use std::sync::Mutex;
+
+    let sock = tempfile_path("bsk-input-lock-old-daemon");
+    let listener = ipc::bind(&sock).await.unwrap();
+    let system = ipc::system_handler(DaemonStatus {
+        started_at: std::time::Instant::now(),
+        ws_port: 0,
+        sock_path: sock.clone(),
+        daemon_version: "0.3.3",
+        protocol_version: "1.9",
+    });
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let recorded = Arc::clone(&calls);
+    let handler: ipc::RpcHandler = Arc::new(move |id, method, params| {
+        recorded.lock().unwrap().push(method.clone());
+        system(id, method, params)
+    });
+    let server = tokio::spawn(ipc::serve(
+        listener,
+        handler,
+        || {},
+        || {},
+        || {},
+        std::future::pending::<()>(),
+    ));
+    let path = sock.clone();
+    let error = tokio::task::spawn_blocking(move || {
+        start_session(
+            path,
+            SessionStartOptions {
+                lock_input: true,
+                ..Default::default()
+            },
+        )
+    })
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert!(matches!(
+        error,
+        CliError::Rpc {
+            code: ErrorCode::Unsupported,
+            ..
+        }
+    ));
+    assert!(
+        error
+            .to_string()
+            .contains("update bsk and restart its daemon")
+    );
+    assert_eq!(*calls.lock().unwrap(), vec![Method::SystemStatus]);
+    server.abort();
+    let _ = server.await;
+    let _ = std::fs::remove_file(sock);
+}

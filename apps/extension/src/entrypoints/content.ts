@@ -191,7 +191,8 @@ export default defineContentScript({
     function renderReactOverlays(): void {
       const overlayState = overlays.snapshot();
       const controlVisible =
-        videoOverlay.canRenderControl() && shouldShowAgentControlOverlay(overlayState);
+        videoOverlay.canRenderControl() &&
+        shouldShowAgentControlOverlay(overlayState, activeAgentState?.lockInput);
       const controlOverlayVisible = controlVisible && !activeAgentState?.cooperation;
       const interactiveOverlayVisible =
         overlayState.borrowRequests.length > 0 ||
@@ -201,13 +202,19 @@ export default defineContentScript({
       const cooperationState =
         controlVisible && !interactiveOverlayVisible ? activeAgentState?.cooperation : undefined;
       const cardVisible = controlOverlayVisible || !!cooperationState;
+      const inputLocked =
+        cardVisible &&
+        !interactiveOverlayVisible &&
+        !overlayState.interrupting &&
+        activeAgentState?.inputLocked === true;
+      const blockingSurface = controlOverlayVisible || inputLocked;
       // Cooperative status updates and minimization keep the same click lease.
       // Clear it only when control UI leaves or interactive overlays take over.
       if (!cardVisible || interactiveOverlayVisible) inputPassthrough.reset();
       setOverlayHostHiddenFromAccessibility(!interactiveOverlayVisible && !cardVisible);
       setOverlaySurfaceState(
-        controlOverlayVisible,
-        controlOverlayVisible && overlayState.automationBypassCount === 0,
+        blockingSurface,
+        blockingSurface && overlayState.automationBypassCount === 0,
       );
       const root = reactRoot;
       if (!root) return;
@@ -233,6 +240,7 @@ export default defineContentScript({
                 controller: overlayState.controller,
                 visible: cardVisible,
                 state: cooperationState,
+                inputLocked,
                 minimized: activeAgentState?.minimized ?? false,
                 onMinimizedChange: handleMinimizedChange,
                 interrupting: overlayState.interrupting,

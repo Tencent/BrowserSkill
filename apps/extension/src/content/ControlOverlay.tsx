@@ -61,6 +61,7 @@ export interface ControlOverlayProps {
   state?: CooperationView;
   interrupting: boolean;
   automationBypass: boolean;
+  inputLocked?: boolean;
   minimized?: boolean;
   onMinimizedChange?(minimized: boolean): void;
   onInterrupt(): void;
@@ -73,6 +74,7 @@ export function ControlOverlay({
   state,
   interrupting,
   automationBypass,
+  inputLocked = false,
   minimized = false,
   onMinimizedChange,
   onInterrupt,
@@ -107,7 +109,7 @@ export function ControlOverlay({
   return (
     <>
       <ControlGlow />
-      {!state && <ControlInputBlocker automationBypass={automationBypass} />}
+      {(!state || inputLocked) && <ControlInputBlocker automationBypass={automationBypass} />}
       <AgentTarget target={state?.target} name={controller?.name} />
       <div
         className="bsk-cooperation"
@@ -182,7 +184,13 @@ export function ControlOverlay({
                     <span>{status ? t(`cooperation.${status}`) : t("controlOverlay.status")}</span>
                   </div>
                   {status && (
-                    <span className="bsk-cooperation-hint">{t(`cooperation.hints.${status}`)}</span>
+                    <span className="bsk-cooperation-hint">
+                      {t(
+                        inputLocked
+                          ? "cooperation.hints.inputLocked"
+                          : `cooperation.hints.${status}`,
+                      )}
+                    </span>
                   )}
                 </div>
               </div>

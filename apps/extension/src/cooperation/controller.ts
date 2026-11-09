@@ -503,6 +503,7 @@ export class CooperationController implements ControlAuthority {
   }
   private canAutoResumeIdle(state: TabState, now: number): boolean {
     if (
+      this.deps.sessions.get(state.sessionId)?.lockInput ||
       state.stopped ||
       state.working ||
       this.humanBusyOrRecentInput(state) ||
@@ -1402,6 +1403,10 @@ export class CooperationController implements ControlAuthority {
       return this.bootstrap(state, req.method, cdp, signal, invoke);
     }
     if (read) {
+      // Recording explicitly gives the page to the person. Keep exclusive
+      // sessions held after recording ends, until the user hands control back.
+      if (req.method === "tool.record_start" && session.lockInput)
+        await this.control(state.tabId, state.revision, "hold");
       // Reads need no action authority. When a caller explicitly supplies a
       // context, however, a retained strict baseline cannot validate a revoked
       // control context after navigation/intervention. Never renew it by reading.

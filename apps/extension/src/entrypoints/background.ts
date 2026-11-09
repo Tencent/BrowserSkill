@@ -208,6 +208,7 @@ export default defineBackground(() => {
     },
     changed: () => {
       upgradeNotice?.refresh();
+      pushAllAgentOverlayStates();
     },
   });
   upgradeNotice = attachDaemonUpgradeNotice({
@@ -311,11 +312,25 @@ export default defineBackground(() => {
   function overlayStateForTab(tabId?: number, windowId?: number): OverlayAgentStateMessage {
     if (typeof tabId === "number" && typeof windowId === "number") {
       const ctx = sessions.findByWindowId(windowId);
-      if (ctx && isAgentControlledTab(ctx, tabId))
+      if (ctx && isAgentControlledTab(ctx, tabId)) {
+        const state = overlayStateForWindow(windowId);
+        const view = cooperation.view(tabId);
         return {
-          ...overlayStateForWindow(windowId),
-          cooperation: cooperation.view(tabId),
+          ...state,
+          cooperation: view,
+          ...(ctx.lockInput
+            ? {
+                lockInput: true,
+                inputLocked:
+                  state.mode === "control" &&
+                  !["human", "held", "yielding"].includes(view?.mode ?? "") &&
+                  !hasActiveHelp(ctx.sessionId) &&
+                  !hasActiveRecording(ctx.sessionId) &&
+                  !video.isRecording(ctx.sessionId),
+              }
+            : {}),
         };
+      }
     }
     return {
       type: OVERLAY_AGENT_STATE,

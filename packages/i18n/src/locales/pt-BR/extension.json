@@ -13,6 +13,7 @@
     "resume": "Devolver ao Agent",
     "stop": "Parar tarefa",
     "hints": {
+      "inputLocked": "A entrada está bloqueada. Pause o Agent para assumir o controle.",
       "ready": "Você pode assumir a qualquer momento",
       "acting": "Você pode assumir a qualquer momento",
       "human": "Agent continua quando você para de interagir",

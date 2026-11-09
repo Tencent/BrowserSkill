@@ -213,3 +213,57 @@ describe("ControlOverlay cooperation", () => {
     expect(sendMessage).not.toHaveBeenCalled();
   });
 });
+
+it("shows the input lock and keeps Pause and Stop reachable while automation passes through", async () => {
+  const sendMessage = vi.fn().mockResolvedValue(undefined);
+  vi.stubGlobal("chrome", { runtime: { sendMessage } });
+  const onStop = vi.fn();
+  const { container, getByRole, rerender } = render(
+    <ControlOverlay
+      visible
+      inputLocked
+      state={view("ready")}
+      automationBypass={false}
+      interrupting={false}
+      onInterrupt={onStop}
+    />,
+  );
+  expect(container.querySelector('[data-slot="control-overlay-blocker"]')).not.toBeNull();
+  expect(getByRole("status").textContent).toContain(
+    i18n.t("cooperation.hints.inputLocked", { ns: "extension" }),
+  );
+  rerender(
+    <ControlOverlay
+      visible
+      inputLocked
+      state={view("acting")}
+      automationBypass
+      interrupting={false}
+      onInterrupt={onStop}
+    />,
+  );
+  expect(
+    container.querySelector<HTMLElement>('[data-slot="control-overlay-blocker"]')?.style
+      .pointerEvents,
+  ).toBe("none");
+  await act(async () => fireEvent.click(getByRole("button", { name: "暂停 Agent" })));
+  expect(sendMessage).toHaveBeenCalledWith({
+    kind: COOPERATION_CONTROL,
+    revision: 17,
+    action: "hold",
+  });
+  fireEvent.click(getByRole("button", { name: "停止任务" }));
+  expect(onStop).toHaveBeenCalledOnce();
+  rerender(
+    <ControlOverlay
+      visible
+      state={view("held")}
+      automationBypass={false}
+      interrupting={false}
+      onInterrupt={onStop}
+    />,
+  );
+  expect(container.querySelector('[data-slot="control-overlay-blocker"]')).toBeNull();
+  cleanup();
+  vi.unstubAllGlobals();
+});

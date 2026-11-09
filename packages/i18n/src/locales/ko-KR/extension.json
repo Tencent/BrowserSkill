@@ -13,6 +13,7 @@
     "resume": "Agent에 넘기기",
     "stop": "작업 중지",
     "hints": {
+      "inputLocked": "페이지 입력이 잠겨 있습니다. 직접 조작하려면 Agent를 일시 중지하세요.",
       "ready": "언제든 직접 조작할 수 있습니다",
       "acting": "언제든 직접 조작할 수 있습니다",
       "human": "조작을 멈추면 Agent가 계속합니다",

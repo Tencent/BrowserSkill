@@ -365,6 +365,11 @@ jobs:
         env:
           BSK_COOP_CHROME: ${{ env.BSK_VIDEO_CHROME }}
         run: pnpm exec vitest run src/content/__tests__/cooperation-capture.browser.test.ts src/cooperation/hidden-frames.browser.test.ts
+      - name: Validate exclusive session input and explicit handover
+        env:
+          BSK_EXCLUSIVE_CHROME: ${{ env.BSK_VIDEO_CHROME }}
+          BSK_EXCLUSIVE_OUTPUT: ${{ env.BSK_VIDEO_ARTIFACTS }}/exclusive-input
+        run: node evals/browser/cases/regression/exclusive-input/run.mjs
       - name: Validate window resize and viewport reporting
         working-directory: apps/extension
         env:

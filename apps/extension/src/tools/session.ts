@@ -59,6 +59,8 @@ export interface SessionStartParams {
   controller?: ControllerInfo | null;
   /** Opt in to Chrome's shared incognito browsing session. */
   incognito?: boolean;
+  /** Opt in to session-level human input blocking. */
+  lock_input?: boolean;
   browser_instance_id?: string;
   /** Optional Agent Window outer width in CSS pixels (100..=7680). */
   width?: number;
@@ -141,6 +143,9 @@ export async function handleSessionStart(
   if (params.incognito !== undefined && typeof params.incognito !== "boolean") {
     return { code: "invalid_params", message: "incognito must be a boolean" };
   }
+  if (params.lock_input !== undefined && typeof params.lock_input !== "boolean") {
+    return { code: "invalid_params", message: "lock_input must be a boolean" };
+  }
   const sizeOrErr = validateWindowSize(params.width, params.height);
   if (isRpcError(sizeOrErr)) return sizeOrErr;
   if (params.controller != null && !isControllerInfo(params.controller)) {
@@ -155,6 +160,7 @@ export async function handleSessionStart(
     const ctx = await manager.start(params.session_id, {
       controller: params.controller ?? undefined,
       incognito: params.incognito,
+      lockInput: params.lock_input,
       size: sizeOrErr,
       focused: params.focused,
       signal: deps.signal,

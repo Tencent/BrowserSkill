@@ -4,6 +4,8 @@ import { RefStore } from "./ref-store";
 
 export interface SessionContext {
   controller?: ControllerInfo;
+  /** Explicitly lock page input while Agent control is active. */
+  lockInput?: boolean;
   /** Incognito sessions cannot borrow user tabs. Absent means a normal window. */
   incognito?: boolean;
   /** Remote connections retain dedicated windows, with explicit page ownership. */
@@ -76,6 +78,8 @@ export interface SessionManagerOptions {
 /** Options for starting a session's Agent Window. */
 export interface SessionStartOptions {
   controller?: ControllerInfo;
+  /** Explicitly lock page input while Agent control is active. */
+  lockInput?: boolean;
   /** Use Chrome's shared incognito browsing session. */
   incognito?: boolean;
   /** Optional Agent Window outer size in CSS pixels. */
@@ -285,7 +289,12 @@ export class SessionManager {
     let windowId: number | null = null;
     const agentCreatedTabs = new Set<number>();
     try {
-      const { signal: _signal, controller: _controller, ...createOptions } = opts;
+      const {
+        signal: _signal,
+        controller: _controller,
+        lockInput: _lockInput,
+        ...createOptions
+      } = opts;
       const created = await this.agentWindow.create(AGENT_WINDOW_HOME, createOptions);
       windowId = created.windowId;
       for (const tabId of created.initialTabIds) agentCreatedTabs.add(tabId);
@@ -306,6 +315,7 @@ export class SessionManager {
       const ctx: SessionContext = {
         controller: this.controllerFor(sessionId, opts.controller),
         incognito: created.incognito ?? false,
+        lockInput: opts.lockInput ?? false,
         ...(this.remote() ? { remote: true } : {}),
         sessionId,
         agentWindowId: windowId,

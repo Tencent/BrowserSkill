@@ -8,6 +8,17 @@ use crate::ErrorCode;
 /// Protocol 1.3 makes browser Automation settings authoritative.
 pub const INTERACTION_POLICY_PROTOCOL: &str = "1.3";
 
+/// Protocol 1.10 supports opt-in session input locking.
+pub const INPUT_LOCK_PROTOCOL: &str = "1.10";
+
+pub fn supports_input_lock(protocol: &str) -> bool {
+    crate::system::compare_protocol(protocol, "2.0") == Some(std::cmp::Ordering::Less)
+        && matches!(
+            crate::system::compare_protocol(protocol, INPUT_LOCK_PROTOCOL),
+            Some(std::cmp::Ordering::Equal | std::cmp::Ordering::Greater)
+        )
+}
+
 /// Protocol 1.4 supports explicitly requested incognito Agent Windows.
 pub const INCOGNITO_SESSION_PROTOCOL: &str = "1.4";
 
@@ -58,6 +69,9 @@ pub struct SessionStartParams {
     /// Use Chrome's shared incognito browsing session. Omitted means normal.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub incognito: bool,
+    /// Block human page input until the user explicitly pauses or stops the task.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub lock_input: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub browser_instance_id: Option<String>,
     /// Optional Agent Window outer width in CSS pixels (100..=7680).
@@ -297,5 +311,46 @@ mod tests {
         let encoded = serde_json::to_value(result).unwrap();
         assert_eq!(encoded["returned_tab_ids"], json!([7, 8]));
         assert_eq!(encoded["return_failures"][0]["code"], "cdp_failed");
+    }
+}
+
+#[cfg(test)]
+mod input_lock_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn input_lock_is_opt_in_and_round_trips() {
+        for enabled in [false, true] {
+            let wire = if enabled {
+                json!({"session_id":"task", "lock_input":true})
+            } else {
+                json!({"session_id":"task"})
+            };
+            let params: SessionStartParams = serde_json::from_value(wire.clone()).unwrap();
+            assert_eq!(params.lock_input, enabled);
+            assert_eq!(serde_json::to_value(params).unwrap(), wire);
+        }
+        for invalid in [json!("true"), json!(1), json!(null)] {
+            assert!(
+                serde_json::from_value::<SessionStartParams>(
+                    json!({"session_id":"task", "lock_input": invalid})
+                )
+                .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn support_requires_protocol_1_10_within_major_1() {
+        for (protocol, expected) in [
+            ("1.9", false),
+            ("1.10", true),
+            ("1.11", true),
+            ("2.0", false),
+            ("bad", false),
+        ] {
+            assert_eq!(supports_input_lock(protocol), expected);
+        }
     }
 }

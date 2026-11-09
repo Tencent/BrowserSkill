@@ -13,6 +13,7 @@
     "resume": "Devolver a Agent",
     "stop": "Detener tarea",
     "hints": {
+      "inputLocked": "La entrada está bloqueada. Pausa el Agent para tomar el control.",
       "ready": "Puedes intervenir en cualquier momento",
       "acting": "Puedes intervenir en cualquier momento",
       "human": "Agent continúa cuando dejas de interactuar",

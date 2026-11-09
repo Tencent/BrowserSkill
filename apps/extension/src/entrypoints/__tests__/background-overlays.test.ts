@@ -357,3 +357,40 @@ it.each([
     router.dispose();
   }
 });
+
+it("locks only opted-in owned and borrowed tabs, and releases on explicit handover or stop", async () => {
+  const f = await fixture();
+  const tabs = [10, 11, 12].map((id) => ({ id, windowId: 10, url: "https://example.test" }));
+  vi.mocked(chrome.tabs.query).mockResolvedValue(tabs as chrome.tabs.Tab[]);
+  vi.mocked(chrome.tabs.get).mockImplementation(
+    async (id) => tabs.find((tab) => tab.id === id) as chrome.tabs.Tab,
+  );
+  const state = async (tabId: number) => {
+    f.deps.onSessionsChanged?.();
+    await vi.waitFor(() =>
+      expect(f.sendMessage).toHaveBeenCalledWith(
+        tabId,
+        expect.objectContaining({ type: OVERLAY_AGENT_STATE }),
+      ),
+    );
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    return f.sendMessage.mock.calls
+      .filter(([id, message]) => id === tabId && message.type === OVERLAY_AGENT_STATE)
+      .at(-1)![1];
+  };
+  expect(await state(10)).not.toHaveProperty("inputLocked");
+  f.task.lockInput = true;
+  f.task.borrowedTabs.set(11, { tabId: 11, originalWindowId: 20, originalIndex: 0 });
+  const cooperation = f.deps.cooperation!;
+  cooperation.startSession("one");
+  expect(await state(10)).toMatchObject({ lockInput: true, inputLocked: true });
+  expect(await state(11)).toMatchObject({ lockInput: true, inputLocked: true });
+  expect(await state(12)).toMatchObject({ mode: "hidden", sessionId: null });
+  expect(await cooperation.control(10, cooperation.view(10)!.revision, "hold")).toMatchObject({
+    ok: true,
+  });
+  expect(await state(10)).toMatchObject({ lockInput: true, inputLocked: false });
+  expect(await state(11)).toMatchObject({ inputLocked: true });
+  cooperation.stopSession("one");
+  expect(await state(10)).toMatchObject({ inputLocked: false });
+});

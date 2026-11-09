@@ -1,6 +1,6 @@
 import { type SyntheticEvent, useEffect, useRef } from "react";
 
-/** Preserve fallback input blocking until a real cooperation state is available. */
+/** Hit-test surface for fallback control and opt-in session input locking. */
 export function ControlInputBlocker({ automationBypass }: { automationBypass: boolean }) {
   const blockerRef = useRef<HTMLDivElement>(null);
 

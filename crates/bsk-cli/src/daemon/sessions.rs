@@ -613,6 +613,8 @@ pub struct AgentWindowOptions {
     pub controller: Option<bsk_protocol::tools::ControllerInfo>,
     /// Opt in to Chrome's shared incognito browsing session.
     pub incognito: bool,
+    /// Block human page input until explicit handover.
+    pub lock_input: bool,
     /// Optional outer size as `(width, height)` CSS pixels.
     pub size: Option<(u32, u32)>,
     /// Optional focus hint (`None` = extension default: background).
@@ -699,6 +701,24 @@ pub(crate) async fn start_session_recoverable(
     if client.is_unresponsive() {
         return Err(StartSessionError::ExtensionUnresponsive);
     }
+    if window.lock_input
+        && !bsk_protocol::tools::supports_input_lock(&client.extension_protocol_version)
+    {
+        return Err(StartSessionError::ExtensionError(RpcError {
+            code: ErrorCode::Unsupported,
+            message: format!(
+                "Input locking requires extension protocol {} (connected: {}); update the BrowserSkill extension and retry",
+                bsk_protocol::tools::INPUT_LOCK_PROTOCOL,
+                client.extension_protocol_version,
+            ),
+            data: Some(serde_json::json!({
+                "reason": "unsupported_feature", "operation": "session start --lock-input",
+                "component": "extension",
+                "required_protocol": bsk_protocol::tools::INPUT_LOCK_PROTOCOL,
+                "actual_protocol": client.extension_protocol_version,
+            })),
+        }));
+    }
     if window.incognito
         && !bsk_protocol::tools::supports_incognito_sessions(&client.extension_protocol_version)
     {
@@ -726,6 +746,7 @@ pub(crate) async fn start_session_recoverable(
     let params = SessionStartParams {
         controller: sessions.set_controller(&session_id, window.controller),
         incognito: window.incognito,
+        lock_input: window.lock_input,
         session_id: session_id.0.clone(),
         browser_instance_id: Some(client.id.0.clone()),
         width: window.size.map(|(width, _)| width),

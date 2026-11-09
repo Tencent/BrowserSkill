@@ -3666,3 +3666,35 @@ describe("strict evidence around the action's own preparation", () => {
     }
   });
 });
+
+it("requires explicit hand-back after pausing a session with input locking", async () => {
+  const f = await fixture();
+  f.ctx.lockInput = true;
+  await f.controller.control(7, f.controller.view(7)!.revision, "hold");
+  f.advance(60_000);
+  const held = await f.command("sync");
+  expect(held).not.toHaveProperty("context_id");
+  expect(f.controller.view(7)?.mode).toBe("held");
+  expect(f.resumeFrames).not.toHaveBeenCalled();
+  await f.controller.control(7, f.controller.view(7)!.revision, "resume");
+  const resumed = await f.command("sync");
+  expect(resumed).toHaveProperty("context_id");
+  expect(await f.act(resumed.context_id)).not.toHaveProperty("code");
+});
+
+it("hands an exclusive tab to the person for action recording and waits for explicit resume", async () => {
+  const f = await fixture();
+  f.ctx.lockInput = true;
+  const record = vi.fn(async () => ({ recording_id: "record" }));
+  await f.controller.run(
+    { id: "record", method: "tool.record_start", params: { session_id: "shared", tab_id: 7 } },
+    f.cdp,
+    f.abort.signal,
+    record,
+  );
+  expect(record).toHaveBeenCalledOnce();
+  expect(f.controller.view(7)?.mode).toBe("held");
+  f.advance(60_000);
+  expect(await f.command("sync")).not.toHaveProperty("context_id");
+  expect(f.controller.view(7)?.mode).toBe("held");
+});

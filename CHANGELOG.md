@@ -11,6 +11,8 @@ determines which versions can connect.
 
 ### Added
 
+- Optional `bsk session start --lock-input` blocks accidental human page input in owned and borrowed tabs while preserving Agent input and explicit Pause/Resume/Stop controls. Shared control remains the default; protocol 1.10 checks reject unsupported peers ([#576](https://github.com/Tencent/BrowserSkill/issues/576)).
+
 - Local pairing with mutual proofs, durable key rotation and interruption recovery.
   Paired connections verify the daemon before sending business traffic; activation
   invalidates the original link. Device revocation and browser registration are

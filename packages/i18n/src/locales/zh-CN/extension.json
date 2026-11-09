@@ -13,6 +13,7 @@
     "resume": "交给 Agent",
     "stop": "停止任务",
     "hints": {
+      "inputLocked": "页面输入已锁定，暂停 Agent 后可接管。",
       "ready": "你可以随时接手",
       "acting": "你可以随时接手",
       "human": "停止操作后，Agent 会继续",

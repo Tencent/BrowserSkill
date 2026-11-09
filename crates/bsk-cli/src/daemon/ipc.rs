@@ -1215,6 +1215,8 @@ struct CliSessionStartParams {
     #[serde(default)]
     pub incognito: bool,
     #[serde(default)]
+    pub lock_input: bool,
+    #[serde(default)]
     pub browser_instance_id: Option<String>,
     #[serde(default)]
     pub width: Option<u32>,
@@ -1334,6 +1336,7 @@ pub(super) async fn handle_session_start(
         CliSessionStartParams {
             controller: None,
             incognito: false,
+            lock_input: false,
             browser_instance_id: None,
             width: None,
             height: None,
@@ -1374,6 +1377,7 @@ pub(super) async fn handle_session_start(
         AgentWindowOptions {
             controller: params.controller,
             incognito: params.incognito,
+            lock_input: params.lock_input,
             size: window_size,
             focused: params.focused,
         },

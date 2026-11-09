@@ -13,6 +13,7 @@
     "resume": "An Agent übergeben",
     "stop": "Aufgabe stoppen",
     "hints": {
+      "inputLocked": "Die Seiteneingabe ist gesperrt. Pausieren Sie den Agenten, um zu übernehmen.",
       "ready": "Sie können jederzeit übernehmen",
       "acting": "Sie können jederzeit übernehmen",
       "human": "Agent fährt fort, wenn Sie nicht mehr interagieren",

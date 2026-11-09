@@ -43,6 +43,10 @@
       "description": "Use Chrome's shared incognito browsing session. Omitted means normal.",
       "type": "boolean"
     },
+    "lock_input": {
+      "description": "Block human page input until the user explicitly pauses or stops the task.",
+      "type": "boolean"
+    },
     "session_id": {
       "type": "string"
     },

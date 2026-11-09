@@ -136,3 +136,19 @@ that business facts remain true: use exact expect checks before input. Main
 SPA route changes (including hash routes) revoke prior contexts and refs, even
 if the URL returns. Read current state without old context, then sync and decide
 again before input. Arbitrary evaluate keeps its strict observation checks.
+
+
+## Optional exclusive input
+
+Start an unattended batch with `bsk session start --lock-input --json` to block human
+page input in that session's owned and borrowed tabs. The default remains shared control.
+Native Agent input and the normal observation/condition checks remain active; this option
+never retries an action. It requires protocol 1.10 in both daemon and extension; older
+components reject the request before creating a session.
+
+The user can choose **Pause Agent** to take over, **Hand back to Agent** to restore the lock,
+or **Stop task** to end automation. An explicit pause in a locked session persists across
+idle syncs. Handover controls remain visible even when ordinary control hints are hidden.
+Returning a tab, moving it out of the task window, ending the session or disconnecting
+releases control. Help and recording temporarily allow human input. Browser chrome,
+system shortcuts and restricted pages are outside this page-level accidental-input guard.

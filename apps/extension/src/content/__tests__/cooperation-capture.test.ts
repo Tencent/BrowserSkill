@@ -8,6 +8,11 @@ import {
   type FrameState,
   type InputExpectation,
 } from "@/cooperation/types";
+import {
+  OVERLAY_AGENT_OVERLAY_RESET,
+  OVERLAY_AGENT_STATE,
+  OVERLAY_AUTOMATION_BYPASS,
+} from "@/lib/overlay-bridge";
 import type { CdpRunner } from "@/tools/shared";
 import { attachCooperationCapture } from "../cooperation-capture";
 
@@ -35,7 +40,7 @@ function collector(shadowRoot?: (element: HTMLElement) => ShadowRoot | null) {
     },
   });
   dispose = attachCooperationCapture();
-  return (
+  const read = (
     kind = COOPERATION_READ,
     lease = "first",
     input?: InputExpectation,
@@ -46,6 +51,7 @@ function collector(shadowRoot?: (element: HTMLElement) => ShadowRoot | null) {
     });
     return result as FrameState | undefined;
   };
+  return Object.assign(read, { message: (message: unknown) => receive(message, {}, () => {}) });
 }
 
 it("collects and arms page interaction when crypto.randomUUID is unavailable", () => {
@@ -1067,4 +1073,139 @@ it.each([
   submit();
   key("keyup", 10);
   expect(read()?.human).toBe(scenario === "matched" ? 1 : 2);
+});
+
+function trusted<T extends Event>(event: T): T {
+  Object.defineProperty(event, "isTrusted", { value: true });
+  return event;
+}
+
+it("blocks accidental page input without changing the shared-control context", () => {
+  document.body.innerHTML = '<input aria-label="City"><button>Submit</button>';
+  const read = collector();
+  const before = read()!;
+  read.message({
+    type: OVERLAY_AGENT_STATE,
+    epoch: "worker",
+    generation: 1,
+    sessionId: "task",
+    mode: "control",
+    lockInput: true,
+    inputLocked: true,
+  });
+  const field = document.querySelector("input")!;
+  const page = vi.fn();
+  for (const type of [
+    "pointerdown",
+    "mousedown",
+    "click",
+    "keydown",
+    "beforeinput",
+    "wheel",
+    "paste",
+  ])
+    field.addEventListener(type, page);
+  const events = [
+    new MouseEvent("pointerdown", { bubbles: true, cancelable: true }),
+    new MouseEvent("mousedown", { bubbles: true, cancelable: true }),
+    new MouseEvent("click", { bubbles: true, cancelable: true }),
+    new KeyboardEvent("keydown", { key: "a", bubbles: true, cancelable: true }),
+    new InputEvent("beforeinput", {
+      inputType: "insertText",
+      data: "a",
+      bubbles: true,
+      cancelable: true,
+    }),
+    new WheelEvent("wheel", { deltaY: 100, bubbles: true, cancelable: true }),
+    new Event("paste", { bubbles: true, cancelable: true }),
+  ];
+  for (const event of events) expect(field.dispatchEvent(trusted(event))).toBe(false);
+  expect(page).not.toHaveBeenCalled();
+  expect(read()).toMatchObject({
+    human: before.human,
+    revision: before.revision,
+    busy: false,
+    pending: false,
+    editing: false,
+  });
+  // Site-script effects are still allowed and observed.
+  field.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+  expect(page).toHaveBeenCalledOnce();
+});
+
+it("keeps Agent keyboard input available while blocking a real key during overlay bypass", () => {
+  document.body.innerHTML = '<input aria-label="City">';
+  const read = collector();
+  read();
+  read.message({
+    type: OVERLAY_AGENT_STATE,
+    epoch: "worker",
+    generation: 1,
+    sessionId: "task",
+    mode: "control",
+    inputLocked: true,
+  });
+  read.message({ type: OVERLAY_AUTOMATION_BYPASS, enabled: true });
+  const field = document.querySelector("input")!;
+  field.focus();
+  const received = vi.fn();
+  field.addEventListener("keydown", received);
+  const timestamp = Date.now();
+  read(COOPERATION_ARM, "first", { type: "keydown", key: "a", timestamp });
+  const key = trusted(new KeyboardEvent("keydown", { key: "a", bubbles: true, cancelable: true }));
+  Object.defineProperty(key, "timeStamp", { value: timestamp - performance.timeOrigin });
+  expect(field.dispatchEvent(key)).toBe(true);
+  const accidental = trusted(
+    new KeyboardEvent("keydown", { key: "b", bubbles: true, cancelable: true }),
+  );
+  expect(field.dispatchEvent(accidental)).toBe(false);
+  expect(received).toHaveBeenCalledOnce();
+  expect(read()).toMatchObject({ human: 0, editing: false });
+});
+
+it("unlocks on handover and return, ignores stale states, and releases on collector disable", () => {
+  document.body.innerHTML = '<input aria-label="City">';
+  const read = collector();
+  read();
+  const state = (generation: number, inputLocked: boolean, mode = "control") =>
+    read.message({
+      type: OVERLAY_AGENT_STATE,
+      epoch: "worker",
+      generation,
+      sessionId: "task",
+      mode,
+      inputLocked,
+    });
+  const key = () =>
+    document.querySelector("input")!.dispatchEvent(
+      trusted(
+        new KeyboardEvent("keydown", {
+          key: "a",
+          bubbles: true,
+          cancelable: true,
+        }),
+      ),
+    );
+  expect(key()).toBe(true);
+  state(1, true);
+  expect(key()).toBe(false);
+  state(3, false);
+  state(2, true);
+  expect(key()).toBe(true);
+  state(4, true);
+  expect(key()).toBe(false);
+  read.message({
+    type: OVERLAY_AGENT_OVERLAY_RESET,
+    epoch: "worker",
+    generation: 5,
+    sessionId: "task",
+  });
+  state(4, true);
+  expect(key()).toBe(true);
+  state(6, true);
+  expect(key()).toBe(false);
+  read(COOPERATION_DISABLE);
+  state(7, true);
+  expect(key()).toBe(true);
+  expect(read()).toBeUndefined();
 });

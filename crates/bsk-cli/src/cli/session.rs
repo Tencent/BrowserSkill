@@ -79,6 +79,10 @@ pub struct SessionStartArgs {
     #[arg(long)]
     pub incognito: bool,
 
+    /// Lock human page input for this session; Pause Agent or Stop task releases it.
+    #[arg(long)]
+    pub lock_input: bool,
+
     /// Agent Window outer width in CSS pixels (100..=7680). Both
     /// `--width` and `--height` must be given to take effect.
     #[arg(long, value_parser = window_size)]
@@ -140,6 +144,8 @@ struct StartParams {
     controller: Option<bsk_protocol::tools::ControllerInfo>,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     incognito: bool,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    lock_input: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     request_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -268,6 +274,7 @@ fn run_start(sock: PathBuf, args: SessionStartArgs, format: Format) -> Result<()
                     color: args.controller_color,
                 }),
             incognito: args.incognito,
+            lock_input: args.lock_input,
             name: args.name,
             request_id: args.request_id,
             browser: args.browser,
@@ -307,6 +314,7 @@ fn run_start(sock: PathBuf, args: SessionStartArgs, format: Format) -> Result<()
 pub struct SessionStartOptions {
     pub controller: Option<bsk_protocol::tools::ControllerInfo>,
     pub incognito: bool,
+    pub lock_input: bool,
     pub request_id: Option<String>,
     pub name: Option<String>,
     pub browser: Option<String>,
@@ -321,6 +329,14 @@ pub fn start_session(sock: PathBuf, opts: SessionStartOptions) -> Result<StartRe
         controller
             .validate()
             .map_err(|err| CliError::Local(anyhow::anyhow!(err)))?;
+    }
+    if opts.lock_input {
+        crate::cli::protocol::require_daemon_support(
+            &sock,
+            "session start --lock-input",
+            bsk_protocol::tools::INPUT_LOCK_PROTOCOL,
+            bsk_protocol::tools::supports_input_lock,
+        )?;
     }
     if opts.incognito {
         crate::cli::protocol::require_daemon_support(
@@ -340,6 +356,7 @@ pub fn start_session(sock: PathBuf, opts: SessionStartOptions) -> Result<StartRe
         Some(StartParams {
             controller: opts.controller,
             incognito: opts.incognito,
+            lock_input: opts.lock_input,
             request_id: opts.request_id,
             task_name: opts.name,
             browser_instance_id: opts.browser,
@@ -762,11 +779,30 @@ mod start_params_tests {
     }
 
     #[test]
+    fn lock_input_flag_is_opt_in() {
+        use clap::Parser;
+        for (flags, expected) in [
+            (vec!["bsk", "session", "start"], false),
+            (vec!["bsk", "session", "start", "--lock-input"], true),
+        ] {
+            let cli = crate::cli::Cli::try_parse_from(flags).unwrap();
+            let crate::cli::Command::Session(SessionCmd {
+                sub: SessionSub::Start(args),
+            }) = cli.command
+            else {
+                panic!("expected session start")
+            };
+            assert_eq!(args.lock_input, expected);
+        }
+    }
+
+    #[test]
     fn start_params_send_task_name_without_policy_overrides() {
         for task_name in [None, Some("Check settings".to_string())] {
             let params = StartParams {
                 controller: None,
                 incognito: false,
+                lock_input: false,
                 request_id: None,
                 task_name: task_name.clone(),
                 browser_instance_id: None,
