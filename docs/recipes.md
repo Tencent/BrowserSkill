@@ -142,7 +142,9 @@ steps, so it is never more expensive than doing the flow by hand.
   value. Several different values are not an answer: a required output hands off.
 - **`interrupts`.** Up to three known dialogs or banners and the control that closes them.
 - **Parameters.** `{{name}}` works in targets, values, `expect`, `until` and paths. In a path the
-  value is percent-encoded, so it cannot change which page is named.
+  value is percent-encoded, so it cannot change which page is named. A `string` parameter's
+  `pattern` must match the whole value, with or without `^` and `$`, so `Q[1-4]` accepts `Q3`
+  but not `Q3 or Delete`.
 
 ## Execution
 

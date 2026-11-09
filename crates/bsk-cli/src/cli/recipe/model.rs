@@ -819,11 +819,12 @@ impl Param {
                 self.values
             );
         }
+        // A value fills targets and paths, so the pattern decides all of it, not a part.
         if let Some(pattern) = &self.pattern {
-            let regex = Regex::new(pattern)?;
+            let regex = Regex::new(&format!("^(?:{pattern})$"))?;
             ensure!(
                 regex.is_match(value),
-                "param {name}: value does not match {pattern}"
+                "param {name}: the whole value must match {pattern}"
             );
         }
         Ok(())
@@ -1509,6 +1510,32 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_pattern_must_match_the_whole_value() {
+        let mut value = report();
+        // Written without anchors, as authors often do.
+        value["params"]["quarter"]["pattern"] = "Q[1-4]|H[12]".into();
+        let recipe = parsed(value).unwrap();
+        let check = |quarter: &str| {
+            recipe.resolve_params(&BTreeMap::from([
+                ("region".to_string(), "East".to_string()),
+                ("quarter".to_string(), quarter.to_string()),
+            ]))
+        };
+        for quarter in ["Q1", "H2"] {
+            assert!(check(quarter).is_ok(), "{quarter}");
+        }
+        for quarter in ["Q1 or Delete", "xQ1", "H1x", ""] {
+            let error = check(quarter).unwrap_err().to_string();
+            assert!(error.contains("whole value"), "{quarter}: {error}");
+        }
+        // A default is held to the same rule when the recipe is read.
+        let mut value = report();
+        value["params"]["quarter"]["pattern"] = "Q[1-4]".into();
+        value["params"]["quarter"]["default"] = "Q1 and more".into();
+        assert!(parsed(value).unwrap_err().message.contains("whole value"));
+    }
+
+    #[test]
     fn parameters_are_checked_then_substituted_everywhere() {
         let mut value = report();
         value["params"]["order"] = json!({"type":"string","default":"A-1"});
@@ -1528,7 +1555,7 @@ pub(crate) mod tests {
             (vec![("region", "South"), ("quarter", "Q1")], "not one of"),
             (
                 vec![("region", "East"), ("quarter", "Q9")],
-                "does not match",
+                "whole value must match",
             ),
             (vec![("region", "East")], "missing param quarter"),
             (
