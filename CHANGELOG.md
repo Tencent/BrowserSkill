@@ -83,6 +83,12 @@ determines which versions can connect.
   `retryable` and `retry_after_ms`. `cooperate sync --settle` pauses and syncs again
   (up to 5 s, also for older extensions), and the CLI no longer suggests a reload that needs
   the same sync ([#527](https://github.com/Tencent/BrowserSkill/issues/527)).
+- `upload` preserves its concrete handler failure receipts (`set_file_input_failed` and
+  `file_drop_failed`, such as `-32000 Not allowed` when Chrome's "Allow access to file URLs"
+  extension toggle is off) when transaction cleanup detaches the debugger or post-action
+  frame collection fails, instead of masking them as `control_context_invalid`. Pre-drop
+  `dragEnter` refusals also keep `effect_state: none` without dispatching a redundant
+  `dragCancel` ([#636](https://github.com/Tencent/BrowserSkill/issues/636)).
 
 ### Fixed
 
