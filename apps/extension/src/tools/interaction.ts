@@ -1501,17 +1501,25 @@ export async function handleFill(
     if (throwIfAborted(deps.signal)) {
       return { code: "cancelled", message: "fill aborted" };
     }
-    // Keep the existing notifications, then read in a separate call so
-    // nested microtasks queued by the page cannot race the verification.
+    // Native insertion and the clearing step already dispatch `input` for the
+    // final value. Synthesize it only for value-set or no-op fills that have
+    // no native event, and always send `change`, which neither path dispatches.
+    const finalValueAlreadyNotified =
+      (clearBefore && params.value === "") ||
+      (preparation.write === "insert" && params.value !== "");
+    const notifyInput = !finalValueAlreadyNotified;
+    // Notify, then read in a separate call so nested microtasks queued by the
+    // page cannot race the verification.
     const notified = await nodeCdp.send<FillScriptReply<unknown>>(
       target.tabId,
       "Runtime.callFunctionOn",
       {
         objectId,
-        functionDeclaration: `function() {
-          this.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
+        functionDeclaration: `function(notifyInput) {
+          if (notifyInput) this.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
           this.dispatchEvent(new Event('change', { bubbles: true }));
         }`,
+        arguments: [{ value: notifyInput }],
         returnByValue: true,
       },
     );

@@ -324,7 +324,8 @@ describe.skipIf(!process.env.BSK_FILL_CHROME)("native controls and editing hosts
         `);
         await h.ref("document.querySelector('#host').shadowRoot.querySelector('input')");
         expect(await h.fill("")).toMatchObject({ value_length: 0 });
-        expect(await h.evaluate("window.inputValues")).toEqual(["", ""]);
+        // Clearing notifies once; the completion step no longer repeats it.
+        expect(await h.evaluate("window.inputValues")).toEqual([""]);
       });
     });
   });
@@ -977,4 +978,40 @@ describe.skipIf(!process.env.BSK_FILL_CHROME)("fill caret validation", () => {
       },
     );
   }, 30_000);
+});
+
+describe.skipIf(!process.env.BSK_FILL_CHROME)("fill native event deduplication", () => {
+  it.each([
+    ["input append", '<input id="target">', "value", false, ["hello"]],
+    ["input clear", '<input id="target" value="old">', "value", true, ["", "hello"]],
+    ["textarea append", '<textarea id="target"></textarea>', "value", false, ["hello"]],
+    [
+      "contenteditable append",
+      '<div id="target" contenteditable="true"></div>',
+      "textContent",
+      false,
+      ["hello"],
+    ],
+    [
+      "contenteditable clear",
+      '<div id="target" contenteditable="true">old</div>',
+      "textContent",
+      true,
+      ["", "hello"],
+    ],
+  ] as const)(
+    "does not duplicate the native input for %s",
+    async (_name, markup, field, clearBefore, expected) => {
+      await withFillBrowser({ background: false, markup: guard + markup }, async (h) => {
+        await h.ref("document.querySelector('#target')");
+        await h.evaluate(`window.fillInputs = [];
+          document.querySelector('#target').addEventListener('input', (event) => {
+            window.fillInputs.push(event.target.${field});
+          });`);
+        expect(await h.fill("hello", clearBefore)).toMatchObject({ value_length: 5 });
+        expect(await h.evaluate("window.fillInputs")).toEqual(expected);
+      });
+    },
+    30_000,
+  );
 });
