@@ -177,7 +177,9 @@ async function runBsk(
       throw error;
     }
     const parsed = parseBskJson(result, label, parseOptions);
-    if (isCompositeResult(parseOptions) && (parsed as { ok?: boolean }).ok === false) {
+    if (parseOptions.allowRecipeResult && (parsed as { status?: string }).status !== "completed") {
+      actionError = "recipe needs attention; inspect its status, effects and remaining steps";
+    } else if (isCompositeResult(parseOptions) && (parsed as { ok?: boolean }).ok === false) {
       actionError = parseOptions.allowPlanResult
         ? "plan needs attention; inspect the stopped step and observation results"
         : "step needs attention; inspect the action and observation results";

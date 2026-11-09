@@ -169,8 +169,12 @@ export function registerRecipeTool(
           session,
           runnerTimeout(deps, RUN_BUDGET_MS),
           { allowRecipeResult: true },
-        )) as { status?: string };
-        return receipt.complete(exec, reply, reply.status !== "completed") as never;
+        )) as { status?: string; cancelled?: boolean };
+        return receipt.complete(
+          exec,
+          reply,
+          reply.status !== "completed" || reply.cancelled === true || exec.signal.aborted,
+        ) as never;
       },
       finalizeContent: receipt.finalizeContent,
       presentCall: (args) => ({

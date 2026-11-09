@@ -131,6 +131,8 @@ export function createBskRunner(bskPath: string, spawnImpl: SpawnImpl = spawn): 
 
   return {
     run(args, options = {}) {
+      const composite =
+        args[0] === "step" || args[0] === "plan" || (args[0] === "recipe" && args[1] === "run");
       if (options.signal?.aborted) {
         return Promise.resolve({
           code: null,
@@ -249,9 +251,9 @@ export function createBskRunner(bskPath: string, spawnImpl: SpawnImpl = spawn): 
 
         const onAbort = () => {
           if (settled) return;
-          // A step that already exited normally has finished its work. A late
+          // A composite that already exited normally has finished its work. A late
           // abort must not discard its receipt while stdout is still draining.
-          if (args[0] === "step" && child.exitCode !== null && child.signalCode === null) return;
+          if (composite && child.exitCode !== null && child.signalCode === null) return;
           aborted = true;
           // Explicit cancellation also stops waiting for an exited child's output.
           if (!requestKill()) finish(child.exitCode);
@@ -281,11 +283,11 @@ export function createBskRunner(bskPath: string, spawnImpl: SpawnImpl = spawn): 
           // Retire forced-kill settlement so it cannot truncate the drain window.
           if (timer !== undefined) clearTimeout(timer);
           clearCancellationTimers();
-          if (signal !== null || timedOut || (aborted && args[0] !== "step")) {
+          if (signal !== null || timedOut || (aborted && !composite)) {
             finish(code);
             return;
           }
-          // A gracefully cancelled step can still report completed action
+          // A gracefully cancelled composite can still report completed action
           // evidence. Collect its buffered receipt under the same drain cap.
           // Normal exit: keep draining while bytes are still arriving, then
           // settle even if a grandchild is still holding the pipes open.
@@ -568,12 +570,17 @@ function isPlanResultPayload(value: unknown, exitCode: number | null): boolean {
   const stopped = value.stopped;
   if (stopped === undefined) {
     if (completed !== total && value.cancelled !== true) return false;
+    if (value.not_run !== undefined) return false;
   } else if (
     !isRecord(stopped) ||
+    completed === total ||
+    value.ok !== false ||
     stopped.index !== completed ||
     typeof stopped.action !== "string" ||
     !EFFECT_STATES.includes(String(stopped.effect_state)) ||
-    !Array.isArray(value.not_run)
+    !Array.isArray(value.not_run) ||
+    value.not_run.length !== total - completed - 1 ||
+    !value.not_run.every((index, offset) => index === completed + offset + 1)
   ) {
     return false;
   }
@@ -588,7 +595,9 @@ const RECIPE_STATUSES = ["completed", "handoff", "uncertain", "refused"];
 function isRecipeResultPayload(value: unknown, exitCode: number | null): boolean {
   if (!isRecord(value) || !RECIPE_STATUSES.includes(String(value.status)) || exitCode === null)
     return false;
-  if (value.status === "completed") return exitCode === 0 && isRecord(value.outputs);
+  if (value.cancelled !== undefined && value.cancelled !== true) return false;
+  if (value.status === "completed")
+    return (value.cancelled === true ? exitCode === 2 : exitCode === 0) && isRecord(value.outputs);
   return exitCode !== 0 && typeof value.reason === "string";
 }
 
