@@ -654,7 +654,7 @@ async fn a_draft_comes_from_the_daemons_log_and_can_be_saved_after_review() {
         "--out",
         out,
     ];
-    let (output, reply, _) = home.with_daemon(script, &args).await;
+    let (output, reply, _) = home.with_daemon(script.clone(), &args).await;
     assert!(output.status.success(), "{output:?}");
     assert_eq!(reply["errors"], json!([]));
     let warnings = reply["warnings"].to_string();
@@ -676,6 +676,19 @@ async fn a_draft_comes_from_the_daemons_log_and_can_be_saved_after_review() {
     // The file is not overwritten by a later draft.
     let (output, _, _) = home.with_daemon(Script::default(), &args).await;
     assert!(!output.status.success());
+
+    // Nor is the saved recipe: a later draft under its name warns, and saving it is refused.
+    let (output, reply, _) = home.with_daemon(script, &args[..8]).await;
+    assert!(output.status.success(), "{output:?}");
+    let warnings = reply["warnings"].to_string();
+    assert!(
+        warnings.contains("already exists at revision 1"),
+        "{warnings}"
+    );
+    let again = home.write("again.json", &reply["draft"]);
+    let (output, refused) = home.local(&["recipe", "save", "--file", &again]).await;
+    assert_eq!(output.status.code(), Some(2), "{refused}");
+    assert_eq!(refused["reason"], "recipe_exists");
 }
 
 /// One JSON-RPC exchange over `bsk mcp`.

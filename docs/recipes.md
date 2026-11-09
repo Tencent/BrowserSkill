@@ -225,7 +225,9 @@ sales-report/
 ```
 
 A new recipe is `draft` until a run completes, then `verified`. Changing what it does returns it
-to `draft`, and saving a file based on an older revision is rejected. Three handoffs in a row at
+to `draft`. A file replaces a saved recipe only when its `revision` names the current one, as
+`show` prints it: a file based on an older revision is refused with `revision_conflict`, and one
+without `revision`, such as a fresh draft that reuses a name, with `recipe_exists`. Three handoffs in a row at
 the same step mark it `stale`, which `list` shows without deleting anything. Only a page that
 deviates counts: a person stepping in, a cancelled run, the budget or a session that is gone say
 nothing about the site. `list` also notes

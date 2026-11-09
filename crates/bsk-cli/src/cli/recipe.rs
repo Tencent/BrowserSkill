@@ -432,6 +432,21 @@ pub(crate) fn draft(
                 .into(),
         );
     }
+    if let Ok(existing) = Store::open().and_then(|store| {
+        store
+            .load(name)
+            .map_err(|refusal| anyhow::anyhow!(refusal.message))
+    }) && let Some(warnings) = reply["warnings"].as_array_mut()
+    {
+        warnings.push(
+            format!(
+                "A recipe named {name} already exists at revision {revision}. Save this draft \
+                 under another name, or set \"revision\": {revision} in it to replace that recipe.",
+                revision = existing.revision
+            )
+            .into(),
+        );
+    }
     Ok(reply)
 }
 
@@ -446,9 +461,13 @@ pub(crate) fn save(document: &[u8]) -> (Value, u8) {
         Ok(recipe) => recipe,
         Err(refusal) => return failed(refusal.reason, refusal.message),
     };
-    match Store::open().and_then(|store| store.save(recipe, declared_revision)) {
+    let store = match Store::open() {
+        Ok(store) => store,
+        Err(error) => return failed("storage_unavailable", format!("{error:#}")),
+    };
+    match store.save(recipe, declared_revision) {
         Ok(reply) => (reply, 0),
-        Err(error) => failed("storage_unavailable", format!("{error:#}")),
+        Err(refusal) => failed(refusal.reason, refusal.message),
     }
 }
 

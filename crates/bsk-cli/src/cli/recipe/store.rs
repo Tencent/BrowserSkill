@@ -7,7 +7,7 @@
 //! runs/r-7f3a.jsonl    step status and a parameter digest, never parameter values
 //! ```
 use super::model::{self, Recipe, Refusal};
-use anyhow::{Context, bail, ensure};
+use anyhow::{Context, ensure};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -283,15 +283,21 @@ impl Store {
     }
 
     /// Stores a validated recipe as the next revision. A change to what it does
-    /// sends it back to draft until a run proves it.
+    /// sends it back to draft until a run proves it. A file replaces a saved recipe
+    /// only when it names the revision it was made from, so a fresh draft with a
+    /// name already in use never overwrites that recipe by accident.
     pub(crate) fn save(
         &self,
         mut recipe: Recipe,
         declared_revision: bool,
-    ) -> anyhow::Result<Value> {
-        let dir = self.dir(&recipe.name)?;
-        private_dir(&self.root)?;
-        private_dir(&dir)?;
+    ) -> Result<Value, Refusal> {
+        let storage =
+            |error: anyhow::Error| Refusal::new("storage_unavailable", format!("{error:#}"));
+        let dir = self
+            .dir(&recipe.name)
+            .map_err(|error| Refusal::new("invalid_recipe", format!("{error:#}")))?;
+        private_dir(&self.root).map_err(storage)?;
+        private_dir(&dir).map_err(storage)?;
         let path = dir.join("recipe.json");
         let previous = path.is_file().then(|| self.load(&recipe.name));
         let mut state = self.state(&recipe.name);
@@ -303,25 +309,46 @@ impl Store {
                     ..State::default()
                 };
             }
-            Some(Err(_)) => bail!(
-                "the saved recipe {} cannot be read; remove it first",
-                recipe.name
-            ),
+            Some(Err(_)) => {
+                return Err(Refusal::new(
+                    "invalid_recipe",
+                    format!(
+                        "the saved recipe {} cannot be read; remove it first",
+                        recipe.name
+                    ),
+                ));
+            }
             Some(Ok(previous)) => {
-                if declared_revision && recipe.revision != previous.revision {
-                    bail!(
-                        "this file is based on revision {}, but revision {} is current; \
-                         start from recipe show",
-                        recipe.revision,
-                        previous.revision
-                    );
+                if !declared_revision {
+                    return Err(Refusal::new(
+                        "recipe_exists",
+                        format!(
+                            "a recipe named {name} already exists at revision {current}. To replace \
+                             it, set \"revision\": {current} in this file, as recipe show prints it; \
+                             to keep both, choose another name",
+                            name = recipe.name,
+                            current = previous.revision
+                        ),
+                    ));
+                }
+                if recipe.revision != previous.revision {
+                    return Err(Refusal::new(
+                        "revision_conflict",
+                        format!(
+                            "this file is based on revision {}, but revision {} is current; \
+                             start from recipe show",
+                            recipe.revision, previous.revision
+                        ),
+                    ));
                 }
                 let revisions = dir.join("revisions");
-                private_dir(&revisions)?;
+                private_dir(&revisions).map_err(storage)?;
+                let bytes = serde_json::to_vec_pretty(&previous).expect("serializable recipe");
                 write_private(
                     &revisions.join(format!("{}.json", previous.revision)),
-                    &serde_json::to_vec_pretty(&previous)?,
-                )?;
+                    &bytes,
+                )
+                .map_err(storage)?;
                 prune_revisions(&revisions);
                 recipe.revision = previous.revision + 1;
                 let mut before = previous;
@@ -336,8 +363,9 @@ impl Store {
                 state.handoff_at = None;
             }
         }
-        write_private(&path, &serde_json::to_vec_pretty(&recipe)?)?;
-        self.write_state(&recipe.name, &state)?;
+        let bytes = serde_json::to_vec_pretty(&recipe).expect("serializable recipe");
+        write_private(&path, &bytes).map_err(storage)?;
+        self.write_state(&recipe.name, &state).map_err(storage)?;
         let mut reply = json!({"saved":true,"name":recipe.name,"revision":recipe.revision,
             "status":state.status,"path":path,"summary":recipe.summary()});
         if let Some(approval) = approval_note(&recipe, &state) {
@@ -546,6 +574,16 @@ mod tests {
         (dir, store)
     }
 
+    /// Saves a new recipe, or the next revision of a saved one, as an edited copy would.
+    fn put(store: &Store, mut value: Value) -> Value {
+        let name = value["name"].as_str().unwrap().to_owned();
+        let based = store.load(&name).ok().map(|current| current.revision);
+        if let Some(revision) = based {
+            value["revision"] = revision.into();
+        }
+        store.save(parsed(value).unwrap(), based.is_some()).unwrap()
+    }
+
     #[test]
     fn saving_creates_private_files_and_new_revisions_keep_the_old_ones() {
         let (_dir, store) = store();
@@ -565,7 +603,7 @@ mod tests {
         }
         let mut next = report();
         next["segments"][0]["until"]["timeout_ms"] = 2000.into();
-        let reply = store.save(parsed(next).unwrap(), false).unwrap();
+        let reply = put(&store, next);
         assert_eq!(reply["revision"], 2);
         assert!(store.root.join("sales-report/revisions/1.json").is_file());
     }
@@ -576,15 +614,37 @@ mod tests {
         for timeout in 1..=13 {
             let mut next = report();
             next["segments"][0]["until"]["timeout_ms"] = (timeout * 100).into();
-            store.save(parsed(next).unwrap(), false).unwrap();
+            put(&store, next);
         }
         let revisions = fs::read_dir(store.root.join("sales-report/revisions")).unwrap();
         assert_eq!(revisions.count(), MAX_REVISIONS);
         let mut old = report();
         old["revision"] = 3.into();
         let error = store.save(parsed(old).unwrap(), true).unwrap_err();
-        assert!(error.to_string().contains("based on revision 3"), "{error}");
+        assert_eq!(error.reason, "revision_conflict");
+        assert!(error.message.contains("based on revision 3"), "{error:?}");
         assert_eq!(store.load("sales-report").unwrap().revision, 13);
+    }
+
+    #[test]
+    fn a_file_without_its_revision_cannot_replace_a_saved_recipe() {
+        let (_dir, store) = store();
+        store.save(parsed(report()).unwrap(), false).unwrap();
+        // A fresh draft has no revision: it would silently replace different steps.
+        let mut fresh = report();
+        fresh["segments"][0]["steps"][2]["target"]["name"] = "Find".into();
+        let error = store
+            .save(parsed(fresh.clone()).unwrap(), false)
+            .unwrap_err();
+        assert_eq!(error.reason, "recipe_exists");
+        assert!(error.message.contains("\"revision\": 1"), "{error:?}");
+        let current = store.load("sales-report").unwrap();
+        assert_eq!(current.revision, 1);
+        assert_eq!(current.segments[0].steps[2].target.name, "Search");
+        // Naming the revision it replaces is a deliberate replacement.
+        fresh["revision"] = 1.into();
+        let saved = store.save(parsed(fresh).unwrap(), true).unwrap();
+        assert_eq!(saved["revision"], 2);
     }
 
     #[test]
@@ -596,12 +656,12 @@ mod tests {
         // Rewording the description keeps what a run proved.
         let mut reworded = report();
         reworded["description"] = "Reworded".into();
-        store.save(parsed(reworded).unwrap(), false).unwrap();
+        put(&store, reworded);
         assert_eq!(store.state("sales-report").status, Status::Verified);
         // Different steps prove nothing yet.
         let mut changed = report();
         changed["segments"][0]["steps"][2]["target"]["name"] = "Find".into();
-        store.save(parsed(changed).unwrap(), false).unwrap();
+        put(&store, changed);
         assert_eq!(store.state("sales-report").status, Status::Draft);
     }
 
@@ -625,12 +685,12 @@ mod tests {
         // Rewording the description changes nothing a person approved.
         let mut reworded = lowered.clone();
         reworded["description"] = "Reworded".into();
-        let saved = store.save(parsed(reworded).unwrap(), false).unwrap();
+        let saved = put(&store, reworded);
         assert_eq!(saved["approval"], "approved");
         // Anything else needs approving again.
         let mut changed = lowered;
         changed["segments"][0]["until"]["timeout_ms"] = 2000.into();
-        let saved = store.save(parsed(changed).unwrap(), false).unwrap();
+        let saved = put(&store, changed);
         assert_eq!(saved["approval"], "required");
         assert!(!store.approved(&store.load("sales-report").unwrap()));
 
