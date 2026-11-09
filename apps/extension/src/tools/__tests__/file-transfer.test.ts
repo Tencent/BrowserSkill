@@ -624,6 +624,38 @@ describe("file transfer tools", () => {
     });
   });
 
+  it("reports a drag_enter CDP refusal without sending dragCancel or detaching", async () => {
+    const { cdp, calls, detach } = dropCdp({
+      dispatchError: (type) =>
+        type === "dragEnter"
+          ? new Error("Input.dispatchDragEvent failed: -32000 Not allowed")
+          : undefined,
+    });
+    const result = await uploadThroughFileDrop({
+      cdp,
+      actionTarget: actionTarget(),
+      files: ["/stage/one.png"],
+      timeoutMs: 1000,
+      withOverlayHidden: withoutOverlay,
+    });
+
+    expect(result).toMatchObject({
+      code: "cdp_failed",
+      message: "Input.dispatchDragEvent failed: -32000 Not allowed",
+      data: {
+        reason: "file_drop_failed",
+        effect_state: "none",
+        phase: "drag_enter",
+      },
+    });
+    expect((result as { data?: Record<string, unknown> }).data).not.toHaveProperty("cleanup_state");
+    expect(calls).not.toContainEqual({
+      method: "Input.dispatchDragEvent",
+      params: expect.objectContaining({ type: "dragCancel" }),
+    });
+    expect(detach).not.toHaveBeenCalled();
+  });
+
   it("cancels an unresolved drag before returning a pre-commit timeout", async () => {
     const { cdp, calls } = dropCdp({
       dispatchError: (type) => (type === "dragEnter" ? new Promise<never>(() => {}) : undefined),

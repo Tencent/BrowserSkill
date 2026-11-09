@@ -52,7 +52,42 @@ const cells = (body: string) =>
 const values = (outcome: Outcome) =>
   outcome.result!.rows.map((row) => outcome.result!.columns.map((column) => row[column.key]));
 
+const slottedLanguageTable = (lightLanguage: string, shadowLanguage: string) =>
+  `<table id="t" lang="${lightLanguage}"><tr>
+    <td><x-case>iı</x-case></td>
+    <td><x-case><span>iı</span></x-case></td>
+    <td><x-case><span lang="${lightLanguage}">iı</span></x-case></td>
+  </tr></table><script>
+    customElements.define("x-case", class extends HTMLElement {
+      constructor() {
+        super();
+        this.attachShadow({ mode: "open" }).innerHTML =
+          '<span lang="${shadowLanguage}" style="text-transform:uppercase"><slot></slot></span>';
+      }
+    });
+  </script>`;
+
 const fixtures: Record<string, string> = {
+  slottedEnglish: slottedLanguageTable("tr", "en"),
+  slottedTurkish: slottedLanguageTable("en", "tr"),
+  textTransform: `<style>
+      #t { text-transform: uppercase; }
+      #t .lower { text-transform: lowercase; }
+      #t .literal { text-transform: none; }
+    </style><table id="t"><caption>orders</caption>
+      <thead><tr><th>status</th><th>lower</th><th>mixed</th><th>lines</th><th>literal</th></tr></thead>
+      <tbody><tr><td>paid</td><td class="lower">PAID</td>
+        <td>pa<span>id</span><span class="literal">MiXeD</span><span class="lower">DONE</span></td>
+        <td>first<br>second</td><td class="literal">PaId</td></tr></tbody></table>
+      <ul id="l" style="text-transform:lowercase"><li><a href="/Paid" data-status="PAID">PAID</a></li></ul>`,
+  caseLanguages: `<table id="t" lang="tr"><tr>
+      <td style="text-transform:uppercase">iı</td><td style="text-transform:lowercase">Iİ</td>
+      <td lang="de" style="text-transform:uppercase">straße</td>
+      <td lang="invalid_tag" style="text-transform:uppercase">paid</td></tr></table>`,
+  transformedSlot: `<table id="t"><tr><td><x-case>paid</x-case></td></tr></table>
+    <script>customElements.define("x-case", class extends HTMLElement {
+      constructor() { super(); this.attachShadow({ mode: "open" }).innerHTML = '<span style="text-transform:uppercase"><slot></slot></span>'; }
+    });</script>`,
   contentVisibility: `<table id="t"><tr><td>Visible<div style="content-visibility: hidden"><span style="content-visibility: visible; visibility: visible">Hidden text</span></div></td><td><div style="content-visibility: auto; position: absolute; top: 100000px">Offscreen text</div></td></tr></table>
     <div style="content-visibility: hidden"><table id="hiddenTable"><tr><td>Hidden table</td></tr></table><ul id="hiddenList"><li>Hidden item</li></ul></div>
     <ul id="l"><li>Visible item<div style="content-visibility: hidden"><a href="/hidden">Hidden link</a></div></li></ul>`,
@@ -123,6 +158,13 @@ const fixtures: Record<string, string> = {
   ),
   hiddenRow:
     '<table id="t"><tr><th>A</th></tr><tr><td>1</td></tr><tr style="display:none"><td>detail</td></tr><tr><td>2</td></tr></table>',
+  hiddenTarget: '<table id="t" hidden><tr><td>Secret</td></tr></table>',
+  hiddenInlineOverride:
+    '<table id="t" hidden style="display:table"><tr><td>Visible</td></tr></table>',
+  hiddenSheetOverride:
+    '<style>#t { display: table; }</style><table id="t" hidden><tr><td>Visible</td></tr></table>',
+  hiddenAncestorOverride:
+    '<style>#host { display: block; }</style><div id="host" hidden><table id="t"><tr><td>Visible</td></tr></table></div>',
   discovery: `${range(40)
     .map((index) => `<ul><li><a href="/n${index}">nav ${index}</a></li></ul>`)
     .join(
@@ -134,6 +176,7 @@ const fixtures: Record<string, string> = {
 
 describe.skipIf(!process.env.BSK_CLICK_CHROME)("real browser structured extraction", () => {
   let extract: (fixture: string, params: Omit<ExtractParams, "session_id">) => Promise<Outcome>;
+  let renderedText: (selector: string) => Promise<string>;
   let finish: () => Promise<void>;
 
   beforeAll(async () => {
@@ -170,6 +213,13 @@ describe.skipIf(!process.env.BSK_CLICK_CHROME)("real browser structured extracti
         });
         const local: Send = (method, params) => send(method, params, sessionId);
         await local("Page.enable");
+        renderedText = async (selector) => {
+          const reply = await local<{ result: { value: string } }>("Runtime.evaluate", {
+            expression: `document.querySelector(${JSON.stringify(selector)}).innerText`,
+            returnByValue: true,
+          });
+          return reply.result.value;
+        };
         extract = async (fixture, params) => {
           await local("Page.navigate", { url: `${origin}/${fixture}` });
           await expect
@@ -282,6 +332,60 @@ describe.skipIf(!process.env.BSK_CLICK_CHROME)("real browser structured extracti
     ).toEqual(["Shipped", "42", "edited", "x"]);
   });
 
+  it("applies CSS case transforms to rendered cell text and discovery previews", async () => {
+    const table = await extract("textTransform", { action: "table", selector: "#t" });
+    expect(table.result!.columns.map((column) => column.name)).toEqual([
+      "STATUS",
+      "LOWER",
+      "MIXED",
+      "LINES",
+      "LITERAL",
+    ]);
+    expect(values(table)).toEqual([["PAID", "paid", "PAIDMiXeDdone", "FIRST\nSECOND", "PaId"]]);
+    const discovery = await extract("textTransform", { action: "discover" });
+    expect(discovery.result!.targets![0]).toMatchObject({
+      name: "ORDERS",
+      columns: ["STATUS", "LOWER", "MIXED", "LINES", "LITERAL"],
+    });
+  });
+
+  it("applies CSS case transforms to list text while retaining URLs and attributes", async () => {
+    const list = await extract("textTransform", { action: "list", selector: "#l" });
+    expect(list.result!.rows[0].text).toBe("paid");
+    expect(list.result!.rows[0].url).toMatch(/\/Paid$/);
+    const fields = await extract("textTransform", {
+      action: "list",
+      selector: "#l",
+      fields: [
+        { key: "text", selector: "a", read: "text" },
+        { key: "raw", selector: "a", read: "attribute", attribute: "data-status" },
+      ],
+    });
+    expect(fields.result!.rows).toEqual([{ text: "paid", raw: "PAID" }]);
+  });
+
+  it("applies CSS case transforms with inherited and overridden languages", async () => {
+    expect(values(await extract("caseLanguages", { action: "table", selector: "#t" }))).toEqual([
+      ["İI", "ıi", "STRASSE", "PAID"],
+    ]);
+  });
+
+  it("applies CSS case transforms to slotted text in open shadow roots", async () => {
+    expect(values(await extract("transformedSlot", { action: "table", selector: "#t" }))).toEqual([
+      ["PAID"],
+    ]);
+  });
+
+  it.each([
+    { fixture: "slottedEnglish", expected: ["II", "II", "İI"] },
+    { fixture: "slottedTurkish", expected: ["İI", "İI", "II"] },
+  ])("uses the rendered slot language for $fixture", async ({ fixture, expected }) => {
+    const table = await extract(fixture, { action: "table", selector: "#t" });
+    const rendered = (await renderedText("#t")).split("\t");
+    expect(rendered).toEqual(expected);
+    expect(values(table)).toEqual([rendered]);
+  });
+
   it("omits content-visibility hidden text without dropping auto offscreen content", async () => {
     expect(values(await extract("contentVisibility", { action: "table", selector: "#t" }))).toEqual(
       [["Visible", "Offscreen text"]],
@@ -301,6 +405,24 @@ describe.skipIf(!process.env.BSK_CLICK_CHROME)("real browser structured extracti
         /^extract_target_hidden:/,
       );
     }
+  });
+
+  it("treats computed rendering as authoritative for the hidden attribute", async () => {
+    expect((await extract("hiddenTarget", { action: "table", selector: "#t" })).error).toMatch(
+      /^extract_target_hidden:/,
+    );
+    expect(
+      values(await extract("hiddenInlineOverride", { action: "table", selector: "#t" })),
+    ).toEqual([["Visible"]]);
+    expect(
+      values(await extract("hiddenSheetOverride", { action: "table", selector: "#t" })),
+    ).toEqual([["Visible"]]);
+  });
+
+  it("extracts a target under a hidden ancestor that author CSS restored", async () => {
+    expect(
+      values(await extract("hiddenAncestorOverride", { action: "table", selector: "#t" })),
+    ).toEqual([["Visible"]]);
   });
 
   it("keeps text where content-visibility does not apply to the display type", async () => {

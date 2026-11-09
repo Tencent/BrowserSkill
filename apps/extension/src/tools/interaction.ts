@@ -1307,8 +1307,33 @@ export async function handleFill(
             if (this.getRootNode().activeElement !== this) return 'fill_focus_lost';
             if (verifyCaret) {
               const selection = this.ownerDocument.getSelection();
-              if (!selection || !selection.isCollapsed || selection.anchorNode !== this ||
-                  selection.anchorOffset !== this.childNodes.length) return 'fill_focus_lost';
+              if (!selection?.isCollapsed || !this.contains(selection.anchorNode)) return 'fill_focus_lost';
+              // Editors can normalize the same end caret into their last paragraph/text node.
+              // Follow that boundary to the host; empty text alone would also skip images/atoms.
+              let node = selection.anchorNode;
+              let offset = selection.anchorOffset;
+              let paddingBreak = false;
+              for (;;) {
+                if (node.nodeType === Node.TEXT_NODE) {
+                  if (offset !== node.length) return 'fill_focus_lost';
+                } else if (node.nodeType === Node.ELEMENT_NODE) {
+                  if (!node.isContentEditable || node.matches('input,textarea,select,button,img,br,hr,iframe,object,embed,canvas,video,audio')) return 'fill_focus_lost';
+                  if (offset !== node.childNodes.length) {
+                    // One BR may hold an empty paragraph or the host's final inline line open.
+                    // Do not cross a real line break or an independent block after the caret.
+                    const inlineHost = node === this && [...node.childNodes].every(child =>
+                      child.nodeType === Node.TEXT_NODE || child.nodeName === 'BR');
+                    if (paddingBreak || offset !== node.childNodes.length - 1 ||
+                        node.lastChild?.nodeName !== 'BR' ||
+                        (node.childNodes.length !== 1 && !inlineHost)) return 'fill_focus_lost';
+                    paddingBreak = true;
+                  }
+                } else return 'fill_focus_lost';
+                if (node === this) break;
+                const parent = node.parentNode;
+                offset = [...parent.childNodes].indexOf(node) + 1;
+                node = parent;
+              }
             }
             if (placeCaret) {
               const selection = this.ownerDocument.getSelection();
@@ -1359,6 +1384,7 @@ export async function handleFill(
     if (ready !== "ready" && ready !== "background") {
       return fillError(ready, "fill target changed or lost focus before typing");
     }
+    let valueAssigned = false;
     if (preparation.write === "value") {
       // Date-like inputs have no text caret and always replace (preparation
       // rejects --no-clear); assign the sanitized value directly. Still flush
@@ -1412,13 +1438,15 @@ export async function handleFill(
       }
       // Assign even an empty value: a deferred focus handler may have filled
       // the field again after the initial clearing step.
-      const assigned = await nodeCdp.send<FillScriptReply<unknown>>(
+      const assigned = await nodeCdp.send<FillScriptReply<boolean>>(
         target.tabId,
         "Runtime.callFunctionOn",
         {
           objectId,
           functionDeclaration: `function(expected) {
+            const changed = this.value !== expected;
             Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(this, expected);
+            return changed;
           }`,
           arguments: [{ value: preparation.expected }],
           returnByValue: true,
@@ -1430,6 +1458,7 @@ export async function handleFill(
       if (assigned.exceptionDetails) {
         return fillError("fill_failed", "fill value assignment script failed");
       }
+      valueAssigned = assigned.result?.value === true;
     } else {
       if (params.value !== "" && (!clearBefore || ready === "background")) {
         // Native commands position number/email carets without selection APIs.
@@ -1476,17 +1505,25 @@ export async function handleFill(
     if (throwIfAborted(deps.signal)) {
       return { code: "cancelled", message: "fill aborted" };
     }
-    // Keep the existing notifications, then read in a separate call so
-    // nested microtasks queued by the page cannot race the verification.
+    // Native insertion and the clearing step already dispatch `input` for the
+    // final value. Synthesize it only for value-set or no-op fills that have
+    // no native event, and always send `change`, which neither path dispatches.
+    const finalValueAlreadyNotified =
+      (clearBefore && params.value === "" && !valueAssigned) ||
+      (preparation.write === "insert" && params.value !== "");
+    const notifyInput = !finalValueAlreadyNotified;
+    // Notify, then read in a separate call so nested microtasks queued by the
+    // page cannot race the verification.
     const notified = await nodeCdp.send<FillScriptReply<unknown>>(
       target.tabId,
       "Runtime.callFunctionOn",
       {
         objectId,
-        functionDeclaration: `function() {
-          this.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
+        functionDeclaration: `function(notifyInput) {
+          if (notifyInput) this.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
           this.dispatchEvent(new Event('change', { bubbles: true }));
         }`,
+        arguments: [{ value: notifyInput }],
         returnByValue: true,
       },
     );
@@ -1636,6 +1673,43 @@ for (let i = 1; i <= 12; i++) {
 }
 
 /**
+ * Physical keys for the ASCII punctuation that has no `Key*`/`Digit*` code,
+ * in the US layout that `Input.dispatchKeyEvent` assumes. The virtual key
+ * codes match Playwright's `USKeyboardLayout`.
+ *
+ * Without them the descriptor carries `code: ""` and no
+ * `windowsVirtualKeyCode`; Chromium does NOT derive either from `text` (the
+ * old comment here claimed it did), and `text` is suppressed whenever
+ * ctrl/meta/alt is held, so `Ctrl+/` reached the page as
+ * `{key: "/", code: "", keyCode: 0}` and never matched a handler that keys
+ * off `event.code === "Slash"`.
+ */
+const PUNCTUATION_KEYMAP: Record<string, { code: string; windowsVirtualKeyCode: number }> = {
+  "`": { code: "Backquote", windowsVirtualKeyCode: 192 },
+  "~": { code: "Backquote", windowsVirtualKeyCode: 192 },
+  "-": { code: "Minus", windowsVirtualKeyCode: 189 },
+  _: { code: "Minus", windowsVirtualKeyCode: 189 },
+  "=": { code: "Equal", windowsVirtualKeyCode: 187 },
+  "+": { code: "Equal", windowsVirtualKeyCode: 187 },
+  "[": { code: "BracketLeft", windowsVirtualKeyCode: 219 },
+  "{": { code: "BracketLeft", windowsVirtualKeyCode: 219 },
+  "]": { code: "BracketRight", windowsVirtualKeyCode: 221 },
+  "}": { code: "BracketRight", windowsVirtualKeyCode: 221 },
+  "\\": { code: "Backslash", windowsVirtualKeyCode: 220 },
+  "|": { code: "Backslash", windowsVirtualKeyCode: 220 },
+  ";": { code: "Semicolon", windowsVirtualKeyCode: 186 },
+  ":": { code: "Semicolon", windowsVirtualKeyCode: 186 },
+  "'": { code: "Quote", windowsVirtualKeyCode: 222 },
+  '"': { code: "Quote", windowsVirtualKeyCode: 222 },
+  ",": { code: "Comma", windowsVirtualKeyCode: 188 },
+  "<": { code: "Comma", windowsVirtualKeyCode: 188 },
+  ".": { code: "Period", windowsVirtualKeyCode: 190 },
+  ">": { code: "Period", windowsVirtualKeyCode: 190 },
+  "/": { code: "Slash", windowsVirtualKeyCode: 191 },
+  "?": { code: "Slash", windowsVirtualKeyCode: 191 },
+};
+
+/**
  * Translate a logical key name (`Enter`, `a`, `3`, `F5`, `ArrowDown`)
  * into the CDP `Input.dispatchKeyEvent` descriptor. Returns `null`
  * for keys we don't recognise (caller surfaces `invalid_params`).
@@ -1669,8 +1743,11 @@ export function resolveKeyDescriptor(key: string): KeyDescriptor | null {
         windowsVirtualKeyCode: ch.charCodeAt(0),
       };
     }
-    // Common punctuation falls back to `text` only. Browsers
-    // synthesise the right code from `text` when CDP can't find one.
+    const punctuation = PUNCTUATION_KEYMAP[ch];
+    if (punctuation) return { key: ch, text: ch, ...punctuation };
+    // Anything else (non-ASCII, characters with no known physical key) still
+    // goes out as text only; a caller that needs `code` semantics should
+    // pass a key from the tables above.
     return { key: ch, code: "", text: ch };
   }
   return null;

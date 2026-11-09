@@ -46,6 +46,27 @@ const PAGE_MOVED: [&str; 11] = [
     "input_not_ready",
 ];
 
+/// The session or its tab is gone: never registered, stopped, or ended with its
+/// window or browser. Nothing about the site follows from that.
+pub(crate) fn session_gone(error: &CliError) -> bool {
+    use crate::rpc_reason::{
+        BROWSER_DISCONNECTED, SESSION_IDLE_TIMEOUT, SESSION_USER_MOVED_TAB, SESSION_WINDOW_CLOSED,
+    };
+    error.code() == Some(ErrorCode::NotFound)
+        && error
+            .data()
+            .and_then(|data| data["reason"].as_str())
+            .is_none_or(|reason| {
+                [
+                    SESSION_IDLE_TIMEOUT,
+                    SESSION_WINDOW_CLOSED,
+                    SESSION_USER_MOVED_TAB,
+                    BROWSER_DISCONNECTED,
+                ]
+                .contains(&reason)
+            })
+}
+
 pub(crate) struct Options {
     pub(crate) session: String,
     pub(crate) tab: Option<i64>,
@@ -317,6 +338,14 @@ where
                 return Stop::handoff("human_intervention", self.here()).message(error.to_string());
             }
             _ => {}
+        }
+        // Before any input this is a bad session, not a deviation of the page.
+        if session_gone(error) {
+            return if self.steps_done == 0 {
+                Stop::refused("session_unavailable", error.to_string())
+            } else {
+                Stop::handoff("session_unavailable", self.here()).message(error.to_string())
+            };
         }
         let stop = Stop::handoff("step_refused", self.here()).message(error.to_string());
         if matches!(
@@ -1190,6 +1219,51 @@ mod tests {
                 self.handle(method, params)
             })
         }
+    }
+
+    fn session_missing() -> CliError {
+        CliError::from_rpc(RpcError {
+            code: ErrorCode::NotFound,
+            message: "session not registered or already stopped".into(),
+            data: None,
+        })
+    }
+
+    #[test]
+    fn a_session_that_is_gone_is_refused_before_input_and_handed_off_after_it() {
+        let recipe = bound(|_| {});
+        let mut log = RunLog::disabled();
+        let outcome = run(
+            &recipe,
+            Options::new("gone".into(), None, Vec::new()),
+            &mut log,
+            |_, _, _| Err(session_missing()),
+        );
+        assert_eq!(outcome.status, "refused");
+        assert_eq!(outcome.reply["reason"], "session_unavailable");
+        assert!(outcome.reply.get("remaining").is_none());
+
+        // Steps already ran: the caller needs what is left, and where it stopped.
+        let mut lists = 0;
+        let mut options = Options::new("s".into(), None, Vec::new());
+        options.poll = Duration::from_millis(1);
+        let outcome = run(&recipe, options, &mut log, |method, _, _| match method {
+            Method::ToolTabList => {
+                lists += 1;
+                if lists > 2 {
+                    Err(session_missing())
+                } else {
+                    Ok(json!({"tabs":[{"tab_id":7,"active":true,
+                        "url":"https://erp.example.com/report"}]}))
+                }
+            }
+            Method::ToolCooperate => Ok(sync_reply(PAGE)),
+            Method::ToolWaitMs => Ok(json!({"waited_ms":1})),
+            _ => Ok(json!({"tab_id":7})),
+        });
+        assert_eq!(outcome.status, "handoff", "{}", outcome.reply);
+        assert_eq!(outcome.reply["reason"], "session_unavailable");
+        assert_eq!(outcome.reply["effects"]["steps_done"], 3);
     }
 
     #[test]

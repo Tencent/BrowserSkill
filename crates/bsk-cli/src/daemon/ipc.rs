@@ -257,10 +257,23 @@ pub fn full_handler(status: DaemonStatus, state: Arc<DaemonState>) -> RpcHandler
                     ResponseBody::Ok(serde_json::to_value(result).unwrap_or(Value::Null))
                 }
                 Method::SessionRunLog => {
-                    let session = params["session_id"].as_str().unwrap_or_default();
-                    ResponseBody::Ok(
-                        serde_json::to_value(state.run_logs.read(session)).unwrap_or(Value::Null),
-                    )
+                    let session =
+                        SessionId(params["session_id"].as_str().unwrap_or_default().to_owned());
+                    // An empty log would read as a session that did nothing, so a
+                    // mistyped or stopped session is reported as missing.
+                    if state.sessions.get(&session).is_some() {
+                        ResponseBody::Ok(
+                            serde_json::to_value(state.run_logs.read(&session.0))
+                                .unwrap_or(Value::Null),
+                        )
+                    } else {
+                        ResponseBody::Err(
+                            DispatchError::SessionNotFound {
+                                ended: state.sessions.end_info(&session),
+                            }
+                            .into_rpc(),
+                        )
+                    }
                 }
                 Method::SystemStatus => match handle_status(&status, &state, params).await {
                     Ok(v) => ResponseBody::Ok(v),

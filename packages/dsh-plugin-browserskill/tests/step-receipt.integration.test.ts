@@ -90,6 +90,78 @@ const PTC_STEP_ARGS = {
   session: "s1",
 };
 
+const COMPOSITES = [
+  {
+    name: "bsk_interact",
+    args: {
+      action: "plan",
+      session: "s1",
+      contextId: "ctx",
+      steps: [{ action: "click", ref: "@e1" }],
+    },
+    receipt: {
+      ok: false,
+      completed: 0,
+      total: 1,
+      elapsed_ms: 12,
+      stopped: { index: 0, action: "click", effect_state: "unknown" },
+      not_run: [],
+    },
+  },
+  {
+    name: "bsk_recipe",
+    args: { action: "run", session: "s1", name: "sales" },
+    receipt: {
+      status: "uncertain",
+      reason: "effect_unknown",
+      run_id: "r-1",
+      effects: { steps_done: 0, last_effect_state: "unknown" },
+    },
+  },
+];
+
+describe("plan and recipe receipts through the real SDK", () => {
+  it.each(COMPOSITES)("retains failure evidence for $name without replay", async ({
+    name,
+    args,
+    receipt,
+  }) => {
+    const run = vi.fn(async () => stepReply(receipt, 2));
+    const runtime = await host(run);
+    const result = await runtime.root.tools.execute({
+      name,
+      arguments: args,
+      callId: ToolCallId("composite"),
+      signal: new AbortController().signal,
+    });
+    expect(result).toMatchObject({
+      isError: true,
+      error: { info: { code: "BSK_STEP_NEEDS_ATTENTION" } },
+    });
+    expect(receiptOf(result)).toEqual(receipt);
+    expect(run).toHaveBeenCalledOnce();
+  });
+
+  it.each(COMPOSITES)("carries cancelled $name evidence through run_code", async ({
+    name,
+    args,
+    receipt,
+  }) => {
+    const controller = new AbortController();
+    const cancelled = { ...receipt, cancelled: true };
+    const run = vi.fn(async () => {
+      controller.abort();
+      return stepReply(cancelled, 2, { aborted: true });
+    });
+    const runtime = await host(run, "ptc");
+    installPtcSubstrate(runtime.root, (tools) => tools[name](args));
+    const result = await runCode(runtime.root, controller);
+    expect(result.isError).toBe(true);
+    expect(contextReceipts(result)).toEqual([cancelled]);
+    expect(run).toHaveBeenCalledOnce();
+  });
+});
+
 describe("step receipts through the real run_code PTC bridge", () => {
   it("makes an ordinary failure receipt readable to the catching program and the next model turn", async () => {
     const run = vi.fn(async () => stepReply(STEP_PARTIAL, 1));

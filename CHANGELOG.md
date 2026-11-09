@@ -32,11 +32,17 @@ determines which versions can connect.
   call, then return the synchronized state, so a form or a set of filters takes one
   model turn instead of one per action. Each step keeps the checks of its own command,
   and the first step that does not complete stops the plan without any retry.
-- `bsk recipe` and the MCP tool `bsk_recipe` (experimental, `BSK_RECIPES=1`) save a
-  verified flow as a local file and replay it, returning its outputs without a model
-  turn per step. Targets match exactly by role, name and context, and a run stops at the
-  first deviation and hands the page back. This version replays only read and reversible
-  steps. See `docs/recipes.md`.
+- The DSH plugin runs decided actions together with `bsk_interact(action=plan)`, with the
+  same checks, stopping rule and receipt as `bsk plan`.
+- The DSH plugin offers `bsk_recipe` when its `recipes` option or `BSK_RECIPES=1` is set.
+  A run uses an owned session, keeps the receipt of a run that did not complete, and has
+  no approve action.
+- `bsk recipe` saves a verified flow as a local file and replays it, returning its
+  outputs without a model turn per step; MCP lists `bsk_recipe` with `BSK_RECIPES=1`.
+  Targets match exactly by role, name and context, and a run stops at the first deviation
+  and hands the page back. This version replays only read and reversible steps: a lowered
+  risk runs only after a person approves it with `bsk recipe approve`, and an uncertain run
+  holds its recipe until the caller checks it. See `docs/recipes.md`.
 - `bsk read`, MCP and DSH `bsk_inspect(action=read)` sample bounded DOM fields
   through fixed synchronous isolated-world queries. Agents can read current title,
   URLs, text, attributes and control state across unrelated animation, then act
@@ -47,13 +53,32 @@ determines which versions can connect.
 
 ### Changed
 
+- `bsk plan` and `bsk recipe` are documented standard CLI workflows, with packaged
+  guidance for batching and replay; recipe schemas remain opt-in in MCP and DSH.
+- Recipe execution and edits share an exclusive lock. Replay refuses unreadable
+  safety state or an unwritable run marker, and retains interrupted-run holds even
+  when the host process remains alive. DSH drains cancelled plan and recipe receipts.
+
 - Extension 0.4.3 removes obsolete migration flags and version gates while keeping
   pairing optional. There is no automatic enforcement deadline.
 
 ### Fixed
 
 - Structured extraction handles HTML `scope` keywords case-insensitively, preserving uppercase and mixed-case row headers as data and correcting discovered column previews.
-
+- `fill` notifies each final value once. Native insertion and clearing already
+  dispatch `input`; the completion step no longer repeats it
+  ([#624](https://github.com/Tencent/BrowserSkill/issues/624)).
+- Window blur releases completed text-editing holds, and new task synchronizations
+  after an idle gap automatically resume paused or editing tabs when no gesture or
+  recent input is active, avoiding unnecessary manual hand-back prompts between tasks.
+- Recording keeps clicks on buttons and links whose name is longer than 48 characters,
+  such as GOV.UK step-by-step sections and long news headlines.
+- Recording keeps clicks on links, filter disclosures, checkboxes and other controls
+  that share a form with a search field, such as GOV.UK search results and filters.
+- Recipe save refuses oversized input and formatted documents before publishing a
+  revision that its own reader could not open.
+- `press` maps US-layout punctuation to its physical `code` and virtual key code,
+  so shortcuts such as `Ctrl+/` reach handlers that check `event.code`.
 - Main-document SPA route changes, including away-and-back and hash routes,
   invalidate old control contexts and refs. Supplementary reads never renew them.
   This also covers passive reads of already loaded tabs and fresh debugger attachments.
@@ -64,11 +89,52 @@ determines which versions can connect.
   instead of repeated sync/evaluate refusals.
 - Control-state sampling recollects once after the browser proves that a failed child document retired; an active unobservable frame still blocks input.
 - Removed nodes already collected by CDP report target_detached with node identity, consistently with detached nodes that remain inspectable; other CDP failures remain target_unavailable.
+- Recording captures option changes on native `<select>` controls inside open shadow roots,
+  whose `change` events do not reach the document.
+- Strict DOM-targeted actions tolerate added or removed noninteractive tooltips after their
+  own hover, and character counters tied to a focused text field by `maxlength` or
+  `aria-describedby` after their own focus. Target meaning, links, ordinary text, form state,
+  modal contents and explicit dependencies stay exact. Scripts, untargeted keys and visual
+  clicks retain the full observation check, including during preparation
+  ([#540](https://github.com/Tencent/BrowserSkill/issues/540)).
+- A targeted strict action without `--depends-on` tolerates a positively identified media
+  timeline elsewhere on the page, as it already did with dependencies. Unnamed, submitted and
+  in-form sliders, and untargeted actions, stay exact.
+- Evidence refusals report `observed_change` (the first differing node, field and check, and
+  whether it happened before or during preparation) without values or sensitive text. Strict
+  click refusals after preparation also report `press_sent: false`.
+- A request refused because an earlier command on the session is still settling (for
+  example a cancelled observation screenshot) now carries `reason: operation_settling`,
+  `retryable` and `retry_after_ms`. `cooperate sync --settle` pauses and syncs again
+  (up to 5 s, also for older extensions), and the CLI no longer suggests a reload that needs
+  the same sync ([#527](https://github.com/Tencent/BrowserSkill/issues/527)).
+- `upload` preserves its concrete handler failure receipts (`set_file_input_failed` and
+  `file_drop_failed`, such as `-32000 Not allowed` when Chrome's "Allow access to file URLs"
+  extension toggle is off) when transaction cleanup detaches the debugger or post-action
+  frame collection fails, instead of masking them as `control_context_invalid`. Pre-drop
+  `dragEnter` refusals also keep `effect_state: none` without dispatching a redundant
+  `dragCancel` ([#636](https://github.com/Tencent/BrowserSkill/issues/636)).
+- Recording preserves clicks on submit, reset and image input buttons, including
+  actions beside search fields, and uses reset buttons' visible values as names.
 
 ### Fixed
 
 - Cooperative status updates preserve an active click-passthrough lease, so the
   control panel and its minimized arrow do not swallow automated page clicks.
+- Recording keeps clicks on buttons and links inside an editor's `contenteditable="false"`
+  regions, such as attachment actions, instead of treating them as editor input.
+
+## [Unreleased]
+
+### Fixed
+
+- `extract` applies CSS `uppercase` and `lowercase` to text in table cells,
+  headers, list fields and discovery previews, respecting nested style overrides
+  and language-specific casing. Transformed text remains subject to the byte
+  budget ([#597](https://github.com/Tencent/BrowserSkill/issues/597)).
+- Closing a retained Agent Window or stopping the last session detaches remaining
+  CDP debugger attachments and cancels active session operations, so the browser's
+  debugging infobar does not linger after the task window is closed.
 
 ## [0.4.2] - 2026-11-05
 

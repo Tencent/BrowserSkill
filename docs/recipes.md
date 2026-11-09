@@ -2,8 +2,8 @@
 
 A recipe stores one verified, repeated flow, such as a daily report query, in a local
 file. `bsk recipe run` replays it and hands the page back to the caller only when the
-page deviates. A chat agent spends about two turns: one to call the recipe and one to
-answer. A script spends none.
+page deviates. A successful agent replay can use one tool call followed by its answer;
+preparation and handoffs add work. A script needs no model calls for replay.
 
 A recipe replays confirmed decisions, not a recording. Every step is the request its
 own command would send, so the extension still checks control, the target and `expect`
@@ -11,14 +11,16 @@ immediately before each input.
 
 | Entry point | Name |
 | --- | --- |
-| CLI | `bsk recipe list`, `show`, `run`, `draft`, `save`, `rm` |
+| CLI | `bsk recipe list`, `show`, `run`, `draft`, `save`, `approve`, `rm` |
 | MCP | `bsk_recipe` |
+| DSH plugin | `bsk_recipe`; `run` and `draft` use an owned session |
 | Wire protocol | None for replay; `session.run_log` is local to the daemon |
 
-Recipes are experimental. They need `BSK_RECIPES=1` in the environment of the command or
-MCP server, and the agent skill does not mention them yet. This version replays **only
-read and reversible steps**. It refuses any step that submits, pays, sends, deletes or
-publishes.
+`bsk recipe` is always available in the CLI. MCP clients see `bsk_recipe` only when the
+server's environment has `BSK_RECIPES=1`, and DSH hosts only with the plugin's `recipes`
+option or the same variable, so a client that never replays pays nothing for the tool's
+schema. This version replays **only read and reversible steps**. It refuses any step that
+submits, pays, sends, deletes or publishes, unless a person approves a lowered risk.
 
 ## Create one
 
@@ -61,14 +63,27 @@ bsk recipe run sales-report --param region=East --param quarter=Q3
 Without `--session`, a run opens its own session named `recipe:<name>`, and stops it after
 completing unless you pass `--keep-session`. With `--session`, it runs on that session's
 current tab, opens the start page if it is elsewhere on the site, and leaves the session
-open. Borrowed user tabs are refused. A session runs one recipe at a time.
+open. Borrowed user tabs are refused. A session runs one recipe at a time, and a recipe
+runs in only one session at a time. Saving, approving and removing that recipe are refused
+while an operation holds it; contention returns `recipe_busy` without waiting or retrying.
 
 | `status` | Meaning | What to do | Exit |
 | --- | --- | --- | --- |
 | `completed` | Everything ran and `outputs` are usable | Answer from `outputs` | 0 |
 | `handoff` | Stopped at a deviation, with no uncertain effect | Continue from `post` and `remaining` | 1 |
-| `uncertain` | A step's effect is unknown | Check the application's records. **Never run it again** | the failing step's |
+| `uncertain` | A step's effect is unknown | Check the application's records. **Never repeat it blindly** | the failing step's |
 | `refused` | Parameters, version or permissions failed; nothing ran | Fix it and call again | 2 |
+
+An `uncertain` run holds its recipe, in its local state, so the next `run` is refused with
+`effect_unchecked`, even after the daemon or the caller restarts. Check what the run did, then
+pass its `run_id` to run again:
+
+```sh
+bsk recipe run sales-report --param region=East --param quarter=Q3 --checked r-7f3a12bc
+```
+
+A run whose process ended before it reported holds the recipe the same way, because it may have
+sent input nobody saw the result of. `list` shows the run that holds a recipe.
 
 ```json
 {"status":"handoff","reason":"target_not_found",
@@ -81,11 +96,14 @@ open. Borrowed user tabs are refused. A session runs one recipe at a time.
 
 For `handoff`, `reason` is one of `target_not_found`, `target_ambiguous`, `requires_failed`,
 `origin_mismatch`, `until_timeout`, `output_missing`, `human_intervention`, `step_refused`,
-`budget_exceeded` and `cancelled`. For `uncertain`, it is `effect_unknown` or, with
-`operation_id`, `dialog_pending`. For `refused`, it names what failed, such as `invalid_params`,
-`recipe_not_found`, `unsupported_version`, `borrowed_tab` or `session_busy`, and `message` says
-how to fix it. Worst case, a handoff costs one observation plus the turns for the remaining
-steps, so it is never more expensive than doing the flow by hand.
+`session_unavailable`, `budget_exceeded` and `cancelled`. For `uncertain`, it is `effect_unknown`
+or, with `operation_id`, `dialog_pending`. For `refused`, it names what failed, such as
+`invalid_params`, `recipe_not_found`, `approval_required`, `effect_unchecked`, `session_unavailable`,
+`unsupported_version`, `borrowed_tab`, `recipe_busy`, `storage_unavailable` or `session_busy`,
+and `message` says how to fix it.
+`session_unavailable` means the session or its tab is gone, for example a mistyped ID or a closed
+Agent Window. A handoff includes an observation and the remaining steps; inspect those
+before deciding how to continue.
 
 ## The file
 
@@ -140,7 +158,9 @@ steps, so it is never more expensive than doing the flow by hand.
   value. Several different values are not an answer: a required output hands off.
 - **`interrupts`.** Up to three known dialogs or banners and the control that closes them.
 - **Parameters.** `{{name}}` works in targets, values, `expect`, `until` and paths. In a path the
-  value is percent-encoded, so it cannot change which page is named.
+  value is percent-encoded, so it cannot change which page is named. A `string` parameter's
+  `pattern` must match the whole value, with or without `^` and `$`, so `Q[1-4]` accepts `Q3`
+  but not `Q3 or Delete`.
 
 ## Execution
 
@@ -175,11 +195,32 @@ happened.
 ## Risk
 
 Each step is `read`, `reversible` or `commit`. Hover and scroll-to read. Fill and select are
-reversible. A click or key press is `commit` when the control's name suggests submitting,
-paying, sending, deleting, publishing or similar, in English or Chinese, and pressing Enter
-counts too, because it can submit a form. Over-marking is deliberate. If a step really can be
-undone, declare `"risk": "reversible"`; `save` and `show` list every lowered risk. A declaration
-does not cover a control named by a parameter, which is classified again after substitution.
+reversible. A click is `commit` when the control's name, in English or Chinese, suggests paying,
+ordering, submitting, sending, publishing, agreeing, registering, booking, deleting or
+archiving, or answers yes, as in "OK" or "是". A verb that is harmless alone counts with what
+it ends: "Cancel" and "取消" close a dialog, but "Cancel subscription", "Reset password" and
+"取消订单" are commits. Only the word itself counts, because "Saved", "Approved" or "Orders"
+usually name a filter or a list.
+
+A key press is reversible only when it moves or edits: Tab, the arrow keys, Home, End, Page Up,
+Page Down, Escape and Space, and Backspace, Delete or a single character in a text field. Enter,
+any key with Ctrl, Alt or Meta, and any other key are `commit`, because a shortcut can do
+anything, and so is a key pressed on a control whose name commits. Over-marking is deliberate.
+
+If a step really can be undone, declare `"risk": "reversible"`; `save`, `show` and `list` report
+every lowered risk. A recipe that lowers any risk does not run until a person approves it:
+
+```sh
+bsk recipe approve sales-report
+```
+
+`approve` lists each lowered step and asks the person to type the recipe's name. It needs a
+terminal and refuses piped input; MCP and DSH have no such action. Agents must never invoke or
+simulate it. This is a manual review workflow, not proof of human identity: a process with
+terminal and local file access remains trusted. The approval covers the recipe as reviewed:
+rewording the description keeps it,
+and any other change needs approving again. A declaration does not cover a control named by a
+parameter, which is classified again after substitution.
 
 `draft` warns about requests in the session that were not GET, HEAD or OPTIONS, without their
 query strings. It cannot attribute them to a particular step, so deciding which step caused a
@@ -192,6 +233,8 @@ their name or by the extension's mask on their value.
 
 Recipes live in `$BSK_HOME/recipes/` and never leave the machine. Directories are `0700` and files
 `0600`, or the current account's defaults on Windows.
+Recipe files, including their canonical saved representation, are limited to 256 KiB;
+oversized documents are refused before replacing the current revision.
 
 ```text
 sales-report/
@@ -202,10 +245,17 @@ sales-report/
 ```
 
 A new recipe is `draft` until a run completes, then `verified`. Changing what it does returns it
-to `draft`, and saving a file based on an older revision is rejected. Three handoffs in a row at
-the same step mark it `stale`, which `list` shows without deleting anything. `list` also notes
+to `draft`. A file replaces a saved recipe only when its `revision` names the current one, as
+`show` prints it: a file based on an older revision is refused with `revision_conflict`, and one
+without `revision`, such as a fresh draft that reuses a name, with `recipe_exists`. Three handoffs in a row at
+the same step mark it `stale`, which `list` shows without deleting anything. Only a page that
+deviates counts: a person stepping in, a cancelled run, the budget or a session that is gone say
+nothing about the site. `list` also notes
 recipes with no successful run in 90 days. Run logs keep the latest 50 runs, for at most 30 days.
-If `BSK_HOME` is read-only, `run` still works and other writes report the error.
+Replay requires readable safety state, a writable run marker and an exclusive lock. If these
+cannot be stored, including when `BSK_HOME` is read-only, it refuses with `storage_unavailable`
+before input. Run history and counters remain best effort. If recording the final safety state
+fails, `storage_error` preserves the original result and the retained marker holds the next run.
 
 ## Limits
 
@@ -218,7 +268,10 @@ If `BSK_HOME` is read-only, `run` still works and other writes report the error.
   `crates/bsk-cli/tests/fixtures/vom_contract.json` is checked by both the renderer's and the
   parser's tests, so a format change fails CI.
 
-## Acceptance before recipes leave experimental
+## Validation
+
+CI replays every fixture drift type twice. Before a release that changes replay, run each one
+20 times:
 
 ```sh
 BSK_COOP_CHROME=... BSK_COOP_RECIPES_ONLY=1 BSK_RECIPE_RUNS=20 \
@@ -226,6 +279,6 @@ BSK_COOP_CHROME=... BSK_COOP_RECIPES_ONLY=1 BSK_RECIPE_RUNS=20 \
 ```
 
 The bar is no wrong action across all drift types, judged by the fixture server's request log,
-and at least 95% success on fixtures whose meaning did not change. Also required, and not yet
-done: read-only flows on at least eight real sites with at least 80% success, and real-model
-runs of first use, replay and takeover after a handoff.
+and at least 95% success on fixtures whose meaning did not change. Replaying commit steps also
+waits for read-only flows on at least eight real sites with at least 80% success, and for
+real-model runs of first use, replay and takeover after a handoff.

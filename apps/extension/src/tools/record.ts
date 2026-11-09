@@ -54,6 +54,7 @@ import {
   isRpcError,
   lookupSession,
   resolveTargetTab,
+  sessionCdpRunner,
 } from "./shared";
 
 interface ActiveRecording {
@@ -893,6 +894,9 @@ export async function handleRecordStart(
   const startedAtMs = Date.now();
   const maxPageTokens = params.max_page_tokens;
   const redactValues = params.redact_values ?? false;
+  const sessionCdp = deps.cdp
+    ? sessionCdpRunner(deps.cdp, params.session_id, () => manager.get(ctx.sessionId) === ctx)
+    : undefined;
   recordings.set(params.session_id, {
     requestId,
     tabs: new RecordingTabCoordinator(target.tabId, navigateUrl),
@@ -911,9 +915,9 @@ export async function handleRecordStart(
     settled: false,
     finishAttempt: null,
     observation:
-      traceVersionOrErr === 3 && deps.cdp
+      traceVersionOrErr === 3 && sessionCdp
         ? new RecordingObservationRuntime({
-            cdp: deps.cdp,
+            cdp: sessionCdp,
             tabsApi: deps.tabsApi,
             maxTokens: maxPageTokens,
             redactValues,
@@ -987,7 +991,7 @@ export async function handleRecordStart(
     if (cancelled) return cancelled;
   }
 
-  if (deps.cdp) {
+  if (sessionCdp) {
     const nav = await handleNavigate(
       manager,
       {
@@ -995,7 +999,7 @@ export async function handleRecordStart(
         url: navigateUrl,
         tab_id: target.tabId,
       },
-      { cdp: deps.cdp, tabsApi: deps.tabsApi, signal: deps.signal },
+      { cdp: sessionCdp, tabsApi: deps.tabsApi, signal: deps.signal },
     );
     if (isRpcError(nav)) {
       await abortPending(false);

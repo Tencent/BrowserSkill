@@ -60,6 +60,11 @@ export const Config = Schema.object({
       "Reveal the bsk_* tools only after the browser-skill skill is invoked (default true); " +
         "false registers the full suite at load.",
     ),
+  recipes: Schema.boolean()
+    .default(false)
+    .description(
+      "Also offer bsk_recipe, which replays saved, reviewed flows (default false; BSK_RECIPES=1 also enables it).",
+    ),
 });
 
 export type Config = PluginConfig;
@@ -84,6 +89,7 @@ export function apply(
     thumbnailIntervalMs: config.thumbnailIntervalMs ?? 1500,
     idleIntervalMs: config.idleIntervalMs ?? 8000,
     lazyTools: config.lazyTools ?? true,
+    recipes: config.recipes === true || process.env.BSK_RECIPES === "1",
   };
   const runner = options.runnerFactory?.(resolved.bskPath) ?? createBskRunner(resolved.bskPath);
   const registry = new SessionRegistry(resolved.maxSessions);
