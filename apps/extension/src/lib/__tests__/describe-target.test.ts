@@ -1,5 +1,11 @@
 import { beforeEach, describe, expect, it } from "vitest";
-import { describeEventTarget, describeTarget, isMeaningfulClickTarget } from "../describe-target";
+import {
+  describeEventTarget,
+  describeTarget,
+  isMeaningfulClickTarget,
+  resolveClickableElement,
+  resolveHoverElement,
+} from "../describe-target";
 
 describe("describeTarget", () => {
   beforeEach(() => {
@@ -109,5 +115,69 @@ describe("LLM textbook click targets", () => {
     expect(describeEventTarget(document.querySelector("#pub"))).toEqual(
       expect.objectContaining({ tag: "div", name: "发布" }),
     );
+  });
+
+  it.each([1, 2])("resolves a button through %i shadow roots", (depth: number) => {
+    document.body.innerHTML = '<button aria-label="Save"><span></span></button>';
+    const button = document.querySelector("button")!;
+    let icon = button.firstElementChild!;
+    for (let level = 0; level < depth; level++) {
+      const root = icon.attachShadow({ mode: "open" });
+      root.innerHTML = "<span>Icon</span>";
+      icon = root.firstElementChild!;
+    }
+
+    expect(resolveClickableElement(icon)).toBe(button);
+    expect(resolveHoverElement(icon)).toBe(button);
+    expect(describeEventTarget(icon)).toEqual({ tag: "button", role: "button", name: "Save" });
+  });
+
+  it("prefers an interactive control inside the shadow root", () => {
+    document.body.innerHTML = '<button aria-label="Outer"><span></span></button>';
+    const root = document.querySelector("span")!.attachShadow({ mode: "open" });
+    root.innerHTML = '<button aria-label="Inner"><span>Icon</span></button>';
+
+    expect(resolveClickableElement(root.querySelector("span")!)).toBe(root.querySelector("button"));
+    expect(describeEventTarget(root.querySelector("span"))).toEqual({
+      tag: "button",
+      role: "button",
+      name: "Inner",
+    });
+  });
+
+  it("resolves slotted icons to the shadow button that receives their events", () => {
+    document.body.innerHTML = '<div id="host"><span>Icon</span></div>';
+    const host = document.querySelector("#host")!;
+    const root = host.attachShadow({ mode: "open" });
+    root.innerHTML = '<button aria-label="Save"><slot></slot></button>';
+    const icon = host.firstElementChild!;
+    // happy-dom does not expose assignedSlot; real slot assignment is checked in Chrome.
+    Object.defineProperty(icon, "assignedSlot", { value: root.querySelector("slot") });
+
+    expect(resolveClickableElement(icon)).toBe(root.querySelector("button"));
+    expect(describeEventTarget(icon)).toEqual({ tag: "button", role: "button", name: "Save" });
+  });
+
+  it("resolves custom controls and unnamed hover triggers across a shadow root", () => {
+    document.body.innerHTML = '<div class="btn" aria-label="Open"><span></span></div>';
+    const control = document.body.firstElementChild!;
+    const root = control.firstElementChild!.attachShadow({ mode: "open" });
+    root.innerHTML = "<span>Icon</span>";
+    const icon = root.firstElementChild!;
+
+    expect(resolveClickableElement(icon)).toBe(control);
+    control.removeAttribute("aria-label");
+    expect(resolveClickableElement(icon)).toBeNull();
+    expect(resolveHoverElement(icon)).toBe(control);
+  });
+
+  it("keeps anonymous shadow content out of recorded clicks", () => {
+    const root = document.body
+      .appendChild(document.createElement("div"))
+      .attachShadow({ mode: "open" });
+    root.innerHTML = "<span>Icon</span>";
+
+    expect(resolveClickableElement(root.firstElementChild!)).toBeNull();
+    expect(describeEventTarget(root.firstElementChild)).toBeNull();
   });
 });

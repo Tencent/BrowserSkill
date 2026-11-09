@@ -196,6 +196,64 @@ describe("record-capture semantic", () => {
     });
   });
 
+  it.each([
+    false,
+    true,
+  ])("records a shadow icon's button and geometry (editor=%s)", (inEditor: boolean) => {
+    const buttonMarkup = '<button type="button" aria-label="Save"><span></span></button>';
+    document.body.innerHTML = inEditor
+      ? `<div contenteditable="true"><div contenteditable="false">${buttonMarkup}</div></div>`
+      : buttonMarkup;
+    const editor = document.querySelector('[contenteditable="true"]');
+    if (editor) Object.defineProperty(editor, "isContentEditable", { value: true });
+    const button = document.querySelector("button")!;
+    const root = button.firstElementChild!.attachShadow({ mode: "open" });
+    root.innerHTML = "<span>Icon</span>";
+    mockRect(button, { left: 20, top: 30, width: 100, height: 40 });
+    mockRect(root.firstElementChild!, { left: 25, top: 35, width: 10, height: 10 });
+    const capture = startRecordCapture("rec-shadow-icon", (step) => steps.push(step));
+    root.firstElementChild!.dispatchEvent(
+      new MouseEvent("click", { bubbles: true, composed: true, button: 0, detail: 1 }),
+    );
+    capture.dispose();
+
+    expect(steps).toEqual([
+      expect.objectContaining({
+        op: "click",
+        target: { tag: "button", role: "button", name: "Save" },
+        geometry: { tag: "button", rect: { x: 20, y: 30, w: 100, h: 40 } },
+      }),
+    ]);
+  });
+
+  it("does not record a button's shadow icon inside the recording overlay", () => {
+    document.body.innerHTML =
+      '<div data-bsk-overlay><button aria-label="Save"><span></span></button></div>';
+    const root = document.querySelector("span")!.attachShadow({ mode: "open" });
+    root.innerHTML = "<span>Icon</span>";
+    const capture = startRecordCapture("rec-overlay-shadow", (step) => steps.push(step));
+    root.firstElementChild!.dispatchEvent(
+      new MouseEvent("click", { bubbles: true, composed: true, button: 0, detail: 1 }),
+    );
+    capture.dispose();
+
+    expect(steps).toEqual([]);
+  });
+
+  it("keeps shadow content inside an editor as a fill interaction", () => {
+    document.body.innerHTML = '<div contenteditable="true" aria-label="Editor"><span></span></div>';
+    Object.defineProperty(document.body.firstElementChild!, "isContentEditable", { value: true });
+    const root = document.querySelector("span")!.attachShadow({ mode: "open" });
+    root.innerHTML = "<span>Icon</span>";
+    const capture = startRecordCapture("rec-editor-shadow", (step) => steps.push(step));
+    root.firstElementChild!.dispatchEvent(
+      new MouseEvent("click", { bubbles: true, composed: true, button: 0, detail: 1 }),
+    );
+    capture.dispose();
+
+    expect(steps).toEqual([]);
+  });
+
   it("does not emit page navigation from a child Document capture", () => {
     const originalUrl = location.href;
     const capture = startRecordCapture("rec-child", (step) => steps.push(step), {
