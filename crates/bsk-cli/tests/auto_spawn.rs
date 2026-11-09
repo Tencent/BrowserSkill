@@ -35,7 +35,7 @@ impl Drop for StopOnDrop {
 }
 
 #[test]
-fn status_auto_spawns_from_an_empty_home() {
+fn status_and_pair_auto_spawn_from_an_empty_home() {
     // BSK_HOME isolates files, not the production default WS port. Exercise
     // the real default on clean CI hosts; never stop a developer's daemon.
     match std::net::TcpListener::bind(("127.0.0.1", bsk::cli::daemon::DEFAULT_WS_PORT)) {
@@ -74,6 +74,31 @@ fn status_auto_spawns_from_an_empty_home() {
     assert!(again.status.success());
     let reused: bsk_protocol::StatusResult = serde_json::from_slice(&again.stdout).unwrap();
     assert_eq!(reused.pid, info.pid);
+
+    // Pairing must print a usable link, not leave the user with an offline
+    // daemon. Run sequentially with the status case to share the default port.
+    assert!(
+        command(&home, &["daemon", "stop"])
+            .output()
+            .unwrap()
+            .status
+            .success()
+    );
+    let pair_home = tmp.path().join("pair");
+    let _pair_cleanup = StopOnDrop(pair_home.clone());
+    let pair = command(&pair_home, &["daemon", "pair"]).output().unwrap();
+    assert!(
+        pair.status.success(),
+        "{}",
+        String::from_utf8_lossy(&pair.stderr)
+    );
+    let info: bsk::daemon::info::DaemonInfo =
+        serde_json::from_slice(&std::fs::read(pair_home.join("daemon.json")).unwrap()).unwrap();
+    assert!(
+        String::from_utf8_lossy(&pair.stdout)
+            .starts_with(&format!("ws://127.0.0.1:{}/#bsk-local.v1.", info.ws_port))
+    );
+    assert!(std::net::TcpStream::connect(("127.0.0.1", info.ws_port)).is_ok());
 }
 
 fn wait_for_pid_exit(pid: i32, timeout: Duration) -> bool {
@@ -145,7 +170,11 @@ fn disabled_auto_start_leaves_missing_and_stale_discovery_alone() {
             bsk::daemon::info::write_to_path(&info, &info_path).unwrap();
         }
         let original = std::fs::read(&info_path).ok();
-        for args in [vec!["--json", "status"], vec!["--json", "session", "start"]] {
+        for args in [
+            vec!["--json", "status"],
+            vec!["--json", "session", "start"],
+            vec!["--json", "daemon", "pair"],
+        ] {
             let out = command(&home, &args)
                 .env("BSK_AUTO_START", "0")
                 .output()

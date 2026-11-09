@@ -128,7 +128,7 @@ bsk --version
 
 #### 2. 连接扩展
 
-从 [Chrome Web Store](https://chromewebstore.google.com/detail/hhcmgoofomhgciiibhipgmgkgnoenaoi) 或 [Edge 加载项商店](https://microsoftedge.microsoft.com/addons/detail/browserskill/emacgiaaaiojkkpkddmmdfhmokgmnikg) 安装扩展。打开弹窗，开启本地连接，在 CLI 启动后检查连接状态。
+从 [Chrome Web Store](https://chromewebstore.google.com/detail/hhcmgoofomhgciiibhipgmgkgnoenaoi) 或 [Edge 加载项商店](https://microsoftedge.microsoft.com/addons/detail/browserskill/emacgiaaaiojkkpkddmmdfhmokgmnikg) 安装扩展，开启连接后即可使用。本机配对是可选的：未配对仍可正常使用，扩展会提示连接身份未经验证。如需配对，运行 `bsk daemon pair`，将链接粘贴到**连接设置 → 配对链接**并保存。重启和升级后无需重复配对；已配对后验证失败不会自动跳过验证。详见[本机配对指南](docs/local-pairing.zh-CN.md)。
 
 #### 3. 给 Agent 安装 skill
 
@@ -366,6 +366,8 @@ CLI 产物位于 `target/release/`；将 `apps/extension/dist/chrome-mv3/` 作�
 
 相关检查包括 `cargo test --workspace --locked`、`pnpm ext:test` 和 `pnpm lint`。可复现的浏览器用例见[评测指南](evals/browser/README.zh-CN.md)。欢迎通过 [GitHub Issues](https://github.com/Tencent/BrowserSkill/issues) 报告问题，或提交聚焦的 PR；附上浏览器证据前，请移除敏感数据。
 
+对浏览器交互、页面观察、控制策略或 CLI／扩展通信等较大改动，推荐在提交 PR 前使用[可选的 Agent 端到端自测 Skill](evals/browser/README.zh-CN.md#可选的-agent-pr-前自测)，通过 Bsk 测试当前分支并记录真实链路证据。这不是提交或合并 PR 的强制要求，也不替代上述检查。
+
 扩展界面支持英语、简体中文、繁体中文、韩语、日语、法语、意大利语、西班牙语、德语和巴西葡萄牙语。翻译贡献见[多语言说明](packages/i18n/README.md)。
 
 ## 贡献者
@@ -429,3 +431,10 @@ CLI 产物位于 `target/release/`；将 `apps/extension/dist/chrome-mv3/` 作�
 ## 许可证
 
 [MIT](LICENSE)
+
+### 动态页面读取（未发布，协议 1.9）
+
+持续动画中的 DOM 字段使用 `bsk read`，表格/列表使用 `extract`；MCP、DSH 对应
+`bsk_inspect(action=read)`。任意 evaluate 仍要求严格观察；读取结果不会更新操作凭证，
+业务判断须用 expect 保护。查询格式、安全边界、兼容性和可复现浏览器测试见
+[动态页面读取说明](docs/dynamic-reading.md)。

@@ -15,6 +15,7 @@ import {
   STEP_PARAMETERS,
   VIEW_PARAMETERS,
 } from "./gesture-observation-tools";
+import { READ_PARAMETERS } from "./read-tool";
 import toolNames from "./tool-names.json";
 import {
   BROWSER_PARAM,
@@ -245,7 +246,7 @@ const BROWSER_TOOL_SPECS: BrowserToolSpec[] = [
     name: toolNames.inspect,
     description:
       "Inspect page state and explicitly control task-scoped debugging. Actions: observe, snapshot, html, " +
-      "screenshot, console, network, video, extract, view. view reads a saved sync/step file offline, with find for literal text search; historical refs/context never authorize a live action. video with videoAction starts/stops a requested recording, checks status, lists, saves or discards MP4 artifacts. Start video before task operations and stop before session teardown. " +
+      "screenshot, console, network, video, read, extract, view. read samples current DOM fields through fixed synchronous isolated-world queries, tolerating unrelated animation. Prefer read/extract for data instead of evaluate/sync retries. Reads never renew control or authorize input. view reads a saved sync/step file offline, with find for literal text search; historical refs/context never authorize a live action. video with videoAction starts/stops a requested recording, checks status, lists, saves or discards MP4 artifacts. Start video before task operations and stop before session teardown. " +
       "extract reads loaded table/list rows with columns and sources, without scrolling or paging: discover first, then pass extractTarget; " +
       "check coverage and warnings before calling the data complete. Prefer observe, then snapshot, then bounded html; use screenshot " +
       "for visual evidence. console/network support cursor fields since/limit/maxTextChars. " +
@@ -261,6 +262,7 @@ const BROWSER_TOOL_SPECS: BrowserToolSpec[] = [
       debug: "inspect.debug",
       video: "inspect.video",
       extract: "inspect.extract",
+      read: "inspect.read",
       view: "inspect.view",
     },
     parameters: {
@@ -269,6 +271,12 @@ const BROWSER_TOOL_SPECS: BrowserToolSpec[] = [
       ...debugParameters,
       ...videoParameters,
       ...extractParameters,
+      ...READ_PARAMETERS,
+      selector: {
+        type: "string",
+        description:
+          "Main-document CSS selector: all matches for read, one container for extract. Use ref for iframe/shadow targets.",
+      },
       ...VIEW_PARAMETERS,
       output: INSPECT_OUTPUT,
       maxDepth: { type: "integer", description: "Tree depth cap for observe/snapshot." },

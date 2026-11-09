@@ -47,9 +47,12 @@ fn tempfile_path(prefix: &str) -> PathBuf {
 async fn spawn_daemon() -> (daemon::DaemonHandle, PathBuf) {
     let port = 0;
     let sock = tempfile_path("bsk-test-queue");
-    let handle = daemon::run(DaemonConfig::new(port), Some(sock.clone()))
-        .await
-        .unwrap();
+    let handle = daemon::run(
+        DaemonConfig::new(port).with_local_auth(bsk::daemon::local_auth::LocalAuthMode::TrustLocal),
+        Some(sock.clone()),
+    )
+    .await
+    .unwrap();
     (handle, sock)
 }
 
@@ -703,15 +706,26 @@ async fn wheel_deadline_cancels_the_extension_and_keeps_the_session_busy_during_
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn click_and_press_deadlines_keep_the_session_busy_during_focus_cleanup() {
-    for method in [Method::ToolClick, Method::ToolPress] {
+async fn page_action_deadlines_keep_the_session_busy_during_cleanup() {
+    for method in [
+        Method::ToolClick,
+        Method::ToolPress,
+        Method::ToolFill,
+        Method::ToolSelect,
+    ] {
         assert_deadline_waits_for_cleanup(method, json!({}), json!({"tab_id": 42})).await;
     }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn native_input_effect_survives_deadline_and_user_cancellation() {
-    for method in [Method::ToolClick, Method::ToolPress, Method::ToolWheel] {
+async fn page_action_effect_survives_deadline_and_user_cancellation() {
+    for method in [
+        Method::ToolClick,
+        Method::ToolPress,
+        Method::ToolWheel,
+        Method::ToolFill,
+        Method::ToolSelect,
+    ] {
         for user_cancel in [false, true] {
             for (effect, reason) in [
                 ("none", "input_not_ready"),
@@ -801,7 +815,10 @@ async fn native_input_effect_survives_deadline_and_user_cancellation() {
                         ErrorCode::Timeout
                     }
                 );
-                assert_eq!(error.data, Some(data));
+                let mut expected = data;
+                expected["phase"] = json!("execution");
+                expected["operation"] = json!(method);
+                assert_eq!(error.data, Some(expected));
                 drop(guard);
                 handle.shutdown().await;
             }
@@ -940,6 +957,12 @@ async fn native_input_retains_terminal_reason_after_user_moves_tab() {
                 );
             }
             data["reason"] = json!(bsk::rpc_reason::SESSION_USER_MOVED_TAB);
+            data["phase"] = json!(if cleanup_effect.is_some() {
+                "execution"
+            } else {
+                "cleanup"
+            });
+            data["operation"] = json!(method);
             assert_eq!(
                 error.data,
                 Some(data),
@@ -1156,9 +1179,9 @@ async fn evaluate_cleanup_timeout_preserves_session_termination() {
         } else {
             "cancel_cleanup_timeout"
         }});
-        if deadline_first {
-            expected["effect_state"] = json!("unknown");
-        }
+        expected["effect_state"] = json!("unknown");
+        expected["phase"] = json!("cleanup");
+        expected["operation"] = json!("tool.evaluate");
         assert_eq!(
             error.data,
             Some(expected),
@@ -1397,7 +1420,11 @@ async fn assert_deadline_waits_for_cleanup(
         assert_eq!(error.code, ErrorCode::Timeout);
         if matches!(
             method,
-            Method::ToolClick | Method::ToolPress | Method::ToolWheel
+            Method::ToolClick
+                | Method::ToolPress
+                | Method::ToolWheel
+                | Method::ToolFill
+                | Method::ToolSelect
         ) {
             let data = error.data.unwrap();
             assert_eq!(data["reason"], "input_outcome_unknown");

@@ -66,9 +66,12 @@ async fn call(sock: &Path, id: &str, method: Method, params: Value) -> Result<Va
 async fn a_sequential_ipc_agent_can_decide_a_modal_and_retrieve_the_original_result() {
     let temp = tempfile::tempdir().unwrap();
     let sock = temp.path().join("dialog.sock");
-    let handle = daemon::run(DaemonConfig::new(0), Some(sock.clone()))
-        .await
-        .unwrap();
+    let handle = daemon::run(
+        DaemonConfig::new(0).with_local_auth(bsk::daemon::local_auth::LocalAuthMode::TrustLocal),
+        Some(sock.clone()),
+    )
+    .await
+    .unwrap();
     let state = handle.state();
     let mut ws = connect(handle.ws_addr(), "dialog-owner").await;
     let mut sessions = Vec::new();

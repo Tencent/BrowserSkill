@@ -150,6 +150,7 @@ interface NetworkRequestMeta {
 }
 
 interface FrameDiscoveryState {
+  rootFrameId?: string;
   sessions: Set<string>;
   pending: Set<Promise<void>>;
   generation: number;
@@ -478,7 +479,9 @@ export class ChromiumCdp {
       {},
       READ_TIMEOUT_MS,
     );
-    if (root.frameTree) sources.push({ target: { tabId }, tree: root.frameTree });
+    if (root.frameTree) {
+      sources.push({ target: { tabId }, tree: root.frameTree });
+    }
 
     const sessions = [...(this.frameDiscovery.get(tabId)?.sessions ?? [])];
     const childTrees = await Promise.all(
@@ -774,7 +777,7 @@ export class ChromiumCdp {
     );
   }
 
-  private command(
+  private async command(
     target: CdpDebuggee,
     method: string,
     params: object,
@@ -782,7 +785,14 @@ export class ChromiumCdp {
     beforeDispatch?: () => void,
     signal?: AbortSignal,
   ): Promise<unknown> {
-    return this.readGate.run(
+    const { tabId } = target;
+    const rootState =
+      method === "Page.getFrameTree" && !target.sessionId && typeof tabId === "number"
+        ? this.frameDiscoveryState(tabId)
+        : undefined;
+    const rootBefore = rootState?.rootFrameId;
+    const version = typeof tabId === "number" ? (this.attachmentVersions.get(tabId) ?? 0) : 0;
+    const result = await this.readGate.run(
       target,
       method,
       () => {
@@ -792,6 +802,21 @@ export class ChromiumCdp {
       readTimeoutMs,
       signal,
     );
+    // Page.enable does not replay navigation for an already loaded tab. Learn
+    // its root from every tree-read path, including guarded passive reads.
+    // A delayed reply must not overwrite a newer attachment or root event.
+    if (
+      rootState &&
+      typeof tabId === "number" &&
+      this.frameDiscovery.get(tabId) === rootState &&
+      (this.attachmentVersions.get(tabId) ?? 0) === version &&
+      rootState.rootFrameId === rootBefore
+    ) {
+      const frame = (result as { frameTree?: CdpFrameTreeNode } | undefined)?.frameTree?.frame;
+      if (typeof frame?.id === "string" && frame.id && !frame.parentId)
+        rootState.rootFrameId = frame.id;
+    }
+    return result;
   }
 
   private async enablePageDomain(tabId: number): Promise<void> {
@@ -899,13 +924,24 @@ export class ChromiumCdp {
       const tabId = source.tabId;
       if (typeof tabId !== "number") return;
       const raw = (params ?? {}) as Record<string, unknown>;
-      const frame = raw.frame as { parentId?: string } | undefined;
+      const frame = raw.frame as { id?: string; parentId?: string } | undefined;
+      if (
+        !source.sessionId &&
+        frame?.id &&
+        !frame.parentId &&
+        ["Page.frameNavigated", "Page.documentOpened"].includes(method)
+      )
+        this.frameDiscoveryState(tabId).rootFrameId = frame.id;
+      const rootRouteChanged =
+        method === "Page.navigatedWithinDocument" &&
+        raw.frameId === this.frameDiscovery.get(tabId)?.rootFrameId;
       // A child navigation/detach does not replace the root document. Keep this
       // tab-wide invalidation limited to root changes; child lifetimes need
       // frame-scoped handling rather than discarding unrelated page refs.
       if (
         !source.sessionId &&
-        (method === "DOM.documentUpdated" ||
+        (rootRouteChanged ||
+          method === "DOM.documentUpdated" ||
           ((method === "Page.frameNavigated" || method === "Page.documentOpened") &&
             frame &&
             !frame.parentId))

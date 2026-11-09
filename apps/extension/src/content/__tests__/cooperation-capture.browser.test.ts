@@ -4,6 +4,7 @@ import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
+import { guardedRunner } from "@/cooperation/action-guard";
 import { collectCooperationFrames } from "@/cooperation/browser-bridge";
 import { CooperationController } from "@/cooperation/controller";
 import { COOPERATION_ARM, COOPERATION_READ, type FrameState } from "@/cooperation/types";
@@ -26,6 +27,13 @@ describe.skipIf(!process.env.BSK_COOP_CHROME)("frame interaction coverage", () =
     );
     const server = createServer((request, response) => {
       response.setHeader("Content-Type", "text/html");
+      if (request.url === "/enter") {
+        response.end(`<!doctype html><form onsubmit="event.preventDefault(); window.submits++">
+          <input aria-label="Search"><button>Submit</button></form><script>
+          window.submits=0;window.keys=[];for(const type of ['keydown','keypress','keyup'])
+          addEventListener(type,e=>keys.push([type,e.isTrusted]));</script>`);
+        return;
+      }
       response.end(
         request.url === "/broken"
           ? brokenFrame
@@ -273,6 +281,73 @@ globalThis.httpCooperationReady = true;`,
               await send("Target.detachFromTarget", { sessionId: human });
             }
           };
+          // Atomic Enter text must remain agent-attributed in the shipped
+          // collector, including Chromium's derived keypress/click/submit.
+          const enter = await createTab("/enter");
+          await collectCooperationFrames(enter.id, COOPERATION_READ, "enter");
+          const { targetInfos: enterTargets } = await send<{
+            targetInfos: { targetId: string; url: string }[];
+          }>("Target.getTargets");
+          const enterTarget = enterTargets.find(
+            (target) => target.url === `http://127.0.0.1:${port}/enter`,
+          )!;
+          const { sessionId: enterSession } = await send<{ sessionId: string }>(
+            "Target.attachToTarget",
+            { targetId: enterTarget.targetId, flatten: true },
+          );
+          const enterSend = <T>(method: string, params?: object) =>
+            send<T>(method, params, enterSession);
+          await enterSend("Page.bringToFront");
+          await enterSend("Runtime.evaluate", {
+            expression: "document.querySelector('input').focus()",
+          });
+          const guarded = guardedRunner(
+            {
+              send: <T>(_tabId: number, method: string, params?: object) =>
+                enterSend<T>(method, params),
+            },
+            {
+              prepare: async (input) => {
+                if (input)
+                  await collectCooperationFrames(enter.id, COOPERATION_ARM, "enter", input);
+              },
+            },
+          );
+          const keydown = {
+            type: "keyDown",
+            key: "Enter",
+            code: "Enter",
+            windowsVirtualKeyCode: 13,
+            text: "\r",
+          };
+          const keyup = { type: "keyUp", key: "Enter", code: "Enter", windowsVirtualKeyCode: 13 };
+          await guarded.send(enter.id, "Input.dispatchKeyEvent", keydown);
+          await guarded.send(enter.id, "Input.dispatchKeyEvent", keyup);
+          const agentEnter = await collectCooperationFrames(enter.id, COOPERATION_READ, "enter");
+          expect(agentEnter.frames.get(0)).toMatchObject({
+            human: 0,
+            lastInput: 0,
+            editing: false,
+          });
+          const keyResult = await enterSend<{ result: { value: unknown } }>("Runtime.evaluate", {
+            expression: "({submits,keys})",
+            returnByValue: true,
+          });
+          expect(keyResult.result.value).toEqual({
+            submits: 1,
+            keys: [
+              ["keydown", true],
+              ["keypress", true],
+              ["keyup", true],
+            ],
+          });
+          await enterSend("Input.dispatchKeyEvent", keydown);
+          await enterSend("Input.dispatchKeyEvent", keyup);
+          const humanEnter = await collectCooperationFrames(enter.id, COOPERATION_READ, "enter");
+          expect(humanEnter.frames.get(0)!.human).toBeGreaterThan(0);
+          await send("Target.detachFromTarget", { sessionId: enterSession });
+          await evaluate(`chrome.tabs.remove(${enter.id})`);
+
           const broken = await createTab("/broken");
           const browserFrames = await getAllFrames({ tabId: broken.id });
           const failed = browserFrames.find((frame) => frame.frameId !== 0)!;

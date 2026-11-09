@@ -99,8 +99,19 @@ function fillableFromTarget(target: EventTarget | null): FillableElement | null 
   if (!(target instanceof Element)) return null;
   if (isTextFillable(target)) return target;
   const el = target.closest('input,textarea,[contenteditable]:not([contenteditable="false"])');
-  if (el && isTextFillable(el)) return el;
-  return null;
+  if (!el || !isTextFillable(el) || isControlInNonEditableRegion(target, el)) return null;
+  return el;
+}
+
+/**
+ * Buttons and links inside a contenteditable="false" region of an editor, such
+ * as attachment or embed actions, are page actions rather than editor text.
+ */
+function isControlInNonEditableRegion(target: Element, editor: Element): boolean {
+  const region = target.closest('[contenteditable="false"]');
+  if (!region || !editor.contains(region)) return false;
+  const control = resolveClickableElement(target);
+  return control !== null && region.contains(control);
 }
 
 /** Clicks on search chrome that only focus the nearby input should not become steps. */
@@ -817,7 +828,14 @@ export function startRecordCapture(
   };
 
   const onInput = (event: Event) => {
-    const target = fillableFromTarget(eventTarget(event));
+    const rawTarget = eventTarget(event);
+    // A native <select> in a shadow root fires a non-composed `change` that
+    // never reaches the document; its composed `input` does.
+    if (rawTarget instanceof HTMLSelectElement && rawTarget.getRootNode() instanceof ShadowRoot) {
+      recordSelect(rawTarget);
+      return;
+    }
+    const target = fillableFromTarget(rawTarget);
     if (!target) return;
     if (composing) return;
     ensureFillSession(target);
@@ -837,25 +855,31 @@ export function startRecordCapture(
     }
   };
 
-  const onChange = (event: Event) => {
+  const recordSelect = (target: HTMLSelectElement) => {
     commitFillSession();
+    emitHoverCandidateBeforeAction(target);
+    const values = Array.from(target.selectedOptions).map((opt) => opt.value);
+    const labels = Array.from(target.selectedOptions).map((opt) =>
+      (opt.label || opt.textContent || opt.value).trim(),
+    );
+    const desc = describeTarget(target);
+    markNavigationAction();
+    emitStep({
+      op: "select",
+      target: desc,
+      geometry: captureGeometry(target),
+      values,
+      labels,
+      expects_navigation: true,
+    });
+  };
+
+  const onChange = (event: Event) => {
     const target = eventTarget(event);
     if (target instanceof HTMLSelectElement) {
-      emitHoverCandidateBeforeAction(target);
-      const values = Array.from(target.selectedOptions).map((opt) => opt.value);
-      const labels = Array.from(target.selectedOptions).map((opt) =>
-        (opt.label || opt.textContent || opt.value).trim(),
-      );
-      const desc = describeTarget(target);
-      markNavigationAction();
-      emitStep({
-        op: "select",
-        target: desc,
-        geometry: captureGeometry(target),
-        values,
-        labels,
-        expects_navigation: true,
-      });
+      recordSelect(target);
+    } else {
+      commitFillSession();
     }
   };
 

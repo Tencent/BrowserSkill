@@ -97,6 +97,7 @@ impl DaemonStatus {
     pub fn snapshot(&self) -> StatusResult {
         StatusResult {
             rpc_admission: None,
+            local_auth: None,
             daemon_version: self.daemon_version.to_string(),
             protocol_version: self.protocol_version.to_string(),
             pid: std::process::id(),
@@ -140,6 +141,7 @@ impl DaemonStatus {
             .collect();
         StatusResult {
             rpc_admission: Some(true),
+            local_auth: state.local_auth_status(),
             daemon_version: self.daemon_version.to_string(),
             protocol_version: self.protocol_version.to_string(),
             pid: std::process::id(),
@@ -237,6 +239,11 @@ pub fn full_handler(status: DaemonStatus, state: Arc<DaemonState>) -> RpcHandler
                     Value::String(ticket.operation_id.clone()),
                 );
             }
+            let logged = serde_json::to_value(&method)
+                .ok()
+                .and_then(|name| name.as_str().map(|name| name.starts_with("tool.")))
+                .unwrap_or(false)
+                .then(|| (method.clone(), params.clone()));
             let body = match method {
                 Method::RpcPrepare => {
                     let prepared = (|| {
@@ -262,9 +269,28 @@ pub fn full_handler(status: DaemonStatus, state: Arc<DaemonState>) -> RpcHandler
                         Err(error) => ResponseBody::Err(error),
                     }
                 }
+                Method::LocalAuthPair
+                | Method::LocalAuthDevices
+                | Method::LocalAuthRevoke
+                | Method::LocalAuthRotate
+                | Method::LocalAuthSetMode => {
+                    super::local_auth::maintenance::handle(
+                        state.clone(),
+                        status.ws_port,
+                        method,
+                        params,
+                    )
+                    .await
+                }
                 Method::SystemPing => {
                     let result = PingResult { pong: true };
                     ResponseBody::Ok(serde_json::to_value(result).unwrap_or(Value::Null))
+                }
+                Method::SessionRunLog => {
+                    let session = params["session_id"].as_str().unwrap_or_default();
+                    ResponseBody::Ok(
+                        serde_json::to_value(state.run_logs.read(session)).unwrap_or(Value::Null),
+                    )
                 }
                 Method::SystemStatus => match handle_status(&status, &state, params).await {
                     Ok(v) => ResponseBody::Ok(v),
@@ -318,6 +344,7 @@ pub fn full_handler(status: DaemonStatus, state: Arc<DaemonState>) -> RpcHandler
                 | Method::ToolObserve
                 | Method::ToolCooperate
                 | Method::ToolGetHtml
+                | Method::ToolRead
                 | Method::ToolExtract
                 | Method::ToolNavigate
                 | Method::ToolNavigateBack
@@ -367,6 +394,14 @@ pub fn full_handler(status: DaemonStatus, state: Arc<DaemonState>) -> RpcHandler
             };
             if let Some(ticket) = ticket {
                 state.audit.finish(ticket, &body);
+            }
+            if let Some((method, params)) = logged {
+                state.run_logs.record(
+                    |id| state.sessions.get(&SessionId(id.to_owned())).is_some(),
+                    &method,
+                    &params,
+                    &body,
+                );
             }
             body
         })
@@ -723,6 +758,18 @@ async fn handle_tool_dispatch(
                 "effect_state": "none", "required_protocol": bsk_protocol::tools::CLICK_MOVE_CLICK_PROTOCOL,
                 "actual_protocol": browser.extension_protocol_version,
             })),
+        });
+    }
+    if method == Method::ToolRead
+        && let Some(session) = state.sessions.get(&session_id)
+        && let Some(browser) = state.browsers.get(&session.browser_id)
+        && !bsk_protocol::tools::supports_dom_read(&browser.extension_protocol_version)
+    {
+        return ResponseBody::Err(RpcError {
+            code: ErrorCode::Unsupported,
+            message: "DOM read requires extension protocol 1.9; update the extension. JavaScript fallback is never used".into(),
+            data: Some(serde_json::json!({"reason":"unsupported_feature","phase":"negotiate","effect_state":"none",
+                "required_protocol":bsk_protocol::tools::DOM_READ_PROTOCOL,"actual_protocol":browser.extension_protocol_version})),
         });
     }
     // Older extensions must never execute an action after silently ignoring its conditions.
@@ -1371,7 +1418,11 @@ pub(super) async fn handle_session_start(
             if recoverable && let StartSessionError::CleanupFailed { session_id, .. } = &err {
                 state.tool_queues.spawn(session_id.clone());
             }
-            Err(map_start_error(err))
+            let mut error = map_start_error(err);
+            if error.code == ErrorCode::NoBrowserConnected && state.recent_unpaired().is_some() {
+                error.data = Some(serde_json::json!({"reason":"local_pairing_required"}));
+            }
+            Err(error)
         }
     }
 }

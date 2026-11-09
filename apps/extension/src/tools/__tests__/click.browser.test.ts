@@ -585,7 +585,7 @@ describe.skipIf(!process.env.BSK_CLICK_CHROME)("real browser click readiness", (
               expect(await evaluate("getComputedStyle(overlay).display")).toBe("block");
               expect(
                 await evaluate(
-                  "getComputedStyle(overlayRoot.querySelector('[data-slot=control-overlay-card]')).opacity",
+                  "getComputedStyle(overlayRoot.querySelector('[role=toolbar]')).opacity",
                 ),
               ).toBe("1");
               expect(await evaluate("overlay.hasAttribute('data-bsk-capture-hidden')")).toBe(false);
@@ -601,21 +601,25 @@ describe.skipIf(!process.env.BSK_CLICK_CHROME)("real browser click readiness", (
           );
         };
         const bypassOverlay = async (_tabId: number, enabled: boolean) => {
-          await evaluate(`window.bypassCount += ${enabled ? 1 : -1};
+          await evaluate(`(() => { window.bypassCount += ${enabled ? 1 : -1};
             overlay.toggleAttribute('data-bsk-overlay-blocking',bypassCount===0);
-            overlayRoot.querySelector('[data-slot="control-overlay-blocker"]').style.pointerEvents=bypassCount>0?'none':'auto';`);
+            const blocker=overlayRoot.querySelector('[data-slot="control-overlay-blocker"]'); if(blocker) blocker.style.pointerEvents=bypassCount>0?'none':'auto'; })()`);
         };
         // A retained hover bypass leaves the card interactive even though the host is transparent.
-        for (const automationBypass of [false, true]) {
+        for (const mode of ["blocking", "bypass", "cooperation"] as const) {
+          const automationBypass = mode === "bypass";
+          const cardSlot = mode === "cooperation" ? "cooperation-toolbar" : "control-overlay-card";
           const markup = renderToStaticMarkup(
             createElement(ControlOverlay, {
               visible: true,
               interrupting: false,
               automationBypass,
+              state:
+                mode === "cooperation" ? { mode: "ready", revision: 1, editing: false } : undefined,
               onInterrupt: () => {},
             }),
           );
-          await evaluate(`window.bypassCount=${automationBypass ? 1 : 0}; overlay.toggleAttribute('data-bsk-overlay-blocking', ${!automationBypass});
+          await evaluate(`window.bypassCount=${automationBypass ? 1 : 0}; overlay.toggleAttribute('data-bsk-overlay-blocking', ${mode === "blocking"});
             overlayRoot.innerHTML = ${JSON.stringify(`<style>${css}</style>`)} + ${JSON.stringify(markup)};
             overlayRoot.querySelector('[data-slot="control-overlay-stop-all"]').addEventListener('click',()=>stops++);`);
           await evaluate(
@@ -630,10 +634,10 @@ describe.skipIf(!process.env.BSK_CLICK_CHROME)("real browser click readiness", (
           expect(clear).not.toHaveProperty("code");
           expect(phases).toEqual([]);
           expect(await evaluate("bypassCount")).toBe(automationBypass ? 1 : 0);
-          for (const slot of ["control-overlay-card", "control-overlay-stop-all"]) {
+          for (const slot of [cardSlot, "control-overlay-stop-all"]) {
             const point = await evaluate<{ x: number; y: number }>(`(() => {
               const r=overlayRoot.querySelector('[data-slot="${slot}"]').getBoundingClientRect();
-              const x=${slot === "control-overlay-card" ? "r.x+25" : "r.x+r.width/2"}, y=r.y+r.height/2;
+              const x=${slot === cardSlot ? "r.x+25" : "r.x+r.width/2"}, y=r.y+r.height/2;
               Object.assign(document.querySelector('#target').style,{left:(x-40)+'px',top:(y-15)+'px'});
               clicks=[]; stops=0; return {x,y};
             })()`);

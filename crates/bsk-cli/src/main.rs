@@ -15,8 +15,12 @@ fn main() -> ExitCode {
 
     // The daemon installs its own subscriber (with the rolling file
     // appender); CLI tracing would race with it and silently win, so
-    // only init the CLI-side stderr subscriber for client commands.
-    if !matches!(cli.command, Command::Daemon(_)) {
+    // only init the CLI-side stderr subscriber for client commands, including
+    // daemon maintenance. Start/restart own the daemon's logging setup.
+    if !matches!(
+        cli.command,
+        Command::Daemon(cli::daemon::DaemonCmd::Start(_) | cli::daemon::DaemonCmd::Restart(_))
+    ) {
         init_cli_tracing(&cli.flags);
     }
     cli::update::print_update_hint_from_cache(&cli.flags, &cli.command);
@@ -35,12 +39,20 @@ fn main() -> ExitCode {
 }
 
 fn dispatch(cli: Cli, format: Format) -> Result<(), CliError> {
-    cli::business_rpc::set_context(cli.flags.context.clone());
-    cli::business_rpc::set_dependencies(cli.flags.depends_on.clone());
-    cli::business_rpc::set_action_evidence(cli.flags.observation.clone(), cli.flags.expect.clone());
+    // Plans and recipes attach evidence step by step, so it never goes on every request.
+    if !matches!(cli.command, Command::Plan(_) | Command::Recipe(_)) {
+        cli::business_rpc::set_context(cli.flags.context.clone());
+        cli::business_rpc::set_dependencies(cli.flags.depends_on.clone());
+        cli::business_rpc::set_action_evidence(
+            cli.flags.observation.clone(),
+            cli.flags.expect.clone(),
+        );
+    }
     match cli.command {
         Command::Cooperate(args) => cli::cooperate::dispatch(args, format),
         Command::Step(args) => cli::step::dispatch(args, format),
+        Command::Plan(args) => cli::plan::dispatch(args, &cli.flags, format),
+        Command::Recipe(cmd) => cli::recipe::dispatch(cmd, &cli.flags, format),
         Command::View(args) => cli::observation_view::dispatch(args, format),
         Command::Daemon(cmd) => cli::daemon::dispatch(cmd).map_err(CliError::Local),
         Command::Status => {
@@ -91,6 +103,7 @@ fn dispatch(cli: Cli, format: Format) -> Result<(), CliError> {
         Command::Debug(args) => cli::debug::dispatch(*args, format),
         Command::Network(args) => cli::network::dispatch(args, format),
         Command::GetHtml(args) => cli::get_html::dispatch(args, format),
+        Command::Read(args) => cli::read::dispatch(args, format),
         Command::Extract(args) => cli::extract::dispatch(args, format),
         Command::Navigate(args) => cli::navigate::dispatch_navigate_command(args, format),
         Command::NavigateBack(args) => cli::navigate::dispatch_navigate_back(args, format),

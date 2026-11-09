@@ -31,10 +31,16 @@ pub(crate) fn auto_start_enabled() -> bool {
 /// Return verified discovery info, starting a daemon only when its discovery
 /// file or IPC listener is absent and auto-start is enabled.
 pub fn ensure_daemon() -> Result<DaemonInfo> {
-    let (info, protocol, admission) = ensure_daemon_with_capabilities()?;
-    super::business_rpc::set_daemon_admission(&info.sock_path, admission);
+    let (info, protocol) = ensure_daemon_with_protocol()?;
     super::business_rpc::check_daemon_protocol(&protocol)?;
     Ok(info)
+}
+
+/// Discover the daemon and retain its admission capability for CLI RPCs.
+pub(crate) fn ensure_daemon_with_protocol() -> Result<(DaemonInfo, String)> {
+    let (info, protocol, admission) = ensure_daemon_with_capabilities()?;
+    super::business_rpc::set_daemon_admission(&info.sock_path, admission);
+    Ok((info, protocol))
 }
 
 /// Same discovery and startup as [`ensure_daemon`], also returning the

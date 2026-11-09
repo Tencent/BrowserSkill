@@ -1,0 +1,29 @@
+<!doctype html><html lang="zh-CN"><meta charset="utf-8"><title>Main review: new edge cases</title>
+<style>body{font:16px system-ui;padding:24px}input,button{font:inherit;padding:7px;margin:6px}label{display:block}output{display:block;white-space:pre-wrap;background:#eef;padding:8px}.box{height:160px;width:320px;overflow:auto;border:2px solid #888}.wide{width:1000px;height:650px}</style>
+<h1>Main 新增边界测试（仅合成数据）</h1>
+<label>Focus field<input id="focused"></label><button id="save-focus">Save focus value</button><output id="focus-result"></output>
+<label>Date<input id="date" type="date" min="2026-11-01" max="2026-11-30"></label>
+<label>Time with seconds<input id="time" type="time" step="1"></label>
+<label>Datetime<input id="datetime" type="datetime-local" step="1"></label>
+<label>Month<input id="month" type="month"></label><label>Week<input id="week" type="week"></label>
+<button id="save-dates">Save all temporal values</button><output id="dates-result"></output>
+<h2>Wait selectors after node replacement</h2><button id="replace-visible">Start visible replacement</button><div id="wait-visible" hidden>Old hidden node</div>
+<button id="replace-hidden">Start hidden replacement</button><div id="wait-hidden">Old visible node</div>
+<h2>Scrolling</h2><div class="box" id="wheel-box"><div class="wide">Scroll this two-dimensional container<button id="far" style="margin-left:800px;margin-top:550px">Far corner</button></div></div><output id="wheel-result"></output>
+<h2>Iframe document changes</h2><button id="refresh-frame">Refresh only child frame</button><button id="main-action">Main document action</button><iframe id="frame" title="Refreshing frame" src="/frame"></iframe><output id="main-result"></output>
+<h2>File chooser trigger</h2><input id="hidden-file" type="file" multiple hidden><button id="trigger-file">Choose synthetic attachments</button><output id="files-result"></output>
+<h2>Request retention</h2><button id="burst">Fetch 260 distinct requests</button><output id="burst-result"></output>
+<h2>Native dialogs and target decisions</h2><button id="async-dialog">Open delayed alert</button><button id="one-click">Increment once</button><output id="once-result">0</output>
+<script>
+const $=s=>document.querySelector(s),emit=(type,data={})=>fetch('/event',{method:'POST',body:JSON.stringify({type,...data})});
+let focusEvents=[];for(let t of ['focus','blur','change','input'])$('#focused').addEventListener(t,()=>{focusEvents.push(t);$('#focus-result').textContent=JSON.stringify({events:focusEvents,value:$('#focused').value,active:document.activeElement.id})});
+$('#save-focus').onclick=()=>emit('focus-save',{value:$('#focused').value,events:focusEvents,active:document.activeElement.id});
+$('#save-dates').onclick=()=>{let values=Object.fromEntries(['date','time','datetime','month','week'].map(k=>[k,$('#'+k).value]));$('#dates-result').textContent=JSON.stringify(values);emit('temporal-save',values)};
+$('#replace-visible').onclick=()=>setTimeout(()=>{let n=document.createElement('div');n.id='wait-visible';n.textContent='Replacement is visible';$('#wait-visible').replaceWith(n);emit('wait-visible-replaced')},250);
+$('#replace-hidden').onclick=()=>setTimeout(()=>{let n=document.createElement('div');n.id='wait-hidden';n.hidden=true;n.textContent='Replacement is hidden';$('#wait-hidden').replaceWith(n);emit('wait-hidden-replaced')},250);
+$('#wheel-box').onscroll=()=>{let data={x:$('#wheel-box').scrollLeft,y:$('#wheel-box').scrollTop};$('#wheel-result').textContent=JSON.stringify(data)};$('#far').onclick=()=>emit('far-click');
+$('#refresh-frame').onclick=()=>{$('#frame').src='/frame?refresh='+Date.now();emit('frame-refreshed')};$('#main-action').onclick=()=>{$('#main-result').textContent='Main action accepted';emit('main-action')};
+$('#trigger-file').onclick=()=>$('#hidden-file').click();$('#hidden-file').onchange=async e=>{let files=await Promise.all([...e.target.files].map(async f=>({name:f.name,size:f.size,text:await f.text()})));$('#files-result').textContent=JSON.stringify(files);emit('hidden-upload',{files})};
+$('#burst').onclick=async()=>{let count=0;for(let i=0;i<260;i+=20){await Promise.all(Array.from({length:Math.min(20,260-i)},(_,j)=>fetch('/api/search?burst='+(i+j)).then(r=>r.json()).then(()=>count++)));$('#burst-result').textContent=String(count)}emit('burst-complete',{count})};
+$('#async-dialog').onclick=()=>setTimeout(()=>{alert('Synthetic delayed alert');emit('delayed-alert-complete')},300);$('#one-click').onclick=()=>{let n=Number($('#once-result').textContent)+1;$('#once-result').textContent=n;emit('once',{count:n})};
+</script></html>

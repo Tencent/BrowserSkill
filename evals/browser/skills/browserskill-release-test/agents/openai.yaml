@@ -1,0 +1,4 @@
+interface:
+  display_name: "BrowserSkill发版前测试"
+  short_description: "使用Bsk对当前分支或指定候选执行可选端到端自测并记录完整证据"
+  default_prompt: "使用 $browserskill-release-test 对当前分支 HEAD 执行 BrowserSkill 端到端测评，如实报告覆盖和失败；这项 PR 前自测推荐但不强制。"

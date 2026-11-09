@@ -4,6 +4,8 @@ export interface InputExpectation {
   x?: number;
   y?: number;
   key?: string;
+  /** This keydown also dispatches text/keypress in the same native browser task. */
+  keypress?: boolean;
   /** Native event time in epoch milliseconds, shared across frame coordinate spaces. */
   timestamp?: number;
   /** One-shot insertText attribution, cleared when the native command settles. Never logged. */

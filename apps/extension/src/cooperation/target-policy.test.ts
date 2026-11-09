@@ -5,7 +5,12 @@ import { scrollNodeIntoView } from "@/tools/element-geometry";
 import { resolveActionTarget } from "@/tools/interaction";
 import { captureVomObservation, handleSnapshot } from "@/tools/observation";
 import type { CdpRunner } from "@/tools/shared";
-import { checkActionTarget, checkExpectations } from "./action-checks";
+import {
+  ActionCheckError,
+  actionError,
+  checkActionTarget,
+  checkExpectations,
+} from "./action-checks";
 import { CooperationController, type CooperationDeps } from "./controller";
 import type { FrameState } from "./types";
 
@@ -128,6 +133,38 @@ beforeEach(() => {
 });
 afterEach(() => {
   vi.unstubAllGlobals();
+});
+
+describe("action cancellation diagnostics", () => {
+  it("reports a precondition cancellation before any page effect", async () => {
+    const f = await fixture();
+    const invoke = vi.fn();
+    vi.mocked(checkActionTarget).mockImplementationOnce(async () => {
+      f.abort.abort();
+      return undefined;
+    });
+    expect(await f.run({ ref: "e1" }, "tool.fill", invoke)).toMatchObject({
+      code: "cancelled",
+      data: { phase: "precondition", effect_state: "none" },
+    });
+    expect(invoke).not.toHaveBeenCalled();
+    expect(f.send).not.toHaveBeenCalled();
+  });
+
+  it("reports execution uncertainty when cancellation follows dispatch", async () => {
+    const f = await fixture();
+    expect(
+      await f.run({ ref: "e1" }, "tool.fill", async (runner) => {
+        await runner.send(7, "Input.insertText", { text: "saved" });
+        f.abort.abort();
+        return { tab_id: 7 };
+      }),
+    ).toMatchObject({
+      code: "cancelled",
+      data: { phase: "execution", effect_state: "unknown" },
+    });
+    expect(f.send).toHaveBeenCalledOnce();
+  });
 });
 
 describe.each(["strict", "target"] as const)("completed action receipts (%s)", (policy) => {
@@ -363,6 +400,100 @@ describe.each(["strict", "target"] as const)("completed action receipts (%s)", (
     ).toMatchObject({ code: "permission_denied", data: { effect_state: "unknown" } });
     expect(await f.run()).toHaveProperty("code");
     expect(f.send).toHaveBeenCalledOnce();
+  });
+
+  it("preserves set_file_input_failed when upload cleanup detaches the debugger", async () => {
+    const f = await fixture(policy);
+    f.cdp.detach = vi.fn(async (tabId: number) => {
+      // Production background.ts wires ChromiumCdp.onDocumentChanged to
+      // invalidateTabRefs + cooperation.invalidate on every debugger detach.
+      f.session.refStore.invalidateTab(tabId);
+      f.controller.invalidate(tabId);
+    });
+    const refusal = {
+      code: "cdp_failed" as const,
+      message: "DOM.setFileInputFiles failed: -32000 Not allowed",
+      data: {
+        reason: "set_file_input_failed",
+        phase: "set_files",
+        effect_state: "unknown" as const,
+        recovery:
+          "Inspect the page before retrying; the file input may or may not have been updated.",
+      },
+    };
+
+    const result = await f.run({ ref: "e1" }, "tool.upload", async (runner) => {
+      await runner.send(7, "Page.setInterceptFileChooserDialog", { enabled: true });
+      await runner.send(7, "DOM.setFileInputFiles", {
+        backendNodeId: 4,
+        files: ["/stage/tiny.txt"],
+      });
+      await runner.detach?.(7);
+      return refusal;
+    });
+
+    expect(result).toEqual(refusal);
+    expect(f.cdp.detach).toHaveBeenCalledExactlyOnceWith(7, undefined);
+    expect(f.controller.view(7)).toMatchObject({ mode: "syncing" });
+    expect(await f.run()).toMatchObject({
+      code: "permission_denied",
+      data: {
+        reason: policy === "target" ? "control_context_invalid" : "cooperation_sync_required",
+        effect_state: "none",
+      },
+    });
+    const next = await f.sync();
+    expect(next.context_id).not.toBe(f.first.context_id);
+  });
+
+  it("preserves file_drop_failed with effect_state none when drag_enter is rejected", async () => {
+    const f = await fixture(policy);
+    const refusal = {
+      code: "cdp_failed" as const,
+      message: "Input.dispatchDragEvent failed: -32000 Not allowed",
+      data: {
+        reason: "file_drop_failed",
+        phase: "drag_enter",
+        effect_state: "none" as const,
+        recovery:
+          "Retry the drop when the target is ready, or upload through a file input instead.",
+      },
+    };
+
+    const result = await f.run({ ref: "e1", mode: "drop" }, "tool.upload", async (runner) => {
+      await runner.send(7, "Runtime.callFunctionOn", {
+        objectId: "drop-target",
+        functionDeclaration: "function() { return true; }",
+      });
+      return refusal;
+    });
+
+    expect(result).toEqual(refusal);
+    if (policy === "target") expect(await f.run()).toEqual({});
+  });
+
+  it("preserves an upload refusal when the post-action collector is unavailable", async () => {
+    const f = await fixture(policy);
+    const refusal = {
+      code: "invalid_params" as const,
+      message: "Target did not open a file chooser and is not an <input type=file>",
+      data: {
+        reason: "upload_target_not_file_input",
+        phase: "open_chooser",
+        effect_state: "none" as const,
+        recovery: "Choose the <input type=file> or the control that opens the file chooser.",
+      },
+    };
+
+    const result = await f.run({ ref: "e1" }, "tool.upload", async (runner) => {
+      await runner.send(7, "Page.setInterceptFileChooserDialog", { enabled: true });
+      f.readFrames.mockRejectedValueOnce(new Error("frame is loading"));
+      return refusal;
+    });
+
+    expect(result).toEqual(refusal);
+    expect(f.controller.view(7)).toMatchObject({ mode: "unavailable" });
+    expect(await f.run()).toMatchObject({ code: "permission_denied" });
   });
 });
 
@@ -1030,4 +1161,63 @@ describe("negotiated target control", () => {
     });
     expect(f.send).not.toHaveBeenCalled();
   });
+});
+
+describe("whether a click was pressed", () => {
+  const covered = () =>
+    new ActionCheckError(
+      actionError("target_covered", "covered", "target", "Synchronize before clicking."),
+    );
+
+  it("says so when a click failed after only preparing to press", async () => {
+    const f = await fixture();
+    const result = await f.run({}, "tool.click", async (runner) => {
+      await runner.send(7, "DOM.scrollIntoViewIfNeeded", { backendNodeId: 4 });
+      await runner.send(7, "Input.dispatchMouseEvent", { type: "mouseMoved", x: 10, y: 20 });
+      throw covered();
+    });
+    expect(result).toMatchObject({
+      data: { reason: "target_covered", effect_state: "unknown", press_sent: false },
+    });
+  });
+
+  it("makes no such claim once the press was sent", async () => {
+    const f = await fixture();
+    const result = (await f.run({}, "tool.click", async (runner) => {
+      await runner.send(7, "DOM.scrollIntoViewIfNeeded", { backendNodeId: 4 });
+      await runner.send(7, "Input.dispatchMouseEvent", {
+        type: "mousePressed",
+        button: "left",
+        x: 10,
+        y: 20,
+      });
+      throw covered();
+    })) as { data: Record<string, unknown> };
+    expect(result.data.effect_state).toBe("unknown");
+    expect(result.data).not.toHaveProperty("press_sent");
+  });
+
+  it("makes no such claim for an action whose effect is not a press", async () => {
+    const f = await fixture();
+    const result = (await f.run({ ref: "e1" }, "tool.fill", async (runner) => {
+      await runner.send(7, "DOM.scrollIntoViewIfNeeded", { backendNodeId: 4 });
+      throw covered();
+    })) as { data: Record<string, unknown> };
+    expect(result.data.effect_state).toBe("unknown");
+    expect(result.data).not.toHaveProperty("press_sent");
+  });
+});
+
+it("passive DOM reads do not revive contexts retained only as strict baselines", async () => {
+  const f = await fixture();
+  const invoke = vi.fn(async () => ({ scope: "current_dom" }));
+  f.controller.invalidate(7);
+  expect(await f.run({}, "tool.read", invoke)).toMatchObject({
+    data: { reason: "control_context_invalid", effect_state: "none" },
+  });
+  expect(invoke).not.toHaveBeenCalled();
+  expect(await f.run({ context_id: undefined }, "tool.read", invoke)).toEqual({
+    scope: "current_dom",
+  });
+  expect(invoke).toHaveBeenCalledOnce();
 });

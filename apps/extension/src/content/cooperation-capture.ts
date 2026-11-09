@@ -186,7 +186,15 @@ export function attachCooperationCapture() {
       if (nested) yield* controls(nested);
     }
   };
+  let documentUrl = location.href;
   const read = () => {
+    // SPA routes retain the DOM document, but cannot retain its action authority.
+    // This also covers child frames; root CDP route events catch away-and-back.
+    if (documentUrl !== location.href) {
+      documentUrl = location.href;
+      state.document = createRandomUuid();
+      state.revision++;
+    }
     mutations(observer.takeRecords());
     const active = activeElement();
     if (editingTarget && (active !== editingTarget || !editable(editingTarget))) {
@@ -330,7 +338,11 @@ export function attachCooperationCapture() {
           expected_event_time: nativeTime,
           event_timestamp: event.timeStamp,
         };
-    if (match) expectation = undefined;
+    if (match)
+      expectation =
+        expected.type === "keydown" && expected.keypress
+          ? { ...expected, type: "keypress" }
+          : undefined;
     return match;
   };
   const humanInput = (event: Event, target: EventTarget | null) => {
@@ -529,9 +541,13 @@ export function attachCooperationCapture() {
         releasedPending = true;
       }
       clearTimeout(eventTimer);
+      const keypress = expectation?.keypress ? expectation : undefined;
       // beforeinput, input and keyboard activation inherit only this event task.
       eventTimer = setTimeout(() => {
         eventAgent = undefined;
+        // A cancelled keydown may produce no keypress. Its expectation cannot
+        // outlive the native task or authorize a later person's submission.
+        if (keypress && expectation === keypress) expectation = undefined;
       }, 0);
       if (state.editing || releasedPending) publish();
       return;

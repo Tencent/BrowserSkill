@@ -106,6 +106,13 @@ pub fn info_for(code: ErrorCode) -> RenderInfo {
             ),
             exit_code: 6,
         },
+        ErrorCode::PairingRequired => RenderInfo {
+            summary: "local browser pairing is required",
+            hint: Some(
+                "run `bsk daemon pair`, then paste the link into the extension's connection settings",
+            ),
+            exit_code: 1,
+        },
         ErrorCode::UnknownMethod => RenderInfo {
             summary: "daemon does not recognise this RPC method",
             hint: Some(
@@ -149,7 +156,7 @@ pub fn info_for(code: ErrorCode) -> RenderInfo {
         ErrorCode::Timeout => RenderInfo {
             summary: "operation timed out",
             hint: Some(
-                "retry the command; if timeouts persist, check `bsk logs` and confirm the browser is still responding",
+                "inspect the application result and synchronize before choosing another action; do not replay an action whose effect is unknown",
             ),
             exit_code: 4,
         },
@@ -237,6 +244,13 @@ pub fn info_for_error(code: ErrorCode, data: Option<&serde_json::Value>) -> Rend
         return base;
     };
     match (code, reason) {
+        (ErrorCode::NoBrowserConnected, "local_pairing_required") => RenderInfo {
+            summary: "the extension needs local pairing",
+            hint: Some(
+                "run `bsk daemon pair`, then paste the link into the extension's connection settings",
+            ),
+            ..base
+        },
         (_, "user_denied") => RenderInfo {
             summary: "the user denied the tab borrow",
             hint: Some("do not repeat the same authorization request"),
@@ -358,7 +372,7 @@ pub fn info_for_error(code: ErrorCode, data: Option<&serde_json::Value>) -> Rend
         (_, "observation_required" | "observation_changed") => RenderInfo {
             summary: "this action needs an explicit current observation",
             hint: Some(
-                "synchronize and pass the reply's top-level observation_id with --observation; do not replay an uncertain action",
+                "for DOM data use read/extract without syncing again; actual scripts/visual actions require a fresh sync and explicit --observation. Never replay uncertain actions",
             ),
             ..base
         },
