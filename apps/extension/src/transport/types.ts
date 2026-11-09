@@ -68,6 +68,7 @@ export type RpcErrorReason =
   | "agent_window_scope"
   | "element_not_visible"
   | "input_not_ready"
+  | "input_clock_unavailable"
   | "input_outcome_unknown"
   | "input_paint_unconfirmed"
   | "input_cleanup_failed"

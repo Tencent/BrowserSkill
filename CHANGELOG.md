@@ -64,6 +64,11 @@ determines which versions can connect.
 
 ### Fixed
 
+- Native clicks, key presses and wheel input calibrate Chromium's input clock so
+  long-running browsers do not misclassify their own input as human intervention
+  after sleep or clock changes. Calibration uses the extension's hidden document,
+  preserves the existing input checks, and reports clock failures before dispatch
+  ([#665](https://github.com/Tencent/BrowserSkill/issues/665)).
 - `fill` notifies each final value once. Native insertion and clearing already
   dispatch `input`; the completion step no longer repeats it
   ([#624](https://github.com/Tencent/BrowserSkill/issues/624)).

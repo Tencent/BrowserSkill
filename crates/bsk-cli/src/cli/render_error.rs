@@ -297,6 +297,13 @@ pub fn info_for_error(code: ErrorCode, data: Option<&serde_json::Value>) -> Rend
             ),
             ..base
         },
+        (_, "input_clock_unavailable") => RenderInfo {
+            summary: "the browser's native input clock could not be calibrated",
+            hint: Some(
+                "synchronize and inspect the application result before deciding again; do not replay an uncertain submission",
+            ),
+            ..base
+        },
         (ErrorCode::CdpFailed, reason::OBSERVE_IDENTITY_RELOAD_LOOP) => RenderInfo {
             summary: "the page kept losing observation identity — the site is likely reloading itself while the debugger is attached (anti-debugging)",
             hint: Some(

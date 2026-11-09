@@ -46,6 +46,21 @@ export class BrowserVideoHost implements VideoHost {
     return true;
   }
 
+  /** A native-clock probe shares this document without interrupting an encoder
+   * or allowing video cleanup to close it while the debugger is attached. */
+  async withDocument<T>(operation: () => Promise<T>): Promise<T> {
+    await this.serialize(async () => {
+      await this.ensure();
+      this.requests++;
+    });
+    try {
+      return await operation();
+    } finally {
+      this.requests--;
+      void this.closeWhenIdle().catch(() => {});
+    }
+  }
+
   async request<T>(command: VideoHostCommand): Promise<T> {
     await this.serialize(async () => {
       await this.ensure();
@@ -110,3 +125,6 @@ export class BrowserVideoHost implements VideoHost {
     });
   }
 }
+
+/** All background consumers must share the offscreen document's lifetime. */
+export const browserVideoHost = new BrowserVideoHost();
