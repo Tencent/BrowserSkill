@@ -28,6 +28,7 @@ import {
   observedChange,
   observedKeyboardTargets,
   observesTarget,
+  preparationEvidence,
   sameObservationEvidence,
 } from "./observation-evidence";
 import { pointerTargetValidator } from "./pointer-target";
@@ -162,9 +163,8 @@ const PASSIVE_DEBUG = new Set<string>(
 const QUIET_MS = 2_000;
 /** Upper bound on nodes whose self-changing text the default check tolerates. */
 const MAX_VOLATILE = 256;
-/** Effects that prepare input by moving scroll, focus or the pointer. Their
- * incidental text and layout changes are not a new page decision. Input that
- * starts the action, and script calls, are never preparation. */
+/** Effects that prepare input before native input starts. Only identified
+ * focus/hover decorations may be excluded from a later DOM-targeted check. */
 const PREPARATION_METHODS = new Set([
   "DOM.scrollIntoViewIfNeeded",
   "DOM.focus",
@@ -1319,6 +1319,8 @@ export class CooperationController implements ControlAuthority {
     let revoked: string | undefined;
     // Whether this action has scrolled, focused or hovered before its input.
     let preparationSent = false;
+    let preparationFocus = false;
+    let preparationHover = false;
     // The first observed difference behind an evidence refusal, for diagnosis.
     let observed:
       | (Partial<ObservedChange> & { scope: string; phase: "decision" | "preparation" })
@@ -1501,14 +1503,14 @@ export class CooperationController implements ControlAuthority {
       const pages = documents(state.frames);
       const volatile =
         tolerant && state.volatile?.documents === pages ? state.volatile.keys : undefined;
-      // Once this action has sent its own preparation (scroll, focus, hover),
-      // its effects on text and layout are not a new page decision: a blurred
-      // field may hide its counter, a hover may show helper text. The full
-      // observation was verified before the first preparation step. Afterwards
-      // keep target presence, form values, checked states, modal layers and
-      // media exact. Human input, control, frame and document changes are still
-      // fenced by interruption(), and the pointer target is checked live.
-      const mode = prepared ? "state" : "full";
+      // Native focus/hover may add or remove an identified input decoration.
+      // Keep all other decision evidence exact, especially explicit dependencies
+      // and actions without a DOM target (including visual clicks).
+      const decorations = prepared && anchored && !visual && TARGET_ACTIONS.has(req.method);
+      const preparation = { focus: preparationFocus, hover: preparationHover };
+      const preparedEvidence = decorations
+        ? preparationEvidence(context.evidence, evidence, actionTarget!, preparation)
+        : undefined;
       type Check = {
         scope: "destination" | "keyboard" | "target" | "dependency" | "page";
         target?: EvidenceTarget;
@@ -1560,11 +1562,14 @@ export class CooperationController implements ControlAuthority {
         list.push({ scope: "page", keys, incidentalMedia: anchored });
         return list;
       };
+      const comparison = (check: Check) =>
+        preparedEvidence && (check.scope === "target" || check.scope === "page")
+          ? preparedEvidence
+          : ([context.evidence!, evidence!] as const);
       const failing = (keys?: ReadonlySet<string>) =>
         checks(keys).find(
           (check) =>
-            !sameObservationEvidence(context.evidence!, evidence!, check.target, check.keys, {
-              mode,
+            !sameObservationEvidence(...comparison(check), check.target, check.keys, {
               incidentalMedia: check.incidentalMedia,
             }),
         );
@@ -1576,8 +1581,7 @@ export class CooperationController implements ControlAuthority {
         return;
       }
       observed = {
-        ...(observedChange(context.evidence, evidence, refusal.target, refusal.keys, {
-          mode,
+        ...(observedChange(...comparison(refusal), refusal.target, refusal.keys, {
           incidentalMedia: refusal.incidentalMedia,
         }) ?? {}),
         scope: refusal.scope,
@@ -1817,7 +1821,11 @@ export class CooperationController implements ControlAuthority {
           dispatch: (startsInput, method) => {
             assert();
             sent = true;
-            if (!startsInput && PREPARATION_METHODS.has(method)) preparationSent = true;
+            if (!startsInput && PREPARATION_METHODS.has(method)) {
+              preparationSent = true;
+              preparationFocus ||= method === "DOM.focus";
+              preparationHover ||= method === "Input.dispatchMouseEvent";
+            }
             nativeInputStarted ||= startsInput || (targeted && primaryEffect(method));
           },
           verifyPointerTarget: async (node, point, offset) => {

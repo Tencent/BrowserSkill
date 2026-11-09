@@ -66,11 +66,12 @@ determines which versions can connect.
 - Removed nodes already collected by CDP report target_detached with node identity, consistently with detached nodes that remain inspectable; other CDP failures remain target_unavailable.
 - Recording captures option changes on native `<select>` controls inside open shadow roots,
   whose `change` events do not reach the document.
-- Strict shared-control actions no longer refuse themselves after their own preparation.
-  Once an action has scrolled, focused or hovered its target, a re-check compares only target
-  presence, form values, checked states, modal layers and media. A counter hidden by blurring
-  the previous field, or helper text shown by a hover, no longer loops `fill` and `click` on
-  "observed content changed" ([#540](https://github.com/Tencent/BrowserSkill/issues/540)).
+- Strict DOM-targeted actions tolerate added or removed noninteractive tooltips after their
+  own hover, and character counters tied to a focused text field by `maxlength` or
+  `aria-describedby` after their own focus. Target meaning, links, ordinary text, form state,
+  modal contents and explicit dependencies stay exact. Scripts, untargeted keys and visual
+  clicks retain the full observation check, including during preparation
+  ([#540](https://github.com/Tencent/BrowserSkill/issues/540)).
 - A targeted strict action without `--depends-on` tolerates a positively identified media
   timeline elsewhere on the page, as it already did with dependencies. Unnamed, submitted and
   in-form sliders, and untargeted actions, stay exact.

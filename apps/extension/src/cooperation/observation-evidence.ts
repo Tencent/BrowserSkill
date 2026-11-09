@@ -29,14 +29,6 @@ export interface EvidenceOptions {
    * actions keep the exact page.
    */
   incidentalMedia?: boolean;
-  /**
-   * `state` compares business state only: target presence, form values,
-   * checked and selected states, modal layers and media players. Text, derived
-   * names, visibility and layout are not compared. This is for checks after
-   * the action's own preparation (scroll, focus, hover), which can change text
-   * and layout without any new decision.
-   */
-  mode?: "full" | "state";
 }
 
 /** The first difference between two observations, for diagnostics only. */
@@ -67,10 +59,12 @@ const semanticAttributes = [
   "aria-disabled",
   "aria-hidden",
   "aria-controls",
+  "aria-describedby",
   "aria-valuemin",
   "aria-valuemax",
   "min",
   "max",
+  "maxlength",
   "step",
   "readonly",
   "required",
@@ -80,23 +74,6 @@ const semanticAttributes = [
 const textRoles = new Set(["StaticText", "InlineTextBox", "ListMarker"]);
 // Attributes that self-updating widgets rewrite alongside their text.
 const contentAttributes = new Set(["aria-label", "title"]);
-// Attributes that describe a control's business state rather than its
-// presentation. Hover and focus may change the others (expanded, hidden).
-const stateAttributes = new Set([
-  "type",
-  "name",
-  "aria-selected",
-  "aria-checked",
-  "aria-pressed",
-  "aria-disabled",
-  "aria-valuemin",
-  "aria-valuemax",
-  "min",
-  "max",
-  "step",
-  "readonly",
-  "required",
-]);
 // Field names of facts(), in order, used to describe a difference.
 const factFields = [
   "frame",
@@ -230,7 +207,7 @@ class Tree {
 }
 
 /** Replaces each occurrence of `value` that is not part of a longer word. */
-function replaceWords(text: string, value: string): string {
+function replaceWords(text: string, value: string, replacement = LEARNED): string {
   let result = "";
   let from = 0;
   for (let at = text.indexOf(value); at !== -1; at = text.indexOf(value, at + 1)) {
@@ -241,7 +218,7 @@ function replaceWords(text: string, value: string): string {
       (end < text.length && wordCharacter.test(text[end]))
     )
       continue;
-    result += text.slice(from, at) + LEARNED;
+    result += text.slice(from, at) + replacement;
     from = end;
   }
   return result + text.slice(from);
@@ -261,6 +238,166 @@ function withoutLearned(name: string | undefined, learned?: ReadonlySet<string>)
   return result;
 }
 
+const controlRoles = new Set([
+  "button",
+  "link",
+  "textbox",
+  "searchbox",
+  "combobox",
+  "checkbox",
+  "radio",
+  "switch",
+  "slider",
+  "spinbutton",
+  "option",
+  "tab",
+  "menuitem",
+]);
+
+function within(tree: Tree, node: VomNode, root: VomNode): boolean {
+  return (
+    tree.within(node, root) ||
+    (node.frameId === root.frameId && (node.domAncestorIds ?? []).includes(root.id))
+  );
+}
+
+/** Remove only identified input decorations after native focus/hover. Callers
+ * must keep explicit dependencies and actions without a DOM target unmodified.
+ * A ratio alone is not evidence of a character counter: it must match a focused
+ * field's value and maxlength, or an explicit aria-describedby association. */
+function withoutPreparationDecorations(
+  evidence: ObservationEvidence,
+  other: ObservationEvidence,
+  target: EvidenceTarget,
+  preparation: { focus: boolean; hover: boolean },
+): ObservationEvidence {
+  const { nodes } = evidence;
+  const tree = new Tree(nodes);
+  const anchor = nodes.find((node) => isTarget(node, target));
+  if (!anchor) return evidence;
+  const present = new Set(other.nodes.map((node) => `${node.frameId ?? ""}:${node.backendNodeId}`));
+  const dialogs = nodes.filter(
+    (node) =>
+      node.modal || node.tag === "dialog" || ["dialog", "alertdialog"].includes(node.role ?? ""),
+  );
+  const controls = (node: VomNode) =>
+    protectedState(node) ||
+    node.sensitive ||
+    node.disabled ||
+    node.inert ||
+    node.focused ||
+    node.clickable ||
+    controlRoles.has(node.role ?? "") ||
+    ["a", "button", "input", "textarea", "select", "video", "audio"].includes(node.tag) ||
+    node.attrs?.tabindex !== undefined ||
+    node.attrs?.contenteditable !== undefined ||
+    node.attrs?.onclick !== undefined ||
+    selectionMarker(node) !== undefined;
+  const fields = preparation.focus
+    ? nodes.filter(
+        (node) =>
+          node.focused &&
+          !node.sensitive &&
+          typeof node.value === "string" &&
+          ["textbox", "searchbox"].includes(node.role ?? ""),
+      )
+    : [];
+  const counter = (node: VomNode) => {
+    const text = node.text ?? (textRoles.has(node.role ?? "") ? node.name : undefined);
+    const match = text && /^(\d+)\s*\/\s*(\d+)$/.exec(clean(text));
+    if (!match) return false;
+    const used = Number(match[1]);
+    const limit = Number(match[2]);
+    return fields.some(
+      (field) =>
+        field.frameId === node.frameId &&
+        used === field.value!.length &&
+        limit > 0 &&
+        ((field.attrs?.maxlength === String(limit) &&
+          !!tree.parent(field) &&
+          within(tree, node, tree.parent(field)!)) ||
+          (!!node.attrs?.id &&
+            (field.attrs?.["aria-describedby"] ?? "").split(/\s+/).includes(node.attrs.id))),
+    );
+  };
+  const decorations = nodes.filter((node) => {
+    // Persistent nodes remain exact, even if they used to be a decoration.
+    if (
+      node.backendNodeId === undefined ||
+      present.has(`${node.frameId ?? ""}:${node.backendNodeId}`)
+    )
+      return false;
+    if (!(preparation.hover && node.role === "tooltip") && !counter(node)) return false;
+    if (within(tree, node, anchor) || dialogs.some((dialog) => within(tree, node, dialog)))
+      return false;
+    // A tooltip or counter containing a control is decision evidence too.
+    return !nodes.some((child) => within(tree, child, node) && controls(child));
+  });
+  if (!decorations.length) return evidence;
+  const omitted = new Set(
+    nodes.filter((node) => decorations.some((root) => within(tree, node, root))),
+  );
+  const names = new Map<VomNode, Set<string>>();
+  for (const node of omitted) {
+    const content = ownContent(node).filter((value): value is string => !!value);
+    for (const holder of tree.ancestors(node).slice(1)) {
+      const fragments = names.get(holder) ?? new Set<string>();
+      for (const value of content) fragments.add(clean(value));
+      names.set(holder, fragments);
+    }
+  }
+  return {
+    ...evidence,
+    nodes: nodes
+      .filter((node) => !omitted.has(node))
+      .map((node) => {
+        if (!node.name || !names.has(node)) return node;
+        let name = node.name;
+        for (const text of [...names.get(node)!].sort((a, b) => b.length - a.length))
+          if (text) name = replaceWords(name, text, "");
+        return { ...node, name: clean(name) };
+      }),
+  };
+}
+
+/** Compare added/removed decorations symmetrically. Stable counter/tooltip
+ * content and state still participate in the normal semantic comparison. */
+export function preparationEvidence(
+  before: ObservationEvidence,
+  after: ObservationEvidence,
+  target: EvidenceTarget,
+  preparation: { focus: boolean; hover: boolean },
+): readonly [ObservationEvidence, ObservationEvidence] {
+  const previous = withoutPreparationDecorations(before, after, target, preparation);
+  const current = withoutPreparationDecorations(after, before, target, preparation);
+  if (previous === before) return [previous, current];
+  const key = (node: VomNode) => `${node.frameId ?? ""}:${node.backendNodeId}`;
+  const originals = new Map(before.nodes.map((node) => [key(node), node]));
+  const normalized = new Map(previous.nodes.map((node) => [key(node), node]));
+  return [
+    previous,
+    {
+      ...current,
+      nodes: current.nodes.map((node) => {
+        const original = originals.get(key(node));
+        const prior = normalized.get(key(node));
+        // semantic-graph/resolve.ts caps DOM-derived names at 240 characters.
+        // Removing a decoration can reveal a previously unobserved suffix.
+        // Keep every known character exact; never shorten the old observation
+        // when an added tooltip hides previously observed text instead.
+        if (
+          original?.name?.length === 240 &&
+          original.name !== prior?.name &&
+          prior?.name &&
+          node.name?.startsWith(prior.name)
+        )
+          return { ...node, name: prior.name };
+        return node;
+      }),
+    },
+  ];
+}
+
 type Part = ObservedChange["part"];
 interface Row {
   node: VomNode;
@@ -277,7 +414,6 @@ function signature(
   volatile?: ReadonlySet<string>,
   options: EvidenceOptions = {},
 ): Signature | undefined {
-  const state = options.mode === "state";
   const nodes = evidence.nodes;
   const tree = new Tree(nodes);
   const anchor = target && nodes.find((node) => isTarget(node, target));
@@ -341,6 +477,7 @@ function signature(
   // Without a target this applies only when the caller checks a resolved
   // action target separately; untargeted actions keep the exact page.
   const media = nodes.filter((node) => node.tag === "video" || node.tag === "audio");
+  const modals = nodes.filter((node) => node.modal);
   const ignoredProgress = new Map<VomNode, VomNode>();
   const explicitlyObserved = (node: VomNode) =>
     !!anchor && (tree.within(node, anchor) || (node.domAncestorIds ?? []).includes(anchor.id));
@@ -361,7 +498,6 @@ function signature(
       if (owner && !explicitlyObserved(owner.node)) ignoredProgress.set(node, owner.node);
     }
   // Identity, structure, state and visibility of learned nodes remain checked.
-  // State mode keeps identity and business state only.
   const facts = (node: VomNode, relax: boolean) => {
     const tolerate = relax && tolerated(node);
     return [
@@ -369,12 +505,10 @@ function signature(
       node.backendNodeId,
       node.role,
       node.tag,
-      state || (tolerate && textRoles.has(node.role ?? ""))
+      tolerate && textRoles.has(node.role ?? "")
         ? undefined
-        : relax
-          ? withoutLearned(node.name, learnedText.get(node))
-          : node.name,
-      state || tolerate ? undefined : node.text,
+        : (relax ? withoutLearned(node.name, learnedText.get(node)) : node.name) || undefined,
+      tolerate ? undefined : node.text,
       ignoredProgress.has(node) ? undefined : node.value,
       node.inForm,
       node.checked,
@@ -382,12 +516,10 @@ function signature(
       node.disabled,
       node.inert,
       node.modal,
-      state ? undefined : !!node.rect && node.rect.w > 0 && node.rect.h > 0,
-      state ? undefined : node.pointerEvents === "none",
+      !!node.rect && node.rect.w > 0 && node.rect.h > 0,
+      node.pointerEvents === "none",
       semanticAttributes.map((key) =>
-        (state && !stateAttributes.has(key)) || (tolerate && contentAttributes.has(key))
-          ? undefined
-          : node.attrs?.[key],
+        tolerate && contentAttributes.has(key) ? undefined : node.attrs?.[key],
       ),
     ];
   };
@@ -396,7 +528,7 @@ function signature(
   return {
     scope: scope && [scope.frameId, scope.backendNodeId],
     parts: [
-      ["region", state ? [] : rows(nodes.filter(inside), true)],
+      ["region", rows(nodes.filter(inside), true)],
       // Form state outside the action region can still determine its meaning.
       [
         "form_state",
@@ -408,7 +540,7 @@ function signature(
       [
         "modal",
         rows(
-          nodes.filter((node) => node.modal),
+          nodes.filter((node) => modals.some((root) => within(tree, node, root))),
           false,
         ),
       ],

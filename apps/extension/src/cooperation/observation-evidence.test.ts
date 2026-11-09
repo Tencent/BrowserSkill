@@ -1,6 +1,11 @@
 import type { VomNode } from "@browser-skill/vom";
 import { describe, expect, it } from "vitest";
-import { contentChanges, observedChange, sameObservationEvidence } from "./observation-evidence";
+import {
+  contentChanges,
+  observedChange,
+  preparationEvidence,
+  sameObservationEvidence,
+} from "./observation-evidence";
 
 const node = (id: number, parentId: number | null, role: string, name = ""): VomNode => ({
   id,
@@ -514,43 +519,159 @@ it("rejects a change in form membership even when the timeline value is unchange
   expect(sameObservationEvidence(before, after, target)).toBe(false);
 });
 
-describe("state comparison after the action's own preparation", () => {
+describe("identified decorations after the action's own preparation", () => {
   const editor = () => [
-    node(1, null, "form"),
-    { ...node(2, 1, "textbox", "Title"), value: "Chapter 1", inForm: true },
+    node(1, null, "form", "Title 9/30 Body"),
+    {
+      ...node(2, 1, "textbox", "Title"),
+      value: "Chapter 1",
+      inForm: true,
+      focused: true,
+      attrs: { maxlength: "30" },
+    },
     { ...node(3, 1, "generic"), text: "9/30" },
     { ...node(4, 1, "textbox", "Body"), value: "", inForm: true },
   ];
   const body = { backendNodeId: 4, frameId: "frame" };
-  const state = { mode: "state" } as const;
+  const preparation = { focus: true, hover: true };
+  const compare = (before: VomNode[], after: VomNode[], target = body) =>
+    sameObservationEvidence(
+      ...preparationEvidence({ nodes: before }, { nodes: after }, target, preparation),
+      target,
+    );
 
-  it("ignores text, derived names, visibility and presentation attributes", () => {
-    const before = { nodes: editor() };
+  it("allows a removed character counter and an added noninteractive tooltip", () => {
+    const before = editor();
     const after = structuredClone(before);
     // Blurring the title removes its counter; a hover shows helper text.
-    after.nodes.splice(2, 1);
-    after.nodes[0].name = "Title Body";
-    after.nodes.push({ ...node(5, 1, "tooltip"), text: "Press Enter to save" });
-    after.nodes[2].attrs = { "aria-expanded": "true", title: "Body text" };
-    after.nodes[1].rect = { x: 0, y: 0, w: 0, h: 0 };
-    expect(sameObservationEvidence(before, after, body)).toBe(false);
-    expect(sameObservationEvidence(before, after)).toBe(false);
-    expect(sameObservationEvidence(before, after, body, undefined, state)).toBe(true);
-    expect(sameObservationEvidence(before, after, undefined, undefined, state)).toBe(true);
+    after.splice(2, 1);
+    after[1].focused = false;
+    after[0].name = "Title Body Press Enter to save";
+    after.push({ ...node(5, 1, "tooltip"), text: "Press Enter to save" });
+    expect(sameObservationEvidence({ nodes: before }, { nodes: after }, body)).toBe(false);
+    expect(compare(before, after)).toBe(true);
+    expect(
+      sameObservationEvidence(
+        ...preparationEvidence({ nodes: before }, { nodes: after }, body, preparation),
+      ),
+    ).toBe(true);
   });
 
   it.each([
     ["value", (nodes: VomNode[]) => (nodes[1].value = "Chapter 2")],
     ["checked", (nodes: VomNode[]) => nodes.push({ ...node(6, 1, "checkbox"), checked: true })],
     ["disabled", (nodes: VomNode[]) => (nodes[1].disabled = true)],
+    ["selection", (nodes: VomNode[]) => (nodes[3].attrs = { "aria-selected": "true" })],
     ["modal", (nodes: VomNode[]) => nodes.push({ ...node(7, null, "dialog"), modal: true })],
     ["required", (nodes: VomNode[]) => (nodes[1].attrs = { required: "" })],
+    ["maxlength", (nodes: VomNode[]) => (nodes[1].attrs = { maxlength: "40" })],
+    ["visibility", (nodes: VomNode[]) => (nodes[3].rect = { x: 0, y: 0, w: 0, h: 0 })],
+    ["name", (nodes: VomNode[]) => (nodes[3].name = "Delete")],
+    ["href", (nodes: VomNode[]) => (nodes[3].attrs = { href: "#delete" })],
+    [
+      "ordinary text",
+      (nodes: VomNode[]) => nodes.push({ ...node(8, 1, "generic"), text: "$1000" }),
+    ],
     ["removed target", (nodes: VomNode[]) => nodes.splice(3, 1)],
   ])("keeps %s exact", (_kind, change) => {
-    const before = { nodes: editor() };
+    const before = editor();
     const after = structuredClone(before);
-    change(after.nodes);
-    expect(sameObservationEvidence(before, after, body, undefined, state)).toBe(false);
+    change(after);
+    expect(compare(before, after)).toBe(false);
+  });
+
+  it.each([
+    "unfocused",
+    "unbound",
+    "wrong length",
+    "wrong limit",
+    "other field group",
+  ])("does not infer a character counter from a ratio alone (%s)", (kind) => {
+    const before = editor();
+    if (kind === "unfocused") before[1].focused = false;
+    if (kind === "unbound") before[1].attrs = {};
+    if (kind === "wrong length") before[2].text = "1/30";
+    if (kind === "wrong limit") before[2].text = "9/100";
+    if (kind === "other field group") before[2].parentId = null;
+    const after = before.filter((node) => node.id !== 3);
+    expect(
+      sameObservationEvidence(
+        ...preparationEvidence({ nodes: before }, { nodes: after }, body, preparation),
+      ),
+    ).toBe(false);
+  });
+
+  it("keeps a counter exact when focus changes but the counter remains", () => {
+    const before = editor();
+    const after = structuredClone(before);
+    after[1].focused = false;
+    expect(compare(before, after)).toBe(true);
+    after[2].text = "100/300";
+    expect(compare(before, after)).toBe(false);
+  });
+
+  it("allows only the newly revealed suffix of a clipped name after counter removal", () => {
+    const before = editor();
+    const prefix = "Chapter ".repeat(40);
+    before[0].name = `9/30 ${prefix}`.slice(0, 240);
+    const after = before.filter((node) => node.id !== 3).map((node) => ({ ...node }));
+    after[0].name = prefix.slice(0, 240);
+    expect(compare(before, after)).toBe(true);
+    after[0].name = `Changed ${prefix}`.slice(0, 240);
+    expect(compare(before, after)).toBe(false);
+  });
+
+  it("does not drop a previously observed suffix hidden by a newly added tooltip", () => {
+    const before = editor();
+    const prefix = "Chapter ".repeat(40);
+    before[0].name = prefix.slice(0, 240);
+    const after = structuredClone(before);
+    after[0].name = `Hint ${prefix}`.slice(0, 240);
+    after.push({ ...node(5, 1, "tooltip"), text: "Hint" });
+    expect(compare(before, after)).toBe(false);
+  });
+
+  it("does not discard a tooltip containing a control", () => {
+    const before = editor();
+    const after = [
+      ...before,
+      { ...node(5, 1, "tooltip"), text: "Confirm" },
+      node(6, 5, "button", "Delete"),
+    ];
+    expect(compare(before, after)).toBe(false);
+  });
+
+  it("keeps all modal content exact even outside the action region", () => {
+    const before = [
+      ...editor(),
+      { ...node(9, null, "dialog", "Confirm"), modal: true },
+      { ...node(10, 9, "generic"), text: "Deleting 1 file" },
+    ];
+    const after = structuredClone(before);
+    after[5].text = "Deleting 100 files";
+    expect(compare(before, after)).toBe(false);
+  });
+
+  it("retains a tooltip when it is the target or appears inside a modal", () => {
+    const before = [...editor(), { ...node(5, 1, "tooltip"), text: "Warning" }];
+    const after = before.filter((node) => node.id !== 5);
+    expect(compare(before, after, { backendNodeId: 5, frameId: "frame" })).toBe(false);
+    before[0].modal = true;
+    expect(compare(before, after)).toBe(false);
+  });
+
+  it("does not apply focus or hover exceptions before those effects were sent", () => {
+    const before = editor();
+    const after = before.filter((node) => node.id !== 3);
+    expect(
+      sameObservationEvidence(
+        ...preparationEvidence({ nodes: before }, { nodes: after }, body, {
+          focus: false,
+          hover: false,
+        }),
+        body,
+      ),
+    ).toBe(false);
   });
 });
 
