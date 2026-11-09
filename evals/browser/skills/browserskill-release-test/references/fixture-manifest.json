@@ -5,10 +5,13 @@
   "fixtures/dialogs.html": "b6139e4129f82be5dedcf99c8c31e69086981985ffcca49dd0d0a263cb217e35",
   "fixtures/edgecases.html": "4f80db6ccfcccdd57085deed8197829bba8147586c80dd0a2a7ee885a1bc94a7",
   "fixtures/extra.html": "b6a7745c405dc375a2b825c85dec5cc8295110517cca85c6dd50b85f84c4660c",
+  "fixtures/forum-hub.html": "dfd848f941b20da1f811d794a2159721a425aa59f38efa4cf64ab31a5b82185a",
   "fixtures/live-update.html": "b326858fcac891eb01b095ec5d1b51503c5174f1742673c5e890a1e301564a55",
   "fixtures/media.html": "e287181e2c92b2d29f8d520b5a9fd90858646bceb9288c7586996f6af4d4a2e5",
   "fixtures/minimal.html": "3cdf27435dc024e7d9290aa9c41684924933f05e7f008be782fd4dcc15a179c2",
   "fixtures/new-media.html": "b90731de4e3d4dc20b0984939093cc7909383058f47facc869e27b5538dbbcb9",
+  "fixtures/plan-recipe-lab.html": "41a6277f3571c54f4fd1eb5fdd78e5358e662fdba3326ca8ae15976b38878dcd",
   "fixtures/pointer-semantic.html": "c8c2f2ed43089787bd46246b0a6b6245661251dc40dda89f965b56f04ebdf161",
+  "fixtures/video-portal.html": "25b4ba828fabd92589a471a754e2cc3e60c68ebf89480d400f3b3da9b4932068",
   "fixtures/workbench.html": "c8278012f54d606738847b1373e4017d2b8ecd3e20f5db959fa7f001282282d1"
 }

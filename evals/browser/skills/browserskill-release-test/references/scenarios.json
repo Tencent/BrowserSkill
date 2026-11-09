@@ -623,5 +623,200 @@
       "evaluate": 8
     },
     "recipe": "references/dynamic-pages.md"
+  },
+  {
+    "id": "PLAN-BATCH-FORM",
+    "kind": "workflow",
+    "page_type": "batch-plan",
+    "goal": "/plan-recipe-lab：target 策略下一次 cooperate sync 后，用单次 bsk plan 批量执行级联表单（fill 申请人、select 省份、wait-for-element 等待异步城市 option 挂载、带步骤级 expect 校验的 select 城市与套餐、click 勾选与生成回执），配合 --until-visible '#plan-summary' 与 --save-full。验证 1 个交互轮次完成全部步骤（ok:true，completed>=5）、返回新 post.context_id，且服务端仅收到一次数值精确匹配的 plan-applied 事件。",
+    "required_commands": ["cooperate sync", "plan", "read"]
+  },
+  {
+    "id": "PLAN-UNTARGETED-AND-CACHE",
+    "kind": "workflow",
+    "page_type": "batch-plan",
+    "goal": "/plan-recipe-lab 或 /workbench：验证 bsk plan 首步为无目标动作（wheel 或 press 携带 --observation）加后续有目标 DOM 动作；随后在不改变页面结构的 sync/plan 上传入 --baseline 与 --save-full 验证 observation_origin.kind:reused，并用 bsk view 本地检索 --find 与行范围（确认 browser_calls:0 且 historical:true）。",
+    "required_commands": ["cooperate sync", "plan", "view"]
+  },
+  {
+    "id": "NEG-PLAN-MIDSTEP-EXPECT",
+    "kind": "workflow",
+    "page_type": "batch-plan",
+    "goal": "/plan-recipe-lab：先 sync 读取单价 ¥120，触发涨价为 ¥260 后执行多步 bsk plan（第1步 fill 申请人，第2步带 expect 单价=¥120 的 click 生成回执，第3步 fill 覆盖）。验证第1步完成、第2步因 expect 不匹配停止（ok:false，completed:1，stopped.index:1，stopped.effect_state:'none'，not_run:[2]），返回可重规划的 post.context_id，且 planAppliedCount 未增加。",
+    "required_commands": ["plan"],
+    "negative": true,
+    "allow_plan_stopped": true
+  },
+  {
+    "id": "NEG-PLAN-WAIT-UNSATISFIED",
+    "kind": "workflow",
+    "page_type": "batch-plan",
+    "goal": "/plan-recipe-lab：bsk plan 内嵌 wait-for-element 等待不存在选择器 #never-ready（timeout_ms:150）后跟 click，验证在等待步中止（ok:false，stopped.reason:'wait_unsatisfied'，stopped.effect_state:'none'），后续 click 进入 not_run 未触发。",
+    "required_commands": ["plan"],
+    "negative": true,
+    "check_effect": false,
+    "allow_plan_stopped": true
+  },
+  {
+    "id": "NEG-PLAN-CONTRACT",
+    "kind": "workflow",
+    "page_type": "batch-plan",
+    "goal": "测试 bsk plan 本地参数与协议护栏（如第2步包含无目标 press/wheel、在 plan 顶层误传 --expect、步骤数超过20或含 navigate/evaluate），确认在发送任何请求前拒绝且原合法 context 仍可继续使用。",
+    "required_commands": ["plan"],
+    "negative": true,
+    "check_effect": false,
+    "allow_plan_stopped": true
+  },
+  {
+    "id": "RECIPE-LIFECYCLE",
+    "kind": "workflow",
+    "page_type": "recipe",
+    "goal": "/plan-recipe-lab?view=form：在真实会话用 plan/fill 完成开户申请预览后，在停止会话前执行 bsk recipe draft 导出草稿（核对 draft 不含敏感输入明文与 query secret）；审查补齐 until 与 outputs 后执行 recipe save、recipe list、recipe show（初始 status:draft）；再执行 bsk recipe run 验证自动创建并关闭 recipe:<name> 会话、status:'completed'、outputs 精确匹配、show 状态升为 verified；最后用临时副本验证 recipe rm。",
+    "required_commands": [
+      "recipe draft",
+      "recipe save",
+      "recipe list",
+      "recipe show",
+      "recipe run",
+      "recipe rm"
+    ]
+  },
+  {
+    "id": "RECIPE-DRIFT-RESILIENCE",
+    "kind": "workflow",
+    "page_type": "recipe",
+    "goal": "/recipe/report：保存含 requires、interrupts（自动关闭订阅优惠弹窗）与 outputs 的报表查询 recipe，依次对 drift=none、ids（随机元素ID）、order（字段顺序调换+干扰按钮）、late（延迟渲染）、popup（已知弹窗中断）、rerender（查询按钮重渲染）执行 bsk recipe run，验证全部 status:'completed'、outputs.total 精确等于 1300，且 /events 中无 /recipe/wrong 或 /recipe/draft 误触发。",
+    "required_commands": ["recipe save", "recipe run"],
+    "required_command_counts": {
+      "recipe run": 6
+    }
+  },
+  {
+    "id": "RECIPE-MULTI-SEGMENT-SESSION",
+    "kind": "workflow",
+    "page_type": "recipe",
+    "goal": "在调用方已启动的 --session 中运行含 2 个 segments（第1段在 /recipe/report 查询季度金额，第2段通过段内 navigate 跳转 /recipe/form?for={{company}} 并校验 requires 后填写预览）的 recipe，验证 status:'completed'、steps_done:4、outputs 正确，且调用方 session 保持打开未自动关闭。",
+    "required_commands": ["session start", "recipe save", "recipe run", "session stop"]
+  },
+  {
+    "id": "NEG-RECIPE-HANDOFF",
+    "kind": "workflow",
+    "page_type": "recipe",
+    "goal": "/recipe/report：对语义漂移页面运行 bsk recipe run，覆盖 drift=label（target_not_found）、drift=duplicate（target_ambiguous）、drift=login 或 unknown-popup（requires_failed）、跨域跳转（origin_mismatch）及 drift=required（until_timeout）。验证均以 exit 1、status:'handoff' 及精确 reason 安全停下，零错误点击，保留打开的 session_id、post.context_id 与 remaining 供接管；连续3次同一步骤 handoff 后 recipe show 状态变为 stale。",
+    "required_commands": ["recipe run", "recipe show"],
+    "negative": true,
+    "check_effect": false,
+    "allow_recipe_handoff": true
+  },
+  {
+    "id": "NEG-RECIPE-REFUSAL",
+    "kind": "workflow",
+    "page_type": "recipe",
+    "goal": "验证 bsk recipe 安全拒止边界：(1) 保存含不可逆提交按钮（如“立即支付提交” commit step）的 recipe 被拒绝（exit 2，saved:false）；(2) 缺失必填 --param 或传入非法枚举值在启动会话前被拒绝（exit 2，status:'refused'，reason:'invalid_params'）；(3) 在借用标签页或不存在 recipe 名上运行返回 status:'refused'。",
+    "required_commands": ["recipe save", "recipe run"],
+    "negative": true,
+    "check_effect": false,
+    "allow_recipe_refusal": true
+  },
+  {
+    "id": "READ-DYNAMIC-BOUNDED",
+    "kind": "workflow",
+    "page_type": "per-second-dynamic",
+    "goal": "/live-update 与 /workbench：在持续动画/每秒更新页面及 iframe/shadow 节点上使用 bsk read（覆盖 --selector 与 --ref，--fields-json 同时读取 text、attribute、value、checked、exists，以及 --max-nodes 与 --max-bytes 限制），证明无需 evaluate 即可零 JS 注入、有界且准确地读取实时 DOM 字段。",
+    "required_commands": ["read", "cooperate sync"],
+    "required_command_counts": {
+      "read": 3
+    }
+  },
+  {
+    "id": "EDGE-VIRTUAL-LIST-RECYCLE",
+    "kind": "workflow",
+    "page_type": "edge-cases",
+    "goal": "/forum-hub 与 /edgecases：测试虚拟列表视口切换（点击切换视口行 20-25）与行复用场景，验证切换后对已卸载旧行 ref 的操作被安全拒绝，新视口下的表格与列表通过 extract table / extract list / read 完整提取且不拆行、不串列。",
+    "required_commands": ["cooperate sync", "click", "extract table", "extract list", "read"]
+  },
+  {
+    "id": "EDGE-STACKED-MODALS",
+    "kind": "workflow",
+    "page_type": "edge-cases",
+    "goal": "/video-portal?modal=2：双层模态框叠加遮罩下，先 sync 核对 VOM @layers 与顶层焦点层；验证此时直接点击底层播放控件被拒绝（target_covered，effect_state:'none'）；再使用 Bsk 依次关闭顶层 modal-2 与下层 modal-1（每关一层均 fresh sync 确认图层收敛），最后成功操作底层控件。",
+    "required_commands": ["cooperate sync", "click", "read"]
+  },
+  {
+    "id": "EDGE-EDITOR-BOUNDARIES",
+    "kind": "workflow",
+    "page_type": "edge-cases",
+    "goal": "/workbench#forms：测试 contenteditable 富文本根节点 fill 覆盖、fill '' 清空、fill --no-clear 追加并核对 DOM 与事件；同时测试对编辑器内部后代节点直接 fill 按合同拒绝（code:'invalid_params'，reason:'target_not_fillable'）且不破坏编辑器内容。",
+    "required_commands": ["fill", "read", "click"]
+  },
+  {
+    "id": "EDGE-SPA-PUSHSTATE-RACE",
+    "kind": "workflow",
+    "page_type": "edge-cases",
+    "goal": "/forum-hub：测试同文档 history.pushState 切换节点 Tab、进入主题详情与 popstate/navigate back 返回列表，配合 step/plan 的 --until-visible 确认等待真实目标挂载，不将路由切换前的旧列表或骨架当成新页面数据。",
+    "required_commands": ["step", "plan", "navigate back", "read"]
+  },
+  {
+    "id": "LOCAL-VIDEO-PORTAL",
+    "kind": "workflow",
+    "page_type": "video-site",
+    "goal": "/video-portal?modal=1：本地视频门户端到端 Benchmark：先定位并关闭高清登录引导弹层，使用 bsk plan 一轮次完成（切换 1.5x 倍速、跳至章节2、展开视频简介），用 bsk read 读取 #player-state 与视频元数据，用 extract list 抽取右侧推荐视频与评论列表，加载更多评论并截图取证。",
+    "required_commands": ["cooperate sync", "click", "plan", "read", "extract list", "screenshot"]
+  },
+  {
+    "id": "LOCAL-FORUM-HUB",
+    "kind": "workflow",
+    "page_type": "forum-site",
+    "goal": "/forum-hub：本地开发者论坛端到端 Benchmark：使用 bsk plan 切换节点 Tab 并按关键词/热度筛选，用 extract list 提取主题列表（核对置顶帖与零回复帖字段对齐不串行），进入一条主题帖用 bsk read 读取正文代码片段与楼层回复，再用 bsk recipe 保存并重放一次节点热帖巡检。",
+    "required_commands": [
+      "cooperate sync",
+      "plan",
+      "extract list",
+      "read",
+      "recipe save",
+      "recipe run"
+    ]
+  },
+  {
+    "id": "PUBLIC-BILIBILI-FEED",
+    "kind": "workflow",
+    "page_type": "video-site",
+    "goal": "真实视频网站 https://www.bilibili.com/ 首页：若出现可关闭的登录提示弹层先用 Bsk 关闭并 fresh sync 确认；结合 wheel / plan 触发推荐流与分区加载，使用 extract list / read 提取至少 10 条当前可见视频卡片（标题、UP主、播放量/时长、链接、封面图加载状态），记录交互轮次与耗时。",
+    "required_commands": [
+      "navigate",
+      "cooperate sync",
+      "wheel",
+      "extract list",
+      "read",
+      "screenshot"
+    ]
+  },
+  {
+    "id": "PUBLIC-BILIBILI-PLAYER",
+    "kind": "workflow",
+    "page_type": "video-site",
+    "goal": "真实视频网站 https://www.bilibili.com/ 公开视频详情页：从首页或公开视频链接进入播放页，若播放或交互触发自动登录遮罩，必须先用 Bsk 定位关闭按钮并 fresh sync 验证遮罩消失；通过 read / evaluate 读取真实 <video> 状态（readyState、duration、currentTime、paused）及标题/统计信息，使用 plan 或 click 执行安全只读交互（如展开简介或切换静音/暂停）并截图核验。严禁发弹幕/点赞/投币/评论。",
+    "required_commands": ["navigate", "cooperate sync", "read", "evaluate", "click", "screenshot"]
+  },
+  {
+    "id": "PUBLIC-FORUM-TOPICS",
+    "kind": "workflow",
+    "page_type": "forum-site",
+    "goal": "真实论坛网站 https://www.v2ex.com/：打开首页及公开技术节点（如 ?tab=tech 或 /go/programmer），使用 plan 或 step 切换节点 Tab，通过 extract list 与 read 抽取至少 20 条真实主题帖（标题、节点、作者、回复数、最后回复时间、链接），核对零回复帖与多回复帖字段不串行，并用 bsk recipe 固化及重放一次公开节点列表读取。",
+    "required_commands": [
+      "navigate",
+      "cooperate sync",
+      "extract list",
+      "read",
+      "recipe save",
+      "recipe run"
+    ]
+  },
+  {
+    "id": "PUBLIC-FORUM-THREAD",
+    "kind": "workflow",
+    "page_type": "forum-site",
+    "goal": "真实论坛网站 https://www.v2ex.com/ 帖子详情与楼层阅读：从列表进入一条含多条回复的公开主题帖，等待正文与回复列表渲染，使用 read / get-html 读取主帖正文与前 N 楼回复（楼层号、作者、时间、正文内容），执行滚动与 navigate back 返回主题列表并核对 URL 与列表恢复。严禁发帖/回帖/感谢。",
+    "required_commands": ["click", "cooperate sync", "read", "get-html", "wheel", "navigate back"]
   }
 ]

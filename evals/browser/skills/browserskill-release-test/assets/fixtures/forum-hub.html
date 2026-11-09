@@ -1,0 +1,207 @@
+<!doctype html>
+<html lang="zh-CN">
+<meta charset="utf-8">
+<title>开发者社区论坛 · Forum Hub Benchmark</title>
+<style>
+  * { box-sizing: border-box; }
+  body { font: 15px system-ui, sans-serif; margin: 0; background: #e2e8f0; color: #1e293b; }
+  header { background: #fff; border-bottom: 1px solid #cbd5e1; padding: 12px 24px; display: flex; justify-content: space-between; align-items: center; }
+  nav { display: flex; gap: 8px; flex-wrap: wrap; }
+  button, select, input { font: inherit; padding: 6px 12px; border-radius: 6px; border: 1px solid #94a3b8; background: #fff; cursor: pointer; }
+  button[aria-current="page"] { background: #2563eb; color: #fff; border-color: #1d4ed8; }
+  main { max-width: 1060px; margin: 20px auto; display: grid; gap: 16px; padding: 0 16px; }
+  .box { background: #fff; border-radius: 8px; border: 1px solid #cbd5e1; padding: 16px; }
+  .topic-item { display: flex; justify-content: space-between; align-items: center; padding: 12px 8px; border-bottom: 1px solid #e2e8f0; }
+  .badge { background: #eff6ff; color: #1d4ed8; padding: 2px 8px; border-radius: 999px; font-size: 13px; }
+  .reply-pill { background: #64748b; color: #fff; padding: 2px 10px; border-radius: 12px; font-weight: 600; }
+  .floor { border-top: 1px solid #e2e8f0; padding: 12px 4px; }
+  pre { background: #0f172a; color: #f8fafc; padding: 10px; border-radius: 6px; overflow-x: auto; }
+  output { display: block; background: #f1f5f9; padding: 10px; border-radius: 6px; margin-top: 8px; white-space: pre-wrap; }
+  .split-grid { display: grid; grid-template-columns: 120px 1fr; border: 1px solid #cbd5e1; margin-top: 12px; }
+  .split-cell { padding: 8px; border-bottom: 1px solid #e2e8f0; }
+</style>
+<header>
+  <strong>V2-Style 开发者论坛 · Forum Hub</strong>
+  <nav aria-label="节点分类">
+    <button type="button" class="tab-btn" data-tab="all" aria-current="page">全部</button>
+    <button type="button" class="tab-btn" data-tab="tech">技术</button>
+    <button type="button" class="tab-btn" data-tab="ai">Agent & AI</button>
+    <button type="button" class="tab-btn" data-tab="qna">问与答</button>
+  </nav>
+</header>
+<main>
+  <section class="box" id="forum-filter-box">
+    <h1>社区主题广场</h1>
+    <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center">
+      <label>关键词筛选 <input id="topic-keyword" placeholder="搜索主题标题..."></label>
+      <label>排序方式
+        <select id="topic-sort" aria-label="排序方式">
+          <option value="hot">按热度</option>
+          <option value="latest">按最新回复</option>
+        </select>
+      </label>
+      <button type="button" id="apply-forum-filter">筛选主题</button>
+      <button type="button" id="recycle-virtual-window">切换到虚拟列表下一视口 (Rows 20-25)</button>
+    </div>
+    <output id="forum-status">当前节点: all (共 6 条)</output>
+  </section>
+
+  <section class="box" id="topic-list-box">
+    <h2 id="topic-list-heading">主题列表</h2>
+    <div id="topic-list" role="list"></div>
+  </section>
+
+  <section class="box" id="thread-detail-box" hidden>
+    <button type="button" id="back-to-list">← 返回主题列表</button>
+    <h2 id="thread-title"></h2>
+    <div id="thread-meta"></div>
+    <article id="thread-body"></article>
+    <h3>全部回复 (<span id="reply-total">0</span>)</h3>
+    <div id="floor-list" role="list"></div>
+  </section>
+
+  <section class="box" id="split-grid-box">
+    <h2>分栏积分榜（Split-Grid 与行回收测试）</h2>
+    <table id="contributor-table">
+      <caption>社区贡献榜</caption>
+      <thead><tr><th>排名</th><th>用户</th><th>技术节点数</th><th>采纳率</th></tr></thead>
+      <tbody id="contributor-tbody"></tbody>
+    </table>
+  </section>
+</main>
+<script>
+  const $ = (s) => document.querySelector(s);
+  const emit = (type, data = {}) => fetch('/event', { method: 'POST', body: JSON.stringify({ type, ...data }) });
+
+  const allTopics = [
+    { id: 101, tab: 'tech', node: 'Rust', title: 'bsk CLI 单飞队列与 Unix Socket 线序实现细节', author: 'ferris_cn', replies: 42, pinned: true, lastReply: '3 分钟前' },
+    { id: 102, tab: 'ai', node: 'Agent', title: '为什么浏览器自动化必须区分 effect_state: none | committed | unknown？', author: 'coop_arch', replies: 68, pinned: false, lastReply: '8 分钟前' },
+    { id: 103, tab: 'tech', node: 'Chromium', title: '跨源 OOPIF 与 Shadow DOM 下的 VOM 坐标投影踩坑记录', author: 'cdp_hacker', replies: 19, pinned: false, lastReply: '15 分钟前' },
+    { id: 104, tab: 'qna', node: '问与答', title: '新问题：零回复帖（无最后回复人字段，测试列表对齐）', author: 'newbie_dev', replies: 0, pinned: false, lastReply: '' },
+    { id: 105, tab: 'ai', node: 'Benchmark', title: 'bsk plan 与 bsk recipe 在多步表单上能省多少交互轮次？', author: 'eval_bot', replies: 35, pinned: false, lastReply: '21 分钟前' },
+    { id: 106, tab: 'tech', node: 'WebMCP', title: 'MV3 扩展 Service Worker 心跳保活与会话恢复设计', author: 'ext_lead', replies: 27, pinned: false, lastReply: '40 分钟前' },
+  ];
+
+  let currentTab = new URLSearchParams(location.search).get('tab') || 'all';
+  let virtualWindowOffset = 0;
+
+  function renderContributorTable(offset = 0) {
+    const rows = Array.from({ length: 5 }, (_, i) => {
+      const rank = offset + i + 1;
+      return `<tr data-rank="${rank}">
+        <td>#${rank}</td>
+        <td>contributor_${rank}</td>
+        <td>${120 - rank * 3}</td>
+        <td>${(98 - rank * 0.5).toFixed(1)}%</td>
+      </tr>`;
+    }).join('');
+    $('#contributor-tbody').innerHTML = rows;
+  }
+  renderContributorTable(0);
+
+  function renderTopics() {
+    const kw = $('#topic-keyword').value.trim().toLowerCase();
+    const sort = $('#topic-sort').value;
+    let filtered = allTopics.filter((t) => (currentTab === 'all' || t.tab === currentTab) && (!kw || t.title.toLowerCase().includes(kw)));
+    if (sort === 'hot') {
+      filtered = [...filtered].sort((a, b) => b.replies - a.replies);
+    }
+    $('#topic-list').innerHTML = filtered.map((t) => `
+      <article class="topic-item" role="listitem" data-topic-id="${t.id}">
+        <div>
+          ${t.pinned ? '<span class="badge">置顶</span>' : ''}
+          <span class="badge">${t.node}</span>
+          <a href="/forum-hub?topic=${t.id}" class="topic-link" data-id="${t.id}">${t.title}</a>
+          <div class="meta">作者: <strong>${t.author}</strong> ${t.lastReply ? `· 最后回复: ${t.lastReply}` : ''}</div>
+        </div>
+        <span class="reply-pill" aria-label="回复数">${t.replies}</span>
+      </article>
+    `).join('');
+    $('#forum-status').textContent = `当前节点: ${currentTab} | 排序: ${sort} | 匹配主题: ${filtered.length} 条 | 视口偏移: ${virtualWindowOffset}`;
+    document.querySelectorAll('.topic-link').forEach((link) => {
+      link.onclick = (e) => {
+        e.preventDefault();
+        openThread(Number(link.dataset.id), true);
+      };
+    });
+  }
+
+  function openThread(topicId, push = false) {
+    const topic = allTopics.find((t) => t.id === topicId) || allTopics[0];
+    if (push) history.pushState({ topicId: topic.id }, '', `/forum-hub?topic=${topic.id}`);
+    $('#topic-list-box').hidden = true;
+    $('#thread-detail-box').hidden = false;
+    $('#thread-title').textContent = topic.title;
+    $('#thread-meta').textContent = `节点: ${topic.node} · 作者: ${topic.author} · 回复: ${topic.replies}`;
+    $('#thread-body').innerHTML = `
+      <p>这是主题 #${topic.id} 的完整正文。在真实论坛测评中，Agent 需要能够稳定提取主题列表、进入帖子详情并读取楼层代码片段：</p>
+      <pre><code id="thread-code">bsk plan --session SID --context CTX --steps '[{"action":"click","ref":"@e1"}]'</code></pre>
+    `;
+    const floors = [
+      { no: 1, user: 'reviewer_1', time: '10 分钟前', text: '沙发！实测 bsk read 无需执行页面 JS 就能安全读取楼层。' },
+      { no: 2, user: 'reviewer_2', time: '6 分钟前', text: '二楼附议，配合 bsk recipe 可以做到 0 模型轮次巡检技术节点。' },
+      { no: 3, user: 'author_reply', time: '2 分钟前', text: '感谢反馈，已加入发版前 Benchmark 套件！' },
+    ];
+    $('#reply-total').textContent = String(floors.length);
+    $('#floor-list').innerHTML = floors.map((f) => `
+      <div class="floor" role="listitem" data-floor="${f.no}">
+        <strong>#${f.no} ${f.user}</strong> <span class="time">${f.time}</span>
+        <p class="floor-content">${f.text}</p>
+      </div>
+    `).join('');
+    emit('forum-thread-opened', { topicId: topic.id, title: topic.title });
+  }
+
+  document.querySelectorAll('.tab-btn').forEach((btn) => {
+    btn.onclick = () => {
+      document.querySelectorAll('.tab-btn').forEach((b) => b.removeAttribute('aria-current'));
+      btn.setAttribute('aria-current', 'page');
+      currentTab = btn.dataset.tab;
+      $('#thread-detail-box').hidden = true;
+      $('#topic-list-box').hidden = false;
+      history.pushState({ tab: currentTab }, '', `/forum-hub?tab=${currentTab}`);
+      renderTopics();
+      emit('forum-tab-switched', { tab: currentTab });
+    };
+  });
+
+  $('#apply-forum-filter').onclick = () => {
+    renderTopics();
+    emit('forum-filter-applied', {
+      tab: currentTab,
+      keyword: $('#topic-keyword').value.trim(),
+      sort: $('#topic-sort').value,
+    });
+  };
+
+  $('#recycle-virtual-window').onclick = () => {
+    virtualWindowOffset += 20;
+    renderContributorTable(virtualWindowOffset);
+    renderTopics();
+    emit('forum-virtual-recycled', { offset: virtualWindowOffset });
+  };
+
+  $('#back-to-list').onclick = () => {
+    $('#thread-detail-box').hidden = true;
+    $('#topic-list-box').hidden = false;
+    history.pushState({ tab: currentTab }, '', `/forum-hub?tab=${currentTab}`);
+    renderTopics();
+    emit('forum-back-to-list', { tab: currentTab });
+  };
+
+  window.addEventListener('popstate', () => {
+    const params = new URLSearchParams(location.search);
+    if (params.get('topic')) openThread(Number(params.get('topic')), false);
+    else {
+      currentTab = params.get('tab') || 'all';
+      $('#thread-detail-box').hidden = true;
+      $('#topic-list-box').hidden = false;
+      renderTopics();
+    }
+  });
+
+  const initTopic = new URLSearchParams(location.search).get('topic');
+  renderTopics();
+  if (initTopic) openThread(Number(initTopic), false);
+</script>
+</html>
