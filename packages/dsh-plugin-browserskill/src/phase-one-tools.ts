@@ -6,6 +6,7 @@ import { registerPhaseOneInteractionTools } from "./phase-one-tools-interaction"
 import { registerPhaseOneNavigationTools } from "./phase-one-tools-navigation";
 import { registerPhaseOneSupportTools } from "./phase-one-tools-support";
 import { registerPhaseOneTabTools } from "./phase-one-tools-tabs";
+import { registerPlanTool } from "./plan-tool";
 import { registerReadTool } from "./read-tool";
 import { registerScriptFileTools } from "./script-file-tools";
 import type { ToolDeps } from "./tools";
@@ -27,4 +28,5 @@ export function registerPhaseOneTools(
   registerReadTool(deps, register, runtime);
   registerScriptFileTools(deps, register, runtime);
   registerGestureObservationTools(deps, register, runtime);
+  registerPlanTool(deps, register, runtime);
 }

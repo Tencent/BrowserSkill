@@ -15,6 +15,7 @@ import {
   STEP_PARAMETERS,
   VIEW_PARAMETERS,
 } from "./gesture-observation-tools";
+import { PLAN_PARAMETERS } from "./plan-tool";
 import { READ_PARAMETERS } from "./read-tool";
 import toolNames from "./tool-names.json";
 import {
@@ -299,8 +300,9 @@ const BROWSER_TOOL_SPECS: BrowserToolSpec[] = [
   {
     name: toolNames.interact,
     description:
-      "Interact with the active Agent Window tab. Actions: click, hover, wheel, drag, step, scroll-to, focus, blur, fill, select, " +
+      "Interact with the active Agent Window tab. Actions: click, hover, wheel, drag, step, plan, scroll-to, focus, blur, fill, select, " +
       "drag requires target plus to or a nonzero deltaX/deltaY. step runs one stepAction using params JSON, then optional untilVisible readiness and read-only sync; inspect ok/action/readiness/post before deciding what to do next and never blindly replay an action. " +
+      "Under target policy, plan runs several steps already decided from one sync (form fields, filters) in one call, then syncs: the first failing step stops it and nothing is retried; read completed, stopped with its effect_state, and not_run. Keep steps that depend on an earlier step's result, and irreversible actions that expect does not protect, for later calls. " +
       "press, evaluate, upload, download. evaluate requires expression; upload requires target/files; download requires target/output. click/hover/scroll-to/focus/blur/fill/select require target; fill also requires value; select requires " +
       "values; press requires key and may optionally focus target first. wheel requires a nonzero deltaX or deltaY and optionally accepts target; observe afterwards to check the response.",
     actions: {
@@ -309,6 +311,7 @@ const BROWSER_TOOL_SPECS: BrowserToolSpec[] = [
       wheel: "interact.wheel",
       drag: "interact.drag",
       step: "interact.step",
+      plan: "interact.plan",
       "scroll-to": "interact.scroll-to",
       focus: "interact.focus",
       blur: "interact.blur",
@@ -324,6 +327,7 @@ const BROWSER_TOOL_SPECS: BrowserToolSpec[] = [
       tabId: TAB_ID_PARAM,
       ...DRAG_PARAMETERS,
       ...STEP_PARAMETERS,
+      ...PLAN_PARAMETERS,
       target: TARGET_PARAM,
       button: {
         type: "string",

@@ -30,6 +30,7 @@ import {
   type BskRunner,
   bskInstallMessage,
   isCommandNotFound,
+  isCompositeResult,
   isNavigationLifecycleTimeoutPayload,
   type ParseBskJsonOptions,
   parseBskJson,
@@ -148,9 +149,9 @@ async function runBsk(
             ...(observeSession !== undefined ? { tag: observeSession } : {}),
           });
         };
-        // A step owns its single action plus read-only recovery. Never retry the
+        // A step or plan owns its actions plus read-only recovery. Never retry the
         // whole composite call, even when an error resembles session contention.
-        return parseOptions.allowStepResult
+        return isCompositeResult(parseOptions)
           ? invoke()
           : runWithSessionBusyRetry(invoke, exec.signal);
       };
@@ -168,14 +169,16 @@ async function runBsk(
       }
       throw error;
     }
-    if (result.aborted && !parseOptions.allowStepResult) {
+    if (result.aborted && !isCompositeResult(parseOptions)) {
       const error = new Error("tool call aborted");
       error.name = "AbortError";
       throw error;
     }
     const parsed = parseBskJson(result, label, parseOptions);
-    if (parseOptions.allowStepResult && (parsed as { ok?: boolean }).ok === false) {
-      actionError = "step needs attention; inspect the action and observation results";
+    if (isCompositeResult(parseOptions) && (parsed as { ok?: boolean }).ok === false) {
+      actionError = parseOptions.allowPlanResult
+        ? "plan needs attention; inspect the stopped step and observation results"
+        : "step needs attention; inspect the action and observation results";
     }
     return parsed;
   } catch (error) {

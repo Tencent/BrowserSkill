@@ -411,6 +411,13 @@ export interface ParseBskJsonOptions {
    * An aborted run must explicitly acknowledge cancellation; execution
    * timeouts, killed processes and ordinary error envelopes still throw. */
   allowStepResult?: boolean;
+  /** Preserve a validated plan reply, including a stopped plan, on the same terms. */
+  allowPlanResult?: boolean;
+}
+
+/** A composite result keeps its receipt and is never retried as a whole. */
+export function isCompositeResult(options: ParseBskJsonOptions): boolean {
+  return options.allowStepResult === true || options.allowPlanResult === true;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -531,6 +538,44 @@ function isStepResultPayload(value: unknown, exitCode: number | null): boolean {
   );
 }
 
+const EFFECT_STATES = ["none", "committed", "unknown"];
+
+/**
+ * Match the CLI's plan reply and its exit status: the completed steps come first,
+ * a stopped plan names the step after them and its effect, and `ok` follows the exit.
+ */
+function isPlanResultPayload(value: unknown, exitCode: number | null): boolean {
+  if (
+    !isRecord(value) ||
+    typeof value.ok !== "boolean" ||
+    !Number.isSafeInteger(value.completed) ||
+    !Number.isSafeInteger(value.total) ||
+    !nonnegativeNumber(value.elapsed_ms) ||
+    (value.cancelled !== undefined && value.cancelled !== true) ||
+    (value.post !== undefined && !isRecord(value.post)) ||
+    (value.storage_error !== undefined && typeof value.storage_error !== "string")
+  )
+    return false;
+  const completed = value.completed as number;
+  const total = value.total as number;
+  if (total < 1 || total > 20 || completed < 0 || completed > total) return false;
+  const stopped = value.stopped;
+  if (stopped === undefined) {
+    if (completed !== total && value.cancelled !== true) return false;
+  } else if (
+    !isRecord(stopped) ||
+    stopped.index !== completed ||
+    typeof stopped.action !== "string" ||
+    !EFFECT_STATES.includes(String(stopped.effect_state)) ||
+    !Array.isArray(value.not_run)
+  ) {
+    return false;
+  }
+  if (exitCode === null) return false;
+  if (value.cancelled === true) return value.ok === false && exitCode !== 0;
+  return value.ok === (exitCode === 0);
+}
+
 /**
  * True when stdout is a navigation/history payload whose lifecycle wait
  * expired (`reached: "timeout"`). Used to distinguish that soft timeout from
@@ -562,23 +607,24 @@ export function parseBskJson(
     throw new BskError(`bsk ${commandLabel} timed out`, { timedOut: true });
   }
   const body = result.stdout.trim();
-  if (options.allowStepResult === true) {
+  if (isCompositeResult(options)) {
     let payload: unknown;
     try {
       payload = JSON.parse(body);
     } catch {
       // Ordinary malformed-output handling below preserves the original error.
     }
-    if (
-      isStepResultPayload(payload, result.code) &&
-      (!result.aborted || (isRecord(payload) && payload.cancelled === true))
-    )
+    const valid = options.allowPlanResult
+      ? isPlanResultPayload(payload, result.code)
+      : isStepResultPayload(payload, result.code);
+    if (valid && (!result.aborted || (isRecord(payload) && payload.cancelled === true)))
       return payload;
     if (result.aborted) throw abortError();
     if (result.code === 0)
-      throw new BskError(`bsk ${commandLabel} did not produce a valid step result`, {
-        exitCode: result.code,
-      });
+      throw new BskError(
+        `bsk ${commandLabel} did not produce a valid ${options.allowPlanResult ? "plan" : "step"} result`,
+        { exitCode: result.code },
+      );
   }
   // Killed by our own interrupt (SIGINT from killFor), not by the abort path:
   // say so instead of doubling the generic label into the message.

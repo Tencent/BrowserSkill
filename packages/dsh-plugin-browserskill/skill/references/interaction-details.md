@@ -73,6 +73,36 @@ It may not shorten ordinary pages. Use `bsk_inspect action: "view"` with `file` 
 window. `view` is offline and accepts no session/tab/context/dependencies. Its
 historical refs and context never refresh or authorize a live action.
 
+## Several decided actions
+
+Under target policy, `bsk_interact` with `action: "plan"` runs several actions already
+decided from one sync, such as a form's fields or a report's filters, then synchronizes, so
+one call replaces one call per action. Each entry of `steps` is an `action` beside that
+action's protocol fields and optional `expect`:
+
+```text
+bsk_interact({ action: "plan", session: "<id>", contextId: "<observed-id>", steps: [
+  { action: "fill", ref: "@e3", value: "Ada" },
+  { action: "select", ref: "@e4", values: ["CN"] },
+  { action: "click", ref: "@e5", expect: [{ target: "@e9", field: "text", equals: "$12" }] }
+] })
+```
+
+Actions are click, fill, select, press, hover, scroll-to, wheel and drag, plus
+`wait-for-element` for a condition later steps need. A plan holds 1 to 20 steps; only the
+first may be untargeted, with `observationId`. Each step passes the same control, target and
+`expect` checks as its own action. Put `expect` on the step it protects, not on the call.
+
+- Include only what is already decided. A step that depends on what an earlier step
+  reveals belongs in the next call.
+- The first step that does not complete stops the plan; nothing is retried or rolled back.
+  Read `completed`, `stopped` with its `effect_state`, and `not_run`, then replan from `post`.
+  Never repeat a step whose `effect_state` is `unknown`, or that reported `dialog_pending`.
+- Send an irreversible action such as submit or pay on its own after reading the state,
+  unless `expect` on that step protects the facts it depends on.
+- Under strict policy, use one action per sync instead; focus, blur, navigation and
+  evaluate also run on their own.
+
 ## Observation continuation
 
 No default token cap. With `maxTokens`, pass `nextCursor` as observe's `cursor` to

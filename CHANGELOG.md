@@ -32,6 +32,8 @@ determines which versions can connect.
   call, then return the synchronized state, so a form or a set of filters takes one
   model turn instead of one per action. Each step keeps the checks of its own command,
   and the first step that does not complete stops the plan without any retry.
+- The DSH plugin runs decided actions together with `bsk_interact(action=plan)`, with the
+  same checks, stopping rule and receipt as `bsk plan`.
 - `bsk recipe` saves a verified flow as a local file and replays it, returning its
   outputs without a model turn per step; MCP lists `bsk_recipe` with `BSK_RECIPES=1`.
   Targets match exactly by role, name and context, and a run stops at the first deviation
