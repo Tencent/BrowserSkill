@@ -913,6 +913,7 @@ export async function handleRecordStart(
     observation:
       traceVersionOrErr === 3 && deps.cdp
         ? new RecordingObservationRuntime({
+            sessionId: params.session_id,
             cdp: deps.cdp,
             tabsApi: deps.tabsApi,
             maxTokens: maxPageTokens,

@@ -158,6 +158,7 @@ export async function handleWindowResize(
     const bounds = size(await deps.windows.get(ctx.agentWindowId));
     if (!bounds) throw new Error("the browser did not return usable window bounds");
     beforeWindow = bounds;
+    deps.cdp.trackSessionTab?.(ctx.sessionId, target.tabId);
     beforeViewport = await viewport(deps.cdp, target.tabId);
   } catch (error) {
     if (signal?.aborted) return { code: "cancelled", message: "window_resize aborted" };

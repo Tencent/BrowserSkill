@@ -24,6 +24,7 @@ interface PendingCapture {
 export class RecordingObservationRuntime {
   readonly #cdp: CdpRunner;
   readonly #tabsApi: ChromeTabsApi;
+  readonly #sessionId?: string;
   readonly #registry = new RecordingStateRegistry();
   readonly #annotations: StepAnnotation[] = [];
   readonly #contexts = new Map<number, TabRecordingContext>();
@@ -32,12 +33,14 @@ export class RecordingObservationRuntime {
   #cancelled = false;
 
   constructor(input: {
+    sessionId?: string;
     cdp: CdpRunner;
     tabsApi: ChromeTabsApi;
     maxTokens?: number;
     redactValues?: boolean;
     isTabAllowed?: (tabId: number) => boolean;
   }) {
+    this.#sessionId = input.sessionId;
     const check = (tabId: number) => {
       if (this.#cancelled || (input.isTabAllowed && !input.isTabAllowed(tabId))) {
         throw new Error("Recording capture is no longer authorized");
@@ -64,6 +67,7 @@ export class RecordingObservationRuntime {
               }
             : undefined,
           getAttachmentId: input.cdp.getAttachmentId?.bind(input.cdp),
+          trackSessionTab: input.cdp.trackSessionTab?.bind(input.cdp),
           ensureAttachedToUrl: input.cdp.ensureAttachedToUrl
             ? async (tabId, url) => {
                 check(tabId);
@@ -107,6 +111,7 @@ export class RecordingObservationRuntime {
     const context = this.#context(tabId);
     if (context.pendingCapture) return context.pendingCapture.promise;
 
+    if (this.#sessionId) this.#cdp.trackSessionTab?.(this.#sessionId, tabId);
     const abort = new AbortController();
     let pending!: PendingCapture;
     const promise = context.session.capture(this.#cdp, this.#tabsApi, tabId, abort.signal);

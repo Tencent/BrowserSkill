@@ -131,6 +131,11 @@ export function attachSessionEventHandler(options: SessionEventHandlerOptions): 
     // the window itself. Capture the cause before asynchronous cleanup so the
     // normal stop response, rather than a user-close event, ends the audit.
     const expectedClose = manager.isWindowCloseExpected(ctx);
+    const ownedTabs = new Set([
+      ...ctx.agentCreatedTabs,
+      ...ctx.borrowedTabs.keys(),
+      ...(ctx.observedTabs ?? []),
+    ]);
     const returnFailures = Array.from(ctx.borrowedTabs.keys()).map((tabId) => ({
       tab_id: tabId,
       code: "cdp_failed",
@@ -142,10 +147,28 @@ export function attachSessionEventHandler(options: SessionEventHandlerOptions): 
         returnFailures,
       );
     }
+    if (!expectedClose) {
+      manager.release(ctx.sessionId);
+      ctx.refStore.clear();
+      try {
+        options.onSessionReleased?.(ctx);
+      } catch (error) {
+        console.debug("[bh] session release callback failed", error);
+      }
+    }
     const detach = options.cdp
-      ? options.cdp.detachSession(ctx.sessionId).catch((err) => {
-          console.debug("[bh] session-event cdp detach failed", err);
-        })
+      ? Promise.all([
+          ...(!expectedClose && options.cdp.releaseSessionTab
+            ? Array.from(ownedTabs, (id) =>
+                options.cdp!.releaseSessionTab!(ctx.sessionId, id).catch((err) => {
+                  console.debug("[bh] session-event tab cdp release failed", err);
+                }),
+              )
+            : []),
+          options.cdp.detachSession(ctx.sessionId).catch((err) => {
+            console.debug("[bh] session-event cdp detach failed", err);
+          }),
+        ])
       : Promise.resolve();
     void detach
       .then(() => manager.stop(ctx.sessionId, { dropOnly: true }))

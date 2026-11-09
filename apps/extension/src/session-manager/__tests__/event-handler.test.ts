@@ -108,19 +108,27 @@ describe("attachSessionEventHandler", () => {
     await manager.start("aa11");
     const transport = fakeTransport();
     const events = fakeWindowEvents();
-    const cdp = { detachSession: vi.fn(async () => {}) };
+    const cdp = {
+      detachSession: vi.fn(async () => {}),
+      releaseSessionTab: vi.fn(async () => {}),
+    };
+    const onSessionReleased = vi.fn();
 
     attachSessionEventHandler({
       manager,
       transport,
       windowEvents: events.api,
       cdp,
+      onSessionReleased,
     });
     expect(events.listenerCount()).toBe(1);
 
     events.emit(4242);
+    expect(manager.has("aa11")).toBe(false);
+    expect(onSessionReleased).toHaveBeenCalledTimes(1);
     await vi.waitUntil(() => transport.sent.length > 0);
 
+    expect(cdp.releaseSessionTab).toHaveBeenCalledWith("aa11", 1);
     expect(cdp.detachSession).toHaveBeenCalledWith("aa11");
     expect(manager.has("aa11")).toBe(false);
     expect(transport.sent).toEqual([

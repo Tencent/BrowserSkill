@@ -105,6 +105,13 @@ const activeHelpRequests = new Map<string, ActiveHelpRequest>();
 export function hasActiveHelp(sessionId: string): boolean {
   return [...activeHelpRequests.values()].some((help) => help.ctx.sessionId === sessionId);
 }
+
+export function clearHelpForSession(sessionId: string): void {
+  for (const help of activeHelpRequests.values()) {
+    if (help.ctx.sessionId !== sessionId) continue;
+    void finishHelp(help, { code: "cancelled", message: "request_help session ended" });
+  }
+}
 const helpRearmTimers = new Map<number, ReturnType<typeof setTimeout>>();
 
 let defaultDeps: RequestHelpDeps | null = null;
@@ -223,6 +230,13 @@ async function resolveHelpTargets(
   const rects: HelpHighlightRect[] = [];
   const resolved: ResolvedTarget[] = [];
   let rootNodeId: number | undefined;
+  if (
+    deps.cdp &&
+    ctx &&
+    targets.some((target) => Boolean(target.selector) || Boolean(target.ref))
+  ) {
+    deps.cdp.trackSessionTab?.(ctx.sessionId, tabId);
+  }
   if (deps.cdp && targets.some((target) => Boolean(target.selector))) {
     try {
       const doc = await deps.cdp.send<{ root?: { nodeId?: number } }>(tabId, "DOM.getDocument", {
@@ -635,6 +649,7 @@ async function evaluateCompletionCondition(
       return true;
     })()`;
     try {
+      help.deps.cdp.trackSessionTab?.(help.ctx.sessionId, help.primaryTabId);
       const result = await help.deps.cdp.send<{ result?: { value?: boolean } }>(
         help.primaryTabId,
         "Runtime.evaluate",

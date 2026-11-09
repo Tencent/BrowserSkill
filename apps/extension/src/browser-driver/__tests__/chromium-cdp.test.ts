@@ -2081,3 +2081,43 @@ it("preserves a navigation wait budget when its frame-tree read takes more than 
   cdp.dispose();
   expect(result).toMatchObject({ reached: "load" });
 });
+
+describe("session and tab lifecycle reconciliation", () => {
+  it("forgetClosedTab detaches and clears ownership for a closed tab", async () => {
+    const { api } = fakeApi();
+    const cdp = new ChromiumCdp(api);
+    await cdp.acquireBackgroundExecution("aa11", 4);
+    expect(cdp.isAttached(4)).toBe(true);
+    expect(cdp.ownsBackgroundExecution("aa11", 4)).toBe(true);
+
+    cdp.forgetClosedTab(4);
+    await vi.waitFor(() => expect(api.detach).toHaveBeenCalledWith({ tabId: 4 }));
+    expect(cdp.isAttached(4)).toBe(false);
+    expect(cdp.ownsBackgroundExecution("aa11", 4)).toBe(false);
+    cdp.dispose();
+  });
+
+  it("syncSessions releases dead session owners and detaches all tabs when no sessions remain", async () => {
+    const { api } = fakeApi();
+    const cdp = new ChromiumCdp(api);
+    await cdp.ensureAttached(1);
+    await cdp.ensureAttached(2);
+    await cdp.ensureAttached(3);
+    cdp.trackSessionTab("aa11", 1);
+    cdp.trackSessionTab("bb22", 2);
+    // Tab 3 was attached without a tracked owner.
+
+    await cdp.syncSessions(new Set(["bb22"]));
+    expect(cdp.isAttached(1)).toBe(false);
+    expect(cdp.isAttached(2)).toBe(true);
+    expect(cdp.isAttached(3)).toBe(true);
+
+    await cdp.syncSessions(new Set());
+    expect(cdp.isAttached(2)).toBe(false);
+    expect(cdp.isAttached(3)).toBe(false);
+    expect(api.detach).toHaveBeenCalledWith({ tabId: 1 });
+    expect(api.detach).toHaveBeenCalledWith({ tabId: 2 });
+    expect(api.detach).toHaveBeenCalledWith({ tabId: 3 });
+    cdp.dispose();
+  });
+});

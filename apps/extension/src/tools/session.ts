@@ -9,6 +9,7 @@ import { type SessionManager, SessionStartCleanupError } from "@/session-manager
 import { detectBrowserMeta } from "@/transport/handshake";
 import type { InteractionPolicy, RpcError } from "@/transport/types";
 import { rpcError } from "./errors";
+import { clearHelpForSession } from "./human-loop";
 import { clearRecordingForSession } from "./record";
 import type { CdpRunner, ChromeTabsApi } from "./shared";
 import { isRpcError } from "./shared";
@@ -243,6 +244,7 @@ async function stopSession(
   // Remote access must end before returning a tab. Preserve the local recording
   // when a failed return keeps its session alive for a retry.
   if (ctx.remote) clearRecordingForSession(params.session_id);
+  clearHelpForSession(params.session_id);
 
   // Step 1: auto-return borrowed tabs. Iterate over a snapshot of the
   // ids so deletions during iteration do not break the Map iterator.
@@ -462,6 +464,11 @@ async function stopSession(
           // Restricted pages and unloaded content scripts cannot receive messages.
         });
       }
+      await Promise.all(
+        observedTabIds.map((tabId) =>
+          deps.cdp?.releaseSessionTab?.(ctx.sessionId, tabId).catch(() => {}),
+        ),
+      );
       result.window_released = true;
     } else {
       // Close the window and any remaining agent-owned tabs.
