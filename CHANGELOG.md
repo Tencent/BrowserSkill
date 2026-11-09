@@ -104,6 +104,8 @@ determines which versions can connect.
   frame collection fails, instead of masking them as `control_context_invalid`. Pre-drop
   `dragEnter` refusals also keep `effect_state: none` without dispatching a redundant
   `dragCancel` ([#636](https://github.com/Tencent/BrowserSkill/issues/636)).
+- Recording preserves clicks on submit, reset and image input buttons, including
+  actions beside search fields, and uses reset buttons' visible values as names.
 
 ### Fixed
 
