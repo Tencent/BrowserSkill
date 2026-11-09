@@ -401,6 +401,100 @@ describe.each(["strict", "target"] as const)("completed action receipts (%s)", (
     expect(await f.run()).toHaveProperty("code");
     expect(f.send).toHaveBeenCalledOnce();
   });
+
+  it("preserves set_file_input_failed when upload cleanup detaches the debugger", async () => {
+    const f = await fixture(policy);
+    f.cdp.detach = vi.fn(async (tabId: number) => {
+      // Production background.ts wires ChromiumCdp.onDocumentChanged to
+      // invalidateTabRefs + cooperation.invalidate on every debugger detach.
+      f.session.refStore.invalidateTab(tabId);
+      f.controller.invalidate(tabId);
+    });
+    const refusal = {
+      code: "cdp_failed" as const,
+      message: "DOM.setFileInputFiles failed: -32000 Not allowed",
+      data: {
+        reason: "set_file_input_failed",
+        phase: "set_files",
+        effect_state: "unknown" as const,
+        recovery:
+          "Inspect the page before retrying; the file input may or may not have been updated.",
+      },
+    };
+
+    const result = await f.run({ ref: "e1" }, "tool.upload", async (runner) => {
+      await runner.send(7, "Page.setInterceptFileChooserDialog", { enabled: true });
+      await runner.send(7, "DOM.setFileInputFiles", {
+        backendNodeId: 4,
+        files: ["/stage/tiny.txt"],
+      });
+      await runner.detach?.(7);
+      return refusal;
+    });
+
+    expect(result).toEqual(refusal);
+    expect(f.cdp.detach).toHaveBeenCalledExactlyOnceWith(7, undefined);
+    expect(f.controller.view(7)).toMatchObject({ mode: "syncing" });
+    expect(await f.run()).toMatchObject({
+      code: "permission_denied",
+      data: {
+        reason: policy === "target" ? "control_context_invalid" : "cooperation_sync_required",
+        effect_state: "none",
+      },
+    });
+    const next = await f.sync();
+    expect(next.context_id).not.toBe(f.first.context_id);
+  });
+
+  it("preserves file_drop_failed with effect_state none when drag_enter is rejected", async () => {
+    const f = await fixture(policy);
+    const refusal = {
+      code: "cdp_failed" as const,
+      message: "Input.dispatchDragEvent failed: -32000 Not allowed",
+      data: {
+        reason: "file_drop_failed",
+        phase: "drag_enter",
+        effect_state: "none" as const,
+        recovery:
+          "Retry the drop when the target is ready, or upload through a file input instead.",
+      },
+    };
+
+    const result = await f.run({ ref: "e1", mode: "drop" }, "tool.upload", async (runner) => {
+      await runner.send(7, "Runtime.callFunctionOn", {
+        objectId: "drop-target",
+        functionDeclaration: "function() { return true; }",
+      });
+      return refusal;
+    });
+
+    expect(result).toEqual(refusal);
+    if (policy === "target") expect(await f.run()).toEqual({});
+  });
+
+  it("preserves an upload refusal when the post-action collector is unavailable", async () => {
+    const f = await fixture(policy);
+    const refusal = {
+      code: "invalid_params" as const,
+      message: "Target did not open a file chooser and is not an <input type=file>",
+      data: {
+        reason: "upload_target_not_file_input",
+        phase: "open_chooser",
+        effect_state: "none" as const,
+        recovery: "Choose the <input type=file> or the control that opens the file chooser.",
+      },
+    };
+
+    const result = await f.run({ ref: "e1" }, "tool.upload", async (runner) => {
+      await runner.send(7, "Page.setInterceptFileChooserDialog", { enabled: true });
+      f.readFrames.mockRejectedValueOnce(new Error("frame is loading"));
+      return refusal;
+    });
+
+    expect(result).toEqual(refusal);
+    expect(f.controller.view(7)).toMatchObject({ mode: "unavailable" });
+    expect(await f.run()).toMatchObject({ code: "permission_denied" });
+  });
 });
 
 describe("negotiated target control", () => {

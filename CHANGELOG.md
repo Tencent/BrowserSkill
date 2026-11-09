@@ -66,6 +66,12 @@ determines which versions can connect.
 - Removed nodes already collected by CDP report target_detached with node identity, consistently with detached nodes that remain inspectable; other CDP failures remain target_unavailable.
 - Recording captures option changes on native `<select>` controls inside open shadow roots,
   whose `change` events do not reach the document.
+- `upload` preserves its concrete handler failure receipts (`set_file_input_failed` and
+  `file_drop_failed`, such as `-32000 Not allowed` when Chrome's "Allow access to file URLs"
+  extension toggle is off) when transaction cleanup detaches the debugger or post-action
+  frame collection fails, instead of masking them as `control_context_invalid`. Pre-drop
+  `dragEnter` refusals also keep `effect_state: none` without dispatching a redundant
+  `dragCancel` ([#636](https://github.com/Tencent/BrowserSkill/issues/636)).
 
 ### Fixed
 

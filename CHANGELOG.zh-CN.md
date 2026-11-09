@@ -36,6 +36,7 @@ CLI、扩展和 DSH 插件可以分别发布，能否连接由协议兼容性决
 - 控制状态采样在浏览器证实失败的子文档已退出后有界重新收集一次；仍存在但不可观测的框架继续阻止输入。
 - 已被 CDP 回收的移除节点与仍可检查的脱离节点统一返回 target_detached，并保留节点身份；其他 CDP 故障仍返回 target_unavailable。
 - 录制捕获 open shadow root 内原生 `<select>` 的选项变化；这类控件的 `change` 事件不会到达 document。
+- `upload` 在事务清理主动断开 debugger 或操作后框架收集失败时保留具体的处理器失败回执（如未开启扩展“允许访问文件网址”权限时的 `set_file_input_failed` 与 `file_drop_failed` `-32000 Not allowed`），不再将其掩盖为 `control_context_invalid`；`dragEnter` 立即拒绝时保持 `effect_state: none`，且不再冗余发送 `dragCancel`（[#636](https://github.com/Tencent/BrowserSkill/issues/636)）。
 
 ### 修复
 

@@ -1323,7 +1323,9 @@ export class CooperationController implements ControlAuthority {
       expectations.every(({ target }) => !/^@?e\d+$/.test(target) || mainDocumentRef(target));
     const observedFramesChanged = () =>
       !mainDocumentAction && context !== undefined && context.frameEpoch !== state.frameEpoch;
-    const epoch = state.epoch;
+    let epoch = state.epoch;
+    let detachedByHandler = false;
+    let postRefreshFailed = false;
     const authorityRevision = state.authorityRevision;
     let verifiedFrames = context?.frames;
     let evidenceTargets: { backendNodeId: number; frameId?: string }[] | undefined;
@@ -1348,7 +1350,10 @@ export class CooperationController implements ControlAuthority {
           : observedFramesChanged() ||
               (context && context.frames.get(0)?.document !== state.frames.get(0)?.document)
             ? "document_changed"
-            : state.unavailable || state.epoch !== epoch || this.controlError(session, state)
+            : state.unavailable ||
+                state.epoch !== epoch ||
+                detachedByHandler ||
+                this.controlError(session, state)
               ? "control_context_invalid"
               : undefined;
       const issue =
@@ -1415,7 +1420,9 @@ export class CooperationController implements ControlAuthority {
     const assert = () => {
       signal.throwIfAborted();
       if (checkFailure) throw new ActionCheckError(checkFailure);
-      const reason = interruption();
+      const reason =
+        interruption() ??
+        (detachedByHandler ? "The observed page or control state changed; synchronize" : undefined);
       if (reason) {
         if (!targetPolicy && context && state.context === context) state.context = undefined;
         // Refusing a strict observation must not discard the reusable DOM context.
@@ -1780,6 +1787,29 @@ export class CooperationController implements ControlAuthority {
             if (!nativeInputStarted) await verifyDecision();
             nativeInputStarted = true;
           },
+          detach: cdp.detach
+            ? async (tabId, expectedAttachmentId) => {
+                const intact =
+                  tabId === state.tabId &&
+                  !state.unavailable &&
+                  state.epoch === epoch &&
+                  !detachedByHandler;
+                await cdp.detach!(tabId, expectedAttachmentId);
+                if (intact && state.epoch <= epoch + 1) {
+                  // Handler cleanup detaches the debugger to fence uncertain CDP
+                  // state, which triggers onDocumentChanged -> invalidate(tabId).
+                  // Revoke the control context for subsequent actions without masking
+                  // the handler's own failure receipt on an otherwise intact page.
+                  detachedByHandler = true;
+                  if (state.epoch === epoch) state.epoch++;
+                  state.context = undefined;
+                  state.learned = undefined;
+                  epoch = state.epoch;
+                  state.unavailable = false;
+                  this.changed(state);
+                }
+              }
+            : undefined,
         }),
         operationSignal,
         completionSignal,
@@ -1807,13 +1837,16 @@ export class CooperationController implements ControlAuthority {
         !isRpcError(result) &&
         (req.method !== "tool.evaluate" || (result as { ok?: boolean })?.ok === true);
       if (["tool.evaluate", "tool.upload"].includes(req.method)) {
+        const intact = !state.unavailable && state.epoch === epoch;
         try {
           await this.refresh(state);
         } catch (error) {
-          if (!completed) throw error;
+          if (!completed && !(isRpcError(result) && intact)) throw error;
           // A new frame may not yet expose its collector. Retain the completed
-          // receipt, but require a fresh sync before any further page action.
+          // receipt (or the handler's own refusal), but require a fresh sync
+          // before any further page action.
           this.invalidate(state.tabId);
+          if (isRpcError(result) && intact) postRefreshFailed = true;
         }
       }
       // Even a successful CDP reply does not authorize a stale next step.
@@ -1829,12 +1862,18 @@ export class CooperationController implements ControlAuthority {
           },
         };
       }
-      const reason = revoked ?? interruption(completed);
+      const reason =
+        revoked ??
+        interruption(completed || postRefreshFailed) ??
+        (!completed && !isRpcError(result) && detachedByHandler
+          ? "The observed page or control state changed; synchronize"
+          : undefined);
       if (checkFailure || reason)
         return reportFailure(checkFailure?.message ?? reason!, sent ? "unknown" : "none");
       if (targetPolicy && isRpcError(result)) {
         const effect = result.data?.effect_state ?? (sent ? "unknown" : "none");
-        if (effect === "unknown") state.context = undefined;
+        if (effect === "unknown" || detachedByHandler || postRefreshFailed)
+          state.context = undefined;
         return {
           ...result,
           data: {
