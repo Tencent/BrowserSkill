@@ -8,6 +8,7 @@
 
 import type { CdpDebuggee, CdpDispatchGuard, DialogCursor } from "@/browser-driver/chromium-cdp";
 import type { CdpFrameGraph, CdpTarget } from "@/browser-driver/frame-graph";
+import { shareScreencasts } from "@/browser-driver/screencast-coordinator";
 import {
   isAgentControlledTab,
   type SessionContext,
@@ -141,6 +142,95 @@ export function cdpRunnerForTarget(cdp: CdpRunner, target: CdpTarget): CdpRunner
     send: <T = unknown>(_tabId: number, method: string, params?: object) =>
       sendToCdpTarget<T>(cdp, target, method, params),
   };
+}
+
+const sessionRunners = new WeakMap<object, Map<string, CdpRunner>>();
+const TAB_SCOPED_CDP_METHODS = new Set([
+  "getFrameGraph",
+  "ensureAttached",
+  "ensureAttachedToUrl",
+  "ensureConsoleCapture",
+  "ensureNetworkCapture",
+  "setDeviceMetricsOverride",
+  "clearDeviceMetricsOverride",
+  "setUserAgentOverride",
+  "setTouchEmulationEnabled",
+]);
+
+/**
+ * Bind a CDP runner to `sessionId` so any tab-attaching command automatically
+ * records session ownership before touching the tab's debugger connection.
+ */
+export function sessionCdpRunner<T extends CdpRunner>(
+  cdp: T,
+  sessionId: string,
+  isLive?: () => boolean,
+): T {
+  let bySession = sessionRunners.get(cdp);
+  const existing = bySession?.get(sessionId);
+  if (existing) return existing as T;
+
+  const track = (tabId: number) => {
+    if (typeof tabId === "number" && (!isLive || isLive())) {
+      cdp.trackSessionTab?.(sessionId, tabId);
+    }
+  };
+  const wrapper = new Proxy(cdp, {
+    get(target, key, receiver) {
+      if (key === "send") {
+        return (tabId: number, ...rest: [string, object?]) => {
+          track(tabId);
+          return (target.send as (tabId: number, ...args: unknown[]) => Promise<unknown>).call(
+            target,
+            tabId,
+            ...rest,
+          );
+        };
+      }
+      if (key === "sendToTarget" && typeof target.sendToTarget === "function") {
+        return (cdpTarget: CdpTarget, ...rest: [string, object?]) => {
+          track(cdpTarget.tabId);
+          return (
+            target.sendToTarget as (target: CdpTarget, ...args: unknown[]) => Promise<unknown>
+          ).call(target, cdpTarget, ...rest);
+        };
+      }
+      if (key === "sendGuarded" && typeof target.sendGuarded === "function") {
+        return (
+          cdpTarget: CdpTarget,
+          method: string,
+          params: object | undefined,
+          guard: CdpDispatchGuard,
+        ) => {
+          if (guard?.attachmentId === undefined) track(cdpTarget.tabId);
+          return target.sendGuarded!(cdpTarget, method, params, guard);
+        };
+      }
+      if (typeof key === "string" && TAB_SCOPED_CDP_METHODS.has(key)) {
+        const fn = Reflect.get(target, key, receiver);
+        if (typeof fn === "function") {
+          return function (this: unknown, tabId: number, ...rest: unknown[]) {
+            track(tabId);
+            return (fn as (tabId: number, ...args: unknown[]) => unknown).call(
+              this === wrapper ? target : this,
+              tabId,
+              ...rest,
+            );
+          };
+        }
+      }
+      const value = Reflect.get(target, key, receiver);
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  });
+  shareScreencasts(cdp, wrapper);
+  if (!bySession) {
+    bySession = new Map();
+    sessionRunners.set(cdp, bySession);
+  }
+  bySession.set(sessionId, wrapper);
+  sessionRunners.set(wrapper, new Map([[sessionId, wrapper]]));
+  return wrapper;
 }
 
 export interface BufferedReadBounds {

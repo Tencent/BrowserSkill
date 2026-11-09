@@ -2097,7 +2097,7 @@ describe("session and tab lifecycle reconciliation", () => {
     cdp.dispose();
   });
 
-  it("syncSessions releases dead session owners and detaches all tabs when no sessions remain", async () => {
+  it("syncSessions releases dead session owners and detaches unowned tabs immediately", async () => {
     const { api } = fakeApi();
     const cdp = new ChromiumCdp(api);
     await cdp.ensureAttached(1);
@@ -2105,19 +2105,49 @@ describe("session and tab lifecycle reconciliation", () => {
     await cdp.ensureAttached(3);
     cdp.trackSessionTab("aa11", 1);
     cdp.trackSessionTab("bb22", 2);
-    // Tab 3 was attached without a tracked owner.
+    // Tab 3 was attached without a tracked owner and must be cleaned up even
+    // while another session ("bb22") remains active.
 
     await cdp.syncSessions(new Set(["bb22"]));
     expect(cdp.isAttached(1)).toBe(false);
     expect(cdp.isAttached(2)).toBe(true);
-    expect(cdp.isAttached(3)).toBe(true);
+    expect(cdp.isAttached(3)).toBe(false);
+    expect(api.detach).toHaveBeenCalledWith({ tabId: 1 });
+    expect(api.detach).toHaveBeenCalledWith({ tabId: 3 });
+    expect(api.detach).not.toHaveBeenCalledWith({ tabId: 2 });
 
     await cdp.syncSessions(new Set());
     expect(cdp.isAttached(2)).toBe(false);
-    expect(cdp.isAttached(3)).toBe(false);
-    expect(api.detach).toHaveBeenCalledWith({ tabId: 1 });
     expect(api.detach).toHaveBeenCalledWith({ tabId: 2 });
-    expect(api.detach).toHaveBeenCalledWith({ tabId: 3 });
+    cdp.dispose();
+  });
+
+  it("syncSessions does not detach tabs claimed by a new session while an earlier sync is in flight", async () => {
+    const { api } = fakeApi();
+    let finishFirstDetach!: () => void;
+    vi.mocked(api.detach).mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve) => {
+          finishFirstDetach = resolve;
+        }),
+    );
+    const cdp = new ChromiumCdp(api);
+    await cdp.ensureAttached(1);
+    cdp.trackSessionTab("aa11", 1);
+
+    const firstSync = cdp.syncSessions(new Set());
+    // While tab 1 is still detaching under the empty-set sync, a new session
+    // starts and attaches to tab 2.
+    cdp.trackSessionTab("bb22", 2);
+    await cdp.ensureAttached(2);
+    const secondSync = cdp.syncSessions(new Set(["bb22"]));
+
+    finishFirstDetach();
+    await Promise.all([firstSync, secondSync]);
+
+    expect(cdp.isAttached(1)).toBe(false);
+    expect(cdp.isAttached(2)).toBe(true);
+    expect(api.detach).not.toHaveBeenCalledWith({ tabId: 2 });
     cdp.dispose();
   });
 });

@@ -131,6 +131,22 @@ export function attachSessionEventHandler(options: SessionEventHandlerOptions): 
     // the window itself. Capture the cause before asynchronous cleanup so the
     // normal stop response, rather than a user-close event, ends the audit.
     const expectedClose = manager.isWindowCloseExpected(ctx);
+    if (expectedClose) {
+      const detach = options.cdp
+        ? options.cdp.detachSession(ctx.sessionId).catch((err) => {
+            console.debug("[bh] session-event cdp detach failed", err);
+          })
+        : Promise.resolve();
+      void detach
+        .then(() => manager.stop(ctx.sessionId, { dropOnly: true }))
+        .then(() => {
+          onSessionsChanged?.();
+        })
+        .catch((err) => {
+          console.warn("[bh] session-event handler failed", err);
+        });
+      return;
+    }
     const ownedTabs = new Set([
       ...ctx.agentCreatedTabs,
       ...ctx.borrowedTabs.keys(),
@@ -147,51 +163,40 @@ export function attachSessionEventHandler(options: SessionEventHandlerOptions): 
         returnFailures,
       );
     }
-    if (!expectedClose) {
-      manager.release(ctx.sessionId);
-      ctx.refStore.clear();
-      try {
-        options.onSessionReleased?.(ctx);
-      } catch (error) {
-        console.debug("[bh] session release callback failed", error);
-      }
+    manager.release(ctx.sessionId);
+    ctx.refStore.clear();
+    // Publish the reason before cancellation replies can overtake it.
+    const event: EventFrame = {
+      event: "session.window_closed",
+      payload: {
+        session_id: ctx.sessionId,
+        reason: "user_closed_window",
+        ...(returnFailures.length > 0 ? { return_failures: returnFailures } : {}),
+      },
+    };
+    try {
+      transport.send(event);
+    } catch (err) {
+      console.warn("[bh] could not push session.window_closed event", err);
     }
-    const detach = options.cdp
-      ? Promise.all([
-          ...(!expectedClose && options.cdp.releaseSessionTab
-            ? Array.from(ownedTabs, (id) =>
-                options.cdp!.releaseSessionTab!(ctx.sessionId, id).catch((err) => {
-                  console.debug("[bh] session-event tab cdp release failed", err);
-                }),
-              )
-            : []),
-          options.cdp.detachSession(ctx.sessionId).catch((err) => {
-            console.debug("[bh] session-event cdp detach failed", err);
-          }),
-        ])
-      : Promise.resolve();
-    void detach
-      .then(() => manager.stop(ctx.sessionId, { dropOnly: true }))
-      .then(() => {
-        onSessionsChanged?.();
-        if (expectedClose) return;
-        const event: EventFrame = {
-          event: "session.window_closed",
-          payload: {
-            session_id: ctx.sessionId,
-            reason: "user_closed_window",
-            ...(returnFailures.length > 0 ? { return_failures: returnFailures } : {}),
-          },
-        };
-        try {
-          transport.send(event);
-        } catch (err) {
-          console.warn("[bh] could not push session.window_closed event", err);
-        }
-      })
-      .catch((err) => {
-        console.warn("[bh] session-event handler failed", err);
+    try {
+      options.onSessionReleased?.(ctx);
+    } catch (error) {
+      console.debug("[bh] session release callback failed", error);
+    }
+    try {
+      onSessionsChanged?.();
+    } catch (error) {
+      console.debug("[bh] released session display refresh failed", error);
+    }
+    for (const id of ownedTabs) {
+      void options.cdp?.releaseSessionTab?.(ctx.sessionId, id).catch((err) => {
+        console.debug("[bh] session-event tab cdp release failed", err);
       });
+    }
+    void options.cdp?.detachSession(ctx.sessionId).catch((err) => {
+      console.debug("[bh] session-event cdp detach failed", err);
+    });
   };
 
   events.addListener(onRemoved);

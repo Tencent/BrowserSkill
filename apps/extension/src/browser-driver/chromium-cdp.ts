@@ -192,6 +192,7 @@ export class ChromiumCdp {
       this.api.sendCommand({ tabId }, "Emulation.setFocusEmulationEnabled", { enabled }),
   );
   private readonly tabOwners = new Map<number, Set<string>>();
+  private syncGeneration = 0;
   private readonly pendingDialogEntries = new Map<
     number,
     {
@@ -1434,9 +1435,8 @@ export class ChromiumCdp {
 
   /** Detach tabs only when no other live session has claimed them. */
   async detachSession(sessionId: string): Promise<void> {
-    await Promise.all(
-      Array.from(this.tabOwners.keys(), (tabId) => this.releaseSessionTab(sessionId, tabId)),
-    );
+    const owned = new Set([...this.tabOwners.keys(), ...this.claimAttempts.keys()]);
+    await Promise.all(Array.from(owned, (tabId) => this.releaseSessionTab(sessionId, tabId)));
   }
 
   /** Clean up ownership and fence any in-flight attachment when a tab closes. */
@@ -1449,6 +1449,7 @@ export class ChromiumCdp {
 
   /** Reconcile debugger attachments with the current set of live sessions. */
   async syncSessions(liveSessionIds: ReadonlySet<string>): Promise<void> {
+    const generation = ++this.syncGeneration;
     const releases: Promise<void>[] = [];
     const seen = new Set<string>();
     const queueRelease = (sessionId: string, tabId: number) => {
@@ -1468,10 +1469,14 @@ export class ChromiumCdp {
       }
     }
     await Promise.all(releases);
-    if (liveSessionIds.size === 0) {
-      const remaining = new Set([...this.attachedTabs, ...this.attachInFlight.keys()]);
-      await Promise.all(Array.from(remaining, (tabId) => this.detach(tabId)));
+    if (generation !== this.syncGeneration) return;
+    const unowned: Promise<void>[] = [];
+    for (const tabId of new Set([...this.attachedTabs, ...this.attachInFlight.keys()])) {
+      if (!this.tabOwners.get(tabId)?.size && !this.claimAttempts.get(tabId)?.size) {
+        unowned.push(this.detach(tabId));
+      }
     }
+    await Promise.all(unowned);
   }
 }
 

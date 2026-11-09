@@ -290,8 +290,8 @@ export class VideoManager {
       if (overlay.interactive)
         throw new Error("Finish the current browser confirmation before starting a video");
       check();
-      await captureReply(cdp.send(tab, "Page.enable"), signal);
       cdp.trackSessionTab?.(session, tab);
+      await captureReply(cdp.send(tab, "Page.enable"), signal);
       if (cdp.acquireBackgroundExecution)
         await captureReply(cdp.acquireBackgroundExecution(session, tab), signal);
       const first = await captureReply(

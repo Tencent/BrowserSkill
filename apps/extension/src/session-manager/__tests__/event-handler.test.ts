@@ -97,7 +97,7 @@ describe("attachSessionEventHandler", () => {
     ]);
   });
 
-  it("drops the local session and emits session.window_closed when the agent window closes", async () => {
+  it("publishes session.window_closed before cancelling commands and detaching debuggers when the agent window closes", async () => {
     const manager = new SessionManager({
       agentWindow: {
         create: vi.fn(async () => ({ windowId: 4242, initialTabIds: [] })),
@@ -106,13 +106,30 @@ describe("attachSessionEventHandler", () => {
       },
     });
     await manager.start("aa11");
+    const order: string[] = [];
     const transport = fakeTransport();
+    const baseSend = transport.send;
+    transport.send = (msg) => {
+      order.push("event" in msg ? `event:${msg.event}` : `reply:${msg.id}`);
+      baseSend(msg);
+    };
     const events = fakeWindowEvents();
     const cdp = {
-      detachSession: vi.fn(async () => {}),
-      releaseSessionTab: vi.fn(async () => {}),
+      detachSession: vi.fn(async () => {
+        order.push("detachSession");
+      }),
+      releaseSessionTab: vi.fn(async (sessionId: string, tabId: number) => {
+        order.push(`releaseSessionTab:${sessionId}:${tabId}`);
+      }),
     };
-    const onSessionReleased = vi.fn();
+    const onSessionReleased = vi.fn(() => {
+      order.push("onSessionReleased");
+      // Simulate an in-flight RPC immediately replying with cancelled upon abort.
+      transport.send({
+        id: "rpc-1",
+        error: { code: "cancelled", message: "rpc aborted by daemon cancel" },
+      });
+    });
 
     attachSessionEventHandler({
       manager,
@@ -126,15 +143,23 @@ describe("attachSessionEventHandler", () => {
     events.emit(4242);
     expect(manager.has("aa11")).toBe(false);
     expect(onSessionReleased).toHaveBeenCalledTimes(1);
-    await vi.waitUntil(() => transport.sent.length > 0);
-
     expect(cdp.releaseSessionTab).toHaveBeenCalledWith("aa11", 1);
     expect(cdp.detachSession).toHaveBeenCalledWith("aa11");
-    expect(manager.has("aa11")).toBe(false);
+    expect(order).toEqual([
+      "event:session.window_closed",
+      "onSessionReleased",
+      "reply:rpc-1",
+      "releaseSessionTab:aa11:1",
+      "detachSession",
+    ]);
     expect(transport.sent).toEqual([
       {
         event: "session.window_closed",
         payload: { session_id: "aa11", reason: "user_closed_window" },
+      },
+      {
+        id: "rpc-1",
+        error: { code: "cancelled", message: "rpc aborted by daemon cancel" },
       },
     ]);
   });

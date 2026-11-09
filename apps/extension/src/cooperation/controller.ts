@@ -6,7 +6,13 @@ import {
 } from "@/session-manager/manager";
 import { type ResolvedActionTarget, resolveActionTarget } from "@/tools/interaction";
 import { captureVomObservation, handleSnapshot } from "@/tools/observation";
-import { type CdpRunner, chromeTabsApi, isRpcError, resolveTargetTab } from "@/tools/shared";
+import {
+  type CdpRunner,
+  chromeTabsApi,
+  isRpcError,
+  resolveTargetTab,
+  sessionCdpRunner,
+} from "@/tools/shared";
 import { lookupSnapshotRef } from "@/tools/snapshot-ref";
 import type { DragTarget, RequestFrame, RpcError } from "@/transport/types";
 import {
@@ -664,6 +670,11 @@ export class CooperationController implements ControlAuthority {
   async command(params: CooperationParams, cdp: CdpRunner, signal: AbortSignal): Promise<unknown> {
     const session = this.deps.sessions.get(params.session_id);
     if (!session) return { code: "not_found", message: "Unknown session" };
+    cdp = sessionCdpRunner(
+      cdp,
+      session.sessionId,
+      () => this.deps.sessions.get(session.sessionId) === session,
+    );
     this.startSession(session.sessionId);
     if (!["enable", "status", "sync", "wait"].includes(params.action))
       return { code: "invalid_params", message: "Unknown cooperation action" };
@@ -788,8 +799,7 @@ export class CooperationController implements ControlAuthority {
           sameMedia(baseline.frames, before);
         // A delta updates the model's field values. Refresh private semantic
         // evidence too, without replacing refs or repeating page text to the model.
-        if (delta && !sameFields(baseline.frames, before)) {
-          cdp.trackSessionTab?.(session.sessionId, state.tabId);
+        if (delta && !sameFields(baseline.frames, before))
           await captureVomObservation(guardedRunner(cdp), state.tabId, target.url, {
             signal,
             conditionalSurfaceProbe: false,
@@ -797,7 +807,6 @@ export class CooperationController implements ControlAuthority {
               evidence = observationEvidence(scene);
             },
           });
-        }
         const observation = delta
           ? undefined
           : await handleSnapshot(
@@ -1116,6 +1125,11 @@ export class CooperationController implements ControlAuthority {
     if (!params?.session_id || SESSION_TOOLS.has(req.method)) return invoke(cdp);
     const session = this.deps.sessions.get(params.session_id);
     if (!session) return invoke(cdp);
+    cdp = sessionCdpRunner(
+      cdp,
+      session.sessionId,
+      () => this.deps.sessions.get(session.sessionId) === session,
+    );
     const targetPolicy = session.controlPolicy === "target";
     this.startSession(session.sessionId);
     if (
@@ -1634,7 +1648,6 @@ export class CooperationController implements ControlAuthority {
           "Synchronize, inspect the result and pass the sync reply's top-level observation_id, not observation.observation_id, explicitly with --observation (plugin: observationId).",
         );
       if (!visual && (primaryTarget?.ref || primaryTarget?.selector)) {
-        cdp.trackSessionTab?.(session.sessionId, target.tabId);
         const resolved = await resolveActionTarget(
           guardedRunner(cdp),
           session,
@@ -1701,7 +1714,6 @@ export class CooperationController implements ControlAuthority {
       }
       // Wait only before execution, and only for transient element readiness.
       // Business facts, missing nodes and ambiguous selectors fail immediately.
-      cdp.trackSessionTab?.(session.sessionId, target.tabId);
       const deadline = Date.now() + (params.timeout_ms ?? 30_000);
       while (true) {
         try {

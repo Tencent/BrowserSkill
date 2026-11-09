@@ -109,7 +109,13 @@ import {
   type SessionStartParams,
   type SessionStopParams,
 } from "./session";
-import { cdpBlockedUrlReason, chromeTabsApi, lookupSession, resolveTargetTab } from "./shared";
+import {
+  cdpBlockedUrlReason,
+  chromeTabsApi,
+  lookupSession,
+  resolveTargetTab,
+  sessionCdpRunner,
+} from "./shared";
 import {
   type BorrowConfirmationApprover,
   chromeTabMutationApi,
@@ -711,13 +717,19 @@ export class ToolDispatcher {
       method: "tool.tab_borrow",
       params: { session_id: sessionId, tab_id: tabId },
     };
-    const runBorrow = (cdp = this.cdp, opSignal = signal) =>
+    const sessionCdp = this.cdpForSession(sessionId);
+    const runBorrow = (cdp = sessionCdp, opSignal = signal) =>
       this.invokeTool(borrowReq, opSignal, undefined, cdp);
-    const borrowResult = await (this.cooperation && this.cdp
-      ? this.cooperation.run(borrowReq, this.cdp, signal, runBorrow)
+    const borrowResult = await (this.cooperation && sessionCdp
+      ? this.cooperation.run(borrowReq, sessionCdp, signal, runBorrow)
       : runBorrow());
     if (isRpcError(borrowResult)) return { error: borrowResult };
     return { borrowed: borrowResult as TabBorrowResult };
+  }
+
+  private cdpForSession(sessionId: string | undefined): DispatcherCdpRunner | undefined {
+    if (!this.cdp || !sessionId) return this.cdp;
+    return sessionCdpRunner(this.cdp, sessionId, () => this.sessions.has(sessionId));
   }
 
   private invoke(
@@ -725,19 +737,28 @@ export class ToolDispatcher {
     signal: AbortSignal,
     onInputSent?: (tabId: number) => void,
   ): Promise<unknown> {
-    const run = (cdp = this.cdp, operationSignal = signal, completionSignal = operationSignal) =>
+    const rawSessionId = (req.params as { session_id?: unknown } | undefined)?.session_id;
+    const sessionId =
+      typeof rawSessionId === "string" &&
+      rawSessionId.length > 0 &&
+      req.method !== "tool.session_start" &&
+      req.method !== "tool.session_stop"
+        ? rawSessionId
+        : undefined;
+    const sessionCdp = this.cdpForSession(sessionId);
+    const run = (cdp = sessionCdp, operationSignal = signal, completionSignal = operationSignal) =>
       this.invokeTool(req, operationSignal, onInputSent, cdp, completionSignal);
     // Modal control uses cached authority checks, without blocked renderer preparation.
     if (req.method.startsWith("tool.dialog_")) return run();
     const dispatchMain = (): Promise<unknown> => {
-      if (req.method === "tool.cooperate" && this.cooperation && this.cdp) {
-        const cdp = this.cdp;
+      if (req.method === "tool.cooperate" && this.cooperation && sessionCdp) {
+        const cdp = sessionCdp;
         return this.releaseHoverLatch((req.params as { session_id: string }).session_id).then(() =>
           this.cooperation!.run(req, cdp, signal, run),
         );
       }
-      return this.cooperation && this.cdp
-        ? this.cooperation.run(req, this.cdp, signal, run)
+      return this.cooperation && sessionCdp
+        ? this.cooperation.run(req, sessionCdp, signal, run)
         : run();
     };
     const autoBorrow = this.tryStartAutoBorrow(req, signal);
@@ -775,12 +796,12 @@ export class ToolDispatcher {
       };
     }
     if (req.method.startsWith("tool.dialog_")) {
-      if (!this.cdp) return { code: "unsupported", message: "Dialog control requires CDP" };
+      if (!cdp) return { code: "unsupported", message: "Dialog control requires CDP" };
       return handleDialog(
         this.sessions,
         req.method,
         req.params as import("@/transport/types").DialogHandleParams,
-        this.cdp,
+        cdp,
         { signal, authority: this.cooperation },
       );
     }
@@ -1365,14 +1386,16 @@ export class ToolDispatcher {
     if (!this.cdp) return;
     await Promise.all(
       this.hoverLatchesForRequest(params).map((latch) =>
-        this.cdp!.send(latch.tabId, "Input.dispatchMouseEvent", {
-          type: "mouseMoved",
-          x: latch.x,
-          y: latch.y,
-        }).catch((err) => {
-          console.debug("[bsk dispatcher] hover reassert failed", err);
-          this.hoverLatches.delete(latch.tabId);
-        }),
+        this.cdpForSession(latch.sessionId)!
+          .send(latch.tabId, "Input.dispatchMouseEvent", {
+            type: "mouseMoved",
+            x: latch.x,
+            y: latch.y,
+          })
+          .catch((err) => {
+            console.debug("[bsk dispatcher] hover reassert failed", err);
+            this.hoverLatches.delete(latch.tabId);
+          }),
       ),
     );
   }

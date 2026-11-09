@@ -230,13 +230,6 @@ async function resolveHelpTargets(
   const rects: HelpHighlightRect[] = [];
   const resolved: ResolvedTarget[] = [];
   let rootNodeId: number | undefined;
-  if (
-    deps.cdp &&
-    ctx &&
-    targets.some((target) => Boolean(target.selector) || Boolean(target.ref))
-  ) {
-    deps.cdp.trackSessionTab?.(ctx.sessionId, tabId);
-  }
   if (deps.cdp && targets.some((target) => Boolean(target.selector))) {
     try {
       const doc = await deps.cdp.send<{ root?: { nodeId?: number } }>(tabId, "DOM.getDocument", {
@@ -649,7 +642,6 @@ async function evaluateCompletionCondition(
       return true;
     })()`;
     try {
-      help.deps.cdp.trackSessionTab?.(help.ctx.sessionId, help.primaryTabId);
       const result = await help.deps.cdp.send<{ result?: { value?: boolean } }>(
         help.primaryTabId,
         "Runtime.evaluate",
