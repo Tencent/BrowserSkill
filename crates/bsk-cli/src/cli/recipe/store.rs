@@ -295,11 +295,25 @@ impl Store {
     }
 
     pub(crate) fn state(&self, name: &str) -> State {
-        self.dir(name)
-            .ok()
-            .and_then(|dir| fs::read(dir.join("state.json")).ok())
-            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
-            .unwrap_or_default()
+        let mut state = self.read_state(name).unwrap_or_default();
+        if let Some(run) = state.running.iter().find(|run| {
+            now_ms() - run.started_ms > RUN_LIFETIME_MS
+                || (run.pid != std::process::id() && !crate::daemon::lockfile::pid_alive(run.pid))
+        }) {
+            state.unchecked.get_or_insert_with(|| Unchecked {
+                run_id: run.run_id.clone(),
+                reason: "interrupted".into(),
+                at: None,
+                since_ms: run.started_ms,
+            });
+        }
+        state
+    }
+
+    /// Execution must not mistake unreadable approval or hold records for a fresh recipe.
+    pub(crate) fn read_state(&self, name: &str) -> anyhow::Result<State> {
+        let bytes = read_limited(&self.dir(name)?.join("state.json"))?;
+        serde_json::from_slice(&bytes).context("read recipe state; restore it before replaying")
     }
 
     fn write_state(&self, name: &str, state: &State) -> anyhow::Result<()> {
@@ -320,6 +334,7 @@ impl Store {
     ) -> Result<Value, Refusal> {
         let storage =
             |error: anyhow::Error| Refusal::new("storage_unavailable", format!("{error:#}"));
+        let _lock = self.lock_recipe(&recipe.name)?;
         let dir = self
             .dir(&recipe.name)
             .map_err(|error| Refusal::new("invalid_recipe", format!("{error:#}")))?;
@@ -327,7 +342,7 @@ impl Store {
         private_dir(&dir).map_err(storage)?;
         let path = dir.join("recipe.json");
         let previous = path.is_file().then(|| self.load(&recipe.name));
-        let mut state = self.state(&recipe.name);
+        let mut state;
         match previous {
             None => {
                 recipe.revision = 1;
@@ -346,6 +361,7 @@ impl Store {
                 ));
             }
             Some(Ok(previous)) => {
+                state = self.read_state(&recipe.name).map_err(storage)?;
                 if !declared_revision {
                     return Err(Refusal::new(
                         "recipe_exists",
@@ -408,7 +424,17 @@ impl Store {
 
     /// Records a person's approval of the recipe as they reviewed it.
     pub(crate) fn approve(&self, recipe: &Recipe) -> anyhow::Result<()> {
-        let mut state = self.state(&recipe.name);
+        let _lock = self
+            .lock_recipe(&recipe.name)
+            .map_err(|error| anyhow::anyhow!(error.message))?;
+        let current = self
+            .load(&recipe.name)
+            .map_err(|error| anyhow::anyhow!(error.message))?;
+        ensure!(
+            current == *recipe,
+            "the recipe changed during review; review it again"
+        );
+        let mut state = self.read_state(&recipe.name)?;
         state.approval = Some(Approval {
             digest: approval_digest(recipe),
             revision: recipe.revision,
@@ -417,12 +443,20 @@ impl Store {
         self.write_state(&recipe.name, &state)
     }
 
-    pub(crate) fn remove(&self, name: &str) -> anyhow::Result<bool> {
-        let dir = self.dir(name)?;
+    pub(crate) fn remove(&self, name: &str) -> Result<bool, Refusal> {
+        let _lock = self.lock_recipe(name)?;
+        let dir = self
+            .dir(name)
+            .map_err(|error| Refusal::new("invalid_params", error.to_string()))?;
         if !dir.join("recipe.json").is_file() {
             return Ok(false);
         }
-        fs::remove_dir_all(&dir).with_context(|| format!("remove {}", dir.display()))?;
+        fs::remove_dir_all(&dir).map_err(|error| {
+            Refusal::new(
+                "storage_unavailable",
+                format!("remove {}: {error}", dir.display()),
+            )
+        })?;
         Ok(true)
     }
 
@@ -473,7 +507,11 @@ impl Store {
             if !self.exists(&name) {
                 continue;
             }
-            match self.load(&name) {
+            match self.load(&name).and_then(|recipe| {
+                self.read_state(&name)
+                    .map_err(|error| Refusal::new("storage_unavailable", format!("{error:#}")))?;
+                Ok(recipe)
+            }) {
                 Ok(recipe) => {
                     if site.is_none_or(|site| recipe.site.origins.iter().any(|o| o == site)) {
                         recipes.push(self.entry(&recipe, &self.state(&name)));
@@ -496,6 +534,8 @@ impl Store {
 
     pub(crate) fn show(&self, name: &str) -> Result<Value, Refusal> {
         let recipe = self.load(name)?;
+        self.read_state(name)
+            .map_err(|error| Refusal::new("storage_unavailable", format!("{error:#}")))?;
         let state = self.state(name);
         let mut reply = json!({"recipe":recipe,"state":state,"summary":recipe.summary()});
         if let Some(approval) = approval_note(&recipe, &state) {
@@ -525,7 +565,9 @@ impl Store {
     /// `at` names where the page deviated, when it did. A person stepping in says
     /// nothing about the recipe. A failure to save costs a counter, not the result.
     pub(crate) fn record_outcome(&self, name: &str, status: &str, at: Option<&str>) {
-        let mut state = self.state(name);
+        let Ok(mut state) = self.read_state(name) else {
+            return;
+        };
         let now = now_ms();
         state.runs += 1;
         state.last_run_ms = Some(now);
@@ -559,20 +601,29 @@ impl Store {
 
     /// Marks a run as started. One that dies before [`Self::finish_run`], with its
     /// process, is taken as unchecked: it may have sent input nobody saw the result of.
-    pub(crate) fn start_run(&self, name: &str, run_id: &str) {
-        let mut state = self.state(name);
+    pub(crate) fn start_run(&self, name: &str, run_id: &str) -> anyhow::Result<()> {
+        let mut state = self.read_state(name)?;
+        ensure!(
+            state.unchecked.is_none(),
+            "the previous run still needs checking"
+        );
         state.running.push(Running {
             run_id: run_id.to_owned(),
             pid: std::process::id(),
             started_ms: now_ms(),
         });
-        let _ = self.write_state(name, &state);
+        self.write_state(name, &state)
     }
 
     /// Clears the run's marker and, for a run whose effect is unknown, holds the
     /// recipe until the caller says it was checked.
-    pub(crate) fn finish_run(&self, name: &str, run_id: &str, unchecked: Option<Unchecked>) {
-        let mut state = self.state(name);
+    pub(crate) fn finish_run(
+        &self,
+        name: &str,
+        run_id: &str,
+        unchecked: Option<Unchecked>,
+    ) -> anyhow::Result<()> {
+        let mut state = self.read_state(name)?;
         state.running.retain(|run| run.run_id != run_id);
         if let Some(unchecked) = unchecked {
             state.unchecked = Some(Unchecked {
@@ -580,25 +631,21 @@ impl Store {
                 ..unchecked
             });
         }
-        let _ = self.write_state(name, &state);
+        self.write_state(name, &state)
     }
 
-    /// The run that holds the recipe, counting runs whose process died first.
+    /// Call only with the recipe lock held. Any leftover marker belongs to a run
+    /// that released its lock without recording an outcome, even in a live MCP host.
     pub(crate) fn unchecked(&self, name: &str) -> Option<Unchecked> {
         let mut state = self.state(name);
-        let now = now_ms();
-        let (dead, alive): (Vec<_>, Vec<_>) = state.running.drain(..).partition(|run| {
-            now - run.started_ms > RUN_LIFETIME_MS
-                || (run.pid != std::process::id() && !crate::daemon::lockfile::pid_alive(run.pid))
-        });
-        state.running = alive;
-        if let Some(run) = dead.first() {
+        if let Some(run) = state.running.first() {
             state.unchecked.get_or_insert_with(|| Unchecked {
                 run_id: run.run_id.clone(),
                 reason: "interrupted".into(),
                 at: None,
                 since_ms: run.started_ms,
             });
+            state.running.clear();
             let _ = self.write_state(name, &state);
         }
         state.unchecked
@@ -618,44 +665,68 @@ impl Store {
         self.write_state(name, &state).is_ok()
     }
 
+    /// The same recipe cannot run, change revision or be removed concurrently.
+    pub(crate) fn lock_recipe(&self, name: &str) -> Result<StoreLock, Refusal> {
+        self.dir(name)
+            .map_err(|error| Refusal::new("invalid_params", error.to_string()))?;
+        self.lock("recipe", name)
+    }
+
     /// One recipe at a time per session; the lock ends with the process.
-    pub(crate) fn lock_session(&self, session: &str) -> Result<Option<SessionLock>, Refusal> {
+    pub(crate) fn lock_session(&self, session: &str) -> Result<StoreLock, Refusal> {
+        self.lock("session", session)
+    }
+
+    fn lock(&self, scope: &str, key: &str) -> Result<StoreLock, Refusal> {
+        let storage = |error| {
+            Refusal::new(
+                "storage_unavailable",
+                format!("cannot lock {scope}: {error}"),
+            )
+        };
         let dir = self.root.join(".locks");
-        if private_dir(&self.root).is_err() || private_dir(&dir).is_err() {
-            return Ok(None);
-        }
-        let hash: String = Sha256::digest(session.as_bytes())
+        private_dir(&self.root).map_err(storage)?;
+        private_dir(&dir).map_err(storage)?;
+        let hash: String = Sha256::digest(key.as_bytes())
             .iter()
             .take(8)
             .map(|byte| format!("{byte:02x}"))
             .collect();
-        let path = dir.join(hash);
-        let Ok(file) = fs::OpenOptions::new()
+        let path = dir.join(format!("{scope}-{hash}"));
+        let file = fs::OpenOptions::new()
             .create(true)
             .truncate(false)
             .write(true)
             .open(&path)
-        else {
-            return Ok(None);
-        };
-        if fs2::FileExt::try_lock_exclusive(&file).is_err() {
-            return Err(Refusal::new(
-                "session_busy",
-                format!("session {session} is already running a recipe"),
-            ));
+            .map_err(|error| storage(error.into()))?;
+        if let Err(error) = fs2::FileExt::try_lock_exclusive(&file) {
+            return Err(
+                if error.raw_os_error() == fs2::lock_contended_error().raw_os_error() {
+                    Refusal::new(
+                        if scope == "recipe" {
+                            "recipe_busy"
+                        } else {
+                            "session_busy"
+                        },
+                        format!("{scope} {key} is already in use by a recipe operation"),
+                    )
+                } else {
+                    storage(error.into())
+                },
+            );
         }
-        Ok(Some(SessionLock { file, path }))
+        Ok(StoreLock { file })
     }
 }
 
-pub(crate) struct SessionLock {
+pub(crate) struct StoreLock {
     file: fs::File,
-    path: PathBuf,
 }
 
-impl Drop for SessionLock {
+impl Drop for StoreLock {
     fn drop(&mut self) {
-        let _ = fs::remove_file(&self.path);
+        // Keep the inode: another process may already have opened this path.
+        // Unlinking it would let a third process lock a different file at the same path.
         let _ = fs2::FileExt::unlock(&self.file);
     }
 }
@@ -789,6 +860,13 @@ mod tests {
         changed["segments"][0]["until"]["timeout_ms"] = 2000.into();
         let saved = put(&store, changed);
         assert_eq!(saved["approval"], "required");
+        assert!(
+            store
+                .approve(&recipe)
+                .unwrap_err()
+                .to_string()
+                .contains("changed during review")
+        );
         assert!(!store.approved(&store.load("sales-report").unwrap()));
 
         // A recipe that lowers nothing needs no approval.
@@ -875,25 +953,24 @@ mod tests {
     fn an_unknown_effect_holds_the_recipe_until_the_caller_names_the_run() {
         let (_dir, store) = store();
         store.save(parsed(report()).unwrap(), false).unwrap();
-        store.start_run("sales-report", "r-clean");
-        assert!(
-            store.unchecked("sales-report").is_none(),
-            "this process is alive"
-        );
-        store.finish_run("sales-report", "r-clean", None);
+        store.start_run("sales-report", "r-clean").unwrap();
+        assert_eq!(store.state("sales-report").running.len(), 1);
+        store.finish_run("sales-report", "r-clean", None).unwrap();
         assert!(store.state("sales-report").running.is_empty());
 
-        store.start_run("sales-report", "r-1");
-        store.finish_run(
-            "sales-report",
-            "r-1",
-            Some(Unchecked {
-                run_id: "r-1".into(),
-                reason: "effect_unknown".into(),
-                at: Some("query/2".into()),
-                since_ms: 0,
-            }),
-        );
+        store.start_run("sales-report", "r-1").unwrap();
+        store
+            .finish_run(
+                "sales-report",
+                "r-1",
+                Some(Unchecked {
+                    run_id: "r-1".into(),
+                    reason: "effect_unknown".into(),
+                    at: Some("query/2".into()),
+                    since_ms: 0,
+                }),
+            )
+            .unwrap();
         let held = store.unchecked("sales-report").unwrap();
         assert_eq!(
             (held.run_id.as_str(), held.at.as_deref()),
@@ -907,6 +984,7 @@ mod tests {
 
         // A run whose process died, or that outlived any budget, never reported.
         for running in [
+            json!({"run_id":"r-live-host","pid":std::process::id(),"started_ms":now_ms()}),
             json!({"run_id":"r-dead","pid":u32::MAX,"started_ms":now_ms()}),
             json!({"run_id":"r-old","pid":std::process::id(),"started_ms":1}),
         ] {
@@ -924,14 +1002,70 @@ mod tests {
     fn a_session_runs_one_recipe_at_a_time() {
         let (_dir, store) = store();
         let held = store.lock_session("s1").unwrap();
-        assert!(held.is_some());
         assert_eq!(
             store.lock_session("s1").err().unwrap().reason,
             "session_busy"
         );
-        assert!(store.lock_session("s2").unwrap().is_some());
+        let _other = store.lock_session("s2").unwrap();
         drop(held);
-        assert!(store.lock_session("s1").unwrap().is_some());
+        let _next = store.lock_session("s1").unwrap();
+    }
+
+    #[test]
+    fn recipe_operations_share_a_stable_lock_separate_from_session_locks() {
+        let (_dir, store) = store();
+        let saved = parsed(report()).unwrap();
+        store.save(saved.clone(), false).unwrap();
+        let held = store.lock_recipe("sales-report").unwrap();
+        assert_eq!(
+            store.lock_recipe("sales-report").err().unwrap().reason,
+            "recipe_busy"
+        );
+        assert_eq!(store.save(saved, true).unwrap_err().reason, "recipe_busy");
+        assert_eq!(
+            store.remove("sales-report").unwrap_err().reason,
+            "recipe_busy"
+        );
+        let _session = store.lock_session("sales-report").unwrap();
+        // Open before release, as a competing process can. It and any fresh opener
+        // must still contend for the same inode after the original lock is gone.
+        let path = fs::read_dir(store.root.join(".locks"))
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .find(|path| {
+                path.file_name()
+                    .unwrap()
+                    .to_str()
+                    .unwrap()
+                    .starts_with("recipe-")
+            })
+            .unwrap();
+        let opened = fs::OpenOptions::new().write(true).open(path).unwrap();
+        drop(held);
+        fs2::FileExt::try_lock_exclusive(&opened).unwrap();
+        assert_eq!(
+            store.lock_recipe("sales-report").err().unwrap().reason,
+            "recipe_busy"
+        );
+        drop(opened);
+        let _next = store.lock_recipe("sales-report").unwrap();
+    }
+
+    #[test]
+    fn unreadable_state_cannot_be_overwritten_by_a_new_run_or_revision() {
+        let (_dir, store) = store();
+        store.save(parsed(report()).unwrap(), false).unwrap();
+        let path = store.root.join("sales-report/state.json");
+        fs::write(&path, b"broken state").unwrap();
+        assert!(store.start_run("sales-report", "r-new").is_err());
+        assert_eq!(
+            store
+                .save(parsed(report()).unwrap(), true)
+                .unwrap_err()
+                .reason,
+            "storage_unavailable"
+        );
+        assert_eq!(fs::read(&path).unwrap(), b"broken state");
     }
 
     #[test]

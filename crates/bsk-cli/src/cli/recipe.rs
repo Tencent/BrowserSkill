@@ -198,7 +198,7 @@ fn held(store: &Store, name: &str, checked: Option<&str>) -> Option<Refusal> {
 }
 
 /// Shows a person what a recipe lowers and records their confirmation. It needs a
-/// terminal, so an agent running commands cannot approve its own downgrades.
+/// terminal and refuses piped input. Agents must never invoke this action.
 fn approve(name: &str) -> Result<(), CliError> {
     use std::io::{BufRead, IsTerminal, Write};
     let store = Store::open().map_err(CliError::Local)?;
@@ -298,10 +298,20 @@ pub(crate) fn run(
             );
         }
     };
+    let _recipe_lock = match store.lock_recipe(name) {
+        Ok(lock) => lock,
+        Err(refusal) => return refused(name, &refusal),
+    };
     let recipe = match store.load(name) {
         Ok(recipe) => recipe,
         Err(refusal) => return refused(name, &refusal),
     };
+    if let Err(error) = store.read_state(name) {
+        return refused(
+            name,
+            &Refusal::new("storage_unavailable", format!("{error:#}")),
+        );
+    }
     if let Some(refusal) = unapproved(&store, &recipe) {
         return refused(name, &refusal);
     }
@@ -327,7 +337,7 @@ pub(crate) fn run(
     let mut borrowed = Vec::new();
     if let Some(session) = &request.session {
         match store.lock_session(session) {
-            Ok(lock) => _lock = lock,
+            Ok(lock) => _lock = Some(lock),
             Err(refusal) => return refused(name, &refusal),
         }
         match call(
@@ -376,7 +386,24 @@ pub(crate) fn run(
     };
 
     let run_id = format!("r-{}", business_rpc::random_short_id());
-    store.start_run(name, &run_id);
+    if let Err(error) = store.start_run(name, &run_id) {
+        let (mut reply, exit) = refused(
+            name,
+            &Refusal::new("storage_unavailable", format!("{error:#}")),
+        );
+        if started {
+            reply["session_id"] = session.as_str().into();
+            match call(
+                Method::SessionStop,
+                json!({"session_id":session,"all":false}),
+                SESSION_STOP_TIMEOUT,
+            ) {
+                Ok(_) => reply["session_stopped"] = true.into(),
+                Err(error) => reply["session_stop_error"] = error.to_string().into(),
+            }
+        }
+        return (reply, exit);
+    }
     let mut log = store.run_log(name, &run_id);
     log.event(
         "start",
@@ -405,9 +432,14 @@ pub(crate) fn run(
         at: outcome.at.clone(),
         since_ms: 0,
     });
-    store.finish_run(name, &run_id, unchecked);
+    let storage_error = store.finish_run(name, &run_id, unchecked).err();
 
     let mut reply = outcome.reply;
+    if let Some(error) = storage_error {
+        reply["storage_error"] =
+            format!("{error:#}; the run marker is retained and must be checked before replay")
+                .into();
+    }
     reply["run_id"] = run_id.into();
     reply["recipe"] = name.into();
     reply["revision"] = recipe.revision.into();
@@ -540,13 +572,16 @@ pub(crate) fn show(name: &str) -> (Value, u8) {
 }
 
 pub(crate) fn remove(name: &str) -> (Value, u8) {
-    match Store::open().and_then(|store| store.remove(name)) {
+    match Store::open()
+        .map_err(|error| Refusal::new("storage_unavailable", format!("{error:#}")))
+        .and_then(|store| store.remove(name))
+    {
         Ok(true) => (json!({"removed":true,"name":name}), 0),
         Ok(false) => refused(
             name,
             &Refusal::new("recipe_not_found", format!("no recipe named {name}")),
         ),
-        Err(error) => refused(name, &Refusal::new("invalid_params", format!("{error:#}"))),
+        Err(error) => refused(name, &error),
     }
 }
 
@@ -648,9 +683,21 @@ pub fn dispatch(cmd: RecipeCmd, flags: &GlobalFlags, _format: Format) -> Result<
             };
             // A missing file or an unapproved risk needs no daemon.
             if let Ok(store) = Store::open() {
+                let _lock = match store.lock_recipe(&request.name) {
+                    Ok(lock) => lock,
+                    Err(refusal) => {
+                        let (reply, exit) = refused(&request.name, &refusal);
+                        return print(&reply, exit);
+                    }
+                };
                 let refusal = match store.load(&request.name) {
-                    Ok(recipe) => unapproved(&store, &recipe)
-                        .or_else(|| held(&store, &request.name, request.checked.as_deref())),
+                    Ok(recipe) => match store.read_state(&request.name) {
+                        Err(error) => {
+                            Some(Refusal::new("storage_unavailable", format!("{error:#}")))
+                        }
+                        Ok(_) => unapproved(&store, &recipe)
+                            .or_else(|| held(&store, &request.name, request.checked.as_deref())),
+                    },
                     Err(refusal) => Some(refusal),
                 };
                 if let Some(refusal) = refusal {
@@ -661,7 +708,7 @@ pub fn dispatch(cmd: RecipeCmd, flags: &GlobalFlags, _format: Format) -> Result<
             let (daemon, protocol) =
                 ensure_daemon::ensure_daemon_with_protocol().context("ensure daemon is running")?;
             plan::check_protocol(&protocol).map_err(CliError::Local)?;
-            let (reply, mut exit) = run(&request, |method, params, timeout| {
+            let (mut reply, mut exit) = run(&request, |method, params, timeout| {
                 business_rpc::call(
                     daemon.sock_path.clone(),
                     "recipe",
@@ -671,6 +718,7 @@ pub fn dispatch(cmd: RecipeCmd, flags: &GlobalFlags, _format: Format) -> Result<
                 )
             });
             if business_rpc::cancel_requested() {
+                reply["cancelled"] = true.into();
                 exit = exit_code_for(ErrorCode::Cancelled);
             }
             print(&reply, exit)

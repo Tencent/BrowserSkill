@@ -591,6 +591,80 @@ async fn a_daemon_dying_during_a_click_is_uncertain_and_the_click_is_never_repea
 }
 
 #[tokio::test]
+async fn concurrent_run_save_and_remove_are_refused_before_contacting_the_daemon() {
+    let home = Home::new();
+    home.save();
+    let lock_path = std::fs::read_dir(home.dir.path().join("recipes/.locks"))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .find(|path| {
+            path.file_name()
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .starts_with("recipe-")
+        })
+        .unwrap();
+    let lock = std::fs::OpenOptions::new()
+        .write(true)
+        .open(lock_path)
+        .unwrap();
+    fs2::FileExt::lock_exclusive(&lock).unwrap();
+    let mut next = recipe();
+    next["revision"] = 1.into();
+    let file = home.write("next.json", &next);
+    for args in [
+        vec!["recipe", "run", "sales", "--param", "region=East"],
+        vec!["recipe", "save", "--file", &file],
+        vec!["recipe", "rm", "sales"],
+    ] {
+        let (output, reply) = home.local(&args).await;
+        assert_eq!(output.status.code(), Some(2), "{output:?}");
+        assert_eq!(reply["reason"], "recipe_busy", "{reply}");
+    }
+}
+
+#[tokio::test]
+async fn missing_or_corrupt_safety_state_refuses_replay_before_contacting_the_daemon() {
+    let home = Home::new();
+    home.save();
+    let path = home.dir.path().join("recipes/sales/state.json");
+    std::fs::write(&path, b"broken state").unwrap();
+    for missing in [false, true] {
+        if missing {
+            std::fs::remove_file(&path).unwrap();
+        }
+        let (output, reply) = home
+            .local(&["recipe", "run", "sales", "--param", "region=East"])
+            .await;
+        assert_eq!(output.status.code(), Some(2), "{output:?}");
+        assert_eq!(reply["reason"], "storage_unavailable", "{reply}");
+    }
+}
+
+#[tokio::test]
+async fn an_unwritable_run_marker_refuses_input_and_closes_the_new_session() {
+    use std::os::unix::fs::PermissionsExt;
+    let home = Home::new();
+    home.save();
+    let directory = home.dir.path().join("recipes/sales");
+    std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o500)).unwrap();
+    let (output, reply, requests) = home
+        .with_daemon(
+            Script::default(),
+            &["recipe", "run", "sales", "--param", "region=East"],
+        )
+        .await;
+    std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700)).unwrap();
+    assert_eq!(output.status.code(), Some(2), "{output:?}");
+    assert_eq!(reply["reason"], "storage_unavailable", "{reply}");
+    assert_eq!(reply["session_stopped"], true, "{reply}");
+    assert!(inputs(&requests).is_empty());
+    assert!(methods(&requests).contains(&"session.start"));
+    assert!(methods(&requests).contains(&"session.stop"));
+}
+
+#[tokio::test]
 async fn an_old_daemon_is_rejected_before_any_step() {
     let home = Home::new();
     home.save();
