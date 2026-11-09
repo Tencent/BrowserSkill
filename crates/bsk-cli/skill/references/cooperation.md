@@ -44,6 +44,14 @@ Unsupported peers return an error, never a silent downgrade. With a current CLI 
 extension, pass `--policy strict` on **every** sync/enable and step; `--expect` still requires
 updated peers. If a plugin reports that `--policy` is unknown, upgrade the CLI and restart its daemon.
 
+A strict refusal reports `observed_change`: the first differing node, field and check (`target`,
+`dependency`, `page`, ...). Values and sensitive text are never included. A DOM-targeted action
+may tolerate added or removed noninteractive tooltips after its own hover, or a character
+counter linked to a focused text field after its own focus. Unidentified counters and other
+text changes still require synchronization. Target meaning, links, form state, modal contents
+and explicit dependencies remain exact. Scripts, untargeted keys and visual clicks keep the
+full observation check even after preparation.
+
 ## Protect the facts behind a decision
 
 Declare business facts that must still be true immediately before input:

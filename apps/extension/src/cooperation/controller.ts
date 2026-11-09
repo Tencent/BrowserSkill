@@ -21,10 +21,14 @@ import { type ControlAuthority, ControlAuthorityError } from "./control-authorit
 import { FrameCollectionError } from "./frame-error";
 import {
   contentChanges,
+  type EvidenceTarget,
   type ObservationEvidence,
+  type ObservedChange,
   observationEvidence,
+  observedChange,
   observedKeyboardTargets,
   observesTarget,
+  preparationEvidence,
   sameObservationEvidence,
 } from "./observation-evidence";
 import { pointerTargetValidator } from "./pointer-target";
@@ -159,6 +163,14 @@ const PASSIVE_DEBUG = new Set<string>(
 const QUIET_MS = 2_000;
 /** Upper bound on nodes whose self-changing text the default check tolerates. */
 const MAX_VOLATILE = 256;
+/** Effects that prepare input before native input starts. Only identified
+ * focus/hover decorations may be excluded from a later DOM-targeted check. */
+const PREPARATION_METHODS = new Set([
+  "DOM.scrollIntoViewIfNeeded",
+  "DOM.focus",
+  "Input.dispatchMouseEvent",
+  "Emulation.setFocusEmulationEnabled",
+]);
 
 function isInitialBlank(tab: { url?: string; pendingUrl?: string }): boolean {
   // Chrome can report the agent-created blank page before its initial load commits.
@@ -1305,6 +1317,14 @@ export class CooperationController implements ControlAuthority {
     let sent = false;
     let finished = false;
     let revoked: string | undefined;
+    // Whether this action has scrolled, focused or hovered before its input.
+    let preparationSent = false;
+    let preparationFocus = false;
+    let preparationHover = false;
+    // The first observed difference behind an evidence refusal, for diagnosis.
+    let observed:
+      | (Partial<ObservedChange> & { scope: string; phase: "decision" | "preparation" })
+      | undefined;
     let nativeInputStarted = false;
     const context = targetPolicy && !targeted ? state.baseline : state.context;
     const rootFrameId = context?.evidence?.rootFrameId;
@@ -1339,7 +1359,11 @@ export class CooperationController implements ControlAuthority {
         ? { press_sent: false }
         : {};
     const reportFailure = (message: string, effect: "none" | "unknown" = "none"): RpcError => {
-      if (!targetPolicy) return failure(message, effect);
+      const diagnosis = observed ? { observed_change: observed } : {};
+      if (!targetPolicy) {
+        const refused = failure(message, effect);
+        return { ...refused, data: { ...refused.data, ...unpressed(effect), ...diagnosis } };
+      }
       if (effect === "unknown") state.context = undefined;
       const controlReason = state.held
         ? "control_held"
@@ -1371,6 +1395,7 @@ export class CooperationController implements ControlAuthority {
           ...issue.data,
           effect_state: effect,
           ...unpressed(effect),
+          ...diagnosis,
           ...(effect === "unknown"
             ? {
                 recovery:
@@ -1435,6 +1460,10 @@ export class CooperationController implements ControlAuthority {
       if (sameFrames(verifiedFrames, state.frames, "revision")) return;
       if (!context.evidence)
         throw new Error((revoked = "Page changed; synchronize before choosing an action"));
+      // Scrolling, focus or hover sent by this action can change text and
+      // layout on their own; native input has not started, or verification
+      // would not run. Read-only probes do not count.
+      const prepared = preparationSent;
       const before = state.frames;
       let evidence: ObservationEvidence | undefined;
       await captureVomObservation(guardedRunner(cdp), state.tabId, target.url, {
@@ -1481,20 +1510,31 @@ export class CooperationController implements ControlAuthority {
       const pages = documents(state.frames);
       const volatile =
         tolerant && state.volatile?.documents === pages ? state.volatile.keys : undefined;
-      // The target's own semantic region and every declared dependency stay
-      // exact; sameObservationEvidence only relaxes broad layout around a target.
-      const keyboardRegionMatches = () => {
-        if (actionTarget) return true;
+      // Native focus/hover may add or remove an identified input decoration.
+      // Keep all other decision evidence exact, especially explicit dependencies
+      // and actions without a DOM target (including visual clicks).
+      const decorations = prepared && anchored && !visual && TARGET_ACTIONS.has(req.method);
+      const preparation = { focus: preparationFocus, hover: preparationHover };
+      const preparedEvidence = decorations
+        ? preparationEvidence(context.evidence, evidence, actionTarget!, preparation)
+        : undefined;
+      type Check = {
+        scope: "destination" | "keyboard" | "target" | "dependency" | "page";
+        target?: EvidenceTarget;
+        keys?: ReadonlySet<string>;
+        incidentalMedia?: boolean;
+      };
+      const keyboardCheck = (): Check | undefined => {
+        if (actionTarget) return;
         // Only keyboard input has an implicit recipient. An untargeted script
         // still requires the exact whole page, as before scoped-key support.
-        if (req.method !== "tool.press")
-          return sameObservationEvidence(context.evidence!, evidence!);
+        if (req.method !== "tool.press") return { scope: "page" };
         const recipients = observedKeyboardTargets(context.evidence!);
         const current = observedKeyboardTargets(evidence!);
         const specificFrames = [...context.frames.values()].filter(
           (frame) => frame.focusIsDocument !== true,
         );
-        if (!specificFrames.length && !recipients.length && !current.length) return true;
+        if (!specificFrames.length && !recipients.length && !current.length) return;
         // A single, stable, observed recipient gets its own exact region. Missing
         // AX focus, hidden targets and ambiguous frame/shadow focus stay strict.
         if (
@@ -1504,43 +1544,61 @@ export class CooperationController implements ControlAuthority {
           recipients[0].backendNodeId === current[0].backendNodeId &&
           recipients[0].frameId === current[0].frameId
         )
-          return sameObservationEvidence(context.evidence!, evidence!, recipients[0]);
-        return sameObservationEvidence(context.evidence!, evidence!);
+          return { scope: "keyboard", target: recipients[0] };
+        return { scope: "page" };
       };
-      const matches = (keys?: ReadonlySet<string>) => {
+      // The target's own semantic region and every declared dependency stay
+      // exact; sameObservationEvidence only relaxes broad layout around a target.
+      const checks = (keys?: ReadonlySet<string>): Check[] => {
         // A drag decision also depends on its destination. Explicit dependencies
         // or learned live text must never relax the destination's own region.
-        if (
-          destinationTarget &&
-          !sameObservationEvidence(context.evidence!, evidence!, destinationTarget, keys)
-        )
-          return false;
+        const list: Check[] = destinationTarget
+          ? [{ scope: "destination", target: destinationTarget, keys }]
+          : [];
         if (evidenceTargets) {
-          return (
-            keyboardRegionMatches() &&
-            (!actionTarget ||
-              sameObservationEvidence(context.evidence!, evidence!, actionTarget, keys)) &&
-            evidenceTargets.every((dependency) =>
-              sameObservationEvidence(context.evidence!, evidence!, dependency),
-            )
-          );
+          const keyboard = keyboardCheck();
+          if (keyboard) list.push(keyboard);
+          if (actionTarget) list.push({ scope: "target", target: actionTarget, keys });
+          for (const dependency of evidenceTargets)
+            list.push({ scope: "dependency", target: dependency });
+          return list;
         }
-        return (
-          (!anchored ||
-            sameObservationEvidence(context.evidence!, evidence!, actionTarget, keys)) &&
-          sameObservationEvidence(context.evidence!, evidence!, undefined, keys)
-        );
+        if (anchored) list.push({ scope: "target", target: actionTarget, keys });
+        // The target's region is checked above, so a positively identified
+        // media timeline elsewhere may advance, as it may with dependencies.
+        list.push({ scope: "page", keys, incidentalMedia: anchored });
+        return list;
       };
-      if (matches(volatile)) {
+      const comparison = (check: Check) =>
+        preparedEvidence && (check.scope === "target" || check.scope === "page")
+          ? preparedEvidence
+          : ([context.evidence!, evidence!] as const);
+      const failing = (keys?: ReadonlySet<string>) =>
+        checks(keys).find(
+          (check) =>
+            !sameObservationEvidence(...comparison(check), check.target, check.keys, {
+              incidentalMedia: check.incidentalMedia,
+            }),
+        );
+      const matches = (keys?: ReadonlySet<string>) => !failing(keys);
+      const refusal = failing(volatile);
+      if (!refusal) {
         // Keep the pre-capture revision: later mutations must be checked again.
         verifiedFrames = before;
         return;
       }
+      observed = {
+        ...(observedChange(...comparison(refusal), refusal.target, refusal.keys, {
+          incidentalMedia: refusal.incidentalMedia,
+        }) ?? {}),
+        scope: refusal.scope,
+        phase: prepared ? "preparation" : "decision",
+      };
       consumeRefused();
       // Learn page activity only from in-place text changes that every protected
       // region would tolerate, with no human input since the sync.
       const changes =
-        tolerant && sameFrames(context.frames, state.frames, "human")
+        tolerant && !prepared && sameFrames(context.frames, state.frames, "human")
           ? contentChanges(context.evidence, evidence, volatile)
           : undefined;
       const candidate =
@@ -1770,6 +1828,11 @@ export class CooperationController implements ControlAuthority {
           dispatch: (startsInput, method) => {
             assert();
             sent = true;
+            if (!startsInput && PREPARATION_METHODS.has(method)) {
+              preparationSent = true;
+              preparationFocus ||= method === "DOM.focus";
+              preparationHover ||= method === "Input.dispatchMouseEvent";
+            }
             nativeInputStarted ||= startsInput || (targeted && primaryEffect(method));
           },
           verifyPointerTarget: async (node, point, offset) => {

@@ -178,6 +178,9 @@ export interface DispatcherDeps {
 
 /** Tools whose page input can make the page open another tab or window. */
 const OPENS_TABS = new Set(["tool.click", "tool.press", "tool.drag"]);
+/** Suggested wait before retrying a request refused while another settles.
+ * Viewport captures are bounded at 10 s plus 500 ms cleanup; most settle sooner. */
+const OPERATION_SETTLING_RETRY_MS = 1_000;
 
 const AUTO_BORROW_WRITE_TOOLS = new Set([
   "tool.navigate",
@@ -433,12 +436,21 @@ export class ToolDispatcher {
       ) {
         // A daemon cleanup deadline can expire before Chrome releases the
         // original call. Do not replace the owner of its dialog cleanup.
+        // Nothing was sent, so the caller may retry the same request once the
+        // earlier one settles (for example a cancelled screenshot, #527).
+        const settling = this.activeDialogOperations.get(operationParams.session_id);
         body = {
           id: req.id,
           error: {
             code: "cdp_failed",
             message: "Previous operation is still settling; this action was not dispatched",
-            data: { dispatched: false },
+            data: {
+              dispatched: false,
+              reason: "operation_settling",
+              retryable: true,
+              retry_after_ms: OPERATION_SETTLING_RETRY_MS,
+              settling_method: settling?.request.method,
+            },
           },
         };
       } else {

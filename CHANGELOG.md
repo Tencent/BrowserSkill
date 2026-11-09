@@ -81,6 +81,23 @@ determines which versions can connect.
 - Removed nodes already collected by CDP report target_detached with node identity, consistently with detached nodes that remain inspectable; other CDP failures remain target_unavailable.
 - Recording captures option changes on native `<select>` controls inside open shadow roots,
   whose `change` events do not reach the document.
+- Strict DOM-targeted actions tolerate added or removed noninteractive tooltips after their
+  own hover, and character counters tied to a focused text field by `maxlength` or
+  `aria-describedby` after their own focus. Target meaning, links, ordinary text, form state,
+  modal contents and explicit dependencies stay exact. Scripts, untargeted keys and visual
+  clicks retain the full observation check, including during preparation
+  ([#540](https://github.com/Tencent/BrowserSkill/issues/540)).
+- A targeted strict action without `--depends-on` tolerates a positively identified media
+  timeline elsewhere on the page, as it already did with dependencies. Unnamed, submitted and
+  in-form sliders, and untargeted actions, stay exact.
+- Evidence refusals report `observed_change` (the first differing node, field and check, and
+  whether it happened before or during preparation) without values or sensitive text. Strict
+  click refusals after preparation also report `press_sent: false`.
+- A request refused because an earlier command on the session is still settling (for
+  example a cancelled observation screenshot) now carries `reason: operation_settling`,
+  `retryable` and `retry_after_ms`. `cooperate sync --settle` pauses and syncs again
+  (up to 5 s, also for older extensions), and the CLI no longer suggests a reload that needs
+  the same sync ([#527](https://github.com/Tencent/BrowserSkill/issues/527)).
 - `upload` preserves its concrete handler failure receipts (`set_file_input_failed` and
   `file_drop_failed`, such as `-32000 Not allowed` when Chrome's "Allow access to file URLs"
   extension toggle is off) when transaction cleanup detaches the debugger or post-action

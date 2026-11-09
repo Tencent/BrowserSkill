@@ -77,6 +77,7 @@ pub mod reason {
     pub const TRANSFER_OUTCOME_UNKNOWN: &str = "transfer_outcome_unknown";
     pub const TRANSFER_TIMEOUT: &str = "transfer_timeout";
     pub const SESSION_BUSY: &str = crate::rpc_reason::SESSION_BUSY;
+    pub const OPERATION_SETTLING: &str = crate::rpc_reason::OPERATION_SETTLING;
     pub const SESSION_IDLE_TIMEOUT: &str = crate::rpc_reason::SESSION_IDLE_TIMEOUT;
     pub const SESSION_WINDOW_CLOSED: &str = crate::rpc_reason::SESSION_WINDOW_CLOSED;
     pub const SESSION_USER_MOVED_TAB: &str = crate::rpc_reason::SESSION_USER_MOVED_TAB;
@@ -605,6 +606,13 @@ pub fn info_for_error(code: ErrorCode, data: Option<&serde_json::Value>) -> Rend
             ),
             exit_code: base.exit_code,
         },
+        (ErrorCode::CdpFailed, reason::OPERATION_SETTLING) => RenderInfo {
+            summary: "an earlier command on this session is still finishing in the browser",
+            hint: Some(
+                "nothing was sent; wait about a second and run the same command again (`bsk cooperate sync --settle` retries this automatically). Reload cannot help: it waits for the same command",
+            ),
+            exit_code: base.exit_code,
+        },
         (ErrorCode::Cancelled, reason::SCREENSHOT_USER_CANCELLED) => RenderInfo {
             summary: "full-page screenshot cancelled by user input",
             hint: Some("respect the interruption; do not automatically retry"),
@@ -897,6 +905,22 @@ mod tests {
         assert!(hint.contains("interrupts all sessions"));
         assert!(!hint.contains("stop/restart"));
         assert_eq!(info.exit_code, 4);
+    }
+
+    #[test]
+    fn operation_settling_does_not_suggest_reload() {
+        let data = serde_json::json!({ "reason": reason::OPERATION_SETTLING, "dispatched": false });
+        let info = info_for_error(ErrorCode::CdpFailed, Some(&data));
+        assert_eq!(
+            info.summary,
+            "an earlier command on this session is still finishing in the browser"
+        );
+        let hint = info.hint.unwrap();
+        assert!(hint.contains("nothing was sent"));
+        assert!(hint.contains("run the same command again"));
+        assert!(hint.contains("--settle"));
+        assert!(!hint.contains("reloading the tab"));
+        assert_eq!(info.exit_code, 3);
     }
 
     #[test]

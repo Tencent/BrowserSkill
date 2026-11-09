@@ -45,6 +45,10 @@ CLI、扩展和 DSH 插件可以分别发布，能否连接由协议兼容性决
 - 控制状态采样在浏览器证实失败的子文档已退出后有界重新收集一次；仍存在但不可观测的框架继续阻止输入。
 - 已被 CDP 回收的移除节点与仍可检查的脱离节点统一返回 target_detached，并保留节点身份；其他 CDP 故障仍返回 target_unavailable。
 - 录制捕获 open shadow root 内原生 `<select>` 的选项变化；这类控件的 `change` 事件不会到达 document。
+- strict DOM 定向动作仅容忍自身悬停后增减的非交互提示气泡，以及自身聚焦后增减、通过 `maxlength` 或 `aria-describedby` 与聚焦文本框关联的字数计数器。目标含义、链接、普通文字、表单状态、模态正文和显式依赖继续精确比较；脚本、无目标按键和视觉点击在准备阶段也保留完整观测检查（[#540](https://github.com/Tencent/BrowserSkill/issues/540)）。
+- 未声明 `--depends-on` 的定向 strict 动作，与声明了依赖时一样，容忍页面其他位置经正向识别的媒体时间轴。无名、会提交或位于表单内的滑块，以及无目标动作，仍保持精确比较。
+- 证据拒绝返回 `observed_change`（第一处差异的节点、字段、所属检查，以及发生在决策阶段还是准备阶段），不包含输入值和敏感文本。准备步骤之后被拒绝的 strict 点击同时返回 `press_sent: false`。
+- 因同一会话上一条命令仍在结算（例如被取消的观测截图）而被拒绝的请求，现在带有 `reason: operation_settling`、`retryable` 和 `retry_after_ms`。`cooperate sync --settle` 会暂停后重新同步（最多 5 秒，旧版扩展同样适用），CLI 不再建议同样需要该次同步的 reload（[#527](https://github.com/Tencent/BrowserSkill/issues/527)）。
 - `upload` 在事务清理主动断开 debugger 或操作后框架收集失败时保留具体的处理器失败回执（如未开启扩展“允许访问文件网址”权限时的 `set_file_input_failed` 与 `file_drop_failed` `-32000 Not allowed`），不再将其掩盖为 `control_context_invalid`；`dragEnter` 立即拒绝时保持 `effect_state: none`，且不再冗余发送 `dragCancel`（[#636](https://github.com/Tencent/BrowserSkill/issues/636)）。
 
 ### 修复
