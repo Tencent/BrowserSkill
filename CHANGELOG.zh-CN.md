@@ -16,19 +16,27 @@ CLI、扩展和 DSH 插件可以分别发布，能否连接由协议兼容性决
 - `bsk plan` 和 MCP 工具 `bsk_plan` 在一次调用中依次执行多个已决定的动作，并返回同步后的状态。
   填写表单或设置筛选条件只需一个模型回合，不必每个动作一回合。每一步都保留对应命令的全部检查，
   第一个未完成的步骤会终止计划，且不做任何重试。
-- `bsk recipe` 和 MCP 工具 `bsk_recipe`（实验功能，需设置 `BSK_RECIPES=1`）把验证过的流程保存为本地文件并回放，
-  直接返回输出，不必每步花一个模型回合。按角色、名称和上下文精确定位，遇到第一个偏离就停下并把页面交回。
-  此版本只回放只读和可逆步骤。详见 `docs/recipes.md`。
+- DSH 插件通过 `bsk_interact(action=plan)` 一次执行多个已决定的动作，检查、终止规则和回执与 `bsk plan` 相同。
+- 设置 `recipes` 选项或 `BSK_RECIPES=1` 后，DSH 插件提供 `bsk_recipe`。运行使用插件自己的会话，
+  未完成的运行会保留回执，且不提供批准动作。
+- `bsk recipe` 把验证过的流程保存为本地文件并回放，直接返回输出，不必每步花一个模型回合；
+  设置 `BSK_RECIPES=1` 后 MCP 会列出 `bsk_recipe`。按角色、名称和上下文精确定位，遇到第一个偏离就停下并把页面交回。
+  此版本只回放只读和可逆步骤：降低风险的步骤要由人用 `bsk recipe approve` 批准后才会运行，
+  结果不确定的运行会锁住该配方，直到调用方确认已核实。详见 `docs/recipes.md`。
 - `bsk read`、MCP 和 DSH 的 `bsk_inspect(action=read)` 通过隔离世界中的固定同步查询读取有界 DOM 字段。Agent 可跨无关动画读取当前标题、URL、文本、属性和表单状态，再通过明确的业务条件执行操作。不接受调用方 JavaScript、回调或延迟副作用，并对敏感字段脱敏。
 - DOM 读取使用协议 1.9 能力协商，旧组件明确报不支持，不回退到脚本执行。任意 evaluate、视觉和无目标输入仍保留严格观察保护。
 
 ### 变更
 
+- `bsk plan` 和 `bsk recipe` 作为标准 CLI 工作流提供文档与内置 skill 指引；MCP 和 DSH 中的 recipe 工具仍按需启用。
+- Recipe 的运行和修改共用互斥锁；安全状态不可读或运行标记不可写时拒绝回放，宿主进程仍存活时也保留中断运行的核实要求。DSH 完整收集取消后的 plan 和 recipe 回执。
+
 - 扩展 0.4.3 移除过时的迁移标志和版本限制，继续采用可选配对。
 
 ### 修复
 
-- CLI 和 MCP 调用协商使用 daemon 发放的一次性请求凭证。取消先于操作登记到达时，即使调用方的两秒取消等待已结束，迟到的操作也不会执行。凭证会过期、拒绝重复使用，并在 daemon 重启后失效；旧 daemon 保留原有的有限重试行为。
+- Recipe 保存时检查输入及格式化后的文件大小，避免生成自身无法读取的修订版本。
+
 - `press` 为美式键盘标点补上物理 `code` 与虚拟键码，`Ctrl+/` 这类快捷键能够触发依据 `event.code` 判断的处理器。
 - 主文档 SPA 路由变化（包括切走后恢复原 URL 和 hash 路由）撤销旧控制上下文和 ref；补充读取不会更新这些凭证。
   已加载标签页的被动读取和新建 debugger 连接同样受到保护。
@@ -38,6 +46,7 @@ CLI、扩展和 DSH 插件可以分别发布，能否连接由协议兼容性决
 - 已被 CDP 回收的移除节点与仍可检查的脱离节点统一返回 target_detached，并保留节点身份；其他 CDP 故障仍返回 target_unavailable。
 - 录制捕获 open shadow root 内原生 `<select>` 的选项变化；这类控件的 `change` 事件不会到达 document。
 - `upload` 在事务清理主动断开 debugger 或操作后框架收集失败时保留具体的处理器失败回执（如未开启扩展“允许访问文件网址”权限时的 `set_file_input_failed` 与 `file_drop_failed` `-32000 Not allowed`），不再将其掩盖为 `control_context_invalid`；`dragEnter` 立即拒绝时保持 `effect_state: none`，且不再冗余发送 `dragCancel`（[#636](https://github.com/Tencent/BrowserSkill/issues/636)）。
+- CLI 和 MCP 调用协商使用 daemon 发放的一次性请求凭证。取消先于操作登记到达时，即使调用方的两秒取消等待已结束，迟到的操作也不会执行。凭证会过期、拒绝重复使用，并在 daemon 重启后失效；旧 daemon 保留原有的有限重试行为。
 
 ### 修复
 

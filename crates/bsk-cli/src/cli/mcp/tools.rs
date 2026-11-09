@@ -51,7 +51,7 @@ const TOOL_NAMES: [&str; 7] = [
     "bsk_assist",
 ];
 
-/// Experimental, so it costs clients nothing unless they ask for it with `BSK_RECIPES=1`.
+/// Opt-in, so it costs clients nothing unless they ask for it with `BSK_RECIPES=1`.
 const RECIPE_TOOL: &str = "bsk_recipe";
 
 pub(crate) fn exists(name: &str) -> bool {
@@ -75,8 +75,9 @@ fn recipe_definition() -> Value {
          parameters; run replays one by name with params and returns outputs. Use a recipe only \
          when its description matches the task. status tells you what to do next: completed \
          means answer from outputs; handoff means continue from post and remaining, by hand; \
-         uncertain means a step's effect is unknown, so check the application's records and \
-         never run it again; refused means nothing ran. A run started without session keeps its \
+         uncertain means a step's effect is unknown, so check the application's records: the \
+         recipe does not run again until you pass that run_id as checked; refused means nothing ran, and approval_required means a person \
+         must approve the recipe's lowered risks in a terminal first. A run started without session keeps its \
          session open for you after handoff or uncertain: stop it when done. After finishing a \
          flow by hand, and only if the user agrees, draft turns the session's actions into a \
          recipe (before stopping that session), and save stores your reviewed copy. Outputs are \
@@ -1490,6 +1491,9 @@ struct RecipeArgs {
     browser: Option<String>,
     /// run: keep a session the run started open after it completes.
     keep_session: Option<bool>,
+    /// run: the run_id of an uncertain run whose effect you checked in the application's
+    /// records. Until then the recipe does not run again.
+    checked: Option<String>,
     /// list: only recipes allowed on this origin.
     site: Option<String>,
     /// draft: what the recipe does.
@@ -1513,6 +1517,7 @@ impl RecipeArgs {
             ("tab_id", self.tab_id.is_some()),
             ("browser", self.browser.is_some()),
             ("keep_session", self.keep_session.is_some()),
+            ("checked", self.checked.is_some()),
             ("site", self.site.is_some()),
             ("description", self.description.is_some()),
             ("recipe", self.recipe.is_some()),
@@ -1581,6 +1586,7 @@ async fn run_recipe(
                     "tab_id",
                     "browser",
                     "keep_session",
+                    "checked",
                 ],
             )?;
             if args.session.is_some() && (args.browser.is_some() || args.keep_session.is_some()) {
@@ -1598,6 +1604,7 @@ async fn run_recipe(
                 tab_id: args.tab_id,
                 browser: args.browser,
                 keep_session: args.keep_session.unwrap_or(false),
+                checked: args.checked,
             };
             let link = connect(daemon, control).await?;
             plan::check_protocol(&link.protocol).map_err(CliError::Local)?;

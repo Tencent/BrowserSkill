@@ -32,11 +32,17 @@ determines which versions can connect.
   call, then return the synchronized state, so a form or a set of filters takes one
   model turn instead of one per action. Each step keeps the checks of its own command,
   and the first step that does not complete stops the plan without any retry.
-- `bsk recipe` and the MCP tool `bsk_recipe` (experimental, `BSK_RECIPES=1`) save a
-  verified flow as a local file and replay it, returning its outputs without a model
-  turn per step. Targets match exactly by role, name and context, and a run stops at the
-  first deviation and hands the page back. This version replays only read and reversible
-  steps. See `docs/recipes.md`.
+- The DSH plugin runs decided actions together with `bsk_interact(action=plan)`, with the
+  same checks, stopping rule and receipt as `bsk plan`.
+- The DSH plugin offers `bsk_recipe` when its `recipes` option or `BSK_RECIPES=1` is set.
+  A run uses an owned session, keeps the receipt of a run that did not complete, and has
+  no approve action.
+- `bsk recipe` saves a verified flow as a local file and replays it, returning its
+  outputs without a model turn per step; MCP lists `bsk_recipe` with `BSK_RECIPES=1`.
+  Targets match exactly by role, name and context, and a run stops at the first deviation
+  and hands the page back. This version replays only read and reversible steps: a lowered
+  risk runs only after a person approves it with `bsk recipe approve`, and an uncertain run
+  holds its recipe until the caller checks it. See `docs/recipes.md`.
 - `bsk read`, MCP and DSH `bsk_inspect(action=read)` sample bounded DOM fields
   through fixed synchronous isolated-world queries. Agents can read current title,
   URLs, text, attributes and control state across unrelated animation, then act
@@ -47,16 +53,20 @@ determines which versions can connect.
 
 ### Changed
 
+- `bsk plan` and `bsk recipe` are documented standard CLI workflows, with packaged
+  guidance for batching and replay; recipe schemas remain opt-in in MCP and DSH.
+- Recipe execution and edits share an exclusive lock. Replay refuses unreadable
+  safety state or an unwritable run marker, and retains interrupted-run holds even
+  when the host process remains alive. DSH drains cancelled plan and recipe receipts.
+
 - Extension 0.4.3 removes obsolete migration flags and version gates while keeping
   pairing optional. There is no automatic enforcement deadline.
 
 ### Fixed
 
-- CLI and MCP calls negotiate one-use daemon admission tickets. A cancellation
-  received before an operation is registered prevents that late operation from
-  running, including after the caller's two-second cancellation grace has ended.
-  Tickets expire, reject replay and cannot survive daemon restarts; older daemons
-  retain the existing bounded-retry behavior.
+- Recipe save refuses oversized input and formatted documents before publishing a
+  revision that its own reader could not open.
+
 - `press` maps US-layout punctuation to its physical `code` and virtual key code,
   so shortcuts such as `Ctrl+/` reach handlers that check `event.code`.
 - Main-document SPA route changes, including away-and-back and hash routes,
@@ -77,6 +87,11 @@ determines which versions can connect.
   frame collection fails, instead of masking them as `control_context_invalid`. Pre-drop
   `dragEnter` refusals also keep `effect_state: none` without dispatching a redundant
   `dragCancel` ([#636](https://github.com/Tencent/BrowserSkill/issues/636)).
+- CLI and MCP calls negotiate one-use daemon admission tickets. A cancellation
+  received before an operation is registered prevents that late operation from
+  running, including after the caller's two-second cancellation grace has ended.
+  Tickets expire, reject replay and cannot survive daemon restarts; older daemons
+  retain the existing bounded-retry behavior.
 
 ### Fixed
 
