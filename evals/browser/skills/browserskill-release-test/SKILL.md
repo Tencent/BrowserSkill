@@ -21,9 +21,9 @@ description: 使用 Bsk 执行 BrowserSkill 的 PR 前可选端到端自测、�
 - 每秒变化页和轮播页都必须独立测 evaluate、`read` 与 wheel，包含即时及跨更新周期的规划延迟、实际滚动和持续更新核验，按 [dynamic-pages.md](references/dynamic-pages.md) 执行。不能只在静态页测过命令就给动态页打勾。
 - **必测新引入命令与边缘场景**：
   - `bsk plan`：验证单次 sync 后多步表单/级联控件/步骤级 `expect`/内嵌 `wait-for-element`/`--until-visible` 的单轮次批量执行，以及中段 `expect` 失败、等待超时、无目标动作位置约束的精确停机（`stopped`、`not_run`、`effect_state`）。
-  - `bsk recipe`（测试环境默认由 `release_audit.py` 开启 `BSK_RECIPES=1`）：验证 `draft -> save -> list -> show -> run -> rm` 全生命周期、良性页面漂移（`ids/order/late/popup/rerender`）下的零模型轮次回放、多 `segments` 跨页执行，以及语义漂移下的安全交接（`status: "handoff"`，连续 3 次同位偏离标为 `stale`）与高风险提交步骤拒止（`commit` step 拒绝保存）。
+  - `bsk recipe`（测试环境默认由 `release_audit.py` 开启 `BSK_RECIPES=1` 以同时覆盖 CLI 与 MCP `bsk_recipe`）：验证 `draft -> save -> approve -> list -> show -> run -> rm` 全生命周期、良性页面漂移（`ids/order/late/popup/rerender`）下的零模型轮次回放、多 `segments` 跨页执行，以及语义漂移下的安全交接（`status: "handoff"`，连续 3 次同位偏离标为 `stale`）与高风险提交步骤/降级未审批拒止（`commit` step 拒绝保存、`approval_required` 与非终端 `approval_needs_person` 拒止）。
   - `bsk read`：验证零 JS 注入的有界 DOM 读取（`--selector`、`--ref`、`--fields-json`、`--max-nodes`、`--max-bytes`）。
-  - 边缘场景：覆盖虚拟列表视口卸载与行回收、双层叠加弹窗遮罩（`@layers` 逐层关闭）、富文本编辑器根节点与内部子节点填充边界、同文档 `pushState` 路由切换竞态。
+  - 边缘场景：覆盖虚拟列表视口卸载与行回收、双层叠加弹窗遮罩（`@layers` 逐层关闭）、富文本编辑器根节点与内部子节点填充边界、同文档 `pushState` 路由切换竞态（其中预期非零退出的负例记录按合同单列归入对应 `NEG-*` 用例）。
 - 人机接管、借用、录制遵守实际 Automation 设置；不改设置绕过确认，不伪造真人输入。缺人工协作、登录、验证码、网络限制或能力不可用均记 blocked/unverified，不能跳过后声称 100%。继续能独立完成的其他项目。
 - 只操作本轮自建/明确借用的标签和 session。daemon 生命周期/配对只在独立 admin runtime 和端口测试；不得重启共享 daemon。公网仅公开浏览，不购买、发消息、发弹幕、点赞投币、发帖回帖、发布内容或提交销售线索。
 - 意外失败后先查实际副作用，禁止盲重放。修复/重试成功保留首次失败，该轮仍不能放行。文档明确的 `dialog_pending` 是可恢复的中间状态，必须结束原 operation，不能重复触发动作。

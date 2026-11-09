@@ -43,7 +43,7 @@
       <button type="button" id="apply-forum-filter">筛选主题</button>
       <button type="button" id="recycle-virtual-window">切换到虚拟列表下一视口 (Rows 20-25)</button>
     </div>
-    <output id="forum-status">当前节点: all (共 6 条)</output>
+    <output id="forum-status" role="status">当前节点: all (共 6 条)</output>
   </section>
 
   <section class="box" id="topic-list-box">
@@ -84,6 +84,7 @@
 
   let currentTab = new URLSearchParams(location.search).get('tab') || 'all';
   let virtualWindowOffset = 0;
+  let filterSeq = 0;
 
   function renderContributorTable(offset = 0) {
     const rows = Array.from({ length: 5 }, (_, i) => {
@@ -117,7 +118,8 @@
         <span class="reply-pill" aria-label="回复数">${t.replies}</span>
       </article>
     `).join('');
-    $('#forum-status').textContent = `当前节点: ${currentTab} | 排序: ${sort} | 匹配主题: ${filtered.length} 条 | 视口偏移: ${virtualWindowOffset}`;
+    const seqSuffix = filterSeq > 0 ? ` | 筛选批次: #${filterSeq}` : '';
+    $('#forum-status').textContent = `当前节点: ${currentTab} | 排序: ${sort} | 匹配主题: ${filtered.length} 条 | 视口偏移: ${virtualWindowOffset}${seqSuffix}`;
     document.querySelectorAll('.topic-link').forEach((link) => {
       link.onclick = (e) => {
         e.preventDefault();
@@ -166,11 +168,13 @@
   });
 
   $('#apply-forum-filter').onclick = () => {
+    filterSeq++;
     renderTopics();
     emit('forum-filter-applied', {
       tab: currentTab,
       keyword: $('#topic-keyword').value.trim(),
       sort: $('#topic-sort').value,
+      seq: filterSeq,
     });
   };
 

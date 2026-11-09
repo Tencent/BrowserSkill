@@ -239,8 +239,10 @@ def extract_metrics(cmd, exit_code, parsed, elapsed_ms):
     j = parsed if isinstance(parsed, dict) else {}
     if cmd == "plan":
         mode = "plan"
-    elif cmd and cmd.startswith("recipe"):
+    elif cmd == "recipe run":
         mode = "recipe"
+    elif cmd and cmd.startswith("recipe"):
+        mode = "recipe_mgmt"
     elif cmd == "step":
         mode = "step"
     elif cmd in READ_COMMANDS:
@@ -256,7 +258,8 @@ def extract_metrics(cmd, exit_code, parsed, elapsed_ms):
         effects = j.get("effects") if isinstance(j.get("effects"), dict) else {}
         actions = int(effects.get("steps_done", 0)) if isinstance(effects.get("steps_done"), int) else 0
     elif cmd == "step":
-        actions = 1 if (exit_code == 0 or j.get("action") is not None) else 0
+        act_obj = j.get("action") if isinstance(j.get("action"), dict) else {}
+        actions = 1 if (exit_code == 0 or "result" in act_obj) else 0
     elif cmd in ACTION_COMMANDS and exit_code == 0:
         actions = 1
     else:
@@ -265,18 +268,40 @@ def extract_metrics(cmd, exit_code, parsed, elapsed_ms):
     if cmd == "view":
         browser_calls = 0
         rpc_calls = 0
-    elif cmd in ("recipe list", "recipe show", "recipe save", "recipe rm", "help"):
+    elif cmd in (
+        "recipe list",
+        "recipe show",
+        "recipe save",
+        "recipe rm",
+        "recipe approve",
+        "help",
+    ):
         browser_calls = 0
         rpc_calls = 0
+    elif cmd == "recipe draft":
+        rpc_calls = 3 if exit_code == 0 else 1
+        browser_calls = 2 if exit_code == 0 else 0
     elif isinstance(j.get("rpc_calls"), int):
         rpc_calls = j["rpc_calls"]
         browser_calls = j.get("browser_calls", rpc_calls)
     elif cmd == "plan":
-        rpc_calls = actions + (1 if j.get("post") else 0) + (1 if j.get("readiness") else 0)
-        browser_calls = rpc_calls
+        if exit_code != 0 and not j:
+            rpc_calls = 0
+            browser_calls = 0
+        else:
+            rpc_calls = (
+                actions
+                + (1 if j.get("post") else 0)
+                + (1 if j.get("readiness") else 0)
+            )
+            browser_calls = rpc_calls
     elif cmd == "recipe run":
-        rpc_calls = max(1, actions + 1)
-        browser_calls = rpc_calls
+        if j.get("status") == "refused" and not j.get("session_id"):
+            rpc_calls = 0
+            browser_calls = 0
+        else:
+            browser_calls = max(1, actions + 1)
+            rpc_calls = browser_calls + (2 if j.get("session_stopped") else 1)
     else:
         rpc_calls = 1
         browser_calls = 1
@@ -324,6 +349,19 @@ def semantic_failure(meta, value):
             return "Machine-readable result required for recipe save"
         if j.get("saved") is False:
             return "recipe save returned saved:false"
+    if cmd == "recipe draft":
+        if not isinstance(j, dict):
+            return "Machine-readable result required for recipe draft"
+        if j.get("errors"):
+            return "recipe draft reported errors"
+    if cmd == "recipe approve":
+        if not isinstance(j, dict):
+            return "Machine-readable result required for recipe approve"
+        if j.get("status") == "refused" or j.get("approved") is False:
+            return "recipe approve was not confirmed"
+    if cmd == "read":
+        if not isinstance(j, dict) or not isinstance(j.get("items"), list):
+            return "Machine-readable items array required for read"
     if (
         cmd in ["navigate", "wait-for-navigation"]
         and isinstance(j, dict)
@@ -679,18 +717,29 @@ def compute_run_benchmark(root, passed_ids=None):
     results = load(root / "results.json")["cases"]
     result_map = {r["id"]: r for r in results if isinstance(r, dict) and "id" in r}
     if passed_ids is None:
-        passed_set = {
-            r["id"]
-            for r in results
-            if isinstance(r, dict) and r.get("status") == "passed"
-        }
+        gate_path = root / "gate.json"
+        if gate_path.exists():
+            gate_data = load(gate_path)
+            if isinstance(gate_data.get("passed_ids"), list):
+                passed_set = set(gate_data["passed_ids"])
+            else:
+                passed_set = {
+                    r["id"]
+                    for r in results
+                    if isinstance(r, dict) and r.get("status") == "passed"
+                }
+        else:
+            passed_set = {
+                r["id"]
+                for r in results
+                if isinstance(r, dict) and r.get("status") == "passed"
+            }
     else:
         passed_set = set(passed_ids)
 
     case_benchmarks = []
     mode_buckets = {}
     command_latencies = {}
-    all_turn_latencies = []
     run_starts = []
     run_finishes = []
 
@@ -698,6 +747,7 @@ def compute_run_benchmark(root, passed_ids=None):
         cid = c["id"]
         kind = c.get("kind", "workflow")
         page_type = c.get("page_type", "unspecified")
+        is_negative = bool(c.get("negative"))
         r = result_map.get(cid)
         status = (
             "passed"
@@ -705,11 +755,10 @@ def compute_run_benchmark(root, passed_ids=None):
             else (r.get("status", "missing") if r else "missing")
         )
         records = r.get("records", []) if isinstance(r, dict) else []
-        metas = []
+        metas_and_values = []
         for rid in records:
             try:
-                m, _ = read_record(root, rid)
-                metas.append(m)
+                metas_and_values.append(read_record(root, rid))
             except (ValueError, KeyError, OSError):
                 continue
 
@@ -724,11 +773,10 @@ def compute_run_benchmark(root, passed_ids=None):
         c_starts = []
         c_finishes = []
 
-        for m in metas:
+        for m, v in metas_and_values:
             metrics = m.get("metrics") or {}
             el = float(m.get("elapsed_ms", 0.0))
             cmd_elapsed.append(el)
-            all_turn_latencies.append(el)
             t = int(metrics.get("interaction_turns", 1))
             act = int(metrics.get("actions_executed", 0))
             turns += t
@@ -750,18 +798,34 @@ def compute_run_benchmark(root, passed_ids=None):
                 c_finishes.append(f_ms)
                 run_finishes.append(f_ms)
 
+            cmd_ok = (
+                m.get("exit_code") == 0
+                and not m.get("timed_out")
+                and not semantic_failure(m, v)
+            )
             # Only count each distinct command invocation once in global mode/command buckets
             # (workflow cases vs CMD-* cases may reference the same record UUID).
+            # Intentional negative guardrail rejections are tracked in `negative_guard_invocations`
+            # rather than diluting positive mode compression/latency/success_rate.
             mode = metrics.get("execution_mode", "other")
             bucket = mode_buckets.setdefault(
                 mode,
-                {"records": set(), "turns": 0, "actions": 0, "success": 0, "latencies": []},
+                {
+                    "records": set(),
+                    "neg_records": set(),
+                    "turns": 0,
+                    "actions": 0,
+                    "success": 0,
+                    "latencies": [],
+                },
             )
-            if m["id"] not in bucket["records"]:
+            if is_negative and not cmd_ok:
+                bucket["neg_records"].add(m["id"])
+            elif m["id"] not in bucket["records"]:
                 bucket["records"].add(m["id"])
                 bucket["turns"] += 1
                 bucket["actions"] += act
-                if m.get("exit_code") == 0 and not m.get("timed_out"):
+                if cmd_ok:
                     bucket["success"] += 1
                 bucket["latencies"].append(el)
 
@@ -772,7 +836,7 @@ def compute_run_benchmark(root, passed_ids=None):
             if m["id"] not in cb["records"]:
                 cb["records"].add(m["id"])
                 cb["latencies"].append(el)
-                if m.get("exit_code") == 0 and not m.get("timed_out"):
+                if cmd_ok or (is_negative and cid in passed_set):
                     cb["success"] += 1
 
         total_el = round(sum(cmd_elapsed), 2)
@@ -789,7 +853,7 @@ def compute_run_benchmark(root, passed_ids=None):
                 "page_type": page_type,
                 "status": status,
                 "passed": cid in passed_set,
-                "records_count": len(metas),
+                "records_count": len(metas_and_values),
                 "interaction_turns": turns,
                 "actions_executed": actions,
                 "turn_compression_ratio": round(actions / turns, 2) if turns > 0 else 0.0,
@@ -845,6 +909,7 @@ def compute_run_benchmark(root, passed_ids=None):
         lat = stats_summary(b["latencies"])
         mode_summary[mode] = {
             "invocations": t_count,
+            "negative_guard_invocations": len(b["neg_records"] - b["records"]),
             "success_count": b["success"],
             "success_rate": round(b["success"] / t_count, 4) if t_count else 0.0,
             "actions_executed": a_count,
@@ -874,6 +939,12 @@ def compute_run_benchmark(root, passed_ids=None):
         try:
             m, _ = read_record(root, p.parent.name)
             distinct_records[m["id"]] = m
+            s_ms = parse_iso_ms(m.get("started"))
+            f_ms = parse_iso_ms(m.get("finished"))
+            if s_ms is not None:
+                run_starts.append(s_ms)
+            if f_ms is not None:
+                run_finishes.append(f_ms)
         except (ValueError, KeyError, OSError):
             continue
 
@@ -1381,6 +1452,7 @@ def gate(root):
         "release_ready": not errors and len(passed) == len(planned),
         "candidate": cfg["candidate"],
         "passed": len(passed),
+        "passed_ids": passed,
         "required": len(planned),
         "success_rate": len(passed) / len(planned) if planned else 0,
         "command_coverage": (

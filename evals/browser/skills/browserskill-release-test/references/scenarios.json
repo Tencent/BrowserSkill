@@ -671,10 +671,11 @@
     "id": "RECIPE-LIFECYCLE",
     "kind": "workflow",
     "page_type": "recipe",
-    "goal": "/plan-recipe-lab?view=form：在真实会话用 plan/fill 完成开户申请预览后，在停止会话前执行 bsk recipe draft 导出草稿（核对 draft 不含敏感输入明文与 query secret）；审查补齐 until 与 outputs 后执行 recipe save、recipe list、recipe show（初始 status:draft）；再执行 bsk recipe run 验证自动创建并关闭 recipe:<name> 会话、status:'completed'、outputs 精确匹配、show 状态升为 verified；最后用临时副本验证 recipe rm。",
+    "goal": "/recipe/form?source=first：在真实会话用 plan/fill 完成开户申请预览后，在停止会话前执行 bsk recipe draft 导出草稿（核对 draft.site.start 为 /recipe/form、不含敏感输入明文且包含 query string 脱敏提示）；审查补齐 until 与 outputs 后执行 recipe save、recipe approve（无风险降级时返回 approval_required:false）、recipe list、recipe show（初始 status:draft）；再执行 bsk recipe run 验证自动创建并关闭 recipe:<name> 会话、status:'completed'、outputs 精确匹配、show 状态升为 verified；最后用临时副本验证 recipe rm。",
     "required_commands": [
       "recipe draft",
       "recipe save",
+      "recipe approve",
       "recipe list",
       "recipe show",
       "recipe run",
@@ -712,7 +713,7 @@
     "id": "NEG-RECIPE-REFUSAL",
     "kind": "workflow",
     "page_type": "recipe",
-    "goal": "验证 bsk recipe 安全拒止边界：(1) 保存含不可逆提交按钮（如“立即支付提交” commit step）的 recipe 被拒绝（exit 2，saved:false）；(2) 缺失必填 --param 或传入非法枚举值在启动会话前被拒绝（exit 2，status:'refused'，reason:'invalid_params'）；(3) 在借用标签页或不存在 recipe 名上运行返回 status:'refused'。",
+    "goal": "验证 bsk recipe 安全拒止边界：(1) 保存含不可逆提交按钮（如“立即支付提交” commit step）的 recipe 被拒绝（exit 2，saved:false）；(2) 将 commit 步骤显式声明为 risk:'reversible' 保存后（approval:'required'），未经终端人工审批直接运行返回 exit 2、reason:'approval_required'，且非终端管道调用 recipe approve 返回 exit 2、reason:'approval_needs_person'；(3) 缺失必填 --param、非法枚举值、借用标签页或不存在 recipe 名上运行返回 status:'refused'。",
     "required_commands": ["recipe save", "recipe run"],
     "negative": true,
     "check_effect": false,
@@ -732,21 +733,21 @@
     "id": "EDGE-VIRTUAL-LIST-RECYCLE",
     "kind": "workflow",
     "page_type": "edge-cases",
-    "goal": "/forum-hub 与 /edgecases：测试虚拟列表视口切换（点击切换视口行 20-25）与行复用场景，验证切换后对已卸载旧行 ref 的操作被安全拒绝，新视口下的表格与列表通过 extract table / extract list / read 完整提取且不拆行、不串列。",
+    "goal": "/forum-hub 与 /edgecases：测试虚拟列表视口切换（点击切换视口行 20-25）与行复用正例：切换后 fresh sync 确认旧视口行卸载、新视口行 #21..#25 挂载，并通过 extract table / extract list / read 完整提取新视口表格与列表且不拆行、不串列；对已复用/已卸载旧行 ref 的拒绝记录单列归入 NEG-RECYCLED 或 NEG-STALE。",
     "required_commands": ["cooperate sync", "click", "extract table", "extract list", "read"]
   },
   {
     "id": "EDGE-STACKED-MODALS",
     "kind": "workflow",
     "page_type": "edge-cases",
-    "goal": "/video-portal?modal=2：双层模态框叠加遮罩下，先 sync 核对 VOM @layers 与顶层焦点层；验证此时直接点击底层播放控件被拒绝（target_covered，effect_state:'none'）；再使用 Bsk 依次关闭顶层 modal-2 与下层 modal-1（每关一层均 fresh sync 确认图层收敛），最后成功操作底层控件。",
+    "goal": "/video-portal?modal=2：双层模态框叠加遮罩下，先 sync 核对 VOM @layers 与顶层焦点层（modal-layer-2）；使用 Bsk 依次关闭顶层 modal-2 与下层 modal-1（每关一层均 fresh sync 确认图层收敛与遮罩移除），最后成功点击并 read 底层播放控件状态；遮罩未关闭时点击底层控件的 target_covered 拒绝记录单列归入 NEG-COVERED。",
     "required_commands": ["cooperate sync", "click", "read"]
   },
   {
     "id": "EDGE-EDITOR-BOUNDARIES",
     "kind": "workflow",
     "page_type": "edge-cases",
-    "goal": "/workbench#forms：测试 contenteditable 富文本根节点 fill 覆盖、fill '' 清空、fill --no-clear 追加并核对 DOM 与事件；同时测试对编辑器内部后代节点直接 fill 按合同拒绝（code:'invalid_params'，reason:'target_not_fillable'）且不破坏编辑器内容。",
+    "goal": "/workbench#forms：测试 contenteditable 富文本根节点 fill 覆盖、fill '' 清空、fill --no-clear 追加以及多行/Emoji/CJK 文本输入，并通过 read 核对 DOM 内容与输入事件；对编辑器内部非根后代节点直接 fill 的 target_not_fillable 拒绝记录单列归入 NEG-INVALID。",
     "required_commands": ["fill", "read", "click"]
   },
   {
