@@ -89,6 +89,10 @@ interface TabState {
   activitySeen: Map<string, number>;
   historyGap: boolean;
   controlRevision: number;
+  /** Timestamp of the most recent explicit manual hold on this tab. */
+  heldAt: number;
+  /** Timestamp of the most recent agent or cooperation activity on this tab. */
+  lastAgentActivity: number;
   /** Revokes permission guards on human intervention, independently of page revisions. */
   authorityRevision: number;
   /**
@@ -161,6 +165,8 @@ const PASSIVE_DEBUG = new Set<string>(
   ),
 );
 const QUIET_MS = 2_000;
+/** Idle gap after which a fresh `cooperate sync`/`enable` automatically resumes a paused or editing tab. */
+const IDLE_RESUME_MS = 3_000;
 /** Upper bound on nodes whose self-changing text the default check tolerates. */
 const MAX_VOLATILE = 256;
 /** Effects that prepare input before native input starts. Only identified
@@ -351,6 +357,8 @@ export class CooperationController implements ControlAuthority {
       activitySeen: new Map(),
       historyGap: false,
       controlRevision: 0,
+      heldAt: 0,
+      lastAgentActivity: this.now(),
       authorityRevision: 0,
     };
     this.tabs.set(tabId, state);
@@ -445,6 +453,33 @@ export class CooperationController implements ControlAuthority {
                     : "syncing",
       editing: [...state.frames.values()].some((frame) => frame.editing),
     };
+  }
+  private humanBusyOrRecentInput(state: TabState): boolean {
+    return [...state.frames.values()].some(
+      (f) => f.busy || f.pending || this.now() - f.lastInput < QUIET_MS,
+    );
+  }
+  private canAutoResumeIdle(state: TabState, now: number): boolean {
+    if (
+      state.stopped ||
+      state.working ||
+      this.humanBusyOrRecentInput(state) ||
+      now - state.lastAgentActivity < IDLE_RESUME_MS ||
+      (state.held && now - state.heldAt < QUIET_MS)
+    )
+      return false;
+    return state.held || [...state.frames.values()].some((f) => f.editing);
+  }
+  private async resumeIdleControl(state: TabState) {
+    const controlRevision = state.controlRevision;
+    state.epoch++;
+    state.context = undefined;
+    state.held = false;
+    state.controlRevision++;
+    state.authorityRevision++;
+    this.changed(state);
+    await this.deps.resumeFrames(state.tabId, state.lease, state.frameRepairs);
+    if (state.controlRevision === controlRevision + 1) await this.refresh(state);
   }
   private humanActive(state: TabState): boolean {
     return [...state.frames.values()].some(
@@ -579,7 +614,10 @@ export class CooperationController implements ControlAuthority {
     state.context = undefined;
     // Reserve the transition before awaiting a renderer. A newer hold wins.
     state.held = action === "hold";
-    if (state.held) state.interruption?.abort(new Error("The user is holding control"));
+    if (state.held) {
+      state.heldAt = this.now();
+      state.interruption?.abort(new Error("The user is holding control"));
+    }
     state.controlRevision++;
     state.authorityRevision++;
     if (action === "resume") state.stopped = false;
@@ -713,6 +751,7 @@ export class CooperationController implements ControlAuthority {
       return failure("This tab belongs to another session");
     if (state.stopped && params.action !== "status") return stopped();
     if (!isInitialBlank(target)) state.bootstrap = false;
+    const commandEnteredAt = this.now();
     if (params.action === "enable" || (params.action === "sync" && params.tab_id !== undefined))
       this.defaultTabs.set(session.sessionId, state.tabId);
     try {
@@ -756,7 +795,13 @@ export class CooperationController implements ControlAuthority {
         }
       }
       if (state.stopped && params.action !== "status") return stopped();
-      if (params.action !== "sync" && params.action !== "enable")
+      if (params.action !== "sync" && params.action !== "enable") {
+        if (
+          params.action === "wait" &&
+          !this.humanBusyOrRecentInput(state) &&
+          (!state.held || this.now() - state.heldAt >= QUIET_MS)
+        )
+          state.lastAgentActivity = this.now();
         return {
           tab_id: state.tabId,
           stopped: state.stopped,
@@ -773,6 +818,14 @@ export class CooperationController implements ControlAuthority {
           control_policy: session.controlPolicy ?? null,
           ...(state.frameGaps.length ? { frame_gaps: state.frameGaps } : {}),
         };
+      }
+      if (
+        (state.held || this.humanActive(state)) &&
+        this.canAutoResumeIdle(state, commandEnteredAt)
+      ) {
+        await this.resumeIdleControl(state);
+        if (state.stopped) return stopped();
+      }
       if (state.held || state.working || this.humanActive(state))
         return failure("The user is still operating this tab; wait for hand-back");
       const previousRefs = session.refStore;
@@ -936,6 +989,7 @@ export class CooperationController implements ControlAuthority {
         };
       } finally {
         state.working = false;
+        state.lastAgentActivity = this.now();
         this.changed(state);
       }
     } catch (error) {
@@ -1001,6 +1055,7 @@ export class CooperationController implements ControlAuthority {
       );
     } finally {
       if (sent && method === "tool.window_resize") this.clearWindowObservations(state.sessionId);
+      if (sent) state.lastAgentActivity = this.now();
       state.working = false;
       if (method === "tool.navigate") await this.observeTab(state.tabId);
       this.changed(state);
@@ -1017,6 +1072,16 @@ export class CooperationController implements ControlAuthority {
     const states = [...this.tabs.values()].filter((state) => state.sessionId === session.sessionId);
     if (states.some((state) => state.working))
       return failure("Another operation is settling on this tab");
+    const enteredAt = this.now();
+    for (const state of states) {
+      if ((state.held || this.humanActive(state)) && this.canAutoResumeIdle(state, enteredAt)) {
+        try {
+          await this.resumeIdleControl(state);
+        } catch {
+          // prepare() below reports collection failures consistently.
+        }
+      }
+    }
     const epochs = new Map(states.map((state) => [state, state.epoch]));
     let sent = false;
     let revoked: string | undefined;
@@ -1085,6 +1150,7 @@ export class CooperationController implements ControlAuthority {
       );
     } finally {
       for (const state of states) {
+        if (sent) state.lastAgentActivity = this.now();
         state.working = false;
         if (this.tabs.get(state.tabId) === state) this.changed(state);
       }
@@ -1347,6 +1413,7 @@ export class CooperationController implements ControlAuthority {
     let detachedByHandler = false;
     let postRefreshFailed = false;
     const authorityRevision = state.authorityRevision;
+    const idleAtEntry = this.canAutoResumeIdle(state, this.now());
     let verifiedFrames = context?.frames;
     let evidenceTargets: { backendNodeId: number; frameId?: string }[] | undefined;
     let actionTarget: ResolvedActionTarget | undefined;
@@ -1360,26 +1427,46 @@ export class CooperationController implements ControlAuthority {
         : {};
     const reportFailure = (message: string, effect: "none" | "unknown" = "none"): RpcError => {
       const diagnosis = observed ? { observed_change: observed } : {};
+      const idleResumable =
+        idleAtEntry &&
+        effect === "none" &&
+        !intervention.signal.aborted &&
+        state.authorityRevision === authorityRevision &&
+        !this.humanBusyOrRecentInput(state);
       if (!targetPolicy) {
         const refused = failure(message, effect);
-        return { ...refused, data: { ...refused.data, ...unpressed(effect), ...diagnosis } };
+        return {
+          ...refused,
+          data: {
+            ...refused.data,
+            ...unpressed(effect),
+            ...diagnosis,
+            ...(idleResumable
+              ? {
+                  recovery:
+                    "Use cooperate sync to resume control and reconcile the live result before issuing a new action. Never replay an uncertain submission.",
+                }
+              : {}),
+          },
+        };
       }
       if (effect === "unknown") state.context = undefined;
-      const controlReason = state.held
-        ? "control_held"
-        : this.humanActive(state) ||
-            intervention.signal.aborted ||
-            state.authorityRevision !== authorityRevision
-          ? "human_intervention"
-          : observedFramesChanged() ||
-              (context && context.frames.get(0)?.document !== state.frames.get(0)?.document)
-            ? "document_changed"
-            : state.unavailable ||
-                state.epoch !== epoch ||
-                detachedByHandler ||
-                this.controlError(session, state)
-              ? "control_context_invalid"
-              : undefined;
+      const controlReason =
+        state.held && !idleResumable
+          ? "control_held"
+          : (this.humanActive(state) && !idleResumable) ||
+              intervention.signal.aborted ||
+              state.authorityRevision !== authorityRevision
+            ? "human_intervention"
+            : observedFramesChanged() ||
+                (context && context.frames.get(0)?.document !== state.frames.get(0)?.document)
+              ? "document_changed"
+              : state.unavailable ||
+                  state.epoch !== epoch ||
+                  detachedByHandler ||
+                  this.controlError(session, state)
+                ? "control_context_invalid"
+                : undefined;
       const issue =
         !controlReason && checkFailure
           ? checkFailure
@@ -1387,7 +1474,9 @@ export class CooperationController implements ControlAuthority {
               controlReason ?? "control_context_invalid",
               message,
               "control",
-              "Wait for control if needed, synchronize and inspect the live result before deciding again. Never replay an uncertain action.",
+              idleResumable
+                ? "Synchronize this tab and inspect the live result before deciding again. Never replay an uncertain action."
+                : "Wait for control if needed, synchronize and inspect the live result before deciding again. Never replay an uncertain action.",
             );
       return {
         ...issue,
@@ -1976,6 +2065,7 @@ export class CooperationController implements ControlAuthority {
       finished = true;
       if (sent && req.method === "tool.window_resize")
         this.clearWindowObservations(state.sessionId);
+      if (sent) state.lastAgentActivity = this.now();
       if (state.interruption === intervention) state.interruption = undefined;
       if (state.completion === completion) state.completion = undefined;
       state.working = false;

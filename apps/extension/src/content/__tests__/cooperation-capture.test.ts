@@ -607,6 +607,18 @@ it("publishes scroll transitions once per burst and ignores idle window blur", (
   vi.useRealTimers();
 });
 
+it("releases an editing hold when the window blurs so switching back to chat hands control back", () => {
+  document.body.innerHTML = '<input aria-label="City" value="Shanghai">';
+  const read = collector();
+  read();
+  const target = document.querySelector("input")!;
+  edit(target, "Beijing");
+  expect(read()).toMatchObject({ human: 1, editing: true, busy: false });
+
+  window.dispatchEvent(new Event("blur"));
+  expect(read()).toMatchObject({ human: 1, editing: false, busy: false, pending: false });
+});
+
 it("clears text attribution when preparation fails before native dispatch", async () => {
   document.body.innerHTML = "<input>";
   const read = collector();

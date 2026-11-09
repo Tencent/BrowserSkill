@@ -64,7 +64,9 @@ async function fixture(policy: "strict" | "target" = "target") {
   const controller = new CooperationController({
     sessions,
     readFrames,
-    resumeFrames: async () => {},
+    resumeFrames: async () => {
+      frame = { ...frame, editing: false, revision: frame.revision + 1 };
+    },
     changed: () => {},
     now: () => now,
   });
@@ -606,6 +608,31 @@ describe("negotiated target control", () => {
     expect(next.context_id).not.toBe(f.first.context_id);
     expect(await f.run()).toMatchObject({ data: { reason: "control_context_invalid" } });
     expect(await f.run({ context_id: next.context_id })).toEqual({});
+  });
+
+  it.each([
+    "held",
+    "editing",
+  ] as const)("reports control_context_invalid and auto-resumes %s on the next sync after an idle gap", async (mode) => {
+    const f = await fixture();
+    if (mode === "held") {
+      await f.controller.control(7, f.controller.view(7)!.revision, "hold");
+    } else {
+      f.change({ human: 1, editing: true, lastInput: 10_000 });
+    }
+    f.advance();
+    expect(await f.run()).toMatchObject({
+      data: { reason: "control_context_invalid", phase: "control", effect_state: "none" },
+    });
+    expect(f.send).not.toHaveBeenCalled();
+    const next = await f.sync();
+    expect(next).toMatchObject({
+      context_id: expect.any(String),
+      state: { mode: "ready" },
+    });
+    expect(next.context_id).not.toBe(f.first.context_id);
+    expect(await f.run({ context_id: next.context_id })).toEqual({});
+    expect(f.send).toHaveBeenCalledOnce();
   });
 
   it("fences input if the user takes control during target checking", async () => {

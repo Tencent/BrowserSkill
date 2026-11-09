@@ -64,6 +64,9 @@ determines which versions can connect.
 
 ### Fixed
 
+- Window blur releases completed text-editing holds, and new task synchronizations
+  after an idle gap automatically resume paused or editing tabs when no gesture or
+  recent input is active, avoiding unnecessary manual hand-back prompts between tasks.
 - Recording keeps clicks on buttons and links whose name is longer than 48 characters,
   such as GOV.UK step-by-step sections and long news headlines.
 - Recording keeps clicks on links, filter disclosures, checkboxes and other controls

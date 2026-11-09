@@ -630,9 +630,16 @@ export function attachCooperationCapture() {
   const onWindowBlur = () => {
     if (
       !enabled ||
-      (!pointer && !composing && !dragging && keys.size === 0 && !eventAgent && !inputSource)
+      (!pointer &&
+        !composing &&
+        !dragging &&
+        !state.editing &&
+        keys.size === 0 &&
+        !eventAgent &&
+        !inputSource)
     )
       return;
+    clearTimeout(focusTimer);
     clearTimeout(pointerTimer);
     clearTimeout(eventTimer);
     clearTimeout(inputTimer);
@@ -640,6 +647,8 @@ export function attachCooperationCapture() {
     composing = false;
     dragging = false;
     dragAgent = undefined;
+    state.editing = false;
+    editingTarget = undefined;
     keys.clear();
     eventAgent = undefined;
     inputSource = undefined;
