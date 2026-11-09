@@ -241,6 +241,7 @@ describe("fill result verification", () => {
   it("clears a background date after deferred focus restores a value", async () => {
     const h = await setup('<input type="date" value="2026-01-01">');
     vi.spyOn(document, "hasFocus").mockReturnValue(false);
+    const inputs: string[] = [];
     const send = h.send.getMockImplementation()!;
     h.send.mockImplementation(async (tabId, method, params) => {
       const reply = await send(tabId, method, params);
@@ -249,12 +250,15 @@ describe("fill result verification", () => {
         (params as { type: string }).type === "rawKeyDown"
       ) {
         h.element.value = "2026-01-01";
+        inputs.push(`focus:${h.element.value}`);
       }
       return reply;
     });
+    h.element.addEventListener("input", () => inputs.push(h.element.value));
 
     expect(await h.fill("")).toMatchObject({ value_length: 0 });
     expect(h.element.value).toBe("");
+    expect(inputs).toEqual(["", "focus:2026-01-01", ""]);
     expect(h.insert).not.toHaveBeenCalled();
   });
 

@@ -1384,6 +1384,7 @@ export async function handleFill(
     if (ready !== "ready" && ready !== "background") {
       return fillError(ready, "fill target changed or lost focus before typing");
     }
+    let valueAssigned = false;
     if (preparation.write === "value") {
       // Date-like inputs have no text caret and always replace (preparation
       // rejects --no-clear); assign the sanitized value directly. Still flush
@@ -1437,13 +1438,15 @@ export async function handleFill(
       }
       // Assign even an empty value: a deferred focus handler may have filled
       // the field again after the initial clearing step.
-      const assigned = await nodeCdp.send<FillScriptReply<unknown>>(
+      const assigned = await nodeCdp.send<FillScriptReply<boolean>>(
         target.tabId,
         "Runtime.callFunctionOn",
         {
           objectId,
           functionDeclaration: `function(expected) {
+            const changed = this.value !== expected;
             Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(this, expected);
+            return changed;
           }`,
           arguments: [{ value: preparation.expected }],
           returnByValue: true,
@@ -1455,6 +1458,7 @@ export async function handleFill(
       if (assigned.exceptionDetails) {
         return fillError("fill_failed", "fill value assignment script failed");
       }
+      valueAssigned = assigned.result?.value === true;
     } else {
       if (params.value !== "" && (!clearBefore || ready === "background")) {
         // Native commands position number/email carets without selection APIs.
@@ -1505,7 +1509,7 @@ export async function handleFill(
     // final value. Synthesize it only for value-set or no-op fills that have
     // no native event, and always send `change`, which neither path dispatches.
     const finalValueAlreadyNotified =
-      (clearBefore && params.value === "") ||
+      (clearBefore && params.value === "" && !valueAssigned) ||
       (preparation.write === "insert" && params.value !== "");
     const notifyInput = !finalValueAlreadyNotified;
     // Notify, then read in a separate call so nested microtasks queued by the
