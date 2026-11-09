@@ -42,13 +42,14 @@ pub struct DownloadArgs {
 
 pub fn dispatch(args: DownloadArgs, format: Format) -> Result<(), CliError> {
     if args.out.exists() && !args.overwrite {
-        return Err(CliError::Local(anyhow::anyhow!(
-            "output already exists (pass --overwrite to replace it): {}",
-            args.out.display()
-        )));
+        return Err(output_exists(&args.out));
     }
+    let (ref_, selector) =
+        split_target(args.target, args.ref_, args.selector).map_err(|error| match error {
+            CliError::Local(error) => CliError::invalid_params(error),
+            error => error,
+        })?;
     let info = ensure_daemon().context("ensure daemon is running")?;
-    let (ref_, selector) = split_target(args.target, args.ref_, args.selector)?;
     let params = DownloadParams {
         session_id: args.session.clone(),
         ref_,
@@ -110,6 +111,16 @@ pub fn dispatch(args: DownloadArgs, format: Format) -> Result<(), CliError> {
     Ok(())
 }
 
+fn output_exists(out: &Path) -> CliError {
+    CliError::file_validation(
+        anyhow::anyhow!(
+            "output already exists (pass --overwrite to replace it): {}",
+            out.display()
+        ),
+        "choose a new --out path, or pass --overwrite to replace the existing file",
+    )
+}
+
 pub(super) fn write_transfer(
     sock: &Path,
     id: &str,
@@ -117,10 +128,7 @@ pub(super) fn write_transfer(
     overwrite: bool,
 ) -> Result<(), CliError> {
     if out.exists() && !overwrite {
-        return Err(CliError::Local(anyhow::anyhow!(
-            "output already exists (pass --overwrite to replace it): {}",
-            out.display()
-        )));
+        return Err(output_exists(out));
     }
     let parent = out
         .parent()

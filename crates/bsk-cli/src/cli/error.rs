@@ -28,8 +28,8 @@ use crate::daemon::start_error::recovery_hint;
 /// a transport / setup failure (`anyhow::Error`).
 #[derive(Debug, Error)]
 pub enum CliError {
-    /// Structured error reported by the daemon (or extension via the
-    /// daemon's RPC layer).
+    /// Structured validation error, reported locally or by the daemon
+    /// (including extension errors forwarded through its RPC layer).
     #[error("{message}")]
     Rpc {
         code: ErrorCode,
@@ -61,6 +61,35 @@ pub enum CliError {
 }
 
 impl CliError {
+    /// Caller-side validation uses the same stable contract as RPC validation,
+    /// without suggesting that a healthy daemon needs to be restarted.
+    pub(crate) fn invalid_params(error: Error) -> Self {
+        Self::Rpc {
+            code: ErrorCode::InvalidParams,
+            message: format!("{error:#}"),
+            data: None,
+            source: Some(error),
+        }
+    }
+
+    /// Classify a local file preflight while retaining its filesystem cause.
+    pub(crate) fn file_validation(error: Error, recovery: &str) -> Self {
+        let code = match error.downcast_ref::<std::io::Error>().map(|e| e.kind()) {
+            Some(std::io::ErrorKind::NotFound) => ErrorCode::NotFound,
+            Some(std::io::ErrorKind::PermissionDenied) => ErrorCode::PermissionDenied,
+            _ => ErrorCode::InvalidParams,
+        };
+        Self::Rpc {
+            code,
+            message: format!("{error:#}"),
+            data: Some(serde_json::json!({
+                "reason": "local_file_error",
+                "recovery": recovery,
+            })),
+            source: Some(error),
+        }
+    }
+
     pub fn from_rpc(err: RpcError) -> Self {
         CliError::Rpc {
             code: err.code,

@@ -395,7 +395,7 @@ fn prepare(args: &PlanArgs, flags: &GlobalFlags) -> anyhow::Result<Plan> {
 }
 
 pub fn dispatch(args: PlanArgs, flags: &GlobalFlags, _format: Format) -> Result<(), CliError> {
-    let plan = prepare(&args, flags)?;
+    let plan = prepare(&args, flags).map_err(CliError::invalid_params)?;
     let output = step::Output::prepare(
         &args.session,
         args.baseline.as_deref(),

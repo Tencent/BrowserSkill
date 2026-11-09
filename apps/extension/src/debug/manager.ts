@@ -46,6 +46,8 @@ const ACTIONS = new Set([
   "tool.reload",
   "tool.click",
   "tool.fill",
+  "tool.upload",
+  "tool.download",
   "tool.press",
   "tool.select",
   "tool.hover",
