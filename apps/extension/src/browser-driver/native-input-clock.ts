@@ -33,7 +33,7 @@ export class NativeInputClockError extends Error {
         phase: "precondition",
         effect_state: effect,
         recovery:
-          "Synchronize and inspect the application result before deciding again. No additional native input was sent after the clock check failed; never replay an uncertain submission.",
+          "Inspect the application result and synchronize before deciding again. The refused native event was not sent; never replay an uncertain submission.",
       },
     };
   }
