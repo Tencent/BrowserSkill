@@ -20,6 +20,7 @@ use crate::cli::error::{CliError, Format};
 use crate::cli::record_recovery;
 use crate::cli::record_state;
 use crate::cli::session::{SessionStartOptions, start_session, stop_session};
+use crate::daemon::queue::RECORD_START_TIMEOUT_MS;
 use export::{
     ExportMeta, export_with_recovery, states_dir_for_output, trace_json_path,
     validate_record_output,
@@ -122,7 +123,7 @@ fn dispatch_start(args: RecordStartArgs, format: Format) -> Result<(), CliError>
         "record-start",
         Method::ToolRecordStart,
         Some(start_params),
-        TOOL_IPC_TIMEOUT,
+        ipc_timeout(RECORD_START_TIMEOUT_MS),
     );
 
     let start_result = match start_result {

@@ -62,6 +62,12 @@ pub const QUEUE_CAPACITY: usize = 64;
 /// so tests can default it.
 pub const DEFAULT_TOOL_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// `record_start` is one RPC for several extension steps: the start navigate
+/// (its own 30s default), the tab-ready wait (up to 10s), the content-script
+/// ack retries and the first capture (settle up to 2s), about 44s at worst.
+/// The single-tool default would cut a slow page off mid-navigate.
+pub const RECORD_START_TIMEOUT_MS: u32 = 60_000;
+
 /// Once a forwarded request is cancelled, keep the session queue busy while
 /// the extension finishes handler-side compensation. This is deliberately
 /// bounded so a wedged extension cannot pin the session forever.

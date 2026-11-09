@@ -74,6 +74,10 @@ determines which versions can connect.
   such as GOV.UK step-by-step sections and long news headlines.
 - Recording keeps clicks on links, filter disclosures, checkboxes and other controls
   that share a form with a search field, such as GOV.UK search results and filters.
+- `bsk record start --url` no longer times out when the page takes more than about
+  30 seconds to load. The daemon and CLI now give record start 60 seconds, enough for
+  its navigation, the content script's start and the first capture
+  ([#669](https://github.com/Tencent/BrowserSkill/issues/669)).
 - Recipe save refuses oversized input and formatted documents before publishing a
   revision that its own reader could not open.
 - `press` maps US-layout punctuation to its physical `code` and virtual key code,
