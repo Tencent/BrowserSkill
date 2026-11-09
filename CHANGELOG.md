@@ -64,6 +64,11 @@ determines which versions can connect.
 
 ### Fixed
 
+- Website debugging attributes agent uploads and downloads to their transfer
+  operations instead of recording the resulting file changes and clicks as human input.
+- Local validation failures in upload, download, plan and step return stable
+  parameter/file error codes and relevant recovery hints. Upload sources are checked
+  before contacting the daemon or staging any files.
 - `fill` notifies each final value once. Native insertion and clearing already
   dispatch `input`; the completion step no longer repeats it
   ([#624](https://github.com/Tencent/BrowserSkill/issues/624)).
