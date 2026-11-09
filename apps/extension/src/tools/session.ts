@@ -9,6 +9,7 @@ import { type SessionManager, SessionStartCleanupError } from "@/session-manager
 import { detectBrowserMeta } from "@/transport/handshake";
 import type { InteractionPolicy, RpcError } from "@/transport/types";
 import { rpcError } from "./errors";
+import { clearHelpForSession } from "./human-loop";
 import { clearRecordingForSession } from "./record";
 import type { CdpRunner, ChromeTabsApi } from "./shared";
 import { isRpcError } from "./shared";
@@ -241,8 +242,11 @@ async function stopSession(
   }
 
   // Remote access must end before returning a tab. Preserve the local recording
-  // when a failed return keeps its session alive for a retry.
-  if (ctx.remote) clearRecordingForSession(params.session_id);
+  // and help request when a failed return keeps its session alive for a retry.
+  if (ctx.remote) {
+    clearRecordingForSession(params.session_id);
+    clearHelpForSession(params.session_id);
+  }
 
   // Step 1: auto-return borrowed tabs. Iterate over a snapshot of the
   // ids so deletions during iteration do not break the Map iterator.
@@ -321,7 +325,10 @@ async function stopSession(
   // Step 2: clear the per-session RefStore (review M6/M7 parity).
   ctx.refStore.clear();
 
-  if (!ctx.remote) clearRecordingForSession(params.session_id);
+  if (!ctx.remote) {
+    clearRecordingForSession(params.session_id);
+    clearHelpForSession(params.session_id);
+  }
 
   // Step 3: detach CDP sessions this session opened (no-op if none).
   await deps.cdp?.detachSession(params.session_id);

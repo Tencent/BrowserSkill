@@ -6,7 +6,13 @@ import {
 } from "@/session-manager/manager";
 import { type ResolvedActionTarget, resolveActionTarget } from "@/tools/interaction";
 import { captureVomObservation, handleSnapshot } from "@/tools/observation";
-import { type CdpRunner, chromeTabsApi, isRpcError, resolveTargetTab } from "@/tools/shared";
+import {
+  type CdpRunner,
+  chromeTabsApi,
+  isRpcError,
+  resolveTargetTab,
+  sessionCdpRunner,
+} from "@/tools/shared";
 import { lookupSnapshotRef } from "@/tools/snapshot-ref";
 import type { DragTarget, RequestFrame, RpcError } from "@/transport/types";
 import {
@@ -676,6 +682,11 @@ export class CooperationController implements ControlAuthority {
   async command(params: CooperationParams, cdp: CdpRunner, signal: AbortSignal): Promise<unknown> {
     const session = this.deps.sessions.get(params.session_id);
     if (!session) return { code: "not_found", message: "Unknown session" };
+    cdp = sessionCdpRunner(
+      cdp,
+      session.sessionId,
+      () => this.deps.sessions.get(session.sessionId) === session,
+    );
     this.startSession(session.sessionId);
     if (!["enable", "status", "sync", "wait"].includes(params.action))
       return { code: "invalid_params", message: "Unknown cooperation action" };
@@ -1126,6 +1137,11 @@ export class CooperationController implements ControlAuthority {
     if (!params?.session_id || SESSION_TOOLS.has(req.method)) return invoke(cdp);
     const session = this.deps.sessions.get(params.session_id);
     if (!session) return invoke(cdp);
+    cdp = sessionCdpRunner(
+      cdp,
+      session.sessionId,
+      () => this.deps.sessions.get(session.sessionId) === session,
+    );
     const targetPolicy = session.controlPolicy === "target";
     this.startSession(session.sessionId);
     if (

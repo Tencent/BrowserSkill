@@ -125,6 +125,9 @@ determines which versions can connect.
   headers, list fields and discovery previews, respecting nested style overrides
   and language-specific casing. Transformed text remains subject to the byte
   budget ([#597](https://github.com/Tencent/BrowserSkill/issues/597)).
+- Closing a retained Agent Window or stopping the last session detaches remaining
+  CDP debugger attachments and cancels active session operations, so the browser's
+  debugging infobar does not linger after the task window is closed.
 
 ## [0.4.2] - 2026-11-05
 

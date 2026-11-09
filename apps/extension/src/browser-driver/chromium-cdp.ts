@@ -192,6 +192,7 @@ export class ChromiumCdp {
       this.api.sendCommand({ tabId }, "Emulation.setFocusEmulationEnabled", { enabled }),
   );
   private readonly tabOwners = new Map<number, Set<string>>();
+  private syncGeneration = 0;
   private readonly pendingDialogEntries = new Map<
     number,
     {
@@ -746,7 +747,7 @@ export class ChromiumCdp {
   /** Best-effort detach of every cached tab. Used on session.stop. */
   async detachAll(): Promise<void> {
     const tabs = Array.from(this.attachedTabs);
-    for (const tabId of this.attachInFlight.keys())
+    for (const tabId of new Set([...tabs, ...this.attachInFlight.keys()]))
       this.attachmentVersions.set(tabId, (this.attachmentVersions.get(tabId) ?? 0) + 1);
     this.claimAttempts.clear();
     this.tabOwners.clear();
@@ -1434,9 +1435,48 @@ export class ChromiumCdp {
 
   /** Detach tabs only when no other live session has claimed them. */
   async detachSession(sessionId: string): Promise<void> {
-    await Promise.all(
-      Array.from(this.tabOwners.keys(), (tabId) => this.releaseSessionTab(sessionId, tabId)),
-    );
+    const owned = new Set([...this.tabOwners.keys(), ...this.claimAttempts.keys()]);
+    await Promise.all(Array.from(owned, (tabId) => this.releaseSessionTab(sessionId, tabId)));
+  }
+
+  /** Clean up ownership and fence any in-flight attachment when a tab closes. */
+  forgetClosedTab(tabId: number): void {
+    this.claimAttempts.delete(tabId);
+    this.tabOwners.delete(tabId);
+    this.backgroundExecution.forget(tabId);
+    void this.detach(tabId);
+  }
+
+  /** Reconcile debugger attachments with the current set of live sessions. */
+  async syncSessions(liveSessionIds: ReadonlySet<string>): Promise<void> {
+    const generation = ++this.syncGeneration;
+    const releases: Promise<void>[] = [];
+    const seen = new Set<string>();
+    const queueRelease = (sessionId: string, tabId: number) => {
+      const key = `${sessionId}:${tabId}`;
+      if (seen.has(key)) return;
+      seen.add(key);
+      releases.push(this.releaseSessionTab(sessionId, tabId));
+    };
+    for (const [tabId, owners] of this.tabOwners) {
+      for (const sessionId of owners) {
+        if (!liveSessionIds.has(sessionId)) queueRelease(sessionId, tabId);
+      }
+    }
+    for (const [tabId, claims] of this.claimAttempts) {
+      for (const sessionId of claims.keys()) {
+        if (!liveSessionIds.has(sessionId)) queueRelease(sessionId, tabId);
+      }
+    }
+    await Promise.all(releases);
+    if (generation !== this.syncGeneration) return;
+    const unowned: Promise<void>[] = [];
+    for (const tabId of new Set([...this.attachedTabs, ...this.attachInFlight.keys()])) {
+      if (!this.tabOwners.get(tabId)?.size && !this.claimAttempts.get(tabId)?.size) {
+        unowned.push(this.detach(tabId));
+      }
+    }
+    await Promise.all(unowned);
   }
 }
 

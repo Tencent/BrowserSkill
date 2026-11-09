@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AgentWindowCreateOptions } from "@/session-manager/agent-window";
 import { createDisconnectCleanup } from "@/session-manager/disconnect-cleanup";
 import { SessionManager } from "@/session-manager/manager";
+import * as humanLoop from "../human-loop";
 import * as recording from "../record";
 import { handleSessionStart, handleSessionStop } from "../session";
 import type { ChromeTabsApi } from "../shared";
@@ -179,6 +180,7 @@ describe("handleSessionStop with auto-return", () => {
     const failures = new Set([7]);
     const { tabs, windows } = makeApis(state, { moveThrowsFor: failures });
     const clear = vi.spyOn(recording, "clearRecordingForSession").mockImplementation(() => {});
+    const clearHelp = vi.spyOn(humanLoop, "clearHelpForSession").mockImplementation(() => {});
     try {
       const result = await handleSessionStop(
         sm,
@@ -188,18 +190,23 @@ describe("handleSessionStop with auto-return", () => {
       expect(result).toHaveProperty("return_failures");
       expect(sm.has("aa11")).toBe(true);
       expect(clear).toHaveBeenCalledTimes(remote ? 1 : 0);
+      expect(clearHelp).toHaveBeenCalledTimes(remote ? 1 : 0);
       failures.clear();
       clear.mockClear();
+      clearHelp.mockClear();
       const move = tabs.move;
       tabs.move = vi.fn(async (id, options) => {
         expect(clear).toHaveBeenCalledTimes(remote ? 1 : 0);
+        expect(clearHelp).toHaveBeenCalledTimes(remote ? 1 : 0);
         return move(id, options);
       });
       await handleSessionStop(sm, { session_id: "aa11" }, { tabManagement: { tabs, windows } });
       expect(clear).toHaveBeenCalledTimes(1);
+      expect(clearHelp).toHaveBeenCalledTimes(1);
       expect(sm.has("aa11")).toBe(false);
     } finally {
       clear.mockRestore();
+      clearHelp.mockRestore();
     }
   });
   it("leaves the session untouched when cancellation arrived before teardown", async () => {

@@ -2438,4 +2438,87 @@ describe("implicit auto-borrow when confirmTabBorrow is false", () => {
       dispatcher.stop();
     }
   });
+
+  it("automatically binds session ownership for CDP commands so session_stop detaches the debugger", async () => {
+    const tab = {
+      id: 7,
+      windowId: 100,
+      active: true,
+      url: "https://example.test",
+    } as chrome.tabs.Tab;
+    let windowSize = { width: 800, height: 600 };
+    vi.stubGlobal("chrome", {
+      tabs: {
+        get: vi.fn(async () => tab),
+        query: vi.fn(async () => [tab]),
+        remove: vi.fn(async () => {}),
+      },
+      windows: {
+        get: vi.fn(async () => ({ id: 100, ...windowSize })),
+        update: vi.fn(async (_id: number, next: { width: number; height: number }) => {
+          windowSize = next;
+          return { id: 100, ...windowSize };
+        }),
+      },
+    });
+    const api: CdpDebuggerApi = {
+      attach: vi.fn(async () => {}),
+      detach: vi.fn(async () => {}),
+      sendCommand: vi.fn(async (_target, method) => {
+        if (method === "Page.getLayoutMetrics") {
+          return {
+            cssLayoutViewport: { clientWidth: windowSize.width, clientHeight: windowSize.height },
+          };
+        }
+        return {};
+      }),
+      onEvent: {
+        addListener: vi.fn(),
+        removeListener: vi.fn(),
+      } as unknown as CdpDebuggerApi["onEvent"],
+      onDetach: {
+        addListener: vi.fn(),
+        removeListener: vi.fn(),
+      } as unknown as CdpDebuggerApi["onDetach"],
+    };
+    const cdp = new ChromiumCdp(api);
+    const { transport, sent, deliver } = fakeTransport();
+    const sessions = new SessionManager({
+      agentWindow: {
+        create: vi.fn(async () => ({ windowId: 100, initialTabIds: [7] })),
+        remove: vi.fn(async () => {}),
+        ensureActiveTab: vi.fn(async () => 7),
+      },
+    });
+    await sessions.start("aa11");
+    const dispatcher = new ToolDispatcher({ transport, sessions, cdp });
+    dispatcher.start();
+    try {
+      // tool.window_resize is not in pageTools for prepareBackgroundExecution and does not
+      // call trackSessionTab directly; dispatcher's session-scoped CDP runner must track it.
+      deliver({
+        id: "resize-1",
+        method: "tool.window_resize",
+        params: { session_id: "aa11", width: 1024, height: 768 },
+      });
+      await vi.waitFor(() => expect(sent).toHaveLength(1));
+      expect(sent[0]).toEqual({
+        id: "resize-1",
+        result: { window_id: 100, width: 1024, height: 768 },
+      });
+      expect(cdp.isAttached(7)).toBe(true);
+
+      deliver({
+        id: "stop-1",
+        method: "tool.session_stop",
+        params: { session_id: "aa11" },
+      });
+      await vi.waitFor(() => expect(sent).toHaveLength(2));
+      expect(cdp.isAttached(7)).toBe(false);
+      expect(api.detach).toHaveBeenCalledWith({ tabId: 7 });
+    } finally {
+      dispatcher.stop();
+      cdp.dispose();
+    }
+  });
 });
