@@ -24,7 +24,7 @@ import {
 } from "./action-checks";
 import { guardedRunner } from "./action-guard";
 import { type ControlAuthority, ControlAuthorityError } from "./control-authority";
-import { FrameCollectionError } from "./frame-error";
+import { FrameCollectionError, FrameUnresponsiveError } from "./frame-error";
 import {
   contentChanges,
   type EvidenceTarget,
@@ -43,8 +43,10 @@ import type {
   CooperationParams,
   CooperationView,
   FrameGap,
+  FrameIdentity,
   FrameRepairs,
   FrameState,
+  HiddenFrames,
   InputExpectation,
 } from "./types";
 
@@ -85,10 +87,13 @@ interface TabState {
   /** Ordinary input revocation must not discard an already accepted download receipt. */
   completion?: AbortController;
   unavailable: boolean;
+  /** Frames that did not answer the collection that made this tab unavailable. */
+  unresponsive?: FrameIdentity[];
   frames: Frames;
   context?: Context;
   frameGaps: FrameGap[];
   frameRepairs: FrameRepairs;
+  hiddenFrames: HiddenFrames;
   baseline?: Context;
   activity: Activity[];
   activitySequence: number;
@@ -120,8 +125,14 @@ export interface CooperationDeps {
     input: InputExpectation | undefined,
     lease: string,
     repairs: FrameRepairs,
+    hidden: HiddenFrames,
   ): Promise<CooperationFrames>;
-  resumeFrames(tabId: number, lease: string, repairs: FrameRepairs): Promise<void>;
+  resumeFrames(
+    tabId: number,
+    lease: string,
+    repairs: FrameRepairs,
+    hidden: HiddenFrames,
+  ): Promise<void>;
   releaseFrames?(tabId: number, lease: string): Promise<void>;
   changed(tabId: number): void;
   sessionActivity?(sessionId: string, idleProtected: boolean): void;
@@ -258,6 +269,30 @@ function failure(message: string, effect: "none" | "unknown" = "none"): RpcError
     },
   };
 }
+/**
+ * Names frames that did not answer collection. A busy frame can recover, so the
+ * reason stays the retryable `cooperation_sync_required`; the recovery also says
+ * how to leave a frame that keeps failing instead of looping.
+ */
+function withUnresponsiveFrames(
+  result: RpcError,
+  frames: (FrameIdentity & { tab_id?: number })[] | undefined,
+): RpcError {
+  if (!frames?.length) return result;
+  return {
+    ...result,
+    data: {
+      ...result.data,
+      frames,
+      ...(result.data?.effect_state === "unknown"
+        ? {}
+        : {
+            recovery:
+              "Use cooperate wait, then cooperate sync; a busy frame can recover. If the same frame keeps failing, use read-only commands such as get-html or snapshot, or stop the session, which also returns borrowed tabs. Never replay an uncertain submission.",
+          }),
+    },
+  };
+}
 function stopped(effect: "none" | "unknown" = "none"): RpcError {
   return {
     code: "user_aborted",
@@ -358,6 +393,7 @@ export class CooperationController implements ControlAuthority {
       frames: new Map(),
       frameGaps: [],
       frameRepairs: new Map(),
+      hiddenFrames: new Set(),
       activity: [],
       activitySequence: 0,
       activitySeen: new Map(),
@@ -484,7 +520,7 @@ export class CooperationController implements ControlAuthority {
     state.controlRevision++;
     state.authorityRevision++;
     this.changed(state);
-    await this.deps.resumeFrames(state.tabId, state.lease, state.frameRepairs);
+    await this.deps.resumeFrames(state.tabId, state.lease, state.frameRepairs, state.hiddenFrames);
     if (state.controlRevision === controlRevision + 1) await this.refresh(state);
   }
   private humanActive(state: TabState): boolean {
@@ -610,6 +646,7 @@ export class CooperationController implements ControlAuthority {
     state.epoch++;
     state.context = undefined;
     state.unavailable = true;
+    state.unresponsive = undefined;
     this.changed(state);
   }
   async control(tabId: number, revision: number, action: "hold" | "resume") {
@@ -631,7 +668,7 @@ export class CooperationController implements ControlAuthority {
     const epoch = state.epoch;
     this.changed(state);
     if (action === "resume") {
-      await this.deps.resumeFrames(tabId, state.lease, state.frameRepairs);
+      await this.deps.resumeFrames(tabId, state.lease, state.frameRepairs, state.hiddenFrames);
       if (state.epoch === epoch) await this.refresh(state);
     }
     return { ok: true, state: this.view(tabId) };
@@ -671,6 +708,7 @@ export class CooperationController implements ControlAuthority {
         input,
         state.lease,
         state.frameRepairs,
+        state.hiddenFrames,
       );
       frames = collection.frames;
       if (!live()) throw new Error("Shared-tab control ended during collection");
@@ -679,6 +717,7 @@ export class CooperationController implements ControlAuthority {
       state.frameGaps = collection.gaps;
     } catch (error) {
       state.unavailable = true;
+      state.unresponsive = error instanceof FrameUnresponsiveError ? error.frames : undefined;
       state.context = undefined;
       this.changed(state);
       throw error;
@@ -715,6 +754,7 @@ export class CooperationController implements ControlAuthority {
     for (const [id, frame] of frames) this.remember(state, id, frame);
     state.frames = frames;
     state.unavailable = false;
+    state.unresponsive = undefined;
     return frames;
   }
   async command(params: CooperationParams, cdp: CdpRunner, signal: AbortSignal): Promise<unknown> {
@@ -1010,7 +1050,10 @@ export class CooperationController implements ControlAuthority {
       state.context = undefined;
       this.changed(state);
       if (error instanceof FrameCollectionError) return error.toRpcError();
-      return failure(error instanceof Error ? error.message : String(error));
+      return withUnresponsiveFrames(
+        failure(error instanceof Error ? error.message : String(error)),
+        state.unresponsive,
+      );
     }
   }
 
@@ -1125,6 +1168,16 @@ export class CooperationController implements ControlAuthority {
         throw error;
       }
     };
+    // Tab operations prepare every owned tab, so name the tab of each silent frame.
+    const refusal = (message: string) =>
+      withUnresponsiveFrames(
+        failure(message, sent ? "unknown" : "none"),
+        states.flatMap((state) =>
+          state.unavailable
+            ? (state.unresponsive ?? []).map((frame) => ({ tab_id: state.tabId, ...frame }))
+            : [],
+        ),
+      );
     for (const state of states) {
       state.working = true;
       state.context = undefined;
@@ -1145,7 +1198,7 @@ export class CooperationController implements ControlAuthority {
       // Existing handlers may convert a guard rejection into their own RPC error.
       if (states.some((state) => state.stopped)) return stopped(sent ? "unknown" : "none");
       if (signal.aborted) signal.throwIfAborted();
-      if (revoked) return failure(revoked, sent ? "unknown" : "none");
+      if (revoked) return refusal(revoked);
       return result;
     } catch (error) {
       if (states.some((state) => state.stopped)) return stopped(sent ? "unknown" : "none");
@@ -1155,10 +1208,7 @@ export class CooperationController implements ControlAuthority {
           message: "Tab operation cancelled",
           data: { effect_state: sent ? "unknown" : "none" },
         };
-      return failure(
-        error instanceof Error ? error.message : String(error),
-        sent ? "unknown" : "none",
-      );
+      return refusal(error instanceof Error ? error.message : String(error));
     } finally {
       for (const state of states) {
         if (sent) state.lastAgentActivity = this.now();
@@ -1273,7 +1323,12 @@ export class CooperationController implements ControlAuthority {
         if (outcome === "cancelled") this.stopSession(state.sessionId);
         if (outcome === "continued" || outcome === "completed") {
           this.preserve(state);
-          await this.deps.resumeFrames(state.tabId, state.lease, state.frameRepairs);
+          await this.deps.resumeFrames(
+            state.tabId,
+            state.lease,
+            state.frameRepairs,
+            state.hiddenFrames,
+          );
         }
         return result;
       } finally {
@@ -1441,7 +1496,7 @@ export class CooperationController implements ControlAuthority {
       effect === "unknown" && req.method === "tool.click" && !nativeInputStarted
         ? { press_sent: false }
         : {};
-    const reportFailure = (message: string, effect: "none" | "unknown" = "none"): RpcError => {
+    const describeFailure = (message: string, effect: "none" | "unknown"): RpcError => {
       const diagnosis = observed ? { observed_change: observed } : {};
       const idleResumable =
         idleAtEntry &&
@@ -1510,6 +1565,11 @@ export class CooperationController implements ControlAuthority {
         },
       };
     };
+    const reportFailure = (message: string, effect: "none" | "unknown" = "none"): RpcError =>
+      withUnresponsiveFrames(
+        describeFailure(message, effect),
+        state.unavailable ? state.unresponsive : undefined,
+      );
     state.working = true;
     const intervention = new AbortController();
     state.interruption = intervention;
@@ -1927,6 +1987,7 @@ export class CooperationController implements ControlAuthority {
                 { type: "clear", id: input.id },
                 state.lease,
                 state.frameRepairs,
+                state.hiddenFrames,
               )
               .catch(() => {});
           },
