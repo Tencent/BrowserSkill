@@ -10,13 +10,14 @@ interface ActionGuard {
   dispatch?: (startsInput: boolean, method: string) => void;
   verifyPointerTarget?: CdpRunner["verifyPointerTarget"];
   beginDomMutation?: CdpRunner["beginDomMutation"];
+  detach?: CdpRunner["detach"];
   /** User-supplied evaluate is opaque; internal readiness probes remain read-only. */
   scriptedEffect?: boolean;
 }
 
 /** Request-scoped input leases and a final fence at native dispatch. */
 export function guardedRunner<T extends CdpRunner>(cdp: T, options: ActionGuard = {}): T {
-  const { prepare, dispatch, verifyPointerTarget, beginDomMutation } = options;
+  const { prepare, dispatch, verifyPointerTarget, beginDomMutation, detach } = options;
   const leases = new Map<string, string | undefined>();
   const attachments = new Map<number, string | undefined>();
   const cleanupSend = <R>(target: CdpTarget, method: string, params?: object) => {
@@ -142,6 +143,7 @@ export function guardedRunner<T extends CdpRunner>(cdp: T, options: ActionGuard 
         };
       if (key === "beginDomMutation") return beginDomMutation;
       if (key === "verifyPointerTarget") return verifyPointerTarget;
+      if (key === "detach" && detach) return detach;
       if (
         key === "acquireBackgroundExecution" ||
         key === "ownsBackgroundExecution" ||
