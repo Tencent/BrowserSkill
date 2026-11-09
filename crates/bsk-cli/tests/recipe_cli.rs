@@ -240,14 +240,21 @@ fn inputs(requests: &[Value]) -> Vec<&Value> {
 }
 
 #[tokio::test]
-async fn without_the_switch_nothing_runs_and_no_daemon_is_needed() {
+async fn the_cli_needs_no_switch_and_lists_the_command() {
     let home = Home::new();
     let mut command = home.command(&["recipe", "list"]);
     command.env_remove("BSK_RECIPES");
     let output = command.spawn().unwrap().wait_with_output().await.unwrap();
-    assert!(!output.status.success());
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("BSK_RECIPES=1"), "{stderr}");
+    assert!(output.status.success(), "{output:?}");
+    let listed: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(listed["recipes"], json!([]));
+
+    let mut command = home.command(&["--help"]);
+    command.env_remove("BSK_RECIPES");
+    let output = command.spawn().unwrap().wait_with_output().await.unwrap();
+    let help = String::from_utf8_lossy(&output.stdout);
+    assert!(help.contains("recipe"), "{help}");
+    assert!(!help.contains("experimental"), "{help}");
 }
 
 #[tokio::test]

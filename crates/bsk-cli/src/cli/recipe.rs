@@ -2,8 +2,8 @@
 //!
 //! A recipe is an explicit, reviewable file. It replays confirmed decisions, not a
 //! recording: each step passes the same control, target and `expect` checks as its
-//! own command. This version replays only read and reversible steps, and is
-//! experimental: it needs `BSK_RECIPES=1`. See `docs/recipes.md`.
+//! own command. This version replays only read and reversible steps. The CLI always
+//! has it; MCP lists `bsk_recipe` only with `BSK_RECIPES=1`. See `docs/recipes.md`.
 use super::{
     GlobalFlags, TOOL_IPC_TIMEOUT, business_rpc, ensure_daemon,
     error::{CliError, Format, exit_code_for},
@@ -24,10 +24,12 @@ pub(crate) mod vom;
 use model::Refusal;
 use store::Store;
 
+/// Lists `bsk_recipe` in MCP, so clients that never replay pay nothing for its schema.
 const ENABLE_ENV: &str = "BSK_RECIPES";
 const SESSION_START_TIMEOUT: Duration = Duration::from_secs(60);
 const SESSION_STOP_TIMEOUT: Duration = Duration::from_secs(60);
 
+/// Whether MCP lists the recipe tool. The CLI command needs no switch.
 pub(crate) fn enabled() -> bool {
     std::env::var_os(ENABLE_ENV).is_some_and(|value| value == "1")
 }
@@ -574,10 +576,6 @@ fn write_new_file(path: &std::path::Path, value: &Value) -> anyhow::Result<()> {
 pub fn dispatch(cmd: RecipeCmd, flags: &GlobalFlags, _format: Format) -> Result<(), CliError> {
     {
         let rejected = || -> anyhow::Result<()> {
-            ensure!(
-                enabled(),
-                "recipes are experimental; set {ENABLE_ENV}=1 to use them"
-            );
             ensure!(
                 flags.context.is_none()
                     && flags.observation.is_none()

@@ -15,10 +15,10 @@ immediately before each input.
 | MCP | `bsk_recipe` |
 | Wire protocol | None for replay; `session.run_log` is local to the daemon |
 
-Recipes are experimental. They need `BSK_RECIPES=1` in the environment of the command or
-MCP server, and the agent skill does not mention them yet. This version replays **only
-read and reversible steps**. It refuses any step that submits, pays, sends, deletes or
-publishes.
+`bsk recipe` is always available in the CLI. MCP clients see `bsk_recipe` only when the
+server's environment has `BSK_RECIPES=1`, so a client that never replays pays nothing for the
+tool's schema. This version replays **only read and reversible steps**. It refuses any step that
+submits, pays, sends, deletes or publishes, unless a person approves a lowered risk.
 
 ## Create one
 
@@ -256,7 +256,10 @@ If `BSK_HOME` is read-only, `run` still works and other writes report the error.
   `crates/bsk-cli/tests/fixtures/vom_contract.json` is checked by both the renderer's and the
   parser's tests, so a format change fails CI.
 
-## Acceptance before recipes leave experimental
+## Validation
+
+CI replays every fixture drift type twice. Before a release that changes replay, run each one
+20 times:
 
 ```sh
 BSK_COOP_CHROME=... BSK_COOP_RECIPES_ONLY=1 BSK_RECIPE_RUNS=20 \
@@ -264,6 +267,6 @@ BSK_COOP_CHROME=... BSK_COOP_RECIPES_ONLY=1 BSK_RECIPE_RUNS=20 \
 ```
 
 The bar is no wrong action across all drift types, judged by the fixture server's request log,
-and at least 95% success on fixtures whose meaning did not change. Also required, and not yet
-done: read-only flows on at least eight real sites with at least 80% success, and real-model
-runs of first use, replay and takeover after a handoff.
+and at least 95% success on fixtures whose meaning did not change. Replaying commit steps also
+waits for read-only flows on at least eight real sites with at least 80% success, and for
+real-model runs of first use, replay and takeover after a handoff.

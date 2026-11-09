@@ -52,7 +52,7 @@ const TOOL_NAMES: [&str; 7] = [
     "bsk_assist",
 ];
 
-/// Experimental, so it costs clients nothing unless they ask for it with `BSK_RECIPES=1`.
+/// Opt-in, so it costs clients nothing unless they ask for it with `BSK_RECIPES=1`.
 const RECIPE_TOOL: &str = "bsk_recipe";
 
 pub(crate) fn exists(name: &str) -> bool {
