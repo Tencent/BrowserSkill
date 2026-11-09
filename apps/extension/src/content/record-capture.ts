@@ -2,6 +2,7 @@ import {
   type CaptureTargetDescriptor,
   describeEventTarget,
   describeTarget,
+  INTERACTIVE_SELECTOR,
   resolveClickableElement,
   resolveHoverElement,
 } from "@/lib/describe-target";
@@ -134,14 +135,18 @@ function nearbyFillableFromSearchChrome(target: Element): FillableElement | null
     'textarea, input[type="search"], input[name="q"], #chat-textarea',
   );
   if (
-    fillable instanceof HTMLElement &&
-    isTextFillable(fillable) &&
-    fillable !== target &&
-    !fillable.contains(target)
+    !(fillable instanceof HTMLElement) ||
+    !isTextFillable(fillable) ||
+    fillable === target ||
+    fillable.contains(target)
   ) {
-    return fillable;
+    return null;
   }
-  return null;
+  // Results, filters and actions that share the search form are page actions; only
+  // the field's own wrapper (e.g. a role="combobox" box) counts as focus chrome.
+  const control = target.closest(INTERACTIVE_SELECTOR);
+  if (control && !control.contains(fillable)) return null;
+  return fillable;
 }
 
 function captureGeometry(el: Element): RecordStepPayload["geometry"] {
