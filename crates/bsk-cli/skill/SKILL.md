@@ -68,7 +68,11 @@ induced to do is done with their sessions.
 3. Pass sync's `context_id` as `--context ID`; target-policy DOM actions and reads reuse it.
    Protect decision facts with `--expect`. Untargeted/visual actions also need sync's
    `--observation ID`. After intervention/navigation, sync and replan; wait during human input.
-   Use [step/cache](references/step-and-cache.md) for the next state.
+   Under target policy, send several actions already decided from one sync (form fields,
+   filters) together with [bsk plan](references/step-and-cache.md) when supported
+   and able to share one context. Use separate calls for strict policy, unsupported
+   actions, actions that depend on earlier results, and irreversible actions that
+   `--expect` does not protect.
    Check ambiguity once; stop at visible success.
 4. Always run `bsk session stop <id>` on success and failure, unless keeping the
    session open is part of the user's request. This also returns borrowed tabs.
@@ -86,6 +90,7 @@ Prefer refs for iframe/shadow-root targets; CSS selectors search the main docume
 
 | Need | Command |
 | --- | --- |
+| Several decided actions | `bsk plan --session <id> --context ID --steps '[...]'` |
 | Click | `bsk click @e3 --session <id> --context ID` |
 | Fill text/date/time | `bsk fill @e3 --value "text" --session <id> --context ID` |
 | Select an option | `bsk select @e3 --value "option-value" --session <id> --context ID` |
@@ -99,7 +104,7 @@ Prefer refs for iframe/shadow-root targets; CSS selectors search the main docume
 
 - `select` uses the option's value, not its visible label.
 
-Read accessibility with `snapshot`, markup with `get-html`, or screenshots.
+Read DOM fields with `read` and tables/lists with `extract` ([guide](references/extraction.md)); use these during animation instead of evaluate/sync loops.
 Inspect unknown effects before retrying.
 
 ## Native dialogs

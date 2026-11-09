@@ -10,13 +10,14 @@ interface ActionGuard {
   dispatch?: (startsInput: boolean, method: string) => void;
   verifyPointerTarget?: CdpRunner["verifyPointerTarget"];
   beginDomMutation?: CdpRunner["beginDomMutation"];
+  detach?: CdpRunner["detach"];
   /** User-supplied evaluate is opaque; internal readiness probes remain read-only. */
   scriptedEffect?: boolean;
 }
 
 /** Request-scoped input leases and a final fence at native dispatch. */
 export function guardedRunner<T extends CdpRunner>(cdp: T, options: ActionGuard = {}): T {
-  const { prepare, dispatch, verifyPointerTarget, beginDomMutation } = options;
+  const { prepare, dispatch, verifyPointerTarget, beginDomMutation, detach } = options;
   const leases = new Map<string, string | undefined>();
   const attachments = new Map<number, string | undefined>();
   const cleanupSend = <R>(target: CdpTarget, method: string, params?: object) => {
@@ -63,7 +64,13 @@ export function guardedRunner<T extends CdpRunner>(cdp: T, options: ActionGuard 
           : method === "Input.dispatchKeyEvent" &&
               ["keyDown", "rawKeyDown", "char"].includes(String(p?.type))
             ? // Native editor commands omit the key; Chromium emits an empty DOM key.
-              { type: p?.type === "char" ? "keypress" : "keydown", key: String(p?.key ?? "") }
+              {
+                type: p?.type === "char" ? "keypress" : "keydown",
+                key: String(p?.key ?? ""),
+                ...(p?.type === "keyDown" && typeof p.text === "string" && p.text.length > 0
+                  ? { keypress: true }
+                  : {}),
+              }
             : method === "Input.insertText"
               ? { type: "beforeinput", text: String(p?.text ?? ""), id: crypto.randomUUID() }
               : undefined;
@@ -136,6 +143,7 @@ export function guardedRunner<T extends CdpRunner>(cdp: T, options: ActionGuard 
         };
       if (key === "beginDomMutation") return beginDomMutation;
       if (key === "verifyPointerTarget") return verifyPointerTarget;
+      if (key === "detach" && detach) return detach;
       if (
         key === "acquireBackgroundExecution" ||
         key === "ownsBackgroundExecution" ||

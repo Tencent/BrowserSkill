@@ -1,0 +1,60 @@
+<!doctype html><html lang="zh-CN"><meta charset="utf-8"><title>BrowserSkill 深度测评工作台</title>
+<style>
+*{box-sizing:border-box}body{font:16px system-ui;margin:0;color:#172b4d;background:#f4f6fa}header{position:sticky;top:0;background:#142a43;color:white;padding:12px;z-index:20}nav{display:flex;gap:14px;flex-wrap:wrap}nav a{color:#d9efff}main{padding:24px;max-width:1200px;margin:auto}section{background:white;padding:24px;border-radius:12px}section[hidden]{display:none}h1{font-size:24px}label{display:block;margin:12px 0}input,textarea,select,button{font:inherit;padding:8px;margin:4px}input[type=checkbox],input[type=radio]{width:20px;height:20px}button{cursor:pointer}output{display:block;white-space:pre-wrap;background:#e8f3ff;padding:12px;margin-top:10px}table{border-collapse:collapse;width:100%;margin:20px 0}th,td{border:1px solid #b7c7da;padding:10px}#menu{display:none;position:absolute;background:white;border:1px solid;padding:15px;color:black;z-index:10}#hover-wrap:hover #menu{display:block}.card{border:1px solid #bcd;padding:12px;margin:8px}#drop-zone{border:3px dashed #789;padding:30px}#editor{border:1px solid #aaa;min-height:90px;padding:8px}.scrollbox{height:200px;overflow:auto;border:2px solid #9ac}.item{padding:12px;border-bottom:1px solid #abc}#canvas{border:1px solid}#modal{position:fixed;inset:100px 20%;background:white;box-shadow:0 0 0 100vw #0008;padding:30px;z-index:30}#modal[hidden]{display:none}
+</style>
+<header><strong>BrowserSkill 深度测评 · 合成数据</strong><nav>
+<a href="#forms">Forms</a><a href="#widgets">Widgets & Frames</a><a href="#data">Data export</a><a href="#files">Files</a><a href="#debug">Debug</a><a href="#dialogs">Dialogs</a><a href="#long">Long page</a>
+</nav></header><main>
+<section id="forms"><h1>填写报名表</h1><form id="registration">
+<label for="name">姓名（中文 / emoji）</label><input id="name" name="name" placeholder="请输入姓名" required>
+<label for="email">Email</label><input id="email" name="email" type="email">
+<label for="notes">备注</label><textarea id="notes" name="notes" rows="3"></textarea>
+<label for="number">数量</label><input id="number" name="number" type="number" min="0" max="100" step="0.5">
+<label for="date">日期</label><input id="date" name="date" type="date">
+<label for="time">时间</label><input id="time" name="time" type="time">
+<label for="country">地区</label><select id="country" name="country"><option value="">请选择</option><option value="cn">中国</option><option value="us">United States</option></select>
+<label for="multi">多选技能</label><select id="multi" multiple name="skills"><option value="js">JavaScript</option><option value="py">Python</option><option value="zh">中文</option></select>
+<label><input type="checkbox" id="agree" name="agree">我同意测试条款</label>
+<label><input type="radio" name="plan" value="basic" id="basic">基础</label><label><input type="radio" name="plan" value="pro" id="pro">专业</label>
+<label for="readonly">只读字段</label><input id="readonly" readonly value="固定值"><label for="disabled">禁用字段</label><input id="disabled" disabled value="不可改">
+<label for="masked">自动大写</label><input id="masked" oninput="this.value=this.value.toUpperCase()">
+<button id="submit">提交测试报名</button></form><output id="form-result">尚未提交</output>
+<h2>富文本</h2><div id="editor" role="textbox" aria-label="富文本正文" contenteditable="true"><p>初始 <b>内容</b></p></div><button id="save-editor">保存富文本</button><output id="editor-result"></output>
+</section>
+<section id="widgets" hidden><h1>复杂控件</h1><div id="hover-wrap"><button id="hover-menu" aria-haspopup="menu">悬停菜单</button><div id="menu" role="menu"><button id="menu-item" role="menuitem">生成预览</button></div></div><output id="menu-result"></output>
+<label for="search">异步搜索</label><input id="search" type="search"><div id="search-status" role="status"></div><ul id="search-results"></ul>
+<button id="open-modal">打开编辑弹层</button><div id="modal" role="dialog" aria-label="编辑记录" hidden><label>标题<input id="modal-title"></label><button id="save-modal">保存弹层</button></div><output id="modal-result"></output>
+<h2>开放 Shadow DOM</h2><div id="shadow-host"></div>
+<h2>同源 iframe</h2><iframe title="Same-origin frame" src="/frame"></iframe><h2>跨源 iframe</h2><iframe title="Cross-origin frame" src="http://localhost:4187/frame"></iframe>
+<h2>Canvas</h2><canvas id="canvas" width="420" height="140" aria-label="合成画布"></canvas><output id="canvas-result"></output>
+<h2>嵌套滚动</h2><div class="scrollbox" id="scrollbox"></div><output id="scroll-result"></output>
+</section>
+<section id="data" hidden><h1>结构化导出</h1><table id="orders"><caption>订单表（合并单元格）</caption><thead><tr><th rowspan="2">编号</th><th colspan="2">商品</th><th rowspan="2">金额</th></tr><tr><th>名称</th><th>数量</th></tr></thead><tbody><tr><td rowspan="2">A-1</td><td>中文，含逗号</td><td>2</td><td>0012.50</td></tr><tr><td>含&quot;引号&quot;与<br>换行</td><td>0</td><td>=SUM(1,2)</td></tr><tr><td>A-2</td><td></td><td>1</td><td>+123</td></tr><tr hidden><td>HIDDEN</td><td>secret synthetic</td><td>9</td><td>9</td></tr></tbody></table>
+<div id="cards" role="list"><article class="card" role="listitem"><h3><a href="/item/1">商品一</a></h3><a href="/brand/1">品牌一</a><span class="price">¥12</span></article><article class="card" role="listitem"><h3><a href="/item/2">商品二</a></h3><span class="price">¥20</span></article></div>
+<button id="more-rows">添加 600 行</button><table id="big-table"><thead><tr><th>ID</th><th>Name</th></tr></thead><tbody></tbody></table>
+</section>
+<section id="files" hidden><h1>文件传输</h1><label for="upload">上传合成文件（可多选）</label><input id="upload" type="file" multiple><output id="upload-result"></output>
+<div id="drop-zone" role="button" tabindex="0" aria-label="拖放附件">将测试附件拖放到这里</div><output id="drop-result"></output>
+<a id="download" href="/download" download>下载中文 CSV</a><button id="blob-download">下载 Blob 文本</button>
+<button id="confirm-download">确认后下载</button></section>
+<section id="debug" hidden><h1>网站调试</h1><button id="fetch-json">读取慢 JSON</button><button id="fetch-error">触发 HTTP 500</button><button id="fetch-duplicates">两个相同请求</button><button id="post-echo">提交合成记录</button><button id="log-error">输出控制台错误</button><output id="debug-result"></output></section>
+<section id="dialogs" hidden><h1>原生弹窗</h1><button id="alert">Alert</button><button id="confirm">Confirm</button><button id="prompt">Prompt</button><button id="chain">Confirm then Prompt</button><output id="dialog-result"></output><output id="dialog-count">0</output></section>
+<section id="long" hidden><h1>长页面截图与定位</h1><div id="long-items"></div><button id="bottom">点击底部完成</button><output id="bottom-result"></output></section>
+</main><script>
+const $=s=>document.querySelector(s);const emit=(type,data={})=>fetch('/event',{method:'POST',body:JSON.stringify({type,...data})});
+function route(){let id=location.hash.slice(1)||'forms';document.querySelectorAll('main>section').forEach(s=>s.hidden=s.id!==id);window.scrollTo(0,0)}window.addEventListener('hashchange',route);route();
+$('#registration').onsubmit=e=>{e.preventDefault();let data=Object.fromEntries(new FormData(e.target));data.skills=[...$('#multi').selectedOptions].map(o=>o.value);$('#form-result').textContent=JSON.stringify(data,null,2);emit('form-submit',data)};
+$('#save-editor').onclick=()=>{$('#editor-result').textContent=$('#editor').innerText;emit('editor-save',{text:$('#editor').innerText,html:$('#editor').innerHTML})};
+$('#menu-item').onclick=()=>{$('#menu-result').textContent='预览已生成';emit('menu-click')};let st;$('#search').oninput=()=>{clearTimeout(st);$('#search-status').textContent='加载中';st=setTimeout(async()=>{let r=await fetch('/api/search?q='+encodeURIComponent($('#search').value)).then(r=>r.json());$('#search-results').innerHTML=r.items.map(i=>'<li><button id="search-choice">'+i.name+'</button></li>').join('');$('#search-status').textContent='搜索完成';$('#search-choice').onclick=()=>emit('search-choice',{q:r.items[0].q})},250)};
+$('#open-modal').onclick=()=>$('#modal').hidden=false;$('#save-modal').onclick=()=>{$('#modal-result').textContent='已保存 '+$('#modal-title').value;$('#modal').hidden=true;emit('modal-save',{title:$('#modal-title').value})};
+$('#shadow-host').attachShadow({mode:'open'}).innerHTML='<label>Shadow name<input id="shadow-name"></label><button id="shadow-save">Save shadow</button><output id="shadow-result"></output><table><caption>Shadow orders</caption><tr><th>ID</th><th>Value</th></tr><tr><td>S-1</td><td>42</td></tr></table>';
+let shadow=$('#shadow-host').shadowRoot;shadow.querySelector('button').onclick=()=>{let v=shadow.querySelector('input').value;shadow.querySelector('output').textContent='Shadow saved: '+v;emit('shadow-save',{value:v})};
+let c=$('#canvas'),ctx=c.getContext('2d');ctx.fillStyle='#163d60';ctx.fillRect(0,0,420,140);ctx.fillStyle='#44deba';ctx.fillRect(250,35,130,65);ctx.fillStyle='white';ctx.font='22px sans-serif';ctx.fillText('Canvas Test',20,78);ctx.fillStyle='#123';ctx.fillText('Click me',265,75);c.onclick=e=>{let x=e.offsetX,y=e.offsetY;$('#canvas-result').textContent=(x>=250&&x<=380&&y>=35&&y<=100)?'Canvas target hit':'Canvas miss';emit('canvas-click',{x,y})};
+$('#scrollbox').innerHTML=Array.from({length:40},(_,i)=>'<div class="item"><button id="nested-'+i+'">Nested '+i+'</button></div>').join('');$('#nested-39').onclick=()=>{$('#scroll-result').textContent='Nested 39 hit';emit('nested-click')};
+$('#more-rows').onclick=()=>$('#big-table tbody').innerHTML=Array.from({length:600},(_,i)=>'<tr><td>'+i+'</td><td>Record '+i+'</td></tr>').join('');
+async function fileProof(files,out,type){let rows=await Promise.all([...files].map(async f=>({name:f.name,size:f.size,type:f.type,text:await f.text()})));$(out).textContent=JSON.stringify(rows);emit(type,{files:rows})}$('#upload').onchange=e=>fileProof(e.target.files,'#upload-result','upload');$('#drop-zone').ondragover=e=>e.preventDefault();$('#drop-zone').ondrop=e=>{e.preventDefault();fileProof(e.dataTransfer.files,'#drop-result','drop')};
+$('#blob-download').onclick=()=>{let a=document.createElement('a');a.href=URL.createObjectURL(new Blob(['Blob 中文 ✅\n'],{type:'text/plain'}));a.download='blob 中文.txt';a.click();emit('blob-download')};$('#confirm-download').onclick=()=>{if(confirm('下载合成文件？'))$('#download').click()};
+$('#fetch-json').onclick=async()=>{$('#debug-result').textContent=JSON.stringify(await fetch('/api/slow').then(r=>r.json()))};$('#fetch-error').onclick=async()=>{$('#debug-result').textContent='status '+(await fetch('/api/fail')).status};$('#fetch-duplicates').onclick=()=>Promise.all([fetch('/api/slow'),fetch('/api/slow')]);$('#post-echo').onclick=async()=>{$('#debug-result').textContent=JSON.stringify(await fetch('/api/echo',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:'合成记录',amount:'0012.50'})}).then(r=>r.json()))};$('#log-error').onclick=()=>{console.error('AUDIT synthetic error',{recordId:42});console.warn('AUDIT synthetic warning')};
+let count=0;function dialogDone(v){$('#dialog-count').textContent=String(++count);$('#dialog-result').textContent=JSON.stringify(v);emit('dialog-result',{value:v,count})}$('#alert').onclick=()=>{alert('合成 Alert');dialogDone('ack')};$('#confirm').onclick=()=>dialogDone(confirm('是否确认合成测试？'));$('#prompt').onclick=()=>dialogDone(prompt('输入测试名称','默认值'));$('#chain').onclick=()=>dialogDone(confirm('继续下一步？')?prompt('第二步','chain-default'):'cancelled');
+$('#long-items').innerHTML=Array.from({length:60},(_,i)=>'<p style="height:70px;border-bottom:1px solid #abc">截图行 '+String(i).padStart(2,'0')+' · 中文 ✅</p>').join('');$('#bottom').onclick=()=>{$('#bottom-result').textContent='底部已完成';emit('bottom-click')};
+</script></html>

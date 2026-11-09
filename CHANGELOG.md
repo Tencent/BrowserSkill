@@ -4,18 +4,114 @@ All notable changes to BrowserSkill will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 See the [Chinese changelog](CHANGELOG.zh-CN.md). Update both versions in the same PR.
 
-Starting from 0.2.0, CLI / Extension / DSH Plugin share the same version number.
+The CLI, extension, and DSH plugin may release separately. Protocol compatibility
+determines which versions can connect.
 
 ## [Unreleased]
 
 ### Added
 
+- Local pairing with mutual proofs, durable key rotation and interruption recovery.
+  Paired connections verify the daemon before sending business traffic; activation
+  invalidates the original link. Device revocation and browser registration are
+  serialized, and successful revocation completes live connection cleanup.
+- `bsk daemon pair --replace`, local device listing/revocation, `daemon rotate`
+  and `daemon trust-local on|off`; status and doctor expose pairing guidance.
+- Extension pairing settings, staged verification, ten-language guidance,
+  explicit bypass confirmation and retained remote grants when using local mode.
+  Pairing is optional for new installs and upgrades; unpaired connections remain
+  usable with an identity warning and a link to the official security overview.
+  Paired connections and saved recovery candidates never automatically downgrade.
+- `bsk daemon pair` reuses or starts the daemon before returning a usable link.
+  Explicit Required mode remains available; unverified connections cannot claim
+  an existing paired identity under the default policy.
+
+- The in-page control panel can minimize to a right-edge expand arrow. Its display
+  state is retained for the current task across status updates and navigation.
+- `bsk plan` and the MCP tool `bsk_plan` run several already-decided actions in one
+  call, then return the synchronized state, so a form or a set of filters takes one
+  model turn instead of one per action. Each step keeps the checks of its own command,
+  and the first step that does not complete stops the plan without any retry.
+- `bsk recipe` and the MCP tool `bsk_recipe` (experimental, `BSK_RECIPES=1`) save a
+  verified flow as a local file and replay it, returning its outputs without a model
+  turn per step. Targets match exactly by role, name and context, and a run stops at the
+  first deviation and hands the page back. This version replays only read and reversible
+  steps. See `docs/recipes.md`.
+- `bsk read`, MCP and DSH `bsk_inspect(action=read)` sample bounded DOM fields
+  through fixed synchronous isolated-world queries. Agents can read current title,
+  URLs, text, attributes and control state across unrelated animation, then act
+  with explicit business conditions. No caller JavaScript, callbacks or delayed
+  effects are accepted; sensitive fields are masked.
+- DOM reads negotiate protocol 1.9 and reject older peers explicitly, without
+  script fallback. Arbitrary evaluate and visual/untargeted input retain strict guards.
+
+### Changed
+
+- Extension 0.4.3 removes obsolete migration flags and version gates while keeping
+  pairing optional. There is no automatic enforcement deadline.
+
+### Fixed
+
+- Recording preserves clicks on submit, reset and image input buttons, including
+  actions beside search fields, and uses reset buttons' visible values as names.
+- `press` maps US-layout punctuation to its physical `code` and virtual key code,
+  so shortcuts such as `Ctrl+/` reach handlers that check `event.code`.
+- Main-document SPA route changes, including away-and-back and hash routes,
+  invalidate old control contexts and refs. Supplementary reads never renew them.
+  This also covers passive reads of already loaded tabs and fresh debugger attachments.
+- Context-bound reads preserve frame-collection diagnostics and report failures before
+  dispatch with `effect_state: none`. Missing root or child document elements report
+  `read_target_stale` instead of a generic CDP failure.
+- CLI, MCP, DSH and bundled skills direct dynamic-page data gathering to read/extract
+  instead of repeated sync/evaluate refusals.
+- Control-state sampling recollects once after the browser proves that a failed child document retired; an active unobservable frame still blocks input.
+- Removed nodes already collected by CDP report target_detached with node identity, consistently with detached nodes that remain inspectable; other CDP failures remain target_unavailable.
+- Recording captures option changes on native `<select>` controls inside open shadow roots,
+  whose `change` events do not reach the document.
+- `upload` preserves its concrete handler failure receipts (`set_file_input_failed` and
+  `file_drop_failed`, such as `-32000 Not allowed` when Chrome's "Allow access to file URLs"
+  extension toggle is off) when transaction cleanup detaches the debugger or post-action
+  frame collection fails, instead of masking them as `control_context_invalid`. Pre-drop
+  `dragEnter` refusals also keep `effect_state: none` without dispatching a redundant
+  `dragCancel` ([#636](https://github.com/Tencent/BrowserSkill/issues/636)).
+
+### Fixed
+
+- Cooperative status updates preserve an active click-passthrough lease, so the
+  control panel and its minimized arrow do not swallow automated page clicks.
+- Recording keeps clicks on buttons and links inside an editor's `contenteditable="false"`
+  regions, such as attachment actions, instead of treating them as editor input.
+
+## [Unreleased]
+
+### Fixed
+
+- `extract` applies CSS `uppercase` and `lowercase` to text in table cells,
+  headers, list fields and discovery previews, respecting nested style overrides
+  and language-specific casing. Transformed text remains subject to the byte
+  budget ([#597](https://github.com/Tencent/BrowserSkill/issues/597)).
+
+## [0.4.2] - 2026-11-05
+
+### Added
+
+- Session controller labels show an agent name, project, session ID and color in
+  browser overlays. CLI and DSH session startup accept the display metadata.
+- Fill supports date, time, datetime-local, month and week inputs, validates
+  formats and min/max limits, and preserves background input state.
 - `bsk mcp` lets MCP clients control BrowserSkill over stdio using the existing
   daemon and browser extension. `bsk install-skill --mcp` can configure Codex,
   Claude Code, and Cursor.
 
 ### Changed
 
+- Borrowed tabs return relative to their original neighbors, with improved pinned
+  tab and group restoration. Eligible requests support automatic borrowing when
+  borrow confirmation is disabled.
+- The extension restores the `tabGroups` permission to read and restore borrowed
+  tabs' original groups.
+- Shared control waits for two seconds of quiet after the person's last completed
+  action before returning control to the Agent, up from 650 ms.
 - CLI and daemon updates prefer the official website's domestic download source,
   falling back to GitHub for failed manifest or archive requests and verification.
   Archive fallback stays on the selected version with SHA256 verification; if both
@@ -24,8 +120,25 @@ Starting from 0.2.0, CLI / Extension / DSH Plugin share the same version number.
 
 ### Fixed
 
-- Recording preserves clicks on submit, reset and image input buttons, including
-  actions beside search fields, and uses reset buttons' visible values as names.
+- Element waits requery selectors when matched nodes are replaced, avoiding false
+  hidden/detached success while a replacement remains visible.
+- Console capture is enabled only when requested, avoiding repeated reloads on
+  affected anti-debugging pages while preserving capture diagnostics.
+- Debug evidence redacts exact vendor credential headers.
+- DSH fill/select values beginning with `-` are passed as option values rather
+  than being parsed as CLI flags.
+- The shared-control toolbar yields pointer hits during automated clicks,
+  including page actions beneath its lower-right corner. Its controls become
+  interactive again when the click finishes or its passthrough lease expires.
+- Enter dispatches keydown and text together, preserving a completed link or
+  form navigation receipt without sending a separate character to a new page.
+  The next action still requires a fresh control context after navigation.
+- Timed-out page actions cancel and await bounded cleanup. Error responses retain
+  execution phase, effect state and operation identity; missing receipts remain
+  explicitly uncertain. CLI and MCP timeout guidance asks callers to inspect the
+  application result before choosing another action instead of blindly retrying.
+- Repeated action labels use their own DOM container's text for context, including
+  labels after the button, so adjacent records no longer misidentify their target.
 - CLI cancellation keeps the original RPC progressing and retries cancellation
   that arrives before daemon registration, reducing background screenshots that
   keep a session busy after the caller stops. Confirmation and response waiting

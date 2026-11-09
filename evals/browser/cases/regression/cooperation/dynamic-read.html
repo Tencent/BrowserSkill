@@ -1,0 +1,24 @@
+<!doctype html>
+<meta charset="utf-8"><title>Dynamic DOM read regression</title>
+<style>body{font:16px sans-serif;margin:30px}#price{display:inline-block;width:50px}button,input,select{padding:10px;margin:5px}#noise{height:100px}.slide{display:none}.slide.active{display:block}canvas{width:100px;height:30px}iframe{width:400px;height:70px}</style>
+<h1>Dynamic read</h1>
+<section id="business"><span id="price">100</span><span id="recipient">Alice</span>
+<button id="apply" data-record-id="42">Apply</button><button id="race" onmouseover="if(window.armRace)document.querySelector('#price').textContent='300'" onclick="applied++">Race action</button><button id="advance">Change price</button>
+<label>Note<input id="note" value="initial"></label><select id="choice"><option value="a">A</option><option value="b">B</option></select>
+<output id="result" data-count="0">0</output></section>
+<section id="noise"><span id="clock">0</span><div id="carousel"></div><canvas id="canvas" width="100" height="30"></canvas><video muted id="video"></video></section>
+<ul id="records"><li data-record-id="1"><b>One</b><a href="/one">Details</a></li><li data-record-id="2"><b>Two</b><a href="/two">Details</a></li></ul>
+<div id="shadow"></div><iframe id="stable-frame" title="Stable frame" src="/frame"></iframe><iframe id="cross-frame" title="Cross frame" src="about:blank"></iframe><iframe id="ad" title="Dynamic ad" src="/ad?0"></iframe>
+<script>
+  document.querySelector('#cross-frame').src=new URL('/frame?cross',location.href).href.replace('127.0.0.1','localhost');
+  window.applied=0;window.readEffects=0;window.ticks=0;window.rotations=0;
+  document.querySelector('#apply').onclick=()=>{ applied++;const result=document.querySelector('#result');result.textContent=String(applied);result.dataset.count=String(applied); };
+  document.querySelector('#advance').onclick=()=>document.querySelector('#price').textContent='200';
+  document.querySelector('#shadow').attachShadow({mode:'open'}).innerHTML='<button id="shadow-button" data-record-id="shadow">Shadow action</button>';
+  const draw=()=>{const c=document.querySelector('canvas').getContext('2d');c.fillStyle=`hsl(${ticks%360} 80% 50%)`;c.fillRect(0,0,100,30);};
+  if(!new URLSearchParams(location.search).has('static')) {
+    setInterval(()=>{ticks++;document.querySelector('#clock').textContent=String(ticks);draw();document.querySelector('#video').setAttribute('poster',`data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg"><text>${ticks}</text></svg>`);},120);
+    setInterval(()=>{rotations++;const c=document.querySelector('#carousel');c.className=`slide-${rotations%3}`;c.style.transform=`translateX(${rotations%2}px)`;c.innerHTML=`<div class="slide active" data-index="${rotations}">Slide ${rotations}</div>`;},750);
+    setInterval(()=>document.querySelector('#ad').src=`/ad?${rotations}`,1700);
+  }
+</script>

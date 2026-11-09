@@ -55,3 +55,8 @@ may remain blocked. Report a specific blocker only when inputs/capabilities are
 missing or viable approaches are exhausted; continue independent work. Do not loop
 on identical failures, repeat unknown effects or switch backends to bypass limits.
 On an unrecoverable failure, report the blocker and stop the owned session.
+
+For observation_changed while gathering data on a changing page, use the fixed
+read/extract path (inspect action=read/extract in MCP/DSH). Do not resubmit
+arbitrary evaluate in a sync loop. A refusal is known to have no effect only
+when effect_state=none; unknown results still require application inspection.

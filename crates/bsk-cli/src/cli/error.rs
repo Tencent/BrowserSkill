@@ -807,3 +807,40 @@ mod tests {
         assert_eq!(rendered["data"]["effect_state"], "none");
     }
 }
+
+#[cfg(test)]
+mod action_timeout_render_tests {
+    use super::*;
+
+    #[test]
+    fn cli_and_mcp_preserve_timeout_evidence_without_blind_retry_advice() {
+        for effect in ["none", "unknown", "committed"] {
+            let data = serde_json::json!({
+                "reason": "action_deadline",
+                "phase": "execution",
+                "effect_state": effect,
+                "operation": "tool.fill"
+            });
+            let error = CliError::from_rpc(RpcError {
+                code: ErrorCode::Timeout,
+                message: "tool RPC timed out after 400ms".into(),
+                data: Some(data.clone()),
+            });
+            let mcp = json_error_value(&error);
+            let render_info = render_info_for(&error);
+            let cli: serde_json::Value = serde_json::from_str(&json_error_string(
+                &error,
+                error.exit_code(),
+                hint_for(&error, render_info.as_ref()),
+            ))
+            .unwrap();
+            assert_eq!(cli, mcp);
+            assert_eq!(cli["data"], data);
+            assert_eq!(cli["exit_code"], 4);
+            let hint = cli["hint"].as_str().unwrap();
+            assert!(hint.contains("inspect the application result"));
+            assert!(hint.contains("do not replay"));
+            assert!(!hint.contains("retry the command"));
+        }
+    }
+}

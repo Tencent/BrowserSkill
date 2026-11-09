@@ -60,6 +60,11 @@ export function projectSemanticGraph(graph: StructuredSemanticGraph): VomScene {
 
   const numericId = new Map<SemanticNodeId, number>();
   orderedNodes.forEach((node, index) => numericId.set(node.id, index + 1));
+  // Flattening presentation-only wrappers must not erase DOM containment.
+  // These IDs are internal ancestry facts; the wrappers stay out of the VOM.
+  for (const id of graph.nodes.keys()) {
+    if (!numericId.has(id)) numericId.set(id, numericId.size + 1);
+  }
   const nodes: VomNode[] = orderedNodes.map((node) => ({
     ...node.vom,
     id: numericId.get(node.id) as number,

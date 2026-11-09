@@ -135,6 +135,7 @@ const READS = new Set([
   "tool.screenshot",
   "tool.console",
   "tool.network",
+  "tool.read",
   "tool.extract",
   "tool.wait_for_element",
   "tool.wait_for_navigation",
@@ -155,7 +156,7 @@ const PASSIVE_DEBUG = new Set<string>(
       !["rule_add", "rule_enable", "rule_disable", "rule_remove", "replay"].includes(action),
   ),
 );
-const QUIET_MS = 650;
+const QUIET_MS = 2_000;
 /** Upper bound on nodes whose self-changing text the default check tolerates. */
 const MAX_VOLATILE = 256;
 
@@ -918,7 +919,7 @@ export class CooperationController implements ControlAuthority {
             }),
           state: { ...this.view(state.tabId), mode: "ready" },
           guidance: targetPolicy
-            ? "Reuse this context for DOM-targeted actions and supplementary reads. Human intervention or main-document replacement requires sync. Actions using an iframe target or precondition require a fresh sync when frame documents change. Use explicit expect checks for business facts such as price, recipient or record ID. Scripts, untargeted keys and visual clicks require this sync's top-level observation_id (not observation.observation_id) and retain strict content checks. Never replay an uncertain action; inspect its result first."
+            ? "Reuse this context for DOM-targeted actions and supplementary reads. Human intervention or main-document replacement requires sync. Actions using an iframe target or precondition require a fresh sync when frame documents change. Use explicit expect checks for business facts such as price, recipient or record ID. Use read/extract for current DOM data even during animation; they never renew action evidence. Arbitrary scripts, untargeted keys and visual clicks require this sync's top-level observation_id (not observation.observation_id) and retain strict content checks. Never replay an uncertain action; inspect its result first."
             : "Continue toward the assigned goal using this current state. Incorporate helpful progress and correct recoverable mistakes. Page activity is not a change of goal. Each context authorizes one action; sync after it. By default the whole page is checked. Text that changes by itself (clocks, counters) is reported once; after the next sync it no longer blocks actions on a ref or selector unless it shares a form, list, dialog, panel or other container with the target. Keys without a ref or selector can use explicit dependencies, while their actual focused region stays protected; uncertain focus and other untargeted actions keep the exact whole-page check. To tolerate other unrelated updates, declare all observed decision regions with --depends-on refs/selectors (plugin: dependsOn); the target region and form values remain protected. Verify completion and prior submissions from application evidence.",
         };
       } finally {
@@ -1251,7 +1252,36 @@ export class CooperationController implements ControlAuthority {
         };
       return this.bootstrap(state, req.method, cdp, signal, invoke);
     }
-    if (read) return invoke(guardedRunner(cdp));
+    if (read) {
+      // Reads need no action authority. When a caller explicitly supplies a
+      // context, however, a retained strict baseline cannot validate a revoked
+      // control context after navigation/intervention. Never renew it by reading.
+      if (req.method === "tool.read" && params.context_id) {
+        const invalidContext = () =>
+          actionError(
+            "control_context_invalid",
+            "This read supplied a revoked control context",
+            "control",
+            "Omit the old context to inspect current data; synchronize and reconsider before further input.",
+          );
+        try {
+          await this.refresh(state);
+        } catch (error) {
+          // No read has been dispatched. Preserve permanent frame diagnostics;
+          // ordinary loading failures have already revoked the supplied context.
+          return error instanceof FrameCollectionError
+            ? error.toRpcError("none")
+            : invalidContext();
+        }
+        if (
+          state.context?.id !== params.context_id ||
+          state.context.epoch !== state.epoch ||
+          this.controlError(session, state)
+        )
+          return invalidContext();
+      }
+      return invoke(guardedRunner(cdp));
+    }
     if (state.working) return failure("Another operation is settling on this tab");
     const expectations = parseExpectations(params.expect);
     if (isRpcError(expectations)) return expectations;
@@ -1293,13 +1323,21 @@ export class CooperationController implements ControlAuthority {
       expectations.every(({ target }) => !/^@?e\d+$/.test(target) || mainDocumentRef(target));
     const observedFramesChanged = () =>
       !mainDocumentAction && context !== undefined && context.frameEpoch !== state.frameEpoch;
-    const epoch = state.epoch;
+    let epoch = state.epoch;
+    let detachedByHandler = false;
+    let postRefreshFailed = false;
     const authorityRevision = state.authorityRevision;
     let verifiedFrames = context?.frames;
     let evidenceTargets: { backendNodeId: number; frameId?: string }[] | undefined;
     let actionTarget: ResolvedActionTarget | undefined;
     let destinationTarget: typeof actionTarget;
     let checkFailure: RpcError | undefined;
+    // Preparation such as scrolling counts as an effect, so a click can be `unknown`
+    // without having been pressed. Only that distinction makes it safe to try again.
+    const unpressed = (effect: unknown) =>
+      effect === "unknown" && req.method === "tool.click" && !nativeInputStarted
+        ? { press_sent: false }
+        : {};
     const reportFailure = (message: string, effect: "none" | "unknown" = "none"): RpcError => {
       if (!targetPolicy) return failure(message, effect);
       if (effect === "unknown") state.context = undefined;
@@ -1312,7 +1350,10 @@ export class CooperationController implements ControlAuthority {
           : observedFramesChanged() ||
               (context && context.frames.get(0)?.document !== state.frames.get(0)?.document)
             ? "document_changed"
-            : state.unavailable || state.epoch !== epoch || this.controlError(session, state)
+            : state.unavailable ||
+                state.epoch !== epoch ||
+                detachedByHandler ||
+                this.controlError(session, state)
               ? "control_context_invalid"
               : undefined;
       const issue =
@@ -1329,6 +1370,7 @@ export class CooperationController implements ControlAuthority {
         data: {
           ...issue.data,
           effect_state: effect,
+          ...unpressed(effect),
           ...(effect === "unknown"
             ? {
                 recovery:
@@ -1378,7 +1420,9 @@ export class CooperationController implements ControlAuthority {
     const assert = () => {
       signal.throwIfAborted();
       if (checkFailure) throw new ActionCheckError(checkFailure);
-      const reason = interruption();
+      const reason =
+        interruption() ??
+        (detachedByHandler ? "The observed page or control state changed; synchronize" : undefined);
       if (reason) {
         if (!targetPolicy && context && state.context === context) state.context = undefined;
         // Refusing a strict observation must not discard the reusable DOM context.
@@ -1410,7 +1454,7 @@ export class CooperationController implements ControlAuthority {
             "observation_changed",
             "The strict observation changed before this action",
             "observation",
-            "Synchronize and reconsider this untargeted action, or use a DOM target with explicit business preconditions.",
+            "For data, use read/extract (fixed passive DOM queries) without another sync. For an actual script or visual action, synchronize and reconsider; use a DOM target with explicit expect facts when possible.",
             { observation_id: context.observationId },
           );
           return;
@@ -1743,6 +1787,29 @@ export class CooperationController implements ControlAuthority {
             if (!nativeInputStarted) await verifyDecision();
             nativeInputStarted = true;
           },
+          detach: cdp.detach
+            ? async (tabId, expectedAttachmentId) => {
+                const intact =
+                  tabId === state.tabId &&
+                  !state.unavailable &&
+                  state.epoch === epoch &&
+                  !detachedByHandler;
+                await cdp.detach!(tabId, expectedAttachmentId);
+                if (intact && state.epoch <= epoch + 1) {
+                  // Handler cleanup detaches the debugger to fence uncertain CDP
+                  // state, which triggers onDocumentChanged -> invalidate(tabId).
+                  // Revoke the control context for subsequent actions without masking
+                  // the handler's own failure receipt on an otherwise intact page.
+                  detachedByHandler = true;
+                  if (state.epoch === epoch) state.epoch++;
+                  state.context = undefined;
+                  state.learned = undefined;
+                  epoch = state.epoch;
+                  state.unavailable = false;
+                  this.changed(state);
+                }
+              }
+            : undefined,
         }),
         operationSignal,
         completionSignal,
@@ -1770,13 +1837,16 @@ export class CooperationController implements ControlAuthority {
         !isRpcError(result) &&
         (req.method !== "tool.evaluate" || (result as { ok?: boolean })?.ok === true);
       if (["tool.evaluate", "tool.upload"].includes(req.method)) {
+        const intact = !state.unavailable && state.epoch === epoch;
         try {
           await this.refresh(state);
         } catch (error) {
-          if (!completed) throw error;
+          if (!completed && !(isRpcError(result) && intact)) throw error;
           // A new frame may not yet expose its collector. Retain the completed
-          // receipt, but require a fresh sync before any further page action.
+          // receipt (or the handler's own refusal), but require a fresh sync
+          // before any further page action.
           this.invalidate(state.tabId);
+          if (isRpcError(result) && intact) postRefreshFailed = true;
         }
       }
       // Even a successful CDP reply does not authorize a stale next step.
@@ -1786,20 +1856,30 @@ export class CooperationController implements ControlAuthority {
         return {
           code: "cancelled",
           message: "Shared-tab action cancelled",
-          data: { effect_state: sent ? "unknown" : "none" },
+          data: {
+            effect_state: sent ? "unknown" : "none",
+            phase: sent ? "execution" : "precondition",
+          },
         };
       }
-      const reason = revoked ?? interruption(completed);
+      const reason =
+        revoked ??
+        interruption(completed || postRefreshFailed) ??
+        (!completed && !isRpcError(result) && detachedByHandler
+          ? "The observed page or control state changed; synchronize"
+          : undefined);
       if (checkFailure || reason)
         return reportFailure(checkFailure?.message ?? reason!, sent ? "unknown" : "none");
       if (targetPolicy && isRpcError(result)) {
         const effect = result.data?.effect_state ?? (sent ? "unknown" : "none");
-        if (effect === "unknown") state.context = undefined;
+        if (effect === "unknown" || detachedByHandler || postRefreshFailed)
+          state.context = undefined;
         return {
           ...result,
           data: {
             ...result.data,
             effect_state: effect,
+            ...unpressed(effect),
             phase: result.data?.phase ?? "execution",
             recovery:
               result.data?.recovery ??
@@ -1817,7 +1897,10 @@ export class CooperationController implements ControlAuthority {
         return {
           code: "cancelled",
           message: "Shared-tab action cancelled",
-          data: { effect_state: sent ? "unknown" : "none" },
+          data: {
+            effect_state: sent ? "unknown" : "none",
+            phase: sent ? "execution" : "precondition",
+          },
         };
       }
       if (error instanceof ActionCheckError) checkFailure = error.rpcError;

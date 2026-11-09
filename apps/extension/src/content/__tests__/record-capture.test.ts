@@ -164,6 +164,38 @@ describe("record-capture semantic", () => {
     ]);
   });
 
+  it("records button clicks inside a non-editable region of an editor", () => {
+    document.body.innerHTML = `
+      <div id="editor" contenteditable="true" aria-label="Editor">
+        Draft
+        <div contenteditable="false">
+          <span id="chip">report.pdf</span>
+          <button type="button">Remove attachment</button>
+        </div>
+      </div>
+    `;
+    const capture = startRecordCapture("rec-island", (step) => steps.push(step));
+    const editor = document.querySelector<HTMLElement>("#editor")!;
+    const button = document.querySelector("button")!;
+    // happy-dom does not derive editability from the contenteditable attribute.
+    Object.defineProperty(editor, "isContentEditable", { value: true });
+
+    editor.dispatchEvent(new FocusEvent("focusin", { bubbles: true }));
+    editor.firstChild!.textContent = "Draft reply";
+    editor.dispatchEvent(new Event("input", { bubbles: true }));
+    // Text inside the region still belongs to the editor session.
+    click(document.querySelector("#chip")!);
+    click(button);
+    capture.dispose();
+
+    expect(steps.map((step) => step.op)).toEqual(["fill", "click"]);
+    expect(steps[0]).toMatchObject({ op: "fill", target: { name: "Editor" } });
+    expect(steps[1]).toMatchObject({
+      op: "click",
+      target: { role: "button", name: "Remove attachment" },
+    });
+  });
+
   it("does not emit page navigation from a child Document capture", () => {
     const originalUrl = location.href;
     const capture = startRecordCapture("rec-child", (step) => steps.push(step), {
@@ -175,6 +207,38 @@ describe("record-capture semantic", () => {
 
     capture.dispose();
     history.replaceState({}, "", originalUrl);
+  });
+
+  it.each([
+    ["an open shadow root", true],
+    ["the light DOM", false],
+  ])("records one select step for a native select in %s", (_name, shadow) => {
+    document.body.innerHTML = `<div id="host"></div>`;
+    const host = document.querySelector("#host")!;
+    const root = shadow ? host.attachShadow({ mode: "open" }) : host;
+    root.innerHTML = `
+      <select aria-label="Choice">
+        <option value="a">Alpha</option>
+        <option value="b">Beta</option>
+      </select>
+    `;
+    const select = root.querySelector("select")!;
+    const capture = startRecordCapture("rec-shadow-select", (step) => steps.push(step));
+
+    // Native user selection: a composed input, then a non-composed change.
+    select.value = "b";
+    select.dispatchEvent(new Event("input", { bubbles: true, composed: true }));
+    select.dispatchEvent(new Event("change", { bubbles: true }));
+    capture.dispose();
+
+    expect(steps).toEqual([
+      expect.objectContaining({
+        op: "select",
+        target: expect.objectContaining({ role: "combobox", name: "Choice" }),
+        values: ["b"],
+        labels: ["Beta"],
+      }),
+    ]);
   });
 
   it("does not record clicks on anonymous layout divs", () => {

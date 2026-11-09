@@ -1,0 +1,123 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "ReadParams",
+  "type": "object",
+  "required": [
+    "session_id"
+  ],
+  "properties": {
+    "fields": {
+      "description": "Defaults to [{\"key\":\"text\",\"read\":\"text\"}].",
+      "type": [
+        "array",
+        "null"
+      ],
+      "items": {
+        "$ref": "#/definitions/ReadField"
+      },
+      "maxItems": 32,
+      "minItems": 1
+    },
+    "max_bytes": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint32",
+      "maximum": 1048576.0,
+      "minimum": 1024.0
+    },
+    "max_nodes": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint32",
+      "maximum": 1000.0,
+      "minimum": 1.0
+    },
+    "ref": {
+      "description": "Exact observed DOM node, including iframe and shadow nodes. Exclusive with selector.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "selector": {
+      "description": "CSS in the main document. All matches, up to max_nodes; no selector means the root.",
+      "type": [
+        "string",
+        "null"
+      ],
+      "maxLength": 2048,
+      "minLength": 1
+    },
+    "session_id": {
+      "type": "string"
+    },
+    "tab_id": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "int64"
+    },
+    "timeout_ms": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint32",
+      "maximum": 10000.0,
+      "minimum": 100.0
+    }
+  },
+  "additionalProperties": false,
+  "definitions": {
+    "DomRead": {
+      "type": "string",
+      "enum": [
+        "text",
+        "attribute",
+        "value",
+        "checked",
+        "exists"
+      ]
+    },
+    "ReadField": {
+      "type": "object",
+      "required": [
+        "key",
+        "read"
+      ],
+      "properties": {
+        "attribute": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 128,
+          "minLength": 1
+        },
+        "key": {
+          "type": "string",
+          "maxLength": 128,
+          "minLength": 1
+        },
+        "read": {
+          "$ref": "#/definitions/DomRead"
+        },
+        "selector": {
+          "description": "Relative selector matching at most one descendant; omitted means the item itself.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 2048,
+          "minLength": 1
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

@@ -1,0 +1,390 @@
+{
+  "cases": [
+    {
+      "name": "page",
+      "scene": {
+        "viewport": {
+          "width": 1280,
+          "height": 720
+        },
+        "nodes": [
+          {
+            "id": 1,
+            "parentId": null,
+            "tag": "main",
+            "role": "main"
+          },
+          {
+            "id": 2,
+            "parentId": 1,
+            "tag": "h1",
+            "role": "heading",
+            "name": "Sales report"
+          },
+          {
+            "id": 3,
+            "parentId": 1,
+            "tag": "select",
+            "role": "combobox",
+            "name": "Region [has-submenu]"
+          },
+          {
+            "id": 4,
+            "parentId": 1,
+            "tag": "input",
+            "role": "textbox",
+            "name": "Note",
+            "placeholder": "a ] =\"b\"",
+            "value": "hello \"x\"",
+            "inputState": "filled",
+            "attrs": {
+              "type": "text"
+            }
+          },
+          {
+            "id": 5,
+            "parentId": 1,
+            "tag": "input",
+            "role": "textbox",
+            "name": "Password",
+            "sensitive": true,
+            "inputState": "filled",
+            "attrs": {
+              "type": "password"
+            }
+          },
+          {
+            "id": 6,
+            "parentId": 1,
+            "tag": "input",
+            "role": "textbox",
+            "name": "Empty",
+            "inputState": "empty"
+          },
+          {
+            "id": 7,
+            "parentId": 1,
+            "tag": "input",
+            "role": "checkbox",
+            "name": "Agree",
+            "checked": true
+          },
+          {
+            "id": 8,
+            "parentId": 1,
+            "tag": "a",
+            "role": "link",
+            "name": "Docs",
+            "href": "https://x.test/a]b?c=[1]"
+          },
+          {
+            "id": 9,
+            "parentId": 1,
+            "tag": "button",
+            "role": "button",
+            "name": "Search",
+            "disabled": true
+          },
+          {
+            "id": 10,
+            "parentId": 1,
+            "tag": "button",
+            "role": "button",
+            "name": "Say \"hi\" \\ now"
+          },
+          {
+            "id": 11,
+            "parentId": 1,
+            "tag": "button",
+            "role": "button"
+          },
+          {
+            "id": 12,
+            "parentId": 1,
+            "tag": "div",
+            "role": "listitem",
+            "name": "Card",
+            "attrs": {
+              "draggable": "true"
+            }
+          },
+          {
+            "id": 13,
+            "parentId": 1,
+            "tag": "tr",
+            "role": "row",
+            "name": "ORD-1"
+          },
+          {
+            "id": 14,
+            "parentId": 13,
+            "tag": "button",
+            "role": "button",
+            "name": "Approve"
+          },
+          {
+            "id": 15,
+            "parentId": 1,
+            "tag": "tr",
+            "role": "row",
+            "name": "ORD-2"
+          },
+          {
+            "id": 16,
+            "parentId": 15,
+            "tag": "button",
+            "role": "button",
+            "name": "Approve"
+          },
+          {
+            "id": 17,
+            "parentId": 1,
+            "tag": "div",
+            "role": "status",
+            "name": "Total $42"
+          },
+          {
+            "id": 18,
+            "parentId": 1,
+            "tag": "button",
+            "role": "button",
+            "name": "Menu"
+          },
+          {
+            "id": 19,
+            "parentId": 1,
+            "tag": "div",
+            "role": "StaticText",
+            "name": "Plain text"
+          }
+        ],
+        "activeScopeBlocks": [
+          {
+            "triggerId": 18,
+            "label": "Menu",
+            "lines": ["@e9 button \"Pay\"", "button \"Pay\""]
+          }
+        ]
+      },
+      "text": "@vom 1\n@view 1280x720\n@layers 1 focus=L1\nL1 page\n  main\n    heading \"Sales report\"\n    @e1 combobox \"Region [has-submenu]\"\n    @e2 textbox \"Note\" [filled] placeholder=\"a ] =\\\"b\\\"\" =\"hello \\\"x\\\"\"\n    @e3 textbox \"Password\" [filled] =\"•••\"\n    @e4 textbox \"Empty\" [empty]\n    @e5 checkbox \"Agree\" [checked]\n    @e6 link \"Docs\" [→ https://x.test/a]b?c=[1]]\n    @e7 button \"Search\" [disabled]\n    @e8 button \"Say \\\"hi\\\" \\\\ now\"\n    @e9 button\n    @e10 listitem [draggable] \"Card\"\n    row \"ORD-1\"\n      @e11 button \"Approve\" [ctx: ORD-1]\n    row \"ORD-2\"\n      @e12 button \"Approve\" [ctx: ORD-2]\n    status \"Total $42\"\n    @e13 button \"Menu\"\n      [§ active: Menu]\n        @e9 button \"Pay\"\n        button \"Pay\"\n    StaticText \"Plain text\"",
+      "lines": [
+        {
+          "ref": null,
+          "role": "main",
+          "name": null,
+          "ctx": null,
+          "value": null
+        },
+        {
+          "ref": null,
+          "role": "heading",
+          "name": "Sales report",
+          "ctx": null,
+          "value": null
+        },
+        {
+          "ref": "e1",
+          "role": "combobox",
+          "name": "Region",
+          "ctx": null,
+          "value": null
+        },
+        {
+          "ref": "e2",
+          "role": "textbox",
+          "name": "Note",
+          "ctx": null,
+          "value": "hello \"x\""
+        },
+        {
+          "ref": "e3",
+          "role": "textbox",
+          "name": "Password",
+          "ctx": null,
+          "value": "•••"
+        },
+        {
+          "ref": "e4",
+          "role": "textbox",
+          "name": "Empty",
+          "ctx": null,
+          "value": null
+        },
+        {
+          "ref": "e5",
+          "role": "checkbox",
+          "name": "Agree",
+          "ctx": null,
+          "value": null
+        },
+        {
+          "ref": "e6",
+          "role": "link",
+          "name": "Docs",
+          "ctx": null,
+          "value": null
+        },
+        {
+          "ref": "e7",
+          "role": "button",
+          "name": "Search",
+          "ctx": null,
+          "value": null
+        },
+        {
+          "ref": "e8",
+          "role": "button",
+          "name": "Say \"hi\" \\ now",
+          "ctx": null,
+          "value": null
+        },
+        {
+          "ref": "e9",
+          "role": "button",
+          "name": null,
+          "ctx": null,
+          "value": null
+        },
+        {
+          "ref": "e10",
+          "role": "listitem",
+          "name": "Card",
+          "ctx": null,
+          "value": null
+        },
+        {
+          "ref": null,
+          "role": "row",
+          "name": "ORD-1",
+          "ctx": null,
+          "value": null
+        },
+        {
+          "ref": "e11",
+          "role": "button",
+          "name": "Approve",
+          "ctx": "ORD-1",
+          "value": null
+        },
+        {
+          "ref": null,
+          "role": "row",
+          "name": "ORD-2",
+          "ctx": null,
+          "value": null
+        },
+        {
+          "ref": "e12",
+          "role": "button",
+          "name": "Approve",
+          "ctx": "ORD-2",
+          "value": null
+        },
+        {
+          "ref": null,
+          "role": "status",
+          "name": "Total $42",
+          "ctx": null,
+          "value": null
+        },
+        {
+          "ref": "e13",
+          "role": "button",
+          "name": "Menu",
+          "ctx": null,
+          "value": null
+        },
+        {
+          "ref": null,
+          "role": "StaticText",
+          "name": "Plain text",
+          "ctx": null,
+          "value": null
+        }
+      ]
+    },
+    {
+      "name": "dialog",
+      "scene": {
+        "viewport": {
+          "width": 1280,
+          "height": 720
+        },
+        "nodes": [
+          {
+            "id": 1,
+            "parentId": null,
+            "tag": "main",
+            "role": "main",
+            "rect": {
+              "x": 0,
+              "y": 0,
+              "w": 1280,
+              "h": 720
+            }
+          },
+          {
+            "id": 2,
+            "parentId": 1,
+            "tag": "button",
+            "role": "button",
+            "name": "Behind",
+            "rect": {
+              "x": 10,
+              "y": 10,
+              "w": 100,
+              "h": 40
+            }
+          },
+          {
+            "id": 3,
+            "parentId": null,
+            "tag": "div",
+            "role": "dialog",
+            "name": "Offer",
+            "modal": true,
+            "position": "fixed",
+            "paintOrder": 10,
+            "rect": {
+              "x": 100,
+              "y": 100,
+              "w": 1080,
+              "h": 520
+            }
+          },
+          {
+            "id": 4,
+            "parentId": 3,
+            "tag": "button",
+            "role": "button",
+            "name": "Close",
+            "paintOrder": 11,
+            "rect": {
+              "x": 200,
+              "y": 200,
+              "w": 100,
+              "h": 40
+            }
+          }
+        ]
+      },
+      "text": "@vom 1\n@view 1280x720\n@layers 2 focus=L1\nL1 modal cover=61%\n  dialog \"Offer\"\n    @e1 button \"Close\"\nL2 page … occluded by L1 (~2 nodes, not actionable)",
+      "lines": [
+        {
+          "ref": null,
+          "role": "dialog",
+          "name": "Offer",
+          "ctx": null,
+          "value": null
+        },
+        {
+          "ref": "e1",
+          "role": "button",
+          "name": "Close",
+          "ctx": null,
+          "value": null
+        }
+      ]
+    }
+  ]
+}

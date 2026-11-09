@@ -17,7 +17,16 @@ bsk daemon start
 # Equivalent: bsk daemon start --mode local
 ```
 
-It listens on loopback. Existing CLI commands and extension port settings continue to work. Select **Local connection** in the extension to leave a remote connection; this ends its current tasks.
+It listens on loopback and permits unpaired local connections by default. Local
+pairing is optional: run `bsk daemon pair` and paste the local link into the
+extension’s connection settings to verify identity. See [local pairing](local-pairing.md).
+Remote connections still require pairing; local keys and remote grants are separate.
+
+Select **Local connection** to leave a remote connection; this ends its current
+tasks but keeps its private authorization. Local mode does not renew the remote
+grant. You can switch back before the displayed expiry without a new link; an
+expired grant requires pairing again. The same input recognizes local and remote
+links automatically.
 
 ## Standalone server
 

@@ -32,6 +32,7 @@ import type {
   ObserveParams,
   PressParams,
   ProtocolFrame,
+  ReadParams,
   RecordAwaitParams,
   RecordStartParams,
   RecordStopParams,
@@ -92,6 +93,7 @@ import {
   handleScreenshot,
   handleSnapshot,
 } from "./observation";
+import { handleRead } from "./read";
 import {
   clearRecordingForSession,
   handleRecordAwait,
@@ -979,6 +981,13 @@ export class ToolDispatcher {
           signal,
         );
       }
+      case "tool.read":
+        return handleRead(
+          this.sessions,
+          req.params as ReadParams,
+          cdp ? { cdp, tabsApi: chromeTabsApi } : undefined,
+          signal,
+        );
       case "tool.extract":
         return handleExtract(
           this.sessions,

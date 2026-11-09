@@ -140,8 +140,8 @@ async function fixture(options: { url?: string; sync?: boolean } = {}) {
     act,
     readFrames,
     resumeFrames,
-    advance: () => {
-      now += 10000;
+    advance: (milliseconds = 10000) => {
+      now += milliseconds;
     },
     beforeDispatch: (work: () => Promise<void>) => {
       beforeDispatch = work;
@@ -195,6 +195,22 @@ describe("renderer-independent control authority", () => {
     expect(check).not.toThrow();
     expect(f.readFrames).not.toHaveBeenCalled();
     expect(f.native).not.toHaveBeenCalled();
+  });
+
+  it("waits for two seconds of quiet after the person's last completed action", async () => {
+    const f = await fixture();
+    f.change({ human: 1, lastInput: 10000 });
+    f.advance(650);
+    expect(f.controller.view(7)?.mode).toBe("human");
+    expect(() => f.controller.controlGuard("shared", 7)()).toThrow();
+    f.advance(1349);
+    expect(f.controller.view(7)?.mode).toBe("human");
+    expect(() => f.controller.controlGuard("shared", 7)()).toThrow();
+    f.advance(1);
+    expect(f.controller.view(7)?.mode).toBe("syncing");
+    expect(() => f.controller.controlGuard("shared", 7)()).not.toThrow();
+    const fresh = await f.command("sync");
+    expect(await f.act(fresh.context_id)).not.toHaveProperty("code");
   });
 
   it("keeps an old decision revoked after hold and resume", async () => {
@@ -1347,6 +1363,51 @@ describe("shared-tab dispatch fences", () => {
     f.readFrames.mockRejectedValueOnce(new Error("frame is loading"));
     expect(await f.command("wait")).toMatchObject({ ready: false, state: { mode: "unavailable" } });
     expect(await f.command("wait")).toMatchObject({ ready: true });
+    expect(await f.act()).toMatchObject({ code: "permission_denied" });
+  });
+  it.each([
+    "loading",
+    "frame_unobservable",
+    "page_load_failed",
+  ] as const)("returns a pre-execution read error when context refresh fails with %s", async (reason) => {
+    const f = await fixture();
+    const frames = [{ frame_id: 3, url: "https://frame.test" }];
+    f.readFrames.mockRejectedValueOnce(
+      reason === "loading"
+        ? new Error("frame is loading")
+        : new FrameCollectionError(reason, frames),
+    );
+    const invoke = vi.fn(async () => ({ scope: "current_dom" }));
+    const request = {
+      id: "read",
+      method: "tool.read",
+      params: { session_id: "shared", tab_id: 7, context_id: f.first.context_id },
+    };
+    expect(await f.controller.run(request, f.cdp, f.abort.signal, invoke)).toMatchObject({
+      code: "permission_denied",
+      data: {
+        reason: reason === "loading" ? "control_context_invalid" : reason,
+        effect_state: "none",
+        ...(reason === "loading" ? { phase: "control" } : { frames }),
+      },
+    });
+    expect(f.controller.view(7)?.mode).toBe("unavailable");
+    expect(await f.controller.run(request, f.cdp, f.abort.signal, invoke)).toMatchObject({
+      data: { reason: "control_context_invalid", effect_state: "none" },
+    });
+    expect(invoke).not.toHaveBeenCalled();
+    expect(f.native).not.toHaveBeenCalled();
+    // A passive read remains possible, but cannot renew the revoked context.
+    f.readFrames.mockClear();
+    expect(
+      await f.controller.run(
+        { ...request, params: { session_id: "shared", tab_id: 7 } },
+        f.cdp,
+        f.abort.signal,
+        invoke,
+      ),
+    ).toEqual({ scope: "current_dom" });
+    expect(f.readFrames).not.toHaveBeenCalled();
     expect(await f.act()).toMatchObject({ code: "permission_denied" });
   });
   it("keeps an explicit human hold visible while navigation makes collection unavailable", async () => {

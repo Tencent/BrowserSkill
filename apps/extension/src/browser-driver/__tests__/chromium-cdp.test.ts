@@ -1571,7 +1571,130 @@ describe("ChromiumCdp", () => {
 });
 
 describe("document-bound references", () => {
-  it("invalidates root document and attachment changes, not hash changes", async () => {
+  it.each([
+    "send",
+    "sendToTarget",
+    "sendGuarded",
+  ] as const)("learns the loaded root from %s without frame discovery, including after reattach", async (method) => {
+    const { api, onEvent } = fakeApi();
+    let root = "loaded-root";
+    vi.mocked(api.sendCommand).mockImplementation(async (target, command) =>
+      command === "Page.getFrameTree"
+        ? { frameTree: { frame: { id: target.sessionId ? "child" : root } } }
+        : {},
+    );
+    const refs = new RefStore();
+    const changed = vi.fn((tabId: number) => refs.invalidateTab(tabId));
+    const cdp = new ChromiumCdp(api, { onDocumentChanged: changed });
+    const read = () => {
+      if (method === "send") return cdp.send(4, "Page.getFrameTree");
+      if (method === "sendToTarget") return cdp.sendToTarget({ tabId: 4 }, "Page.getFrameTree");
+      return cdp.sendGuarded(
+        { tabId: 4 },
+        "Page.getFrameTree",
+        {},
+        {
+          attachmentId: cdp.getAttachmentId(4),
+        },
+      );
+    };
+    try {
+      for (const id of ["loaded-root", "reattached-root"]) {
+        root = id;
+        await cdp.ensureAttached(4);
+        changed.mockClear();
+        refs.set("e1", 42, { tabId: 4, frameId: root });
+        await cdp.sendToTarget({ tabId: 4, sessionId: "child-session" }, "Page.getFrameTree");
+        onEvent.fire({ tabId: 4 }, "Page.navigatedWithinDocument", { frameId: "child" });
+        expect(changed).not.toHaveBeenCalled();
+        await read();
+        onEvent.fire({ tabId: 4, sessionId: "child-session" }, "Page.navigatedWithinDocument", {
+          frameId: root,
+        });
+        expect(refs.resolve("e1", { tabId: 4 })).toBe(42);
+        for (const url of ["https://site.test/other", "https://site.test/"])
+          onEvent.fire({ tabId: 4 }, "Page.navigatedWithinDocument", { frameId: root, url });
+        expect(changed).toHaveBeenCalledTimes(2);
+        expect(refs.resolve("e1", { tabId: 4 })).toBeNull();
+        await cdp.detach(4);
+      }
+    } finally {
+      cdp.dispose();
+    }
+  });
+
+  it("does not seed a new attachment with a delayed old root tree", async () => {
+    const { api, onEvent } = fakeApi();
+    let finish!: (value: object) => void;
+    vi.mocked(api.sendCommand).mockImplementation(async (_target, method) =>
+      method === "Page.getFrameTree"
+        ? new Promise((resolve) => {
+            finish = resolve;
+          })
+        : {},
+    );
+    const changed = vi.fn();
+    const cdp = new ChromiumCdp(api, { onDocumentChanged: changed });
+    try {
+      await cdp.ensureAttached(4);
+      const tree = cdp.sendGuarded(
+        { tabId: 4 },
+        "Page.getFrameTree",
+        {},
+        {
+          attachmentId: cdp.getAttachmentId(4),
+        },
+      );
+      await cdp.detach(4);
+      await cdp.ensureAttached(4);
+      changed.mockClear();
+      finish({ frameTree: { frame: { id: "retired-root" } } });
+      await tree;
+      onEvent.fire({ tabId: 4 }, "Page.navigatedWithinDocument", { frameId: "retired-root" });
+      expect(changed).not.toHaveBeenCalled();
+    } finally {
+      await cdp.detachAll();
+      cdp.dispose();
+    }
+  });
+
+  it("does not overwrite a newer root navigation with a delayed tree", async () => {
+    const { api, onEvent } = fakeApi();
+    let finish!: (value: object) => void;
+    vi.mocked(api.sendCommand).mockImplementation(async (_target, method) =>
+      method === "Page.getFrameTree"
+        ? new Promise((resolve) => {
+            finish = resolve;
+          })
+        : {},
+    );
+    const changed = vi.fn();
+    const cdp = new ChromiumCdp(api, { onDocumentChanged: changed });
+    try {
+      await cdp.ensureAttached(4);
+      const tree = cdp.sendGuarded(
+        { tabId: 4 },
+        "Page.getFrameTree",
+        {},
+        {
+          attachmentId: cdp.getAttachmentId(4),
+        },
+      );
+      onEvent.fire({ tabId: 4 }, "Page.frameNavigated", { frame: { id: "new-root" } });
+      finish({ frameTree: { frame: { id: "retired-root" } } });
+      await tree;
+      changed.mockClear();
+      onEvent.fire({ tabId: 4 }, "Page.navigatedWithinDocument", { frameId: "retired-root" });
+      expect(changed).not.toHaveBeenCalled();
+      onEvent.fire({ tabId: 4 }, "Page.navigatedWithinDocument", { frameId: "new-root" });
+      expect(changed).toHaveBeenCalledExactlyOnceWith(4);
+    } finally {
+      await cdp.detachAll();
+      cdp.dispose();
+    }
+  });
+
+  it("invalidates root documents, SPA routes and attachments, not child routes", async () => {
     const { api, onEvent, onDetach } = fakeApi();
     const changed = vi.fn();
     const cdp = new ChromiumCdp(api, { onDocumentChanged: changed });
@@ -1583,11 +1706,26 @@ describe("document-bound references", () => {
       expect(changed).toHaveBeenLastCalledWith(4);
     }
     expect(changed).toHaveBeenCalledTimes(3);
+    onEvent.fire({ tabId: 4 }, "Page.navigatedWithinDocument", { frameId: "child" });
+    onEvent.fire({ tabId: 4, sessionId: "child-session" }, "Page.navigatedWithinDocument", {
+      frameId: "root",
+    });
+    expect(changed).toHaveBeenCalledTimes(3);
+    // Every route event revokes, including away and back before the next observation.
+    onEvent.fire({ tabId: 4 }, "Page.navigatedWithinDocument", {
+      frameId: "root",
+      url: "https://site.test/other",
+    });
+    onEvent.fire({ tabId: 4 }, "Page.navigatedWithinDocument", {
+      frameId: "root",
+      url: "https://site.test/",
+    });
+    expect(changed).toHaveBeenCalledTimes(5);
     await cdp.detach(4);
-    expect(changed).toHaveBeenCalledTimes(4);
+    expect(changed).toHaveBeenCalledTimes(6);
     await cdp.ensureAttached(4);
     onDetach.fire({ tabId: 4 }, "target_closed");
-    expect(changed).toHaveBeenCalledTimes(5);
+    expect(changed).toHaveBeenCalledTimes(7);
     cdp.dispose();
   });
 

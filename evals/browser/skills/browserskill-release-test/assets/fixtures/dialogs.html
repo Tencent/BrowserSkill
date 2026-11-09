@@ -1,0 +1,13 @@
+<!doctype html><meta charset="utf-8"><title>Native dialog release fixture</title>
+<h1>Native dialog release fixture</h1><label>Draft <input id="draft"></label><button id="arm">Arm beforeunload</button>
+<button id="alert">Alert</button><button id="confirm">Confirm</button><button id="prompt">Prompt</button><button id="later">Delayed alert</button><a href="/minimal">Leave page</a><output id="result"></output>
+<script>
+const out=document.querySelector('output');let armed=false;
+const emit=(type,value)=>fetch('/event',{method:'POST',body:JSON.stringify({type,value})});
+document.querySelector('#arm').onclick=()=>{armed=true;out.textContent='armed'};
+addEventListener('beforeunload',e=>{if(armed){e.preventDefault();e.returnValue=''}});
+document.querySelector('#alert').onclick=()=>{alert('synthetic alert');out.textContent='alert done';emit('alert-done',true)};
+document.querySelector('#confirm').onclick=()=>{let v=confirm('synthetic confirm');out.textContent=JSON.stringify(v);emit('confirm-done',v)};
+document.querySelector('#prompt').onclick=()=>{let v=prompt('synthetic prompt','draft');out.textContent=JSON.stringify(v);emit('prompt-done',v)};
+document.querySelector('#later').onclick=()=>setTimeout(()=>alert('synthetic delayed alert'),200);
+</script>

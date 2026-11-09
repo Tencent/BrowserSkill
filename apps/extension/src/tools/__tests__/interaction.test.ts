@@ -1696,6 +1696,30 @@ describe("resolveKeyDescriptor", () => {
     expect(resolveKeyDescriptor("arrowdown")).toMatchObject({ code: "ArrowDown" });
     expect(resolveKeyDescriptor("space")).toMatchObject({ key: " ", code: "Space" });
   });
+  // A code-less descriptor makes Chromium report `code: ""`/`keyCode: 0`,
+  // so `Ctrl+/` never reaches a handler that keys off `event.code`.
+  it("maps common punctuation to its physical code and virtual key code", () => {
+    expect(resolveKeyDescriptor("/")).toEqual({
+      key: "/",
+      code: "Slash",
+      text: "/",
+      windowsVirtualKeyCode: 191,
+    });
+    expect(resolveKeyDescriptor("-")).toMatchObject({ code: "Minus", windowsVirtualKeyCode: 189 });
+    expect(resolveKeyDescriptor("=")).toMatchObject({ code: "Equal", windowsVirtualKeyCode: 187 });
+    expect(resolveKeyDescriptor(";")).toMatchObject({
+      code: "Semicolon",
+      windowsVirtualKeyCode: 186,
+    });
+    // Shifted glyphs live on the same physical key.
+    expect(resolveKeyDescriptor("?")).toEqual({
+      key: "?",
+      code: "Slash",
+      text: "?",
+      windowsVirtualKeyCode: 191,
+    });
+    expect(resolveKeyDescriptor(":")).toMatchObject({ code: "Semicolon" });
+  });
 });
 
 // PressResult also has a `code` field (the CDP keyboard code), so
@@ -1747,6 +1771,27 @@ describe("handlePress", () => {
     ]);
     expect(calls[0].params).not.toHaveProperty("text");
     expect(calls[1].params).toMatchObject({ text: "a" });
+  });
+
+  it("dispatches Enter keydown and text atomically before releasing the key", async () => {
+    const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
+    await sm.start("aa11");
+    const fake = makeFakeCdp({ "Input.dispatchKeyEvent": () => ({}) });
+    const result = await handlePress(sm, { session_id: "aa11", key: "Enter" }, fake);
+    expectPressOk(result);
+    expect(
+      fake.sent.filter((c) => c.method === "Input.dispatchKeyEvent").map((c) => c.params),
+    ).toEqual([
+      {
+        type: "keyDown",
+        key: "Enter",
+        code: "Enter",
+        windowsVirtualKeyCode: 13,
+        modifiers: 0,
+        text: "\r",
+      },
+      { type: "keyUp", key: "Enter", code: "Enter", windowsVirtualKeyCode: 13, modifiers: 0 },
+    ]);
   });
 
   it("handles compound expressions and folds modifiers", async () => {
@@ -1830,6 +1875,31 @@ describe("handlePress", () => {
     expect(keyDown?.params).toMatchObject({ key: "A", code: "KeyA", modifiers: 2 });
   });
 
+  it("dispatches Ctrl+/ with a Slash code and key code", async () => {
+    const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
+    await sm.start("aa11");
+    const fake = makeFakeCdp({ "Input.dispatchKeyEvent": () => ({}) });
+    const res = await handlePress(
+      sm,
+      { session_id: "aa11", key: "Ctrl+/" },
+      { cdp: fake.cdp, tabsApi: fake.tabsApi },
+    );
+    expectPressOk(res);
+    expect(res).toMatchObject({ key: "/", code: "Slash", modifiers: ["ctrl"] });
+    const keyDown = fake.sent.find(
+      (call) =>
+        call.method === "Input.dispatchKeyEvent" &&
+        (call.params as { type?: string }).type === "rawKeyDown",
+    );
+    expect(keyDown?.params).toMatchObject({
+      key: "/",
+      code: "Slash",
+      windowsVirtualKeyCode: 191,
+      modifiers: 2,
+    });
+    expect(keyDown?.params).not.toHaveProperty("text");
+  });
+
   it("focuses an optional target before dispatch", async () => {
     const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
     const ctx = await sm.start("aa11");
@@ -1866,7 +1936,7 @@ describe("handlePress", () => {
         return {};
       },
       "Input.dispatchKeyEvent": (params) => {
-        if ((params as { type: string }).type === "rawKeyDown") {
+        if ((params as { type: string }).type === "keyDown") {
           if (step === "key") throw new Error("key acknowledgement lost");
           if (step === "cancel") abort.abort();
         }
@@ -2346,7 +2416,7 @@ it.each([
   if (kind === "click")
     expect(order).toEqual(["prepare", "mouseMoved", "arm", "mousePressed", "arm", "mouseReleased"]);
   else {
-    expect(order.indexOf("arm")).toBeLessThan(order.indexOf("rawKeyDown"));
+    expect(order.indexOf("arm")).toBeLessThan(order.indexOf("keyDown"));
     expect(order.at(-2)).toBe("arm");
     expect(order.at(-1)).toBe("keyUp");
   }

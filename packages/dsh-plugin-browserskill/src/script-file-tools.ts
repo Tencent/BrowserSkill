@@ -41,7 +41,7 @@ export function registerScriptFileTools(
     defineTool({
       name: "interact.evaluate",
       description:
-        "Evaluate JavaScript in an owned task tab. Scripts may have effects; use a fresh observation context. A script already dispatched cannot be rolled back. Check application state after an uncertain result before retrying.",
+        "Evaluate JavaScript in an owned task tab. Use bsk_inspect(action=read) or extract for data on dynamic pages. Arbitrary scripts may write or defer effects; strict observation is required even for apparently read-only code. A script already dispatched cannot be rolled back. Check application state after an uncertain result before retrying.",
       parameters: {
         session: SESSION_PARAM,
         tabId: TAB_ID_PARAM,
