@@ -345,6 +345,8 @@ Stop the daemon in its owning host or supervisor, update with `bsk update --yes 
 | Record and save a task video | [Task video recording](docs/video-recording.md) |
 | Export tables or lists | [Structured extraction](docs/structured-extraction.md) |
 | Wait for an element condition | [Element waits](docs/wait-for-element.md) |
+| Run several decided actions together | [Plans](docs/plan.md) |
+| Save and replay a reviewed flow | [Recipes](docs/recipes.md) |
 | Use a specific account or profile | [Browser profiles](docs/browser-profiles.md) |
 | Connect a server-side agent | [Remote browser connections](docs/remote-extension-connection.md) |
 | Run in a sandbox | [Sandboxed agents](docs/sandboxed-agents.md) |

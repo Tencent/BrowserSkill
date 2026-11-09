@@ -7,7 +7,7 @@
 //! runs/r-7f3a.jsonl    step status and a parameter digest, never parameter values
 //! ```
 use super::model::{self, Recipe, Refusal};
-use anyhow::{Context, bail, ensure};
+use anyhow::{Context, ensure};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -24,6 +24,8 @@ const MAX_REVISIONS: usize = 10;
 const MAX_RUNS: usize = 50;
 const RUN_RETENTION: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 const STALE_AFTER_HANDOFFS: u32 = 3;
+/// Far beyond a run's budget plus starting and stopping its session.
+const RUN_LIFETIME_MS: i64 = 10 * 60 * 1000;
 const UNUSED_NOTICE_MS: i64 = 90 * 24 * 60 * 60 * 1000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -52,6 +54,75 @@ pub struct State {
     #[serde(default)]
     pub handoff_streak: u32,
     pub created_ms: i64,
+    /// A person's approval of the risks the recipe lowers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approval: Option<Approval>,
+    /// A run whose effect nobody has checked. The recipe does not run again until the
+    /// caller names it: repeating an unknown effect can double it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unchecked: Option<Unchecked>,
+    /// Runs in progress, so one that dies without reporting is not taken for a clean one.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub running: Vec<Running>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Unchecked {
+    pub run_id: String,
+    /// `effect_unknown` or `dialog_pending`, or `interrupted` for a run that never reported.
+    pub reason: String,
+    /// Where it stopped, such as `query/2`, when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub at: Option<String>,
+    pub since_ms: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Running {
+    pub run_id: String,
+    pub pid: u32,
+    pub started_ms: i64,
+}
+
+/// What a person approved at a terminal, so a later change needs approving again.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Approval {
+    /// Digest of the recipe as reviewed, without its description and revision.
+    pub digest: String,
+    pub revision: u32,
+    pub approved_ms: i64,
+}
+
+/// `required` until a person approves the risks a recipe lowers, then `approved`.
+fn approval_note(recipe: &Recipe, state: &State) -> Option<&'static str> {
+    if recipe.downgrades().is_empty() {
+        return None;
+    }
+    let digest = approval_digest(recipe);
+    Some(
+        if state
+            .approval
+            .as_ref()
+            .is_some_and(|approval| approval.digest == digest)
+        {
+            "approved"
+        } else {
+            "required"
+        },
+    )
+}
+
+/// Covers what a run does. Rewording the description changes nothing a person approved.
+pub(crate) fn approval_digest(recipe: &Recipe) -> String {
+    let mut reviewed = recipe.clone();
+    reviewed.description.clear();
+    reviewed.revision = 0;
+    let bytes = serde_json::to_vec(&reviewed).expect("serializable recipe");
+    Sha256::digest(bytes)
+        .iter()
+        .take(16)
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
 }
 
 #[derive(Debug, Clone)]
@@ -103,6 +174,12 @@ fn read_limited(path: &Path) -> anyhow::Result<Vec<u8>> {
 
 /// Parses a recipe file, or what MCP sent instead of one.
 pub(crate) fn parse_document(bytes: &[u8]) -> Result<Recipe, Refusal> {
+    if bytes.len() as u64 > MAX_FILE_BYTES {
+        return Err(Refusal::new(
+            "invalid_recipe",
+            format!("recipe exceeds {MAX_FILE_BYTES} bytes"),
+        ));
+    }
     let value: Value = serde_json::from_slice(bytes)
         .map_err(|error| Refusal::new("invalid_recipe", format!("recipe is not JSON: {error}")))?;
     model::from_value(value)
@@ -224,11 +301,25 @@ impl Store {
     }
 
     pub(crate) fn state(&self, name: &str) -> State {
-        self.dir(name)
-            .ok()
-            .and_then(|dir| fs::read(dir.join("state.json")).ok())
-            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
-            .unwrap_or_default()
+        let mut state = self.read_state(name).unwrap_or_default();
+        if let Some(run) = state.running.iter().find(|run| {
+            now_ms() - run.started_ms > RUN_LIFETIME_MS
+                || (run.pid != std::process::id() && !crate::daemon::lockfile::pid_alive(run.pid))
+        }) {
+            state.unchecked.get_or_insert_with(|| Unchecked {
+                run_id: run.run_id.clone(),
+                reason: "interrupted".into(),
+                at: None,
+                since_ms: run.started_ms,
+            });
+        }
+        state
+    }
+
+    /// Execution must not mistake unreadable approval or hold records for a fresh recipe.
+    pub(crate) fn read_state(&self, name: &str) -> anyhow::Result<State> {
+        let bytes = read_limited(&self.dir(name)?.join("state.json"))?;
+        serde_json::from_slice(&bytes).context("read recipe state; restore it before replaying")
     }
 
     fn write_state(&self, name: &str, state: &State) -> anyhow::Result<()> {
@@ -239,18 +330,25 @@ impl Store {
     }
 
     /// Stores a validated recipe as the next revision. A change to what it does
-    /// sends it back to draft until a run proves it.
+    /// sends it back to draft until a run proves it. A file replaces a saved recipe
+    /// only when it names the revision it was made from, so a fresh draft with a
+    /// name already in use never overwrites that recipe by accident.
     pub(crate) fn save(
         &self,
         mut recipe: Recipe,
         declared_revision: bool,
-    ) -> anyhow::Result<Value> {
-        let dir = self.dir(&recipe.name)?;
-        private_dir(&self.root)?;
-        private_dir(&dir)?;
+    ) -> Result<Value, Refusal> {
+        let storage =
+            |error: anyhow::Error| Refusal::new("storage_unavailable", format!("{error:#}"));
+        let _lock = self.lock_recipe(&recipe.name)?;
+        let dir = self
+            .dir(&recipe.name)
+            .map_err(|error| Refusal::new("invalid_recipe", format!("{error:#}")))?;
+        private_dir(&self.root).map_err(storage)?;
+        private_dir(&dir).map_err(storage)?;
         let path = dir.join("recipe.json");
         let previous = path.is_file().then(|| self.load(&recipe.name));
-        let mut state = self.state(&recipe.name);
+        let mut state;
         match previous {
             None => {
                 recipe.revision = 1;
@@ -259,25 +357,47 @@ impl Store {
                     ..State::default()
                 };
             }
-            Some(Err(_)) => bail!(
-                "the saved recipe {} cannot be read; remove it first",
-                recipe.name
-            ),
+            Some(Err(_)) => {
+                return Err(Refusal::new(
+                    "invalid_recipe",
+                    format!(
+                        "the saved recipe {} cannot be read; remove it first",
+                        recipe.name
+                    ),
+                ));
+            }
             Some(Ok(previous)) => {
-                if declared_revision && recipe.revision != previous.revision {
-                    bail!(
-                        "this file is based on revision {}, but revision {} is current; \
-                         start from recipe show",
-                        recipe.revision,
-                        previous.revision
-                    );
+                state = self.read_state(&recipe.name).map_err(storage)?;
+                if !declared_revision {
+                    return Err(Refusal::new(
+                        "recipe_exists",
+                        format!(
+                            "a recipe named {name} already exists at revision {current}. To replace \
+                             it, set \"revision\": {current} in this file, as recipe show prints it; \
+                             to keep both, choose another name",
+                            name = recipe.name,
+                            current = previous.revision
+                        ),
+                    ));
+                }
+                if recipe.revision != previous.revision {
+                    return Err(Refusal::new(
+                        "revision_conflict",
+                        format!(
+                            "this file is based on revision {}, but revision {} is current; \
+                             start from recipe show",
+                            recipe.revision, previous.revision
+                        ),
+                    ));
                 }
                 let revisions = dir.join("revisions");
-                private_dir(&revisions)?;
+                private_dir(&revisions).map_err(storage)?;
+                let bytes = serde_json::to_vec_pretty(&previous).expect("serializable recipe");
                 write_private(
                     &revisions.join(format!("{}.json", previous.revision)),
-                    &serde_json::to_vec_pretty(&previous)?,
-                )?;
+                    &bytes,
+                )
+                .map_err(storage)?;
                 prune_revisions(&revisions);
                 recipe.revision = previous.revision + 1;
                 let mut before = previous;
@@ -292,20 +412,65 @@ impl Store {
                 state.handoff_at = None;
             }
         }
-        write_private(&path, &serde_json::to_vec_pretty(&recipe)?)?;
-        self.write_state(&recipe.name, &state)?;
-        Ok(
-            json!({"saved":true,"name":recipe.name,"revision":recipe.revision,
-            "status":state.status,"path":path,"summary":recipe.summary()}),
-        )
+        let bytes = serde_json::to_vec_pretty(&recipe).expect("serializable recipe");
+        if bytes.len() as u64 > MAX_FILE_BYTES {
+            return Err(Refusal::new(
+                "invalid_recipe",
+                format!(
+                    "saved recipe exceeds {MAX_FILE_BYTES} bytes after formatting; shorten constants or split the flow"
+                ),
+            ));
+        }
+        write_private(&path, &bytes).map_err(storage)?;
+        self.write_state(&recipe.name, &state).map_err(storage)?;
+        let mut reply = json!({"saved":true,"name":recipe.name,"revision":recipe.revision,
+            "status":state.status,"path":path,"summary":recipe.summary()});
+        if let Some(approval) = approval_note(&recipe, &state) {
+            reply["approval"] = approval.into();
+        }
+        Ok(reply)
     }
 
-    pub(crate) fn remove(&self, name: &str) -> anyhow::Result<bool> {
-        let dir = self.dir(name)?;
+    /// Whether the recipe may run: nothing lowered, or a person approved exactly this.
+    pub(crate) fn approved(&self, recipe: &Recipe) -> bool {
+        approval_note(recipe, &self.state(&recipe.name)) != Some("required")
+    }
+
+    /// Records a person's approval of the recipe as they reviewed it.
+    pub(crate) fn approve(&self, recipe: &Recipe) -> anyhow::Result<()> {
+        let _lock = self
+            .lock_recipe(&recipe.name)
+            .map_err(|error| anyhow::anyhow!(error.message))?;
+        let current = self
+            .load(&recipe.name)
+            .map_err(|error| anyhow::anyhow!(error.message))?;
+        ensure!(
+            current == *recipe,
+            "the recipe changed during review; review it again"
+        );
+        let mut state = self.read_state(&recipe.name)?;
+        state.approval = Some(Approval {
+            digest: approval_digest(recipe),
+            revision: recipe.revision,
+            approved_ms: now_ms(),
+        });
+        self.write_state(&recipe.name, &state)
+    }
+
+    pub(crate) fn remove(&self, name: &str) -> Result<bool, Refusal> {
+        let _lock = self.lock_recipe(name)?;
+        let dir = self
+            .dir(name)
+            .map_err(|error| Refusal::new("invalid_params", error.to_string()))?;
         if !dir.join("recipe.json").is_file() {
             return Ok(false);
         }
-        fs::remove_dir_all(&dir).with_context(|| format!("remove {}", dir.display()))?;
+        fs::remove_dir_all(&dir).map_err(|error| {
+            Refusal::new(
+                "storage_unavailable",
+                format!("remove {}: {error}", dir.display()),
+            )
+        })?;
         Ok(true)
     }
 
@@ -322,6 +487,18 @@ impl Store {
                 "Stopped at the same point {} runs in a row ({}); the site may have changed.",
                 state.handoff_streak,
                 state.handoff_at.as_deref().unwrap_or("unknown")
+            )
+            .into();
+        }
+        if let Some(approval) = approval_note(recipe, state) {
+            entry["approval"] = approval.into();
+        }
+        if let Some(unchecked) = &state.unchecked {
+            entry["unchecked_run"] = unchecked.run_id.as_str().into();
+            entry["notice"] = format!(
+                "Run {} ended with an effect nobody has checked. Check the application's \
+                 records, then run again with checked set to that run.",
+                unchecked.run_id
             )
             .into();
         }
@@ -344,7 +521,11 @@ impl Store {
             if !self.exists(&name) {
                 continue;
             }
-            match self.load(&name) {
+            match self.load(&name).and_then(|recipe| {
+                self.read_state(&name)
+                    .map_err(|error| Refusal::new("storage_unavailable", format!("{error:#}")))?;
+                Ok(recipe)
+            }) {
                 Ok(recipe) => {
                     if site.is_none_or(|site| recipe.site.origins.iter().any(|o| o == site)) {
                         recipes.push(self.entry(&recipe, &self.state(&name)));
@@ -367,8 +548,14 @@ impl Store {
 
     pub(crate) fn show(&self, name: &str) -> Result<Value, Refusal> {
         let recipe = self.load(name)?;
+        self.read_state(name)
+            .map_err(|error| Refusal::new("storage_unavailable", format!("{error:#}")))?;
         let state = self.state(name);
-        Ok(json!({"recipe":recipe,"state":state,"summary":recipe.summary()}))
+        let mut reply = json!({"recipe":recipe,"state":state,"summary":recipe.summary()});
+        if let Some(approval) = approval_note(&recipe, &state) {
+            reply["approval"] = approval.into();
+        }
+        Ok(reply)
     }
 
     /// A log nobody can write is not a reason to stop a run.
@@ -392,7 +579,9 @@ impl Store {
     /// `at` names where the page deviated, when it did. A person stepping in says
     /// nothing about the recipe. A failure to save costs a counter, not the result.
     pub(crate) fn record_outcome(&self, name: &str, status: &str, at: Option<&str>) {
-        let mut state = self.state(name);
+        let Ok(mut state) = self.read_state(name) else {
+            return;
+        };
         let now = now_ms();
         state.runs += 1;
         state.last_run_ms = Some(now);
@@ -424,44 +613,134 @@ impl Store {
         let _ = self.write_state(name, &state);
     }
 
-    /// One recipe at a time per session; the lock ends with the process.
-    pub(crate) fn lock_session(&self, session: &str) -> Result<Option<SessionLock>, Refusal> {
-        let dir = self.root.join(".locks");
-        if private_dir(&self.root).is_err() || private_dir(&dir).is_err() {
-            return Ok(None);
+    /// Marks a run as started. One that dies before [`Self::finish_run`], with its
+    /// process, is taken as unchecked: it may have sent input nobody saw the result of.
+    pub(crate) fn start_run(&self, name: &str, run_id: &str) -> anyhow::Result<()> {
+        let mut state = self.read_state(name)?;
+        ensure!(
+            state.unchecked.is_none(),
+            "the previous run still needs checking"
+        );
+        state.running.push(Running {
+            run_id: run_id.to_owned(),
+            pid: std::process::id(),
+            started_ms: now_ms(),
+        });
+        self.write_state(name, &state)
+    }
+
+    /// Clears the run's marker and, for a run whose effect is unknown, holds the
+    /// recipe until the caller says it was checked.
+    pub(crate) fn finish_run(
+        &self,
+        name: &str,
+        run_id: &str,
+        unchecked: Option<Unchecked>,
+    ) -> anyhow::Result<()> {
+        let mut state = self.read_state(name)?;
+        state.running.retain(|run| run.run_id != run_id);
+        if let Some(unchecked) = unchecked {
+            state.unchecked = Some(Unchecked {
+                since_ms: now_ms(),
+                ..unchecked
+            });
         }
-        let hash: String = Sha256::digest(session.as_bytes())
+        self.write_state(name, &state)
+    }
+
+    /// Call only with the recipe lock held. Any leftover marker belongs to a run
+    /// that released its lock without recording an outcome, even in a live MCP host.
+    pub(crate) fn unchecked(&self, name: &str) -> Option<Unchecked> {
+        let mut state = self.state(name);
+        if let Some(run) = state.running.first() {
+            state.unchecked.get_or_insert_with(|| Unchecked {
+                run_id: run.run_id.clone(),
+                reason: "interrupted".into(),
+                at: None,
+                since_ms: run.started_ms,
+            });
+            state.running.clear();
+            let _ = self.write_state(name, &state);
+        }
+        state.unchecked
+    }
+
+    /// Releases the hold once the caller names the run whose effect they checked.
+    pub(crate) fn release(&self, name: &str, run_id: &str) -> bool {
+        let mut state = self.state(name);
+        if state
+            .unchecked
+            .as_ref()
+            .is_none_or(|unchecked| unchecked.run_id != run_id)
+        {
+            return false;
+        }
+        state.unchecked = None;
+        self.write_state(name, &state).is_ok()
+    }
+
+    /// The same recipe cannot run, change revision or be removed concurrently.
+    pub(crate) fn lock_recipe(&self, name: &str) -> Result<StoreLock, Refusal> {
+        self.dir(name)
+            .map_err(|error| Refusal::new("invalid_params", error.to_string()))?;
+        self.lock("recipe", name)
+    }
+
+    /// One recipe at a time per session; the lock ends with the process.
+    pub(crate) fn lock_session(&self, session: &str) -> Result<StoreLock, Refusal> {
+        self.lock("session", session)
+    }
+
+    fn lock(&self, scope: &str, key: &str) -> Result<StoreLock, Refusal> {
+        let storage = |error| {
+            Refusal::new(
+                "storage_unavailable",
+                format!("cannot lock {scope}: {error}"),
+            )
+        };
+        let dir = self.root.join(".locks");
+        private_dir(&self.root).map_err(storage)?;
+        private_dir(&dir).map_err(storage)?;
+        let hash: String = Sha256::digest(key.as_bytes())
             .iter()
             .take(8)
             .map(|byte| format!("{byte:02x}"))
             .collect();
-        let path = dir.join(hash);
-        let Ok(file) = fs::OpenOptions::new()
+        let path = dir.join(format!("{scope}-{hash}"));
+        let file = fs::OpenOptions::new()
             .create(true)
             .truncate(false)
             .write(true)
             .open(&path)
-        else {
-            return Ok(None);
-        };
-        if fs2::FileExt::try_lock_exclusive(&file).is_err() {
-            return Err(Refusal::new(
-                "session_busy",
-                format!("session {session} is already running a recipe"),
-            ));
+            .map_err(|error| storage(error.into()))?;
+        if let Err(error) = fs2::FileExt::try_lock_exclusive(&file) {
+            return Err(
+                if error.raw_os_error() == fs2::lock_contended_error().raw_os_error() {
+                    Refusal::new(
+                        if scope == "recipe" {
+                            "recipe_busy"
+                        } else {
+                            "session_busy"
+                        },
+                        format!("{scope} {key} is already in use by a recipe operation"),
+                    )
+                } else {
+                    storage(error.into())
+                },
+            );
         }
-        Ok(Some(SessionLock { file, path }))
+        Ok(StoreLock { file })
     }
 }
 
-pub(crate) struct SessionLock {
+pub(crate) struct StoreLock {
     file: fs::File,
-    path: PathBuf,
 }
 
-impl Drop for SessionLock {
+impl Drop for StoreLock {
     fn drop(&mut self) {
-        let _ = fs::remove_file(&self.path);
+        // Keep the inode: another process may already have opened this path.
+        // Unlinking it would let a third process lock a different file at the same path.
         let _ = fs2::FileExt::unlock(&self.file);
     }
 }
@@ -475,6 +754,16 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::at(dir.path().join("recipes"));
         (dir, store)
+    }
+
+    /// Saves a new recipe, or the next revision of a saved one, as an edited copy would.
+    fn put(store: &Store, mut value: Value) -> Value {
+        let name = value["name"].as_str().unwrap().to_owned();
+        let based = store.load(&name).ok().map(|current| current.revision);
+        if let Some(revision) = based {
+            value["revision"] = revision.into();
+        }
+        store.save(parsed(value).unwrap(), based.is_some()).unwrap()
     }
 
     #[test]
@@ -496,9 +785,34 @@ mod tests {
         }
         let mut next = report();
         next["segments"][0]["until"]["timeout_ms"] = 2000.into();
-        let reply = store.save(parsed(next).unwrap(), false).unwrap();
+        let reply = put(&store, next);
         assert_eq!(reply["revision"], 2);
         assert!(store.root.join("sales-report/revisions/1.json").is_file());
+    }
+
+    #[test]
+    fn saving_never_publishes_a_document_larger_than_the_reader_accepts() {
+        let (_dir, store) = store();
+        store.save(parsed(report()).unwrap(), false).unwrap();
+        assert!(
+            parse_document(&vec![b' '; MAX_FILE_BYTES as usize + 1])
+                .unwrap_err()
+                .message
+                .contains("exceeds")
+        );
+        let mut large = report();
+        large["revision"] = 1.into();
+        large["segments"][0]["steps"][0]["values"] = json!([""]);
+        let overhead = serde_json::to_vec(&large).unwrap().len();
+        large["segments"][0]["steps"][0]["values"][0] =
+            "x".repeat(MAX_FILE_BYTES as usize - overhead - 1).into();
+        // The compact input fits; the canonical pretty-printed document does not.
+        let input = serde_json::to_vec(&large).unwrap();
+        let recipe = parse_document(&input).unwrap();
+        assert!(serde_json::to_vec_pretty(&recipe).unwrap().len() > MAX_FILE_BYTES as usize);
+        let refusal = store.save(recipe, true).unwrap_err();
+        assert_eq!(refusal.reason, "invalid_recipe");
+        assert_eq!(store.load("sales-report").unwrap().revision, 1);
     }
 
     #[test]
@@ -507,15 +821,37 @@ mod tests {
         for timeout in 1..=13 {
             let mut next = report();
             next["segments"][0]["until"]["timeout_ms"] = (timeout * 100).into();
-            store.save(parsed(next).unwrap(), false).unwrap();
+            put(&store, next);
         }
         let revisions = fs::read_dir(store.root.join("sales-report/revisions")).unwrap();
         assert_eq!(revisions.count(), MAX_REVISIONS);
         let mut old = report();
         old["revision"] = 3.into();
         let error = store.save(parsed(old).unwrap(), true).unwrap_err();
-        assert!(error.to_string().contains("based on revision 3"), "{error}");
+        assert_eq!(error.reason, "revision_conflict");
+        assert!(error.message.contains("based on revision 3"), "{error:?}");
         assert_eq!(store.load("sales-report").unwrap().revision, 13);
+    }
+
+    #[test]
+    fn a_file_without_its_revision_cannot_replace_a_saved_recipe() {
+        let (_dir, store) = store();
+        store.save(parsed(report()).unwrap(), false).unwrap();
+        // A fresh draft has no revision: it would silently replace different steps.
+        let mut fresh = report();
+        fresh["segments"][0]["steps"][2]["target"]["name"] = "Find".into();
+        let error = store
+            .save(parsed(fresh.clone()).unwrap(), false)
+            .unwrap_err();
+        assert_eq!(error.reason, "recipe_exists");
+        assert!(error.message.contains("\"revision\": 1"), "{error:?}");
+        let current = store.load("sales-report").unwrap();
+        assert_eq!(current.revision, 1);
+        assert_eq!(current.segments[0].steps[2].target.name, "Search");
+        // Naming the revision it replaces is a deliberate replacement.
+        fresh["revision"] = 1.into();
+        let saved = store.save(parsed(fresh).unwrap(), true).unwrap();
+        assert_eq!(saved["revision"], 2);
     }
 
     #[test]
@@ -527,13 +863,56 @@ mod tests {
         // Rewording the description keeps what a run proved.
         let mut reworded = report();
         reworded["description"] = "Reworded".into();
-        store.save(parsed(reworded).unwrap(), false).unwrap();
+        put(&store, reworded);
         assert_eq!(store.state("sales-report").status, Status::Verified);
         // Different steps prove nothing yet.
         let mut changed = report();
         changed["segments"][0]["steps"][2]["target"]["name"] = "Find".into();
-        store.save(parsed(changed).unwrap(), false).unwrap();
+        put(&store, changed);
         assert_eq!(store.state("sales-report").status, Status::Draft);
+    }
+
+    #[test]
+    fn an_approval_covers_exactly_the_steps_a_person_reviewed() {
+        let (_dir, store) = store();
+        let mut lowered = report();
+        lowered["segments"][0]["steps"][2]["target"]["name"] = "Save filters".into();
+        lowered["segments"][0]["steps"][2]["risk"] = "reversible".into();
+        let saved = store.save(parsed(lowered.clone()).unwrap(), false).unwrap();
+        assert_eq!(saved["approval"], "required");
+        let recipe = store.load("sales-report").unwrap();
+        assert!(!store.approved(&recipe));
+        store.approve(&recipe).unwrap();
+        assert!(store.approved(&recipe));
+        assert_eq!(store.show("sales-report").unwrap()["approval"], "approved");
+        assert_eq!(
+            store.list(None).unwrap()["recipes"][0]["approval"],
+            "approved"
+        );
+        // Rewording the description changes nothing a person approved.
+        let mut reworded = lowered.clone();
+        reworded["description"] = "Reworded".into();
+        let saved = put(&store, reworded);
+        assert_eq!(saved["approval"], "approved");
+        // Anything else needs approving again.
+        let mut changed = lowered;
+        changed["segments"][0]["until"]["timeout_ms"] = 2000.into();
+        let saved = put(&store, changed);
+        assert_eq!(saved["approval"], "required");
+        assert!(
+            store
+                .approve(&recipe)
+                .unwrap_err()
+                .to_string()
+                .contains("changed during review")
+        );
+        assert!(!store.approved(&store.load("sales-report").unwrap()));
+
+        // A recipe that lowers nothing needs no approval.
+        let (_other, plain) = self::store();
+        let saved = plain.save(parsed(report()).unwrap(), false).unwrap();
+        assert!(saved.get("approval").is_none());
+        assert!(plain.approved(&plain.load("sales-report").unwrap()));
     }
 
     #[test]
@@ -610,17 +989,122 @@ mod tests {
     }
 
     #[test]
+    fn an_unknown_effect_holds_the_recipe_until_the_caller_names_the_run() {
+        let (_dir, store) = store();
+        store.save(parsed(report()).unwrap(), false).unwrap();
+        store.start_run("sales-report", "r-clean").unwrap();
+        assert_eq!(store.state("sales-report").running.len(), 1);
+        store.finish_run("sales-report", "r-clean", None).unwrap();
+        assert!(store.state("sales-report").running.is_empty());
+
+        store.start_run("sales-report", "r-1").unwrap();
+        store
+            .finish_run(
+                "sales-report",
+                "r-1",
+                Some(Unchecked {
+                    run_id: "r-1".into(),
+                    reason: "effect_unknown".into(),
+                    at: Some("query/2".into()),
+                    since_ms: 0,
+                }),
+            )
+            .unwrap();
+        let held = store.unchecked("sales-report").unwrap();
+        assert_eq!(
+            (held.run_id.as_str(), held.at.as_deref()),
+            ("r-1", Some("query/2"))
+        );
+        assert!(held.since_ms > 0);
+        assert!(!store.release("sales-report", "r-2"));
+        assert!(store.unchecked("sales-report").is_some());
+        assert!(store.release("sales-report", "r-1"));
+        assert!(store.unchecked("sales-report").is_none());
+
+        // A run whose process died, or that outlived any budget, never reported.
+        for running in [
+            json!({"run_id":"r-live-host","pid":std::process::id(),"started_ms":now_ms()}),
+            json!({"run_id":"r-dead","pid":u32::MAX,"started_ms":now_ms()}),
+            json!({"run_id":"r-old","pid":std::process::id(),"started_ms":1}),
+        ] {
+            let mut state = store.state("sales-report");
+            state.running = vec![serde_json::from_value(running).unwrap()];
+            store.write_state("sales-report", &state).unwrap();
+            let held = store.unchecked("sales-report").unwrap();
+            assert_eq!(held.reason, "interrupted");
+            assert!(store.state("sales-report").running.is_empty());
+            assert!(store.release("sales-report", &held.run_id));
+        }
+    }
+
+    #[test]
     fn a_session_runs_one_recipe_at_a_time() {
         let (_dir, store) = store();
         let held = store.lock_session("s1").unwrap();
-        assert!(held.is_some());
         assert_eq!(
             store.lock_session("s1").err().unwrap().reason,
             "session_busy"
         );
-        assert!(store.lock_session("s2").unwrap().is_some());
+        let _other = store.lock_session("s2").unwrap();
         drop(held);
-        assert!(store.lock_session("s1").unwrap().is_some());
+        let _next = store.lock_session("s1").unwrap();
+    }
+
+    #[test]
+    fn recipe_operations_share_a_stable_lock_separate_from_session_locks() {
+        let (_dir, store) = store();
+        let saved = parsed(report()).unwrap();
+        store.save(saved.clone(), false).unwrap();
+        let held = store.lock_recipe("sales-report").unwrap();
+        assert_eq!(
+            store.lock_recipe("sales-report").err().unwrap().reason,
+            "recipe_busy"
+        );
+        assert_eq!(store.save(saved, true).unwrap_err().reason, "recipe_busy");
+        assert_eq!(
+            store.remove("sales-report").unwrap_err().reason,
+            "recipe_busy"
+        );
+        let _session = store.lock_session("sales-report").unwrap();
+        // Open before release, as a competing process can. It and any fresh opener
+        // must still contend for the same inode after the original lock is gone.
+        let path = fs::read_dir(store.root.join(".locks"))
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .find(|path| {
+                path.file_name()
+                    .unwrap()
+                    .to_str()
+                    .unwrap()
+                    .starts_with("recipe-")
+            })
+            .unwrap();
+        let opened = fs::OpenOptions::new().write(true).open(path).unwrap();
+        drop(held);
+        fs2::FileExt::try_lock_exclusive(&opened).unwrap();
+        assert_eq!(
+            store.lock_recipe("sales-report").err().unwrap().reason,
+            "recipe_busy"
+        );
+        drop(opened);
+        let _next = store.lock_recipe("sales-report").unwrap();
+    }
+
+    #[test]
+    fn unreadable_state_cannot_be_overwritten_by_a_new_run_or_revision() {
+        let (_dir, store) = store();
+        store.save(parsed(report()).unwrap(), false).unwrap();
+        let path = store.root.join("sales-report/state.json");
+        fs::write(&path, b"broken state").unwrap();
+        assert!(store.start_run("sales-report", "r-new").is_err());
+        assert_eq!(
+            store
+                .save(parsed(report()).unwrap(), true)
+                .unwrap_err()
+                .reason,
+            "storage_unavailable"
+        );
+        assert_eq!(fs::read(&path).unwrap(), b"broken state");
     }
 
     #[test]
