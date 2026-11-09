@@ -185,6 +185,32 @@ describe("fill result verification", () => {
     expect(h.insert).not.toHaveBeenCalled();
   });
 
+  it("does not repeat the empty input notification when clearing a date", async () => {
+    const h = await setup('<input type="date" value="2026-01-01">');
+    const inputs: string[] = [];
+    h.element.addEventListener("input", () => inputs.push(h.element.value));
+    expect(await h.fill("")).toMatchObject({ value_length: 0 });
+    expect(inputs).toEqual([""]);
+  });
+
+  it.each([
+    ["clear then type", '<input value="old">', "hello", true, ["", "hello"]],
+    ["append without clearing", '<input value="old">', "hello", false, ["oldhello"]],
+    ["clear to empty", '<input value="old">', "", true, [""]],
+    ["append empty to empty", "<input>", "", false, [""]],
+  ] as const)("dispatches one input per value change when it %s", async (_name, markup, value, clearBefore, expected) => {
+    const h = await setup(markup);
+    const inputs: string[] = [];
+    let changes = 0;
+    h.element.addEventListener("input", () => inputs.push(h.element.value));
+    h.element.addEventListener("change", () => changes++);
+    expect(await h.fill(value, clearBefore)).toMatchObject({
+      value_length: expected.at(-1)!.length,
+    });
+    expect(inputs).toEqual(expected);
+    expect(changes).toBe(1);
+  });
+
   it("flushes deferred background focus before a date value write", async () => {
     const h = await setup('<input type="date" value="">');
     vi.spyOn(document, "hasFocus").mockReturnValue(false);
@@ -215,6 +241,7 @@ describe("fill result verification", () => {
   it("clears a background date after deferred focus restores a value", async () => {
     const h = await setup('<input type="date" value="2026-01-01">');
     vi.spyOn(document, "hasFocus").mockReturnValue(false);
+    const inputs: string[] = [];
     const send = h.send.getMockImplementation()!;
     h.send.mockImplementation(async (tabId, method, params) => {
       const reply = await send(tabId, method, params);
@@ -223,12 +250,15 @@ describe("fill result verification", () => {
         (params as { type: string }).type === "rawKeyDown"
       ) {
         h.element.value = "2026-01-01";
+        inputs.push(`focus:${h.element.value}`);
       }
       return reply;
     });
+    h.element.addEventListener("input", () => inputs.push(h.element.value));
 
     expect(await h.fill("")).toMatchObject({ value_length: 0 });
     expect(h.element.value).toBe("");
+    expect(inputs).toEqual(["", "focus:2026-01-01", ""]);
     expect(h.insert).not.toHaveBeenCalled();
   });
 
