@@ -7,6 +7,8 @@ CLI、扩展和 DSH 插件可以分别发布，能否连接由协议兼容性决
 
 ### 新增
 
+- 新增 Qoder 和 Qoder CN 的 skill 安装目标，可使用 `bsk install-skill --harness qoder` 和
+  `--harness qoder-cn`。
 - 本机配对支持双向身份验证、持久化密钥轮换和中断恢复。已配对连接在发送业务请求前验证 daemon，激活后原链接失效。撤销与浏览器注册串行执行，撤销成功后对应连接已清理。
 - `bsk daemon pair --replace`、本机设备列表和撤销、`daemon rotate` 及 `daemon trust-local on|off`。状态和诊断命令提供配对指引。
 - 扩展增加配对设置、分阶段验证、十种语言的指引和跳过验证确认。切换到本机模式时保留远程授权。新安装和升级均可使用未配对连接，扩展显示身份提示和官方安全说明。已配对连接和待恢复凭据都需要继续验证。

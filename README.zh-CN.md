@@ -61,6 +61,8 @@ https://github.com/user-attachments/assets/959cb520-80ba-4b9e-b6d8-d94523b03693
   </tr>
 </table>
 
+Qoder 和 Qoder CN 作为 skill-only 目标支持：`bsk install-skill --harness qoder` 和 `--harness qoder-cn`。
+
 这些 Agent，以及其他能调用 Shell 的 Agent，都可以通过同一套 **`bsk` CLI** 使用。**[DeepSeek Harness](#deepseek-harness-插件)** 还提供专用插件，直接使用浏览器工具并查看任务预览。Agent 和模型由你选择，BrowserSkill 负责连接浏览器。
 
 ## 能做什么
