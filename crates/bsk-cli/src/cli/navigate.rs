@@ -162,15 +162,17 @@ pub fn dispatch_navigate_command(args: NavigateCommand, format: Format) -> Resul
 }
 
 pub fn dispatch_navigate(args: NavigateArgs, format: Format) -> Result<(), CliError> {
-    let info = ensure_daemon().context("ensure daemon is running")?;
     let Some(url) = args.url.clone() else {
-        return Err(CliError::Local(anyhow::anyhow!("navigate requires a url")));
+        return Err(CliError::invalid_params(anyhow::anyhow!(
+            "navigate requires a url"
+        )));
     };
     let Some(session) = args.session.clone() else {
-        return Err(CliError::Local(anyhow::anyhow!(
+        return Err(CliError::invalid_params(anyhow::anyhow!(
             "navigate requires --session <session-id>"
         )));
     };
+    let info = ensure_daemon().context("ensure daemon is running")?;
     let params = NavigateParams {
         session_id: session,
         url,
