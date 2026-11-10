@@ -161,9 +161,12 @@ function geometryForEventTarget(
   target: EventTarget | null,
 ): RecordStepPayload["geometry"] | undefined {
   if (!(target instanceof Element)) return undefined;
-  const clickable = target.closest(
-    'a,button,input,select,textarea,[role="button"],[role="link"],[role="menuitem"],[contenteditable="true"]',
-  );
+  // Measure the control the step is described as, so its rect matches that control's ref.
+  const clickable =
+    resolveClickableElement(target) ??
+    target.closest(
+      'a,button,input,select,textarea,[role="button"],[role="link"],[role="menuitem"],[contenteditable="true"]',
+    );
   return captureGeometry(clickable ?? target);
 }
 
