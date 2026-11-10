@@ -106,6 +106,7 @@ Prefer refs for iframe/shadow-root targets; CSS selectors search the main docume
 - `select` uses the option's value, not its visible label.
 
 Read DOM fields with `read` and tables/lists with `extract` ([guide](references/extraction.md)); use these during animation instead of evaluate/sync loops.
+A script on a changing page: state its facts with `--expect`; `evaluate --unverified` only if you cannot ([scripts](references/cooperation.md#scripts)).
 Inspect unknown effects before retrying.
 
 ## Native dialogs

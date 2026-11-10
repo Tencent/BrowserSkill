@@ -49,7 +49,14 @@ determines which versions can connect.
   with explicit business conditions. No caller JavaScript, callbacks or delayed
   effects are accepted; sensitive fields are masked.
 - DOM reads negotiate protocol 1.9 and reject older peers explicitly, without
-  script fallback. Arbitrary evaluate and visual/untargeted input retain strict guards.
+  script fallback. Visual/untargeted input retains strict guards.
+- `bsk evaluate --unverified` (MCP `params.unverified`, DSH `unverified`) runs a script
+  without comparing the page with any observation, for pages that never hold still and
+  scripts whose dependencies cannot be stated. Control authority, main-document identity
+  and tab ownership are still enforced; it cannot be combined with `--expect`,
+  `--observation` or `--depends-on`, and its result carries `verified: false`. It needs
+  protocol 1.9 on the daemon and extension; peers below 1.9 are rejected before dispatch.
+  Earlier 1.9 development builds require updating the CLI, daemon and extension together.
 
 ### Changed
 
@@ -94,6 +101,17 @@ determines which versions can connect.
   `read_target_stale` instead of a generic CDP failure.
 - CLI, MCP, DSH and bundled skills direct dynamic-page data gathering to read/extract
   instead of repeated sync/evaluate refusals.
+- A script that states what it relies on is checked against that instead of the whole
+  page, so unrelated clocks, feeds and media no longer refuse it in a loop. Under target
+  policy, `evaluate` with `--expect` and no `--observation` reuses its context and is not
+  refused when a child frame navigates; passing `--observation` as well still checks the
+  whole page. Under strict policy, `evaluate` with
+  `--depends-on` checks those regions, form values and modal layers only; it previously
+  also required the whole page to match. A script that states nothing is checked as before.
+- A refusal caused by a changed observation also reports `observed_changes`: the number
+  of changed, added and removed nodes with up to five examples. For scripts, the recovery
+  text and the bundled skills give the order to try: state the facts, and use
+  `--unverified` only when they cannot be stated.
 - Control-state sampling recollects once after the browser proves that a failed child document retired; an active unobservable frame still blocks input.
 - A frame that does not answer collection in time is named in the error message and
   `data.frames` (frame ID with the sanitized origin and path; tab operations add the tab).

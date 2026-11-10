@@ -1,9 +1,9 @@
 # Reading changing pages
 
 Use `bsk read` (MCP/DSH: `bsk_inspect` action `read`) for current DOM facts.
-`evaluate` remains arbitrary page execution, including writes and deferred work;
-it keeps its strict observation requirement. Repeated sync/evaluate on a carousel
-is therefore the wrong data path. Read the current facts, decide from those facts,
+`evaluate` remains arbitrary page execution, including writes and deferred work.
+A script that states nothing keeps its strict observation requirement, so repeated
+sync/evaluate on a carousel is the wrong data path. Read the current facts, decide from those facts,
 and protect the decision with `expect` before DOM input.
 
 ```sh
@@ -24,9 +24,14 @@ inspect the current page after control changes; subsequent input must synchroniz
 | --- | --- |
 | read, snapshot, HTML, bounded extraction | Current document/attachment and exact node identity; no historical whole-page comparison. No page input. |
 | Target-policy DOM input | Reusable control context, exact pinned node, readiness, pointer hit/focus and explicit business `expect` facts immediately before input. |
-| Arbitrary evaluate | Single-use strict observation; scripts are opaque even if they look read-only. Dispatch cannot be rolled back. |
+| Arbitrary evaluate | Scripts are opaque even if they look read-only, and dispatch cannot be rolled back. In order of preference: stated facts (`expect` without `observation_id` under target policy, `depends_on` regions under strict) are checked and the rest of the page may change; with `observation_id`, a single-use strict observation of the whole page; `unverified` compares nothing about the page, keeps control and main-document checks, and returns `verified: false`. |
 | Visual input, untargeted keys, displacement-only drag | Strict observation and existing geometry/focus guards; a DOM read cannot refresh them. |
 | Strict-policy input | Existing single-use whole-page contract. read/extract do not renew it. |
+
+`evaluate --unverified` requires daemon and extension protocol 1.9 or later compatible 1.x;
+peers below 1.9 are rejected before dispatch. The version gate cannot distinguish earlier
+1.9 development builds, so update the CLI, restart its daemon and reload the matching extension
+together. Strict contexts still authorize only one action, including an unverified script.
 
 Unrelated clocks, counts, carousel DOM replacement/reordering, class/style changes,
 video state, Canvas drawing and unrelated child navigations can occur during data

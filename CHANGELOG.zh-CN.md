@@ -24,7 +24,11 @@ CLI、扩展和 DSH 插件可以分别发布，能否连接由协议兼容性决
   此版本只回放只读和可逆步骤：降低风险的步骤要由人用 `bsk recipe approve` 批准后才会运行，
   结果不确定的运行会锁住该配方，直到调用方确认已核实。详见 `docs/recipes.md`。
 - `bsk read`、MCP 和 DSH 的 `bsk_inspect(action=read)` 通过隔离世界中的固定同步查询读取有界 DOM 字段。Agent 可跨无关动画读取当前标题、URL、文本、属性和表单状态，再通过明确的业务条件执行操作。不接受调用方 JavaScript、回调或延迟副作用，并对敏感字段脱敏。
-- DOM 读取使用协议 1.9 能力协商，旧组件明确报不支持，不回退到脚本执行。任意 evaluate、视觉和无目标输入仍保留严格观察保护。
+- DOM 读取使用协议 1.9 能力协商，旧组件明确报不支持，不回退到脚本执行。视觉和无目标输入仍保留严格观察保护。
+- 新增 `bsk evaluate --unverified`（MCP 为 `params.unverified`，DSH 为 `unverified`）：执行脚本前不比对页面与任何观察，
+  用于持续变化的页面上依赖无法声明的脚本。控制权、主文档身份和标签页归属仍然检查；不能与 `--expect`、`--observation`、
+  `--depends-on` 同用，回执带 `verified: false`。daemon 和扩展都需要协议 1.9，低于 1.9 的组件在派发前明确报不支持。
+  更早的 1.9 开发版无法通过协议号区分，需要同时更新 CLI、重启 daemon 并重新加载匹配的扩展。
 
 ### 变更
 
@@ -49,6 +53,13 @@ CLI、扩展和 DSH 插件可以分别发布，能否连接由协议兼容性决
   已加载标签页的被动读取和新建 debugger 连接同样受到保护。
 - 携带控制上下文的读取保留框架收集失败的具体原因，并以 `effect_state: none` 报告派发前错误；主文档或子框架暂时缺少根元素时返回 `read_target_stale`，不再归为通用 CDP 故障。
 - CLI、MCP、DSH 及内置 skill 引导动态页面的数据读取使用 read/extract，避免反复 sync/evaluate 拒绝。
+- 脚本声明了自己的依赖时，只校验这些依赖，不再比对整页，无关的时钟、信息流和媒体变化不会再让脚本陷入反复拒绝。
+  目标策略下，带 `--expect` 且不带 `--observation` 的 `evaluate` 可复用控制凭证，子 frame 导航也不再拦截它；
+  同时传入 `--observation` 时仍比对整页。
+  严格策略下，带 `--depends-on` 的 `evaluate` 只校验这些区域、表单值和模态层；此前还会额外要求整页一致。
+  未声明依赖的脚本校验方式不变。
+- 因观察内容变化而拒绝时，回执增加 `observed_changes`：变化、新增、移除的节点数和最多五个示例。
+  针对脚本，恢复提示和内置 skill 给出了尝试顺序：先声明依赖，无法声明时才使用 `--unverified`。
 - 控制状态采样在浏览器证实失败的子文档已退出后有界重新收集一次；仍存在但不可观测的框架继续阻止输入。
 - 框架未在时限内响应收集时，错误消息和 `data.frames` 会标明该框架（frame ID 及去除敏感部分的 origin 与路径；标签页操作另附所在标签页）。拒绝原因仍为 `cooperation_sync_required`，`--settle`、recipe 和 DSH 照常重试；恢复建议说明框架持续无响应时如何退出（[#614](https://github.com/Tencent/BrowserSkill/issues/614)）。
 - 无法收集的子框架若其元素未显示、没有面积或不可见，且未持有焦点，会以 `hidden_frame` 列入 `frame_gaps`，不再阻塞整个标签页，例如微前端的沙箱 iframe。之后的收集重新检查该元素，不再重复等待该框架；仍显示的框架继续阻止输入（[#614](https://github.com/Tencent/BrowserSkill/issues/614)）。

@@ -215,6 +215,7 @@ async fn evaluate_round_trips_ok_with_value() {
                 value: Some(json!(2)),
                 error: None,
                 dialogs: vec![],
+                verified: None,
             })
             .unwrap(),
         )
@@ -231,6 +232,7 @@ async fn evaluate_round_trips_ok_with_value() {
             await_promise: Some(true),
             return_by_value: Some(true),
             timeout_ms: None,
+            unverified: None,
         },
     )
     .await
@@ -263,6 +265,7 @@ async fn evaluate_round_trips_dialogs_payload() {
                     handled: JavaScriptDialogHandledAction::Accepted,
                     sequence: 1,
                 }],
+                verified: None,
             })
             .unwrap(),
         )
@@ -279,6 +282,7 @@ async fn evaluate_round_trips_dialogs_payload() {
             await_promise: None,
             return_by_value: None,
             timeout_ms: None,
+            unverified: None,
         },
     )
     .await
@@ -305,6 +309,7 @@ async fn evaluate_round_trips_exception_as_in_band_error() {
                     column: Some(6),
                 }),
                 dialogs: vec![],
+                verified: None,
             })
             .unwrap(),
         )
@@ -321,6 +326,7 @@ async fn evaluate_round_trips_exception_as_in_band_error() {
             await_promise: None,
             return_by_value: None,
             timeout_ms: None,
+            unverified: None,
         },
     )
     .await
@@ -355,6 +361,7 @@ async fn evaluate_propagates_permission_denied() {
             await_promise: None,
             return_by_value: None,
             timeout_ms: None,
+            unverified: None,
         },
     )
     .await
@@ -382,6 +389,7 @@ async fn evaluate_returns_not_found_for_unknown_session() {
             await_promise: None,
             return_by_value: None,
             timeout_ms: None,
+            unverified: None,
         },
     )
     .await

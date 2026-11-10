@@ -73,6 +73,16 @@ pub fn set_target_policy_requested() {
     let _ = TARGET_POLICY_REQUESTED.set(true);
 }
 
+/// Whether the caller attached anything asking for the page to be checked.
+pub(super) fn verification_requested() -> bool {
+    OBSERVATION_DEPENDENCIES
+        .get()
+        .is_some_and(|dependencies| !dependencies.is_empty())
+        || ACTION_EVIDENCE
+            .get()
+            .is_some_and(|(observation, expect)| observation.is_some() || expect.is_some())
+}
+
 /// Use the status already read during discovery, before any guarded action can be forwarded.
 pub(super) fn check_daemon_protocol(protocol: &str) -> anyhow::Result<()> {
     require_target_control(
