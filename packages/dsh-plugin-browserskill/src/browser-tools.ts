@@ -197,7 +197,7 @@ const BROWSER_TOOL_SPECS: BrowserToolSpec[] = [
       "Manage plugin-owned browser sessions. Human collaboration is automatic; share is an optional compatibility alias for sync/rebinding. " +
       "sync returns current state and context_id; wait-user waits for hand-back; cooperation-status reads ownership. " +
       "sync can saveFull to a new JSON file for offline bsk_inspect view; matchText only folds plain numbered fallback buttons, not general text. " +
-      "Target policy lets DOM actions reuse contextId across supplementary reads; pass expect for business facts that must remain true. Human intervention or document replacement requires sync. Untargeted actions also require observationId. " +
+      "Target policy lets DOM actions reuse contextId across supplementary reads; pass expect for business facts that must remain true. Human intervention or document replacement requires sync. Untargeted actions also require observationId, except scripts using expect facts without observationId or explicit unverified execution. " +
       "Actions: start opens an Agent Window; stop closes an " +
       "owned session; list returns owned sessions. For start, url/device/width/height/noFocus/incognito are " +
       "optional. When a specific profile is required, always set browser to its verified instance " +
@@ -399,6 +399,11 @@ const BROWSER_TOOL_SPECS: BrowserToolSpec[] = [
       expression: { type: "string", description: "JavaScript expression for evaluate." },
       awaitPromise: { type: "boolean", description: "Evaluate: await promises, default true." },
       returnByValue: { type: "boolean", description: "Evaluate: return JSON, default true." },
+      unverified: {
+        type: "boolean",
+        description:
+          "Evaluate, last resort: run without comparing the page with any observation; the result has verified=false. First state what the script relies on with expect (target policy) or dependsOn (strict policy). Not with observationId, expect or dependsOn.",
+      },
       files: {
         type: "array",
         items: { type: "string" },

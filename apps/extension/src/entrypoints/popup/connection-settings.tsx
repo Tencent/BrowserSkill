@@ -1,5 +1,6 @@
 import { useTranslation } from "@browser-skill/i18n/react";
 import { Button, Input, Label } from "@browser-skill/ui";
+import { RiAlertLine } from "@remixicon/react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { DEFAULT_DAEMON_PORT, resolveDaemonWsUrl } from "@/transport/daemon-endpoint";
 import type { LocalAuthStatus } from "@/transport/local-auth";
@@ -56,7 +57,7 @@ export function ConnectionSettings({
   const [selection, setSelection] = useState<Mode | null>(null);
   const [draft, setDraft] = useState("");
   const [newLink, setNewLink] = useState(false);
-  const [open, setOpen] = useState(false);
+  const [noticeOpen, setNoticeOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const [confirm, setConfirm] = useState(false);
   const [restored, setRestored] = useState(false);
@@ -116,7 +117,6 @@ export function ConnectionSettings({
   }, [read]);
   useEffect(() => {
     if (localAuth?.state === "pairing_required") {
-      setOpen(true);
       setSelection("local");
       setNewLink(true);
     }
@@ -271,24 +271,11 @@ export function ConnectionSettings({
         ? { state: "unverified_local" as const, reason: "skip" as const }
         : localAuth
       : null);
+  // The optional-pairing advice stays behind its icon. Skipped verification and every
+  // state that blocks the connection are always shown.
+  const advisory = notice?.state === "unverified_local" && notice.reason !== "skip";
   return (
     <>
-      <LocalPairingNotice
-        status={notice}
-        instanceId={instanceId}
-        onPair={() => {
-          setOpen(true);
-          setSelection("local");
-          setNewLink(true);
-        }}
-        onRetry={() => void retry()}
-        onRestore={() => void changeSkip(false).catch(() => setError("local"))}
-      />
-      {restored && (
-        <p role="status" className="mt-2 text-xs text-muted-foreground">
-          {t("popup.localAuth.restoreHint")}
-        </p>
-      )}
       {disconnected && !notice && !storageError && !statusKey && (
         <p className="mt-2 text-xs text-muted-foreground" data-slot="popup-daemon-unreachable">
           {t(activeMode === "remote" ? "popup.remoteUnreachable" : "popup.daemonUnreachable")}
@@ -304,13 +291,11 @@ export function ConnectionSettings({
           {t("popup.remoteStorageError")}
         </p>
       )}
-      <details
-        open={open}
-        onToggle={(event) => setOpen(event.currentTarget.open)}
+      <section
         className="mt-3 border-t border-border/70 pt-2.5"
         data-slot="popup-connection-settings"
       >
-        <summary className="cursor-pointer text-xs text-muted-foreground">
+        <div className="flex items-center text-xs text-muted-foreground">
           <span>{t("popup.connectionSettings")}</span>
           {ready && !storageError && (
             <span className="ml-2">
@@ -318,24 +303,42 @@ export function ConnectionSettings({
               {paired && activeMode === "local" ? ` · ${t("popup.localAuth.paired")}` : ""}
             </span>
           )}
+          {advisory && (
+            <button
+              type="button"
+              aria-expanded={noticeOpen}
+              aria-label={t("popup.localAuth.unpaired")}
+              title={t("popup.localAuth.unpaired")}
+              data-slot="local-pairing-toggle"
+              onClick={() => setNoticeOpen((value) => !value)}
+              className="ml-1.5 flex size-5 items-center justify-center rounded-sm text-amber-600 focus-visible:outline-2 focus-visible:outline-ring dark:text-amber-400"
+            >
+              <RiAlertLine className="size-4" aria-hidden />
+            </button>
+          )}
           {needsAttention && (
             <span className="ml-2 text-destructive">{t("popup.remoteNeedsAttention")}</span>
           )}
-        </summary>
-        <div className="mt-3 space-y-3">
-          <p
-            className="break-all text-xs text-muted-foreground"
-            data-slot="popup-current-connection"
-          >
-            {address}
+        </div>
+        {(!advisory || noticeOpen) && (
+          <LocalPairingNotice
+            status={notice}
+            instanceId={instanceId}
+            onPair={() => {
+              setSelection("local");
+              setNewLink(true);
+              document.getElementById("remote-pairing")?.focus();
+            }}
+            onRetry={() => void retry()}
+            onRestore={() => void changeSkip(false).catch(() => setError("local"))}
+          />
+        )}
+        {restored && (
+          <p role="status" className="mt-2 text-xs text-muted-foreground">
+            {t("popup.localAuth.restoreHint")}
           </p>
-          {(connection ?? (mode === "remote" ? savedRemote : null))?.expiresAt && (
-            <p className="text-xs text-muted-foreground">
-              {t("popup.remoteExpires", {
-                date: new Date((connection ?? savedRemote)!.expiresAt!).toLocaleString(),
-              })}
-            </p>
-          )}
+        )}
+        <div className="mt-3 space-y-3">
           <div
             role="group"
             aria-label={t("popup.connectionMode")}
@@ -362,6 +365,21 @@ export function ConnectionSettings({
               </Button>
             ))}
           </div>
+          {(!ready || storageError || mode === activeMode) && (
+            <p
+              className="break-all text-xs text-muted-foreground"
+              data-slot="popup-current-connection"
+            >
+              {address}
+            </p>
+          )}
+          {(connection ?? (mode === "remote" ? savedRemote : null))?.expiresAt && (
+            <p className="text-xs text-muted-foreground">
+              {t("popup.remoteExpires", {
+                date: new Date((connection ?? savedRemote)!.expiresAt!).toLocaleString(),
+              })}
+            </p>
+          )}
           <form
             onSubmit={(event) => {
               event.preventDefault();
@@ -384,8 +402,8 @@ export function ConnectionSettings({
                       <Button
                         type="button"
                         size="sm"
-                        variant="ghost"
-                        className="mt-1 h-7 px-0 text-xs"
+                        variant="outline"
+                        className="mt-2 h-7 px-2.5 text-xs"
                         onClick={() => setNewLink(true)}
                       >
                         {t("popup.localAuth.newLink")}
@@ -446,9 +464,16 @@ export function ConnectionSettings({
               <>
                 <div className="relative flex items-center gap-1">
                   <Label htmlFor="remote-pairing">{t("popup.remotePairing")}</Label>
-                  {mode === "remote" && (
+                  {mode === "remote" ? (
                     <SettingInfo label={t("popup.remotePermissionsInfo")}>
                       {t("popup.remotePermissionsHint")}
+                    </SettingInfo>
+                  ) : (
+                    <SettingInfo
+                      label={t("popup.localAuth.pairInfoLabel")}
+                      data-slot="popup-pairing-info"
+                    >
+                      <span className="whitespace-pre-line">{t("popup.localAuth.pairHint")}</span>
                     </SettingInfo>
                   )}
                 </div>
@@ -463,9 +488,9 @@ export function ConnectionSettings({
                   aria-invalid={error === "format" || undefined}
                   onChange={(event) => edit(event.target.value)}
                 />
-                <p className="text-xs text-muted-foreground">
-                  {t(mode === "local" ? "popup.localAuth.pairHint" : "popup.remoteHint")}
-                </p>
+                {mode === "remote" && (
+                  <p className="text-xs text-muted-foreground">{t("popup.remoteHint")}</p>
+                )}
                 {parsed && (
                   <p
                     className="break-all text-xs text-muted-foreground"
@@ -479,15 +504,17 @@ export function ConnectionSettings({
             {mode === "remote" && activeMode === "local" && savedRemote?.status === "expired" && (
               <p className="text-xs text-muted-foreground">{t("popup.remoteExpired")}</p>
             )}
-            <p className="text-xs text-muted-foreground">
-              {t(
-                switchingToLocal
-                  ? "popup.connectionLocalWarning"
-                  : mode === "local" && showInput && !port.dirty
-                    ? "popup.localAuth.pairPreserves"
-                    : "popup.connectionSaveWarning",
-              )}
-            </p>
+            {!saveDisabled && !port.invalid && (
+              <p className="text-xs text-muted-foreground" data-slot="popup-save-warning">
+                {t(
+                  switchingToLocal
+                    ? "popup.connectionLocalWarning"
+                    : mode === "local" && showInput && !port.dirty
+                      ? "popup.localAuth.pairPreserves"
+                      : "popup.connectionSaveWarning",
+                )}
+              </p>
+            )}
             {confirm && (
               <div
                 role="alertdialog"
@@ -581,7 +608,7 @@ export function ConnectionSettings({
             />
           )}
         </div>
-      </details>
+      </section>
     </>
   );
 }

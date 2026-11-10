@@ -61,6 +61,8 @@ https://github.com/user-attachments/assets/6111d978-baa6-4a76-92c4-4f51d47ae617
   </tr>
 </table>
 
+Qoder and Qoder CN are supported as skill-only targets: `bsk install-skill --harness qoder` and `--harness qoder-cn`.
+
 These and other agents that can run shell commands use the same **`bsk` CLI**. **[DeepSeek Harness](#deepseek-harness-plugin)** has a dedicated plugin with native browser tools and task previews. You choose the agent and model; BrowserSkill connects it to your browser.
 
 ## What you can do
@@ -446,7 +448,8 @@ Thank you to everyone who contributes code, documentation, translations, and fee
 ### Reading dynamic pages (unreleased, protocol 1.9)
 
 Use `bsk read` for current DOM fields during animation, and `extract` for tables/
-lists. MCP and DSH expose it as `bsk_inspect(action=read)`. Arbitrary evaluate still
-requires a strict observation. Read results never renew action authority: protect
+lists. MCP and DSH expose it as `bsk_inspect(action=read)`. A script is checked
+against the `--expect` facts it states, or the whole page when it passes `--observation`;
+`evaluate --unverified` is the last resort. Read results never renew action authority: protect
 business facts with expect. See [dynamic reading](docs/dynamic-reading.md) for
 query fields, safety boundaries, compatibility and reproducible browser tests.

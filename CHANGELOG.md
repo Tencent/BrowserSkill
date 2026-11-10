@@ -11,6 +11,8 @@ determines which versions can connect.
 
 ### Added
 
+- Qoder and Qoder CN are available as skill-only install targets through
+  `bsk install-skill --harness qoder` and `--harness qoder-cn`.
 - Local pairing with mutual proofs, durable key rotation and interruption recovery.
   Paired connections verify the daemon before sending business traffic; activation
   invalidates the original link. Device revocation and browser registration are
@@ -49,10 +51,23 @@ determines which versions can connect.
   with explicit business conditions. No caller JavaScript, callbacks or delayed
   effects are accepted; sensitive fields are masked.
 - DOM reads negotiate protocol 1.9 and reject older peers explicitly, without
-  script fallback. Arbitrary evaluate and visual/untargeted input retain strict guards.
+  script fallback. Visual/untargeted input retains strict guards.
+- `bsk evaluate --unverified` (MCP `params.unverified`, DSH `unverified`) runs a script
+  without comparing the page with any observation, for pages that never hold still and
+  scripts whose dependencies cannot be stated. Control authority, main-document identity
+  and tab ownership are still enforced; it cannot be combined with `--expect`,
+  `--observation` or `--depends-on`, and its result carries `verified: false`. It needs
+  protocol 1.9 on the daemon and extension; peers below 1.9 are rejected before dispatch.
+  Earlier 1.9 development builds require updating the CLI, daemon and extension together.
 
 ### Changed
 
+- The extension popup always shows Connection settings instead of hiding them behind
+  a disclosure. The optional-pairing advice collapses to a warning-triangle icon beside
+  the heading and expands on click; skipped verification and states that block the
+  connection stay visible. The current address sits under the selected mode, the
+  pairing steps move behind an info icon, "Use a new pairing link" is a button, and the
+  save notice appears only once there is a valid change to save.
 - `bsk plan` and `bsk recipe` are documented standard CLI workflows, with packaged
   guidance for batching and replay; recipe schemas remain opt-in in MCP and DSH.
 - Recipe execution and edits share an exclusive lock. Replay refuses unreadable
@@ -65,6 +80,13 @@ determines which versions can connect.
 ### Fixed
 
 - Structured extraction handles HTML `scope` keywords case-insensitively, preserving uppercase and mixed-case row headers as data and correcting discovered column previews.
+- Daemon shutdown retains its WebSocket stop notification when the accept loop is
+  between waits, avoiding a lost notification that can leave `daemon stop` waiting.
+- Website debugging attributes agent uploads and downloads to their transfer
+  operations instead of recording the resulting file changes and clicks as human input.
+- Local validation failures in upload, download, plan and step return stable
+  parameter/file error codes and relevant recovery hints. Upload sources are checked
+  before contacting the daemon or staging any files.
 - `fill` notifies each final value once. Native insertion and clearing already
   dispatch `input`; the completion step no longer repeats it
   ([#624](https://github.com/Tencent/BrowserSkill/issues/624)).
@@ -75,6 +97,9 @@ determines which versions can connect.
   such as GOV.UK step-by-step sections and long news headlines.
 - Recording keeps clicks on links, filter disclosures, checkboxes and other controls
   that share a form with a search field, such as GOV.UK search results and filters.
+- Recorded steps keep their element ref after the page scrolls or the target changes size:
+  when no position matches, the only same-tag ref with the same role and name is used.
+  A click on text inside a `<summary>`, tab or option is measured on that control.
 - Recipe save refuses oversized input and formatted documents before publishing a
   revision that its own reader could not open.
 - `press` maps US-layout punctuation to its physical `code` and virtual key code,
@@ -87,7 +112,28 @@ determines which versions can connect.
   `read_target_stale` instead of a generic CDP failure.
 - CLI, MCP, DSH and bundled skills direct dynamic-page data gathering to read/extract
   instead of repeated sync/evaluate refusals.
+- A script that states what it relies on is checked against that instead of the whole
+  page, so unrelated clocks, feeds and media no longer refuse it in a loop. Under target
+  policy, `evaluate` with `--expect` and no `--observation` reuses its context and is not
+  refused when a child frame navigates; passing `--observation` as well still checks the
+  whole page. Under strict policy, `evaluate` with
+  `--depends-on` checks those regions, form values and modal layers only; it previously
+  also required the whole page to match. A script that states nothing is checked as before.
+- A refusal caused by a changed observation also reports `observed_changes`: the number
+  of changed, added and removed nodes with up to five examples. For scripts, the recovery
+  text and the bundled skills give the order to try: state the facts, and use
+  `--unverified` only when they cannot be stated.
 - Control-state sampling recollects once after the browser proves that a failed child document retired; an active unobservable frame still blocks input.
+- A frame that does not answer collection in time is named in the error message and
+  `data.frames` (frame ID with the sanitized origin and path; tab operations add the tab).
+  The refusal remains `cooperation_sync_required`, so `--settle`, recipes and DSH still
+  retry it, and its recovery explains how to leave a frame that keeps failing
+  ([#614](https://github.com/Tencent/BrowserSkill/issues/614)).
+- A child frame that cannot be collected while its element is not displayed, has no area
+  or is invisible, and does not hold focus, is listed in `frame_gaps` as `hidden_frame`
+  instead of blocking the tab, as with micro-frontend sandbox iframes. Later collections
+  recheck the element instead of waiting for the frame again, and a displayed frame still
+  blocks input ([#614](https://github.com/Tencent/BrowserSkill/issues/614)).
 - Removed nodes already collected by CDP report target_detached with node identity, consistently with detached nodes that remain inspectable; other CDP failures remain target_unavailable.
 - Recording captures option changes on native `<select>` controls inside open shadow roots,
   whose `change` events do not reach the document.

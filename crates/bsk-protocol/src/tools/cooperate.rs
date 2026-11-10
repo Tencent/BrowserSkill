@@ -55,8 +55,9 @@ pub struct ActionMetadata {
     #[schemars(with = "String")]
     pub context_id: Option<String>,
     /// Sync's single-use baseline for untargeted/visual actions under target policy,
-    /// including scripts, untargeted keys and displacement-only drags. Drags with a
-    /// target ref/selector need only context_id.
+    /// including untargeted keys and displacement-only drags. Drags with a
+    /// target ref/selector need only context_id. A script needs it only when it
+    /// states no expect facts; passing both checks the whole page as well.
     /// Strict-policy drag instead accepts its legacy ref-map observation token.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub observation_id: Option<String>,

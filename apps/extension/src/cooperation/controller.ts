@@ -24,14 +24,16 @@ import {
 } from "./action-checks";
 import { guardedRunner } from "./action-guard";
 import { type ControlAuthority, ControlAuthorityError } from "./control-authority";
-import { FrameCollectionError } from "./frame-error";
+import { FrameCollectionError, FrameUnresponsiveError } from "./frame-error";
 import {
   contentChanges,
   type EvidenceTarget,
   type ObservationEvidence,
   type ObservedChange,
+  type ObservedChanges,
   observationEvidence,
   observedChange,
+  observedChanges,
   observedKeyboardTargets,
   observesTarget,
   preparationEvidence,
@@ -43,8 +45,10 @@ import type {
   CooperationParams,
   CooperationView,
   FrameGap,
+  FrameIdentity,
   FrameRepairs,
   FrameState,
+  HiddenFrames,
   InputExpectation,
 } from "./types";
 
@@ -85,10 +89,13 @@ interface TabState {
   /** Ordinary input revocation must not discard an already accepted download receipt. */
   completion?: AbortController;
   unavailable: boolean;
+  /** Frames that did not answer the collection that made this tab unavailable. */
+  unresponsive?: FrameIdentity[];
   frames: Frames;
   context?: Context;
   frameGaps: FrameGap[];
   frameRepairs: FrameRepairs;
+  hiddenFrames: HiddenFrames;
   baseline?: Context;
   activity: Activity[];
   activitySequence: number;
@@ -120,8 +127,14 @@ export interface CooperationDeps {
     input: InputExpectation | undefined,
     lease: string,
     repairs: FrameRepairs,
+    hidden: HiddenFrames,
   ): Promise<CooperationFrames>;
-  resumeFrames(tabId: number, lease: string, repairs: FrameRepairs): Promise<void>;
+  resumeFrames(
+    tabId: number,
+    lease: string,
+    repairs: FrameRepairs,
+    hidden: HiddenFrames,
+  ): Promise<void>;
   releaseFrames?(tabId: number, lease: string): Promise<void>;
   changed(tabId: number): void;
   sessionActivity?(sessionId: string, idleProtected: boolean): void;
@@ -246,6 +259,17 @@ function sameMedia(a: Frames, b: Frames): boolean {
   );
 }
 
+/**
+ * Ways out for a script refused because the page changed. Declaring comes
+ * first: it keeps a real check. Running unverified is the last resort.
+ */
+const SCRIPT_CHANGE_RECOVERY = {
+  target:
+    "For data, use read/extract (fixed passive DOM queries) without another sync. For a script, read observed_changes and decide whether it touches what the script relies on. If those facts can be stated, pass them as explicit expect checks and omit observation_id: then only they are checked and the rest of the page may keep changing. Only if they cannot be stated, run evaluate with unverified, which compares nothing about the page; make the script check its own preconditions and throw when they do not hold. Do not resubmit the same script in a sync loop.",
+  strict:
+    "Read observed_changes and decide whether it touches what the script relies on. If those regions can be named, synchronize and pass them with --depends-on (plugin: dependsOn): then only they, form values and modal layers are checked, and the rest of the page may keep changing. Only if they cannot be named, synchronize and run evaluate with unverified, which compares nothing about the page; make the script check its own preconditions and throw when they do not hold. Do not resubmit the same script in a sync loop.",
+};
+
 function failure(message: string, effect: "none" | "unknown" = "none"): RpcError {
   return {
     code: "permission_denied",
@@ -255,6 +279,30 @@ function failure(message: string, effect: "none" | "unknown" = "none"): RpcError
       effect_state: effect,
       recovery:
         "Use cooperate wait, then cooperate sync. Keep the assigned goal; reconcile the live result before issuing a new action. Never replay an uncertain submission.",
+    },
+  };
+}
+/**
+ * Names frames that did not answer collection. A busy frame can recover, so the
+ * reason stays the retryable `cooperation_sync_required`; the recovery also says
+ * how to leave a frame that keeps failing instead of looping.
+ */
+function withUnresponsiveFrames(
+  result: RpcError,
+  frames: (FrameIdentity & { tab_id?: number })[] | undefined,
+): RpcError {
+  if (!frames?.length) return result;
+  return {
+    ...result,
+    data: {
+      ...result.data,
+      frames,
+      ...(result.data?.effect_state === "unknown"
+        ? {}
+        : {
+            recovery:
+              "Use cooperate wait, then cooperate sync; a busy frame can recover. If the same frame keeps failing, use read-only commands such as get-html or snapshot, or stop the session, which also returns borrowed tabs. Never replay an uncertain submission.",
+          }),
     },
   };
 }
@@ -358,6 +406,7 @@ export class CooperationController implements ControlAuthority {
       frames: new Map(),
       frameGaps: [],
       frameRepairs: new Map(),
+      hiddenFrames: new Set(),
       activity: [],
       activitySequence: 0,
       activitySeen: new Map(),
@@ -484,7 +533,7 @@ export class CooperationController implements ControlAuthority {
     state.controlRevision++;
     state.authorityRevision++;
     this.changed(state);
-    await this.deps.resumeFrames(state.tabId, state.lease, state.frameRepairs);
+    await this.deps.resumeFrames(state.tabId, state.lease, state.frameRepairs, state.hiddenFrames);
     if (state.controlRevision === controlRevision + 1) await this.refresh(state);
   }
   private humanActive(state: TabState): boolean {
@@ -610,6 +659,7 @@ export class CooperationController implements ControlAuthority {
     state.epoch++;
     state.context = undefined;
     state.unavailable = true;
+    state.unresponsive = undefined;
     this.changed(state);
   }
   async control(tabId: number, revision: number, action: "hold" | "resume") {
@@ -631,7 +681,7 @@ export class CooperationController implements ControlAuthority {
     const epoch = state.epoch;
     this.changed(state);
     if (action === "resume") {
-      await this.deps.resumeFrames(tabId, state.lease, state.frameRepairs);
+      await this.deps.resumeFrames(tabId, state.lease, state.frameRepairs, state.hiddenFrames);
       if (state.epoch === epoch) await this.refresh(state);
     }
     return { ok: true, state: this.view(tabId) };
@@ -671,6 +721,7 @@ export class CooperationController implements ControlAuthority {
         input,
         state.lease,
         state.frameRepairs,
+        state.hiddenFrames,
       );
       frames = collection.frames;
       if (!live()) throw new Error("Shared-tab control ended during collection");
@@ -679,6 +730,7 @@ export class CooperationController implements ControlAuthority {
       state.frameGaps = collection.gaps;
     } catch (error) {
       state.unavailable = true;
+      state.unresponsive = error instanceof FrameUnresponsiveError ? error.frames : undefined;
       state.context = undefined;
       this.changed(state);
       throw error;
@@ -704,17 +756,17 @@ export class CooperationController implements ControlAuthority {
     if (documentsChanged) state.frameEpoch++;
     const mainDocumentChanged =
       documentsChanged && state.frames.get(0)?.document !== frames.get(0)?.document;
-    if (
-      state.authorityRevision !== authorityRevision ||
-      mainDocumentChanged ||
-      (documentsChanged && this.deps.sessions.get(state.sessionId)?.controlPolicy === "strict")
-    ) {
+    // Child documents revoke observation evidence through frameEpoch, rather
+    // than control itself. An unverified script still needs the same main
+    // document and uninterrupted authority, but does not use that evidence.
+    if (state.authorityRevision !== authorityRevision || mainDocumentChanged) {
       state.epoch++;
       state.context = undefined;
     }
     for (const [id, frame] of frames) this.remember(state, id, frame);
     state.frames = frames;
     state.unavailable = false;
+    state.unresponsive = undefined;
     return frames;
   }
   async command(params: CooperationParams, cdp: CdpRunner, signal: AbortSignal): Promise<unknown> {
@@ -995,8 +1047,8 @@ export class CooperationController implements ControlAuthority {
             }),
           state: { ...this.view(state.tabId), mode: "ready" },
           guidance: targetPolicy
-            ? "Reuse this context for DOM-targeted actions and supplementary reads. Human intervention or main-document replacement requires sync. Actions using an iframe target or precondition require a fresh sync when frame documents change. Use explicit expect checks for business facts such as price, recipient or record ID. Use read/extract for current DOM data even during animation; they never renew action evidence. Arbitrary scripts, untargeted keys and visual clicks require this sync's top-level observation_id (not observation.observation_id) and retain strict content checks. Never replay an uncertain action; inspect its result first."
-            : "Continue toward the assigned goal using this current state. Incorporate helpful progress and correct recoverable mistakes. Page activity is not a change of goal. Each context authorizes one action; sync after it. By default the whole page is checked. Text that changes by itself (clocks, counters) is reported once; after the next sync it no longer blocks actions on a ref or selector unless it shares a form, list, dialog, panel or other container with the target. Keys without a ref or selector can use explicit dependencies, while their actual focused region stays protected; uncertain focus and other untargeted actions keep the exact whole-page check. To tolerate other unrelated updates, declare all observed decision regions with --depends-on refs/selectors (plugin: dependsOn); the target region and form values remain protected. Verify completion and prior submissions from application evidence.",
+            ? "Reuse this context for DOM-targeted actions and supplementary reads. Human intervention or main-document replacement requires sync. Actions using an iframe target or precondition require a fresh sync when frame documents change. Use explicit expect checks for business facts such as price, recipient or record ID. Use read/extract for current DOM data even during animation; they never renew action evidence. Untargeted keys, visual clicks and scripts without stated facts require this sync's top-level observation_id (not observation.observation_id) and retain strict content checks. A script with explicit expect checks and no observation_id is verified against those facts only and reuses this context; prefer that on pages that keep changing. evaluate with unverified compares nothing about the page and is the last resort when the facts cannot be stated. Never replay an uncertain action; inspect its result first."
+            : "Continue toward the assigned goal using this current state. Incorporate helpful progress and correct recoverable mistakes. Page activity is not a change of goal. Each context authorizes one action; sync after it. By default the whole page is checked. Text that changes by itself (clocks, counters) is reported once; after the next sync it no longer blocks actions on a ref or selector unless it shares a form, list, dialog, panel or other container with the target. Keys without a ref or selector can use explicit dependencies, while their actual focused region stays protected; uncertain focus and other untargeted actions keep the exact whole-page check. A script with --depends-on is checked against those regions, form values and modal layers only; evaluate with unverified compares nothing about the page and is the last resort when the regions cannot be named. To tolerate other unrelated updates, declare all observed decision regions with --depends-on refs/selectors (plugin: dependsOn); the target region and form values remain protected. Verify completion and prior submissions from application evidence.",
         };
       } finally {
         state.working = false;
@@ -1010,7 +1062,10 @@ export class CooperationController implements ControlAuthority {
       state.context = undefined;
       this.changed(state);
       if (error instanceof FrameCollectionError) return error.toRpcError();
-      return failure(error instanceof Error ? error.message : String(error));
+      return withUnresponsiveFrames(
+        failure(error instanceof Error ? error.message : String(error)),
+        state.unresponsive,
+      );
     }
   }
 
@@ -1125,6 +1180,16 @@ export class CooperationController implements ControlAuthority {
         throw error;
       }
     };
+    // Tab operations prepare every owned tab, so name the tab of each silent frame.
+    const refusal = (message: string) =>
+      withUnresponsiveFrames(
+        failure(message, sent ? "unknown" : "none"),
+        states.flatMap((state) =>
+          state.unavailable
+            ? (state.unresponsive ?? []).map((frame) => ({ tab_id: state.tabId, ...frame }))
+            : [],
+        ),
+      );
     for (const state of states) {
       state.working = true;
       state.context = undefined;
@@ -1145,7 +1210,7 @@ export class CooperationController implements ControlAuthority {
       // Existing handlers may convert a guard rejection into their own RPC error.
       if (states.some((state) => state.stopped)) return stopped(sent ? "unknown" : "none");
       if (signal.aborted) signal.throwIfAborted();
-      if (revoked) return failure(revoked, sent ? "unknown" : "none");
+      if (revoked) return refusal(revoked);
       return result;
     } catch (error) {
       if (states.some((state) => state.stopped)) return stopped(sent ? "unknown" : "none");
@@ -1155,10 +1220,7 @@ export class CooperationController implements ControlAuthority {
           message: "Tab operation cancelled",
           data: { effect_state: sent ? "unknown" : "none" },
         };
-      return failure(
-        error instanceof Error ? error.message : String(error),
-        sent ? "unknown" : "none",
-      );
+      return refusal(error instanceof Error ? error.message : String(error));
     } finally {
       for (const state of states) {
         if (sent) state.lastAgentActivity = this.now();
@@ -1189,6 +1251,7 @@ export class CooperationController implements ControlAuthority {
           ref?: string;
           selector?: string;
           depends_on?: string[];
+          unverified?: unknown;
           source?: DragTarget;
           target?: DragTarget;
         }
@@ -1273,7 +1336,12 @@ export class CooperationController implements ControlAuthority {
         if (outcome === "cancelled") this.stopSession(state.sessionId);
         if (outcome === "continued" || outcome === "completed") {
           this.preserve(state);
-          await this.deps.resumeFrames(state.tabId, state.lease, state.frameRepairs);
+          await this.deps.resumeFrames(
+            state.tabId,
+            state.lease,
+            state.frameRepairs,
+            state.hiddenFrames,
+          );
         }
         return result;
       } finally {
@@ -1385,17 +1453,51 @@ export class CooperationController implements ControlAuthority {
         message: "depends_on requires strict policy; use explicit expect checks with target policy",
         data: { phase: "precondition", effect_state: "none" },
       };
+    const script = req.method === "tool.evaluate";
+    if (params.unverified !== undefined && (!script || typeof params.unverified !== "boolean"))
+      return {
+        code: "invalid_params",
+        message: "unverified is a boolean accepted only by evaluate",
+        data: { phase: "precondition", effect_state: "none" },
+      };
+    // The caller takes responsibility for the page being as it expects. Asking
+    // for a page check as well is a contradiction, not a stricter request.
+    const unverified = script && params.unverified === true;
+    if (
+      unverified &&
+      (params.expect !== undefined ||
+        params.depends_on?.length ||
+        params.observation_id !== undefined)
+    )
+      return {
+        code: "invalid_params",
+        message:
+          "unverified skips page verification; omit expect, depends_on and observation_id, or omit unverified to have them checked",
+        data: { phase: "precondition", effect_state: "none" },
+      };
+    // Only the caller knows what an opaque script relies on. When it says so,
+    // those facts or regions are checked instead of the whole page. Passing a
+    // strict observation as well still asks for the whole page, as it always has.
+    const declared =
+      script &&
+      (targetPolicy
+        ? expectations.length > 0 && params.observation_id === undefined
+        : !!params.depends_on?.length);
+    const scopedScript = unverified || declared;
     const primaryTarget = req.method === "tool.drag" ? params.source : params;
     const visual =
       params.capture_id !== undefined ||
       params.image_x !== undefined ||
       params.image_y !== undefined;
+    // Authorized by the control context plus explicit checks, not by a strict
+    // observation of the whole page.
     const targeted =
       targetPolicy &&
-      TARGET_ACTIONS.has(req.method) &&
-      !visual &&
-      !!(primaryTarget?.ref || primaryTarget?.selector) &&
-      (req.method !== "tool.drag" || !!(params.target?.ref || params.target?.selector));
+      (scopedScript ||
+        (TARGET_ACTIONS.has(req.method) &&
+          !visual &&
+          !!(primaryTarget?.ref || primaryTarget?.selector) &&
+          (req.method !== "tool.drag" || !!(params.target?.ref || params.target?.selector))));
     let sent = false;
     let finished = false;
     let revoked: string | undefined;
@@ -1407,6 +1509,8 @@ export class CooperationController implements ControlAuthority {
     let observed:
       | (Partial<ObservedChange> & { scope: string; phase: "decision" | "preparation" })
       | undefined;
+    // All of them in brief, so the caller can judge whether they matter to it.
+    let observedSummary: ObservedChanges | undefined;
     let nativeInputStarted = false;
     const context = targetPolicy && !targeted ? state.baseline : state.context;
     const rootFrameId = context?.evidence?.rootFrameId;
@@ -1417,14 +1521,20 @@ export class CooperationController implements ControlAuthority {
     const mainDocumentTarget = (node?: DragTarget) =>
       node?.ref ? mainDocumentRef(node.ref) : !!node?.selector;
     // Selectors are main-document only. Refs must prove their frame, including
-    // both drag endpoints and any refs whose facts authorize the action.
+    // both drag endpoints and any refs whose facts authorize the action. A
+    // script runs in the main document, so only its stated facts can involve
+    // another frame.
     const mainDocumentAction =
       targeted &&
-      mainDocumentTarget(primaryTarget) &&
-      (req.method !== "tool.drag" || mainDocumentTarget(params.target)) &&
+      (scopedScript ||
+        (mainDocumentTarget(primaryTarget) &&
+          (req.method !== "tool.drag" || mainDocumentTarget(params.target)))) &&
       expectations.every(({ target }) => !/^@?e\d+$/.test(target) || mainDocumentRef(target));
     const observedFramesChanged = () =>
-      !mainDocumentAction && context !== undefined && context.frameEpoch !== state.frameEpoch;
+      !unverified &&
+      !mainDocumentAction &&
+      context !== undefined &&
+      context.frameEpoch !== state.frameEpoch;
     let epoch = state.epoch;
     let detachedByHandler = false;
     let postRefreshFailed = false;
@@ -1441,8 +1551,13 @@ export class CooperationController implements ControlAuthority {
       effect === "unknown" && req.method === "tool.click" && !nativeInputStarted
         ? { press_sent: false }
         : {};
-    const reportFailure = (message: string, effect: "none" | "unknown" = "none"): RpcError => {
-      const diagnosis = observed ? { observed_change: observed } : {};
+    const describeFailure = (message: string, effect: "none" | "unknown"): RpcError => {
+      const diagnosis = observed
+        ? {
+            observed_change: observed,
+            ...(observedSummary ? { observed_changes: observedSummary } : {}),
+          }
+        : {};
       const idleResumable =
         idleAtEntry &&
         effect === "none" &&
@@ -1462,7 +1577,9 @@ export class CooperationController implements ControlAuthority {
                   recovery:
                     "Use cooperate sync to resume control and reconcile the live result before issuing a new action. Never replay an uncertain submission.",
                 }
-              : {}),
+              : script && observed && effect === "none"
+                ? { recovery: SCRIPT_CHANGE_RECOVERY.strict }
+                : {}),
           },
         };
       }
@@ -1510,6 +1627,11 @@ export class CooperationController implements ControlAuthority {
         },
       };
     };
+    const reportFailure = (message: string, effect: "none" | "unknown" = "none"): RpcError =>
+      withUnresponsiveFrames(
+        describeFailure(message, effect),
+        state.unavailable ? state.unresponsive : undefined,
+      );
     state.working = true;
     const intervention = new AbortController();
     state.interruption = intervention;
@@ -1539,6 +1661,7 @@ export class CooperationController implements ControlAuthority {
       if (
         !completed &&
         !targeted &&
+        !scopedScript &&
         !nativeInputStarted &&
         context &&
         !sameMedia(context.frames, state.frames)
@@ -1588,7 +1711,9 @@ export class CooperationController implements ControlAuthority {
             "observation_changed",
             "The strict observation changed before this action",
             "observation",
-            "For data, use read/extract (fixed passive DOM queries) without another sync. For an actual script or visual action, synchronize and reconsider; use a DOM target with explicit expect facts when possible.",
+            script
+              ? SCRIPT_CHANGE_RECOVERY.target
+              : "For data, use read/extract (fixed passive DOM queries) without another sync. For a visual action, synchronize and reconsider; use a DOM target with explicit expect facts when possible.",
             { observation_id: context.observationId },
           );
           return;
@@ -1631,8 +1756,10 @@ export class CooperationController implements ControlAuthority {
       };
       const keyboardCheck = (): Check | undefined => {
         if (actionTarget) return;
-        // Only keyboard input has an implicit recipient. An untargeted script
-        // still requires the exact whole page, as before scoped-key support.
+        // A script has no implicit recipient: its declared regions are what
+        // it relies on. Other untargeted actions keep the exact whole page.
+        if (script) return;
+        // Only keyboard input has an implicit recipient.
         if (req.method !== "tool.press") return { scope: "page" };
         const recipients = observedKeyboardTargets(context.evidence!);
         const current = observedKeyboardTargets(evidence!);
@@ -1699,6 +1826,9 @@ export class CooperationController implements ControlAuthority {
         scope: refusal.scope,
         phase: prepared ? "preparation" : "decision",
       };
+      observedSummary = observedChanges(...comparison(refusal), refusal.target, refusal.keys, {
+        incidentalMedia: refusal.incidentalMedia,
+      });
       consumeRefused();
       // Learn page activity only from in-place text changes that every protected
       // region would tolerate, with no human input since the sync.
@@ -1733,8 +1863,12 @@ export class CooperationController implements ControlAuthority {
       throw new Error((revoked = "The action's observed content changed; synchronize and replan"));
     };
     const verifyDecision = async (requireFocus = false) => {
-      if (targeted) {
-        for (const node of [actionTarget, destinationTarget]) {
+      if (unverified) {
+        // Nothing about the page is compared. Control, the document and the
+        // tab are still checked by assert() below and at dispatch.
+      } else if (targeted) {
+        // A script has no DOM recipient to check; its expect facts follow.
+        for (const node of script ? [] : [actionTarget, destinationTarget]) {
           if (!node) continue;
           const error = await checkActionTarget(cdp, node, req.method, requireFocus);
           if (error) throw new ActionCheckError((checkFailure = error));
@@ -1785,7 +1919,7 @@ export class CooperationController implements ControlAuthority {
         !state.context ||
         params.context_id !== state.context.id ||
         context.epoch !== state.epoch ||
-        (!targetPolicy && context.refs !== session.refStore.revision)
+        (!targetPolicy && !unverified && context.refs !== session.refStore.revision)
       )
         return targetPolicy
           ? reportFailure("This action requires a valid control context from cooperate sync")
@@ -1799,7 +1933,9 @@ export class CooperationController implements ControlAuthority {
           "observation_required",
           "This action requires an unused strict observation from cooperate sync",
           "observation",
-          "Synchronize, inspect the result and pass the sync reply's top-level observation_id, not observation.observation_id, explicitly with --observation (plugin: observationId).",
+          script
+            ? "Synchronize, inspect the result and pass the sync reply's top-level observation_id, not observation.observation_id, explicitly with --observation (plugin: observationId). On a page that keeps changing, state what the script relies on with explicit expect checks and omit observation_id: then only they are checked."
+            : "Synchronize, inspect the result and pass the sync reply's top-level observation_id, not observation.observation_id, explicitly with --observation (plugin: observationId).",
         );
       if (!visual && (primaryTarget?.ref || primaryTarget?.selector)) {
         const resolved = await resolveActionTarget(
@@ -1927,6 +2063,7 @@ export class CooperationController implements ControlAuthority {
                 { type: "clear", id: input.id },
                 state.lease,
                 state.frameRepairs,
+                state.hiddenFrames,
               )
               .catch(() => {});
           },

@@ -657,6 +657,100 @@ export function observedChange(
   }
 }
 
+/** How much differs between two observations, with a few examples. */
+export interface ObservedChanges {
+  changed: number;
+  added: number;
+  removed: number;
+  examples: ObservedChange[];
+}
+
+const MAX_EXAMPLES = 5;
+const NAME_FACT = factFields.indexOf("name");
+
+/**
+ * Every node that differs between two observations, with the same arguments
+ * as sameObservationEvidence(). Only the caller knows what its action relies
+ * on, so this states what changed and leaves relevance to the caller.
+ *
+ * Nodes are matched by backend identity, so an insertion is one addition and
+ * not a shift of every later row. A container whose derived name changed only
+ * because a descendant did is not counted again. Returns undefined when no
+ * identified node differs, such as text that only wraps differently.
+ */
+export function observedChanges(
+  before: ObservationEvidence,
+  after: ObservationEvidence,
+  target?: EvidenceTarget,
+  volatile?: ReadonlySet<string>,
+  options?: EvidenceOptions,
+): ObservedChanges | undefined {
+  const a = signature(before, target, volatile, options);
+  const b = signature(after, target, volatile, options);
+  if (!a || !b) return;
+  const identity = (node: VomNode) =>
+    node.backendNodeId === undefined ? undefined : `${node.frameId ?? ""}:${node.backendNodeId}`;
+  const keyed = (rows: Row[]) => {
+    const map = new Map<string, Row>();
+    for (const row of rows) {
+      const key = identity(row.node);
+      if (key !== undefined && !map.has(key)) map.set(key, row);
+    }
+    return map;
+  };
+  const same = (x: unknown, y: unknown) => JSON.stringify(x) === JSON.stringify(y);
+  const found = new Map<
+    string,
+    { node: VomNode; removed: boolean; nameOnly: boolean; change: ObservedChange }
+  >();
+  for (let at = 0; at < a.parts.length; at++) {
+    const [part, old] = a.parts[at];
+    const was = keyed(old);
+    const now = keyed(b.parts[at][1]);
+    for (const [key, row] of was) {
+      const next = now.get(key);
+      if (found.has(key) || (next && same(row.facts, next.facts))) continue;
+      found.set(key, {
+        node: next?.node ?? row.node,
+        removed: !next,
+        nameOnly:
+          !!next &&
+          !textRoles.has(row.node.role ?? "") &&
+          row.facts.every((fact, i) => i === NAME_FACT || same(fact, next.facts[i])),
+        change: describeRow(part, row, next),
+      });
+    }
+    for (const [key, row] of now)
+      if (!was.has(key) && !found.has(key))
+        found.set(key, {
+          node: row.node,
+          removed: false,
+          nameOnly: false,
+          change: describeRow(part, undefined, row),
+        });
+  }
+  // Ancestors of a differing node: their derived names repeat its change.
+  const trees = { before: new Tree(before.nodes), after: new Tree(after.nodes) };
+  const containers = new Set<string>();
+  for (const { node, removed } of found.values())
+    for (const ancestor of (removed ? trees.before : trees.after).ancestors(node).slice(1)) {
+      const key = identity(ancestor);
+      if (key !== undefined) containers.add(key);
+    }
+  const changes = [...found]
+    .filter(([key, item]) => !(item.nameOnly && containers.has(key)))
+    .map(([, item]) => item.change);
+  if (!changes.length) return;
+  const count = (kind: ObservedChange["change"]) =>
+    changes.filter((change) => change.change === kind).length;
+  return {
+    changed: count("changed"),
+    added: count("added"),
+    removed: count("removed"),
+    examples: changes.slice(0, MAX_EXAMPLES),
+  };
+}
+
 interface ContentGroup {
   content: (string | undefined)[][];
   protected: boolean;

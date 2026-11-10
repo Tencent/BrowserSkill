@@ -304,6 +304,14 @@ pub fn info_for_error(code: ErrorCode, data: Option<&serde_json::Value>) -> Rend
             ),
             exit_code: base.exit_code,
         },
+        (
+            ErrorCode::InvalidParams | ErrorCode::NotFound | ErrorCode::PermissionDenied,
+            "local_file_error",
+        ) => RenderInfo {
+            summary: "local file validation failed",
+            hint: Some("check the local file path and permissions"),
+            exit_code: 1,
+        },
         (ErrorCode::InvalidParams, reason::BORROW_AGENT_WINDOW_TAB) => RenderInfo {
             summary: "the borrow target already lives inside an Agent Window",
             hint: Some(
