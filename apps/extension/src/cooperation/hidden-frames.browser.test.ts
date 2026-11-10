@@ -194,8 +194,6 @@ describe.skipIf(!process.env.BSK_COOP_CHROME)("hidden frames that do not answer"
           await evaluate(`chrome.tabs.remove(${owners.id})`);
 
           const tab = await open("/");
-          // Let the cross-site frame start spinning after its collector answered once.
-          await new Promise((resolve) => setTimeout(resolve, 1000));
           const frames = await getAllFrames({ tabId: tab.id });
           const busy = frames.find((frame) => frame.url.endsWith("/busy"))!;
           const shown = frames.find((frame) => frame.url.endsWith("/frame"))!;
@@ -204,16 +202,26 @@ describe.skipIf(!process.env.BSK_COOP_CHROME)("hidden frames that do not answer"
             url: `http://intranet.test:${port}/busy`,
             reason: "hidden_frame",
           };
-          const hidden: HiddenFrames = new Set();
-          const collect = () =>
+          const collectWith = (memory: HiddenFrames) =>
             collectCooperationFrames(
               tab.id,
               COOPERATION_READ,
               "lease",
               undefined,
               new Map(),
-              hidden,
+              memory,
             );
+          // Chrome may throttle timers in a hidden cross-origin frame to one
+          // wake-up per second, so a fixed delay does not prove that the frame
+          // has started spinning. Probe with throwaway memory until it is silent.
+          await expect
+            .poll(async () => (await collectWith(new Set())).gaps, {
+              timeout: 15000,
+              interval: 100,
+            })
+            .toEqual([gap]);
+          const hidden: HiddenFrames = new Set();
+          const collect = () => collectWith(hidden);
           let started = Date.now();
           const first = await collect();
           expect(Date.now() - started).toBeGreaterThanOrEqual(1100);
