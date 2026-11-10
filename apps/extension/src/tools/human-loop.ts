@@ -105,6 +105,13 @@ const activeHelpRequests = new Map<string, ActiveHelpRequest>();
 export function hasActiveHelp(sessionId: string): boolean {
   return [...activeHelpRequests.values()].some((help) => help.ctx.sessionId === sessionId);
 }
+
+export function clearHelpForSession(sessionId: string): void {
+  for (const help of activeHelpRequests.values()) {
+    if (help.ctx.sessionId !== sessionId) continue;
+    void finishHelp(help, { code: "cancelled", message: "request_help session ended" });
+  }
+}
 const helpRearmTimers = new Map<number, ReturnType<typeof setTimeout>>();
 
 let defaultDeps: RequestHelpDeps | null = null;

@@ -64,9 +64,23 @@ determines which versions can connect.
 
 ### Fixed
 
+- Website debugging attributes agent uploads and downloads to their transfer
+  operations instead of recording the resulting file changes and clicks as human input.
+- Local validation failures in upload, download, plan and step return stable
+  parameter/file error codes and relevant recovery hints. Upload sources are checked
+  before contacting the daemon or staging any files.
+- `fill` notifies each final value once. Native insertion and clearing already
+  dispatch `input`; the completion step no longer repeats it
+  ([#624](https://github.com/Tencent/BrowserSkill/issues/624)).
+- Window blur releases completed text-editing holds, and new task synchronizations
+  after an idle gap automatically resume paused or editing tabs when no gesture or
+  recent input is active, avoiding unnecessary manual hand-back prompts between tasks.
+- Recording keeps clicks on buttons and links whose name is longer than 48 characters,
+  such as GOV.UK step-by-step sections and long news headlines.
+- Recording keeps clicks on links, filter disclosures, checkboxes and other controls
+  that share a form with a search field, such as GOV.UK search results and filters.
 - Recipe save refuses oversized input and formatted documents before publishing a
   revision that its own reader could not open.
-
 - `press` maps US-layout punctuation to its physical `code` and virtual key code,
   so shortcuts such as `Ctrl+/` reach handlers that check `event.code`.
 - Main-document SPA route changes, including away-and-back and hash routes,
@@ -78,15 +92,44 @@ determines which versions can connect.
 - CLI, MCP, DSH and bundled skills direct dynamic-page data gathering to read/extract
   instead of repeated sync/evaluate refusals.
 - Control-state sampling recollects once after the browser proves that a failed child document retired; an active unobservable frame still blocks input.
+- A frame that does not answer collection in time is named in the error message and
+  `data.frames` (frame ID with the sanitized origin and path; tab operations add the tab).
+  The refusal remains `cooperation_sync_required`, so `--settle`, recipes and DSH still
+  retry it, and its recovery explains how to leave a frame that keeps failing
+  ([#614](https://github.com/Tencent/BrowserSkill/issues/614)).
+- A child frame that cannot be collected while its element is not displayed, has no area
+  or is invisible, and does not hold focus, is listed in `frame_gaps` as `hidden_frame`
+  instead of blocking the tab, as with micro-frontend sandbox iframes. Later collections
+  recheck the element instead of waiting for the frame again, and a displayed frame still
+  blocks input ([#614](https://github.com/Tencent/BrowserSkill/issues/614)).
 - Removed nodes already collected by CDP report target_detached with node identity, consistently with detached nodes that remain inspectable; other CDP failures remain target_unavailable.
 - Recording captures option changes on native `<select>` controls inside open shadow roots,
   whose `change` events do not reach the document.
+- Strict DOM-targeted actions tolerate added or removed noninteractive tooltips after their
+  own hover, and character counters tied to a focused text field by `maxlength` or
+  `aria-describedby` after their own focus. Target meaning, links, ordinary text, form state,
+  modal contents and explicit dependencies stay exact. Scripts, untargeted keys and visual
+  clicks retain the full observation check, including during preparation
+  ([#540](https://github.com/Tencent/BrowserSkill/issues/540)).
+- A targeted strict action without `--depends-on` tolerates a positively identified media
+  timeline elsewhere on the page, as it already did with dependencies. Unnamed, submitted and
+  in-form sliders, and untargeted actions, stay exact.
+- Evidence refusals report `observed_change` (the first differing node, field and check, and
+  whether it happened before or during preparation) without values or sensitive text. Strict
+  click refusals after preparation also report `press_sent: false`.
+- A request refused because an earlier command on the session is still settling (for
+  example a cancelled observation screenshot) now carries `reason: operation_settling`,
+  `retryable` and `retry_after_ms`. `cooperate sync --settle` pauses and syncs again
+  (up to 5 s, also for older extensions), and the CLI no longer suggests a reload that needs
+  the same sync ([#527](https://github.com/Tencent/BrowserSkill/issues/527)).
 - `upload` preserves its concrete handler failure receipts (`set_file_input_failed` and
   `file_drop_failed`, such as `-32000 Not allowed` when Chrome's "Allow access to file URLs"
   extension toggle is off) when transaction cleanup detaches the debugger or post-action
   frame collection fails, instead of masking them as `control_context_invalid`. Pre-drop
   `dragEnter` refusals also keep `effect_state: none` without dispatching a redundant
   `dragCancel` ([#636](https://github.com/Tencent/BrowserSkill/issues/636)).
+- Recording preserves clicks on submit, reset and image input buttons, including
+  actions beside search fields, and uses reset buttons' visible values as names.
 - CLI and MCP calls negotiate one-use daemon admission tickets. A cancellation
   received before an operation is registered prevents that late operation from
   running, including after the caller's two-second cancellation grace has ended.
@@ -108,6 +151,9 @@ determines which versions can connect.
   headers, list fields and discovery previews, respecting nested style overrides
   and language-specific casing. Transformed text remains subject to the byte
   budget ([#597](https://github.com/Tencent/BrowserSkill/issues/597)).
+- Closing a retained Agent Window or stopping the last session detaches remaining
+  CDP debugger attachments and cancels active session operations, so the browser's
+  debugging infobar does not linger after the task window is closed.
 
 ## [0.4.2] - 2026-11-05
 

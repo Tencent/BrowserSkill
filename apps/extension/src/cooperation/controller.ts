@@ -6,7 +6,13 @@ import {
 } from "@/session-manager/manager";
 import { type ResolvedActionTarget, resolveActionTarget } from "@/tools/interaction";
 import { captureVomObservation, handleSnapshot } from "@/tools/observation";
-import { type CdpRunner, chromeTabsApi, isRpcError, resolveTargetTab } from "@/tools/shared";
+import {
+  type CdpRunner,
+  chromeTabsApi,
+  isRpcError,
+  resolveTargetTab,
+  sessionCdpRunner,
+} from "@/tools/shared";
 import { lookupSnapshotRef } from "@/tools/snapshot-ref";
 import type { DragTarget, RequestFrame, RpcError } from "@/transport/types";
 import {
@@ -18,13 +24,17 @@ import {
 } from "./action-checks";
 import { guardedRunner } from "./action-guard";
 import { type ControlAuthority, ControlAuthorityError } from "./control-authority";
-import { FrameCollectionError } from "./frame-error";
+import { FrameCollectionError, FrameUnresponsiveError } from "./frame-error";
 import {
   contentChanges,
+  type EvidenceTarget,
   type ObservationEvidence,
+  type ObservedChange,
   observationEvidence,
+  observedChange,
   observedKeyboardTargets,
   observesTarget,
+  preparationEvidence,
   sameObservationEvidence,
 } from "./observation-evidence";
 import { pointerTargetValidator } from "./pointer-target";
@@ -33,8 +43,10 @@ import type {
   CooperationParams,
   CooperationView,
   FrameGap,
+  FrameIdentity,
   FrameRepairs,
   FrameState,
+  HiddenFrames,
   InputExpectation,
 } from "./types";
 
@@ -75,16 +87,23 @@ interface TabState {
   /** Ordinary input revocation must not discard an already accepted download receipt. */
   completion?: AbortController;
   unavailable: boolean;
+  /** Frames that did not answer the collection that made this tab unavailable. */
+  unresponsive?: FrameIdentity[];
   frames: Frames;
   context?: Context;
   frameGaps: FrameGap[];
   frameRepairs: FrameRepairs;
+  hiddenFrames: HiddenFrames;
   baseline?: Context;
   activity: Activity[];
   activitySequence: number;
   activitySeen: Map<string, number>;
   historyGap: boolean;
   controlRevision: number;
+  /** Timestamp of the most recent explicit manual hold on this tab. */
+  heldAt: number;
+  /** Timestamp of the most recent agent or cooperation activity on this tab. */
+  lastAgentActivity: number;
   /** Revokes permission guards on human intervention, independently of page revisions. */
   authorityRevision: number;
   /**
@@ -106,8 +125,14 @@ export interface CooperationDeps {
     input: InputExpectation | undefined,
     lease: string,
     repairs: FrameRepairs,
+    hidden: HiddenFrames,
   ): Promise<CooperationFrames>;
-  resumeFrames(tabId: number, lease: string, repairs: FrameRepairs): Promise<void>;
+  resumeFrames(
+    tabId: number,
+    lease: string,
+    repairs: FrameRepairs,
+    hidden: HiddenFrames,
+  ): Promise<void>;
   releaseFrames?(tabId: number, lease: string): Promise<void>;
   changed(tabId: number): void;
   sessionActivity?(sessionId: string, idleProtected: boolean): void;
@@ -157,8 +182,18 @@ const PASSIVE_DEBUG = new Set<string>(
   ),
 );
 const QUIET_MS = 2_000;
+/** Idle gap after which a fresh `cooperate sync`/`enable` automatically resumes a paused or editing tab. */
+const IDLE_RESUME_MS = 3_000;
 /** Upper bound on nodes whose self-changing text the default check tolerates. */
 const MAX_VOLATILE = 256;
+/** Effects that prepare input before native input starts. Only identified
+ * focus/hover decorations may be excluded from a later DOM-targeted check. */
+const PREPARATION_METHODS = new Set([
+  "DOM.scrollIntoViewIfNeeded",
+  "DOM.focus",
+  "Input.dispatchMouseEvent",
+  "Emulation.setFocusEmulationEnabled",
+]);
 
 function isInitialBlank(tab: { url?: string; pendingUrl?: string }): boolean {
   // Chrome can report the agent-created blank page before its initial load commits.
@@ -231,6 +266,30 @@ function failure(message: string, effect: "none" | "unknown" = "none"): RpcError
       effect_state: effect,
       recovery:
         "Use cooperate wait, then cooperate sync. Keep the assigned goal; reconcile the live result before issuing a new action. Never replay an uncertain submission.",
+    },
+  };
+}
+/**
+ * Names frames that did not answer collection. A busy frame can recover, so the
+ * reason stays the retryable `cooperation_sync_required`; the recovery also says
+ * how to leave a frame that keeps failing instead of looping.
+ */
+function withUnresponsiveFrames(
+  result: RpcError,
+  frames: (FrameIdentity & { tab_id?: number })[] | undefined,
+): RpcError {
+  if (!frames?.length) return result;
+  return {
+    ...result,
+    data: {
+      ...result.data,
+      frames,
+      ...(result.data?.effect_state === "unknown"
+        ? {}
+        : {
+            recovery:
+              "Use cooperate wait, then cooperate sync; a busy frame can recover. If the same frame keeps failing, use read-only commands such as get-html or snapshot, or stop the session, which also returns borrowed tabs. Never replay an uncertain submission.",
+          }),
     },
   };
 }
@@ -334,11 +393,14 @@ export class CooperationController implements ControlAuthority {
       frames: new Map(),
       frameGaps: [],
       frameRepairs: new Map(),
+      hiddenFrames: new Set(),
       activity: [],
       activitySequence: 0,
       activitySeen: new Map(),
       historyGap: false,
       controlRevision: 0,
+      heldAt: 0,
+      lastAgentActivity: this.now(),
       authorityRevision: 0,
     };
     this.tabs.set(tabId, state);
@@ -433,6 +495,33 @@ export class CooperationController implements ControlAuthority {
                     : "syncing",
       editing: [...state.frames.values()].some((frame) => frame.editing),
     };
+  }
+  private humanBusyOrRecentInput(state: TabState): boolean {
+    return [...state.frames.values()].some(
+      (f) => f.busy || f.pending || this.now() - f.lastInput < QUIET_MS,
+    );
+  }
+  private canAutoResumeIdle(state: TabState, now: number): boolean {
+    if (
+      state.stopped ||
+      state.working ||
+      this.humanBusyOrRecentInput(state) ||
+      now - state.lastAgentActivity < IDLE_RESUME_MS ||
+      (state.held && now - state.heldAt < QUIET_MS)
+    )
+      return false;
+    return state.held || [...state.frames.values()].some((f) => f.editing);
+  }
+  private async resumeIdleControl(state: TabState) {
+    const controlRevision = state.controlRevision;
+    state.epoch++;
+    state.context = undefined;
+    state.held = false;
+    state.controlRevision++;
+    state.authorityRevision++;
+    this.changed(state);
+    await this.deps.resumeFrames(state.tabId, state.lease, state.frameRepairs, state.hiddenFrames);
+    if (state.controlRevision === controlRevision + 1) await this.refresh(state);
   }
   private humanActive(state: TabState): boolean {
     return [...state.frames.values()].some(
@@ -557,6 +646,7 @@ export class CooperationController implements ControlAuthority {
     state.epoch++;
     state.context = undefined;
     state.unavailable = true;
+    state.unresponsive = undefined;
     this.changed(state);
   }
   async control(tabId: number, revision: number, action: "hold" | "resume") {
@@ -567,7 +657,10 @@ export class CooperationController implements ControlAuthority {
     state.context = undefined;
     // Reserve the transition before awaiting a renderer. A newer hold wins.
     state.held = action === "hold";
-    if (state.held) state.interruption?.abort(new Error("The user is holding control"));
+    if (state.held) {
+      state.heldAt = this.now();
+      state.interruption?.abort(new Error("The user is holding control"));
+    }
     state.controlRevision++;
     state.authorityRevision++;
     if (action === "resume") state.stopped = false;
@@ -575,7 +668,7 @@ export class CooperationController implements ControlAuthority {
     const epoch = state.epoch;
     this.changed(state);
     if (action === "resume") {
-      await this.deps.resumeFrames(tabId, state.lease, state.frameRepairs);
+      await this.deps.resumeFrames(tabId, state.lease, state.frameRepairs, state.hiddenFrames);
       if (state.epoch === epoch) await this.refresh(state);
     }
     return { ok: true, state: this.view(tabId) };
@@ -615,6 +708,7 @@ export class CooperationController implements ControlAuthority {
         input,
         state.lease,
         state.frameRepairs,
+        state.hiddenFrames,
       );
       frames = collection.frames;
       if (!live()) throw new Error("Shared-tab control ended during collection");
@@ -623,6 +717,7 @@ export class CooperationController implements ControlAuthority {
       state.frameGaps = collection.gaps;
     } catch (error) {
       state.unavailable = true;
+      state.unresponsive = error instanceof FrameUnresponsiveError ? error.frames : undefined;
       state.context = undefined;
       this.changed(state);
       throw error;
@@ -659,11 +754,17 @@ export class CooperationController implements ControlAuthority {
     for (const [id, frame] of frames) this.remember(state, id, frame);
     state.frames = frames;
     state.unavailable = false;
+    state.unresponsive = undefined;
     return frames;
   }
   async command(params: CooperationParams, cdp: CdpRunner, signal: AbortSignal): Promise<unknown> {
     const session = this.deps.sessions.get(params.session_id);
     if (!session) return { code: "not_found", message: "Unknown session" };
+    cdp = sessionCdpRunner(
+      cdp,
+      session.sessionId,
+      () => this.deps.sessions.get(session.sessionId) === session,
+    );
     this.startSession(session.sessionId);
     if (!["enable", "status", "sync", "wait"].includes(params.action))
       return { code: "invalid_params", message: "Unknown cooperation action" };
@@ -701,6 +802,7 @@ export class CooperationController implements ControlAuthority {
       return failure("This tab belongs to another session");
     if (state.stopped && params.action !== "status") return stopped();
     if (!isInitialBlank(target)) state.bootstrap = false;
+    const commandEnteredAt = this.now();
     if (params.action === "enable" || (params.action === "sync" && params.tab_id !== undefined))
       this.defaultTabs.set(session.sessionId, state.tabId);
     try {
@@ -744,7 +846,13 @@ export class CooperationController implements ControlAuthority {
         }
       }
       if (state.stopped && params.action !== "status") return stopped();
-      if (params.action !== "sync" && params.action !== "enable")
+      if (params.action !== "sync" && params.action !== "enable") {
+        if (
+          params.action === "wait" &&
+          !this.humanBusyOrRecentInput(state) &&
+          (!state.held || this.now() - state.heldAt >= QUIET_MS)
+        )
+          state.lastAgentActivity = this.now();
         return {
           tab_id: state.tabId,
           stopped: state.stopped,
@@ -761,6 +869,14 @@ export class CooperationController implements ControlAuthority {
           control_policy: session.controlPolicy ?? null,
           ...(state.frameGaps.length ? { frame_gaps: state.frameGaps } : {}),
         };
+      }
+      if (
+        (state.held || this.humanActive(state)) &&
+        this.canAutoResumeIdle(state, commandEnteredAt)
+      ) {
+        await this.resumeIdleControl(state);
+        if (state.stopped) return stopped();
+      }
       if (state.held || state.working || this.humanActive(state))
         return failure("The user is still operating this tab; wait for hand-back");
       const previousRefs = session.refStore;
@@ -924,6 +1040,7 @@ export class CooperationController implements ControlAuthority {
         };
       } finally {
         state.working = false;
+        state.lastAgentActivity = this.now();
         this.changed(state);
       }
     } catch (error) {
@@ -933,7 +1050,10 @@ export class CooperationController implements ControlAuthority {
       state.context = undefined;
       this.changed(state);
       if (error instanceof FrameCollectionError) return error.toRpcError();
-      return failure(error instanceof Error ? error.message : String(error));
+      return withUnresponsiveFrames(
+        failure(error instanceof Error ? error.message : String(error)),
+        state.unresponsive,
+      );
     }
   }
 
@@ -989,6 +1109,7 @@ export class CooperationController implements ControlAuthority {
       );
     } finally {
       if (sent && method === "tool.window_resize") this.clearWindowObservations(state.sessionId);
+      if (sent) state.lastAgentActivity = this.now();
       state.working = false;
       if (method === "tool.navigate") await this.observeTab(state.tabId);
       this.changed(state);
@@ -1005,6 +1126,16 @@ export class CooperationController implements ControlAuthority {
     const states = [...this.tabs.values()].filter((state) => state.sessionId === session.sessionId);
     if (states.some((state) => state.working))
       return failure("Another operation is settling on this tab");
+    const enteredAt = this.now();
+    for (const state of states) {
+      if ((state.held || this.humanActive(state)) && this.canAutoResumeIdle(state, enteredAt)) {
+        try {
+          await this.resumeIdleControl(state);
+        } catch {
+          // prepare() below reports collection failures consistently.
+        }
+      }
+    }
     const epochs = new Map(states.map((state) => [state, state.epoch]));
     let sent = false;
     let revoked: string | undefined;
@@ -1037,6 +1168,16 @@ export class CooperationController implements ControlAuthority {
         throw error;
       }
     };
+    // Tab operations prepare every owned tab, so name the tab of each silent frame.
+    const refusal = (message: string) =>
+      withUnresponsiveFrames(
+        failure(message, sent ? "unknown" : "none"),
+        states.flatMap((state) =>
+          state.unavailable
+            ? (state.unresponsive ?? []).map((frame) => ({ tab_id: state.tabId, ...frame }))
+            : [],
+        ),
+      );
     for (const state of states) {
       state.working = true;
       state.context = undefined;
@@ -1057,7 +1198,7 @@ export class CooperationController implements ControlAuthority {
       // Existing handlers may convert a guard rejection into their own RPC error.
       if (states.some((state) => state.stopped)) return stopped(sent ? "unknown" : "none");
       if (signal.aborted) signal.throwIfAborted();
-      if (revoked) return failure(revoked, sent ? "unknown" : "none");
+      if (revoked) return refusal(revoked);
       return result;
     } catch (error) {
       if (states.some((state) => state.stopped)) return stopped(sent ? "unknown" : "none");
@@ -1067,12 +1208,10 @@ export class CooperationController implements ControlAuthority {
           message: "Tab operation cancelled",
           data: { effect_state: sent ? "unknown" : "none" },
         };
-      return failure(
-        error instanceof Error ? error.message : String(error),
-        sent ? "unknown" : "none",
-      );
+      return refusal(error instanceof Error ? error.message : String(error));
     } finally {
       for (const state of states) {
+        if (sent) state.lastAgentActivity = this.now();
         state.working = false;
         if (this.tabs.get(state.tabId) === state) this.changed(state);
       }
@@ -1114,6 +1253,11 @@ export class CooperationController implements ControlAuthority {
     if (!params?.session_id || SESSION_TOOLS.has(req.method)) return invoke(cdp);
     const session = this.deps.sessions.get(params.session_id);
     if (!session) return invoke(cdp);
+    cdp = sessionCdpRunner(
+      cdp,
+      session.sessionId,
+      () => this.deps.sessions.get(session.sessionId) === session,
+    );
     const targetPolicy = session.controlPolicy === "target";
     this.startSession(session.sessionId);
     if (
@@ -1179,7 +1323,12 @@ export class CooperationController implements ControlAuthority {
         if (outcome === "cancelled") this.stopSession(state.sessionId);
         if (outcome === "continued" || outcome === "completed") {
           this.preserve(state);
-          await this.deps.resumeFrames(state.tabId, state.lease, state.frameRepairs);
+          await this.deps.resumeFrames(
+            state.tabId,
+            state.lease,
+            state.frameRepairs,
+            state.hiddenFrames,
+          );
         }
         return result;
       } finally {
@@ -1305,6 +1454,14 @@ export class CooperationController implements ControlAuthority {
     let sent = false;
     let finished = false;
     let revoked: string | undefined;
+    // Whether this action has scrolled, focused or hovered before its input.
+    let preparationSent = false;
+    let preparationFocus = false;
+    let preparationHover = false;
+    // The first observed difference behind an evidence refusal, for diagnosis.
+    let observed:
+      | (Partial<ObservedChange> & { scope: string; phase: "decision" | "preparation" })
+      | undefined;
     let nativeInputStarted = false;
     const context = targetPolicy && !targeted ? state.baseline : state.context;
     const rootFrameId = context?.evidence?.rootFrameId;
@@ -1327,6 +1484,7 @@ export class CooperationController implements ControlAuthority {
     let detachedByHandler = false;
     let postRefreshFailed = false;
     const authorityRevision = state.authorityRevision;
+    const idleAtEntry = this.canAutoResumeIdle(state, this.now());
     let verifiedFrames = context?.frames;
     let evidenceTargets: { backendNodeId: number; frameId?: string }[] | undefined;
     let actionTarget: ResolvedActionTarget | undefined;
@@ -1338,24 +1496,48 @@ export class CooperationController implements ControlAuthority {
       effect === "unknown" && req.method === "tool.click" && !nativeInputStarted
         ? { press_sent: false }
         : {};
-    const reportFailure = (message: string, effect: "none" | "unknown" = "none"): RpcError => {
-      if (!targetPolicy) return failure(message, effect);
+    const describeFailure = (message: string, effect: "none" | "unknown"): RpcError => {
+      const diagnosis = observed ? { observed_change: observed } : {};
+      const idleResumable =
+        idleAtEntry &&
+        effect === "none" &&
+        !intervention.signal.aborted &&
+        state.authorityRevision === authorityRevision &&
+        !this.humanBusyOrRecentInput(state);
+      if (!targetPolicy) {
+        const refused = failure(message, effect);
+        return {
+          ...refused,
+          data: {
+            ...refused.data,
+            ...unpressed(effect),
+            ...diagnosis,
+            ...(idleResumable
+              ? {
+                  recovery:
+                    "Use cooperate sync to resume control and reconcile the live result before issuing a new action. Never replay an uncertain submission.",
+                }
+              : {}),
+          },
+        };
+      }
       if (effect === "unknown") state.context = undefined;
-      const controlReason = state.held
-        ? "control_held"
-        : this.humanActive(state) ||
-            intervention.signal.aborted ||
-            state.authorityRevision !== authorityRevision
-          ? "human_intervention"
-          : observedFramesChanged() ||
-              (context && context.frames.get(0)?.document !== state.frames.get(0)?.document)
-            ? "document_changed"
-            : state.unavailable ||
-                state.epoch !== epoch ||
-                detachedByHandler ||
-                this.controlError(session, state)
-              ? "control_context_invalid"
-              : undefined;
+      const controlReason =
+        state.held && !idleResumable
+          ? "control_held"
+          : (this.humanActive(state) && !idleResumable) ||
+              intervention.signal.aborted ||
+              state.authorityRevision !== authorityRevision
+            ? "human_intervention"
+            : observedFramesChanged() ||
+                (context && context.frames.get(0)?.document !== state.frames.get(0)?.document)
+              ? "document_changed"
+              : state.unavailable ||
+                  state.epoch !== epoch ||
+                  detachedByHandler ||
+                  this.controlError(session, state)
+                ? "control_context_invalid"
+                : undefined;
       const issue =
         !controlReason && checkFailure
           ? checkFailure
@@ -1363,7 +1545,9 @@ export class CooperationController implements ControlAuthority {
               controlReason ?? "control_context_invalid",
               message,
               "control",
-              "Wait for control if needed, synchronize and inspect the live result before deciding again. Never replay an uncertain action.",
+              idleResumable
+                ? "Synchronize this tab and inspect the live result before deciding again. Never replay an uncertain action."
+                : "Wait for control if needed, synchronize and inspect the live result before deciding again. Never replay an uncertain action.",
             );
       return {
         ...issue,
@@ -1371,6 +1555,7 @@ export class CooperationController implements ControlAuthority {
           ...issue.data,
           effect_state: effect,
           ...unpressed(effect),
+          ...diagnosis,
           ...(effect === "unknown"
             ? {
                 recovery:
@@ -1380,6 +1565,11 @@ export class CooperationController implements ControlAuthority {
         },
       };
     };
+    const reportFailure = (message: string, effect: "none" | "unknown" = "none"): RpcError =>
+      withUnresponsiveFrames(
+        describeFailure(message, effect),
+        state.unavailable ? state.unresponsive : undefined,
+      );
     state.working = true;
     const intervention = new AbortController();
     state.interruption = intervention;
@@ -1435,6 +1625,10 @@ export class CooperationController implements ControlAuthority {
       if (sameFrames(verifiedFrames, state.frames, "revision")) return;
       if (!context.evidence)
         throw new Error((revoked = "Page changed; synchronize before choosing an action"));
+      // Scrolling, focus or hover sent by this action can change text and
+      // layout on their own; native input has not started, or verification
+      // would not run. Read-only probes do not count.
+      const prepared = preparationSent;
       const before = state.frames;
       let evidence: ObservationEvidence | undefined;
       await captureVomObservation(guardedRunner(cdp), state.tabId, target.url, {
@@ -1481,20 +1675,31 @@ export class CooperationController implements ControlAuthority {
       const pages = documents(state.frames);
       const volatile =
         tolerant && state.volatile?.documents === pages ? state.volatile.keys : undefined;
-      // The target's own semantic region and every declared dependency stay
-      // exact; sameObservationEvidence only relaxes broad layout around a target.
-      const keyboardRegionMatches = () => {
-        if (actionTarget) return true;
+      // Native focus/hover may add or remove an identified input decoration.
+      // Keep all other decision evidence exact, especially explicit dependencies
+      // and actions without a DOM target (including visual clicks).
+      const decorations = prepared && anchored && !visual && TARGET_ACTIONS.has(req.method);
+      const preparation = { focus: preparationFocus, hover: preparationHover };
+      const preparedEvidence = decorations
+        ? preparationEvidence(context.evidence, evidence, actionTarget!, preparation)
+        : undefined;
+      type Check = {
+        scope: "destination" | "keyboard" | "target" | "dependency" | "page";
+        target?: EvidenceTarget;
+        keys?: ReadonlySet<string>;
+        incidentalMedia?: boolean;
+      };
+      const keyboardCheck = (): Check | undefined => {
+        if (actionTarget) return;
         // Only keyboard input has an implicit recipient. An untargeted script
         // still requires the exact whole page, as before scoped-key support.
-        if (req.method !== "tool.press")
-          return sameObservationEvidence(context.evidence!, evidence!);
+        if (req.method !== "tool.press") return { scope: "page" };
         const recipients = observedKeyboardTargets(context.evidence!);
         const current = observedKeyboardTargets(evidence!);
         const specificFrames = [...context.frames.values()].filter(
           (frame) => frame.focusIsDocument !== true,
         );
-        if (!specificFrames.length && !recipients.length && !current.length) return true;
+        if (!specificFrames.length && !recipients.length && !current.length) return;
         // A single, stable, observed recipient gets its own exact region. Missing
         // AX focus, hidden targets and ambiguous frame/shadow focus stay strict.
         if (
@@ -1504,43 +1709,61 @@ export class CooperationController implements ControlAuthority {
           recipients[0].backendNodeId === current[0].backendNodeId &&
           recipients[0].frameId === current[0].frameId
         )
-          return sameObservationEvidence(context.evidence!, evidence!, recipients[0]);
-        return sameObservationEvidence(context.evidence!, evidence!);
+          return { scope: "keyboard", target: recipients[0] };
+        return { scope: "page" };
       };
-      const matches = (keys?: ReadonlySet<string>) => {
+      // The target's own semantic region and every declared dependency stay
+      // exact; sameObservationEvidence only relaxes broad layout around a target.
+      const checks = (keys?: ReadonlySet<string>): Check[] => {
         // A drag decision also depends on its destination. Explicit dependencies
         // or learned live text must never relax the destination's own region.
-        if (
-          destinationTarget &&
-          !sameObservationEvidence(context.evidence!, evidence!, destinationTarget, keys)
-        )
-          return false;
+        const list: Check[] = destinationTarget
+          ? [{ scope: "destination", target: destinationTarget, keys }]
+          : [];
         if (evidenceTargets) {
-          return (
-            keyboardRegionMatches() &&
-            (!actionTarget ||
-              sameObservationEvidence(context.evidence!, evidence!, actionTarget, keys)) &&
-            evidenceTargets.every((dependency) =>
-              sameObservationEvidence(context.evidence!, evidence!, dependency),
-            )
-          );
+          const keyboard = keyboardCheck();
+          if (keyboard) list.push(keyboard);
+          if (actionTarget) list.push({ scope: "target", target: actionTarget, keys });
+          for (const dependency of evidenceTargets)
+            list.push({ scope: "dependency", target: dependency });
+          return list;
         }
-        return (
-          (!anchored ||
-            sameObservationEvidence(context.evidence!, evidence!, actionTarget, keys)) &&
-          sameObservationEvidence(context.evidence!, evidence!, undefined, keys)
-        );
+        if (anchored) list.push({ scope: "target", target: actionTarget, keys });
+        // The target's region is checked above, so a positively identified
+        // media timeline elsewhere may advance, as it may with dependencies.
+        list.push({ scope: "page", keys, incidentalMedia: anchored });
+        return list;
       };
-      if (matches(volatile)) {
+      const comparison = (check: Check) =>
+        preparedEvidence && (check.scope === "target" || check.scope === "page")
+          ? preparedEvidence
+          : ([context.evidence!, evidence!] as const);
+      const failing = (keys?: ReadonlySet<string>) =>
+        checks(keys).find(
+          (check) =>
+            !sameObservationEvidence(...comparison(check), check.target, check.keys, {
+              incidentalMedia: check.incidentalMedia,
+            }),
+        );
+      const matches = (keys?: ReadonlySet<string>) => !failing(keys);
+      const refusal = failing(volatile);
+      if (!refusal) {
         // Keep the pre-capture revision: later mutations must be checked again.
         verifiedFrames = before;
         return;
       }
+      observed = {
+        ...(observedChange(...comparison(refusal), refusal.target, refusal.keys, {
+          incidentalMedia: refusal.incidentalMedia,
+        }) ?? {}),
+        scope: refusal.scope,
+        phase: prepared ? "preparation" : "decision",
+      };
       consumeRefused();
       // Learn page activity only from in-place text changes that every protected
       // region would tolerate, with no human input since the sync.
       const changes =
-        tolerant && sameFrames(context.frames, state.frames, "human")
+        tolerant && !prepared && sameFrames(context.frames, state.frames, "human")
           ? contentChanges(context.evidence, evidence, volatile)
           : undefined;
       const candidate =
@@ -1764,12 +1987,18 @@ export class CooperationController implements ControlAuthority {
                 { type: "clear", id: input.id },
                 state.lease,
                 state.frameRepairs,
+                state.hiddenFrames,
               )
               .catch(() => {});
           },
           dispatch: (startsInput, method) => {
             assert();
             sent = true;
+            if (!startsInput && PREPARATION_METHODS.has(method)) {
+              preparationSent = true;
+              preparationFocus ||= method === "DOM.focus";
+              preparationHover ||= method === "Input.dispatchMouseEvent";
+            }
             nativeInputStarted ||= startsInput || (targeted && primaryEffect(method));
           },
           verifyPointerTarget: async (node, point, offset) => {
@@ -1913,6 +2142,7 @@ export class CooperationController implements ControlAuthority {
       finished = true;
       if (sent && req.method === "tool.window_resize")
         this.clearWindowObservations(state.sessionId);
+      if (sent) state.lastAgentActivity = this.now();
       if (state.interruption === intervention) state.interruption = undefined;
       if (state.completion === completion) state.completion = undefined;
       state.working = false;

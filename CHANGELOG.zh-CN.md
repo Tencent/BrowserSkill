@@ -35,17 +35,30 @@ CLI、扩展和 DSH 插件可以分别发布，能否连接由协议兼容性决
 
 ### 修复
 
+- 网站调试将 Agent 发起的上传和下载归入对应传输操作，不再把产生的文件变更和点击误记为人工输入。
+- upload、download、plan 和 step 的本地校验失败返回稳定的参数或文件错误码，并提供对应修复提示。上传源文件在连接 daemon 或暂存任何文件前完成检查。
+- `fill` 对每个最终值只通知一次。原生插入或清空步骤已经派发 `input`，完成阶段不再重复派发
+  （[#624](https://github.com/Tencent/BrowserSkill/issues/624)）。
+- 窗口失焦时释放已完成的文本编辑保持；任务静置间隙后的新同步在无进行中手势或近期输入时自动恢复暂停或编辑状态，避免跨任务指令时重复提示手动交回控制权。
+- 录制保留名称超过 48 个字符的按钮和链接的点击，例如 GOV.UK 分步指南的展开按钮和较长的新闻标题。
+- 录制保留与搜索框同在一个表单中的链接、筛选折叠项、复选框等控件的点击，例如 GOV.UK 的搜索结果和筛选条件。
 - Recipe 保存时检查输入及格式化后的文件大小，避免生成自身无法读取的修订版本。
-
 - `press` 为美式键盘标点补上物理 `code` 与虚拟键码，`Ctrl+/` 这类快捷键能够触发依据 `event.code` 判断的处理器。
 - 主文档 SPA 路由变化（包括切走后恢复原 URL 和 hash 路由）撤销旧控制上下文和 ref；补充读取不会更新这些凭证。
   已加载标签页的被动读取和新建 debugger 连接同样受到保护。
 - 携带控制上下文的读取保留框架收集失败的具体原因，并以 `effect_state: none` 报告派发前错误；主文档或子框架暂时缺少根元素时返回 `read_target_stale`，不再归为通用 CDP 故障。
 - CLI、MCP、DSH 及内置 skill 引导动态页面的数据读取使用 read/extract，避免反复 sync/evaluate 拒绝。
 - 控制状态采样在浏览器证实失败的子文档已退出后有界重新收集一次；仍存在但不可观测的框架继续阻止输入。
+- 框架未在时限内响应收集时，错误消息和 `data.frames` 会标明该框架（frame ID 及去除敏感部分的 origin 与路径；标签页操作另附所在标签页）。拒绝原因仍为 `cooperation_sync_required`，`--settle`、recipe 和 DSH 照常重试；恢复建议说明框架持续无响应时如何退出（[#614](https://github.com/Tencent/BrowserSkill/issues/614)）。
+- 无法收集的子框架若其元素未显示、没有面积或不可见，且未持有焦点，会以 `hidden_frame` 列入 `frame_gaps`，不再阻塞整个标签页，例如微前端的沙箱 iframe。之后的收集重新检查该元素，不再重复等待该框架；仍显示的框架继续阻止输入（[#614](https://github.com/Tencent/BrowserSkill/issues/614)）。
 - 已被 CDP 回收的移除节点与仍可检查的脱离节点统一返回 target_detached，并保留节点身份；其他 CDP 故障仍返回 target_unavailable。
 - 录制捕获 open shadow root 内原生 `<select>` 的选项变化；这类控件的 `change` 事件不会到达 document。
+- strict DOM 定向动作仅容忍自身悬停后增减的非交互提示气泡，以及自身聚焦后增减、通过 `maxlength` 或 `aria-describedby` 与聚焦文本框关联的字数计数器。目标含义、链接、普通文字、表单状态、模态正文和显式依赖继续精确比较；脚本、无目标按键和视觉点击在准备阶段也保留完整观测检查（[#540](https://github.com/Tencent/BrowserSkill/issues/540)）。
+- 未声明 `--depends-on` 的定向 strict 动作，与声明了依赖时一样，容忍页面其他位置经正向识别的媒体时间轴。无名、会提交或位于表单内的滑块，以及无目标动作，仍保持精确比较。
+- 证据拒绝返回 `observed_change`（第一处差异的节点、字段、所属检查，以及发生在决策阶段还是准备阶段），不包含输入值和敏感文本。准备步骤之后被拒绝的 strict 点击同时返回 `press_sent: false`。
+- 因同一会话上一条命令仍在结算（例如被取消的观测截图）而被拒绝的请求，现在带有 `reason: operation_settling`、`retryable` 和 `retry_after_ms`。`cooperate sync --settle` 会暂停后重新同步（最多 5 秒，旧版扩展同样适用），CLI 不再建议同样需要该次同步的 reload（[#527](https://github.com/Tencent/BrowserSkill/issues/527)）。
 - `upload` 在事务清理主动断开 debugger 或操作后框架收集失败时保留具体的处理器失败回执（如未开启扩展“允许访问文件网址”权限时的 `set_file_input_failed` 与 `file_drop_failed` `-32000 Not allowed`），不再将其掩盖为 `control_context_invalid`；`dragEnter` 立即拒绝时保持 `effect_state: none`，且不再冗余发送 `dragCancel`（[#636](https://github.com/Tencent/BrowserSkill/issues/636)）。
+- 录制保留提交、重置和图片输入按钮的点击，包括搜索框旁的按钮操作，并使用重置按钮的可见值作为名称。
 - CLI 和 MCP 调用协商使用 daemon 发放的一次性请求凭证。取消先于操作登记到达时，即使调用方的两秒取消等待已结束，迟到的操作也不会执行。凭证会过期、拒绝重复使用，并在 daemon 重启后失效；旧 daemon 保留原有的有限重试行为。
 
 ### 修复
@@ -58,6 +71,7 @@ CLI、扩展和 DSH 插件可以分别发布，能否连接由协议兼容性决
 ### 修复
 
 - `extract` 对表格单元格、表头、列表字段和发现预览中的文本应用 CSS `uppercase` 与 `lowercase`，保留子元素样式覆盖和语言相关的大小写映射；转换后的文本仍受字节预算约束（[#597](https://github.com/Tencent/BrowserSkill/issues/597)）。
+- 关闭保留的 Agent 窗口或停止最后一个会话时，释放剩余的 CDP 调试连接并取消会话在途操作，避免任务窗口关闭后浏览器顶部仍残留调试横幅。
 
 ## [0.4.2] - 2026-11-05
 

@@ -1,8 +1,10 @@
+import { describeFrameOwners } from "@/cooperation/hidden-frames";
 import { playbackProgressMedia } from "@/cooperation/media-progress";
 import {
   COOPERATION_ARM,
   COOPERATION_DISABLE,
   COOPERATION_MESSAGE,
+  COOPERATION_OWNERS,
   COOPERATION_READ,
   COOPERATION_READY,
   COOPERATION_RESUME,
@@ -630,9 +632,16 @@ export function attachCooperationCapture() {
   const onWindowBlur = () => {
     if (
       !enabled ||
-      (!pointer && !composing && !dragging && keys.size === 0 && !eventAgent && !inputSource)
+      (!pointer &&
+        !composing &&
+        !dragging &&
+        !state.editing &&
+        keys.size === 0 &&
+        !eventAgent &&
+        !inputSource)
     )
       return;
+    clearTimeout(focusTimer);
     clearTimeout(pointerTimer);
     clearTimeout(eventTimer);
     clearTimeout(inputTimer);
@@ -640,6 +649,8 @@ export function attachCooperationCapture() {
     composing = false;
     dragging = false;
     dragAgent = undefined;
+    state.editing = false;
+    editingTarget = undefined;
     keys.clear();
     eventAgent = undefined;
     inputSource = undefined;
@@ -652,6 +663,12 @@ export function attachCooperationCapture() {
     _sender: chrome.runtime.MessageSender,
     reply: (value: unknown) => void,
   ) => {
+    if (message.kind === COOPERATION_OWNERS) {
+      // Layout facts for proving a child frame hidden. It grants nothing, so it
+      // needs no lease and leaves collection state untouched.
+      reply(describeFrameOwners(document, shadowRoot));
+      return false;
+    }
     if (typeof message.lease !== "string") return false;
     if (message.kind === COOPERATION_READ) {
       if (retired.has(message.lease)) {

@@ -106,6 +106,7 @@ export type RpcErrorReason =
   | "borrow_outcome_unknown"
   | "screenshot_capture_failed"
   | "renderer_read_timeout"
+  | "operation_settling"
   | "user_cancelled"
   | "page_hidden"
   | "navigation"

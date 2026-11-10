@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Bsk-only execution ledger and fail-closed release gate. Standard library only."""
+"""Bsk-only execution ledger, fail-closed release gate, and multi-run benchmark suite. Standard library only."""
 
 import argparse
 import datetime as dt
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -17,9 +18,103 @@ import uuid
 
 SKILL = Path(__file__).resolve().parents[1]
 
+ACTION_COMMANDS = {
+    "click",
+    "fill",
+    "select",
+    "press",
+    "hover",
+    "drag",
+    "wheel",
+    "scroll-to",
+    "focus",
+    "blur",
+    "upload",
+    "download",
+    "navigate",
+    "navigate back",
+    "navigate forward",
+    "navigate-back",
+    "navigate-forward",
+    "reload",
+    "window resize",
+    "emulate",
+    "dialog accept",
+    "dialog dismiss",
+    "tab create",
+    "tab select",
+    "tab close",
+    "tab borrow",
+    "tab return",
+}
+
+READ_COMMANDS = {
+    "read",
+    "extract discover",
+    "extract table",
+    "extract list",
+    "observe",
+    "snapshot",
+    "cooperate sync",
+    "view",
+    "get-html",
+    "console",
+    "network",
+}
+
 
 def now():
     return dt.datetime.now(dt.timezone.utc).isoformat()
+
+
+def parse_iso_ms(ts):
+    if not ts or not isinstance(ts, str):
+        return None
+    try:
+        if ts.endswith("Z"):
+            ts = ts[:-1] + "+00:00"
+        return dt.datetime.fromisoformat(ts).timestamp() * 1000.0
+    except ValueError:
+        return None
+
+
+def percentile(values, q):
+    if not values:
+        return 0.0
+    ordered = sorted(float(v) for v in values)
+    if len(ordered) == 1:
+        return round(ordered[0], 2)
+    pos = (len(ordered) - 1) * q
+    low = int(math.floor(pos))
+    high = int(math.ceil(pos))
+    if low == high:
+        return round(ordered[low], 2)
+    weight = pos - low
+    return round(ordered[low] * (1.0 - weight) + ordered[high] * weight, 2)
+
+
+def stats_summary(values):
+    nums = [float(v) for v in values if v is not None]
+    if not nums:
+        return {
+            "count": 0,
+            "total": 0.0,
+            "mean": 0.0,
+            "p50": 0.0,
+            "p95": 0.0,
+            "min": 0.0,
+            "max": 0.0,
+        }
+    total = sum(nums)
+    return {
+        "count": len(nums),
+        "total": round(total, 2),
+        "mean": round(total / len(nums), 2),
+        "p50": percentile(nums, 0.50),
+        "p95": percentile(nums, 0.95),
+        "min": round(min(nums), 2),
+        "max": round(max(nums), 2),
+    }
 
 
 def digest(p):
@@ -56,6 +151,7 @@ def discover(bsk, directory):
     leaves = []
     seen = set()
     documents = []
+    env = dict(os.environ, BSK_RECIPES="1", BSK_AUTO_UPDATE="off")
 
     def visit(parts):
         key = " ".join(parts)
@@ -63,7 +159,11 @@ def discover(bsk, directory):
             return
         seen.add(key)
         r = subprocess.run(
-            [bsk, *parts, "--help"], capture_output=True, text=True, timeout=20
+            [bsk, *parts, "--help"],
+            capture_output=True,
+            text=True,
+            timeout=20,
+            env=env,
         )
         if r.returncode:
             raise ValueError("Help discovery failed: " + key + " " + r.stderr)
@@ -77,6 +177,22 @@ def discover(bsk, directory):
             if match
             else []
         )
+        # `recipe` is hidden from root `--help` while experimental, but `bsk recipe --help`
+        # exposes its subcommands when supported by the candidate binary.
+        if not parts and "recipe" not in children:
+            probe = subprocess.run(
+                [bsk, "recipe", "--help"],
+                capture_output=True,
+                text=True,
+                timeout=20,
+                env=env,
+            )
+            if (
+                probe.returncode == 0
+                and re.search(r"Usage:\s+\S+\s+recipe\b", probe.stdout)
+                and re.search(r"^Commands:\s*\n", probe.stdout, re.M)
+            ):
+                children.append("recipe")
         # `help` is terminal; recursively exploring its aliases would cycle.
         children = [c for c in children if c != "help"]
         if children:
@@ -119,16 +235,133 @@ def canonical(argv, inventory):
     return max(matches, key=lambda x: len(x.split())) if matches else None
 
 
+def extract_metrics(cmd, exit_code, parsed, elapsed_ms):
+    j = parsed if isinstance(parsed, dict) else {}
+    if cmd == "plan":
+        mode = "plan"
+    elif cmd == "recipe run":
+        mode = "recipe"
+    elif cmd and cmd.startswith("recipe"):
+        mode = "recipe_mgmt"
+    elif cmd == "step":
+        mode = "step"
+    elif cmd in READ_COMMANDS:
+        mode = "read"
+    elif cmd in ACTION_COMMANDS:
+        mode = "single_action"
+    else:
+        mode = "other"
+
+    if cmd == "plan":
+        actions = int(j.get("completed", 0)) if isinstance(j.get("completed"), int) else 0
+    elif cmd == "recipe run":
+        effects = j.get("effects") if isinstance(j.get("effects"), dict) else {}
+        actions = int(effects.get("steps_done", 0)) if isinstance(effects.get("steps_done"), int) else 0
+    elif cmd == "step":
+        act_obj = j.get("action") if isinstance(j.get("action"), dict) else {}
+        actions = 1 if (exit_code == 0 or "result" in act_obj) else 0
+    elif cmd in ACTION_COMMANDS and exit_code == 0:
+        actions = 1
+    else:
+        actions = 0
+
+    if cmd == "view":
+        browser_calls = 0
+        rpc_calls = 0
+    elif cmd in (
+        "recipe list",
+        "recipe show",
+        "recipe save",
+        "recipe rm",
+        "recipe approve",
+        "help",
+    ):
+        browser_calls = 0
+        rpc_calls = 0
+    elif cmd == "recipe draft":
+        rpc_calls = 3 if exit_code == 0 else 1
+        browser_calls = 2 if exit_code == 0 else 0
+    elif isinstance(j.get("rpc_calls"), int):
+        rpc_calls = j["rpc_calls"]
+        browser_calls = j.get("browser_calls", rpc_calls)
+    elif cmd == "plan":
+        if exit_code != 0 and not j:
+            rpc_calls = 0
+            browser_calls = 0
+        else:
+            rpc_calls = (
+                actions
+                + (1 if j.get("post") else 0)
+                + (1 if j.get("readiness") else 0)
+            )
+            browser_calls = rpc_calls
+    elif cmd == "recipe run":
+        if j.get("status") == "refused" and not j.get("session_id"):
+            rpc_calls = 0
+            browser_calls = 0
+        else:
+            browser_calls = max(1, actions + 1)
+            rpc_calls = browser_calls + (2 if j.get("session_stopped") else 1)
+    else:
+        rpc_calls = 1
+        browser_calls = 1
+
+    post = j.get("post") if isinstance(j.get("post"), dict) else {}
+    obs = j.get("observation") if isinstance(j.get("observation"), dict) else {}
+    post_obs = post.get("observation") if isinstance(post.get("observation"), dict) else {}
+    obs_text = obs.get("text") or post_obs.get("text") or ""
+    obs_kind = j.get("kind") or post.get("kind")
+    origin = j.get("observation_origin") or post.get("observation_origin") or {}
+    reused = isinstance(origin, dict) and origin.get("kind") == "reused"
+    tool_elapsed = j.get("elapsed_ms") if isinstance(j.get("elapsed_ms"), (int, float)) else None
+
+    return {
+        "execution_mode": mode,
+        "interaction_turns": 0 if cmd == "help" or cmd is None else 1,
+        "actions_executed": actions,
+        "rpc_calls": int(rpc_calls),
+        "browser_calls": int(browser_calls),
+        "elapsed_ms": round(float(elapsed_ms or 0.0), 2),
+        "tool_elapsed_ms": round(float(tool_elapsed), 2) if tool_elapsed is not None else None,
+        "observation_kind": obs_kind if isinstance(obs_kind, str) else None,
+        "observation_reused": bool(reused),
+        "vom_chars": len(obs_text) if isinstance(obs_text, str) else 0,
+    }
+
+
 def semantic_failure(meta, value):
     cmd = meta["command"]
     j = value.get("json")
-    if cmd in ["evaluate", "step", "wait-for-element"]:
+    if cmd in ["evaluate", "step", "plan", "wait-for-element"]:
         if not isinstance(j, dict):
             return "Machine-readable result required for " + cmd
-        if cmd in ["evaluate", "step"] and j.get("ok") is not True:
+        if cmd in ["evaluate", "step", "plan"] and j.get("ok") is not True:
             return cmd + " did not return ok:true"
         if cmd == "wait-for-element" and j.get("satisfied") is not True:
             return "Wait condition was not satisfied"
+    if cmd == "recipe run":
+        if not isinstance(j, dict):
+            return "Machine-readable result required for recipe run"
+        if j.get("status") != "completed":
+            return "recipe run did not return status:completed"
+    if cmd == "recipe save":
+        if not isinstance(j, dict):
+            return "Machine-readable result required for recipe save"
+        if j.get("saved") is False:
+            return "recipe save returned saved:false"
+    if cmd == "recipe draft":
+        if not isinstance(j, dict):
+            return "Machine-readable result required for recipe draft"
+        if j.get("errors"):
+            return "recipe draft reported errors"
+    if cmd == "recipe approve":
+        if not isinstance(j, dict):
+            return "Machine-readable result required for recipe approve"
+        if j.get("status") == "refused" or j.get("approved") is False:
+            return "recipe approve was not confirmed"
+    if cmd == "read":
+        if not isinstance(j, dict) or not isinstance(j.get("items"), list):
+            return "Machine-readable items array required for read"
     if (
         cmd in ["navigate", "wait-for-navigation"]
         and isinstance(j, dict)
@@ -164,7 +397,7 @@ def init(args):
         raise ValueError("Command paths produced duplicate case IDs")
     binary = str(Path(args.binary or bsk).expanduser().resolve())
     config = {
-        "schema_version": 1,
+        "schema_version": 2,
         "created_at": now(),
         "bsk": bsk,
         "entry_sha256": inv["entry_sha256"],
@@ -177,6 +410,8 @@ def init(args):
         "site_urls": [
             "https://www.oceanengine.com/",
             "https://www.taobao.com/",
+            "https://www.bilibili.com/",
+            "https://www.v2ex.com/",
             "https://developer.mozilla.org/zh-CN/",
             "https://github.com/Tencent/BrowserSkill",
             "https://books.toscrape.com/",
@@ -184,7 +419,7 @@ def init(args):
         ],
     }
     write(out / "run.json", config)
-    write(out / "plan.json", {"schema_version": 1, "cases": cases})
+    write(out / "plan.json", {"schema_version": 2, "cases": cases})
     config.update(
         inventory_sha256=digest(out / "inventory.json"),
         plan_sha256=digest(out / "plan.json"),
@@ -235,19 +470,32 @@ def execute(args):
     record_id = uuid.uuid4().hex
     folder = root / "commands" / record_id
     folder.mkdir(parents=True)
-    env = dict(os.environ, BSK_AUTO_START="0", BSK_AUTO_UPDATE="off")
+    env = dict(
+        os.environ,
+        BSK_AUTO_START="0",
+        BSK_AUTO_UPDATE="off",
+        BSK_RECIPES=os.environ.get("BSK_RECIPES", "1"),
+    )
+    for item in getattr(args, "env", None) or []:
+        if "=" not in item:
+            raise ValueError("Environment override must be KEY=VALUE")
+        k, v = item.split("=", 1)
+        env[k] = v
     exe = cfg["bsk"]
     if args.lane == "admin":
         exe = cfg["binary"]
         env["BSK_HOME"] = str(root / "admin-runtime")
     stdin_path = within(root, args.stdin_file) if args.stdin_file else None
+    cmd_name = canonical(argv, inv["commands"])
+    started_iso = now()
+    started_ms = parse_iso_ms(started_iso)
     # No implicit context, tab, session, browser, retries, or argument repair.
     meta = {
         "id": record_id,
         "case_id": args.case,
         "argv": argv,
-        "command": canonical(argv, inv["commands"]),
-        "started": now(),
+        "command": cmd_name,
+        "started": started_iso,
         "bsk": cfg["bsk"],
         "entry_sha256": cfg["entry_sha256"],
         "backend": "bsk",
@@ -315,12 +563,25 @@ def execute(args):
                 code = p.wait()
         if stdin_path:
             input_handle.close()
+    finished_iso = now()
+    finished_ms = parse_iso_ms(finished_iso)
+    elapsed_ms = (
+        round(max(0.0, finished_ms - started_ms), 2)
+        if started_ms is not None and finished_ms is not None
+        else 0.0
+    )
+    out_text = (folder / "stdout.txt").read_text(errors="replace")
+    err_text = (folder / "stderr.txt").read_text(errors="replace")
+    parsed_json = parse(out_text.strip() or err_text.strip())
+    metrics = extract_metrics(cmd_name, code, parsed_json, elapsed_ms)
     meta.update(
-        finished=now(),
+        finished=finished_iso,
+        elapsed_ms=elapsed_ms,
         exit_code=code,
         timed_out=timed_out,
         stdout_sha256=digest(folder / "stdout.txt"),
         stderr_sha256=digest(folder / "stderr.txt"),
+        metrics=metrics,
     )
     if args.interactive and (folder / "stdin.txt").exists():
         meta["stdin_sha256"] = digest(folder / "stdin.txt")
@@ -331,6 +592,8 @@ def execute(args):
                 "record": record_id,
                 "exit_code": code,
                 "timed_out": timed_out,
+                "elapsed_ms": elapsed_ms,
+                "metrics": metrics,
                 "stdout": str(folder / "stdout.txt"),
                 "stderr": str(folder / "stderr.txt"),
             },
@@ -372,12 +635,27 @@ def read_record(root, record_id):
         raise ValueError("Changed protocol input")
     out = (d / "stdout.txt").read_text(errors="replace")
     err = (d / "stderr.txt").read_text(errors="replace")
+    parsed_json = parse(out.strip() or err.strip())
+    if "elapsed_ms" not in m:
+        s_ms = parse_iso_ms(m.get("started"))
+        f_ms = parse_iso_ms(m.get("finished"))
+        m["elapsed_ms"] = (
+            round(max(0.0, f_ms - s_ms), 2)
+            if s_ms is not None and f_ms is not None
+            else 0.0
+        )
+    if "metrics" not in m:
+        m["metrics"] = extract_metrics(
+            m.get("command"), m.get("exit_code", 0), parsed_json, m["elapsed_ms"]
+        )
     return m, {
-        "json": parse(out.strip() or err.strip()),
+        "json": parsed_json,
         "stdout": out,
         "stderr": err,
         "exit_code": m["exit_code"],
         "argv": m["argv"],
+        "elapsed_ms": m["elapsed_ms"],
+        "metrics": m["metrics"],
     }
 
 
@@ -430,6 +708,509 @@ def result(args):
     results.append(value)
     write(root / "results.json", {"cases": results})
     print(value["id"] + " recorded; final gate still required")
+
+
+def compute_run_benchmark(root, passed_ids=None):
+    root = Path(root).resolve()
+    cfg = load(root / "run.json")
+    planned = load(root / "plan.json")["cases"]
+    results = load(root / "results.json")["cases"]
+    result_map = {r["id"]: r for r in results if isinstance(r, dict) and "id" in r}
+    if passed_ids is None:
+        gate_path = root / "gate.json"
+        if gate_path.exists():
+            gate_data = load(gate_path)
+            if isinstance(gate_data.get("passed_ids"), list):
+                passed_set = set(gate_data["passed_ids"])
+            else:
+                passed_set = {
+                    r["id"]
+                    for r in results
+                    if isinstance(r, dict) and r.get("status") == "passed"
+                }
+        else:
+            passed_set = {
+                r["id"]
+                for r in results
+                if isinstance(r, dict) and r.get("status") == "passed"
+            }
+    else:
+        passed_set = set(passed_ids)
+
+    case_benchmarks = []
+    mode_buckets = {}
+    command_latencies = {}
+    run_starts = []
+    run_finishes = []
+
+    for c in planned:
+        cid = c["id"]
+        kind = c.get("kind", "workflow")
+        page_type = c.get("page_type", "unspecified")
+        is_negative = bool(c.get("negative"))
+        r = result_map.get(cid)
+        status = (
+            "passed"
+            if cid in passed_set
+            else (r.get("status", "missing") if r else "missing")
+        )
+        records = r.get("records", []) if isinstance(r, dict) else []
+        metas_and_values = []
+        for rid in records:
+            try:
+                metas_and_values.append(read_record(root, rid))
+            except (ValueError, KeyError, OSError):
+                continue
+
+        turns = 0
+        actions = 0
+        rpc_calls = 0
+        browser_calls = 0
+        sync_count = 0
+        reused_count = 0
+        vom_chars = 0
+        cmd_elapsed = []
+        c_starts = []
+        c_finishes = []
+
+        for m, v in metas_and_values:
+            metrics = m.get("metrics") or {}
+            el = float(m.get("elapsed_ms", 0.0))
+            cmd_elapsed.append(el)
+            t = int(metrics.get("interaction_turns", 1))
+            act = int(metrics.get("actions_executed", 0))
+            turns += t
+            actions += act
+            rpc_calls += int(metrics.get("rpc_calls", 1))
+            browser_calls += int(metrics.get("browser_calls", 1))
+            vom_chars += int(metrics.get("vom_chars", 0))
+            if m.get("command") == "cooperate sync" or metrics.get("observation_kind"):
+                sync_count += 1
+            if metrics.get("observation_reused"):
+                reused_count += 1
+
+            s_ms = parse_iso_ms(m.get("started"))
+            f_ms = parse_iso_ms(m.get("finished"))
+            if s_ms is not None:
+                c_starts.append(s_ms)
+                run_starts.append(s_ms)
+            if f_ms is not None:
+                c_finishes.append(f_ms)
+                run_finishes.append(f_ms)
+
+            cmd_ok = (
+                m.get("exit_code") == 0
+                and not m.get("timed_out")
+                and not semantic_failure(m, v)
+            )
+            # Only count each distinct command invocation once in global mode/command buckets
+            # (workflow cases vs CMD-* cases may reference the same record UUID).
+            # Intentional negative guardrail rejections are tracked in `negative_guard_invocations`
+            # rather than diluting positive mode compression/latency/success_rate.
+            mode = metrics.get("execution_mode", "other")
+            bucket = mode_buckets.setdefault(
+                mode,
+                {
+                    "records": set(),
+                    "neg_records": set(),
+                    "turns": 0,
+                    "actions": 0,
+                    "success": 0,
+                    "latencies": [],
+                },
+            )
+            if is_negative and not cmd_ok:
+                bucket["neg_records"].add(m["id"])
+            elif m["id"] not in bucket["records"]:
+                bucket["records"].add(m["id"])
+                bucket["turns"] += 1
+                bucket["actions"] += act
+                if cmd_ok:
+                    bucket["success"] += 1
+                bucket["latencies"].append(el)
+
+            cname = m.get("command") or "unknown"
+            cb = command_latencies.setdefault(
+                cname, {"records": set(), "latencies": [], "success": 0}
+            )
+            if m["id"] not in cb["records"]:
+                cb["records"].add(m["id"])
+                cb["latencies"].append(el)
+                if cmd_ok or (is_negative and cid in passed_set):
+                    cb["success"] += 1
+
+        total_el = round(sum(cmd_elapsed), 2)
+        wall_el = (
+            round(max(0.0, max(c_finishes) - min(c_starts)), 2)
+            if c_starts and c_finishes
+            else total_el
+        )
+        turn_stats = stats_summary(cmd_elapsed)
+        case_benchmarks.append(
+            {
+                "id": cid,
+                "kind": kind,
+                "page_type": page_type,
+                "status": status,
+                "passed": cid in passed_set,
+                "records_count": len(metas_and_values),
+                "interaction_turns": turns,
+                "actions_executed": actions,
+                "turn_compression_ratio": round(actions / turns, 2) if turns > 0 else 0.0,
+                "rpc_calls": rpc_calls,
+                "browser_calls": browser_calls,
+                "sync_count": sync_count,
+                "reused_observations": reused_count,
+                "vom_chars": vom_chars,
+                "elapsed_ms": total_el,
+                "wall_elapsed_ms": wall_el,
+                "avg_turn_ms": turn_stats["mean"],
+                "p50_turn_ms": turn_stats["p50"],
+                "p95_turn_ms": turn_stats["p95"],
+                "max_turn_ms": turn_stats["max"],
+            }
+        )
+
+    workflows = [c for c in case_benchmarks if c["kind"] != "command"]
+    commands_only = [c for c in case_benchmarks if c["kind"] == "command"]
+
+    page_type_benchmarks = {}
+    for c in workflows:
+        pt = c["page_type"]
+        b = page_type_benchmarks.setdefault(
+            pt,
+            {
+                "required": 0,
+                "passed": 0,
+                "interaction_turns": 0,
+                "actions_executed": 0,
+                "elapsed_ms": 0.0,
+                "case_latencies": [],
+            },
+        )
+        b["required"] += 1
+        b["passed"] += int(c["passed"])
+        b["interaction_turns"] += c["interaction_turns"]
+        b["actions_executed"] += c["actions_executed"]
+        b["elapsed_ms"] = round(b["elapsed_ms"] + c["elapsed_ms"], 2)
+        b["case_latencies"].append(c["elapsed_ms"])
+
+    for pt, b in page_type_benchmarks.items():
+        req = b["required"]
+        b["success_rate"] = round(b["passed"] / req, 4) if req else 0.0
+        b["avg_turns_per_case"] = round(b["interaction_turns"] / req, 2) if req else 0.0
+        b["avg_case_elapsed_ms"] = round(b["elapsed_ms"] / req, 2) if req else 0.0
+        b["p95_case_elapsed_ms"] = percentile(b.pop("case_latencies"), 0.95)
+
+    mode_summary = {}
+    for mode, b in sorted(mode_buckets.items()):
+        t_count = b["turns"]
+        a_count = b["actions"]
+        lat = stats_summary(b["latencies"])
+        mode_summary[mode] = {
+            "invocations": t_count,
+            "negative_guard_invocations": len(b["neg_records"] - b["records"]),
+            "success_count": b["success"],
+            "success_rate": round(b["success"] / t_count, 4) if t_count else 0.0,
+            "actions_executed": a_count,
+            "avg_actions_per_turn": round(a_count / t_count, 2) if t_count else 0.0,
+            "total_elapsed_ms": lat["total"],
+            "avg_ms_per_turn": lat["mean"],
+            "avg_ms_per_action": round(lat["total"] / a_count, 2) if a_count else 0.0,
+            "p50_ms": lat["p50"],
+            "p95_ms": lat["p95"],
+        }
+
+    command_summary = {}
+    for cname, b in sorted(command_latencies.items()):
+        cnt = len(b["records"])
+        lat = stats_summary(b["latencies"])
+        command_summary[cname] = {
+            "invocations": cnt,
+            "success_rate": round(b["success"] / cnt, 4) if cnt else 0.0,
+            "mean_ms": lat["mean"],
+            "p50_ms": lat["p50"],
+            "p95_ms": lat["p95"],
+            "total_ms": lat["total"],
+        }
+
+    distinct_records = {}
+    for p in (root / "commands").glob("*/meta.json"):
+        try:
+            m, _ = read_record(root, p.parent.name)
+            distinct_records[m["id"]] = m
+            s_ms = parse_iso_ms(m.get("started"))
+            f_ms = parse_iso_ms(m.get("finished"))
+            if s_ms is not None:
+                run_starts.append(s_ms)
+            if f_ms is not None:
+                run_finishes.append(f_ms)
+        except (ValueError, KeyError, OSError):
+            continue
+
+    total_turns = sum(
+        int((m.get("metrics") or {}).get("interaction_turns", 1))
+        for m in distinct_records.values()
+    )
+    total_actions = sum(
+        int((m.get("metrics") or {}).get("actions_executed", 0))
+        for m in distinct_records.values()
+    )
+    total_cmd_ms = round(
+        sum(float(m.get("elapsed_ms", 0.0)) for m in distinct_records.values()), 2
+    )
+    wall_run_ms = (
+        round(max(0.0, max(run_finishes) - min(run_starts)), 2)
+        if run_starts and run_finishes
+        else total_cmd_ms
+    )
+
+    return {
+        "schema_version": 1,
+        "generated_at": now(),
+        "candidate": cfg.get("candidate"),
+        "browser": cfg.get("browser"),
+        "summary": {
+            "total_cases": len(planned),
+            "passed_cases": len(passed_set),
+            "success_rate": round(len(passed_set) / len(planned), 4) if planned else 0.0,
+            "workflow_cases": len(workflows),
+            "workflow_passed": sum(int(c["passed"]) for c in workflows),
+            "workflow_success_rate": (
+                round(sum(int(c["passed"]) for c in workflows) / len(workflows), 4)
+                if workflows
+                else 0.0
+            ),
+            "command_cases": len(commands_only),
+            "command_passed": sum(int(c["passed"]) for c in commands_only),
+            "distinct_command_invocations": len(distinct_records),
+            "total_interaction_turns": total_turns,
+            "total_actions_executed": total_actions,
+            "overall_turn_compression": (
+                round(total_actions / total_turns, 2) if total_turns > 0 else 0.0
+            ),
+            "total_command_elapsed_ms": total_cmd_ms,
+            "wall_elapsed_ms": wall_run_ms,
+            "turn_latency_ms": stats_summary(
+                [m.get("elapsed_ms", 0.0) for m in distinct_records.values()]
+            ),
+            "workflow_case_latency_ms": stats_summary([c["elapsed_ms"] for c in workflows]),
+        },
+        "execution_modes": mode_summary,
+        "page_types": page_type_benchmarks,
+        "commands": command_summary,
+        "cases": case_benchmarks,
+    }
+
+
+def render_benchmark_markdown(bench):
+    s = bench["summary"]
+    lines = [
+        f"# BrowserSkill Release Benchmark Report (`{bench.get('candidate', 'unknown')}`)",
+        "",
+        "## 1. 总体指标 (Overall Summary)",
+        "",
+        "| 指标 | 数值 |",
+        "| --- | --- |",
+        f"| 总用例通过率 (`success_rate`) | **{s['passed_cases']} / {s['total_cases']} ({s['success_rate'] * 100:.1f}%)** |",
+        f"| 真实场景工作流通过率 (`workflow_success_rate`) | **{s['workflow_passed']} / {s['workflow_cases']} ({s['workflow_success_rate'] * 100:.1f}%)** |",
+        f"| 总交互轮次 (`total_interaction_turns`) | {s['total_interaction_turns']} turns |",
+        f"| 总执行浏览器动作数 (`total_actions_executed`) | {s['total_actions_executed']} actions |",
+        f"| 整体轮次压缩比 (`actions / turn`) | {s['overall_turn_compression']:.2f}x |",
+        f"| 命令累计执行耗时 (`total_command_elapsed_ms`) | {s['total_command_elapsed_ms']:.2f} ms |",
+        f"| 端到端总墙钟耗时 (`wall_elapsed_ms`) | {s['wall_elapsed_ms']:.2f} ms |",
+        f"| 单次交互耗时 (Mean / P50 / P95) | {s['turn_latency_ms']['mean']:.1f} / {s['turn_latency_ms']['p50']:.1f} / {s['turn_latency_ms']['p95']:.1f} ms |",
+        "",
+        "## 2. 执行模式对比 (`single_action` vs `step` vs `plan` vs `recipe`)",
+        "",
+        "| 模式 | 调用次数 (Turns) | 成功率 | 完成动作数 | 每轮动作数 (`actions/turn`) | 平均单轮耗时 (ms) | 平均单动作耗时 (ms) | P95 耗时 (ms) |",
+        "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+    ]
+    for mode, m in bench.get("execution_modes", {}).items():
+        lines.append(
+            f"| `{mode}` | {m['invocations']} | {m['success_rate'] * 100:.1f}% | {m['actions_executed']} | {m['avg_actions_per_turn']:.2f} | {m['avg_ms_per_turn']:.1f} | {m['avg_ms_per_action']:.1f} | {m['p95_ms']:.1f} |"
+        )
+    lines.extend(
+        [
+            "",
+            "## 3. 按场景类别统计 (Page Type Breakdown)",
+            "",
+            "| 场景类别 (`page_type`) | 通过 / 必测 | 成功率 | 总交互轮次 | 总动作数 | 平均每场景轮次 | 平均场景耗时 (ms) | P95 场景耗时 (ms) |",
+            "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+        ]
+    )
+    for pt, p in sorted(bench.get("page_types", {}).items()):
+        lines.append(
+            f"| `{pt}` | {p['passed']} / {p['required']} | {p['success_rate'] * 100:.1f}% | {p['interaction_turns']} | {p['actions_executed']} | {p['avg_turns_per_case']:.1f} | {p['avg_case_elapsed_ms']:.1f} | {p['p95_case_elapsed_ms']:.1f} |"
+        )
+    lines.extend(
+        [
+            "",
+            "## 4. 重点工作流场景明细 (Workflow Scenarios)",
+            "",
+            "| Case ID | 类别 | 状态 | 交互轮次 | 动作数 | 轮次压缩比 | 累计耗时 (ms) | P95 单轮耗时 (ms) |",
+            "| --- | --- | --- | ---: | ---: | ---: | ---: | ---: |",
+        ]
+    )
+    for c in bench.get("cases", []):
+        if c.get("kind") == "command":
+            continue
+        lines.append(
+            f"| `{c['id']}` | `{c['page_type']}` | `{c['status']}` | {c['interaction_turns']} | {c['actions_executed']} | {c['turn_compression_ratio']:.2f}x | {c['elapsed_ms']:.1f} | {c['p95_turn_ms']:.1f} |"
+        )
+    return "\n".join(lines) + "\n"
+
+
+def aggregate_multi_run_benchmarks(roots):
+    run_benchmarks = []
+    for r in roots:
+        root = Path(r).resolve()
+        b_path = root / "benchmark.json"
+        if b_path.exists():
+            run_benchmarks.append(load(b_path))
+        else:
+            run_benchmarks.append(compute_run_benchmark(root))
+
+    if not run_benchmarks:
+        raise ValueError("No benchmark runs supplied")
+
+    case_Rollup = {}
+    mode_Rollup = {}
+    for rb in run_benchmarks:
+        for c in rb.get("cases", []):
+            cid = c["id"]
+            entry = case_Rollup.setdefault(
+                cid,
+                {
+                    "id": cid,
+                    "kind": c.get("kind", "workflow"),
+                    "page_type": c.get("page_type", "unspecified"),
+                    "runs": 0,
+                    "passes": 0,
+                    "turns": [],
+                    "actions": [],
+                    "elapsed_ms": [],
+                },
+            )
+            entry["runs"] += 1
+            entry["passes"] += int(bool(c.get("passed")))
+            entry["turns"].append(c.get("interaction_turns", 0))
+            entry["actions"].append(c.get("actions_executed", 0))
+            entry["elapsed_ms"].append(c.get("elapsed_ms", 0.0))
+
+        for mode, m in rb.get("execution_modes", {}).items():
+            me = mode_Rollup.setdefault(
+                mode,
+                {"invocations": 0, "success_count": 0, "actions": 0, "total_ms": 0.0},
+            )
+            me["invocations"] += m.get("invocations", 0)
+            me["success_count"] += m.get("success_count", 0)
+            me["actions"] += m.get("actions_executed", 0)
+            me["total_ms"] = round(me["total_ms"] + m.get("total_elapsed_ms", 0.0), 2)
+
+    cases_summary = []
+    for cid, e in case_Rollup.items():
+        lat = stats_summary(e["elapsed_ms"])
+        t_stat = stats_summary(e["turns"])
+        a_stat = stats_summary(e["actions"])
+        cases_summary.append(
+            {
+                "id": cid,
+                "kind": e["kind"],
+                "page_type": e["page_type"],
+                "runs": e["runs"],
+                "passes": e["passes"],
+                "pass_rate": round(e["passes"] / e["runs"], 4) if e["runs"] else 0.0,
+                "mean_turns": t_stat["mean"],
+                "mean_actions": a_stat["mean"],
+                "mean_elapsed_ms": lat["mean"],
+                "p50_elapsed_ms": lat["p50"],
+                "p95_elapsed_ms": lat["p95"],
+                "min_elapsed_ms": lat["min"],
+                "max_elapsed_ms": lat["max"],
+            }
+        )
+
+    modes_summary = {}
+    for mode, me in sorted(mode_Rollup.items()):
+        inv = me["invocations"]
+        act = me["actions"]
+        modes_summary[mode] = {
+            "invocations": inv,
+            "success_rate": round(me["success_count"] / inv, 4) if inv else 0.0,
+            "actions_executed": act,
+            "avg_actions_per_turn": round(act / inv, 2) if inv else 0.0,
+            "avg_ms_per_turn": round(me["total_ms"] / inv, 2) if inv else 0.0,
+            "avg_ms_per_action": round(me["total_ms"] / act, 2) if act else 0.0,
+        }
+
+    run_rates = [rb["summary"]["success_rate"] for rb in run_benchmarks]
+    wf_rates = [rb["summary"]["workflow_success_rate"] for rb in run_benchmarks]
+    run_turns = [rb["summary"]["total_interaction_turns"] for rb in run_benchmarks]
+    run_actions = [rb["summary"]["total_actions_executed"] for rb in run_benchmarks]
+    run_elapsed = [rb["summary"]["total_command_elapsed_ms"] for rb in run_benchmarks]
+
+    return {
+        "schema_version": 1,
+        "generated_at": now(),
+        "runs_count": len(run_benchmarks),
+        "candidates": [rb.get("candidate") for rb in run_benchmarks],
+        "summary": {
+            "runs_count": len(run_benchmarks),
+            "full_pass_runs": sum(1 for r in run_rates if r == 1.0),
+            "mean_success_rate": round(sum(run_rates) / len(run_rates), 4),
+            "mean_workflow_success_rate": round(sum(wf_rates) / len(wf_rates), 4),
+            "interaction_turns": stats_summary(run_turns),
+            "actions_executed": stats_summary(run_actions),
+            "command_elapsed_ms": stats_summary(run_elapsed),
+        },
+        "execution_modes": modes_summary,
+        "cases": cases_summary,
+    }
+
+
+def render_multi_run_markdown(agg):
+    s = agg["summary"]
+    lines = [
+        f"# BrowserSkill Multi-Run Benchmark Report ({agg['runs_count']} Runs)",
+        "",
+        "## 1. 跨轮次汇总指标 (Multi-Run Summary)",
+        "",
+        "| 指标 | 数值 |",
+        "| --- | --- |",
+        f"| 统计轮次数 (`runs_count`) | {s['runs_count']} |",
+        f"| 全量 100% 通过轮次数 (`full_pass_runs`) | {s['full_pass_runs']} / {s['runs_count']} |",
+        f"| 平均总通过率 (`mean_success_rate`) | **{s['mean_success_rate'] * 100:.2f}%** |",
+        f"| 平均工作流通过率 (`mean_workflow_success_rate`) | **{s['mean_workflow_success_rate'] * 100:.2f}%** |",
+        f"| 平均每轮总交互轮次 (`interaction_turns`) | {s['interaction_turns']['mean']:.1f} (P50: {s['interaction_turns']['p50']:.1f}, P95: {s['interaction_turns']['p95']:.1f}) |",
+        f"| 平均每轮总动作数 (`actions_executed`) | {s['actions_executed']['mean']:.1f} |",
+        f"| 平均每轮累计耗时 (`command_elapsed_ms`) | {s['command_elapsed_ms']['mean']:.1f} ms (P50: {s['command_elapsed_ms']['p50']:.1f}, P95: {s['command_elapsed_ms']['p95']:.1f}) |",
+        "",
+        "## 2. 执行模式跨轮次效率 (`execution_modes`)",
+        "",
+        "| 模式 | 累计调用 (Turns) | 成功率 | 累计动作数 | 每轮动作数 | 平均每轮耗时 (ms) | 平均每动作耗时 (ms) |",
+        "| --- | ---: | ---: | ---: | ---: | ---: | ---: |",
+    ]
+    for mode, m in agg.get("execution_modes", {}).items():
+        lines.append(
+            f"| `{mode}` | {m['invocations']} | {m['success_rate'] * 100:.1f}% | {m['actions_executed']} | {m['avg_actions_per_turn']:.2f} | {m['avg_ms_per_turn']:.1f} | {m['avg_ms_per_action']:.1f} |"
+        )
+    lines.extend(
+        [
+            "",
+            "## 3. 各场景运行成功率、交互轮次与耗时分布",
+            "",
+            "| Case ID | 类别 | 运行次数 | 成功率 (`pass_rate`) | 平均交互轮次 | 平均动作数 | 平均耗时 (ms) | P50 耗时 (ms) | P95 耗时 (ms) |",
+            "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+        ]
+    )
+    for c in agg.get("cases", []):
+        if c.get("kind") == "command":
+            continue
+        lines.append(
+            f"| `{c['id']}` | `{c['page_type']}` | {c['runs']} | {c['pass_rate'] * 100:.1f}% | {c['mean_turns']:.1f} | {c['mean_actions']:.1f} | {c['mean_elapsed_ms']:.1f} | {c['p50_elapsed_ms']:.1f} | {c['p95_elapsed_ms']:.1f} |"
+        )
+    return "\n".join(lines) + "\n"
 
 
 def gate(root):
@@ -539,6 +1320,24 @@ def gate(root):
                 pointers = {
                     x.get("pointer") for x in r["checks"] if x.get("record") in records
                 }
+                allowed_error_pointers = {"/json/code"}
+                if c.get("allow_plan_stopped"):
+                    allowed_error_pointers.update(
+                        {
+                            "/json/stopped/error/code",
+                            "/json/stopped/reason",
+                            "/stderr",
+                        }
+                    )
+                if c.get("allow_recipe_handoff") or c.get("allow_recipe_refusal"):
+                    allowed_error_pointers.update(
+                        {
+                            "/json/status",
+                            "/json/reason",
+                            "/json/saved",
+                            "/stderr",
+                        }
+                    )
                 if c.get("allow_zero_rejection"):
                     if not any(
                         x.get("pointer") in ["/json/satisfied", "/json/data/satisfied"]
@@ -547,11 +1346,15 @@ def gate(root):
                         for x in r["checks"]
                     ):
                         raise ValueError("No unsatisfied-wait assertion")
-                elif "/json/code" not in pointers:
+                elif not (pointers & allowed_error_pointers):
                     raise ValueError("Negative test has no error-code assertion")
-                if (
-                    c.get("check_effect", True)
-                    and "/json/data/effect_state" not in pointers
+                allowed_effect_pointers = {
+                    "/json/data/effect_state",
+                    "/json/stopped/effect_state",
+                    "/json/effects/last_effect_state",
+                }
+                if c.get("check_effect", True) and not (
+                    pointers & allowed_effect_pointers
                 ):
                     raise ValueError("Negative test has no effect-state assertion")
             else:
@@ -588,6 +1391,13 @@ def gate(root):
                 raise ValueError("Oracle assertion failed")
             if c.get("negative"):
                 negative_records.update(records)
+                # For commands executed inside a negative case that succeeded as setup
+                # steps (exit_code == 0 and no semantic failure), allow them to count.
+                for m in metas:
+                    if m["exit_code"] == 0 and m["command"]:
+                        _, v = read_record(root, m["id"])
+                        if not semantic_failure(m, v):
+                            covered.add(m["command"])
             else:
                 intermediate_records.update(r.get("intermediate_records", []))
                 covered.update(
@@ -630,11 +1440,19 @@ def gate(root):
         types.setdefault(key, {"passed": 0, "required": 0})
         types[key]["required"] += 1
         types[key]["passed"] += int(c["id"] in passed)
+
+    bench = compute_run_benchmark(root, passed_ids=passed)
+    write(root / "benchmark.json", bench)
+    (root / "benchmark.md").write_text(
+        render_benchmark_markdown(bench), encoding="utf-8"
+    )
+
     report = {
         "generated_at": now(),
         "release_ready": not errors and len(passed) == len(planned),
         "candidate": cfg["candidate"],
         "passed": len(passed),
+        "passed_ids": passed,
         "required": len(planned),
         "success_rate": len(passed) / len(planned) if planned else 0,
         "command_coverage": (
@@ -653,6 +1471,8 @@ def gate(root):
             if types
             else 0
         ),
+        "benchmark_summary": bench["summary"],
+        "execution_modes": bench["execution_modes"],
         "uncovered_commands": missing,
         "errors": errors,
         "case_commands": case_coverage,
@@ -661,6 +1481,34 @@ def gate(root):
     write(root / "gate.json", report)
     print(json.dumps(report, ensure_ascii=False, indent=2))
     return 0 if report["release_ready"] else 1
+
+
+def benchmark_cmd(args):
+    runs = list(args.run or [])
+    if args.runs_dir:
+        base = Path(args.runs_dir).expanduser().resolve()
+        for child in sorted(base.iterdir()):
+            if child.is_dir() and (child / "run.json").exists():
+                runs.append(str(child))
+    if not runs:
+        raise ValueError("Supply --run <dir> [more dirs...] or --runs-dir <dir>")
+    if len(runs) == 1:
+        root = Path(runs[0]).expanduser().resolve()
+        bench = compute_run_benchmark(root)
+        md = render_benchmark_markdown(bench)
+        write(root / "benchmark.json", bench)
+        (root / "benchmark.md").write_text(md, encoding="utf-8")
+    else:
+        bench = aggregate_multi_run_benchmarks(runs)
+        md = render_multi_run_markdown(bench)
+    if args.out:
+        write(Path(args.out).expanduser().resolve(), bench)
+    if args.markdown:
+        md_path = Path(args.markdown).expanduser().resolve()
+        md_path.parent.mkdir(parents=True, exist_ok=True)
+        md_path.write_text(md, encoding="utf-8")
+    print(json.dumps(bench, ensure_ascii=False, indent=2))
+    return 0
 
 
 def main():
@@ -679,6 +1527,12 @@ def main():
     q.add_argument("--timeout", type=int, default=60)
     q.add_argument("--lane", choices=["browser", "admin"], default="browser")
     q.add_argument(
+        "--env",
+        action="append",
+        default=[],
+        help="Optional KEY=VALUE environment override for negative or experimental tests",
+    )
+    q.add_argument(
         "--stdin-file", help="Run-relative input for stdio MCP or interactive CLI"
     )
     q.add_argument(
@@ -692,6 +1546,11 @@ def main():
     q.add_argument("--file", required=True)
     q = subs.add_parser("gate")
     q.add_argument("--run", required=True)
+    q = subs.add_parser("benchmark")
+    q.add_argument("--run", nargs="*", help="One or more run directories to benchmark")
+    q.add_argument("--runs-dir", help="Directory containing multiple run subdirectories")
+    q.add_argument("--out", help="Optional path to write benchmark JSON")
+    q.add_argument("--markdown", help="Optional path to write Markdown benchmark report")
     a = p.parse_args()
     if a.action == "init":
         init(a)
@@ -701,6 +1560,8 @@ def main():
     if a.action == "result":
         result(a)
         return 0
+    if a.action == "benchmark":
+        return benchmark_cmd(a)
     return gate(a.run)
 
 
