@@ -33,6 +33,32 @@ function Assert-Fails([scriptblock]$Action, [string]$MessageContains) {
     if (-not $failed) { throw "expected failure" }
 }
 
+function Wait-TestDaemonReady($Process, [string]$Executable, [string]$InfoPath) {
+    $deadline = [DateTime]::UtcNow.AddSeconds(15)
+    $lastStatus = 'daemon.json has not been published'
+    while ([DateTime]::UtcNow -lt $deadline) {
+        if ($Process.HasExited) { throw "test daemon exited before IPC was ready: $lastStatus" }
+        if ([IO.File]::Exists($InfoPath)) {
+            # Discovery is published before the IPC accept loop starts. Only
+            # retry this read-only readiness probe, never the install/stop.
+            # PowerShell 5.1 promotes redirected native stderr to error records.
+            $savedPreference = $ErrorActionPreference
+            try {
+                $ErrorActionPreference = 'Continue'
+                $lastStatus = & $Executable --quiet --json status 2>&1 | Out-String
+                $statusCode = $LASTEXITCODE
+            } finally { $ErrorActionPreference = $savedPreference }
+            if ($statusCode -eq 0) {
+                $status = $lastStatus | ConvertFrom-Json
+                Assert-Equal $status.pid $Process.Id
+                return
+            }
+        }
+        Start-Sleep -Milliseconds 50
+    }
+    throw "test daemon IPC did not become ready within 15 seconds: $lastStatus"
+}
+
 # Isolate the fatal-error stub and restore the real process environment.
 & {
     function Write-Die([string]$Message) { throw $Message }
@@ -101,6 +127,7 @@ $root = Join-Path ([IO.Path]::GetTempPath()) ("bsk-install-test-" + [Guid]::NewG
 [IO.Directory]::CreateDirectory($root) | Out-Null
 $oldBskHome = $env:BSK_HOME
 $oldAutoUpdate = $env:BSK_AUTO_UPDATE
+$oldAutoStart = $env:BSK_AUTO_START
 $oldVersion = $env:BSK_VERSION
 $oldProcessArch = $env:PROCESSOR_ARCHITECTURE
 $oldNativeArch = $env:PROCESSOR_ARCHITEW6432
@@ -132,6 +159,7 @@ try {
 
     $env:BSK_HOME = Join-Path $root "home [state]"
     $env:BSK_AUTO_UPDATE = "off"
+    $env:BSK_AUTO_START = "0"
     [IO.Directory]::CreateDirectory($env:BSK_HOME) | Out-Null
     $sourceDir = Join-Path $root "download"
     [IO.Directory]::CreateDirectory($sourceDir) | Out-Null
@@ -146,11 +174,7 @@ try {
 
     $daemon = Start-Process -FilePath $target -ArgumentList @('daemon', 'start', '--foreground', '--port', '0') -WindowStyle Hidden -PassThru
     $infoPath = Join-Path $env:BSK_HOME "daemon.json"
-    $deadline = [DateTime]::UtcNow.AddSeconds(15)
-    while (-not [IO.File]::Exists($infoPath)) {
-        if ($daemon.HasExited -or [DateTime]::UtcNow -gt $deadline) { throw "daemon failed to start" }
-        Start-Sleep -Milliseconds 50
-    }
+    Wait-TestDaemonReady $daemon $target $infoPath
     # PE overlays distinguish old/new executables without another build.
     $stream = [IO.File]::OpenWrite($source)
     try {
@@ -170,11 +194,7 @@ try {
     $newTarget = Join-Path $newTargetDir "bsk.exe"
     $before = (Get-FileHash -LiteralPath $target).Hash
     $daemon = Start-Process -FilePath $target -ArgumentList @('daemon', 'start', '--foreground', '--port', '0') -WindowStyle Hidden -PassThru
-    $deadline = [DateTime]::UtcNow.AddSeconds(15)
-    while (-not [IO.File]::Exists($infoPath)) {
-        if ($daemon.HasExited -or [DateTime]::UtcNow -gt $deadline) { throw "old-directory daemon failed to start" }
-        Start-Sleep -Milliseconds 50
-    }
+    Wait-TestDaemonReady $daemon $target $infoPath
     Install-Binary $source $newTarget
     if (-not $daemon.WaitForExit(5000)) { throw "new-directory install left the old daemon running" }
     Assert-Equal (Get-FileHash -LiteralPath $target).Hash $before
@@ -332,6 +352,8 @@ try {
 catch {
     Write-Host ($_ | Out-String)
     Write-Host $_.ScriptStackTrace
+    Get-ChildItem -LiteralPath (Join-Path $root 'home [state]') -Filter 'daemon.log*' -ErrorAction SilentlyContinue |
+        ForEach-Object { Get-Content -LiteralPath $_.FullName -Tail 100 -ErrorAction SilentlyContinue | Out-Host }
     throw
 }
 finally {
@@ -345,6 +367,7 @@ finally {
     }
     $env:BSK_HOME = $oldBskHome
     $env:BSK_AUTO_UPDATE = $oldAutoUpdate
+    $env:BSK_AUTO_START = $oldAutoStart
     $env:BSK_VERSION = $oldVersion
     $env:PROCESSOR_ARCHITECTURE = $oldProcessArch
     $env:PROCESSOR_ARCHITEW6432 = $oldNativeArch
