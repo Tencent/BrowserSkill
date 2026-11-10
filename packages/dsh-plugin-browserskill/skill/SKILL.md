@@ -36,7 +36,7 @@ For remote setup, follow the [remote guide](https://github.com/Tencent/BrowserSk
 2. For existing tabs, read [tab borrowing](references/tabs-and-profiles.md). Use actual IDs/refs.
    Pass `session` when several exist; never use foreign IDs.
 3. Pass sync's `context_id` as `contextId`. Target-policy DOM actions and extra reads reuse it;
-   protect business facts with `expect`. Untargeted/visual actions also need sync's `observationId`.
+   protect business facts with `expect`. Untargeted keys and visual actions also need sync's `observationId`.
    After intervention/navigation, sync and replan; wait-user while the person is active.
    Verify success. Stop requested video first, then on success or failure call
    `bsk_session({ action: "stop", session: "<id>" })` unless keeping the session
@@ -59,7 +59,7 @@ bsk_interact({ action: "fill", session: "<id>", target: "@e3", value: "text", co
 
 DOM refs survive reads; navigation invalidates them. Use refs for frames/shadow roots;
 selectors search the main document.
-Use bsk_inspect action=read for DOM fields during animation; see [extraction](references/extraction.md). Select options by value.
+During animation use `bsk_inspect` read/extract ([guide](references/extraction.md)). Scripts: target `expect` without `observationId`; strict `dependsOn`; `unverified` last. Select options by value.
 
 Inspect unknown effects before retrying. On an error or two attempts without progress,
 read [human help and recovery](references/help-and-recovery.md) for `bsk_assist`.

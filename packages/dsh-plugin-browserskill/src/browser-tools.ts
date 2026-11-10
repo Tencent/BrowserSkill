@@ -197,7 +197,7 @@ const BROWSER_TOOL_SPECS: BrowserToolSpec[] = [
       "Manage plugin-owned browser sessions. Human collaboration is automatic; share is an optional compatibility alias for sync/rebinding. " +
       "sync returns current state and context_id; wait-user waits for hand-back; cooperation-status reads ownership. " +
       "sync can saveFull to a new JSON file for offline bsk_inspect view; matchText only folds plain numbered fallback buttons, not general text. " +
-      "Target policy lets DOM actions reuse contextId across supplementary reads; pass expect for business facts that must remain true. Human intervention or document replacement requires sync. Untargeted actions also require observationId, except a script that states expect facts instead. " +
+      "Target policy lets DOM actions reuse contextId across supplementary reads; pass expect for business facts that must remain true. Human intervention or document replacement requires sync. Untargeted actions also require observationId, except scripts using expect facts without observationId or explicit unverified execution. " +
       "Actions: start opens an Agent Window; stop closes an " +
       "owned session; list returns owned sessions. For start, url/device/width/height/noFocus/incognito are " +
       "optional. When a specific profile is required, always set browser to its verified instance " +
