@@ -79,6 +79,9 @@ determines which versions can connect.
   such as GOV.UK step-by-step sections and long news headlines.
 - Recording keeps clicks on links, filter disclosures, checkboxes and other controls
   that share a form with a search field, such as GOV.UK search results and filters.
+- Recorded steps keep their element ref after the page scrolls or the target changes size:
+  when no position matches, the only same-tag ref with the same role and name is used.
+  A click on text inside a `<summary>`, tab or option is measured on that control.
 - Recipe save refuses oversized input and formatted documents before publishing a
   revision that its own reader could not open.
 - `press` maps US-layout punctuation to its physical `code` and virtual key code,
