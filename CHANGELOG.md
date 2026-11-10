@@ -62,6 +62,11 @@ determines which versions can connect.
 
 ### Changed
 
+- Cooperative synchronization and strict pre-action verification reuse a sliding
+  10-second `Accessibility` domain lease per tab, skip unused VOM text rendering on
+  scene-only evidence and delta captures, stream unrelaxed whole-page evidence
+  comparison without per-node serialization, and reduce semantic-graph and VOM
+  allocations on large pages.
 - The extension popup always shows Connection settings instead of hiding them behind
   a disclosure. The optional-pairing advice collapses to a warning-triangle icon beside
   the heading and expands on click; skipped verification and states that block the

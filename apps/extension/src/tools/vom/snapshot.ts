@@ -201,21 +201,22 @@ export async function decodeDocument(
     }
 
     const li = layoutByNode.get(n);
-    const styleRow = li === undefined ? [] : (dl?.styles?.[li] ?? []);
-    const styles: Record<string, string> = {};
-    for (let i = 0; i < profile.computedStyles.length; i++)
-      styles[profile.computedStyles[i]] = str(strings, styleRow[i]);
-    const layout =
-      li === undefined
-        ? undefined
-        : {
-            boundsSpace: "snapshot-document-layout" as const,
-            bounds: dl?.bounds?.[li],
-            ...(profile.includeVisualFacts && dl?.clientRects?.[li]
-              ? { clientRect: dl.clientRects[li] }
-              : {}),
-            styles,
-          };
+    let styles: Record<string, string> | undefined;
+    let layout: DecodedNode["layout"];
+    if (li !== undefined) {
+      const styleRow = dl?.styles?.[li] ?? [];
+      styles = {};
+      for (let i = 0; i < profile.computedStyles.length; i++)
+        styles[profile.computedStyles[i]] = str(strings, styleRow[i]);
+      layout = {
+        boundsSpace: "snapshot-document-layout" as const,
+        bounds: dl?.bounds?.[li],
+        ...(profile.includeVisualFacts && dl?.clientRects?.[li]
+          ? { clientRect: dl.clientRects[li] }
+          : {}),
+        styles,
+      };
+    }
 
     const textContent = nodeTextContent.get(n)?.join(" ");
 
@@ -231,7 +232,7 @@ export async function decodeDocument(
       Object.prototype.hasOwnProperty.call(attrs, "value"),
       sensitive,
     );
-    if (sensitive) delete attrs.value;
+    if (sensitive && "value" in attrs) delete attrs.value;
 
     nodes.push({
       backendNodeId,
@@ -245,9 +246,9 @@ export async function decodeDocument(
       attrs,
       layout,
       paintOrder: li === undefined ? 0 : (dl?.paintOrders?.[li] ?? 0),
-      position: styles.position || "static",
-      pointerEvents: styles["pointer-events"] || "auto",
-      cursor: styles.cursor || "auto",
+      position: styles?.position || "static",
+      pointerEvents: styles?.["pointer-events"] || "auto",
+      cursor: styles?.cursor || "auto",
       ...(clickableNodes.has(n) ? { clickable: true } : {}),
 
       textContent,

@@ -354,20 +354,26 @@ function recoveryCandidateName(
 function recoveredRole(
   node: VomNode,
   children?: Map<number | null, VomNode[]>,
+  getName?: () => string | undefined,
 ): string | undefined {
-  const currentRole = normalizedRole(node);
+  if (isContentEditable(node)) return "textbox";
   const explicitRole = node.attrs?.role?.toLowerCase() ?? "";
   const hasHandler = hasRecoveryHandler(node);
   const focusable = isFocusable(node);
-  const hasName = recoveryCandidateName(node, children) !== undefined;
-
-  if (isContentEditable(node)) return "textbox";
   if (explicitRole === "combobox" && (hasHandler || focusable)) return "combobox";
-  if (
+
+  const currentRole = normalizedRole(node);
+  const explicitRecoverable =
     EXPLICIT_RECOVERY_ROLES.has(explicitRole) &&
-    hasName &&
-    (hasHandler || focusable || node.cursor === "pointer")
-  ) {
+    (hasHandler || focusable || node.cursor === "pointer");
+  const pointerRecoverable =
+    (!currentRole || SKIP_ROLES.has(currentRole)) && node.cursor === "pointer";
+  if (!explicitRecoverable && !hasHandler && !pointerRecoverable) return undefined;
+
+  const hasName = (getName ? getName() : recoveryCandidateName(node, children)) !== undefined;
+  if (!hasName) return undefined;
+
+  if (explicitRecoverable) {
     return explicitRole === "switch" ||
       explicitRole === "checkbox" ||
       explicitRole === "radio" ||
@@ -376,10 +382,8 @@ function recoveredRole(
       ? explicitRole
       : "button";
   }
-  if (hasHandler && hasName) return "button";
-  if ((!currentRole || SKIP_ROLES.has(currentRole)) && node.cursor === "pointer" && hasName) {
-    return "button";
-  }
+  if (hasHandler) return "button";
+  if (pointerRecoverable) return "button";
   return undefined;
 }
 
@@ -388,24 +392,24 @@ function rectArea(node: VomNode): number {
   return Math.max(0, node.rect.w) * Math.max(0, node.rect.h);
 }
 
-function passesRecoveryGuards(node: VomNode, children: Map<number | null, VomNode[]>): boolean {
-  const area = rectArea(node);
+function passesStaticRecoveryGuards(node: VomNode): boolean {
   const tag = normalizedTag(node);
-
   if (node.pointerEvents === "none") return false;
   if (node.disabled || node.inert || node.insideNative) return false;
   if (node.hasNativeDescendant && !isContentEditable(node)) return false;
-
-  const singleIntentLargeCandidate =
-    area <= MAX_RECOVERABLE_SINGLE_INTENT_AREA &&
-    recoveryCandidateName(node, children) !== undefined &&
-    hasRecoveryHandler(node);
-  if (area > MAX_CUSTOM_RECOVERY_AREA && !isContentEditable(node) && !singleIntentLargeCandidate) {
-    return false;
-  }
   if (NATIVE_TAGS.has(tag) || tag === "a") return false;
   if (GRAPHIC_ONLY_TAGS.has(tag)) return false;
-  return recoveredRole(node, children) !== undefined;
+  return true;
+}
+
+function passesAreaRecoveryGuard(node: VomNode, getName: () => string | undefined): boolean {
+  const area = rectArea(node);
+  if (area <= MAX_CUSTOM_RECOVERY_AREA || isContentEditable(node)) return true;
+  return (
+    area <= MAX_RECOVERABLE_SINGLE_INTENT_AREA &&
+    hasRecoveryHandler(node) &&
+    getName() !== undefined
+  );
 }
 
 function buildParentMap(nodes: VomNode[]): Map<number, number | null> {
@@ -435,37 +439,58 @@ function isAncestorOf(
 export function applyVomInteractionRecovery(nodes: VomNode[]): VomNode[] {
   // CSS cursors inherit. Expose the handle once instead of assigning refs to
   // every decorative span inside it; retain explicit nested draggable/drop cues.
-  const byId = new Map(nodes.map((node) => [node.id, node]));
-  nodes = nodes.map((node) => {
-    const parent = node.parentId === null ? undefined : byId.get(node.parentId);
-    return dragHint(node) === "drag-handle" &&
-      parent &&
-      dragHint(parent) &&
-      parent.cursor === node.cursor &&
-      parent.frameId === node.frameId
-      ? { ...node, dragHint: false }
-      : node;
-  });
-  const parentMap = buildParentMap(nodes);
+  if (nodes.some((node) => dragHint(node) === "drag-handle")) {
+    const byId = new Map(nodes.map((node) => [node.id, node]));
+    nodes = nodes.map((node) => {
+      const parent = node.parentId === null ? undefined : byId.get(node.parentId);
+      return dragHint(node) === "drag-handle" &&
+        parent &&
+        dragHint(parent) &&
+        parent.cursor === node.cursor &&
+        parent.frameId === node.frameId
+        ? { ...node, dragHint: false }
+        : node;
+    });
+  }
+
+  const eligible: VomNode[] = [];
+  for (const node of nodes) {
+    // Drag evidence adds a capability; it must not suppress existing role/name recovery.
+    if (!isSemanticReferenceNode(node) && passesStaticRecoveryGuards(node)) {
+      eligible.push(node);
+    }
+  }
+  if (eligible.length === 0) return nodes;
+
   const children = buildChildren(nodes);
   const recoveredIds = new Set<number>();
   const recoveredRoleById = new Map<number, string>();
   const recoveredNameById = new Map<number, string>();
 
-  for (const node of nodes) {
-    // Drag evidence adds a capability; it must not suppress existing role/name recovery.
-    if (isSemanticReferenceNode(node)) continue;
-    const role = recoveredRole(node, children);
-    if (!role || !passesRecoveryGuards(node, children)) continue;
+  for (const node of eligible) {
+    let computed = false;
+    let cachedName: string | undefined;
+    const getName = (): string | undefined => {
+      if (!computed) {
+        computed = true;
+        cachedName = recoveryCandidateName(node, children);
+      }
+      return cachedName;
+    };
+    const role = recoveredRole(node, children, getName);
+    if (!role) continue;
+    if (!passesAreaRecoveryGuard(node, getName)) continue;
     recoveredIds.add(node.id);
     recoveredRoleById.set(node.id, role);
-    const name = recoveryCandidateName(node, children);
+    const name = getName();
     if (name) recoveredNameById.set(node.id, name);
   }
 
-  for (const node of nodes) {
-    if (!recoveredIds.has(node.id)) continue;
-    let current = parentMap.get(node.id) ?? null;
+  if (recoveredIds.size === 0) return nodes;
+
+  const parentMap = buildParentMap(nodes);
+  for (const nodeId of [...recoveredIds]) {
+    let current = parentMap.get(nodeId) ?? null;
     let guard = 0;
     while (current !== null && guard <= parentMap.size) {
       recoveredIds.delete(current);
@@ -946,7 +971,8 @@ function* renderTreeRows(
         ? `${indent}@${ref} canvas ${JSON.stringify(Array.from(label).slice(0, 160).join(""))} [visual:screenshot]`
         : minimal!
       : renderNodeLine(node, depth, ref, context, surface, state.redactValues);
-    const parent = node.parentId === null ? undefined : state.nodesById.get(node.parentId);
+    const parent =
+      observation && node.parentId !== null ? state.nodesById.get(node.parentId) : undefined;
     const parentLabel = parent ? cleaned(parent.name) : undefined;
     yield {
       ...(parent
@@ -1004,6 +1030,8 @@ function createRenderState(
     for (let index = 0; index < siblings.length; index++)
       siblingIndex.set(siblings[index].id, index);
   }
+  const maxTokens = options.maxTokens ?? DEFAULT_MAX_TOKENS;
+  const duplicateRefNames = duplicateReferenceNames(nodes);
   const state: RenderState = {
     visualAncestors: new Set(),
     siblingIndex,
@@ -1012,16 +1040,17 @@ function createRenderState(
     refs: [],
     nextRef: 1,
     allocateRef: options.allocateRef,
-    tokens: estimateTokens(initialLines.join("\n")),
+    tokens: Number.isFinite(maxTokens) ? estimateTokens(initialLines.join("\n")) : 0,
     maxDepth: options.maxDepth ?? DEFAULT_MAX_DEPTH,
-    maxTokens: options.maxTokens ?? DEFAULT_MAX_TOKENS,
+    maxTokens,
     redactValues: options.redactValues ?? false,
     truncated: false,
     children,
     parentMap: buildParentMap(nodes),
     nodesById: new Map(nodes.map((node) => [node.id, node])),
-    domContextIndex: buildDomContextIndex(nodes),
-    duplicateRefNames: duplicateReferenceNames(nodes),
+    domContextIndex:
+      duplicateRefNames.size > 0 ? buildDomContextIndex(nodes) : { labelsByScopeParent: new Map() },
+    duplicateRefNames,
     surfaceMap: new Map(surfaces.map((surface) => [surface.triggerId, surface])),
     scopeMap: new Map(activeScopeBlocks.map((scope) => [scope.triggerId, scope])),
   };
@@ -1046,15 +1075,18 @@ function renderNodes(
 ): RenderState {
   const state = createRenderState(nodes, options, initialLines, surfaces, activeScopeBlocks);
   const children = state.children;
+  const budgetFinite = Number.isFinite(state.maxTokens);
   for (const row of renderTreeRows(children, state)) {
-    const cost = estimateLineTokens(row.text);
-    if (state.tokens + cost > state.maxTokens) {
-      state.truncated = true;
-      break;
+    if (budgetFinite) {
+      const cost = estimateLineTokens(row.text);
+      if (state.tokens + cost > state.maxTokens) {
+        state.truncated = true;
+        break;
+      }
+      state.tokens += cost;
     }
     if (row.ref) state.refs.push({ ...row.ref, line: state.lines.length });
     state.lines.push(row.text);
-    state.tokens += cost;
   }
 
   return state;
@@ -1204,9 +1236,6 @@ function applyActiveRegionPolicy(
   scene: VomScene,
   visualSources?: ReadonlyMap<number, VomNode>,
 ): VomNode[] {
-  const parentMap = buildParentMap(nodes);
-  const nodesById = new Map(nodes.map((node) => [node.id, node]));
-  const lineageCache = new Map<number, Map<string | undefined, VomNode>>();
   const candidates = nodes
     .filter(isPositionedRegionCandidate)
     .map((node) => ({
@@ -1215,6 +1244,11 @@ function applyActiveRegionPolicy(
       fullCover: spansViewport(node.rect, scene.viewport),
     }))
     .filter((candidate) => candidate.viewportCoverage > 0 || candidate.node.modal === true);
+  if (candidates.length === 0) return nodes;
+
+  const parentMap = buildParentMap(nodes);
+  const nodesById = new Map(nodes.map((node) => [node.id, node]));
+  const lineageCache = new Map<number, Map<string | undefined, VomNode>>();
 
   const blockedRoots = new Set<number>();
   for (const target of nodes) {

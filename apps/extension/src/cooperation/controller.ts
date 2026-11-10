@@ -14,6 +14,7 @@ import {
   sessionCdpRunner,
 } from "@/tools/shared";
 import { lookupSnapshotRef } from "@/tools/snapshot-ref";
+import { AccessibilityLease } from "@/tools/vom/capture-coordinator";
 import type { DragTarget, RequestFrame, RpcError } from "@/transport/types";
 import {
   ActionCheckError,
@@ -71,6 +72,7 @@ type Activity = FrameState["events"][number] & {
 };
 interface TabState {
   lease: string;
+  accessibilityLease: AccessibilityLease;
   /** Only the untouched, agent-created blank tab may bootstrap without an observation. */
   bootstrap: boolean;
   /** Only actual human participation changes the original tab/idle cleanup policy. */
@@ -392,6 +394,7 @@ export class CooperationController implements ControlAuthority {
     if (existing) return existing;
     const state: TabState = {
       lease: crypto.randomUUID(),
+      accessibilityLease: new AccessibilityLease(tabId),
       bootstrap,
       intervened: false,
       sessionId: session.sessionId,
@@ -481,6 +484,7 @@ export class CooperationController implements ControlAuthority {
     state.interruption?.abort(reason);
     state.completion?.abort(reason);
     this.tabs.delete(tabId);
+    void state.accessibilityLease.dispose();
     void this.deps.releaseFrames?.(tabId, state.lease).catch(() => {});
     this.deps.changed(tabId);
     this.sessionActivity(state.sessionId);
@@ -656,6 +660,7 @@ export class CooperationController implements ControlAuthority {
   invalidate(tabId: number) {
     const state = this.tabs.get(tabId);
     if (!state) return;
+    state.accessibilityLease.markNeedsEnable();
     state.epoch++;
     state.context = undefined;
     state.unavailable = true;
@@ -700,6 +705,7 @@ export class CooperationController implements ControlAuthority {
         const reason = new Error("The user stopped this task");
         state.interruption?.abort(reason);
         state.completion?.abort(reason);
+        void state.accessibilityLease.release();
         state.epoch++;
         state.context = undefined;
         this.changed(state);
@@ -753,7 +759,10 @@ export class CooperationController implements ControlAuthority {
       }
     }
     const documentsChanged = state.frames.size > 0 && !sameFrames(state.frames, frames, "document");
-    if (documentsChanged) state.frameEpoch++;
+    if (documentsChanged) {
+      state.frameEpoch++;
+      state.accessibilityLease.markNeedsEnable();
+    }
     const mainDocumentChanged =
       documentsChanged && state.frames.get(0)?.document !== frames.get(0)?.document;
     // Child documents revoke observation evidence through frameEpoch, rather
@@ -919,6 +928,8 @@ export class CooperationController implements ControlAuthority {
         if (delta && !sameFields(baseline.frames, before))
           await captureVomObservation(guardedRunner(cdp), state.tabId, target.url, {
             signal,
+            accessibilityLease: state.accessibilityLease,
+            skipRender: true,
             conditionalSurfaceProbe: false,
             onScene: (scene) => {
               evidence = observationEvidence(scene);
@@ -933,6 +944,7 @@ export class CooperationController implements ControlAuthority {
                 cdp: guardedRunner(cdp),
                 tabsApi: chromeTabsApi,
                 refStore,
+                accessibilityLease: state.accessibilityLease,
                 onScene: (scene) => {
                   evidence = observationEvidence(scene);
                 },
@@ -1696,6 +1708,8 @@ export class CooperationController implements ControlAuthority {
       let evidence: ObservationEvidence | undefined;
       await captureVomObservation(guardedRunner(cdp), state.tabId, target.url, {
         signal,
+        accessibilityLease: state.accessibilityLease,
+        skipRender: true,
         conditionalSurfaceProbe: false,
         onScene: (scene) => {
           evidence = observationEvidence(scene);
