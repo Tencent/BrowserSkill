@@ -26,6 +26,31 @@ fn bsk(args: &[&str]) -> Output {
         .expect("run bsk")
 }
 
+#[test]
+fn navigate_validates_required_arguments_before_daemon_discovery() {
+    let home = tempfile::tempdir().unwrap();
+    for (args, expected) in [
+        (vec!["navigate"], "navigate requires a url"),
+        (
+            vec!["navigate", "https://example.com"],
+            "navigate requires --session <session-id>",
+        ),
+    ] {
+        let output = Command::new(env!("CARGO_BIN_EXE_bsk"))
+            .args(args)
+            .env("BSK_HOME", home.path())
+            .env("BSK_AUTO_START", "0")
+            .env("BSK_AUTO_UPDATE", "off")
+            .output()
+            .expect("run bsk navigate");
+        assert_eq!(output.status.code(), Some(1));
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        assert!(stderr.contains(expected), "{stderr}");
+        assert!(!stderr.contains("daemon"), "{stderr}");
+        assert!(!home.path().join("daemon.json").exists());
+    }
+}
+
 fn json_usage_error(output: &Output) -> Value {
     assert_eq!(output.status.code(), Some(1));
     assert!(
