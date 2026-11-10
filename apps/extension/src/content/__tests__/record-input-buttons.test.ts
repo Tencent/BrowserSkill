@@ -31,6 +31,52 @@ describe("record form button clicks", () => {
     }
   });
 
+  it.each([
+    ["text", '<button id="save" type="button">Save</button>', "Save"],
+    [
+      "image alt",
+      '<button id="save" type="button"><img alt="Save" width="40" height="20" src="icon.svg"></button>',
+      "Save",
+    ],
+    [
+      "aria-label",
+      '<button id="save" type="button" aria-label="Save"><img alt="Save" width="40" height="20" src="icon.svg"></button>',
+      "Save",
+    ],
+  ])("records a %s button click", (_variant, markup, name) => {
+    document.body.innerHTML = `${markup}<output id="status">Unsaved</output>`;
+    const steps: RecordStepPayload[] = [];
+    const capture = startRecordCapture("image-button", (step) => steps.push(step));
+    try {
+      const button = document.querySelector("#save")!;
+      const hit = button.querySelector("img") ?? button;
+      hit.dispatchEvent(new MouseEvent("click", { bubbles: true, button: 0, detail: 1 }));
+      expect(steps.filter((step) => step.op === "click")).toEqual([
+        expect.objectContaining({
+          op: "click",
+          target: { tag: "button", role: "button", name },
+        }),
+      ]);
+    } finally {
+      capture.dispose();
+    }
+  });
+
+  it("does not record a button whose only image alt is empty", () => {
+    document.body.innerHTML =
+      '<button id="save" type="button"><img alt="" src="icon.svg"></button>';
+    const steps: RecordStepPayload[] = [];
+    const capture = startRecordCapture("decorative-button", (step) => steps.push(step));
+    try {
+      document
+        .querySelector("#save img")!
+        .dispatchEvent(new MouseEvent("click", { bubbles: true, button: 0, detail: 1 }));
+      expect(steps).toEqual([]);
+    } finally {
+      capture.dispose();
+    }
+  });
+
   it("still ignores search decoration that only focuses the field", () => {
     document.body.innerHTML = '<form><span id="icon">Search</span><input name="q"></form>';
     const steps: RecordStepPayload[] = [];

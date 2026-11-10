@@ -45,6 +45,7 @@ CLI、扩展和 DSH 插件可以分别发布，能否连接由协议兼容性决
 ### 修复
 
 - daemon 关闭时保留 WebSocket 停止通知，避免接收循环尚未等待时丢失通知，导致 `daemon stop` 等待不结束。
+- 录制保留仅由子图片 alt 命名的普通按钮点击。空的 alt 仍然忽略（[#676](https://github.com/Tencent/BrowserSkill/issues/676)）。
 - 网站调试将 Agent 发起的上传和下载归入对应传输操作，不再把产生的文件变更和点击误记为人工输入。
 - upload、download、plan 和 step 的本地校验失败返回稳定的参数或文件错误码，并提供对应修复提示。上传源文件在连接 daemon 或暂存任何文件前完成检查。
 - `fill` 对每个最终值只通知一次。原生插入或清空步骤已经派发 `input`，完成阶段不再重复派发

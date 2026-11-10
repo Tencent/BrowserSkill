@@ -81,6 +81,8 @@ determines which versions can connect.
 
 - Daemon shutdown retains its WebSocket stop notification when the accept loop is
   between waits, avoiding a lost notification that can leave `daemon stop` waiting.
+- Recording keeps a click on a plain button whose name comes only from a child image's alt text.
+  An empty alt is still ignored ([#676](https://github.com/Tencent/BrowserSkill/issues/676)).
 - Website debugging attributes agent uploads and downloads to their transfer
   operations instead of recording the resulting file changes and clicks as human input.
 - Local validation failures in upload, download, plan and step return stable
