@@ -71,6 +71,8 @@ determines which versions can connect.
 
 ### Fixed
 
+- Daemon shutdown retains its WebSocket stop notification when the accept loop is
+  between waits, avoiding a lost notification that can leave `daemon stop` waiting.
 - Website debugging attributes agent uploads and downloads to their transfer
   operations instead of recording the resulting file changes and clicks as human input.
 - Local validation failures in upload, download, plan and step return stable
