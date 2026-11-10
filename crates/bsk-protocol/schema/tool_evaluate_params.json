@@ -38,7 +38,7 @@
       "type": "string"
     },
     "observation_id": {
-      "description": "Sync's single-use baseline for untargeted/visual actions under target policy, including scripts, untargeted keys and displacement-only drags. Drags with a target ref/selector need only context_id. Strict-policy drag instead accepts its legacy ref-map observation token.",
+      "description": "Sync's single-use baseline for untargeted/visual actions under target policy, including untargeted keys and displacement-only drags. Drags with a target ref/selector need only context_id. A script needs it only when it states no expect facts; passing both checks the whole page as well. Strict-policy drag instead accepts its legacy ref-map observation token.",
       "type": [
         "string",
         "null"
@@ -70,6 +70,13 @@
       ],
       "format": "uint32",
       "minimum": 1.0
+    },
+    "unverified": {
+      "description": "Run without comparing the page with any observation. Control authority, document identity and tab ownership are still enforced. Cannot be combined with `expect`, `depends_on` or `observation_id`. Prefer stating what the script relies on; use this only when that cannot be stated.",
+      "type": [
+        "boolean",
+        "null"
+      ]
     }
   },
   "definitions": {

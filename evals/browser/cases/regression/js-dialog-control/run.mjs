@@ -328,12 +328,14 @@ try {
         const saved = await cli(download.data.download_output.resume_argv.slice(1));
         assert.equal(saved.result.saved, true);
         assert.equal(await readFile(downloadPath, "utf8"), "BrowserSkill dialog download\n");
-        const existingOutput = await cli(
+        // An existing output is a local file validation error: exit 1 with a
+        // structured reason, and the saved file stays untouched.
+        const exists = await cli(
           ["operation", "await", download.data.operation_id, ...sessionArgs, "--out", downloadPath],
           1,
         );
-        assert.equal(existingOutput.code, "invalid_params");
-        assert.equal(existingOutput.data.reason, "local_file_error");
+        assert.equal(exists.code, "invalid_params");
+        assert.equal(exists.data?.reason, "local_file_error");
         assert.equal(await readFile(downloadPath, "utf8"), "BrowserSkill dialog download\n");
         await cli([
           "operation",
