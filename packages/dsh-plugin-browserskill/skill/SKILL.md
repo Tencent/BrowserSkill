@@ -5,7 +5,7 @@ description: Use injected bsk_* tools in logged-in Chromium to read pages, fill 
 
 # DeepSeek Harness
 
-All browser work must use the injected tools directly, in an Agent Window with existing logins.
+All browser work must use the injected tools directly in an Agent Window.
 Never control the browser through another process. Follow the loaded action schemas.
 Never extract credentials, cookies, tokens, or other secrets.
 
@@ -59,7 +59,7 @@ bsk_interact({ action: "fill", session: "<id>", target: "@e3", value: "text", co
 
 DOM refs survive reads; navigation invalidates them. Use refs for frames/shadow roots;
 selectors search the main document.
-During animation use `bsk_inspect` read/extract ([guide](references/extraction.md)). Scripts: target `expect` without `observationId`; strict `dependsOn`; `unverified` last. Select options by value.
+Dynamic pages: [read/extract](references/extraction.md) first. Scripts: target `expect` without `observationId`; strict `dependsOn`; `unverified` last. Select options by value.
 
 Inspect unknown effects before retrying. On an error or two attempts without progress,
 read [human help and recovery](references/help-and-recovery.md) for `bsk_assist`.
@@ -72,7 +72,7 @@ The agent decides native dialogs. On `dialog_pending`,
 
 ## Read details only when needed
 
-Resolve references from the harness skill directory. Read only the matching file.
+Read matching references from the harness skill directory.
 
 | When | Read |
 | --- | --- |
