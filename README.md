@@ -61,6 +61,8 @@ https://github.com/user-attachments/assets/6111d978-baa6-4a76-92c4-4f51d47ae617
   </tr>
 </table>
 
+Qoder and Qoder CN are supported as skill-only targets: `bsk install-skill --harness qoder` and `--harness qoder-cn`.
+
 These and other agents that can run shell commands use the same **`bsk` CLI**. **[DeepSeek Harness](#deepseek-harness-plugin)** has a dedicated plugin with native browser tools and task previews. You choose the agent and model; BrowserSkill connects it to your browser.
 
 ## What you can do

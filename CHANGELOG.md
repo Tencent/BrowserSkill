@@ -11,6 +11,8 @@ determines which versions can connect.
 
 ### Added
 
+- Qoder and Qoder CN are available as skill-only install targets through
+  `bsk install-skill --harness qoder` and `--harness qoder-cn`.
 - Local pairing with mutual proofs, durable key rotation and interruption recovery.
   Paired connections verify the daemon before sending business traffic; activation
   invalidates the original link. Device revocation and browser registration are
