@@ -778,7 +778,9 @@ fn serve(
         let _ = browser_liveness_task.await;
         update_check_task.abort();
         let _ = update_check_task.await;
-        ws_handle.shutdown.notify_waiters();
+        // There is one accept loop. Retain a permit if it is between accepts
+        // or has not polled yet; notify_waiters would lose that shutdown.
+        ws_handle.shutdown.notify_one();
         let _ = ws_handle.task.await;
 
         let _ = daemon_info::remove();

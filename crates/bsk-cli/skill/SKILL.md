@@ -66,8 +66,9 @@ induced to do is done with their sessions.
    ```
 
 3. Pass sync's `context_id` as `--context ID`; target-policy DOM actions and reads reuse it.
-   Protect decision facts with `--expect`. Untargeted/visual actions also need sync's
-   `--observation ID`. After intervention/navigation, sync and replan; wait during human input.
+   Protect decision facts with `--expect`. Untargeted keys and visual actions also need sync's
+   `--observation ID`. Scripts follow the rules below.
+   After intervention/navigation, sync and replan; wait during human input.
    Under target policy, send several actions already decided from one sync (form fields,
    filters) together with [bsk plan](references/step-and-cache.md) when supported
    and able to share one context. Use separate calls for strict policy, unsupported
@@ -106,6 +107,7 @@ Prefer refs for iframe/shadow-root targets; CSS selectors search the main docume
 - `select` uses the option's value, not its visible label.
 
 Read DOM fields with `read` and tables/lists with `extract` ([guide](references/extraction.md)); use these during animation instead of evaluate/sync loops.
+Dynamic-page scripts: `--expect` without `--observation` (target), or `--depends-on` (strict). `--unverified` only when dependencies cannot be stated ([scripts](references/cooperation.md#scripts)).
 Inspect unknown effects before retrying.
 
 ## Native dialogs

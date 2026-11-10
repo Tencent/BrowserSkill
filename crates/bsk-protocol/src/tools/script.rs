@@ -18,6 +18,18 @@ use serde::{Deserialize, Serialize};
 
 use super::JavaScriptDialogInfo;
 
+/// First protocol whose extension honours `unverified`. An older extension
+/// would ignore the field and apply its page checks, which looks like a
+/// refusal the caller cannot explain, so peers below this are rejected.
+pub const UNVERIFIED_SCRIPT_PROTOCOL: &str = "1.9";
+pub fn supports_unverified_script(protocol: &str) -> bool {
+    crate::system::compare_protocol(protocol, "2.0") == Some(std::cmp::Ordering::Less)
+        && matches!(
+            crate::system::compare_protocol(protocol, UNVERIFIED_SCRIPT_PROTOCOL),
+            Some(std::cmp::Ordering::Equal | std::cmp::Ordering::Greater)
+        )
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct EvaluateParams {
     pub session_id: String,
@@ -37,6 +49,12 @@ pub struct EvaluateParams {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(range(min = 1))]
     pub timeout_ms: Option<u32>,
+    /// Run without comparing the page with any observation. Control authority,
+    /// document identity and tab ownership are still enforced. Cannot be
+    /// combined with `expect`, `depends_on` or `observation_id`. Prefer stating
+    /// what the script relies on; use this only when that cannot be stated.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unverified: Option<bool>,
 }
 
 /// Outcome of an `evaluate` call.
@@ -59,6 +77,10 @@ pub struct EvaluateResult {
     /// Native JS dialogs observed and auto-handled during this call.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub dialogs: Vec<JavaScriptDialogInfo>,
+    /// Present, and `false`, only when the script ran with `unverified`: nothing
+    /// about the page was compared before it ran.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verified: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -84,6 +106,7 @@ mod tests {
             await_promise: None,
             return_by_value: None,
             timeout_ms: None,
+            unverified: None,
         };
         let v = serde_json::to_value(&p).unwrap();
         assert!(v.get("tab_id").is_none());
@@ -102,6 +125,7 @@ mod tests {
             value: Some(json!(2)),
             error: None,
             dialogs: vec![],
+            verified: None,
         };
         let v = serde_json::to_value(&r).unwrap();
         assert_eq!(v.get("value"), Some(&json!(2)));
@@ -122,6 +146,7 @@ mod tests {
                 column: Some(6),
             }),
             dialogs: vec![],
+            verified: None,
         };
         let v = serde_json::to_value(&r).unwrap();
         assert!(v.get("value").is_none());

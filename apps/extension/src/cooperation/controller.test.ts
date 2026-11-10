@@ -1035,7 +1035,7 @@ describe("shared-tab dispatch fences", () => {
       expect(f.native).not.toHaveBeenCalled();
     });
 
-    it("keeps untargeted scripts strict even when they declare unrelated dependencies", async () => {
+    it("checks untargeted scripts against their declared dependencies", async () => {
       live((tick) => scene(`10:00:0${tick}`));
       refs();
       const f = await fixture();
@@ -1056,8 +1056,8 @@ describe("shared-tab dispatch fences", () => {
         f.abort.signal,
         (runner) => runner.send(7, "Runtime.evaluate", { expression: "buy()" }),
       );
-      expect(result).toMatchObject({ message: changed, data: { effect_state: "none" } });
-      expect(f.native).not.toHaveBeenCalled();
+      expect(result).toEqual({});
+      expect(f.native).toHaveBeenCalledOnce();
     });
 
     it("does not let a refused context retry with newly learned tolerance", async () => {

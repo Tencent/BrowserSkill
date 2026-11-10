@@ -847,6 +847,12 @@ export interface EvaluateParams {
   await_promise?: boolean;
   return_by_value?: boolean;
   timeout_ms?: number;
+  /**
+   * Run without comparing the page with any observation. Control, document
+   * identity and tab ownership are still enforced. The caller accepts that
+   * the page may differ from what it last saw.
+   */
+  unverified?: boolean;
 }
 
 export interface EvaluateError {
@@ -861,6 +867,8 @@ export interface EvaluateResult {
   value?: unknown;
   error?: EvaluateError;
   dialogs?: JavaScriptDialogInfo[];
+  /** Present, and false, only when the script ran with `unverified`. */
+  verified?: false;
 }
 
 export interface WaitForNavigationParams {

@@ -25,9 +25,10 @@ Protect record identity, meaning, price, recipient and form values with expect.
 Changed-then-restored values can match; uninterrupted history is not promised.
 
 Requires CLI/daemon/extension protocol 1.9; unsupported peers fail without script
-fallback. Arbitrary evaluate retains strict checks even if it looks read-only.
-For observation_changed while gathering data, use read/extract instead of a
-sync/evaluate loop. Transform returned JSON on the host if needed.
+fallback. Arbitrary evaluate that declares nothing retains strict checks even if it
+looks read-only. For observation_changed while gathering data, use read/extract
+instead of a sync/evaluate loop. Transform returned JSON on the host if needed.
+For data these cannot express, see [scripts](cooperation.md#scripts).
 
 For complex tables/lists, use bsk_inspect action=extract, extractKind=discover,
 then extractKind=table/list with extractTarget. Lists accept itemSelector and

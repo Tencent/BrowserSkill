@@ -279,6 +279,8 @@ resizing. A fixed emulated viewport may need its own `emulate` adjustment; resiz
 does not clear emulation or focus the window. When a resize reports an unconfirmed
 result, inspect its actual dimensions and sync before deciding what to do next.
 `evaluate` is a last resort: inspect JSON `.ok`, since a script exception can have
-CLI exit code 0. Never evaluate secrets. `record start` captures user actions;
+CLI exit code 0. Never evaluate secrets. On a page that keeps changing, state what
+the script relies on with `--expect` rather than retrying; `--unverified` skips the
+page check entirely and comes last ([scripts](cooperation.md#scripts)). `record start` captures user actions;
 read its help first and never record banking, SSO or password-manager pages.
 Use `bsk --help` to find navigation/history, tab, wait and window commands.

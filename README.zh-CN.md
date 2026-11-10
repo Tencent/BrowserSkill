@@ -437,6 +437,7 @@ CLI 产物位于 `target/release/`；将 `apps/extension/dist/chrome-mv3/` 作�
 ### 动态页面读取（未发布，协议 1.9）
 
 持续动画中的 DOM 字段使用 `bsk read`，表格/列表使用 `extract`；MCP、DSH 对应
-`bsk_inspect(action=read)`。任意 evaluate 仍要求严格观察；读取结果不会更新操作凭证，
+`bsk_inspect(action=read)`。脚本只声明 `--expect` 事实时只校验这些事实，传入 `--observation` 时仍比对整页，
+`evaluate --unverified` 是最后手段；读取结果不会更新操作凭证，
 业务判断须用 expect 保护。查询格式、安全边界、兼容性和可复现浏览器测试见
 [动态页面读取说明](docs/dynamic-reading.md)。
