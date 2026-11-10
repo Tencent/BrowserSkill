@@ -53,6 +53,12 @@ determines which versions can connect.
 
 ### Changed
 
+- The extension popup always shows Connection settings instead of hiding them behind
+  a disclosure. The optional-pairing advice collapses to a warning-triangle icon beside
+  the heading and expands on click; skipped verification and states that block the
+  connection stay visible. The current address sits under the selected mode, the
+  pairing steps move behind an info icon, "Use a new pairing link" is a button, and the
+  save notice appears only once there is a valid change to save.
 - `bsk plan` and `bsk recipe` are documented standard CLI workflows, with packaged
   guidance for batching and replay; recipe schemas remain opt-in in MCP and DSH.
 - Recipe execution and edits share an exclusive lock. Replay refuses unreadable
