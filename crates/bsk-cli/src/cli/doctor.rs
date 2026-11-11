@@ -145,7 +145,11 @@ fn resolve_daemon_state(output: Output) -> DaemonState {
     };
 
     if wait > Duration::ZERO && output == Output::Human {
-        eprintln!("waiting for browser extension to connect…");
+        // Issue #465 §5: name the two possible causes up front so an
+        // installed-but-disconnected extension is not read as "missing".
+        eprintln!(
+            "waiting for browser extension to connect… (if it is installed: check that a window with the extension enabled is open in the expected profile and that it targets this daemon; reinstall from the store if missing)"
+        );
     }
 
     if wait.is_zero() {
@@ -169,7 +173,7 @@ enum DaemonState {
     NoListener(DaemonInfo),
     ProbeError(anyhow::Error),
     Verified {
-        status: StatusResult,
+        status: Box<StatusResult>,
         local_identity_error: Option<String>,
         /// Owned by a terminal or supervisor, which must restart it.
         host_managed: bool,
@@ -204,6 +208,7 @@ fn collect_checks(state: DaemonState) -> Vec<CheckResult> {
         check_version_compatible(state.status()),
         check_auto_update(state.status(), state.host_managed()),
         check_extension_connected(state.status()),
+        check_local_auth(state.status()),
         check_browsers_protocol_compatible(state.status()),
         check_feature_availability(state.status()),
     ]
@@ -404,7 +409,7 @@ fn current_state(browser_wait: Duration) -> DaemonState {
                 .err()
                 .map(|err| format!("{err:#}")),
             host_managed: daemon.info.host_managed,
-            status: daemon.status,
+            status: Box::new(daemon.status),
         },
         Ok(Probe::Absent(Some(info))) => DaemonState::NoListener(info),
         Ok(Probe::Absent(None)) => DaemonState::Missing,
@@ -705,6 +710,31 @@ fn display_protocol(value: &str) -> &str {
     if value.is_empty() { "unknown" } else { value }
 }
 
+fn check_local_auth(status: Option<&StatusResult>) -> CheckResult {
+    let mode = status
+        .and_then(|s| s.local_auth.as_ref())
+        .map(|s| s.mode.clone())
+        .or_else(|| {
+            paths::bsk_home()
+                .ok()
+                .and_then(|home| crate::daemon::local_auth::read_mode(&home).ok())
+                .and_then(|mode| serde_json::to_value(mode).ok())
+                .and_then(|value| value.as_str().map(str::to_owned))
+        });
+    if mode.as_deref() == Some("trust_local") {
+        CheckResult::warn(
+            "local connection verification",
+            "unverified local connections are allowed",
+            "run `bsk daemon trust-local off` and turn off skipping in the extension to restore verification",
+        )
+    } else {
+        CheckResult::ok(
+            "local connection verification",
+            "local pairing verification is available",
+        )
+    }
+}
+
 fn check_extension_connected(status: Option<&StatusResult>) -> CheckResult {
     let name = "extension connected";
     let Some(status) = status else {
@@ -714,6 +744,18 @@ fn check_extension_connected(status: Option<&StatusResult>) -> CheckResult {
             "start the daemon and load the extension first",
         );
     };
+    if status.browsers.is_empty()
+        && status
+            .local_auth
+            .as_ref()
+            .is_some_and(|auth| auth.last_unpaired_attempt.is_some())
+    {
+        return CheckResult::fail(
+            name,
+            "extension is waiting for local pairing",
+            "run `bsk daemon pair`, then paste the link into the extension's connection settings",
+        );
+    }
     let browsers = status.browsers.len();
     let unresponsive = status
         .browsers
@@ -732,12 +774,21 @@ fn check_extension_connected(status: Option<&StatusResult>) -> CheckResult {
     if browsers > 0 {
         CheckResult::ok(name, format!("{} browser(s) connected", browsers))
     } else {
+        // Issue #465 §5: "0 browsers connected" is true for both "not
+        // installed" and "installed but not connected" (another or no
+        // browser window, wrong profile, a different daemon or port, a
+        // stale extension service worker). Spell both out so the fix
+        // does not require guessing which one applies.
         CheckResult::fail(
             name,
             "0 browsers connected",
             format!(
-                "install the extension from {EXTENSION_STORE_URL} (Chrome) \
-                 or {EXTENSION_STORE_URL_EDGE} (Edge) and load it in the browser"
+                "if the extension is not installed, install it from {EXTENSION_STORE_URL} (Chrome) \
+                 or {EXTENSION_STORE_URL_EDGE} (Edge); \
+                 if it is already installed, it is not connected to this daemon — keep a window \
+                 of that browser open with the extension enabled in the profile you are using \
+                 (the extension is per-profile), point the extension at this daemon's \
+                 address/port, and reload the extension if it was just updated"
             ),
         )
     }
@@ -800,6 +851,10 @@ mod m2_tests {
         for failure in [
             DaemonStartFailure::AutoStartDisabled,
             DaemonStartFailure::IndependentStartFailed,
+            DaemonStartFailure::BreakawayUnverified,
+            DaemonStartFailure::ProcessCreationDenied,
+            DaemonStartFailure::PartialBreakaway,
+            DaemonStartFailure::ResumeFailed,
         ] {
             let error = anyhow::anyhow!("startup fixture cause")
                 .context(failure)
@@ -828,6 +883,7 @@ mod m2_tests {
 
     fn fake_status(browsers: Vec<BrowserStatusEntry>, skew: Vec<VersionSkewEntry>) -> StatusResult {
         StatusResult {
+            local_auth: None,
             daemon_version: env!("CARGO_PKG_VERSION").into(),
             protocol_version: "1.0".into(),
             pid: 1,
@@ -999,7 +1055,7 @@ mod m2_tests {
     #[test]
     fn unverified_local_identity_warns_without_failing_usable_ipc() {
         let state = DaemonState::Verified {
-            status: fake_status(Vec::new(), Vec::new()),
+            status: Box::new(fake_status(Vec::new(), Vec::new())),
             local_identity_error: Some("peer identity is unavailable".into()),
             host_managed: false,
         };
@@ -1204,6 +1260,13 @@ mod m2_tests {
         assert!(
             hint.contains(EXTENSION_STORE_URL_EDGE),
             "hint should include Edge Add-ons URL: {hint}"
+        );
+        // Issue #465 §5: the hint must not imply "not installed" is the
+        // only possibility — an installed-but-disconnected extension is
+        // the harder case to diagnose.
+        assert!(
+            hint.contains("already installed"),
+            "hint should name the installed-but-disconnected case: {hint}"
         );
     }
 

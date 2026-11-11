@@ -66,6 +66,12 @@ necessarily select the directory that the agent's user expects. Configure
 `BSK_HOME` explicitly on both sides instead of guessing a username or changing
 the process's global `HOME`.
 
+Local pairing is optional. Each independent `BSK_HOME` has its own identity.
+If you choose to pair, pair the intended browser with each home you use; changing directories to bypass an error does not
+reuse authorization. Run `bsk daemon pair` with the same environment as status
+and session commands, then have the user paste its private link in the extension.
+See [local pairing](local-pairing.md).
+
 ## 2. Check for an existing daemon
 
 From the agent's command environment, disable implicit startup and check the
@@ -236,6 +242,37 @@ leaving the variable unset or setting it to `1` retains normal automatic startup
 Explicit `bsk daemon start`, `stop`, `restart`, and update operations retain their
 existing management behavior; the variable is not a prohibition on those commands.
 Doctor retains its existing directory preparation and skill checks.
+
+## Windows sandbox users (access denied on the pipe)
+
+Symptom: `bsk status --json` inside the agent fails with
+`connect IPC named pipe \\.\pipe\bsk-daemon-<hash>` and `os error 5`
+(access denied), while the same command works in your own PowerShell.
+
+The daemon creates its pipe with Windows' default security descriptor, so only
+the account that started the daemon (plus administrators and SYSTEM) can open it
+for reading and writing. Local IPC has no separate login: the pipe's ACL is the
+access control, and anyone who can open it can drive your signed-in browser
+sessions. Agent sandboxes that run commands as a different account, such as
+Codex's elevated Windows sandbox (`CodexSandboxOffline` / `CodexSandboxOnline`),
+or under a restricted token, are therefore refused. Neither `BSK_HOME` nor
+`BSK_AUTO_START=0` changes this, and a daemon that is running and connected to
+the extension ("已连接") is not evidence the sandboxed client can reach it.
+
+There is currently no supported setting that grants a sandbox account access to
+the pipe, and BrowserSkill does not widen the pipe's ACL by default. Options:
+
+- **Keep the sandbox intact:** run the browser commands from a context that
+  is not sandboxed as another account, for example your own terminal, or the
+  host's per-command exception for those commands only. Do not disable the
+  sandbox globally for this.
+- **Grant the account access yourself:** this is a deliberate security
+  decision outside BrowserSkill. It lets that account control your browser
+  sessions, and the pipe name changes whenever the daemon restarts under a
+  different `BSK_HOME`.
+
+Report which host and sandbox mode you use if you need first-class support, so
+an explicit opt-in grant can be designed for it.
 
 ## Diagnostics and recovery
 

@@ -20,13 +20,14 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  verify:
+  verify-windows:
     if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
     runs-on: windows-latest
-    timeout-minutes: 40
+    timeout-minutes: 70
     outputs:
       version: ${{ steps.collect.outputs.version }}
       tag: ${{ steps.collect.outputs.tag }}
+      artifact_id: ${{ steps.upload.outputs.artifact-id }}
     steps:
       # The privileged publishing code always comes from the default branch.
       - uses: actions/checkout@v6
@@ -42,7 +43,7 @@ jobs:
           SOURCE_RUN_ID: ${{ github.event.workflow_run.id || inputs.run_id }}
           SOURCE_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
         run: |
-          $arguments = @('scripts/windows-release.py', 'collect', '--run-id', $env:SOURCE_RUN_ID, '--timeout', '1800')
+          $arguments = @('scripts/windows-release.py', 'collect', '--run-id', $env:SOURCE_RUN_ID, '--timeout', '3600', '--linux-only')
           if ($env:SOURCE_ATTEMPT) { $arguments += @('--attempt', $env:SOURCE_ATTEMPT) }
           python @arguments
           if ($LASTEXITCODE -ne 0) { throw 'Release provenance validation failed' }
@@ -60,17 +61,51 @@ jobs:
         run: Compress-Archive -Path signed/bsk.exe -DestinationPath "dist/bsk-v$env:VERSION-x86_64-pc-windows-msvc.zip"
 
       - name: Upload verified release files
+        id: upload
         uses: actions/upload-artifact@v7
         with:
-          name: verified-cli-${{ github.run_id }}-${{ github.run_attempt }}
+          name: verified-windows-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             dist/*
             release-state.json
           if-no-files-found: error
           retention-days: 7
 
+  verify-macos:
+    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
+    runs-on: macos-latest
+    timeout-minutes: 80
+    outputs:
+      artifact_id: ${{ steps.upload.outputs.artifact-id }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+
+      - name: Verify Mac provenance, Developer ID signatures and Apple notarization
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_RUN_ID: ${{ github.event.workflow_run.id || inputs.run_id }}
+          SOURCE_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
+        run: |
+          args=(collect --run-id "$SOURCE_RUN_ID" --timeout 4200)
+          if [[ -n "$SOURCE_ATTEMPT" ]]; then args+=(--attempt "$SOURCE_ATTEMPT"); fi
+          python3 scripts/macos-release.py "${args[@]}"
+
+      - name: Upload independently verified Mac release files
+        id: upload
+        uses: actions/upload-artifact@v7
+        with:
+          name: verified-macos-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            dist/*
+            macos-release-state.json
+          if-no-files-found: error
+          retention-days: 7
+
   publish:
-    needs: verify
+    needs: [verify-windows, verify-macos]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -79,13 +114,17 @@ jobs:
           ref: ${{ github.event.repository.default_branch }}
           persist-credentials: false
 
+      # Partial reruns retain successful jobs and their outputs from earlier attempts.
       - uses: actions/download-artifact@v8
         with:
-          name: verified-cli-${{ github.run_id }}-${{ github.run_attempt }}
+          artifact-ids: ${{ needs.verify-windows.outputs.artifact_id }},${{ needs.verify-macos.outputs.artifact_id }}
+          github-token: ${{ github.token }}
+          run-id: ${{ github.run_id }}
+          merge-multiple: true
 
       - name: Generate checksums from the final signed archives
         env:
-          VERSION: ${{ needs.verify.outputs.version }}
+          VERSION: ${{ needs.verify-windows.outputs.version }}
         run: |
           node scripts/render-version-json.mjs \
             --version "$VERSION" --repo "$GITHUB_REPOSITORY" \

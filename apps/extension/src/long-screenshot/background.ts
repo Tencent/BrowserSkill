@@ -2,6 +2,7 @@ import { i18n } from "@browser-skill/i18n";
 import { capturePage } from "./capture";
 import { captureManual } from "./manual";
 import { createPageClient } from "./page-client";
+import { pruneScreenshots } from "./retention";
 import { openScreenshotSource } from "./source";
 import { readTiledScreenshot, removeTiledScreenshot, TileWriter } from "./tiles";
 import {
@@ -26,8 +27,9 @@ export function attachLongScreenshot(options: { isTabBusy(tabId: number): boolea
     page?: (command: PageCommand) => Promise<unknown>;
   };
   let running: Job | null = null;
-  let openingPreviews = 0;
+  const openingPreviews = new Map<string, number>();
   let writes = Promise.resolve();
+  let pruning = Promise.resolve();
   const ready = chrome.storage.session
     .get(LONG_SCREENSHOT_STATE)
     .then(async (stored) => {
@@ -48,7 +50,34 @@ export function attachLongScreenshot(options: { isTabBusy(tabId: number): boolea
         );
       }
     })
-    .catch(() => {});
+    .catch(() => {})
+    .then(() => prune());
+  function prune() {
+    pruning = pruning
+      .then(async () => {
+        const previewUrl = chrome.runtime.getURL("/long-screenshot.html");
+        const inUse = (id: string) =>
+          id === running?.id || id === state?.id || openingPreviews.has(id);
+        await pruneScreenshots(async (id) => {
+          if (inUse(id)) return true;
+          // Disk reads can overlap new previews. Revalidate immediately before
+          // deletion, including the document still visible during navigation.
+          const tabs = await chrome.tabs.query({});
+          return (
+            inUse(id) ||
+            tabs.some((tab) =>
+              [tab.url, tab.pendingUrl].some(
+                (url) =>
+                  url?.startsWith(`${previewUrl}?`) && new URL(url).searchParams.get("id") === id,
+              ),
+            )
+          );
+        });
+      })
+      // Retention is best effort; storage recovery retries on the next lifecycle event.
+      .catch(() => {});
+    return pruning;
+  }
   function publish(next: CaptureState | null) {
     state = next;
     writes = writes
@@ -57,14 +86,17 @@ export function attachLongScreenshot(options: { isTabBusy(tabId: number): boolea
   }
   function clearResult() {
     // Active jobs own their cancellation and partial-result lifecycle.
-    if (state && !running && !openingPreviews && !isCapturing(state)) publish(null);
+    if (state && !running && !openingPreviews.size && !isCapturing(state)) {
+      publish(null);
+      void prune();
+    }
   }
   async function clearResultOnPageChange() {
     await ready;
     const previous = state;
-    if (!previous || running || openingPreviews || isCapturing(previous)) return;
+    if (!previous || running || openingPreviews.size || isCapturing(previous)) return;
     const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
-    if (state !== previous || running || openingPreviews || !tab) return;
+    if (state !== previous || running || openingPreviews.size || !tab) return;
     const pageUrl = tab.pendingUrl ?? tab.url;
     if (!pageUrl) return;
     if (tab.id === previous.tabId && (!previous.pageUrl || pageUrl === previous.pageUrl)) return;
@@ -89,6 +121,7 @@ export function attachLongScreenshot(options: { isTabBusy(tabId: number): boolea
     void ready.then(() => {
       if (state?.tabId === tabId && info.url !== state.pageUrl) clearResult();
       else pageChanged();
+      void prune();
     });
   });
   chrome.webNavigation.onCommitted.addListener((info) => {
@@ -101,6 +134,7 @@ export function attachLongScreenshot(options: { isTabBusy(tabId: number): boolea
   chrome.tabs.onRemoved.addListener((tabId) => {
     void ready.then(() => {
       if (state?.tabId === tabId) clearResult();
+      void prune();
     });
   });
   async function preview(id: string) {
@@ -109,13 +143,15 @@ export function attachLongScreenshot(options: { isTabBusy(tabId: number): boolea
         ? `&notice=${encodeURIComponent(state.notice)}`
         : "";
     // Chrome activates a newly created tab before its preview URL commits.
-    openingPreviews++;
+    openingPreviews.set(id, (openingPreviews.get(id) ?? 0) + 1);
     try {
       await chrome.tabs.create({
         url: chrome.runtime.getURL(`/long-screenshot.html?id=${encodeURIComponent(id)}${notice}`),
       });
     } finally {
-      openingPreviews--;
+      const remaining = openingPreviews.get(id)! - 1;
+      if (remaining) openingPreviews.set(id, remaining);
+      else openingPreviews.delete(id);
     }
   }
   async function start(requested: "auto" | "manual" | "visible" = "auto") {
@@ -194,6 +230,8 @@ export function attachLongScreenshot(options: { isTabBusy(tabId: number): boolea
         void chrome.runtime.getPlatformInfo().catch(() => {});
       }, 20_000);
       try {
+        await prune();
+        controller.signal.throwIfAborted();
         const mode = requested;
         if (mode === "auto") await client.prepare();
         await checkTab();
@@ -306,6 +344,7 @@ export function attachLongScreenshot(options: { isTabBusy(tabId: number): boolea
         chrome.webNavigation.onBeforeNavigate.removeListener(navigated);
         chrome.webNavigation.onCommitted.removeListener(navigated);
         if (running?.id === id) running = null;
+        void prune();
       }
       if (complete) await preview(id).catch(() => {});
     }

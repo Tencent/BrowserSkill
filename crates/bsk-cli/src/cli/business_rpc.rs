@@ -1,14 +1,11 @@
-//! Cancellable business-RPC helper used by every long-running CLI
-//! subcommand.
+//! Business RPCs with terminal Ctrl-C and opt-in parent cancellation.
 //!
-//! M10.2 wires `SIGINT → cancel { rpc_id }` end-to-end. The CLI arms
-//! a Ctrl-C handler around the IPC call, so when the user hits Ctrl-C
-//! while a `bsk tool.*` / `bsk session.*` call is in flight:
+//! When cancellation arrives while a business RPC is in flight:
 //!
 //! 1. We send a fresh `cancel { rpc_id }` IPC frame on a new
-//!    connection (the original socket is still parked on `read_line`).
-//! 2. Wait up to [`CANCEL_RESPONSE_GRACE`] for the original call to
-//!    return with a structured `cancelled` error.
+//!    connection without blocking progress on the original call.
+//! 2. Keep polling the original call while retrying unmatched cancellation.
+//!    Connection setup, retries and the response share [`CANCEL_RESPONSE_GRACE`].
 //! 3. If the daemon never replies within the grace window, synthesise
 //!    a `cancelled` [`RpcError`] locally and return — CLI exits with
 //!    the matching exit code rather than hanging on a wedged daemon.
@@ -19,28 +16,45 @@
 //! "kill the CLI process" behaviour for short status reads.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use anyhow::Context;
 use bsk_protocol::{CancelParams, CancelResult, ErrorCode, Method, RpcError, RpcId};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
+use tokio::time::{Instant, timeout_at};
 use tracing::debug;
 
 use crate::cli::error::CliError;
 use crate::ipc_client::IpcClient;
 
-/// Hard cap on how long we wait for the cancelled RPC to settle after
-/// SIGINT triggers. Picked per design §4.6 ("≤ 2s, then force exit").
+/// Total budget after cancellation is observed: connecting, sending cancel,
+/// retrying before registration, and waiting for the original RPC to settle.
 pub const CANCEL_RESPONSE_GRACE: Duration = Duration::from_secs(2);
 
-/// Hard cap on the cancel-frame's own IPC round-trip. Independent of
-/// the original call's timeout because cancel must answer promptly.
-const CANCEL_FRAME_TIMEOUT: Duration = Duration::from_secs(2);
+const CANCEL_RETRY_INITIAL: Duration = Duration::from_millis(10);
+const CANCEL_RETRY_MAX: Duration = Duration::from_millis(250);
+
+/// Keep the IPC connection alive long enough to receive the tool's timeout.
+pub(crate) fn ipc_timeout(timeout_ms: u32) -> Duration {
+    Duration::from_millis(u64::from(timeout_ms) + 15_000)
+}
 
 static OBSERVATION_DEPENDENCIES: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
 
 static OBSERVATION_CONTEXT: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+static ACTION_EVIDENCE: std::sync::OnceLock<(Option<String>, Option<serde_json::Value>)> =
+    std::sync::OnceLock::new();
+static TARGET_POLICY_REQUESTED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+
+// Keep the user's stop request even if the in-flight RPC finishes successfully.
+// One CLI process is one command, including its follow-up reads.
+static CANCEL_REQUESTED: AtomicBool = AtomicBool::new(false);
+
+pub(super) fn cancel_requested() -> bool {
+    CANCEL_REQUESTED.load(Ordering::Relaxed)
+}
 
 /// A CLI process represents one explicit caller operation. Never fill this from cached state.
 pub fn set_context(context: Option<String>) {
@@ -51,10 +65,62 @@ pub fn set_dependencies(dependencies: Vec<String>) {
     let _ = OBSERVATION_DEPENDENCIES.set(dependencies);
 }
 
-fn with_context<P: Serialize>(
+pub fn set_action_evidence(observation: Option<String>, expect: Option<serde_json::Value>) {
+    let _ = ACTION_EVIDENCE.set((observation, expect));
+}
+
+pub fn set_target_policy_requested() {
+    let _ = TARGET_POLICY_REQUESTED.set(true);
+}
+
+/// Whether the caller attached anything asking for the page to be checked.
+pub(super) fn verification_requested() -> bool {
+    OBSERVATION_DEPENDENCIES
+        .get()
+        .is_some_and(|dependencies| !dependencies.is_empty())
+        || ACTION_EVIDENCE
+            .get()
+            .is_some_and(|(observation, expect)| observation.is_some() || expect.is_some())
+}
+
+/// Use the status already read during discovery, before any guarded action can be forwarded.
+pub(super) fn check_daemon_protocol(protocol: &str) -> anyhow::Result<()> {
+    require_target_control(
+        protocol,
+        TARGET_POLICY_REQUESTED.get().copied().unwrap_or(false),
+        ACTION_EVIDENCE
+            .get()
+            .is_some_and(|(observation, expect)| observation.is_some() || expect.is_some()),
+    )
+}
+
+/// Reject target policy or action evidence when the daemon could silently discard them.
+pub(crate) fn require_target_control(
+    protocol: &str,
+    target_policy: bool,
+    evidence: bool,
+) -> anyhow::Result<()> {
+    if target_policy {
+        anyhow::ensure!(
+            bsk_protocol::tools::supports_target_control(protocol),
+            "--policy target requires daemon protocol 1.8 or a later compatible 1.x version; update the CLI and restart its daemon (running protocol {protocol})"
+        );
+    }
+    if evidence {
+        anyhow::ensure!(
+            bsk_protocol::tools::supports_target_control(protocol),
+            "--expect and --observation require daemon protocol 1.8 or a later compatible 1.x version; update the CLI and restart its daemon (running protocol {protocol}). Conditions are never silently discarded"
+        );
+    }
+    Ok(())
+}
+
+pub(crate) fn with_context<P: Serialize>(
     params: Option<P>,
     context: Option<&str>,
     dependencies: &[String],
+    observation: Option<&str>,
+    expect: Option<&serde_json::Value>,
 ) -> anyhow::Result<Option<serde_json::Value>> {
     params
         .map(|p| {
@@ -63,6 +129,20 @@ fn with_context<P: Serialize>(
                 object.insert("context_id".into(), context.into());
                 if !dependencies.is_empty() {
                     object.insert("depends_on".into(), serde_json::to_value(dependencies)?);
+                }
+            }
+            if let Some(object) = value.as_object_mut() {
+                if let Some(observation) = observation {
+                    anyhow::ensure!(
+                        object
+                            .get("observation_id")
+                            .is_none_or(|existing| existing == observation),
+                        "--observation conflicts with the action's observation_id"
+                    );
+                    object.insert("observation_id".into(), observation.into());
+                }
+                if let Some(expect) = expect {
+                    object.insert("expect".into(), expect.clone());
                 }
             }
             Ok(value)
@@ -106,10 +186,11 @@ where
     R: DeserializeOwned + Send + 'static,
 {
     let parent_cancel = stdin_cancellation();
-    if parent_cancel.as_ref().is_some_and(|rx| *rx.borrow()) {
+    if cancel_requested() || parent_cancel.as_ref().is_some_and(|rx| *rx.borrow()) {
+        CANCEL_REQUESTED.store(true, Ordering::Relaxed);
         return Err(CliError::from_rpc(RpcError {
             code: ErrorCode::Cancelled,
-            message: "parent closed the cancellation pipe".into(),
+            message: "command cancelled before dispatch".into(),
             data: Some(serde_json::json!({"reason": "cancelled_before_dispatch"})),
         }));
     }
@@ -121,6 +202,17 @@ where
             .get()
             .map(Vec::as_slice)
             .unwrap_or_default(),
+        ACTION_EVIDENCE
+            .get()
+            .and_then(|(observation, _)| observation.as_deref()),
+        ACTION_EVIDENCE
+            .get()
+            .and_then(|(_, expect)| expect.as_ref()),
+    )?;
+    let prechecked = super::protocol::precheck_cached_daemon_support(
+        &sock,
+        &method,
+        params.as_ref().unwrap_or(&serde_json::Value::Null),
     )?;
     let mut client = IpcClient::connect(sock.clone()).await?;
     let rpc_id_for_call = rpc_id.clone();
@@ -129,12 +221,13 @@ where
     let action_started_ref = &action_started;
 
     let main_fut = async move {
-        if let Err(error) = super::protocol::check_daemon_support(
-            &mut client,
-            &method,
-            params.as_ref().unwrap_or(&serde_json::Value::Null),
-        )
-        .await?
+        if !prechecked
+            && let Err(error) = super::protocol::check_daemon_support(
+                &mut client,
+                &method,
+                params.as_ref().unwrap_or(&serde_json::Value::Null),
+            )
+            .await?
         {
             return Ok(Err(error));
         }
@@ -147,9 +240,10 @@ where
 
     let outcome = tokio::select! {
         biased;
-        res = &mut main_fut => res?,
+        // Arm cancellation before the RPC can dispatch browser input.
         sig = wait_for_cancel(parent_cancel) => {
             sig.context("wait for cancellation").map_err(CliError::Local)?;
+            CANCEL_REQUESTED.store(true, Ordering::Relaxed);
             // The feature probe has no browser effects. Dropping it here must
             // also prevent the action from being sent after cancellation.
             if !action_started.load(std::sync::atomic::Ordering::Relaxed) {
@@ -162,8 +256,23 @@ where
                 }));
             }
             debug!(rpc_id = %rpc_id_for_cancel, "forwarding cancel to daemon");
-            let _ = send_cancel(&sock, &rpc_id_for_cancel).await;
-            match tokio::time::timeout(CANCEL_RESPONSE_GRACE, &mut main_fut).await {
+            // Separate IPC connections can deliver cancel before the business
+            // request is registered. Keep polling that request while confirming
+            // cancellation, including any write that has not completed yet.
+            let deadline = Instant::now() + CANCEL_RESPONSE_GRACE;
+            let settle = async {
+                tokio::select! {
+                    biased;
+                    res = &mut main_fut => return res,
+                    result = send_cancel(&sock, &rpc_id_for_cancel, deadline) => {
+                        if let Err(err) = result {
+                            debug!(rpc_id = %rpc_id_for_cancel, %err, "cancel was not confirmed");
+                        }
+                    },
+                }
+                main_fut.await
+            };
+            match timeout_at(deadline, settle).await {
                 Ok(res) => res?,
                 Err(_) => {
                     debug!(
@@ -178,6 +287,7 @@ where
                 }
             }
         }
+        res = &mut main_fut => res?,
     };
 
     outcome.map_err(CliError::from_rpc)
@@ -225,31 +335,43 @@ pub fn release_transfers<'a>(
 
 /// Send a `cancel { rpc_id }` frame over a fresh connection so it
 /// lands on the daemon while the original call is still parked.
-///
-/// The on-the-wire method name is `cancel` (not `system.cancel`)
-/// because that is the identifier registered in
-/// [`bsk_protocol::Method::Cancel`] today — design §4.3 lists the
-/// bare `cancel` namespace, and the implementation has used that
-/// name since M9. The CLI sticks to whatever the protocol crate
-/// exports as `Method::Cancel` so drift between docs and code
-/// stays loud.
-pub async fn send_cancel(sock: &Path, rpc_id: &str) -> anyhow::Result<()> {
-    let mut client = IpcClient::connect(sock).await?;
-    let cancel_id = format!("cancel-{}", random_short_id());
-    let _ignored: anyhow::Result<std::result::Result<CancelResult, RpcError>> = client
-        .call_with_id::<_, CancelResult>(
-            cancel_id,
-            Method::Cancel,
-            Some(CancelParams {
-                rpc_id: rpc_id.to_string(),
-            }),
-            CANCEL_FRAME_TIMEOUT,
-        )
-        .await;
-    Ok(())
+/// An unmatched request may still be in transit on the other connection;
+/// retry with backoff until the shared response deadline. The daemon may never
+/// register this method, so retries must not extend the caller's grace period.
+/// This bounds the registration race; it cannot cancel a request that arrives
+/// after the deadline without daemon-side cancellation tracking.
+pub(crate) async fn send_cancel(
+    sock: &Path,
+    rpc_id: &str,
+    deadline: Instant,
+) -> anyhow::Result<()> {
+    timeout_at(deadline, async {
+        let mut client = IpcClient::connect(sock).await?;
+        let mut retry_delay = CANCEL_RETRY_INITIAL;
+        loop {
+            let result = client
+                .call_with_id::<_, CancelResult>(
+                    format!("cancel-{}", random_short_id()),
+                    Method::Cancel,
+                    Some(CancelParams {
+                        rpc_id: rpc_id.to_string(),
+                    }),
+                    deadline.saturating_duration_since(Instant::now()),
+                )
+                .await?
+                .map_err(CliError::from_rpc)?;
+            if result.cancelled {
+                return Ok(());
+            }
+            tokio::time::sleep(retry_delay).await;
+            retry_delay = (retry_delay * 2).min(CANCEL_RETRY_MAX);
+        }
+    })
+    .await
+    .context("daemon did not confirm cancellation before the response deadline")?
 }
 
-fn random_short_id() -> String {
+pub(crate) fn random_short_id() -> String {
     use rand::Rng;
     let mut rng = rand::thread_rng();
     let mut bytes = [0u8; 4];
@@ -313,24 +435,98 @@ async fn wait_for_sigint() -> anyhow::Result<()> {
     Ok(())
 }
 
+#[cfg(all(test, windows))]
+mod windows_tests {
+    use super::*;
+    use tokio::net::windows::named_pipe::{ClientOptions, ServerOptions};
+
+    #[tokio::test]
+    async fn cancel_deadline_includes_waiting_for_a_busy_pipe() {
+        let address = PathBuf::from(format!(
+            r"\\.\pipe\bsk-cancel-busy-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let server = ServerOptions::new()
+            .first_pipe_instance(true)
+            .max_instances(1)
+            .create(&address)
+            .unwrap();
+        let _occupied = ClientOptions::new().open(&address).unwrap();
+        server.connect().await.unwrap();
+        assert_eq!(
+            ClientOptions::new()
+                .open(&address)
+                .err()
+                .unwrap()
+                .raw_os_error(),
+            Some(windows_sys::Win32::Foundation::ERROR_PIPE_BUSY as i32)
+        );
+
+        let start = Instant::now();
+        let result = send_cancel(&address, "pending-rpc", start + Duration::from_millis(100)).await;
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("response deadline")
+        );
+        assert!(start.elapsed() < Duration::from_secs(1));
+    }
+}
+
 #[cfg(test)]
-mod context_tests {
-    use super::with_context;
+mod tests {
+    use super::{ipc_timeout, with_context};
     use serde_json::json;
+    use std::time::Duration;
+
+    #[test]
+    fn ipc_timeout_preserves_grace_at_the_largest_tool_timeout() {
+        assert_eq!(ipc_timeout(60_000), Duration::from_secs(75));
+        assert_eq!(ipc_timeout(u32::MAX).as_millis(), u32::MAX as u128 + 15_000);
+    }
 
     #[test]
     fn context_is_explicit_and_does_not_change_action_parameters() {
         let params = json!({"session_id":"s1", "ref":"e1", "value":"Shanghai"});
         assert_eq!(
-            with_context(Some(&params), None, &[]).unwrap(),
+            with_context(Some(&params), None, &[], None, None).unwrap(),
             Some(params.clone())
         );
-        let framed = with_context(Some(&params), Some("observed-context"), &["@e2".into()])
-            .unwrap()
-            .unwrap();
+        let framed = with_context(
+            Some(&params),
+            Some("observed-context"),
+            &["@e2".into()],
+            None,
+            None,
+        )
+        .unwrap()
+        .unwrap();
         assert_eq!(framed["context_id"], "observed-context");
         assert_eq!(framed["depends_on"], json!(["@e2"]));
         assert_eq!(framed["value"], "Shanghai");
         assert!(params.get("context_id").is_none());
+    }
+    #[test]
+    fn explicit_conditions_survive_without_implicit_context() {
+        let params = json!({"session_id":"s1", "ref":"e1"});
+        let checks = json!([{ "target":"#price", "field":"text", "equals":"$12" }]);
+        let framed = with_context(Some(&params), None, &[], Some("observed"), Some(&checks))
+            .unwrap()
+            .unwrap();
+        assert_eq!(framed["observation_id"], "observed");
+        assert_eq!(framed["expect"], checks);
+        assert!(framed.get("context_id").is_none());
+        assert_eq!(params, json!({"session_id":"s1", "ref":"e1"}));
+    }
+
+    #[test]
+    fn conflicting_visual_and_action_observations_are_rejected() {
+        let params = json!({"session_id":"s1", "observation_id":"visual"});
+        assert!(with_context(Some(&params), None, &[], Some("other"), None).is_err());
+        assert_eq!(
+            with_context(Some(&params), None, &[], Some("visual"), None).unwrap(),
+            Some(params)
+        );
     }
 }

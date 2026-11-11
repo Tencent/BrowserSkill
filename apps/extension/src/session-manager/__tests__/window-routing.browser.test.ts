@@ -32,6 +32,7 @@ document.querySelector('#run').onclick=()=>requestAnimationFrame(()=>{
 // and input/snapshot handlers in an extension page that survives user window close.
 const entry = `
 import { ChromiumCdp } from '@/browser-driver/chromium-cdp';
+import { attachCooperation } from '@/cooperation/browser-bridge';
 import { isAgentControlledTab, SessionManager } from '@/session-manager/manager';
 import { AgentWindowRouting } from '@/session-manager/window-routing';
 import { withTaskPopups } from '@/session-manager/task-popups';
@@ -49,6 +50,7 @@ globalThis.run=async(url,soak)=>{
  const controller=await chrome.tabs.getCurrent();
  await chrome.windows.create({tabId:controller.id,type:'popup',focused:false});
  const manager=new SessionManager(),cdp=new ChromiumCdp(chrome.debugger);
+ const cooperation=attachCooperation(manager,()=>{});
  const user=(await chrome.windows.getAll({windowTypes:['normal']}))[0];
  const [control]=await chrome.tabs.query({windowId:user.id,active:true});
  await chrome.tabs.update(control.id,{url:url+'/control'});
@@ -62,6 +64,8 @@ globalThis.run=async(url,soak)=>{
  chrome.tabs.onActivated.addListener(info=>activated.push(info));
  chrome.tabs.onRemoved.addListener((id,info)=>removed.push({id,...info}));
  const task=await manager.start('background-regression',{size:{width:800,height:600}});
+ cooperation.startSession(task.sessionId);
+ check(cooperation.hasSession(task.sessionId),'default collaboration missing');
  router.sync();
  const evaluate=async(id,expression)=>(await cdp.send(id,'Runtime.evaluate',{
   expression,returnByValue:true,awaitPromise:true
@@ -69,8 +73,10 @@ globalThis.run=async(url,soak)=>{
  const created=await handleTabCreate(manager,{session_id:task.sessionId,url:url+'/agent'},{cdp});
  check(!created.code,JSON.stringify(created));
  const id=created.tab_id;
+ check((await chrome.tabs.get(id)).groupId===-1,'expected task tab to remain ungrouped after creation');
  const params={session_id:task.sessionId,tab_id:id};
- const deps={cdp,tabsApi:chrome.tabs};
+ // Direct navigation handlers need the same opt-in supplied by ToolDispatcher.
+ const deps={cdp,tabsApi:chrome.tabs,backgroundExecution:true};
  const states=[];
  let idleId;
  const exercise=async(label)=>{
@@ -160,6 +166,7 @@ globalThis.run=async(url,soak)=>{
    const navigated=await handleNavigate(manager,{...defaults,url:url+'/default-target'},deps);
    const defaultId=navigated.tab_id;
    check(!navigated.code&&defaultId!==external.id&&isAgentControlledTab(task,defaultId),'default navigation did not target a controlled task tab');
+   await wait(async()=>await evaluate(defaultId,"!!document.querySelector('#run')&&!document.querySelector('#run').disabled"),'default task ready');
    const clicked=await handleClick(manager,{...defaults,selector:'#run'},deps);
    check(!clicked.code&&clicked.tab_id===defaultId,'default click did not target the selected task tab');
    await wait(async()=>(await evaluate(defaultId,'clicks'))>0,'default task click');
@@ -170,6 +177,8 @@ globalThis.run=async(url,soak)=>{
    check(await evaluate(external.id,'clicks')===0,'default click changed the external page');
   } finally {finishCreation();}
   await wait(async()=>(await chrome.tabs.get(external.id)).windowId===user.id,'background external routing');
+  check((await chrome.tabs.get(external.id)).groupId===-1,'expected external tab to remain ungrouped after routing');
+  check((await chrome.tabs.get(id)).groupId===-1,'expected task tab to remain ungrouped after routing');
   check((await chrome.tabs.get(control.id)).active,'routing changed user selection');
   check(!(await chrome.windows.get(task.agentWindowId)).focused,'routing stole focus');
   // Let the host open a URL through Chrome's process singleton, as external
@@ -240,7 +249,8 @@ globalThis.run=async(url,soak)=>{
    check(manager.findControllingSession(page.id)===null,'help provenance granted control');
   }
   return {states,backgroundFocusEvents,nativeExternal:true,replacementWindow:nativeFallback.windowId,
-   replacementFocused,closedSourcePopup:true,humanAssistancePopupChain:true,defaultTargetProtected:true};
+   replacementFocused,closedSourcePopup:true,humanAssistancePopupChain:true,defaultTargetProtected:true,
+   defaultCooperation:true};
  } catch(error) {
   throw new Error(JSON.stringify({error:error.message,phase:globalThis.phase,id,idleId,control:control.id,states,focused,removed,
    tabs:(await chrome.tabs.query({})).map(({id,windowId,url,frozen,discarded,openerTabId})=>({id,windowId,url,frozen,discarded,openerTabId})),
@@ -268,7 +278,10 @@ describe.skipIf(!process.env.BSK_BACKGROUND_CHROME)("Agent Window browser regres
       await build({
         configFile: false,
         logLevel: "error",
-        define: { __BSK_EXT_VERSION__: JSON.stringify("0.0.0") },
+        define: {
+          __BSK_EXT_VERSION__: JSON.stringify("0.0.0"),
+          __BSK_DAEMON_WS_URL__: JSON.stringify("ws://127.0.0.1:1"),
+        },
         resolve: {
           alias: {
             "@": path.resolve("src"),

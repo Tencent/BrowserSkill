@@ -1,4 +1,39 @@
-# Structured extraction
+# Live DOM fields and structured extraction
+
+For current title/URL, labels, attributes and control values, use `read`, not
+`evaluate`. It samples the current DOM through fixed synchronous code in an
+isolated world, without script callbacks, input, timers or network requests.
+Clocks, carousels and unrelated frame navigation do not invalidate a read.
+
+~~~sh
+bsk read --session SID --selector '.swiper-slide-active' --fields-json '[{"key":"index","read":"attribute","attribute":"data-swiper-slide-index"},{"key":"text","read":"text"}]'
+~~~
+
+`--ref @eN` selects the exact observed node in its frame/shadow root; `--selector`
+searches the main document. Omit both for the document root. Fields use `key`,
+`read` (text/attribute/value/checked/exists), optional relative `selector` matching
+at most one descendant, and `attribute` only for attribute reads. Text is exact
+`textContent`, not rendered innerText; hidden DOM can be included. Missing fields
+are null (exists is false); missing top-level selectors return no items. Sensitive
+controls and ancestor text containing them are null and listed in `redacted`.
+No arbitrary properties, functions or JavaScript are accepted. Transform returned
+JSON on the host when needed; use extract below for table/list normalization.
+
+Inspect `truncated`: default/max nodes are 100/1000; default bytes 262144,
+maximum 1048576; collection budget 3000ms, adjustable 100..10000ms. Byte overflow
+or an ambiguous field returns an error, not a plausible partial result. A read
+binds to current document/attachment identity and never renews control or strict
+observations. Detached refs are not redirected. Use the returned refs plus exact
+`expect` facts for record IDs, labels, prices, recipients and form values before
+input. Comparisons concern values at input time, not an uninterrupted history;
+changed-then-restored facts may match. Cross-frame reads are separate samples,
+not one atomic business transaction.
+
+Requires CLI/daemon/extension protocol 1.9; unsupported peers fail explicitly,
+with no JavaScript fallback. Arbitrary evaluate that declares nothing still needs
+a fresh strict observation. After observation_changed during data gathering,
+switch to read/extract; do not keep syncing and retrying the script. For data
+these cannot express, see [scripts](cooperation.md#scripts).
 
 Use this for tables, lists, orders, reports or search results as reusable JSON/CSV.
 

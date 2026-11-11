@@ -43,5 +43,22 @@ Use `bsk_tabs` to list IDs before acting. Borrow for the immediate step and
 return promptly. Browser Automation settings
 govern confirmation and help; never change them to bypass a prompt or repeat
 pending/denied/expired borrows. Inspect unknown outcomes; follow version-error hints.
+
+For a borrow that returns `not_found`, inspect the error: the session or target tab
+may be unavailable. If the session is missing, verify the session ID and browser
+instance; recover the session or report that it is unavailable before proceeding.
+If the target tab is missing, list user tabs again with `bsk_tabs`. When it is no
+longer visible and the task depends on its state, ask the user to restore or reopen
+it in a user window of the same profile rather than silently substituting a new tab.
+Re-list tabs and identify the current ID before borrowing; ask the user if the
+target is ambiguous. After borrowing, verify the expected account and required page
+state. Reopening a page may not restore unsaved state.
+
+`confirmation_ui_unavailable` means the confirmation could not be shown. One
+possible cause is that no eligible user window has an ordinary http(s) page selected.
+Ask the user to select such a page, excluding extension stores, in a normal
+non-Agent window of the same browser profile, then retry once. Task tabs in the
+Agent Window cannot host the prompt. If it still fails, stop and report the error.
+
 Remote reads/actions require task-created or borrowed tabs; popups gain no control.
 An unowned tab inside the Agent Window needs a user move to a user window before borrowing.

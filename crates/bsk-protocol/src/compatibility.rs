@@ -37,17 +37,34 @@ impl Peer {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Feature {
-    IncognitoSessions,
     BorrowConfirmationTimeout,
     InteractionPolicy,
+    IncognitoSessions,
+    DialogControl,
+    ClickMoveClick,
+    TargetControl,
+    ActionConditions,
+    DomRead,
+    UnverifiedScript,
 }
 
 #[derive(Debug, Clone, Copy, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum FeatureWhen {
     Always,
-    True { field: &'static str },
-    Present { field: &'static str },
+    True {
+        field: &'static str,
+    },
+    Present {
+        field: &'static str,
+    },
+    Equals {
+        field: &'static str,
+        value: &'static str,
+    },
+    /// CLI permits `auto` to probe legacy daemons post-call, whereas the daemon
+    /// never forwards `target` or `auto` to a pre-1.8 extension.
+    ControlPolicy,
 }
 
 #[derive(Debug, Serialize)]
@@ -59,22 +76,23 @@ pub struct FeatureRequirement {
     pub when: FeatureWhen,
 }
 
+const TARGET_CONTROL_EXTENSION_RECOVERY: &str = "Please update the BrowserSkill extension in the affected browser profile and wait for it to reconnect. With a current CLI and an older extension, pass --policy strict on every sync/enable and step for legacy behavior. Strict policy does not make expect conditions available on old peers.";
+
 impl Feature {
     pub const ALL: &'static [Self] = &[
-        Self::IncognitoSessions,
         Self::BorrowConfirmationTimeout,
         Self::InteractionPolicy,
+        Self::IncognitoSessions,
+        Self::DialogControl,
+        Self::ClickMoveClick,
+        Self::TargetControl,
+        Self::ActionConditions,
+        Self::DomRead,
+        Self::UnverifiedScript,
     ];
 
     pub const fn requirement(self) -> &'static FeatureRequirement {
         match self {
-            Self::IncognitoSessions => &FeatureRequirement {
-                feature: Self::IncognitoSessions,
-                operation: "session start --incognito",
-                daemon: "1.4",
-                extension: "1.4",
-                when: FeatureWhen::True { field: "incognito" },
-            },
             Self::BorrowConfirmationTimeout => &FeatureRequirement {
                 feature: Self::BorrowConfirmationTimeout,
                 operation: "tab borrow --timeout",
@@ -94,6 +112,60 @@ impl Feature {
                 extension: "1.0",
                 when: FeatureWhen::Always,
             },
+            Self::IncognitoSessions => &FeatureRequirement {
+                feature: Self::IncognitoSessions,
+                operation: "session start --incognito",
+                daemon: "1.4",
+                extension: "1.4",
+                when: FeatureWhen::True { field: "incognito" },
+            },
+            Self::DialogControl => &FeatureRequirement {
+                feature: Self::DialogControl,
+                operation: "dialog and operation control",
+                daemon: "1.5",
+                extension: "1.5",
+                when: FeatureWhen::Always,
+            },
+            Self::ClickMoveClick => &FeatureRequirement {
+                feature: Self::ClickMoveClick,
+                operation: "click-move-click",
+                daemon: "1.7",
+                extension: "1.7",
+                when: FeatureWhen::Equals {
+                    field: "mode",
+                    value: "click-move-click",
+                },
+            },
+            Self::TargetControl => &FeatureRequirement {
+                feature: Self::TargetControl,
+                operation: "target control",
+                daemon: "1.8",
+                extension: "1.8",
+                when: FeatureWhen::ControlPolicy,
+            },
+            Self::ActionConditions => &FeatureRequirement {
+                feature: Self::ActionConditions,
+                operation: "action conditions (--expect)",
+                daemon: "1.8",
+                extension: "1.8",
+                when: FeatureWhen::Present { field: "expect" },
+            },
+            Self::DomRead => &FeatureRequirement {
+                feature: Self::DomRead,
+                operation: "read",
+                daemon: "1.9",
+                extension: "1.9",
+                when: FeatureWhen::Always,
+            },
+            Self::UnverifiedScript => &FeatureRequirement {
+                feature: Self::UnverifiedScript,
+                operation: "evaluate --unverified",
+                daemon: "1.9",
+                extension: "1.9",
+                when: FeatureWhen::True {
+                    field: "unverified",
+                },
+            },
         }
     }
 
@@ -101,6 +173,15 @@ impl Feature {
         match peer {
             Peer::Daemon => self.requirement().daemon,
             Peer::Extension => self.requirement().extension,
+        }
+    }
+
+    pub const fn recovery_hint(self, peer: Peer) -> &'static str {
+        match (self, peer) {
+            (Self::TargetControl | Self::ActionConditions, Peer::Extension) => {
+                TARGET_CONTROL_EXTENSION_RECOVERY
+            }
+            _ => peer.upgrade_hint(),
         }
     }
 
@@ -114,11 +195,23 @@ impl Feature {
             )
     }
 
-    pub fn requested(self, params: &Value) -> bool {
+    pub fn requested(self, peer: Peer, params: &Value) -> bool {
         match self.requirement().when {
             FeatureWhen::Always => true,
             FeatureWhen::True { field } => params.get(field) == Some(&Value::Bool(true)),
             FeatureWhen::Present { field } => params.get(field).is_some_and(|v| !v.is_null()),
+            FeatureWhen::Equals { field, value } => {
+                params.get(field).and_then(Value::as_str) == Some(value)
+            }
+            FeatureWhen::ControlPolicy => match peer {
+                Peer::Daemon => {
+                    params.get("control_policy").and_then(Value::as_str) == Some("target")
+                }
+                Peer::Extension => matches!(
+                    params.get("control_policy").and_then(Value::as_str),
+                    Some("target" | "auto")
+                ),
+            },
         }
     }
 
@@ -128,10 +221,11 @@ impl Feature {
         }
         let requirement = self.requirement();
         let required = self.required_protocol(peer);
+        let recovery = self.recovery_hint(peer);
         Err(RpcError {
             code: ErrorCode::Unsupported,
             message: format!(
-                "{} requires {} protocol {} (connected: {}). {} Other supported operations remain available",
+                "{} requires {} protocol {} or a later compatible 1.x version (connected: {}). {} Other supported operations remain available",
                 requirement.operation,
                 peer.name(),
                 required,
@@ -140,13 +234,18 @@ impl Feature {
                 } else {
                     protocol
                 },
-                peer.upgrade_hint(),
+                recovery,
             ),
             data: Some(json!({
-                "reason": "unsupported_feature", "feature": self,
-                "operation": requirement.operation, "component": peer,
-                "required_protocol": required, "actual_protocol": protocol,
-                "effect_state": "none", "recovery": peer.upgrade_hint(),
+                "reason": "unsupported_feature",
+                "phase": "negotiate",
+                "feature": self,
+                "operation": requirement.operation,
+                "component": peer,
+                "required_protocol": required,
+                "actual_protocol": protocol,
+                "effect_state": "none",
+                "recovery": recovery,
             })),
         })
     }
@@ -159,7 +258,7 @@ pub fn check_request(
     protocol: &str,
 ) -> Result<(), RpcError> {
     for feature in method.features() {
-        if feature.requested(params) {
+        if feature.requested(peer, params) {
             feature.require(peer, protocol)?;
         }
     }

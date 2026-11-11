@@ -33,7 +33,11 @@ backends to bypass limits. Borrow confirmation still applies.
 - Unknown browser tool after plugin reload: invoke `skill` with `name: "browser-skill"`
   again (users can enter `/browser-skill`), then retry the intended browser tool once
   after its schema appears. If it remains unavailable, report the failure.
-- Stale ref: observe, then retry the intended action once.
+- Stale ref or target failure: inspect the live target and choose the appropriate action.
+  A missing, hidden or covered target is not evidence of human takeover.
+- `precondition_failed`: compare `target`, `field`, `expected` and `actual`, then reconsider
+  the decision. A new context does not make the expected value true.
+- Control revoked: wait-user while the person is active, then sync and reconcile completed steps.
 - Unknown tab/session: list owned resources or start a session with the required
   browser selector, if any; never guess IDs.
 - Failed/interrupted stop: accepted cleanup continues in the background. Retry the
@@ -45,3 +49,22 @@ backends to bypass limits. Borrow confirmation still applies.
 - Unconfirmed fill: read the field. Formatting may satisfy the goal; correct only a
   remaining difference instead of blindly refilling or requesting help.
 - Other errors: follow the hint; on unrecoverable failure, report and stop the owned session.
+
+For observation_changed while gathering data on a changing page, use the fixed
+read/extract path (inspect action=read/extract in MCP/DSH). Do not resubmit
+arbitrary evaluate in a sync loop. When a script is still needed, state what it
+relies on (`expect`, or `dependsOn` under strict policy) so only that is checked;
+`unverified` is the last resort when that cannot be stated
+([scripts](cooperation.md#scripts)). A refusal is known to have no effect only
+when effect_state=none; unknown results still require application inspection.
+
+## Local pairing
+
+On `pairing_required`, follow the [local setup guide](https://github.com/Tencent/BrowserSkill/blob/main/docs/local-pairing.md)
+with the intended daemon environment. Have the user paste the private pairing
+link into extension settings and wait for Connected / Verified before retrying
+the native session tool. Never include the link in logs or shared reports.
+`already_paired` preserves the current connection; replace it only when intended.
+`replace_mismatch` needs a normal link for a new profile; revoke an unused old
+device separately. Never enable verification skipping to bypass an error.
+Independent daemon homes require separate pairings.

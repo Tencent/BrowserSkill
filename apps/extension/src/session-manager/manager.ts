@@ -1,7 +1,9 @@
+import { type ControllerInfo, controllerColor } from "@/lib/controller-info";
 import { AGENT_WINDOW_HOME, type AgentWindowApi, chromeAgentWindowApi } from "./agent-window";
 import { RefStore } from "./ref-store";
 
 export interface SessionContext {
+  controller?: ControllerInfo;
   /** Incognito sessions cannot borrow user tabs. Absent means a normal window. */
   incognito?: boolean;
   /** Remote connections retain dedicated windows, with explicit page ownership. */
@@ -9,6 +11,8 @@ export interface SessionContext {
   sessionId: string;
   agentWindowId: number;
   refStore: RefStore;
+  /** Negotiated once per session; omitted clients retain strict observations. */
+  controlPolicy?: "strict" | "target";
   borrowedTabs: Map<number, BorrowedTab>;
   /**
    * Tabs explicitly claimed by the agent because it created them. This
@@ -32,10 +36,30 @@ export function isAgentControlledTab(ctx: SessionContext, tabId: number): boolea
   );
 }
 
+export interface BorrowedTabGroupMetadata {
+  title?: string;
+  color?: chrome.tabGroups.ColorEnum;
+  collapsed?: boolean;
+}
+
 export interface BorrowedTab {
   tabId: number;
   originalWindowId: number;
   originalIndex: number;
+  /** Left-hand neighbor tab ID in the original window at borrow time. */
+  leftNeighborTabId?: number;
+  /** Right-hand neighbor tab ID in the original window at borrow time. */
+  rightNeighborTabId?: number;
+  /** Ordered left-hand neighbor tab IDs (closest to farthest) in the original window. */
+  leftNeighborTabIds?: number[];
+  /** Ordered right-hand neighbor tab IDs (closest to farthest) in the original window. */
+  rightNeighborTabIds?: number[];
+  /** Original Chrome Tab Group ID (>= 0 when grouped). */
+  originalGroupId?: number;
+  /** Snapshot of the original Tab Group's properties for recreating single-tab groups. */
+  originalGroup?: BorrowedTabGroupMetadata;
+  /** Whether the tab was pinned in the original window before borrowing. */
+  originalPinned?: boolean;
 }
 
 export interface BorrowReservation {
@@ -51,6 +75,7 @@ export interface SessionManagerOptions {
 
 /** Options for starting a session's Agent Window. */
 export interface SessionStartOptions {
+  controller?: ControllerInfo;
   /** Use Chrome's shared incognito browsing session. */
   incognito?: boolean;
   /** Optional Agent Window outer size in CSS pixels. */
@@ -260,7 +285,7 @@ export class SessionManager {
     let windowId: number | null = null;
     const agentCreatedTabs = new Set<number>();
     try {
-      const { signal: _signal, ...createOptions } = opts;
+      const { signal: _signal, controller: _controller, ...createOptions } = opts;
       const created = await this.agentWindow.create(AGENT_WINDOW_HOME, createOptions);
       windowId = created.windowId;
       for (const tabId of created.initialTabIds) agentCreatedTabs.add(tabId);
@@ -279,6 +304,7 @@ export class SessionManager {
       throwIfSessionStartAborted(opts.signal);
 
       const ctx: SessionContext = {
+        controller: this.controllerFor(sessionId, opts.controller),
         incognito: created.incognito ?? false,
         ...(this.remote() ? { remote: true } : {}),
         sessionId,
@@ -302,6 +328,7 @@ export class SessionManager {
           // The daemon may retry stop after a failed startup rollback. Retain
           // the exact window handle until closure is confirmed.
           const pending: SessionContext = {
+            controller: this.controllerFor(sessionId, opts.controller),
             incognito: opts.incognito ?? false,
             ...(this.remote() ? { remote: true } : {}),
             sessionId,
@@ -320,6 +347,21 @@ export class SessionManager {
     }
   }
 
+  private controllerFor(
+    sessionId: string,
+    controller?: ControllerInfo,
+  ): ControllerInfo | undefined {
+    if (!controller) return undefined;
+    return {
+      ...controller,
+      color: controllerColor(
+        sessionId,
+        controller,
+        Array.from(this.sessions.values(), (ctx) => ctx.controller?.color),
+      ),
+    };
+  }
+
   /**
    * Tear down a session: close its Agent Window and drop the context.
    *
@@ -336,8 +378,19 @@ export class SessionManager {
     if (!options.dropOnly) {
       await this.agentWindow.remove(ctx.agentWindowId);
     }
+    if (this.sessions.get(sessionId) === ctx) this.release(sessionId);
+    return ctx;
+  }
+
+  /** End ownership synchronously, without moving or closing any browser page. */
+  release(sessionId: string): SessionContext | null {
+    const ctx = this.sessions.get(sessionId);
+    if (!ctx) return null;
     this.sessions.delete(sessionId);
     this.windowIndex.delete(ctx.agentWindowId);
+    for (const [tabId, owner] of this.borrowReservations) {
+      if (owner === sessionId) this.borrowReservations.delete(tabId);
+    }
     return ctx;
   }
 

@@ -77,6 +77,13 @@
       },
       "type": "array"
     },
+    "observation_id": {
+      "description": "Token identifying the current ref map; pass to drag to reject stale refs.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
     "ref_count": {
       "description": "Number of `@e<N>` refs registered for this session by this\nsnapshot. Equivalent to the size of the new ref-store map.",
       "format": "uint32",

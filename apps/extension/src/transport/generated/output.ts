@@ -2,6 +2,11 @@
 
 /**
  * This interface was referenced by `ProtocolTypes`'s JSON-Schema
+ * via the `definition` "ExpectationField".
+ */
+export type ExpectationField = "text" | "value" | "checked" | "attribute" | "exists";
+/**
+ * This interface was referenced by `ProtocolTypes`'s JSON-Schema
  * via the `definition` "AnyValue".
  */
 export type AnyValue = unknown;
@@ -45,6 +50,11 @@ export type KeyModifier = "alt" | "ctrl" | "meta" | "shift";
  * via the `definition` "ConsoleEntryKind".
  */
 export type ConsoleEntryKind = "console" | "exception" | "log";
+/**
+ * This interface was referenced by `ProtocolTypes`'s JSON-Schema
+ * via the `definition` "ControlPolicy".
+ */
+export type ControlPolicy = ("strict" | "target") | "auto";
 /**
  * This interface was referenced by `ProtocolTypes`'s JSON-Schema
  * via the `definition` "CooperateAction".
@@ -127,6 +137,16 @@ export type DebugRuleState = "enabled" | "disabled" | "exhausted" | "removed" | 
  */
 export type DebugRunState = "capturing" | "stopped";
 /**
+ * This interface was referenced by `ProtocolTypes`'s JSON-Schema
+ * via the `definition` "DomRead".
+ */
+export type DomRead = "text" | "attribute" | "value" | "checked" | "exists";
+/**
+ * This interface was referenced by `ProtocolTypes`'s JSON-Schema
+ * via the `definition` "DragMode".
+ */
+export type DragMode = "press-move-release" | "click-move-click";
+/**
  * Which state the caller is waiting for.
  *
  * `Visible` / `Hidden` ask about **visibility**; `Attached` /
@@ -148,19 +168,45 @@ export type ElementState = "visible" | "hidden" | "attached" | "detached";
  * via the `definition` "ErrorCode".
  */
 export type ErrorCode =
-  | "unknown_method"
-  | "unsupported"
-  | "invalid_params"
-  | "not_found"
-  | "permission_denied"
-  | "timeout"
-  | "cdp_failed"
-  | "protocol_error"
-  | "cancelled"
-  | "user_aborted"
-  | "version_too_old"
-  | "multiple_browsers_online"
-  | "no_browser_connected";
+  | (
+      | "unknown_method"
+      | "unsupported"
+      | "invalid_params"
+      | "not_found"
+      | "permission_denied"
+      | "timeout"
+      | "cdp_failed"
+      | "protocol_error"
+      | "cancelled"
+      | "user_aborted"
+      | "version_too_old"
+      | "multiple_browsers_online"
+      | "no_browser_connected"
+      | "pairing_required"
+    )
+  | "dialog_pending";
+/**
+ * This interface was referenced by `ProtocolTypes`'s JSON-Schema
+ * via the `definition` "EventKind".
+ */
+export type EventKind =
+  | (
+      | "audit.context"
+      | "dialog.changed"
+      | "session.activity"
+      | "session.window_closed"
+      | "session.user_interrupt"
+      | "session.interaction_changed"
+      | "browser.disconnected"
+      | "browser.connected"
+    )
+  | "system.heartbeat"
+  | "session.ended";
+/**
+ * This interface was referenced by `ProtocolTypes`'s JSON-Schema
+ * via the `definition` "ExpectedValue".
+ */
+export type ExpectedValue = string | boolean | null;
 /**
  * This interface was referenced by `ProtocolTypes`'s JSON-Schema
  * via the `definition` "ExtractAction".
@@ -546,6 +592,8 @@ export type WaitForNavigationReached =
   "load" | "domcontentloaded" | "networkidle" | "commit" | "timeout";
 
 export interface ProtocolTypes {
+  ActionExpectation: ActionExpectation;
+  ActionMetadata: ActionMetadata;
   AnyValue: AnyValue;
   BlurParams: BlurParams;
   BlurResult: BlurResult;
@@ -562,6 +610,8 @@ export interface ProtocolTypes {
   ConsoleParams: ConsoleParams;
   ConsoleResult: ConsoleResult;
   ConsoleStackFrame: ConsoleStackFrame;
+  ControlPolicy: ControlPolicy;
+  ControllerInfo: ControllerInfo;
   CooperateAction: CooperateAction;
   CooperateParams: CooperateParams;
   DebugAction: DebugAction;
@@ -605,8 +655,18 @@ export interface ProtocolTypes {
   DebugTextChanges: DebugTextChanges;
   DebugValue: DebugValue;
   DebugVisibility: DebugVisibility;
+  DialogHandleParams: DialogHandleParams;
+  DialogHandleResult: DialogHandleResult;
+  DialogStatusParams: DialogStatusParams;
+  DialogStatusResult: DialogStatusResult;
+  DomRead: DomRead;
   DownloadParams: DownloadParams;
   DownloadResult: DownloadResult;
+  DragMode: DragMode;
+  DragParams: DragParams;
+  DragPoint: DragPoint;
+  DragResult: DragResult;
+  DragTarget: DragTarget;
   ElementState: ElementState;
   EmulateOverrides: EmulateOverrides;
   EmulateParams: EmulateParams;
@@ -615,6 +675,9 @@ export interface ProtocolTypes {
   EvaluateError: EvaluateError;
   EvaluateParams: EvaluateParams;
   EvaluateResult: EvaluateResult;
+  EventKind: EventKind;
+  ExpectationField: ExpectationField;
+  ExpectedValue: ExpectedValue;
   ExtractAction: ExtractAction;
   ExtractColumn: ExtractColumn;
   ExtractCompleteness: ExtractCompleteness;
@@ -653,6 +716,7 @@ export interface ProtocolTypes {
   JavaScriptDialogInfo: JavaScriptDialogInfo;
   JavaScriptDialogType: JavaScriptDialogType;
   KeyModifier: KeyModifier;
+  LocalAuthStatus: LocalAuthStatus;
   MouseButton: MouseButton;
   NavigateBackParams: NavigateBackParams;
   NavigateBackResult: NavigateBackResult;
@@ -668,11 +732,17 @@ export interface ProtocolTypes {
   ObserveDebug: ObserveDebug;
   ObserveParams: ObserveParams;
   ObserveResult: ObserveResult;
+  OperationParams: OperationParams;
   PageRefV2: PageRefV2;
+  PendingJavaScriptDialog: PendingJavaScriptDialog;
   PingParams: PingParams;
   PingResult: PingResult;
   PressParams: PressParams;
   PressResult: PressResult;
+  ReadField: ReadField;
+  ReadItem: ReadItem;
+  ReadParams: ReadParams;
+  ReadResult: ReadResult;
   RecordAwaitParams: RecordAwaitParams;
   RecordAwaitResult: RecordAwaitResult;
   RecordStartParams: RecordStartParams;
@@ -741,6 +811,7 @@ export interface ProtocolTypes {
   TraceStateV3: TraceStateV3;
   TraceV2: TraceV2;
   TraceV3: TraceV3;
+  UnpairedAttempt: UnpairedAttempt;
   UploadFile: UploadFile;
   UploadMode: UploadMode;
   UploadParams: UploadParams;
@@ -770,10 +841,95 @@ export interface ProtocolTypes {
   WindowResizeResult: WindowResizeResult;
 }
 /**
+ * Caller-supplied facts checked immediately before starting an action.
+ *
+ * This interface was referenced by `ProtocolTypes`'s JSON-Schema
+ * via the `definition` "ActionExpectation".
+ */
+export interface ActionExpectation {
+  /**
+   * Required only for field=attribute, measured in Unicode code points.
+   */
+  attribute?: string;
+  /**
+   * text/value require a string; checked/exists require a boolean;
+   * attribute accepts a string or null for absence. Text is exact textContent.
+   */
+  equals: string | boolean | null;
+  field: ExpectationField;
+  /**
+   * Observed ref or main-document CSS selector, measured in Unicode code points.
+   */
+  target: string;
+}
+/**
+ * Shared metadata merged into guarded tool params on the wire.
+ * Passive reads and session lifecycle operations do not evaluate these conditions.
+ *
+ * This interface was referenced by `ProtocolTypes`'s JSON-Schema
+ * via the `definition` "ActionMetadata".
+ */
+export interface ActionMetadata {
+  /**
+   * Context actually returned by sync. Reusable for target-policy DOM actions;
+   * strict policy consumes it after one action. Never fill it from cached state.
+   */
+  context_id?: string;
+  /**
+   * Strict policy only: observed decision regions. Target policy requires exact
+   * business facts in expect; regions cannot be translated to facts automatically.
+   *
+   * @maxItems 16
+   */
+  depends_on?: string[];
+  /**
+   * Literal conditions checked before input. Selectors search the main document;
+   * use observed refs for iframe/shadow-root targets. Text includes all whitespace.
+   *
+   * @maxItems 16
+   */
+  expect?: ActionExpectation[];
+  /**
+   * Sync's single-use baseline for untargeted/visual actions under target policy,
+   * including untargeted keys and displacement-only drags. Drags with a
+   * target ref/selector need only context_id. A script needs it only when it
+   * states no expect facts; passing both checks the whole page as well.
+   * Strict-policy drag instead accepts its legacy ref-map observation token.
+   */
+  observation_id?: string;
+}
+/**
  * This interface was referenced by `ProtocolTypes`'s JSON-Schema
  * via the `definition` "BlurParams".
  */
 export interface BlurParams {
+  /**
+   * Context actually returned by sync. Reusable for target-policy DOM actions;
+   * strict policy consumes it after one action. Never fill it from cached state.
+   */
+  context_id?: string;
+  /**
+   * Strict policy only: observed decision regions. Target policy requires exact
+   * business facts in expect; regions cannot be translated to facts automatically.
+   *
+   * @maxItems 16
+   */
+  depends_on?: string[];
+  /**
+   * Literal conditions checked before input. Selectors search the main document;
+   * use observed refs for iframe/shadow-root targets. Text includes all whitespace.
+   *
+   * @maxItems 16
+   */
+  expect?: ActionExpectation[];
+  /**
+   * Sync's single-use baseline for untargeted/visual actions under target policy,
+   * including untargeted keys and displacement-only drags. Drags with a
+   * target ref/selector need only context_id. A script needs it only when it
+   * states no expect facts; passing both checks the whole page as well.
+   * Strict-policy drag instead accepts its legacy ref-map observation token.
+   */
+  observation_id?: string;
   /**
    * Optional `@e<N>` ref allocated by the last observation.
    * Mutually exclusive with `selector`.
@@ -913,9 +1069,36 @@ export interface ClickParams {
    * Number of consecutive mouse presses (double-click = 2).
    */
   click_count?: number;
+  /**
+   * Context actually returned by sync. Reusable for target-policy DOM actions;
+   * strict policy consumes it after one action. Never fill it from cached state.
+   */
+  context_id?: string;
+  /**
+   * Strict policy only: observed decision regions. Target policy requires exact
+   * business facts in expect; regions cannot be translated to facts automatically.
+   *
+   * @maxItems 16
+   */
+  depends_on?: string[];
+  /**
+   * Literal conditions checked before input. Selectors search the main document;
+   * use observed refs for iframe/shadow-root targets. Text includes all whitespace.
+   *
+   * @maxItems 16
+   */
+  expect?: ActionExpectation[];
   image_x?: number;
   image_y?: number;
   modifiers?: KeyModifier[];
+  /**
+   * Sync's single-use baseline for untargeted/visual actions under target policy,
+   * including untargeted keys and displacement-only drags. Drags with a
+   * target ref/selector need only context_id. A script needs it only when it
+   * states no expect facts; passing both checks the whole page as well.
+   * Strict-policy drag instead accepts its legacy ref-map observation token.
+   */
+  observation_id?: string;
   /**
    * Optional `@e<N>` ref allocated by the last `tool.snapshot`.
    * Mutually exclusive with `selector` (caller must supply exactly
@@ -1013,11 +1196,29 @@ export interface ConsoleResult {
   truncated: boolean;
 }
 /**
+ * Display identity of the agent controlling a session. Never an authorization claim.
+ *
+ * This interface was referenced by `ProtocolTypes`'s JSON-Schema
+ * via the `definition` "ControllerInfo".
+ */
+export interface ControllerInfo {
+  /**
+   * Optional six-digit hex color. Omitted colors are derived from the session ID.
+   */
+  color?: string;
+  name: string;
+  project?: string;
+}
+/**
  * This interface was referenced by `ProtocolTypes`'s JSON-Schema
  * via the `definition` "CooperateParams".
  */
 export interface CooperateParams {
   action: CooperateAction;
+  /**
+   * Omitted by legacy callers. A negotiated policy remains fixed for the session.
+   */
+  control_policy?: ControlPolicy;
   max_tokens?: number;
   session_id: string;
   tab_id?: number;
@@ -1320,6 +1521,25 @@ export interface DebugParams {
   action: DebugAction;
   budget?: number;
   command_id?: string;
+  /**
+   * Context actually returned by sync. Reusable for target-policy DOM actions;
+   * strict policy consumes it after one action. Never fill it from cached state.
+   */
+  context_id?: string;
+  /**
+   * Strict policy only: observed decision regions. Target policy requires exact
+   * business facts in expect; regions cannot be translated to facts automatically.
+   *
+   * @maxItems 16
+   */
+  depends_on?: string[];
+  /**
+   * Literal conditions checked before input. Selectors search the main document;
+   * use observed refs for iframe/shadow-root targets. Text includes all whitespace.
+   *
+   * @maxItems 16
+   */
+  expect?: ActionExpectation[];
   fields?: string[];
   id?: string;
   include_controlled?: boolean;
@@ -1328,6 +1548,14 @@ export interface DebugParams {
   max_chars?: number;
   method?: string;
   name?: string;
+  /**
+   * Sync's single-use baseline for untargeted/visual actions under target policy,
+   * including untargeted keys and displacement-only drags. Drags with a
+   * target ref/selector need only context_id. A script needs it only when it
+   * states no expect facts; passing both checks the whole page as well.
+   * Strict-policy drag instead accepts its legacy ref-map observation token.
+   */
+  observation_id?: string;
   offset?: number;
   part?: string;
   pointer?: string;
@@ -1584,6 +1812,53 @@ export interface DebugResult {
 }
 /**
  * This interface was referenced by `ProtocolTypes`'s JSON-Schema
+ * via the `definition` "DialogHandleParams".
+ */
+export interface DialogHandleParams {
+  dialog_id: string;
+  session_id: string;
+  text?: string;
+}
+/**
+ * This interface was referenced by `ProtocolTypes`'s JSON-Schema
+ * via the `definition` "DialogHandleResult".
+ */
+export interface DialogHandleResult {
+  dialog: JavaScriptDialogInfo;
+  session_id: string;
+}
+/**
+ * This interface was referenced by `ProtocolTypes`'s JSON-Schema
+ * via the `definition` "DialogStatusParams".
+ */
+export interface DialogStatusParams {
+  session_id: string;
+  tab_id?: number;
+}
+/**
+ * This interface was referenced by `ProtocolTypes`'s JSON-Schema
+ * via the `definition` "DialogStatusResult".
+ */
+export interface DialogStatusResult {
+  dialogs: PendingJavaScriptDialog[];
+  session_id: string;
+}
+/**
+ * This interface was referenced by `ProtocolTypes`'s JSON-Schema
+ * via the `definition` "PendingJavaScriptDialog".
+ */
+export interface PendingJavaScriptDialog {
+  decision_deadline: number;
+  default_prompt?: string;
+  id: string;
+  message: string;
+  sequence: number;
+  tab_id: number;
+  type: JavaScriptDialogType;
+  url?: string;
+}
+/**
+ * This interface was referenced by `ProtocolTypes`'s JSON-Schema
  * via the `definition` "DownloadParams".
  */
 export interface DownloadParams {
@@ -1592,10 +1867,37 @@ export interface DownloadParams {
    */
   browser_relative_dir?: string;
   /**
+   * Context actually returned by sync. Reusable for target-policy DOM actions;
+   * strict policy consumes it after one action. Never fill it from cached state.
+   */
+  context_id?: string;
+  /**
+   * Strict policy only: observed decision regions. Target policy requires exact
+   * business facts in expect; regions cannot be translated to facts automatically.
+   *
+   * @maxItems 16
+   */
+  depends_on?: string[];
+  /**
+   * Literal conditions checked before input. Selectors search the main document;
+   * use observed refs for iframe/shadow-root targets. Text includes all whitespace.
+   *
+   * @maxItems 16
+   */
+  expect?: ActionExpectation[];
+  /**
    * Daemon-injected authoritative transfer size limit. The extension uses
    * it only for early cancellation; daemon import remains the final check.
    */
   max_byte_size?: number;
+  /**
+   * Sync's single-use baseline for untargeted/visual actions under target policy,
+   * including untargeted keys and displacement-only drags. Drags with a
+   * target ref/selector need only context_id. A script needs it only when it
+   * states no expect facts; passing both checks the whole page as well.
+   * Strict-policy drag instead accepts its legacy ref-map observation token.
+   */
+  observation_id?: string;
   ref?: string;
   selector?: string;
   session_id: string;
@@ -1622,6 +1924,95 @@ export interface DownloadResult {
   transfer_id?: string;
   used_ref?: string;
   used_selector?: string;
+}
+/**
+ * This interface was referenced by `ProtocolTypes`'s JSON-Schema
+ * via the `definition` "DragParams".
+ */
+export interface DragParams {
+  button?: MouseButton;
+  /**
+   * Context actually returned by sync. Reusable for target-policy DOM actions;
+   * strict policy consumes it after one action. Never fill it from cached state.
+   */
+  context_id?: string;
+  delta?: DragPoint;
+  /**
+   * Strict policy only: observed decision regions. Target policy requires exact
+   * business facts in expect; regions cannot be translated to facts automatically.
+   *
+   * @maxItems 16
+   */
+  depends_on?: string[];
+  /**
+   * Travel duration, excluding hold. Defaults to 500 ms.
+   */
+  duration_ms?: number;
+  /**
+   * Literal conditions checked before input. Selectors search the main document;
+   * use observed refs for iframe/shadow-root targets. Text includes all whitespace.
+   *
+   * @maxItems 16
+   */
+  expect?: ActionExpectation[];
+  /**
+   * Delay after pressing and before moving. Defaults to zero.
+   */
+  hold_ms?: number;
+  /**
+   * Defaults to press-move-release. Click-move-click requires target and zero hold.
+   */
+  mode?: DragMode;
+  modifiers?: KeyModifier[];
+  /**
+   * Sync's single-use baseline for untargeted/visual actions under target policy,
+   * including untargeted keys and displacement-only drags. Drags with a
+   * target ref/selector need only context_id. A script needs it only when it
+   * states no expect facts; passing both checks the whole page as well.
+   * Strict-policy drag instead accepts its legacy ref-map observation token.
+   */
+  observation_id?: string;
+  session_id: string;
+  source: DragTarget;
+  tab_id?: number;
+  /**
+   * Exactly one of target or delta is required.
+   */
+  target?: DragTarget;
+  timeout_ms?: number;
+}
+/**
+ * This interface was referenced by `ProtocolTypes`'s JSON-Schema
+ * via the `definition` "DragPoint".
+ */
+export interface DragPoint {
+  x: number;
+  y: number;
+}
+/**
+ * This interface was referenced by `ProtocolTypes`'s JSON-Schema
+ * via the `definition` "DragTarget".
+ */
+export interface DragTarget {
+  /**
+   * Offset from the visible action point, in top-level viewport CSS pixels.
+   */
+  offset?: DragPoint;
+  ref?: string;
+  selector?: string;
+}
+/**
+ * This interface was referenced by `ProtocolTypes`'s JSON-Schema
+ * via the `definition` "DragResult".
+ */
+export interface DragResult {
+  /**
+   * Input delivery completed; application acceptance must be observed separately.
+   */
+  dialogs?: JavaScriptDialogInfo[];
+  source: DragPoint;
+  tab_id: number;
+  target: DragPoint;
 }
 /**
  * Concrete emulation overrides for one tab. Field presence drives the
@@ -1707,6 +2098,33 @@ export interface UserAgentBrandVersion {
  */
 export interface EmulateParams {
   /**
+   * Context actually returned by sync. Reusable for target-policy DOM actions;
+   * strict policy consumes it after one action. Never fill it from cached state.
+   */
+  context_id?: string;
+  /**
+   * Strict policy only: observed decision regions. Target policy requires exact
+   * business facts in expect; regions cannot be translated to facts automatically.
+   *
+   * @maxItems 16
+   */
+  depends_on?: string[];
+  /**
+   * Literal conditions checked before input. Selectors search the main document;
+   * use observed refs for iframe/shadow-root targets. Text includes all whitespace.
+   *
+   * @maxItems 16
+   */
+  expect?: ActionExpectation[];
+  /**
+   * Sync's single-use baseline for untargeted/visual actions under target policy,
+   * including untargeted keys and displacement-only drags. Drags with a
+   * target ref/selector need only context_id. A script needs it only when it
+   * states no expect facts; passing both checks the whole page as well.
+   * Strict-policy drag instead accepts its legacy ref-map observation token.
+   */
+  observation_id?: string;
+  /**
    * Clear every emulation override on the tab and restore its real
    * environment. Mutually exclusive with `overrides`.
    */
@@ -1760,7 +2178,34 @@ export interface EvaluateParams {
    * `Runtime.evaluate(awaitPromise=...)`). Defaults to `true`.
    */
   await_promise?: boolean;
+  /**
+   * Context actually returned by sync. Reusable for target-policy DOM actions;
+   * strict policy consumes it after one action. Never fill it from cached state.
+   */
+  context_id?: string;
+  /**
+   * Strict policy only: observed decision regions. Target policy requires exact
+   * business facts in expect; regions cannot be translated to facts automatically.
+   *
+   * @maxItems 16
+   */
+  depends_on?: string[];
+  /**
+   * Literal conditions checked before input. Selectors search the main document;
+   * use observed refs for iframe/shadow-root targets. Text includes all whitespace.
+   *
+   * @maxItems 16
+   */
+  expect?: ActionExpectation[];
   expression: string;
+  /**
+   * Sync's single-use baseline for untargeted/visual actions under target policy,
+   * including untargeted keys and displacement-only drags. Drags with a
+   * target ref/selector need only context_id. A script needs it only when it
+   * states no expect facts; passing both checks the whole page as well.
+   * Strict-policy drag instead accepts its legacy ref-map observation token.
+   */
+  observation_id?: string;
   /**
    * Ask CDP to serialise the result by value (vs. returning a
    * `RemoteObject` id we cannot use). Defaults to `true`.
@@ -1775,6 +2220,13 @@ export interface EvaluateParams {
    * Hard upper bound on the evaluation. Defaults to 30s.
    */
   timeout_ms?: number;
+  /**
+   * Run without comparing the page with any observation. Control authority,
+   * document identity and tab ownership are still enforced. Cannot be
+   * combined with `expect`, `depends_on` or `observation_id`. Prefer stating
+   * what the script relies on; use this only when that cannot be stated.
+   */
+  unverified?: boolean;
 }
 /**
  * Outcome of an `evaluate` call.
@@ -1799,6 +2251,11 @@ export interface EvaluateResult {
   ok: boolean;
   tab_id: number;
   value?: unknown;
+  /**
+   * Present, and `false`, only when the script ran with `unverified`: nothing
+   * about the page was compared before it ran.
+   */
+  verified?: boolean;
 }
 /**
  * This interface was referenced by `ProtocolTypes`'s JSON-Schema
@@ -1929,6 +2386,33 @@ export interface FillParams {
    * to append instead of replacing.
    */
   clear_before?: boolean;
+  /**
+   * Context actually returned by sync. Reusable for target-policy DOM actions;
+   * strict policy consumes it after one action. Never fill it from cached state.
+   */
+  context_id?: string;
+  /**
+   * Strict policy only: observed decision regions. Target policy requires exact
+   * business facts in expect; regions cannot be translated to facts automatically.
+   *
+   * @maxItems 16
+   */
+  depends_on?: string[];
+  /**
+   * Literal conditions checked before input. Selectors search the main document;
+   * use observed refs for iframe/shadow-root targets. Text includes all whitespace.
+   *
+   * @maxItems 16
+   */
+  expect?: ActionExpectation[];
+  /**
+   * Sync's single-use baseline for untargeted/visual actions under target policy,
+   * including untargeted keys and displacement-only drags. Drags with a
+   * target ref/selector need only context_id. A script needs it only when it
+   * states no expect facts; passing both checks the whole page as well.
+   * Strict-policy drag instead accepts its legacy ref-map observation token.
+   */
+  observation_id?: string;
   ref?: string;
   selector?: string;
   session_id: string;
@@ -1956,6 +2440,33 @@ export interface FillResult {
  * via the `definition` "FocusParams".
  */
 export interface FocusParams {
+  /**
+   * Context actually returned by sync. Reusable for target-policy DOM actions;
+   * strict policy consumes it after one action. Never fill it from cached state.
+   */
+  context_id?: string;
+  /**
+   * Strict policy only: observed decision regions. Target policy requires exact
+   * business facts in expect; regions cannot be translated to facts automatically.
+   *
+   * @maxItems 16
+   */
+  depends_on?: string[];
+  /**
+   * Literal conditions checked before input. Selectors search the main document;
+   * use observed refs for iframe/shadow-root targets. Text includes all whitespace.
+   *
+   * @maxItems 16
+   */
+  expect?: ActionExpectation[];
+  /**
+   * Sync's single-use baseline for untargeted/visual actions under target policy,
+   * including untargeted keys and displacement-only drags. Drags with a
+   * target ref/selector need only context_id. A script needs it only when it
+   * states no expect facts; passing both checks the whole page as well.
+   * Strict-policy drag instead accepts its legacy ref-map observation token.
+   */
+  observation_id?: string;
   /**
    * Optional `@e<N>` ref allocated by the last observation.
    * Mutually exclusive with `selector`.
@@ -2127,7 +2638,34 @@ export interface HelpTarget {
  * via the `definition` "HoverParams".
  */
 export interface HoverParams {
+  /**
+   * Context actually returned by sync. Reusable for target-policy DOM actions;
+   * strict policy consumes it after one action. Never fill it from cached state.
+   */
+  context_id?: string;
+  /**
+   * Strict policy only: observed decision regions. Target policy requires exact
+   * business facts in expect; regions cannot be translated to facts automatically.
+   *
+   * @maxItems 16
+   */
+  depends_on?: string[];
+  /**
+   * Literal conditions checked before input. Selectors search the main document;
+   * use observed refs for iframe/shadow-root targets. Text includes all whitespace.
+   *
+   * @maxItems 16
+   */
+  expect?: ActionExpectation[];
   modifiers?: KeyModifier[];
+  /**
+   * Sync's single-use baseline for untargeted/visual actions under target policy,
+   * including untargeted keys and displacement-only drags. Drags with a
+   * target ref/selector need only context_id. A script needs it only when it
+   * states no expect facts; passing both checks the whole page as well.
+   * Strict-policy drag instead accepts its legacy ref-map observation token.
+   */
+  observation_id?: string;
   /**
    * Optional `@e<N>` ref allocated by the last observation.
    * Mutually exclusive with `selector`.
@@ -2188,9 +2726,53 @@ export interface InteractionPolicy {
 }
 /**
  * This interface was referenced by `ProtocolTypes`'s JSON-Schema
+ * via the `definition` "LocalAuthStatus".
+ */
+export interface LocalAuthStatus {
+  last_unpaired_attempt: UnpairedAttempt | null;
+  mode: string;
+  paired_devices: number;
+}
+/**
+ * This interface was referenced by `ProtocolTypes`'s JSON-Schema
+ * via the `definition` "UnpairedAttempt".
+ */
+export interface UnpairedAttempt {
+  at: string;
+  extension_version: string | null;
+}
+/**
+ * This interface was referenced by `ProtocolTypes`'s JSON-Schema
  * via the `definition` "NavigateBackParams".
  */
 export interface NavigateBackParams {
+  /**
+   * Context actually returned by sync. Reusable for target-policy DOM actions;
+   * strict policy consumes it after one action. Never fill it from cached state.
+   */
+  context_id?: string;
+  /**
+   * Strict policy only: observed decision regions. Target policy requires exact
+   * business facts in expect; regions cannot be translated to facts automatically.
+   *
+   * @maxItems 16
+   */
+  depends_on?: string[];
+  /**
+   * Literal conditions checked before input. Selectors search the main document;
+   * use observed refs for iframe/shadow-root targets. Text includes all whitespace.
+   *
+   * @maxItems 16
+   */
+  expect?: ActionExpectation[];
+  /**
+   * Sync's single-use baseline for untargeted/visual actions under target policy,
+   * including untargeted keys and displacement-only drags. Drags with a
+   * target ref/selector need only context_id. A script needs it only when it
+   * states no expect facts; passing both checks the whole page as well.
+   * Strict-policy drag instead accepts its legacy ref-map observation token.
+   */
+  observation_id?: string;
   session_id: string;
   tab_id?: number;
   timeout_ms?: number;
@@ -2213,6 +2795,33 @@ export interface NavigateBackResult {
  * via the `definition` "NavigateForwardParams".
  */
 export interface NavigateForwardParams {
+  /**
+   * Context actually returned by sync. Reusable for target-policy DOM actions;
+   * strict policy consumes it after one action. Never fill it from cached state.
+   */
+  context_id?: string;
+  /**
+   * Strict policy only: observed decision regions. Target policy requires exact
+   * business facts in expect; regions cannot be translated to facts automatically.
+   *
+   * @maxItems 16
+   */
+  depends_on?: string[];
+  /**
+   * Literal conditions checked before input. Selectors search the main document;
+   * use observed refs for iframe/shadow-root targets. Text includes all whitespace.
+   *
+   * @maxItems 16
+   */
+  expect?: ActionExpectation[];
+  /**
+   * Sync's single-use baseline for untargeted/visual actions under target policy,
+   * including untargeted keys and displacement-only drags. Drags with a
+   * target ref/selector need only context_id. A script needs it only when it
+   * states no expect facts; passing both checks the whole page as well.
+   * Strict-policy drag instead accepts its legacy ref-map observation token.
+   */
+  observation_id?: string;
   session_id: string;
   tab_id?: number;
   timeout_ms?: number;
@@ -2235,6 +2844,33 @@ export interface NavigateForwardResult {
  * via the `definition` "NavigateParams".
  */
 export interface NavigateParams {
+  /**
+   * Context actually returned by sync. Reusable for target-policy DOM actions;
+   * strict policy consumes it after one action. Never fill it from cached state.
+   */
+  context_id?: string;
+  /**
+   * Strict policy only: observed decision regions. Target policy requires exact
+   * business facts in expect; regions cannot be translated to facts automatically.
+   *
+   * @maxItems 16
+   */
+  depends_on?: string[];
+  /**
+   * Literal conditions checked before input. Selectors search the main document;
+   * use observed refs for iframe/shadow-root targets. Text includes all whitespace.
+   *
+   * @maxItems 16
+   */
+  expect?: ActionExpectation[];
+  /**
+   * Sync's single-use baseline for untargeted/visual actions under target policy,
+   * including untargeted keys and displacement-only drags. Drags with a
+   * target ref/selector need only context_id. A script needs it only when it
+   * states no expect facts; passing both checks the whole page as well.
+   * Strict-policy drag instead accepts its legacy ref-map observation token.
+   */
+  observation_id?: string;
   session_id: string;
   /**
    * Target tab. Defaults to the Agent Window's currently active tab.
@@ -2370,6 +3006,11 @@ export interface SurfaceProbePoint {
  */
 export interface ObserveParams {
   /**
+   * Context actually returned by sync. Reusable for target-policy DOM actions;
+   * strict policy consumes it after one action. Never fill it from cached state.
+   */
+  context_id?: string;
+  /**
    * Continue a retained observation; does not recapture the page.
    */
   cursor?: string;
@@ -2377,6 +3018,20 @@ export interface ObserveParams {
    * Include implementation diagnostics for conditional surface probes.
    */
   debug_surfaces: boolean;
+  /**
+   * Strict policy only: observed decision regions. Target policy requires exact
+   * business facts in expect; regions cannot be translated to facts automatically.
+   *
+   * @maxItems 16
+   */
+  depends_on?: string[];
+  /**
+   * Literal conditions checked before input. Selectors search the main document;
+   * use observed refs for iframe/shadow-root targets. Text includes all whitespace.
+   *
+   * @maxItems 16
+   */
+  expect?: ActionExpectation[];
   /**
    * Cap the depth of the rendered VOM tree.
    */
@@ -2386,6 +3041,14 @@ export interface ObserveParams {
    * best-effort heuristic based on character count).
    */
   max_tokens?: number;
+  /**
+   * Sync's single-use baseline for untargeted/visual actions under target policy,
+   * including untargeted keys and displacement-only drags. Drags with a
+   * target ref/selector need only context_id. A script needs it only when it
+   * states no expect facts; passing both checks the whole page as well.
+   * Strict-policy drag instead accepts its legacy ref-map observation token.
+   */
+  observation_id?: string;
   /**
    * Opt in to active hover probing: the extension moves the real cursor
    * over a bounded set of controls to discover hover-only menus and
@@ -2420,6 +3083,10 @@ export interface ObserveResult {
    */
   next_cursor?: string;
   /**
+   * Token identifying the current ref map; pass to drag to reject stale refs.
+   */
+  observation_id?: string;
+  /**
    * Number of `@e<N>` refs registered for this session by this
    * observation. Equivalent to the size of the new ref-store map.
    */
@@ -2438,6 +3105,15 @@ export interface ObserveResult {
    * `max_tokens`. Agents may re-run with looser caps.
    */
   truncated: boolean;
+}
+/**
+ * This interface was referenced by `ProtocolTypes`'s JSON-Schema
+ * via the `definition` "OperationParams".
+ */
+export interface OperationParams {
+  operation_id: string;
+  session_id: string;
+  wait_ms?: number;
 }
 /**
  * Page context dictionary entry — referenced by steps via `page` id.
@@ -2472,6 +3148,25 @@ export interface PingResult {
  */
 export interface PressParams {
   /**
+   * Context actually returned by sync. Reusable for target-policy DOM actions;
+   * strict policy consumes it after one action. Never fill it from cached state.
+   */
+  context_id?: string;
+  /**
+   * Strict policy only: observed decision regions. Target policy requires exact
+   * business facts in expect; regions cannot be translated to facts automatically.
+   *
+   * @maxItems 16
+   */
+  depends_on?: string[];
+  /**
+   * Literal conditions checked before input. Selectors search the main document;
+   * use observed refs for iframe/shadow-root targets. Text includes all whitespace.
+   *
+   * @maxItems 16
+   */
+  expect?: ActionExpectation[];
+  /**
    * Hold the key down for this many milliseconds between `keyDown`
    * and `keyUp`. Useful for testing long-press handlers.
    */
@@ -2484,6 +3179,14 @@ export interface PressParams {
    */
   key: string;
   modifiers?: KeyModifier[];
+  /**
+   * Sync's single-use baseline for untargeted/visual actions under target policy,
+   * including untargeted keys and displacement-only drags. Drags with a
+   * target ref/selector need only context_id. A script needs it only when it
+   * states no expect facts; passing both checks the whole page as well.
+   * Strict-policy drag instead accepts its legacy ref-map observation token.
+   */
+  observation_id?: string;
   /**
    * Optional target to focus before dispatching the key.
    */
@@ -2503,6 +3206,78 @@ export interface PressResult {
   key: string;
   modifiers: KeyModifier[];
   tab_id: number;
+}
+/**
+ * This interface was referenced by `ProtocolTypes`'s JSON-Schema
+ * via the `definition` "ReadField".
+ */
+export interface ReadField {
+  attribute?: string;
+  key: string;
+  read: DomRead;
+  /**
+   * Relative selector matching at most one descendant; omitted means the item itself.
+   */
+  selector?: string;
+}
+/**
+ * This interface was referenced by `ProtocolTypes`'s JSON-Schema
+ * via the `definition` "ReadItem".
+ */
+export interface ReadItem {
+  redacted: string[];
+  ref: string;
+  values: {
+    [k: string]: unknown;
+  };
+}
+/**
+ * This interface was referenced by `ProtocolTypes`'s JSON-Schema
+ * via the `definition` "ReadParams".
+ */
+export interface ReadParams {
+  /**
+   * Optional cooperation context validated by the extension without renewing control.
+   */
+  context_id?: string;
+  /**
+   * Defaults to [{"key":"text","read":"text"}].
+   *
+   * @minItems 1
+   * @maxItems 32
+   */
+  fields?: ReadField[];
+  max_bytes?: number;
+  max_nodes?: number;
+  /**
+   * Exact observed DOM node, including iframe and shadow nodes. Exclusive with selector.
+   */
+  ref?: string;
+  /**
+   * CSS in the main document. All matches, up to max_nodes; no selector means the root.
+   */
+  selector?: string;
+  session_id: string;
+  tab_id?: number;
+  timeout_ms?: number;
+}
+/**
+ * This interface was referenced by `ProtocolTypes`'s JSON-Schema
+ * via the `definition` "ReadResult".
+ */
+export interface ReadResult {
+  captured_at: string;
+  frame_id: string;
+  frame_url: string;
+  items: ReadItem[];
+  page_url: string;
+  /**
+   * A live sample, not an action authorization or a complete dataset.
+   */
+  scope: string;
+  tab_id: number;
+  title: string;
+  truncated: boolean;
 }
 /**
  * This interface was referenced by `ProtocolTypes`'s JSON-Schema
@@ -2704,9 +3479,36 @@ export interface RecordStopResult {
  */
 export interface ReloadParams {
   /**
+   * Context actually returned by sync. Reusable for target-policy DOM actions;
+   * strict policy consumes it after one action. Never fill it from cached state.
+   */
+  context_id?: string;
+  /**
+   * Strict policy only: observed decision regions. Target policy requires exact
+   * business facts in expect; regions cannot be translated to facts automatically.
+   *
+   * @maxItems 16
+   */
+  depends_on?: string[];
+  /**
+   * Literal conditions checked before input. Selectors search the main document;
+   * use observed refs for iframe/shadow-root targets. Text includes all whitespace.
+   *
+   * @maxItems 16
+   */
+  expect?: ActionExpectation[];
+  /**
    * When `true`, bypass the HTTP cache (CDP `Page.reload(ignoreCache=true)`).
    */
   hard?: boolean;
+  /**
+   * Sync's single-use baseline for untargeted/visual actions under target policy,
+   * including untargeted keys and displacement-only drags. Drags with a
+   * target ref/selector need only context_id. A script needs it only when it
+   * states no expect facts; passing both checks the whole page as well.
+   * Strict-policy drag instead accepts its legacy ref-map observation token.
+   */
+  observation_id?: string;
   session_id: string;
   tab_id?: number;
   timeout_ms?: number;
@@ -2810,6 +3612,33 @@ export interface RpcError {
  * via the `definition` "ScreenshotFullPageParams".
  */
 export interface ScreenshotFullPageParams {
+  /**
+   * Context actually returned by sync. Reusable for target-policy DOM actions;
+   * strict policy consumes it after one action. Never fill it from cached state.
+   */
+  context_id?: string;
+  /**
+   * Strict policy only: observed decision regions. Target policy requires exact
+   * business facts in expect; regions cannot be translated to facts automatically.
+   *
+   * @maxItems 16
+   */
+  depends_on?: string[];
+  /**
+   * Literal conditions checked before input. Selectors search the main document;
+   * use observed refs for iframe/shadow-root targets. Text includes all whitespace.
+   *
+   * @maxItems 16
+   */
+  expect?: ActionExpectation[];
+  /**
+   * Sync's single-use baseline for untargeted/visual actions under target policy,
+   * including untargeted keys and displacement-only drags. Drags with a
+   * target ref/selector need only context_id. A script needs it only when it
+   * states no expect facts; passing both checks the whole page as well.
+   * Strict-policy drag instead accepts its legacy ref-map observation token.
+   */
+  observation_id?: string;
   /**
    * Follow appended content (default), or capture the initial document height.
    */
@@ -2934,6 +3763,33 @@ export interface ScreenshotResult {
  */
 export interface ScrollToParams {
   /**
+   * Context actually returned by sync. Reusable for target-policy DOM actions;
+   * strict policy consumes it after one action. Never fill it from cached state.
+   */
+  context_id?: string;
+  /**
+   * Strict policy only: observed decision regions. Target policy requires exact
+   * business facts in expect; regions cannot be translated to facts automatically.
+   *
+   * @maxItems 16
+   */
+  depends_on?: string[];
+  /**
+   * Literal conditions checked before input. Selectors search the main document;
+   * use observed refs for iframe/shadow-root targets. Text includes all whitespace.
+   *
+   * @maxItems 16
+   */
+  expect?: ActionExpectation[];
+  /**
+   * Sync's single-use baseline for untargeted/visual actions under target policy,
+   * including untargeted keys and displacement-only drags. Drags with a
+   * target ref/selector need only context_id. A script needs it only when it
+   * states no expect facts; passing both checks the whole page as well.
+   * Strict-policy drag instead accepts its legacy ref-map observation token.
+   */
+  observation_id?: string;
+  /**
    * Optional `@e<N>` ref allocated by the last observation.
    * Mutually exclusive with `selector`.
    */
@@ -2970,6 +3826,33 @@ export interface ScrollToResult {
  * via the `definition` "SelectParams".
  */
 export interface SelectParams {
+  /**
+   * Context actually returned by sync. Reusable for target-policy DOM actions;
+   * strict policy consumes it after one action. Never fill it from cached state.
+   */
+  context_id?: string;
+  /**
+   * Strict policy only: observed decision regions. Target policy requires exact
+   * business facts in expect; regions cannot be translated to facts automatically.
+   *
+   * @maxItems 16
+   */
+  depends_on?: string[];
+  /**
+   * Literal conditions checked before input. Selectors search the main document;
+   * use observed refs for iframe/shadow-root targets. Text includes all whitespace.
+   *
+   * @maxItems 16
+   */
+  expect?: ActionExpectation[];
+  /**
+   * Sync's single-use baseline for untargeted/visual actions under target policy,
+   * including untargeted keys and displacement-only drags. Drags with a
+   * target ref/selector need only context_id. A script needs it only when it
+   * states no expect facts; passing both checks the whole page as well.
+   * Strict-policy drag instead accepts its legacy ref-map observation token.
+   */
+  observation_id?: string;
   /**
    * Optional `@e<N>` ref allocated by the last `tool.snapshot`.
    * Mutually exclusive with `selector`. Accepts both `"e3"` and
@@ -3028,6 +3911,10 @@ export interface SelectResult {
 export interface SessionStartParams {
   browser_instance_id?: string;
   /**
+   * Caller-supplied display labels, not an authenticated identity.
+   */
+  controller?: ControllerInfo;
+  /**
    * Whether the new Agent Window should take focus. Omitted means the
    * extension's default (`false`).
    */
@@ -3063,6 +3950,7 @@ export interface SessionStartResult {
 export interface SessionStatusEntry {
   agent_window_id?: number;
   browser_instance_id: string;
+  controller?: ControllerInfo;
   /**
    * Unix epoch milliseconds.
    */
@@ -3122,6 +4010,10 @@ export interface SnapshotParams {
 export interface SnapshotResult {
   dialogs?: JavaScriptDialogInfo[];
   /**
+   * Token identifying the current ref map; pass to drag to reject stale refs.
+   */
+  observation_id?: string;
+  /**
    * Number of `@e<N>` refs registered for this session by this
    * snapshot. Equivalent to the size of the new ref-store map.
    */
@@ -3172,6 +4064,7 @@ export interface StatusResult {
    * Semver of the daemon binary (`env!("CARGO_PKG_VERSION")`).
    */
   daemon_version: string;
+  local_auth?: LocalAuthStatus;
   /**
    * Daemon process id.
    */
@@ -3267,6 +4160,33 @@ export interface TabBorrowResult {
  * via the `definition` "TabCloseParams".
  */
 export interface TabCloseParams {
+  /**
+   * Context actually returned by sync. Reusable for target-policy DOM actions;
+   * strict policy consumes it after one action. Never fill it from cached state.
+   */
+  context_id?: string;
+  /**
+   * Strict policy only: observed decision regions. Target policy requires exact
+   * business facts in expect; regions cannot be translated to facts automatically.
+   *
+   * @maxItems 16
+   */
+  depends_on?: string[];
+  /**
+   * Literal conditions checked before input. Selectors search the main document;
+   * use observed refs for iframe/shadow-root targets. Text includes all whitespace.
+   *
+   * @maxItems 16
+   */
+  expect?: ActionExpectation[];
+  /**
+   * Sync's single-use baseline for untargeted/visual actions under target policy,
+   * including untargeted keys and displacement-only drags. Drags with a
+   * target ref/selector need only context_id. A script needs it only when it
+   * states no expect facts; passing both checks the whole page as well.
+   * Strict-policy drag instead accepts its legacy ref-map observation token.
+   */
+  observation_id?: string;
   session_id: string;
   tab_id: number;
 }
@@ -3415,8 +4335,35 @@ export interface UploadFile {
  * via the `definition` "UploadParams".
  */
 export interface UploadParams {
+  /**
+   * Context actually returned by sync. Reusable for target-policy DOM actions;
+   * strict policy consumes it after one action. Never fill it from cached state.
+   */
+  context_id?: string;
+  /**
+   * Strict policy only: observed decision regions. Target policy requires exact
+   * business facts in expect; regions cannot be translated to facts automatically.
+   *
+   * @maxItems 16
+   */
+  depends_on?: string[];
+  /**
+   * Literal conditions checked before input. Selectors search the main document;
+   * use observed refs for iframe/shadow-root targets. Text includes all whitespace.
+   *
+   * @maxItems 16
+   */
+  expect?: ActionExpectation[];
   files: UploadFile[];
   mode?: UploadMode;
+  /**
+   * Sync's single-use baseline for untargeted/visual actions under target policy,
+   * including untargeted keys and displacement-only drags. Drags with a
+   * target ref/selector need only context_id. A script needs it only when it
+   * states no expect facts; passing both checks the whole page as well.
+   * Strict-policy drag instead accepts its legacy ref-map observation token.
+   */
+  observation_id?: string;
   ref?: string;
   selector?: string;
   session_id: string;
@@ -3593,6 +4540,11 @@ export interface WaitMsResult {
  */
 export interface WheelParams {
   /**
+   * Context actually returned by sync. Reusable for target-policy DOM actions;
+   * strict policy consumes it after one action. Never fill it from cached state.
+   */
+  context_id?: string;
+  /**
    * Native CDP wheel input in CSS pixels. Positive X means right. Not measured displacement.
    */
   delta_x: number;
@@ -3600,7 +4552,29 @@ export interface WheelParams {
    * Native CDP wheel input in CSS pixels. Positive Y means down. Defaults to zero.
    */
   delta_y: number;
+  /**
+   * Strict policy only: observed decision regions. Target policy requires exact
+   * business facts in expect; regions cannot be translated to facts automatically.
+   *
+   * @maxItems 16
+   */
+  depends_on?: string[];
+  /**
+   * Literal conditions checked before input. Selectors search the main document;
+   * use observed refs for iframe/shadow-root targets. Text includes all whitespace.
+   *
+   * @maxItems 16
+   */
+  expect?: ActionExpectation[];
   modifiers?: KeyModifier[];
+  /**
+   * Sync's single-use baseline for untargeted/visual actions under target policy,
+   * including untargeted keys and displacement-only drags. Drags with a
+   * target ref/selector need only context_id. A script needs it only when it
+   * states no expect facts; passing both checks the whole page as well.
+   * Strict-policy drag instead accepts its legacy ref-map observation token.
+   */
+  observation_id?: string;
   /**
    * Optional `@e<N>` ref used as the wheel event's hit-test point.
    * Mutually exclusive with `selector`. When neither is supplied,
@@ -3641,10 +4615,41 @@ export interface WheelResult {
  */
 export interface WindowResizeParams {
   /**
+   * Context actually returned by sync. Reusable for target-policy DOM actions;
+   * strict policy consumes it after one action. Never fill it from cached state.
+   */
+  context_id?: string;
+  /**
+   * Strict policy only: observed decision regions. Target policy requires exact
+   * business facts in expect; regions cannot be translated to facts automatically.
+   *
+   * @maxItems 16
+   */
+  depends_on?: string[];
+  /**
+   * Literal conditions checked before input. Selectors search the main document;
+   * use observed refs for iframe/shadow-root targets. Text includes all whitespace.
+   *
+   * @maxItems 16
+   */
+  expect?: ActionExpectation[];
+  /**
    * New Agent Window outer height in CSS pixels (100..=7680).
    */
   height: number;
+  /**
+   * Sync's single-use baseline for untargeted/visual actions under target policy,
+   * including untargeted keys and displacement-only drags. Drags with a
+   * target ref/selector need only context_id. A script needs it only when it
+   * states no expect facts; passing both checks the whole page as well.
+   * Strict-policy drag instead accepts its legacy ref-map observation token.
+   */
+  observation_id?: string;
   session_id: string;
+  /**
+   * Optional target tab bound by cooperation before resizing.
+   */
+  tab_id?: number;
   /**
    * New Agent Window outer width in CSS pixels (100..=7680).
    */

@@ -8,6 +8,7 @@ import type {
   TabScope,
 } from "./generated/types";
 
+export type { EventName } from "./generated/methods";
 export { TRACE_VERSION_V2, TRACE_VERSION_V3, VOM_FORMAT_VERSION } from "./generated/methods";
 export type * from "./generated/types";
 export type HandshakeParams = HandshakeRequest;
@@ -18,8 +19,33 @@ export type NavigateHistoryResult = NavigateBackResult;
 export type TabScopeFilter = TabScope;
 export type ConnectionState = "disconnected" | "connecting" | "connected" | "version_skew";
 
+/** Stable `RpcError.data.reason` values for CLI hint selection. */
 export type RpcErrorReason =
+  | "user_moved_tab"
   | "cooperation_sync_required"
+  | "frame_unobservable"
+  | "page_load_failed"
+  | "control_authority_required"
+  | "control_context_invalid"
+  | "human_intervention"
+  | "control_held"
+  | "document_changed"
+  | "observation_required"
+  | "observation_changed"
+  | "precondition_invalid"
+  | "precondition_failed"
+  | "target_detached"
+  | "target_hidden"
+  | "target_disabled"
+  | "target_readonly"
+  | "target_focus_lost"
+  | "target_moved"
+  | "target_covered"
+  | "read_params_invalid"
+  | "read_target_stale"
+  | "read_selector_invalid"
+  | "read_field_ambiguous"
+  | "read_limit"
   | "extract_params_invalid"
   | "extract_target_stale"
   | "extract_target_ambiguous"
@@ -58,8 +84,14 @@ export type RpcErrorReason =
   | "option_not_found"
   | "single_select_value_count"
   | "tab_not_active"
+  | "window_resize_inactive_tab"
+  | "window_resize_constrained"
+  | "window_resize_unconfirmed"
+  | "window_resize_viewport_unchanged"
   | "restricted_tab_url"
   | "cdp_extension_access_denied"
+  | "observe_identity_reload_loop"
+  | "borrow_agent_window_tab"
   | "borrow_conflict"
   | "incognito_borrow_disabled"
   | "borrow_in_progress"
@@ -69,6 +101,7 @@ export type RpcErrorReason =
   | "borrow_outcome_unknown"
   | "screenshot_capture_failed"
   | "renderer_read_timeout"
+  | "operation_settling"
   | "user_cancelled"
   | "page_hidden"
   | "navigation"
@@ -125,6 +158,16 @@ export type ResponseFrame = OkResponseFrame | ErrResponseFrame;
 export interface EventFrame {
   event: string;
   payload?: unknown;
+}
+
+/** Terminal user action: pages stay open, but the session cannot resume. */
+export interface SessionEndedEvent extends EventFrame {
+  event: "session.ended";
+  payload: {
+    session_id: string;
+    reason: "user_moved_tab";
+    tab_id: number;
+  };
 }
 
 export type ProtocolFrame = RequestFrame | ResponseFrame | EventFrame;

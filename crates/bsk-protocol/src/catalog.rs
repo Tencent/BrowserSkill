@@ -1,15 +1,15 @@
 //! Export the protocol from the same catalog used by Rust dispatch.
 //!
 //! Daemon-local payloads deliberately remain outside the extension contract.
-//! Shared and extension methods, plus handshake/error roots, are exported in full.
+//! Shared and extension methods, plus handshake/error/event roots, are exported in full.
 
 use schemars::{JsonSchema, Schema, SchemaGenerator, generate::SchemaSettings};
 use serde::Serialize;
 use serde_json::{Value, json};
 
-use crate::{ErrorCode, Method, RpcError, method::MethodEffect};
+use crate::{ErrorCode, EventKind, Method, RpcError, method::MethodEffect};
 
-pub const PROTOCOL_VERSION: &str = "1.4";
+pub const PROTOCOL_VERSION: &str = "1.9";
 pub const MIN_COMPATIBLE_PROTOCOL: &str = "1.0";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -25,6 +25,7 @@ pub struct MethodDescriptor {
     pub method: &'static str,
     pub owner: MethodOwner,
     pub effect: MethodEffect,
+    pub action_metadata: bool,
     pub features: &'static [crate::compatibility::Feature],
     pub params: String,
     pub result: String,
@@ -35,6 +36,7 @@ impl MethodDescriptor {
         method: &'static str,
         owner: MethodOwner,
         effect: MethodEffect,
+        action_metadata: bool,
         features: &'static [crate::compatibility::Feature],
         generator: &mut SchemaGenerator,
     ) -> Self {
@@ -42,6 +44,7 @@ impl MethodDescriptor {
             method,
             owner,
             effect,
+            action_metadata,
             features,
             params: register::<P>(generator),
             result: register::<R>(generator),
@@ -76,22 +79,47 @@ pub fn schema_for<T: JsonSchema>() -> Schema {
 
 fn describe(settings: SchemaSettings) -> (Vec<MethodDescriptor>, Value) {
     let mut generator = settings.into_generator();
-    let methods = Method::ALL
+    let methods: Vec<MethodDescriptor> = Method::ALL
         .iter()
         .map(|method| method.describe(&mut generator))
         .collect();
     register::<ErrorCode>(&mut generator);
     register::<RpcError>(&mut generator);
+    register::<EventKind>(&mut generator);
+    register::<crate::tools::ActionExpectation>(&mut generator);
+    register::<crate::tools::ActionMetadata>(&mut generator);
+    register::<crate::tools::PendingJavaScriptDialog>(&mut generator);
+    register::<crate::tools::DialogHandleParams>(&mut generator);
+    register::<crate::tools::OperationParams>(&mut generator);
     register::<crate::tools::TraceV2>(&mut generator);
     register::<crate::tools::TraceV3>(&mut generator);
     register::<crate::tools::StepV2>(&mut generator);
     register::<crate::tools::StepV3>(&mut generator);
     register::<crate::tools::RecordedStep>(&mut generator);
+    let mut definitions = generator.take_definitions(false);
+    let metadata_properties = definitions
+        .get("ActionMetadata")
+        .and_then(|schema| schema.get("properties"))
+        .and_then(Value::as_object)
+        .expect("ActionMetadata properties")
+        .clone();
+    for descriptor in &methods {
+        if !descriptor.action_metadata {
+            continue;
+        }
+        let properties = definitions
+            .get_mut(&descriptor.params)
+            .and_then(Value::as_object_mut)
+            .and_then(|schema| schema.get_mut("properties"))
+            .and_then(Value::as_object_mut)
+            .unwrap_or_else(|| panic!("{} properties must be an object", descriptor.params));
+        properties.extend(metadata_properties.clone());
+    }
     (
         methods,
         json!({
             "$schema": "http://json-schema.org/draft-07/schema#",
-            "definitions": generator.take_definitions(false),
+            "definitions": definitions,
         }),
     )
 }
@@ -106,6 +134,7 @@ pub fn export() -> Value {
         "protocol_version": PROTOCOL_VERSION,
         "min_compatible_protocol": MIN_COMPATIBLE_PROTOCOL,
         "methods": methods,
+        "events": EventKind::ALL,
         "feature_requirements": crate::compatibility::Feature::ALL.iter().map(|f| f.requirement()).collect::<Vec<_>>(),
         "constants": {
             "TRACE_VERSION_V2": crate::tools::TRACE_VERSION_V2,
@@ -116,6 +145,7 @@ pub fn export() -> Value {
             "action": action,
             "effect": action.effect(),
             "owner": action.owner(),
+            "cooperation_guarded": action.cooperation_guarded(),
         })).collect::<Vec<_>>(),
         "schema": input,
         "output_schema": output,

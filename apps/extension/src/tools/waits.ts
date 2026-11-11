@@ -1,3 +1,4 @@
+import { isMissingNode } from "./errors";
 // `tool.wait_for_navigation` — subscribe to CDP `Page.lifecycleEvent`
 // on the target tab and wait until the requested phase fires. Design
 // §4 / §7, plan M9.2.
@@ -235,21 +236,6 @@ async function beforeDeadline<T>(
   }
 }
 
-/** Recognize only CDP's explicit missing-node errors. A stale selector lookup
- * must still be retried. Chrome's debugger API may encode the error as JSON. */
-function isMissingNode(error: unknown): boolean {
-  let message = error instanceof Error ? error.message : String(error);
-  try {
-    const parsed = JSON.parse(message);
-    if (typeof parsed?.message === "string") message = parsed.message;
-  } catch {
-    // Plain debugger error message.
-  }
-  return (
-    message === "No node with given id found" || message === "Could not find node with given id"
-  );
-}
-
 /** Does an observation of `(attached, visible)` satisfy `state`? */
 export function satisfiesState(state: ElementState, attached: boolean, visible: boolean): boolean {
   switch (state) {
@@ -449,11 +435,10 @@ async function probeState(
     );
     objectId = resolved.object?.objectId;
   } catch (error) {
-    // The node left the document between the lookup and the handle
-    // request. That is the `detached` transition itself — the one case
-    // where a failing CDP call is an observation rather than a fault.
+    // A missing ref identifies a removed node. A selector may already match
+    // its replacement, so only a fresh lookup can establish its absence.
     if (!isMissingNode(error)) throw error;
-    return { attached: false, visible: false };
+    return params.selector ? null : { attached: false, visible: false };
   }
   if (!objectId) return { code: "cdp_failed", message: "DOM.resolveNode returned no objectId" };
 
@@ -479,6 +464,8 @@ async function probeState(
       message: reply.exceptionDetails?.text ?? "wait-for-element state probe returned nothing",
     };
   }
+  // The selected node can also detach after its remote object was resolved.
+  if (params.selector && !value.attached) return null;
   return {
     attached: value.attached,
     visible: value.visible === true,

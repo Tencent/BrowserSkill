@@ -5,7 +5,6 @@ import { flushSync } from "react-dom";
 import ReactDOM from "react-dom/client";
 import { BorrowConfirmationOverlay } from "@/content/BorrowConfirmationOverlay";
 import { ControlOverlay } from "@/content/ControlOverlay";
-import { CooperationOverlay } from "@/content/CooperationOverlay";
 import { createCaptureSuppressController } from "@/content/capture-suppress";
 import { HelpRequestOverlay } from "@/content/HelpRequestOverlay";
 import { createHelpRequestData } from "@/content/help-request";
@@ -41,6 +40,7 @@ import {
   isOverlayAgentStateMessage,
   OVERLAY_AUTOMATION_BYPASS,
   OVERLAY_MSG_READY,
+  OVERLAY_MSG_SET_MINIMIZED,
   type OverlayAgentOverlayResetMessage,
   type OverlayAgentStateMessage,
   type OverlayAutomationBypassMessage,
@@ -193,8 +193,6 @@ export default defineContentScript({
       const controlVisible =
         videoOverlay.canRenderControl() && shouldShowAgentControlOverlay(overlayState);
       const controlOverlayVisible = controlVisible && !activeAgentState?.cooperation;
-      // Leaving control (including help/record UI) must not retain click leases.
-      if (!controlOverlayVisible) inputPassthrough.reset();
       const interactiveOverlayVisible =
         overlayState.borrowRequests.length > 0 ||
         overlayState.activeHelp !== null ||
@@ -202,7 +200,11 @@ export default defineContentScript({
       const showInteractive = videoOverlay.canRenderInteractive(interactiveOverlayVisible);
       const cooperationState =
         controlVisible && !interactiveOverlayVisible ? activeAgentState?.cooperation : undefined;
-      setOverlayHostHiddenFromAccessibility(!interactiveOverlayVisible && !cooperationState);
+      const cardVisible = controlOverlayVisible || !!cooperationState;
+      // Cooperative status updates and minimization keep the same click lease.
+      // Clear it only when control UI leaves or interactive overlays take over.
+      if (!cardVisible || interactiveOverlayVisible) inputPassthrough.reset();
+      setOverlayHostHiddenFromAccessibility(!interactiveOverlayVisible && !cardVisible);
       setOverlaySurfaceState(
         controlOverlayVisible,
         controlOverlayVisible && overlayState.automationBypassCount === 0,
@@ -227,14 +229,15 @@ export default defineContentScript({
                 request: showInteractive ? overlayState.activeRecord : null,
               }),
               React.createElement(ControlOverlay, {
-                visible: controlOverlayVisible,
+                sessionId: overlayState.activeSessionId,
+                controller: overlayState.controller,
+                visible: cardVisible,
+                state: cooperationState,
+                minimized: activeAgentState?.minimized ?? false,
+                onMinimizedChange: handleMinimizedChange,
                 interrupting: overlayState.interrupting,
                 automationBypass: overlayState.automationBypassCount > 0,
                 onInterrupt: handleInterrupt,
-              }),
-              React.createElement(CooperationOverlay, {
-                state: cooperationState,
-                onStop: handleInterrupt,
               }),
             ),
           ),
@@ -277,7 +280,7 @@ export default defineContentScript({
     function applyOverlayState(state: OverlayAgentStateMessage): void {
       if (overlays.snapshot().activeSessionId !== state.sessionId) inputPassthrough.reset();
       activeAgentState = state;
-      overlays.applyAgentControlMode(state.sessionId, state.mode);
+      overlays.applyAgentControlMode(state.sessionId, state.mode, state.controller);
       renderAll();
     }
 
@@ -291,6 +294,14 @@ export default defineContentScript({
       }
       activeRecordRequestId = null;
       renderAll();
+    }
+
+    function handleMinimizedChange(minimized: boolean) {
+      const sessionId = overlays.snapshot().activeSessionId;
+      if (!sessionId) return;
+      void chrome.runtime
+        .sendMessage({ kind: OVERLAY_MSG_SET_MINIMIZED, sessionId, minimized })
+        .catch((error) => console.debug("[bsk overlay] minimize update failed", error));
     }
 
     function handleInterrupt() {

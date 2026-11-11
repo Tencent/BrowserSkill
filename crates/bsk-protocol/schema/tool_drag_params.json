@@ -1,0 +1,257 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "definitions": {
+    "ActionExpectation": {
+      "additionalProperties": false,
+      "description": "Caller-supplied facts checked immediately before starting an action.",
+      "properties": {
+        "attribute": {
+          "description": "Required only for field=attribute, measured in Unicode code points.",
+          "maxLength": 256,
+          "minLength": 1,
+          "type": "string"
+        },
+        "equals": {
+          "$ref": "#/definitions/ExpectedValue",
+          "description": "text/value require a string; checked/exists require a boolean;\nattribute accepts a string or null for absence. Text is exact textContent."
+        },
+        "field": {
+          "$ref": "#/definitions/ExpectationField"
+        },
+        "target": {
+          "description": "Observed ref or main-document CSS selector, measured in Unicode code points.",
+          "maxLength": 1024,
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "target",
+        "field",
+        "equals"
+      ],
+      "type": "object"
+    },
+    "DragMode": {
+      "enum": [
+        "press-move-release",
+        "click-move-click"
+      ],
+      "type": "string"
+    },
+    "DragPoint": {
+      "properties": {
+        "x": {
+          "format": "double",
+          "type": "number"
+        },
+        "y": {
+          "format": "double",
+          "type": "number"
+        }
+      },
+      "required": [
+        "x",
+        "y"
+      ],
+      "type": "object"
+    },
+    "DragTarget": {
+      "properties": {
+        "offset": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/DragPoint"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Offset from the visible action point, in top-level viewport CSS pixels."
+        },
+        "ref": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "selector": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "ExpectationField": {
+      "enum": [
+        "text",
+        "value",
+        "checked",
+        "attribute",
+        "exists"
+      ],
+      "type": "string"
+    },
+    "ExpectedValue": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "boolean"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "KeyModifier": {
+      "description": "Keyboard modifier flags. Multiple flags may be combined; the\nextension folds them into CDP's bitfield (`alt=1, ctrl=2, meta=4,\nshift=8`).",
+      "enum": [
+        "alt",
+        "ctrl",
+        "meta",
+        "shift"
+      ],
+      "type": "string"
+    },
+    "MouseButton": {
+      "description": "Mouse button selector for `tool.click`.",
+      "enum": [
+        "left",
+        "middle",
+        "right"
+      ],
+      "type": "string"
+    }
+  },
+  "properties": {
+    "button": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/MouseButton"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "context_id": {
+      "description": "Context actually returned by sync. Reusable for target-policy DOM actions;\nstrict policy consumes it after one action. Never fill it from cached state.",
+      "type": "string"
+    },
+    "delta": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/DragPoint"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "depends_on": {
+      "description": "Strict policy only: observed decision regions. Target policy requires exact\nbusiness facts in expect; regions cannot be translated to facts automatically.",
+      "items": {
+        "type": "string"
+      },
+      "maxItems": 16,
+      "type": "array"
+    },
+    "duration_ms": {
+      "description": "Travel duration, excluding hold. Defaults to 500 ms.",
+      "format": "uint32",
+      "maximum": 5000,
+      "minimum": 1,
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "expect": {
+      "description": "Literal conditions checked before input. Selectors search the main document;\nuse observed refs for iframe/shadow-root targets. Text includes all whitespace.",
+      "items": {
+        "$ref": "#/definitions/ActionExpectation"
+      },
+      "maxItems": 16,
+      "type": "array"
+    },
+    "hold_ms": {
+      "description": "Delay after pressing and before moving. Defaults to zero.",
+      "format": "uint32",
+      "maximum": 5000,
+      "minimum": 0,
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "mode": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/DragMode"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Defaults to press-move-release. Click-move-click requires target and zero hold."
+    },
+    "modifiers": {
+      "items": {
+        "$ref": "#/definitions/KeyModifier"
+      },
+      "type": [
+        "array",
+        "null"
+      ]
+    },
+    "observation_id": {
+      "description": "Sync's single-use baseline for untargeted/visual actions under target policy,\nincluding untargeted keys and displacement-only drags. Drags with a\ntarget ref/selector need only context_id. A script needs it only when it\nstates no expect facts; passing both checks the whole page as well.\nStrict-policy drag instead accepts its legacy ref-map observation token.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "session_id": {
+      "type": "string"
+    },
+    "source": {
+      "$ref": "#/definitions/DragTarget"
+    },
+    "tab_id": {
+      "format": "int64",
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "target": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/DragTarget"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Exactly one of target or delta is required."
+    },
+    "timeout_ms": {
+      "format": "uint32",
+      "minimum": 1,
+      "type": [
+        "integer",
+        "null"
+      ]
+    }
+  },
+  "required": [
+    "session_id",
+    "source"
+  ],
+  "title": "DragParams",
+  "type": "object"
+}

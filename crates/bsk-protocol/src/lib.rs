@@ -5,6 +5,7 @@ pub mod catalog;
 pub mod compatibility;
 pub mod error;
 pub mod frame;
+pub mod local_auth;
 pub mod method;
 pub mod system;
 pub mod tools;

@@ -86,6 +86,8 @@ pub fn __set_promote_delay_for_tests(delay: Duration) {
 pub enum CancelReason {
     Cancelled,
     UserAborted,
+    /// Terminal user intervention; the session cannot resume.
+    UserMovedTab,
 }
 
 /// Mutable state inside [`ToolInflightEntry`]. Behind a `Mutex` so
@@ -172,6 +174,7 @@ pub enum PromoteOutcome {
 #[derive(Debug)]
 pub struct ToolInflightEntry {
     pub cli_rpc_id: RpcId,
+    pub dialog_pending: tokio::sync::watch::Sender<bool>,
     cancel: AbortToken,
     inner: Mutex<InflightInner>,
 }
@@ -180,6 +183,7 @@ impl ToolInflightEntry {
     fn new(session_id: SessionId, cli_rpc_id: RpcId) -> Arc<Self> {
         Arc::new(Self {
             cli_rpc_id,
+            dialog_pending: tokio::sync::watch::channel(false).0,
             cancel: AbortToken::new(),
             inner: Mutex::new(InflightInner::new(session_id)),
         })
@@ -417,6 +421,14 @@ impl ToolInflightRegistry {
     /// cancel; `ws_rpc_id == None` means the worker will short-circuit
     /// in its next pre-flight.
     pub fn cancel_session(&self, sid: &SessionId) -> Vec<InflightSnapshot> {
+        self.cancel_session_with_reason(sid, CancelReason::UserAborted)
+    }
+
+    pub(super) fn cancel_session_with_reason(
+        &self,
+        sid: &SessionId,
+        reason: CancelReason,
+    ) -> Vec<InflightSnapshot> {
         // Snapshot the entries we want to cancel under the registry
         // lock, then trip each one outside the registry lock so a
         // concurrent unregister (driven by Drop on InflightGuard) can
@@ -436,7 +448,7 @@ impl ToolInflightRegistry {
         };
         to_cancel
             .into_iter()
-            .map(|entry| entry.cancel_and_snapshot(CancelReason::UserAborted))
+            .map(|entry| entry.cancel_and_snapshot(reason))
             .collect()
     }
 

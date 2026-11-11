@@ -1,11 +1,11 @@
 //! Emit JSON Schema files for handshake + §7 tool params/results (`schema/`).
 
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::PathBuf;
 
 use bsk_protocol::catalog;
 use serde_json::{Map, Value};
-use std::collections::BTreeSet;
 
 fn references(value: &Value, names: &mut BTreeSet<String>) {
     match value {
@@ -104,6 +104,11 @@ fn main() {
     // Stable file aliases for reusable CLI/documentation schemas. Their shapes
     // still come from the catalog; this list cannot hide a method from generation.
     for (name, file) in [
+        ("PendingJavaScriptDialog", "pending_javascript_dialog"),
+        ("DialogHandleParams", "tool_dialog_handle_params"),
+        ("OperationParams", "tool_operation_params"),
+        ("ActionExpectation", "action_expectation"),
+        ("ActionMetadata", "action_metadata"),
         ("VideoRecording", "video_recording"),
         ("VideoGrant", "video_grant"),
         ("VideoReadResult", "tool_video_read_result"),
@@ -121,5 +126,99 @@ fn main() {
         ("RecordedStep", "trace_step"),
     ] {
         write_schema(&dir, file, standalone(&catalog, name));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bsk_protocol::tools::DragParams;
+    use serde_json::{Value, json};
+
+    #[test]
+    fn composition_preserves_operation_fields_and_exposes_condition_limits() {
+        let original = serde_json::to_value(catalog::schema_for::<DragParams>()).unwrap();
+        let value = standalone(&catalog::export(), "DragParams");
+        assert_eq!(value["required"], original["required"]);
+        for (name, property) in original["properties"].as_object().unwrap() {
+            if name != "observation_id" {
+                assert_eq!(&value["properties"][name], property, "{name}");
+            }
+        }
+        assert_eq!(value["title"], "DragParams");
+        assert_eq!(value["properties"]["expect"]["type"], "array");
+        // Drag already exposed this optional field; retain its accepted wire shape.
+        assert_eq!(
+            value["properties"]["observation_id"]["type"],
+            json!(["string", "null"])
+        );
+        assert_eq!(value["properties"]["expect"]["maxItems"], 16);
+        assert_eq!(
+            value["definitions"]["ActionExpectation"]["properties"]["target"]["maxLength"],
+            1024
+        );
+        assert_eq!(
+            value["definitions"]["ActionExpectation"]["properties"]["attribute"]["maxLength"],
+            256
+        );
+        assert!(
+            value["properties"]["observation_id"]["description"]
+                .as_str()
+                .unwrap()
+                .contains("Strict-policy drag")
+        );
+    }
+
+    #[test]
+    fn published_action_schemas_include_shared_metadata() {
+        for operation in [
+            "window_resize",
+            "emulate",
+            "tab_close",
+            "navigate",
+            "navigate_back",
+            "navigate_forward",
+            "reload",
+            "click",
+            "hover",
+            "drag",
+            "wheel",
+            "scroll_to",
+            "focus",
+            "blur",
+            "fill",
+            "press",
+            "select",
+            "upload",
+            "download",
+            "observe",
+            "screenshot_full_page",
+            "debug",
+            "evaluate",
+        ] {
+            let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join(format!("schema/tool_{operation}_params.json"));
+            let schema: Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+            for field in ["context_id", "observation_id", "depends_on", "expect"] {
+                assert!(
+                    schema["properties"].get(field).is_some(),
+                    "{operation}.{field}"
+                );
+                assert!(
+                    !schema["required"]
+                        .as_array()
+                        .unwrap()
+                        .contains(&json!(field))
+                );
+            }
+            assert_eq!(
+                schema["properties"]["expect"]["items"]["$ref"],
+                "#/definitions/ActionExpectation"
+            );
+            assert_eq!(
+                schema["definitions"]["ActionExpectation"]["additionalProperties"],
+                false
+            );
+        }
     }
 }

@@ -1,15 +1,23 @@
 import {
   EXTENSION_VERSION,
+  type HandshakeRejectedError,
   MIN_COMPATIBLE_PROTOCOL,
   PROTOCOL_VERSION,
   performHandshake,
 } from "../transport/handshake";
+import type { LocalAuthStatus } from "../transport/local-auth";
 import type { Transport } from "../transport/transport";
 import type { ConnectionState, HandshakeResult } from "../transport/types";
 import { getLabel, getOrCreateInstanceId } from "./instance-id";
 import { compareProtocol, parseProtocolMajor } from "./semver";
 
 const HANDSHAKE_RETRY_DELAY_MS = 1_000;
+
+export interface DaemonUpgradeRequired {
+  daemonVersion: string | null;
+  daemonProtocolVersion: string;
+  requiredProtocolVersion: string;
+}
 
 export interface SnapshotInfo {
   state: ConnectionState;
@@ -18,7 +26,9 @@ export interface SnapshotInfo {
   extensionVersion: string;
   handshake: HandshakeResult | null;
   lastError: string | null;
+  daemonUpgradeRequired?: DaemonUpgradeRequired | null;
   connectionEnabled: boolean;
+  localAuth?: LocalAuthStatus | null;
 }
 
 type Listener = (s: SnapshotInfo) => void;
@@ -48,6 +58,17 @@ export class ConnectionController {
     this.auditEnabled = enabled;
   }
   private lastError: string | null = null;
+  private daemonUpgradeRequired: DaemonUpgradeRequired | null = null;
+  private localAuth: LocalAuthStatus | null = null;
+
+  setLocalAuth(status: LocalAuthStatus | null): void {
+    this.localAuth = status;
+    this.fire();
+  }
+
+  async retryConnection(): Promise<void> {
+    if (this.ready && this.connectionEnabled) await this.teardown(false);
+  }
   private connectionEnabled = true;
   private listeners = new Set<Listener>();
   private lifecycleHooks: ConnectionLifecycleHooks = {};
@@ -85,7 +106,9 @@ export class ConnectionController {
       extensionVersion: EXTENSION_VERSION,
       handshake: this.handshake,
       lastError: this.lastError,
+      daemonUpgradeRequired: this.daemonUpgradeRequired,
       connectionEnabled: this.connectionEnabled,
+      localAuth: this.localAuth,
     };
   }
 
@@ -140,6 +163,10 @@ export class ConnectionController {
     this.preferenceChanged = true;
     if (this.connectionEnabled === enabled) return;
     this.connectionEnabled = enabled;
+    if (!enabled) {
+      this.daemonUpgradeRequired = null;
+      this.lastError = null;
+    }
     this.fire();
     if (!this.ready) return;
     if (!enabled) await this.teardown(true);
@@ -154,8 +181,11 @@ export class ConnectionController {
       if (this.pendingConfiguration) this.pendingConfiguration = apply;
       return this.transition ?? Promise.resolve();
     }
+    this.daemonUpgradeRequired = null;
+    this.lastError = null;
     this.configurationKey = key;
     this.pendingConfiguration = apply;
+    this.fire();
     if (!this.ready) return Promise.resolve();
     return this.teardown(false);
   }
@@ -219,13 +249,31 @@ export class ConnectionController {
           label: this.label,
           auditEnabled: this.auditEnabled,
         },
-        { signal },
+        {
+          signal,
+          onRejected: (error) => {
+            if (generation !== this.connectionGeneration || signal.aborted) return;
+            // Record before the promise settles: a daemon may send the rejection
+            // and close the socket before runHandshake's catch gets to run.
+            // A fresh reply supersedes the previous diagnosis; only transport
+            // failures retain an earlier daemon-upgrade requirement.
+            this.daemonUpgradeRequired = daemonUpgradeFromRejection(error);
+            this.lastError = error.message;
+            if (error.code === "pairing_required" && this.localAuth)
+              this.localAuth = { state: "pairing_required" };
+            this.fire();
+          },
+        },
       );
       if (generation !== this.connectionGeneration || signal.aborted) return;
       this.handshake = outcome.result;
       const verdict = computeConnectedState(outcome.result);
       if (verdict.kind === "rejected") {
         this.lastError = `version_too_old: ${verdict.reason}`;
+        this.daemonUpgradeRequired = daemonUpgradeFromVersion(
+          outcome.result.protocol_version,
+          outcome.result.version,
+        );
         this.handshake = null;
         // Preserve the rejection until the next explicit/wake-driven attempt.
         await this.disconnectTransport();
@@ -233,6 +281,7 @@ export class ConnectionController {
       }
       this.clearHandshakeRetry();
       this.lastError = null;
+      this.daemonUpgradeRequired = null;
       this.setState(verdict.kind);
     } catch (err) {
       if (generation !== this.connectionGeneration || signal.aborted || isAbortError(err)) return;
@@ -260,7 +309,7 @@ export class ConnectionController {
     this.cancelHandshake();
     this.clearHandshakeRetry();
     this.handshake = null;
-    this.lastError = null;
+    if (!this.daemonUpgradeRequired) this.lastError = null;
     this.setState("disconnected");
     this.fire();
     // Install the gate before disconnect can synchronously notify listeners.
@@ -348,6 +397,25 @@ export class ConnectionController {
       }
     }
   }
+}
+
+function daemonUpgradeFromRejection(error: HandshakeRejectedError): DaemonUpgradeRequired | null {
+  if (error.code !== "version_too_old") return null;
+  return daemonUpgradeFromVersion(error.data?.daemon_protocol_version, error.data?.daemon_version);
+}
+
+function daemonUpgradeFromVersion(
+  protocol: unknown,
+  version: unknown,
+): DaemonUpgradeRequired | null {
+  if (typeof protocol !== "string") return null;
+  const order = compareProtocol(protocol, MIN_COMPATIBLE_PROTOCOL);
+  if (order === null || order >= 0) return null;
+  return {
+    daemonVersion: typeof version === "string" && version.trim() ? version : null,
+    daemonProtocolVersion: protocol,
+    requiredProtocolVersion: MIN_COMPATIBLE_PROTOCOL,
+  };
 }
 
 function isAbortError(err: unknown): boolean {

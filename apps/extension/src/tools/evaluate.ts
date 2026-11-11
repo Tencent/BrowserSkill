@@ -8,6 +8,11 @@
 // design-doc red-line that `evaluate` must not be useful as a
 // token-exfil window against arbitrary user tabs (design §6).
 //
+// Page checks live in the shared-control layer, not here. `unverified`
+// asks that layer to compare nothing about the page before dispatch; the
+// result then carries `verified: false` so the receipt cannot be read as
+// a checked action.
+//
 // Errors:
 // * RPC-level (`not_found / invalid_params / permission_denied /
 //   cancelled / cdp_failed`) — returned as `RpcError`.
@@ -75,19 +80,17 @@ function abortedError(signal: AbortSignal | undefined): RpcError | null {
 
 /**
  * Pull a human-readable error text out of CDP's exception payload.
- * Prefers `exception.description` (the full stack) and falls back to
- * `exceptionDetails.text` (the short header). Both are best-effort —
- * Chrome sometimes ships an empty string when the throw value is
- * `null` / `undefined` / a non-Error primitive.
+ * Prefers `exception.description` (the full stack), then a thrown
+ * primitive's value, before falling back to the generic short header.
  */
 function extractErrorText(details: CdpExceptionDetails): string {
   const desc = details.exception?.description?.trim();
   if (desc) return desc;
-  const text = details.text?.trim();
-  if (text) return text;
   if (details.exception?.value !== undefined) {
     return `Uncaught ${String(details.exception.value)}`;
   }
+  const text = details.text?.trim();
+  if (text) return text;
   return "Uncaught (unknown error)";
 }
 
@@ -138,6 +141,9 @@ export async function handleEvaluate(
   if (!params || typeof params.expression !== "string" || params.expression.length === 0) {
     return { code: "invalid_params", message: "evaluate requires a non-empty expression" };
   }
+  if (params.unverified !== undefined && typeof params.unverified !== "boolean") {
+    return { code: "invalid_params", message: "unverified must be a boolean" };
+  }
   const ctxOrErr = lookupSession(manager, params, "evaluate");
   if (isRpcError(ctxOrErr)) return ctxOrErr;
   const ctx = ctxOrErr;
@@ -160,17 +166,27 @@ export async function handleEvaluate(
       returnByValue: params.return_by_value ?? true,
       throwOnSideEffect: false,
     });
+    if (deps.signal?.aborted)
+      return {
+        code: "cancelled",
+        message: "evaluate cancelled after dispatch; page effects may have occurred",
+        data: { effect_state: "unknown" },
+      };
+    // The receipt says so when nothing about the page was verified.
+    const unverified = params.unverified === true ? { verified: false as const } : {};
     if (reply.exceptionDetails) {
       return attachDialogs(deps.cdp, target.tabId, dialogCursor, {
         ok: false,
         tab_id: target.tabId,
         error: buildEvaluateError(reply.exceptionDetails),
+        ...unverified,
       });
     }
     return attachDialogs(deps.cdp, target.tabId, dialogCursor, {
       ok: true,
       tab_id: target.tabId,
       value: extractValue(reply.result),
+      ...unverified,
     });
   } catch (err) {
     return {

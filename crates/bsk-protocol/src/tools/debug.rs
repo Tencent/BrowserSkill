@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 macro_rules! debug_actions {
-    ($($action:ident => ($wire:literal, $effect:ident, $owner:ident)),* $(,)?) => {
+    ($($action:ident => ($wire:literal, $effect:ident, $owner:ident, $cooperation_guarded:literal)),* $(,)?) => {
         #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
         pub enum DebugAction { $(#[serde(rename = $wire)] $action,)* }
         impl DebugAction {
@@ -18,35 +18,41 @@ macro_rules! debug_actions {
             pub const fn owner(&self) -> crate::catalog::MethodOwner {
                 match self { $(Self::$action => crate::catalog::MethodOwner::$owner,)* }
             }
+            /// Whether shared-tab cooperation gates this debug sub-action as an active
+            /// intervention or rule mutation (`rule_disable`/`rule_remove` also modify
+            /// active rule state on the controlled tab).
+            pub const fn cooperation_guarded(&self) -> bool {
+                match self { $(Self::$action => $cooperation_guarded,)* }
+            }
         }
     };
 }
 
 debug_actions! {
-    Performance => ("performance", ControlPlane, Extension),
-    Aggregate => ("aggregate", ControlPlane, Extension),
-    Duplicates => ("duplicates", ControlPlane, Extension),
-    Capabilities => ("capabilities", ControlPlane, Extension),
-    Activity => ("activity", ControlPlane, Daemon),
-    Wait => ("wait", ControlPlane, Daemon),
-    Pin => ("pin", ControlPlane, Extension),
-    Unpin => ("unpin", ControlPlane, Extension),
-    Start => ("start", ControlPlane, Extension),
-    Stop => ("stop", ControlPlane, Extension),
-    Status => ("status", ControlPlane, Extension),
-    Requests => ("requests", ControlPlane, Extension),
-    Request => ("request", ControlPlane, Extension),
-    Operations => ("operations", ControlPlane, Extension),
-    Operation => ("operation", ControlPlane, Extension),
-    Console => ("console", ControlPlane, Extension),
-    Pages => ("pages", ControlPlane, Extension),
-    Export => ("export", ControlPlane, Extension),
-    Rules => ("rules", ControlPlane, Extension),
-    RuleAdd => ("rule_add", BrowserMutation, Extension),
-    RuleEnable => ("rule_enable", BrowserMutation, Extension),
-    RuleDisable => ("rule_disable", ControlPlane, Extension),
-    RuleRemove => ("rule_remove", ControlPlane, Extension),
-    Replay => ("replay", BrowserMutation, Extension),
+    Performance => ("performance", ControlPlane, Extension, false),
+    Aggregate => ("aggregate", ControlPlane, Extension, false),
+    Duplicates => ("duplicates", ControlPlane, Extension, false),
+    Capabilities => ("capabilities", ControlPlane, Extension, false),
+    Activity => ("activity", ControlPlane, Daemon, false),
+    Wait => ("wait", ControlPlane, Daemon, false),
+    Pin => ("pin", ControlPlane, Extension, false),
+    Unpin => ("unpin", ControlPlane, Extension, false),
+    Start => ("start", ControlPlane, Extension, false),
+    Stop => ("stop", ControlPlane, Extension, false),
+    Status => ("status", ControlPlane, Extension, false),
+    Requests => ("requests", ControlPlane, Extension, false),
+    Request => ("request", ControlPlane, Extension, false),
+    Operations => ("operations", ControlPlane, Extension, false),
+    Operation => ("operation", ControlPlane, Extension, false),
+    Console => ("console", ControlPlane, Extension, false),
+    Pages => ("pages", ControlPlane, Extension, false),
+    Export => ("export", ControlPlane, Extension, false),
+    Rules => ("rules", ControlPlane, Extension, false),
+    RuleAdd => ("rule_add", BrowserMutation, Extension, true),
+    RuleEnable => ("rule_enable", BrowserMutation, Extension, true),
+    RuleDisable => ("rule_disable", ControlPlane, Extension, true),
+    RuleRemove => ("rule_remove", ControlPlane, Extension, true),
+    Replay => ("replay", BrowserMutation, Extension, true),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]

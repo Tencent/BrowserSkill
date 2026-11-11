@@ -3,7 +3,11 @@ import type { DebugManager, DebugTicket } from "@/debug/manager";
 import type { InteractionPreferenceStore } from "@/lib/interaction-preferences";
 import { OVERLAY_AUTOMATION_BYPASS } from "@/lib/overlay-bridge";
 import { ScreenshotExports } from "@/long-screenshot/exports";
-import type { SessionManager } from "@/session-manager/manager";
+import {
+  isAgentControlledTab,
+  type SessionContext,
+  type SessionManager,
+} from "@/session-manager/manager";
 import { withTaskPopups } from "@/session-manager/task-popups";
 import type { ExtensionToolMethod, ResultOf } from "@/transport/generated/methods";
 import {
@@ -15,7 +19,15 @@ import {
   validateToolResult,
 } from "@/transport/protocol";
 import type { Transport } from "@/transport/transport";
-import type { HoverResult, ProtocolFrame, ResponseFrame, RpcError } from "@/transport/types";
+import type {
+  DialogHandleResult,
+  DialogStatusResult,
+  HoverResult,
+  ProtocolFrame,
+  RequestFrame,
+  ResponseFrame,
+  RpcError,
+} from "@/transport/types";
 import { isRequestFrame } from "@/transport/types";
 import { videoError } from "@/video/errors";
 import type { VideoManager } from "@/video/manager";
@@ -23,9 +35,11 @@ import { auditContext } from "./audit-context";
 import { prepareBackgroundExecution } from "./background-execution";
 import { handleConsole } from "./console";
 import { handleDebug } from "./debug";
+import { handleDialog } from "./dialog-control";
 import { handleDownload } from "./download";
+import { handleDrag } from "./drag";
 import { type EmulateCdpRunner, handleEmulate } from "./emulate";
-import { classifyCdpError } from "./errors";
+import { classifyCdpError, rpcError } from "./errors";
 import { handleEvaluate } from "./evaluate";
 import { handleExtract } from "./extract";
 import { handleRequestHelp } from "./human-loop";
@@ -53,7 +67,8 @@ import {
   handleScreenshot,
   handleSnapshot,
 } from "./observation";
-import { resumesBrowserControl, TOOL_POLICIES } from "./policy";
+import { resumesBrowserControl, TOOL_POLICIES, toolPolicy } from "./policy";
+import { handleRead } from "./read";
 import {
   clearRecordingForSession,
   handleRecordAwait,
@@ -64,7 +79,13 @@ import {
 import { handleFullPageScreenshot } from "./screenshot-full-page";
 import { handleScrollTo } from "./scroll";
 import { handleSessionStart, handleSessionStop } from "./session";
-import { chromeTabsApi, lookupSession, resolveTargetTab } from "./shared";
+import {
+  cdpBlockedUrlReason,
+  chromeTabsApi,
+  lookupSession,
+  resolveTargetTab,
+  sessionCdpRunner,
+} from "./shared";
 import {
   type BorrowConfirmationApprover,
   chromeTabMutationApi,
@@ -74,11 +95,12 @@ import {
   handleTabList,
   handleTabReturn,
   handleTabSelect,
+  type TabBorrowResult,
 } from "./tabs";
 import { handleUpload } from "./upload";
 import { handleWaitForElement, handleWaitForNavigation } from "./waits";
 import { handleWheel } from "./wheel";
-import { handleWindowResize } from "./window";
+import { chromeWindowResizeApi, handleWindowResize } from "./window";
 
 type DispatcherCdpRunner = CdpRunner &
   NetworkCdpRunner &
@@ -131,6 +153,10 @@ export interface DispatcherDeps {
   helpNotificationCopy?: () => { title: string; body: string };
 }
 
+/** Suggested wait before retrying a request refused while another settles.
+ * Viewport captures are bounded at 10 s plus 500 ms cleanup; most settle sooner. */
+const OPERATION_SETTLING_RETRY_MS = 1_000;
+
 /**
  * Routes RPC requests pushed by the daemon over the Transport to the
  * appropriate tool implementation.
@@ -165,6 +191,11 @@ export class ToolDispatcher {
   private subscription: { dispose(): void } | null = null;
   private readonly hoverBypassTabs = new Map<number, string>();
   private readonly hoverLatches = new Map<number, HoverLatch>();
+  private readonly activeDialogOperations = new Map<
+    string,
+    { request: RequestFrame; operationId: string }
+  >();
+  private dialogSubscription: { dispose(): void } | null = null;
   private pendingSessionStarts = 0;
   private idleOperationInProgress = false;
   /**
@@ -174,6 +205,7 @@ export class ToolDispatcher {
    * controllers. Made public for tests.
    */
   readonly inflightAbortControllers = new Map<string, AbortController>();
+  private readonly requestSessions = new Map<string, string>();
 
   constructor(deps: DispatcherDeps) {
     this.cooperation = deps.cooperation;
@@ -194,6 +226,35 @@ export class ToolDispatcher {
 
   start(): void {
     if (this.subscription) return;
+    this.dialogSubscription =
+      this.cdp?.onDialogChanged?.((tabId, dialog, reason) => {
+        const sessionId = this.sessions.findControllingSession(tabId);
+        if (!sessionId) return;
+        const active = this.activeDialogOperations.get(sessionId);
+        if (reason === "decision_timeout" && active)
+          this.inflightAbortControllers.get(active.request.id)?.abort();
+        // Dismissing one dialog can synchronously resume page code that opens
+        // another. Keep rejecting the chain until the original handler settles.
+        if (
+          dialog &&
+          active &&
+          this.inflightAbortControllers.get(active.request.id)?.signal.aborted
+        )
+          void this.cdp?.resolveDialog?.(dialog.id, false).catch(() => {});
+        try {
+          this.transport.send({
+            event: "dialog.changed",
+            payload: {
+              session_id: sessionId,
+              tab_id: tabId,
+              dialog,
+              ...(active ? { operation_id: active.operationId } : {}),
+            },
+          });
+        } catch {
+          /* Disconnect invalidates the daemon's operation, never replay it. */
+        }
+      }) ?? null;
     this.subscription = this.transport.onMessage((msg) => {
       void this.dispatch(msg);
     });
@@ -228,6 +289,11 @@ export class ToolDispatcher {
     this.subscription = null;
     // Trip every outstanding controller so dependent waits unblock
     // before the dispatcher is GC'd.
+    this.dialogSubscription?.dispose();
+    this.dialogSubscription = null;
+    for (const active of this.activeDialogOperations.values())
+      this.dismissOperationDialogs(active.request);
+    this.activeDialogOperations.clear();
     for (const ac of this.inflightAbortControllers.values()) {
       try {
         ac.abort();
@@ -236,9 +302,17 @@ export class ToolDispatcher {
       }
     }
     this.inflightAbortControllers.clear();
+    this.requestSessions.clear();
     const exports = this.screenshotExports;
     this.screenshotExports = new ScreenshotExports((id) => this.sessions.has(id));
     void exports.dispose();
+  }
+
+  /** Revoke in-flight work locally; do not wait for the daemon's round trip. */
+  cancelSession(sessionId: string): void {
+    for (const [rpcId, owner] of this.requestSessions) {
+      if (owner === sessionId) this.inflightAbortControllers.get(rpcId)?.abort();
+    }
   }
 
   private async dispatch(msg: ProtocolFrame): Promise<void> {
@@ -260,11 +334,15 @@ export class ToolDispatcher {
       const target = typeof params.rpc_id === "string" ? params.rpc_id : "";
       const ac = target ? this.inflightAbortControllers.get(target) : undefined;
       if (ac) {
+        const active = [...this.activeDialogOperations.values()].find(
+          (item) => item.request.id === target,
+        );
         try {
           ac.abort();
         } catch (err) {
           console.warn("[bsk dispatcher] AbortController.abort() threw", err);
         }
+        if (active) this.dismissOperationDialogs(active.request);
       }
       const reply: ResponseFrame = {
         id: raw.id,
@@ -293,17 +371,33 @@ export class ToolDispatcher {
         return;
       }
     }
+    const rawEnvelope =
+      typeof raw.params === "object" && raw.params !== null && !Array.isArray(raw.params)
+        ? (raw.params as { _operation_id?: unknown; _audit_id?: unknown })
+        : undefined;
+    const rawOperationId =
+      typeof rawEnvelope?._operation_id === "string" ? rawEnvelope._operation_id : undefined;
+    const rawAuditId =
+      typeof rawEnvelope?._audit_id === "string" ? rawEnvelope._audit_id : undefined;
+
     const decoded = decodeToolRequest(raw);
     if (!decoded.ok) {
       this.sendResponse({ id: raw.id, error: decoded.error });
       return;
     }
     const req = decoded.request;
+    const policy = TOOL_POLICIES[req.method];
     const startsSession = req.method === "tool.session_start";
-    const mutatesSessions = startsSession || req.method === "tool.session_stop";
+    const stopsSession = req.method === "tool.session_stop";
+    const mutatesSessions = startsSession || stopsSession;
     if (startsSession) this.pendingSessionStarts += 1;
     const ac = new AbortController();
     this.inflightAbortControllers.set(req.id, ac);
+    const requestSessionId =
+      "session_id" in req.params && typeof req.params.session_id === "string"
+        ? req.params.session_id
+        : undefined;
+    if (requestSessionId) this.requestSessions.set(req.id, requestSessionId);
     let body: ResponseFrame;
     let startedSession: string | null = null;
     let debugTicket: DebugTicket | undefined;
@@ -311,44 +405,102 @@ export class ToolDispatcher {
       if (startsSession && this.idleOperationInProgress) {
         throw new Error("Browser settings are updating; retry session start.");
       }
-      const sessionId = sessionIdForBrowserControlMethod(req);
-      if (sessionId) this.onBrowserControlResumed?.(sessionId);
-      // Best-effort context must never prevent the requested operation.
-      try {
-        const context = await auditContext(req, this.sessions);
-        if (context) this.transport.send({ event: "audit.context", payload: context });
-      } catch {
-        /* The daemon still has the original operation metadata. */
-      }
-      try {
-        debugTicket = await this.debug?.before(req, ac.signal);
-      } catch {
-        /* Evidence must not block the operation. */
-      }
-      throwIfDispatchAborted(ac.signal);
-      let result = TOOL_POLICIES[req.method].opensTabs
-        ? await withTaskPopups(
-            this.sessions,
-            (req.params ?? {}) as { session_id?: string; tab_id?: number },
-            (inputSent) => this.invoke(req, ac.signal, inputSent),
-            this.onAgentTabClaimed,
-            ac.signal,
-          )
-        : await this.invoke(req, ac.signal);
-      if (!isRpcError(result)) {
-        const invalid = validateToolResult(req.method, result);
-        if (invalid && startsSession && "session_id" in req.params && req.params.session_id)
-          await this.sessions.stop(req.params.session_id);
-        result = invalid ?? result;
-      }
-      this.debug?.after(debugTicket, isRpcError(result) ? result.message : undefined);
-      debugTicket = undefined;
-      if (isRpcError(result)) {
-        body = { id: req.id, error: classifyCdpError(result) };
+      const dialogControl = policy.cooperation === "dialog";
+      const blocked = requestSessionId ? this.pendingForSession(requestSessionId) : undefined;
+      if (!dialogControl && !stopsSession && blocked) {
+        body = {
+          id: req.id,
+          error: {
+            code: "dialog_pending",
+            message:
+              "Resolve the pending dialog before starting another action; this action was not dispatched",
+            data: { dispatched: false, dialog: blocked, session_id: requestSessionId },
+          },
+        };
+      } else if (
+        requestSessionId &&
+        rawOperationId &&
+        this.activeDialogOperations.has(requestSessionId)
+      ) {
+        // A daemon cleanup deadline can expire before Chrome releases the
+        // original call. Do not replace the owner of its dialog cleanup.
+        // Nothing was sent, so the caller may retry the same request once the
+        // earlier one settles (for example a cancelled screenshot, #527).
+        const settling = this.activeDialogOperations.get(requestSessionId);
+        body = {
+          id: req.id,
+          error: {
+            code: "cdp_failed",
+            message: "Previous operation is still settling; this action was not dispatched",
+            data: {
+              dispatched: false,
+              reason: "operation_settling",
+              retryable: true,
+              retry_after_ms: OPERATION_SETTLING_RETRY_MS,
+              settling_method: settling?.request.method,
+            },
+          },
+        };
       } else {
-        body = { id: req.id, result };
-        if (req.method === "tool.session_start") {
-          startedSession = "session_id" in req.params ? (req.params.session_id ?? null) : null;
+        if (requestSessionId && rawOperationId) {
+          this.activeDialogOperations.set(requestSessionId, {
+            request: req,
+            operationId: rawOperationId,
+          });
+        }
+        const sessionId = sessionIdForBrowserControlMethod(req);
+        if (sessionId) this.onBrowserControlResumed?.(sessionId);
+        // Best-effort context must never prevent the requested operation.
+        if (rawAuditId) {
+          try {
+            const context = await auditContext(
+              {
+                ...req,
+                params: {
+                  ...(req.params as Record<string, unknown>),
+                  _audit_id: rawAuditId,
+                },
+              },
+              this.sessions,
+            );
+            if (context) this.transport.send({ event: "audit.context", payload: context });
+          } catch {
+            /* The daemon still has the original operation metadata. */
+          }
+        }
+        try {
+          if (!dialogControl && !stopsSession)
+            debugTicket = await this.debug?.before(req, ac.signal);
+        } catch {
+          /* Evidence must not block the operation. */
+        }
+        throwIfDispatchAborted(ac.signal);
+        let result = policy.opensTabs
+          ? await withTaskPopups(
+              this.sessions,
+              (req.params ?? {}) as { session_id?: string; tab_id?: number },
+              (inputSent) => this.invoke(req, ac.signal, inputSent),
+              this.onAgentTabClaimed,
+              ac.signal,
+            )
+          : stopsSession && requestSessionId
+            ? await this.withDialogCleanup(requestSessionId, () => this.invoke(req, ac.signal))
+            : await this.invoke(req, ac.signal);
+        if (!isRpcError(result)) {
+          const invalid = validateToolResult(req.method, result);
+          if (invalid && startsSession && requestSessionId)
+            await this.sessions.stop(requestSessionId);
+          result = invalid ?? result;
+        }
+        this.debug?.after(debugTicket, isRpcError(result) ? result.message : undefined);
+        debugTicket = undefined;
+        if (isRpcError(result)) {
+          body = { id: req.id, error: classifyCdpError(result) };
+        } else {
+          body = { id: req.id, result };
+          if (startsSession) {
+            startedSession = requestSessionId ?? null;
+          }
         }
       }
     } catch (err) {
@@ -370,6 +522,13 @@ export class ToolDispatcher {
       if (startsSession) this.pendingSessionStarts -= 1;
       this.debug?.after(debugTicket, "operation failed");
       this.inflightAbortControllers.delete(req.id);
+      this.requestSessions.delete(req.id);
+      if (
+        requestSessionId &&
+        this.activeDialogOperations.get(requestSessionId)?.request.id === req.id
+      ) {
+        this.activeDialogOperations.delete(requestSessionId);
+      }
     }
     const sent = this.sendResponse(body);
     if (!sent && startedSession) {
@@ -395,6 +554,7 @@ export class ToolDispatcher {
       this.onSessionsChanged?.();
     }
   }
+
   private sendResponse(body: ResponseFrame): boolean {
     try {
       this.transport.send(body);
@@ -423,6 +583,8 @@ export class ToolDispatcher {
         return videoError(error, signal?.aborted ? "cancelled" : "cdp_failed");
       }
     },
+    "tool.read": async (params, { signal, cdp }) =>
+      handleRead(this.sessions, params, cdp ? { cdp, tabsApi: chromeTabsApi } : undefined, signal),
     "tool.extract": async (params, { signal, cdp }) =>
       handleExtract(
         this.sessions,
@@ -450,6 +612,27 @@ export class ToolDispatcher {
         signal,
         cdp?.runBrowserMutation,
       );
+    },
+    "tool.dialog_status": async (params, { signal, cdp }) => {
+      if (!cdp) return { code: "unsupported", message: "Dialog control requires CDP" };
+      return handleDialog(this.sessions, "tool.dialog_status", params, cdp, {
+        signal,
+        authority: this.cooperation,
+      }) as Promise<DialogStatusResult | RpcError>;
+    },
+    "tool.dialog_accept": async (params, { signal, cdp }) => {
+      if (!cdp) return { code: "unsupported", message: "Dialog control requires CDP" };
+      return handleDialog(this.sessions, "tool.dialog_accept", params, cdp, {
+        signal,
+        authority: this.cooperation,
+      }) as Promise<DialogHandleResult | RpcError>;
+    },
+    "tool.dialog_dismiss": async (params, { signal, cdp }) => {
+      if (!cdp) return { code: "unsupported", message: "Dialog control requires CDP" };
+      return handleDialog(this.sessions, "tool.dialog_dismiss", params, cdp, {
+        signal,
+        authority: this.cooperation,
+      }) as Promise<DialogHandleResult | RpcError>;
     },
     "tool.session_start": async (params, { signal }) => {
       return handleSessionStart(this.sessions, params, {
@@ -501,7 +684,7 @@ export class ToolDispatcher {
     "tool.tab_borrow": async (params, { signal, cdp }) => {
       const result = await handleTabBorrow(this.sessions, params, {
         signal,
-        approveBorrow: this.approveBorrow,
+        approveBorrow: this.getBorrowApprover(),
         cdp,
       });
       if (!isRpcError(result)) {
@@ -515,13 +698,18 @@ export class ToolDispatcher {
         cdp,
         beforeReturn: async (sessionId, tabId) => {
           this.debug?.stopTab(tabId);
-          if (this.sessions.get(sessionId)?.remote) clearRecordingForSession(sessionId);
+          clearRecordingForSession(sessionId);
           await this.releaseHoverLatch(sessionId, tabId);
         },
       });
     },
-    "tool.window_resize": async (params, { signal }) => {
-      return handleWindowResize(this.sessions, params, undefined, signal);
+    "tool.window_resize": async (params, { signal, cdp }) => {
+      return handleWindowResize(
+        this.sessions,
+        params,
+        { windows: chromeWindowResizeApi, tabs: chromeTabsApi, cdp },
+        signal,
+      );
     },
     "tool.emulate": async (params, { signal, cdp }) => {
       return handleEmulate(
@@ -708,6 +896,19 @@ export class ToolDispatcher {
       );
       return this.rememberHover(params.session_id, result);
     },
+    "tool.drag": async (params, { signal, onInputSent, cdp }) => {
+      return this.withHoverReassert(
+        params,
+        () =>
+          handleDrag(
+            this.sessions,
+            params,
+            cdp ? { cdp, tabsApi: chromeTabsApi, signal, bypassOverlay, onInputSent } : undefined,
+          ),
+        { releaseAfter: true },
+        signal,
+      );
+    },
     "tool.wheel": async (params, { signal, cdp }) => {
       return this.withHoverReassert(
         params,
@@ -892,20 +1093,220 @@ export class ToolDispatcher {
     },
   };
 
+  private pendingForSession(sessionId: string) {
+    const ctx = this.sessions.get(sessionId);
+    if (!ctx) return undefined;
+    return this.cdp
+      ?.pendingDialogs?.()
+      .find((dialog) => this.sessions.findControllingSession(dialog.tab_id) === sessionId);
+  }
+
+  private dismissOperationDialogs(request: RequestFrame): void {
+    const sessionId = (request.params as { session_id?: string } | undefined)?.session_id;
+    if (!sessionId) return;
+    for (const dialog of this.cdp?.pendingDialogs?.() ?? []) {
+      if (this.sessions.findControllingSession(dialog.tab_id) === sessionId)
+        void this.cdp?.resolveDialog?.(dialog.id, false).catch(() => {});
+    }
+  }
+
+  /** Teardown must also dismiss dialogs opened after their initiating action
+   * returned, including a chained dialog resumed by the first dismissal. */
+  private withDialogCleanup(sessionId: string, stop: () => Promise<unknown>): Promise<unknown> {
+    const owned = (tabId: number) => this.sessions.findControllingSession(tabId) === sessionId;
+    const dismiss = (id: string) => this.cdp?.resolveDialog?.(id, false).catch(() => {});
+    const subscription = this.cdp?.onDialogChanged?.((tabId, dialog) => {
+      if (dialog && owned(tabId)) void dismiss(dialog.id);
+    });
+    const pending = (this.cdp?.pendingDialogs?.() ?? []).filter((dialog) => owned(dialog.tab_id));
+    if (!subscription && pending.length === 0) return stop();
+    return (async () => {
+      try {
+        await Promise.all(pending.map((dialog) => dismiss(dialog.id)));
+        return await stop();
+      } finally {
+        subscription?.dispose();
+      }
+    })();
+  }
+
+  private getBorrowApprover(): BorrowConfirmationApprover | undefined {
+    if (this.approveBorrow) return this.approveBorrow;
+    if (!this.interactionPreferences) return undefined;
+    return async () => {
+      await this.interactionPreferences!.readyOrFallback();
+      if (!this.interactionPreferences!.get().confirmTabBorrow) return true;
+      return rpcError(
+        "permission_denied",
+        "confirmation_ui_unavailable",
+        "Borrow confirmation is unavailable",
+      );
+    };
+  }
+
+  private canAutoBorrowForRequest(req: RequestFrame, session: SessionContext): boolean {
+    if (req.method === "tool.cooperate") {
+      const params = req.params as { action?: string; control_policy?: string } | undefined;
+      const action = params?.action;
+      if (action !== "sync" && action !== "enable") return false;
+      if (params?.control_policy !== undefined) {
+        if (!["auto", "strict", "target"].includes(params.control_policy)) return false;
+        const requestedPolicy =
+          params.control_policy === "auto"
+            ? (session.controlPolicy ?? "target")
+            : params.control_policy;
+        if (requestedPolicy && session.controlPolicy && requestedPolicy !== session.controlPolicy) {
+          return false;
+        }
+      }
+      return true;
+    }
+    if (req.method === "tool.tab_select") return true;
+    if (!this.cooperation) {
+      return (
+        Boolean(toolPolicy(req.method)?.autoBorrowWrite) ||
+        (req.method === "tool.observe" &&
+          (req.params as { probe_hover?: boolean } | undefined)?.probe_hover === true)
+      );
+    }
+    return false;
+  }
+
+  private tryStartAutoBorrow(
+    req: RequestFrame,
+    signal: AbortSignal,
+  ): Promise<{ borrowed: TabBorrowResult } | { error: RpcError } | null> | null {
+    if (!this.interactionPreferences) return null;
+    const params = req.params as { session_id?: string; tab_id?: number } | undefined;
+    const sessionId = params?.session_id;
+    const tabId = params?.tab_id;
+    if (
+      typeof sessionId !== "string" ||
+      typeof tabId !== "number" ||
+      !Number.isSafeInteger(tabId) ||
+      tabId <= 0
+    ) {
+      return null;
+    }
+    const session = this.sessions.get(sessionId);
+    if (
+      !session ||
+      session.remote ||
+      session.incognito ||
+      isAgentControlledTab(session, tabId) ||
+      !this.canAutoBorrowForRequest(req, session)
+    ) {
+      return null;
+    }
+    if (
+      this.sessions.findControllingSession(tabId) !== null ||
+      this.sessions.findBorrowingSession(tabId, null) !== null
+    ) {
+      return null;
+    }
+    return this.executeAutoBorrow(req, sessionId, tabId, signal);
+  }
+
+  private async executeAutoBorrow(
+    req: RequestFrame,
+    sessionId: string,
+    tabId: number,
+    signal: AbortSignal,
+  ): Promise<{ borrowed: TabBorrowResult } | { error: RpcError } | null> {
+    const session = this.sessions.get(sessionId);
+    if (!session || !this.interactionPreferences || !this.canAutoBorrowForRequest(req, session)) {
+      return null;
+    }
+    await this.interactionPreferences.readyOrFallback();
+    if (
+      signal.aborted ||
+      this.interactionPreferences.get().confirmTabBorrow ||
+      !this.canAutoBorrowForRequest(req, session)
+    ) {
+      return null;
+    }
+    let tab: chrome.tabs.Tab;
+    try {
+      tab = await chromeTabsApi.get(tabId);
+    } catch {
+      return null;
+    }
+    if (
+      tab.incognito ||
+      typeof tab.windowId !== "number" ||
+      tab.windowId === session.agentWindowId ||
+      this.sessions.findByWindowId(tab.windowId) !== null
+    ) {
+      return null;
+    }
+    if (
+      req.method === "tool.cooperate" &&
+      (req.params as { action?: string } | undefined)?.action === "sync" &&
+      cdpBlockedUrlReason(tab.url)
+    ) {
+      return null;
+    }
+    const borrowReq: ToolRequest<"tool.tab_borrow"> = {
+      id: `${req.id}:auto_borrow`,
+      method: "tool.tab_borrow",
+      params: { session_id: sessionId, tab_id: tabId },
+    };
+    const sessionCdp = this.cdpForSession(sessionId);
+    const runBorrow = (cdp = sessionCdp, opSignal = signal) =>
+      this.invokeTool(borrowReq, opSignal, undefined, cdp);
+    const borrowResult = await (this.cooperation && sessionCdp
+      ? this.cooperation.run(borrowReq, sessionCdp, signal, runBorrow)
+      : runBorrow());
+    if (isRpcError(borrowResult)) return { error: borrowResult };
+    return { borrowed: borrowResult as TabBorrowResult };
+  }
+
+  private cdpForSession(sessionId: string | undefined): DispatcherCdpRunner | undefined {
+    if (!this.cdp || !sessionId) return this.cdp;
+    return sessionCdpRunner(this.cdp, sessionId, () => this.sessions.has(sessionId));
+  }
+
   private invoke(
     req: ToolRequest,
     signal: AbortSignal,
     onInputSent?: (tabId: number) => void,
   ): Promise<unknown> {
-    const run = (cdp = this.cdp, operationSignal = signal, completionSignal = operationSignal) =>
+    const rawSessionId = (req.params as { session_id?: unknown } | undefined)?.session_id;
+    const sessionId =
+      typeof rawSessionId === "string" &&
+      rawSessionId.length > 0 &&
+      req.method !== "tool.session_start" &&
+      req.method !== "tool.session_stop"
+        ? rawSessionId
+        : undefined;
+    const sessionCdp = this.cdpForSession(sessionId);
+    const run = (cdp = sessionCdp, operationSignal = signal, completionSignal = operationSignal) =>
       this.invokeTool(req, operationSignal, onInputSent, cdp, completionSignal);
-    if (req.method === "tool.cooperate" && this.cooperation && this.cdp) {
-      const cdp = this.cdp;
-      return this.releaseHoverLatch((req.params as { session_id: string }).session_id).then(() =>
-        this.cooperation!.run(req, cdp, signal, run),
-      );
-    }
-    return this.cooperation && this.cdp ? this.cooperation.run(req, this.cdp, signal, run) : run();
+    // Modal control uses cached authority checks, without blocked renderer preparation.
+    if (TOOL_POLICIES[req.method].cooperation === "dialog") return run();
+    const dispatchMain = (): Promise<unknown> => {
+      if (req.method === "tool.cooperate" && this.cooperation && sessionCdp) {
+        const cdp = sessionCdp;
+        return this.releaseHoverLatch((req.params as { session_id: string }).session_id).then(() =>
+          this.cooperation!.run(req, cdp, signal, run),
+        );
+      }
+      return this.cooperation && sessionCdp
+        ? this.cooperation.run(req, sessionCdp, signal, run)
+        : run();
+    };
+    const autoBorrow = this.tryStartAutoBorrow(req, signal);
+    if (!autoBorrow) return dispatchMain();
+    return autoBorrow.then((outcome) => {
+      if (outcome && "error" in outcome) return outcome.error;
+      if (outcome && "borrowed" in outcome && req.method === "tool.tab_select") {
+        return {
+          tab_id: outcome.borrowed.tab_id,
+          window_id: outcome.borrowed.agent_window_id,
+        };
+      }
+      return dispatchMain();
+    });
   }
 
   private async invokeTool<M extends ExtensionToolMethod>(
@@ -1024,14 +1425,16 @@ export class ToolDispatcher {
     if (!this.cdp) return;
     await Promise.all(
       this.hoverLatchesForRequest(params).map((latch) =>
-        this.cdp!.send(latch.tabId, "Input.dispatchMouseEvent", {
-          type: "mouseMoved",
-          x: latch.x,
-          y: latch.y,
-        }).catch((err) => {
-          console.debug("[bsk dispatcher] hover reassert failed", err);
-          this.hoverLatches.delete(latch.tabId);
-        }),
+        this.cdpForSession(latch.sessionId)!
+          .send(latch.tabId, "Input.dispatchMouseEvent", {
+            type: "mouseMoved",
+            x: latch.x,
+            y: latch.y,
+          })
+          .catch((err) => {
+            console.debug("[bsk dispatcher] hover reassert failed", err);
+            this.hoverLatches.delete(latch.tabId);
+          }),
       ),
     );
   }

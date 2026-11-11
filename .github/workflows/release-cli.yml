@@ -91,7 +91,7 @@ jobs:
         shell: bash
         run: cargo build --release --locked -p bsk --target "${{ matrix.target }}"
 
-      - name: Package archive (Unix)
+      - name: Package Unix build input (Mac signing happens internally)
         if: matrix.archive == 'tar.gz'
         shell: bash
         run: |

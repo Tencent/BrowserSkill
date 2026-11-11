@@ -30,6 +30,9 @@ Agent Window does not authorize capture. Returning/closing that tab, ending its
 task or disconnecting stops collection and saves the retained evidence. These events
 do not delete saved records. Browser/extension restarts recover the latest checkpoint
 as interrupted, without resuming capture or claiming pending operations succeeded.
+Starting capture enables page console reporting, which some anti-debugging sites
+detect. If browser-generated log events cannot be enabled, capture continues and
+`run.coverage` includes `browser_log_capture_unavailable`.
 
 ## CLI example
 

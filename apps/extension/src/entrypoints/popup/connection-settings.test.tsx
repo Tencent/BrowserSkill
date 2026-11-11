@@ -3,14 +3,25 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { STORAGE_KEYS } from "@/lib/instance-id";
 import type { RemoteEndpoint } from "@/transport/remote-endpoint";
-import { readRemoteConnection } from "@/transport/remote-storage";
+import { readRemoteConnection, readSavedRemoteConnection } from "@/transport/remote-storage";
 import { ConnectionSettings } from "./connection-settings";
 
 vi.mock("@/transport/remote-storage", () => ({
   REMOTE_CONNECTION_REVISION: "revision",
   REMOTE_CONNECTION_MODE: "mode",
   readRemoteConnection: vi.fn(),
+  readSavedRemoteConnection: vi.fn(),
 }));
+vi.mock("./local-pairing", async (original) => ({
+  ...(await original<typeof import("./local-pairing")>()),
+  readLocalPairingInfo: vi.fn(),
+}));
+
+import type { LocalAuthStatus } from "@/transport/local-auth";
+import v from "../../../../../crates/bsk-protocol/tests/fixtures/local-auth-v1.json";
+import { readLocalPairingInfo } from "./local-pairing";
+
+const localLink = `ws://127.0.0.1:52800/#bsk-local.v1.${v.daemon_id}.${v.device_id}.${v.key}`;
 const endpoint: RemoteEndpoint = {
   url: "wss://browser.example/extension",
   token: "a".repeat(43),
@@ -34,6 +45,15 @@ beforeEach(() => {
   portWriteFails = false;
   store = { [STORAGE_KEYS.DAEMON_PORT]: 52800 };
   listeners = new Set();
+  vi.mocked(readLocalPairingInfo)
+    .mockReset()
+    .mockResolvedValue({
+      policy: { skip: false },
+      devices: [],
+    });
+  vi.mocked(readSavedRemoteConnection)
+    .mockReset()
+    .mockImplementation(async () => remote);
   vi.mocked(readRemoteConnection)
     .mockReset()
     .mockImplementation(async () => {
@@ -95,27 +115,54 @@ function submit() {
   fireEvent.submit(document.querySelector("form")!);
 }
 
-it("keeps the connection mode visible and the address inside the collapsed settings", async () => {
+it("shows the settings without a disclosure and the address under the selected tab", async () => {
   const { container } = render(<ConnectionSettings connectionEnabled />);
-  const details = container.querySelector("details")!;
-  const summary = details.querySelector("summary")!;
-  await waitFor(() => expect(summary.textContent).toContain("本机"));
-  expect(details.open).toBe(false);
-  expect(summary.textContent).not.toContain("ws://");
-  expect(details.querySelector('[data-slot="popup-current-connection"]')?.textContent).toBe(
-    "本机 · ws://127.0.0.1:52800",
-  );
+  const settings = container.querySelector('[data-slot="popup-connection-settings"]')!;
+  expect(settings.tagName).toBe("SECTION");
+  await waitFor(() => expect(settings.firstElementChild?.textContent).toContain("本机"));
+  expect(settings.firstElementChild?.textContent).not.toContain("ws://");
+  const address = settings.querySelector('[data-slot="popup-current-connection"]')!;
+  expect(address.textContent).toBe("本机 · ws://127.0.0.1:52800");
+  const tabs = screen.getByRole("group", { name: "连接方式" });
+  expect(tabs.compareDocumentPosition(address) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  await choose("远程");
+  expect(settings.querySelector('[data-slot="popup-current-connection"]')).toBeNull();
+});
+
+it("explains what saving does only once there is a valid change to save", async () => {
+  render(<ConnectionSettings connectionEnabled />);
+  await choose("本机");
+  const warning = () => document.querySelector('[data-slot="popup-save-warning"]');
+  expect(warning()).toBeNull();
+  fireEvent.change(screen.getByLabelText("本机端口"), { target: { value: "53300" } });
+  expect(warning()?.textContent).toBe("保存后会结束当前任务，并在连接开启时重新连接。");
+  fireEvent.change(screen.getByLabelText("本机端口"), { target: { value: "port" } });
+  submit();
+  await screen.findByText("请输入 1 到 65535 之间的端口号。");
+  expect(warning()).toBeNull();
+  fireEvent.change(screen.getByLabelText("本机端口"), { target: { value: "52800" } });
+  expect(warning()).toBeNull();
+});
+
+it("local: gives the pairing steps behind an info icon and keeps the remote hint in place", async () => {
+  render(<ConnectionSettings connectionEnabled />);
+  await choose("本机");
+  const info = screen.getByRole("button", { name: "配对链接说明" });
+  const steps = document.getElementById(info.getAttribute("aria-describedby")!)!;
+  expect(steps.getAttribute("role")).toBe("tooltip");
+  expect(steps.textContent).toBe("运行 bsk daemon pair 命令\n将输出的完整链接粘贴进输入框");
+  expect(document.querySelector("form")?.textContent).not.toContain("自动识别");
+  await choose("远程");
+  expect(screen.queryByRole("button", { name: "配对链接说明" })).toBeNull();
+  expect(screen.getByText("粘贴可信服务器的完整配对链接，端口已包含在内。")).toBeTruthy();
 });
 
 it("only changes the form until saved, and cancels both mode and port drafts without writes", async () => {
   render(<ConnectionSettings connectionEnabled />);
-  fireEvent.click(screen.getByText("连接设置"));
   await choose("本机");
   fireEvent.change(screen.getByLabelText("本机端口"), { target: { value: "53300" } });
   await choose("远程");
-  expect(document.querySelector('[data-slot="popup-current-connection"]')?.textContent).toBe(
-    "本机 · ws://127.0.0.1:52800",
-  );
+  expect(document.querySelector('[data-slot="popup-current-connection"]')).toBeNull();
   expect(screen.queryByLabelText("本机端口")).toBeNull();
   fireEvent.change(screen.getByLabelText("配对链接"), { target: { value: pairing } });
   expect(screen.getByText("将连接到：wss://other.example:8443/extension")).toBeTruthy();
@@ -128,7 +175,6 @@ it("only changes the form until saved, and cancels both mode and port drafts wit
 it("submits pairing on Enter, preserves the disabled switch and shows the configured address", async () => {
   const user = userEvent.setup();
   render(<ConnectionSettings connectionEnabled={false} />);
-  fireEvent.click(screen.getByText("连接设置"));
   await choose("远程");
   await user.type(screen.getByLabelText("配对链接"), pairing);
   await user.keyboard("{Enter}");
@@ -147,7 +193,6 @@ it("submits pairing on Enter, preserves the disabled switch and shows the config
 
 it("rejects an invalid pairing link before messaging the background", async () => {
   render(<ConnectionSettings connectionEnabled />);
-  fireEvent.click(screen.getByText("连接设置"));
   await choose("远程");
   fireEvent.change(screen.getByLabelText("配对链接"), { target: { value: "https://example.com" } });
   submit();
@@ -167,7 +212,6 @@ it("shows progress and prevents duplicate pairing while the request is pending",
       }),
   );
   render(<ConnectionSettings connectionEnabled />);
-  fireEvent.click(screen.getByText("连接设置"));
   await choose("远程");
   fireEvent.change(screen.getByLabelText("配对链接"), { target: { value: pairing } });
   submit();
@@ -188,7 +232,6 @@ it("keeps the current grant and draft when pairing fails", async () => {
   remote = endpoint;
   vi.mocked(chrome.runtime.sendMessage).mockResolvedValueOnce({ error: "Unable to pair" });
   render(<ConnectionSettings connectionEnabled />);
-  fireEvent.click(screen.getByText("连接设置"));
   await choose("远程");
   fireEvent.change(screen.getByLabelText("配对链接"), { target: { value: pairing } });
   submit();
@@ -203,9 +246,8 @@ it("keeps the current grant and draft when pairing fails", async () => {
 it("keeps the remote grant when the proposed local port is invalid or cannot be saved", async () => {
   remote = endpoint;
   render(<ConnectionSettings connectionEnabled />);
-  fireEvent.click(screen.getByText("连接设置"));
   await choose("本机");
-  expect(screen.getByText(/再次连接远程需要新的配对链接/)).toBeTruthy();
+  expect(screen.getByText(/远程配对会保留/)).toBeTruthy();
   fireEvent.change(screen.getByLabelText("本机端口"), { target: { value: "65536" } });
   submit();
   expect(await screen.findByText("请输入 1 到 65535 之间的端口号。")).toBeTruthy();
@@ -230,7 +272,6 @@ it("keeps the remote grant when the proposed local port is invalid or cannot be 
 it("offers explicit local recovery when remote storage cannot be read", async () => {
   storageFails = true;
   render(<ConnectionSettings connectionEnabled />);
-  fireEvent.click(screen.getByText("连接设置"));
   expect((await screen.findByRole("alert")).textContent).toContain("无法读取连接设置");
   expect(screen.getByText("无法读取连接设置")).toBeTruthy();
   await choose("本机");
@@ -246,7 +287,6 @@ it("offers explicit local recovery when remote storage cannot be read", async ()
 it("shows remote-specific guidance for a disconnected remote connection", async () => {
   remote = endpoint;
   render(<ConnectionSettings connectionEnabled disconnected />);
-  fireEvent.click(screen.getByText("连接设置"));
   expect(await screen.findByText("无法连接远程服务，请检查服务器、网络或授权状态。")).toBeTruthy();
   expect(screen.queryByText("无法连接，请确认 daemon 已启动且端口一致。")).toBeNull();
 });
@@ -254,7 +294,6 @@ it("shows remote-specific guidance for a disconnected remote connection", async 
 it("shows an expired grant and asks for a new pairing without deleting it", async () => {
   remote = { ...endpoint, expiresAt: "2020-01-01T00:00:00Z" };
   render(<ConnectionSettings connectionEnabled disconnected />);
-  fireEvent.click(screen.getByText("连接设置"));
   expect(await screen.findByText("授权已过期，请使用新的配对链接重新连接。")).toBeTruthy();
   expect(screen.getByText(/授权到期时间：/)).toBeTruthy();
   expect(screen.getByText("需要关注")).toBeTruthy();
@@ -265,7 +304,6 @@ it("shows an expired grant and asks for a new pairing without deleting it", asyn
 it("distinguishes a failed renewal from an expired grant", async () => {
   remote = { ...endpoint, pendingToken: "c".repeat(43), renewalFailure: "unavailable" };
   render(<ConnectionSettings connectionEnabled />);
-  fireEvent.click(screen.getByText("连接设置"));
   expect(await screen.findByText(/续期暂未成功/)).toBeTruthy();
   expect(screen.queryByText(/授权已过期/)).toBeNull();
   expect(document.body.textContent).not.toContain(endpoint.token);
@@ -274,7 +312,167 @@ it("distinguishes a failed renewal from an expired grant", async () => {
 it("does not declare an unconfirmed rotation invalid based on its old local expiry", async () => {
   remote = { ...endpoint, expiresAt: "2020-01-01T00:00:00Z", pendingToken: "c".repeat(43) };
   render(<ConnectionSettings connectionEnabled />);
-  fireEvent.click(screen.getByText("连接设置"));
   expect(await screen.findByText(/此前续期可能已成功/)).toBeTruthy();
   expect(screen.queryByText("授权已过期，请使用新的配对链接重新连接。")).toBeNull();
+});
+
+it("pair: opens local pairing immediately and recognizes local links from either tab", async () => {
+  render(
+    <ConnectionSettings
+      connectionEnabled
+      instanceId="a1b2c3d4"
+      localAuth={{ state: "pairing_required" }}
+    />,
+  );
+  await choose("远程");
+  fireEvent.change(screen.getByLabelText("配对链接"), { target: { value: localLink } });
+  expect(screen.getByRole("button", { name: "本机" }).getAttribute("aria-pressed")).toBe("true");
+  vi.mocked(chrome.runtime.sendMessage).mockResolvedValueOnce({ ok: true });
+  submit();
+  await screen.findByText("配对成功。");
+  expect(chrome.runtime.sendMessage).toHaveBeenCalledExactlyOnceWith({
+    kind: "bsk-local-pairing",
+    action: "pair",
+    link: localLink,
+  });
+  expect(document.body.textContent).not.toContain(v.key);
+});
+function pairedInfo(skip = false) {
+  vi.mocked(readLocalPairingInfo).mockResolvedValue({
+    policy: { skip },
+    devices: [{ daemonId: v.daemon_id, deviceId: v.device_id, endpoint: "ws://127.0.0.1:52800/" }],
+  });
+}
+it("connected/settings: the new-link input and advanced settings stay hidden until asked for", async () => {
+  pairedInfo();
+  render(
+    <ConnectionSettings
+      connectionEnabled
+      localAuth={{ state: "verified", daemonId: v.daemon_id }}
+    />,
+  );
+  const newLink = await screen.findByRole("button", { name: "使用新的配对链接" });
+  expect(newLink.getAttribute("data-variant")).toBe("outline");
+  expect(document.querySelector<HTMLDetailsElement>('[data-slot="local-advanced"]')?.open).toBe(
+    false,
+  );
+  expect(screen.queryByLabelText("配对链接")).toBeNull();
+  fireEvent.click(screen.getByText("使用新的配对链接"));
+  expect(screen.getByLabelText("配对链接")).toBeTruthy();
+});
+it.each([
+  ["already_paired", /bsk daemon pair --replace a1b2c3d4/],
+  ["replace_mismatch", /bsk daemon revoke a1b2c3d4/],
+] as const)("%s: replacement requires confirmation and a rejected link preserves the current grant", async (error, guidance) => {
+  pairedInfo();
+  render(
+    <ConnectionSettings
+      connectionEnabled
+      instanceId="b7e2f019"
+      localAuth={{ state: "verified", daemonId: v.daemon_id }}
+    />,
+  );
+  fireEvent.click(await screen.findByText("使用新的配对链接"));
+  fireEvent.change(screen.getByLabelText("配对链接"), { target: { value: localLink } });
+  submit();
+  expect(screen.getByRole("alertdialog").textContent).toContain("替换成功后当前任务会结束");
+  expect(chrome.runtime.sendMessage).not.toHaveBeenCalled();
+  vi.mocked(chrome.runtime.sendMessage).mockResolvedValueOnce({ error, browserId: "a1b2c3d4" });
+  fireEvent.click(screen.getByText("继续配对"));
+  expect(await screen.findByText(guidance)).toBeTruthy();
+  expect((screen.getByLabelText("配对链接") as HTMLInputElement).value).toBe(localLink);
+  expect(document.querySelector('[data-slot="local-paired-info"]')).toBeTruthy();
+  expect(chrome.runtime.sendMessage).toHaveBeenCalledTimes(1);
+});
+it("skip: requires confirmation and keeps restore guidance visible without a click", async () => {
+  pairedInfo();
+  const { rerender } = render(<ConnectionSettings connectionEnabled />);
+  await screen.findByText("使用新的配对链接");
+  fireEvent.click(screen.getByRole("switch", { name: "跳过本机验证" }));
+  expect(screen.getByRole("alertdialog").textContent).toContain("bsk daemon trust-local on");
+  expect(chrome.runtime.sendMessage).not.toHaveBeenCalled();
+  vi.mocked(chrome.runtime.sendMessage).mockResolvedValueOnce({ ok: true });
+  pairedInfo(true);
+  fireEvent.click(screen.getByText("确认跳过"));
+  await screen.findByText("恢复验证");
+  expect(chrome.runtime.sendMessage).toHaveBeenCalledExactlyOnceWith({
+    kind: "bsk-local-pairing",
+    action: "skip",
+    value: true,
+  });
+  rerender(
+    <ConnectionSettings
+      connectionEnabled
+      localAuth={{ state: "unverified_local", reason: "skip" }}
+    />,
+  );
+  expect(
+    document.querySelector('[data-slot="local-pairing-notice"]')?.closest("details"),
+  ).toBeNull();
+  pairedInfo(false);
+  vi.mocked(chrome.runtime.sendMessage).mockResolvedValueOnce({ ok: true });
+  fireEvent.click(screen.getByText("恢复验证"));
+  expect(await screen.findByText(/bsk daemon trust-local off/)).toBeTruthy();
+});
+it.each([
+  [{ state: "unverified_local", reason: "unpaired" }, /连接身份尚未验证/],
+  [{ state: "server_unverified" }, /服务未通过验证/],
+  [{ state: "daemon_too_old" }, /本机 bsk 版本过旧/],
+] satisfies [
+  LocalAuthStatus,
+  RegExp,
+][])("renders the %j state without revealing credentials", async (status, message) => {
+  render(<ConnectionSettings connectionEnabled localAuth={status} />);
+  if (status.state === "unverified_local")
+    fireEvent.click(screen.getByRole("button", { name: "未配对" }));
+  await screen.findByText(message);
+  if (["server_unverified", "daemon_too_old"].includes(status.state)) {
+    vi.mocked(chrome.runtime.sendMessage).mockResolvedValueOnce({ ok: true });
+    fireEvent.click(screen.getByText("重试"));
+    expect(chrome.runtime.sendMessage).toHaveBeenCalledWith({
+      kind: "bsk-local-pairing",
+      action: "retry",
+    });
+  }
+  expect(document.body.textContent).not.toContain(v.key);
+});
+it("unpaired: keeps the advice behind a warning icon and offers optional pairing and official security guidance", async () => {
+  render(
+    <ConnectionSettings
+      connectionEnabled
+      localAuth={{ state: "unverified_local", reason: "unpaired" }}
+    />,
+  );
+  const settings = document.querySelector('[data-slot="popup-connection-settings"]')!;
+  const toggle = screen.getByRole("button", { name: "未配对" });
+  expect(settings.firstElementChild?.contains(toggle)).toBe(true);
+  expect(toggle.getAttribute("aria-expanded")).toBe("false");
+  expect(document.querySelector('[data-slot="local-pairing-notice"]')).toBeNull();
+  fireEvent.click(toggle);
+  expect(toggle.getAttribute("aria-expanded")).toBe("true");
+  expect(settings.contains(document.querySelector('[data-slot="local-pairing-notice"]'))).toBe(
+    true,
+  );
+  expect(screen.getByText(/连接身份尚未验证/)).toBeTruthy();
+  const help = screen.getByRole("link", { name: "为什么建议配对？" });
+  expect(help.getAttribute("href")).toBe("https://browserskill.weixin.qq.com/#security");
+  expect(help.getAttribute("target")).toBe("_blank");
+  fireEvent.click(screen.getByRole("button", { name: "去配对" }));
+  expect(document.activeElement).toBe(screen.getByLabelText("配对链接"));
+  expect(chrome.runtime.sendMessage).not.toHaveBeenCalled();
+  fireEvent.click(toggle);
+  expect(document.querySelector('[data-slot="local-pairing-notice"]')).toBeNull();
+});
+it("remote: resumes retained authorization before expiry without asking for a new link", async () => {
+  vi.mocked(readSavedRemoteConnection).mockResolvedValue(endpoint);
+  render(<ConnectionSettings connectionEnabled />);
+  await choose("远程");
+  expect(screen.getByText(/授权到期时间/)).toBeTruthy();
+  vi.mocked(chrome.runtime.sendMessage).mockResolvedValueOnce({ url: endpoint.url });
+  fireEvent.click(screen.getByText("切回远程"));
+  await screen.findByText("配对成功。");
+  expect(chrome.runtime.sendMessage).toHaveBeenCalledExactlyOnceWith({
+    kind: "bsk-remote-authorization",
+    resume: true,
+  });
 });

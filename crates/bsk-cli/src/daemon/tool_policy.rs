@@ -12,7 +12,7 @@ pub enum Deadline {
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Outcome {
     Ordinary,
-    NativeInput,
+    EffectAwareAction,
     FileTransfer,
 }
 
@@ -38,18 +38,20 @@ pub fn execution_policy(method: &Method) -> ExecutionPolicy {
             cancel_at_deadline: true,
             ..ORDINARY
         },
-        ToolNavigate
-        | ToolNavigateBack
-        | ToolNavigateForward
-        | ToolReload
-        | ToolWaitForNavigation
-        | ToolWaitForElement => ExecutionPolicy {
+        ToolNavigate | ToolNavigateBack | ToolNavigateForward | ToolReload => ExecutionPolicy {
+            response_grace: true,
+            cancel_at_deadline: true,
+            outcome: Outcome::EffectAwareAction,
+            ..ORDINARY
+        },
+        ToolWaitForNavigation | ToolWaitForElement => ExecutionPolicy {
             response_grace: true,
             ..ORDINARY
         },
-        ToolClick | ToolWheel | ToolPress => ExecutionPolicy {
+        ToolClick | ToolPress | ToolWheel | ToolDrag | ToolFill | ToolSelect | ToolFocus
+        | ToolBlur | ToolHover | ToolScrollTo | ToolEvaluate => ExecutionPolicy {
             cancel_at_deadline: true,
-            outcome: Outcome::NativeInput,
+            outcome: Outcome::EffectAwareAction,
             ..ORDINARY
         },
         ToolUpload | ToolDownload => ExecutionPolicy {
@@ -70,12 +72,18 @@ pub fn execution_policy(method: &Method) -> ExecutionPolicy {
         },
         ToolCooperate
         | AuditRequest
+        | LocalAuthPair
+        | LocalAuthDevices
+        | LocalAuthRevoke
+        | LocalAuthRotate
+        | LocalAuthSetMode
         | SystemHandshake
         | SystemPing
         | SystemStatus
         | SessionStart
         | SessionStartTracked
         | SessionRequest
+        | SessionRunLog
         | SessionStop
         | SessionStopAll
         | SessionList
@@ -89,15 +97,10 @@ pub fn execution_policy(method: &Method) -> ExecutionPolicy {
         | ToolTabClose
         | ToolTabReturn
         | ToolTabSelect
-        | ToolHover
-        | ToolScrollTo
-        | ToolFocus
-        | ToolBlur
-        | ToolFill
-        | ToolSelect
         | ToolSnapshot
         | ToolObserve
         | ToolGetHtml
+        | ToolRead
         | ToolExtract
         | ToolVideo
         | ToolScreenshot
@@ -106,7 +109,11 @@ pub fn execution_policy(method: &Method) -> ExecutionPolicy {
         | ToolConsole
         | ToolDebug
         | ToolNetwork
-        | ToolEvaluate
+        | ToolDialogStatus
+        | ToolDialogAccept
+        | ToolDialogDismiss
+        | ToolOperationAwait
+        | ToolOperationCancel
         | ToolWaitMs
         | ToolRecordStart
         | ToolRecordStop

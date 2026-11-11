@@ -64,6 +64,36 @@
       ],
       "type": "object"
     },
+    "ControllerInfo": {
+      "description": "Display identity of the agent controlling a session. Never an authorization claim.",
+      "properties": {
+        "color": {
+          "description": "Optional six-digit hex color. Omitted colors are derived from the session ID.",
+          "pattern": "^#[0-9a-fA-F]{6}$",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "name": {
+          "maxLength": 80,
+          "minLength": 1,
+          "type": "string"
+        },
+        "project": {
+          "maxLength": 120,
+          "minLength": 1,
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "type": "object"
+    },
     "InteractionPolicy": {
       "properties": {
         "borrow_confirmation": {
@@ -76,6 +106,33 @@
       "required": [
         "borrow_confirmation",
         "request_help"
+      ],
+      "type": "object"
+    },
+    "LocalAuthStatus": {
+      "properties": {
+        "last_unpaired_attempt": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/UnpairedAttempt"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "mode": {
+          "type": "string"
+        },
+        "paired_devices": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "mode",
+        "paired_devices"
       ],
       "type": "object"
     },
@@ -98,6 +155,16 @@
         },
         "browser_instance_id": {
           "type": "string"
+        },
+        "controller": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ControllerInfo"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "created_at_ms": {
           "description": "Unix epoch milliseconds.",
@@ -122,6 +189,23 @@
         "session_id",
         "browser_instance_id",
         "created_at_ms"
+      ],
+      "type": "object"
+    },
+    "UnpairedAttempt": {
+      "properties": {
+        "at": {
+          "type": "string"
+        },
+        "extension_version": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "at"
       ],
       "type": "object"
     },
@@ -178,6 +262,16 @@
     "daemon_version": {
       "description": "Semver of the daemon binary (`env!(\"CARGO_PKG_VERSION\")`).",
       "type": "string"
+    },
+    "local_auth": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/LocalAuthStatus"
+        },
+        {
+          "type": "null"
+        }
+      ]
     },
     "pid": {
       "description": "Daemon process id.",

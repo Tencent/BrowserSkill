@@ -30,7 +30,8 @@ fn tempfile_path(prefix: &str) -> PathBuf {
 async fn spawn_daemon() -> (daemon::DaemonHandle, PathBuf) {
     let port = 0;
 
-    let config = DaemonConfig::new(port);
+    let config =
+        DaemonConfig::new(port).with_local_auth(bsk::daemon::local_auth::LocalAuthMode::TrustLocal);
     let sock = tempfile_path("bsk-test-handshake");
     let handle = daemon::run(config, Some(sock.clone())).await.unwrap();
     (handle, sock)
@@ -154,12 +155,14 @@ async fn handshake_ok_when_app_versions_differ_but_protocol_matches() {
 async fn handshake_skew_when_protocol_minor_differs() {
     let (handle, _sock) = spawn_daemon().await;
     let mut ws = open_ws(handle.ws_addr()).await;
+    let (major, minor) = PROTOCOL_VERSION.split_once('.').unwrap();
+    let newer_protocol = format!("{major}.{}", minor.parse::<u32>().unwrap() + 1);
     let resp = send_handshake_with_floors(
         &mut ws,
-        "1.3",
+        &newer_protocol,
         env!("CARGO_PKG_VERSION"),
         Some("0.0.0"),
-        Some("1.3"),
+        Some("1.5"),
     )
     .await;
     match resp.body {
@@ -212,12 +215,34 @@ async fn handshake_rejected_when_peer_protocol_major_is_below_daemon() {
 }
 
 #[tokio::test]
+async fn handshake_keeps_pre_terminal_event_extension_connected() {
+    let (handle, _sock) = spawn_daemon().await;
+    let mut ws = open_ws(handle.ws_addr()).await;
+    let response = send_handshake_with_floors(
+        &mut ws,
+        "1.5",
+        env!("CARGO_PKG_VERSION"),
+        Some("0.0.0"),
+        Some("1.5"),
+    )
+    .await;
+    assert!(matches!(response.body, ResponseBody::Ok(_)));
+    let browser = handle
+        .state()
+        .browsers
+        .get(&bsk::daemon::browsers::BrowserId(TEST_EXT_ID.into()))
+        .expect("older extension stays registered");
+    assert!(browser.version_skew);
+    handle.shutdown().await;
+}
+
+#[tokio::test]
 async fn handshake_legacy_ext_without_protocol_floor_still_ok() {
     let (handle, _sock) = spawn_daemon().await;
     let mut ws = open_ws(handle.ws_addr()).await;
     let resp = send_handshake_with_floors(
         &mut ws,
-        "1.3",
+        "1.5",
         env!("CARGO_PKG_VERSION"),
         Some("0.1.0"),
         None,
@@ -242,7 +267,7 @@ async fn status_surfaces_version_skew_for_skewed_browser() {
         browser_name: "chrome".into(),
         browser_version: "131.0".into(),
         extension_version: "9.9.9".into(),
-        extension_protocol_version: "1.3".into(),
+        extension_protocol_version: "1.5".into(),
         label: "Older".into(),
         sink: bsk::daemon::browsers::BrowserSink { tx },
         pending: Mutex::new(bsk::daemon::browsers::Pending::default()),
@@ -269,7 +294,7 @@ async fn status_surfaces_version_skew_for_skewed_browser() {
         .iter()
         .find(|s| s.instance_id == "skew-only-test")
         .expect("status must list our skew client");
-    assert_eq!(skew.client_protocol_version, "1.3");
+    assert_eq!(skew.client_protocol_version, "1.5");
     assert_eq!(skew.server_protocol_version, PROTOCOL_VERSION);
     assert_eq!(skew.client_version, "9.9.9");
     let entry = status
@@ -287,7 +312,7 @@ async fn handshake_rejects_when_local_below_peer_min_compatible_protocol() {
     let mut ws = open_ws(handle.ws_addr()).await;
     let resp = send_handshake_with_floors(
         &mut ws,
-        "1.3",
+        "1.5",
         env!("CARGO_PKG_VERSION"),
         Some("0.0.0"),
         Some("99.0.0"),

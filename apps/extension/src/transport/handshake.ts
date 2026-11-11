@@ -1,4 +1,4 @@
-import { MIN_COMPATIBLE_PROTOCOL, PROTOCOL_VERSION } from "./generated/methods";
+import { PROTOCOL_VERSION } from "./generated/methods";
 import { decodeHandshakeResult } from "./protocol";
 import type { Transport } from "./transport";
 import type {
@@ -7,16 +7,24 @@ import type {
   ProtocolFrame,
   RequestFrame,
   ResponseFrame,
+  RpcError,
 } from "./types";
 import { isResponseFrame } from "./types";
 
-export { MIN_COMPATIBLE_PROTOCOL, PROTOCOL_VERSION } from "./generated/methods";
+export { PROTOCOL_VERSION } from "./generated/methods";
 /**
  * Extension semver, injected at build time from `package.json` via
  * Vite's `define` (see `wxt.config.ts` and `vitest.config.ts`).
  */
 export const EXTENSION_VERSION: string =
   typeof __BSK_EXT_VERSION__ === "string" ? __BSK_EXT_VERSION__ : "0.0.0-unset";
+/**
+ * Lowest **protocol** version this extension accepts (e.g. `"1.0"`).
+ * This is the daemon floor; the daemon can independently accept older extensions.
+ */
+// Moving a controlled tab ends the session. Older daemons cannot consume the
+// terminal event and would leave the session active, so require this protocol.
+export const MIN_COMPATIBLE_PROTOCOL = "1.6";
 /**
  * **Deprecated** — legacy app-semver floor for wire compat with old
  * daemons. New code sends `"0.0.0"`; compat decisions ignore this.
@@ -46,6 +54,19 @@ export interface HandshakeOutcome {
   result: HandshakeResult;
 }
 
+/** A daemon rejection retains its structured compatibility diagnostics. */
+export class HandshakeRejectedError extends Error {
+  readonly code: RpcError["code"];
+  readonly data: RpcError["data"];
+
+  constructor(error: RpcError) {
+    super(`[handshake] daemon rejected handshake: ${error.code} — ${error.message}`);
+    this.name = "HandshakeRejectedError";
+    this.code = error.code;
+    this.data = error.data;
+  }
+}
+
 function ridToString(): string {
   return `hs-${Math.random().toString(36).slice(2, 10)}`;
 }
@@ -56,7 +77,12 @@ function ridToString(): string {
 export function performHandshake(
   transport: Transport,
   input: HandshakeInput,
-  options: { timeoutMs?: number; signal?: AbortSignal } = {},
+  options: {
+    timeoutMs?: number;
+    signal?: AbortSignal;
+    /** Runs synchronously before rejection handlers, so an immediate close cannot hide diagnostics. */
+    onRejected?: (error: HandshakeRejectedError) => void;
+  } = {},
 ): Promise<HandshakeOutcome> {
   const id = input.rpcId ?? ridToString();
   const params: HandshakeParams = {
@@ -91,9 +117,9 @@ export function performHandshake(
       cleanup();
       const r = msg as ResponseFrame;
       if ("error" in r) {
-        reject(
-          new Error(`[handshake] daemon rejected handshake: ${r.error.code} — ${r.error.message}`),
-        );
+        const error = new HandshakeRejectedError(r.error);
+        reject(error);
+        options.onRejected?.(error);
         return;
       }
       try {

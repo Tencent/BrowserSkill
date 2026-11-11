@@ -17,7 +17,8 @@
 //!   * `2` — protocol or transport error (incl. `cancelled`),
 //!   * `3` — browser / CDP failure,
 //!   * `4` — timeout,
-//!   * `5` — version mismatch.
+//!   * `5` — version mismatch,
+//!   * `6` — pending dialog; decide explicitly, then retrieve the original result.
 //!
 //! Strings are in English: the CLI is consumed by agents and other
 //! automated tooling, so all user-facing copy uses English. Command
@@ -76,6 +77,13 @@ pub mod reason {
     pub const TRANSFER_OUTCOME_UNKNOWN: &str = "transfer_outcome_unknown";
     pub const TRANSFER_TIMEOUT: &str = "transfer_timeout";
     pub const SESSION_BUSY: &str = crate::rpc_reason::SESSION_BUSY;
+    pub const OPERATION_SETTLING: &str = crate::rpc_reason::OPERATION_SETTLING;
+    pub const SESSION_IDLE_TIMEOUT: &str = crate::rpc_reason::SESSION_IDLE_TIMEOUT;
+    pub const SESSION_WINDOW_CLOSED: &str = crate::rpc_reason::SESSION_WINDOW_CLOSED;
+    pub const SESSION_USER_MOVED_TAB: &str = crate::rpc_reason::SESSION_USER_MOVED_TAB;
+    pub const BROWSER_DISCONNECTED: &str = crate::rpc_reason::BROWSER_DISCONNECTED;
+    pub const OBSERVE_IDENTITY_RELOAD_LOOP: &str = crate::rpc_reason::OBSERVE_IDENTITY_RELOAD_LOOP;
+    pub const BORROW_AGENT_WINDOW_TAB: &str = crate::rpc_reason::BORROW_AGENT_WINDOW_TAB;
     pub const RECORD_START_PAGE_UNREACHABLE: &str = "record_start_page_unreachable";
 }
 
@@ -92,6 +100,20 @@ pub struct RenderInfo {
 /// Look up the rendering info for a given error code.
 pub fn info_for(code: ErrorCode) -> RenderInfo {
     match code {
+        ErrorCode::DialogPending => RenderInfo {
+            summary: "operation is waiting for an agent dialog decision",
+            hint: Some(
+                "inspect `bsk dialog status --session <id> --json`; decide with dialog accept/dismiss, then retrieve the ORIGINAL result with `bsk operation await <operation-id> --session <id> --json`. Do not repeat the original action.",
+            ),
+            exit_code: 6,
+        },
+        ErrorCode::PairingRequired => RenderInfo {
+            summary: "local browser pairing is required",
+            hint: Some(
+                "run `bsk daemon pair`, then paste the link into the extension's connection settings",
+            ),
+            exit_code: 1,
+        },
         ErrorCode::UnknownMethod => RenderInfo {
             summary: "daemon does not recognise this RPC method",
             hint: Some(
@@ -135,7 +157,7 @@ pub fn info_for(code: ErrorCode) -> RenderInfo {
         ErrorCode::Timeout => RenderInfo {
             summary: "operation timed out",
             hint: Some(
-                "retry the command; if timeouts persist, check `bsk logs` and confirm the browser is still responding",
+                "inspect the application result and synchronize before choosing another action; do not replay an action whose effect is unknown",
             ),
             exit_code: 4,
         },
@@ -239,6 +261,13 @@ pub fn info_for_error(code: ErrorCode, data: Option<&serde_json::Value>) -> Rend
             },
             ..base
         },
+        (ErrorCode::NoBrowserConnected, "local_pairing_required") => RenderInfo {
+            summary: "the extension needs local pairing",
+            hint: Some(
+                "run `bsk daemon pair`, then paste the link into the extension's connection settings",
+            ),
+            ..base
+        },
         (_, "user_denied") => RenderInfo {
             summary: "the user denied the tab borrow",
             hint: Some("do not repeat the same authorization request"),
@@ -284,10 +313,116 @@ pub fn info_for_error(code: ErrorCode, data: Option<&serde_json::Value>) -> Rend
             ),
             ..base
         },
+        (ErrorCode::CdpFailed, reason::OBSERVE_IDENTITY_RELOAD_LOOP) => RenderInfo {
+            summary: "the page kept losing observation identity — the site is likely reloading itself while the debugger is attached (anti-debugging)",
+            hint: Some(
+                "do not observe again and do not reload this tab; the site rejects the debugger attach itself (see GitHub issues #454 and #465); continue on another page or hand the task back to the user",
+            ),
+            exit_code: base.exit_code,
+        },
+        (
+            ErrorCode::InvalidParams | ErrorCode::NotFound | ErrorCode::PermissionDenied,
+            "local_file_error",
+        ) => RenderInfo {
+            summary: "local file validation failed",
+            hint: Some("check the local file path and permissions"),
+            exit_code: 1,
+        },
+        (ErrorCode::InvalidParams, reason::BORROW_AGENT_WINDOW_TAB) => RenderInfo {
+            summary: "the borrow target already lives inside an Agent Window",
+            hint: Some(
+                "a tab the session did not open needs a user move to a user window first; a tab this session opened is already controlled and needs no borrow",
+            ),
+            exit_code: base.exit_code,
+        },
+        (ErrorCode::NotFound, reason::SESSION_IDLE_TIMEOUT) => RenderInfo {
+            summary: "the session stopped after its idle timeout",
+            hint: Some(
+                "start a new session with `bsk session start`; run the daemon with a larger `--session-idle` (default 5m) for longer tasks; the Agent Window and any tab it opened were closed with the session",
+            ),
+            exit_code: base.exit_code,
+        },
+        (_, reason::SESSION_USER_MOVED_TAB) => RenderInfo {
+            summary: "the session ended because the user moved a controlled tab out of its Agent Window",
+            hint: Some(
+                "all pages were preserved and browser control ended; this session cannot resume. Ask the user before starting a new session or borrowing a page again",
+            ),
+            exit_code: base.exit_code,
+        },
+        (ErrorCode::NotFound, reason::SESSION_WINDOW_CLOSED) => RenderInfo {
+            summary: "the session ended because the user closed the Agent Window",
+            hint: Some(
+                "start a new session; closing the Agent Window ends the session, while the window's stop button only cancels the running action",
+            ),
+            exit_code: base.exit_code,
+        },
+        (ErrorCode::NotFound, reason::BROWSER_DISCONNECTED) => RenderInfo {
+            summary: "the browser was disconnected from the daemon",
+            hint: Some(
+                "wait for the extension to reconnect, then start a new session; the session and its Agent Window are gone",
+            ),
+            exit_code: base.exit_code,
+        },
         (_, "cooperation_sync_required") => RenderInfo {
             summary: "shared page control or observation changed",
             hint: Some(
                 "use `bsk cooperate wait --session SID`, then `bsk cooperate sync --session SID`; replan toward the assigned goal and check existing effects before another action",
+            ),
+            ..base
+        },
+        (_, "frame_unobservable") => RenderInfo {
+            summary: "page interaction coverage is unavailable",
+            hint: Some(
+                "reload the tab once; if it persists, use read-only commands such as `bsk get-html` or `bsk snapshot`",
+            ),
+            ..base
+        },
+        (_, "page_load_failed") => RenderInfo {
+            summary: "the main page failed to load",
+            hint: Some("check the page URL and network connection, then reload and synchronize"),
+            ..base
+        },
+        (_, "precondition_failed") => RenderInfo {
+            summary: "a required business fact no longer matches",
+            hint: Some(
+                "read the expected and actual values, then reconsider the action; do not silently replace the expected value",
+            ),
+            ..base
+        },
+        (_, "control_context_invalid" | "document_changed") => RenderInfo {
+            summary: "the control context no longer belongs to the current document or control state",
+            hint: Some("synchronize this tab and reconsider the action using the current page"),
+            ..base
+        },
+        (_, "observation_required" | "observation_changed") => RenderInfo {
+            summary: "this action needs an explicit current observation",
+            hint: Some(
+                "for DOM data use read/extract without syncing again; actual scripts/visual actions require a fresh sync and explicit --observation. Never replay uncertain actions",
+            ),
+            ..base
+        },
+        (
+            _,
+            "target_detached" | "target_hidden" | "target_disabled" | "target_readonly"
+            | "target_moved" | "target_covered" | "target_focus_lost",
+        ) => RenderInfo {
+            summary: "the selected target is not currently actionable",
+            hint: Some(
+                "inspect or wait for the target; unrelated page updates do not require a new control context",
+            ),
+            ..base
+        },
+        (_, "human_intervention" | "control_held") => RenderInfo {
+            summary: "the user has control of this tab",
+            hint: Some(
+                "wait for control to return, then synchronize before deciding on another action",
+            ),
+            ..base
+        },
+        (_, "control_authority_required") => RenderInfo {
+            summary: "the agent does not currently have control",
+            hint: Some(
+                "wait for the user to return control, then inspect the current operation or dialog before deciding again; status and cancellation remain available; do not replay the original action",
             ),
             ..base
         },
@@ -491,7 +626,14 @@ pub fn info_for_error(code: ErrorCode, data: Option<&serde_json::Value>) -> Rend
         (ErrorCode::Timeout, reason::SESSION_BUSY) => RenderInfo {
             summary: "previous session command is still running",
             hint: Some(
-                "wait for the current command to finish, cancel it with Ctrl-C, or stop/restart the session",
+                "wait for the current command to finish, or cancel it through its parent process or with Ctrl-C in the terminal running that command, then retry; if the caller is gone and the session stays busy, use `bsk daemon restart` (interrupts all sessions)",
+            ),
+            exit_code: base.exit_code,
+        },
+        (ErrorCode::CdpFailed, reason::OPERATION_SETTLING) => RenderInfo {
+            summary: "an earlier command on this session is still finishing in the browser",
+            hint: Some(
+                "nothing was sent; wait about a second and run the same command again (`bsk cooperate sync --settle` retries this automatically). Reload cannot help: it waits for the same command",
             ),
             exit_code: base.exit_code,
         },
@@ -528,6 +670,13 @@ pub fn info_for_error(code: ErrorCode, data: Option<&serde_json::Value>) -> Rend
                 "use --full-page --scope current only if the currently loaded document range satisfies the request",
             ),
             exit_code: 4,
+        },
+        (ErrorCode::Timeout, reason::SCREENSHOT_CAPTURE_FAILED) => RenderInfo {
+            summary: "viewport screenshot timed out",
+            hint: Some(
+                "check that the tab is responsive before capturing again; if capture keeps timing out, reload the tab or restart the browser",
+            ),
+            exit_code: base.exit_code,
         },
         (ErrorCode::CdpFailed, reason::SCREENSHOT_CAPTURE_FAILED) => RenderInfo {
             summary: "the browser could not capture the tab image",
@@ -646,13 +795,16 @@ mod tests {
         // errors (exit 1).
         assert_eq!(exit_code_for(ErrorCode::UnknownMethod), 5);
         assert_eq!(exit_code_for(ErrorCode::VersionTooOld), 5);
+
+        assert_eq!(exit_code_for(ErrorCode::DialogPending), 6);
+        assert_eq!(exit_code_for(ErrorCode::PairingRequired), 1);
     }
 
     /// Every code must carry a non-empty summary; an empty `summary`
     /// would render `error: ` with nothing after it.
     #[test]
     fn every_code_has_a_summary() {
-        for code in EVERY_CODE {
+        for code in ErrorCode::ALL {
             let info = info_for(*code);
             assert!(
                 !info.summary.is_empty(),
@@ -667,30 +819,11 @@ mod tests {
     /// lands without thinking about UX.
     #[test]
     fn every_code_has_a_hint_today() {
-        for code in EVERY_CODE {
+        for code in ErrorCode::ALL {
             let info = info_for(*code);
             assert!(info.hint.is_some(), "hint missing for {code:?}");
         }
     }
-
-    /// Exhaustive list used by the table-driven assertions above. Kept
-    /// here (rather than in bsk-protocol) so a test failure shows up
-    /// next to the rendering data the test is guarding.
-    const EVERY_CODE: &[ErrorCode] = &[
-        ErrorCode::UnknownMethod,
-        ErrorCode::Unsupported,
-        ErrorCode::InvalidParams,
-        ErrorCode::NotFound,
-        ErrorCode::PermissionDenied,
-        ErrorCode::Timeout,
-        ErrorCode::CdpFailed,
-        ErrorCode::ProtocolError,
-        ErrorCode::Cancelled,
-        ErrorCode::UserAborted,
-        ErrorCode::VersionTooOld,
-        ErrorCode::MultipleBrowsersOnline,
-        ErrorCode::NoBrowserConnected,
-    ];
 
     #[test]
     fn fill_reasons_provide_recovery_without_changing_exit_codes() {
@@ -771,11 +904,31 @@ mod tests {
         let data = serde_json::json!({ "reason": reason::SESSION_BUSY });
         let info = info_for_error(ErrorCode::Timeout, Some(&data));
         assert_eq!(info.summary, "previous session command is still running");
-        assert!(
-            info.hint.unwrap().contains("wait for the current command"),
-            "expected session-busy-specific hint"
-        );
+        let hint = info.hint.unwrap();
+        assert!(hint.contains("wait for the current command"));
+        assert!(hint.contains("Ctrl-C in the terminal running that command"));
+        assert!(hint.contains("parent process"));
+        assert!(hint.contains("then retry"));
+        assert!(hint.contains("bsk daemon restart"));
+        assert!(hint.contains("interrupts all sessions"));
+        assert!(!hint.contains("stop/restart"));
         assert_eq!(info.exit_code, 4);
+    }
+
+    #[test]
+    fn operation_settling_does_not_suggest_reload() {
+        let data = serde_json::json!({ "reason": reason::OPERATION_SETTLING, "dispatched": false });
+        let info = info_for_error(ErrorCode::CdpFailed, Some(&data));
+        assert_eq!(
+            info.summary,
+            "an earlier command on this session is still finishing in the browser"
+        );
+        let hint = info.hint.unwrap();
+        assert!(hint.contains("nothing was sent"));
+        assert!(hint.contains("run the same command again"));
+        assert!(hint.contains("--settle"));
+        assert!(!hint.contains("reloading the tab"));
+        assert_eq!(info.exit_code, 3);
     }
 
     #[test]
@@ -806,6 +959,31 @@ mod tests {
         );
         // Still the browser/CDP failure bucket.
         assert_eq!(info.exit_code, 3);
+    }
+
+    #[test]
+    fn screenshot_capture_timeout_has_specific_guidance_and_timeout_exit_code() {
+        let data = serde_json::json!({ "reason": reason::SCREENSHOT_CAPTURE_FAILED });
+        let info = info_for_error(ErrorCode::Timeout, Some(&data));
+        assert_eq!(info.summary, "viewport screenshot timed out");
+        assert_eq!(
+            info.hint,
+            Some(
+                "check that the tab is responsive before capturing again; if capture keeps timing out, reload the tab or restart the browser"
+            )
+        );
+        assert_eq!(info.exit_code, 4);
+    }
+
+    #[test]
+    fn control_authority_denial_does_not_request_a_blocked_renderer_sync() {
+        let data = serde_json::json!({ "reason": "control_authority_required" });
+        let info = info_for_error(ErrorCode::PermissionDenied, Some(&data));
+        assert_eq!(info.exit_code, 1);
+        let hint = info.hint.unwrap();
+        assert!(hint.contains("return control"));
+        assert!(hint.contains("do not replay"));
+        assert!(!hint.contains("cooperate sync"));
     }
 
     #[test]
@@ -1037,5 +1215,117 @@ mod tests {
         assert_eq!(disconnected.summary, "extension disconnected");
         assert_eq!(disconnected.exit_code, 2);
         assert!(!disconnected.hint.unwrap().contains("protocol version"));
+    }
+
+    /// Issue #465: a dead session surfaces *why* it stopped instead of
+    /// a generic not-found, and the anti-debugging / borrow-target
+    /// reasons get non-retry copy instead of the `cdp_failed` /
+    /// `invalid_params` defaults.
+    #[test]
+    fn user_moved_tab_is_terminal_for_running_and_later_commands() {
+        for code in [
+            ErrorCode::UserAborted,
+            ErrorCode::NotFound,
+            ErrorCode::Timeout,
+            ErrorCode::Cancelled,
+            ErrorCode::CdpFailed,
+            ErrorCode::ProtocolError,
+        ] {
+            let rendered = info_for_error(
+                code,
+                Some(&serde_json::json!({"reason": crate::rpc_reason::SESSION_USER_MOVED_TAB})),
+            );
+            assert!(rendered.summary.contains("user moved a controlled tab"));
+            let hint = rendered.hint.unwrap();
+            assert!(hint.contains("all pages were preserved"));
+            assert!(hint.contains("cannot resume"));
+            assert!(hint.contains("Ask the user"));
+            assert_eq!(rendered.exit_code, info_for(code).exit_code);
+        }
+    }
+
+    #[test]
+    fn ended_sessions_and_recurring_failures_get_reasoned_copy() {
+        let idle = info_for_error(
+            ErrorCode::NotFound,
+            Some(&serde_json::json!({"reason": crate::rpc_reason::SESSION_IDLE_TIMEOUT})),
+        );
+        assert_eq!(idle.summary, "the session stopped after its idle timeout");
+        assert!(idle.hint.unwrap().contains("--session-idle"));
+        assert_eq!(idle.exit_code, info_for(ErrorCode::NotFound).exit_code);
+
+        let closed = info_for_error(
+            ErrorCode::NotFound,
+            Some(&serde_json::json!({"reason": crate::rpc_reason::SESSION_WINDOW_CLOSED})),
+        );
+        assert_eq!(
+            closed.summary,
+            "the session ended because the user closed the Agent Window"
+        );
+
+        let browser_gone = info_for_error(
+            ErrorCode::NotFound,
+            Some(&serde_json::json!({"reason": crate::rpc_reason::BROWSER_DISCONNECTED})),
+        );
+        assert_eq!(
+            browser_gone.summary,
+            "the browser was disconnected from the daemon"
+        );
+
+        let anti_debug = info_for_error(
+            ErrorCode::CdpFailed,
+            Some(&serde_json::json!({"reason": crate::rpc_reason::OBSERVE_IDENTITY_RELOAD_LOOP})),
+        );
+        assert!(anti_debug.summary.contains("anti-debugging"));
+        // The reporter explicitly asked that this failure must not
+        // propose reloading the tab; the hint forbids it instead.
+        let anti_debug_hint = anti_debug.hint.unwrap();
+        assert!(anti_debug_hint.contains("do not reload"));
+        assert!(anti_debug_hint.contains("hand the task back"));
+        assert_eq!(
+            anti_debug.exit_code,
+            info_for(ErrorCode::CdpFailed).exit_code
+        );
+
+        let borrow = info_for_error(
+            ErrorCode::InvalidParams,
+            Some(&serde_json::json!({"reason": crate::rpc_reason::BORROW_AGENT_WINDOW_TAB})),
+        );
+        assert!(borrow.summary.contains("Agent Window"));
+        assert!(borrow.hint.unwrap().contains("needs a user move"));
+    }
+    #[test]
+    fn target_control_errors_point_to_the_failed_check() {
+        for (reason, phrase) in [
+            ("precondition_failed", "business fact"),
+            ("target_covered", "not currently actionable"),
+            ("target_focus_lost", "not currently actionable"),
+            ("control_context_invalid", "control context"),
+            ("observation_required", "explicit current observation"),
+            ("human_intervention", "user has control"),
+        ] {
+            let info = info_for_error(
+                ErrorCode::PermissionDenied,
+                Some(&serde_json::json!({"reason":reason})),
+            );
+            assert!(info.summary.contains(phrase));
+        }
+    }
+
+    #[test]
+    fn collection_errors_explain_recovery_without_waiting_again() {
+        for (reason, summary, hint) in [
+            ("frame_unobservable", "coverage is unavailable", "read-only"),
+            ("page_load_failed", "main page failed to load", "network"),
+        ] {
+            let info = info_for_error(
+                ErrorCode::PermissionDenied,
+                Some(&serde_json::json!({"reason":reason})),
+            );
+            assert!(info.summary.contains(summary));
+            assert!(info.hint.unwrap().contains(hint));
+            assert!(!info.hint.unwrap().contains("cooperate wait"));
+            assert_ne!(info.exit_code, 0);
+        }
     }
 }

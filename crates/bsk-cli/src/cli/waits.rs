@@ -27,6 +27,7 @@ use bsk_protocol::tools::{
 };
 use clap::{Args, ValueEnum};
 
+use crate::cli::business_rpc::ipc_timeout;
 use crate::cli::dialogs::print_dialog_summaries;
 use crate::cli::ensure_daemon::ensure_daemon;
 use crate::cli::error::{CliError, Format};
@@ -314,9 +315,7 @@ fn call_wait_ms(
     // IPC budget: requested duration + 15s of slack so the client
     // doesn't tear the connection down before the daemon's sleep
     // resolves.
-    let timeout = Duration::from_millis(duration_ms)
-        .checked_add(Duration::from_secs(15))
-        .unwrap_or(Duration::from_secs(30));
+    let timeout = Duration::from_millis(duration_ms) + Duration::from_secs(15);
     crate::cli::business_rpc::call::<WaitMsParams, WaitMsResult>(
         sock,
         "wait-ms",
@@ -338,12 +337,6 @@ fn render_wait_ms(reply: &WaitMsResult, format: Format) -> Result<(), CliError> 
         }
     }
     Ok(())
-}
-
-fn ipc_timeout(timeout_ms: u32) -> Duration {
-    Duration::from_millis(u64::from(timeout_ms))
-        .checked_add(Duration::from_secs(15))
-        .unwrap_or(Duration::from_secs(u64::from(timeout_ms / 1_000) + 15))
 }
 
 #[cfg(test)]

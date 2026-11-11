@@ -11,9 +11,11 @@ pub mod console;
 pub mod cooperate;
 pub mod daemon;
 pub mod debug;
+pub mod dialog_control;
 pub mod dialogs;
 pub mod doctor;
 pub mod download;
+pub mod drag;
 pub mod emulate;
 pub mod ensure_daemon;
 pub mod error;
@@ -25,10 +27,15 @@ pub mod install_skill;
 pub mod interaction;
 pub(crate) mod interaction_policy;
 pub mod logs;
+pub mod mcp;
 pub mod navigate;
 pub mod network;
+pub mod observation_view;
 pub mod observe;
+pub mod plan;
 pub(crate) mod protocol;
+pub mod read;
+pub mod recipe;
 pub mod record;
 pub mod record_recovery;
 pub mod record_state;
@@ -38,6 +45,7 @@ pub mod scroll;
 pub mod session;
 pub mod snapshot;
 pub mod status;
+pub mod step;
 pub mod tab;
 pub mod update;
 pub mod upload;
@@ -82,12 +90,18 @@ pub const TOOL_IPC_TIMEOUT: Duration = Duration::from_secs(35);
 /// Global flags shared by every subcommand.
 #[derive(Debug, Clone, Args, Default)]
 pub struct GlobalFlags {
-    /// Observation context returned by cooperate sync. Required for shared-tab actions.
+    /// Control context returned by cooperate sync. Required for shared-tab actions.
     #[arg(long, global = true)]
     pub context: Option<String>,
-    /// Observed refs/selectors covering this decision. Repeat for other regions; omit to validate the whole page.
+    /// Legacy strict-policy decision regions. Target policy uses --expect instead.
     #[arg(long, global = true)]
     pub depends_on: Vec<String>,
+    /// Explicit observation ID for visual or untargeted actions; never inferred from cached state.
+    #[arg(long, global = true)]
+    pub observation: Option<String>,
+    /// JSON array of target facts to check before input: [{"target":"@e1","field":"text","equals":"Save"}].
+    #[arg(long, global = true, value_parser = parse_expectations_json)]
+    pub expect: Option<serde_json::Value>,
     /// Emit machine-readable JSON output (when meaningful).
     #[arg(long, global = true)]
     pub json: bool,
@@ -99,6 +113,11 @@ pub struct GlobalFlags {
     /// Increase log verbosity (`-v` debug, `-vv` trace).
     #[arg(short = 'v', long = "verbose", global = true, action = clap::ArgAction::Count)]
     pub verbose: u8,
+}
+
+fn parse_expectations_json(value: &str) -> Result<serde_json::Value, String> {
+    let conditions = bsk_protocol::tools::parse_expectations(value)?;
+    serde_json::to_value(conditions).map_err(|error| error.to_string())
 }
 
 /// Top-level `bsk` CLI.
@@ -118,8 +137,20 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
+    /// Decide native JavaScript dialogs (alert, confirm, prompt, beforeunload).
+    Dialog(dialog_control::DialogCmd),
+    /// Retrieve or cancel the original operation suspended by a native dialog.
+    Operation(dialog_control::OperationCmd),
     /// Cooperate with a person on the same browser tab.
     Cooperate(cooperate::CooperateArgs),
+    /// Execute one action, await a known condition, and return synchronized state.
+    Step(step::StepArgs),
+    /// Run several decided actions in order, stop at the first failure, and return synchronized state.
+    Plan(plan::PlanArgs),
+    /// Replay a saved, reviewed flow without a model turn per step.
+    Recipe(recipe::RecipeCmd),
+    /// Read a saved observation locally, without refreshing refs or contacting the browser.
+    View(observation_view::ViewArgs),
     /// Manage the local `bsk` daemon process.
     #[command(subcommand)]
     Daemon(DaemonCmd),
@@ -139,6 +170,9 @@ pub enum Command {
 
     /// Print (and optionally follow) the daemon log file.
     Logs(LogsCmd),
+
+    /// Serve BrowserSkill tools to MCP clients over stdio.
+    Mcp(mcp::McpArgs),
 
     /// Session lifecycle.
     Session(SessionCmd),
@@ -176,6 +210,8 @@ pub enum Command {
     /// Dump raw HTML for a tab or a snapshot ref.
     #[command(name = "get-html")]
     GetHtml(GetHtmlArgs),
+    /// Read current DOM fields safely across unrelated animation. No JavaScript.
+    Read(read::ReadArgs),
     /// Extract loaded tables/lists with column definitions and source metadata.
     Extract(extract::ExtractArgs),
 
@@ -202,6 +238,9 @@ pub enum Command {
     /// Dispatch a native mouse-wheel event at the viewport centre or an element.
     Wheel(WheelArgs),
 
+    /// Drag an element to another element or by a relative offset.
+    Drag(drag::DragArgs),
+
     /// Scroll a snapshot ref or CSS selector into the visible viewport.
     #[command(name = "scroll-to")]
     ScrollTo(ScrollToArgs),
@@ -227,7 +266,7 @@ pub enum Command {
     /// Capture one browser download and write it to a local path.
     Download(DownloadArgs),
 
-    /// Evaluate a JavaScript expression inside the Agent Window.
+    /// Execute arbitrary JavaScript (strict observation required). For passive DOM data use read/extract.
     Evaluate(EvaluateArgs),
 
     /// Wait for a page-lifecycle event.
@@ -261,4 +300,36 @@ pub struct LogsCmd {
     /// Number of trailing lines to print before following (default 200).
     #[arg(short = 'n', long, default_value_t = 200)]
     pub lines: usize,
+}
+
+#[cfg(test)]
+mod action_condition_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn explicit_action_evidence_parses_without_rewriting_literals() {
+        let expected = json!([{"target":"#price","field":"text","equals":"  $12 [sale]  "}]);
+        let command = Cli::try_parse_from([
+            "bsk",
+            "click",
+            "@e1",
+            "--session",
+            "s",
+            "--context",
+            "c",
+            "--observation",
+            "o",
+            "--expect",
+            &expected.to_string(),
+        ])
+        .unwrap();
+        assert_eq!(command.flags.context.as_deref(), Some("c"));
+        assert_eq!(command.flags.observation.as_deref(), Some("o"));
+        assert_eq!(command.flags.expect, Some(expected));
+        assert!(
+            Cli::try_parse_from(["bsk", "click", "@e1", "--session", "s", "--expect", "{}"])
+                .is_err()
+        );
+    }
 }

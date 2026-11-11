@@ -80,13 +80,13 @@ export interface BskRunner {
 
 // Business RPCs translate Ctrl-C / opt-in stdin EOF into cancel(rpc_id).
 // Allow reconciliation before hard-killing an old or unresponsive CLI.
-const KILL_GRACE_MS = 3000;
+export const KILL_GRACE_MS = 3000;
 // Windows IPC may spend 5s connecting, 2s cancelling, 2s settling,
 // and up to 5s releasing the entire batch of caller-owned transfers.
-const WINDOWS_KILL_GRACE_MS = 15_000;
+export const WINDOWS_KILL_GRACE_MS = 15_000;
 // A killed child that never reports `exit` at all must still release the caller
 // once the forced kill has had its chance.
-const SETTLE_AFTER_KILL_SLACK_MS = 1000;
+export const SETTLE_AFTER_KILL_SLACK_MS = 1000;
 // `close` fires only once every stdio pipe has reached EOF, which needs every
 // process holding a copy of the pipe handles to be gone, not just `bsk`. When
 // `bsk` auto-spawns the daemon, the daemon can end up holding those handles
@@ -131,6 +131,8 @@ export function createBskRunner(bskPath: string, spawnImpl: SpawnImpl = spawn): 
 
   return {
     run(args, options = {}) {
+      const composite =
+        args[0] === "step" || args[0] === "plan" || (args[0] === "recipe" && args[1] === "run");
       if (options.signal?.aborted) {
         return Promise.resolve({
           code: null,
@@ -249,18 +251,27 @@ export function createBskRunner(bskPath: string, spawnImpl: SpawnImpl = spawn): 
 
         const onAbort = () => {
           if (settled) return;
+          // A composite that already exited normally has finished its work. A late
+          // abort must not discard its receipt while stdout is still draining.
+          if (composite && child.exitCode !== null && child.signalCode === null) return;
           aborted = true;
           // Explicit cancellation also stops waiting for an exited child's output.
           if (!requestKill()) finish(child.exitCode);
         };
-        const settle = () => {
-          if (timer !== undefined) clearTimeout(timer);
-          if (deadline !== undefined) clearTimeout(deadline);
-          if (drainWindow !== undefined) clearTimeout(drainWindow);
-          if (drainCap !== undefined) clearTimeout(drainCap);
+        const clearCancellationTimers = () => {
+          if (deadline !== undefined) {
+            clearTimeout(deadline);
+            deadline = undefined;
+          }
           const force = cancelling.get(child);
           if (force !== undefined) clearTimeout(force);
           cancelling.delete(child);
+        };
+        const settle = () => {
+          if (timer !== undefined) clearTimeout(timer);
+          clearCancellationTimers();
+          if (drainWindow !== undefined) clearTimeout(drainWindow);
+          if (drainCap !== undefined) clearTimeout(drainCap);
           options.signal?.removeEventListener("abort", onAbort);
           child.off("exit", onExit);
           child.off("close", finish);
@@ -269,12 +280,15 @@ export function createBskRunner(bskPath: string, spawnImpl: SpawnImpl = spawn): 
 
         const onExit = (code: number | null, signal: NodeJS.Signals | null) => {
           // Execution is over; output collection has its own bounded deadline.
+          // Retire forced-kill settlement so it cannot truncate the drain window.
           if (timer !== undefined) clearTimeout(timer);
-          if (signal !== null || timedOut || aborted) {
-            // Killed on our initiative: nothing left worth draining.
+          clearCancellationTimers();
+          if (signal !== null || timedOut || (aborted && !composite)) {
             finish(code);
             return;
           }
+          // A gracefully cancelled composite can still report completed action
+          // evidence. Collect its buffered receipt under the same drain cap.
           // Normal exit: keep draining while bytes are still arriving, then
           // settle even if a grandchild is still holding the pipes open.
           beginDrain(code);
@@ -378,7 +392,9 @@ export function bskInstallMessage(bskPath: string): string {
   return (
     `the bsk CLI ("${bskPath}") was not found. BrowserSkill must be installed and on PATH ` +
     "for browser tools to work — install it from https://github.com/Tencent/BrowserSkill " +
-    "(see the README install script or `cargo install`), then retry."
+    "(see the README install script or `cargo install`), then retry. " +
+    `If bsk is installed at a custom location, set the plugin's \`bskPath\` option ` +
+    `(currently "${bskPath}") instead of relying on PATH.`
   );
 }
 
@@ -393,6 +409,196 @@ export function bskInstallMessage(bskPath: string): string {
  */
 export interface ParseBskJsonOptions {
   allowNavigationTimeout?: boolean;
+  /** Preserve a validated step receipt, including its unsuccessful stages.
+   * An aborted run must explicitly acknowledge cancellation; execution
+   * timeouts, killed processes and ordinary error envelopes still throw. */
+  allowStepResult?: boolean;
+  /** Preserve a validated plan reply, including a stopped plan, on the same terms. */
+  allowPlanResult?: boolean;
+  /** Preserve a validated recipe run reply, whatever its status, on the same terms. */
+  allowRecipeResult?: boolean;
+}
+
+/** A composite result keeps its receipt and is never retried as a whole. */
+export function isCompositeResult(options: ParseBskJsonOptions): boolean {
+  return (
+    options.allowStepResult === true ||
+    options.allowPlanResult === true ||
+    options.allowRecipeResult === true
+  );
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function nonnegativeNumber(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0;
+}
+
+function isStepFailure(value: unknown): value is Record<string, unknown> & { exit_code: number } {
+  return (
+    isRecord(value) &&
+    typeof value.message === "string" &&
+    (typeof value.code === "string" || value.code === null) &&
+    Number.isInteger(value.exit_code) &&
+    (value.exit_code as number) > 0 &&
+    (value.exit_code as number) <= 255
+  );
+}
+
+/** Match the CLI's step receipt and its exit status, not just an `ok: false` body. */
+function isStepResultPayload(value: unknown, exitCode: number | null): boolean {
+  if (
+    !isRecord(value) ||
+    typeof value.ok !== "boolean" ||
+    value.action_replayed !== false ||
+    !Number.isInteger(value.rpc_calls) ||
+    (value.rpc_calls as number) < 1 ||
+    !isRecord(value.action) ||
+    (value.cancelled !== undefined && value.cancelled !== true) ||
+    (value.storage_error !== undefined && typeof value.storage_error !== "string")
+  )
+    return false;
+  const { action, readiness, post, post_error: postError } = value;
+  const cancelled = value.cancelled === true;
+  let expectedExit = 0;
+  let expectedPhase: string;
+  if (isStepFailure(action.error) && action.result === undefined) {
+    if (
+      value.rpc_calls !== 1 ||
+      !nonnegativeNumber(value.elapsed_ms) ||
+      readiness !== undefined ||
+      post !== undefined ||
+      postError !== undefined
+    )
+      return false;
+    expectedExit = action.error.exit_code;
+    expectedPhase = "action";
+  } else if (
+    isRecord(action.result) &&
+    Number.isSafeInteger(action.result.tab_id) &&
+    action.error === undefined &&
+    isRecord(readiness)
+  ) {
+    if (action.result.reached === "timeout") expectedExit = 4;
+    const readinessError = readiness.error;
+    const noWait = readiness.requested === false;
+    if (isStepFailure(readinessError)) {
+      if (readiness.requested !== undefined || readiness.satisfied !== undefined) return false;
+      expectedExit = Math.max(expectedExit, readinessError.exit_code);
+    } else if (readinessError !== undefined) {
+      return false;
+    } else if (noWait) {
+      if (readiness.satisfied !== undefined) return false;
+    } else if (typeof readiness.satisfied === "boolean" && Number.isSafeInteger(readiness.tab_id)) {
+      if (!readiness.satisfied) expectedExit = Math.max(expectedExit, 1);
+    } else {
+      return false;
+    }
+    if (post === undefined && postError === undefined) {
+      if (
+        !isStepFailure(readinessError) ||
+        !["cancelled", "user_aborted"].includes(String(readinessError.code)) ||
+        value.rpc_calls !== 2 ||
+        !nonnegativeNumber(value.elapsed_ms)
+      )
+        return false;
+      expectedPhase = "readiness";
+    } else {
+      if (
+        (value.rpc_calls as number) < (noWait ? 2 : 3) ||
+        !isRecord(value.timing_ms) ||
+        !["action", "readiness", "sync", "total"].every((key) =>
+          nonnegativeNumber((value.timing_ms as Record<string, unknown>)[key]),
+        )
+      )
+        return false;
+      if (isStepFailure(postError) && post === undefined) {
+        expectedExit = Math.max(expectedExit, postError.exit_code);
+      } else if (isRecord(post) && Number.isSafeInteger(post.tab_id) && postError === undefined) {
+        if (typeof post.context_id !== "string") {
+          if (
+            typeof post.ready !== "boolean" ||
+            !isRecord(post.settle) ||
+            post.settle.outcome !== "not_ready"
+          )
+            return false;
+          expectedExit = Math.max(expectedExit, 1);
+        }
+      } else {
+        return false;
+      }
+      expectedPhase = expectedExit === 0 ? "observed" : "needs_attention";
+    }
+  } else {
+    return false;
+  }
+  if (cancelled) {
+    expectedPhase = "cancelled";
+    expectedExit = 2;
+  }
+  // Storage happens after phase selection, so a failed publication can retain
+  // phase:observed while correctly returning ok:false and a nonzero exit.
+  if (value.storage_error !== undefined) expectedExit = Math.max(expectedExit, 2);
+  return (
+    value.phase === expectedPhase && value.ok === (expectedExit === 0) && exitCode === expectedExit
+  );
+}
+
+const EFFECT_STATES = ["none", "committed", "unknown"];
+
+/**
+ * Match the CLI's plan reply and its exit status: the completed steps come first,
+ * a stopped plan names the step after them and its effect, and `ok` follows the exit.
+ */
+function isPlanResultPayload(value: unknown, exitCode: number | null): boolean {
+  if (
+    !isRecord(value) ||
+    typeof value.ok !== "boolean" ||
+    !Number.isSafeInteger(value.completed) ||
+    !Number.isSafeInteger(value.total) ||
+    !nonnegativeNumber(value.elapsed_ms) ||
+    (value.cancelled !== undefined && value.cancelled !== true) ||
+    (value.post !== undefined && !isRecord(value.post)) ||
+    (value.storage_error !== undefined && typeof value.storage_error !== "string")
+  )
+    return false;
+  const completed = value.completed as number;
+  const total = value.total as number;
+  if (total < 1 || total > 20 || completed < 0 || completed > total) return false;
+  const stopped = value.stopped;
+  if (stopped === undefined) {
+    if (completed !== total && value.cancelled !== true) return false;
+    if (value.not_run !== undefined) return false;
+  } else if (
+    !isRecord(stopped) ||
+    completed === total ||
+    value.ok !== false ||
+    stopped.index !== completed ||
+    typeof stopped.action !== "string" ||
+    !EFFECT_STATES.includes(String(stopped.effect_state)) ||
+    !Array.isArray(value.not_run) ||
+    value.not_run.length !== total - completed - 1 ||
+    !value.not_run.every((index, offset) => index === completed + offset + 1)
+  ) {
+    return false;
+  }
+  if (exitCode === null) return false;
+  if (value.cancelled === true) return value.ok === false && exitCode !== 0;
+  return value.ok === (exitCode === 0);
+}
+
+const RECIPE_STATUSES = ["completed", "handoff", "uncertain", "refused"];
+
+/** Match the CLI's recipe run reply: only `completed` exits 0, and others say why. */
+function isRecipeResultPayload(value: unknown, exitCode: number | null): boolean {
+  if (!isRecord(value) || !RECIPE_STATUSES.includes(String(value.status)) || exitCode === null)
+    return false;
+  if (value.cancelled !== undefined && value.cancelled !== true) return false;
+  if (value.status === "completed")
+    return (value.cancelled === true ? exitCode === 2 : exitCode === 0) && isRecord(value.outputs);
+  return exitCode !== 0 && typeof value.reason === "string";
 }
 
 /**
@@ -426,6 +632,31 @@ export function parseBskJson(
     throw new BskError(`bsk ${commandLabel} timed out`, { timedOut: true });
   }
   const body = result.stdout.trim();
+  if (isCompositeResult(options)) {
+    let payload: unknown;
+    try {
+      payload = JSON.parse(body);
+    } catch {
+      // Ordinary malformed-output handling below preserves the original error.
+    }
+    const kind = options.allowRecipeResult ? "recipe" : options.allowPlanResult ? "plan" : "step";
+    const valid =
+      kind === "recipe"
+        ? isRecipeResultPayload(payload, result.code)
+        : kind === "plan"
+          ? isPlanResultPayload(payload, result.code)
+          : isStepResultPayload(payload, result.code);
+    // An aborted run must say it was cancelled; otherwise its reply may be partial.
+    const acknowledged =
+      isRecord(payload) &&
+      (payload.cancelled === true || (kind === "recipe" && payload.reason === "cancelled"));
+    if (valid && (!result.aborted || acknowledged)) return payload;
+    if (result.aborted) throw abortError();
+    if (result.code === 0)
+      throw new BskError(`bsk ${commandLabel} did not produce a valid ${kind} result`, {
+        exitCode: result.code,
+      });
+  }
   // Killed by our own interrupt (SIGINT from killFor), not by the abort path:
   // say so instead of doubling the generic label into the message.
   if (result.code === null && !result.aborted && !result.timedOut) {
@@ -456,7 +687,9 @@ export function parseBskJson(
       parsed?.message ?? (result.stderr.trim() || body || `bsk ${commandLabel} failed`);
     // Surface the envelope's actionable hint in the model-facing message; a
     // hint the model cannot see cannot be followed.
-    const withHint = parsed?.hint !== undefined ? `${message} (hint: ${parsed.hint})` : message;
+    let withHint = parsed?.hint !== undefined ? `${message} (hint: ${parsed.hint})` : message;
+    if (parsed?.code === "dialog_pending" && parsed.data !== undefined)
+      withHint += `\nPending dialog and original operation: ${JSON.stringify(parsed.data)}`;
     throw new BskError(`bsk ${commandLabel} failed: ${withHint}`, {
       code: parsed?.code,
       data: parsed?.data,

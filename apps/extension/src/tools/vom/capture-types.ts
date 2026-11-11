@@ -23,6 +23,8 @@ export interface CapturedNode {
    * `textContent`: the live parser always sets it, hand-built fixtures may not.
    */
   cursor?: string;
+  /** Browser-reported clickability, including JavaScript event listeners. */
+  clickable?: boolean;
   /**
    * Whether the live DOM snapshot provides a painted, non-hidden box for this
    * node. Semantic resolution uses this only for DOM fallback nodes; AX-backed
@@ -30,6 +32,9 @@ export interface CapturedNode {
    */
   rendered?: boolean;
   textContent?: string;
+  /** Native form ownership, or raw containment for custom progress widgets;
+   * absent when unavailable. Never infer this from the projected semantic tree. */
+  inForm?: boolean;
   formState?: "empty" | "filled" | "default";
   formValue?: string;
   /** Live native checked state, independent of the submitted form value. */

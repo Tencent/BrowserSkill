@@ -47,7 +47,7 @@ describe("registerBskSkill", () => {
     expect(content).not.toMatch(/--[a-z]/);
     expect(content).toMatch(/All browser work\s+must use the injected tools directly/);
     expect(content).toContain("Mandatory workflow");
-    expect(content).toContain("Refs invalidate after navigation");
+    expect(content).toContain("DOM refs survive reads; navigation invalidates them");
     expect(content).toContain("Interaction recording is not exposed");
     // Keep the lazily injected instructions inside a bounded prompt budget,
     // while the lower bound catches accidental truncation of the guidance.
@@ -60,8 +60,10 @@ describe("registerBskSkill", () => {
     expect([...new Set(references)].sort()).toEqual([
       "references/cooperation.md",
       "references/debugging.md",
+      "references/extraction.md",
       "references/help-and-recovery.md",
       "references/interaction-details.md",
+      "references/native-dialogs.md",
       "references/screenshots-and-canvas.md",
       "references/tabs-and-profiles.md",
       "references/video.md",
@@ -73,6 +75,11 @@ describe("registerBskSkill", () => {
     }
     expect(readFileSync(join(base.path, "references/tabs-and-profiles.md"), "utf8")).toContain(
       'bsk_session({ action: "start", browser: "<verified-instance-id>" })',
+    );
+    const interactions = readFileSync(join(base.path, "references/interaction-details.md"), "utf8");
+    expect(interactions).toContain("endpoint drags with `to` need only `contextId`");
+    expect(interactions).toContain(
+      "drags with `deltaX`/`deltaY` also require sync's single-use `observationId` receipt",
     );
     expect(content).toMatch(/Never omit\s+`browser` or substitute another instance/);
     expect(content).toContain("[visual:screenshot]");

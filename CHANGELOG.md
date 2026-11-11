@@ -2,19 +2,446 @@
 
 All notable changes to BrowserSkill will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
+See the [Chinese changelog](CHANGELOG.zh-CN.md). Update both versions in the same PR.
 
-Starting from 0.2.0, CLI / Extension / DSH Plugin share the same version number.
+The CLI, extension, and DSH plugin may release separately. Protocol compatibility
+determines which versions can connect.
+
+## [Unreleased]
+
+### Added
+
+- Qoder and Qoder CN are available as skill-only install targets through
+  `bsk install-skill --harness qoder` and `--harness qoder-cn`.
+- Local pairing with mutual proofs, durable key rotation and interruption recovery.
+  Paired connections verify the daemon before sending business traffic; activation
+  invalidates the original link. Device revocation and browser registration are
+  serialized, and successful revocation completes live connection cleanup.
+- `bsk daemon pair --replace`, local device listing/revocation, `daemon rotate`
+  and `daemon trust-local on|off`; status and doctor expose pairing guidance.
+- Extension pairing settings, staged verification, ten-language guidance,
+  explicit bypass confirmation and retained remote grants when using local mode.
+  Pairing is optional for new installs and upgrades; unpaired connections remain
+  usable with an identity warning and a link to the official security overview.
+  Paired connections and saved recovery candidates never automatically downgrade.
+- `bsk daemon pair` reuses or starts the daemon before returning a usable link.
+  Explicit Required mode remains available; unverified connections cannot claim
+  an existing paired identity under the default policy.
+
+- The in-page control panel can minimize to a right-edge expand arrow. Its display
+  state is retained for the current task across status updates and navigation.
+- `bsk plan` and the MCP tool `bsk_plan` run several already-decided actions in one
+  call, then return the synchronized state, so a form or a set of filters takes one
+  model turn instead of one per action. Each step keeps the checks of its own command,
+  and the first step that does not complete stops the plan without any retry.
+- The DSH plugin runs decided actions together with `bsk_interact(action=plan)`, with the
+  same checks, stopping rule and receipt as `bsk plan`.
+- The DSH plugin offers `bsk_recipe` when its `recipes` option or `BSK_RECIPES=1` is set.
+  A run uses an owned session, keeps the receipt of a run that did not complete, and has
+  no approve action.
+- `bsk recipe` saves a verified flow as a local file and replays it, returning its
+  outputs without a model turn per step; MCP lists `bsk_recipe` with `BSK_RECIPES=1`.
+  Targets match exactly by role, name and context, and a run stops at the first deviation
+  and hands the page back. This version replays only read and reversible steps: a lowered
+  risk runs only after a person approves it with `bsk recipe approve`, and an uncertain run
+  holds its recipe until the caller checks it. See `docs/recipes.md`.
+- `bsk read`, MCP and DSH `bsk_inspect(action=read)` sample bounded DOM fields
+  through fixed synchronous isolated-world queries. Agents can read current title,
+  URLs, text, attributes and control state across unrelated animation, then act
+  with explicit business conditions. No caller JavaScript, callbacks or delayed
+  effects are accepted; sensitive fields are masked.
+- DOM reads negotiate protocol 1.9 and reject older peers explicitly, without
+  script fallback. Visual/untargeted input retains strict guards.
+- `bsk evaluate --unverified` (MCP `params.unverified`, DSH `unverified`) runs a script
+  without comparing the page with any observation, for pages that never hold still and
+  scripts whose dependencies cannot be stated. Control authority, main-document identity
+  and tab ownership are still enforced; it cannot be combined with `--expect`,
+  `--observation` or `--depends-on`, and its result carries `verified: false`. It needs
+  protocol 1.9 on the daemon and extension; peers below 1.9 are rejected before dispatch.
+  Earlier 1.9 development builds require updating the CLI, daemon and extension together.
+
+### Changed
+
+- The extension popup always shows Connection settings instead of hiding them behind
+  a disclosure. The optional-pairing advice collapses to a warning-triangle icon beside
+  the heading and expands on click; skipped verification and states that block the
+  connection stay visible. The current address sits under the selected mode, the
+  pairing steps move behind an info icon, "Use a new pairing link" is a button, and the
+  save notice appears only once there is a valid change to save.
+- `bsk plan` and `bsk recipe` are documented standard CLI workflows, with packaged
+  guidance for batching and replay; recipe schemas remain opt-in in MCP and DSH.
+- Recipe execution and edits share an exclusive lock. Replay refuses unreadable
+  safety state or an unwritable run marker, and retains interrupted-run holds even
+  when the host process remains alive. DSH drains cancelled plan and recipe receipts.
+
+- Extension 0.4.3 removes obsolete migration flags and version gates while keeping
+  pairing optional. There is no automatic enforcement deadline.
+- `bsk-protocol` is the single source of truth for method metadata, JSON schemas,
+  TypeScript request/result codecs, exhaustive daemon/extension execution policies,
+  and protocol 1.2–1.9 peer feature compatibility checks (`pnpm protocol:check`).
+
+### Fixed
+
+- `tool.record_start` enforces shared-tab cooperation ownership, stop, and human-control
+  guards and invalidates stale control contexts when starting recording; `tool.tab_return`
+  clears active recordings for local sessions as well as remote ones.
+- Daemon shutdown retains its WebSocket stop notification when the accept loop is
+  between waits, avoiding a lost notification that can leave `daemon stop` waiting.
+- Website debugging attributes agent uploads and downloads to their transfer
+  operations instead of recording the resulting file changes and clicks as human input.
+- Local validation failures in upload, download, plan and step return stable
+  parameter/file error codes and relevant recovery hints. Upload sources are checked
+  before contacting the daemon or staging any files.
+- `fill` notifies each final value once. Native insertion and clearing already
+  dispatch `input`; the completion step no longer repeats it
+  ([#624](https://github.com/Tencent/BrowserSkill/issues/624)).
+- Window blur releases completed text-editing holds, and new task synchronizations
+  after an idle gap automatically resume paused or editing tabs when no gesture or
+  recent input is active, avoiding unnecessary manual hand-back prompts between tasks.
+- Recording keeps clicks on buttons and links whose name is longer than 48 characters,
+  such as GOV.UK step-by-step sections and long news headlines.
+- Recording keeps clicks on links, filter disclosures, checkboxes and other controls
+  that share a form with a search field, such as GOV.UK search results and filters.
+- Recorded steps keep their element ref after the page scrolls or the target changes size:
+  when no position matches, the only same-tag ref with the same role and name is used.
+  A click on text inside a `<summary>`, tab or option is measured on that control.
+- Recipe save refuses oversized input and formatted documents before publishing a
+  revision that its own reader could not open.
+- `press` maps US-layout punctuation to its physical `code` and virtual key code,
+  so shortcuts such as `Ctrl+/` reach handlers that check `event.code`.
+- Main-document SPA route changes, including away-and-back and hash routes,
+  invalidate old control contexts and refs. Supplementary reads never renew them.
+  This also covers passive reads of already loaded tabs and fresh debugger attachments.
+- Context-bound reads preserve frame-collection diagnostics and report failures before
+  dispatch with `effect_state: none`. Missing root or child document elements report
+  `read_target_stale` instead of a generic CDP failure.
+- CLI, MCP, DSH and bundled skills direct dynamic-page data gathering to read/extract
+  instead of repeated sync/evaluate refusals.
+- A script that states what it relies on is checked against that instead of the whole
+  page, so unrelated clocks, feeds and media no longer refuse it in a loop. Under target
+  policy, `evaluate` with `--expect` and no `--observation` reuses its context and is not
+  refused when a child frame navigates; passing `--observation` as well still checks the
+  whole page. Under strict policy, `evaluate` with
+  `--depends-on` checks those regions, form values and modal layers only; it previously
+  also required the whole page to match. A script that states nothing is checked as before.
+- A refusal caused by a changed observation also reports `observed_changes`: the number
+  of changed, added and removed nodes with up to five examples. For scripts, the recovery
+  text and the bundled skills give the order to try: state the facts, and use
+  `--unverified` only when they cannot be stated.
+- Control-state sampling recollects once after the browser proves that a failed child document retired; an active unobservable frame still blocks input.
+- A frame that does not answer collection in time is named in the error message and
+  `data.frames` (frame ID with the sanitized origin and path; tab operations add the tab).
+  The refusal remains `cooperation_sync_required`, so `--settle`, recipes and DSH still
+  retry it, and its recovery explains how to leave a frame that keeps failing
+  ([#614](https://github.com/Tencent/BrowserSkill/issues/614)).
+- A child frame that cannot be collected while its element is not displayed, has no area
+  or is invisible, and does not hold focus, is listed in `frame_gaps` as `hidden_frame`
+  instead of blocking the tab, as with micro-frontend sandbox iframes. Later collections
+  recheck the element instead of waiting for the frame again, and a displayed frame still
+  blocks input ([#614](https://github.com/Tencent/BrowserSkill/issues/614)).
+- Removed nodes already collected by CDP report target_detached with node identity, consistently with detached nodes that remain inspectable; other CDP failures remain target_unavailable.
+- Recording captures option changes on native `<select>` controls inside open shadow roots,
+  whose `change` events do not reach the document.
+- Strict DOM-targeted actions tolerate added or removed noninteractive tooltips after their
+  own hover, and character counters tied to a focused text field by `maxlength` or
+  `aria-describedby` after their own focus. Target meaning, links, ordinary text, form state,
+  modal contents and explicit dependencies stay exact. Scripts, untargeted keys and visual
+  clicks retain the full observation check, including during preparation
+  ([#540](https://github.com/Tencent/BrowserSkill/issues/540)).
+- A targeted strict action without `--depends-on` tolerates a positively identified media
+  timeline elsewhere on the page, as it already did with dependencies. Unnamed, submitted and
+  in-form sliders, and untargeted actions, stay exact.
+- Evidence refusals report `observed_change` (the first differing node, field and check, and
+  whether it happened before or during preparation) without values or sensitive text. Strict
+  click refusals after preparation also report `press_sent: false`.
+- A request refused because an earlier command on the session is still settling (for
+  example a cancelled observation screenshot) now carries `reason: operation_settling`,
+  `retryable` and `retry_after_ms`. `cooperate sync --settle` pauses and syncs again
+  (up to 5 s, also for older extensions), and the CLI no longer suggests a reload that needs
+  the same sync ([#527](https://github.com/Tencent/BrowserSkill/issues/527)).
+- `upload` preserves its concrete handler failure receipts (`set_file_input_failed` and
+  `file_drop_failed`, such as `-32000 Not allowed` when Chrome's "Allow access to file URLs"
+  extension toggle is off) when transaction cleanup detaches the debugger or post-action
+  frame collection fails, instead of masking them as `control_context_invalid`. Pre-drop
+  `dragEnter` refusals also keep `effect_state: none` without dispatching a redundant
+  `dragCancel` ([#636](https://github.com/Tencent/BrowserSkill/issues/636)).
+- Recording preserves clicks on submit, reset and image input buttons, including
+  actions beside search fields, and uses reset buttons' visible values as names.
+
+### Fixed
+
+- Cooperative status updates preserve an active click-passthrough lease, so the
+  control panel and its minimized arrow do not swallow automated page clicks.
+- Recording keeps clicks on buttons and links inside an editor's `contenteditable="false"`
+  regions, such as attachment actions, instead of treating them as editor input.
 
 ## [Unreleased]
 
 ### Fixed
 
+- `extract` applies CSS `uppercase` and `lowercase` to text in table cells,
+  headers, list fields and discovery previews, respecting nested style overrides
+  and language-specific casing. Transformed text remains subject to the byte
+  budget ([#597](https://github.com/Tencent/BrowserSkill/issues/597)).
+- Closing a retained Agent Window or stopping the last session detaches remaining
+  CDP debugger attachments and cancels active session operations, so the browser's
+  debugging infobar does not linger after the task window is closed.
+
+## [0.4.2] - 2026-11-05
+
+### Added
+
+- Session controller labels show an agent name, project, session ID and color in
+  browser overlays. CLI and DSH session startup accept the display metadata.
+- Fill supports date, time, datetime-local, month and week inputs, validates
+  formats and min/max limits, and preserves background input state.
+- `bsk mcp` lets MCP clients control BrowserSkill over stdio using the existing
+  daemon and browser extension. `bsk install-skill --mcp` can configure Codex,
+  Claude Code, and Cursor.
+
+### Changed
+
+- Borrowed tabs return relative to their original neighbors, with improved pinned
+  tab and group restoration. Eligible requests support automatic borrowing when
+  borrow confirmation is disabled.
+- The extension restores the `tabGroups` permission to read and restore borrowed
+  tabs' original groups.
+- Shared control waits for two seconds of quiet after the person's last completed
+  action before returning control to the Agent, up from 650 ms.
+- CLI and daemon updates prefer the official website's domestic download source,
+  falling back to GitHub for failed manifest or archive requests and verification.
+  Archive fallback stays on the selected version with SHA256 verification; if both
+  sources fail, the error includes each URL and cause. Explicit manifest overrides
+  continue to use only the configured source.
+
+### Fixed
+
+- Element waits requery selectors when matched nodes are replaced, avoiding false
+  hidden/detached success while a replacement remains visible.
+- Console capture is enabled only when requested, avoiding repeated reloads on
+  affected anti-debugging pages while preserving capture diagnostics.
+- Debug evidence redacts exact vendor credential headers.
+- DSH fill/select values beginning with `-` are passed as option values rather
+  than being parsed as CLI flags.
+- The shared-control toolbar yields pointer hits during automated clicks,
+  including page actions beneath its lower-right corner. Its controls become
+  interactive again when the click finishes or its passthrough lease expires.
+- Enter dispatches keydown and text together, preserving a completed link or
+  form navigation receipt without sending a separate character to a new page.
+  The next action still requires a fresh control context after navigation.
+- Timed-out page actions cancel and await bounded cleanup. Error responses retain
+  execution phase, effect state and operation identity; missing receipts remain
+  explicitly uncertain. CLI and MCP timeout guidance asks callers to inspect the
+  application result before choosing another action instead of blindly retrying.
+- Repeated action labels use their own DOM container's text for context, including
+  labels after the button, so adjacent records no longer misidentify their target.
+- CLI cancellation keeps the original RPC progressing and retries cancellation
+  that arrives before daemon registration, reducing background screenshots that
+  keep a session busy after the caller stops. Confirmation and response waiting
+  share a two-second budget, including MCP cancellation; transfer cleanup keeps
+  its separate bounded budget. Requests registered after that deadline still
+  require daemon-side cancellation tracking
+  ([#419](https://github.com/Tencent/BrowserSkill/pull/419)).
+- Saved HTML debug captures redact sensitive input values when `autocomplete`
+  contains surrounding whitespace or multiple tokens, such as
+  `section-login one-time-code` or `section-checkout billing cc-number`.
+  Non-sensitive token lists such as `section-login email` remain unchanged
+  ([#566](https://github.com/Tencent/BrowserSkill/pull/566)).
+- Pages that handle the legacy `mousewheel` event, such as Bilibili's player volume,
+  receive wheel input again. The extension listened for `wheel` on every page even
+  without a shared-control session, which made Chromium skip those handlers; it now
+  listens only while collecting, on `window`.
+- Commands no longer wait until their timeout when truncated page text cuts an
+  emoji in half, for example `bsk console --max-text-chars 4` on `Hi 🚀 there`.
+  The lone surrogate left by the cut made the daemon drop the extension's whole
+  reply; the extension now sends it as `U+FFFD`.
+- Shared control keeps running during scrolling and ineffective key presses. Completed
+  page clicks, keyboard activation and actual field edits yield to the person. Pending
+  gestures wait at dispatch without revoking control, and coordinate input waits for
+  scrolling to settle. Focusing a text field alone no longer holds editing control.
+
+- With target control, a carousel, video embed or ad refreshing an iframe no
+  longer revokes actions whose targets and preconditions are all in the main
+  document. Actions involving iframe refs or a strict observation require a
+  fresh sync when the frame documents change.
+- Values in one-time-code, card and password fields marked by `autocomplete`
+  (`one-time-code`, `cc-*`, `current-password`, `new-password`), which observations
+  already hide, are also kept out of shared-control field state, `expect` failure
+  details, structured extraction and recorded fill steps. Every check matches each
+  `autocomplete` token, so `section-login current-password` or `billing cc-number`
+  values stay hidden too. Password fields that a "show password" toggle switches to
+  `type=text` also stay masked across shared-control field state and recorded steps
+  and state observations.
+- On Windows, pairing, rotating or revoking a remote browser no longer fails with
+  `replace authorization snapshot: Access is denied` when another request is
+  reading the authorization store at the same moment.
+- Window resize verifies the browser's resulting bounds and the target tab's
+  layout viewport. It reports constrained bounds, inactive tabs and viewports
+  that did not follow the resize instead of echoing the requested size as success.
+  A dispatched resize also forces the next shared-control sync to recapture the
+  page, even when no DOM mutation recorded the layout change.
+- Shared-control synchronization skips failed child frames and inactive documents,
+  reporting them in `frame_gaps` with only HTTP(S) origins and paths or other URL schemes,
+  and repairs missing interaction collectors immediately once per current
+  document. Active frames without coverage still block actions with
+  `frame_unobservable`; a failed main page reports `page_load_failed`.
+- `cooperate sync --settle` continues bounded retries when a wait reports unavailable
+  coverage, returning the last sync error if all attempts fail instead of a
+  successful `not_ready` reply or an invented permanent frame failure. Temporary
+  human control retains the existing `not_ready` behavior, including explicit
+  holds during navigation. Status and wait report
+  `control_policy: null` until the first successful policy negotiation.
+- Shared control: the `observation_required` recovery, the target-policy sync
+  guidance and the skill references now say to pass the sync reply's top-level
+  `observation_id`. The reply also carries `observation.observation_id` for its
+  ref map, and passing that one was refused with a hint that did not say which
+  of the two ids to use.
+
+## [0.4.1] - 2026-11-02
+
+### Changed
+
+- **Shared-control default:** new CLI and DSH sync calls select `target` policy.
+  DOM actions can reuse the returned control context across completed actions
+  and supplementary reads; unrelated page updates no longer require a full-page
+  resync. Human intervention or navigation revokes control. Use `--expect` / DSH
+  `expect` to protect observed business facts. Scripts, untargeted keys and visual
+  actions still require the sync's `--observation` / `observationId` and strict
+  observation checks. Select `--policy strict` / `policy: "strict"` on the first
+  sync to retain the one-action-per-context workflow; later syncs and steps
+  preserve that session's policy.
+- CLI/daemon and extension now use protocol 1.8. The new target policy requires
+  both peers to support 1.8; update the CLI, running daemon, extension and DSH
+  plugin together rather than relying on a successful mixed-version connection.
+- DOM references remain attached to the same nodes across supplementary
+  observations. Removed nodes are not silently replaced, and navigation
+  invalidates the document's refs. DOM actions can wait for an existing target
+  to become ready within their timeout without replaying input.
+
+### Fixed
+
+- Interaction capture initializes on ordinary HTTP intranet pages and their
+  child frames when `crypto.randomUUID()` is unavailable. A compatible UUID
+  fallback restores the frame coverage needed for shared control.
+- Shared-control synchronization waits for cancelled observation thumbnails to
+  settle. Viewport capture reads have a 10-second deadline with separate bounded
+  cleanup; reaching that deadline returns `timeout` (exit 4) with screenshot-specific
+  guidance. Browser/CDP capture failures remain `cdp_failed` (exit 3).
+- Completed inputs retain their successful receipts when they navigate, including
+  clicks, Enter submissions, drag submissions, and forms submitted after filling
+  or selecting a value. After navigation, synchronize before the next action.
+- CLI cancellation is armed before sending a browser command, so an immediate
+  Ctrl-C can cancel the operation and return its outcome instead of terminating silently.
+- Pointer hit tests stay within the target's document, and human input during
+  frame changes continues to revoke control without discarding completed actions.
+- Windows daemon startup errors distinguish verified Job Object restrictions,
+  unverified breakaway failures, executable access failures, partial breakaway
+  and resume failures, with recovery guidance for the actual failure stage.
+- DSH-injected messages use native durable-format v4 plugin sources while
+  retaining the legacy source shape for older formats.
+
+### Removed
+
+- Automatic native Agent Window tab groups and the `tabGroups` permission, to
+  prevent new `BrowserSkill` groups from accumulating across browsers through
+  Chrome sync. Existing saved groups are not deleted; page control indicators,
+  background window behavior and user-tab routing remain available.
+
+### Upgrade
+
+1. Finish active tasks, install CLI 0.4.1 and restart the running daemon.
+2. Install extension 0.4.1 before upgrading the DSH plugin to 0.4.1. Store review
+   can delay availability; verify the installed extension, not just its submission.
+3. Restart the DSH profile and invoke `/browser-skill` again, or start a new CLI
+   agent conversation to load the updated skill. Custom tool integrations need
+   the new observation and expectation fields for target-policy actions.
+4. Check `bsk --version`, `bsk status` and `bsk doctor`; the running daemon and
+   extension should both report protocol 1.8.
+
+## [0.4.0] - 2026-10-30
+
+### Changed
+
+- **Breaking — extension compatibility:** the extension now requires daemon
+  protocol 1.6 or later; CLI/daemon 0.3.3 uses protocol 1.3 and cannot connect.
+  Update the CLI and restart the running daemon before updating the extension,
+  then update the DSH plugin. CLI/daemon and extension 0.4.0 use protocol 1.7.
+- **Breaking — shared browser control:** new sessions and their task tabs enable
+  human/agent collaboration automatically. After initial navigation, synchronize
+  with `bsk cooperate sync` and pass its single-use `--context` to each action;
+  DSH uses `bsk_session action:sync` and `contextId`. Human input or changed page
+  evidence can revoke a pending action; synchronize and reconsider the result
+  instead of replaying it. Reload the updated skill in existing conversations.
+- Moving any controlled tab out of its original Agent Window ends the whole
+  session, preserves pages in place and removes control indicators. Moving the
+  tab back does not restart the task. Normal session stop preserves pages with
+  human participation and cleans up untouched task-created pages.
+- macOS CLI releases require Developer ID signing and Apple notarization for
+  both architectures, alongside the existing Windows EV signature checks.
+  `Publish CLI` verifies both platforms before publishing the complete release;
+  archive names and installation commands remain unchanged.
+- English and Chinese privacy policies cover shared-control observations,
+  explicitly saved observation files, incognito tasks and `tabGroups`. Upgrade
+  and publishing instructions use CLI-first rollout for this compatibility change.
+
+### Added
+
+- Human/agent collaboration with visible control indicators, manual hold and
+  resume, bounded activity evidence, page-change guards and explicit decision
+  regions. Native JavaScript dialogs participate in control and recovery.
+- Native drag interactions, including cross-origin frame targets, and a
+  click–move–click mode for selecting ranges. CLI and DSH expose the new actions.
+- `bsk step` executes one chosen action, optionally waits for an element and then
+  synchronizes, preserving the action receipt if a later stage fails. Explicit
+  observation saving, baseline reuse and `bsk view` let agents read and search
+  historical evidence locally without another browser call. DSH exposes these
+  through `step`, `view`, `saveFull` and baseline options.
+- Incognito Agent Windows through `session start --incognito`, with explicit
+  browser incognito permission and no borrowing of ordinary tabs. Incognito
+  windows in one profile share their incognito login state.
+- Orange BrowserSkill tab groups mark controlled Agent Window tabs using the
+  new `tabGroups` permission; grouping is removed when the task ends.
+
+### Fixed
+
+- Browser interactions retain current element references for dynamic menus,
+  dispatch shadow-DOM input events correctly, handle plus-key chords, and reject
+  select controls that become disabled during focus. Extraction respects
+  `content-visibility`, and observation token estimates and evidence scope are
+  more consistent.
+- Website debugging preserves failed request-body metadata and primitive console
+  exceptions. Video capture respects human control, and playback regressions wait
+  for decoded frames before checking colors.
+- Windows DSH child-process cancellation preserves its termination grace period;
+  remote authorization handles a busy store, and WebSocket connection limits
+  bound incoming peers. Foreground daemon consoles remain visible.
+- Browser evaluation scaffolding handles Windows cross-drive paths, relative
+  import URLs and long run IDs; child output preserves UTF-8. Extension types are
+  prepared during dependency installation.
+- Extension: explain when the running bsk daemon is too old to connect, with
+  its version, a copyable update command and restart guidance in the popup.
+  A toolbar warning and a notification make the problem visible before opening
+  the popup; repeated reconnects do not repeat the notification.
 - CLI: argument parsing failures now honor `--json`, returning an
   `invalid_params` error on stdout with `data.reason: "cli_parse_error"`
   instead of leaving stdout empty. A misplaced `--session` / `--tab-id` now
   explains that it belongs after a supporting subcommand, replacing the
   misleading `--version` suggestion and usage line
   ([#387](https://github.com/Tencent/BrowserSkill/issues/387)).
+- DSH Plugin: the right-sidebar observation tab auto-opens again on DSH
+  0.2.0+, which removed `current` from the `sessions.list` snapshot. The
+  auto-open target now falls back to the `uiSession` main binding (exposed by
+  DSH 0.1.5 and 0.2.x alike), and conversation switches on 0.2.x hosts keep
+  re-triggering it
+  ([#484](https://github.com/Tencent/BrowserSkill/issues/484)).
+- Extension: shared-control actions no longer refuse forever on pages with
+  self-updating text such as clocks or counters. The first change is reported
+  with its before/after text and requires a sync; after that, changes to that
+  text stop blocking actions on a ref or selector unless it shares a form,
+  list, dialog, panel or other container with the target. Actions without a
+  target, form values, modal layers and `--depends-on` regions stay exact,
+  and a refused context can no longer be retried
+  ([#495](https://github.com/Tencent/BrowserSkill/issues/495)).
 
 ## [0.3.3] - 2026-10-14
 

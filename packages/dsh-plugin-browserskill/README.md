@@ -54,6 +54,50 @@ dsh plugin --profile web update @wxg-prc-cpg/browser-skill-dsh-plugin --latest
 Restart that dsh profile after upgrading. This command updates the plugin; update
 the `bsk` CLI and browser extension separately when a release requires it.
 
+### Upgrading to 0.4.1
+
+Update the CLI and restart the running daemon first, install extension 0.4.1,
+then update this plugin to 0.4.1. The default target policy requires daemon and
+extension protocol 1.8; a successful connection to an older peer does not provide
+that capability. Wait for the new extension to be available in your installation
+channel before upgrading the plugin. Updating the npm package does not update
+the CLI, daemon or extension.
+
+Restart the DSH profile and invoke `/browser-skill` again in existing conversations.
+The six `bsk_*` tool names remain unchanged. After initial navigation, call
+`bsk_session action:sync` and pass its returned `context_id` as `contextId`.
+New sessions use target policy: DOM actions can reuse control across supplementary
+reads and completed actions, and `expect` checks protect observed business facts.
+Scripts, untargeted keys and visual actions also require the sync's `observation_id`
+as `observationId`. Human intervention or navigation revokes control; synchronize
+and replan. Select `policy: "strict"` on the first sync to retain the legacy
+one-action-per-context workflow. Later syncs and steps preserve the selected policy.
+Custom tool integrations must expose and forward these fields. See the
+[cooperation reference](skill/references/cooperation.md) for action-specific checks.
+
+### Upgrading to 0.4.0
+
+Update the CLI and restart the running daemon first, then update the browser
+extension, and finally update this plugin. The 0.4.0 extension requires daemon
+protocol 1.6 or later; CLI/daemon 0.3.3 uses 1.3 and cannot connect. Updating the npm
+package does not update the CLI, daemon or extension. Use matching 0.4.0 components
+for drag, step and saved-observation workflows.
+
+Restart the DSH profile and invoke `/browser-skill` again in existing conversations.
+The six `bsk_*` tool names remain unchanged. Shared control is now enabled for new
+tasks: after initial navigation, call `bsk_session action:sync`, pass its returned
+context identifier as `contextId` for one action, then synchronize again. Human
+edits and changed page evidence can revoke a pending action; synchronize and replan
+instead of repeating the old call. Version 0.4.1 changes the default policy as
+described above.
+Custom tool policies and integrations must allow the new actions they intend to use.
+
+Explicit `saveFull` results remain as JSON files on the CLI machine until deleted;
+closing a browser task or clearing extension storage does not remove them.
+See [cooperation](skill/references/cooperation.md) and
+[steps and saved observations](skill/references/interaction-details.md#steps-and-saved-observations).
+If upgrading from before 0.3.3, also apply the tool-name migration below.
+
 ### Breaking tool API migration (0.3.3)
 
 The coordinated 0.3.3 release replaces all six `browser_*` tool names with stable
@@ -89,8 +133,8 @@ capabilities. Updating the npm package does not update either component.
 | --- | --- | --- |
 | `bsk_session` | `start`, `stop`, `list`, `share`, `sync`, `wait-user`, `cooperation-status` | Manage owned sessions and shared-tab control. |
 | `bsk_page` | `navigate`, `back`, `forward`, `reload`, `wait`, `wait-for-element` | Navigate the active tab; wait for page lifecycle events or one element condition. |
-| `bsk_inspect` | `observe`, `snapshot`, `html`, `screenshot`, `console`, `network`, `debug`, `video`, `extract` | Inspect page state, debug websites, capture screenshots or requested task videos, and export structured tables/lists. |
-| `bsk_interact` | `click`, `hover`, `wheel`, `scroll-to`, `focus`, `blur`, `fill`, `select`, `press`, `evaluate`, `upload`, `download` | Interact with controls using fresh refs or selectors. |
+| `bsk_inspect` | `observe`, `snapshot`, `view`, `html`, `screenshot`, `console`, `network`, `debug`, `video`, `extract` | Inspect page state, read saved observations, debug websites, capture screenshots or requested task videos, and export structured tables/lists. |
+| `bsk_interact` | `click`, `hover`, `drag`, `step`, `wheel`, `scroll-to`, `focus`, `blur`, `fill`, `select`, `press`, `evaluate`, `upload`, `download` | Interact with controls using fresh refs or selectors. |
 | `bsk_tabs` | `list`, `create`, `select`, `close`, `borrow`, `return` | Manage Agent Window tabs and temporarily borrow user tabs. |
 | `bsk_assist` | `resize`, `emulate`, `request-help` | Resize or emulate the browser and pause for human-only steps. |
 
@@ -104,6 +148,36 @@ for signed deltas, optional targets, result semantics and interruption.
 For `bsk_interact` with `action: "scroll-to"`, see the
 [scroll-to reference](../../docs/scroll-to.md) for parameters, visible bounds and errors.
 
+For `bsk_interact` with `action: "drag"`, pass the source as `target` and either a
+destination `to` or relative `deltaX`/`deltaY`. The default holds the mouse button
+while moving; `dragMode: "click-move-click"` selects ranges using two clicks and
+requires a destination. Use current observed refs/selectors and inspect the result.
+
+Use `action: "step"` for one decided interaction, with `stepAction` and a `params`
+JSON string using that action's CLI protocol fields. It executes once, optionally
+waits for `untilVisible`, then synchronizes. Read action, readiness and sync outcomes
+separately; a failed follow-up does not mean the action should be repeated.
+
+Use `bsk_interact` with `action: "plan"` and a `steps` array for 1–20 actions
+already decided from one sync. It stops at the first failure, preserves completed
+steps and returns the final synchronized state. Put expectations on individual
+steps; never repeat a step with unknown effects. See [plans](../../docs/plan.md).
+
+The optional `bsk_recipe` tool lists, reviews and replays saved flows. Enable the
+plugin's `recipes: true` option or start DSH with `BSK_RECIPES=1`; activation remains
+scoped to conversations using the browser skill. `run` and `draft` use owned
+sessions. Read `status`, `effects` and `remaining` before continuing a handoff;
+uncertain runs require checking the application's records before passing `checked`.
+Risk approval is a person's CLI action and is never exposed by the plugin.
+See [recipes](../../docs/recipes.md).
+
+Save complete observations with `saveFull` on `bsk_session action: "sync"` or
+`bsk_interact action: "step"`. Use `bsk_inspect action: "view"` with `file` and
+optional `find`, `startLine` or `lineCount` to inspect the saved file locally, even
+after the browser session ends. The view is historical, makes no browser calls,
+and needs no `session` or `contextId`. It never refreshes refs or authorizes an
+action. See [steps and saved observations](skill/references/interaction-details.md#steps-and-saved-observations).
+
 For `bsk_inspect` with `action: "extract"`, see
 [structured extraction](../../docs/structured-extraction.md) for discovery, list
 fields, JSON/CSV output and loaded-DOM completeness.
@@ -114,7 +188,9 @@ is not exposed by this plugin.
 
 Human/agent collaboration is enabled automatically for new sessions and owned task tabs.
 No `share` call is required. See [cooperation](skill/references/cooperation.md).
-Actions on shared tabs require the `contextId` returned by `sync`; each context is used once.
+Actions on shared tabs require the `contextId` returned by `sync` or a step's
+`post.context_id`. Target-policy DOM actions can reuse it; strict-policy contexts
+remain single-use. The plugin never infers context or observation receipts from its cache.
 
 ### Activation failures
 
@@ -137,9 +213,9 @@ after fixing it.
 One agent conversation can drive several browser sessions at once:
 
 - `bsk_session` with `action: start` returns the session id and makes it the **current session**.
-- Every operation tool accepts an optional `session` argument. When omitted, the call acts on the
+- Browser operations accept an optional `session` argument. When omitted, the call acts on the
   current session (the one most recently started or used); when given, that session becomes current.
-- Every tool result echoes the session it actually acted on, so the model never has to guess.
+- Browser operation results echo the session they acted on; offline `view` reads only its local file.
 - The number of concurrent sessions started through the plugin is capped (`maxSessions`, default 5).
 - Unloading the plugin stops every session it started and kills in-flight bsk processes.
 
@@ -267,20 +343,23 @@ The [Release dsh plugin workflow](https://github.com/Tencent/BrowserSkill/blob/m
 publishes the package and this README to npm. Pushing a `dsh-plugin-vX.Y.Z` tag
 triggers it; ordinary commits to `main` do not.
 
-Before publishing the 0.3.3 plugin, publish the coordinated 0.3.3 CLI and extension.
-Element waits require the implementation introduced in [#407](https://github.com/Tencent/BrowserSkill/pull/407).
-The `cli-v0.3.0`, `cli-v0.3.1`, and `cli-v0.3.2` releases do not include this
-command. Confirm the compatible CLI and extension release artifacts are available
-before pushing the plugin tag; publishing the npm package alone does not upgrade
-either component on users' machines. Older installations can still use the
-[single-action recovery path](skill/references/interaction-details.md#element-waits).
+Before publishing the 0.4.1 plugin, publish the coordinated 0.4.1 CLI and extension.
+Make the CLI release downloadable first, then confirm extension availability in
+the supported installation channels. The default target policy requires protocol
+1.8 on both the running daemon and extension. During rollout, explicitly select
+strict policy on every sync/enable and step when using older compatible peers;
+do not assume a successful handshake enables target policy.
+Publishing the npm package alone does not upgrade either component on users' machines.
 
 1. Prepare a release PR that updates the shared CLI, extension and plugin version,
    local Cargo lock entries, changelog and relevant documentation. Merge it after
    validation and record the merge commit.
-2. Tag that commit as `ext-v<version>` and wait for the browser extension to become
-   available. Then tag the same commit as `cli-v<version>` and wait for the complete
-   CLI release, including [Windows signing](../../docs/windows-signing.md).
+2. Tag that commit as `cli-v<version>` and wait for the complete public CLI release,
+   including [Windows signing](../../docs/windows-signing.md) and
+   [macOS signing and notarization](../../docs/macos-signing.md). `Release CLI`
+   builds alone are not publication; both `Publish CLI` verification jobs and its
+   final publish job must succeed. Synchronize store permission/privacy disclosures,
+   then tag the same commit as `ext-v<version>` and wait for store availability.
 3. Create `dsh-plugin-v<version>` on that same merge commit and push only that tag:
 
    ```sh

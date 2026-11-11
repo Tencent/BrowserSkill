@@ -1,3 +1,8 @@
+import {
+  RECORD_PASSWORD_ATTRIBUTE,
+  SENSITIVE_AUTOCOMPLETE_SELECTOR,
+  sensitiveAutocomplete,
+} from "@/lib/sensitive-autocomplete";
 import type { CdpRunner } from "../shared";
 import { isCaptureTerminalError, throwIfAborted } from "./capture-abort";
 import type { CapturedNode } from "./capture-types";
@@ -6,8 +11,10 @@ interface RuntimeEvaluateReply {
   result?: { deepSerializedValue?: DeepSerializedValue };
 }
 const MAX_FORM_ENRICH_CONTROLS = 250;
+const MAX_RANGE_FORM_READS = 64;
 
 interface CapturedFormState {
+  inForm?: boolean;
   value?: string;
   defaultValue?: string;
   placeholder?: string;
@@ -25,18 +32,24 @@ function formStateBatchExpression(maxControls: number): string {
     const maxControls = ${JSON.stringify(maxControls)};
     let remaining = maxControls;
     const controlSelector = "input,textarea,select";
+    const sensitiveSelector = ${JSON.stringify(`input[type="password"],[${RECORD_PASSWORD_ATTRIBUTE}],${SENSITIVE_AUTOCOMPLETE_SELECTOR}`)};
     const controlState = (el) => {
       const tag = el.tagName.toLowerCase();
       const type = tag === "input" ? String(el.type || "text").toLowerCase() : tag;
-      const sensitive = type === "password" || type === "credit-card";
+      const sensitive =
+        type === "password" ||
+        type === "credit-card" ||
+        (typeof el.matches === "function" && el.matches(sensitiveSelector));
       const rawValue = typeof el.value === "string" ? el.value : "";
       const defaultValue = typeof el.defaultValue === "string" ? el.defaultValue : "";
       const placeholder = typeof el.placeholder === "string" ? el.placeholder : "";
-      const state = rawValue === "" ? "empty" : rawValue === defaultValue ? "default" : "filled";
+      const state =
+        rawValue === "" ? "empty" : !sensitive && rawValue === defaultValue ? "default" : "filled";
       return {
         state,
         sensitive,
         placeholder,
+        inForm: el.form !== null,
         ...(sensitive ? {} : { value: rawValue, defaultValue }),
       };
     };
@@ -80,6 +93,7 @@ function formStatesByBackendId(result: RuntimeEvaluateReply): Map<number, Captur
         !["empty", "filled", "default"].includes(state.state ?? "") ||
         typeof state.sensitive !== "boolean" ||
         typeof state.placeholder !== "string" ||
+        (state.inForm !== undefined && typeof state.inForm !== "boolean") ||
         (!state.sensitive &&
           (typeof state.value !== "string" || typeof state.defaultValue !== "string"))
       ) {
@@ -98,12 +112,16 @@ function applyFormStates(nodes: CapturedNode[], states: Map<number, CapturedForm
     if (!["input", "textarea", "select"].includes(node.tag)) continue;
     const state = states.get(node.backendNodeId);
     if (!state) continue;
-    node.formState = state.state;
-    node.formPlaceholder = state.placeholder ?? "";
-    if (
+    const sensitive =
       state.sensitive ||
-      (node.tag === "input" && (node.attrs.type ?? "").toLowerCase() === "password")
-    ) {
+      (node.tag === "input" &&
+        ((node.attrs.type ?? "").toLowerCase() === "password" ||
+          Object.prototype.hasOwnProperty.call(node.attrs, RECORD_PASSWORD_ATTRIBUTE))) ||
+      sensitiveAutocomplete(node.attrs.autocomplete);
+    node.inForm = state.inForm;
+    node.formState = sensitive && state.state === "default" ? "filled" : state.state;
+    node.formPlaceholder = state.placeholder ?? "";
+    if (sensitive) {
       delete node.formValue;
       delete node.formDefaultValue;
       delete node.attrs.value;
@@ -112,6 +130,71 @@ function applyFormStates(nodes: CapturedNode[], states: Map<number, CapturedForm
       if (state.value !== undefined) node.formValue = state.value;
     }
   }
+}
+
+/** The batch query cannot reach closed shadow roots. Only native ranges need
+ * this bounded fallback to qualify for incidental media progress. Read the
+ * exact captured node, not a selector or a pruned ancestor approximation. */
+async function enrichRangeFormMembership(
+  cdp: CdpRunner,
+  tabId: number,
+  groups: CapturedNode[][],
+  objectGroup: string,
+  signal?: AbortSignal,
+): Promise<void> {
+  const pending = groups
+    .flat()
+    .filter(
+      (node) =>
+        node.tag === "input" &&
+        node.attrs.type?.toLowerCase() === "range" &&
+        node.inForm === undefined,
+    )
+    .slice(0, MAX_RANGE_FORM_READS);
+  let cursor = 0;
+  let failed = false;
+  let failure: unknown;
+  await Promise.all(
+    Array.from({ length: Math.min(4, pending.length) }, async () => {
+      while (cursor < pending.length && !failed && !signal?.aborted) {
+        const node = pending[cursor++];
+        try {
+          throwIfAborted(signal);
+          const resolved = await cdp.send<{ object?: { objectId?: string } }>(
+            tabId,
+            "DOM.resolveNode",
+            {
+              backendNodeId: node.backendNodeId,
+              objectGroup,
+            },
+          );
+          throwIfAborted(signal);
+          if (failed) return;
+          if (!resolved.object?.objectId) continue;
+          const result = await cdp.send<{
+            result?: { value?: unknown };
+            exceptionDetails?: unknown;
+          }>(tabId, "Runtime.callFunctionOn", {
+            objectId: resolved.object.objectId,
+            functionDeclaration: "function() { return this.form !== null; }",
+            returnByValue: true,
+            throwOnSideEffect: true,
+          });
+          throwIfAborted(signal);
+          if (!result.exceptionDetails && typeof result.result?.value === "boolean")
+            node.inForm = result.result.value;
+        } catch (error) {
+          if (isCaptureTerminalError(error)) {
+            if (!failed) failure = error;
+            failed = true;
+          }
+          // Unknown ownership stays protected; never guess from missing ancestors.
+        }
+      }
+    }),
+  );
+  throwIfAborted(signal);
+  if (failed) throw failure;
 }
 
 export async function enrichFormControlStates(
@@ -143,6 +226,7 @@ export async function enrichFormControlStates(
     for (const nodes of frameNodeGroups) {
       applyFormStates(nodes, states);
     }
+    await enrichRangeFormMembership(cdp, tabId, frameNodeGroups, objectGroup, signal);
     return true;
   } catch (error) {
     if (isCaptureTerminalError(error)) throw error;

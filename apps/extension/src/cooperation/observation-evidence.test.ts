@@ -1,6 +1,11 @@
 import type { VomNode } from "@browser-skill/vom";
-import { expect, it } from "vitest";
-import { sameObservationEvidence } from "./observation-evidence";
+import { describe, expect, it } from "vitest";
+import {
+  contentChanges,
+  observedChange,
+  preparationEvidence,
+  sameObservationEvidence,
+} from "./observation-evidence";
 
 const node = (id: number, parentId: number | null, role: string, name = ""): VomNode => ({
   id,
@@ -31,6 +36,52 @@ it("allows unrelated updates and cosmetic hover changes while retaining form evi
   after[3].attrs = { class: "hovered" };
   after[3].rect!.x += 30;
   expect(sameObservationEvidence({ nodes: before }, { nodes: after }, target)).toBe(true);
+});
+
+describe("selection evidence", () => {
+  it.each([
+    { role: "button" },
+    { role: "generic", clickable: true },
+    { role: "generic", attrs: { onclick: "selectCell()" } },
+  ])("protects semantic and custom controls: %j", (control) => {
+    const before = scene();
+    before[3] = { ...before[3], ...control };
+    const after = structuredClone(before);
+    after[3].attrs = { ...after[3].attrs, class: "selected" };
+    expect(sameObservationEvidence({ nodes: before }, { nodes: after }, target)).toBe(false);
+  });
+
+  it("ignores selection-like attributes on decorative wrappers", () => {
+    const before = scene();
+    const after = structuredClone(before);
+    after[1].attrs = { class: "selected", "data-selected": "true", "data-state": "selected" };
+    expect(sameObservationEvidence({ nodes: before }, { nodes: after }, target)).toBe(true);
+    expect(sameObservationEvidence({ nodes: before }, { nodes: after })).toBe(true);
+  });
+
+  it("keeps unrelated selection changes outside an explicit dependency region", () => {
+    const before = scene();
+    before.push({ ...node(6, 5, "button", "Other choice"), attrs: { "data-selected": "false" } });
+    const after = structuredClone(before);
+    after[5].attrs = { "data-selected": "true" };
+    expect(sameObservationEvidence({ nodes: before }, { nodes: after }, target)).toBe(true);
+    expect(sameObservationEvidence({ nodes: before }, { nodes: after })).toBe(false);
+    expect(sameObservationEvidence({ nodes: before }, { nodes: after }, { backendNodeId: 6 })).toBe(
+      false,
+    );
+  });
+
+  it("never learns selection changes as volatile text", () => {
+    const before = scene();
+    before[3].text = "16:00";
+    const after = structuredClone(before);
+    after[3].text = "16:01";
+    after[3].attrs = { "data-state": "selected" };
+    expect(contentChanges({ nodes: before }, { nodes: after })).toBeUndefined();
+    expect(
+      sameObservationEvidence({ nodes: before }, { nodes: after }, undefined, new Set(["frame:4"])),
+    ).toBe(false);
+  });
 });
 
 it.each([
@@ -69,4 +120,658 @@ it("checks fields outside the action region and falls back to the whole document
   after[5].value = "B";
   expect(sameObservationEvidence({ nodes: before }, { nodes: after }, target)).toBe(false);
   expect(sameObservationEvidence({ nodes: scene() }, { nodes: after })).toBe(false);
+});
+
+it("identifies in-place text changes and tolerates only those in the whole-page check", () => {
+  const before = scene();
+  before.push({ ...node(6, 1, "timer"), text: "10:00:00" });
+  const after = structuredClone(before);
+  after[5].text = "10:00:01";
+  expect(contentChanges({ nodes: before }, { nodes: after })).toEqual([
+    { key: "frame:6", before: "10:00:00", after: "10:00:01" },
+  ]);
+  const volatile = new Set(["frame:6"]);
+  expect(sameObservationEvidence({ nodes: before }, { nodes: after }, undefined, volatile)).toBe(
+    true,
+  );
+  for (const change of ["removed", "disabled", "hidden", "added"]) {
+    const next = structuredClone(after);
+    if (change === "removed") next.pop();
+    if (change === "disabled") next[5].disabled = true;
+    if (change === "hidden") next[5].rect = { x: 0, y: 0, w: 0, h: 0 };
+    if (change === "added") next.push(node(7, 1, "status", "Sold out"));
+    expect(sameObservationEvidence({ nodes: before }, { nodes: next }, undefined, volatile)).toBe(
+      false,
+    );
+    expect(contentChanges({ nodes: before }, { nodes: next }, volatile)).toBeUndefined();
+  }
+  // Explicit targets never use the tolerated set.
+  expect(
+    sameObservationEvidence({ nodes: before }, { nodes: after }, { backendNodeId: 6 }, volatile),
+  ).toBe(false);
+});
+
+it("never treats form values or modal content as page activity", () => {
+  const before = scene();
+  before.push({ ...node(6, 1, "textbox", "Amount"), value: "1" });
+  before.push({ ...node(7, 1, "dialog", "Confirm"), modal: true });
+  for (const index of [5, 6]) {
+    const after = structuredClone(before);
+    after[index].name = "changed";
+    const volatile = new Set([`frame:${index + 1}`]);
+    expect(contentChanges({ nodes: before }, { nodes: after })).toBeUndefined();
+    expect(sameObservationEvidence({ nodes: before }, { nodes: after }, undefined, volatile)).toBe(
+      false,
+    );
+  }
+});
+
+it("reports aria-label and title rewrites as content changes", () => {
+  const before = [
+    node(1, null, "main"),
+    { ...node(2, 1, "timer"), attrs: { "aria-label": "10:00" } },
+  ];
+  const after = structuredClone(before);
+  after[1].attrs = { "aria-label": "10:01" };
+  expect(contentChanges({ nodes: before }, { nodes: after })).toEqual([
+    { key: "frame:2", before: "10:00", after: "10:01" },
+  ]);
+  const volatile = new Set(["frame:2"]);
+  expect(sameObservationEvidence({ nodes: before }, { nodes: after }, undefined, volatile)).toBe(
+    true,
+  );
+});
+
+it("relaxes learned text only around targets in <main> or without a region", () => {
+  const volatile = new Set(["frame:4"]);
+  const check = (parent: string, sibling = true) => {
+    const before = [
+      node(1, null, "body"),
+      node(2, 1, parent),
+      node(3, 2, "button", "Buy"),
+      { ...node(4, sibling ? 2 : 3, "span"), text: "1" },
+    ];
+    const after = structuredClone(before);
+    after[3].text = "2";
+    return sameObservationEvidence(
+      { nodes: before },
+      { nodes: after },
+      { backendNodeId: 3 },
+      volatile,
+    );
+  };
+  expect(check("main")).toBe(true);
+  expect(check("div")).toBe(true);
+  for (const region of ["form", "dialog", "list", "table", "section", "article", "region"])
+    expect(check(region)).toBe(false);
+  // Text inside the target itself is never relaxed.
+  expect(check("main", false)).toBe(false);
+});
+
+// Real Chrome observations add text nodes and derive container names from
+// descendant text: a tick changes every ancestor's name, a StaticText node and
+// an InlineTextBox without a backend node.
+const page = (clock: string, price = "$100", hidden = false): VomNode[] => [
+  { ...node(1, null, "main"), name: hidden ? clock : `${clock} ${price}` },
+  { ...node(2, 1, "span"), name: clock, text: clock },
+  { ...node(3, 2, "StaticText"), name: clock },
+  { ...node(4, 3, "InlineTextBox"), name: clock, backendNodeId: undefined },
+  { ...node(5, 1, "generic"), name: price },
+  ...(hidden
+    ? []
+    : [
+        { ...node(6, 5, "span"), name: price, text: price },
+        { ...node(7, 6, "StaticText"), name: price },
+      ]),
+  node(8, 1, "button", "Buy"),
+];
+
+it("learns virtual text through the node that owns it, never derived names", () => {
+  const before = { nodes: page("10:00:00") };
+  const after = { nodes: page("10:00:01") };
+  expect(contentChanges(before, after)?.map((change) => change.key)).toEqual([
+    "frame:2",
+    "frame:3",
+  ]);
+  expect(sameObservationEvidence(before, after, undefined, new Set(["frame:2", "frame:3"]))).toBe(
+    true,
+  );
+  // The InlineTextBox and derived names stay exact without their owner.
+  expect(sameObservationEvidence(before, after, undefined, new Set(["frame:2"]))).toBe(false);
+});
+
+it("keeps content without its own node exact inside derived names", () => {
+  // An aria-hidden price exists only in its ancestors' derived names.
+  expect(
+    contentChanges({ nodes: page("1", "$100", true) }, { nodes: page("1", "$200", true) }),
+  ).toBe(undefined);
+  const learned = new Set(["frame:2", "frame:3"]);
+  const before = { nodes: page("10:00:00", "$100", true) };
+  // The learned clock ticks while the hidden price changes in the same container.
+  const after = { nodes: page("10:00:01", "$100", true) };
+  after.nodes[0].name = "10:00:01 $200";
+  before.nodes[0].name = "10:00:00 $100";
+  expect(sameObservationEvidence(before, after, undefined, learned)).toBe(false);
+});
+
+it("learns the same value shown twice", () => {
+  const twins = (clock: string): VomNode[] => [
+    { ...node(1, null, "main"), name: `${clock} ${clock}` },
+    { ...node(2, 1, "span"), name: clock, text: clock },
+    { ...node(3, 1, "span"), name: clock, text: clock },
+    node(4, 1, "button", "Go"),
+  ];
+  const changes = contentChanges({ nodes: twins("1") }, { nodes: twins("2") });
+  expect(changes?.map((change) => change.key)).toEqual(["frame:2", "frame:3"]);
+  // A different value elsewhere in the derived name is not learned text.
+  const after = twins("2");
+  after[0].name = "2 3";
+  expect(
+    sameObservationEvidence(
+      { nodes: twins("1") },
+      { nodes: after },
+      undefined,
+      new Set(["frame:2"]),
+    ),
+  ).toBe(false);
+});
+
+describe("learned text around a target inside <main> or without a region", () => {
+  const shape = (
+    specs: [id: number, parent: number | null, role: string, extra?: Partial<VomNode>][],
+  ): VomNode[] =>
+    // Like Chrome, an element's name includes its own text.
+    specs.map(([id, parent, role, extra]) => ({
+      ...node(id, parent, role, extra?.text),
+      ...extra,
+    }));
+  const tick = (nodes: VomNode[], id: number, text: string) => {
+    const next = structuredClone(nodes);
+    const changed = next.find((candidate) => candidate.id === id)!;
+    changed.text = text;
+    changed.name = text;
+    return next;
+  };
+  const allowed = (nodes: VomNode[], target: number, learned: number) =>
+    sameObservationEvidence(
+      { nodes },
+      { nodes: tick(nodes, learned, "changed") },
+      { backendNodeId: target, frameId: "frame" },
+      new Set([`frame:${learned}`]),
+    );
+
+  it("keeps a positioned panel exact", () => {
+    const nodes = shape([
+      [1, null, "main"],
+      [2, 1, "form"],
+      [3, 2, "button", { name: "Continue" }],
+      [4, 1, "generic", { position: "fixed" }],
+      [5, 4, "span", { text: "$100" }],
+      [6, 4, "button", { name: "Pay" }],
+    ]);
+    expect(allowed(nodes, 6, 5)).toBe(false);
+    // The same panel nested under a single-child wrapper stays exact as well.
+    const wrapped = shape([
+      [1, null, "main"],
+      [7, 1, "generic"],
+      [4, 7, "generic", { position: "absolute" }],
+      [5, 4, "span", { text: "$100" }],
+      [6, 4, "button", { name: "Pay" }],
+    ]);
+    expect(allowed(wrapped, 6, 5)).toBe(false);
+  });
+
+  it("keeps the target's own branch exact and tolerates other branches", () => {
+    const nodes = shape([
+      [1, null, "RootWebArea"],
+      [2, 1, "html"],
+      [3, 2, "body"],
+      [4, 3, "generic"],
+      [5, 4, "banner"],
+      [6, 5, "span", { text: "10:00:00" }],
+      [7, 4, "group"],
+      [8, 7, "generic"],
+      [9, 8, "span", { text: "$100" }],
+      [10, 8, "button", { name: "Buy" }],
+      [11, 7, "button", { name: "Refresh" }],
+    ]);
+    // Single-child wrappers collapse, so the header is a separate branch.
+    expect(allowed(nodes, 10, 6)).toBe(true);
+    // The card's price shares the content branch with Buy and Refresh.
+    expect(allowed(nodes, 10, 9)).toBe(false);
+    expect(allowed(nodes, 11, 9)).toBe(false);
+    // A target beside its learned text directly inside <main> is its own branch.
+    const flat = shape([
+      [1, null, "main"],
+      [2, 1, "button", { name: "Go" }],
+      [3, 1, "span", { text: "10:00:00" }],
+    ]);
+    expect(allowed(flat, 2, 3)).toBe(true);
+  });
+});
+
+const mediaScene = () => [
+  ...scene(),
+  { ...node(6, 1, "Video", "Preview"), tag: "video", attrs: { id: "preview", src: "clip.webm" } },
+  {
+    ...node(7, 1, "slider", "Playback progress"),
+    tag: "input",
+    inForm: false,
+    value: "1",
+    attrs: { type: "range" },
+  },
+];
+
+it("tolerates only the value of an outside media timeline for a declared scope", () => {
+  const before = mediaScene();
+  const after = structuredClone(before);
+  after[6].value = "2";
+  expect(sameObservationEvidence({ nodes: before }, { nodes: after }, target)).toBe(true);
+  expect(sameObservationEvidence({ nodes: before }, { nodes: after })).toBe(false);
+  expect(
+    sameObservationEvidence(
+      { nodes: before },
+      { nodes: after },
+      { backendNodeId: 7, frameId: "frame" },
+    ),
+  ).toBe(false);
+});
+
+it.each([
+  "business slider",
+  "business text",
+  "named input",
+  "form member",
+  "external form",
+  "missing media",
+  "ambiguous media",
+  "different frame",
+  "wrong relation",
+])("protects %s despite video playback", (kind) => {
+  const before = mediaScene();
+  const progress = before[6];
+  if (kind === "business slider") progress.name = "Order amount";
+  if (kind === "business text") {
+    progress.role = "textbox";
+    progress.attrs = { type: "text" };
+  }
+  if (kind === "named input") progress.attrs!.name = "amount";
+  if (kind === "form member") {
+    progress.inForm = true;
+    before.push(node(8, 1, "form", "Order"));
+    progress.domAncestorIds = [8, 1];
+  }
+  if (kind === "external form") progress.attrs!.form = "order";
+  if (kind === "missing media") before[5].tag = "div";
+  if (kind === "ambiguous media") before.push({ ...node(8, 1, "Video"), tag: "video" });
+  if (kind === "different frame") before[5].frameId = "other";
+  if (kind === "wrong relation") progress.attrs!["aria-controls"] = "order";
+  const after = structuredClone(before);
+  after[6].value = "2";
+  expect(sameObservationEvidence({ nodes: before }, { nodes: after }, target)).toBe(false);
+});
+
+it("supports an explicit media relation when more than one player exists", () => {
+  const before = mediaScene();
+  before.push({ ...node(8, 1, "Video"), tag: "video", attrs: { id: "other" } });
+  before[6].attrs!["aria-controls"] = "preview";
+  const after = structuredClone(before);
+  after[6].value = "2";
+  expect(sameObservationEvidence({ nodes: before }, { nodes: after }, target)).toBe(true);
+});
+
+it.each([
+  "identity",
+  "label",
+  "disabled",
+  "removed",
+  "media identity",
+  "media source",
+  "business value",
+])("retains %s evidence while ignoring timeline ticks", (kind) => {
+  const before = mediaScene();
+  before.push({ ...node(8, 1, "textbox", "Order total"), value: "100" });
+  const after = structuredClone(before);
+  after[6].value = "2";
+  if (kind === "identity") after[6].backendNodeId = 70;
+  if (kind === "label") after[6].name = "Order amount";
+  if (kind === "disabled") after[6].disabled = true;
+  if (kind === "removed") after.splice(6, 1);
+  if (kind === "media identity") after[5].backendNodeId = 60;
+  if (kind === "media source") after[5].attrs!.src = "other.webm";
+  if (kind === "business value") after[7].value = "200";
+  expect(sameObservationEvidence({ nodes: before }, { nodes: after }, target)).toBe(false);
+});
+
+it.each([
+  "min",
+  "max",
+  "step",
+  "aria-valuemin",
+  "aria-valuemax",
+])("protects timeline %s while its value advances", (attribute) => {
+  const before = mediaScene();
+  const after = structuredClone(before);
+  after[6].value = "2";
+  after[6].attrs![attribute] = "10";
+  expect(sameObservationEvidence({ nodes: before }, { nodes: after }, target)).toBe(false);
+});
+
+it("never learns media values or relaxes an explicitly observed timeline", () => {
+  const before = { nodes: mediaScene() };
+  const after = structuredClone(before);
+  after.nodes[6].value = "2";
+  const learned = new Set(["frame:7"]);
+  expect(contentChanges(before, after)).toBeUndefined();
+  expect(sameObservationEvidence(before, after, undefined, learned)).toBe(false);
+  expect(
+    sameObservationEvidence(before, after, { backendNodeId: 7, frameId: "frame" }, learned),
+  ).toBe(false);
+  expect(sameObservationEvidence(before, after, target, learned)).toBe(true);
+});
+
+it("allows incidental progress within the pause button's region, but keeps declared containers exact", () => {
+  const before = { nodes: mediaScene() };
+  before.nodes[1].tag = "section";
+  before.nodes[1].role = "region";
+  before.nodes[5].parentId = 2;
+  before.nodes[6].parentId = 2;
+  const after = structuredClone(before);
+  after.nodes[6].value = "2";
+  expect(sameObservationEvidence(before, after, target)).toBe(true);
+  expect(sameObservationEvidence(before, after, { backendNodeId: 7, frameId: "frame" })).toBe(
+    false,
+  );
+  expect(sameObservationEvidence(before, after, { backendNodeId: 2, frameId: "frame" })).toBe(
+    false,
+  );
+  expect(sameObservationEvidence(before, after)).toBe(false);
+  after.nodes[2].value = "new order";
+  expect(sameObservationEvidence(before, after, target)).toBe(false);
+});
+
+it("keeps explicitly declared DOM ancestors exact even when an AX parent differs", () => {
+  const before = { nodes: mediaScene() };
+  before.nodes.push(node(8, 1, "section", "Player"));
+  before.nodes[6].domAncestorIds = [8, 1];
+  const after = structuredClone(before);
+  after.nodes[6].value = "2";
+  expect(sameObservationEvidence(before, after, { backendNodeId: 8, frameId: "frame" })).toBe(
+    false,
+  );
+});
+
+it.each([
+  true,
+  undefined,
+])("keeps media-labelled controls exact when native form membership is %s", (inForm) => {
+  const before = { nodes: mediaScene() };
+  before.nodes[6].inForm = inForm;
+  const after = structuredClone(before);
+  after.nodes[6].value = "2";
+  expect(sameObservationEvidence(before, after, target)).toBe(false);
+});
+
+it("rejects a change in form membership even when the timeline value is unchanged", () => {
+  const before = { nodes: mediaScene() };
+  const after = structuredClone(before);
+  after.nodes[6].inForm = true;
+  expect(sameObservationEvidence(before, after, target)).toBe(false);
+});
+
+describe("identified decorations after the action's own preparation", () => {
+  const editor = () => [
+    node(1, null, "form", "Title 9/30 Body"),
+    {
+      ...node(2, 1, "textbox", "Title"),
+      value: "Chapter 1",
+      inForm: true,
+      focused: true,
+      attrs: { maxlength: "30" },
+    },
+    { ...node(3, 1, "generic"), text: "9/30" },
+    { ...node(4, 1, "textbox", "Body"), value: "", inForm: true },
+  ];
+  const body = { backendNodeId: 4, frameId: "frame" };
+  const preparation = { focus: true, hover: true };
+  const compare = (before: VomNode[], after: VomNode[], target = body) =>
+    sameObservationEvidence(
+      ...preparationEvidence({ nodes: before }, { nodes: after }, target, preparation),
+      target,
+    );
+
+  it("allows a removed character counter and an added noninteractive tooltip", () => {
+    const before = editor();
+    const after = structuredClone(before);
+    // Blurring the title removes its counter; a hover shows helper text.
+    after.splice(2, 1);
+    after[1].focused = false;
+    after[0].name = "Title Body Press Enter to save";
+    after.push({ ...node(5, 1, "tooltip"), text: "Press Enter to save" });
+    expect(sameObservationEvidence({ nodes: before }, { nodes: after }, body)).toBe(false);
+    expect(compare(before, after)).toBe(true);
+    expect(
+      sameObservationEvidence(
+        ...preparationEvidence({ nodes: before }, { nodes: after }, body, preparation),
+      ),
+    ).toBe(true);
+  });
+
+  it.each([
+    ["value", (nodes: VomNode[]) => (nodes[1].value = "Chapter 2")],
+    ["checked", (nodes: VomNode[]) => nodes.push({ ...node(6, 1, "checkbox"), checked: true })],
+    ["disabled", (nodes: VomNode[]) => (nodes[1].disabled = true)],
+    ["selection", (nodes: VomNode[]) => (nodes[3].attrs = { "aria-selected": "true" })],
+    ["modal", (nodes: VomNode[]) => nodes.push({ ...node(7, null, "dialog"), modal: true })],
+    ["required", (nodes: VomNode[]) => (nodes[1].attrs = { required: "" })],
+    ["maxlength", (nodes: VomNode[]) => (nodes[1].attrs = { maxlength: "40" })],
+    ["visibility", (nodes: VomNode[]) => (nodes[3].rect = { x: 0, y: 0, w: 0, h: 0 })],
+    ["name", (nodes: VomNode[]) => (nodes[3].name = "Delete")],
+    ["href", (nodes: VomNode[]) => (nodes[3].attrs = { href: "#delete" })],
+    [
+      "ordinary text",
+      (nodes: VomNode[]) => nodes.push({ ...node(8, 1, "generic"), text: "$1000" }),
+    ],
+    ["removed target", (nodes: VomNode[]) => nodes.splice(3, 1)],
+  ])("keeps %s exact", (_kind, change) => {
+    const before = editor();
+    const after = structuredClone(before);
+    change(after);
+    expect(compare(before, after)).toBe(false);
+  });
+
+  it.each([
+    "unfocused",
+    "unbound",
+    "wrong length",
+    "wrong limit",
+    "other field group",
+  ])("does not infer a character counter from a ratio alone (%s)", (kind) => {
+    const before = editor();
+    if (kind === "unfocused") before[1].focused = false;
+    if (kind === "unbound") before[1].attrs = {};
+    if (kind === "wrong length") before[2].text = "1/30";
+    if (kind === "wrong limit") before[2].text = "9/100";
+    if (kind === "other field group") before[2].parentId = null;
+    const after = before.filter((node) => node.id !== 3);
+    expect(
+      sameObservationEvidence(
+        ...preparationEvidence({ nodes: before }, { nodes: after }, body, preparation),
+      ),
+    ).toBe(false);
+  });
+
+  it("keeps a counter exact when focus changes but the counter remains", () => {
+    const before = editor();
+    const after = structuredClone(before);
+    after[1].focused = false;
+    expect(compare(before, after)).toBe(true);
+    after[2].text = "100/300";
+    expect(compare(before, after)).toBe(false);
+  });
+
+  it("allows only the newly revealed suffix of a clipped name after counter removal", () => {
+    const before = editor();
+    const prefix = "Chapter ".repeat(40);
+    before[0].name = `9/30 ${prefix}`.slice(0, 240);
+    const after = before.filter((node) => node.id !== 3).map((node) => ({ ...node }));
+    after[0].name = prefix.slice(0, 240);
+    expect(compare(before, after)).toBe(true);
+    after[0].name = `Changed ${prefix}`.slice(0, 240);
+    expect(compare(before, after)).toBe(false);
+  });
+
+  it("does not drop a previously observed suffix hidden by a newly added tooltip", () => {
+    const before = editor();
+    const prefix = "Chapter ".repeat(40);
+    before[0].name = prefix.slice(0, 240);
+    const after = structuredClone(before);
+    after[0].name = `Hint ${prefix}`.slice(0, 240);
+    after.push({ ...node(5, 1, "tooltip"), text: "Hint" });
+    expect(compare(before, after)).toBe(false);
+  });
+
+  it("does not discard a tooltip containing a control", () => {
+    const before = editor();
+    const after = [
+      ...before,
+      { ...node(5, 1, "tooltip"), text: "Confirm" },
+      node(6, 5, "button", "Delete"),
+    ];
+    expect(compare(before, after)).toBe(false);
+  });
+
+  it("keeps all modal content exact even outside the action region", () => {
+    const before = [
+      ...editor(),
+      { ...node(9, null, "dialog", "Confirm"), modal: true },
+      { ...node(10, 9, "generic"), text: "Deleting 1 file" },
+    ];
+    const after = structuredClone(before);
+    after[5].text = "Deleting 100 files";
+    expect(compare(before, after)).toBe(false);
+  });
+
+  it("retains a tooltip when it is the target or appears inside a modal", () => {
+    const before = [...editor(), { ...node(5, 1, "tooltip"), text: "Warning" }];
+    const after = before.filter((node) => node.id !== 5);
+    expect(compare(before, after, { backendNodeId: 5, frameId: "frame" })).toBe(false);
+    before[0].modal = true;
+    expect(compare(before, after)).toBe(false);
+  });
+
+  it("does not apply focus or hover exceptions before those effects were sent", () => {
+    const before = editor();
+    const after = before.filter((node) => node.id !== 3);
+    expect(
+      sameObservationEvidence(
+        ...preparationEvidence({ nodes: before }, { nodes: after }, body, {
+          focus: false,
+          hover: false,
+        }),
+        body,
+      ),
+    ).toBe(false);
+  });
+});
+
+describe("incidental media for a targeted action's whole-page check", () => {
+  it("tolerates only an identified timeline, and only when requested", () => {
+    const before = mediaScene();
+    const after = structuredClone(before);
+    after[6].value = "2";
+    const media = { incidentalMedia: true };
+    expect(sameObservationEvidence({ nodes: before }, { nodes: after })).toBe(false);
+    expect(
+      sameObservationEvidence({ nodes: before }, { nodes: after }, undefined, undefined, media),
+    ).toBe(true);
+    after[2].value = "changed";
+    expect(
+      sameObservationEvidence({ nodes: before }, { nodes: after }, undefined, undefined, media),
+    ).toBe(false);
+  });
+
+  it("keeps an in-form or unnamed slider exact", () => {
+    const before = mediaScene();
+    before[6].name = "";
+    const after = structuredClone(before);
+    after[6].value = "2";
+    expect(
+      sameObservationEvidence({ nodes: before }, { nodes: after }, undefined, undefined, {
+        incidentalMedia: true,
+      }),
+    ).toBe(false);
+  });
+});
+
+describe("observedChange", () => {
+  it("returns nothing when the observations match", () => {
+    expect(observedChange({ nodes: scene() }, { nodes: scene() }, target)).toBeUndefined();
+  });
+
+  it("names the first changed field with truncated text", () => {
+    const before = scene();
+    before.push({ ...node(6, 2, "generic"), text: "6/30" });
+    const after = structuredClone(before);
+    after[5].text = "7/30";
+    expect(observedChange({ nodes: before }, { nodes: after }, target)).toEqual({
+      part: "region",
+      change: "changed",
+      role: "generic",
+      name: "",
+      field: "text",
+      before: "6/30",
+      after: "7/30",
+    });
+    after[5].text = "x".repeat(200);
+    expect(observedChange({ nodes: before }, { nodes: after }, target)?.after).toHaveLength(80);
+  });
+
+  it("reports added and removed nodes instead of their successors", () => {
+    const before = scene();
+    const after = structuredClone(before);
+    after.splice(2, 0, { ...node(9, 2, "status"), text: "Saving" });
+    expect(observedChange({ nodes: before }, { nodes: after }, target)).toMatchObject({
+      part: "region",
+      change: "added",
+      role: "status",
+    });
+    expect(observedChange({ nodes: after }, { nodes: before }, target)).toMatchObject({
+      part: "region",
+      change: "removed",
+      role: "status",
+    });
+  });
+
+  it("never reports value contents or sensitive text", () => {
+    const before = scene();
+    before[2].value = "secret order";
+    const after = structuredClone(before);
+    after[2].value = "other order";
+    const change = observedChange({ nodes: before }, { nodes: after }, target);
+    expect(change).toMatchObject({ part: "region", field: "value", name: "Choice" });
+    expect(change).not.toHaveProperty("before");
+    expect(change).not.toHaveProperty("after");
+    after[2].value = before[2].value;
+    after[2].sensitive = before[2].sensitive = true;
+    after[2].name = "Password 1234";
+    const sensitive = observedChange({ nodes: before }, { nodes: after }, target);
+    expect(sensitive).toMatchObject({ field: "name" });
+    expect(JSON.stringify(sensitive)).not.toContain("1234");
+  });
+
+  it("names a changed attribute and a missing target", () => {
+    const before = scene();
+    const after = structuredClone(before);
+    after[3].attrs = { "aria-disabled": "true" };
+    expect(observedChange({ nodes: before }, { nodes: after }, target)).toMatchObject({
+      field: "attribute:aria-disabled",
+      before: undefined,
+      after: "true",
+    });
+    expect(observedChange({ nodes: before }, { nodes: after.slice(0, 3) }, target)).toEqual({
+      part: "target",
+      change: "removed",
+    });
+  });
 });

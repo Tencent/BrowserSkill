@@ -1,0 +1,21 @@
+<!doctype html><meta charset="utf-8"><title>Continuous carousel evaluation</title>
+<style>body{font:18px system-ui;padding:32px}img{width:600px;height:180px}button,input{font:inherit;margin:10px;padding:10px}#carousel-scroll-box{width:min(640px,90vw);height:180px;overflow:auto;border:3px solid #357}#carousel-scroll-content{width:1600px;height:900px;background:linear-gradient(135deg,#def,#fc9)}.long-section{height:700px;border-top:1px solid #aaa;padding-top:20px}</style>
+<h1>持续轮播 / 稳定目标对照</h1><p>轮播每400ms自动变化。测试活动轮播时不要暂停。</p>
+<img id="hero" alt="轮播合成图片"><output id="slide" aria-live="polite"></output>
+<label>稳定输入<input id="stable-input"></label><button id="save">保存合成值</button><output id="saved"></output>
+<button id="pause">暂停/恢复（仅用于独立对照组）</button>
+<h2>活动轮播页的滚轮测试</h2>
+<div id="carousel-scroll-box" tabindex="0" aria-label="轮播页双向滚动容器"><div id="carousel-scroll-content">左上角<p style="padding-top:700px;padding-left:1300px">容器远端</p></div></div>
+<output id="carousel-scroll-state"></output>
+<section class="long-section"><h2>长页段落1</h2></section><section class="long-section"><h2>长页段落2</h2></section><section class="long-section"><h2 id="carousel-page-end">轮播页末端</h2></section>
+<script>
+const $=s=>document.querySelector(s);let index=0,paused=false;
+function draw(){const color=['#2255aa','#aa3366','#228855'][index%3];$('#hero').src='data:image/svg+xml,'+encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" width="600" height="180"><rect width="600" height="180" fill="${color}"/><text x="40" y="100" fill="white" font-size="32">Synthetic slide ${index}</text></svg>`);$('#hero').alt='Synthetic slide '+index;$('#slide').textContent=String(index);}
+draw();setInterval(()=>{if(!paused){index++;draw()}},400);
+$('#pause').onclick=()=>{paused=!paused};$('#save').onclick=()=>{const data={type:'carousel-save',value:$('#stable-input').value,slide:index};$('#saved').textContent=JSON.stringify(data);fetch('/event',{method:'POST',body:JSON.stringify(data)})};
+const box=$('#carousel-scroll-box');window.carouselWheelEvents=[];
+function remember(scope,e){window.carouselWheelEvents.push({scope,slide:index,time:Date.now(),deltaX:e.deltaX,deltaY:e.deltaY});if(window.carouselWheelEvents.length>100)window.carouselWheelEvents.shift()}
+window.addEventListener('wheel',e=>remember('page',e),{passive:true});box.addEventListener('wheel',e=>remember('nested',e),{passive:true});
+function showScroll(){$('#carousel-scroll-state').textContent=JSON.stringify({pageY:scrollY,nestedTop:box.scrollTop,nestedLeft:box.scrollLeft})}
+window.addEventListener('scroll',showScroll,{passive:true});box.addEventListener('scroll',showScroll,{passive:true});showScroll();
+</script>

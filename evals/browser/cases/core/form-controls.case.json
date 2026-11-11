@@ -53,29 +53,43 @@
   "smoke": {
     "steps": [
       { "action": "navigate" },
+      { "action": "sync", "saveAs": "control" },
       {
         "action": "fill",
+        "contextId": "{control.context_id}",
         "selector": "#text-input",
         "value": "agent-parity"
       },
       {
         "action": "fill",
+        "contextId": "{control.context_id}",
         "selector": "#notes",
         "value": "BrowserSkill works"
       },
-      { "action": "select", "selector": "#choice", "values": ["two"] },
+      {
+        "action": "select",
+        "selector": "#choice",
+        "values": ["two"],
+        "contextId": "{control.context_id}"
+      },
       {
         "action": "screenshot",
         "artifactName": "form.png",
         "evidence": "screenshotCreated"
       },
-      { "action": "press", "key": "Enter", "selector": "#submit" },
+      {
+        "action": "press",
+        "key": "Enter",
+        "selector": "#submit",
+        "contextId": "{control.context_id}"
+      },
       {
         "action": "wait-site-event",
         "type": "page.shown",
         "where": { "path": "/result" }
       },
       { "action": "wait", "duration": "200ms" },
+      { "action": "sync", "saveAs": "control" },
       { "action": "observe" }
     ]
   }

@@ -1,4 +1,5 @@
 import { type CdpFrame, type CdpTarget, cdpTargetKey } from "@/browser-driver/frame-graph";
+import { RECORD_PASSWORD_ATTRIBUTE, sensitiveAutocomplete } from "@/lib/sensitive-autocomplete";
 import { createCaptureCheckpoint } from "./capture-abort";
 import type { CapturedNode } from "./capture-types";
 import type { DecodedDocument, DecodedNode } from "./facts";
@@ -67,6 +68,7 @@ export interface SnapshotDocument {
     textValue?: SparseArray;
     inputChecked?: RareBooleanData;
     optionSelected?: RareBooleanData;
+    isClickable?: RareBooleanData;
   };
   layout?: {
     nodeIndex?: number[];
@@ -89,7 +91,12 @@ export interface SnapshotReply {
 }
 
 function isSensitiveFormControl(node: Pick<CapturedNode, "tag" | "attrs">): boolean {
-  return node.tag === "input" && (node.attrs.type ?? "").toLowerCase() === "password";
+  return (
+    (node.tag === "input" &&
+      ((node.attrs.type ?? "").toLowerCase() === "password" ||
+        Object.prototype.hasOwnProperty.call(node.attrs, RECORD_PASSWORD_ATTRIBUTE))) ||
+    sensitiveAutocomplete(node.attrs.autocomplete)
+  );
 }
 
 function snapshotFormState(
@@ -150,6 +157,7 @@ export async function decodeDocument(
   const textValues = sparseIndexMap(dn.textValue);
   const checkedInputs = new Set(dn.inputChecked?.index ?? []);
   const selectedOptions = new Set(dn.optionSelected?.index ?? []);
+  const clickableNodes = new Set(dn.isClickable?.index ?? []);
 
   // Collect visible text from #text child nodes so element CapturedNodes
   // carry a textContent value usable as a button/link label fallback.
@@ -229,8 +237,7 @@ export async function decodeDocument(
       backendNodeId,
       nodeType: dn.nodeType?.[n],
       parentBackendNodeId,
-      ...(profile.includeVisualFacts &&
-      (dn.parentIndex?.[n] === undefined || (parentIdx >= 0 && parentBackendNodeId === null))
+      ...(dn.parentIndex?.[n] === undefined || (parentIdx >= 0 && parentBackendNodeId === null)
         ? { parentMissing: true }
         : {}),
 
@@ -241,6 +248,7 @@ export async function decodeDocument(
       position: styles.position || "static",
       pointerEvents: styles["pointer-events"] || "auto",
       cursor: styles.cursor || "auto",
+      ...(clickableNodes.has(n) ? { clickable: true } : {}),
 
       textContent,
       ...(formValue !== undefined ? { formValue } : {}),

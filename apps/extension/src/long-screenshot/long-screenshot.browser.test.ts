@@ -22,6 +22,7 @@ const extensionPath = process.env.BSK_LONG_SCREENSHOT_EXTENSION ?? path.resolve(
 async function withHarness(
   run: (h: Awaited<ReturnType<typeof harness>>) => Promise<void>,
   scale = 1,
+  prepareCapture = true,
 ) {
   const server = createServer((req, res) => {
     res.setHeader("Content-Type", "text/html");
@@ -51,7 +52,9 @@ async function withHarness(
     await new Promise<void>((resolve) => server.close(() => resolve()));
   }
   async function runHarness(send: Send) {
-    await run(await harness(send, `http://127.0.0.1:${port}`));
+    await run(
+      await harness(send, `http://127.0.0.1:${port}`, undefined, undefined, prepareCapture),
+    );
   }
 }
 
@@ -60,6 +63,7 @@ async function harness(
   baseUrl: string,
   existingPage?: { targetId: string; sessionId: string },
   knownOrigin?: string,
+  prepareCapture = true,
 ) {
   const targets = () =>
     send<{ targetInfos: { type: string; url: string; targetId: string }[] }>("Target.getTargets");
@@ -145,7 +149,8 @@ async function harness(
   );
   await new Promise((resolve) => setTimeout(resolve, 500));
   await send("Page.enable", {}, page.sessionId);
-  await send("Page.captureScreenshot", { format: "png", fromSurface: true }, page.sessionId);
+  if (prepareCapture)
+    await send("Page.captureScreenshot", { format: "png", fromSurface: true }, page.sessionId);
   const request = <T>(action: string, extra: object = {}) =>
     evaluate<T>(
       popup.sessionId,
@@ -223,6 +228,55 @@ async function harness(
 describe.skipIf(!process.env.BSK_LONG_SCREENSHOT_CHROME)(
   "full-page screenshot in a real extension",
   () => {
+    it("prunes stored artifacts while retaining open previews and Agent exports", async () => {
+      await withHarness(
+        async (h) => {
+          const id = (index: number) =>
+            `00000000-0000-4000-8000-${String(index).padStart(12, "0")}`;
+          const preview = await h.create(`${h.origin}/long-screenshot.html?id=${id(7)}`, true);
+          await h.poll(() => h.evaluate(preview.sessionId, "document.readyState === 'complete'"));
+          await h.evaluate(
+            h.popup.sessionId,
+            `(async () => {
+            const root = await (await navigator.storage.getDirectory()).getDirectoryHandle('long-screenshots', {create: true});
+            for (let index = 1; index <= 8; index++) {
+              const id = '00000000-0000-4000-8000-' + String(index).padStart(12, '0');
+              const directory = await root.getDirectoryHandle(id, {create: true});
+              const manifest = await (await directory.getFileHandle('index.json', {create: true})).createWritable();
+              await manifest.write(JSON.stringify({id, createdAt: index >= 7 ? 1 : Date.now() - index * 1000}));
+              await manifest.close();
+              const image = await (await directory.getFileHandle('0.png', {create: true})).createWritable();
+              await image.write('retained artifact bytes');
+              await image.close();
+            }
+            await root.getDirectoryHandle('agent-retained', {create: true});
+          })()`,
+          );
+          const stored = () =>
+            h.evaluate<string[]>(
+              h.popup.sessionId,
+              `(async () => {
+              const root = await (await navigator.storage.getDirectory()).getDirectoryHandle('long-screenshots');
+              const ids = [];
+              for await (const id of root.keys()) ids.push(id);
+              return ids.sort();
+            })()`,
+            );
+          const trigger = await h.create("about:blank", true);
+          await h.send("Target.closeTarget", { targetId: trigger.targetId });
+          await expect
+            .poll(stored, { timeout: 10000 })
+            .toEqual([...[1, 2, 3, 4, 5, 7].map(id), "agent-retained"]);
+          await h.send("Target.closeTarget", { targetId: preview.targetId });
+          await expect
+            .poll(stored, { timeout: 10000 })
+            .toEqual([...[1, 2, 3, 4, 5].map(id), "agent-retained"]);
+        },
+        1,
+        false,
+      );
+    }, 30000);
+
     it("clears the completed popup result on another tab while keeping its open preview usable", async () => {
       await withHarness(async (h) => {
         await h.startFromPopup();

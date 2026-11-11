@@ -63,6 +63,7 @@ const INSPECT_COMMANDS: Record<string, string> = {
   screenshot: "screenshot",
   console: "console",
   network: "network",
+  view: "view",
 };
 
 function titleOf(action: string): string {
@@ -82,10 +83,18 @@ interface InspectArgs {
   limit?: unknown;
   maxTextChars?: unknown;
   includeStack?: unknown;
+  file?: unknown;
+  find?: unknown;
+  startLine?: unknown;
+  lineCount?: unknown;
 }
 
 function appendNumber(parts: string[], flag: string, value: unknown): void {
   if (typeof value === "number" && Number.isFinite(value)) parts.push(flag, String(value));
+}
+
+function displayArgument(value: string): string {
+  return /^[\w@%+=:,./-]+$/.test(value) ? value : `'${value.replace(/'/g, "'\\''")}'`;
 }
 
 function commandOf(argsRaw: string, callId: string): { command: string; title: string } {
@@ -93,6 +102,15 @@ function commandOf(argsRaw: string, callId: string): { command: string; title: s
     const args = JSON.parse(argsRaw) as InspectArgs;
     const action = typeof args.action === "string" ? args.action : "inspect";
     const command = INSPECT_COMMANDS[action] ?? action;
+    if (action === "view") {
+      // A saved view reads a local file; do not imply a live browser/session call.
+      const parts = ["bsk", command];
+      if (typeof args.find === "string") parts.push(`--find=${displayArgument(args.find)}`);
+      appendNumber(parts, "--start-line", args.startLine);
+      appendNumber(parts, "--line-count", args.lineCount);
+      parts.push("--", typeof args.file === "string" ? displayArgument(args.file) : "(file)");
+      return { command: parts.join(" "), title: "Saved observation" };
+    }
     const parts = ["bsk", command, "--session"];
     parts.push(
       typeof args.session === "string" && args.session !== "" ? args.session : "(current)",

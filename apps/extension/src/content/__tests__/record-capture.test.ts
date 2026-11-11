@@ -94,6 +94,46 @@ describe("record-capture semantic", () => {
     expect(steps.some((s) => "selector" in s)).toBe(false);
   });
 
+  it("masks codes and card numbers typed into a recorded field", () => {
+    document.querySelector("input")!.setAttribute("autocomplete", "billing cc-number");
+    const capture = startRecordCapture("rec-1", (step) => steps.push(step));
+    const input = document.querySelector("input")!;
+    input.dispatchEvent(new FocusEvent("focusin", { bubbles: true }));
+    input.value = "4111111111111111";
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    input.dispatchEvent(new FocusEvent("focusout", { bubbles: true }));
+    capture.dispose();
+
+    expect(steps).toEqual([expect.objectContaining({ op: "fill", value: "***", redacted: true })]);
+    expect(JSON.stringify(steps)).not.toContain("4111111111111111");
+  });
+
+  it.each([
+    ["after a masked edit", true],
+    ["before the first edit", false],
+  ])("keeps masking a password field shown as text %s", (_name, editWhileHidden) => {
+    document.body.innerHTML = `<input id="pw" type="password" aria-label="Password">`;
+    const capture = startRecordCapture("rec-1", (step) => steps.push(step));
+    const input = document.querySelector<HTMLInputElement>("#pw")!;
+    const edit = (value: string) => {
+      input.dispatchEvent(new FocusEvent("focusin", { bubbles: true }));
+      input.value = value;
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+      input.dispatchEvent(new FocusEvent("focusout", { bubbles: true }));
+    };
+    if (editWhileHidden) edit("BSK_SYNTHETIC_PASSWORD");
+    input.type = "text"; // a "show password" toggle
+    edit("BSK_SYNTHETIC_PASSWORDx");
+    expect(input.hasAttribute("data-bsk-record-password")).toBe(true);
+    capture.dispose();
+    expect(input.hasAttribute("data-bsk-record-password")).toBe(false);
+
+    const fills = steps.filter((step) => step.op === "fill");
+    expect(fills).toHaveLength(editWhileHidden ? 2 : 1);
+    for (const fill of fills) expect(fill).toMatchObject({ value: "***", redacted: true });
+    expect(JSON.stringify(steps)).not.toContain("BSK_SYNTHETIC_PASSWORD");
+  });
+
   it("ignores autocomplete suggestion clicks while a fill session is open", () => {
     const capture = startRecordCapture("rec-2", (step) => steps.push(step));
     const input = document.querySelector("input")!;
@@ -124,6 +164,38 @@ describe("record-capture semantic", () => {
     ]);
   });
 
+  it("records button clicks inside a non-editable region of an editor", () => {
+    document.body.innerHTML = `
+      <div id="editor" contenteditable="true" aria-label="Editor">
+        Draft
+        <div contenteditable="false">
+          <span id="chip">report.pdf</span>
+          <button type="button">Remove attachment</button>
+        </div>
+      </div>
+    `;
+    const capture = startRecordCapture("rec-island", (step) => steps.push(step));
+    const editor = document.querySelector<HTMLElement>("#editor")!;
+    const button = document.querySelector("button")!;
+    // happy-dom does not derive editability from the contenteditable attribute.
+    Object.defineProperty(editor, "isContentEditable", { value: true });
+
+    editor.dispatchEvent(new FocusEvent("focusin", { bubbles: true }));
+    editor.firstChild!.textContent = "Draft reply";
+    editor.dispatchEvent(new Event("input", { bubbles: true }));
+    // Text inside the region still belongs to the editor session.
+    click(document.querySelector("#chip")!);
+    click(button);
+    capture.dispose();
+
+    expect(steps.map((step) => step.op)).toEqual(["fill", "click"]);
+    expect(steps[0]).toMatchObject({ op: "fill", target: { name: "Editor" } });
+    expect(steps[1]).toMatchObject({
+      op: "click",
+      target: { role: "button", name: "Remove attachment" },
+    });
+  });
+
   it("does not emit page navigation from a child Document capture", () => {
     const originalUrl = location.href;
     const capture = startRecordCapture("rec-child", (step) => steps.push(step), {
@@ -135,6 +207,38 @@ describe("record-capture semantic", () => {
 
     capture.dispose();
     history.replaceState({}, "", originalUrl);
+  });
+
+  it.each([
+    ["an open shadow root", true],
+    ["the light DOM", false],
+  ])("records one select step for a native select in %s", (_name, shadow) => {
+    document.body.innerHTML = `<div id="host"></div>`;
+    const host = document.querySelector("#host")!;
+    const root = shadow ? host.attachShadow({ mode: "open" }) : host;
+    root.innerHTML = `
+      <select aria-label="Choice">
+        <option value="a">Alpha</option>
+        <option value="b">Beta</option>
+      </select>
+    `;
+    const select = root.querySelector("select")!;
+    const capture = startRecordCapture("rec-shadow-select", (step) => steps.push(step));
+
+    // Native user selection: a composed input, then a non-composed change.
+    select.value = "b";
+    select.dispatchEvent(new Event("input", { bubbles: true, composed: true }));
+    select.dispatchEvent(new Event("change", { bubbles: true }));
+    capture.dispose();
+
+    expect(steps).toEqual([
+      expect.objectContaining({
+        op: "select",
+        target: expect.objectContaining({ role: "combobox", name: "Choice" }),
+        values: ["b"],
+        labels: ["Beta"],
+      }),
+    ]);
   });
 
   it("does not record clicks on anonymous layout divs", () => {
@@ -156,6 +260,48 @@ describe("record-capture semantic", () => {
       op: "click",
       target: { name: "下一步", role: "button" },
     });
+  });
+
+  it("records controls that share a form with a search field", () => {
+    // Shape of gov.uk/search: results and filters live in the form that holds the search box.
+    document.body.innerHTML = `
+      <form id="finder">
+        <input type="search" name="keywords" aria-label="Search GOV.UK" />
+        <span id="decor">magnifier</span>
+        <button type="button">Filter and sort</button>
+        <details><summary>Filter by Type</summary>
+          <input type="checkbox" id="services" aria-label="Services" />
+        </details>
+        <div role="button" tabindex="0" aria-label="Search using an image">img</div>
+        <ul><li><a href="#renew">Renew or replace your adult passport</a></li></ul>
+      </form>
+    `;
+    const capture = startRecordCapture("rec-search-form", (step) => steps.push(step));
+    for (const selector of ["#decor", "button", "summary", "#services", "[role=button]", "a"]) {
+      click(document.querySelector(selector)!);
+    }
+    capture.dispose();
+
+    expect(steps.filter((s) => s.op === "click").map((s) => s.target?.name)).toEqual([
+      "Filter and sort",
+      "Filter by Type",
+      "Services",
+      "Search using an image",
+      "Renew or replace your adult passport",
+    ]);
+  });
+
+  it("still treats clicks on the search field's own wrapper as focus chrome", () => {
+    document.body.innerHTML = `
+      <div class="search-box"><div role="combobox" aria-label="Search">
+        <span id="pad"></span><input name="q" />
+      </div></div>
+    `;
+    const capture = startRecordCapture("rec-search-chrome", (step) => steps.push(step));
+    click(document.querySelector("#pad")!);
+    capture.dispose();
+
+    expect(steps.filter((s) => s.op === "click")).toEqual([]);
   });
 
   it("records a hover trigger before clicking its revealed menu item", () => {
@@ -1516,5 +1662,28 @@ describe("record-capture semantic", () => {
     capture.dispose();
 
     expect(steps.map((s) => s.op)).toEqual(["click"]);
+  });
+
+  it("reads click geometry from the control the click is described as", () => {
+    // GOV.UK details: the click lands on the text span, the control is the <summary>.
+    document.body.innerHTML = `
+      <details><summary><span id="text">Help with nationality</span></summary><p>More</p></details>
+    `;
+    const summary = document.querySelector("summary")!;
+    const text = document.querySelector("#text")!;
+    mockRect(summary, { left: 30, top: 30, width: 194, height: 25 });
+    mockRect(text, { left: 55, top: 31, width: 169, height: 23 });
+    const capture = startRecordCapture("rec-geometry", (step) => steps.push(step));
+
+    click(text);
+    capture.dispose();
+
+    expect(steps).toEqual([
+      expect.objectContaining({
+        op: "click",
+        target: expect.objectContaining({ role: "button", name: "Help with nationality" }),
+        geometry: { tag: "summary", rect: { x: 30, y: 30, w: 194, h: 25 } },
+      }),
+    ]);
   });
 });

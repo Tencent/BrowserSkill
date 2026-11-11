@@ -15,7 +15,7 @@ pub struct RpcError {
 }
 
 /// Stable daemon/extension error codes (§4.5).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ErrorCode {
     UnknownMethod,
@@ -24,6 +24,8 @@ pub enum ErrorCode {
     NotFound,
     PermissionDenied,
     Timeout,
+    /// The original operation is still running and needs an agent dialog decision.
+    DialogPending,
     CdpFailed,
     ProtocolError,
     Cancelled,
@@ -31,6 +33,47 @@ pub enum ErrorCode {
     VersionTooOld,
     MultipleBrowsersOnline,
     NoBrowserConnected,
+    PairingRequired,
+}
+
+impl ErrorCode {
+    pub const ALL: &'static [Self] = &[
+        Self::UnknownMethod,
+        Self::Unsupported,
+        Self::InvalidParams,
+        Self::NotFound,
+        Self::PermissionDenied,
+        Self::Timeout,
+        Self::DialogPending,
+        Self::CdpFailed,
+        Self::ProtocolError,
+        Self::Cancelled,
+        Self::UserAborted,
+        Self::VersionTooOld,
+        Self::MultipleBrowsersOnline,
+        Self::NoBrowserConnected,
+        Self::PairingRequired,
+    ];
+
+    pub const fn wire_name(self) -> &'static str {
+        match self {
+            Self::UnknownMethod => "unknown_method",
+            Self::Unsupported => "unsupported",
+            Self::InvalidParams => "invalid_params",
+            Self::NotFound => "not_found",
+            Self::PermissionDenied => "permission_denied",
+            Self::Timeout => "timeout",
+            Self::DialogPending => "dialog_pending",
+            Self::CdpFailed => "cdp_failed",
+            Self::ProtocolError => "protocol_error",
+            Self::Cancelled => "cancelled",
+            Self::UserAborted => "user_aborted",
+            Self::VersionTooOld => "version_too_old",
+            Self::MultipleBrowsersOnline => "multiple_browsers_online",
+            Self::NoBrowserConnected => "no_browser_connected",
+            Self::PairingRequired => "pairing_required",
+        }
+    }
 }
 
 #[derive(Debug, Error)]
@@ -60,5 +103,17 @@ mod user_aborted_tests {
     #[test]
     fn user_aborted_is_distinct_from_cancelled() {
         assert_ne!(ErrorCode::UserAborted, ErrorCode::Cancelled);
+    }
+
+    #[test]
+    fn error_code_all_matches_wire_names_uniquely() {
+        let mut seen = std::collections::HashSet::new();
+        for &code in ErrorCode::ALL {
+            assert!(seen.insert(code), "duplicate ErrorCode in ALL: {code:?}");
+            assert_eq!(
+                serde_json::to_value(code).unwrap(),
+                serde_json::Value::String(code.wire_name().to_owned()),
+            );
+        }
     }
 }

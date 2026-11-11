@@ -10,6 +10,7 @@ import { BrowserProfile } from "./browser-profile";
 import { ConnectionSettings } from "./connection-settings";
 import { ConnectionStatusIndicator } from "./connection-status-indicator";
 import { CurrentTasks } from "./current-tasks";
+import { DaemonUpgradeNotice } from "./daemon-upgrade-notice";
 import { DebugPanel } from "./debug-panel";
 import { POPUP_FEATURES, type PopupView } from "./features";
 import { InteractionSettings } from "./interaction-settings";
@@ -78,7 +79,13 @@ export function App() {
   const isSkewed = statusState === "version_skew";
   const isDisconnected = statusState === "disconnected";
   const connectionLive = statusState === "connected" || isSkewed;
-  const daemonVersion = snapshot.handshake?.version ?? "—";
+  const daemonUpgrade =
+    snapshot.connectionEnabled &&
+    snapshot.state !== "connected" &&
+    snapshot.state !== "version_skew"
+      ? snapshot.daemonUpgradeRequired
+      : null;
+  const daemonVersion = snapshot.handshake?.version ?? daemonUpgrade?.daemonVersion ?? "—";
   const daemonProtocol = snapshot.handshake?.protocol_version ?? "—";
   const legacyInteraction =
     connectionLive && !supportsFeature("interaction_policy", "daemon", daemonProtocol);
@@ -184,6 +191,8 @@ export function App() {
         )}
       </header>
 
+      {daemonUpgrade && <DaemonUpgradeNotice upgrade={daemonUpgrade} error={snapshot.lastError} />}
+
       {view === "video" && <VideoPanel />}
 
       {view === "main" && (
@@ -194,12 +203,49 @@ export function App() {
           >
             <div className="flex items-center justify-between gap-2" data-slot="popup-status">
               <div className="flex min-w-0 items-center gap-2">
-                <ConnectionStatusIndicator state={statusState} />
+                <ConnectionStatusIndicator
+                  state={statusState}
+                  className={
+                    statusState === "disabled"
+                      ? undefined
+                      : ["pairing_required", "server_unverified", "daemon_too_old"].includes(
+                            snapshot.localAuth?.state ?? "",
+                          )
+                        ? "bg-destructive"
+                        : undefined
+                  }
+                />
                 <span className="truncate text-sm font-medium" data-slot="popup-state-label">
-                  {t(STATE_LABEL_KEYS[statusState])}
+                  {t(
+                    statusState !== "disabled" && snapshot.localAuth?.state === "pairing_required"
+                      ? "popup.localAuth.required"
+                      : STATE_LABEL_KEYS[statusState],
+                  )}
                 </span>
               </div>
               <div className="flex shrink-0 items-center gap-2">
+                {connectionLive && snapshot.localAuth === null && (
+                  <Badge variant="outline" className="px-1.5 py-0 text-[10px]">
+                    {t("popup.connectionRemote")}
+                  </Badge>
+                )}
+                {connectionLive &&
+                  snapshot.localAuth &&
+                  ["verified", "unverified_local"].includes(snapshot.localAuth.state) && (
+                    <Badge
+                      variant="outline"
+                      className="px-1.5 py-0 text-[10px]"
+                      data-slot="local-auth-badge"
+                    >
+                      {t(
+                        snapshot.localAuth.state === "verified"
+                          ? "popup.localAuth.verified"
+                          : snapshot.localAuth.reason === "unpaired"
+                            ? "popup.localAuth.unpaired"
+                            : "popup.localAuth.unverified",
+                      )}
+                    </Badge>
+                  )}
                 {isSkewed && (
                   <Badge
                     variant="outline"
@@ -245,7 +291,9 @@ export function App() {
             />
             <ConnectionSettings
               connectionEnabled={snapshot.connectionEnabled}
-              disconnected={isDisconnected && !snapshot.lastError}
+              disconnected={isDisconnected && !snapshot.lastError && !daemonUpgrade}
+              localAuth={snapshot.localAuth}
+              instanceId={snapshot.instanceId}
             />
           </section>
 
@@ -278,7 +326,7 @@ export function App() {
 
           <CurrentTasks enabled={connectionLive} />
 
-          {snapshot.lastError && (
+          {snapshot.lastError && !daemonUpgrade && (
             <div
               className="rounded-lg border border-destructive/25 bg-destructive/10 px-3 py-2 text-xs leading-snug text-destructive"
               data-slot="popup-error"

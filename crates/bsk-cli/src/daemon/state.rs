@@ -6,7 +6,7 @@ use std::sync::Arc;
 use tokio::task::JoinHandle;
 
 use super::abort::AbortRegistry;
-use super::browsers::BrowserRegistry;
+use super::browsers::{BrowserId, BrowserRegistry};
 use super::file_transfer::TransferRegistry;
 use super::inflight::ToolInflightRegistry;
 use super::ipc::IpcHandle;
@@ -27,6 +27,9 @@ pub const SERVER_NAME: &str = "browser-skill-daemon";
 pub struct DaemonState {
     pub audit: Arc<super::audit::AuditStore>,
     pub config: DaemonConfig,
+    pub local_auth: Arc<super::local_auth::LocalAuth>,
+    last_unpaired_attempt:
+        std::sync::Mutex<Option<(std::time::Instant, bsk_protocol::system::UnpairedAttempt)>>,
     pub browsers: Arc<BrowserRegistry>,
     pub sessions: Arc<SessionRegistry>,
     pub session_requests: super::session_requests::SessionRequests,
@@ -44,6 +47,7 @@ pub struct DaemonState {
     /// translated into a WS-side cancel frame addressed to the
     /// matching browser (M10.2).
     pub tool_inflight: Arc<ToolInflightRegistry>,
+    pub dialog_operations: Arc<super::dialog_operations::DialogOperations>,
     /// Per-session "pending interrupt" signal. The WS event handler
     /// `mark`s the session when the user clicks the agent-window
     /// mask's stop button; the IPC tool-dispatch handler
@@ -55,9 +59,83 @@ pub struct DaemonState {
     /// Operation-scoped local file staging. The extension only sees paths
     /// minted here; agent-facing RPCs use opaque transfer ids.
     pub transfers: Arc<TransferRegistry>,
+    /// What each live session did, for recipe drafts. Metadata only, in memory.
+    pub run_logs: super::run_log::RunLogs,
 }
 
 impl DaemonState {
+    /// Forget every session owned by `browser_id`: drop its queue and
+    /// interrupt state, release its transfers, clear its dialog
+    /// operations, and tombstone why the ids ended so later dispatches
+    /// answer "browser disconnected" instead of a bare not-found.
+    ///
+    /// Shared by every browser-driven purge (maintainer review of
+    /// issue #465): the reconnect-time stale purge, the ordinary socket
+    /// cleanup, and the liveness-timeout reaper.
+    pub fn purge_sessions_of_browser(
+        &self,
+        browser_id: &BrowserId,
+        end_reason: &'static str,
+        note: &'static str,
+    ) {
+        for session in self.sessions.purge_browser(browser_id) {
+            self.tool_queues.remove(&session.id);
+            self.session_interrupts.drop_session(&session.id);
+            self.transfers.release_session(&session.id.0);
+            self.dialog_operations.remove_session(&session.id.0);
+            self.sessions.remember_end(&session.id, end_reason);
+            tracing::debug!(session = %session.id, note);
+        }
+    }
+}
+
+impl DaemonState {
+    pub fn record_unpaired(&self, version: Option<&str>) {
+        let extension_version = version
+            .and_then(|v| semver::Version::parse(v).ok())
+            .map(|v| v.to_string());
+        let at = time::OffsetDateTime::now_utc()
+            .format(&time::format_description::well_known::Rfc3339)
+            .expect("current timestamp");
+        *self.last_unpaired_attempt.lock().unwrap() = Some((
+            std::time::Instant::now(),
+            bsk_protocol::system::UnpairedAttempt {
+                at,
+                extension_version,
+            },
+        ));
+    }
+    pub fn recent_unpaired(&self) -> Option<bsk_protocol::system::UnpairedAttempt> {
+        if self.local_auth.mode().accepts_legacy() {
+            return None;
+        }
+        self.last_unpaired_attempt
+            .lock()
+            .unwrap()
+            .as_ref()
+            .filter(|(when, _)| when.elapsed() < std::time::Duration::from_secs(300))
+            .map(|(_, attempt)| attempt.clone())
+    }
+    pub fn local_auth_status(&self) -> Option<bsk_protocol::system::LocalAuthStatus> {
+        if self.config.server.is_some() {
+            return None;
+        }
+        Some(bsk_protocol::system::LocalAuthStatus {
+            mode: serde_json::to_value(self.local_auth.mode())
+                .expect("local policy")
+                .as_str()
+                .unwrap()
+                .into(),
+            paired_devices: self
+                .local_auth
+                .store
+                .devices()
+                .iter()
+                .filter(|d| d.status == super::local_auth::store::DeviceStatus::Active)
+                .count(),
+            last_unpaired_attempt: self.recent_unpaired(),
+        })
+    }
     pub fn new(config: DaemonConfig) -> Self {
         if crate::cli::human_loop::legacy_help_override_requested() {
             crate::cli::interaction_policy::warn_legacy_override("BSK_REQUEST_HELP=off");
@@ -77,6 +155,8 @@ impl DaemonState {
         let transfers = Arc::new(TransferRegistry::new().expect("initialise transfer staging"));
         Self {
             audit,
+            local_auth: Arc::new(super::local_auth::LocalAuth::memory(config.local_auth)),
+            last_unpaired_attempt: Default::default(),
             config,
             browsers,
             sessions,
@@ -84,8 +164,10 @@ impl DaemonState {
             tool_queues,
             abort_registry,
             tool_inflight,
+            dialog_operations: Default::default(),
             session_interrupts,
             transfers,
+            run_logs: Default::default(),
         }
     }
 }

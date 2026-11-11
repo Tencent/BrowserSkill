@@ -121,7 +121,14 @@
       "format": "int64",
       "type": "integer"
     },
-    "value": true
+    "value": true,
+    "verified": {
+      "description": "Present, and `false`, only when the script ran with `unverified`: nothing\nabout the page was compared before it ran.",
+      "type": [
+        "boolean",
+        "null"
+      ]
+    }
   },
   "required": [
     "ok",

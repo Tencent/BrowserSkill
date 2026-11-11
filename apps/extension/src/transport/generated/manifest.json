@@ -1,19 +1,9 @@
 {
   "source": "bsk-protocol",
-  "fingerprint": "84655b6c1dcba444915f8efdf19b4669f83637c5fa13a225532a204d83b992c0",
-  "protocol_version": "1.4",
+  "fingerprint": "1eba8e8910e38780b6b6a9808a46f5bf40847bd5789bfdf0ab2f803ce48fc9af",
+  "protocol_version": "1.9",
   "min_compatible_protocol": "1.0",
   "feature_requirements": [
-    {
-      "daemon": "1.4",
-      "extension": "1.4",
-      "feature": "incognito_sessions",
-      "operation": "session start --incognito",
-      "when": {
-        "field": "incognito",
-        "kind": "true"
-      }
-    },
     {
       "daemon": "1.2",
       "extension": "1.2",
@@ -32,7 +22,87 @@
       "when": {
         "kind": "always"
       }
+    },
+    {
+      "daemon": "1.4",
+      "extension": "1.4",
+      "feature": "incognito_sessions",
+      "operation": "session start --incognito",
+      "when": {
+        "field": "incognito",
+        "kind": "true"
+      }
+    },
+    {
+      "daemon": "1.5",
+      "extension": "1.5",
+      "feature": "dialog_control",
+      "operation": "dialog and operation control",
+      "when": {
+        "kind": "always"
+      }
+    },
+    {
+      "daemon": "1.7",
+      "extension": "1.7",
+      "feature": "click_move_click",
+      "operation": "click-move-click",
+      "when": {
+        "field": "mode",
+        "kind": "equals",
+        "value": "click-move-click"
+      }
+    },
+    {
+      "daemon": "1.8",
+      "extension": "1.8",
+      "feature": "target_control",
+      "operation": "target control",
+      "when": {
+        "kind": "control_policy"
+      }
+    },
+    {
+      "daemon": "1.8",
+      "extension": "1.8",
+      "feature": "action_conditions",
+      "operation": "action conditions (--expect)",
+      "when": {
+        "field": "expect",
+        "kind": "present"
+      }
+    },
+    {
+      "daemon": "1.9",
+      "extension": "1.9",
+      "feature": "dom_read",
+      "operation": "read",
+      "when": {
+        "kind": "always"
+      }
+    },
+    {
+      "daemon": "1.9",
+      "extension": "1.9",
+      "feature": "unverified_script",
+      "operation": "evaluate --unverified",
+      "when": {
+        "field": "unverified",
+        "kind": "true"
+      }
     }
+  ],
+  "events": [
+    "audit.context",
+    "dialog.changed",
+    "system.heartbeat",
+    "session.activity",
+    "session.window_closed",
+    "session.ended",
+    "session.user_interrupt",
+    "session.interaction_changed",
+    "browser.disconnected",
+    "browser.connected"
   ],
   "methods": [
     "tool.cooperate",
@@ -52,6 +122,7 @@
     "tool.reload",
     "tool.click",
     "tool.hover",
+    "tool.drag",
     "tool.wheel",
     "tool.scroll_to",
     "tool.focus",
@@ -64,24 +135,30 @@
     "tool.snapshot",
     "tool.observe",
     "tool.get_html",
+    "tool.read",
+    "tool.extract",
     "tool.screenshot",
     "tool.screenshot_full_page",
     "tool.screenshot_read",
     "tool.screenshot_release",
     "tool.console",
-    "tool.extract",
-    "tool.wait_for_element",
-    "tool.video",
     "tool.debug",
     "tool.network",
     "tool.evaluate",
+    "tool.dialog_status",
+    "tool.dialog_accept",
+    "tool.dialog_dismiss",
     "tool.wait_for_navigation",
+    "tool.wait_for_element",
     "tool.request_help",
     "tool.record_start",
     "tool.record_stop",
-    "tool.record_await"
+    "tool.record_await",
+    "tool.video"
   ],
   "contracts": [
+    "ActionExpectation",
+    "ActionMetadata",
     "AnyValue",
     "BlurParams",
     "BlurResult",
@@ -98,6 +175,8 @@
     "ConsoleParams",
     "ConsoleResult",
     "ConsoleStackFrame",
+    "ControlPolicy",
+    "ControllerInfo",
     "CooperateAction",
     "CooperateParams",
     "DebugAction",
@@ -141,8 +220,18 @@
     "DebugTextChanges",
     "DebugValue",
     "DebugVisibility",
+    "DialogHandleParams",
+    "DialogHandleResult",
+    "DialogStatusParams",
+    "DialogStatusResult",
+    "DomRead",
     "DownloadParams",
     "DownloadResult",
+    "DragMode",
+    "DragParams",
+    "DragPoint",
+    "DragResult",
+    "DragTarget",
     "ElementState",
     "EmulateOverrides",
     "EmulateParams",
@@ -151,6 +240,9 @@
     "EvaluateError",
     "EvaluateParams",
     "EvaluateResult",
+    "EventKind",
+    "ExpectationField",
+    "ExpectedValue",
     "ExtractAction",
     "ExtractColumn",
     "ExtractCompleteness",
@@ -189,6 +281,7 @@
     "JavaScriptDialogInfo",
     "JavaScriptDialogType",
     "KeyModifier",
+    "LocalAuthStatus",
     "MouseButton",
     "NavigateBackParams",
     "NavigateBackResult",
@@ -204,11 +297,17 @@
     "ObserveDebug",
     "ObserveParams",
     "ObserveResult",
+    "OperationParams",
     "PageRefV2",
+    "PendingJavaScriptDialog",
     "PingParams",
     "PingResult",
     "PressParams",
     "PressResult",
+    "ReadField",
+    "ReadItem",
+    "ReadParams",
+    "ReadResult",
     "RecordAwaitParams",
     "RecordAwaitResult",
     "RecordStartParams",
@@ -277,6 +376,7 @@
     "TraceStateV3",
     "TraceV2",
     "TraceV3",
+    "UnpairedAttempt",
     "UploadFile",
     "UploadMode",
     "UploadParams",

@@ -314,6 +314,8 @@ const methodSource =
     .join("") +
   `export const featureRequirements = ${JSON.stringify(catalog.feature_requirements, null, 2)} as const;\n` +
   `export type FeatureName = typeof featureRequirements[number]["feature"];\n` +
+  `export const eventNames = ${JSON.stringify(catalog.events, null, 2)} as const;\n` +
+  `export type EventName = typeof eventNames[number];\n` +
   `export const debugActions = ${JSON.stringify(catalog.debug_actions, null, 2)} as const;\n` +
   `export const methods = ${JSON.stringify(catalog.methods, null, 2)} as const;\n` +
   `export interface ToolMap {\n${methods.map((method) => `  ${JSON.stringify(method.method)}: { params: Types.${method.params}; result: Types.${method.result} };`).join("\n")}\n}\n` +
@@ -338,6 +340,7 @@ const outputs = new Map([
         protocol_version: catalog.protocol_version,
         min_compatible_protocol: catalog.min_compatible_protocol,
         feature_requirements: catalog.feature_requirements,
+        events: catalog.events,
         methods: methods.map((m) => m.method),
         contracts: names,
       },

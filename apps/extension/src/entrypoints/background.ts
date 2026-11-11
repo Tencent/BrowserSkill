@@ -8,19 +8,23 @@ import { getAuditEnabled } from "@/lib/audit";
 import { attachAuditBridge } from "@/lib/audit-bridge";
 import { ConnectionController } from "@/lib/connection-controller";
 import { watchDaemonConnection } from "@/lib/daemon-connection-preference";
+import { attachDaemonUpgradeNotice } from "@/lib/daemon-upgrade-notice";
 import { startHeartbeat } from "@/lib/heartbeat";
 import {
   getConnectionEnabled,
+  getOrCreateInstanceId,
   setConnectionEnabled as persistConnectionEnabled,
   setLabel,
 } from "@/lib/instance-id";
 import { interactionPolicy, interactionPreferences } from "@/lib/interaction-preferences";
 import { startKeepalive } from "@/lib/keepalive";
+import { attachLocalPairing } from "@/lib/local-pairing-bridge";
 import {
   OVERLAY_AGENT_STATE,
   OVERLAY_AUTOMATION_BYPASS,
   OVERLAY_MSG_INTERRUPT,
   OVERLAY_MSG_READY,
+  OVERLAY_MSG_SET_MINIMIZED,
   OVERLAY_MSG_WHO_AM_I,
   type OverlayAgentStateMessage,
   type OverlayInterruptRequest,
@@ -48,17 +52,19 @@ import {
   requestBorrowConfirmation,
 } from "@/tools/borrow-confirmation";
 import { ToolDispatcher } from "@/tools/dispatcher";
-import { hasActiveHelp } from "@/tools/human-loop";
+import { clearHelpForSession, hasActiveHelp } from "@/tools/human-loop";
 import {
   attachRecordFinishListener,
   attachRecordQueryListener,
   attachRecordStepListener,
+  clearRecordingForSession,
   hasActiveRecording,
   type RecordRuntimeDeps,
 } from "@/tools/record";
 import { cdpBlockedUrlReason, chromeTabsApi } from "@/tools/shared";
 import { chromeTabMutationApi } from "@/tools/tabs";
 import { detectBrowserMeta } from "@/transport/handshake";
+import { createLocalAuthenticator } from "@/transport/local-auth";
 import { watchRemoteAuthorization } from "@/transport/remote-authorization";
 import { type RemoteEndpoint, remoteSocket } from "@/transport/remote-endpoint";
 import type { Transport } from "@/transport/transport";
@@ -73,8 +79,25 @@ export default defineBackground(() => {
   let remoteEndpoint: RemoteEndpoint | null = null;
   let connectionPreferenceValid = false;
   let requestedConnection: { key: string; remote: boolean } | null = null;
+  const authenticateLocal = createLocalAuthenticator({
+    instanceId: () => getOrCreateInstanceId(),
+    origin: chrome.runtime.getURL("").replace(/\/$/, ""),
+    status: (status) => controller.setLocalAuth(status),
+  });
   const transport = new WSTransport({
     url: __BSK_DAEMON_WS_URL__,
+    onAuthenticationError: () => {
+      const state = controller.snapshot().localAuth?.state;
+      if (!remoteEndpoint && (state === "verifying" || state === "verified"))
+        controller.setLocalAuth({ state: "server_unverified" });
+    },
+    authenticate: (socket, signal) => {
+      if (remoteEndpoint) {
+        controller.setLocalAuth(null);
+        return;
+      }
+      return authenticateLocal(socket, signal);
+    },
     webSocketFactory: (url) => {
       if (!connectionPreferenceValid) throw new Error("Connection settings are unavailable");
       const socket = remoteSocket(url, remoteEndpoint);
@@ -89,6 +112,24 @@ export default defineBackground(() => {
     },
   });
   const sessions = new SessionManager({ remote: () => remoteEndpoint !== null });
+  // Capture the original owner before cooperation releases a detached page.
+  attachSessionEventHandler({
+    manager: sessions,
+    transport,
+    cdp: {
+      detachSession: (id) => cdp.detachSession(id),
+      releaseSessionTab: (id, tabId) => cdp.releaseSessionTab(id, tabId),
+    },
+    onSessionReleased: (ctx) => {
+      dispatcher.cancelSession(ctx.sessionId);
+      cooperation.release(ctx.sessionId);
+      debug.releaseSession(ctx.sessionId);
+      void video.stopSession(ctx.sessionId).catch(() => {});
+      clearRecordingForSession(ctx.sessionId);
+      clearHelpForSession(ctx.sessionId);
+    },
+    onSessionsChanged: onOverlaySessionStateChanged,
+  });
   const cooperation = attachCooperation(
     sessions,
     (tabId) => {
@@ -108,10 +149,12 @@ export default defineBackground(() => {
       }
     },
   );
+  // Default collaboration is always present; only explicit help or recording
+  // suspends routing of unrelated tabs out of the task window.
   const windowRouting = new AgentWindowRouting(
     sessions,
     chrome,
-    (id) => hasActiveHelp(id) || hasActiveRecording(id) || cooperation.hasSession(id),
+    (id) => hasActiveHelp(id) || hasActiveRecording(id),
   );
   attachLongScreenshot({
     isTabBusy: (tabId) => sessions.list().some((session) => isAgentControlledTab(session, tabId)),
@@ -122,16 +165,16 @@ export default defineBackground(() => {
       sessions.invalidateTabRefs(tabId);
       cooperation.invalidate(tabId);
     },
-    shouldAutoAcceptDialog: async (tabId) => {
-      if (cooperation.enabled(tabId)) return false;
+    canControlDialog: async (tabId) => {
       const tab = await chrome.tabs.get(tabId);
       const session = sessions.findByWindowId(tab.windowId);
-      return session !== null && (!session.remote || isAgentControlledTab(session, tabId));
+      return session !== null && isAgentControlledTab(session, tabId);
     },
   });
   const debug = new DebugManager(sessions, cdp, chrome.tabs, Date.now, new LocalDebugArchive());
   attachDebugBridge(sessions, debug);
   const videoHost = new BrowserVideoHost();
+  let upgradeNotice: ReturnType<typeof attachDaemonUpgradeNotice> | undefined;
   const video = new VideoManager({
     sessions,
     cdp,
@@ -164,9 +207,13 @@ export default defineBackground(() => {
       }
     },
     changed: () => {
-      void chrome.action.setBadgeBackgroundColor({ color: "#dc2626" });
-      void chrome.action.setBadgeText({ text: video.isRecording() ? "REC" : "" });
+      upgradeNotice?.refresh();
     },
+  });
+  upgradeNotice = attachDaemonUpgradeNotice({
+    controller,
+    connectionKey: () => requestedConnection?.key ?? "unavailable",
+    isRecording: () => video.isRecording(),
   });
   attachVideoBridge(video, videoHost, (sessionId) => handleOverlayInterrupt(transport, sessionId));
   chrome.webNavigation.onBeforeNavigate.addListener((details) => {
@@ -191,7 +238,9 @@ export default defineBackground(() => {
   const sessionsLive = attachSessionsLiveFlag({ manager: sessions });
   const popupSnapshotRefreshers = new Set<() => void>();
   const controlModes = new Map<string, OverlayMode>();
+  const minimizedControlSessions = new Set<string>();
 
+  attachLocalPairing(controller, transport);
   watchRemoteAuthorization();
   const daemonPort = watchDaemonConnection(
     (url, remote) => {
@@ -247,6 +296,8 @@ export default defineBackground(() => {
     return {
       type: OVERLAY_AGENT_STATE,
       sessionId: ctx.sessionId,
+      controller: ctx.controller,
+      ...(minimizedControlSessions.has(ctx.sessionId) ? { minimized: true } : {}),
       mode: controlModes.get(ctx.sessionId) ?? "control",
       ...nextOverlayVersion(),
     };
@@ -317,6 +368,12 @@ export default defineBackground(() => {
     for (const sessionId of controlModes.keys()) {
       if (!liveSessionIds.has(sessionId)) controlModes.delete(sessionId);
     }
+    for (const sessionId of minimizedControlSessions) {
+      if (!liveSessionIds.has(sessionId)) minimizedControlSessions.delete(sessionId);
+    }
+    void cdp.syncSessions?.(liveSessionIds)?.catch((error) => {
+      console.debug("[bsk] session CDP sync failed", error);
+    });
     pushAllAgentOverlayStates();
     for (const refresh of popupSnapshotRefreshers) refresh();
   }
@@ -347,6 +404,10 @@ export default defineBackground(() => {
     if (!sessions.findByWindowId(tab.windowId)) return;
     void pushOverlayStateForTab(tab.id, tab.windowId);
   });
+  chrome.tabs.onAttached.addListener((tabId, { newWindowId }) => {
+    // Refresh controls after Chrome finishes moving the page.
+    void pushOverlayStateForTab(tabId, newWindowId);
+  });
   chrome.tabs.onDetached.addListener((tabId) => {
     void video.stopTab(tabId, "session_ended").catch(() => {});
     debug.releaseTab(tabId);
@@ -361,6 +422,7 @@ export default defineBackground(() => {
     void video.stopTab(tabId, "tab_closed").catch(() => {});
     debug.stopTab(tabId, "tab_closed");
     sessions.forgetClosedTab(tabId, { isWindowClosing: removeInfo.isWindowClosing });
+    cdp.forgetClosedTab?.(tabId);
     debug.sync();
   });
   // Re-sync the storage.session flag on SW startup so a previous SW's
@@ -482,13 +544,6 @@ export default defineBackground(() => {
       "[browser-skill] chrome.notifications.onButtonClicked unavailable; borrow Allow/Deny buttons will be inactive",
     );
   }
-  attachSessionEventHandler({
-    manager: sessions,
-    transport,
-    cdp,
-    onSessionsChanged: onOverlaySessionStateChanged,
-  });
-
   // MV3 service worker keepalive + reconnect supervisor (review M4/M5
   // C3 + C4). Every 30s the alarm wakes the SW; if the transport is
   // not connected we force a fresh connect attempt so we never sit on
@@ -577,6 +632,26 @@ export default defineBackground(() => {
       if (typeof sender.tab?.id === "number") {
         void pushOverlayStateForTab(sender.tab.id, sender.tab.windowId);
       }
+      return false;
+    }
+
+    if (msg.kind === OVERLAY_MSG_SET_MINIMIZED) {
+      const ctx = sessions.get(msg.sessionId);
+      const tab = sender.tab;
+      if (
+        typeof msg.minimized !== "boolean" ||
+        !ctx ||
+        tab?.windowId !== ctx.agentWindowId ||
+        typeof tab.id !== "number" ||
+        !isAgentControlledTab(ctx, tab.id)
+      ) {
+        sendResponse({ ok: false });
+        return false;
+      }
+      if (msg.minimized) minimizedControlSessions.add(ctx.sessionId);
+      else minimizedControlSessions.delete(ctx.sessionId);
+      void pushOverlayStateForWindow(ctx.agentWindowId);
+      sendResponse({ ok: true });
       return false;
     }
 

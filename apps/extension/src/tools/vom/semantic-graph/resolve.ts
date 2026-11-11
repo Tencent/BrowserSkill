@@ -1,4 +1,5 @@
 import type { VomNode } from "@browser-skill/vom";
+import { RECORD_PASSWORD_ATTRIBUTE, sensitiveAutocomplete } from "@/lib/sensitive-autocomplete";
 import { stableIdentifierName } from "./name-evidence";
 import type {
   ResolvedSemanticGraph,
@@ -118,11 +119,10 @@ function resolvedRole(node: SemanticGraphNode): {
 function sensitive(node: SemanticGraphNode): boolean {
   const attrs = node.dom?.attrs ?? {};
   const type = (attrs.type ?? "").toLowerCase();
-  const autocomplete = (attrs.autocomplete ?? "").toLowerCase();
   return (
     type === "password" ||
-    autocomplete.startsWith("cc-") ||
-    SENSITIVE_INPUT_TYPES.has(autocomplete) ||
+    Object.prototype.hasOwnProperty.call(attrs, RECORD_PASSWORD_ATTRIBUTE) ||
+    sensitiveAutocomplete(attrs.autocomplete) ||
     SENSITIVE_INPUT_TYPES.has(axProperty(node.ax, "inputType") ?? "")
   );
 }
@@ -133,7 +133,9 @@ function inputState(
   value: string | undefined,
   isSensitive: boolean,
 ): VomNode["inputState"] {
-  if (node.dom?.formState) return node.dom.formState;
+  if (node.dom?.formState) {
+    return isSensitive && node.dom.formState === "default" ? "filled" : node.dom.formState;
+  }
   const tag = node.dom?.tag.toLowerCase() ?? "";
   if (!FORM_TAGS.has(tag) && !["textbox", "searchbox"].includes(role ?? "")) return undefined;
   if (isSensitive) return value ? "filled" : "empty";
@@ -178,6 +180,8 @@ function externalHrefHost(
 interface ResolveIndexes {
   domChildren: Map<SemanticNodeId, SemanticNodeId[]>;
   axChildren: Map<SemanticNodeId, SemanticNodeId[]>;
+  domSiblingIndex: Map<SemanticNodeId, number>;
+  axSiblingIndex: Map<SemanticNodeId, number>;
   domIdIndex: Map<string, SemanticNodeId>;
   labelForIndex: Map<string, SemanticNodeId[]>;
   domText: (nodeId: SemanticNodeId) => string | undefined;
@@ -188,11 +192,14 @@ interface ResolveIndexes {
 function buildIndexes(graph: SemanticGraph): ResolveIndexes {
   const domChildren = new Map<SemanticNodeId, SemanticNodeId[]>();
   const axChildren = new Map<SemanticNodeId, SemanticNodeId[]>();
+  const domSiblingIndex = new Map<SemanticNodeId, number>();
+  const axSiblingIndex = new Map<SemanticNodeId, number>();
   const domIdIndex = new Map<string, SemanticNodeId>();
   const labelForIndex = new Map<string, SemanticNodeId[]>();
   for (const node of graph.nodes.values()) {
     if (node.domParentId) {
       const children = domChildren.get(node.domParentId) ?? [];
+      domSiblingIndex.set(node.id, children.length);
       children.push(node.id);
       domChildren.set(node.domParentId, children);
     }
@@ -223,6 +230,9 @@ function buildIndexes(graph: SemanticGraph): ResolveIndexes {
         (bIndex < 0 ? Number.MAX_SAFE_INTEGER : bIndex)
       );
     });
+    for (let index = 0; index < children.length; index += 1) {
+      axSiblingIndex.set(children[index], index);
+    }
   }
 
   const textMemo = new Map<SemanticNodeId, string | undefined>();
@@ -305,6 +315,8 @@ function buildIndexes(graph: SemanticGraph): ResolveIndexes {
   return {
     domChildren,
     axChildren,
+    domSiblingIndex,
+    axSiblingIndex,
     domIdIndex,
     labelForIndex,
     domText,
@@ -357,7 +369,7 @@ function precedingAxText(
 ): string | undefined {
   if (!node.axParentId) return undefined;
   const siblings = indexes.axChildren.get(node.axParentId) ?? [];
-  const index = siblings.indexOf(node.id);
+  const index = indexes.axSiblingIndex.get(node.id) ?? -1;
   for (let offset = 1; offset <= 4 && index - offset >= 0; offset += 1) {
     const sibling = graph.nodes.get(siblings[index - offset]);
     const role = normalizeRole(axValue(sibling?.ax?.role)) ?? "";
@@ -379,7 +391,7 @@ function precedingDomText(
 ): string | undefined {
   if (!node.domParentId) return undefined;
   const siblings = indexes.domChildren.get(node.domParentId) ?? [];
-  const index = siblings.indexOf(node.id);
+  const index = indexes.domSiblingIndex.get(node.id) ?? -1;
   for (let offset = 1; offset <= 4 && index - offset >= 0; offset += 1) {
     const sibling = graph.nodes.get(siblings[index - offset]);
     const siblingRole = sibling
@@ -453,7 +465,7 @@ function nearbyText(
 ): string | undefined {
   if (!node.domParentId) return undefined;
   const siblings = indexes.domChildren.get(node.domParentId) ?? [];
-  const index = siblings.indexOf(node.id);
+  const index = indexes.domSiblingIndex.get(node.id) ?? -1;
   if (index < 0) return undefined;
   const texts = siblings
     .slice(Math.max(0, index - 3), index + 4)
@@ -484,8 +496,11 @@ export function resolveSemanticGraph(
     const checked = checkedState(node, role);
     const attrs = { ...(node.dom?.attrs ?? {}) };
     if (isSensitive) delete attrs.value;
+    delete attrs[RECORD_PASSWORD_ATTRIBUTE];
     const frame = graph.frames.get(node.frameId);
     const tag = node.dom?.tag.toLowerCase() ?? "";
+    const inForm = node.dom?.inForm;
+    const nearby = nearbyText(node, graph, indexes);
     const vom: ResolvedSemanticNode["vom"] = {
       tag,
       rect: node.dom?.rect ?? null,
@@ -493,16 +508,21 @@ export function resolveSemanticGraph(
       position: node.dom?.position || "static",
       pointerEvents: node.dom?.pointerEvents || "auto",
       ...(node.dom?.cursor ? { cursor: node.dom.cursor } : {}),
+      ...(node.dom?.clickable ? { clickable: true } : {}),
       ...(role ? { role } : {}),
       ...(name ? { name } : {}),
       ...(value !== undefined ? { value } : {}),
+      ...(inForm !== undefined ? { inForm } : {}),
       ...(checked !== undefined ? { checked } : {}),
+      ...(node.ax?.ignored !== true && axProperty(node.ax, "focused") === "true"
+        ? { focused: true }
+        : {}),
       ...(clean(node.dom?.formPlaceholder ?? attrs.placeholder)
         ? { placeholder: clean(node.dom?.formPlaceholder ?? attrs.placeholder) }
         : {}),
       attrs,
       ...(clean(node.dom?.textContent) ? { text: clean(node.dom?.textContent) } : {}),
-      ...(nearbyText(node, graph, indexes) ? { nearbyText: nearbyText(node, graph, indexes) } : {}),
+      ...(nearby ? { nearbyText: nearby } : {}),
       inputState: inputState(node, role, sourceValue, isSensitive),
       sensitive: isSensitive,
       // An available AX result is authoritative, including ignored/nonmodal nodes.
@@ -521,8 +541,8 @@ export function resolveSemanticGraph(
     const selected = node.ax?.ignored === true ? undefined : axProperty(node.ax, "selected");
     const expanded = node.ax?.ignored === true ? undefined : axProperty(node.ax, "expanded");
     const controls = node.ax?.ignored === true ? undefined : axProperty(node.ax, "controls");
-    if (selected === "true" && !vom.attrs?.["aria-selected"]) {
-      vom.attrs = { ...(vom.attrs ?? {}), "aria-selected": "true" };
+    if ((selected === "true" || selected === "false") && !vom.attrs?.["aria-selected"]) {
+      vom.attrs = { ...(vom.attrs ?? {}), "aria-selected": selected };
     }
     if (expanded === "true" && !vom.attrs?.["aria-expanded"]) {
       vom.attrs = { ...(vom.attrs ?? {}), "aria-expanded": "true" };

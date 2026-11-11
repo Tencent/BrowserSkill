@@ -1,3 +1,4 @@
+import type { ControllerInfo } from "@/lib/controller-info";
 import type { OverlayMode } from "@/lib/overlay-bridge";
 import type { BorrowRequestData } from "./BorrowConfirmationOverlay";
 import type { HelpRequestData } from "./HelpRequestOverlay";
@@ -10,6 +11,7 @@ export interface OverlayState {
   controlVisible: boolean;
   interrupting: boolean;
   activeSessionId: string | null;
+  controller?: ControllerInfo;
   controlMode: OverlayMode;
   automationBypassCount: number;
   /**
@@ -20,8 +22,8 @@ export interface OverlayState {
   suppressControlAfterRecord: boolean;
   /**
    * User preference (chrome.storage, toggled from the popup): hide the
-   * control hints — status pill, orange glow, and the input blocker that
-   * comes with them. Not session state; survives overlay resets.
+   * control hints — status card, orange glow, and the fallback input
+   * blocker. Not session state; survives overlay resets.
    */
   controlHintsHidden: boolean;
 }
@@ -69,12 +71,18 @@ export class OverlayController {
   }
 
   activateAgentSession(sessionId: string): void {
+    this.state.controller = undefined;
     this.state.activeSessionId = sessionId;
     this.state.interrupting = false;
     this.state.controlMode = "control";
   }
 
-  applyAgentControlMode(sessionId: string | null, mode: OverlayMode): void {
+  applyAgentControlMode(
+    sessionId: string | null,
+    mode: OverlayMode,
+    controller?: ControllerInfo,
+  ): void {
+    this.state.controller = sessionId && mode !== "hidden" ? controller : undefined;
     if (mode === "control" && sessionId) {
       this.state.activeSessionId = sessionId;
       this.state.interrupting = false;
@@ -151,6 +159,7 @@ export class OverlayController {
       activeRecord: null,
       interrupting: false,
       activeSessionId: null,
+      controller: undefined,
       controlMode: "hidden",
       automationBypassCount: 0,
       suppressControlAfterRecord: false,

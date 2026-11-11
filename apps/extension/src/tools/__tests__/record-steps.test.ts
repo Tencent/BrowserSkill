@@ -153,7 +153,6 @@ function makeFakeCdp(
     "Page.getLayoutMetrics": () => ({
       cssLayoutViewport: { clientWidth: 1280, clientHeight: 720 },
     }),
-    "Runtime.enable": () => ({}),
     "Runtime.evaluate": (params: unknown) => {
       const expression = String((params as { expression?: string })?.expression ?? "");
       if (!expression.includes("__bskRecordQuiet")) return { result: { value: "complete" } };

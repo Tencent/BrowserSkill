@@ -1,12 +1,11 @@
 //! `bsk scroll-to` — bring a target element into the visible viewport.
 
-use std::time::Duration;
-
 use anyhow::Context;
 use bsk_protocol::Method;
 use bsk_protocol::tools::{ScrollToParams, ScrollToResult};
 use clap::Args;
 
+use crate::cli::business_rpc::ipc_timeout;
 use crate::cli::dialogs::print_dialog_summaries;
 use crate::cli::ensure_daemon::ensure_daemon;
 use crate::cli::error::{CliError, Format};
@@ -75,12 +74,6 @@ fn format_used_target(used_ref: Option<&str>, used_selector: Option<&str>) -> St
         .map(|r| format!("@{r}"))
         .or_else(|| used_selector.map(str::to_string))
         .unwrap_or_else(|| "?".into())
-}
-
-fn ipc_timeout(timeout_ms: u32) -> Duration {
-    Duration::from_millis(u64::from(timeout_ms))
-        .checked_add(Duration::from_secs(15))
-        .unwrap_or(Duration::from_secs(u64::from(timeout_ms / 1_000) + 15))
 }
 
 #[cfg(test)]

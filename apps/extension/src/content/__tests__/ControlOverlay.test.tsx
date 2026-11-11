@@ -1,14 +1,51 @@
-import { cleanup, render } from "@testing-library/react";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { cleanup, fireEvent, render } from "@testing-library/react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ControlOverlay } from "../ControlOverlay";
 
-describe("ControlOverlay", () => {
+describe("ControlOverlay fallback", () => {
+  const sendMessage = vi.fn();
+  beforeEach(() => {
+    sendMessage.mockReset().mockResolvedValue(undefined);
+    vi.stubGlobal("chrome", { runtime: { sendMessage } });
+  });
   afterEach(() => {
     cleanup();
+    vi.unstubAllGlobals();
+  });
+
+  it("renders the agent, project and session as text and names the control action", () => {
+    const props = { visible: true, interrupting: false, automationBypass: false, onInterrupt() {} };
+    const { getByText, getByRole, rerender, container } = render(
+      <ControlOverlay
+        {...props}
+        sessionId="aaaa"
+        controller={{ name: "Codex", project: "<b>Search</b>", color: "#2563eb" }}
+        state={{ mode: "ready", editing: false, revision: 1 }}
+      />,
+    );
+    expect(getByText("Codex")).toBeTruthy();
+    expect(getByText("<b>Search</b>")).toBeTruthy();
+    expect(getByText("aaaa")).toBeTruthy();
+    expect(getByRole("button", { name: "暂停 Codex" })).toBeTruthy();
+    expect(container.querySelector(".bsk-controller-details b")).toBeNull();
+    rerender(
+      <ControlOverlay
+        {...props}
+        sessionId="aaab"
+        controller={{ name: "Claude" }}
+        state={{ mode: "held", editing: false, revision: 2 }}
+      />,
+    );
+    expect(getByRole("button", { name: "交给 Claude" })).toBeTruthy();
+    expect(container.textContent).not.toContain("Codex");
+    expect(container.textContent).not.toContain("Search");
+    rerender(<ControlOverlay {...props} sessionId="legacy" />);
+    expect(getByText("BrowserSkill")).toBeTruthy();
+    expect(getByText("legacy")).toBeTruthy();
   });
 
   it("keeps page blocker none under automationBypass but Interrupt stays clickable", () => {
-    const { container } = render(
+    const { container, getByRole, queryByRole } = render(
       <ControlOverlay
         visible={true}
         interrupting={false}
@@ -21,13 +58,11 @@ describe("ControlOverlay", () => {
     expect(blocker).toBeTruthy();
     expect((blocker as HTMLElement).style.pointerEvents).toBe("none");
 
-    const pill = container.querySelector("[data-slot='control-overlay-pill']");
-    expect(pill).toBeTruthy();
-    expect((pill as HTMLElement).style.pointerEvents).toBe("auto");
-
-    const stopBtn = container.querySelector("[data-slot='control-overlay-stop-all']");
-    expect(stopBtn).toBeTruthy();
-    expect((stopBtn as HTMLElement).style.pointerEvents).toBe("auto");
+    expect(container.querySelector("[data-slot='control-overlay-card']")).not.toBeNull();
+    expect(getByRole("status").textContent).toBe("Agent 正在控制");
+    expect((getByRole("button", { name: "停止任务" }) as HTMLButtonElement).disabled).toBe(false);
+    expect(queryByRole("button", { name: "暂停 Agent" })).toBeNull();
+    expect(sendMessage).not.toHaveBeenCalled();
   });
 
   it("uses pointer-events auto on blocker when automationBypass is false", () => {
@@ -60,6 +95,64 @@ describe("ControlOverlay", () => {
     (stopBtn as HTMLButtonElement).click();
 
     expect(onInterrupt).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps stop disabled while interrupting without sending cooperation messages", () => {
+    const onInterrupt = vi.fn();
+    const { getByRole } = render(
+      <ControlOverlay visible interrupting automationBypass={false} onInterrupt={onInterrupt} />,
+    );
+    const stop = getByRole("button", { name: "中断中…" }) as HTMLButtonElement;
+    expect(stop.disabled).toBe(true);
+    fireEvent.click(stop);
+    expect(onInterrupt).not.toHaveBeenCalled();
+    expect(sendMessage).not.toHaveBeenCalled();
+  });
+
+  it("reuses the card and glow while removing fallback input blocking when cooperation arrives", () => {
+    const props = {
+      visible: true,
+      interrupting: false,
+      automationBypass: false,
+      onInterrupt: vi.fn(),
+    };
+    const { container, getByRole, rerender } = render(<ControlOverlay {...props} />);
+    const card = getByRole("toolbar");
+    const glow = container.querySelector('[data-slot="control-overlay"]');
+    const scroll = (type: string) => window.dispatchEvent(new Event(type, { cancelable: true }));
+    expect(scroll("wheel")).toBe(false);
+    expect(scroll("touchmove")).toBe(false);
+
+    rerender(<ControlOverlay {...props} state={{ mode: "ready", editing: false, revision: 23 }} />);
+    expect(getByRole("toolbar")).toBe(card);
+    expect(container.querySelector('[data-slot="control-overlay"]')).toBe(glow);
+    expect(container.querySelector('[data-slot="control-overlay-blocker"]')).toBeNull();
+    expect(scroll("wheel")).toBe(true);
+    expect(scroll("touchmove")).toBe(true);
+    expect(sendMessage).not.toHaveBeenCalled();
+  });
+
+  it("restores fallback scroll blocking after bypass and removes it when hidden or unmounted", () => {
+    const props = {
+      visible: true,
+      interrupting: false,
+      automationBypass: false,
+      onInterrupt: vi.fn(),
+    };
+    const { container, rerender, unmount } = render(<ControlOverlay {...props} />);
+    const scroll = () => window.dispatchEvent(new Event("wheel", { cancelable: true }));
+    expect(scroll()).toBe(false);
+    rerender(<ControlOverlay {...props} automationBypass />);
+    expect(scroll()).toBe(true);
+    rerender(<ControlOverlay {...props} />);
+    expect(scroll()).toBe(false);
+    rerender(<ControlOverlay {...props} visible={false} />);
+    expect(container.childElementCount).toBe(0);
+    expect(scroll()).toBe(true);
+    rerender(<ControlOverlay {...props} />);
+    expect(scroll()).toBe(false);
+    unmount();
+    expect(scroll()).toBe(true);
   });
 
   describe("control glow", () => {

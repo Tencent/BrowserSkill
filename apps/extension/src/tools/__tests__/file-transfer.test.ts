@@ -233,7 +233,8 @@ function dropCdp(
     if (method === "DOM.getContentQuads") {
       return { quads: [[10, 20, 210, 20, 210, 120, 10, 120]] };
     }
-    if (method === "DOM.getNodeForLocation") return { backendNodeId: 124 };
+    if (method === "Page.getFrameTree") return { frameTree: { frame: { id: "main" } } };
+    if (method === "DOM.getNodeForLocation") return { backendNodeId: 124, frameId: "main" };
     if (method === "DOM.resolveNode") {
       const id = (params as { backendNodeId?: number }).backendNodeId;
       return { object: { objectId: id === 123 ? "drop-target" : "hit-target" } };
@@ -621,6 +622,38 @@ describe("file transfer tools", () => {
         phase: "drag_enter",
       },
     });
+  });
+
+  it("reports a drag_enter CDP refusal without sending dragCancel or detaching", async () => {
+    const { cdp, calls, detach } = dropCdp({
+      dispatchError: (type) =>
+        type === "dragEnter"
+          ? new Error("Input.dispatchDragEvent failed: -32000 Not allowed")
+          : undefined,
+    });
+    const result = await uploadThroughFileDrop({
+      cdp,
+      actionTarget: actionTarget(),
+      files: ["/stage/one.png"],
+      timeoutMs: 1000,
+      withOverlayHidden: withoutOverlay,
+    });
+
+    expect(result).toMatchObject({
+      code: "cdp_failed",
+      message: "Input.dispatchDragEvent failed: -32000 Not allowed",
+      data: {
+        reason: "file_drop_failed",
+        effect_state: "none",
+        phase: "drag_enter",
+      },
+    });
+    expect((result as { data?: Record<string, unknown> }).data).not.toHaveProperty("cleanup_state");
+    expect(calls).not.toContainEqual({
+      method: "Input.dispatchDragEvent",
+      params: expect.objectContaining({ type: "dragCancel" }),
+    });
+    expect(detach).not.toHaveBeenCalled();
   });
 
   it("cancels an unresolved drag before returning a pre-commit timeout", async () => {

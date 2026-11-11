@@ -4,7 +4,7 @@ import { createServer } from "node:http";
 import { join } from "node:path";
 import { createDshRegressionClient } from "./dsh-client.mjs";
 
-/** Independent file bytes and server effects, exercised through both shipped clients. */
+/** Legacy strict-policy file bytes and server effects, exercised through both shipped clients. */
 export async function runCompatibilityScenarios({ send, bsk, cli, env, directory, headful }) {
   const html = await readFile(new URL("compatibility.html", import.meta.url));
   const bytes = Buffer.concat([
@@ -194,7 +194,7 @@ export async function runCompatibilityScenarios({ send, bsk, cli, env, directory
             });
           await send("Page.bringToFront", {}, coverSession);
           // During an attachment navigation the renderer may withhold reads.
-          // Confirm browser state here; only sample visibility outside a transfer.
+          // Native browser state also remains meaningful under focus emulation.
           await poll(() => workerRead(`chrome.tabs.get(${coverTabId}).then(tab=>tab.active)`));
           if (placement === "window")
             await poll(
@@ -204,11 +204,6 @@ export async function runCompatibilityScenarios({ send, bsk, cli, env, directory
             );
         };
         const assertParked = async () => {
-          assert.equal(
-            await read("document.visibilityState"),
-            "hidden",
-            "temporary focus override leaked",
-          );
           const foreground = await send(
             "Runtime.evaluate",
             {
@@ -248,10 +243,17 @@ export async function runCompatibilityScenarios({ send, bsk, cli, env, directory
               human,
             );
         };
-        const sync = () =>
-          dsh
+        const sync = async () => {
+          const state = await (dsh
             ? dsh.run("bsk_session", { action: "sync", session })
-            : bsk(["cooperate", "sync", ...scope]);
+            : bsk(["cooperate", "sync", ...scope]));
+          assert.equal(
+            state.control_policy,
+            "strict",
+            "legacy transfer checks require strict policy",
+          );
+          return state;
+        };
         const wait = async () =>
           assert.equal(
             (
@@ -264,9 +266,8 @@ export async function runCompatibilityScenarios({ send, bsk, cli, env, directory
         const act = async (action, args = {}, context) => {
           if (background) {
             await parkTask();
-            // Wait for native window transitions before sending the one input.
-            // Post-action assertions below still check cleanup without retrying it.
-            await poll(async () => (await read("document.visibilityState")) === "hidden");
+            // The execution lease may report the controlled document as visible;
+            // preserve the user's native foreground tab and window instead.
             await assertParked();
           }
           const contextId = context ?? (await sync()).context_id;
@@ -542,7 +543,8 @@ export async function runCompatibilityScenarios({ send, bsk, cli, env, directory
           send(
             "Runtime.evaluate",
             {
-              expression: "({visibility:document.visibilityState,focus:document.hasFocus()})",
+              expression:
+                "({visibility:document.visibilityState,focus:document.hasFocus(),width:innerWidth,dpr:devicePixelRatio,layout:document.querySelector('#viewport')?.textContent,narrow:matchMedia('(max-width:400px)').matches})",
               returnByValue: true,
             },
             targetSession,
@@ -564,6 +566,9 @@ export async function runCompatibilityScenarios({ send, bsk, cli, env, directory
           foreground: await visibility(coverSession),
           tabs: await workerRead(
             "chrome.tabs.query({}).then(tabs=>tabs.map(({id,windowId,active,url})=>({id,windowId,active,url})))",
+          ).catch((failure) => ({ error: failure.message })),
+          windows: await workerRead(
+            "chrome.windows.getAll().then(windows=>windows.map(({id,focused,state,width,height})=>({id,focused,state,width,height})))",
           ).catch((failure) => ({ error: failure.message })),
         };
         throw new Error(`${tag}: ${error.message}; browser state: ${JSON.stringify(state)}`, {

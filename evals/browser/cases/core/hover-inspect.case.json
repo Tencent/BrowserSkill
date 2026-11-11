@@ -46,8 +46,9 @@
   "smoke": {
     "steps": [
       { "action": "navigate" },
-      { "action": "hover", "selector": "#account-menu" },
-      { "action": "click", "selector": "#profile-link" },
+      { "action": "sync", "saveAs": "control" },
+      { "action": "hover", "selector": "#account-menu", "contextId": "{control.context_id}" },
+      { "action": "click", "selector": "#profile-link", "contextId": "{control.context_id}" },
       { "action": "html", "evidence": "htmlInspected" },
       {
         "action": "screenshot",

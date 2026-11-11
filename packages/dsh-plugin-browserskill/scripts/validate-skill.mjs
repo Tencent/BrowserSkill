@@ -74,6 +74,7 @@ export function validateSkillDirectory(directory, { maxEntryBytes, browserTools 
 }
 
 // Host schemas, client toolviews, and packaged instructions share one contract.
-export const DSH_BROWSER_TOOLS = Object.values(
-  JSON.parse(readFileSync(new URL("../src/tool-names.json", import.meta.url), "utf8")),
+// Opt-in tools are taught too, so a host that enables one finds its instructions.
+export const DSH_BROWSER_TOOLS = ["tool-names.json", "optional-tool-names.json"].flatMap((file) =>
+  Object.values(JSON.parse(readFileSync(new URL(`../src/${file}`, import.meta.url), "utf8"))),
 );

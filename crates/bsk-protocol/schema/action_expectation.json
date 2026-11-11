@@ -1,0 +1,58 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
+  "definitions": {
+    "ExpectationField": {
+      "enum": [
+        "text",
+        "value",
+        "checked",
+        "attribute",
+        "exists"
+      ],
+      "type": "string"
+    },
+    "ExpectedValue": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "boolean"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    }
+  },
+  "description": "Caller-supplied facts checked immediately before starting an action.",
+  "properties": {
+    "attribute": {
+      "description": "Required only for field=attribute, measured in Unicode code points.",
+      "maxLength": 256,
+      "minLength": 1,
+      "type": "string"
+    },
+    "equals": {
+      "$ref": "#/definitions/ExpectedValue",
+      "description": "text/value require a string; checked/exists require a boolean;\nattribute accepts a string or null for absence. Text is exact textContent."
+    },
+    "field": {
+      "$ref": "#/definitions/ExpectationField"
+    },
+    "target": {
+      "description": "Observed ref or main-document CSS selector, measured in Unicode code points.",
+      "maxLength": 1024,
+      "minLength": 1,
+      "type": "string"
+    }
+  },
+  "required": [
+    "target",
+    "field",
+    "equals"
+  ],
+  "title": "ActionExpectation",
+  "type": "object"
+}

@@ -39,6 +39,7 @@ import { type ClickOverlayDeps, withClickOverlay } from "./click-overlay";
 import { attachDialogs, markDialogCursor } from "./dialogs";
 import { backendNodeToObject } from "./element-geometry";
 import { rpcError } from "./errors";
+import { FOCUS_CHECK } from "./focus-state";
 import { resolveNodeGeometry, scrollElementAndFramesIntoView } from "./frame-geometry";
 import {
   type CdpRunner,
@@ -149,6 +150,7 @@ export async function resolveBackendNode(
   target: { tabId: number },
   params: { ref?: string; selector?: string },
   toolName: string,
+  strictSelector = false,
 ): Promise<
   | {
       backendNodeId: number;
@@ -200,11 +202,25 @@ export async function resolveBackendNode(
         message: "DOM.getDocument returned no root nodeId",
       };
     }
-    const found = await cdp.send<{ nodeId?: number }>(target.tabId, "DOM.querySelector", {
-      nodeId: rootNodeId,
-      selector: params.selector,
-    });
-    if (typeof found.nodeId !== "number" || found.nodeId === 0) {
+    const query = { nodeId: rootNodeId, selector: params.selector };
+    let nodeId: number | undefined;
+    if (strictSelector) {
+      const found = await cdp.send<{ nodeIds: number[] }>(
+        target.tabId,
+        "DOM.querySelectorAll",
+        query,
+      );
+      if (found.nodeIds.length > 1)
+        return {
+          code: "invalid_params",
+          message: `${toolName}: selector matched ${found.nodeIds.length} elements; use a VOM ref or a narrower selector`,
+        };
+      nodeId = found.nodeIds[0];
+    } else {
+      nodeId = (await cdp.send<{ nodeId?: number }>(target.tabId, "DOM.querySelector", query))
+        .nodeId;
+    }
+    if (typeof nodeId !== "number" || nodeId === 0) {
       return rpcError(
         "not_found",
         "selector_not_found",
@@ -214,7 +230,7 @@ export async function resolveBackendNode(
     const described = await cdp.send<{ node?: { backendNodeId?: number } }>(
       target.tabId,
       "DOM.describeNode",
-      { nodeId: found.nodeId },
+      { nodeId },
     );
     const backendNodeId = described.node?.backendNodeId;
     if (typeof backendNodeId !== "number") {
@@ -231,19 +247,6 @@ export async function resolveBackendNode(
     };
   }
 }
-
-// Check the target's own root, then its hosts: closed shadow roots are not
-// reachable via host.shadowRoot. DOM focus remains meaningful in background tabs.
-const FOCUS_CHECK = `function() {
-  if (!this.isConnected) return false;
-  let element = this;
-  while (element) {
-    const root = element.getRootNode();
-    if (root.activeElement !== element) return false;
-    element = root.host;
-  }
-  return true;
-}`;
 
 const BLUR_TARGET = `function() {
   if (!this.isConnected) throw new Error('blur target is detached');
@@ -439,8 +442,9 @@ export async function resolveActionTarget(
   target: ResolvedTargetTab,
   params: { ref?: string; selector?: string },
   toolName: string,
+  strictSelector = false,
 ): Promise<ResolvedActionTarget | RpcError> {
-  const node = await resolveBackendNode(cdp, ctx, target, params, toolName);
+  const node = await resolveBackendNode(cdp, ctx, target, params, toolName, strictSelector);
   return isRpcError(node) ? node : { tab: target, ...node };
 }
 
@@ -940,7 +944,7 @@ type SelectMutationResult =
     }
   | {
       ok: false;
-      reason: "option_not_found";
+      reason: "option_not_found" | "target_disabled";
       missing?: string;
     };
 
@@ -957,7 +961,7 @@ type FillFailureReason =
   | "fill_failed";
 
 type FillPreparation =
-  | { before: string; expected: string }
+  | { before: string; expected: string; write: "insert" | "value" }
   | { reason: FillFailureReason; error: string };
 
 type FillReadiness = "ready" | "background" | "fill_target_changed" | "fill_focus_lost";
@@ -977,10 +981,14 @@ interface FillScriptReply<T> {
   exceptionDetails?: unknown;
 }
 
+// Date-like controls accept a programmatic value, but Chrome's Input.insertText
+// leaves them empty. Fill them via the input value setter instead of typing.
+const FILL_DATE_LIKE_TYPES = "['date', 'time', 'datetime-local', 'month', 'week']";
+
 const FILL_EDITABLE_FUNCTION = `function() {
   const tag = this.tagName.toLowerCase();
   const supported = tag === 'input'
-    ? ['text', 'search', 'tel', 'url', 'email', 'password', 'number'].includes(this.type)
+    ? ['text', 'search', 'tel', 'url', 'email', 'password', 'number', ...${FILL_DATE_LIKE_TYPES}].includes(this.type)
     : tag === 'textarea' || (this.isContentEditable && !this.parentElement?.isContentEditable);
   return this.isConnected && supported && !this.readOnly && !this.matches(':disabled');
 }`;
@@ -1033,7 +1041,10 @@ const FILL_VALUE_FUNCTION = `function() {
 const FILL_PREPARATION_FUNCTION = `function(value, clearBefore) {
   const tag = this.tagName.toLowerCase();
   const native = tag === 'input' || tag === 'textarea';
-  if (!(${FILL_EDITABLE_FUNCTION}).call(this)) return { reason: 'target_not_fillable', error: 'fill requires an enabled text input, textarea, or contenteditable editing host; target the editor root rather than an internal paragraph or span' };
+  const dateLike = tag === 'input' && ${FILL_DATE_LIKE_TYPES}.includes(this.type);
+  if (!(${FILL_EDITABLE_FUNCTION}).call(this)) return { reason: 'target_not_fillable', error: 'fill requires an enabled text input, textarea, date/time control, or contenteditable editing host; target the editor root rather than an internal paragraph or span' };
+  // Appending to a date/time value only concatenates strings; always replace.
+  if (dateLike && !clearBefore) return { reason: 'fill_value_invalid', error: 'fill --no-clear is not supported for date/time inputs; omit it to replace the value' };
   const before = clearBefore ? '' : (${FILL_VALUE_FUNCTION}).call(this);
   let expected = before + value;
   if (native) {
@@ -1045,20 +1056,31 @@ const FILL_PREPARATION_FUNCTION = `function(value, clearBefore) {
       normalizer.multiple = this.multiple;
     }
     // insertText treats line breaks in a single-line input as spaces.
-    if (tag === 'input') expected = expected.replace(/\\r\\n|\\r|\\n/g, ' ');
+    if (tag === 'input' && !dateLike) expected = expected.replace(/\\r\\n|\\r|\\n/g, ' ');
     normalizer.value = expected;
-    if (expected !== '' && normalizer.value === '' && this.type === 'number') {
-      return { reason: 'fill_value_invalid', error: 'fill value is not valid for a number input' };
+    if (expected !== '' && normalizer.value === '' && (this.type === 'number' || dateLike)) {
+      return { reason: 'fill_value_invalid', error: dateLike
+        ? 'fill value is not valid for this date/time input'
+        : 'fill value is not valid for a number input' };
     }
     expected = normalizer.value;
-    if (this.type !== 'number' && this.maxLength >= 0 && expected.length > this.maxLength) {
+    if (dateLike && expected !== '') {
+      // Let the browser compare against min/max, including reversed time ranges.
+      if (this.min) normalizer.min = this.min;
+      if (this.max) normalizer.max = this.max;
+      if (normalizer.validity.rangeUnderflow || normalizer.validity.rangeOverflow) {
+        const bounds = [this.min && 'min ' + this.min, this.max && 'max ' + this.max].filter(Boolean).join(', ');
+        return { reason: 'fill_value_invalid', error: 'fill value ' + expected + ' is outside the allowed range of this date/time input (' + bounds + ')' };
+      }
+    }
+    if (!dateLike && this.type !== 'number' && this.maxLength >= 0 && expected.length > this.maxLength) {
       return { reason: 'fill_value_invalid', error: 'fill value exceeds the target maxlength' };
     }
   } else {
     expected = expected.replace(/\\r\\n?/g, '\\n');
     if (${FILL_COLLAPSES_WHITESPACE}) expected = expected.replace(/\\u00a0/g, ' ');
   }
-  return { before, expected };
+  return { before, expected, write: dateLike ? 'value' : 'insert' };
 }`;
 
 export async function handleFill(
@@ -1100,7 +1122,7 @@ export async function handleFill(
       return rpcError(
         "invalid_params",
         "target_not_fillable",
-        `element ${described.node?.nodeName ?? "?"} not fillable; choose a text input, textarea, or the contenteditable editor root`,
+        `element ${described.node?.nodeName ?? "?"} not fillable; choose a text input, textarea, date/time control, or the contenteditable editor root`,
       );
     }
   } catch (err) {
@@ -1136,7 +1158,11 @@ export async function handleFill(
     }
     const plan = preflight.result.value;
     if ("error" in plan) return fillError(plan.reason, plan.error);
-    if (typeof plan.before !== "string" || typeof plan.expected !== "string") {
+    if (
+      typeof plan.before !== "string" ||
+      typeof plan.expected !== "string" ||
+      (plan.write !== "insert" && plan.write !== "value")
+    ) {
       return fillError("fill_failed", "fill preflight returned an unexpected result");
     }
     const scrollErr = await scrollElementAndFramesIntoView(
@@ -1178,6 +1204,49 @@ export async function handleFill(
     // Check editability before clearing. Keep the expected result tied to
     // this object, including the existing value on the append path.
     await deps.cdp.beginDomMutation?.();
+    if (plan.write === "insert" && params.value === "") {
+      // Empty fills do not send insertText, so flush any background focus
+      // before clearing (or reading an unchanged value for --no-clear).
+      const focus = await nodeCdp.send<
+        FillScriptReply<"ready" | "background" | "target_not_fillable" | "fill_focus_lost">
+      >(target.tabId, "Runtime.callFunctionOn", {
+        objectId,
+        functionDeclaration: `function() {
+          if (!(${FILL_EDITABLE_FUNCTION}).call(this)) return 'target_not_fillable';
+          if (this.getRootNode().activeElement !== this) return 'fill_focus_lost';
+          return this.ownerDocument.hasFocus() ? 'ready' : 'background';
+        }`,
+        returnByValue: true,
+      });
+      if (throwIfAborted(deps.signal)) return { code: "cancelled", message: "fill aborted" };
+      const state = focus.result?.value;
+      if (
+        focus.exceptionDetails ||
+        (state !== "ready" &&
+          state !== "background" &&
+          state !== "target_not_fillable" &&
+          state !== "fill_focus_lost")
+      ) {
+        return fillError(
+          "fill_failed",
+          "fill readiness script failed or returned an unexpected result",
+        );
+      }
+      if (state === "target_not_fillable" || state === "fill_focus_lost") {
+        return fillError(state, "fill target changed or lost focus before clearing");
+      }
+      if (state === "background") {
+        try {
+          await deps.cdp.send(target.tabId, "Input.dispatchKeyEvent", {
+            type: "rawKeyDown",
+            commands: [],
+          });
+        } finally {
+          await deps.cdp.send(target.tabId, "Input.dispatchKeyEvent", { type: "keyUp" });
+        }
+        if (throwIfAborted(deps.signal)) return { code: "cancelled", message: "fill aborted" };
+      }
+    }
     const prepared = await nodeCdp.send<FillScriptReply<FillPreparation>>(
       target.tabId,
       "Runtime.callFunctionOn",
@@ -1195,7 +1264,7 @@ export async function handleFill(
             } else {
               this.textContent = '';
             }
-            this.dispatchEvent(new Event('input', { bubbles: true }));
+            this.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
           }
           return preparation;
         }`,
@@ -1213,7 +1282,11 @@ export async function handleFill(
     if (preparation && "error" in preparation) {
       return fillError(preparation.reason, preparation.error);
     }
-    if (typeof preparation?.before !== "string" || typeof preparation?.expected !== "string") {
+    if (
+      typeof preparation?.before !== "string" ||
+      typeof preparation?.expected !== "string" ||
+      (preparation.write !== "insert" && preparation.write !== "value")
+    ) {
       return fillError("fill_failed", "fill preparation returned an unexpected result");
     }
     // A separate call runs after the clearing event's microtasks drain.
@@ -1234,8 +1307,33 @@ export async function handleFill(
             if (this.getRootNode().activeElement !== this) return 'fill_focus_lost';
             if (verifyCaret) {
               const selection = this.ownerDocument.getSelection();
-              if (!selection || !selection.isCollapsed || selection.anchorNode !== this ||
-                  selection.anchorOffset !== this.childNodes.length) return 'fill_focus_lost';
+              if (!selection?.isCollapsed || !this.contains(selection.anchorNode)) return 'fill_focus_lost';
+              // Editors can normalize the same end caret into their last paragraph/text node.
+              // Follow that boundary to the host; empty text alone would also skip images/atoms.
+              let node = selection.anchorNode;
+              let offset = selection.anchorOffset;
+              let paddingBreak = false;
+              for (;;) {
+                if (node.nodeType === Node.TEXT_NODE) {
+                  if (offset !== node.length) return 'fill_focus_lost';
+                } else if (node.nodeType === Node.ELEMENT_NODE) {
+                  if (!node.isContentEditable || node.matches('input,textarea,select,button,img,br,hr,iframe,object,embed,canvas,video,audio')) return 'fill_focus_lost';
+                  if (offset !== node.childNodes.length) {
+                    // One BR may hold an empty paragraph or the host's final inline line open.
+                    // Do not cross a real line break or an independent block after the caret.
+                    const inlineHost = node === this && [...node.childNodes].every(child =>
+                      child.nodeType === Node.TEXT_NODE || child.nodeName === 'BR');
+                    if (paddingBreak || offset !== node.childNodes.length - 1 ||
+                        node.lastChild?.nodeName !== 'BR' ||
+                        (node.childNodes.length !== 1 && !inlineHost)) return 'fill_focus_lost';
+                    paddingBreak = true;
+                  }
+                } else return 'fill_focus_lost';
+                if (node === this) break;
+                const parent = node.parentNode;
+                offset = [...parent.childNodes].indexOf(node) + 1;
+                node = parent;
+              }
             }
             if (placeCaret) {
               const selection = this.ownerDocument.getSelection();
@@ -1286,61 +1384,146 @@ export async function handleFill(
     if (ready !== "ready" && ready !== "background") {
       return fillError(ready, "fill target changed or lost focus before typing");
     }
-    if (params.value !== "" && (!clearBefore || ready === "background")) {
-      // Native commands position number/email carets without selection APIs.
-      // For editors, only flush deferred background focus here: the document
-      // end command can escape a nested editing host. Place its range below.
-      // Neither event carries an End key that could invoke a page shortcut.
-      try {
-        await deps.cdp.send(target.tabId, "Input.dispatchKeyEvent", {
-          type: "rawKeyDown",
-          commands: native ? ["moveToEndOfDocument"] : [],
-        });
-      } finally {
-        await deps.cdp.send(target.tabId, "Input.dispatchKeyEvent", { type: "keyUp" });
+    let valueAssigned = false;
+    if (preparation.write === "value") {
+      // Date-like inputs have no text caret and always replace (preparation
+      // rejects --no-clear); assign the sanitized value directly. Still flush
+      // deferred background focus first so a later tab switch cannot replay a
+      // pending focus handler over the value we are about to write.
+      if (ready === "background") {
+        try {
+          await deps.cdp.send(target.tabId, "Input.dispatchKeyEvent", {
+            type: "rawKeyDown",
+            commands: ["moveToEndOfDocument"],
+          });
+        } finally {
+          await deps.cdp.send(target.tabId, "Input.dispatchKeyEvent", { type: "keyUp" });
+        }
+        if (throwIfAborted(deps.signal)) {
+          return { code: "cancelled", message: "fill aborted" };
+        }
+        // The replacement may overwrite a value set by a focus handler.
+        const focusReply = await nodeCdp.send<FillScriptReply<FillReadiness>>(
+          target.tabId,
+          "Runtime.callFunctionOn",
+          {
+            objectId,
+            functionDeclaration: `function() {
+              if (!(${FILL_EDITABLE_FUNCTION}).call(this)) return 'fill_target_changed';
+              if (this.getRootNode().activeElement !== this) return 'fill_focus_lost';
+              return this.ownerDocument.hasFocus() ? 'ready' : 'background';
+            }`,
+            returnByValue: true,
+          },
+        );
+        ready = focusReply.result?.value as FillReadiness;
+        if (
+          focusReply.exceptionDetails ||
+          (ready !== "ready" &&
+            ready !== "background" &&
+            ready !== "fill_target_changed" &&
+            ready !== "fill_focus_lost")
+        ) {
+          return fillError(
+            "fill_failed",
+            "fill readiness script failed or returned an unexpected result",
+          );
+        }
+        if (throwIfAborted(deps.signal)) {
+          return { code: "cancelled", message: "fill aborted" };
+        }
+        if (ready !== "ready" && ready !== "background") {
+          return fillError(ready, "fill target changed or lost focus before assigning the value");
+        }
       }
+      // Assign even an empty value: a deferred focus handler may have filled
+      // the field again after the initial clearing step.
+      const assigned = await nodeCdp.send<FillScriptReply<boolean>>(
+        target.tabId,
+        "Runtime.callFunctionOn",
+        {
+          objectId,
+          functionDeclaration: `function(expected) {
+            const changed = this.value !== expected;
+            Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(this, expected);
+            return changed;
+          }`,
+          arguments: [{ value: preparation.expected }],
+          returnByValue: true,
+        },
+      );
       if (throwIfAborted(deps.signal)) {
         return { code: "cancelled", message: "fill aborted" };
       }
-    }
-    if (params.value !== "" && (!native || !clearBefore || ready === "background")) {
-      // Recheck after deferred focus handlers, then place the caret only in
-      // this editing host. Empty hosts need no temporary DOM characters.
-      ready = await checkReady(!native);
-      if (throwIfAborted(deps.signal)) return { code: "cancelled", message: "fill aborted" };
-      if (!native && (ready === "ready" || ready === "background")) {
-        // Selection changes can run page handlers after the placement script.
-        ready = await checkReady(false, true);
+      if (assigned.exceptionDetails) {
+        return fillError("fill_failed", "fill value assignment script failed");
       }
-      if (throwIfAborted(deps.signal)) return { code: "cancelled", message: "fill aborted" };
-      if (typeof ready !== "string") return ready;
-      if (ready !== "ready" && ready !== "background") {
-        return fillError(ready, "fill target changed or lost focus while positioning the caret");
+      valueAssigned = assigned.result?.value === true;
+    } else {
+      if (params.value !== "" && (!clearBefore || ready === "background")) {
+        // Native commands position number/email carets without selection APIs.
+        // For editors, only flush deferred background focus here: the document
+        // end command can escape a nested editing host. Place its range below.
+        // Neither event carries an End key that could invoke a page shortcut.
+        try {
+          await deps.cdp.send(target.tabId, "Input.dispatchKeyEvent", {
+            type: "rawKeyDown",
+            commands: native ? ["moveToEndOfDocument"] : [],
+          });
+        } finally {
+          await deps.cdp.send(target.tabId, "Input.dispatchKeyEvent", { type: "keyUp" });
+        }
+        if (throwIfAborted(deps.signal)) {
+          return { code: "cancelled", message: "fill aborted" };
+        }
       }
-    }
-    // CDP `Input.insertText` handles IME / multi-byte input out of the
-    // box, much more reliably than per-key `dispatchKeyEvent`.
-    if (params.value !== "") {
-      // Normalize the actual input as well as the expected value: older Chrome
-      // versions retain CR in editors or turn CRLF into two textarea breaks.
-      await deps.cdp.send(target.tabId, "Input.insertText", {
-        text: params.value.replace(/\r\n?/g, "\n"),
-      });
+      if (params.value !== "" && (!native || !clearBefore || ready === "background")) {
+        // Recheck after deferred focus handlers, then place the caret only in
+        // this editing host. Empty hosts need no temporary DOM characters.
+        ready = await checkReady(!native);
+        if (throwIfAborted(deps.signal)) return { code: "cancelled", message: "fill aborted" };
+        if (!native && (ready === "ready" || ready === "background")) {
+          // Selection changes can run page handlers after the placement script.
+          ready = await checkReady(false, true);
+        }
+        if (throwIfAborted(deps.signal)) return { code: "cancelled", message: "fill aborted" };
+        if (typeof ready !== "string") return ready;
+        if (ready !== "ready" && ready !== "background") {
+          return fillError(ready, "fill target changed or lost focus while positioning the caret");
+        }
+      }
+      // CDP `Input.insertText` handles IME / multi-byte input out of the
+      // box, much more reliably than per-key `dispatchKeyEvent`.
+      if (params.value !== "") {
+        // Normalize the actual input as well as the expected value: older Chrome
+        // versions retain CR in editors or turn CRLF into two textarea breaks.
+        await deps.cdp.send(target.tabId, "Input.insertText", {
+          text: params.value.replace(/\r\n?/g, "\n"),
+        });
+      }
     }
     if (throwIfAborted(deps.signal)) {
       return { code: "cancelled", message: "fill aborted" };
     }
-    // Keep the existing notifications, then read in a separate call so
-    // nested microtasks queued by the page cannot race the verification.
+    // Native insertion and the clearing step already dispatch `input` for the
+    // final value. Synthesize it only for value-set or no-op fills that have
+    // no native event, and always send `change`, which neither path dispatches.
+    const finalValueAlreadyNotified =
+      (clearBefore && params.value === "" && !valueAssigned) ||
+      (preparation.write === "insert" && params.value !== "");
+    const notifyInput = !finalValueAlreadyNotified;
+    // Notify, then read in a separate call so nested microtasks queued by the
+    // page cannot race the verification.
     const notified = await nodeCdp.send<FillScriptReply<unknown>>(
       target.tabId,
       "Runtime.callFunctionOn",
       {
         objectId,
-        functionDeclaration: `function() {
-          this.dispatchEvent(new Event('input', { bubbles: true }));
+        functionDeclaration: `function(notifyInput) {
+          if (notifyInput) this.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
           this.dispatchEvent(new Event('change', { bubbles: true }));
         }`,
+        arguments: [{ value: notifyInput }],
         returnByValue: true,
       },
     );
@@ -1433,6 +1616,14 @@ export function parseKeySpec(spec: string): { key: string; modifiers: KeyModifie
     .split("+")
     .map((s) => s.trim())
     .filter((s) => s.length > 0);
+  // The final '+' is a base key only when every preceding token is a modifier.
+  if (
+    /\+\s*\+\s*$/.test(spec) &&
+    parts.length > 0 &&
+    parts.every((part) => normaliseModifier(part))
+  ) {
+    parts.push("+");
+  }
   if (parts.length <= 1) {
     return { key: spec.trim(), modifiers: [] };
   }
@@ -1482,6 +1673,43 @@ for (let i = 1; i <= 12; i++) {
 }
 
 /**
+ * Physical keys for the ASCII punctuation that has no `Key*`/`Digit*` code,
+ * in the US layout that `Input.dispatchKeyEvent` assumes. The virtual key
+ * codes match Playwright's `USKeyboardLayout`.
+ *
+ * Without them the descriptor carries `code: ""` and no
+ * `windowsVirtualKeyCode`; Chromium does NOT derive either from `text` (the
+ * old comment here claimed it did), and `text` is suppressed whenever
+ * ctrl/meta/alt is held, so `Ctrl+/` reached the page as
+ * `{key: "/", code: "", keyCode: 0}` and never matched a handler that keys
+ * off `event.code === "Slash"`.
+ */
+const PUNCTUATION_KEYMAP: Record<string, { code: string; windowsVirtualKeyCode: number }> = {
+  "`": { code: "Backquote", windowsVirtualKeyCode: 192 },
+  "~": { code: "Backquote", windowsVirtualKeyCode: 192 },
+  "-": { code: "Minus", windowsVirtualKeyCode: 189 },
+  _: { code: "Minus", windowsVirtualKeyCode: 189 },
+  "=": { code: "Equal", windowsVirtualKeyCode: 187 },
+  "+": { code: "Equal", windowsVirtualKeyCode: 187 },
+  "[": { code: "BracketLeft", windowsVirtualKeyCode: 219 },
+  "{": { code: "BracketLeft", windowsVirtualKeyCode: 219 },
+  "]": { code: "BracketRight", windowsVirtualKeyCode: 221 },
+  "}": { code: "BracketRight", windowsVirtualKeyCode: 221 },
+  "\\": { code: "Backslash", windowsVirtualKeyCode: 220 },
+  "|": { code: "Backslash", windowsVirtualKeyCode: 220 },
+  ";": { code: "Semicolon", windowsVirtualKeyCode: 186 },
+  ":": { code: "Semicolon", windowsVirtualKeyCode: 186 },
+  "'": { code: "Quote", windowsVirtualKeyCode: 222 },
+  '"': { code: "Quote", windowsVirtualKeyCode: 222 },
+  ",": { code: "Comma", windowsVirtualKeyCode: 188 },
+  "<": { code: "Comma", windowsVirtualKeyCode: 188 },
+  ".": { code: "Period", windowsVirtualKeyCode: 190 },
+  ">": { code: "Period", windowsVirtualKeyCode: 190 },
+  "/": { code: "Slash", windowsVirtualKeyCode: 191 },
+  "?": { code: "Slash", windowsVirtualKeyCode: 191 },
+};
+
+/**
  * Translate a logical key name (`Enter`, `a`, `3`, `F5`, `ArrowDown`)
  * into the CDP `Input.dispatchKeyEvent` descriptor. Returns `null`
  * for keys we don't recognise (caller surfaces `invalid_params`).
@@ -1515,8 +1743,11 @@ export function resolveKeyDescriptor(key: string): KeyDescriptor | null {
         windowsVirtualKeyCode: ch.charCodeAt(0),
       };
     }
-    // Common punctuation falls back to `text` only. Browsers
-    // synthesise the right code from `text` when CDP can't find one.
+    const punctuation = PUNCTUATION_KEYMAP[ch];
+    if (punctuation) return { key: ch, text: ch, ...punctuation };
+    // Anything else (non-ASCII, characters with no known physical key) still
+    // goes out as text only; a caller that needs `code` semantics should
+    // pass a key from the tables above.
     return { key: ch, code: "", text: ch };
   }
   return null;
@@ -1616,21 +1847,27 @@ export async function handlePress(
     // Suppress `text` when any non-shift modifier is held — `Ctrl+a`
     // should not also type the character "a" into the focused field.
     const suppressText = mods.some((m) => m === "ctrl" || m === "meta" || m === "alt");
+    // Enter can navigate on keydown (links) or keypress (form submission).
+    // Let Chromium dispatch that pair in one command: a separate char command
+    // would either fail the old document's guard or reach the new document.
+    const enterText = descriptor.key === "Enter" && !suppressText ? descriptor.text : undefined;
     try {
       let cancelled = false;
       deps.cdp.trackSessionTab?.(ctx.sessionId, target.tabId);
       deps.onInputSent?.(target.tabId);
       input.markSent();
       await deps.cdp.send(target.tabId, "Input.dispatchKeyEvent", {
-        type: "rawKeyDown",
+        type: enterText ? "keyDown" : "rawKeyDown",
         key: descriptor.key,
         code: descriptor.code,
         windowsVirtualKeyCode: descriptor.windowsVirtualKeyCode,
         modifiers,
+        ...(enterText ? { text: enterText } : {}),
       });
       cancelled = throwIfAborted(deps.signal) !== null;
       if (
         !cancelled &&
+        !enterText &&
         !suppressText &&
         typeof descriptor.text === "string" &&
         descriptor.text.length > 0
@@ -1775,6 +2012,9 @@ export async function handleSelect(
       objectId,
       functionDeclaration: `function(values) {
         const select = this;
+        if (select.matches(':disabled')) {
+          return { ok: false, reason: 'target_disabled' };
+        }
         const multiple = select.multiple;
         const known = new Set(Array.from(select.options).map((o) => o.value));
         for (const v of values) {
@@ -1786,7 +2026,7 @@ export async function handleSelect(
         for (const opt of select.options) {
           opt.selected = want.has(opt.value);
         }
-        select.dispatchEvent(new Event('input', { bubbles: true }));
+        select.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
         select.dispatchEvent(new Event('change', { bubbles: true }));
         const selected = Array.from(select.selectedOptions);
         return {
@@ -1801,6 +2041,9 @@ export async function handleSelect(
     });
     const mutation = evaluated.result?.value;
     if (!mutation?.ok) {
+      if (mutation?.reason === "target_disabled") {
+        return { code: "invalid_params", message: "select requires an enabled <select>" };
+      }
       if (mutation?.reason === "option_not_found") {
         return rpcError(
           "invalid_params",

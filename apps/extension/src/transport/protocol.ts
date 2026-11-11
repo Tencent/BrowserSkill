@@ -55,6 +55,17 @@ export function decodeHandshakeResult(value: unknown): HandshakeResult {
   return result as HandshakeResult;
 }
 
+function stripEnvelopeParams(value: unknown): unknown {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return value;
+  if (!("_audit_id" in value) && !("_operation_id" in value)) return value;
+  const {
+    _audit_id: _auditId,
+    _operation_id: _operationId,
+    ...rest
+  } = value as Record<string, unknown>;
+  return rest;
+}
+
 export function decodeToolRequest(
   frame: RequestFrame,
 ): { ok: true; request: ToolRequest } | { ok: false; error: RpcError } {
@@ -65,14 +76,15 @@ export function decodeToolRequest(
     };
   }
   const definition = extensionMethods.get(frame.method)!;
+  const rawParams = stripEnvelopeParams(frame.params);
   const wire = validators[`wire_${definition.params}`];
-  if (!wire(frame.params)) {
+  if (!wire(rawParams)) {
     return {
       ok: false,
       error: { code: "invalid_params", message: `${frame.method}: ${describe(wire)}` },
     };
   }
-  const params = normalizers[definition.params](frame.params);
+  const params = normalizers[definition.params](rawParams);
   const canonical = validators[`canonical_${definition.params}`];
   if (!canonical(params)) {
     return {

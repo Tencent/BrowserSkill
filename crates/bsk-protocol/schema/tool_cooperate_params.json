@@ -1,6 +1,22 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "definitions": {
+    "ControlPolicy": {
+      "oneOf": [
+        {
+          "enum": [
+            "strict",
+            "target"
+          ],
+          "type": "string"
+        },
+        {
+          "const": "auto",
+          "description": "Keep the negotiated policy, or choose target when the session is unconfigured.",
+          "type": "string"
+        }
+      ]
+    },
     "CooperateAction": {
       "enum": [
         "enable",
@@ -14,6 +30,17 @@
   "properties": {
     "action": {
       "$ref": "#/definitions/CooperateAction"
+    },
+    "control_policy": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/ControlPolicy"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Omitted by legacy callers. A negotiated policy remains fixed for the session."
     },
     "max_tokens": {
       "format": "uint32",

@@ -7,10 +7,10 @@ use std::time::Duration;
 
 use anyhow::Context;
 use base64::Engine;
-use bsk_protocol::Method;
 use bsk_protocol::tools::{
     DownloadParams, DownloadResult, TransferChunkParams, TransferChunkResult,
 };
+use bsk_protocol::{ErrorCode, Method};
 use clap::Args;
 use uuid::Uuid;
 
@@ -42,15 +42,16 @@ pub struct DownloadArgs {
 
 pub fn dispatch(args: DownloadArgs, format: Format) -> Result<(), CliError> {
     if args.out.exists() && !args.overwrite {
-        return Err(CliError::Local(anyhow::anyhow!(
-            "output already exists (pass --overwrite to replace it): {}",
-            args.out.display()
-        )));
+        return Err(output_exists(&args.out));
     }
+    let (ref_, selector) =
+        split_target(args.target, args.ref_, args.selector).map_err(|error| match error {
+            CliError::Local(error) => CliError::invalid_params(error),
+            error => error,
+        })?;
     let info = ensure_daemon().context("ensure daemon is running")?;
-    let (ref_, selector) = split_target(args.target, args.ref_, args.selector)?;
     let params = DownloadParams {
-        session_id: args.session,
+        session_id: args.session.clone(),
         ref_,
         selector,
         tab_id: args.tab_id,
@@ -64,7 +65,31 @@ pub fn dispatch(args: DownloadArgs, format: Format) -> Result<(), CliError> {
         Method::ToolDownload,
         Some(params),
         ipc_timeout(args.timeout),
-    )?;
+    )
+    .map_err(|mut error| {
+        if let CliError::Rpc {
+            code: ErrorCode::DialogPending,
+            message,
+            data: Some(data),
+            ..
+        } = &mut error
+            && let Some(operation_id) = data.get("operation_id").and_then(serde_json::Value::as_str)
+        {
+            let out = std::path::absolute(&args.out).unwrap_or_else(|_| args.out.clone());
+            let mut command = vec![
+                "bsk".to_string(), "operation".into(), "await".into(), operation_id.into(),
+                "--session".into(), args.session.clone(), "--out".into(), out.to_string_lossy().into_owned(),
+            ];
+            if args.overwrite { command.push("--overwrite".into()); }
+            command.push("--json".into());
+            data["download_output"] = serde_json::json!({
+                "path": out.to_string_lossy(), "overwrite": args.overwrite, "saved": false,
+                "resume_argv": command,
+            });
+            message.push_str("; after deciding the dialog, save the captured download with operation await --out (see download_output.resume_argv)");
+        }
+        error
+    })?;
     let transfer_id = reply.transfer_id.clone().ok_or_else(|| {
         CliError::Local(anyhow::anyhow!("daemon returned no download transfer id"))
     })?;
@@ -86,7 +111,25 @@ pub fn dispatch(args: DownloadArgs, format: Format) -> Result<(), CliError> {
     Ok(())
 }
 
-fn write_transfer(sock: &Path, id: &str, out: &Path, overwrite: bool) -> Result<(), CliError> {
+fn output_exists(out: &Path) -> CliError {
+    CliError::file_validation(
+        anyhow::anyhow!(
+            "output already exists (pass --overwrite to replace it): {}",
+            out.display()
+        ),
+        "choose a new --out path, or pass --overwrite to replace the existing file",
+    )
+}
+
+pub(super) fn write_transfer(
+    sock: &Path,
+    id: &str,
+    out: &Path,
+    overwrite: bool,
+) -> Result<(), CliError> {
+    if out.exists() && !overwrite {
+        return Err(output_exists(out));
+    }
     let parent = out
         .parent()
         .filter(|p| !p.as_os_str().is_empty())

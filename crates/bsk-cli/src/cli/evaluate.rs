@@ -12,15 +12,17 @@
 //!   normal `CliError` path with the usual non-zero exit codes.
 
 use std::path::PathBuf;
-use std::time::Duration;
 
 use anyhow::Context;
 use bsk_protocol::Method;
-use bsk_protocol::tools::{EvaluateParams, EvaluateResult};
+use bsk_protocol::tools::{
+    EvaluateParams, EvaluateResult, UNVERIFIED_SCRIPT_PROTOCOL, supports_unverified_script,
+};
 use clap::Args;
 
+use crate::cli::business_rpc::{self, ipc_timeout};
 use crate::cli::dialogs::print_dialog_summaries;
-use crate::cli::ensure_daemon::ensure_daemon;
+use crate::cli::ensure_daemon::ensure_daemon_with_protocol;
 use crate::cli::error::{CliError, Format};
 use crate::cli::navigate::parse_timeout_ms;
 
@@ -53,10 +55,31 @@ pub struct EvaluateArgs {
     /// Hard timeout (default 30s). Accepts `30s`, `1m`, `1500ms`.
     #[arg(long, default_value = "30s", value_parser = parse_timeout_ms)]
     pub timeout: u32,
+
+    /// Run without comparing the page with any observation: no --observation
+    /// is needed and nothing is refused because the page changed. Control,
+    /// the document and tab ownership are still checked. Last resort: first
+    /// state what the script relies on with --expect and no --observation
+    /// (target policy) or --depends-on (strict policy), which keeps a real
+    /// check and also runs on pages that keep changing. The script should check its own
+    /// preconditions and throw; the result carries `verified: false`.
+    #[arg(long)]
+    pub unverified: bool,
 }
 
 pub fn dispatch(args: EvaluateArgs, format: Format) -> Result<(), CliError> {
-    let info = ensure_daemon().context("ensure daemon is running")?;
+    // Asking for a page check and for none at once is a contradiction, not a
+    // stricter request. Refuse before anything reaches the daemon.
+    if args.unverified && business_rpc::verification_requested() {
+        return Err(CliError::invalid_params(anyhow::anyhow!(
+            "--unverified skips page verification; omit --expect, --observation and --depends-on, or omit --unverified to have them checked"
+        )));
+    }
+    let (info, protocol) = ensure_daemon_with_protocol().context("ensure daemon is running")?;
+    business_rpc::check_daemon_protocol(&protocol)?;
+    if args.unverified {
+        require_unverified_script(&protocol)?;
+    }
     let params = EvaluateParams {
         session_id: args.session,
         expression: args.expression,
@@ -64,9 +87,28 @@ pub fn dispatch(args: EvaluateArgs, format: Format) -> Result<(), CliError> {
         await_promise: Some(args.await_promise),
         return_by_value: Some(args.return_by_value),
         timeout_ms: Some(args.timeout),
+        unverified: args.unverified.then_some(true),
     };
     let reply = call(info.sock_path, params, args.timeout)?;
     render(&reply, format)
+}
+
+/// An older daemon or extension would ignore the flag and apply its page
+/// checks, so the refusal would look unexplained. Fail before dispatch instead.
+pub(crate) fn require_unverified_script(protocol: &str) -> Result<(), CliError> {
+    if supports_unverified_script(protocol) {
+        return Ok(());
+    }
+    Err(CliError::from_rpc(bsk_protocol::RpcError {
+        code: bsk_protocol::ErrorCode::Unsupported,
+        message: format!(
+            "evaluate --unverified requires daemon protocol {UNVERIFIED_SCRIPT_PROTOCOL} or a later compatible 1.x version; update the CLI and restart its daemon (running protocol {protocol})"
+        ),
+        data: Some(serde_json::json!({
+            "reason": "unsupported_feature", "phase": "negotiate", "effect_state": "none",
+            "required_protocol": UNVERIFIED_SCRIPT_PROTOCOL, "actual_protocol": protocol,
+        })),
+    }))
 }
 
 fn call(
@@ -81,12 +123,6 @@ fn call(
         Some(params),
         ipc_timeout(timeout_ms),
     )
-}
-
-fn ipc_timeout(timeout_ms: u32) -> Duration {
-    Duration::from_millis(u64::from(timeout_ms))
-        .checked_add(Duration::from_secs(15))
-        .unwrap_or(Duration::from_secs(u64::from(timeout_ms / 1_000) + 15))
 }
 
 fn render(reply: &EvaluateResult, format: Format) -> Result<(), CliError> {
@@ -126,6 +162,9 @@ fn render(reply: &EvaluateResult, format: Format) -> Result<(), CliError> {
                 eprintln!("evaluate failed: ok=false with no error payload");
             }
             print_dialog_summaries(&reply.dialogs);
+            if reply.verified == Some(false) {
+                eprintln!("note: ran unverified; the page was not compared with any observation");
+            }
         }
     }
     Ok(())

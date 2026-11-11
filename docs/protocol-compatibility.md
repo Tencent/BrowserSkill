@@ -49,10 +49,12 @@ just to make an unsupported operation run.
    generates extension contracts, feature metadata and the checked-in schemas.
    Popup guidance reads these generated requirements too.
 
-The initial feature table covers incognito sessions (1.4), explicit borrow
-confirmation timeouts (1.2), and request-help interaction policy (daemon 1.3;
-existing extension support starts at 1.0). It does not
-claim to reconstruct introduction versions for every historical method.
+The feature table covers borrow confirmation timeouts (1.2), request-help
+interaction policy (daemon 1.3; existing extension support starts at 1.0),
+incognito sessions (1.4), native dialog and suspended operation control (1.5),
+click-move-click drag gestures (1.7), target control and `expect` preconditions
+(1.8), and declarative DOM `read` plus `evaluate --unverified` (1.9). It does not
+claim to reconstruct introduction versions for every historical base method.
 
 Base compatibility also does not remove a feature's workflow requirements. In
 particular, shared-browser cooperation requires `cooperate sync` and a fresh
