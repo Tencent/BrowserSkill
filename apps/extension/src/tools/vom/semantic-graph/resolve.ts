@@ -50,8 +50,42 @@ function axValue(field?: { value?: string | number | boolean }): string | undefi
   return field?.value === undefined ? undefined : clean(String(field.value));
 }
 
-function axProperty(node: SemanticAxNode | undefined, name: string): string | undefined {
-  return axValue(node?.properties?.find((property) => property.name === name)?.value);
+interface ExtractedAxProps {
+  inputType?: string;
+  checked?: string;
+  hasPopup?: string;
+  expanded?: string;
+  focused?: string;
+  modal?: string;
+  disabled?: string;
+  selected?: string;
+  controls?: string;
+}
+
+const TRACKED_AX_PROPS = new Set<keyof ExtractedAxProps>([
+  "inputType",
+  "checked",
+  "hasPopup",
+  "expanded",
+  "focused",
+  "modal",
+  "disabled",
+  "selected",
+  "controls",
+]);
+
+function extractAxProps(node: SemanticAxNode | undefined): ExtractedAxProps | undefined {
+  const properties = node?.properties;
+  if (!properties?.length) return undefined;
+  let result: ExtractedAxProps | undefined;
+  for (const property of properties) {
+    const name = property.name as keyof ExtractedAxProps | undefined;
+    if (!name || !TRACKED_AX_PROPS.has(name)) continue;
+    if (result && name in result) continue;
+    result ??= {};
+    result[name] = axValue(property.value);
+  }
+  return result;
 }
 
 function normalizeRole(value: string | undefined): string | undefined {
@@ -116,15 +150,19 @@ function resolvedRole(node: SemanticGraphNode): {
   return { source: "none" };
 }
 
-function sensitive(node: SemanticGraphNode): boolean {
-  const attrs = node.dom?.attrs ?? {};
-  const type = (attrs.type ?? "").toLowerCase();
-  return (
-    type === "password" ||
-    Object.prototype.hasOwnProperty.call(attrs, RECORD_PASSWORD_ATTRIBUTE) ||
-    sensitiveAutocomplete(attrs.autocomplete) ||
-    SENSITIVE_INPUT_TYPES.has(axProperty(node.ax, "inputType") ?? "")
-  );
+function sensitive(node: SemanticGraphNode, axProps: ExtractedAxProps | undefined): boolean {
+  const attrs = node.dom?.attrs;
+  if (attrs) {
+    const type = (attrs.type ?? "").toLowerCase();
+    if (
+      type === "password" ||
+      Object.prototype.hasOwnProperty.call(attrs, RECORD_PASSWORD_ATTRIBUTE) ||
+      sensitiveAutocomplete(attrs.autocomplete)
+    ) {
+      return true;
+    }
+  }
+  return SENSITIVE_INPUT_TYPES.has(axProps?.inputType ?? "");
 }
 
 function inputState(
@@ -146,14 +184,18 @@ function inputState(
   return value ? "filled" : "empty";
 }
 
-function checkedState(node: SemanticGraphNode, role: string | undefined): VomNode["checked"] {
+function checkedState(
+  node: SemanticGraphNode,
+  role: string | undefined,
+  axProps: ExtractedAxProps | undefined,
+): VomNode["checked"] {
   if (
     !["checkbox", "radio", "switch", "menuitemcheckbox", "menuitemradio"].includes(
       role?.toLowerCase() ?? "",
     )
   )
     return undefined;
-  const axChecked = node.ax?.ignored === true ? undefined : axProperty(node.ax, "checked");
+  const axChecked = node.ax?.ignored === true ? undefined : axProps?.checked;
   if (axChecked === "true" || axChecked === "false") return axChecked === "true";
   if (axChecked === "mixed") return "mixed";
   // Native live state must not be inferred from the default HTML checked attribute.
@@ -184,9 +226,12 @@ interface ResolveIndexes {
   axSiblingIndex: Map<SemanticNodeId, number>;
   domIdIndex: Map<string, SemanticNodeId>;
   labelForIndex: Map<string, SemanticNodeId[]>;
+  axRoleLower: Map<SemanticNodeId, string>;
   domText: (nodeId: SemanticNodeId) => string | undefined;
   axText: (nodeId: SemanticNodeId) => string | undefined;
   hasNativeDescendant: (nodeId: SemanticNodeId) => boolean;
+  isOrInsideNative: (nodeId: SemanticNodeId) => boolean;
+  selfOrEnclosingLabel: (nodeId: SemanticNodeId) => SemanticNodeId | undefined;
 }
 
 function buildIndexes(graph: SemanticGraph): ResolveIndexes {
@@ -196,7 +241,12 @@ function buildIndexes(graph: SemanticGraph): ResolveIndexes {
   const axSiblingIndex = new Map<SemanticNodeId, number>();
   const domIdIndex = new Map<string, SemanticNodeId>();
   const labelForIndex = new Map<string, SemanticNodeId[]>();
+  const axRoleLower = new Map<SemanticNodeId, string>();
   for (const node of graph.nodes.values()) {
+    if (node.ax?.role?.value !== undefined) {
+      const role = normalizeRole(String(node.ax.role.value));
+      if (role) axRoleLower.set(node.id, role);
+    }
     if (node.domParentId) {
       const children = domChildren.get(node.domParentId) ?? [];
       domSiblingIndex.set(node.id, children.length);
@@ -220,16 +270,37 @@ function buildIndexes(graph: SemanticGraph): ResolveIndexes {
   }
 
   for (const [parentId, children] of axChildren) {
-    const order = graph.nodes.get(parentId)?.ax?.childIds ?? [];
-    const orderByAxId = new Map(order.map((nodeId, index) => [nodeId, index]));
-    children.sort((a, b) => {
-      const aIndex = orderByAxId.get(graph.nodes.get(a)?.axNodeId ?? "") ?? -1;
-      const bIndex = orderByAxId.get(graph.nodes.get(b)?.axNodeId ?? "") ?? -1;
-      return (
-        (aIndex < 0 ? Number.MAX_SAFE_INTEGER : aIndex) -
-        (bIndex < 0 ? Number.MAX_SAFE_INTEGER : bIndex)
-      );
-    });
+    if (children.length > 1) {
+      const order = graph.nodes.get(parentId)?.ax?.childIds;
+      if (order && order.length > 0) {
+        let alreadyOrdered = true;
+        let cursor = 0;
+        for (let i = 0; i < children.length; i++) {
+          const axId = graph.nodes.get(children[i])?.axNodeId;
+          if (!axId) {
+            alreadyOrdered = false;
+            break;
+          }
+          while (cursor < order.length && order[cursor] !== axId) cursor++;
+          if (cursor >= order.length) {
+            alreadyOrdered = false;
+            break;
+          }
+          cursor++;
+        }
+        if (!alreadyOrdered) {
+          const orderByAxId = new Map(order.map((nodeId, index) => [nodeId, index]));
+          children.sort((a, b) => {
+            const aIndex = orderByAxId.get(graph.nodes.get(a)?.axNodeId ?? "") ?? -1;
+            const bIndex = orderByAxId.get(graph.nodes.get(b)?.axNodeId ?? "") ?? -1;
+            return (
+              (aIndex < 0 ? Number.MAX_SAFE_INTEGER : aIndex) -
+              (bIndex < 0 ? Number.MAX_SAFE_INTEGER : bIndex)
+            );
+          });
+        }
+      }
+    }
     for (let index = 0; index < children.length; index += 1) {
       axSiblingIndex.set(children[index], index);
     }
@@ -243,20 +314,27 @@ function buildIndexes(graph: SemanticGraph): ResolveIndexes {
     resolvingText.add(nodeId);
     const node = graph.nodes.get(nodeId);
     const parts: string[] = [];
+    let joinedLength = 0;
     const own = clean(node?.dom?.textContent);
-    if (own) parts.push(own);
+    if (own) {
+      parts.push(own);
+      joinedLength = own.length;
+    }
     for (const childId of domChildren.get(nodeId) ?? []) {
       const child = graph.nodes.get(childId);
-      const childRole = child
-        ? domRole(child.dom?.tag.toLowerCase() ?? "", child.dom?.attrs ?? {})
+      const childRole = child?.dom
+        ? domRole(child.dom.tag.toLowerCase(), child.dom.attrs)
         : undefined;
-      if (childRole && INTERACTIVE_ROLES.has(childRole.toLowerCase())) continue;
+      if (childRole && INTERACTIVE_ROLES.has(childRole)) continue;
       const childText = domText(childId);
-      if (childText) parts.push(childText);
-      if (parts.join(" ").length >= 240) break;
+      if (childText) {
+        joinedLength += (parts.length > 0 ? 1 : 0) + childText.length;
+        parts.push(childText);
+      }
+      if (joinedLength >= 240) break;
     }
     resolvingText.delete(nodeId);
-    const result = clean(parts.join(" ").slice(0, 240));
+    const result = parts.length === 0 ? undefined : clean(parts.join(" ").slice(0, 240));
     textMemo.set(nodeId, result);
     return result;
   };
@@ -273,21 +351,24 @@ function buildIndexes(graph: SemanticGraph): ResolveIndexes {
       return value;
     };
     const node = graph.nodes.get(nodeId);
-    const role = normalizeRole(axValue(node?.ax?.role)) ?? "";
+    const role = axRoleLower.get(nodeId) ?? "";
     if (TEXT_AX_ROLES.has(role)) {
       const own = clean(axValue(node?.ax?.name) ?? axValue(node?.ax?.value));
       if (own) return complete(own);
     }
     const parts: string[] = [];
+    let joinedLength = 0;
     for (const childId of axChildren.get(nodeId) ?? []) {
-      const child = graph.nodes.get(childId);
-      const childRole = normalizeRole(axValue(child?.ax?.role)) ?? "";
+      const childRole = axRoleLower.get(childId) ?? "";
       if (INTERACTIVE_ROLES.has(childRole)) continue;
       const childText = axText(childId);
-      if (childText) parts.push(childText);
-      if (parts.join(" ").length >= 240) break;
+      if (childText) {
+        joinedLength += (parts.length > 0 ? 1 : 0) + childText.length;
+        parts.push(childText);
+      }
+      if (joinedLength >= 240) break;
     }
-    return complete(clean(parts.join(" ").slice(0, 240)));
+    return complete(parts.length === 0 ? undefined : clean(parts.join(" ").slice(0, 240)));
   };
 
   const nativeMemo = new Map<SemanticNodeId, boolean>();
@@ -298,8 +379,8 @@ function buildIndexes(graph: SemanticGraph): ResolveIndexes {
     for (const childId of domChildren.get(nodeId) ?? []) {
       const child = graph.nodes.get(childId);
       const childRole =
-        (child?.ax?.ignored === true ? undefined : normalizeRole(axValue(child?.ax?.role))) ??
-        (child ? domRole(child.dom?.tag.toLowerCase() ?? "", child.dom?.attrs ?? {}) : undefined);
+        (child?.ax?.ignored === true ? undefined : axRoleLower.get(childId)) ??
+        (child?.dom ? domRole(child.dom.tag.toLowerCase(), child.dom.attrs) : undefined);
       if (
         (child?.dom && NATIVE_CONTROL_TAGS.has(child.dom.tag.toLowerCase())) ||
         INTERACTIVE_ROLES.has(childRole ?? "") ||
@@ -312,6 +393,42 @@ function buildIndexes(graph: SemanticGraph): ResolveIndexes {
     return false;
   };
 
+  const insideNativeMemo = new Map<SemanticNodeId, boolean>();
+  const visitingInsideNative = new Set<SemanticNodeId>();
+  const isOrInsideNative = (nodeId: SemanticNodeId): boolean => {
+    const cached = insideNativeMemo.get(nodeId);
+    if (cached !== undefined) return cached;
+    if (visitingInsideNative.has(nodeId)) return false;
+    visitingInsideNative.add(nodeId);
+    const node = graph.nodes.get(nodeId);
+    const value = !node
+      ? false
+      : Boolean(node.dom && NATIVE_CONTROL_TAGS.has(node.dom.tag.toLowerCase())) ||
+        (node.domParentId ? isOrInsideNative(node.domParentId) : false);
+    visitingInsideNative.delete(nodeId);
+    insideNativeMemo.set(nodeId, value);
+    return value;
+  };
+
+  const enclosingLabelMemo = new Map<SemanticNodeId, SemanticNodeId | undefined>();
+  const visitingLabel = new Set<SemanticNodeId>();
+  const selfOrEnclosingLabel = (nodeId: SemanticNodeId): SemanticNodeId | undefined => {
+    if (enclosingLabelMemo.has(nodeId)) return enclosingLabelMemo.get(nodeId);
+    if (visitingLabel.has(nodeId)) return undefined;
+    visitingLabel.add(nodeId);
+    const node = graph.nodes.get(nodeId);
+    const value = !node
+      ? undefined
+      : node.dom?.tag.toLowerCase() === "label"
+        ? nodeId
+        : node.domParentId
+          ? selfOrEnclosingLabel(node.domParentId)
+          : undefined;
+    visitingLabel.delete(nodeId);
+    enclosingLabelMemo.set(nodeId, value);
+    return value;
+  };
+
   return {
     domChildren,
     axChildren,
@@ -319,9 +436,12 @@ function buildIndexes(graph: SemanticGraph): ResolveIndexes {
     axSiblingIndex,
     domIdIndex,
     labelForIndex,
+    axRoleLower,
     domText,
     axText,
     hasNativeDescendant,
+    isOrInsideNative,
+    selfOrEnclosingLabel,
   };
 }
 
@@ -334,32 +454,22 @@ function ariaLabelledText(node: SemanticGraphNode, indexes: ResolveIndexes): str
   return clean(parts.join(" "));
 }
 
-function nativeLabelText(
-  node: SemanticGraphNode,
-  graph: SemanticGraph,
-  indexes: ResolveIndexes,
-): string | undefined {
+function nativeLabelText(node: SemanticGraphNode, indexes: ResolveIndexes): string | undefined {
   const id = clean(node.dom?.attrs.id);
   if (id) {
-    const labels = indexes.labelForIndex.get(`${node.frameId}\u0000${id}`) ?? [];
-    const explicit = clean(
-      labels
-        .map((labelId) => indexes.domText(labelId))
-        .filter(Boolean)
-        .join(" "),
-    );
-    if (explicit) return explicit;
+    const labels = indexes.labelForIndex.get(`${node.frameId}\u0000${id}`);
+    if (labels?.length) {
+      const explicit = clean(
+        labels
+          .map((labelId) => indexes.domText(labelId))
+          .filter(Boolean)
+          .join(" "),
+      );
+      if (explicit) return explicit;
+    }
   }
-  let parentId = node.domParentId;
-  let guard = 0;
-  while (parentId && guard <= graph.nodes.size) {
-    const parent = graph.nodes.get(parentId);
-    if (!parent) break;
-    if (parent.dom?.tag.toLowerCase() === "label") return indexes.domText(parentId);
-    parentId = parent.domParentId;
-    guard += 1;
-  }
-  return undefined;
+  const labelId = node.domParentId ? indexes.selfOrEnclosingLabel(node.domParentId) : undefined;
+  return labelId ? indexes.domText(labelId) : undefined;
 }
 
 function precedingAxText(
@@ -371,8 +481,9 @@ function precedingAxText(
   const siblings = indexes.axChildren.get(node.axParentId) ?? [];
   const index = indexes.axSiblingIndex.get(node.id) ?? -1;
   for (let offset = 1; offset <= 4 && index - offset >= 0; offset += 1) {
-    const sibling = graph.nodes.get(siblings[index - offset]);
-    const role = normalizeRole(axValue(sibling?.ax?.role)) ?? "";
+    const siblingId = siblings[index - offset];
+    const sibling = graph.nodes.get(siblingId);
+    const role = indexes.axRoleLower.get(siblingId) ?? "";
     if (INTERACTIVE_ROLES.has(role)) break;
     if (!TEXT_AX_ROLES.has(role) && role !== "generic") continue;
     const text = clean(axValue(sibling?.ax?.name) ?? axValue(sibling?.ax?.value))?.replace(
@@ -404,75 +515,77 @@ function precedingDomText(
   return undefined;
 }
 
+const EMPTY_ATTRS: Record<string, string> = {};
+
 function resolvedName(
   node: SemanticGraphNode,
   role: string | undefined,
+  tag: string,
+  axProps: ExtractedAxProps | undefined,
   graph: SemanticGraph,
   indexes: ResolveIndexes,
   supplementalNames: ReadonlyMap<string, string>,
   identifierFallback: boolean,
 ): string | undefined {
-  const attrs = node.dom?.attrs ?? {};
-  const formControl = FORM_TAGS.has(node.dom?.tag.toLowerCase() ?? "");
-  const descendantText = indexes.domText(node.id);
-  const interactive =
-    INTERACTIVE_ROLES.has(role?.toLowerCase() ?? "") ||
-    NATIVE_CONTROL_TAGS.has(node.dom?.tag.toLowerCase() ?? "");
-  const candidates = [
-    node.ax?.ignored === true ? undefined : axValue(node.ax?.name),
-    ariaLabelledText(node, indexes),
-    clean(attrs["aria-label"]),
-    nativeLabelText(node, graph, indexes),
-    clean(attrs.title),
-    clean(attrs.alt),
-    node.ax?.ignored === true ? undefined : indexes.axText(node.id),
-    descendantText,
-    formControl ? precedingAxText(node, graph, indexes) : undefined,
-    formControl ? precedingDomText(node, graph, indexes) : undefined,
-    formControl ? clean(node.dom?.formPlaceholder ?? attrs.placeholder) : undefined,
-    formControl || !interactive || node.backendNodeId === undefined
-      ? undefined
-      : clean(supplementalNames.get(frameBackendKey(node.frameId, node.backendNodeId))),
-    identifierFallback && interactive ? stableIdentifierName(attrs) : undefined,
-  ];
-  let name = candidates.find((candidate) => candidate !== undefined);
-  const hasPopup = axProperty(node.ax, "hasPopup");
+  const attrs = node.dom?.attrs ?? EMPTY_ATTRS;
+  const axIgnored = node.ax?.ignored === true;
+  let name =
+    (axIgnored ? undefined : axValue(node.ax?.name)) ??
+    (attrs["aria-labelledby"] ? ariaLabelledText(node, indexes) : undefined) ??
+    clean(attrs["aria-label"]) ??
+    nativeLabelText(node, indexes) ??
+    clean(attrs.title) ??
+    clean(attrs.alt) ??
+    (axIgnored ? undefined : indexes.axText(node.id)) ??
+    indexes.domText(node.id);
+  if (name === undefined) {
+    const formControl = FORM_TAGS.has(tag);
+    if (formControl) {
+      name =
+        precedingAxText(node, graph, indexes) ??
+        precedingDomText(node, graph, indexes) ??
+        clean(node.dom?.formPlaceholder ?? attrs.placeholder);
+    }
+    if (name === undefined) {
+      const interactive =
+        INTERACTIVE_ROLES.has(role?.toLowerCase() ?? "") || NATIVE_CONTROL_TAGS.has(tag);
+      if (
+        !formControl &&
+        interactive &&
+        node.backendNodeId !== undefined &&
+        supplementalNames.size > 0
+      ) {
+        name = clean(supplementalNames.get(frameBackendKey(node.frameId, node.backendNodeId)));
+      }
+      if (name === undefined && identifierFallback && interactive) {
+        name = stableIdentifierName(attrs);
+      }
+    }
+  }
+  const hasPopup = axProps?.hasPopup;
   if (name && hasPopup && hasPopup !== "false") {
-    name =
-      axProperty(node.ax, "expanded") === "true" ? `${name} [expanded]` : `${name} [has-submenu]`;
+    name = axProps?.expanded === "true" ? `${name} [expanded]` : `${name} [has-submenu]`;
   }
   if (!name && role?.toLowerCase() === "iframe") return clean(attrs.id);
   return name;
 }
 
-function insideNative(node: SemanticGraphNode, graph: SemanticGraph): boolean {
-  let parentId = node.domParentId;
-  let guard = 0;
-  while (parentId && guard <= graph.nodes.size) {
-    const parent = graph.nodes.get(parentId);
-    if (!parent) break;
-    if (parent.dom && NATIVE_CONTROL_TAGS.has(parent.dom.tag.toLowerCase())) return true;
-    parentId = parent.domParentId;
-    guard += 1;
-  }
-  return false;
-}
-
-function nearbyText(
-  node: SemanticGraphNode,
-  graph: SemanticGraph,
-  indexes: ResolveIndexes,
-): string | undefined {
+function nearbyText(node: SemanticGraphNode, indexes: ResolveIndexes): string | undefined {
   if (!node.domParentId) return undefined;
-  const siblings = indexes.domChildren.get(node.domParentId) ?? [];
+  const siblings = indexes.domChildren.get(node.domParentId);
+  if (!siblings || siblings.length <= 1) return undefined;
   const index = indexes.domSiblingIndex.get(node.id) ?? -1;
   if (index < 0) return undefined;
-  const texts = siblings
-    .slice(Math.max(0, index - 3), index + 4)
-    .filter((id) => id !== node.id)
-    .flatMap((id) => indexes.domText(id) ?? [])
-    .slice(0, 3);
-  return clean(texts.join(" "));
+  const start = Math.max(0, index - 3);
+  const end = Math.min(siblings.length, index + 4);
+  const texts: string[] = [];
+  for (let i = start; i < end && texts.length < 3; i += 1) {
+    const id = siblings[i];
+    if (id === node.id) continue;
+    const text = indexes.domText(id);
+    if (text) texts.push(text);
+  }
+  return texts.length === 0 ? undefined : clean(texts.join(" "));
 }
 
 export function resolveSemanticGraph(
@@ -487,20 +600,34 @@ export function resolveSemanticGraph(
   const identifierFallback = options.identifierFallback ?? true;
   const nodes = new Map<SemanticNodeId, ResolvedSemanticNode>();
   for (const node of graph.nodes.values()) {
+    const axProps = extractAxProps(node.ax);
+    const axIgnored = node.ax?.ignored === true;
     const roleResolution = resolvedRole(node);
     const role = roleResolution.value;
-    const name = resolvedName(node, role, graph, indexes, supplementalNames, identifierFallback);
-    const isSensitive = sensitive(node);
+    const tag = node.dom?.tag.toLowerCase() ?? "";
+    const name = resolvedName(
+      node,
+      role,
+      tag,
+      axProps,
+      graph,
+      indexes,
+      supplementalNames,
+      identifierFallback,
+    );
+    const isSensitive = sensitive(node, axProps);
     const sourceValue = node.dom?.formValue ?? axValue(node.ax?.value);
     const value = isSensitive ? undefined : sourceValue;
-    const checked = checkedState(node, role);
-    const attrs = { ...(node.dom?.attrs ?? {}) };
-    if (isSensitive) delete attrs.value;
-    delete attrs[RECORD_PASSWORD_ATTRIBUTE];
+    const checked = checkedState(node, role, axProps);
+    const rawAttrs = node.dom?.attrs;
+    const attrs = rawAttrs ? { ...rawAttrs } : {};
+    if (isSensitive && "value" in attrs) delete attrs.value;
+    if (RECORD_PASSWORD_ATTRIBUTE in attrs) delete attrs[RECORD_PASSWORD_ATTRIBUTE];
     const frame = graph.frames.get(node.frameId);
-    const tag = node.dom?.tag.toLowerCase() ?? "";
     const inForm = node.dom?.inForm;
-    const nearby = nearbyText(node, graph, indexes);
+    const nearby = nearbyText(node, indexes);
+    const placeholder = clean(node.dom?.formPlaceholder ?? attrs.placeholder);
+    const textContent = clean(node.dom?.textContent);
     const vom: ResolvedSemanticNode["vom"] = {
       tag,
       rect: node.dom?.rect ?? null,
@@ -514,33 +641,29 @@ export function resolveSemanticGraph(
       ...(value !== undefined ? { value } : {}),
       ...(inForm !== undefined ? { inForm } : {}),
       ...(checked !== undefined ? { checked } : {}),
-      ...(node.ax?.ignored !== true && axProperty(node.ax, "focused") === "true"
-        ? { focused: true }
-        : {}),
-      ...(clean(node.dom?.formPlaceholder ?? attrs.placeholder)
-        ? { placeholder: clean(node.dom?.formPlaceholder ?? attrs.placeholder) }
-        : {}),
+      ...(!axIgnored && axProps?.focused === "true" ? { focused: true } : {}),
+      ...(placeholder ? { placeholder } : {}),
       attrs,
-      ...(clean(node.dom?.textContent) ? { text: clean(node.dom?.textContent) } : {}),
+      ...(textContent ? { text: textContent } : {}),
       ...(nearby ? { nearbyText: nearby } : {}),
       inputState: inputState(node, role, sourceValue, isSensitive),
       sensitive: isSensitive,
       // An available AX result is authoritative, including ignored/nonmodal nodes.
       modal: node.ax
-        ? node.ax.ignored !== true && axProperty(node.ax, "modal") === "true"
+        ? !axIgnored && axProps?.modal === "true"
         : (attrs["aria-modal"] ?? "").toLowerCase() === "true",
       disabled:
-        (node.ax?.ignored !== true && axProperty(node.ax, "disabled") === "true") ||
+        (!axIgnored && axProps?.disabled === "true") ||
         Object.prototype.hasOwnProperty.call(attrs, "disabled") ||
         (attrs["aria-disabled"] ?? "").toLowerCase() === "true",
       inert: Object.prototype.hasOwnProperty.call(attrs, "inert"),
       hasNativeDescendant: indexes.hasNativeDescendant(node.id),
-      insideNative: insideNative(node, graph),
+      insideNative: node.domParentId ? indexes.isOrInsideNative(node.domParentId) : false,
       ...(role?.toLowerCase() === "link" ? { href: externalHrefHost(attrs.href, frame?.url) } : {}),
     };
-    const selected = node.ax?.ignored === true ? undefined : axProperty(node.ax, "selected");
-    const expanded = node.ax?.ignored === true ? undefined : axProperty(node.ax, "expanded");
-    const controls = node.ax?.ignored === true ? undefined : axProperty(node.ax, "controls");
+    const selected = axIgnored ? undefined : axProps?.selected;
+    const expanded = axIgnored ? undefined : axProps?.expanded;
+    const controls = axIgnored ? undefined : axProps?.controls;
     if ((selected === "true" || selected === "false") && !vom.attrs?.["aria-selected"]) {
       vom.attrs = { ...(vom.attrs ?? {}), "aria-selected": selected };
     }

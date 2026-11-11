@@ -1,11 +1,21 @@
 import type { Viewport } from "@browser-skill/vom";
 import type { CdpFrame, CdpTarget } from "@/browser-driver/frame-graph";
-import { isOverlayHostNode } from "@/lib/overlay-bridge";
+import { OVERLAY_HOST_MARKER_ATTR, OVERLAY_HOST_NAME } from "@/lib/overlay-bridge";
 import type { GeometryProjection } from "../geometry";
 import type { FrameProjectionIssue, SnapshotCoordinates } from "../geometry/coordinate-types";
 import { createCaptureCheckpoint } from "./capture-abort";
 import type { CapturedNode } from "./capture-types";
 import type { FrameOwnedAxNode } from "./frame-document";
+
+function isDecodedOverlayHost(item: DecodedNode): boolean {
+  if (item.tag === OVERLAY_HOST_NAME || item.tag.toLowerCase() === OVERLAY_HOST_NAME) return true;
+  const attrs = item.attrs;
+  if (OVERLAY_HOST_MARKER_ATTR in attrs) return true;
+  for (const key in attrs) {
+    if (key.toLowerCase() === OVERLAY_HOST_MARKER_ATTR) return true;
+  }
+  return false;
+}
 
 /** Bounds retain their raw snapshot document layout units until normalization. */
 export interface SnapshotLayout {
@@ -65,6 +75,18 @@ export async function buildDocumentIndex<T extends DecodedNode>(
       if (pending) await pending;
     }
     if (overlayByNode.has(node.backendNodeId)) continue;
+    if (!ancestryComplete && !isDecodedOverlayHost(node)) {
+      if (node.parentBackendNodeId === null) {
+        overlayByNode.set(node.backendNodeId, false);
+        continue;
+      }
+      const parentOverlay = overlayByNode.get(node.parentBackendNodeId);
+      if (parentOverlay !== undefined) {
+        overlayByNode.set(node.backendNodeId, parentOverlay);
+        if (parentOverlay) excludedBackendNodeIds.add(node.backendNodeId);
+        continue;
+      }
+    }
     const path: DecodedNode[] = [];
     const visiting = new Set<number>();
     let current: DecodedNode | undefined = node;
@@ -79,7 +101,7 @@ export async function buildDocumentIndex<T extends DecodedNode>(
         // Only an overlay inside the cycle may mark the cycle and its descendants.
         overlay = path
           .slice(path.findIndex((item) => item.backendNodeId === current!.backendNodeId))
-          .some((item) => isOverlayHostNode(item.tag, Object.keys(item.attrs)));
+          .some((item) => isDecodedOverlayHost(item));
         break;
       }
       visiting.add(current.backendNodeId);
@@ -101,7 +123,7 @@ export async function buildDocumentIndex<T extends DecodedNode>(
         if (pending) await pending;
       }
       const item = path[i];
-      overlay = overlay || isOverlayHostNode(item.tag, Object.keys(item.attrs));
+      overlay = overlay || isDecodedOverlayHost(item);
       overlayByNode.set(item.backendNodeId, overlay);
       if (ancestryComplete) {
         complete = complete && !item.parentMissing;
