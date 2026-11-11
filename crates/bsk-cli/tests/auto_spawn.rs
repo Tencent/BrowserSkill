@@ -20,6 +20,8 @@ fn command(home: &Path, args: &[&str]) -> Command {
         .env("HOME", home)
         .env_remove("BSK_AUTO_START")
         .env("BSK_AUTO_UPDATE", "off")
+        // Disabling installation still allows a background manifest fetch.
+        .env("BSK_UPDATE_MANIFEST_URL", "http://127.0.0.1:1/disabled")
         .env("BSK_BROWSER_WAIT_MS", "0")
         .env("BSK_DOCTOR_BROWSER_WAIT_MS", "0")
         .env("RUST_LOG", "warn");
