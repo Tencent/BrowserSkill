@@ -459,10 +459,7 @@ const TEXT_NODE_TAGS = new Set(["#text", "#cdata-section"]);
  * structures (list tags/roles, or homogeneous repeated rows), never for a
  * multi-child compound button.
  */
-function isDelegatedRowContainer(
-  node: VomNode,
-  children: Map<number | null, VomNode[]>,
-): boolean {
+function isDelegatedRowContainer(node: VomNode, children: Map<number | null, VomNode[]>): boolean {
   if (!hasRecoveryHandler(node)) return false;
   const direct = (children.get(node.id) ?? []).filter((child) => !TEXT_NODE_TAGS.has(child.tag));
   if (direct.length === 0) return false;
@@ -479,9 +476,7 @@ function isDelegatedRowContainer(
   const firstTag = direct[0].tag;
   if (!direct.every((child) => child.tag === firstTag)) return false;
   if (
-    !direct.every(
-      (child) => cleaned(child.name) !== undefined || cleaned(child.text) !== undefined,
-    )
+    !direct.every((child) => cleaned(child.name) !== undefined || cleaned(child.text) !== undefined)
   )
     return false;
   const rects = direct.map((child) => child.rect);
