@@ -20,6 +20,30 @@ interface ActionGuard {
   scriptedEffect?: boolean;
 }
 
+/**
+ * True when a CDP step is an internal preparation, focus, geometry, or isolated-world
+ * helper call that cannot synthesize renderer `event.isTrusted === true` input events.
+ * Native `Input.*` dispatches (`input !== undefined`), user-supplied scripts
+ * (`scriptedEffect`), file-input/chooser mutations, drag-enter, and browser navigations
+ * are excluded and must still arm or refresh cooperation frames.
+ */
+export function isInternalActionStep(
+  input: InputExpectation | undefined,
+  method: string | undefined,
+  scriptedEffect = false,
+): boolean {
+  if (input !== undefined || scriptedEffect || !method) return false;
+  return ![
+    "DOM.setFileInputFiles",
+    "Page.setInterceptFileChooserDialog",
+    "Input.dispatchDragEvent",
+    "Page.navigate",
+    "Page.navigateToHistoryEntry",
+    "Page.reload",
+    "Browser.mutate",
+  ].includes(method);
+}
+
 /** Request-scoped input leases and a final fence at native dispatch. */
 export function guardedRunner<T extends CdpRunner>(cdp: T, options: ActionGuard = {}): T {
   const { prepare, dispatch, verifyPointerTarget, beginDomMutation, detach } = options;

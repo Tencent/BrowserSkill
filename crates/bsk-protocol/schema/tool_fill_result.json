@@ -71,11 +71,25 @@
     }
   },
   "properties": {
+    "actual_value": {
+      "description": "Final readback value for non-sensitive controls (truncated to 200 chars).\nAlways omitted (`None`) for password, card, or one-time-code controls.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
     "dialogs": {
       "items": {
         "$ref": "#/definitions/JavaScriptDialogInfo"
       },
       "type": "array"
+    },
+    "formatted": {
+      "description": "Set to `Some(true)` when a non-sensitive control's final value differs\nfrom the normalized requested value due to page formatting or truncation.",
+      "type": [
+        "boolean",
+        "null"
+      ]
     },
     "tab_id": {
       "format": "int64",

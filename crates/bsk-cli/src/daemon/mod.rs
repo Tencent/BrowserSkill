@@ -8,6 +8,7 @@ pub mod dialog_operations;
 pub mod file_transfer;
 pub mod inflight;
 pub mod info;
+pub mod intent_wal;
 pub mod ipc;
 pub(crate) mod json_store;
 pub mod local_auth;

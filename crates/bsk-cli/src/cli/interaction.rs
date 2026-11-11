@@ -18,7 +18,7 @@ use clap::{Args, ValueEnum};
 
 use crate::cli::business_rpc::ipc_timeout;
 use crate::cli::dialogs::print_dialog_summaries;
-use crate::cli::ensure_daemon::ensure_daemon;
+use crate::cli::ensure_daemon::ensure_daemon_optimistic as ensure_daemon;
 use crate::cli::error::{CliError, Format};
 use crate::cli::navigate::parse_timeout_ms;
 
@@ -494,10 +494,19 @@ pub fn dispatch_fill(args: FillArgs, format: Format) -> Result<(), CliError> {
         Format::Human => {
             let target =
                 format_used_target(reply.used_ref.as_deref(), reply.used_selector.as_deref());
-            println!(
-                "fill ok tab={} target={target} length={}",
-                reply.tab_id, reply.value_length
-            );
+            if reply.formatted == Some(true)
+                && let Some(actual) = reply.actual_value.as_deref()
+            {
+                println!(
+                    "fill ok tab={} target={target} length={} actual_value={actual:?}",
+                    reply.tab_id, reply.value_length
+                );
+            } else {
+                println!(
+                    "fill ok tab={} target={target} length={}",
+                    reply.tab_id, reply.value_length
+                );
+            }
             print_dialog_summaries(&reply.dialogs);
         }
     }

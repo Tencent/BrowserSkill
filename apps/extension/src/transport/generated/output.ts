@@ -523,6 +523,7 @@ export type RpcErrorReason =
   | "input_not_ready"
   | "input_clock_unavailable"
   | "input_outcome_unknown"
+  | "uncertain_prior_effect"
   | "input_paint_unconfirmed"
   | "input_cleanup_failed"
   | "ref_not_found"
@@ -2538,7 +2539,17 @@ export interface FillParams {
  * via the `definition` "FillResult".
  */
 export interface FillResult {
+  /**
+   * Final readback value for non-sensitive controls (truncated to 200 chars).
+   * Always omitted (`None`) for password, card, or one-time-code controls.
+   */
+  actual_value?: string;
   dialogs?: JavaScriptDialogInfo[];
+  /**
+   * Set to `Some(true)` when a non-sensitive control's final value differs
+   * from the normalized requested value due to page formatting or truncation.
+   */
+  formatted?: boolean;
   tab_id: number;
   used_ref?: string;
   used_selector?: string;

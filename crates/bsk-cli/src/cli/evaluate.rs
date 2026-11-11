@@ -22,7 +22,7 @@ use clap::Args;
 
 use crate::cli::business_rpc::{self, ipc_timeout};
 use crate::cli::dialogs::print_dialog_summaries;
-use crate::cli::ensure_daemon::ensure_daemon_with_protocol;
+use crate::cli::ensure_daemon::ensure_daemon_optimistic_with_protocol as ensure_daemon_with_protocol;
 use crate::cli::error::{CliError, Format};
 use crate::cli::navigate::parse_timeout_ms;
 

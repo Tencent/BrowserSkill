@@ -1435,13 +1435,44 @@ describe("handleFocus and handleBlur", () => {
 function successfulFillScript(params: unknown) {
   const script = params as { arguments?: Array<{ value: unknown }>; functionDeclaration: string };
   const args = script.arguments ?? [];
+  if (script.functionDeclaration.startsWith("async function(value, clearBefore")) {
+    const expected = String(args[0]?.value ?? "");
+    const clearBefore = Boolean(args[1]?.value ?? true);
+    return {
+      result: {
+        value: {
+          before: "",
+          expected,
+          write: "insert",
+          native: true,
+          supportsSelection: true,
+          isSensitive: false,
+          focused: true,
+          hasFocus: true,
+          cleared: clearBefore,
+          readyForInsert: true,
+        },
+      },
+    };
+  }
+  if (script.functionDeclaration.startsWith("async function(notifyInput, expected")) {
+    const expected = String(args[1]?.value ?? "");
+    return {
+      result: {
+        value: {
+          connected: true,
+          matches: true,
+          valueLength: expected.length,
+          sensitive: false,
+          actualValue: expected,
+          formatted: false,
+        },
+      },
+    };
+  }
   return {
     result: {
-      value: script.functionDeclaration.startsWith("function(value, clearBefore")
-        ? { before: "", expected: args[0].value, write: "insert" }
-        : script.functionDeclaration.startsWith("function(expected)")
-          ? { connected: true, matches: true, valueLength: String(args[0].value).length }
-          : "ready",
+      value: "ready",
     },
   };
 }
@@ -1465,9 +1496,17 @@ describe("handleFill", () => {
     const ctx = await sm.start("aa11");
     ctx.refStore.set("e1", 100, { tabId: 4 });
     const fake = makeFakeCdp({
-      "DOM.describeNode": () => ({
-        node: { backendNodeId: 100, nodeName: "BUTTON", attributes: [] },
+      "DOM.resolveNode": () => ({ object: { objectId: "obj-btn" } }),
+      "Runtime.callFunctionOn": () => ({
+        result: {
+          value: {
+            reason: "target_not_fillable",
+            error:
+              "fill requires an enabled text input, textarea, date/time control, or contenteditable editing host",
+          },
+        },
       }),
+      "Runtime.releaseObject": () => ({}),
     });
     const res = await handleFill(
       sm,
@@ -1476,7 +1515,7 @@ describe("handleFill", () => {
     );
     expect(res).toMatchObject({
       code: "invalid_params",
-      message: /not fillable/i,
+      message: /text input|not fillable/i,
       data: { reason: "target_not_fillable" },
     });
   });
@@ -1486,11 +1525,6 @@ describe("handleFill", () => {
     const ctx = await sm.start("aa11");
     ctx.refStore.set("e1", 555, { tabId: 4 });
     const fake = makeFakeCdp({
-      "DOM.describeNode": () => ({
-        node: { backendNodeId: 555, nodeName: "INPUT", attributes: ["type", "text"] },
-      }),
-      "DOM.scrollIntoViewIfNeeded": () => ({}),
-      "DOM.focus": () => ({}),
       "DOM.resolveNode": () => ({ object: { objectId: "obj-1" } }),
       "Runtime.callFunctionOn": successfulFillScript,
       "Runtime.releaseObject": () => ({}),
@@ -1507,9 +1541,9 @@ describe("handleFill", () => {
     expect(res.used_ref).toBe("e1");
     const insert = fake.sent.find((c) => c.method === "Input.insertText");
     expect(insert?.params).toEqual({ text: "hello" });
-    // Foreground replacement needs no extra caret-positioning round trip.
+    // Optimistic 3-step fast path runs Step 1 prepare + Step 3 verify (2 script calls).
     const callFns = fake.sent.filter((c) => c.method === "Runtime.callFunctionOn");
-    expect(callFns).toHaveLength(5);
+    expect(callFns).toHaveLength(2);
   });
 
   it("passes clear_before=false to preparation and verifies the result", async () => {
@@ -1517,20 +1551,14 @@ describe("handleFill", () => {
     const ctx = await sm.start("aa11");
     ctx.refStore.set("e1", 1, { tabId: 4 });
     const fake = makeFakeCdp({
-      "DOM.describeNode": () => ({
-        node: { backendNodeId: 1, nodeName: "TEXTAREA", attributes: [] },
-      }),
-      "DOM.scrollIntoViewIfNeeded": () => ({}),
-      "DOM.focus": () => ({}),
       "DOM.resolveNode": () => ({ object: { objectId: "obj-2" } }),
       "Runtime.callFunctionOn": (p) => {
         const script = p as { arguments?: Array<{ value: unknown }>; functionDeclaration: string };
-        if (script.functionDeclaration.startsWith("function(value, clearBefore")) {
+        if (script.functionDeclaration.startsWith("async function(value, clearBefore")) {
           expect(script.arguments?.[1].value).toBe(false);
         }
         return successfulFillScript(p);
       },
-      "Input.dispatchKeyEvent": () => ({}),
       "Runtime.releaseObject": () => ({}),
       "Input.insertText": () => ({}),
     });
@@ -1548,15 +1576,6 @@ describe("handleFill", () => {
     const ctx = await sm.start("aa11");
     ctx.refStore.set("e1", 7, { tabId: 4 });
     const fake = makeFakeCdp({
-      "DOM.describeNode": () => ({
-        node: {
-          backendNodeId: 7,
-          nodeName: "DIV",
-          attributes: ["contenteditable", "true"],
-        },
-      }),
-      "DOM.scrollIntoViewIfNeeded": () => ({}),
-      "DOM.focus": () => ({}),
       "DOM.resolveNode": () => ({ object: { objectId: "obj-3" } }),
       "Runtime.callFunctionOn": successfulFillScript,
       "Runtime.releaseObject": () => ({}),
@@ -1576,16 +1595,12 @@ describe("handleFill", () => {
     ctx.refStore.set("e1", 555, { tabId: 4 });
     const abort = new AbortController();
     const fake = makeFakeCdp({
-      "DOM.describeNode": () => ({
-        node: { backendNodeId: 555, nodeName: "INPUT", attributes: ["type", "text"] },
-      }),
-      "DOM.scrollIntoViewIfNeeded": () => ({}),
-      "DOM.focus": () => ({}),
       "DOM.resolveNode": () => ({ object: { objectId: "obj-1" } }),
       "Runtime.callFunctionOn": () => {
         abort.abort();
         return { result: { type: "undefined" } };
       },
+      "Runtime.releaseObject": () => ({}),
       "Input.insertText": () => ({}),
     });
 
@@ -1602,12 +1617,9 @@ describe("handleFill", () => {
   it("stops before focus when abort fires after fill scroll", async () => {
     const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
     const ctx = await sm.start("aa11");
-    ctx.refStore.set("e1", 555, { tabId: 4 });
+    ctx.refStore.set("e1", 555, { tabId: 4, frameId: "subframe-1" });
     const abort = new AbortController();
     const fake = makeFakeCdp({
-      "DOM.describeNode": () => ({
-        node: { backendNodeId: 555, nodeName: "INPUT", attributes: ["type", "text"] },
-      }),
       "DOM.scrollIntoViewIfNeeded": () => {
         abort.abort();
         return {};
@@ -1616,6 +1628,18 @@ describe("handleFill", () => {
       "DOM.resolveNode": () => ({ object: { objectId: "fill-target" } }),
       "Runtime.callFunctionOn": successfulFillScript,
       "Runtime.releaseObject": () => ({}),
+    });
+    fake.cdp.getFrameGraph = async () => ({
+      rootFrameId: "root",
+      frames: [
+        { frameId: "root", target: { tabId: 4 } },
+        {
+          frameId: "subframe-1",
+          parentFrameId: "root",
+          ownerBackendNodeId: 900,
+          target: { tabId: 4 },
+        },
+      ],
     });
 
     const res = await handleFill(
@@ -1626,6 +1650,7 @@ describe("handleFill", () => {
 
     expect(res).toMatchObject({ code: "cancelled" });
     expect(fake.sent.some((c) => c.method === "DOM.focus")).toBe(false);
+    expect(fake.sent.some((c) => c.method === "DOM.resolveNode")).toBe(false);
   });
 });
 

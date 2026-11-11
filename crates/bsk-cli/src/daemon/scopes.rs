@@ -363,6 +363,12 @@ impl ImplicitScopeRegistry {
             .map(|(_, uuid)| uuid.clone())
     }
 
+    /// Return the session's currently tracked active `tab_id` when known.
+    pub fn active_tab_id(&self, session_id: &SessionId) -> Option<i64> {
+        let guard = self.inner.lock().expect("implicit scope registry poisoned");
+        guard.sessions.get(session_id)?.active_tab_id
+    }
+
     /// Return the latest reusable `context_id` for the target tab ONLY when the
     /// session's negotiated cooperation policy is `target`. Never injects another
     /// tab's context when `tab_id` is omitted after tab switches/creation/closure.

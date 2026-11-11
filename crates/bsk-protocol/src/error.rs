@@ -129,6 +129,7 @@ pub enum RpcErrorReason {
     InputNotReady,
     InputClockUnavailable,
     InputOutcomeUnknown,
+    UncertainPriorEffect,
     InputPaintUnconfirmed,
     InputCleanupFailed,
     RefNotFound,
@@ -233,6 +234,10 @@ mod user_aborted_tests {
         for (variant, expected) in [
             (RpcErrorReason::VirtualRowRecycled, "virtual_row_recycled"),
             (RpcErrorReason::OptionAmbiguous, "option_ambiguous"),
+            (
+                RpcErrorReason::UncertainPriorEffect,
+                "uncertain_prior_effect",
+            ),
         ] {
             let encoded = serde_json::to_value(variant).unwrap();
             assert_eq!(encoded, serde_json::json!(expected));

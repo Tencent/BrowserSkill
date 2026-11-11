@@ -14,7 +14,7 @@ use bsk_protocol::{ErrorCode, Method, RpcError};
 use clap::Args;
 
 use crate::cli::TOOL_IPC_TIMEOUT;
-use crate::cli::ensure_daemon::ensure_daemon;
+use crate::cli::ensure_daemon::ensure_daemon_optimistic as ensure_daemon;
 use crate::cli::error::{CliError, Format};
 
 /// One built-in device preset: viewport metrics + UA + touch applied in

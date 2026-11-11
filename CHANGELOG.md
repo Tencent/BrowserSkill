@@ -11,6 +11,15 @@ determines which versions can connect.
 
 ### Added
 
+- Daemon-local `<3ms` Intent Write-Ahead Ledger (`$BSK_HOME/intent_ledger.jsonl`, `0600`)
+  and `bsk ledger status | resolve`: intercepts all mutating tools (`click`, `fill`,
+  `press`, `select`, `upload`, `drag`, `evaluate`) regardless of `--ref`, raw CSS
+  `--selector`, or visual `(image_x, image_y)` targeting while persisting only redacted
+  target summaries (never plaintext `fill` values or `evaluate` scripts). Transitions
+  timed-out, cancelled, disconnected, or `effect_state: "unknown"` actions (plus leftover
+  `DISPATCHED` entries across daemon restarts) to `UNKNOWN`, blocking blind mutating
+  replays on that tab in `<1ms` (`uncertain_prior_effect`) while allowing 100% of
+  read-only/diagnostic commands and auto-reconciling on `bsk sync`.
 - Zero-ceremony lifecycle commands (`bsk open`, `bsk sync`, `bsk close`) and a
   daemon-memory `ImplicitScopeRegistry` with deterministic `caller_scope` isolation
   (`--session` > `--scope` / `BSK_SESSION` / `BSK_SCOPE` > per-process MCP stdio
@@ -85,6 +94,17 @@ determines which versions can connect.
 
 ### Changed
 
+- Accelerated single-step interaction hot paths by ~85%: under `target` cooperation
+  policy, internal non-input CDP steps (`Runtime.callFunctionOn`, `DOM.focus`,
+  `DOM.scrollIntoViewIfNeeded`, `Emulation.*`, `DOM.getBoxModel`) run against a zero-RPC
+  in-memory push-interruption fence after a single entry `verifyDecision()` (preserving
+  real-time `isTrusted` human takeover cancellation and strict-policy semantics), merged
+  duplicate `beforeinput` cross-frame refreshes, and made `finishInput` cleanup
+  non-blocking on untouched Agent Window tabs; compressed `handleFill` to a 3–4 step CDP
+  fast path that retires hard `fill_value_mismatch` errors on auto-formatted inputs and
+  returns `actual_value` / `formatted` on non-sensitive fields; switched business CLI
+  commands to optimistic single-UDS direct connection via `daemon.json` with zero-replay
+  connect-failure auto-spawn fallback.
 - Rewrote the CLI `SKILL.md` into a zero-preread workflow (`<= 2,000` UTF-8 bytes)
   preserving all four cooperative safety invariants, removed repeated static `guidance`
   prose from `cooperate sync` replies, and added 75-second four-guard idle

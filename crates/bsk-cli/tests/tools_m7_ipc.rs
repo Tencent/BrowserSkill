@@ -546,6 +546,8 @@ async fn fill_round_trips_clear_before_default() {
                 used_ref: None,
                 used_selector: Some(".search".into()),
                 value_length: 11,
+                actual_value: Some("hello world".into()),
+                formatted: None,
                 dialogs: vec![],
             })
             .unwrap(),

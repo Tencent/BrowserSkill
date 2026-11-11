@@ -17,7 +17,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use super::cooperate::{self, Policy};
-use super::ensure_daemon::ensure_daemon;
+use super::ensure_daemon::ensure_daemon_optimistic as ensure_daemon;
 use super::error::{CliError, Format};
 use super::session::{StartReply, StopReply, handle_start_error, window_size};
 use super::{TOOL_IPC_TIMEOUT, business_rpc};

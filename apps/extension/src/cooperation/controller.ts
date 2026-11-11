@@ -23,7 +23,7 @@ import {
   checkExpectations,
   parseExpectations,
 } from "./action-checks";
-import { guardedRunner } from "./action-guard";
+import { guardedRunner, isInternalActionStep } from "./action-guard";
 import { type ControlAuthority, ControlAuthorityError } from "./control-authority";
 import { FrameCollectionError, FrameUnresponsiveError } from "./frame-error";
 import {
@@ -519,7 +519,7 @@ export class CooperationController implements ControlAuthority {
     const authorityRevision = state.authorityRevision;
     const epoch = state.epoch;
     const inputDeadline = Math.min(deadline, Date.now() + 25000);
-    await this.refresh(state, input?.type === "beforeinput" ? undefined : input);
+    await this.refresh(state, input);
     let waited = false;
     while (
       !state.held &&
@@ -548,7 +548,7 @@ export class CooperationController implements ControlAuthority {
       await this.refresh(state);
       waited = true;
     }
-    if ((waited && input) || input?.type === "beforeinput") {
+    if (waited && input) {
       if (
         !this.humanActive(state) &&
         !state.held &&
@@ -2054,6 +2054,9 @@ export class CooperationController implements ControlAuthority {
           scriptedEffect: req.method === "tool.evaluate",
           prepare: async (input, method) => {
             assert();
+            if (targeted && isInternalActionStep(input, method, req.method === "tool.evaluate")) {
+              return;
+            }
             await this.prepareFrames(state, operationSignal, input, method, deadline);
             assert();
             if (
@@ -2064,15 +2067,18 @@ export class CooperationController implements ControlAuthority {
               state.target = { x: input.x!, y: input.y!, expires: this.now() + 650 };
               this.changed(state);
             }
-            if (!nativeInputStarted)
-              await verifyDecision(
-                targeted && req.method === "tool.press" && input?.type === "keydown",
-              );
+            if (!nativeInputStarted) {
+              if (!targeted) {
+                await verifyDecision(false);
+              } else if (req.method === "tool.press" && input?.type === "keydown") {
+                await verifyDecision(true);
+              }
+            }
           },
           finishInput: async (input) => {
             // Retire only this command's one-shot text expectation. A late
             // acknowledgement must not clear another action's expectation.
-            await this.deps
+            const clear = this.deps
               .readFrames(
                 state.tabId,
                 { type: "clear", id: input.id },
@@ -2081,6 +2087,9 @@ export class CooperationController implements ControlAuthority {
                 state.hiddenFrames,
               )
               .catch(() => {});
+            if (!session.agentCreatedTabs.has(state.tabId) || state.intervened || state.held) {
+              await clear;
+            }
           },
           dispatch: (startsInput, method) => {
             assert();
@@ -2102,6 +2111,11 @@ export class CooperationController implements ControlAuthority {
             }
           },
           beginDomMutation: async () => {
+            if (targeted) {
+              assert();
+              nativeInputStarted = true;
+              return;
+            }
             await this.refresh(state);
             assert();
             if (!nativeInputStarted) await verifyDecision();

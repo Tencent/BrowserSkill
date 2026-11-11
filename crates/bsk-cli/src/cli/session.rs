@@ -17,7 +17,7 @@ use bsk_protocol::{ErrorCode, Method};
 use clap::{Args, Subcommand};
 use serde::{Deserialize, Serialize};
 
-use crate::cli::ensure_daemon::ensure_daemon;
+use crate::cli::ensure_daemon::ensure_daemon_optimistic as ensure_daemon;
 use crate::cli::error::{self, CliError, Format, RenderExtras};
 use crate::daemon::browsers::EXTENSION_CONNECT_WAIT;
 

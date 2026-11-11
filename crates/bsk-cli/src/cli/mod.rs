@@ -26,6 +26,7 @@ pub mod human_loop;
 pub mod install_skill;
 pub mod interaction;
 pub(crate) mod interaction_policy;
+pub mod ledger;
 pub mod lifecycle;
 pub mod logs;
 pub mod mcp;
@@ -147,6 +148,8 @@ pub enum Command {
     Sync(lifecycle::SyncArgs),
     /// Stop the active session, return borrowed tabs, and detach the debugger immediately.
     Close(lifecycle::CloseArgs),
+    /// Inspect or manually reconcile pending `UNKNOWN` actions in the Intent WAL.
+    Ledger(ledger::LedgerCmd),
     /// Decide native JavaScript dialogs (alert, confirm, prompt, beforeunload).
     Dialog(dialog_control::DialogCmd),
     /// Retrieve or cancel the original operation suspended by a native dialog.

@@ -650,8 +650,8 @@ pub fn dispatch(cmd: RecipeCmd, flags: &GlobalFlags, _format: Format) -> Result<
             print(&reply, exit)
         }
         RecipeCommand::Draft(args) => {
-            let (daemon, _protocol) =
-                ensure_daemon::ensure_daemon_with_protocol().context("ensure daemon is running")?;
+            let (daemon, _protocol) = ensure_daemon::ensure_daemon_optimistic_with_protocol()
+                .context("ensure daemon is running")?;
             let reply = draft(
                 &args.session,
                 &args.name,
@@ -705,8 +705,8 @@ pub fn dispatch(cmd: RecipeCmd, flags: &GlobalFlags, _format: Format) -> Result<
                     return print(&reply, exit);
                 }
             }
-            let (daemon, protocol) =
-                ensure_daemon::ensure_daemon_with_protocol().context("ensure daemon is running")?;
+            let (daemon, protocol) = ensure_daemon::ensure_daemon_optimistic_with_protocol()
+                .context("ensure daemon is running")?;
             plan::check_protocol(&protocol).map_err(CliError::Local)?;
             let (mut reply, mut exit) = run(&request, |method, params, timeout| {
                 business_rpc::call(

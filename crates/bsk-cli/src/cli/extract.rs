@@ -12,7 +12,10 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
 use super::error::{CliError, Format};
-use super::{TOOL_IPC_TIMEOUT, atomic_output, business_rpc, ensure_daemon::ensure_daemon};
+use super::{
+    TOOL_IPC_TIMEOUT, atomic_output, business_rpc,
+    ensure_daemon::ensure_daemon_optimistic as ensure_daemon,
+};
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
 pub enum Action {

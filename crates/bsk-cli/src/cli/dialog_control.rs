@@ -2,7 +2,7 @@
 
 use super::{
     business_rpc,
-    ensure_daemon::ensure_daemon,
+    ensure_daemon::ensure_daemon_optimistic as ensure_daemon,
     error::{CliError, Format},
 };
 use bsk_protocol::Method;
