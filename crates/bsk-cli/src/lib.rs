@@ -31,6 +31,10 @@ pub mod rpc_reason {
     pub const SCOPE_BROWSER_CONFLICT: &str = "scope_browser_conflict";
     /// Daemon-side: `bsk open --incognito` conflicts with the scope's bound session.
     pub const SCOPE_INCOGNITO_CONFLICT: &str = "scope_incognito_conflict";
+    /// Daemon-side (`RM-03` Intent WAL): prior mutating action on this session/tab
+    /// ended with an unconfirmed effect (`Timeout`, `Cancelled`, transport loss, or
+    /// `effect_state == "unknown"`), blocking blind replay until reconciled.
+    pub const UNCERTAIN_PRIOR_EFFECT: &str = "uncertain_prior_effect";
 }
 pub mod skill_install;
 

@@ -7,6 +7,13 @@ CLI、扩展和 DSH 插件可以分别发布，能否连接由协议兼容性决
 
 ### 新增
 
+- 新增 daemon 本地 `<3ms` 预写意图账本（`$BSK_HOME/intent_ledger.jsonl`，`0600` 权限）与
+  `bsk ledger status | resolve` 子命令：在派发层统一覆盖所有变异操作（`click`、`fill`、`press`、
+  `select`、`upload`、`drag`、`evaluate`），无论使用 `--ref`、原始 CSS `--selector` 还是视觉坐标
+  `(image_x, image_y)` 均提取脱敏目标摘要保护（绝不落盘 `fill` 明文输入或 `evaluate` 脚本内容）。
+  当调用因超时、取消、断连或 `effect_state: "unknown"` 结束（含 daemon 重启恢复残留 `DISPATCHED`
+  记录）时进入 `UNKNOWN` 冻结态，在 `<1ms` 内以 `uncertain_prior_effect` 拦截同标签页盲目变异重放，
+  100% 放行只读与诊断命令，并在执行 `bsk sync` 时零摩擦自动对账解锁。
 - 新增零仪式生命周期命令（`bsk open`、`bsk sync`、`bsk close`）与 daemon 内存级
   `ImplicitScopeRegistry`：提供确定性 `caller_scope` 并发隔离（`--session` >
   `--scope` / `BSK_SESSION` / `BSK_SCOPE` > `bsk mcp` 进程级连接作用域 > 宿主子代理环境变量 >
@@ -41,6 +48,13 @@ CLI、扩展和 DSH 插件可以分别发布，能否连接由协议兼容性决
 
 ### 变更
 
+- 单步交互热路径提速并削减约 85% 冗余串行 IPC/CDP 往返：`target` 共驾策略下在动作入口完成单次
+  `verifyDecision()` 预检后，对不会产生原生 `isTrusted` 输入的内部准备/脚本类 CDP 步骤采用同步零 RPC
+  内存级栅栏（完整保留推送式真实人类介入毫秒级中断与 `strict` 策略兼容），消除 `beforeinput`
+  双重跨帧广播轮询并优化未介入 Agent 窗口标签页的 `finishInput` 收尾开销；将 `handleFill`
+  压缩为 3–4 步乐观极速通道，废除页面自动格式化导致的 `fill_value_mismatch` 硬报错并为非敏感控件回传
+  `actual_value` 与 `formatted`；业务 CLI 命令升级为基于 `daemon.json` 的乐观单次 UDS 直连，仅在首次
+  `connect()` 未连接阶段按需回退自动拉起 daemon，确保零重复派发风险。
 - 将 CLI 内置 `SKILL.md` 重写为零预读闭环（`<= 2,000` UTF-8 字节）并完整保留四大安全红线，
   移除 `cooperate sync` 回执中每回合重复的静态 `guidance` 文本，同时为 `ChromiumCdp` 增加
   75 秒四重硬守卫空闲软卸载（保留会话归属与控制台/网络 `since` 游标并支持下一命令无感重连）及

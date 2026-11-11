@@ -92,6 +92,7 @@ pub mod reason {
     pub const SESSION_STOPPED: &str = crate::rpc_reason::SESSION_STOPPED;
     pub const SCOPE_BROWSER_CONFLICT: &str = crate::rpc_reason::SCOPE_BROWSER_CONFLICT;
     pub const SCOPE_INCOGNITO_CONFLICT: &str = crate::rpc_reason::SCOPE_INCOGNITO_CONFLICT;
+    pub const UNCERTAIN_PRIOR_EFFECT: &str = crate::rpc_reason::UNCERTAIN_PRIOR_EFFECT;
 }
 
 /// Per-code rendering metadata. The `summary` is what the CLI prints
@@ -440,6 +441,13 @@ pub fn info_for_error(code: ErrorCode, data: Option<&serde_json::Value>) -> Rend
             summary: "the active session in this scope has a different incognito mode",
             hint: Some(
                 "run `bsk close` first, or pass `--scope <new-scope>` to run normal and incognito sessions in parallel",
+            ),
+            exit_code: base.exit_code,
+        },
+        (ErrorCode::PermissionDenied, reason::UNCERTAIN_PRIOR_EFFECT) => RenderInfo {
+            summary: "mutating action blocked because a prior action on this tab has an unconfirmed side effect",
+            hint: Some(
+                "run `bsk sync` to observe the current page state and auto-reconcile, or inspect with `bsk read` / `bsk network` and run `bsk ledger resolve`; do not blindly replay the prior action",
             ),
             exit_code: base.exit_code,
         },

@@ -218,11 +218,13 @@ pub fn full_handler(status: DaemonStatus, state: Arc<DaemonState>) -> RpcHandler
                 .then(|| {
                     let action = params.get("action").and_then(Value::as_str)?;
                     if matches!(action, "sync" | "enable") {
-                        params
+                        let sid = params
                             .get("session_id")
                             .and_then(Value::as_str)
                             .filter(|s| !s.is_empty())
-                            .map(|s| SessionId(s.to_string()))
+                            .map(|s| SessionId(s.to_string()))?;
+                        let req_tab_id = params.get("tab_id").and_then(Value::as_i64);
+                        Some((sid, action == "sync", req_tab_id))
                     } else {
                         None
                     }
@@ -346,6 +348,7 @@ pub fn full_handler(status: DaemonStatus, state: Arc<DaemonState>) -> RpcHandler
                     Err(e) => ResponseBody::Err(e),
                 },
                 Method::SessionList => handle_session_list(&state),
+                Method::LedgerRequest => handle_ledger_request(&state, params, &scope_meta),
                 Method::BrowserList => match handle_browser_list(&state, params).await {
                     Ok(v) => ResponseBody::Ok(v),
                     Err(e) => ResponseBody::Err(e),
@@ -424,8 +427,20 @@ pub fn full_handler(status: DaemonStatus, state: Arc<DaemonState>) -> RpcHandler
                 }),
             };
             let mut body = body;
-            if let (Some(sid), ResponseBody::Ok(value)) = (&cooperate_sync_session, &mut body) {
+            if let (Some((sid, is_sync, req_tab_id)), ResponseBody::Ok(value)) =
+                (&cooperate_sync_session, &mut body)
+            {
                 let recorded = state.scopes.record_cooperate_result(sid, value);
+                if *is_sync {
+                    let synced_tab_id = value
+                        .get("tab_id")
+                        .and_then(Value::as_i64)
+                        .or(*req_tab_id)
+                        .or_else(|| state.scopes.active_tab_id(sid));
+                    state
+                        .intent_wal
+                        .reconcile_tab(sid, synced_tab_id, "cooperate_sync");
+                }
                 if scope_meta.return_scope_meta
                     && let Some(obj) = value.as_object_mut()
                 {
@@ -839,6 +854,18 @@ async fn handle_tool_dispatch(
             data: None,
         });
     }
+    let wal_mutating = super::intent_wal::IntentWal::is_mutating_tool(&method);
+    let wal_tab_id = wal_mutating
+        .then(|| {
+            params
+                .get("tab_id")
+                .and_then(Value::as_i64)
+                .or_else(|| state.scopes.active_tab_id(&session_id))
+        })
+        .flatten();
+    if wal_mutating && let Err(err) = state.intent_wal.check_gate(&session_id, wal_tab_id) {
+        return ResponseBody::Err(err);
+    }
     let timeout = match tool_dispatch_transport_timeout(&method, &params) {
         Ok(timeout) => timeout,
         Err(err) => return ResponseBody::Err(err),
@@ -979,6 +1006,12 @@ async fn handle_tool_dispatch(
     // serial busy lock — finishing the recording unblocks await.
     let independent_control = method == Method::ToolCooperate
         && params.get("action").and_then(Value::as_str) != Some("enable");
+    let wal_ticket = wal_mutating.then(|| {
+        let op_id = params.get("_operation_id").and_then(Value::as_str);
+        state
+            .intent_wal
+            .begin_dispatch(&session_id, wal_tab_id, op_id, &method, &params)
+    });
     let outcome = if independent_control
         || matches!(
             method,
@@ -998,6 +1031,11 @@ async fn handle_tool_dispatch(
             .await
     };
     drop(inflight_guard);
+    if let Some(wal_ticket) = wal_ticket {
+        state
+            .intent_wal
+            .finish_dispatch(wal_ticket, &method, &outcome);
+    }
     match outcome {
         Ok(v) if method == Method::ToolDownload => {
             let id = download_transfer_id.expect("download transfer allocated");
@@ -1594,6 +1632,7 @@ pub(super) async fn handle_session_start_scoped(
         state
             .scopes
             .on_session_ended(&binding.session_id, crate::rpc_reason::BROWSER_DISCONNECTED);
+        state.intent_wal.on_session_ended(&binding.session_id);
     }
 
     let requested_incognito = params.incognito;
@@ -1800,6 +1839,7 @@ async fn handle_session_stop(
             state
                 .scopes
                 .on_session_ended(&session_id, crate::rpc_reason::SESSION_STOPPED);
+            state.intent_wal.on_session_ended(&session_id);
             let result = CliSessionStopResult {
                 stopped: vec![session_id.0],
                 failed: Vec::new(),
@@ -1906,6 +1946,7 @@ async fn handle_session_stop_all(
                 state
                     .scopes
                     .on_session_ended(&id, crate::rpc_reason::SESSION_STOPPED);
+                state.intent_wal.on_session_ended(&id);
                 stopped.push(id.0);
                 returned_tab_ids.extend(stop.returned_tab_ids);
                 return_failures.extend(stop.return_failures);
@@ -1964,6 +2005,104 @@ fn handle_session_list(state: &Arc<DaemonState>) -> ResponseBody {
         .map(|s| s.status_entry())
         .collect();
     ResponseBody::Ok(serde_json::to_value(SessionListResult { sessions }).unwrap_or(Value::Null))
+}
+
+fn handle_ledger_request(
+    state: &Arc<DaemonState>,
+    params: Value,
+    scope_meta: &EnvelopeScopeMeta,
+) -> ResponseBody {
+    #[derive(serde::Deserialize)]
+    struct LedgerParams {
+        action: String,
+        #[serde(default)]
+        session_id: Option<String>,
+        #[serde(default)]
+        tab_id: Option<i64>,
+        #[serde(default)]
+        operation_id: Option<String>,
+    }
+
+    let p: LedgerParams = match serde_json::from_value(params) {
+        Ok(p) => p,
+        Err(err) => return ResponseBody::Err(invalid_params(err.to_string())),
+    };
+    let explicit_sid = p
+        .session_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| SessionId(s.to_owned()));
+
+    match p.action.as_str() {
+        "status" => {
+            let sid = match explicit_sid {
+                Some(sid) => Some(sid),
+                None => match scope_meta.caller_scope.as_deref() {
+                    Some(scope) => {
+                        match state
+                            .scopes
+                            .resolve_implicit_session(scope, &state.sessions)
+                        {
+                            Ok(sid) => Some(sid),
+                            Err(_) if scope == "default" || state.sessions.is_empty() => None,
+                            Err(_) if scope.starts_with("session_env:") => scope
+                                .strip_prefix("session_env:")
+                                .map(|raw| SessionId(raw.to_owned())),
+                            Err(err) => return ResponseBody::Err(err),
+                        }
+                    }
+                    None => None,
+                },
+            };
+            let reply = state.intent_wal.status(sid.as_ref());
+            ResponseBody::Ok(serde_json::to_value(reply).unwrap_or(Value::Null))
+        }
+        "resolve" => {
+            let sid = match explicit_sid {
+                Some(sid) => sid,
+                None => {
+                    let scope_res = scope_meta
+                        .caller_scope
+                        .as_deref()
+                        .ok_or_else(|| {
+                            invalid_params("ledger.resolve requires session_id or caller scope")
+                        })
+                        .and_then(|scope| {
+                            state
+                                .scopes
+                                .resolve_implicit_session(scope, &state.sessions)
+                        });
+                    match scope_res {
+                        Ok(sid) => sid,
+                        Err(err) => {
+                            if let Some(op_id) = p.operation_id.as_deref()
+                                && let Some(sid) =
+                                    state.intent_wal.find_unknown_session_by_operation(op_id)
+                            {
+                                sid
+                            } else if let Some(raw) = scope_meta
+                                .caller_scope
+                                .as_deref()
+                                .and_then(|sc| sc.strip_prefix("session_env:"))
+                            {
+                                SessionId(raw.to_owned())
+                            } else {
+                                return ResponseBody::Err(err);
+                            }
+                        }
+                    }
+                }
+            };
+            let reply = state
+                .intent_wal
+                .resolve(&sid, p.tab_id, p.operation_id.as_deref());
+            ResponseBody::Ok(serde_json::to_value(reply).unwrap_or(Value::Null))
+        }
+        other => ResponseBody::Err(invalid_params(format!(
+            "unsupported ledger action '{other}'; expected 'status' or 'resolve'"
+        ))),
+    }
 }
 
 async fn handle_browser_list(state: &Arc<DaemonState>, params: Value) -> Result<Value, RpcError> {

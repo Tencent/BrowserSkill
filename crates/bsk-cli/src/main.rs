@@ -53,6 +53,7 @@ fn dispatch(cli: Cli, format: Format) -> Result<(), CliError> {
         Command::Open(args) => cli::lifecycle::dispatch_open(args, format),
         Command::Sync(args) => cli::lifecycle::dispatch_sync(args, format),
         Command::Close(args) => cli::lifecycle::dispatch_close(args, format),
+        Command::Ledger(cmd) => cli::ledger::dispatch(cmd, format),
         Command::Cooperate(args) => cli::cooperate::dispatch(args, format),
         Command::Step(args) => cli::step::dispatch(args, format),
         Command::Plan(args) => cli::plan::dispatch(args, &cli.flags, format),

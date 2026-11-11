@@ -63,6 +63,8 @@ pub struct DaemonState {
     pub run_logs: super::run_log::RunLogs,
     /// Caller-scoped implicit session bindings, short `cN`/`oN` tokens, and `last_vom`.
     pub scopes: super::scopes::ImplicitScopeRegistry,
+    /// `<3ms` write-ahead intent ledger guarding against blind replay (`RM-03`).
+    pub intent_wal: super::intent_wal::IntentWal,
 }
 
 impl DaemonState {
@@ -87,6 +89,7 @@ impl DaemonState {
             self.dialog_operations.remove_session(&session.id.0);
             self.sessions.remember_end(&session.id, end_reason);
             self.scopes.on_session_ended(&session.id, end_reason);
+            self.intent_wal.on_session_ended(&session.id);
             tracing::debug!(session = %session.id, note);
         }
     }
@@ -172,6 +175,7 @@ impl DaemonState {
             transfers,
             run_logs: Default::default(),
             scopes: Default::default(),
+            intent_wal: super::intent_wal::IntentWal::new(super::paths::intent_ledger_path().ok()),
         }
     }
 }
