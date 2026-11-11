@@ -213,11 +213,7 @@ pub fn full_handler(status: DaemonStatus, state: Arc<DaemonState>) -> RpcHandler
                 object.remove("_audit_id");
                 object.remove("_operation_id");
             }
-            let mut ticket = if serde_json::to_value(&method)
-                .ok()
-                .and_then(|v| v.as_str().map(|s| s.starts_with("tool.")))
-                .unwrap_or(false)
-            {
+            let mut ticket = if method.is_tool() {
                 match state.audit.begin(params.get("session_id").and_then(Value::as_str).unwrap_or(""), &method, &params) {
                     Ok(ticket) => ticket,
                     Err(_) => return ResponseBody::Err(RpcError { code: ErrorCode::ProtocolError, message: "Operation audit could not be saved; action was not dispatched. Check the audit page or turn recording off.".into(), data: None }),
@@ -233,11 +229,7 @@ pub fn full_handler(status: DaemonStatus, state: Arc<DaemonState>) -> RpcHandler
                     Value::String(ticket.operation_id.clone()),
                 );
             }
-            let logged = serde_json::to_value(&method)
-                .ok()
-                .and_then(|name| name.as_str().map(|name| name.starts_with("tool.")))
-                .unwrap_or(false)
-                .then(|| (method.clone(), params.clone()));
+            let logged = method.is_tool().then(|| (method.clone(), params.clone()));
             let body = match method {
                 Method::LocalAuthPair
                 | Method::LocalAuthDevices
@@ -432,7 +424,9 @@ async fn handle_video(state: &Arc<DaemonState>, rpc_id: RpcId, params: Value) ->
             params: Some(params),
         }) {
             Ok(receiver) => receiver,
-            Err(SendError::Terminated(error)) => return ResponseBody::Err(error),
+            Err(SendError::Terminated(error) | SendError::UnsupportedFeature(error)) => {
+                return ResponseBody::Err(error);
+            }
             Err(SendError::SinkClosed) => {
                 return ResponseBody::Err(invalid_params("Recording browser disconnected"));
             }
@@ -707,73 +701,19 @@ async fn handle_tool_dispatch(
         if let Some(object) = params.as_object_mut() {
             object.remove("confirm");
         }
-        if params
-            .get("confirmation_timeout_ms")
-            .is_some_and(|v| !v.is_null())
-            && let Some(session) = state.sessions.get(&session_id)
-            && let Some(browser) = state.browsers.get(&session.browser_id)
-            && !bsk_protocol::tools::supports_borrow_confirmation_timeout(
-                &browser.extension_protocol_version,
-            )
-        {
-            return ResponseBody::Err(RpcError {
-                code: ErrorCode::Unsupported,
-                message: "Custom tab-borrow confirmation waits require extension protocol 1.2; update the extension or omit --timeout to use its default wait".into(),
-                data: Some(serde_json::json!({
-                    "reason": "unsupported_feature", "operation": "tab borrow --timeout",
-                    "component": "extension", "required_protocol": bsk_protocol::tools::BORROW_CONFIRMATION_TIMEOUT_PROTOCOL,
-                    "actual_protocol": browser.extension_protocol_version,
-                })),
-            });
-        }
     }
-    if method == Method::ToolDrag
-        && params.get("mode").and_then(Value::as_str) == Some("click-move-click")
-        && let Some(session) = state.sessions.get(&session_id)
+    // Reject unsupported extension features up front before staging transfers or queueing;
+    // `BrowserClient::dispatch` repeats this check at the WebSocket boundary as a second gate.
+    if let Some(session) = state.sessions.get(&session_id)
         && let Some(browser) = state.browsers.get(&session.browser_id)
-        && !bsk_protocol::tools::supports_click_move_click(&browser.extension_protocol_version)
+        && let Err(error) = bsk_protocol::compatibility::check_request(
+            &method,
+            &params,
+            bsk_protocol::compatibility::Peer::Extension,
+            &browser.extension_protocol_version,
+        )
     {
-        return ResponseBody::Err(RpcError {
-            code: ErrorCode::Unsupported,
-            message: "click-move-click requires extension protocol 1.7; update the extension"
-                .into(),
-            data: Some(serde_json::json!({
-                "effect_state": "none", "required_protocol": bsk_protocol::tools::CLICK_MOVE_CLICK_PROTOCOL,
-                "actual_protocol": browser.extension_protocol_version,
-            })),
-        });
-    }
-    if method == Method::ToolRead
-        && let Some(session) = state.sessions.get(&session_id)
-        && let Some(browser) = state.browsers.get(&session.browser_id)
-        && !bsk_protocol::tools::supports_dom_read(&browser.extension_protocol_version)
-    {
-        return ResponseBody::Err(RpcError {
-            code: ErrorCode::Unsupported,
-            message: "DOM read requires extension protocol 1.9; update the extension. JavaScript fallback is never used".into(),
-            data: Some(serde_json::json!({"reason":"unsupported_feature","phase":"negotiate","effect_state":"none",
-                "required_protocol":bsk_protocol::tools::DOM_READ_PROTOCOL,"actual_protocol":browser.extension_protocol_version})),
-        });
-    }
-    // Older extensions must never execute an action after silently ignoring its conditions.
-    if (matches!(
-        params.get("control_policy").and_then(Value::as_str),
-        Some("target" | "auto")
-    ) || params.get("expect").is_some())
-        && let Some(session) = state.sessions.get(&session_id)
-        && let Some(browser) = state.browsers.get(&session.browser_id)
-        && !bsk_protocol::tools::supports_target_control(&browser.extension_protocol_version)
-    {
-        return ResponseBody::Err(RpcError {
-            code: ErrorCode::Unsupported,
-            message: "Target control and action conditions require extension protocol 1.8 or a later compatible 1.x version; update the extension".into(),
-            data: Some(serde_json::json!({
-                "reason": "unsupported_feature", "phase": "negotiate", "effect_state": "none",
-                "required_protocol": bsk_protocol::tools::TARGET_CONTROL_PROTOCOL,
-                "actual_protocol": browser.extension_protocol_version,
-                "recovery": "Update the extension to use target control or action conditions. With a current CLI and an older extension, pass --policy strict on every sync/enable and step for legacy behavior. Strict policy does not make expect conditions available on old peers.",
-            })),
-        });
+        return ResponseBody::Err(error);
     }
     let mut download_transfer_id: Option<String> = None;
     if method == Method::ToolUpload {
@@ -1166,7 +1106,8 @@ fn tool_dispatch_transport_timeout(method: &Method, params: &Value) -> Result<Du
         // including the zero-duration status check; sync uses the ordinary read budget.
         return Ok(DEFAULT_TOOL_TIMEOUT);
     }
-    if *method == Method::ToolTabBorrow {
+    let policy = super::tool_policy::execution_policy(method);
+    if policy.deadline == super::tool_policy::Deadline::BorrowConfirmation {
         let ms = params
             .get("confirmation_timeout_ms")
             .map_or(Some(60_000), Value::as_u64)
@@ -1177,25 +1118,15 @@ fn tool_dispatch_transport_timeout(method: &Method, params: &Value) -> Result<Du
         // Include the UI countdown/fade and Chrome move before deadline cancellation.
         return Ok(Duration::from_millis(ms).saturating_add(Duration::from_secs(15)));
     }
-    let timeout = if *method == Method::ToolScreenshotFullPage && params.get("timeout_ms").is_none()
+    let timeout = if policy.deadline == super::tool_policy::Deadline::FullPage
+        && params.get("timeout_ms").is_none()
     {
         Ok(Duration::from_secs(120))
     } else {
         tool_dispatch_timeout(params)
     };
     timeout.map(|timeout| {
-        if matches!(
-            method,
-            Method::ToolUpload
-                | Method::ToolDownload
-                | Method::ToolRequestHelp
-                | Method::ToolNavigate
-                | Method::ToolNavigateBack
-                | Method::ToolNavigateForward
-                | Method::ToolReload
-                | Method::ToolWaitForNavigation
-                | Method::ToolWaitForElement
-        ) {
+        if policy.response_grace {
             timeout.saturating_add(EXTENSION_RESPONSE_GRACE)
         } else {
             timeout

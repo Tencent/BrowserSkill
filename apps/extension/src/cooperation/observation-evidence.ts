@@ -560,6 +560,47 @@ const serialize = (value?: Signature) =>
   value &&
   JSON.stringify([value.scope, value.parts.map(([, list]) => list.map((row) => row.facts))]);
 
+const jsonPrimitiveEq = (x: unknown, y: unknown): boolean => {
+  const nx = x === undefined || (typeof x === "number" && !Number.isFinite(x)) ? null : x;
+  const ny = y === undefined || (typeof y === "number" && !Number.isFinite(y)) ? null : y;
+  return nx === ny;
+};
+
+function sameUnrelaxedNodeFacts(a: VomNode, b: VomNode): boolean {
+  if (
+    !jsonPrimitiveEq(a.frameId, b.frameId) ||
+    !jsonPrimitiveEq(a.backendNodeId, b.backendNodeId) ||
+    !jsonPrimitiveEq(a.role, b.role) ||
+    !jsonPrimitiveEq(a.tag, b.tag) ||
+    !jsonPrimitiveEq(a.name || undefined, b.name || undefined) ||
+    !jsonPrimitiveEq(a.text, b.text) ||
+    (a.value !== undefined) !== (b.value !== undefined) ||
+    !jsonPrimitiveEq(a.value, b.value) ||
+    !jsonPrimitiveEq(a.inForm, b.inForm) ||
+    (a.checked !== undefined) !== (b.checked !== undefined) ||
+    !jsonPrimitiveEq(a.checked, b.checked) ||
+    !jsonPrimitiveEq(a.disabled, b.disabled) ||
+    !jsonPrimitiveEq(a.inert, b.inert) ||
+    !jsonPrimitiveEq(a.modal, b.modal)
+  ) {
+    return false;
+  }
+  const aVisible = !!a.rect && a.rect.w > 0 && a.rect.h > 0;
+  const bVisible = !!b.rect && b.rect.w > 0 && b.rect.h > 0;
+  if (aVisible !== bVisible) return false;
+  if ((a.pointerEvents === "none") !== (b.pointerEvents === "none")) return false;
+  if (!jsonPrimitiveEq(selectionMarker(a), selectionMarker(b))) return false;
+  const aAttrs = a.attrs;
+  const bAttrs = b.attrs;
+  if (aAttrs !== bAttrs) {
+    for (let i = 0; i < semanticAttributes.length; i++) {
+      const key = semanticAttributes[i];
+      if (!jsonPrimitiveEq(aAttrs?.[key], bAttrs?.[key])) return false;
+    }
+  }
+  return true;
+}
+
 /**
  * `volatile` lists the stable identities (backend nodes, owning any virtual
  * text beneath them) whose own text, aria-label and title may differ. Names
@@ -577,6 +618,19 @@ export function sameObservationEvidence(
   volatile?: ReadonlySet<string>,
   options?: EvidenceOptions,
 ): boolean {
+  if (
+    !target &&
+    !volatile?.size &&
+    !options?.incidentalMedia &&
+    !before.nodes.some((node) => node.modal) &&
+    !after.nodes.some((node) => node.modal)
+  ) {
+    if (before.nodes.length !== after.nodes.length) return false;
+    for (let i = 0; i < before.nodes.length; i++) {
+      if (!sameUnrelaxedNodeFacts(before.nodes[i], after.nodes[i])) return false;
+    }
+    return true;
+  }
   const a = serialize(signature(before, target, volatile, options));
   return a !== undefined && a === serialize(signature(after, target, volatile, options));
 }
@@ -655,6 +709,100 @@ export function observedChange(
       return describeRow(part, x, y);
     }
   }
+}
+
+/** How much differs between two observations, with a few examples. */
+export interface ObservedChanges {
+  changed: number;
+  added: number;
+  removed: number;
+  examples: ObservedChange[];
+}
+
+const MAX_EXAMPLES = 5;
+const NAME_FACT = factFields.indexOf("name");
+
+/**
+ * Every node that differs between two observations, with the same arguments
+ * as sameObservationEvidence(). Only the caller knows what its action relies
+ * on, so this states what changed and leaves relevance to the caller.
+ *
+ * Nodes are matched by backend identity, so an insertion is one addition and
+ * not a shift of every later row. A container whose derived name changed only
+ * because a descendant did is not counted again. Returns undefined when no
+ * identified node differs, such as text that only wraps differently.
+ */
+export function observedChanges(
+  before: ObservationEvidence,
+  after: ObservationEvidence,
+  target?: EvidenceTarget,
+  volatile?: ReadonlySet<string>,
+  options?: EvidenceOptions,
+): ObservedChanges | undefined {
+  const a = signature(before, target, volatile, options);
+  const b = signature(after, target, volatile, options);
+  if (!a || !b) return;
+  const identity = (node: VomNode) =>
+    node.backendNodeId === undefined ? undefined : `${node.frameId ?? ""}:${node.backendNodeId}`;
+  const keyed = (rows: Row[]) => {
+    const map = new Map<string, Row>();
+    for (const row of rows) {
+      const key = identity(row.node);
+      if (key !== undefined && !map.has(key)) map.set(key, row);
+    }
+    return map;
+  };
+  const same = (x: unknown, y: unknown) => JSON.stringify(x) === JSON.stringify(y);
+  const found = new Map<
+    string,
+    { node: VomNode; removed: boolean; nameOnly: boolean; change: ObservedChange }
+  >();
+  for (let at = 0; at < a.parts.length; at++) {
+    const [part, old] = a.parts[at];
+    const was = keyed(old);
+    const now = keyed(b.parts[at][1]);
+    for (const [key, row] of was) {
+      const next = now.get(key);
+      if (found.has(key) || (next && same(row.facts, next.facts))) continue;
+      found.set(key, {
+        node: next?.node ?? row.node,
+        removed: !next,
+        nameOnly:
+          !!next &&
+          !textRoles.has(row.node.role ?? "") &&
+          row.facts.every((fact, i) => i === NAME_FACT || same(fact, next.facts[i])),
+        change: describeRow(part, row, next),
+      });
+    }
+    for (const [key, row] of now)
+      if (!was.has(key) && !found.has(key))
+        found.set(key, {
+          node: row.node,
+          removed: false,
+          nameOnly: false,
+          change: describeRow(part, undefined, row),
+        });
+  }
+  // Ancestors of a differing node: their derived names repeat its change.
+  const trees = { before: new Tree(before.nodes), after: new Tree(after.nodes) };
+  const containers = new Set<string>();
+  for (const { node, removed } of found.values())
+    for (const ancestor of (removed ? trees.before : trees.after).ancestors(node).slice(1)) {
+      const key = identity(ancestor);
+      if (key !== undefined) containers.add(key);
+    }
+  const changes = [...found]
+    .filter(([key, item]) => !(item.nameOnly && containers.has(key)))
+    .map(([, item]) => item.change);
+  if (!changes.length) return;
+  const count = (kind: ObservedChange["change"]) =>
+    changes.filter((change) => change.change === kind).length;
+  return {
+    changed: count("changed"),
+    added: count("added"),
+    removed: count("removed"),
+    examples: changes.slice(0, MAX_EXAMPLES),
+  };
 }
 
 interface ContentGroup {

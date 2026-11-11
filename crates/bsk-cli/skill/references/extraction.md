@@ -30,9 +30,10 @@ changed-then-restored facts may match. Cross-frame reads are separate samples,
 not one atomic business transaction.
 
 Requires CLI/daemon/extension protocol 1.9; unsupported peers fail explicitly,
-with no JavaScript fallback. Arbitrary evaluate, async or delayed effects still
-need a fresh strict observation. After observation_changed during data gathering,
-switch to read/extract; do not keep syncing and retrying the script.
+with no JavaScript fallback. Arbitrary evaluate that declares nothing still needs
+a fresh strict observation. After observation_changed during data gathering,
+switch to read/extract; do not keep syncing and retrying the script. For data
+these cannot express, see [scripts](cooperation.md#scripts).
 
 Use this for tables, lists, orders, reports or search results as reusable JSON/CSV.
 

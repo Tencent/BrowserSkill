@@ -1,17 +1,37 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "title": "CooperateParams",
-  "type": "object",
-  "required": [
-    "action",
-    "session_id"
-  ],
+  "definitions": {
+    "ControlPolicy": {
+      "oneOf": [
+        {
+          "enum": [
+            "strict",
+            "target"
+          ],
+          "type": "string"
+        },
+        {
+          "const": "auto",
+          "description": "Keep the negotiated policy, or choose target when the session is unconfigured.",
+          "type": "string"
+        }
+      ]
+    },
+    "CooperateAction": {
+      "enum": [
+        "enable",
+        "status",
+        "sync",
+        "wait"
+      ],
+      "type": "string"
+    }
+  },
   "properties": {
     "action": {
       "$ref": "#/definitions/CooperateAction"
     },
     "control_policy": {
-      "description": "Omitted by legacy callers. A negotiated policy remains fixed for the session.",
       "anyOf": [
         {
           "$ref": "#/definitions/ControlPolicy"
@@ -19,62 +39,40 @@
         {
           "type": "null"
         }
-      ]
+      ],
+      "description": "Omitted by legacy callers. A negotiated policy remains fixed for the session."
     },
     "max_tokens": {
+      "format": "uint32",
+      "minimum": 0,
       "type": [
         "integer",
         "null"
-      ],
-      "format": "uint32",
-      "minimum": 0.0
+      ]
     },
     "session_id": {
       "type": "string"
     },
     "tab_id": {
+      "format": "int64",
       "type": [
         "integer",
         "null"
-      ],
-      "format": "int64"
+      ]
     },
     "timeout_ms": {
+      "format": "uint64",
+      "minimum": 0,
       "type": [
         "integer",
         "null"
-      ],
-      "format": "uint64",
-      "minimum": 0.0
+      ]
     }
   },
-  "definitions": {
-    "ControlPolicy": {
-      "oneOf": [
-        {
-          "type": "string",
-          "enum": [
-            "strict",
-            "target"
-          ]
-        },
-        {
-          "description": "Keep the negotiated policy, or choose target when the session is unconfigured.",
-          "type": "string",
-          "enum": [
-            "auto"
-          ]
-        }
-      ]
-    },
-    "CooperateAction": {
-      "type": "string",
-      "enum": [
-        "enable",
-        "status",
-        "sync",
-        "wait"
-      ]
-    }
-  }
+  "required": [
+    "session_id",
+    "action"
+  ],
+  "title": "CooperateParams",
+  "type": "object"
 }

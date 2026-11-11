@@ -370,13 +370,27 @@ impl<'a> Output<'a> {
         save_full: Option<&'a Path>,
         match_text: &'a [String],
         context_lines: u32,
-    ) -> anyhow::Result<Self> {
+    ) -> Result<Self, CliError> {
         Ok(Self {
             session,
-            baseline: baseline.map(observation_view::read).transpose()?,
+            baseline: baseline
+                .map(observation_view::read)
+                .transpose()
+                .map_err(|error| {
+                    CliError::file_validation(
+                        error,
+                        "check --baseline: provide a readable, valid saved reply",
+                    )
+                })?,
             saved: save_full
                 .map(cooperate::saved_reply::SavedReply::prepare)
-                .transpose()?,
+                .transpose()
+                .map_err(|error| {
+                    CliError::file_validation(
+                        error,
+                        "check --save-full: use a new path in a writable directory",
+                    )
+                })?,
             save_full,
             match_text,
             context_lines,
@@ -421,7 +435,7 @@ impl<'a> Output<'a> {
 }
 
 pub fn dispatch(args: StepArgs, _format: Format) -> Result<(), CliError> {
-    let (method, params) = prepare(&args)?;
+    let (method, params) = prepare(&args).map_err(CliError::invalid_params)?;
     let output = Output::prepare(
         &args.session,
         args.baseline.as_deref(),
@@ -434,7 +448,10 @@ pub fn dispatch(args: StepArgs, _format: Format) -> Result<(), CliError> {
     }
     let daemon = ensure_daemon().context("ensure daemon is running")?;
     if matches!(args.action, Action::Drag) && params["mode"] == "click-move-click" {
-        super::drag::require_click_move_click_daemon(daemon.sock_path.clone())?;
+        super::protocol::require_feature_on_daemon(
+            &daemon.sock_path,
+            bsk_protocol::compatibility::Feature::ClickMoveClick,
+        )?;
     }
     let (reply, exit) = run(&args, method, params, |method, params, timeout| {
         business_rpc::call(

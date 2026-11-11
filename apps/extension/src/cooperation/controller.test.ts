@@ -8,7 +8,7 @@ import { captureVomObservation, handleSnapshot } from "@/tools/observation";
 import type { CdpRunner } from "@/tools/shared";
 import { handleTabBorrow, handleTabCreate, handleTabReturn, handleTabSelect } from "@/tools/tabs";
 import { CooperationController } from "./controller";
-import { FrameCollectionError } from "./frame-error";
+import { FrameCollectionError, FrameUnresponsiveError } from "./frame-error";
 import type { CooperationFrames, FrameState } from "./types";
 
 vi.mock("@/tools/observation", () => ({
@@ -1035,7 +1035,7 @@ describe("shared-tab dispatch fences", () => {
       expect(f.native).not.toHaveBeenCalled();
     });
 
-    it("keeps untargeted scripts strict even when they declare unrelated dependencies", async () => {
+    it("checks untargeted scripts against their declared dependencies", async () => {
       live((tick) => scene(`10:00:0${tick}`));
       refs();
       const f = await fixture();
@@ -1056,8 +1056,8 @@ describe("shared-tab dispatch fences", () => {
         f.abort.signal,
         (runner) => runner.send(7, "Runtime.evaluate", { expression: "buy()" }),
       );
-      expect(result).toMatchObject({ message: changed, data: { effect_state: "none" } });
-      expect(f.native).not.toHaveBeenCalled();
+      expect(result).toEqual({});
+      expect(f.native).toHaveBeenCalledOnce();
     });
 
     it("does not let a refused context retry with newly learned tolerance", async () => {
@@ -1487,6 +1487,46 @@ describe("shared-tab dispatch fences", () => {
     expect(await f.act()).toMatchObject({ data: { reason, effect_state: "none" } });
     expect(f.controller.view(7)?.mode).toBe("unavailable");
     expect(f.native).not.toHaveBeenCalled();
+  });
+  it("names a silent frame on action, sync and tab refusals while keeping them retryable", async () => {
+    const f = await fixture();
+    const collect = f.readFrames.getMockImplementation()!;
+    const silent = { frame_id: 3, url: "https://frame.test/widget" };
+    const retryable = {
+      reason: "cooperation_sync_required",
+      effect_state: "none",
+      recovery: expect.stringContaining("stop the session, which also returns borrowed tabs"),
+    };
+    f.readFrames.mockRejectedValue(new FrameUnresponsiveError([silent]));
+    expect(await f.act()).toMatchObject({ data: { effect_state: "none", frames: [silent] } });
+    expect(await f.command("sync")).toMatchObject({
+      code: "permission_denied",
+      message: "A page frame is not responding: 3 (https://frame.test/widget)",
+      data: { ...retryable, frames: [silent] },
+    });
+    // Unlike a permanent frame failure, wait keeps polling a frame that may be busy.
+    expect(await f.command("wait")).toMatchObject({ ready: false, state: { mode: "unavailable" } });
+    const invoke = vi.fn();
+    expect(
+      await f.controller.run(
+        { id: "return", method: "tool.tab_return", params: { session_id: "shared", tab_id: 7 } },
+        f.cdp,
+        f.abort.signal,
+        invoke,
+      ),
+    ).toMatchObject({
+      code: "permission_denied",
+      data: { ...retryable, frames: [{ tab_id: 7, ...silent }] },
+    });
+    expect(invoke).not.toHaveBeenCalled();
+    expect(f.native).not.toHaveBeenCalled();
+    // A successful collection forgets the silent frame.
+    f.readFrames.mockImplementation(collect);
+    expect(await f.command("sync")).toHaveProperty("context_id");
+    f.readFrames.mockRejectedValueOnce(new Error("frame is loading"));
+    const loading = await f.command("sync");
+    expect(loading).toMatchObject({ data: { reason: "cooperation_sync_required" } });
+    expect(loading.data).not.toHaveProperty("frames");
   });
   it("exposes skipped frame gaps and leaves the policy unset until a successful sync", async () => {
     const f = await fixture({ sync: false });
@@ -3624,5 +3664,63 @@ describe("strict evidence around the action's own preparation", () => {
           data: { observed_change: { part: expect.any(String), field: "value" } },
         });
     }
+  });
+});
+
+describe("tool.record_start cooperation guard", () => {
+  it("rejects record_start when the task was stopped", async () => {
+    const f = await fixture();
+    f.controller.stopSession("shared");
+    const invoke = vi.fn(async () => ({ tab_id: 7, recording: true }));
+    const result = await f.controller.run(
+      { id: "rec-stopped", method: "tool.record_start", params: { session_id: "shared" } },
+      f.cdp,
+      f.abort.signal,
+      invoke,
+    );
+    expect(result).toMatchObject({
+      code: "user_aborted",
+      data: { effect_state: "none" },
+    });
+    expect(invoke).not.toHaveBeenCalled();
+  });
+
+  it("rejects record_start while the user is actively holding control", async () => {
+    const f = await fixture();
+    const view = f.controller.view(7)!;
+    await f.controller.control(7, view.revision, "hold");
+    const invoke = vi.fn(async () => ({ tab_id: 7, recording: true }));
+    const result = await f.controller.run(
+      { id: "rec-held", method: "tool.record_start", params: { session_id: "shared" } },
+      f.cdp,
+      f.abort.signal,
+      invoke,
+    );
+    expect(result).toMatchObject({
+      code: "permission_denied",
+      message: "The user is still operating this tab; wait for hand-back",
+      data: { reason: "cooperation_sync_required", effect_state: "none" },
+    });
+    expect(invoke).not.toHaveBeenCalled();
+  });
+
+  it("invalidates prior control contexts when record_start begins on an owned tab", async () => {
+    const f = await fixture();
+    const invoke = vi.fn(async () => ({ tab_id: 7, recording: true }));
+    const started = await f.controller.run(
+      { id: "rec-ok", method: "tool.record_start", params: { session_id: "shared" } },
+      f.cdp,
+      f.abort.signal,
+      invoke,
+    );
+    expect(started).toEqual({ tab_id: 7, recording: true });
+    expect(invoke).toHaveBeenCalledOnce();
+
+    const followUp = await f.act(f.first.context_id);
+    expect(followUp).toMatchObject({
+      code: "permission_denied",
+      data: { effect_state: "none" },
+    });
+    expect(f.native).not.toHaveBeenCalled();
   });
 });

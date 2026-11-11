@@ -62,6 +62,7 @@ pub fn dispatch(cmd: WindowCmd, format: Format) -> Result<(), CliError> {
 fn run_resize(sock: PathBuf, args: WindowResizeArgs, format: Format) -> Result<(), CliError> {
     let params = WindowResizeParams {
         session_id: args.session,
+        tab_id: None,
         width: args.width,
         height: args.height,
     };

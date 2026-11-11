@@ -47,7 +47,7 @@
       <button type="button" id="apply-plan">生成批处理回执</button>
     </form>
     <div id="plan-summary" hidden role="region" aria-label="批处理摘要"></div>
-    <output id="plan-output">等待执行 plan</output>
+    <output id="plan-output" role="status">等待执行 plan</output>
   </section>
 
   <section id="recipe-app"></section>
@@ -56,7 +56,20 @@
   const $ = (s) => document.querySelector(s);
   const search = new URLSearchParams(location.search);
   const drift = search.get('drift') || 'none';
-  const view = search.get('view') || (location.pathname.endsWith('/form') ? 'form' : location.pathname.endsWith('/login') ? 'login' : 'report');
+  const isRecipeRoute =
+    location.pathname.endsWith('/report') ||
+    location.pathname.endsWith('/form') ||
+    location.pathname.endsWith('/login') ||
+    search.has('view') ||
+    search.has('drift') ||
+    search.has('human');
+  const view =
+    search.get('view') ||
+    (location.pathname.endsWith('/form')
+      ? 'form'
+      : location.pathname.endsWith('/login')
+        ? 'login'
+        : 'report');
   const delay = Number(search.get('delay') || (drift === 'slow' ? 5000 : 120));
   const emit = (type, data = {}) => fetch('/event', { method: 'POST', body: JSON.stringify({ type, ...data }) });
   const postRecipe = (path, body) => fetch(path, { method: 'POST', body: JSON.stringify(body) });
@@ -64,53 +77,63 @@
   window.planAppliedCount = 0;
   window.humanIntervened = false;
 
-  $('#drift-price').onclick = () => {
-    $('#unit-price').textContent = '¥260';
-    $('#stock-tag').textContent = '紧张';
-    emit('plan-price-drifted', { price: '¥260' });
-  };
-  $('#human-intervene').onclick = () => {
-    window.humanIntervened = true;
-    emit('plan-human-intervene');
-  };
+  if (isRecipeRoute) {
+    // Isolate #recipe-app on recipe routes so role+name labels (e.g. combobox "省份"/"城市")
+    // and primary headings never collide with #plan-section.
+    $('#plan-section').remove();
+  } else {
+    $('#recipe-app').remove();
+  }
 
-  const cityMap = {
-    ZJ: [{ value: 'HZ', label: '杭州' }, { value: 'NB', label: '宁波' }],
-    JS: [{ value: 'NJ', label: '南京' }, { value: 'SZ', label: '苏州' }],
-  };
-  $('#province').addEventListener('change', () => {
-    const val = $('#province').value;
-    const city = $('#city');
-    city.innerHTML = '<option value="">加载中...</option>';
-    setTimeout(() => {
-      city.innerHTML = '<option value="">请选择城市</option>';
-      for (const item of cityMap[val] || []) {
-        const opt = document.createElement('option');
-        opt.value = item.value;
-        opt.textContent = item.label;
-        city.append(opt);
-      }
-      emit('plan-cities-loaded', { province: val });
-    }, 120);
-  });
-
-  $('#apply-plan').onclick = () => {
-    window.planAppliedCount++;
-    const payload = {
-      applicant: $('#applicant').value,
-      province: $('#province').value,
-      city: $('#city').value,
-      tier: $('#tier').value,
-      confirmed: $('#confirm-terms').checked,
-      price: $('#unit-price').textContent,
-      count: window.planAppliedCount,
+  if ($('#plan-section')) {
+    $('#drift-price').onclick = () => {
+      $('#unit-price').textContent = '¥260';
+      $('#stock-tag').textContent = '紧张';
+      emit('plan-price-drifted', { price: '¥260' });
     };
-    const summary = $('#plan-summary');
-    summary.hidden = false;
-    summary.textContent = `批处理完成 #${payload.count}: ${payload.applicant} (${payload.province}/${payload.city}/${payload.tier}) @ ${payload.price}`;
-    $('#plan-output').textContent = JSON.stringify(payload);
-    emit('plan-applied', payload);
-  };
+    $('#human-intervene').onclick = () => {
+      window.humanIntervened = true;
+      emit('plan-human-intervene');
+    };
+
+    const cityMap = {
+      ZJ: [{ value: 'HZ', label: '杭州' }, { value: 'NB', label: '宁波' }],
+      JS: [{ value: 'NJ', label: '南京' }, { value: 'SZ', label: '苏州' }],
+    };
+    $('#province').addEventListener('change', () => {
+      const val = $('#province').value;
+      const city = $('#city');
+      city.innerHTML = '<option value="">加载中...</option>';
+      setTimeout(() => {
+        city.innerHTML = '<option value="">请选择城市</option>';
+        for (const item of cityMap[val] || []) {
+          const opt = document.createElement('option');
+          opt.value = item.value;
+          opt.textContent = item.label;
+          city.append(opt);
+        }
+        emit('plan-cities-loaded', { province: val });
+      }, 120);
+    });
+
+    $('#apply-plan').onclick = () => {
+      window.planAppliedCount++;
+      const payload = {
+        applicant: $('#applicant').value,
+        province: $('#province').value,
+        city: $('#city').value,
+        tier: $('#tier').value,
+        confirmed: $('#confirm-terms').checked,
+        price: $('#unit-price').textContent,
+        count: window.planAppliedCount,
+      };
+      const summary = $('#plan-summary');
+      summary.hidden = false;
+      summary.textContent = `批处理完成 #${payload.count}: ${payload.applicant} (${payload.province}/${payload.city}/${payload.tier}) @ ${payload.price}`;
+      $('#plan-output').textContent = JSON.stringify(payload);
+      emit('plan-applied', payload);
+    };
+  }
 
   // Recipe surface supporting drift modes and multi-segment flows
   const app = $('#recipe-app');
@@ -118,7 +141,7 @@
 
   function mkField(label, control) {
     const w = document.createElement('label');
-    w.textContent = label + ' ';
+    w.textContent = label;
     w.append(control);
     return w;
   }
@@ -142,7 +165,7 @@
     return b;
   }
   function mkHeading(text) {
-    const h = document.createElement('h2');
+    const h = document.createElement('h1');
     h.textContent = text;
     return h;
   }
@@ -210,12 +233,19 @@
     // Irreversible commit button for testing recipe risk refusal
     nodes.push(mkButton('立即支付提交', () => postRecipe('/recipe/wrong', { reason: 'commit' })));
     nodes.push(status);
+    if (search.get('human')) {
+      const human = mkButton('人工操作', () => {
+        window.humanChanged = true;
+      });
+      human.id = 'human';
+      nodes.push(human);
+    }
     app.replaceChildren(...nodes);
 
     if (drift === 'popup' || drift === 'unknown-popup') {
       const dlg = document.createElement('dialog');
-      dlg.setAttribute('aria-label', drift === 'popup' ? '订阅优惠' : '未知调查问卷');
-      dlg.append(mkButton(drift === 'popup' ? '关闭' : '稍后填写', () => dlg.close()));
+      dlg.setAttribute('aria-label', drift === 'popup' ? '订阅优惠' : '调查问卷');
+      dlg.append(mkButton(drift === 'popup' ? '关闭' : '稍后', () => dlg.close()));
       app.append(dlg);
       dlg.showModal();
     }
@@ -253,12 +283,15 @@
   }
 
   function bootRecipeSurface() {
+    if (!app) return;
     if (view === 'login' || drift === 'login') renderLogin();
     else if (view === 'form') renderForm();
     else if (drift === 'redirect') location.replace(search.get('to') || '/minimal');
     else renderReport();
   }
-  if (drift === 'late') setTimeout(bootRecipeSurface, 700);
-  else bootRecipeSurface();
+  if (isRecipeRoute) {
+    if (drift === 'late') setTimeout(bootRecipeSurface, 700);
+    else bootRecipeSurface();
+  }
 </script>
 </html>

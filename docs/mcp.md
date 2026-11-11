@@ -106,5 +106,6 @@ Fixed synchronous isolated-world code accepts no JavaScript or deferred work.
 Returns current title/URLs, refs/values, redactions and truncation. max_nodes
 is 100 by default, at most 1000; max_bytes is 262144 by default, at most 1048576.
 Reads never renew contexts or observations; use explicit expect before input.
-Old peers fail explicitly; evaluate keeps strict guards. See
-[dynamic reading](dynamic-reading.md).
+Old peers fail explicitly. A script is checked against the `expect` facts it states,
+or the whole page when it passes `observation`; `params.unverified=true` is the last resort
+and returns `verified=false`. See [dynamic reading](dynamic-reading.md).

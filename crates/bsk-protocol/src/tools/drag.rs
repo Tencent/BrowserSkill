@@ -23,11 +23,8 @@ pub struct DragTarget {
 pub const CLICK_MOVE_CLICK_PROTOCOL: &str = "1.7";
 
 pub fn supports_click_move_click(protocol: &str) -> bool {
-    crate::system::compare_protocol(protocol, "2.0") == Some(std::cmp::Ordering::Less)
-        && matches!(
-            crate::system::compare_protocol(protocol, CLICK_MOVE_CLICK_PROTOCOL),
-            Some(std::cmp::Ordering::Equal | std::cmp::Ordering::Greater)
-        )
+    crate::compatibility::Feature::ClickMoveClick
+        .supports(crate::compatibility::Peer::Extension, protocol)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

@@ -1663,4 +1663,27 @@ describe("record-capture semantic", () => {
 
     expect(steps.map((s) => s.op)).toEqual(["click"]);
   });
+
+  it("reads click geometry from the control the click is described as", () => {
+    // GOV.UK details: the click lands on the text span, the control is the <summary>.
+    document.body.innerHTML = `
+      <details><summary><span id="text">Help with nationality</span></summary><p>More</p></details>
+    `;
+    const summary = document.querySelector("summary")!;
+    const text = document.querySelector("#text")!;
+    mockRect(summary, { left: 30, top: 30, width: 194, height: 25 });
+    mockRect(text, { left: 55, top: 31, width: 169, height: 23 });
+    const capture = startRecordCapture("rec-geometry", (step) => steps.push(step));
+
+    click(text);
+    capture.dispose();
+
+    expect(steps).toEqual([
+      expect.objectContaining({
+        op: "click",
+        target: expect.objectContaining({ role: "button", name: "Help with nationality" }),
+        geometry: { tag: "summary", rect: { x: 30, y: 30, w: 194, h: 25 } },
+      }),
+    ]);
+  });
 });

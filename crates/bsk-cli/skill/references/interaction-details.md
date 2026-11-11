@@ -229,7 +229,12 @@ Never replay the preceding click, drag or submission because sync was refused.
 after one targeted collector repair. Reload once; if it persists, use read-only
 commands such as `get-html` or `snapshot`. `page_load_failed` means the main page
 failed to load: check its URL and network, then reload. Neither reason is retried
-by `--settle`. Failed child frames and inactive documents are listed in
+by `--settle`. A frame that does not answer in time may only be busy, so its
+refusal stays `cooperation_sync_required` and names it in `data.frames` (tab
+operations add `tab_id`). If the same frame keeps failing, use read-only commands
+or stop the session; stopping also returns borrowed tabs. Failed child frames,
+inactive documents and child frames that cannot be collected while hidden
+(`hidden_frame`: not displayed, no area or invisible, and unfocused) are listed in
 `frame_gaps` without blocking sync; other active frames must remain observable.
 Frame diagnostic URLs retain only HTTP(S) origins and paths. Other URLs show
 only their protocol, and malformed URLs show `[unavailable]`.
@@ -274,6 +279,8 @@ resizing. A fixed emulated viewport may need its own `emulate` adjustment; resiz
 does not clear emulation or focus the window. When a resize reports an unconfirmed
 result, inspect its actual dimensions and sync before deciding what to do next.
 `evaluate` is a last resort: inspect JSON `.ok`, since a script exception can have
-CLI exit code 0. Never evaluate secrets. `record start` captures user actions;
+CLI exit code 0. Never evaluate secrets. On a page that keeps changing, state what
+the script relies on with `--expect` rather than retrying; `--unverified` skips the
+page check entirely and comes last ([scripts](cooperation.md#scripts)). `record start` captures user actions;
 read its help first and never record banking, SSO or password-manager pages.
 Use `bsk --help` to find navigation/history, tab, wait and window commands.

@@ -24,7 +24,7 @@ use bsk_protocol::tools::{
 };
 use bsk_protocol::{ErrorCode, Method, RpcError};
 use schemars::JsonSchema;
-use schemars::r#gen::SchemaSettings;
+use schemars::generate::SchemaSettings;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
@@ -142,7 +142,11 @@ fn base_definitions() -> Vec<Value> {
              sync_after (optionally with until_visible) to get the synchronized state in the same \
              call. Never repeat an action whose effect_state is unknown or that reported \
              dialog_pending. For reading use bsk_inspect action=read or extract, not evaluate/sync retries on dynamic pages. evaluate {expression} executes JavaScript in the page and may \
-             change it; it needs context and observation under shared target control.",
+             change it. Under shared target control it needs context plus one of, in this order of \
+             preference: expect, without observation, stating the facts the script relies on (only they are \
+             checked, so it also runs on a page that keeps changing); observation (the whole page \
+             must still match); or, only when those facts cannot be stated, params.unverified=true, which \
+             compares nothing about the page and returns verified=false.",
             Hints {
                 destructive: true,
                 ..Hints::default()
@@ -220,13 +224,36 @@ fn tool<T: JsonSchema>(name: &str, title: &str, description: &str, hints: Hints)
 fn input_schema<T: JsonSchema>() -> Value {
     let settings = SchemaSettings::draft07().with(|settings| {
         settings.inline_subschemas = true;
-        settings.option_add_null_type = false;
-        settings.option_nullable = false;
     });
     let schema = settings.into_generator().into_root_schema_for::<T>();
     let mut value = serde_json::to_value(schema).unwrap_or_default();
     strip_schema(&mut value, 0);
     value
+}
+
+fn strip_optional_null(property: &mut Map<String, Value>) {
+    if let Some(Value::Array(types)) = property.get_mut("type") {
+        types.retain(|item| item.as_str() != Some("null"));
+        if types.len() == 1
+            && let Some(single) = types.pop()
+        {
+            property.insert("type".into(), single);
+        }
+    }
+    for keyword in ["anyOf", "oneOf"] {
+        let collapse = if let Some(Value::Array(variants)) = property.get_mut(keyword) {
+            variants.retain(|item| item != &json!({ "type": "null" }));
+            (variants.len() == 1).then(|| variants.pop()).flatten()
+        } else {
+            None
+        };
+        if let Some(Value::Object(single)) = collapse {
+            property.remove(keyword);
+            for (k, v) in single {
+                property.entry(k).or_insert(v);
+            }
+        }
+    }
 }
 
 fn strip_schema(schema: &mut Value, depth: usize) {
@@ -240,8 +267,23 @@ fn strip_schema(schema: &mut Value, depth: usize) {
     if depth != 1 {
         object.remove("description");
     }
+    let required: Vec<String> = object
+        .get("required")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| item.as_str().map(str::to_owned))
+                .collect()
+        })
+        .unwrap_or_default();
     if let Some(properties) = object.get_mut("properties").and_then(Value::as_object_mut) {
-        for property in properties.values_mut() {
+        for (name, property) in properties.iter_mut() {
+            if !required.iter().any(|req| req == name)
+                && let Some(prop_obj) = property.as_object_mut()
+            {
+                strip_optional_null(prop_obj);
+            }
             strip_schema(property, depth + 1);
         }
     }
@@ -593,6 +635,11 @@ impl Evidence {
             expect,
             depends_on: depends_on.unwrap_or_default(),
         })
+    }
+
+    /// Whether the caller asked for anything about the page to be checked.
+    fn verifies(&self) -> bool {
+        self.observation.is_some() || self.expect.is_some() || !self.depends_on.is_empty()
     }
 
     /// Conditions must never reach a daemon that could silently drop them.
@@ -1248,7 +1295,8 @@ struct InteractArgs {
     tab_id: Option<i64>,
     /// Action fields with protocol names. Targets: ref (observed @eN) or selector (main-document
     /// CSS). click: button, click_count, modifiers. fill: value, clear_before. select: values.
-    /// press: key (Enter, a, Ctrl+A), modifiers, hold_ms. evaluate: expression. wheel: delta_x, delta_y. drag: source
+    /// press: key (Enter, a, Ctrl+A), modifiers, hold_ms. evaluate: expression, unverified (last
+    /// resort; not with observation, expect or depends_on). wheel: delta_x, delta_y. drag: source
     /// and target ({ref} or {selector}) or delta ({x, y}), mode, hold_ms. All accept timeout_ms
     /// (1-30000).
     #[serde(default)]
@@ -1342,6 +1390,10 @@ fn interact_prepare(args: InteractArgs) -> Result<Prepared, CliError> {
             let params = params.map_err(|err| invalid(format!("{err:#}")))?;
             if !matches!(args.action, InteractAction::Evaluate) {
                 step::target(&params, true).map_err(|err| invalid(format!("{err:#}")))?;
+            } else if params["unverified"] == true && evidence.verifies() {
+                return Err(invalid(
+                    "unverified skips page verification; omit observation, expect and depends_on, or omit unverified to have them checked",
+                ));
             }
             return Ok(Prepared::Single {
                 method,
@@ -1397,6 +1449,9 @@ async fn interact(link: &Link, prepared: Prepared) -> Result<Reply, CliError> {
             evidence.check(&link.protocol, false)?;
             let timeout = timeout_of(&params, 30_000);
             let is_evaluate = method == Method::ToolEvaluate;
+            if is_evaluate && params["unverified"] == true {
+                crate::cli::evaluate::require_unverified_script(&link.protocol)?;
+            }
             let value = link.rpc(method, evidence.attach(params)?, timeout).await?;
             Ok(Reply {
                 is_error: is_evaluate && value["ok"] == false,

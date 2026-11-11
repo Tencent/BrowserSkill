@@ -1,107 +1,16 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "title": "ExtractParams",
-  "type": "object",
-  "required": [
-    "action",
-    "session_id"
-  ],
-  "properties": {
-    "action": {
-      "$ref": "#/definitions/ExtractAction"
-    },
-    "fields": {
-      "type": [
-        "array",
-        "null"
-      ],
-      "items": {
-        "$ref": "#/definitions/ExtractField"
-      }
-    },
-    "item_selector": {
-      "type": [
-        "string",
-        "null"
-      ]
-    },
-    "max_bytes": {
-      "type": [
-        "integer",
-        "null"
-      ],
-      "format": "uint32",
-      "minimum": 0.0
-    },
-    "max_columns": {
-      "type": [
-        "integer",
-        "null"
-      ],
-      "format": "uint32",
-      "minimum": 0.0
-    },
-    "max_rows": {
-      "type": [
-        "integer",
-        "null"
-      ],
-      "format": "uint32",
-      "minimum": 0.0
-    },
-    "ref": {
-      "type": [
-        "string",
-        "null"
-      ]
-    },
-    "selector": {
-      "type": [
-        "string",
-        "null"
-      ]
-    },
-    "session_id": {
-      "type": "string"
-    },
-    "tab_id": {
-      "type": [
-        "integer",
-        "null"
-      ],
-      "format": "int64"
-    },
-    "target_id": {
-      "type": [
-        "string",
-        "null"
-      ]
-    },
-    "timeout_ms": {
-      "type": [
-        "integer",
-        "null"
-      ],
-      "format": "uint32",
-      "minimum": 0.0
-    }
-  },
   "definitions": {
     "ExtractAction": {
-      "type": "string",
       "enum": [
         "discover",
         "table",
         "list"
-      ]
+      ],
+      "type": "string"
     },
     "ExtractField": {
-      "type": "object",
-      "required": [
-        "key",
-        "read",
-        "selector"
-      ],
+      "additionalProperties": false,
       "properties": {
         "attribute": {
           "type": [
@@ -125,15 +34,106 @@
           "type": "string"
         }
       },
-      "additionalProperties": false
+      "required": [
+        "key",
+        "selector",
+        "read"
+      ],
+      "type": "object"
     },
     "ExtractRead": {
-      "type": "string",
       "enum": [
         "text",
         "href",
         "attribute"
+      ],
+      "type": "string"
+    }
+  },
+  "properties": {
+    "action": {
+      "$ref": "#/definitions/ExtractAction"
+    },
+    "fields": {
+      "items": {
+        "$ref": "#/definitions/ExtractField"
+      },
+      "type": [
+        "array",
+        "null"
+      ]
+    },
+    "item_selector": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "max_bytes": {
+      "format": "uint32",
+      "minimum": 0,
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "max_columns": {
+      "format": "uint32",
+      "minimum": 0,
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "max_rows": {
+      "format": "uint32",
+      "minimum": 0,
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "ref": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "selector": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "session_id": {
+      "type": "string"
+    },
+    "tab_id": {
+      "format": "int64",
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "target_id": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "timeout_ms": {
+      "format": "uint32",
+      "minimum": 0,
+      "type": [
+        "integer",
+        "null"
       ]
     }
-  }
+  },
+  "required": [
+    "session_id",
+    "action"
+  ],
+  "title": "ExtractParams",
+  "type": "object"
 }

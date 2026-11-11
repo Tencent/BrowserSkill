@@ -29,11 +29,8 @@ pub struct CooperateParams {
 pub const TARGET_CONTROL_PROTOCOL: &str = "1.8";
 
 pub fn supports_target_control(protocol: &str) -> bool {
-    crate::system::compare_protocol(protocol, "2.0") == Some(std::cmp::Ordering::Less)
-        && matches!(
-            crate::system::compare_protocol(protocol, TARGET_CONTROL_PROTOCOL),
-            Some(std::cmp::Ordering::Equal | std::cmp::Ordering::Greater)
-        )
+    crate::compatibility::Feature::TargetControl
+        .supports(crate::compatibility::Peer::Extension, protocol)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -55,8 +52,9 @@ pub struct ActionMetadata {
     #[schemars(with = "String")]
     pub context_id: Option<String>,
     /// Sync's single-use baseline for untargeted/visual actions under target policy,
-    /// including scripts, untargeted keys and displacement-only drags. Drags with a
-    /// target ref/selector need only context_id.
+    /// including untargeted keys and displacement-only drags. Drags with a
+    /// target ref/selector need only context_id. A script needs it only when it
+    /// states no expect facts; passing both checks the whole page as well.
     /// Strict-policy drag instead accepts its legacy ref-map observation token.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub observation_id: Option<String>,

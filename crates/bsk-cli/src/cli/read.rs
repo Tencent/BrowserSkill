@@ -3,12 +3,11 @@ use super::{
     TOOL_IPC_TIMEOUT, business_rpc,
     ensure_daemon::ensure_daemon,
     error::{CliError, Format},
-    protocol::require_daemon_support,
 };
 use anyhow::Context;
 use bsk_protocol::{
     Method,
-    tools::{DOM_READ_PROTOCOL, ReadField, ReadParams, ReadResult, supports_dom_read},
+    tools::{ReadField, ReadParams, ReadResult},
 };
 use clap::Args;
 
@@ -43,15 +42,10 @@ pub fn dispatch(args: ReadArgs, _format: Format) -> Result<(), CliError> {
         .transpose()
         .context("parse --fields-json as a DOM read field array")?;
     let info = ensure_daemon().context("ensure daemon is running")?;
-    require_daemon_support(
-        &info.sock_path,
-        "read",
-        DOM_READ_PROTOCOL,
-        supports_dom_read,
-    )?;
     let params = ReadParams {
         session_id: args.session,
         tab_id: args.tab_id,
+        context_id: None,
         selector: args.selector,
         ref_: args.ref_,
         fields,

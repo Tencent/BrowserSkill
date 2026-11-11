@@ -546,10 +546,56 @@ else:
         self.assertEqual(code, 0, report.get("errors"))
         self.assertTrue(report["release_ready"])
         self.assertIn("benchmark_summary", report)
-        self.assertEqual(report["execution_modes"]["plan"]["actions_executed"], 6)
+        self.assertEqual(report["execution_modes"]["plan"]["actions_executed"], 5)
+        self.assertEqual(report["execution_modes"]["plan"]["avg_actions_per_turn"], 5.0)
+        self.assertEqual(report["execution_modes"]["plan"]["success_rate"], 1.0)
+        self.assertEqual(
+            report["execution_modes"]["plan"]["negative_guard_invocations"], 1
+        )
         self.assertEqual(report["execution_modes"]["recipe"]["actions_executed"], 4)
+        self.assertEqual(
+            report["execution_modes"]["recipe"]["avg_actions_per_turn"], 4.0
+        )
+        self.assertEqual(report["execution_modes"]["recipe"]["success_rate"], 1.0)
+        self.assertEqual(
+            report["execution_modes"]["recipe"]["negative_guard_invocations"], 1
+        )
+        self.assertEqual(
+            report["execution_modes"]["recipe_mgmt"]["actions_executed"], 0
+        )
         self.assertTrue((self.root / "benchmark.json").exists())
         self.assertTrue((self.root / "benchmark.md").exists())
+
+        # Verify step error vs result action counting and semantic checks
+        m_step_err = audit.extract_metrics(
+            "step", 1, {"ok": False, "action": {"error": {"code": "refused"}}}, 12.0
+        )
+        self.assertEqual(m_step_err["actions_executed"], 0)
+        m_step_ok = audit.extract_metrics(
+            "step", 0, {"ok": True, "action": {"result": {"tab_id": 1}}}, 15.0
+        )
+        self.assertEqual(m_step_ok["actions_executed"], 1)
+        self.assertIsNotNone(
+            audit.semantic_failure(
+                {"command": "recipe draft"}, {"json": {"errors": ["ambiguous"]}}
+            )
+        )
+        self.assertIsNone(
+            audit.semantic_failure(
+                {"command": "recipe approve"},
+                {"json": {"name": "sales", "approval_required": False}},
+            )
+        )
+        self.assertIsNotNone(
+            audit.semantic_failure(
+                {"command": "read"}, {"json": {"ok": True}}
+            )
+        )
+        self.assertIsNone(
+            audit.semantic_failure(
+                {"command": "read"}, {"json": {"items": [{"text": "hello"}]}}
+            )
+        )
 
         # Multi-run aggregation
         agg = audit.aggregate_multi_run_benchmarks([self.root, self.root])
