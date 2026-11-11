@@ -10,13 +10,15 @@ that must understand them.
 - Ordinary requests keep their existing defaults. For example, omitting
   `--incognito` does not require incognito support, and omitting the borrow
   confirmation timeout keeps the older behavior.
-- An explicitly requested feature is checked before dispatch. The CLI checks the
-  running daemon over the same connection used for the action. The daemon checks
-  the actual target browser connection before sending it a request.
-- Unsupported features return `unsupported` with `data.reason =
+- An explicitly requested feature is checked before dispatch. CLI business RPCs
+  reuse the daemon protocol version cached during discovery or startup for the
+  daemon's socket path. Without a cached version, the business RPC checks
+  `system.status` over the same IPC connection used for the action. The daemon
+  checks the actual target browser connection before sending it a request.
+- A failed feature check returns `unsupported` with `data.reason =
   "unsupported_feature"`, `component`, `required_protocol`, `actual_protocol`,
-  `feature`, `effect_state: "none"` and `recovery`. They are never silently dropped
-  or converted into an operation with different behavior.
+  `feature`, `effect_state: "none"` and `recovery`. The request is rejected before
+  browser effects; the requested feature is not removed to make the call succeed.
 
 Run `bsk status --json` to see `compatibility.daemon` and
 `compatibility.browsers[].features`. Each feature reports `available` and its
@@ -37,6 +39,11 @@ same structured runtime rejection. Do not remove an explicitly requested option
 just to make an unsupported operation run.
 
 ## Where maintainers change the contract
+
+The CLI cache lasts for the current process and is keyed by socket path, not by
+daemon identity or IPC connection. Reusing it assumes the daemon has not been
+replaced at that path since discovery. The cached path does not provide a
+same-connection version check or detect such a replacement.
 
 1. Define a feature and its daemon/extension protocol requirements in
    `crates/bsk-protocol/src/compatibility.rs`. Bump the protocol when adding a new
