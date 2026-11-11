@@ -422,4 +422,59 @@ describe("virtual-scroll row business-key guard", () => {
       "Runtime.releaseObjectGroup",
     ]);
   });
+
+  it("skips HTML comment nodes, 1x1 .sr-only microboxes, and volatile percentage cells in parity with snapshot resolution", async () => {
+    document.body.innerHTML = `
+      <table><tbody>
+        <tr>
+          <td><label class="el-checkbox"><span></span><!--v-if--></label></td>
+          <td><span id="sr" style="overflow:hidden">选择当前行</span></td>
+          <td id="pct">45%</td>
+          <td>ORD-902</td>
+          <td><button id="act" type="button">详情</button></td>
+        </tr>
+      </tbody></table>
+    `;
+    const sr = document.getElementById("sr")!;
+    vi.spyOn(sr, "getBoundingClientRect").mockReturnValue({
+      x: 0,
+      y: 0,
+      width: 1,
+      height: 1,
+      top: 0,
+      right: 1,
+      bottom: 1,
+      left: 0,
+      toJSON: () => ({}),
+    } as DOMRect);
+    const btn = document.getElementById("act")!;
+    vi.spyOn(btn, "getClientRects").mockReturnValue([{}] as unknown as DOMRectList);
+    const sendToTarget = vi.fn(async (_target, method, params) => {
+      if (method === "DOM.resolveNode") return { object: { objectId: "act-obj" } };
+      if (method === "Runtime.callFunctionOn") {
+        const read = new Function(`return (${params.functionDeclaration})`)();
+        return {
+          result: {
+            value: read.apply(
+              btn,
+              params.arguments.map((arg: { value: unknown }) => arg.value),
+            ),
+          },
+        };
+      }
+      return {};
+    });
+    const cdp = { send: vi.fn(), sendToTarget } as unknown as CdpRunner;
+    const anchoredTarget = {
+      ...target,
+      usedRef: "e9",
+      rowAnchor: "ORD-902",
+    };
+
+    expect(await checkActionTarget(cdp, anchoredTarget, "tool.click")).toBeUndefined();
+
+    // Live progress cell ticks from 45% -> 88% on the same row: still resolves ORD-902 without false rejection
+    document.getElementById("pct")!.textContent = "88%";
+    expect(await checkActionTarget(cdp, anchoredTarget, "tool.click")).toBeUndefined();
+  });
 });

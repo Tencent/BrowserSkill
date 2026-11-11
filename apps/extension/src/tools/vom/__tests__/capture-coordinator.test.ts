@@ -205,8 +205,8 @@ function fixture(
                     requested.map(
                       (name) =>
                         [
-                          7, 8, 8, 5, 6, 13, 14, 15, 9, 5, 5, 10, 6, 10, 10, 10, 10, 10, 8, 10, 5,
-                          12, 11,
+                          7, 8, 8, 5, 6, 13, 14, 15, 10, 9, 5, 5, 10, 6, 10, 10, 10, 10, 10, 8, 10,
+                          5, 12, 11,
                         ][VISUAL_STYLES.indexOf(name as (typeof VISUAL_STYLES)[number])],
                     ),
                   ),

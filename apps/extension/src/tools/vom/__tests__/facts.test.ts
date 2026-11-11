@@ -77,6 +77,7 @@ describe("document facts", () => {
       "16px",
       "rgb(0, 0, 0)",
       "rgba(0, 0, 0, 0)",
+      "none",
     ];
     const styles = REQUESTED_STYLES.map((style) =>
       style === "visibility"
@@ -91,7 +92,9 @@ describe("document facts", () => {
                 ? 10
                 : style === "background-color"
                   ? 11
-                  : 8,
+                  : style === "background-image"
+                    ? 12
+                    : 8,
     );
     const { nodes } = await decodeDocument(
       {
@@ -113,6 +116,7 @@ describe("document facts", () => {
         "font-size": "16px",
         color: "rgb(0, 0, 0)",
         "background-color": "rgba(0, 0, 0, 0)",
+        "background-image": "none",
       },
     });
     expect(nodes[0]).not.toHaveProperty("rect");
@@ -402,5 +406,67 @@ describe("computed-style stealth prompt-injection stripper", () => {
 
     const index = await buildDocumentIndex(nodes);
     expect([...index.excludedBackendNodeIds]).toEqual([]);
+  });
+
+  it("ignores HTML comment nodeValue in decodeDocument and preserves non-link white text over background-image or <img> media", async () => {
+    // 1) Comment node (`nodeType === 8`, e.g. Vue `<!--v-if-->`) must never leak into element textContent
+    const commentDecoded = await decodeDocument(
+      {
+        nodes: {
+          backendNodeId: [1, 2, 3, 4],
+          parentIndex: [-1, 0, 0, 0],
+          nodeType: [1, 1, 8, 3],
+          nodeName: [0, 1, 2, 3],
+          nodeValue: [-1, -1, 4, 5],
+        },
+      },
+      ["label", "span", "#comment", "#text", "v-if", "全选"],
+    );
+    expect(commentDecoded.nodes[0].textContent).toBe("全选");
+
+    // 2) Non-link white headings/captions over CSS background-image or sibling <img> are preserved,
+    // while explicit solid white-on-white injection on top of media is still stripped.
+    const nodes: DecodedNode[] = [
+      styledNode(1, null, "body", {
+        bounds: [0, 0, 1000, 800],
+        styles: { "background-color": "rgb(255, 255, 255)" },
+      }),
+      // Ancestor with CSS background-image (even with fallback white background-color)
+      styledNode(10, 1, "section", {
+        bounds: [0, 0, 1000, 260],
+        styles: {
+          "background-color": "rgb(255, 255, 255)",
+          "background-image": 'url("https://cdn.example/banner.jpg")',
+        },
+      }),
+      styledNode(11, 10, "h1", {
+        bounds: [40, 80, 400, 48],
+        styles: { color: "rgb(255, 255, 255)" },
+        textContent: "年度精选纪录片",
+      }),
+      styledNode(12, 11, "#text", { textContent: "年度精选纪录片" }),
+      // Card with sibling <img> cover and overlaid non-link white duration/caption
+      styledNode(20, 1, "div", { bounds: [0, 300, 320, 180] }),
+      styledNode(21, 20, "img", { bounds: [0, 300, 320, 180] }),
+      styledNode(22, 20, "span", {
+        bounds: [250, 450, 60, 22],
+        styles: { position: "absolute", color: "rgb(255, 255, 255)" },
+        textContent: "12.4万播放",
+      }),
+      styledNode(23, 22, "#text", { textContent: "12.4万播放" }),
+      // Explicit opaque white-on-white injection placed over the same card IS still stripped
+      styledNode(30, 20, "span", {
+        bounds: [10, 310, 180, 20],
+        styles: {
+          color: "rgb(255, 255, 255)",
+          "background-color": "rgb(255, 255, 255)",
+        },
+        textContent: "INJ_SOLID_ON_CARD",
+      }),
+      styledNode(31, 30, "#text", { textContent: "INJ_SOLID_ON_CARD" }),
+    ];
+
+    const index = await buildDocumentIndex(nodes);
+    expect([...index.excludedBackendNodeIds].sort((a, b) => a - b)).toEqual([30, 31]);
   });
 });

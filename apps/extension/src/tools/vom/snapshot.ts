@@ -12,6 +12,7 @@ export const REQUESTED_STYLES = [
   "font-size",
   "color",
   "background-color",
+  "background-image",
 ] as const;
 export const VISUAL_STYLES = [
   ...REQUESTED_STYLES,
@@ -174,6 +175,16 @@ export async function decodeDocument(
       }
       const nvIdx = dn.nodeValue[n] ?? -1;
       if (nvIdx < 0) continue;
+      // Chromium's DOMSnapshot emits `nodeValue` for Comment nodes (`nodeType === 8`,
+      // e.g. Vue `<!--v-if-->`) as well as Text/CDATA nodes. Only Text (3) and CDATA (4)
+      // contribute to element `textContent`.
+      const nt = dn.nodeType?.[n];
+      if (nt !== undefined) {
+        if (nt !== 3 && nt !== 4) continue;
+      } else {
+        const rawName = str(strings, dn.nodeName?.[n]).toLowerCase();
+        if (rawName && rawName !== "#text" && rawName !== "#cdata-section") continue;
+      }
       const text = str(strings, nvIdx).trim();
       if (!text) continue;
       const parentIdx = dn.parentIndex?.[n] ?? -1;

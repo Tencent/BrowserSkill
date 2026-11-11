@@ -182,9 +182,16 @@ function applyStealthPromptInjectionExclusions<T extends DecodedNode>(
   };
 
   let hasAnyOpaqueBg = false;
-  const ownBgByNode = new Map<number, ParsedRgba>();
+  const ownBgByNode = new Map<number, ParsedRgba | "image">();
   for (let i = 0; i < input.length; i++) {
-    const rawBg = input[i].layout?.styles["background-color"];
+    const st = input[i].layout?.styles;
+    if (!st) continue;
+    const rawBgImg = st["background-image"];
+    if (rawBgImg && rawBgImg !== "none" && rawBgImg !== "initial") {
+      ownBgByNode.set(input[i].backendNodeId, "image");
+      continue;
+    }
+    const rawBg = st["background-color"];
     if (!rawBg || rawBg === "rgba(0, 0, 0, 0)" || rawBg === "transparent") continue;
     const parsed = parseCachedColor(rawBg);
     if (parsed && parsed.a >= 0.15) {
@@ -201,9 +208,10 @@ function applyStealthPromptInjectionExclusions<T extends DecodedNode>(
     const node = nodes.get(id);
     if (!node) return null;
     const own = ownBgByNode.get(id);
-    if (own) {
-      bgMemo.set(id, own);
-      return own;
+    if (own !== undefined) {
+      const resolved = own === "image" ? null : own;
+      bgMemo.set(id, resolved);
+      return resolved;
     }
     const parentId = node.parentBackendNodeId;
     if (parentId === null) {
@@ -226,9 +234,9 @@ function applyStealthPromptInjectionExclusions<T extends DecodedNode>(
         break;
       }
       const curOwn = ownBgByNode.get(cur.backendNodeId);
-      if (curOwn) {
-        found = curOwn;
-        bgMemo.set(cur.backendNodeId, curOwn);
+      if (curOwn !== undefined) {
+        found = curOwn === "image" ? null : curOwn;
+        bgMemo.set(cur.backendNodeId, found);
         break;
       }
       chain.push(cur.backendNodeId);
@@ -238,7 +246,13 @@ function applyStealthPromptInjectionExclusions<T extends DecodedNode>(
     return found;
   };
 
-  const candidates: Array<{ node: T; kind: StealthKind }> = [];
+  let hasInheritedZeroContrast = false;
+  const candidates: Array<{
+    node: T;
+    order: number;
+    kind: StealthKind;
+    inheritedZeroContrast?: boolean;
+  }> = [];
   for (let i = 0; i < input.length; i++) {
     const item = input[i];
     if (item.tag.charCodeAt(0) === 35) continue;
@@ -251,6 +265,7 @@ function applyStealthPromptInjectionExclusions<T extends DecodedNode>(
     if (STEALTH_SKIP_SHELL_TAGS.has(tag)) continue;
 
     let kind: StealthKind | undefined;
+    let inheritedZeroContrast = false;
 
     const rawOpacity =
       styles?.opacity || (inlineStyle ? INLINE_OPACITY_RE.exec(inlineStyle)?.[1] : undefined);
@@ -310,12 +325,23 @@ function applyStealthPromptInjectionExclusions<T extends DecodedNode>(
           const bg = resolveEffectiveBg(item.backendNodeId);
           if (bg && bg.a >= 0.9 && fg.r === bg.r && fg.g === bg.g && fg.b === bg.b) {
             kind = "textstyle";
+            if (ownBgByNode.get(item.backendNodeId) === undefined) {
+              inheritedZeroContrast = true;
+              hasInheritedZeroContrast = true;
+            }
           }
         }
       }
     }
 
-    if (kind) candidates.push({ node: item, kind });
+    if (kind) {
+      candidates.push({
+        node: item,
+        order: i,
+        kind,
+        ...(inheritedZeroContrast ? { inheritedZeroContrast: true } : {}),
+      });
+    }
   }
 
   if (candidates.length === 0) return;
@@ -373,7 +399,7 @@ function applyStealthPromptInjectionExclusions<T extends DecodedNode>(
     if (own === 0 && kids) {
       for (let i = 0; i < kids.length; i++) {
         const ch = kids[i];
-        if (ch.tag.startsWith("#") && ch.textContent) {
+        if ((ch.tag === "#text" || ch.tag === "#cdata-section") && ch.textContent) {
           own += ch.textContent.replace(/\s+/g, " ").trim().length;
         }
       }
@@ -514,7 +540,54 @@ function applyStealthPromptInjectionExclusions<T extends DecodedNode>(
     }
   };
 
-  for (const { node: cand, kind } of candidates) {
+  let mediaBackdrops:
+    | Array<{ x: number; y: number; r: number; b: number; paintOrder: number; order: number }>
+    | undefined;
+  if (hasInheritedZeroContrast) {
+    mediaBackdrops = [];
+    for (let i = 0; i < input.length; i++) {
+      const m = input[i];
+      const mTag = m.tag.toLowerCase();
+      const isMediaEl = mTag === "img" || mTag === "video" || mTag === "canvas";
+      const isBgImgEl = ownBgByNode.get(m.backendNodeId) === "image";
+      if (!isMediaEl && !isBgImgEl) continue;
+      const mb = m.layout?.bounds;
+      if (!mb || mb.length < 4 || mb[2] < 8 || mb[3] < 8) continue;
+      mediaBackdrops.push({
+        x: mb[0],
+        y: mb[1],
+        r: mb[0] + mb[2],
+        b: mb[1] + mb[3],
+        paintOrder: m.paintOrder,
+        order: i,
+      });
+    }
+  }
+
+  const overlapsUnderneathMedia = (cand: T, candOrder: number): boolean => {
+    if (!mediaBackdrops || mediaBackdrops.length === 0) return false;
+    const cb = cand.layout?.bounds;
+    if (!cb || cb.length < 4 || cb[2] <= 0 || cb[3] <= 0) return false;
+    const cx = cb[0];
+    const cy = cb[1];
+    const cr = cx + cb[2];
+    const cbot = cy + cb[3];
+    for (let i = 0; i < mediaBackdrops.length; i++) {
+      const m = mediaBackdrops[i];
+      if (
+        m.paintOrder > cand.paintOrder ||
+        (m.paintOrder === cand.paintOrder && m.order >= candOrder)
+      ) {
+        continue;
+      }
+      const ox = Math.min(cr, m.r) - Math.max(cx, m.x);
+      const oy = Math.min(cbot, m.b) - Math.max(cy, m.y);
+      if (ox > 1 && oy > 1) return true;
+    }
+    return false;
+  };
+
+  for (const { node: cand, order: candOrder, kind, inheritedZeroContrast } of candidates) {
     const id = cand.backendNodeId;
     if (
       excludedBackendNodeIds.has(id) ||
@@ -528,6 +601,10 @@ function applyStealthPromptInjectionExclusions<T extends DecodedNode>(
     if (textLen === 0 && !subtreeHasLabelAttr(id, new Set())) {
       continue;
     }
+    if (inheritedZeroContrast && overlapsUnderneathMedia(cand, candOrder)) {
+      markExemptSubtree(id);
+      continue;
+    }
     if (hasInteractiveAncestor(id) && textLen <= MAX_SR_ONLY_LABEL_CHARS) {
       markExemptSubtree(id);
       continue;
@@ -537,7 +614,9 @@ function applyStealthPromptInjectionExclusions<T extends DecodedNode>(
     }
     if (kind === "textstyle" && hasNonStealthElementDescendant(id)) {
       for (const ch of childrenByParent.get(id) ?? []) {
-        if (ch.tag.startsWith("#")) excludedBackendNodeIds.add(ch.backendNodeId);
+        if (ch.tag === "#text" || ch.tag === "#cdata-section") {
+          excludedBackendNodeIds.add(ch.backendNodeId);
+        }
       }
       continue;
     }

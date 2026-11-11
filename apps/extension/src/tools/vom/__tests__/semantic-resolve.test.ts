@@ -181,4 +181,32 @@ describe("semantic sibling context", () => {
     expect(byBackend(resolved, 15)?.rowAnchor).toBe("ORD-8841");
     expect(byBackend(resolved, 102)?.rowAnchor).toBe("TK-1000 | P1 | 网关续期");
   });
+
+  it("skips volatile progress percentages, stops at shadow boundaries, and keeps snapshot/in-page rowAnchor spec in parity", () => {
+    const resolved = resolveSemanticGraph(
+      graph([
+        dom(1, "main"),
+        { ...dom(10, "table"), parentBackendNodeId: 1 },
+        { ...dom(11, "tr"), parentBackendNodeId: 10 },
+        // Selection cell with empty checkbox wrapper (after comment-node stripping in snapshot.ts)
+        { ...dom(12, "td"), parentBackendNodeId: 11 },
+        { ...dom(13, "label"), parentBackendNodeId: 12, attrs: { class: "el-checkbox" } },
+        { ...dom(14, "span"), parentBackendNodeId: 13 },
+        // Volatile progress percentage cell ("45%") skipped in favor of stable filename
+        { ...dom(15, "td", "45%"), parentBackendNodeId: 11 },
+        { ...dom(16, "td", "settlement-2026Q4.csv"), parentBackendNodeId: 11 },
+        { ...dom(17, "td"), parentBackendNodeId: 11 },
+        { ...dom(18, "button", "导出"), parentBackendNodeId: 17 },
+        // Button inside a ShadowRoot (#document-fragment, nodeType=11) must NOT leak across host <tr>
+        { ...dom(20, "tr"), parentBackendNodeId: 10 },
+        { ...dom(21, "td", "HOST-ROW-99"), parentBackendNodeId: 20 },
+        { ...dom(22, "td"), parentBackendNodeId: 20 },
+        { ...dom(23, "x-widget"), parentBackendNodeId: 22 },
+        { ...dom(24, "#document-fragment"), parentBackendNodeId: 23, nodeType: 11 } as CapturedNode,
+        { ...dom(25, "button", "内部操作"), parentBackendNodeId: 24 },
+      ]),
+    );
+    expect(byBackend(resolved, 18)?.rowAnchor).toBe("settlement-2026Q4.csv");
+    expect(byBackend(resolved, 25)?.rowAnchor).toBeUndefined();
+  });
 });

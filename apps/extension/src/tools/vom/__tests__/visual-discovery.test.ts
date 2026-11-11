@@ -17,6 +17,7 @@ const defaults: Record<string, string> = {
   "font-size": "16px",
   color: "rgb(0, 0, 0)",
   "background-color": "rgba(0, 0, 0, 0)",
+  "background-image": "none",
   display: "block",
   "overflow-x": "visible",
   "overflow-y": "visible",

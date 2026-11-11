@@ -1,5 +1,17 @@
 import type { VomNode, VomSelectOption } from "@browser-skill/vom";
 import { RECORD_PASSWORD_ATTRIBUTE, sensitiveAutocomplete } from "@/lib/sensitive-autocomplete";
+import type { NodeFacts } from "../facts";
+import {
+  MAX_ROW_ANCHOR_CHARS,
+  MAX_SEMANTIC_ROW_HOPS,
+  MAX_SLOT_TEXT_SCAN_CHARS,
+  MAX_VIRTUAL_DIV_ROW_HOPS,
+  NON_ANCHOR_ROLES,
+  NON_ANCHOR_TAGS,
+  ROW_STOP_TAGS,
+  VIRTUAL_POOL_EXCLUDED_TAGS,
+  VOLATILE_ROW_TEXT_RE,
+} from "../row-anchor-spec";
 import { stableIdentifierName } from "./name-evidence";
 import type {
   ResolvedSemanticGraph,
@@ -600,55 +612,6 @@ function nearbyText(node: SemanticGraphNode, indexes: ResolveIndexes): string | 
 }
 
 const MAX_INLINE_SELECT_OPTIONS = 10;
-const MAX_ROW_ANCHOR_CHARS = 80;
-const PURE_TIMER_RE =
-  /^(?:\d{1,2}:\d{2}(?::\d{2})?|\d+\s*(?:ms|s|sec|secs|m|min|mins|h|hr|hrs|秒|分钟|分|小时)(?:\s*前|\s*ago)?)$/i;
-const ROW_STOP_TAGS = new Set([
-  "body",
-  "html",
-  "form",
-  "table",
-  "main",
-  "nav",
-  "header",
-  "footer",
-  "section",
-  "article",
-  "aside",
-  "dialog",
-]);
-const NON_ANCHOR_TAGS = new Set([
-  "button",
-  "input",
-  "select",
-  "textarea",
-  "option",
-  "optgroup",
-  "summary",
-  "script",
-  "style",
-  "noscript",
-  "template",
-  "svg",
-]);
-const NON_ANCHOR_ROLES = new Set([
-  "button",
-  "checkbox",
-  "combobox",
-  "listbox",
-  "menuitem",
-  "menuitemcheckbox",
-  "menuitemradio",
-  "option",
-  "radio",
-  "searchbox",
-  "slider",
-  "spinbutton",
-  "switch",
-  "tab",
-  "textbox",
-  "treeitem",
-]);
 
 function extractSelectOptions(
   selectNode: SemanticGraphNode,
@@ -713,7 +676,19 @@ function extractSelectOptions(
 function createRowAnchorResolver(graph: SemanticGraph, indexes: ResolveIndexes) {
   const pureSlotMemo = new Map<SemanticNodeId, string>();
   const formAncestorMemo = new Map<SemanticNodeId, boolean>();
+  const renderedDescendantMemo = new Map<SemanticNodeId, boolean>();
   const poolClassCounts = new Map<SemanticNodeId, Map<string, number>>();
+
+  const domFacts = (node: SemanticGraphNode | undefined): Partial<NodeFacts> | undefined =>
+    node?.dom as Partial<NodeFacts> | undefined;
+
+  const lightDomParentId = (node: SemanticGraphNode | undefined): SemanticNodeId | undefined => {
+    const pid = node?.domParentId;
+    if (!pid) return undefined;
+    const p = domFacts(graph.nodes.get(pid));
+    if (!p || p.nodeType === 11 || p.tag?.startsWith("#")) return undefined;
+    return pid;
+  };
 
   const hasFormAncestor = (nodeId: SemanticNodeId): boolean => {
     const hit = formAncestorMemo.get(nodeId);
@@ -727,9 +702,26 @@ function createRowAnchorResolver(graph: SemanticGraph, indexes: ResolveIndexes) 
       formAncestorMemo.set(nodeId, true);
       return true;
     }
-    const res = node.domParentId ? hasFormAncestor(node.domParentId) : false;
+    const pid = lightDomParentId(node);
+    const res = pid ? hasFormAncestor(pid) : false;
     formAncestorMemo.set(nodeId, res);
     return res;
+  };
+
+  const hasRenderedDescendant = (nodeId: SemanticNodeId): boolean => {
+    const cached = renderedDescendantMemo.get(nodeId);
+    if (cached !== undefined) return cached;
+    for (const cid of indexes.domChildren.get(nodeId) ?? []) {
+      const c = graph.nodes.get(cid);
+      const cf = domFacts(c);
+      if (!c || !cf || c.excluded || cf.nodeType === 11 || cf.tag?.startsWith("#")) continue;
+      if (cf.rendered === true || hasRenderedDescendant(cid)) {
+        renderedDescendantMemo.set(nodeId, true);
+        return true;
+      }
+    }
+    renderedDescendantMemo.set(nodeId, false);
+    return false;
   };
 
   const countSameClassDivs = (poolId: SemanticNodeId, cls: string): number => {
@@ -749,7 +741,28 @@ function createRowAnchorResolver(graph: SemanticGraph, indexes: ResolveIndexes) 
   };
 
   const isSkippedSlotNode = (n: SemanticGraphNode): boolean => {
-    if (n.excluded || !n.dom || n.dom.rendered === false) return true;
+    const nf = domFacts(n);
+    if (n.excluded || !n.dom || nf?.nodeType === 11 || n.dom.tag.startsWith("#")) return true;
+    if (n.dom.rendered === false) {
+      // `display: contents` wrappers carry no layout box (`layout === undefined`)
+      // while their descendants render; `display: none` suppresses the whole subtree.
+      const disp = nf?.layout?.styles.display;
+      if (nf?.layout !== undefined || disp === "none" || !hasRenderedDescendant(n.id)) {
+        return true;
+      }
+    }
+    const st = nf?.layout?.styles;
+    if (st) {
+      if (st.visibility === "hidden" || st.visibility === "collapse") return true;
+      if (st.opacity && st.opacity !== "1") {
+        const op = Number.parseFloat(st.opacity);
+        if (Number.isFinite(op) && op < 0.05) return true;
+      }
+      if (st["font-size"] && st["font-size"] !== "16px") {
+        const fs = Number.parseFloat(st["font-size"]);
+        if (Number.isFinite(fs) && fs <= 1.5) return true;
+      }
+    }
     const attrs = n.dom.attrs;
     if (
       Object.prototype.hasOwnProperty.call(attrs, "hidden") ||
@@ -784,7 +797,7 @@ function createRowAnchorResolver(graph: SemanticGraph, indexes: ResolveIndexes) 
       if (sub) {
         parts.push(sub);
         len += sub.length + 1;
-        if (len >= 160) break;
+        if (len >= MAX_SLOT_TEXT_SCAN_CHARS) break;
       }
     }
     const out = parts.length === 0 ? "" : (clean(parts.join(" ")) ?? "");
@@ -813,42 +826,34 @@ function createRowAnchorResolver(graph: SemanticGraph, indexes: ResolveIndexes) 
       if (sub) {
         parts.push(sub);
         len += sub.length + 1;
-        if (len >= 160) break;
+        if (len >= MAX_SLOT_TEXT_SCAN_CHARS) break;
       }
     }
     return parts.length === 0 ? "" : (clean(parts.join(" ")) ?? "");
   };
 
-  const semanticRowMemo = new Map<SemanticNodeId, SemanticGraphNode | null>();
-  const resolveSemanticRow = (parentId: SemanticNodeId | undefined): SemanticGraphNode | null => {
-    if (!parentId) return null;
-    const cached = semanticRowMemo.get(parentId);
-    if (cached !== undefined) return cached;
-    const cur = graph.nodes.get(parentId);
-    if (!cur?.dom) {
-      semanticRowMemo.set(parentId, null);
-      return null;
+  const findSemanticRow = (node: SemanticGraphNode): SemanticGraphNode | undefined => {
+    let curId = lightDomParentId(node);
+    for (let hop = 0; hop < MAX_SEMANTIC_ROW_HOPS && curId; hop++) {
+      const cur = graph.nodes.get(curId);
+      if (!cur?.dom) break;
+      const curTag = cur.dom.tag.toLowerCase();
+      if (curTag === "body" || curTag === "html") break;
+      const curRole = (cur.dom.attrs.role ?? "").trim().toLowerCase();
+      if (curTag === "tr" || curTag === "li" || curRole === "row" || curRole === "listitem") {
+        return cur;
+      }
+      curId = lightDomParentId(cur);
     }
-    const curTag = cur.dom.tag.toLowerCase();
-    if (curTag === "body" || curTag === "html") {
-      semanticRowMemo.set(parentId, null);
-      return null;
-    }
-    const curRole = (cur.dom.attrs.role ?? "").trim().toLowerCase();
-    const found =
-      curTag === "tr" || curTag === "li" || curRole === "row" || curRole === "listitem"
-        ? cur
-        : resolveSemanticRow(cur.domParentId);
-    semanticRowMemo.set(parentId, found);
-    return found;
+    return undefined;
   };
 
   const findRow = (node: SemanticGraphNode): SemanticGraphNode | undefined => {
-    const semanticHit = resolveSemanticRow(node.domParentId);
+    const semanticHit = findSemanticRow(node);
     if (semanticHit) return semanticHit;
     if (hasFormAncestor(node.id)) return undefined;
-    let curId = node.domParentId;
-    for (let hop = 0; hop < 3 && curId; hop++) {
+    let curId = lightDomParentId(node);
+    for (let hop = 0; hop < MAX_VIRTUAL_DIV_ROW_HOPS && curId; hop++) {
       const cur = graph.nodes.get(curId);
       if (!cur?.dom) break;
       const curTag = cur.dom.tag.toLowerCase();
@@ -857,7 +862,7 @@ function createRowAnchorResolver(graph: SemanticGraph, indexes: ResolveIndexes) 
         const curRole = (cur.dom.attrs.role ?? "").trim().toLowerCase();
         const cls = (cur.dom.attrs.class ?? "").trim();
         const curKids = indexes.domChildren.get(cur.id) ?? [];
-        const poolId = cur.domParentId;
+        const poolId = lightDomParentId(cur);
         const pool = poolId ? graph.nodes.get(poolId) : undefined;
         const poolTag = pool?.dom?.tag.toLowerCase() ?? "";
         if (
@@ -866,39 +871,36 @@ function createRowAnchorResolver(graph: SemanticGraph, indexes: ResolveIndexes) 
           curKids.length >= 1 &&
           curKids.length <= 12 &&
           poolId &&
-          poolTag !== "body" &&
-          poolTag !== "html" &&
-          poolTag !== "form" &&
-          poolTag !== "label" &&
-          poolTag !== "fieldset" &&
+          !VIRTUAL_POOL_EXCLUDED_TAGS.has(poolTag) &&
           countSameClassDivs(poolId, cls) >= 4
         ) {
           return cur;
         }
       }
-      curId = cur.domParentId;
+      curId = lightDomParentId(cur);
     }
     return undefined;
   };
 
   return (node: SemanticGraphNode): string | undefined => {
-    if (!node.dom || !node.domParentId) return undefined;
+    const startParentId = lightDomParentId(node);
+    if (!node.dom || !startParentId) return undefined;
     const row = findRow(node);
     if (!row?.dom) return undefined;
 
     const ancestors = new Set<SemanticNodeId>();
-    let walk: SemanticNodeId | undefined = node.domParentId;
+    let walk: SemanticNodeId | undefined = startParentId;
     let guard = 0;
     while (walk && walk !== row.id && guard++ < 16) {
       ancestors.add(walk);
-      walk = graph.nodes.get(walk)?.domParentId;
+      walk = lightDomParentId(graph.nodes.get(walk));
     }
 
     const selfText = (indexes.domText(node.id) ?? clean(node.dom.textContent) ?? "").toLowerCase();
     const selfAria = (clean(node.dom.attrs["aria-label"]) ?? "").toLowerCase();
     const accept = (raw: string | undefined): string | undefined => {
       if (!raw) return undefined;
-      if (PURE_TIMER_RE.test(raw)) return undefined;
+      if (VOLATILE_ROW_TEXT_RE.test(raw)) return undefined;
       const lower = raw.toLowerCase();
       if ((selfText && lower === selfText) || (selfAria && lower === selfAria)) return undefined;
       const cps = [...raw];
@@ -910,6 +912,8 @@ function createRowAnchorResolver(graph: SemanticGraph, indexes: ResolveIndexes) 
     const direct = accept(clean(row.dom.textContent));
     if (direct) return direct;
     for (const slotId of indexes.domChildren.get(row.id) ?? []) {
+      const slotFacts = domFacts(graph.nodes.get(slotId));
+      if (slotFacts?.nodeType === 11 || slotFacts?.tag?.startsWith("#")) continue;
       const text = slotTextExcluding(slotId, node.id, ancestors);
       const hit = accept(text);
       if (hit) return hit;

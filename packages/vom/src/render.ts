@@ -127,8 +127,16 @@ const ACTIVE_REGION_POSITIONS = new Set(["fixed", "absolute", "sticky"]);
 const LABELABLE_INPUT_ROLES = new Set(["textbox", "searchbox", "combobox", "spinbutton"]);
 const TABLE_CELL_ROLES = new Set(["cell", "gridcell", "columnheader", "rowheader"]);
 const MAX_INLINE_SELECT_OPTIONS = 10;
+const MAX_INLINE_OPTION_VALUE_CHARS = 36;
+const MAX_INLINE_OPTION_LABEL_CHARS = 48;
 const MIN_FOLDABLE_TABLE_ROWS = 3;
-const PURE_TIMER_RE = /^(?:\d{1,2}:\d{2}(?::\d{2})?|\d+(?:\.\d+)?\s*(?:ms|s|sec|secs|秒)前?)$/i;
+
+const NON_CAPTION_TOKEN_RE =
+  /^(?:[\d\s\p{P}\p{S}]+|(?:kg|g|mg|lb|lbs|oz|km|m|cm|mm|px|pt|rem|em|vw|vh|ms|s|sec|secs|min|mins|hr|hrs|hz|khz|mhz|ghz|kb|mb|gb|tb|kbps|mbps|kcal|℃|°c|°f|元|万元|亿元|件|个|次|天|月|年|to|至|到))$/iu;
+const NON_CAPTION_VALIDATION_RE =
+  /(?:不正确|无效|不能为空|必填|格式错误|请输入|不匹配|已存在|至少\s*\d|不能超过|\binvalid\b|\brequired\b|\bmust be\b|\bcannot be\b|\btoo short\b|\btoo long\b)/i;
+const NON_CAPTION_ATTR_CLASS_RE =
+  /(?:^|[-_\s])(?:err|error|errors|invalid|warn|warning|alert|feedback|helper|hint|unit|suffix|addon)(?:$|[-_\s])/i;
 
 function cleaned(value: string | undefined): string | undefined {
   const trimmed = value?.replace(/\s+/g, " ").trim();
@@ -802,11 +810,18 @@ function handleContext(node: VomNode, state: RenderState): string[] {
   ]);
 }
 
+function capCodePoints(raw: string, maxChars: number): string {
+  const cps = [...raw];
+  return cps.length > maxChars ? `${cps.slice(0, maxChars).join("").trimEnd()}…` : raw;
+}
+
 function formatOptionToken(val: string, lbl: string, selected: boolean): string {
   const star = selected ? "*" : "";
-  if (val === lbl) return `${JSON.stringify(lbl)}${star}`;
-  const key = /^[A-Za-z0-9_.:/-]+$/.test(val) ? val : JSON.stringify(val);
-  return `${key}=${JSON.stringify(lbl)}${star}`;
+  const cappedLbl = capCodePoints(lbl, MAX_INLINE_OPTION_LABEL_CHARS);
+  if (val === lbl) return `${JSON.stringify(cappedLbl)}${star}`;
+  const cappedVal = capCodePoints(val, MAX_INLINE_OPTION_VALUE_CHARS);
+  const key = /^[A-Za-z0-9_.:/-]+$/.test(cappedVal) ? cappedVal : JSON.stringify(cappedVal);
+  return `${key}=${JSON.stringify(cappedLbl)}${star}`;
 }
 
 function formatInlineSelectOptions(node: VomNode, state?: RenderState): string | undefined {
@@ -909,7 +924,7 @@ function renderNodeLine(
   if (isNativeSelect && !node.sensitive && !redactValues) {
     const inlineOpts = formatInlineSelectOptions(node, state);
     if (inlineOpts) line += ` [options: ${inlineOpts}]`;
-  } else if (role === "combobox" && !isNativeSelect) {
+  } else if (role === "combobox" && !isNativeSelect && !isEditableCombobox(node)) {
     const expanded = node.attrs?.["aria-expanded"]?.toLowerCase() === "true";
     line += expanded ? " [custom-dropdown: expanded]" : " [custom-dropdown: click to open]";
   }
@@ -923,6 +938,20 @@ function renderNodeLine(
   }
 
   return line;
+}
+
+function isEditableCombobox(node: VomNode): boolean {
+  const tag = normalizedTag(node);
+  const attrs = node.attrs ?? {};
+  const isReadonly =
+    Object.prototype.hasOwnProperty.call(attrs, "readonly") ||
+    attrs["aria-readonly"]?.trim().toLowerCase() === "true";
+  if ((tag === "input" || tag === "textarea") && !isReadonly) return true;
+  const ce = attrs.contenteditable?.trim().toLowerCase();
+  if (ce === "" || ce === "true" || ce === "plaintext-only") return true;
+  const auto = attrs["aria-autocomplete"]?.trim().toLowerCase();
+  if (auto && auto !== "none") return true;
+  return false;
 }
 
 function shouldSkipRedundantRefChildren(node: VomNode): boolean {
@@ -983,8 +1012,6 @@ interface RenderState {
   surfaceMap: Map<number, CondSurface>;
   scopeMap: Map<number, ActiveScopeBlock>;
   hasInteractiveDescendant: Set<number>;
-  hasAnyRowOrListitem: boolean;
-  rowAncestorMemo: Map<number, number | null>;
   boundFieldLabels: Map<number, string>;
   consumedCaptionIds: Set<number>;
   foldedRowCells: Map<number, string>;
@@ -1023,64 +1050,6 @@ function collectSubtreeText(node: VomNode, children: Map<number | null, VomNode[
   }
   if (kidTexts.length > 0) return kidTexts.join(" ");
   return ownName ?? cleaned(node.text) ?? cleaned(node.value) ?? "";
-}
-
-function collectNonInteractiveRowText(
-  node: VomNode,
-  targetId: number,
-  state: RenderState,
-): string | undefined {
-  if (node.id === targetId || node.sensitive || isVomReferenceNode(node)) return undefined;
-  const kids = state.children.get(node.id) ?? [];
-  if (!state.hasInteractiveDescendant.has(node.id)) {
-    const text = collectSubtreeText(node, state.children);
-    return text || undefined;
-  }
-  const parts: string[] = [];
-  for (const child of kids) {
-    const sub = collectNonInteractiveRowText(child, targetId, state);
-    if (sub) parts.push(sub);
-  }
-  return parts.length > 0 ? cleaned(parts.join(" ")) : undefined;
-}
-
-function resolveEnclosingRowNodeId(nodeId: number, state: RenderState): number | null {
-  const cached = state.rowAncestorMemo.get(nodeId);
-  if (cached !== undefined) return cached;
-  const parentId = state.parentMap.get(nodeId) ?? null;
-  if (parentId === null) {
-    state.rowAncestorMemo.set(nodeId, null);
-    return null;
-  }
-  const parent = state.nodesById.get(parentId);
-  if (!parent) {
-    state.rowAncestorMemo.set(nodeId, null);
-    return null;
-  }
-  const r = normalizedRole(parent);
-  const t = normalizedTag(parent);
-  const found =
-    r === "row" || r === "listitem" || t === "tr" || t === "li"
-      ? parentId
-      : resolveEnclosingRowNodeId(parentId, state);
-  state.rowAncestorMemo.set(nodeId, found);
-  return found;
-}
-
-function inferSceneRowAnchor(node: VomNode, state: RenderState): string | undefined {
-  if (node.rowAnchor) return node.rowAnchor;
-  if (!state.hasAnyRowOrListitem || node.domAncestorIds !== undefined) return undefined;
-  const rowNodeId = resolveEnclosingRowNodeId(node.id, state);
-  const rowNode = rowNodeId === null ? undefined : state.nodesById.get(rowNodeId);
-  if (!rowNode) return undefined;
-  const ownKey = (cleaned(node.name) ?? cleaned(node.text) ?? "").toLowerCase();
-  for (const slot of state.children.get(rowNode.id) ?? []) {
-    const text = collectNonInteractiveRowText(slot, node.id, state);
-    if (!text || PURE_TIMER_RE.test(text)) continue;
-    if (ownKey && text.toLowerCase() === ownKey) continue;
-    return Array.from(text).slice(0, 80).join("").trim() || undefined;
-  }
-  return undefined;
 }
 
 function* renderTreeRows(
@@ -1160,7 +1129,7 @@ function* renderTreeRows(
     const minimal = visual ? `${indent}@${ref} canvas [visual:screenshot]` : undefined;
     const label = cleaned(node.name);
     const effectiveRefName = label ?? (!visual ? state.boundFieldLabels.get(node.id) : undefined);
-    const rowAnchor = ref && !visual ? inferSceneRowAnchor(node, state) : undefined;
+    const rowAnchor = ref && !visual ? node.rowAnchor : undefined;
     const text = visual
       ? label
         ? `${indent}@${ref} canvas ${JSON.stringify(Array.from(label).slice(0, 160).join(""))} [visual:screenshot]`
@@ -1227,6 +1196,15 @@ function pureStaticCaptionText(
   }
   const role = normalizedRole(candidate);
   if (!["statictext", "labeltext", "text", ""].includes(role)) return undefined;
+  const attrs = candidate.attrs;
+  if (attrs) {
+    const live = attrs["aria-live"]?.trim().toLowerCase();
+    if (live && live !== "off") return undefined;
+    const cls = attrs.class?.trim();
+    if (cls && NON_CAPTION_ATTR_CLASS_RE.test(cls)) return undefined;
+    const idAttr = attrs.id?.trim();
+    if (idAttr && NON_CAPTION_ATTR_CLASS_RE.test(idAttr)) return undefined;
+  }
   const kids = children.get(candidate.id) ?? [];
   let text: string | undefined;
   if (kids.length === 0) {
@@ -1245,7 +1223,43 @@ function pureStaticCaptionText(
     return undefined;
   }
   if (!text || text.length > 64 || isNoisyText(text)) return undefined;
+  if (NON_CAPTION_TOKEN_RE.test(text) || NON_CAPTION_VALIDATION_RE.test(text)) return undefined;
   return text;
+}
+
+function isTrailingSuffixOfPreviousControl(
+  prevControl: VomNode | undefined,
+  captionNode: VomNode,
+  curInput: VomNode,
+  state: RenderState,
+): boolean {
+  if (!prevControl) return false;
+  const isControl =
+    isVomReferenceNode(prevControl) ||
+    LABELABLE_INPUT_ROLES.has(normalizedRole(prevControl)) ||
+    state.hasInteractiveDescendant.has(prevControl.id);
+  if (!isControl) return false;
+  // In `[input1] "text" [input2]`, if `input1` itself had no name or bound caption,
+  // this is a compound/range group (`[min] "至" [max]`), not `[label, input]` pairs.
+  if (
+    LABELABLE_INPUT_ROLES.has(normalizedRole(prevControl)) &&
+    !cleaned(prevControl.name) &&
+    !state.boundFieldLabels.has(prevControl.id)
+  ) {
+    return true;
+  }
+  const pr = prevControl.rect;
+  const cr = captionNode.rect;
+  const nr = curInput.rect;
+  if (pr && cr && nr && pr.h > 0 && cr.h > 0 && nr.h > 0) {
+    const prevMidY = pr.y + pr.h / 2;
+    const capMidY = cr.y + cr.h / 2;
+    const sameRowAsPrev =
+      cr.x >= pr.x + pr.w - 4 && Math.abs(capMidY - prevMidY) <= Math.max(pr.h, 16) * 0.65;
+    const curBelowPrev = nr.y >= pr.y + pr.h * 0.7;
+    if (sameRowAsPrev && curBelowPrev) return true;
+  }
+  return false;
 }
 
 function extractPureReadOnlyRowText(
@@ -1339,8 +1353,6 @@ function createRenderState(
     surfaceMap: new Map(surfaces.map((surface) => [surface.triggerId, surface])),
     scopeMap: new Map(activeScopeBlocks.map((scope) => [scope.triggerId, scope])),
     hasInteractiveDescendant: new Set(),
-    hasAnyRowOrListitem: false,
-    rowAncestorMemo: new Map(),
     boundFieldLabels: new Map(),
     consumedCaptionIds: new Set(),
     foldedRowCells: new Map(),
@@ -1349,11 +1361,6 @@ function createRenderState(
   };
 
   for (const node of nodes) {
-    const nRole = normalizedRole(node);
-    const nTag = normalizedTag(node);
-    if (nRole === "row" || nRole === "listitem" || nTag === "tr" || nTag === "li") {
-      state.hasAnyRowOrListitem = true;
-    }
     if (node.visualKey !== undefined) {
       let id = node.parentId;
       while (id !== null && !state.visualAncestors.has(id)) {
@@ -1377,27 +1384,34 @@ function createRenderState(
       const cur = siblings[i];
       if (!LABELABLE_INPUT_ROLES.has(normalizedRole(cur)) || cleaned(cur.name)) continue;
       let bound = false;
-      for (let j = i - 1; j >= Math.max(0, i - 2); j--) {
-        const prev = siblings[j];
+      if (i > 0) {
+        const prev = siblings[i - 1];
+        const prevBefore = i >= 2 ? siblings[i - 2] : undefined;
         if (
-          prev.visualKey !== undefined ||
-          isVomReferenceNode(prev) ||
-          state.hasInteractiveDescendant.has(prev.id)
+          prev.visualKey === undefined &&
+          !isVomReferenceNode(prev) &&
+          !state.hasInteractiveDescendant.has(prev.id) &&
+          !state.consumedCaptionIds.has(prev.id) &&
+          !isTrailingSuffixOfPreviousControl(prevBefore, prev, cur, state)
         ) {
-          break;
-        }
-        if (state.consumedCaptionIds.has(prev.id)) continue;
-        const caption = pureStaticCaptionText(prev, children, state);
-        if (caption) {
-          state.boundFieldLabels.set(cur.id, caption);
-          state.consumedCaptionIds.add(prev.id);
-          bound = true;
-          break;
+          const caption = pureStaticCaptionText(prev, children, state);
+          if (caption) {
+            state.boundFieldLabels.set(cur.id, caption);
+            state.consumedCaptionIds.add(prev.id);
+            bound = true;
+          }
         }
       }
       if (!bound && cur.nearbyText) {
         const near = cleanSemanticText(cur.nearbyText);
-        if (near && near.length <= 48) state.boundFieldLabels.set(cur.id, near);
+        if (
+          near &&
+          near.length <= 48 &&
+          !NON_CAPTION_TOKEN_RE.test(near) &&
+          !NON_CAPTION_VALIDATION_RE.test(near)
+        ) {
+          state.boundFieldLabels.set(cur.id, near);
+        }
       }
     }
   }

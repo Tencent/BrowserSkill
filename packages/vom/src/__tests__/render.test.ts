@@ -1800,7 +1800,7 @@ describe("selection evidence", () => {
       expect(sensitiveSelect.text).not.toContain("[options:");
     });
 
-    it("annotates non-<select> ARIA comboboxes with [custom-dropdown: click to open] or [custom-dropdown: expanded]", () => {
+    it("annotates non-editable non-<select> ARIA comboboxes with [custom-dropdown: ...] while skipping editable search/autocomplete inputs", () => {
       const out = renderVom(
         scene([
           node({
@@ -1821,10 +1821,119 @@ describe("selection evidence", () => {
             attrs: { "aria-expanded": "true" },
             rect: { x: 10, y: 50, w: 180, h: 28 },
           }),
+          // YouTube-style editable search input with role="combobox"
+          node({
+            id: 3,
+            backendNodeId: 303,
+            tag: "input",
+            role: "combobox",
+            name: "Search",
+            attrs: { type: "text", name: "search_query" },
+            rect: { x: 10, y: 90, w: 240, h: 28 },
+          }),
+          // Non-input combobox with aria-autocomplete="list"
+          node({
+            id: 4,
+            backendNodeId: 304,
+            tag: "div",
+            role: "combobox",
+            name: "命令面板",
+            attrs: { "aria-autocomplete": "list" },
+            rect: { x: 10, y: 130, w: 240, h: 28 },
+          }),
+          // Element Plus readonly <input role="combobox"> select trigger
+          node({
+            id: 5,
+            backendNodeId: 305,
+            tag: "input",
+            role: "combobox",
+            name: "币种",
+            attrs: { type: "text", readonly: "" },
+            rect: { x: 10, y: 170, w: 160, h: 28 },
+          }),
         ]),
       );
       expect(out.text).toContain('@e1 combobox "结算账期方案" [custom-dropdown: click to open]');
       expect(out.text).toContain('@e2 combobox "开票类型" [custom-dropdown: expanded]');
+      expect(out.text).toContain('@e3 combobox "Search"');
+      expect(out.text).not.toContain('@e3 combobox "Search" [custom-dropdown:');
+      expect(out.text).not.toContain('@e4 combobox "命令面板" [custom-dropdown:');
+      expect(out.text).toContain('@e5 combobox "币种" [custom-dropdown: click to open]');
+    });
+
+    it("does not misbind inline units ([input] 'kg' [input2]) or validation errors ([input] '邮箱格式不正确' [input2]) as [field: ...], and caps overlong option labels", () => {
+      const unitAndErrorForm = renderVom(
+        scene([
+          node({ id: 1, role: "form", rect: { x: 0, y: 0, w: 600, h: 200 } }),
+          node({
+            id: 2,
+            parentId: 1,
+            backendNodeId: 502,
+            tag: "input",
+            role: "textbox",
+            inputState: "empty",
+            rect: { x: 10, y: 10, w: 80, h: 28 },
+          }),
+          node({
+            id: 3,
+            parentId: 1,
+            role: "statictext",
+            name: "kg",
+            rect: { x: 96, y: 14, w: 24, h: 20 },
+          }),
+          node({
+            id: 4,
+            parentId: 1,
+            backendNodeId: 504,
+            tag: "input",
+            role: "textbox",
+            inputState: "empty",
+            rect: { x: 130, y: 10, w: 80, h: 28 },
+          }),
+          node({
+            id: 5,
+            parentId: 1,
+            backendNodeId: 505,
+            tag: "input",
+            role: "textbox",
+            name: "联系邮箱",
+            inputState: "filled",
+            value: "bad@",
+            rect: { x: 10, y: 50, w: 200, h: 28 },
+          }),
+          node({
+            id: 6,
+            parentId: 1,
+            role: "statictext",
+            name: "邮箱格式不正确",
+            rect: { x: 220, y: 54, w: 120, h: 20 },
+          }),
+          node({
+            id: 7,
+            parentId: 1,
+            backendNodeId: 507,
+            tag: "input",
+            role: "textbox",
+            inputState: "empty",
+            rect: { x: 10, y: 95, w: 200, h: 28 },
+          }),
+          node({
+            id: 8,
+            parentId: 1,
+            backendNodeId: 508,
+            tag: "select",
+            role: "combobox",
+            name: "条款",
+            selectOptions: [{ value: "clause_1", label: "甲".repeat(70), selected: true }],
+            rect: { x: 10, y: 140, w: 260, h: 28 },
+          }),
+        ]),
+      );
+      expect(unitAndErrorForm.text).not.toContain('[field: "kg"]');
+      expect(unitAndErrorForm.text).toContain("kg");
+      expect(unitAndErrorForm.text).not.toContain('[field: "邮箱格式不正确"]');
+      expect(unitAndErrorForm.text).toContain("邮箱格式不正确");
+      expect(unitAndErrorForm.text).toContain(`[options: clause_1="${"甲".repeat(48)}…"*]`);
     });
 
     it("keeps 1-2 row tables and interactive rows expanded, and folds >= 3 consecutive pure read-only rows", () => {
