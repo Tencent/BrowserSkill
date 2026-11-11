@@ -1343,6 +1343,7 @@ async function handleVomObservation(
           ref.ref,
           {
             ...(ref.name ? { name: ref.name } : {}),
+            ...(ref.rowAnchor ? { rowAnchor: ref.rowAnchor } : {}),
             backendNodeId: ref.backendNodeId,
             tabId: target.tabId,
             ...(ref.frameId ? { frameId: ref.frameId } : {}),

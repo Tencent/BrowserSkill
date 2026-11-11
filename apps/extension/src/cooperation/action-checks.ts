@@ -83,20 +83,136 @@ export function parseExpectations(value: unknown): ActionExpectation[] | RpcErro
 }
 
 /** Fixed read-only probes; page text and supplied expected values are never code. */
-const SAMPLE_TARGET = `function(field, attribute) {
+const SAMPLE_TARGET = `function(field, attribute, needRowAnchor) {
   if (!this.isConnected) return { connected: false };
   if (field === 'exists') return { connected: true, value: true };
   if (field === 'text') return { connected: true, value: this.textContent };
-  const sensitive = this.matches('input[type="password"],input[type="file"],input[type="hidden"],' + ${JSON.stringify(`[${RECORD_PASSWORD_ATTRIBUTE}],${SENSITIVE_AUTOCOMPLETE_SELECTOR}`)});
+  const sensitiveSelector = 'input[type="password"],input[type="file"],input[type="hidden"],' + ${JSON.stringify(`[${RECORD_PASSWORD_ATTRIBUTE}],${SENSITIVE_AUTOCOMPLETE_SELECTOR}`)};
+  const sensitive = this.matches(sensitiveSelector);
   if (field === 'attribute') return { connected: true, value: this.getAttribute(attribute), redacted: sensitive && attribute.toLowerCase() === 'value' };
   if (field) return { connected: true, value: this[field] ?? null, redacted: sensitive && field === 'value' };
   const style = getComputedStyle(this);
+  let rowAnchor = null;
+  if (needRowAnchor) {
+    const el = this;
+    const clean = (s) => String(s || '').replace(/\\s+/g, ' ').trim();
+    const directText = (n) => {
+      const parts = [];
+      for (let c = n.firstChild; c; c = c.nextSibling) {
+        if (c.nodeType === 3) {
+          const t = String(c.nodeValue || '').trim();
+          if (t) parts.push(t);
+        }
+      }
+      return parts.length ? clean(parts.join(' ')) : '';
+    };
+    const stopTags = new Set(['body','html','form','table','main','nav','header','footer','section','article','aside','dialog']);
+    const nonAnchorTags = new Set(['button','input','select','textarea','option','optgroup','summary','script','style','noscript','template','svg']);
+    const nonAnchorRoles = new Set(['button','checkbox','combobox','listbox','menuitem','menuitemcheckbox','menuitemradio','option','radio','searchbox','slider','spinbutton','switch','tab','textbox','treeitem']);
+    const timerRe = /^(?:\\d{1,2}:\\d{2}(?::\\d{2})?|\\d+\\s*(?:ms|s|sec|secs|m|min|mins|h|hr|hrs|秒|分钟|分|小时)(?:\\s*前|\\s*ago)?)$/i;
+    const findRow = () => {
+      let cur = el.parentElement;
+      for (let hop = 0; hop < 12 && cur; hop++) {
+        const t = cur.tagName.toLowerCase();
+        if (t === 'body' || t === 'html') break;
+        const r = (cur.getAttribute('role') || '').trim().toLowerCase();
+        if (t === 'tr' || t === 'li' || r === 'row' || r === 'listitem') return cur;
+        cur = cur.parentElement;
+      }
+      if (el.closest('form')) return null;
+      cur = el.parentElement;
+      for (let hop = 0; hop < 3 && cur; hop++) {
+        const t = cur.tagName.toLowerCase();
+        if (stopTags.has(t)) break;
+        if (t === 'div') {
+          const r = (cur.getAttribute('role') || '').trim().toLowerCase();
+          const cls = (cur.getAttribute('class') || '').trim();
+          const pool = cur.parentElement;
+          const poolTag = pool ? pool.tagName.toLowerCase() : '';
+          if (
+            cls &&
+            (!r || r === 'generic' || r === 'none' || r === 'presentation') &&
+            cur.children.length >= 1 &&
+            cur.children.length <= 12 &&
+            pool &&
+            poolTag !== 'body' &&
+            poolTag !== 'html' &&
+            poolTag !== 'form' &&
+            poolTag !== 'label' &&
+            poolTag !== 'fieldset'
+          ) {
+            let same = 0;
+            for (let i = 0; i < pool.children.length && same < 4; i++) {
+              const sib = pool.children[i];
+              if (sib.tagName.toLowerCase() === 'div' && (sib.getAttribute('class') || '').trim() === cls) {
+                same++;
+              }
+            }
+            if (same >= 4) return cur;
+          }
+        }
+        cur = cur.parentElement;
+      }
+      return null;
+    };
+    const slotText = (n) => {
+      if (n === el || !(n instanceof Element)) return '';
+      if (n.hasAttribute('hidden') || (n.getAttribute('aria-hidden') || '').toLowerCase() === 'true') return '';
+      const t = n.tagName.toLowerCase();
+      if (nonAnchorTags.has(t)) return '';
+      const r = (n.getAttribute('role') || '').trim().toLowerCase();
+      if (r && nonAnchorRoles.has(r)) return '';
+      if (n.matches(sensitiveSelector)) return '';
+      const st = getComputedStyle(n);
+      if (st.display === 'none' || st.visibility === 'hidden' || st.visibility === 'collapse') return '';
+      const op = parseFloat(st.opacity || '1');
+      if (Number.isFinite(op) && op < 0.05) return '';
+      const fs = parseFloat(st.fontSize || '16');
+      if (Number.isFinite(fs) && fs <= 1.5) return '';
+      const parts = [];
+      let len = 0;
+      const own = directText(n);
+      if (own) {
+        parts.push(own);
+        len += own.length;
+      }
+      for (let i = 0; i < n.children.length; i++) {
+        const sub = slotText(n.children[i]);
+        if (sub) {
+          parts.push(sub);
+          len += sub.length + 1;
+          if (len >= 160) break;
+        }
+      }
+      return parts.length ? clean(parts.join(' ')) : '';
+    };
+    const row = findRow();
+    if (row) {
+      const selfText = clean(el.textContent).toLowerCase();
+      const selfAria = clean(el.getAttribute('aria-label')).toLowerCase();
+      const accept = (raw) => {
+        if (!raw || timerRe.test(raw)) return null;
+        const lower = raw.toLowerCase();
+        if ((selfText && lower === selfText) || (selfAria && lower === selfAria)) return null;
+        const cps = Array.from(raw);
+        return cps.length > 80 ? cps.slice(0, 80).join('').trim() : raw;
+      };
+      rowAnchor = accept(directText(row));
+      if (!rowAnchor) {
+        for (let i = 0; i < row.children.length; i++) {
+          rowAnchor = accept(slotText(row.children[i]));
+          if (rowAnchor) break;
+        }
+      }
+    }
+  }
   return {
     connected: true,
     visible: (this.getClientRects().length > 0 || style.display === 'contents') && style.visibility !== 'hidden' && style.visibility !== 'collapse',
     disabled: this.matches(':disabled') || this.getAttribute('aria-disabled') === 'true' || !!this.closest('[inert]'),
     readOnly: this.readOnly === true,
-    focused: (${FOCUS_CHECK}).call(this)
+    focused: (${FOCUS_CHECK}).call(this),
+    ...(needRowAnchor ? { rowAnchor } : {})
   };
 }`;
 
@@ -108,6 +224,7 @@ interface Sample {
   readOnly?: boolean;
   focused?: boolean;
   redacted?: boolean;
+  rowAnchor?: string | null;
 }
 
 async function sample(
@@ -129,7 +246,11 @@ async function sample(
       {
         objectId: resolved.object.objectId,
         functionDeclaration: SAMPLE_TARGET,
-        arguments: [{ value: check?.field ?? null }, { value: check?.attribute ?? null }],
+        arguments: [
+          { value: check?.field ?? null },
+          { value: check?.attribute ?? null },
+          { value: !check && Boolean(target.usedRef && target.rowAnchor) },
+        ],
         returnByValue: true,
       },
     );
@@ -165,6 +286,26 @@ export async function checkActionTarget(
 ): Promise<RpcError | undefined> {
   const facts = await sample(cdp, target);
   if (isRpcError(facts)) return facts;
+  if (
+    facts.connected &&
+    target.usedRef &&
+    target.rowAnchor &&
+    facts.rowAnchor !== target.rowAnchor
+  ) {
+    return actionError(
+      "virtual_row_recycled",
+      `Target @${target.usedRef} belonged to row "${target.rowAnchor}", but its DOM slot now renders "${facts.rowAnchor ?? "(empty)"}"`,
+      "target",
+      "Run cooperate sync (or observe) to refresh refs for the updated rows before retrying.",
+      {
+        target: `@${target.usedRef}`,
+        expected_row: target.rowAnchor,
+        actual_row: facts.rowAnchor ?? null,
+        backend_node_id: target.backendNodeId,
+        ...(target.frameId ? { frame_id: target.frameId } : {}),
+      },
+    );
+  }
   const reason = !facts.connected
     ? "target_detached"
     : !facts.visible && !["tool.upload", "tool.blur"].includes(method)

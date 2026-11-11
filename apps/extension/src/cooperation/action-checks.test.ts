@@ -354,3 +354,72 @@ it("keeps other CDP failures unavailable instead of declaring the node absent", 
     data: { reason: "target_unavailable" },
   });
 });
+
+describe("virtual-scroll row business-key guard", () => {
+  it("verifies rowAnchor in the single SAMPLE_TARGET call and blocks in-place DOM slot recycling with effect_state: none", async () => {
+    document.body.innerHTML = `
+      <div id="pool">
+        <div class="vrow" data-ticket-id="TK-1018"><span>TK-1018 | P1 | 高优-核心API网关证书续期</span><button id="slot0" type="button" aria-label="批准发布 TK-1018">批准发布</button></div>
+        <div class="vrow"><span>TK-1019 | P3 | 常规任务</span><button type="button">批准发布</button></div>
+        <div class="vrow"><span>TK-1020 | P3 | 常规任务</span><button type="button">批准发布</button></div>
+        <div class="vrow"><span>TK-1021 | P3 | 常规任务</span><button type="button">批准发布</button></div>
+      </div>
+    `;
+    const btn = document.getElementById("slot0")!;
+    vi.spyOn(btn, "getClientRects").mockReturnValue([{}] as unknown as DOMRectList);
+    const sendToTarget = vi.fn(async (_target, method, params) => {
+      if (method === "DOM.resolveNode") return { object: { objectId: "slot0-obj" } };
+      if (method === "Runtime.callFunctionOn") {
+        const read = new Function(`return (${params.functionDeclaration})`)();
+        return {
+          result: {
+            value: read.apply(
+              btn,
+              params.arguments.map((arg: { value: unknown }) => arg.value),
+            ),
+          },
+        };
+      }
+      return {};
+    });
+    const cdp = { send: vi.fn(), sendToTarget } as unknown as CdpRunner;
+    const anchoredTarget = {
+      ...target,
+      usedRef: "e5",
+      rowAnchor: "TK-1018 | P1 | 高优-核心API网关证书续期",
+    };
+
+    // 1) Before virtual scroll recycling: passes with exactly 1 Runtime.callFunctionOn
+    expect(await checkActionTarget(cdp, anchoredTarget, "tool.click")).toBeUndefined();
+    expect(sendToTarget.mock.calls.filter(([, m]) => m === "Runtime.callFunctionOn")).toHaveLength(
+      1,
+    );
+
+    // 2) Virtual list recycles the exact same DOM row + button in place for TK-1017
+    sendToTarget.mockClear();
+    const row0 = btn.parentElement!;
+    row0.setAttribute("data-ticket-id", "TK-1017");
+    row0.querySelector("span")!.textContent = "TK-1017 | P3 | 常规变更任务-1017";
+    btn.setAttribute("aria-label", "批准发布 TK-1017");
+
+    const blocked = await checkActionTarget(cdp, anchoredTarget, "tool.click");
+    expect(blocked).toMatchObject({
+      code: "permission_denied",
+      data: {
+        reason: "virtual_row_recycled",
+        phase: "target",
+        effect_state: "none",
+        target: "@e5",
+        expected_row: "TK-1018 | P1 | 高优-核心API网关证书续期",
+        actual_row: "TK-1017 | P3 | 常规变更任务-1017",
+        recovery: expect.stringContaining("cooperate sync"),
+      },
+    });
+    // Zero extra CDP roundtrips: still a single Runtime.callFunctionOn!
+    expect(sendToTarget.mock.calls.map(([, m]) => m)).toEqual([
+      "DOM.resolveNode",
+      "Runtime.callFunctionOn",
+      "Runtime.releaseObjectGroup",
+    ]);
+  });
+});
