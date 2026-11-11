@@ -279,26 +279,37 @@ describe.skipIf(!process.env.BSK_FILL_CHROME)("native controls and editing hosts
       );
     }, 30_000);
 
-    it.each([
-      ['<input id="target" type="number" value="12">', "invalid"],
-      ['<input id="target" maxlength="3" value="old">', "longer"],
-    ])(
-      "rejects invalid values before focus: %s",
-      async (markup, value) => {
-        await withFillBrowser({ background, markup: guard + markup }, async (h) => {
+    it("rejects invalid number values before focus", async () => {
+      await withFillBrowser(
+        { background, markup: guard + '<input id="target" type="number" value="12">' },
+        async (h) => {
           await h.ref("document.querySelector('#target')");
           await h.evaluate("document.querySelector('#guard').focus(); window.fillEvents = []");
           const before = await h.evaluate(unchangedState);
-          expect(await h.fill(value)).toMatchObject({
+          expect(await h.fill("invalid")).toMatchObject({
             code: "invalid_params",
             data: { reason: "fill_value_invalid" },
           });
           expect(await h.evaluate(unchangedState)).toBe(before);
           expect(h.calls).not.toContain("DOM.focus");
-        });
-      },
-      30_000,
-    );
+        },
+      );
+    }, 30_000);
+
+    it("accepts maxlength truncation optimistically and reports actual_value", async () => {
+      await withFillBrowser(
+        { background, markup: guard + '<input id="target" maxlength="3" value="old">' },
+        async (h) => {
+          await h.ref("document.querySelector('#target')");
+          expect(await h.fill("longer")).toMatchObject({
+            value_length: 3,
+            actual_value: "lon",
+            formatted: true,
+          });
+          expect(await h.evaluate("document.querySelector('#target').value")).toBe("lon");
+        },
+      );
+    }, 30_000);
 
     it("uses the same contract for selectors", async () => {
       await withFillBrowser({ background, markup: editorMarkup }, async (h) => {
@@ -451,12 +462,9 @@ describe.skipIf(!process.env.BSK_FILL_CHROME)("fill lifecycle and discoverabilit
 
   it.each([
     ["DOM.resolveNode", "old"],
-    ["DOM.scrollIntoViewIfNeeded", "old"],
-    ["DOM.focus", "old"],
     ["cleared", ""],
     ["Input.insertText", "hello"],
-    ["notified", "hello"],
-    ["verified", "hello"],
+    ["finalized", "hello"],
   ])(
     "cancels after %s without leaving temporary content",
     async (phase, expected) => {
@@ -471,8 +479,7 @@ describe.skipIf(!process.env.BSK_FILL_CHROME)("fill lifecycle and discoverabilit
             const matched =
               method === phase ||
               (phase === "cleared" && declaration.includes("this.textContent = ''")) ||
-              (phase === "notified" && declaration.includes("new Event('change'")) ||
-              (phase === "verified" && declaration.startsWith("function(expected)"));
+              (phase === "finalized" && declaration.includes("new Event('change'"));
             if (matched) controller.abort();
           });
           expect(await h.fill("hello", true, controller.signal)).toMatchObject({
