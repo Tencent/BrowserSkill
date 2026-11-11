@@ -193,7 +193,7 @@ it
               // Hold only a completed input/verification reply until navigation commits.
               if ((method === 'Input.dispatchKeyEvent' && params.type === 'keyUp' && params.key === 'Enter') ||
                   (method === 'Input.dispatchMouseEvent' && params.type === 'mouseReleased') ||
-                  (method === 'Runtime.callFunctionOn' && (value?.selected_values || value?.connected && value?.matches)))
+                  (method === 'Runtime.callFunctionOn' && (value?.selected_values || (value?.connected && (value?.matches || typeof value?.valueLength === 'number')))))
                 await committed;
               return result;
             };

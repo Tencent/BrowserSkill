@@ -987,6 +987,7 @@ type FillStep1Result =
 
 type FillVerificationResult = {
   connected: boolean;
+  matches: boolean;
   valueLength: number;
   sensitive: boolean;
   actualValue?: string;
@@ -1233,14 +1234,15 @@ const FILL_STEP3_FUNCTION = `async function(notifyInput, expected, wasSensitive,
   await Promise.resolve();
   const connected = Boolean(this.isConnected);
   const value = (${FILL_VALUE_FUNCTION}).call(this);
+  const matches = value === expected;
   const sensitive = Boolean(wasSensitive || (${FILL_SENSITIVE_FUNCTION}).call(this));
   if (sensitive) {
-    return { connected, valueLength: value.length, sensitive: true };
+    return { connected, matches, valueLength: value.length, sensitive: true };
   }
-  const formatted = value !== expected;
+  const formatted = !matches;
   const chars = value.length > maxChars ? Array.from(value) : null;
   const actualValue = chars && chars.length > maxChars ? chars.slice(0, maxChars).join('') : value;
-  return { connected, valueLength: value.length, sensitive: false, actualValue, formatted };
+  return { connected, matches, valueLength: value.length, sensitive: false, actualValue, formatted };
 }`;
 
 export async function handleFill(
