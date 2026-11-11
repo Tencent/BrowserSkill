@@ -324,6 +324,15 @@ export const methods = [
     "action_metadata": false,
     "effect": "control_plane",
     "features": [],
+    "method": "ledger.request",
+    "owner": "daemon",
+    "params": "AnyValue",
+    "result": "AnyValue"
+  },
+  {
+    "action_metadata": false,
+    "effect": "control_plane",
+    "features": [],
     "method": "system.handshake",
     "owner": "daemon",
     "params": "HandshakeRequest",

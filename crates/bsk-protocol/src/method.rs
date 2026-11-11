@@ -108,6 +108,7 @@ methods! {
     LocalAuthRotate => ("local_auth.rotate", Daemon, ControlPlane, false, serde_json::Value, serde_json::Value, []),
     LocalAuthSetMode => ("local_auth.set_mode", Daemon, ControlPlane, false, serde_json::Value, serde_json::Value, []),
     AuditRequest => ("audit.request", Daemon, ControlPlane, false, serde_json::Value, serde_json::Value, []),
+    LedgerRequest => ("ledger.request", Daemon, ControlPlane, false, serde_json::Value, serde_json::Value, []),
     SystemHandshake => ("system.handshake", Daemon, ControlPlane, false, HandshakeRequest, HandshakeResponse, []),
     SystemPing => ("system.ping", Daemon, ControlPlane, false, PingParams, PingResult, []),
     SystemStatus => ("system.status", Daemon, ControlPlane, false, StatusParams, StatusResult, []),

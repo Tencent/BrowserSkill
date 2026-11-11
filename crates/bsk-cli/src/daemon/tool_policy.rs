@@ -72,6 +72,7 @@ pub fn execution_policy(method: &Method) -> ExecutionPolicy {
         },
         ToolCooperate
         | AuditRequest
+        | LedgerRequest
         | LocalAuthPair
         | LocalAuthDevices
         | LocalAuthRevoke
