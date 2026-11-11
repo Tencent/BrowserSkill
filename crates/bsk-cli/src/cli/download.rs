@@ -31,7 +31,9 @@ pub struct DownloadArgs {
     #[arg(long)]
     pub out: PathBuf,
     #[arg(long)]
-    pub session: String,
+    pub session: Option<String>,
+    #[arg(long)]
+    pub scope: Option<String>,
     #[arg(long = "tab-id")]
     pub tab_id: Option<i64>,
     #[arg(long, default_value = "2m", value_parser = parse_timeout_ms)]
@@ -49,9 +51,10 @@ pub fn dispatch(args: DownloadArgs, format: Format) -> Result<(), CliError> {
             CliError::Local(error) => CliError::invalid_params(error),
             error => error,
         })?;
+    crate::cli::business_rpc::set_caller_scope(args.scope.clone());
     let info = ensure_daemon().context("ensure daemon is running")?;
     let params = DownloadParams {
-        session_id: args.session.clone(),
+        session_id: args.session.clone().unwrap_or_default(),
         ref_,
         selector,
         tab_id: args.tab_id,
@@ -77,9 +80,20 @@ pub fn dispatch(args: DownloadArgs, format: Format) -> Result<(), CliError> {
         {
             let out = std::path::absolute(&args.out).unwrap_or_else(|_| args.out.clone());
             let mut command = vec![
-                "bsk".to_string(), "operation".into(), "await".into(), operation_id.into(),
-                "--session".into(), args.session.clone(), "--out".into(), out.to_string_lossy().into_owned(),
+                "bsk".to_string(),
+                "operation".into(),
+                "await".into(),
+                operation_id.into(),
             ];
+            if let Some(session) = &args.session {
+                command.push("--session".into());
+                command.push(session.clone());
+            } else if let Some(scope) = &args.scope {
+                command.push("--scope".into());
+                command.push(scope.clone());
+            }
+            command.push("--out".into());
+            command.push(out.to_string_lossy().into_owned());
             if args.overwrite { command.push("--overwrite".into()); }
             command.push("--json".into());
             data["download_output"] = serde_json::json!({

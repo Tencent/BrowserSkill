@@ -44,7 +44,7 @@ fn global_output_flags_work_before_and_after_the_command() {
         let Command::Click(click) = cli.command else {
             panic!("expected click");
         };
-        assert_eq!(click.session, "s1");
+        assert_eq!(click.session.as_deref(), Some("s1"));
         assert_eq!(click.tab_id, Some(7));
     }
     for args in [
@@ -253,7 +253,7 @@ fn parses_console_command_with_context_safety_flags() {
     let Command::Console(args) = cli.command else {
         panic!("expected console command");
     };
-    assert_eq!(args.session, "s1");
+    assert_eq!(args.session.as_deref(), Some("s1"));
     assert_eq!(args.tab_id, Some(9));
     assert_eq!(args.since, Some(12));
     assert_eq!(args.limit, Some(75));
@@ -289,7 +289,7 @@ fn parses_network_command_with_context_safety_flags() {
     let Command::Network(args) = cli.command else {
         panic!("expected network command");
     };
-    assert_eq!(args.session, "s1");
+    assert_eq!(args.session.as_deref(), Some("s1"));
     assert_eq!(args.tab_id, Some(9));
     assert_eq!(args.since, Some(12));
     assert_eq!(args.limit, Some(75));
@@ -587,7 +587,7 @@ fn parses_window_resize() {
     else {
         panic!("expected window resize subcommand");
     };
-    assert_eq!(args.session, "s1");
+    assert_eq!(args.session.as_deref(), Some("s1"));
     assert_eq!(args.width, 1280);
     assert_eq!(args.height, 800);
 }
@@ -639,7 +639,7 @@ fn parses_emulate_with_device_preset() {
     else {
         panic!("expected emulate subcommand");
     };
-    assert_eq!(session, "s1");
+    assert_eq!(session.as_deref(), Some("s1"));
     assert_eq!(device.as_deref(), Some("iphone-14"));
     assert!(!off);
 }

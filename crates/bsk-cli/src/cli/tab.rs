@@ -63,9 +63,9 @@ impl From<CliScope> for TabScope {
 
 #[derive(Debug, Clone, Args)]
 pub struct TabListArgs {
-    /// Session id (must be active).
+    /// Session id (omit to resolve via caller scope).
     #[arg(long)]
-    pub session: String,
+    pub session: Option<String>,
 
     /// View scope (defaults to `all`).
     #[arg(long, value_enum, default_value_t = CliScope::All)]
@@ -74,9 +74,11 @@ pub struct TabListArgs {
 
 #[derive(Debug, Clone, Args)]
 pub struct TabCreateArgs {
-    /// Session id (must be active).
+    /// Session id (omit to resolve via caller scope).
     #[arg(long)]
-    pub session: String,
+    pub session: Option<String>,
+    #[arg(long)]
+    pub scope: Option<String>,
     /// Destination URL (default `chrome://newtab/`).
     #[arg(long)]
     pub url: Option<String>,
@@ -93,7 +95,9 @@ pub struct TabCloseArgs {
     /// Tab id to close (must be in the session's Agent Window).
     pub tab_id: i64,
     #[arg(long)]
-    pub session: String,
+    pub session: Option<String>,
+    #[arg(long)]
+    pub scope: Option<String>,
 }
 
 #[derive(Debug, Clone, Args)]
@@ -101,7 +105,9 @@ pub struct TabSelectArgs {
     /// Tab id to activate.
     pub tab_id: i64,
     #[arg(long)]
-    pub session: String,
+    pub session: Option<String>,
+    #[arg(long)]
+    pub scope: Option<String>,
 }
 
 #[derive(Debug, Clone, Args)]
@@ -109,7 +115,9 @@ pub struct TabBorrowArgs {
     /// User-window tab id to borrow into the session's Agent Window.
     pub tab_id: i64,
     #[arg(long)]
-    pub session: String,
+    pub session: Option<String>,
+    #[arg(long)]
+    pub scope: Option<String>,
     /// Deprecated compatibility flag. The extension decides whether confirmation is required.
     #[arg(long = "no-confirm", action = clap::ArgAction::SetTrue)]
     pub no_confirm: bool,
@@ -123,7 +131,9 @@ pub struct TabReturnArgs {
     /// Borrowed tab id to return to its origin window.
     pub tab_id: i64,
     #[arg(long)]
-    pub session: String,
+    pub session: Option<String>,
+    #[arg(long)]
+    pub scope: Option<String>,
 }
 
 pub fn dispatch(cmd: TabCmd, format: Format) -> Result<(), CliError> {
@@ -155,8 +165,9 @@ fn print_payload<T: Serialize>(
 }
 
 fn run_create(sock: PathBuf, args: TabCreateArgs, format: Format) -> Result<(), CliError> {
+    crate::cli::business_rpc::set_caller_scope(args.scope);
     let params = TabCreateParams {
-        session_id: args.session,
+        session_id: args.session.unwrap_or_default(),
         url: args.url,
         active: if args.no_active { Some(false) } else { None },
         index: args.index,
@@ -177,8 +188,9 @@ fn run_create(sock: PathBuf, args: TabCreateArgs, format: Format) -> Result<(), 
 }
 
 fn run_close(sock: PathBuf, args: TabCloseArgs, format: Format) -> Result<(), CliError> {
+    crate::cli::business_rpc::set_caller_scope(args.scope);
     let params = TabCloseParams {
-        session_id: args.session,
+        session_id: args.session.unwrap_or_default(),
         tab_id: args.tab_id,
     };
     let reply: TabCloseResult = ipc_call("tab-close-1", Method::ToolTabClose, sock, params)?;
@@ -188,8 +200,9 @@ fn run_close(sock: PathBuf, args: TabCloseArgs, format: Format) -> Result<(), Cl
 }
 
 fn run_select(sock: PathBuf, args: TabSelectArgs, format: Format) -> Result<(), CliError> {
+    crate::cli::business_rpc::set_caller_scope(args.scope);
     let params = TabSelectParams {
-        session_id: args.session,
+        session_id: args.session.unwrap_or_default(),
         tab_id: args.tab_id,
     };
     let reply: TabSelectResult = ipc_call("tab-select-1", Method::ToolTabSelect, sock, params)?;
@@ -205,8 +218,9 @@ fn run_borrow(sock: PathBuf, args: TabBorrowArgs, format: Format) -> Result<(), 
     if args.no_confirm {
         crate::cli::interaction_policy::warn_legacy_override("--no-confirm");
     }
+    crate::cli::business_rpc::set_caller_scope(args.scope);
     let params = TabBorrowParams {
-        session_id: args.session,
+        session_id: args.session.unwrap_or_default(),
         tab_id: args.tab_id,
         confirmation_timeout_ms: args.timeout,
         confirm: None,
@@ -230,8 +244,9 @@ fn run_borrow(sock: PathBuf, args: TabBorrowArgs, format: Format) -> Result<(), 
 }
 
 fn run_return(sock: PathBuf, args: TabReturnArgs, format: Format) -> Result<(), CliError> {
+    crate::cli::business_rpc::set_caller_scope(args.scope);
     let params = TabReturnParams {
-        session_id: args.session,
+        session_id: args.session.unwrap_or_default(),
         tab_id: args.tab_id,
     };
     let reply: TabReturnResult = ipc_call("tab-return-1", Method::ToolTabReturn, sock, params)?;
@@ -269,7 +284,7 @@ where
 
 fn run_list(sock: PathBuf, args: TabListArgs, format: Format) -> Result<(), CliError> {
     let params = TabListParams {
-        session_id: args.session.clone(),
+        session_id: args.session.unwrap_or_default(),
         scope: args.scope.into(),
     };
     let reply: TabListResult = call(sock, params)?;

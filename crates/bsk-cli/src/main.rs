@@ -39,6 +39,7 @@ fn main() -> ExitCode {
 }
 
 fn dispatch(cli: Cli, format: Format) -> Result<(), CliError> {
+    cli::business_rpc::set_caller_scope(cli.flags.scope.clone());
     // Plans and recipes attach evidence step by step, so it never goes on every request.
     if !matches!(cli.command, Command::Plan(_) | Command::Recipe(_)) {
         cli::business_rpc::set_context(cli.flags.context.clone());
@@ -49,6 +50,9 @@ fn dispatch(cli: Cli, format: Format) -> Result<(), CliError> {
         );
     }
     match cli.command {
+        Command::Open(args) => cli::lifecycle::dispatch_open(args, format),
+        Command::Sync(args) => cli::lifecycle::dispatch_sync(args, format),
+        Command::Close(args) => cli::lifecycle::dispatch_close(args, format),
         Command::Cooperate(args) => cli::cooperate::dispatch(args, format),
         Command::Step(args) => cli::step::dispatch(args, format),
         Command::Plan(args) => cli::plan::dispatch(args, &cli.flags, format),

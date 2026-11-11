@@ -124,7 +124,10 @@ pub struct ClickArgs {
     pub selector: Option<String>,
 
     #[arg(long)]
-    pub session: String,
+    pub session: Option<String>,
+
+    #[arg(long)]
+    pub scope: Option<String>,
 
     #[arg(long = "tab-id")]
     pub tab_id: Option<i64>,
@@ -150,7 +153,6 @@ pub struct ClickArgs {
 }
 
 pub fn dispatch_click(args: ClickArgs, format: Format) -> Result<(), CliError> {
-    let info = ensure_daemon().context("ensure daemon is running")?;
     let (ref_, selector) = split_target(
         args.target.clone(),
         args.ref_.clone(),
@@ -158,11 +160,13 @@ pub fn dispatch_click(args: ClickArgs, format: Format) -> Result<(), CliError> {
     )?;
     let modifiers = parse_modifiers(&args.modifiers)
         .map_err(|e| CliError::Local(anyhow::anyhow!("--modifiers: {e}")))?;
+    crate::cli::business_rpc::set_caller_scope(args.scope.clone());
+    let info = ensure_daemon().context("ensure daemon is running")?;
     let params = ClickParams {
         capture_id: args.capture_id.clone(),
         image_x: args.image_x,
         image_y: args.image_y,
-        session_id: args.session.clone(),
+        session_id: args.session.clone().unwrap_or_default(),
         ref_,
         selector,
         tab_id: args.tab_id,
@@ -221,7 +225,10 @@ pub struct HoverArgs {
     pub selector: Option<String>,
 
     #[arg(long)]
-    pub session: String,
+    pub session: Option<String>,
+
+    #[arg(long)]
+    pub scope: Option<String>,
 
     #[arg(long = "tab-id")]
     pub tab_id: Option<i64>,
@@ -239,7 +246,6 @@ pub struct HoverArgs {
 }
 
 pub fn dispatch_hover(args: HoverArgs, format: Format) -> Result<(), CliError> {
-    let info = ensure_daemon().context("ensure daemon is running")?;
     let (ref_, selector) = split_target(
         args.target.clone(),
         args.ref_.clone(),
@@ -247,8 +253,10 @@ pub fn dispatch_hover(args: HoverArgs, format: Format) -> Result<(), CliError> {
     )?;
     let modifiers = parse_modifiers(&args.modifiers)
         .map_err(|e| CliError::Local(anyhow::anyhow!("--modifiers: {e}")))?;
+    crate::cli::business_rpc::set_caller_scope(args.scope.clone());
+    let info = ensure_daemon().context("ensure daemon is running")?;
     let params = HoverParams {
-        session_id: args.session.clone(),
+        session_id: args.session.clone().unwrap_or_default(),
         ref_,
         selector,
         tab_id: args.tab_id,
@@ -304,7 +312,10 @@ pub struct FocusArgs {
     pub selector: Option<String>,
 
     #[arg(long)]
-    pub session: String,
+    pub session: Option<String>,
+
+    #[arg(long)]
+    pub scope: Option<String>,
 
     #[arg(long = "tab-id")]
     pub tab_id: Option<i64>,
@@ -314,10 +325,11 @@ pub struct FocusArgs {
 }
 
 pub fn dispatch_focus(args: FocusArgs, format: Format) -> Result<(), CliError> {
-    let info = ensure_daemon().context("ensure daemon is running")?;
     let (ref_, selector) = split_target(args.target, args.ref_, args.selector)?;
+    crate::cli::business_rpc::set_caller_scope(args.scope);
+    let info = ensure_daemon().context("ensure daemon is running")?;
     let params = FocusParams {
-        session_id: args.session,
+        session_id: args.session.unwrap_or_default(),
         ref_,
         selector,
         tab_id: args.tab_id,
@@ -361,7 +373,10 @@ pub struct BlurArgs {
     pub selector: Option<String>,
 
     #[arg(long)]
-    pub session: String,
+    pub session: Option<String>,
+
+    #[arg(long)]
+    pub scope: Option<String>,
 
     #[arg(long = "tab-id")]
     pub tab_id: Option<i64>,
@@ -371,10 +386,11 @@ pub struct BlurArgs {
 }
 
 pub fn dispatch_blur(args: BlurArgs, format: Format) -> Result<(), CliError> {
-    let info = ensure_daemon().context("ensure daemon is running")?;
     let (ref_, selector) = split_target(args.target, args.ref_, args.selector)?;
+    crate::cli::business_rpc::set_caller_scope(args.scope);
+    let info = ensure_daemon().context("ensure daemon is running")?;
     let params = BlurParams {
-        session_id: args.session,
+        session_id: args.session.unwrap_or_default(),
         ref_,
         selector,
         tab_id: args.tab_id,
@@ -427,7 +443,10 @@ pub struct FillArgs {
     pub selector: Option<String>,
 
     #[arg(long)]
-    pub session: String,
+    pub session: Option<String>,
+
+    #[arg(long)]
+    pub scope: Option<String>,
 
     #[arg(long = "tab-id")]
     pub tab_id: Option<i64>,
@@ -441,14 +460,15 @@ pub struct FillArgs {
 }
 
 pub fn dispatch_fill(args: FillArgs, format: Format) -> Result<(), CliError> {
-    let info = ensure_daemon().context("ensure daemon is running")?;
     let (ref_, selector) = split_target(
         args.target.clone(),
         args.ref_.clone(),
         args.selector.clone(),
     )?;
+    crate::cli::business_rpc::set_caller_scope(args.scope.clone());
+    let info = ensure_daemon().context("ensure daemon is running")?;
     let params = FillParams {
-        session_id: args.session.clone(),
+        session_id: args.session.clone().unwrap_or_default(),
         value: args.value.clone(),
         ref_,
         selector,
@@ -494,7 +514,10 @@ pub struct PressArgs {
     pub key: String,
 
     #[arg(long)]
-    pub session: String,
+    pub session: Option<String>,
+
+    #[arg(long)]
+    pub scope: Option<String>,
 
     #[arg(long = "tab-id")]
     pub tab_id: Option<i64>,
@@ -520,11 +543,12 @@ pub struct PressArgs {
 }
 
 pub fn dispatch_press(args: PressArgs, format: Format) -> Result<(), CliError> {
-    let info = ensure_daemon().context("ensure daemon is running")?;
     let modifiers = parse_modifiers(&args.modifiers)
         .map_err(|e| CliError::Local(anyhow::anyhow!("--modifiers: {e}")))?;
+    crate::cli::business_rpc::set_caller_scope(args.scope.clone());
+    let info = ensure_daemon().context("ensure daemon is running")?;
     let params = PressParams {
-        session_id: args.session.clone(),
+        session_id: args.session.clone().unwrap_or_default(),
         key: args.key.clone(),
         modifiers: if modifiers.is_empty() {
             None
@@ -597,7 +621,10 @@ pub struct SelectArgs {
     pub selector: Option<String>,
 
     #[arg(long)]
-    pub session: String,
+    pub session: Option<String>,
+
+    #[arg(long)]
+    pub scope: Option<String>,
 
     #[arg(long = "tab-id")]
     pub tab_id: Option<i64>,
@@ -607,14 +634,15 @@ pub struct SelectArgs {
 }
 
 pub fn dispatch_select(args: SelectArgs, format: Format) -> Result<(), CliError> {
-    let info = ensure_daemon().context("ensure daemon is running")?;
     let (ref_, selector) = split_target(
         args.target.clone(),
         args.ref_.clone(),
         args.selector.clone(),
     )?;
+    crate::cli::business_rpc::set_caller_scope(args.scope.clone());
+    let info = ensure_daemon().context("ensure daemon is running")?;
     let params = SelectParams {
-        session_id: args.session.clone(),
+        session_id: args.session.clone().unwrap_or_default(),
         values: args.values.clone(),
         ref_,
         selector,
@@ -737,7 +765,7 @@ mod tests {
                 .expect("fill args should parse");
         assert_eq!(parsed.args.target.as_deref(), Some("@e138"));
         assert_eq!(parsed.args.value, "deepseek");
-        assert_eq!(parsed.args.session, "ohli");
+        assert_eq!(parsed.args.session.as_deref(), Some("ohli"));
     }
 
     #[test]
@@ -764,6 +792,6 @@ mod tests {
         .expect("select args should parse");
         assert_eq!(parsed.args.target.as_deref(), Some("@e138"));
         assert_eq!(parsed.args.values, vec!["us", "ca"]);
-        assert_eq!(parsed.args.session, "ohli");
+        assert_eq!(parsed.args.session.as_deref(), Some("ohli"));
     }
 }

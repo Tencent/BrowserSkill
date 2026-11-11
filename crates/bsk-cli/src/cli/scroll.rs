@@ -24,7 +24,10 @@ pub struct ScrollToArgs {
     pub selector: Option<String>,
 
     #[arg(long)]
-    pub session: String,
+    pub session: Option<String>,
+
+    #[arg(long)]
+    pub scope: Option<String>,
 
     #[arg(long = "tab-id")]
     pub tab_id: Option<i64>,
@@ -35,9 +38,10 @@ pub struct ScrollToArgs {
 
 pub fn dispatch(args: ScrollToArgs, format: Format) -> Result<(), CliError> {
     let (ref_, selector) = split_target(args.target, args.ref_, args.selector)?;
+    crate::cli::business_rpc::set_caller_scope(args.scope);
     let info = ensure_daemon().context("ensure daemon is running")?;
     let params = ScrollToParams {
-        session_id: args.session,
+        session_id: args.session.unwrap_or_default(),
         ref_,
         selector,
         tab_id: args.tab_id,

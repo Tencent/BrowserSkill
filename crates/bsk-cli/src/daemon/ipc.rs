@@ -208,11 +208,26 @@ pub fn full_handler(status: DaemonStatus, state: Arc<DaemonState>) -> RpcHandler
         let state = Arc::clone(&state);
         Box::pin(async move {
             let mut params = params;
-            // Internal correlation is minted here, never accepted from a CLI caller.
-            if let Some(object) = params.as_object_mut() {
-                object.remove("_audit_id");
-                object.remove("_operation_id");
+            let scope_meta = strip_envelope_scope_meta(&mut params);
+            if let Err(err) =
+                prepare_implicit_session_and_evidence(&state, &method, &mut params, &scope_meta)
+            {
+                return ResponseBody::Err(err);
             }
+            let cooperate_sync_session = (method == Method::ToolCooperate)
+                .then(|| {
+                    let action = params.get("action").and_then(Value::as_str)?;
+                    if matches!(action, "sync" | "enable") {
+                        params
+                            .get("session_id")
+                            .and_then(Value::as_str)
+                            .filter(|s| !s.is_empty())
+                            .map(|s| SessionId(s.to_string()))
+                    } else {
+                        None
+                    }
+                })
+                .flatten();
             let mut ticket = if method.is_tool() {
                 match state.audit.begin(params.get("session_id").and_then(Value::as_str).unwrap_or(""), &method, &params) {
                     Ok(ticket) => ticket,
@@ -272,19 +287,43 @@ pub fn full_handler(status: DaemonStatus, state: Arc<DaemonState>) -> RpcHandler
                     Err(e) => ResponseBody::Err(e),
                 },
                 Method::SessionStartTracked => {
-                    super::session_requests::start(&state, rpc_id, params).await
+                    let tracked_incognito = params
+                        .get("incognito")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false);
+                    let body = super::session_requests::start(&state, rpc_id, params).await;
+                    if scope_meta.bind_scope
+                        && let Some(scope) = scope_meta.caller_scope.as_deref()
+                        && let ResponseBody::Ok(ref value) = body
+                        && let Some(sid_str) = value.get("session_id").and_then(Value::as_str)
+                    {
+                        let sid = SessionId(sid_str.to_owned());
+                        if let Some(session) = state.sessions.get(&sid) {
+                            state.scopes.bind_scope(
+                                scope,
+                                sid,
+                                session.browser_id,
+                                tracked_incognito,
+                            );
+                        }
+                    }
+                    body
                 }
                 Method::SessionRequest => super::session_requests::operate(&state, params).await,
                 Method::SessionStart => {
-                    match handle_session_start(&state, rpc_id, params, false).await {
+                    match handle_session_start_scoped(&state, rpc_id, params, false, &scope_meta)
+                        .await
+                    {
                         Ok(v) => ResponseBody::Ok(v),
                         Err(e) => ResponseBody::Err(e),
                     }
                 }
-                Method::SessionStop => match handle_session_stop(&state, rpc_id, params).await {
-                    Ok(v) => ResponseBody::Ok(v),
-                    Err(e) => ResponseBody::Err(e),
-                },
+                Method::SessionStop => {
+                    match handle_session_stop(&state, rpc_id, params, &scope_meta).await {
+                        Ok(v) => ResponseBody::Ok(v),
+                        Err(e) => ResponseBody::Err(e),
+                    }
+                }
                 Method::SessionStopAll => match handle_session_stop_all_rpc(&state, rpc_id).await {
                     Ok(v) => ResponseBody::Ok(v),
                     Err(e) => ResponseBody::Err(e),
@@ -367,6 +406,15 @@ pub fn full_handler(status: DaemonStatus, state: Arc<DaemonState>) -> RpcHandler
                     data: None,
                 }),
             };
+            let mut body = body;
+            if let (Some(sid), ResponseBody::Ok(value)) = (&cooperate_sync_session, &mut body) {
+                let recorded = state.scopes.record_cooperate_result(sid, value);
+                if scope_meta.return_scope_meta
+                    && let Some(obj) = value.as_object_mut()
+                {
+                    obj.insert("_scope_meta".into(), recorded);
+                }
+            }
             if let Some(ticket) = ticket {
                 state.audit.finish(ticket, &body);
             }
@@ -381,6 +429,148 @@ pub fn full_handler(status: DaemonStatus, state: Arc<DaemonState>) -> RpcHandler
             body
         })
     })
+}
+
+#[derive(Debug, Default, Clone)]
+pub(super) struct EnvelopeScopeMeta {
+    pub caller_scope: Option<String>,
+    pub bind_scope: bool,
+    pub reuse_or_start_scope: bool,
+    pub explicit_incognito: bool,
+    pub return_scope_meta: bool,
+}
+
+fn strip_envelope_scope_meta(params: &mut Value) -> EnvelopeScopeMeta {
+    let mut meta = EnvelopeScopeMeta::default();
+    if let Some(object) = params.as_object_mut() {
+        // Internal correlation and caller-scope hints are stripped here and never
+        // forwarded onto the extension WebSocket wire.
+        object.remove("_audit_id");
+        object.remove("_operation_id");
+        meta.caller_scope = object
+            .remove("_caller_scope")
+            .and_then(|v| v.as_str().map(str::to_owned));
+        meta.bind_scope = object
+            .remove("_bind_scope")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        meta.reuse_or_start_scope = object
+            .remove("_reuse_or_start_scope")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        meta.explicit_incognito = object
+            .remove("_explicit_incognito")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        meta.return_scope_meta = object
+            .remove("_return_scope_meta")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+    }
+    meta
+}
+
+fn method_uses_implicit_session(method: &Method, params: &Value) -> bool {
+    match method {
+        Method::SessionRunLog | Method::TransferBegin => true,
+        Method::ToolVideo => params.get("session_id").is_some(),
+        Method::ToolWaitMs | Method::ToolSessionStart | Method::ToolSessionStop => false,
+        other => other.is_tool(),
+    }
+}
+
+fn method_auto_injects_target_context(method: &Method, params: &Value) -> bool {
+    match method {
+        Method::ToolObserve => params.get("probe_hover") == Some(&Value::Bool(true)),
+        Method::ToolDebug => params
+            .get("action")
+            .and_then(|v| {
+                serde_json::from_value::<bsk_protocol::tools::DebugAction>(v.clone()).ok()
+            })
+            .is_some_and(|action| action.cooperation_guarded()),
+        other => other.accepts_action_metadata(),
+    }
+}
+
+fn prepare_implicit_session_and_evidence(
+    state: &DaemonState,
+    method: &Method,
+    params: &mut Value,
+    scope_meta: &EnvelopeScopeMeta,
+) -> Result<(), RpcError> {
+    if !method_uses_implicit_session(method, params) {
+        return Ok(());
+    }
+    if params.is_null() {
+        *params = serde_json::json!({});
+    }
+    let Some(obj) = params.as_object_mut() else {
+        return Ok(());
+    };
+
+    let explicit_sid = obj
+        .get("session_id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned);
+
+    let session_id = match explicit_sid {
+        Some(sid) => SessionId(sid),
+        None => {
+            // Only resolve an implicit session when the caller signalled an implicit
+            // CLI/MCP invocation via `_caller_scope` OR passed an empty `session_id: ""`
+            // placeholder from an optional `--session` flag; raw protocol unit tests
+            // sending malformed JSON without `session_id` keep InvalidParams.
+            let has_empty_placeholder = obj
+                .get("session_id")
+                .and_then(Value::as_str)
+                .is_some_and(|s| s.trim().is_empty());
+            if scope_meta.caller_scope.is_none() && !has_empty_placeholder {
+                return Ok(());
+            }
+            let scope = scope_meta.caller_scope.as_deref().unwrap_or("default");
+            let resolved = state
+                .scopes
+                .resolve_implicit_session(scope, &state.sessions)?;
+            obj.insert("session_id".into(), Value::String(resolved.0.clone()));
+            resolved
+        }
+    };
+
+    let tab_id = obj.get("tab_id").and_then(Value::as_i64);
+
+    // Expand explicit `--context c1`, or inject latest target-policy context when omitted.
+    match obj.get("context_id").and_then(Value::as_str) {
+        Some(raw_ctx) if !raw_ctx.trim().is_empty() => {
+            if let Some(uuid) = state.scopes.expand_short_ctx(&session_id, raw_ctx.trim()) {
+                obj.insert("context_id".into(), Value::String(uuid));
+            }
+        }
+        _ => {
+            obj.remove("context_id");
+            if method_auto_injects_target_context(method, &Value::Object(obj.clone()))
+                && let Some(uuid) = state.scopes.implicit_target_context(&session_id, tab_id)
+            {
+                obj.insert("context_id".into(), Value::String(uuid));
+            }
+        }
+    }
+
+    // Expand explicit `--observation o1` ONLY; never fabricate omitted `observation_id`.
+    match obj.get("observation_id").and_then(Value::as_str) {
+        Some(raw_obs) if !raw_obs.trim().is_empty() => {
+            if let Some(uuid) = state.scopes.expand_short_obs(&session_id, raw_obs.trim()) {
+                obj.insert("observation_id".into(), Value::String(uuid));
+            }
+        }
+        Some(_) => {
+            obj.remove("observation_id");
+        }
+        None => {}
+    }
+
+    Ok(())
 }
 
 /// Stored videos remain addressable after session teardown. Only start takes
@@ -1248,6 +1438,18 @@ pub(super) async fn handle_session_start(
     params: Value,
     recoverable: bool,
 ) -> Result<Value, RpcError> {
+    let mut params = params;
+    let scope_meta = strip_envelope_scope_meta(&mut params);
+    handle_session_start_scoped(state, rpc_id, params, recoverable, &scope_meta).await
+}
+
+pub(super) async fn handle_session_start_scoped(
+    state: &Arc<DaemonState>,
+    rpc_id: RpcId,
+    params: Value,
+    recoverable: bool,
+    scope_meta: &EnvelopeScopeMeta,
+) -> Result<Value, RpcError> {
     let task_name = params
         .get("task_name")
         .and_then(Value::as_str)
@@ -1297,6 +1499,72 @@ pub(super) async fn handle_session_start(
             });
         }
     };
+
+    let scope = scope_meta.caller_scope.as_deref().unwrap_or("default");
+    if scope_meta.reuse_or_start_scope
+        && let Some((binding, live)) = state.scopes.active_binding(scope, &state.sessions)
+    {
+        if let Some(ref selector) = params.browser_instance_id {
+            match state.browsers.select(Some(selector.as_str())) {
+                Ok(selected) if selected.id != binding.browser_id => {
+                    return Err(RpcError {
+                        code: ErrorCode::InvalidParams,
+                        message: format!(
+                            "current scope is already bound to session '{}' on browser '{}', which conflicts with --browser '{}'; run 'bsk close' first or pass '--scope <name>'",
+                            binding.session_id, binding.browser_id, selector
+                        ),
+                        data: Some(serde_json::json!({
+                            "reason": crate::rpc_reason::SCOPE_BROWSER_CONFLICT,
+                            "session_id": binding.session_id.0,
+                            "bound_browser": binding.browser_id.0,
+                            "requested_browser": selected.id.0,
+                        })),
+                    });
+                }
+                Ok(_) => {}
+                Err(select_err) => {
+                    if selector != &binding.browser_id.0 {
+                        return Err(map_select_browser_error(&state.browsers, select_err));
+                    }
+                }
+            }
+        }
+        if (scope_meta.explicit_incognito && params.incognito != binding.incognito)
+            || (params.incognito && !binding.incognito)
+        {
+            return Err(RpcError {
+                code: ErrorCode::InvalidParams,
+                message: format!(
+                    "current scope is already bound to {} session '{}', which conflicts with --incognito; run 'bsk close' first or pass '--scope <name>'",
+                    if binding.incognito {
+                        "an incognito"
+                    } else {
+                        "a normal"
+                    },
+                    binding.session_id
+                ),
+                data: Some(serde_json::json!({
+                    "reason": crate::rpc_reason::SCOPE_INCOGNITO_CONFLICT,
+                    "session_id": binding.session_id.0,
+                })),
+            });
+        }
+        if state.browsers.get(&binding.browser_id).is_some() {
+            state.sessions.touch(&binding.session_id);
+            let result = CliSessionStartResult {
+                interaction: live.interaction,
+                session_id: live.id.0,
+                browser_instance_id: live.browser_id.0,
+                agent_window_id: live.agent_window_id,
+            };
+            return Ok(serde_json::to_value(result).unwrap_or(Value::Null));
+        }
+        state
+            .scopes
+            .on_session_ended(&binding.session_id, crate::rpc_reason::BROWSER_DISCONNECTED);
+    }
+
+    let requested_incognito = params.incognito;
     match super::sessions::start_session_recoverable(
         &state.browsers,
         &state.sessions,
@@ -1318,6 +1586,17 @@ pub(super) async fn handle_session_start(
         Ok(session) => {
             if let Some(name) = task_name {
                 state.audit.set_name(&session.id.0, &name);
+            }
+            if scope_meta.bind_scope
+                || scope_meta.reuse_or_start_scope
+                || super::scopes::is_isolated_scope(scope)
+            {
+                state.scopes.bind_scope(
+                    scope,
+                    session.id.clone(),
+                    session.browser_id.clone(),
+                    requested_incognito,
+                );
             }
             let result = CliSessionStartResult {
                 interaction: session.interaction,
@@ -1397,10 +1676,40 @@ fn map_start_error(err: StartSessionError) -> RpcError {
     }
 }
 
+fn map_select_browser_error(
+    browsers: &super::browsers::BrowserRegistry,
+    err: super::browsers::SelectError,
+) -> RpcError {
+    let entries: Vec<BrowserStatusEntry> = browsers
+        .snapshot()
+        .into_iter()
+        .map(|b| b.status_entry(0))
+        .collect();
+    match err {
+        super::browsers::SelectError::NoBrowserConnected => {
+            map_start_error(StartSessionError::NoBrowserConnected)
+        }
+        super::browsers::SelectError::MultipleBrowsersOnline => {
+            map_start_error(StartSessionError::MultipleBrowsersOnline { browsers: entries })
+        }
+        super::browsers::SelectError::NotFound => {
+            map_start_error(StartSessionError::BrowserNotFound { browsers: entries })
+        }
+        super::browsers::SelectError::AmbiguousLabel {
+            label,
+            instance_ids,
+        } => map_start_error(StartSessionError::AmbiguousBrowserLabel {
+            label,
+            instance_ids,
+        }),
+    }
+}
+
 async fn handle_session_stop(
     state: &Arc<DaemonState>,
     rpc_id: RpcId,
     params: Value,
+    scope_meta: &EnvelopeScopeMeta,
 ) -> Result<Value, RpcError> {
     let abort_guard = state
         .abort_registry
@@ -1426,14 +1735,20 @@ async fn handle_session_stop(
     if params.all {
         return handle_session_stop_all(state, Some(cancel)).await;
     }
-    let session_id = match params.session_id {
+    let session_id = match params.session_id.filter(|s| !s.trim().is_empty()) {
         Some(s) => SessionId(s),
         None => {
-            return Err(RpcError {
-                code: ErrorCode::InvalidParams,
-                message: "session.stop requires session_id or all=true".into(),
-                data: None,
-            });
+            if let Some(scope) = scope_meta.caller_scope.as_deref() {
+                state
+                    .scopes
+                    .resolve_implicit_session(scope, &state.sessions)?
+            } else {
+                return Err(RpcError {
+                    code: ErrorCode::InvalidParams,
+                    message: "session.stop requires session_id or all=true".into(),
+                    data: None,
+                });
+            }
         }
     };
     match stop_session(
@@ -1450,6 +1765,9 @@ async fn handle_session_stop(
         Ok(stop) => {
             state.transfers.release_session(&session_id.0);
             state.dialog_operations.remove_session(&session_id.0);
+            state
+                .scopes
+                .on_session_ended(&session_id, crate::rpc_reason::SESSION_STOPPED);
             let result = CliSessionStopResult {
                 stopped: vec![session_id.0],
                 failed: Vec::new(),
@@ -1553,6 +1871,9 @@ async fn handle_session_stop_all(
             Ok(stop) => {
                 state.transfers.release_session(&id.0);
                 state.dialog_operations.remove_session(&id.0);
+                state
+                    .scopes
+                    .on_session_ended(&id, crate::rpc_reason::SESSION_STOPPED);
                 stopped.push(id.0);
                 returned_tab_ids.extend(stop.returned_tab_ids);
                 return_failures.extend(stop.return_failures);

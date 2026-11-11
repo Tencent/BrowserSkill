@@ -11,6 +11,13 @@ determines which versions can connect.
 
 ### Added
 
+- Zero-ceremony lifecycle commands (`bsk open`, `bsk sync`, `bsk close`) and a
+  daemon-memory `ImplicitScopeRegistry` with deterministic `caller_scope` isolation
+  (`--session` > `--scope` / `BSK_SESSION` / `BSK_SCOPE` > per-process MCP stdio
+  `conn_scope` > host subagent IDs > anti-silent-hijack `"default"`), monotonic short
+  evidence aliases (`c1..cN`, `o1..oN`), omitted `--session` / target-policy
+  `--context` resolution, and `unchanged` VOM hydration without altering extension-side
+  cooperative safety verification.
 - Qoder and Qoder CN are available as skill-only install targets through
   `bsk install-skill --harness qoder` and `--harness qoder-cn`.
 - Local pairing with mutual proofs, durable key rotation and interruption recovery.
@@ -62,6 +69,12 @@ determines which versions can connect.
 
 ### Changed
 
+- Rewrote the CLI `SKILL.md` into a zero-preread workflow (`<= 2,000` UTF-8 bytes)
+  preserving all four cooperative safety invariants, removed repeated static `guidance`
+  prose from `cooperate sync` replies, and added 75-second four-guard idle
+  `chrome.debugger` soft-detach (preserving `tabOwners` and console/network `since`
+  cursors with transparent reattach) alongside immediate 0ms detach on `bsk close` and
+  `bsk tab return`.
 - Cooperative synchronization and strict pre-action verification reuse a sliding
   10-second `Accessibility` domain lease per tab, skip unused VOM text rendering on
   scene-only evidence and delta captures, stream unrelaxed whole-page evidence

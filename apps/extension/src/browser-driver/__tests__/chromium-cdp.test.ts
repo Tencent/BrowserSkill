@@ -2,7 +2,12 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { SessionManager } from "@/session-manager/manager";
 import { RefStore } from "@/session-manager/ref-store";
 import { handleWaitForNavigation } from "@/tools/waits";
-import { type CdpDebuggee, type CdpDebuggerApi, ChromiumCdp } from "../chromium-cdp";
+import {
+  type CdpDebuggee,
+  type CdpDebuggerApi,
+  ChromiumCdp,
+  DEFAULT_IDLE_DETACH_MS,
+} from "../chromium-cdp";
 import { CdpReadTimeoutError, READ_TIMEOUT_MS } from "../command-deadline";
 
 function fakeChromeEvent<TArgs extends unknown[]>() {
@@ -2149,5 +2154,246 @@ describe("session and tab lifecycle reconciliation", () => {
     expect(cdp.isAttached(2)).toBe(true);
     expect(api.detach).not.toHaveBeenCalledWith({ tabId: 2 });
     cdp.dispose();
+  });
+});
+
+describe("idle soft-detach and immediate close/return detach", () => {
+  it("soft-detaches after 75s idle when all 4 guards pass, preserves tabOwners and buffer cursors, and reattaches transparently", async () => {
+    vi.useFakeTimers();
+    const { api, onEvent } = fakeApi();
+    const changed = vi.fn();
+    const cdp = new ChromiumCdp(api, { onDocumentChanged: changed });
+    try {
+      expect(DEFAULT_IDLE_DETACH_MS).toBe(75_000);
+      cdp.trackSessionTab("sess-1", 41);
+      await cdp.ensureAttached(41);
+      expect(cdp.isAttached(41)).toBe(true);
+
+      // Populate passive console & network history before idle soft-detach.
+      onEvent.fire({ tabId: 41 }, "Runtime.consoleAPICalled", {
+        type: "log",
+        args: [{ value: "first-log" }],
+      });
+      onEvent.fire({ tabId: 41 }, "Network.requestWillBeSent", {
+        requestId: "req-1",
+        request: { url: "https://example.test/a", method: "GET" },
+      });
+      onEvent.fire({ tabId: 41 }, "Network.responseReceived", {
+        requestId: "req-1",
+        response: { status: 200 },
+      });
+      expect(cdp.consoleEntriesSince(41, 0, 50, 1000, false).next_since).toBe(1);
+      expect(cdp.networkEntriesSince(41, 0, 50, 1000).next_since).toBe(1);
+
+      // Sliding window: activity at 50s resets the 75s countdown.
+      await vi.advanceTimersByTimeAsync(50_000);
+      expect(api.detach).not.toHaveBeenCalled();
+      await cdp.send(41, "DOM.getDocument");
+      await vi.advanceTimersByTimeAsync(74_999);
+      expect(api.detach).not.toHaveBeenCalled();
+      expect(cdp.isAttached(41)).toBe(true);
+
+      // Reaching 75s after the last command triggers soft-detach.
+      await vi.advanceTimersByTimeAsync(1);
+      expect(api.detach).toHaveBeenCalledExactlyOnceWith({ tabId: 41 });
+      expect(cdp.isAttached(41)).toBe(false);
+      expect(changed).not.toHaveBeenCalled();
+
+      // Historical console & network buffers + sequence cursors stay intact.
+      expect(cdp.consoleEntriesSince(41, 0, 50, 1000, false)).toMatchObject({
+        next_since: 1,
+        entries: [{ sequence: 1, text: "first-log" }],
+      });
+      expect(cdp.networkEntriesSince(41, 0, 50, 1000)).toMatchObject({
+        next_since: 1,
+        entries: [{ sequence: 1, url: "https://example.test/a", status: 200 }],
+      });
+
+      // Next command transparently reattaches and keeps cursor monotonicity.
+      await cdp.send(41, "DOM.getDocument");
+      expect(cdp.isAttached(41)).toBe(true);
+      expect(api.attach).toHaveBeenCalledTimes(2);
+      onEvent.fire({ tabId: 41 }, "Runtime.consoleAPICalled", {
+        type: "log",
+        args: [{ value: "second-log" }],
+      });
+      onEvent.fire({ tabId: 41 }, "Network.requestWillBeSent", {
+        requestId: "req-2",
+        request: { url: "https://example.test/b", method: "POST" },
+      });
+      onEvent.fire({ tabId: 41 }, "Network.responseReceived", {
+        requestId: "req-2",
+        response: { status: 201 },
+      });
+      expect(cdp.consoleEntriesSince(41, 1, 50, 1000, false)).toMatchObject({
+        next_since: 2,
+        truncated: false,
+        entries: [{ sequence: 2, text: "second-log" }],
+      });
+      expect(cdp.networkEntriesSince(41, 1, 50, 1000)).toMatchObject({
+        next_since: 2,
+        truncated: false,
+        entries: [{ sequence: 2, url: "https://example.test/b", status: 201 }],
+      });
+
+      // Preserved `tabOwners` allows `detachSession` to detach immediately (0ms) on close.
+      await cdp.detachSession("sess-1");
+      expect(api.detach).toHaveBeenCalledTimes(2);
+      expect(cdp.isAttached(41)).toBe(false);
+      expect(cdp.consoleEntriesSince(41, 0, 50, 1000, false).entries).toEqual([]);
+      expect(cdp.networkEntriesSince(41, 0, 50, 1000).entries).toEqual([]);
+    } finally {
+      cdp.dispose();
+    }
+  });
+
+  it("blocks soft-detach when Guard 1 (in-flight command) is active, then detaches after idle", async () => {
+    vi.useFakeTimers();
+    const { api } = fakeApi();
+    let finishEval!: (value: object) => void;
+    vi.mocked(api.sendCommand).mockImplementation(async (_target, method) => {
+      if (method === "Runtime.evaluate") {
+        return new Promise<object>((resolve) => {
+          finishEval = resolve;
+        });
+      }
+      return {};
+    });
+    const cdp = new ChromiumCdp(api, { idleDetachMs: 1_000 });
+    try {
+      await cdp.ensureAttached(42);
+      const pending = cdp.send(42, "Runtime.evaluate", { expression: "slow()" });
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(api.detach).not.toHaveBeenCalled();
+      expect(cdp.isAttached(42)).toBe(true);
+
+      finishEval({ result: { value: 1 } });
+      await pending;
+      await vi.advanceTimersByTimeAsync(999);
+      expect(api.detach).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(1);
+      expect(api.detach).toHaveBeenCalledExactlyOnceWith({ tabId: 42 });
+      expect(cdp.isAttached(42)).toBe(false);
+    } finally {
+      cdp.dispose();
+    }
+  });
+
+  it.each([
+    "console",
+    "network",
+  ] as const)("blocks soft-detach when Guard 2 (%s diagnostic capture) is enabled", async (domain) => {
+    vi.useFakeTimers();
+    const { api } = fakeApi();
+    const cdp = new ChromiumCdp(api, { idleDetachMs: 1_000 });
+    try {
+      cdp.trackSessionTab("sess-diag", 43);
+      if (domain === "console") await cdp.ensureConsoleCapture(43);
+      else await cdp.ensureNetworkCapture(43);
+
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(api.detach).not.toHaveBeenCalled();
+      expect(cdp.isAttached(43)).toBe(true);
+
+      // Hard detach on session stop still detaches immediately in 0ms.
+      await cdp.detachSession("sess-diag");
+      expect(api.detach).toHaveBeenCalledExactlyOnceWith({ tabId: 43 });
+      expect(cdp.isAttached(43)).toBe(false);
+    } finally {
+      cdp.dispose();
+    }
+  });
+
+  it("blocks soft-detach when Guard 3 (backgroundExecution or Emulation override) is active, until released", async () => {
+    vi.useFakeTimers();
+    const { api } = fakeApi();
+    const cdp = new ChromiumCdp(api, { idleDetachMs: 1_000 });
+    try {
+      await cdp.acquireBackgroundExecution("sess-bg", 44);
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(api.detach).not.toHaveBeenCalled();
+      expect(cdp.isAttached(44)).toBe(true);
+
+      await cdp.releaseBackgroundExecution("sess-bg", 44);
+      await cdp.setDeviceMetricsOverride(44, {
+        width: 390,
+        height: 844,
+        deviceScaleFactor: 3,
+        mobile: true,
+      });
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(api.detach).not.toHaveBeenCalled();
+
+      await cdp.clearDeviceMetricsOverride(44);
+      await vi.advanceTimersByTimeAsync(999);
+      expect(api.detach).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(1);
+      expect(api.detach).toHaveBeenCalledExactlyOnceWith({ tabId: 44 });
+      expect(cdp.isAttached(44)).toBe(false);
+    } finally {
+      cdp.dispose();
+    }
+  });
+
+  it("blocks soft-detach when Guard 4 (pending native JS dialog) is active, then detaches after resolution", async () => {
+    vi.useFakeTimers();
+    const { api, onEvent } = fakeApi();
+    vi.mocked(api.sendCommand).mockImplementation(async (_target, method) => {
+      if (method === "Page.handleJavaScriptDialog") {
+        onEvent.fire({ tabId: 45 }, "Page.javascriptDialogClosed", { result: false });
+      }
+      return {};
+    });
+    const cdp = new ChromiumCdp(api, { idleDetachMs: 1_000 });
+    try {
+      await cdp.ensureAttached(45);
+      onEvent.fire({ tabId: 45 }, "Page.javascriptDialogOpening", {
+        type: "confirm",
+        message: "Proceed?",
+      });
+      expect(cdp.pendingDialogs(45)).toHaveLength(1);
+
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(api.detach).not.toHaveBeenCalled();
+      expect(cdp.isAttached(45)).toBe(true);
+
+      await cdp.resolveDialog(cdp.pendingDialogs(45)[0].id, false);
+      await vi.advanceTimersByTimeAsync(999);
+      expect(api.detach).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(1);
+      expect(api.detach).toHaveBeenCalledExactlyOnceWith({ tabId: 45 });
+      expect(cdp.isAttached(45)).toBe(false);
+    } finally {
+      cdp.dispose();
+    }
+  });
+
+  it("detaches in 0ms on releaseSessionTab / detachSession and cleans up idle timers", async () => {
+    vi.useFakeTimers();
+    const { api } = fakeApi();
+    const cdp = new ChromiumCdp(api);
+    try {
+      cdp.trackSessionTab("sess-a", 46);
+      cdp.trackSessionTab("sess-b", 47);
+      await cdp.ensureAttached(46);
+      await cdp.ensureAttached(47);
+
+      // 0ms immediate detach on `bsk tab return` (`releaseSessionTab`) and `bsk close` (`detachSession`)
+      // without advancing fake timers at all.
+      await cdp.releaseSessionTab("sess-a", 46);
+      expect(api.detach).toHaveBeenCalledExactlyOnceWith({ tabId: 46 });
+      expect(cdp.isAttached(46)).toBe(false);
+
+      await cdp.detachSession("sess-b");
+      expect(api.detach).toHaveBeenCalledTimes(2);
+      expect(api.detach).toHaveBeenLastCalledWith({ tabId: 47 });
+      expect(cdp.isAttached(47)).toBe(false);
+
+      // Advancing past 75s triggers zero orphaned timer calls.
+      await vi.advanceTimersByTimeAsync(100_000);
+      expect(api.detach).toHaveBeenCalledTimes(2);
+    } finally {
+      cdp.dispose();
+    }
   });
 });

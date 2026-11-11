@@ -47,6 +47,7 @@ static OBSERVATION_CONTEXT: std::sync::OnceLock<Option<String>> = std::sync::Onc
 static ACTION_EVIDENCE: std::sync::OnceLock<(Option<String>, Option<serde_json::Value>)> =
     std::sync::OnceLock::new();
 static TARGET_POLICY_REQUESTED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+static EXPLICIT_CALLER_SCOPE: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
 
 // Keep the user's stop request even if the in-flight RPC finishes successfully.
 // One CLI process is one command, including its follow-up reads.
@@ -71,6 +72,17 @@ pub fn set_action_evidence(observation: Option<String>, expect: Option<serde_jso
 
 pub fn set_target_policy_requested() {
     let _ = TARGET_POLICY_REQUESTED.set(true);
+}
+
+pub fn set_caller_scope(scope: Option<String>) {
+    if let Some(scope) = scope.filter(|s| !s.trim().is_empty()) {
+        *EXPLICIT_CALLER_SCOPE.lock().unwrap() = Some(scope);
+    }
+}
+
+pub fn current_caller_scope() -> String {
+    let explicit = EXPLICIT_CALLER_SCOPE.lock().unwrap().clone();
+    crate::daemon::scopes::resolve_caller_scope_from_env(explicit.as_deref(), None)
 }
 
 /// Whether the caller attached anything asking for the page to be checked.
@@ -143,6 +155,12 @@ pub(crate) fn with_context<P: Serialize>(
                 }
                 if let Some(expect) = expect {
                     object.insert("expect".into(), expect.clone());
+                }
+                let has_empty_session = object.get("session_id").is_some_and(|v| {
+                    v.is_null() || v.as_str().is_some_and(|s| s.trim().is_empty())
+                });
+                if has_empty_session && !object.contains_key("_caller_scope") {
+                    object.insert("_caller_scope".into(), current_caller_scope().into());
                 }
             }
             Ok(value)

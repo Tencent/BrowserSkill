@@ -61,6 +61,8 @@ pub struct DaemonState {
     pub transfers: Arc<TransferRegistry>,
     /// What each live session did, for recipe drafts. Metadata only, in memory.
     pub run_logs: super::run_log::RunLogs,
+    /// Caller-scoped implicit session bindings, short `cN`/`oN` tokens, and `last_vom`.
+    pub scopes: super::scopes::ImplicitScopeRegistry,
 }
 
 impl DaemonState {
@@ -84,6 +86,7 @@ impl DaemonState {
             self.transfers.release_session(&session.id.0);
             self.dialog_operations.remove_session(&session.id.0);
             self.sessions.remember_end(&session.id, end_reason);
+            self.scopes.on_session_ended(&session.id, end_reason);
             tracing::debug!(session = %session.id, note);
         }
     }
@@ -168,6 +171,7 @@ impl DaemonState {
             session_interrupts,
             transfers,
             run_logs: Default::default(),
+            scopes: Default::default(),
         }
     }
 }

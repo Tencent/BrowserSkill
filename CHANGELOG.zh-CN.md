@@ -7,6 +7,11 @@ CLI、扩展和 DSH 插件可以分别发布，能否连接由协议兼容性决
 
 ### 新增
 
+- 新增零仪式生命周期命令（`bsk open`、`bsk sync`、`bsk close`）与 daemon 内存级
+  `ImplicitScopeRegistry`：提供确定性 `caller_scope` 并发隔离（`--session` >
+  `--scope` / `BSK_SESSION` / `BSK_SCOPE` > `bsk mcp` 进程级连接作用域 > 宿主子代理环境变量 >
+  防静默抢占 `"default"` 槽位）、单调短证据别名（`c1..cN`、`o1..oN`）、可选 `--session` /
+  `target` 策略省略 `--context` 自动还原以及 `unchanged` 缓存 VOM 补齐，且保持扩展侧共驾安全校验不变。
 - 新增 Qoder 和 Qoder CN 的 skill 安装目标，可使用 `bsk install-skill --harness qoder` 和
   `--harness qoder-cn`。
 - 本机配对支持双向身份验证、持久化密钥轮换和中断恢复。已配对连接在发送业务请求前验证 daemon，激活后原链接失效。撤销与浏览器注册串行执行，撤销成功后对应连接已清理。
@@ -34,6 +39,10 @@ CLI、扩展和 DSH 插件可以分别发布，能否连接由协议兼容性决
 
 ### 变更
 
+- 将 CLI 内置 `SKILL.md` 重写为零预读闭环（`<= 2,000` UTF-8 字节）并完整保留四大安全红线，
+  移除 `cooperate sync` 回执中每回合重复的静态 `guidance` 文本，同时为 `ChromiumCdp` 增加
+  75 秒四重硬守卫空闲软卸载（保留会话归属与控制台/网络 `since` 游标并支持下一命令无感重连）及
+  `bsk close` / `bsk tab return` 时的 0 秒立即卸载。
 - 协作同步与严格动作前置校验按标签页复用 10 秒滑动 TTL 的 `Accessibility` 域租约，在仅比对场景的证据校验和增量刷新中跳过无用的 VOM 文本渲染，采用流式逐节点比对替代全页证据序列化，并降低大页面语义图与 VOM 渲染的内存分配开销。
 - 扩展弹窗的连接设置不再折叠，始终展开。未配对的建议收起为标题旁的三角警示图标，点击后展开；
   已跳过验证和阻断连接的状态仍直接显示。当前地址显示在所选模式下方，配对步骤改为点击信息图标查看，

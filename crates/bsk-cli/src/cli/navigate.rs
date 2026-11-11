@@ -102,9 +102,13 @@ pub struct NavigateArgs {
     /// Destination URL.
     pub url: Option<String>,
 
-    /// Session id (must be active).
+    /// Session id (omit to resolve via caller scope).
     #[arg(long)]
     pub session: Option<String>,
+
+    /// Explicit caller scope name for multi-agent isolation.
+    #[arg(long)]
+    pub scope: Option<String>,
 
     /// Target tab. Defaults to the Agent Window's active tab.
     #[arg(long = "tab-id")]
@@ -122,7 +126,10 @@ pub struct NavigateArgs {
 #[derive(Debug, Clone, Args)]
 pub struct NavigateHistoryArgs {
     #[arg(long)]
-    pub session: String,
+    pub session: Option<String>,
+
+    #[arg(long)]
+    pub scope: Option<String>,
 
     #[arg(long = "tab-id")]
     pub tab_id: Option<i64>,
@@ -137,7 +144,10 @@ pub struct NavigateHistoryArgs {
 #[derive(Debug, Clone, Args)]
 pub struct ReloadArgs {
     #[arg(long)]
-    pub session: String,
+    pub session: Option<String>,
+
+    #[arg(long)]
+    pub scope: Option<String>,
 
     #[arg(long = "tab-id")]
     pub tab_id: Option<i64>,
@@ -162,17 +172,13 @@ pub fn dispatch_navigate_command(args: NavigateCommand, format: Format) -> Resul
 }
 
 pub fn dispatch_navigate(args: NavigateArgs, format: Format) -> Result<(), CliError> {
-    let info = ensure_daemon().context("ensure daemon is running")?;
     let Some(url) = args.url.clone() else {
         return Err(CliError::Local(anyhow::anyhow!("navigate requires a url")));
     };
-    let Some(session) = args.session.clone() else {
-        return Err(CliError::Local(anyhow::anyhow!(
-            "navigate requires --session <session-id>"
-        )));
-    };
+    crate::cli::business_rpc::set_caller_scope(args.scope.clone());
+    let info = ensure_daemon().context("ensure daemon is running")?;
     let params = NavigateParams {
-        session_id: session,
+        session_id: args.session.clone().unwrap_or_default(),
         url,
         tab_id: args.tab_id,
         wait_until: Some(args.wait_until.into()),
@@ -189,9 +195,10 @@ pub fn dispatch_navigate(args: NavigateArgs, format: Format) -> Result<(), CliEr
 }
 
 pub fn dispatch_navigate_back(args: NavigateHistoryArgs, format: Format) -> Result<(), CliError> {
+    crate::cli::business_rpc::set_caller_scope(args.scope.clone());
     let info = ensure_daemon().context("ensure daemon is running")?;
     let params = NavigateBackParams {
-        session_id: args.session.clone(),
+        session_id: args.session.clone().unwrap_or_default(),
         tab_id: args.tab_id,
         wait_until: Some(args.wait_until.into()),
         timeout_ms: Some(args.timeout),
@@ -210,9 +217,10 @@ pub fn dispatch_navigate_forward(
     args: NavigateHistoryArgs,
     format: Format,
 ) -> Result<(), CliError> {
+    crate::cli::business_rpc::set_caller_scope(args.scope.clone());
     let info = ensure_daemon().context("ensure daemon is running")?;
     let params = NavigateForwardParams {
-        session_id: args.session.clone(),
+        session_id: args.session.clone().unwrap_or_default(),
         tab_id: args.tab_id,
         wait_until: Some(args.wait_until.into()),
         timeout_ms: Some(args.timeout),
@@ -228,9 +236,10 @@ pub fn dispatch_navigate_forward(
 }
 
 pub fn dispatch_reload(args: ReloadArgs, format: Format) -> Result<(), CliError> {
+    crate::cli::business_rpc::set_caller_scope(args.scope.clone());
     let info = ensure_daemon().context("ensure daemon is running")?;
     let params = ReloadParams {
-        session_id: args.session.clone(),
+        session_id: args.session.clone().unwrap_or_default(),
         tab_id: args.tab_id,
         wait_until: Some(args.wait_until.into()),
         timeout_ms: Some(args.timeout),

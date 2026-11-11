@@ -14,7 +14,9 @@ use clap::Args;
 #[derive(Debug, Clone, Args)]
 pub struct ReadArgs {
     #[arg(long)]
-    pub session: String,
+    pub session: Option<String>,
+    #[arg(long)]
+    pub scope: Option<String>,
     #[arg(long)]
     pub tab_id: Option<i64>,
     /// CSS selector in the main document. Reads all matches, up to max-nodes.
@@ -41,9 +43,10 @@ pub fn dispatch(args: ReadArgs, _format: Format) -> Result<(), CliError> {
         .map(serde_json::from_str)
         .transpose()
         .context("parse --fields-json as a DOM read field array")?;
+    business_rpc::set_caller_scope(args.scope);
     let info = ensure_daemon().context("ensure daemon is running")?;
     let params = ReadParams {
-        session_id: args.session,
+        session_id: args.session.unwrap_or_default(),
         tab_id: args.tab_id,
         context_id: None,
         selector: args.selector,

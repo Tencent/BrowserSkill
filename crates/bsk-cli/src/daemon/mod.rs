@@ -18,6 +18,7 @@ pub(crate) mod probe;
 pub mod queue;
 pub mod remote;
 pub mod run_log;
+pub mod scopes;
 pub mod session_interrupt;
 pub mod session_requests;
 pub mod sessions;
