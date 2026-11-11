@@ -7,7 +7,7 @@ use schemars::{JsonSchema, Schema, SchemaGenerator, generate::SchemaSettings};
 use serde::Serialize;
 use serde_json::{Value, json};
 
-use crate::{ErrorCode, EventKind, Method, RpcError, method::MethodEffect};
+use crate::{ErrorCode, EventKind, Method, RpcError, RpcErrorReason, method::MethodEffect};
 
 pub const PROTOCOL_VERSION: &str = "1.9";
 pub const MIN_COMPATIBLE_PROTOCOL: &str = "1.0";
@@ -84,6 +84,7 @@ fn describe(settings: SchemaSettings) -> (Vec<MethodDescriptor>, Value) {
         .map(|method| method.describe(&mut generator))
         .collect();
     register::<ErrorCode>(&mut generator);
+    register::<RpcErrorReason>(&mut generator);
     register::<RpcError>(&mut generator);
     register::<EventKind>(&mut generator);
     register::<crate::tools::ActionExpectation>(&mut generator);

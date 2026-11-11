@@ -76,6 +76,117 @@ impl ErrorCode {
     }
 }
 
+/// Stable `RpcError.data.reason` values shared across extension emitters and CLI renderers.
+///
+/// Wire frames carry `data` as untyped JSON so older peers can ignore unknown reasons and
+/// fall back to [`ErrorCode`]-level rendering, while TypeScript and JSON Schema consumers
+/// obtain the canonical union from this single source of truth.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum RpcErrorReason {
+    UserMovedTab,
+    CooperationSyncRequired,
+    FrameUnobservable,
+    PageLoadFailed,
+    ControlAuthorityRequired,
+    ControlContextInvalid,
+    HumanIntervention,
+    ControlHeld,
+    DocumentChanged,
+    ObservationRequired,
+    ObservationChanged,
+    PreconditionInvalid,
+    PreconditionFailed,
+    TargetDetached,
+    TargetHidden,
+    TargetDisabled,
+    TargetReadonly,
+    TargetFocusLost,
+    TargetMoved,
+    TargetCovered,
+    VirtualRowRecycled,
+    ReadParamsInvalid,
+    ReadTargetStale,
+    ReadSelectorInvalid,
+    ReadFieldAmbiguous,
+    ReadLimit,
+    ExtractParamsInvalid,
+    ExtractTargetStale,
+    ExtractTargetAmbiguous,
+    ExtractTargetHidden,
+    ExtractSelectorInvalid,
+    ExtractStructureInvalid,
+    ExtractFieldAmbiguous,
+    ExtractLimit,
+    UiLookupFailed,
+    TaskUnavailable,
+    TargetUnavailable,
+    TaskStopping,
+    UiDeadline,
+    PreviewBusy,
+    AgentWindowScope,
+    ElementNotVisible,
+    InputNotReady,
+    InputClockUnavailable,
+    InputOutcomeUnknown,
+    InputPaintUnconfirmed,
+    InputCleanupFailed,
+    RefNotFound,
+    RefKindUnsupported,
+    VisualCaptureStale,
+    VisualCaptureInvalid,
+    VisualCoordinateInvalid,
+    VisualTargetChanged,
+    VisualPixelBudgetExceeded,
+    SelectorNotFound,
+    TargetNotFillable,
+    FillValueInvalid,
+    FillTargetChanged,
+    FillFocusLost,
+    FillValueMismatch,
+    FillFailed,
+    TargetNotSelect,
+    OptionNotFound,
+    OptionAmbiguous,
+    SingleSelectValueCount,
+    TabNotActive,
+    WindowResizeInactiveTab,
+    WindowResizeConstrained,
+    WindowResizeUnconfirmed,
+    WindowResizeViewportUnchanged,
+    RestrictedTabUrl,
+    CdpExtensionAccessDenied,
+    ObserveIdentityReloadLoop,
+    BorrowAgentWindowTab,
+    BorrowConflict,
+    IncognitoBorrowDisabled,
+    BorrowInProgress,
+    UserDenied,
+    ConfirmationTimeout,
+    ConfirmationUiUnavailable,
+    BorrowOutcomeUnknown,
+    ScreenshotCaptureFailed,
+    RendererReadTimeout,
+    OperationSettling,
+    UserCancelled,
+    PageHidden,
+    Navigation,
+    WatchdogTimeout,
+    StaleFrame,
+    LoadingStalled,
+    FileInputProbeFailed,
+    FileInputNotActivated,
+    SetFileInputFailed,
+    UploadMechanismUnsupported,
+    FileDropTargetUnavailable,
+    FileDropFailed,
+    DownloadCaptureFailed,
+    DownloadPathMismatch,
+    TransferOutcomeUnknown,
+    TransferTimeout,
+    CleanupFailed,
+}
+
 #[derive(Debug, Error)]
 pub enum DecodeError {
     #[error("ambiguous response frame: expected exactly one of result or error")]
@@ -114,6 +225,19 @@ mod user_aborted_tests {
                 serde_json::to_value(code).unwrap(),
                 serde_json::Value::String(code.wire_name().to_owned()),
             );
+        }
+    }
+
+    #[test]
+    fn rpc_error_reason_round_trips_wave1_reasons() {
+        for (variant, expected) in [
+            (RpcErrorReason::VirtualRowRecycled, "virtual_row_recycled"),
+            (RpcErrorReason::OptionAmbiguous, "option_ambiguous"),
+        ] {
+            let encoded = serde_json::to_value(variant).unwrap();
+            assert_eq!(encoded, serde_json::json!(expected));
+            let decoded: RpcErrorReason = serde_json::from_value(encoded).unwrap();
+            assert_eq!(decoded, variant);
         }
     }
 }

@@ -1,6 +1,6 @@
 {
   "source": "bsk-protocol",
-  "fingerprint": "1eba8e8910e38780b6b6a9808a46f5bf40847bd5789bfdf0ab2f803ce48fc9af",
+  "fingerprint": "a74682b0e361024692247507c5d1a8a63a26d5d7d64fd99116d333f3bf8aaa37",
   "protocol_version": "1.9",
   "min_compatible_protocol": "1.0",
   "feature_requirements": [
@@ -325,6 +325,7 @@
     "ResolvedTarget",
     "ReturnFailure",
     "RpcError",
+    "RpcErrorReason",
     "ScreenshotFullPageParams",
     "ScreenshotFullPageResult",
     "ScreenshotParams",
