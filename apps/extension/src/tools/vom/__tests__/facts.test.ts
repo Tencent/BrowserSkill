@@ -64,9 +64,34 @@ describe("document facts", () => {
   });
 
   it("decodes current observation bounds, styles and attributes without projecting coordinates", async () => {
-    const strings = ["div", "aria-hidden", "true", "inert", "", "visible", "0", "static", "auto"];
+    const strings = [
+      "div",
+      "aria-hidden",
+      "true",
+      "inert",
+      "",
+      "visible",
+      "0",
+      "static",
+      "auto",
+      "16px",
+      "rgb(0, 0, 0)",
+      "rgba(0, 0, 0, 0)",
+    ];
     const styles = REQUESTED_STYLES.map((style) =>
-      style === "visibility" ? 5 : style === "opacity" ? 6 : style === "position" ? 7 : 8,
+      style === "visibility"
+        ? 5
+        : style === "opacity"
+          ? 6
+          : style === "position"
+            ? 7
+            : style === "font-size"
+              ? 9
+              : style === "color"
+                ? 10
+                : style === "background-color"
+                  ? 11
+                  : 8,
     );
     const { nodes } = await decodeDocument(
       {
@@ -85,6 +110,9 @@ describe("document facts", () => {
         cursor: "auto",
         visibility: "visible",
         opacity: "0",
+        "font-size": "16px",
+        color: "rgb(0, 0, 0)",
+        "background-color": "rgba(0, 0, 0, 0)",
       },
     });
     expect(nodes[0]).not.toHaveProperty("rect");
@@ -184,5 +212,149 @@ describe("visual ancestry facts", () => {
     expect(decoded.nodes.every((node) => node.parentMissing)).toBe(true);
     const index = await buildDocumentIndex(decoded.nodes, undefined, true);
     expect([...index.ancestryComplete!.values()]).toEqual([false, false]);
+  });
+});
+
+describe("computed-style stealth prompt-injection stripper", () => {
+  function styledNode(
+    id: number,
+    parent: number | null,
+    tag: string,
+    options: {
+      attrs?: Record<string, string>;
+      bounds?: number[];
+      styles?: Partial<Record<string, string>>;
+      textContent?: string;
+      clickable?: boolean;
+    } = {},
+  ): DecodedNode {
+    return {
+      backendNodeId: id,
+      parentBackendNodeId: parent,
+      nodeType: tag.startsWith("#") ? 3 : 1,
+      tag,
+      attrs: options.attrs ?? {},
+      ...(options.textContent !== undefined ? { textContent: options.textContent } : {}),
+      ...(options.clickable ? { clickable: true } : {}),
+      paintOrder: id,
+      position: options.styles?.position ?? "static",
+      pointerEvents: options.styles?.["pointer-events"] ?? "auto",
+      ...(tag.startsWith("#")
+        ? {}
+        : {
+            layout: {
+              boundsSpace: "snapshot-document-layout",
+              bounds: options.bounds ?? [10, 20, 200, 30],
+              styles: {
+                position: "static",
+                "pointer-events": "auto",
+                cursor: "auto",
+                visibility: "visible",
+                opacity: "1",
+                "font-size": "16px",
+                color: "rgb(17, 17, 17)",
+                "background-color": "rgba(0, 0, 0, 0)",
+                ...options.styles,
+              },
+            },
+          }),
+    };
+  }
+
+  it("strips inline and stylesheet-computed opacity<0.05, font-size<=1.5px, zero-contrast, offscreen and 1px-clipped subtrees including #text children", async () => {
+    const nodes: DecodedNode[] = [
+      styledNode(1, null, "html", { bounds: [0, 0, 1000, 800] }),
+      styledNode(2, 1, "body", {
+        bounds: [0, 0, 1000, 800],
+        styles: { "background-color": "rgb(255, 255, 255)" },
+      }),
+      styledNode(3, 2, "p", { textContent: "正常业务摘要" }),
+      // 1) CSS class opacity: 0.001 (no inline style)
+      styledNode(10, 2, "span", {
+        attrs: { class: "ghost-op" },
+        styles: { opacity: "0.001" },
+        textContent: "INJ_OPACITY",
+      }),
+      styledNode(11, 10, "#text", { textContent: "INJ_OPACITY" }),
+      // 2) CSS class font-size: 1px (no inline style)
+      styledNode(20, 2, "div", {
+        attrs: { class: "micro-font" },
+        styles: { "font-size": "1px" },
+        textContent: "INJ_FONTSIZE",
+      }),
+      styledNode(21, 20, "#text", { textContent: "INJ_FONTSIZE" }),
+      // 3) Zero-contrast color === ancestor background-color
+      styledNode(30, 2, "span", {
+        attrs: { class: "same-color" },
+        styles: { color: "rgb(255, 255, 255)" },
+        textContent: "INJ_ZEROCONTRAST",
+      }),
+      styledNode(31, 30, "#text", { textContent: "INJ_ZEROCONTRAST" }),
+      // 4) Offscreen left: -9999px
+      styledNode(40, 2, "div", {
+        bounds: [-9999, -9999, 200, 20],
+        textContent: "INJ_OFFSCREEN",
+      }),
+      styledNode(41, 40, "#text", { textContent: "INJ_OFFSCREEN" }),
+      // 5) 1px x 1px clipped block
+      styledNode(50, 2, "div", {
+        attrs: { class: "clip-box" },
+        bounds: [10, 10, 1, 1],
+        styles: { "overflow-x": "hidden", "overflow-y": "hidden" },
+        textContent: "INJ_CLIPPED",
+      }),
+      styledNode(51, 50, "#text", { textContent: "INJ_CLIPPED" }),
+    ];
+
+    const index = await buildDocumentIndex(nodes);
+    expect(index.excludedBackendNodeIds.has(3)).toBe(false);
+    for (const stealthId of [10, 11, 20, 21, 30, 31, 40, 41, 50, 51]) {
+      expect(index.excludedBackendNodeIds.has(stealthId)).toBe(true);
+    }
+  });
+
+  it("exempts interactive controls, .sr-only button accessible labels, <label for> and aria-labelledby/describedby targets", async () => {
+    const nodes: DecodedNode[] = [
+      styledNode(1, null, "body", { bounds: [0, 0, 1000, 800] }),
+      // Icon button with 1px x 1px .sr-only label inside
+      styledNode(10, 1, "button", { bounds: [20, 20, 36, 36] }),
+      styledNode(11, 10, "span", {
+        attrs: { class: "sr-only" },
+        bounds: [20, 20, 1, 1],
+        styles: { "overflow-x": "hidden", "overflow-y": "hidden" },
+        textContent: "关闭弹窗",
+      }),
+      styledNode(12, 11, "#text", { textContent: "关闭弹窗" }),
+      // Hidden aria-labelledby target outside the control
+      styledNode(20, 1, "span", {
+        attrs: { id: "combo-lbl", class: "sr-only" },
+        bounds: [-2000, 0, 1, 1],
+        textContent: "结算账期",
+      }),
+      styledNode(21, 20, "#text", { textContent: "结算账期" }),
+      styledNode(22, 1, "div", {
+        attrs: { role: "combobox", "aria-labelledby": "combo-lbl" },
+        bounds: [20, 80, 180, 32],
+      }),
+      // .sr-only <label for="...">
+      styledNode(30, 1, "label", {
+        attrs: { for: "search-q", class: "sr-only" },
+        bounds: [0, -1000, 1, 1],
+        textContent: "站内搜索",
+      }),
+      styledNode(31, 1, "input", {
+        attrs: { id: "search-q", type: "search" },
+        bounds: [20, 130, 200, 32],
+      }),
+      // Opacity-0 file input itself must never be stripped
+      styledNode(40, 1, "input", {
+        attrs: { type: "file" },
+        bounds: [20, 180, 1, 1],
+        styles: { opacity: "0" },
+      }),
+    ];
+
+    const index = await buildDocumentIndex(nodes);
+    expect([...index.excludedBackendNodeIds]).toEqual([]);
   });
 });

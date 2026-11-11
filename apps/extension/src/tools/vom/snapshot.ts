@@ -9,6 +9,9 @@ export const REQUESTED_STYLES = [
   "cursor",
   "visibility",
   "opacity",
+  "font-size",
+  "color",
+  "background-color",
 ] as const;
 export const VISUAL_STYLES = [
   ...REQUESTED_STYLES,
@@ -203,7 +206,7 @@ export async function decodeDocument(
     const li = layoutByNode.get(n);
     let styles: Record<string, string> | undefined;
     let layout: DecodedNode["layout"];
-    if (li !== undefined) {
+    if (li !== undefined && tag !== "#text") {
       const styleRow = dl?.styles?.[li] ?? [];
       styles = {};
       for (let i = 0; i < profile.computedStyles.length; i++)
@@ -262,6 +265,9 @@ export async function decodeDocument(
         : {}),
       ...(tag === "input" && ["checkbox", "radio"].includes((attrs.type ?? "").toLowerCase())
         ? { checked: checkedInputs.has(n) }
+        : {}),
+      ...(tag === "option" && dn.optionSelected !== undefined
+        ? { checked: selectedOptions.has(n) }
         : {}),
       ...(selectedOptions.has(n) ? { formValue: attrs.value ?? textContent ?? "" } : {}),
     });

@@ -2377,6 +2377,109 @@ describe("handleSelect", () => {
     expect(res).toMatchObject({ code: "cancelled" });
     expect(fake.sent.some((c) => c.method === "Runtime.callFunctionOn")).toBe(false);
   });
+
+  it("selects by unique visible label (exact and case-insensitive), rejects ambiguous labels, and lists available options", async () => {
+    const select = document.createElement("select");
+    select.innerHTML = [
+      '<option value="east">华东大区</option>',
+      '<option value="south">South Region</option>',
+      '<option value="dup_a">同名项</option>',
+      '<option value="dup_b">同名项</option>',
+    ].join("");
+    const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
+    const ctx = await sm.start("aa11");
+    ctx.refStore.set("e1", 555, { tabId: 4 });
+    const fake = makeFakeCdp({
+      ...selectHandlers({ ok: true, multiple: false }),
+      "Runtime.callFunctionOn": (params) => {
+        const script = params as {
+          functionDeclaration: string;
+          arguments: Array<{ value: unknown }>;
+        };
+        const fn = new Function(`return (${script.functionDeclaration})`)();
+        return {
+          result: {
+            value: fn.apply(
+              select,
+              script.arguments.map((arg) => arg.value),
+            ),
+          },
+        };
+      },
+    });
+
+    const byExactCjkLabel = await handleSelect(
+      sm,
+      { session_id: "aa11", ref: "e1", values: ["华东大区"] },
+      { cdp: fake.cdp, tabsApi: fake.tabsApi },
+    );
+    expect(byExactCjkLabel).toMatchObject({
+      selected_values: ["east"],
+      selected_labels: ["华东大区"],
+    });
+
+    const byCaseInsensitiveLabel = await handleSelect(
+      sm,
+      { session_id: "aa11", ref: "e1", values: ["south region"] },
+      { cdp: fake.cdp, tabsApi: fake.tabsApi },
+    );
+    expect(byCaseInsensitiveLabel).toMatchObject({
+      selected_values: ["south"],
+      selected_labels: ["South Region"],
+    });
+
+    const ambiguous = await handleSelect(
+      sm,
+      { session_id: "aa11", ref: "e1", values: ["同名项"] },
+      { cdp: fake.cdp, tabsApi: fake.tabsApi },
+    );
+    expect(ambiguous).toMatchObject({
+      code: "invalid_params",
+      data: {
+        reason: "option_ambiguous",
+        ambiguous: "同名项",
+        count: 2,
+      },
+    });
+
+    const missing = await handleSelect(
+      sm,
+      { session_id: "aa11", ref: "e1", values: ["不存在的大区"] },
+      { cdp: fake.cdp, tabsApi: fake.tabsApi },
+    );
+    expect(missing).toMatchObject({
+      code: "invalid_params",
+      data: {
+        reason: "option_not_found",
+        missing: "不存在的大区",
+        available: ['east="华东大区"', 'south="South Region"', 'dup_a="同名项"', 'dup_b="同名项"'],
+      },
+    });
+  });
+
+  it("returns actionable click-to-expand guidance when target_not_select hits a custom dropdown", async () => {
+    const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
+    const ctx = await sm.start("aa11");
+    ctx.refStore.set("e7", 100, { tabId: 4 });
+    const fake = makeFakeCdp({
+      "DOM.describeNode": () => ({
+        node: { backendNodeId: 100, nodeName: "DIV", attributes: ["role", "combobox"] },
+      }),
+    });
+    const res = await handleSelect(
+      sm,
+      { session_id: "aa11", ref: "e7", values: ["月结45天"] },
+      { cdp: fake.cdp, tabsApi: fake.tabsApi },
+    );
+    expect(res).toMatchObject({
+      code: "invalid_params",
+      message: expect.stringContaining("Click @e7"),
+      data: {
+        reason: "target_not_select",
+        recovery: expect.stringContaining("Click @e7"),
+      },
+    });
+  });
 });
 
 it.each([

@@ -124,6 +124,11 @@ const WEAK_ACTION_LABELS = new Set([
 ]);
 
 const ACTIVE_REGION_POSITIONS = new Set(["fixed", "absolute", "sticky"]);
+const LABELABLE_INPUT_ROLES = new Set(["textbox", "searchbox", "combobox", "spinbutton"]);
+const TABLE_CELL_ROLES = new Set(["cell", "gridcell", "columnheader", "rowheader"]);
+const MAX_INLINE_SELECT_OPTIONS = 10;
+const MIN_FOLDABLE_TABLE_ROWS = 3;
+const PURE_TIMER_RE = /^(?:\d{1,2}:\d{2}(?::\d{2})?|\d+(?:\.\d+)?\s*(?:ms|s|sec|secs|秒)前?)$/i;
 
 function cleaned(value: string | undefined): string | undefined {
   const trimmed = value?.replace(/\s+/g, " ").trim();
@@ -797,6 +802,53 @@ function handleContext(node: VomNode, state: RenderState): string[] {
   ]);
 }
 
+function formatOptionToken(val: string, lbl: string, selected: boolean): string {
+  const star = selected ? "*" : "";
+  if (val === lbl) return `${JSON.stringify(lbl)}${star}`;
+  const key = /^[A-Za-z0-9_.:/-]+$/.test(val) ? val : JSON.stringify(val);
+  return `${key}=${JSON.stringify(lbl)}${star}`;
+}
+
+function formatInlineSelectOptions(node: VomNode, state?: RenderState): string | undefined {
+  if (node.selectOptions && node.selectOptions.length > 0) {
+    const specs = node.selectOptions
+      .slice(0, MAX_INLINE_SELECT_OPTIONS)
+      .map((opt) => formatOptionToken(opt.value, cleaned(opt.label) ?? "", opt.selected === true));
+    if (node.selectOptionsTruncated || node.selectOptions.length > MAX_INLINE_SELECT_OPTIONS) {
+      specs.push("…");
+    }
+    return specs.join(" | ");
+  }
+  if (!state) return undefined;
+  const specs: string[] = [];
+  const selVal = cleaned(node.value);
+  const stack = [...(state.children.get(node.id) ?? [])].reverse();
+  while (stack.length > 0) {
+    const child = stack.pop() as VomNode;
+    const cTag = normalizedTag(child);
+    const cRole = normalizedRole(child);
+    if (cTag === "optgroup" || (cRole === "group" && cTag !== "option")) {
+      const nested = state.children.get(child.id) ?? [];
+      for (let i = nested.length - 1; i >= 0; i -= 1) stack.push(nested[i]);
+      continue;
+    }
+    if (cTag !== "option" && cRole !== "option") continue;
+    if (specs.length >= MAX_INLINE_SELECT_OPTIONS) {
+      specs.push("…");
+      break;
+    }
+    const lbl = cleaned(child.attrs?.label) ?? cleaned(child.name) ?? cleaned(child.text) ?? "";
+    const val = child.attrs?.value ?? lbl;
+    const selected =
+      child.checked === true ||
+      child.attrs?.["aria-selected"] === "true" ||
+      Object.prototype.hasOwnProperty.call(child.attrs ?? {}, "selected") ||
+      (selVal !== undefined && val === selVal);
+    specs.push(formatOptionToken(val, lbl, selected));
+  }
+  return specs.length > 0 ? specs.join(" | ") : undefined;
+}
+
 function renderNodeLine(
   node: VomNode,
   depth: number,
@@ -804,13 +856,24 @@ function renderNodeLine(
   context: string[] = [],
   surface: CondSurface | undefined = undefined,
   redactValues = false,
+  state?: RenderState,
 ): string {
+  const isNativeSelect = normalizedTag(node) === "select";
   let line = `${"  ".repeat(depth)}${ref ? `@${ref} ` : ""}${node.role ?? "generic"}`;
 
   const hint = dragHint(node);
   if (hint) line += ` [${hint}]`;
-  const name = cleaned(node.name);
+  const suppressRedundantTableName =
+    normalizedRole(node) === "table" &&
+    state?.foldedTableIds.has(node.id) === true &&
+    !node.attrs?.["aria-label"]?.trim() &&
+    !node.attrs?.["aria-labelledby"]?.trim() &&
+    !node.attrs?.title?.trim() &&
+    descendantTextCoveredByName(node, state);
+  const name = suppressRedundantTableName ? undefined : cleaned(node.name);
   if (name) line += ` ${JSON.stringify(name)}`;
+  const boundField = !name ? state?.boundFieldLabels.get(node.id) : undefined;
+  if (boundField) line += ` [field: ${JSON.stringify(boundField)}]`;
   if (context.length > 0) line += ` [ctx: ${context.join(" > ")}]`;
 
   // For link nodes with an external href, annotate so the agent can
@@ -842,6 +905,14 @@ function renderNodeLine(
         : undefined
       : rawValue?.slice(0, MAX_VALUE_LENGTH);
   if (value !== undefined) line += ` =${JSON.stringify(value)}`;
+
+  if (isNativeSelect && !node.sensitive && !redactValues) {
+    const inlineOpts = formatInlineSelectOptions(node, state);
+    if (inlineOpts) line += ` [options: ${inlineOpts}]`;
+  } else if (role === "combobox" && !isNativeSelect) {
+    const expanded = node.attrs?.["aria-expanded"]?.toLowerCase() === "true";
+    line += expanded ? " [custom-dropdown: expanded]" : " [custom-dropdown: click to open]";
+  }
 
   if (surface && surface.subItems.length > 0) {
     const items = surface.subItems.slice(0, MAX_SURFACE_ITEMS).join(" | ");
@@ -911,6 +982,14 @@ interface RenderState {
   duplicateRefNames: Set<string>;
   surfaceMap: Map<number, CondSurface>;
   scopeMap: Map<number, ActiveScopeBlock>;
+  hasInteractiveDescendant: Set<number>;
+  hasAnyRowOrListitem: boolean;
+  rowAncestorMemo: Map<number, number | null>;
+  boundFieldLabels: Map<number, string>;
+  consumedCaptionIds: Set<number>;
+  foldedRowCells: Map<number, string>;
+  foldedTableIds: Set<number>;
+  transparentRowgroupIds: Set<number>;
 }
 
 export interface RenderRow {
@@ -932,6 +1011,78 @@ function pushRenderChildren(
   }
 }
 
+function collectSubtreeText(node: VomNode, children: Map<number | null, VomNode[]>): string {
+  const kids = children.get(node.id) ?? [];
+  const ownName = cleaned(node.name);
+  if (kids.length === 0) {
+    return ownName ?? cleaned(node.text) ?? cleaned(node.value) ?? "";
+  }
+  const kidTexts = kids.map((child) => collectSubtreeText(child, children)).filter(Boolean);
+  if (ownName && (kidTexts.length === 0 || kidTexts.every((text) => ownName.includes(text)))) {
+    return ownName;
+  }
+  if (kidTexts.length > 0) return kidTexts.join(" ");
+  return ownName ?? cleaned(node.text) ?? cleaned(node.value) ?? "";
+}
+
+function collectNonInteractiveRowText(
+  node: VomNode,
+  targetId: number,
+  state: RenderState,
+): string | undefined {
+  if (node.id === targetId || node.sensitive || isVomReferenceNode(node)) return undefined;
+  const kids = state.children.get(node.id) ?? [];
+  if (!state.hasInteractiveDescendant.has(node.id)) {
+    const text = collectSubtreeText(node, state.children);
+    return text || undefined;
+  }
+  const parts: string[] = [];
+  for (const child of kids) {
+    const sub = collectNonInteractiveRowText(child, targetId, state);
+    if (sub) parts.push(sub);
+  }
+  return parts.length > 0 ? cleaned(parts.join(" ")) : undefined;
+}
+
+function resolveEnclosingRowNodeId(nodeId: number, state: RenderState): number | null {
+  const cached = state.rowAncestorMemo.get(nodeId);
+  if (cached !== undefined) return cached;
+  const parentId = state.parentMap.get(nodeId) ?? null;
+  if (parentId === null) {
+    state.rowAncestorMemo.set(nodeId, null);
+    return null;
+  }
+  const parent = state.nodesById.get(parentId);
+  if (!parent) {
+    state.rowAncestorMemo.set(nodeId, null);
+    return null;
+  }
+  const r = normalizedRole(parent);
+  const t = normalizedTag(parent);
+  const found =
+    r === "row" || r === "listitem" || t === "tr" || t === "li"
+      ? parentId
+      : resolveEnclosingRowNodeId(parentId, state);
+  state.rowAncestorMemo.set(nodeId, found);
+  return found;
+}
+
+function inferSceneRowAnchor(node: VomNode, state: RenderState): string | undefined {
+  if (node.rowAnchor) return node.rowAnchor;
+  if (!state.hasAnyRowOrListitem || node.domAncestorIds !== undefined) return undefined;
+  const rowNodeId = resolveEnclosingRowNodeId(node.id, state);
+  const rowNode = rowNodeId === null ? undefined : state.nodesById.get(rowNodeId);
+  if (!rowNode) return undefined;
+  const ownKey = (cleaned(node.name) ?? cleaned(node.text) ?? "").toLowerCase();
+  for (const slot of state.children.get(rowNode.id) ?? []) {
+    const text = collectNonInteractiveRowText(slot, node.id, state);
+    if (!text || PURE_TIMER_RE.test(text)) continue;
+    if (ownKey && text.toLowerCase() === ownKey) continue;
+    return Array.from(text).slice(0, 80).join("").trim() || undefined;
+  }
+  return undefined;
+}
+
 function* renderTreeRows(
   children: Map<number | null, VomNode[]>,
   state: RenderState,
@@ -944,8 +1095,33 @@ function* renderTreeRows(
   while (stack.length > 0) {
     const { node, depth } = stack.pop() as { node: VomNode; depth: number };
 
-    if (representedSources?.has(node.id) || (node.visualKey === undefined && !shouldRender(node))) {
+    if (state.consumedCaptionIds.has(node.id)) {
+      continue;
+    }
+
+    if (
+      state.transparentRowgroupIds.has(node.id) ||
+      representedSources?.has(node.id) ||
+      (node.visualKey === undefined && !shouldRender(node))
+    ) {
       pushRenderChildren(stack, children.get(node.id) ?? [], depth);
+      continue;
+    }
+
+    const rawParent = node.parentId === null ? undefined : state.nodesById.get(node.parentId);
+    const rawParentLabel = rawParent ? cleaned(rawParent.name) : undefined;
+
+    // CJK-safe exact parent-child echo deduplication: fold statictext only when verbatim equal (`===`).
+    if (
+      node.visualKey === undefined &&
+      !isVomReferenceNode(node) &&
+      !state.hasInteractiveDescendant.has(node.id) &&
+      normalizedRole(node) === "statictext" &&
+      rawParent &&
+      shouldRender(rawParent) &&
+      rawParentLabel !== undefined &&
+      cleaned(node.name) === rawParentLabel
+    ) {
       continue;
     }
 
@@ -953,6 +1129,23 @@ function* renderTreeRows(
       state.truncated = true;
       if (observation && state.visualAncestors.has(node.id))
         pushRenderChildren(stack, children.get(node.id) ?? [], depth);
+      continue;
+    }
+
+    const foldedCells = state.foldedRowCells.get(node.id);
+    if (foldedCells !== undefined && node.visualKey === undefined) {
+      const parent = observation ? rawParent : undefined;
+      const parentLabel = parent ? rawParentLabel : undefined;
+      const indent = "  ".repeat(Math.min(depth, state.maxDepth, 32));
+      yield {
+        ...(parent
+          ? {
+              context: `@context ${parent.role ?? parent.tag}${parentLabel ? ` ${JSON.stringify(Array.from(parentLabel).slice(0, 80).join(""))}` : ""}`,
+            }
+          : {}),
+        frameId: node.frameId,
+        text: `${indent}row ${JSON.stringify(foldedCells)}`,
+      };
       continue;
     }
 
@@ -966,14 +1159,15 @@ function* renderTreeRows(
     const indent = "  ".repeat(Math.min(depth, state.maxDepth, 32));
     const minimal = visual ? `${indent}@${ref} canvas [visual:screenshot]` : undefined;
     const label = cleaned(node.name);
+    const effectiveRefName = label ?? (!visual ? state.boundFieldLabels.get(node.id) : undefined);
+    const rowAnchor = ref && !visual ? inferSceneRowAnchor(node, state) : undefined;
     const text = visual
       ? label
         ? `${indent}@${ref} canvas ${JSON.stringify(Array.from(label).slice(0, 160).join(""))} [visual:screenshot]`
         : minimal!
-      : renderNodeLine(node, depth, ref, context, surface, state.redactValues);
-    const parent =
-      observation && node.parentId !== null ? state.nodesById.get(node.parentId) : undefined;
-    const parentLabel = parent ? cleaned(parent.name) : undefined;
+      : renderNodeLine(node, depth, ref, context, surface, state.redactValues, state);
+    const parent = observation ? rawParent : undefined;
+    const parentLabel = parent ? rawParentLabel : undefined;
     yield {
       ...(parent
         ? {
@@ -991,8 +1185,9 @@ function* renderTreeRows(
               ...(visual ? { visualKey: node.visualKey } : {}),
               ...(node.frameId ? { frameId: node.frameId } : {}),
               ...(node.role ? { role: node.role } : {}),
-              ...(label ? { name: label } : {}),
+              ...(effectiveRefName ? { name: effectiveRefName } : {}),
               ...(context.length > 0 ? { ctx: context.join(" > ") } : {}),
+              ...(rowAnchor ? { rowAnchor } : {}),
               line: 0,
             },
           }
@@ -1015,6 +1210,96 @@ function* renderTreeRows(
     }
     pushRenderChildren(stack, children.get(node.id) ?? [], depth + 1);
   }
+}
+
+function pureStaticCaptionText(
+  candidate: VomNode,
+  children: Map<number | null, VomNode[]>,
+  state: RenderState,
+): string | undefined {
+  if (
+    candidate.visualKey !== undefined ||
+    isVomReferenceNode(candidate) ||
+    state.hasInteractiveDescendant.has(candidate.id) ||
+    state.visualAncestors.has(candidate.id)
+  ) {
+    return undefined;
+  }
+  const role = normalizedRole(candidate);
+  if (!["statictext", "labeltext", "text", ""].includes(role)) return undefined;
+  const kids = children.get(candidate.id) ?? [];
+  let text: string | undefined;
+  if (kids.length === 0) {
+    text = cleaned(candidate.name) ?? cleaned(candidate.text);
+  } else if (
+    kids.length === 1 &&
+    normalizedRole(kids[0]) === "statictext" &&
+    (children.get(kids[0].id) ?? []).length === 0
+  ) {
+    text =
+      cleaned(kids[0].name) ??
+      cleaned(kids[0].text) ??
+      cleaned(candidate.name) ??
+      cleaned(candidate.text);
+  } else {
+    return undefined;
+  }
+  if (!text || text.length > 64 || isNoisyText(text)) return undefined;
+  return text;
+}
+
+function extractPureReadOnlyRowText(
+  row: VomNode,
+  children: Map<number | null, VomNode[]>,
+  state: RenderState,
+): string | undefined {
+  if (
+    row.visualKey !== undefined ||
+    state.visualAncestors.has(row.id) ||
+    normalizedRole(row) !== "row" ||
+    isVomReferenceNode(row) ||
+    state.hasInteractiveDescendant.has(row.id)
+  ) {
+    return undefined;
+  }
+  const kids = children.get(row.id) ?? [];
+  if (kids.length === 0) return undefined;
+  const cells: string[] = [];
+  for (const kid of kids) {
+    if (
+      kid.visualKey !== undefined ||
+      state.visualAncestors.has(kid.id) ||
+      !TABLE_CELL_ROLES.has(normalizedRole(kid))
+    ) {
+      return undefined;
+    }
+    cells.push(collectSubtreeText(kid, children));
+  }
+  if (cells.every((cell) => !cell)) return undefined;
+  return cells.join(" | ");
+}
+
+function recordFoldedRowRuns(
+  seq: readonly VomNode[],
+  children: Map<number | null, VomNode[]>,
+  state: RenderState,
+): void {
+  let run: Array<{ id: number; text: string }> = [];
+  const flush = () => {
+    if (run.length >= MIN_FOLDABLE_TABLE_ROWS) {
+      for (const item of run) state.foldedRowCells.set(item.id, item.text);
+    }
+    run = [];
+  };
+  for (const item of seq) {
+    const rowText = extractPureReadOnlyRowText(item, children, state);
+    if (rowText !== undefined) {
+      run.push({ id: item.id, text: rowText });
+    } else {
+      flush();
+    }
+  }
+  flush();
 }
 
 function createRenderState(
@@ -1053,16 +1338,120 @@ function createRenderState(
     duplicateRefNames,
     surfaceMap: new Map(surfaces.map((surface) => [surface.triggerId, surface])),
     scopeMap: new Map(activeScopeBlocks.map((scope) => [scope.triggerId, scope])),
+    hasInteractiveDescendant: new Set(),
+    hasAnyRowOrListitem: false,
+    rowAncestorMemo: new Map(),
+    boundFieldLabels: new Map(),
+    consumedCaptionIds: new Set(),
+    foldedRowCells: new Map(),
+    foldedTableIds: new Set(),
+    transparentRowgroupIds: new Set(),
   };
 
   for (const node of nodes) {
-    if (node.visualKey === undefined) continue;
-    let id = node.parentId;
-    while (id !== null && !state.visualAncestors.has(id)) {
-      state.visualAncestors.add(id);
-      id = state.parentMap.get(id) ?? null;
+    const nRole = normalizedRole(node);
+    const nTag = normalizedTag(node);
+    if (nRole === "row" || nRole === "listitem" || nTag === "tr" || nTag === "li") {
+      state.hasAnyRowOrListitem = true;
+    }
+    if (node.visualKey !== undefined) {
+      let id = node.parentId;
+      while (id !== null && !state.visualAncestors.has(id)) {
+        state.visualAncestors.add(id);
+        id = state.parentMap.get(id) ?? null;
+      }
+    }
+    if (node.visualKey !== undefined || isVomReferenceNode(node)) {
+      let pid = state.parentMap.get(node.id) ?? null;
+      let guard = 0;
+      while (pid !== null && guard++ <= state.parentMap.size) {
+        if (state.hasInteractiveDescendant.has(pid)) break;
+        state.hasInteractiveDescendant.add(pid);
+        pid = state.parentMap.get(pid) ?? null;
+      }
     }
   }
+
+  for (const siblings of children.values()) {
+    for (let i = 0; i < siblings.length; i++) {
+      const cur = siblings[i];
+      if (!LABELABLE_INPUT_ROLES.has(normalizedRole(cur)) || cleaned(cur.name)) continue;
+      let bound = false;
+      for (let j = i - 1; j >= Math.max(0, i - 2); j--) {
+        const prev = siblings[j];
+        if (
+          prev.visualKey !== undefined ||
+          isVomReferenceNode(prev) ||
+          state.hasInteractiveDescendant.has(prev.id)
+        ) {
+          break;
+        }
+        if (state.consumedCaptionIds.has(prev.id)) continue;
+        const caption = pureStaticCaptionText(prev, children, state);
+        if (caption) {
+          state.boundFieldLabels.set(cur.id, caption);
+          state.consumedCaptionIds.add(prev.id);
+          bound = true;
+          break;
+        }
+      }
+      if (!bound && cur.nearbyText) {
+        const near = cleanSemanticText(cur.nearbyText);
+        if (near && near.length <= 48) state.boundFieldLabels.set(cur.id, near);
+      }
+    }
+  }
+
+  for (const container of nodes) {
+    const cRole = normalizedRole(container);
+    if (cRole === "table" || cRole === "grid") {
+      const seq: VomNode[] = [];
+      const inlineRowgroups: VomNode[] = [];
+      for (const ch of children.get(container.id) ?? []) {
+        const hasExplicitRgLabel = Boolean(
+          ch.attrs?.["aria-label"]?.trim() ||
+            ch.attrs?.["aria-labelledby"]?.trim() ||
+            ch.attrs?.title?.trim(),
+        );
+        const chRole = normalizedRole(ch);
+        const chTag = normalizedTag(ch);
+        const isPureRg =
+          ch.visualKey === undefined &&
+          !isVomReferenceNode(ch) &&
+          !hasExplicitRgLabel &&
+          (chRole === "rowgroup" ||
+            chTag === "thead" ||
+            chTag === "tbody" ||
+            chTag === "tfoot" ||
+            !shouldRender(ch)) &&
+          (!cleaned(ch.name) || descendantTextCoveredByName(ch, state));
+        if (isPureRg) {
+          inlineRowgroups.push(ch);
+          seq.push(...(children.get(ch.id) ?? []));
+        } else {
+          seq.push(ch);
+        }
+      }
+      const prevFoldedCount = state.foldedRowCells.size;
+      recordFoldedRowRuns(seq, children, state);
+      if (state.foldedRowCells.size > prevFoldedCount) {
+        state.foldedTableIds.add(container.id);
+      }
+      for (const rg of inlineRowgroups) {
+        const rgKids = children.get(rg.id) ?? [];
+        if (rgKids.length > 0 && rgKids.every((rk) => state.foldedRowCells.has(rk.id))) {
+          state.transparentRowgroupIds.add(rg.id);
+        }
+      }
+    } else if (cRole === "rowgroup") {
+      const parentId = state.parentMap.get(container.id) ?? null;
+      const parentRole = parentId === null ? "" : normalizedRole(state.nodesById.get(parentId)!);
+      if (parentRole !== "table" && parentRole !== "grid") {
+        recordFoldedRowRuns(children.get(container.id) ?? [], children, state);
+      }
+    }
+  }
+
   return state;
 }
 

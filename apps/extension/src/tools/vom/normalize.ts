@@ -149,7 +149,7 @@ export async function normalizeDocument(
         bounds[3] > 0 &&
         visibility !== "hidden" &&
         visibility !== "collapse" &&
-        (Number.parseFloat(opacity) || 0) > 0,
+        (Number.parseFloat(opacity) || 0) >= 0.05,
     });
   }
   const index = await buildDocumentIndex(nodes, signal, profile.includeVisualFacts);
