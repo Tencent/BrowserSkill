@@ -1,7 +1,7 @@
 //! `bsk drag`: a bounded held drag or click-move-click gesture in one request.
 use super::{
     dialogs::print_dialog_summaries,
-    ensure_daemon::ensure_daemon,
+    ensure_daemon::ensure_daemon_optimistic as ensure_daemon,
     error::{CliError, Format},
     interaction::{CliMouseButton, parse_modifiers, split_target},
     navigate::parse_timeout_ms,

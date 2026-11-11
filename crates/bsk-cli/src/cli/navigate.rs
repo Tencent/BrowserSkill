@@ -17,7 +17,7 @@ use serde::Serialize;
 
 use crate::cli::business_rpc::ipc_timeout;
 use crate::cli::dialogs::print_dialog_summaries;
-use crate::cli::ensure_daemon::ensure_daemon;
+use crate::cli::ensure_daemon::ensure_daemon_optimistic as ensure_daemon;
 use crate::cli::error::{CliError, Format};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]

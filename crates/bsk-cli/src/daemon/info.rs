@@ -32,6 +32,11 @@ pub struct DaemonInfo {
     /// Omitted when false, so detached daemons write the same file as before.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub host_managed: bool,
+    /// Negotiated IPC protocol version written by >=0.5.0 Wave 3 daemons so
+    /// business commands can validate protocol support without opening a
+    /// separate `system.status` probe socket.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub protocol_version: Option<String>,
 }
 
 impl DaemonInfo {
@@ -46,11 +51,17 @@ impl DaemonInfo {
                 .map(|d| d.as_secs())
                 .unwrap_or(0),
             host_managed: false,
+            protocol_version: None,
         }
     }
 
     pub fn with_host_managed(mut self, host_managed: bool) -> Self {
         self.host_managed = host_managed;
+        self
+    }
+
+    pub fn with_protocol_version(mut self, protocol_version: impl Into<String>) -> Self {
+        self.protocol_version = Some(protocol_version.into());
         self
     }
 }

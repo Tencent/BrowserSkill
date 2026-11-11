@@ -1,7 +1,7 @@
 //! Bounded DOM reads: data parameters, never caller JavaScript.
 use super::{
     TOOL_IPC_TIMEOUT, business_rpc,
-    ensure_daemon::ensure_daemon,
+    ensure_daemon::ensure_daemon_optimistic as ensure_daemon,
     error::{CliError, Format},
 };
 use anyhow::Context;

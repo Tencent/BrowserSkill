@@ -407,8 +407,8 @@ pub fn dispatch(args: PlanArgs, flags: &GlobalFlags, _format: Format) -> Result<
         args.context_lines,
     )?;
     business_rpc::set_caller_scope(args.scope.clone());
-    let (daemon, protocol) =
-        ensure_daemon::ensure_daemon_with_protocol().context("ensure daemon is running")?;
+    let (daemon, protocol) = ensure_daemon::ensure_daemon_optimistic_with_protocol()
+        .context("ensure daemon is running")?;
     check_protocol(&protocol)?;
     let (reply, exit) = run(&plan, |method, params, timeout| {
         business_rpc::call(

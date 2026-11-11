@@ -1,7 +1,7 @@
 //! One explicit action, optional positive readiness condition, then read-only sync.
 use super::{
     TOOL_IPC_TIMEOUT, business_rpc, cooperate,
-    ensure_daemon::ensure_daemon,
+    ensure_daemon::ensure_daemon_optimistic as ensure_daemon,
     error::{CliError, Format},
     observation_view,
 };

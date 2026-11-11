@@ -14,7 +14,7 @@ use bsk_protocol::tools::{
 };
 use clap::{Args, ValueEnum};
 
-use crate::cli::ensure_daemon::ensure_daemon;
+use crate::cli::ensure_daemon::ensure_daemon_optimistic as ensure_daemon;
 use crate::cli::error::{CliError, Format};
 use crate::cli::interaction::split_target;
 use crate::cli::navigate::parse_timeout_ms;
