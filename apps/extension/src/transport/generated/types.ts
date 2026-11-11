@@ -167,6 +167,7 @@ export type { RequestHelpResult } from './output';
 export type { ResolvedTarget } from './output';
 export type { ReturnFailure } from './output';
 export type { RpcError } from './output';
+export type { RpcErrorReason } from './output';
 export type { ScreenshotFullPageParams } from './input';
 export type { ScreenshotFullPageResult } from './output';
 export type { ScreenshotParams } from './input';

@@ -11,7 +11,7 @@ pub mod system;
 pub mod tools;
 
 pub use cancel::{CancelParams, CancelResult};
-pub use error::{DecodeError, ErrorCode, RpcError};
+pub use error::{DecodeError, ErrorCode, RpcError, RpcErrorReason};
 pub use frame::{EventFrame, EventKind, Frame, RequestFrame, ResponseBody, ResponseFrame, RpcId};
 pub use method::Method;
 pub use system::{

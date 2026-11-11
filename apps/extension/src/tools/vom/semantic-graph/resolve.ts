@@ -1,5 +1,17 @@
-import type { VomNode } from "@browser-skill/vom";
+import type { VomNode, VomSelectOption } from "@browser-skill/vom";
 import { RECORD_PASSWORD_ATTRIBUTE, sensitiveAutocomplete } from "@/lib/sensitive-autocomplete";
+import type { NodeFacts } from "../facts";
+import {
+  MAX_ROW_ANCHOR_CHARS,
+  MAX_SEMANTIC_ROW_HOPS,
+  MAX_SLOT_TEXT_SCAN_CHARS,
+  MAX_VIRTUAL_DIV_ROW_HOPS,
+  NON_ANCHOR_ROLES,
+  NON_ANCHOR_TAGS,
+  ROW_STOP_TAGS,
+  VIRTUAL_POOL_EXCLUDED_TAGS,
+  VOLATILE_ROW_TEXT_RE,
+} from "../row-anchor-spec";
 import { stableIdentifierName } from "./name-evidence";
 import type {
   ResolvedSemanticGraph,
@@ -311,18 +323,23 @@ function buildIndexes(graph: SemanticGraph): ResolveIndexes {
   const domText = (nodeId: SemanticNodeId): string | undefined => {
     if (textMemo.has(nodeId)) return textMemo.get(nodeId);
     if (resolvingText.has(nodeId)) return undefined;
-    resolvingText.add(nodeId);
     const node = graph.nodes.get(nodeId);
+    if (!node || node.excluded) {
+      textMemo.set(nodeId, undefined);
+      return undefined;
+    }
+    resolvingText.add(nodeId);
     const parts: string[] = [];
     let joinedLength = 0;
-    const own = clean(node?.dom?.textContent);
+    const own = clean(node.dom?.textContent);
     if (own) {
       parts.push(own);
       joinedLength = own.length;
     }
     for (const childId of domChildren.get(nodeId) ?? []) {
       const child = graph.nodes.get(childId);
-      const childRole = child?.dom
+      if (!child || child.excluded) continue;
+      const childRole = child.dom
         ? domRole(child.dom.tag.toLowerCase(), child.dom.attrs)
         : undefined;
       if (childRole && INTERACTIVE_ROLES.has(childRole)) continue;
@@ -344,21 +361,27 @@ function buildIndexes(graph: SemanticGraph): ResolveIndexes {
   const axText = (nodeId: SemanticNodeId): string | undefined => {
     if (axTextMemo.has(nodeId)) return axTextMemo.get(nodeId);
     if (resolvingAxText.has(nodeId)) return undefined;
+    const node = graph.nodes.get(nodeId);
+    if (!node || node.excluded) {
+      axTextMemo.set(nodeId, undefined);
+      return undefined;
+    }
     resolvingAxText.add(nodeId);
     const complete = (value: string | undefined): string | undefined => {
       resolvingAxText.delete(nodeId);
       axTextMemo.set(nodeId, value);
       return value;
     };
-    const node = graph.nodes.get(nodeId);
     const role = axRoleLower.get(nodeId) ?? "";
     if (TEXT_AX_ROLES.has(role)) {
-      const own = clean(axValue(node?.ax?.name) ?? axValue(node?.ax?.value));
+      const own = clean(axValue(node.ax?.name) ?? axValue(node.ax?.value));
       if (own) return complete(own);
     }
     const parts: string[] = [];
     let joinedLength = 0;
     for (const childId of axChildren.get(nodeId) ?? []) {
+      const child = graph.nodes.get(childId);
+      if (!child || child.excluded) continue;
       const childRole = axRoleLower.get(childId) ?? "";
       if (INTERACTIVE_ROLES.has(childRole)) continue;
       const childText = axText(childId);
@@ -483,10 +506,11 @@ function precedingAxText(
   for (let offset = 1; offset <= 4 && index - offset >= 0; offset += 1) {
     const siblingId = siblings[index - offset];
     const sibling = graph.nodes.get(siblingId);
+    if (!sibling || sibling.excluded) continue;
     const role = indexes.axRoleLower.get(siblingId) ?? "";
     if (INTERACTIVE_ROLES.has(role)) break;
     if (!TEXT_AX_ROLES.has(role) && role !== "generic") continue;
-    const text = clean(axValue(sibling?.ax?.name) ?? axValue(sibling?.ax?.value))?.replace(
+    const text = clean(axValue(sibling.ax?.name) ?? axValue(sibling.ax?.value))?.replace(
       /[：:]\s*$/,
       "",
     );
@@ -505,9 +529,8 @@ function precedingDomText(
   const index = indexes.domSiblingIndex.get(node.id) ?? -1;
   for (let offset = 1; offset <= 4 && index - offset >= 0; offset += 1) {
     const sibling = graph.nodes.get(siblings[index - offset]);
-    const siblingRole = sibling
-      ? domRole(sibling.dom?.tag.toLowerCase() ?? "", sibling.dom?.attrs ?? {})
-      : undefined;
+    if (!sibling || sibling.excluded) continue;
+    const siblingRole = domRole(sibling.dom?.tag.toLowerCase() ?? "", sibling.dom?.attrs ?? {});
     if (siblingRole && INTERACTIVE_ROLES.has(siblingRole.toLowerCase())) break;
     const text = indexes.domText(siblings[index - offset])?.replace(/[：:]\s*$/, "");
     if (text && text.length <= 80) return text;
@@ -588,6 +611,317 @@ function nearbyText(node: SemanticGraphNode, indexes: ResolveIndexes): string | 
   return texts.length === 0 ? undefined : clean(texts.join(" "));
 }
 
+const MAX_INLINE_SELECT_OPTIONS = 10;
+
+function extractSelectOptions(
+  selectNode: SemanticGraphNode,
+  sourceValue: string | undefined,
+  graph: SemanticGraph,
+  indexes: ResolveIndexes,
+): { options: VomSelectOption[]; truncated: boolean } | undefined {
+  const options: VomSelectOption[] = [];
+  let truncated = false;
+  const domKids = indexes.domChildren.get(selectNode.id);
+  const useDom = Boolean(domKids && domKids.length > 0);
+  const visit = (childIds: readonly SemanticNodeId[] | undefined): void => {
+    if (!childIds || truncated) return;
+    for (const childId of childIds) {
+      const child = graph.nodes.get(childId);
+      if (!child || child.excluded) continue;
+      const cTag = child.dom?.tag.toLowerCase() ?? "";
+      const cRole = indexes.axRoleLower.get(childId) ?? normalizeRole(child.dom?.attrs.role) ?? "";
+      if (cTag === "optgroup" || cRole === "group" || cRole === "menulistpopup") {
+        visit(useDom ? indexes.domChildren.get(childId) : indexes.axChildren.get(childId));
+        if (truncated) return;
+        continue;
+      }
+      if (cTag !== "option" && cRole !== "option" && cRole !== "menuitem") continue;
+      const optAttrs = child.dom?.attrs ?? {};
+      const optLabel =
+        clean(optAttrs.label) ??
+        clean(child.dom?.textContent) ??
+        clean(axValue(child.ax?.name)) ??
+        "";
+      const hasValueAttr = Object.prototype.hasOwnProperty.call(optAttrs, "value");
+      const optValue = hasValueAttr
+        ? optAttrs.value
+        : (clean(child.dom?.textContent) ?? axValue(child.ax?.value) ?? optLabel);
+      if (!optValue && !optLabel) continue;
+      if (options.length >= MAX_INLINE_SELECT_OPTIONS) {
+        truncated = true;
+        return;
+      }
+      const optAxProps = extractAxProps(child.ax);
+      let optSelected = false;
+      if (child.dom?.checked !== undefined) {
+        optSelected = child.dom.checked === true;
+      } else if (child.ax?.ignored !== true && optAxProps?.selected !== undefined) {
+        optSelected = optAxProps.selected === "true";
+      } else if (sourceValue !== undefined) {
+        optSelected = optValue === sourceValue;
+      } else {
+        optSelected = Object.prototype.hasOwnProperty.call(optAttrs, "selected");
+      }
+      options.push({
+        value: optValue,
+        label: optLabel || optValue,
+        ...(optSelected ? { selected: true } : {}),
+      });
+    }
+  };
+  visit(useDom ? domKids : indexes.axChildren.get(selectNode.id));
+  return options.length > 0 ? { options, truncated } : undefined;
+}
+
+function createRowAnchorResolver(graph: SemanticGraph, indexes: ResolveIndexes) {
+  const pureSlotMemo = new Map<SemanticNodeId, string>();
+  const formAncestorMemo = new Map<SemanticNodeId, boolean>();
+  const renderedDescendantMemo = new Map<SemanticNodeId, boolean>();
+  const poolClassCounts = new Map<SemanticNodeId, Map<string, number>>();
+
+  const domFacts = (node: SemanticGraphNode | undefined): Partial<NodeFacts> | undefined =>
+    node?.dom as Partial<NodeFacts> | undefined;
+
+  const lightDomParentId = (node: SemanticGraphNode | undefined): SemanticNodeId | undefined => {
+    const pid = node?.domParentId;
+    if (!pid) return undefined;
+    const p = domFacts(graph.nodes.get(pid));
+    if (!p || p.nodeType === 11 || p.tag?.startsWith("#")) return undefined;
+    return pid;
+  };
+
+  const hasFormAncestor = (nodeId: SemanticNodeId): boolean => {
+    const hit = formAncestorMemo.get(nodeId);
+    if (hit !== undefined) return hit;
+    const node = graph.nodes.get(nodeId);
+    if (!node) {
+      formAncestorMemo.set(nodeId, false);
+      return false;
+    }
+    if (node.dom?.inForm === true || node.dom?.tag.toLowerCase() === "form") {
+      formAncestorMemo.set(nodeId, true);
+      return true;
+    }
+    const pid = lightDomParentId(node);
+    const res = pid ? hasFormAncestor(pid) : false;
+    formAncestorMemo.set(nodeId, res);
+    return res;
+  };
+
+  const hasRenderedDescendant = (nodeId: SemanticNodeId): boolean => {
+    const cached = renderedDescendantMemo.get(nodeId);
+    if (cached !== undefined) return cached;
+    for (const cid of indexes.domChildren.get(nodeId) ?? []) {
+      const c = graph.nodes.get(cid);
+      const cf = domFacts(c);
+      if (!c || !cf || c.excluded || cf.nodeType === 11 || cf.tag?.startsWith("#")) continue;
+      if (cf.rendered === true || hasRenderedDescendant(cid)) {
+        renderedDescendantMemo.set(nodeId, true);
+        return true;
+      }
+    }
+    renderedDescendantMemo.set(nodeId, false);
+    return false;
+  };
+
+  const countSameClassDivs = (poolId: SemanticNodeId, cls: string): number => {
+    let byClass = poolClassCounts.get(poolId);
+    if (!byClass) {
+      byClass = new Map<string, number>();
+      for (const cid of indexes.domChildren.get(poolId) ?? []) {
+        const c = graph.nodes.get(cid);
+        if (!c || c.excluded || c.dom?.tag.toLowerCase() !== "div") continue;
+        const cCls = (c.dom.attrs.class ?? "").trim();
+        if (!cCls) continue;
+        byClass.set(cCls, (byClass.get(cCls) ?? 0) + 1);
+      }
+      poolClassCounts.set(poolId, byClass);
+    }
+    return byClass.get(cls) ?? 0;
+  };
+
+  const isSkippedSlotNode = (n: SemanticGraphNode): boolean => {
+    const nf = domFacts(n);
+    if (n.excluded || !n.dom || nf?.nodeType === 11 || n.dom.tag.startsWith("#")) return true;
+    if (n.dom.rendered === false) {
+      // `display: contents` wrappers carry no layout box (`layout === undefined`)
+      // while their descendants render; `display: none` suppresses the whole subtree.
+      const disp = nf?.layout?.styles.display;
+      if (nf?.layout !== undefined || disp === "none" || !hasRenderedDescendant(n.id)) {
+        return true;
+      }
+    }
+    const st = nf?.layout?.styles;
+    if (st) {
+      if (st.visibility === "hidden" || st.visibility === "collapse") return true;
+      if (st.opacity && st.opacity !== "1") {
+        const op = Number.parseFloat(st.opacity);
+        if (Number.isFinite(op) && op < 0.05) return true;
+      }
+      if (st["font-size"] && st["font-size"] !== "16px") {
+        const fs = Number.parseFloat(st["font-size"]);
+        if (Number.isFinite(fs) && fs <= 1.5) return true;
+      }
+    }
+    const attrs = n.dom.attrs;
+    if (
+      Object.prototype.hasOwnProperty.call(attrs, "hidden") ||
+      (attrs["aria-hidden"] ?? "").toLowerCase() === "true"
+    ) {
+      return true;
+    }
+    const tag = n.dom.tag.toLowerCase();
+    if (NON_ANCHOR_TAGS.has(tag)) return true;
+    const explicitRole = (attrs.role ?? "").trim().toLowerCase();
+    if (NON_ANCHOR_ROLES.has(explicitRole)) return true;
+    return sensitive(n, undefined);
+  };
+
+  const pureSlotText = (nodeId: SemanticNodeId): string => {
+    const cached = pureSlotMemo.get(nodeId);
+    if (cached !== undefined) return cached;
+    const n = graph.nodes.get(nodeId);
+    if (!n || isSkippedSlotNode(n)) {
+      pureSlotMemo.set(nodeId, "");
+      return "";
+    }
+    const parts: string[] = [];
+    let len = 0;
+    const own = clean(n.dom?.textContent);
+    if (own) {
+      parts.push(own);
+      len += own.length;
+    }
+    for (const cid of indexes.domChildren.get(nodeId) ?? []) {
+      const sub = pureSlotText(cid);
+      if (sub) {
+        parts.push(sub);
+        len += sub.length + 1;
+        if (len >= MAX_SLOT_TEXT_SCAN_CHARS) break;
+      }
+    }
+    const out = parts.length === 0 ? "" : (clean(parts.join(" ")) ?? "");
+    pureSlotMemo.set(nodeId, out);
+    return out;
+  };
+
+  const slotTextExcluding = (
+    nodeId: SemanticNodeId,
+    targetId: SemanticNodeId,
+    ancestorsOfTarget: ReadonlySet<SemanticNodeId>,
+  ): string => {
+    if (nodeId === targetId) return "";
+    if (!ancestorsOfTarget.has(nodeId)) return pureSlotText(nodeId);
+    const n = graph.nodes.get(nodeId);
+    if (!n || isSkippedSlotNode(n)) return "";
+    const parts: string[] = [];
+    let len = 0;
+    const own = clean(n.dom?.textContent);
+    if (own) {
+      parts.push(own);
+      len += own.length;
+    }
+    for (const cid of indexes.domChildren.get(nodeId) ?? []) {
+      const sub = slotTextExcluding(cid, targetId, ancestorsOfTarget);
+      if (sub) {
+        parts.push(sub);
+        len += sub.length + 1;
+        if (len >= MAX_SLOT_TEXT_SCAN_CHARS) break;
+      }
+    }
+    return parts.length === 0 ? "" : (clean(parts.join(" ")) ?? "");
+  };
+
+  const findSemanticRow = (node: SemanticGraphNode): SemanticGraphNode | undefined => {
+    let curId = lightDomParentId(node);
+    for (let hop = 0; hop < MAX_SEMANTIC_ROW_HOPS && curId; hop++) {
+      const cur = graph.nodes.get(curId);
+      if (!cur?.dom) break;
+      const curTag = cur.dom.tag.toLowerCase();
+      if (curTag === "body" || curTag === "html") break;
+      const curRole = (cur.dom.attrs.role ?? "").trim().toLowerCase();
+      if (curTag === "tr" || curTag === "li" || curRole === "row" || curRole === "listitem") {
+        return cur;
+      }
+      curId = lightDomParentId(cur);
+    }
+    return undefined;
+  };
+
+  const findRow = (node: SemanticGraphNode): SemanticGraphNode | undefined => {
+    const semanticHit = findSemanticRow(node);
+    if (semanticHit) return semanticHit;
+    if (hasFormAncestor(node.id)) return undefined;
+    let curId = lightDomParentId(node);
+    for (let hop = 0; hop < MAX_VIRTUAL_DIV_ROW_HOPS && curId; hop++) {
+      const cur = graph.nodes.get(curId);
+      if (!cur?.dom) break;
+      const curTag = cur.dom.tag.toLowerCase();
+      if (ROW_STOP_TAGS.has(curTag)) break;
+      if (curTag === "div") {
+        const curRole = (cur.dom.attrs.role ?? "").trim().toLowerCase();
+        const cls = (cur.dom.attrs.class ?? "").trim();
+        const curKids = indexes.domChildren.get(cur.id) ?? [];
+        const poolId = lightDomParentId(cur);
+        const pool = poolId ? graph.nodes.get(poolId) : undefined;
+        const poolTag = pool?.dom?.tag.toLowerCase() ?? "";
+        if (
+          cls &&
+          (!curRole || curRole === "generic" || curRole === "none" || curRole === "presentation") &&
+          curKids.length >= 1 &&
+          curKids.length <= 12 &&
+          poolId &&
+          !VIRTUAL_POOL_EXCLUDED_TAGS.has(poolTag) &&
+          countSameClassDivs(poolId, cls) >= 4
+        ) {
+          return cur;
+        }
+      }
+      curId = lightDomParentId(cur);
+    }
+    return undefined;
+  };
+
+  return (node: SemanticGraphNode): string | undefined => {
+    const startParentId = lightDomParentId(node);
+    if (!node.dom || !startParentId) return undefined;
+    const row = findRow(node);
+    if (!row?.dom) return undefined;
+
+    const ancestors = new Set<SemanticNodeId>();
+    let walk: SemanticNodeId | undefined = startParentId;
+    let guard = 0;
+    while (walk && walk !== row.id && guard++ < 16) {
+      ancestors.add(walk);
+      walk = lightDomParentId(graph.nodes.get(walk));
+    }
+
+    const selfText = (indexes.domText(node.id) ?? clean(node.dom.textContent) ?? "").toLowerCase();
+    const selfAria = (clean(node.dom.attrs["aria-label"]) ?? "").toLowerCase();
+    const accept = (raw: string | undefined): string | undefined => {
+      if (!raw) return undefined;
+      if (VOLATILE_ROW_TEXT_RE.test(raw)) return undefined;
+      const lower = raw.toLowerCase();
+      if ((selfText && lower === selfText) || (selfAria && lower === selfAria)) return undefined;
+      const cps = [...raw];
+      return cps.length > MAX_ROW_ANCHOR_CHARS
+        ? cps.slice(0, MAX_ROW_ANCHOR_CHARS).join("").trim()
+        : raw;
+    };
+
+    const direct = accept(clean(row.dom.textContent));
+    if (direct) return direct;
+    for (const slotId of indexes.domChildren.get(row.id) ?? []) {
+      const slotFacts = domFacts(graph.nodes.get(slotId));
+      if (slotFacts?.nodeType === 11 || slotFacts?.tag?.startsWith("#")) continue;
+      const text = slotTextExcluding(slotId, node.id, ancestors);
+      const hit = accept(text);
+      if (hit) return hit;
+    }
+    return undefined;
+  };
+}
+
 export function resolveSemanticGraph(
   graph: SemanticGraph,
   options: {
@@ -596,6 +930,7 @@ export function resolveSemanticGraph(
   } = {},
 ): ResolvedSemanticGraph {
   const indexes = buildIndexes(graph);
+  const resolveRowAnchor = createRowAnchorResolver(graph, indexes);
   const supplementalNames = options.supplementalNames ?? new Map<string, string>();
   const identifierFallback = options.identifierFallback ?? true;
   const nodes = new Map<SemanticNodeId, ResolvedSemanticNode>();
@@ -628,6 +963,20 @@ export function resolveSemanticGraph(
     const nearby = nearbyText(node, indexes);
     const placeholder = clean(node.dom?.formPlaceholder ?? attrs.placeholder);
     const textContent = clean(node.dom?.textContent);
+    const selectInfo =
+      tag === "select" && !isSensitive
+        ? extractSelectOptions(node, sourceValue, graph, indexes)
+        : undefined;
+    const mayBeReferenced =
+      node.backendNodeId !== undefined &&
+      !node.excluded &&
+      (INTERACTIVE_ROLES.has(role?.toLowerCase() ?? "") ||
+        NATIVE_CONTROL_TAGS.has(tag) ||
+        tag === "a" ||
+        tag === "summary" ||
+        node.dom?.clickable === true ||
+        node.dom?.cursor === "pointer");
+    const rowAnchor = mayBeReferenced ? resolveRowAnchor(node) : undefined;
     const vom: ResolvedSemanticNode["vom"] = {
       tag,
       rect: node.dom?.rect ?? null,
@@ -646,6 +995,13 @@ export function resolveSemanticGraph(
       attrs,
       ...(textContent ? { text: textContent } : {}),
       ...(nearby ? { nearbyText: nearby } : {}),
+      ...(selectInfo
+        ? {
+            selectOptions: selectInfo.options,
+            ...(selectInfo.truncated ? { selectOptionsTruncated: true } : {}),
+          }
+        : {}),
+      ...(rowAnchor ? { rowAnchor } : {}),
       inputState: inputState(node, role, sourceValue, isSensitive),
       sensitive: isSensitive,
       // An available AX result is authoritative, including ignored/nonmodal nodes.
