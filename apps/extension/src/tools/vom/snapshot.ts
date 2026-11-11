@@ -3,6 +3,10 @@ import { RECORD_PASSWORD_ATTRIBUTE, sensitiveAutocomplete } from "@/lib/sensitiv
 import { createCaptureCheckpoint } from "./capture-abort";
 import type { CapturedNode } from "./capture-types";
 import type { DecodedDocument, DecodedNode } from "./facts";
+
+/** Elements whose text is code/markup, never visible label content. */
+const TEXT_EXCLUDED_PARENT_TAGS = new Set(["style", "script", "noscript", "template"]);
+
 export const REQUESTED_STYLES = [
   "position",
   "pointer-events",
@@ -194,11 +198,14 @@ export async function decodeDocument(
       const text = str(strings, nvIdx).trim();
       if (!text) continue;
       const parentIdx = dn.parentIndex?.[n] ?? -1;
-      if (parentIdx >= 0) {
-        const existing = nodeTextContent.get(parentIdx);
-        if (existing) existing.push(text);
-        else nodeTextContent.set(parentIdx, [text]);
-      }
+      if (parentIdx < 0) continue;
+      // Text under code/markup containers is not visible content and must not
+      // become an element's textContent fallback (e.g. `<style>.x{}</style>`).
+      const parentTag = str(strings, dn.nodeName?.[parentIdx]).toLowerCase();
+      if (TEXT_EXCLUDED_PARENT_TAGS.has(parentTag)) continue;
+      const existing = nodeTextContent.get(parentIdx);
+      if (existing) existing.push(text);
+      else nodeTextContent.set(parentIdx, [text]);
     }
   }
 

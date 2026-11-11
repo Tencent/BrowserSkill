@@ -843,4 +843,39 @@ describe("computed-style stealth prompt-injection stripper", () => {
       15, 16, 17, 18, 19, 40, 41,
     ]);
   });
+
+  it("ignores text inside style/script/noscript/template when decoding textContent", async () => {
+    const strings = [
+      "div",
+      "style",
+      "script",
+      "noscript",
+      "template",
+      "#text",
+      ".leak{color:red}",
+      "run()",
+      "fallback",
+      "tpl",
+      "Hello",
+    ];
+    const { nodes } = await decodeDocument(
+      {
+        nodes: {
+          backendNodeId: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11],
+          parentIndex: [-1, 0, 1, 0, 3, 0, 5, 0, 7, 0, 9],
+          nodeType: [1, 1, 3, 1, 3, 1, 3, 1, 3, 1, 3],
+          nodeName: [0, 1, 5, 2, 5, 3, 5, 4, 5, 0, 5],
+          nodeValue: [-1, -1, 6, -1, 7, -1, 8, -1, 9, -1, 10],
+        },
+      },
+      strings,
+    );
+    // Code/markup containers must not contribute label text.
+    expect(nodes[1].textContent).toBeUndefined(); // <style>
+    expect(nodes[3].textContent).toBeUndefined(); // <script>
+    expect(nodes[5].textContent).toBeUndefined(); // <noscript>
+    expect(nodes[7].textContent).toBeUndefined(); // <template>
+    // Ordinary visible text still contributes.
+    expect(nodes[9].textContent).toBe("Hello"); // <div>Hello</div>
+  });
 });
