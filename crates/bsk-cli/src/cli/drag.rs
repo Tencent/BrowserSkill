@@ -44,7 +44,9 @@ pub struct DragArgs {
     #[arg(long, requires = "to", allow_negative_numbers = true)]
     pub to_offset_y: Option<f64>,
     #[arg(long)]
-    pub session: String,
+    pub session: Option<String>,
+    #[arg(long)]
+    pub scope: Option<String>,
     #[arg(long)]
     pub tab_id: Option<i64>,
     #[arg(long)]
@@ -117,8 +119,9 @@ pub fn dispatch(args: DragArgs, format: Format) -> Result<(), CliError> {
     }
     let modifiers =
         parse_modifiers(&args.modifiers).map_err(|e| CliError::Local(anyhow::anyhow!(e)))?;
+    super::business_rpc::set_caller_scope(args.scope);
     let params = DragParams {
-        session_id: args.session,
+        session_id: args.session.unwrap_or_default(),
         tab_id: args.tab_id,
         source,
         mode: match args.mode {

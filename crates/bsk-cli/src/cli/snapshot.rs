@@ -16,9 +16,13 @@ use crate::cli::error::{CliError, Format};
 
 #[derive(Debug, Clone, Args)]
 pub struct SnapshotArgs {
-    /// Session id (must be active).
+    /// Session id (omit to resolve via caller scope).
     #[arg(long)]
-    pub session: String,
+    pub session: Option<String>,
+
+    /// Explicit caller scope name for multi-agent isolation.
+    #[arg(long)]
+    pub scope: Option<String>,
 
     /// Target tab. Defaults to the Agent Window's active tab.
     #[arg(long = "tab-id")]
@@ -34,13 +38,14 @@ pub struct SnapshotArgs {
 }
 
 pub fn dispatch(args: SnapshotArgs, format: Format) -> Result<(), CliError> {
+    crate::cli::business_rpc::set_caller_scope(args.scope.clone());
     let info = ensure_daemon().context("ensure daemon is running")?;
     run(info.sock_path, args, format)
 }
 
 fn run(sock: PathBuf, args: SnapshotArgs, format: Format) -> Result<(), CliError> {
     let params = SnapshotParams {
-        session_id: args.session.clone(),
+        session_id: args.session.unwrap_or_default(),
         tab_id: args.tab_id,
         max_depth: args.max_depth,
         max_tokens: args.max_tokens,

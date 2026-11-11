@@ -31,7 +31,9 @@ pub enum DialogSub {
 #[derive(Debug, Clone, Args)]
 pub struct DialogStatusArgs {
     #[arg(long)]
-    pub session: String,
+    pub session: Option<String>,
+    #[arg(long)]
+    pub scope: Option<String>,
     #[arg(long)]
     pub tab_id: Option<i64>,
 }
@@ -40,7 +42,9 @@ pub struct DialogStatusArgs {
 pub struct DialogAcceptArgs {
     pub dialog_id: String,
     #[arg(long)]
-    pub session: String,
+    pub session: Option<String>,
+    #[arg(long)]
+    pub scope: Option<String>,
     #[arg(long)]
     pub text: Option<String>,
 }
@@ -49,7 +53,9 @@ pub struct DialogAcceptArgs {
 pub struct DialogDismissArgs {
     pub dialog_id: String,
     #[arg(long)]
-    pub session: String,
+    pub session: Option<String>,
+    #[arg(long)]
+    pub scope: Option<String>,
 }
 
 #[derive(Debug, Clone, Args)]
@@ -70,7 +76,9 @@ pub enum OperationSub {
 pub struct OperationAwaitArgs {
     pub operation_id: String,
     #[arg(long)]
-    pub session: String,
+    pub session: Option<String>,
+    #[arg(long)]
+    pub scope: Option<String>,
     #[arg(long, default_value_t = 10000, value_parser = clap::value_parser!(u32).range(0..=60000))]
     pub wait_ms: u32,
     /// Save a completed download's retained bytes without repeating its browser action.
@@ -84,7 +92,9 @@ pub struct OperationAwaitArgs {
 pub struct OperationCancelArgs {
     pub operation_id: String,
     #[arg(long)]
-    pub session: String,
+    pub session: Option<String>,
+    #[arg(long)]
+    pub scope: Option<String>,
 }
 
 fn invoke(
@@ -103,55 +113,70 @@ fn invoke(
 
 pub fn dispatch_dialog(cmd: DialogCmd, _format: Format) -> Result<(), CliError> {
     match cmd.sub {
-        DialogSub::Status(p) => invoke(
-            Method::ToolDialogStatus,
-            DialogStatusParams {
-                session_id: p.session,
-                tab_id: p.tab_id,
-            },
-            Duration::from_secs(10),
-        ),
-        DialogSub::Accept(p) => invoke(
-            Method::ToolDialogAccept,
-            DialogHandleParams {
-                session_id: p.session,
-                dialog_id: p.dialog_id,
-                text: p.text,
-            },
-            Duration::from_secs(10),
-        ),
-        DialogSub::Dismiss(p) => invoke(
-            Method::ToolDialogDismiss,
-            DialogHandleParams {
-                session_id: p.session,
-                dialog_id: p.dialog_id,
-                text: None,
-            },
-            Duration::from_secs(10),
-        ),
+        DialogSub::Status(p) => {
+            business_rpc::set_caller_scope(p.scope);
+            invoke(
+                Method::ToolDialogStatus,
+                DialogStatusParams {
+                    session_id: p.session.unwrap_or_default(),
+                    tab_id: p.tab_id,
+                },
+                Duration::from_secs(10),
+            )
+        }
+        DialogSub::Accept(p) => {
+            business_rpc::set_caller_scope(p.scope);
+            invoke(
+                Method::ToolDialogAccept,
+                DialogHandleParams {
+                    session_id: p.session.unwrap_or_default(),
+                    dialog_id: p.dialog_id,
+                    text: p.text,
+                },
+                Duration::from_secs(10),
+            )
+        }
+        DialogSub::Dismiss(p) => {
+            business_rpc::set_caller_scope(p.scope);
+            invoke(
+                Method::ToolDialogDismiss,
+                DialogHandleParams {
+                    session_id: p.session.unwrap_or_default(),
+                    dialog_id: p.dialog_id,
+                    text: None,
+                },
+                Duration::from_secs(10),
+            )
+        }
     }
 }
 
 pub fn dispatch_operation(cmd: OperationCmd, _format: Format) -> Result<(), CliError> {
     let (method, params, output) = match cmd.sub {
-        OperationSub::Await(p) => (
-            Method::ToolOperationAwait,
-            OperationParams {
-                session_id: p.session,
-                operation_id: p.operation_id,
-                wait_ms: Some(p.wait_ms),
-            },
-            p.out.map(|path| (path, p.overwrite)),
-        ),
-        OperationSub::Cancel(p) => (
-            Method::ToolOperationCancel,
-            OperationParams {
-                session_id: p.session,
-                operation_id: p.operation_id,
-                wait_ms: None,
-            },
-            None,
-        ),
+        OperationSub::Await(p) => {
+            business_rpc::set_caller_scope(p.scope);
+            (
+                Method::ToolOperationAwait,
+                OperationParams {
+                    session_id: p.session.unwrap_or_default(),
+                    operation_id: p.operation_id,
+                    wait_ms: Some(p.wait_ms),
+                },
+                p.out.map(|path| (path, p.overwrite)),
+            )
+        }
+        OperationSub::Cancel(p) => {
+            business_rpc::set_caller_scope(p.scope);
+            (
+                Method::ToolOperationCancel,
+                OperationParams {
+                    session_id: p.session.unwrap_or_default(),
+                    operation_id: p.operation_id,
+                    wait_ms: None,
+                },
+                None,
+            )
+        }
     };
     let timeout = Duration::from_millis(params.wait_ms.unwrap_or(0) as u64 + 10000);
     let info = ensure_daemon()?;

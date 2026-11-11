@@ -24,9 +24,9 @@ use crate::cli::error::{CliError, Format};
 
 #[derive(Debug, Clone, Args)]
 pub struct ScreenshotArgs {
-    /// Session id (must be active).
+    /// Session id (omit to resolve via caller scope).
     #[arg(long)]
-    pub session: String,
+    pub session: Option<String>,
 
     /// Target tab. Defaults to the Agent Window's active tab.
     #[arg(long = "tab-id")]
@@ -64,7 +64,7 @@ fn run(sock: PathBuf, args: ScreenshotArgs, format: Format) -> Result<(), CliErr
         return run_full_page(sock, args, format);
     }
     let params = ScreenshotParams {
-        session_id: args.session.clone(),
+        session_id: args.session.clone().unwrap_or_default(),
         tab_id: args.tab_id,
         ref_: args.ref_.clone(),
     };
@@ -119,6 +119,7 @@ fn run(sock: PathBuf, args: ScreenshotArgs, format: Format) -> Result<(), CliErr
 
 fn run_full_page(sock: PathBuf, args: ScreenshotArgs, format: Format) -> Result<(), CliError> {
     let timeout = args.timeout.unwrap_or(120_000);
+    let session = args.session.clone().unwrap_or_default();
     let reply: ScreenshotFullPageResult = crate::cli::business_rpc::call(
         sock.clone(),
         "screenshot-full-page",
@@ -131,7 +132,7 @@ fn run_full_page(sock: PathBuf, args: ScreenshotArgs, format: Format) -> Result<
                     ScreenshotScope::Follow
                 }
             }),
-            session_id: args.session.clone(),
+            session_id: session.clone(),
             tab_id: args.tab_id,
             timeout_ms: Some(timeout),
         }),
@@ -140,16 +141,16 @@ fn run_full_page(sock: PathBuf, args: ScreenshotArgs, format: Format) -> Result<
     // An older extension may ignore new optional params. Never save a capture
     // that did not explicitly acknowledge the requested range.
     if args.scope.as_deref() == Some("current") && reply.scope != Some(ScreenshotScope::Current) {
-        let _ = release_full_page(&sock, &args.session, &reply.capture_id);
+        let _ = release_full_page(&sock, &session, &reply.capture_id);
         return Err(CliError::Local(anyhow!(
             "extension did not acknowledge --scope current; update the extension"
         )));
     }
     let out = args.out.unwrap_or_else(default_out_path);
-    let result = write_full_page(&sock, &args.session, &reply, &out);
+    let result = write_full_page(&sock, &session, &reply, &out);
     // Cleanup must run even after Ctrl-C or a local write failure. Unlike the
     // business call, this small release RPC is not itself cancelled by stdin.
-    let _ = release_full_page(&sock, &args.session, &reply.capture_id);
+    let _ = release_full_page(&sock, &session, &reply.capture_id);
     result?;
     match format {
         Format::Json => {
@@ -267,14 +268,23 @@ fn release_full_page(sock: &Path, session: &str, capture_id: &str) -> anyhow::Re
     runtime.block_on(async {
         tokio::time::timeout(Duration::from_secs(5), async {
             let mut client = crate::ipc_client::IpcClient::connect(sock).await?;
+            let mut params = serde_json::to_value(ScreenshotReleaseParams {
+                session_id: session.into(),
+                capture_id: capture_id.into(),
+            })?;
+            if session.trim().is_empty()
+                && let Some(obj) = params.as_object_mut()
+            {
+                obj.insert(
+                    "_caller_scope".into(),
+                    crate::cli::business_rpc::current_caller_scope().into(),
+                );
+            }
             let _: Result<ScreenshotReleaseResult, _> = client
                 .call(
                     "screenshot-release",
                     Method::ToolScreenshotRelease,
-                    Some(ScreenshotReleaseParams {
-                        session_id: session.into(),
-                        capture_id: capture_id.into(),
-                    }),
+                    Some(params),
                     Duration::from_secs(5),
                 )
                 .await?;

@@ -117,9 +117,13 @@ pub fn find_preset(name: &str) -> Option<&'static DevicePreset> {
 
 #[derive(Debug, Clone, Args)]
 pub struct EmulateArgs {
-    /// Session id (must be active).
+    /// Session id (omit to resolve via caller scope).
     #[arg(long)]
-    pub session: String,
+    pub session: Option<String>,
+
+    /// Explicit caller scope name for multi-agent isolation.
+    #[arg(long)]
+    pub scope: Option<String>,
 
     /// Target tab. Defaults to the Agent Window's active tab.
     #[arg(long = "tab-id")]
@@ -254,7 +258,7 @@ pub fn build_params(args: &EmulateArgs) -> Result<EmulateParams, CliError> {
             ));
         }
         return Ok(EmulateParams {
-            session_id: args.session.clone(),
+            session_id: args.session.clone().unwrap_or_default(),
             tab_id: args.tab_id,
             off: Some(true),
             overrides: None,
@@ -345,7 +349,7 @@ pub fn build_params(args: &EmulateArgs) -> Result<EmulateParams, CliError> {
     }
 
     Ok(EmulateParams {
-        session_id: args.session.clone(),
+        session_id: args.session.clone().unwrap_or_default(),
         tab_id: args.tab_id,
         off: None,
         overrides: Some(overrides),
@@ -355,6 +359,7 @@ pub fn build_params(args: &EmulateArgs) -> Result<EmulateParams, CliError> {
 pub fn dispatch(args: EmulateArgs, format: Format) -> Result<(), CliError> {
     let device = args.device.clone();
     let params = build_params(&args)?;
+    crate::cli::business_rpc::set_caller_scope(args.scope);
     let info = ensure_daemon().context("ensure daemon is running")?;
     let reply = call(info.sock_path, params)?;
     render(&reply, device.as_deref(), format)
@@ -418,7 +423,8 @@ mod tests {
 
     fn base_args() -> EmulateArgs {
         EmulateArgs {
-            session: "s1".into(),
+            session: Some("s1".into()),
+            scope: None,
             tab_id: None,
             device: None,
             width: None,

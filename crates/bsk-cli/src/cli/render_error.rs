@@ -87,6 +87,11 @@ pub mod reason {
     pub const OBSERVE_IDENTITY_RELOAD_LOOP: &str = crate::rpc_reason::OBSERVE_IDENTITY_RELOAD_LOOP;
     pub const BORROW_AGENT_WINDOW_TAB: &str = crate::rpc_reason::BORROW_AGENT_WINDOW_TAB;
     pub const RECORD_START_PAGE_UNREACHABLE: &str = "record_start_page_unreachable";
+    pub const NO_ACTIVE_SESSION: &str = crate::rpc_reason::NO_ACTIVE_SESSION;
+    pub const AMBIGUOUS_IMPLICIT_SESSION: &str = crate::rpc_reason::AMBIGUOUS_IMPLICIT_SESSION;
+    pub const SESSION_STOPPED: &str = crate::rpc_reason::SESSION_STOPPED;
+    pub const SCOPE_BROWSER_CONFLICT: &str = crate::rpc_reason::SCOPE_BROWSER_CONFLICT;
+    pub const SCOPE_INCOGNITO_CONFLICT: &str = crate::rpc_reason::SCOPE_INCOGNITO_CONFLICT;
 }
 
 /// Per-code rendering metadata. The `summary` is what the CLI prints
@@ -400,8 +405,43 @@ pub fn info_for_error(code: ErrorCode, data: Option<&serde_json::Value>) -> Rend
         },
         (_, "control_context_invalid" | "document_changed") => RenderInfo {
             summary: "the control context no longer belongs to the current document or control state",
-            hint: Some("synchronize this tab and reconsider the action using the current page"),
+            hint: Some(
+                "run `bsk sync` to synchronize this tab and reconsider the action using the current page",
+            ),
             ..base
+        },
+        (ErrorCode::NotFound, reason::NO_ACTIVE_SESSION) => RenderInfo {
+            summary: "no active session is bound to the current caller scope",
+            hint: Some(
+                "run `bsk open <url>` first to start a session and synchronize, or pass `--session <id>`",
+            ),
+            exit_code: base.exit_code,
+        },
+        (ErrorCode::InvalidParams, reason::AMBIGUOUS_IMPLICIT_SESSION) => RenderInfo {
+            summary: "active sessions exist in other scopes; refusing to hijack implicitly",
+            hint: Some(
+                "pass `--session <id>` (see `bsk session list`), set `BSK_SCOPE=<name>`, or run `bsk open --scope <name> <url>`",
+            ),
+            exit_code: base.exit_code,
+        },
+        (ErrorCode::NotFound, reason::SESSION_STOPPED) => RenderInfo {
+            summary: "the session previously bound to this scope has ended",
+            hint: Some("run `bsk open <url>` to start a fresh session in this scope"),
+            exit_code: base.exit_code,
+        },
+        (ErrorCode::InvalidParams, reason::SCOPE_BROWSER_CONFLICT) => RenderInfo {
+            summary: "the active session in this scope is bound to a different browser profile",
+            hint: Some(
+                "run `bsk close` first, or pass `--scope <new-scope>` to open another browser profile in parallel",
+            ),
+            exit_code: base.exit_code,
+        },
+        (ErrorCode::InvalidParams, reason::SCOPE_INCOGNITO_CONFLICT) => RenderInfo {
+            summary: "the active session in this scope has a different incognito mode",
+            hint: Some(
+                "run `bsk close` first, or pass `--scope <new-scope>` to run normal and incognito sessions in parallel",
+            ),
+            exit_code: base.exit_code,
         },
         (_, "observation_required" | "observation_changed") => RenderInfo {
             summary: "this action needs an explicit current observation",

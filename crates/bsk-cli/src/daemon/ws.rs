@@ -735,6 +735,7 @@ fn forget_browser_session(
     if removed {
         state.transfers.release_session(&session_id.0);
         state.dialog_operations.remove_session(&session_id.0);
+        state.scopes.on_session_ended(session_id, reason);
     }
     removed
 }

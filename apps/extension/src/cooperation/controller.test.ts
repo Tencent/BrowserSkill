@@ -3723,4 +3723,24 @@ describe("tool.record_start cooperation guard", () => {
     });
     expect(f.native).not.toHaveBeenCalled();
   });
+
+  it("omits static guidance text from cooperate sync replies under both policies", async () => {
+    for (const controlPolicy of ["strict", "target"] as const) {
+      const f = await fixture({ sync: false });
+      const synced = await f.controller.command(
+        {
+          session_id: "shared",
+          action: "sync",
+          control_policy: controlPolicy,
+        },
+        f.cdp,
+        f.abort.signal,
+      );
+      expect(synced).toMatchObject({
+        tab_id: 7,
+        control_policy: controlPolicy,
+      });
+      expect(synced).not.toHaveProperty("guidance");
+    }
+  });
 });

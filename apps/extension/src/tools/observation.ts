@@ -307,6 +307,13 @@ export async function handleScreenshot(
     if (entry?.kind === "visual-region") {
       clearVisualCapture(ctx.refStore, ref);
       deps.cdp.trackSessionTab?.(ctx.sessionId, target.tabId);
+      await deps.cdp.ensureAttachedToUrl?.(target.tabId, target.url);
+      if (signal?.aborted) return cancelled("screenshot");
+      const verifiedEntry = lookupRefTarget(ctx, ref, target.tabId);
+      if (verifiedEntry?.kind !== "visual-region") {
+        const missing = resolveSnapshotRef(ctx, ref, target.tabId);
+        if (isRpcError(missing)) return missing;
+      }
       const captured = await withExtensionOverlayHidden(
         target.tabId,
         () => captureVisualScreenshot(deps.cdp!, entry.candidate, signal),
@@ -330,12 +337,14 @@ export async function handleScreenshot(
             }),
       });
     }
-    const node = resolveSnapshotRef(ctx, ref, target.tabId);
-    if (isRpcError(node)) return node;
+    const initialNode = resolveSnapshotRef(ctx, ref, target.tabId);
+    if (isRpcError(initialNode)) return initialNode;
     if (signal?.aborted) return cancelled("screenshot");
     deps.cdp.trackSessionTab?.(ctx.sessionId, target.tabId);
     await deps.cdp.ensureAttachedToUrl?.(target.tabId, target.url);
     if (signal?.aborted) return cancelled("screenshot");
+    const node = resolveSnapshotRef(ctx, ref, target.tabId);
+    if (isRpcError(node)) return node;
     const cdp = deps.cdp;
     const nodeTarget = {
       tabId: target.tabId,
@@ -1253,6 +1262,8 @@ async function handleVomObservation(
           code: "invalid_params",
           message: "cursor cannot change depth or request hover/debug probes",
         };
+      await deps.cdp.ensureAttachedToUrl?.(target.tabId, target.url);
+      throwIfAborted(signal, toolName);
       const page = await publishObservationPage(
         refStore,
         deps.cdp,
@@ -1271,6 +1282,8 @@ async function handleVomObservation(
       return attachDialogs(deps.cdp, target.tabId, dialogCursor, page);
     }
     clearObservationContinuation(refStore);
+    await deps.cdp.ensureAttachedToUrl?.(target.tabId, target.url);
+    throwIfAborted(signal, toolName);
     const documentRevision = sessionRefs.documentRevision(target.tabId);
     const observation = await captureVomObservation(deps.cdp, target.tabId, target.url, {
       refStore,
