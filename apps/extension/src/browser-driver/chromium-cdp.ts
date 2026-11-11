@@ -42,6 +42,8 @@ import {
   type CdpTarget,
   omitFrameSubtrees,
 } from "./frame-graph";
+import { NativeInputClock } from "./native-input-clock";
+import { sampleNativeInputClock } from "./native-input-probe";
 
 export type CdpDebuggee = chrome.debugger.Debuggee & { sessionId?: string };
 
@@ -63,6 +65,7 @@ export interface CdpDebuggerApi {
   attach(target: CdpDebuggee, requiredVersion: string): Promise<void>;
   detach(target: CdpDebuggee): Promise<void>;
   sendCommand(target: CdpDebuggee, method: string, commandParams?: object): Promise<unknown>;
+  getTargets?(): Promise<chrome.debugger.TargetInfo[]>;
   /**
    * Fires for every CDP event (`Page.lifecycleEvent`, `DOM.documentUpdated`,
    * …). The first callback argument is the source debuggee; the second
@@ -88,6 +91,7 @@ export const chromeDebuggerApi: CdpDebuggerApi = {
   detach: (target) => chrome.debugger.detach(target),
   sendCommand: (target, method, commandParams) =>
     chrome.debugger.sendCommand(target, method, commandParams),
+  getTargets: () => chrome.debugger.getTargets(),
   get onEvent() {
     return chrome.debugger.onEvent;
   },
@@ -179,6 +183,7 @@ async function settleBeforeDeadline(promises: Promise<void>[], deadline: number)
  */
 export class ChromiumCdp {
   private readonly api: CdpDebuggerApi;
+  private readonly inputClock = new NativeInputClock(() => sampleNativeInputClock(this.api));
   private readonly readGate = new CdpReadGate();
   private readonly attachedTabs = new Set<number>();
   private readonly claimAttempts = new Map<number, Map<string, object>>();
@@ -246,6 +251,10 @@ export class ChromiumCdp {
   /** Identity of this actual debugger attachment, independent of frame topology. */
   getAttachmentId(tabId: number): string | undefined {
     return this.attachmentIds.get(tabId);
+  }
+
+  prepareInputTimestamp() {
+    return this.inputClock.prepare();
   }
 
   /** Attach to `tabId` if we haven't already in this driver. */
@@ -746,6 +755,7 @@ export class ChromiumCdp {
 
   /** Best-effort detach of every cached tab. Used on session.stop. */
   async detachAll(): Promise<void> {
+    this.inputClock.invalidate();
     const tabs = Array.from(this.attachedTabs);
     for (const tabId of new Set([...tabs, ...this.attachInFlight.keys()]))
       this.attachmentVersions.set(tabId, (this.attachmentVersions.get(tabId) ?? 0) + 1);
@@ -1419,6 +1429,7 @@ export class ChromiumCdp {
 
   /** Remove internal Chrome event listeners; tests and SW teardown call this. */
   dispose(): void {
+    this.inputClock.invalidate();
     for (const tabId of this.pendingDialogEntries.keys()) this.clearDialogState(tabId);
     this.dialogListeners.clear();
     this.detachSubscription?.dispose();

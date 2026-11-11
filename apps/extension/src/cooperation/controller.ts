@@ -1556,6 +1556,15 @@ export class CooperationController implements ControlAuthority {
         ? { press_sent: false }
         : {};
     const describeFailure = (message: string, effect: "none" | "unknown"): RpcError => {
+      if (
+        checkFailure?.data?.reason === "input_clock_unavailable" &&
+        !intervention.signal.aborted &&
+        state.authorityRevision === authorityRevision
+      )
+        return {
+          ...checkFailure,
+          data: { ...checkFailure.data, effect_state: effect, ...unpressed(effect) },
+        };
       const diagnosis = observed
         ? {
             observed_change: observed,
@@ -2042,6 +2051,9 @@ export class CooperationController implements ControlAuthority {
       this.changed(state);
       let result = await invoke(
         guardedRunner(cdp, {
+          onInputClockError: (error) => {
+            checkFailure = error.toRpcError();
+          },
           scriptedEffect: req.method === "tool.evaluate",
           prepare: async (input, method) => {
             assert();

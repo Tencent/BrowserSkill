@@ -8,6 +8,7 @@
 
 import type { CdpDebuggee, CdpDispatchGuard, DialogCursor } from "@/browser-driver/chromium-cdp";
 import type { CdpFrameGraph, CdpTarget } from "@/browser-driver/frame-graph";
+import type { NativeInputTimestamp } from "@/browser-driver/native-input-clock";
 import { shareScreencasts } from "@/browser-driver/screencast-coordinator";
 import {
   isAgentControlledTab,
@@ -62,6 +63,8 @@ export type { DialogCursor };
  * teardown.
  */
 export interface CdpRunner {
+  /** Measure the browser's native epoch conversion before arming page input. */
+  prepareInputTimestamp?(): Promise<NativeInputTimestamp>;
   /** Fence a browser API effect at invocation, after asynchronous ownership checks. */
   runBrowserMutation?<T>(operation: () => Promise<T>): Promise<T>;
   /** Only release resources acquired by this request; never restore page/user state. */

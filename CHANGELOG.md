@@ -87,6 +87,11 @@ determines which versions can connect.
 
 ### Fixed
 
+- Native clicks, key presses and wheel input calibrate Chromium's input clock so
+  long-running browsers do not misclassify their own input as human intervention
+  after sleep or clock changes. Calibration uses the extension's hidden document,
+  preserves the existing input checks, and reports clock failures before dispatch
+  ([#665](https://github.com/Tencent/BrowserSkill/issues/665)).
 - `tool.record_start` enforces shared-tab cooperation ownership, stop, and human-control
   guards and invalidates stale control contexts when starting recording; `tool.tab_return`
   clears active recordings for local sessions as well as remote ones.
