@@ -322,14 +322,6 @@ pub fn start_session(sock: PathBuf, opts: SessionStartOptions) -> Result<StartRe
             .validate()
             .map_err(|err| CliError::Local(anyhow::anyhow!(err)))?;
     }
-    if opts.incognito {
-        crate::cli::protocol::require_daemon_support(
-            &sock,
-            "session start --incognito",
-            bsk_protocol::tools::INCOGNITO_SESSION_PROTOCOL,
-            bsk_protocol::tools::supports_incognito_sessions,
-        )?;
-    }
     call(
         sock,
         if opts.request_id.is_some() {

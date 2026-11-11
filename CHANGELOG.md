@@ -76,9 +76,15 @@ determines which versions can connect.
 
 - Extension 0.4.3 removes obsolete migration flags and version gates while keeping
   pairing optional. There is no automatic enforcement deadline.
+- `bsk-protocol` is the single source of truth for method metadata, JSON schemas,
+  TypeScript request/result codecs, exhaustive daemon/extension execution policies,
+  and protocol 1.2–1.9 peer feature compatibility checks (`pnpm protocol:check`).
 
 ### Fixed
 
+- `tool.record_start` enforces shared-tab cooperation ownership, stop, and human-control
+  guards and invalidates stale control contexts when starting recording; `tool.tab_return`
+  clears active recordings for local sessions as well as remote ones.
 - Daemon shutdown retains its WebSocket stop notification when the accept loop is
   between waits, avoiding a lost notification that can leave `daemon stop` waiting.
 - Website debugging attributes agent uploads and downloads to their transfer

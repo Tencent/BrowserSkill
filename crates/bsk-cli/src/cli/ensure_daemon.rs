@@ -41,11 +41,17 @@ pub fn ensure_daemon() -> Result<DaemonInfo> {
 pub(crate) fn ensure_daemon_with_protocol() -> Result<(DaemonInfo, String)> {
     let deadline = Instant::now() + SPAWN_DEADLINE;
     if let Probe::Ready(daemon) = probe::probe(PROBE_TIMEOUT)? {
+        super::protocol::record_daemon_protocol(
+            &daemon.info.sock_path,
+            &daemon.status.protocol_version,
+        );
         return Ok((daemon.info, daemon.status.protocol_version));
     }
     ensure!(auto_start_enabled(), DaemonStartFailure::AutoStartDisabled);
     let info = start_background(&StartArgs::default(), deadline)
         .context("automatic daemon startup failed")?;
     // A daemon this process just started runs this binary's protocol.
-    Ok((info, crate::daemon::state::PROTOCOL_VERSION.to_string()))
+    let protocol = crate::daemon::state::PROTOCOL_VERSION.to_string();
+    super::protocol::record_daemon_protocol(&info.sock_path, &protocol);
+    Ok((info, protocol))
 }

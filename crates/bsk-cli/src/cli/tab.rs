@@ -205,9 +205,6 @@ fn run_borrow(sock: PathBuf, args: TabBorrowArgs, format: Format) -> Result<(), 
     if args.no_confirm {
         crate::cli::interaction_policy::warn_legacy_override("--no-confirm");
     }
-    if args.timeout.is_some() {
-        crate::cli::interaction_policy::require_borrow_timeout_support(&sock)?;
-    }
     let params = TabBorrowParams {
         session_id: args.session,
         tab_id: args.tab_id,

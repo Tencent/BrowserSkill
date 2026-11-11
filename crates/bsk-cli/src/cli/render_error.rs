@@ -245,6 +245,22 @@ pub fn info_for_error(code: ErrorCode, data: Option<&serde_json::Value>) -> Rend
         return base;
     };
     match (code, reason) {
+        (ErrorCode::Unsupported, "unsupported_feature") => RenderInfo {
+            summary: "a connected component does not support the requested feature",
+            hint: match data
+                .and_then(|data| data.get("component"))
+                .and_then(|value| value.as_str())
+            {
+                Some("daemon") => Some(bsk_protocol::compatibility::Peer::Daemon.upgrade_hint()),
+                Some("extension") => {
+                    Some(bsk_protocol::compatibility::Peer::Extension.upgrade_hint())
+                }
+                _ => Some(
+                    "Run `bsk status --json` for feature availability; update the component named in this error before retrying this feature",
+                ),
+            },
+            ..base
+        },
         (ErrorCode::NoBrowserConnected, "local_pairing_required") => RenderInfo {
             summary: "the extension needs local pairing",
             hint: Some(
@@ -779,13 +795,16 @@ mod tests {
         // errors (exit 1).
         assert_eq!(exit_code_for(ErrorCode::UnknownMethod), 5);
         assert_eq!(exit_code_for(ErrorCode::VersionTooOld), 5);
+
+        assert_eq!(exit_code_for(ErrorCode::DialogPending), 6);
+        assert_eq!(exit_code_for(ErrorCode::PairingRequired), 1);
     }
 
     /// Every code must carry a non-empty summary; an empty `summary`
     /// would render `error: ` with nothing after it.
     #[test]
     fn every_code_has_a_summary() {
-        for code in EVERY_CODE {
+        for code in ErrorCode::ALL {
             let info = info_for(*code);
             assert!(
                 !info.summary.is_empty(),
@@ -800,30 +819,11 @@ mod tests {
     /// lands without thinking about UX.
     #[test]
     fn every_code_has_a_hint_today() {
-        for code in EVERY_CODE {
+        for code in ErrorCode::ALL {
             let info = info_for(*code);
             assert!(info.hint.is_some(), "hint missing for {code:?}");
         }
     }
-
-    /// Exhaustive list used by the table-driven assertions above. Kept
-    /// here (rather than in bsk-protocol) so a test failure shows up
-    /// next to the rendering data the test is guarding.
-    const EVERY_CODE: &[ErrorCode] = &[
-        ErrorCode::UnknownMethod,
-        ErrorCode::Unsupported,
-        ErrorCode::InvalidParams,
-        ErrorCode::NotFound,
-        ErrorCode::PermissionDenied,
-        ErrorCode::Timeout,
-        ErrorCode::CdpFailed,
-        ErrorCode::ProtocolError,
-        ErrorCode::Cancelled,
-        ErrorCode::UserAborted,
-        ErrorCode::VersionTooOld,
-        ErrorCode::MultipleBrowsersOnline,
-        ErrorCode::NoBrowserConnected,
-    ];
 
     #[test]
     fn fill_reasons_provide_recovery_without_changing_exit_codes() {

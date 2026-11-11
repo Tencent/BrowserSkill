@@ -209,11 +209,29 @@ where
             .get()
             .and_then(|(_, expect)| expect.as_ref()),
     )?;
+    let prechecked = super::protocol::precheck_cached_daemon_support(
+        &sock,
+        &method,
+        params.as_ref().unwrap_or(&serde_json::Value::Null),
+    )?;
     let mut client = IpcClient::connect(sock.clone()).await?;
     let rpc_id_for_call = rpc_id.clone();
     let rpc_id_for_cancel = rpc_id.clone();
+    let action_started = std::sync::atomic::AtomicBool::new(false);
+    let action_started_ref = &action_started;
 
     let main_fut = async move {
+        if !prechecked
+            && let Err(error) = super::protocol::check_daemon_support(
+                &mut client,
+                &method,
+                params.as_ref().unwrap_or(&serde_json::Value::Null),
+            )
+            .await?
+        {
+            return Ok(Err(error));
+        }
+        action_started_ref.store(true, std::sync::atomic::Ordering::Relaxed);
         client
             .call_with_id::<serde_json::Value, R>(rpc_id_for_call, method, params, call_timeout)
             .await
@@ -226,6 +244,17 @@ where
         sig = wait_for_cancel(parent_cancel) => {
             sig.context("wait for cancellation").map_err(CliError::Local)?;
             CANCEL_REQUESTED.store(true, Ordering::Relaxed);
+            // The feature probe has no browser effects. Dropping it here must
+            // also prevent the action from being sent after cancellation.
+            if !action_started.load(std::sync::atomic::Ordering::Relaxed) {
+                return Err(CliError::from_rpc(RpcError {
+                    code: ErrorCode::Cancelled,
+                    message: "request cancelled before dispatch".into(),
+                    data: Some(serde_json::json!({
+                        "reason": "cancelled_before_dispatch", "effect_state": "none"
+                    })),
+                }));
+            }
             debug!(rpc_id = %rpc_id_for_cancel, "forwarding cancel to daemon");
             // Separate IPC connections can deliver cancel before the business
             // request is registered. Keep polling that request while confirming

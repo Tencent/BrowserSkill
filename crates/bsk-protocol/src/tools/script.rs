@@ -23,11 +23,8 @@ use super::JavaScriptDialogInfo;
 /// refusal the caller cannot explain, so peers below this are rejected.
 pub const UNVERIFIED_SCRIPT_PROTOCOL: &str = "1.9";
 pub fn supports_unverified_script(protocol: &str) -> bool {
-    crate::system::compare_protocol(protocol, "2.0") == Some(std::cmp::Ordering::Less)
-        && matches!(
-            crate::system::compare_protocol(protocol, UNVERIFIED_SCRIPT_PROTOCOL),
-            Some(std::cmp::Ordering::Equal | std::cmp::Ordering::Greater)
-        )
+    crate::compatibility::Feature::UnverifiedScript
+        .supports(crate::compatibility::Peer::Extension, protocol)
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]

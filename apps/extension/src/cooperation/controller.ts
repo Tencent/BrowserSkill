@@ -1,4 +1,3 @@
-import { DEBUG_ACTIONS } from "@/debug/capabilities";
 import {
   isAgentControlledTab,
   type SessionContext,
@@ -6,6 +5,7 @@ import {
 } from "@/session-manager/manager";
 import { type ResolvedActionTarget, resolveActionTarget } from "@/tools/interaction";
 import { captureVomObservation, handleSnapshot } from "@/tools/observation";
+import { isPassiveDebugAction, toolPolicy } from "@/tools/policy";
 import {
   type CdpRunner,
   chromeTabsApi,
@@ -140,49 +140,6 @@ export interface CooperationDeps {
   sessionActivity?(sessionId: string, idleProtected: boolean): void;
   now?: () => number;
 }
-/** Only operations whose complete input recipient is a resolved DOM target. */
-const TARGET_ACTIONS = new Set([
-  "tool.click",
-  "tool.fill",
-  "tool.press",
-  "tool.select",
-  "tool.hover",
-  "tool.focus",
-  "tool.blur",
-  "tool.scroll_to",
-  "tool.wheel",
-  "tool.upload",
-  "tool.download",
-  "tool.drag",
-]);
-const READS = new Set([
-  "tool.snapshot",
-  "tool.observe",
-  "tool.get_html",
-  "tool.screenshot",
-  "tool.console",
-  "tool.network",
-  "tool.read",
-  "tool.extract",
-  "tool.wait_for_element",
-  "tool.wait_for_navigation",
-  "tool.record_start",
-]);
-const SESSION_TOOLS = new Set([
-  "tool.session_start",
-  "tool.session_stop",
-  "tool.tab_list",
-  "tool.screenshot_read",
-  "tool.screenshot_release",
-  "tool.record_stop",
-  "tool.record_await",
-]);
-const PASSIVE_DEBUG = new Set<string>(
-  DEBUG_ACTIONS.filter(
-    (action) =>
-      !["rule_add", "rule_enable", "rule_disable", "rule_remove", "replay"].includes(action),
-  ),
-);
 const QUIET_MS = 2_000;
 /** Idle gap after which a fresh `cooperate sync`/`enable` automatically resumes a paused or editing tab. */
 const IDLE_RESUME_MS = 3_000;
@@ -1256,14 +1213,21 @@ export class CooperationController implements ControlAuthority {
           target?: DragTarget;
         }
       | undefined;
-    if (req.method === "tool.session_start") {
+    const policy = toolPolicy(req.method);
+    if (policy?.cooperation === "session_start") {
       const result = await invoke(cdp);
       if (!isRpcError(result) && params?.session_id) this.startSession(params.session_id);
       return result;
     }
-    if (req.method === "tool.cooperate")
+    if (policy?.cooperation === "cooperate")
       return this.command(params as CooperationParams, cdp, signal);
-    if (!params?.session_id || SESSION_TOOLS.has(req.method)) return invoke(cdp);
+    if (
+      !params?.session_id ||
+      !policy ||
+      policy.cooperation === "session" ||
+      policy.cooperation === "dialog"
+    )
+      return invoke(cdp);
     const session = this.deps.sessions.get(params.session_id);
     if (!session) return invoke(cdp);
     cdp = sessionCdpRunner(
@@ -1274,15 +1238,11 @@ export class CooperationController implements ControlAuthority {
     const targetPolicy = session.controlPolicy === "target";
     this.startSession(session.sessionId);
     if (
-      !READS.has(req.method) &&
+      policy.cooperation !== "passive_read" &&
       [...this.tabs.values()].some((s) => s.sessionId === params.session_id && s.stopped)
     )
       return stopped();
-    if (
-      ["tool.tab_create", "tool.tab_borrow", "tool.tab_select", "tool.tab_return"].includes(
-        req.method,
-      )
-    ) {
+    if (policy.cooperation === "manage_tabs") {
       if (
         req.method === "tool.tab_select" &&
         (params.tab_id === undefined || !isAgentControlledTab(session, params.tab_id))
@@ -1310,7 +1270,7 @@ export class CooperationController implements ControlAuthority {
       }
       return result;
     }
-    if (req.method === "tool.request_help") {
+    if (policy.cooperation === "request_help") {
       const target = await resolveTargetTab(
         this.deps.sessions,
         session,
@@ -1350,12 +1310,50 @@ export class CooperationController implements ControlAuthority {
         this.changed(state);
       }
     }
-    const read = READS.has(req.method) && !params.probe_hover;
+    if (policy.cooperation === "record_start") {
+      const target = await resolveTargetTab(
+        this.deps.sessions,
+        session,
+        params.tab_id ?? this.defaultTabs.get(session.sessionId),
+        chromeTabsApi,
+      );
+      if (isRpcError(target)) return target;
+      if (!isAgentControlledTab(session, target.tabId))
+        return failure("Actions require an owned task tab; borrow user tabs explicitly");
+      const state = this.track(session, target.tabId);
+      if (state.working) return failure("Another operation is settling on this tab");
+      if ((state.held || this.humanActive(state)) && this.canAutoResumeIdle(state, this.now())) {
+        try {
+          await this.resumeIdleControl(state);
+        } catch {
+          /* Fall through to held/humanActive check below. */
+        }
+        if (state.stopped) return stopped();
+      }
+      if (state.held || this.humanActive(state))
+        return failure("The user is still operating this tab; wait for hand-back");
+      req.params = { ...params, tab_id: target.tabId };
+      state.bootstrap = false;
+      state.working = true;
+      state.context = undefined;
+      state.baseline = undefined;
+      state.epoch++;
+      this.changed(state);
+      try {
+        const result = await invoke(cdp);
+        if (!isRpcError(result)) await this.observeTab(state.tabId);
+        return result;
+      } finally {
+        state.working = false;
+        this.changed(state);
+      }
+    }
+    const read = policy.cooperation === "passive_read" && !params.probe_hover;
     // History/status remain usable after a task tab closes; their handlers enforce ownership.
     const action = (req.params as { action?: string }).action;
     if (
-      (req.method === "tool.debug" && PASSIVE_DEBUG.has(action ?? "")) ||
-      (req.method === "tool.video" &&
+      (policy.cooperation === "debug" && isPassiveDebugAction(action)) ||
+      (policy.cooperation === "video" &&
         ["start", "stop", "status", "read", "list", "capabilities"].includes(action ?? ""))
     ) {
       req.params = { ...params, tab_id: params.tab_id ?? this.defaultTabs.get(session.sessionId) };
@@ -1394,13 +1392,7 @@ export class CooperationController implements ControlAuthority {
     }
     const state = this.track(session, target.tabId);
     if (state.bootstrap && !isInitialBlank(target)) state.bootstrap = false;
-    if (
-      state.bootstrap &&
-      ["tool.navigate", "tool.emulate", "tool.window_resize", "tool.tab_close"].includes(
-        req.method,
-      ) &&
-      !params.context_id
-    ) {
+    if (state.bootstrap && policy.bootstrapAllowed && !params.context_id) {
       if (
         params.expect !== undefined ||
         params.observation_id !== undefined ||
@@ -1494,7 +1486,7 @@ export class CooperationController implements ControlAuthority {
     const targeted =
       targetPolicy &&
       (scopedScript ||
-        (TARGET_ACTIONS.has(req.method) &&
+        (policy.domTargeted &&
           !visual &&
           !!(primaryTarget?.ref || primaryTarget?.selector) &&
           (req.method !== "tool.drag" || !!(params.target?.ref || params.target?.selector))));
@@ -1743,7 +1735,7 @@ export class CooperationController implements ControlAuthority {
       // Native focus/hover may add or remove an identified input decoration.
       // Keep all other decision evidence exact, especially explicit dependencies
       // and actions without a DOM target (including visual clicks).
-      const decorations = prepared && anchored && !visual && TARGET_ACTIONS.has(req.method);
+      const decorations = prepared && anchored && !visual && policy.domTargeted;
       const preparation = { focus: preparationFocus, hover: preparationHover };
       const preparedEvidence = decorations
         ? preparationEvidence(context.evidence, evidence, actionTarget!, preparation)

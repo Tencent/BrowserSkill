@@ -24,7 +24,7 @@ use bsk_protocol::tools::{
 };
 use bsk_protocol::{ErrorCode, Method, RpcError};
 use schemars::JsonSchema;
-use schemars::r#gen::SchemaSettings;
+use schemars::generate::SchemaSettings;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
@@ -224,13 +224,36 @@ fn tool<T: JsonSchema>(name: &str, title: &str, description: &str, hints: Hints)
 fn input_schema<T: JsonSchema>() -> Value {
     let settings = SchemaSettings::draft07().with(|settings| {
         settings.inline_subschemas = true;
-        settings.option_add_null_type = false;
-        settings.option_nullable = false;
     });
     let schema = settings.into_generator().into_root_schema_for::<T>();
     let mut value = serde_json::to_value(schema).unwrap_or_default();
     strip_schema(&mut value, 0);
     value
+}
+
+fn strip_optional_null(property: &mut Map<String, Value>) {
+    if let Some(Value::Array(types)) = property.get_mut("type") {
+        types.retain(|item| item.as_str() != Some("null"));
+        if types.len() == 1
+            && let Some(single) = types.pop()
+        {
+            property.insert("type".into(), single);
+        }
+    }
+    for keyword in ["anyOf", "oneOf"] {
+        let collapse = if let Some(Value::Array(variants)) = property.get_mut(keyword) {
+            variants.retain(|item| item != &json!({ "type": "null" }));
+            (variants.len() == 1).then(|| variants.pop()).flatten()
+        } else {
+            None
+        };
+        if let Some(Value::Object(single)) = collapse {
+            property.remove(keyword);
+            for (k, v) in single {
+                property.entry(k).or_insert(v);
+            }
+        }
+    }
 }
 
 fn strip_schema(schema: &mut Value, depth: usize) {
@@ -244,8 +267,23 @@ fn strip_schema(schema: &mut Value, depth: usize) {
     if depth != 1 {
         object.remove("description");
     }
+    let required: Vec<String> = object
+        .get("required")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| item.as_str().map(str::to_owned))
+                .collect()
+        })
+        .unwrap_or_default();
     if let Some(properties) = object.get_mut("properties").and_then(Value::as_object_mut) {
-        for property in properties.values_mut() {
+        for (name, property) in properties.iter_mut() {
+            if !required.iter().any(|req| req == name)
+                && let Some(prop_obj) = property.as_object_mut()
+            {
+                strip_optional_null(prop_obj);
+            }
             strip_schema(property, depth + 1);
         }
     }

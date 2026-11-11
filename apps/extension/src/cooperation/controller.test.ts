@@ -3666,3 +3666,61 @@ describe("strict evidence around the action's own preparation", () => {
     }
   });
 });
+
+describe("tool.record_start cooperation guard", () => {
+  it("rejects record_start when the task was stopped", async () => {
+    const f = await fixture();
+    f.controller.stopSession("shared");
+    const invoke = vi.fn(async () => ({ tab_id: 7, recording: true }));
+    const result = await f.controller.run(
+      { id: "rec-stopped", method: "tool.record_start", params: { session_id: "shared" } },
+      f.cdp,
+      f.abort.signal,
+      invoke,
+    );
+    expect(result).toMatchObject({
+      code: "user_aborted",
+      data: { effect_state: "none" },
+    });
+    expect(invoke).not.toHaveBeenCalled();
+  });
+
+  it("rejects record_start while the user is actively holding control", async () => {
+    const f = await fixture();
+    const view = f.controller.view(7)!;
+    await f.controller.control(7, view.revision, "hold");
+    const invoke = vi.fn(async () => ({ tab_id: 7, recording: true }));
+    const result = await f.controller.run(
+      { id: "rec-held", method: "tool.record_start", params: { session_id: "shared" } },
+      f.cdp,
+      f.abort.signal,
+      invoke,
+    );
+    expect(result).toMatchObject({
+      code: "permission_denied",
+      message: "The user is still operating this tab; wait for hand-back",
+      data: { reason: "cooperation_sync_required", effect_state: "none" },
+    });
+    expect(invoke).not.toHaveBeenCalled();
+  });
+
+  it("invalidates prior control contexts when record_start begins on an owned tab", async () => {
+    const f = await fixture();
+    const invoke = vi.fn(async () => ({ tab_id: 7, recording: true }));
+    const started = await f.controller.run(
+      { id: "rec-ok", method: "tool.record_start", params: { session_id: "shared" } },
+      f.cdp,
+      f.abort.signal,
+      invoke,
+    );
+    expect(started).toEqual({ tab_id: 7, recording: true });
+    expect(invoke).toHaveBeenCalledOnce();
+
+    const followUp = await f.act(f.first.context_id);
+    expect(followUp).toMatchObject({
+      code: "permission_denied",
+      data: { effect_state: "none" },
+    });
+    expect(f.native).not.toHaveBeenCalled();
+  });
+});

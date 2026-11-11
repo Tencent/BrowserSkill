@@ -1,24 +1,30 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "title": "WaitForElementParams",
-  "type": "object",
-  "required": [
-    "session_id",
-    "state"
-  ],
+  "definitions": {
+    "ElementState": {
+      "description": "Which state the caller is waiting for.\n\n`Visible` / `Hidden` ask about **visibility**; `Attached` /\n`Detached` ask about **presence in the DOM**.\n\n`Hidden` is the opposite of `Visible`: absent or attached but not visible,\nincluding an element absent at the first probe. `Detached` requires absence.\nThe result's `attached` field distinguishes removal from a hidden node.\nInvalid refs and inspection failures remain errors for every state.",
+      "enum": [
+        "visible",
+        "hidden",
+        "attached",
+        "detached"
+      ],
+      "type": "string"
+    }
+  },
   "properties": {
     "poll_ms": {
-      "description": "Polling interval, shortened near the deadline to allow a final probe. Defaults to 100ms; values outside 16..=2000ms are rejected.",
+      "description": "Polling interval, shortened near the deadline to allow a final probe.\nDefaults to 100ms; values outside 16..=2000ms are rejected.",
+      "format": "uint32",
+      "maximum": 2000,
+      "minimum": 16,
       "type": [
         "integer",
         "null"
-      ],
-      "format": "uint32",
-      "maximum": 2000.0,
-      "minimum": 16.0
+      ]
     },
     "ref": {
-      "description": "Optional `@e<N>` ref from the latest snapshot or observe. Mutually exclusive with `selector`.",
+      "description": "Optional `@e<N>` ref from the latest snapshot or observe.\nMutually exclusive with `selector`.",
       "type": [
         "string",
         "null"
@@ -34,42 +40,32 @@
       "type": "string"
     },
     "state": {
-      "description": "State to wait for.",
-      "allOf": [
-        {
-          "$ref": "#/definitions/ElementState"
-        }
-      ]
+      "$ref": "#/definitions/ElementState",
+      "description": "State to wait for."
     },
     "tab_id": {
       "description": "Target tab. Defaults to the Agent Window's active tab.",
+      "format": "int64",
       "type": [
         "integer",
         "null"
-      ],
-      "format": "int64"
+      ]
     },
     "timeout_ms": {
       "description": "Element inspection budget, including probes. Defaults to 10s (1..=300000ms).",
+      "format": "uint32",
+      "maximum": 300000,
+      "minimum": 1,
       "type": [
         "integer",
         "null"
-      ],
-      "format": "uint32",
-      "maximum": 300000.0,
-      "minimum": 1.0
-    }
-  },
-  "definitions": {
-    "ElementState": {
-      "description": "Which state the caller is waiting for.\n\n`Visible` / `Hidden` ask about **visibility**; `Attached` / `Detached` ask about **presence in the DOM**.\n\n`Hidden` is the opposite of `Visible`: absent or attached but not visible, including an element absent at the first probe. `Detached` requires absence. The result's `attached` field distinguishes removal from a hidden node. Invalid refs and inspection failures remain errors for every state.",
-      "type": "string",
-      "enum": [
-        "visible",
-        "hidden",
-        "attached",
-        "detached"
       ]
     }
-  }
+  },
+  "required": [
+    "session_id",
+    "state"
+  ],
+  "title": "WaitForElementParams",
+  "type": "object"
 }

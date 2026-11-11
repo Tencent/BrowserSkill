@@ -448,7 +448,10 @@ pub fn dispatch(args: StepArgs, _format: Format) -> Result<(), CliError> {
     }
     let daemon = ensure_daemon().context("ensure daemon is running")?;
     if matches!(args.action, Action::Drag) && params["mode"] == "click-move-click" {
-        super::drag::require_click_move_click_daemon(daemon.sock_path.clone())?;
+        super::protocol::require_feature_on_daemon(
+            &daemon.sock_path,
+            bsk_protocol::compatibility::Feature::ClickMoveClick,
+        )?;
     }
     let (reply, exit) = run(&args, method, params, |method, params, timeout| {
         business_rpc::call(
