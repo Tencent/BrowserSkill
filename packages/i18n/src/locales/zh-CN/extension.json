@@ -747,5 +747,36 @@
     "agentHint": "开始任务前告诉 Agent 需要录制，它会自动启停录制。你可以在这里查看状态、预览和保存视频。",
     "manual": "手动录制正在运行的任务",
     "copyFailed": "复制提示词失败，请重试。"
+  },
+  "pairPage": {
+    "badge": "BrowserSkill · 本地引导配对",
+    "title": "将 BrowserSkill 与本地 CLI 配对",
+    "description": "请确认是否将当前浏览器配置与本机正在运行的 bsk 服务建立双向验证连接。",
+    "loading": "正在读取配对请求…",
+    "endpointLabel": "目标端点",
+    "daemonLabel": "Daemon 指纹",
+    "deviceLabel": "设备指纹",
+    "browserLabel": "当前浏览器实例",
+    "statusLabel": "当前配对状态",
+    "statusUnpaired": "尚未配对",
+    "statusSameDaemon": "已与当前 Daemon 配对（如需重绑请使用替换配对）",
+    "statusOtherDaemon": "已与其他本地 Daemon 配对（批准后将切换至此 Daemon）",
+    "securityHint": "点击批准后将完成本机双向身份验证，防止本机其他程序冒充 bsk 控制浏览器。",
+    "approveButton": "批准并配对",
+    "approvingButton": "正在验证并配对…",
+    "connectedBadge": "✓ Connected · Verified",
+    "connectedSubtitle": "当前浏览器已与本机 CLI 完成安全配对与验证。现在可以关闭此标签页并返回终端。",
+    "connectedDisabledHint": "已完成配对验证。扩展工具栏弹窗中的连接开关当前处于关闭状态，开启后即可接收自动化任务。",
+    "errorTitle": "未能完成配对",
+    "errors": {
+      "missing_ticket": "当前页面缺少配对票据。请在终端运行 bsk setup 重新发起一键配对。",
+      "ticket_expired": "该一次性配对票据已过期或已被使用。请在终端重新运行 bsk setup 打开新的确认页。",
+      "already_paired": "当前浏览器已完成与这台本地 bsk 的配对（{{browser}}）。如需重绑请在终端运行 bsk setup --re-pair。",
+      "replace_mismatch": "当前浏览器实例为 {{instance}}，而该替换链接目标是 {{browser}}。请在终端运行 bsk setup --re-pair 或 bsk setup --replace {{instance}}。",
+      "server_unverified": "本地服务未通过身份验证。请确认对应端口的 bsk 服务仍在运行，然后在终端重新执行 bsk setup。",
+      "daemon_too_old": "当前运行的 bsk 服务版本过旧，不支持本地双向配对验证。请先运行 bsk update 后重试 bsk setup。",
+      "busy": "另一个连接正在验证该设备，请稍后在终端重新运行 bsk setup。",
+      "pairing_failed": "配对未能完成。请确认本地 bsk 服务正在运行，然后在终端重新运行 bsk setup。"
+    }
   }
 }

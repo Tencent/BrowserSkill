@@ -43,6 +43,7 @@ pub mod render_error;
 pub mod screenshot;
 pub mod scroll;
 pub mod session;
+pub mod setup;
 pub mod snapshot;
 pub mod status;
 pub mod step;
@@ -160,6 +161,9 @@ pub enum Command {
 
     /// Run diagnostics + repair hints.
     Doctor,
+
+    /// One-click onboarding wizard: start daemon, install agent skills, pair browser, and verify health.
+    Setup(setup::SetupArgs),
 
     /// Install the browser-skill agent skill into local agent harnesses.
     #[command(name = "install-skill")]

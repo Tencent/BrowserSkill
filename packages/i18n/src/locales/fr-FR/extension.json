@@ -747,5 +747,36 @@
     "agentHint": "Tell your agent to record before starting the task. It will start and stop recording for you; preview and save the result here.",
     "manual": "Record a running task manually",
     "copyFailed": "Could not copy the prompt. Please try again."
+  },
+  "pairPage": {
+    "badge": "BrowserSkill · Local Setup",
+    "title": "Pair BrowserSkill with Local CLI",
+    "description": "Confirm that you want to connect this browser profile to the local bsk daemon running on your computer.",
+    "loading": "Loading pairing request…",
+    "endpointLabel": "Target endpoint",
+    "daemonLabel": "Daemon fingerprint",
+    "deviceLabel": "Device fingerprint",
+    "browserLabel": "Browser instance",
+    "statusLabel": "Current status",
+    "statusUnpaired": "Not yet paired",
+    "statusSameDaemon": "Already paired with this daemon (replacement required to rebind)",
+    "statusOtherDaemon": "Paired with another local daemon (approving switches to this daemon)",
+    "securityHint": "Your approval establishes mutual local verification so other local programs cannot impersonate bsk.",
+    "approveButton": "Approve & Pair",
+    "approvingButton": "Verifying & pairing…",
+    "connectedBadge": "✓ Connected · Verified",
+    "connectedSubtitle": "This browser is now securely paired with your local CLI. You can close this tab and return to your terminal.",
+    "connectedDisabledHint": "Paired and verified. The BrowserSkill connection switch is currently off in the toolbar popup — turn it on when you are ready to run tasks.",
+    "errorTitle": "Could not complete pairing",
+    "errors": {
+      "missing_ticket": "No pairing ticket was found in this page URL. Run bsk setup in your terminal to start a fresh pairing.",
+      "ticket_expired": "This one-time pairing ticket has expired or was already used. Run bsk setup in your terminal to open a fresh confirmation page.",
+      "already_paired": "This browser is already paired with this local bsk daemon ({{browser}}). To rebind it, run bsk setup --re-pair in your terminal.",
+      "replace_mismatch": "This browser is {{instance}}, while this replacement link targets {{browser}}. Run bsk setup --re-pair or bsk setup --replace {{instance}} in your terminal.",
+      "server_unverified": "Local daemon verification failed. Make sure bsk is still running on this port, then run bsk setup again.",
+      "daemon_too_old": "The running bsk daemon is too old for local pairing verification. Run bsk update and retry bsk setup.",
+      "busy": "Another connection is currently verifying this device. Run bsk setup again in a moment.",
+      "pairing_failed": "Pairing could not be completed. Make sure the local bsk daemon is running, then run bsk setup again in your terminal."
+    }
   }
 }

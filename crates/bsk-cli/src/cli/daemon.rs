@@ -260,7 +260,7 @@ pub fn dispatch(cmd: DaemonCmd) -> anyhow::Result<()> {
     }
 }
 
-fn maintain(
+pub(crate) fn maintain(
     method: bsk_protocol::Method,
     params: serde_json::Value,
 ) -> anyhow::Result<serde_json::Value> {
