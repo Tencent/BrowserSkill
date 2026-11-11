@@ -449,6 +449,51 @@ function isAncestorOf(
   return false;
 }
 
+const DELEGATED_LIST_TAGS = new Set(["ul", "ol", "menu"]);
+const DELEGATED_LIST_ROLES = new Set(["list", "listbox", "menu", "tree", "treegrid", "tablist"]);
+const TEXT_NODE_TAGS = new Set(["#text", "#cdata-section"]);
+
+/**
+ * A delegated list/row container carries the click itself while its rows are
+ * not individually clickable. Only propagate refs to rows for list-like
+ * structures (list tags/roles, or homogeneous repeated rows), never for a
+ * multi-child compound button.
+ */
+function isDelegatedRowContainer(
+  node: VomNode,
+  children: Map<number | null, VomNode[]>,
+): boolean {
+  if (!hasRecoveryHandler(node)) return false;
+  const direct = (children.get(node.id) ?? []).filter((child) => !TEXT_NODE_TAGS.has(child.tag));
+  if (direct.length === 0) return false;
+  // Rows that are already individually addressable are handled by normal recovery.
+  if (direct.some((child) => isSemanticReferenceNode(child))) return false;
+
+  const tag = normalizedTag(node);
+  const role = normalizedRole(node);
+  if (DELEGATED_LIST_TAGS.has(tag) || DELEGATED_LIST_ROLES.has(role)) return true;
+
+  // Homogeneous repeated rows (>=3): same tag, text-bearing, similarly sized and
+  // vertically stacked. This avoids splitting a two-line card button.
+  if (direct.length < 3) return false;
+  const firstTag = direct[0].tag;
+  if (!direct.every((child) => child.tag === firstTag)) return false;
+  if (
+    !direct.every(
+      (child) => cleaned(child.name) !== undefined || cleaned(child.text) !== undefined,
+    )
+  )
+    return false;
+  const rects = direct.map((child) => child.rect);
+  if (rects.some((rect) => !rect || rect.w <= 0 || rect.h <= 0)) return false;
+  const heights = rects.map((rect) => rect!.h);
+  const avg = heights.reduce((sum, h) => sum + h, 0) / heights.length;
+  if (avg <= 0 || heights.some((h) => Math.abs(h - avg) / avg > 0.35)) return false;
+  const ys = rects.map((rect) => rect!.y).sort((a, b) => a - b);
+  for (let i = 1; i < ys.length; i++) if (ys[i] <= ys[i - 1]) return false;
+  return true;
+}
+
 export function applyVomInteractionRecovery(nodes: VomNode[]): VomNode[] {
   // CSS cursors inherit. Expose the handle once instead of assigning refs to
   // every decorative span inside it; retain explicit nested draggable/drop cues.
@@ -466,19 +511,39 @@ export function applyVomInteractionRecovery(nodes: VomNode[]): VomNode[] {
     });
   }
 
+  const children = buildChildren(nodes);
+  const recoveredIds = new Set<number>();
+  const recoveredRoleById = new Map<number, string>();
+  const recoveredNameById = new Map<number, string>();
+
+  // Delegated row lists keep the click on the container while their rows are
+  // not individually clickable. Expose each text-bearing row instead of
+  // collapsing the whole list into one button.
+  const delegatedRowContainers = new Set<number>();
+  for (const node of nodes) {
+    if (!isDelegatedRowContainer(node, children)) continue;
+    delegatedRowContainers.add(node.id);
+    for (const row of children.get(node.id) ?? []) {
+      if (TEXT_NODE_TAGS.has(row.tag)) continue;
+      if (isSemanticReferenceNode(row) || !passesStaticRecoveryGuards(row)) continue;
+      const rowName = recoveryCandidateName(row, children);
+      if (!rowName) continue;
+      if (!passesAreaRecoveryGuard(row, () => rowName)) continue;
+      recoveredIds.add(row.id);
+      recoveredRoleById.set(row.id, "button");
+      recoveredNameById.set(row.id, rowName);
+    }
+  }
+
   const eligible: VomNode[] = [];
   for (const node of nodes) {
+    if (delegatedRowContainers.has(node.id)) continue;
     // Drag evidence adds a capability; it must not suppress existing role/name recovery.
     if (!isSemanticReferenceNode(node) && passesStaticRecoveryGuards(node)) {
       eligible.push(node);
     }
   }
-  if (eligible.length === 0) return nodes;
-
-  const children = buildChildren(nodes);
-  const recoveredIds = new Set<number>();
-  const recoveredRoleById = new Map<number, string>();
-  const recoveredNameById = new Map<number, string>();
+  if (eligible.length === 0 && recoveredIds.size === 0) return nodes;
 
   for (const node of eligible) {
     let computed = false;

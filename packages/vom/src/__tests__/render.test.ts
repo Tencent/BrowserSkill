@@ -540,6 +540,139 @@ describe("renderVom single-layer page", () => {
     expect(out.refs).toEqual([]);
   });
 
+  it("propagates refs to rows of a delegated list container", () => {
+    const out = renderVom(
+      scene([
+        node({ id: 1, role: "RootWebArea", name: "Doc" }),
+        node({
+          id: 2,
+          parentId: 1,
+          tag: "ul",
+          role: "list",
+          clickable: true,
+          rect: { x: 0, y: 0, w: 200, h: 120 },
+        }),
+        node({
+          id: 3,
+          parentId: 2,
+          tag: "li",
+          role: "listitem",
+          name: "甲一",
+          rect: { x: 0, y: 0, w: 200, h: 40 },
+        }),
+        node({
+          id: 4,
+          parentId: 2,
+          tag: "li",
+          role: "listitem",
+          name: "甲二",
+          rect: { x: 0, y: 40, w: 200, h: 40 },
+        }),
+        node({
+          id: 5,
+          parentId: 2,
+          tag: "li",
+          role: "listitem",
+          name: "甲三",
+          rect: { x: 0, y: 80, w: 200, h: 40 },
+        }),
+      ]),
+    );
+    expect(out.refs).toHaveLength(3);
+    expect(out.text).toContain('button "甲一"');
+    expect(out.text).not.toContain('button "甲一 甲二 甲三"');
+  });
+
+  it("keeps plain lists without delegated clickability ref-free", () => {
+    const out = renderVom(
+      scene([
+        node({ id: 1, role: "RootWebArea", name: "Doc" }),
+        node({ id: 2, parentId: 1, tag: "ul", role: "list" }),
+        node({ id: 3, parentId: 2, tag: "li", role: "listitem", name: "行一" }),
+        node({ id: 4, parentId: 2, tag: "li", role: "listitem", name: "行二" }),
+        node({ id: 5, parentId: 2, tag: "li", role: "listitem", name: "行三" }),
+      ]),
+    );
+    expect(out.refs).toEqual([]);
+  });
+
+  it("propagates refs to homogeneous repeated rows under a delegated div", () => {
+    const out = renderVom(
+      scene([
+        node({ id: 1, role: "RootWebArea", name: "Doc" }),
+        node({
+          id: 2,
+          parentId: 1,
+          tag: "div",
+          role: "generic",
+          clickable: true,
+          rect: { x: 0, y: 0, w: 300, h: 120 },
+        }),
+        node({
+          id: 3,
+          parentId: 2,
+          tag: "div",
+          role: "generic",
+          text: "甲一",
+          rect: { x: 0, y: 0, w: 300, h: 40 },
+        }),
+        node({
+          id: 4,
+          parentId: 2,
+          tag: "div",
+          role: "generic",
+          text: "甲二",
+          rect: { x: 0, y: 40, w: 300, h: 40 },
+        }),
+        node({
+          id: 5,
+          parentId: 2,
+          tag: "div",
+          role: "generic",
+          text: "甲三",
+          rect: { x: 0, y: 80, w: 300, h: 40 },
+        }),
+      ]),
+    );
+    expect(out.refs).toHaveLength(3);
+    expect(out.text).toContain('button "甲一"');
+  });
+
+  it("keeps a two-line compound button as a single ref", () => {
+    const out = renderVom(
+      scene([
+        node({ id: 1, role: "RootWebArea", name: "Doc" }),
+        node({
+          id: 2,
+          parentId: 1,
+          tag: "div",
+          role: "generic",
+          clickable: true,
+          name: "标题 副标题",
+          rect: { x: 0, y: 0, w: 300, h: 80 },
+        }),
+        node({
+          id: 3,
+          parentId: 2,
+          tag: "div",
+          role: "generic",
+          name: "标题",
+          rect: { x: 0, y: 0, w: 300, h: 40 },
+        }),
+        node({
+          id: 4,
+          parentId: 2,
+          tag: "div",
+          role: "generic",
+          name: "副标题",
+          rect: { x: 0, y: 40, w: 300, h: 40 },
+        }),
+      ]),
+    );
+    expect(out.refs).toHaveLength(1);
+    expect(out.text).toContain('button "标题 副标题"');
+  });
+
   it("does not treat implementation CSS classes as control names", () => {
     const out = renderVom(
       scene([
