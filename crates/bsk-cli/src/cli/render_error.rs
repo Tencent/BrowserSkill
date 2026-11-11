@@ -54,6 +54,8 @@ pub mod reason {
     pub const FILL_FAILED: &str = "fill_failed";
     pub const TARGET_NOT_SELECT: &str = "target_not_select";
     pub const OPTION_NOT_FOUND: &str = "option_not_found";
+    pub const OPTION_AMBIGUOUS: &str = "option_ambiguous";
+    pub const VIRTUAL_ROW_RECYCLED: &str = "virtual_row_recycled";
     pub const SINGLE_SELECT_VALUE_COUNT: &str = "single_select_value_count";
     pub const TAB_NOT_ACTIVE: &str = "tab_not_active";
     pub const CDP_EXTENSION_ACCESS_DENIED: &str = "cdp_extension_access_denied";
@@ -459,6 +461,13 @@ pub fn info_for_error(code: ErrorCode, data: Option<&serde_json::Value>) -> Rend
             ),
             ..base
         },
+        (_, reason::VIRTUAL_ROW_RECYCLED) => RenderInfo {
+            summary: "the target row was recycled in place and now belongs to a different record",
+            hint: Some(
+                "nothing was sent; run `bsk cooperate sync` (or `bsk observe`) to refresh row refs before acting on the intended record",
+            ),
+            ..base
+        },
         (_, "human_intervention" | "control_held") => RenderInfo {
             summary: "the user has control of this tab",
             hint: Some(
@@ -645,14 +654,21 @@ pub fn info_for_error(code: ErrorCode, data: Option<&serde_json::Value>) -> Rend
         (ErrorCode::InvalidParams, reason::TARGET_NOT_SELECT) => RenderInfo {
             summary: "target element is not a <select>",
             hint: Some(
-                "choose a native <select> ref or selector from the latest snapshot, or use `bsk click` / `bsk fill` for other controls",
+                "choose a native <select> ref or selector from the latest snapshot, or for custom ARIA dropdowns use `bsk click` on the combobox trigger first and then click the desired option",
             ),
             exit_code: base.exit_code,
         },
         (ErrorCode::InvalidParams, reason::OPTION_NOT_FOUND) => RenderInfo {
             summary: "option value not found in <select>",
             hint: Some(
-                "rerun `bsk snapshot` or `bsk get-html` to list valid option values, then pass them via `--value`",
+                "check the inline `[options: ...]` candidates in the VOM observation or rerun `bsk snapshot`, then pass a valid value or unique option label via `--value`",
+            ),
+            exit_code: base.exit_code,
+        },
+        (ErrorCode::InvalidParams, reason::OPTION_AMBIGUOUS) => RenderInfo {
+            summary: "option label matches multiple <select> options",
+            hint: Some(
+                "multiple <option> elements share that visible label; pass the exact unambiguous option value via `--value`",
             ),
             exit_code: base.exit_code,
         },
@@ -1160,6 +1176,22 @@ mod tests {
         let info = info_for_error(ErrorCode::InvalidParams, Some(&data));
         assert_eq!(info.summary, "option value not found in <select>");
         assert!(info.hint.unwrap().contains("--value"));
+    }
+
+    #[test]
+    fn option_ambiguous_and_virtual_row_recycled_provide_targeted_hints() {
+        let amb = serde_json::json!({ "reason": reason::OPTION_AMBIGUOUS });
+        let amb_info = info_for_error(ErrorCode::InvalidParams, Some(&amb));
+        assert_eq!(
+            amb_info.summary,
+            "option label matches multiple <select> options"
+        );
+        assert!(amb_info.hint.unwrap().contains("--value"));
+
+        let rec = serde_json::json!({ "reason": reason::VIRTUAL_ROW_RECYCLED });
+        let rec_info = info_for_error(ErrorCode::PermissionDenied, Some(&rec));
+        assert!(rec_info.summary.contains("recycled in place"));
+        assert!(rec_info.hint.unwrap().contains("cooperate sync"));
     }
 
     #[test]

@@ -1643,4 +1643,500 @@ describe("selection evidence", () => {
     expect(out.refs).toHaveLength(0);
     expect(out.text).not.toContain("[selected");
   });
+
+  describe("Wave 1 Affordance-Typed VOM v2 & CJK-safe compaction", () => {
+    it("binds preceding static sibling captions to bare inputs as [field: ...] without duplicating consumed captions", () => {
+      const out = renderVom(
+        scene([
+          node({
+            id: 1,
+            role: "form",
+            name: "准入表单",
+            rect: { x: 0, y: 0, w: 600, h: 300 },
+          }),
+          node({
+            id: 2,
+            parentId: 1,
+            role: "statictext",
+            name: "企业全称",
+            rect: { x: 10, y: 10, w: 120, h: 24 },
+          }),
+          node({
+            id: 3,
+            parentId: 1,
+            backendNodeId: 103,
+            tag: "input",
+            role: "textbox",
+            inputState: "empty",
+            rect: { x: 140, y: 10, w: 240, h: 24 },
+          }),
+          node({
+            id: 4,
+            parentId: 1,
+            role: "statictext",
+            name: "未关联的独立说明文字必须保留",
+            rect: { x: 10, y: 50, w: 280, h: 24 },
+          }),
+          node({
+            id: 5,
+            parentId: 1,
+            backendNodeId: 105,
+            tag: "input",
+            role: "searchbox",
+            nearbyText: "邻近回退标签",
+            inputState: "empty",
+            rect: { x: 10, y: 90, w: 240, h: 24 },
+          }),
+        ]),
+      );
+      expect(out.text).toContain('@e1 textbox [field: "企业全称"] [empty]');
+      expect(out.text.match(/企业全称/g)).toHaveLength(1);
+      expect(out.text).toContain("未关联的独立说明文字必须保留");
+      // Preceding unclaimed sibling id=4 is bound to id=5; test nearbyText fallback on an isolated input too:
+      const isolated = renderVom(
+        scene([
+          node({
+            id: 10,
+            backendNodeId: 110,
+            tag: "input",
+            role: "spinbutton",
+            nearbyText: "重试次数上限",
+            inputState: "empty",
+            rect: { x: 10, y: 10, w: 120, h: 24 },
+          }),
+        ]),
+      );
+      expect(isolated.text).toContain('@e1 spinbutton [field: "重试次数上限"]');
+    });
+
+    it("folds exact parent-child statictext echoes while preserving CJK prefix/substring child text", () => {
+      const out = renderVom(
+        scene([
+          node({
+            id: 1,
+            role: "region",
+            name: "星云数据看板",
+            rect: { x: 0, y: 0, w: 600, h: 200 },
+          }),
+          node({
+            id: 2,
+            parentId: 1,
+            role: "statictext",
+            name: "星云数据看板",
+            rect: { x: 10, y: 10, w: 200, h: 24 },
+          }),
+          node({
+            id: 3,
+            parentId: 1,
+            role: "statictext",
+            name: "星云数据看板筛选器",
+            rect: { x: 10, y: 40, w: 260, h: 24 },
+          }),
+        ]),
+      );
+      expect(out.text).toContain('region "星云数据看板"');
+      expect(out.text).toContain("星云数据看板筛选器");
+      const lines = out.text.split("\n");
+      expect(lines.filter((line) => line.trim() === 'text "星云数据看板"')).toHaveLength(0);
+    });
+
+    it("inlines up to 10 native <select> options with selected marker and suppresses them when sensitive or redacted", () => {
+      const options = Array.from({ length: 10 }, (_, idx) => ({
+        value: idx === 1 ? "华南大区" : `r_${idx + 1}`,
+        label: idx === 1 ? "华南大区" : `大区${idx + 1}`,
+        ...(idx === 0 ? { selected: true } : {}),
+      }));
+      const normal = renderVom(
+        scene([
+          node({
+            id: 1,
+            backendNodeId: 201,
+            tag: "select",
+            role: "combobox",
+            name: "经营大区",
+            value: "r_1",
+            selectOptions: options,
+            selectOptionsTruncated: true,
+            rect: { x: 10, y: 10, w: 180, h: 28 },
+          }),
+        ]),
+      );
+      expect(normal.text).toContain(
+        '[options: r_1="大区1"* | "华南大区" | r_3="大区3" | r_4="大区4" | r_5="大区5" | r_6="大区6" | r_7="大区7" | r_8="大区8" | r_9="大区9" | r_10="大区10" | …]',
+      );
+      expect(normal.text).not.toContain("[custom-dropdown:");
+
+      const redacted = renderVom(
+        scene([
+          node({
+            id: 1,
+            backendNodeId: 201,
+            tag: "select",
+            role: "combobox",
+            name: "经营大区",
+            value: "r_1",
+            selectOptions: options,
+            rect: { x: 10, y: 10, w: 180, h: 28 },
+          }),
+        ]),
+        { redactValues: true },
+      );
+      expect(redacted.text).not.toContain("[options:");
+
+      const sensitiveSelect = renderVom(
+        scene([
+          node({
+            id: 1,
+            backendNodeId: 202,
+            tag: "select",
+            role: "combobox",
+            name: "安全密保问题",
+            sensitive: true,
+            selectOptions: options,
+            rect: { x: 10, y: 10, w: 180, h: 28 },
+          }),
+        ]),
+      );
+      expect(sensitiveSelect.text).not.toContain("[options:");
+    });
+
+    it("annotates non-editable non-<select> ARIA comboboxes with [custom-dropdown: ...] while skipping editable search/autocomplete inputs", () => {
+      const out = renderVom(
+        scene([
+          node({
+            id: 1,
+            backendNodeId: 301,
+            tag: "div",
+            role: "combobox",
+            name: "结算账期方案",
+            attrs: { "aria-expanded": "false" },
+            rect: { x: 10, y: 10, w: 180, h: 28 },
+          }),
+          node({
+            id: 2,
+            backendNodeId: 302,
+            tag: "div",
+            role: "combobox",
+            name: "开票类型",
+            attrs: { "aria-expanded": "true" },
+            rect: { x: 10, y: 50, w: 180, h: 28 },
+          }),
+          // YouTube-style editable search input with role="combobox"
+          node({
+            id: 3,
+            backendNodeId: 303,
+            tag: "input",
+            role: "combobox",
+            name: "Search",
+            attrs: { type: "text", name: "search_query" },
+            rect: { x: 10, y: 90, w: 240, h: 28 },
+          }),
+          // Non-input combobox with aria-autocomplete="list"
+          node({
+            id: 4,
+            backendNodeId: 304,
+            tag: "div",
+            role: "combobox",
+            name: "命令面板",
+            attrs: { "aria-autocomplete": "list" },
+            rect: { x: 10, y: 130, w: 240, h: 28 },
+          }),
+          // Element Plus readonly <input role="combobox"> select trigger
+          node({
+            id: 5,
+            backendNodeId: 305,
+            tag: "input",
+            role: "combobox",
+            name: "币种",
+            attrs: { type: "text", readonly: "" },
+            rect: { x: 10, y: 170, w: 160, h: 28 },
+          }),
+        ]),
+      );
+      expect(out.text).toContain('@e1 combobox "结算账期方案" [custom-dropdown: click to open]');
+      expect(out.text).toContain('@e2 combobox "开票类型" [custom-dropdown: expanded]');
+      expect(out.text).toContain('@e3 combobox "Search"');
+      expect(out.text).not.toContain('@e3 combobox "Search" [custom-dropdown:');
+      expect(out.text).not.toContain('@e4 combobox "命令面板" [custom-dropdown:');
+      expect(out.text).toContain('@e5 combobox "币种" [custom-dropdown: click to open]');
+    });
+
+    it("does not misbind inline units ([input] 'kg' [input2]) or validation errors ([input] '邮箱格式不正确' [input2]) as [field: ...], and caps overlong option labels", () => {
+      const unitAndErrorForm = renderVom(
+        scene([
+          node({ id: 1, role: "form", rect: { x: 0, y: 0, w: 600, h: 200 } }),
+          node({
+            id: 2,
+            parentId: 1,
+            backendNodeId: 502,
+            tag: "input",
+            role: "textbox",
+            inputState: "empty",
+            rect: { x: 10, y: 10, w: 80, h: 28 },
+          }),
+          node({
+            id: 3,
+            parentId: 1,
+            role: "statictext",
+            name: "kg",
+            rect: { x: 96, y: 14, w: 24, h: 20 },
+          }),
+          node({
+            id: 4,
+            parentId: 1,
+            backendNodeId: 504,
+            tag: "input",
+            role: "textbox",
+            inputState: "empty",
+            rect: { x: 130, y: 10, w: 80, h: 28 },
+          }),
+          node({
+            id: 5,
+            parentId: 1,
+            backendNodeId: 505,
+            tag: "input",
+            role: "textbox",
+            name: "联系邮箱",
+            inputState: "filled",
+            value: "bad@",
+            rect: { x: 10, y: 50, w: 200, h: 28 },
+          }),
+          node({
+            id: 6,
+            parentId: 1,
+            role: "statictext",
+            name: "邮箱格式不正确",
+            rect: { x: 220, y: 54, w: 120, h: 20 },
+          }),
+          node({
+            id: 7,
+            parentId: 1,
+            backendNodeId: 507,
+            tag: "input",
+            role: "textbox",
+            inputState: "empty",
+            rect: { x: 10, y: 95, w: 200, h: 28 },
+          }),
+          node({
+            id: 8,
+            parentId: 1,
+            backendNodeId: 508,
+            tag: "select",
+            role: "combobox",
+            name: "条款",
+            selectOptions: [{ value: "clause_1", label: "甲".repeat(70), selected: true }],
+            rect: { x: 10, y: 140, w: 260, h: 28 },
+          }),
+        ]),
+      );
+      expect(unitAndErrorForm.text).not.toContain('[field: "kg"]');
+      expect(unitAndErrorForm.text).toContain("kg");
+      expect(unitAndErrorForm.text).not.toContain('[field: "邮箱格式不正确"]');
+      expect(unitAndErrorForm.text).toContain("邮箱格式不正确");
+      expect(unitAndErrorForm.text).toContain(`[options: clause_1="${"甲".repeat(48)}…"*]`);
+    });
+
+    it("keeps 1-2 row tables and interactive rows expanded, and folds >= 3 consecutive pure read-only rows", () => {
+      const shortTable = renderVom(
+        scene([
+          node({ id: 1, role: "table", rect: { x: 0, y: 0, w: 400, h: 100 } }),
+          node({ id: 2, parentId: 1, role: "row", rect: { x: 0, y: 0, w: 400, h: 30 } }),
+          node({
+            id: 3,
+            parentId: 2,
+            role: "columnheader",
+            name: "键",
+            rect: { x: 0, y: 0, w: 200, h: 30 },
+          }),
+          node({
+            id: 4,
+            parentId: 2,
+            role: "columnheader",
+            name: "值",
+            rect: { x: 200, y: 0, w: 200, h: 30 },
+          }),
+          node({ id: 5, parentId: 1, role: "row", rect: { x: 0, y: 30, w: 400, h: 30 } }),
+          node({
+            id: 6,
+            parentId: 5,
+            role: "cell",
+            name: "状态",
+            rect: { x: 0, y: 30, w: 200, h: 30 },
+          }),
+          node({
+            id: 7,
+            parentId: 5,
+            role: "cell",
+            name: "正常",
+            rect: { x: 200, y: 30, w: 200, h: 30 },
+          }),
+        ]),
+      );
+      expect(shortTable.text).toContain('columnheader "键"');
+      expect(shortTable.text).not.toContain('row "键 | 值"');
+
+      const longMixedTable = renderVom(
+        scene([
+          node({ id: 1, role: "table", rect: { x: 0, y: 0, w: 500, h: 200 } }),
+          node({ id: 2, parentId: 1, role: "rowgroup", rect: { x: 0, y: 0, w: 500, h: 40 } }),
+          node({ id: 3, parentId: 2, role: "row", rect: { x: 0, y: 0, w: 500, h: 40 } }),
+          node({
+            id: 4,
+            parentId: 3,
+            role: "columnheader",
+            name: "编号",
+            rect: { x: 0, y: 0, w: 200, h: 40 },
+          }),
+          node({
+            id: 5,
+            parentId: 3,
+            role: "columnheader",
+            name: "等级",
+            rect: { x: 200, y: 0, w: 300, h: 40 },
+          }),
+          node({ id: 6, parentId: 1, role: "rowgroup", rect: { x: 0, y: 40, w: 500, h: 160 } }),
+          node({ id: 7, parentId: 6, role: "row", rect: { x: 0, y: 40, w: 500, h: 40 } }),
+          node({
+            id: 8,
+            parentId: 7,
+            role: "cell",
+            name: "CHK-01",
+            rect: { x: 0, y: 40, w: 200, h: 40 },
+          }),
+          node({
+            id: 9,
+            parentId: 7,
+            role: "cell",
+            name: "常规",
+            rect: { x: 200, y: 40, w: 300, h: 40 },
+          }),
+          node({ id: 10, parentId: 6, role: "row", rect: { x: 0, y: 80, w: 500, h: 40 } }),
+          node({
+            id: 11,
+            parentId: 10,
+            role: "cell",
+            name: "CHK-02",
+            rect: { x: 0, y: 80, w: 200, h: 40 },
+          }),
+          node({
+            id: 12,
+            parentId: 10,
+            role: "cell",
+            name: "提示",
+            rect: { x: 200, y: 80, w: 300, h: 40 },
+          }),
+          node({ id: 13, parentId: 6, role: "row", rect: { x: 0, y: 120, w: 500, h: 40 } }),
+          node({
+            id: 14,
+            parentId: 13,
+            role: "cell",
+            name: "CHK-03",
+            rect: { x: 0, y: 120, w: 200, h: 40 },
+          }),
+          node({ id: 15, parentId: 13, role: "cell", rect: { x: 200, y: 120, w: 300, h: 40 } }),
+          node({
+            id: 16,
+            parentId: 15,
+            backendNodeId: 416,
+            tag: "button",
+            role: "button",
+            name: "复核",
+            rowAnchor: "CHK-03",
+            rect: { x: 210, y: 125, w: 80, h: 28 },
+          }),
+        ]),
+      );
+      expect(longMixedTable.text).toContain('row "编号 | 等级"');
+      expect(longMixedTable.text).toContain('row "CHK-01 | 常规"');
+      expect(longMixedTable.text).toContain('row "CHK-02 | 提示"');
+      expect(longMixedTable.text).toContain('@e1 button "复核"');
+      expect(longMixedTable.refs[0]).toMatchObject({
+        ref: "e1",
+        backendNodeId: 416,
+        rowAnchor: "CHK-03",
+      });
+    });
+
+    it("folds >= 3 pure read-only rows when rowgroups carry descendant-derived names while preserving explicit aria-labels", () => {
+      const chromeAxTable = renderVom(
+        scene([
+          node({ id: 1, parentId: null, role: "RootWebArea", name: "Page" }),
+          node({
+            id: 2,
+            parentId: 1,
+            tag: "table",
+            role: "table",
+            name: "检查项编号 审计等级 CHK-101 常规 CHK-102 提示",
+            rect: { x: 0, y: 0, w: 500, h: 120 },
+          }),
+          node({
+            id: 3,
+            parentId: 2,
+            tag: "thead",
+            role: "rowgroup",
+            name: "检查项编号 审计等级",
+            rect: { x: 0, y: 0, w: 500, h: 40 },
+          }),
+          node({ id: 4, parentId: 3, role: "row", rect: { x: 0, y: 0, w: 500, h: 40 } }),
+          node({
+            id: 5,
+            parentId: 4,
+            role: "columnheader",
+            name: "检查项编号",
+            rect: { x: 0, y: 0, w: 200, h: 40 },
+          }),
+          node({
+            id: 6,
+            parentId: 4,
+            role: "columnheader",
+            name: "审计等级",
+            rect: { x: 200, y: 0, w: 300, h: 40 },
+          }),
+          node({
+            id: 7,
+            parentId: 2,
+            tag: "tbody",
+            role: "rowgroup",
+            name: "CHK-101 常规 CHK-102 提示",
+            rect: { x: 0, y: 40, w: 500, h: 80 },
+          }),
+          node({ id: 8, parentId: 7, role: "row", rect: { x: 0, y: 40, w: 500, h: 40 } }),
+          node({
+            id: 9,
+            parentId: 8,
+            role: "cell",
+            name: "CHK-101",
+            rect: { x: 0, y: 40, w: 200, h: 40 },
+          }),
+          node({
+            id: 10,
+            parentId: 8,
+            role: "cell",
+            name: "常规",
+            rect: { x: 200, y: 40, w: 300, h: 40 },
+          }),
+          node({ id: 11, parentId: 7, role: "row", rect: { x: 0, y: 80, w: 500, h: 40 } }),
+          node({
+            id: 12,
+            parentId: 11,
+            role: "cell",
+            name: "CHK-102",
+            rect: { x: 0, y: 80, w: 200, h: 40 },
+          }),
+          node({
+            id: 13,
+            parentId: 11,
+            role: "cell",
+            name: "提示",
+            rect: { x: 200, y: 80, w: 300, h: 40 },
+          }),
+        ]),
+      );
+      expect(chromeAxTable.text).toContain("    table\n");
+      expect(chromeAxTable.text).not.toContain("rowgroup");
+      expect(chromeAxTable.text).toContain('      row "检查项编号 | 审计等级"');
+      expect(chromeAxTable.text).toContain('      row "CHK-101 | 常规"');
+      expect(chromeAxTable.text).toContain('      row "CHK-102 | 提示"');
+    });
+  });
 });

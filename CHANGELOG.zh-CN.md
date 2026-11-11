@@ -12,6 +12,8 @@ CLI、扩展和 DSH 插件可以分别发布，能否连接由协议兼容性决
   `--scope` / `BSK_SESSION` / `BSK_SCOPE` > `bsk mcp` 进程级连接作用域 > 宿主子代理环境变量 >
   防静默抢占 `"default"` 槽位）、单调短证据别名（`c1..cN`、`o1..oN`）、可选 `--session` /
   `target` 策略省略 `--context` 自动还原以及 `unchanged` 缓存 VOM 补齐，且保持扩展侧共驾安全校验不变。
+- 动作可供性增强的 VOM 渲染与 `<select>` 标签选择：无名输入控件绑定紧邻前置静态文本为 `[field: "..."]` 并消除消费标签重复输出；中文父子文本回声去重收紧为精确全等匹配；非敏感原生 `<select>` 内联展示前 10 个选项（`[options: val="Label"* | ...]`），`select` 支持按唯一无歧义可见标签选择、以 `option_ambiguous` 拒绝同名歧义标签、在 `option_not_found` 中附带前 12 个合法候选，并对自定义 ARIA 下拉（`[custom-dropdown: ...]`）给出先点击展开的恢复引导；同一表内连续 3 行及以上的纯只读数据行无损折叠为单行管道格式。
+- 基于计算样式的隐形提示注入剥离与零额外 RPC 虚拟滚动行主键守卫：静态采集与悬停探测自动剥离通过 `opacity < 0.05`、`font-size <= 1.5px`、前景背景零对比度、远屏外偏移或 `< 2px` 裁剪隐藏的非交互注入子树（完整保留交互元素、按钮内部 `.sr-only` 无障碍名称、`<label for>` 及 `aria-labelledby`/`aria-describedby` 引用目标）；位于表格行、列表项或虚拟行池内的 `@eN` 引用在发布时记录归一化业务行锚点 `rowAnchor`，并在 `checkActionTarget` 单次 `SAMPLE_TARGET` 采样中原子核验，在动作派发前阻断原地复用的虚拟列表 DOM 节点（`virtual_row_recycled`，`effect_state: none`）。
 - 新增 Qoder 和 Qoder CN 的 skill 安装目标，可使用 `bsk install-skill --harness qoder` 和
   `--harness qoder-cn`。
 - 本机配对支持双向身份验证、持久化密钥轮换和中断恢复。已配对连接在发送业务请求前验证 daemon，激活后原链接失效。撤销与浏览器注册串行执行，撤销成功后对应连接已清理。

@@ -9,6 +9,10 @@ export const REQUESTED_STYLES = [
   "cursor",
   "visibility",
   "opacity",
+  "font-size",
+  "color",
+  "background-color",
+  "background-image",
 ] as const;
 export const VISUAL_STYLES = [
   ...REQUESTED_STYLES,
@@ -171,6 +175,16 @@ export async function decodeDocument(
       }
       const nvIdx = dn.nodeValue[n] ?? -1;
       if (nvIdx < 0) continue;
+      // Chromium's DOMSnapshot emits `nodeValue` for Comment nodes (`nodeType === 8`,
+      // e.g. Vue `<!--v-if-->`) as well as Text/CDATA nodes. Only Text (3) and CDATA (4)
+      // contribute to element `textContent`.
+      const nt = dn.nodeType?.[n];
+      if (nt !== undefined) {
+        if (nt !== 3 && nt !== 4) continue;
+      } else {
+        const rawName = str(strings, dn.nodeName?.[n]).toLowerCase();
+        if (rawName && rawName !== "#text" && rawName !== "#cdata-section") continue;
+      }
       const text = str(strings, nvIdx).trim();
       if (!text) continue;
       const parentIdx = dn.parentIndex?.[n] ?? -1;
@@ -203,7 +217,7 @@ export async function decodeDocument(
     const li = layoutByNode.get(n);
     let styles: Record<string, string> | undefined;
     let layout: DecodedNode["layout"];
-    if (li !== undefined) {
+    if (li !== undefined && tag !== "#text") {
       const styleRow = dl?.styles?.[li] ?? [];
       styles = {};
       for (let i = 0; i < profile.computedStyles.length; i++)
@@ -262,6 +276,9 @@ export async function decodeDocument(
         : {}),
       ...(tag === "input" && ["checkbox", "radio"].includes((attrs.type ?? "").toLowerCase())
         ? { checked: checkedInputs.has(n) }
+        : {}),
+      ...(tag === "option" && dn.optionSelected !== undefined
+        ? { checked: selectedOptions.has(n) }
         : {}),
       ...(selectedOptions.has(n) ? { formValue: attrs.value ?? textContent ?? "" } : {}),
     });

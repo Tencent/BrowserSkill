@@ -18,6 +18,22 @@ determines which versions can connect.
   evidence aliases (`c1..cN`, `o1..oN`), omitted `--session` / target-policy
   `--context` resolution, and `unchanged` VOM hydration without altering extension-side
   cooperative safety verification.
+- Affordance-typed VOM rendering and `<select>` label selection: bare input controls bind
+  preceding static captions as `[field: "..."]` without duplicating consumed labels; CJK
+  parent-child text deduplication requires exact equality; non-sensitive native `<select>`
+  elements inline up to 10 options (`[options: val="Label"* | ...]`), while `select`
+  accepts unique visible option labels, rejects ambiguous duplicate labels
+  (`option_ambiguous`), lists up to 12 available candidates on `option_not_found`, and
+  guides callers to click custom ARIA comboboxes (`[custom-dropdown: ...]`); runs of 3 or
+  more consecutive pure read-only table rows fold into compact pipe-delimited rows.
+- Computed-style stealth prompt-injection stripping and zero-extra-RPC virtual-scroll row
+  business-key guards: observation and hover probes strip non-interactive subtrees hidden
+  via `opacity < 0.05`, `font-size <= 1.5px`, zero foreground/background contrast,
+  far-offscreen layout bounds, or `< 2px` clipped boxes (preserving interactive controls,
+  `.sr-only` accessible button labels, `<label for>` and `aria-labelledby`/`aria-describedby`
+  targets); `@eN` refs inside table, list, or virtual rows record a normalized `rowAnchor`
+  and verify it atomically in `checkActionTarget`'s single `SAMPLE_TARGET` probe, blocking
+  in-place recycled DOM slots before dispatch (`virtual_row_recycled`, `effect_state: none`).
 - Qoder and Qoder CN are available as skill-only install targets through
   `bsk install-skill --harness qoder` and `--harness qoder-cn`.
 - Local pairing with mutual proofs, durable key rotation and interruption recovery.

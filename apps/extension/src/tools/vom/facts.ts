@@ -17,6 +17,613 @@ function isDecodedOverlayHost(item: DecodedNode): boolean {
   return false;
 }
 
+const STEALTH_SKIP_SHELL_TAGS = new Set([
+  "html",
+  "body",
+  "head",
+  "meta",
+  "link",
+  "script",
+  "style",
+  "noscript",
+  "template",
+  "br",
+  "hr",
+  "wbr",
+  "col",
+  "colgroup",
+  "svg",
+  "path",
+  "g",
+  "defs",
+  "use",
+  "symbol",
+  "clippath",
+  "lineargradient",
+  "radialgradient",
+  "stop",
+]);
+
+const INTERACTIVE_OR_VISUAL_TAGS = new Set([
+  "button",
+  "input",
+  "select",
+  "textarea",
+  "option",
+  "optgroup",
+  "summary",
+  "details",
+  "iframe",
+  "canvas",
+  "video",
+  "audio",
+  "dialog",
+]);
+
+const INTERACTIVE_ARIA_ROLES = new Set([
+  "button",
+  "checkbox",
+  "combobox",
+  "link",
+  "listbox",
+  "menuitem",
+  "menuitemcheckbox",
+  "menuitemradio",
+  "option",
+  "radio",
+  "searchbox",
+  "slider",
+  "spinbutton",
+  "switch",
+  "tab",
+  "textbox",
+  "treeitem",
+]);
+
+const INLINE_OPACITY_RE = /(?:^|;)\s*opacity\s*:\s*([+-]?\d*\.?\d+)/i;
+const INLINE_FONT_SIZE_RE = /(?:^|;)\s*font-size\s*:\s*([+-]?\d*\.?\d+)\s*px\b/i;
+const INLINE_CLIP_OVERFLOW_RE = /(?:^|;)\s*overflow(?:-[xy])?\s*:\s*(?:hidden|clip)\b/i;
+const MAX_SR_ONLY_LABEL_CHARS = 80;
+
+interface ParsedRgba {
+  r: number;
+  g: number;
+  b: number;
+  a: number;
+}
+
+function parseCssRgba(raw: string | undefined): ParsedRgba | undefined {
+  if (!raw) return undefined;
+  const s = raw.trim().toLowerCase();
+  if (!s || s === "none" || s === "auto" || s === "initial" || s === "inherit") return undefined;
+  if (s === "transparent") return { r: 0, g: 0, b: 0, a: 0 };
+  if (s.startsWith("#")) {
+    const hex = s.slice(1);
+    if (hex.length === 3 || hex.length === 4) {
+      const r = Number.parseInt(hex[0] + hex[0], 16);
+      const g = Number.parseInt(hex[1] + hex[1], 16);
+      const b = Number.parseInt(hex[2] + hex[2], 16);
+      const a = hex.length === 4 ? Number.parseInt(hex[3] + hex[3], 16) / 255 : 1;
+      return Number.isNaN(r + g + b + a) ? undefined : { r, g, b, a };
+    }
+    if (hex.length === 6 || hex.length === 8) {
+      const r = Number.parseInt(hex.slice(0, 2), 16);
+      const g = Number.parseInt(hex.slice(2, 4), 16);
+      const b = Number.parseInt(hex.slice(4, 6), 16);
+      const a = hex.length === 8 ? Number.parseInt(hex.slice(6, 8), 16) / 255 : 1;
+      return Number.isNaN(r + g + b + a) ? undefined : { r, g, b, a };
+    }
+    return undefined;
+  }
+  const rgbMatch =
+    /^rgba?\(\s*([\d.]+)\s*(?:,\s*|\s+)([\d.]+)\s*(?:,\s*|\s+)([\d.]+)(?:\s*(?:,\s*|\/\s*)([\d.%]+))?\s*\)$/.exec(
+      s,
+    );
+  if (rgbMatch) {
+    const r = Math.round(Number.parseFloat(rgbMatch[1]));
+    const g = Math.round(Number.parseFloat(rgbMatch[2]));
+    const b = Math.round(Number.parseFloat(rgbMatch[3]));
+    let a = 1;
+    if (rgbMatch[4] !== undefined) {
+      a = rgbMatch[4].endsWith("%")
+        ? Number.parseFloat(rgbMatch[4]) / 100
+        : Number.parseFloat(rgbMatch[4]);
+    }
+    return Number.isNaN(r + g + b + a) ? undefined : { r, g, b, a };
+  }
+  const srgbMatch =
+    /^color\(srgb\s+([\d.]+)\s+([\d.]+)\s+([\d.]+)(?:\s*\/\s*([\d.%]+))?\s*\)$/.exec(s);
+  if (srgbMatch) {
+    const r = Math.round(Number.parseFloat(srgbMatch[1]) * 255);
+    const g = Math.round(Number.parseFloat(srgbMatch[2]) * 255);
+    const b = Math.round(Number.parseFloat(srgbMatch[3]) * 255);
+    let a = 1;
+    if (srgbMatch[4] !== undefined) {
+      a = srgbMatch[4].endsWith("%")
+        ? Number.parseFloat(srgbMatch[4]) / 100
+        : Number.parseFloat(srgbMatch[4]);
+    }
+    return Number.isNaN(r + g + b + a) ? undefined : { r, g, b, a };
+  }
+  return undefined;
+}
+
+function isInteractiveFactsNode(item: DecodedNode): boolean {
+  const tag = item.tag.toLowerCase();
+  if (tag.startsWith("#")) return false;
+  if (tag === "input") return (item.attrs.type ?? "").toLowerCase() !== "hidden";
+  if (tag === "a") return "href" in item.attrs || item.clickable === true;
+  if (INTERACTIVE_OR_VISUAL_TAGS.has(tag)) return true;
+  const role = (item.attrs.role ?? "").trim().toLowerCase();
+  if (role && INTERACTIVE_ARIA_ROLES.has(role)) return true;
+  if (item.clickable === true) return true;
+  if ("contenteditable" in item.attrs) {
+    const ce = (item.attrs.contenteditable ?? "").trim().toLowerCase();
+    if (ce === "" || ce === "true" || ce === "plaintext-only") return true;
+  }
+  return false;
+}
+
+type StealthKind = "container" | "microbox" | "textstyle";
+
+function applyStealthPromptInjectionExclusions<T extends DecodedNode>(
+  input: readonly T[],
+  nodes: ReadonlyMap<number, T>,
+  excludedBackendNodeIds: Set<number>,
+): void {
+  const colorCache = new Map<string, ParsedRgba | null>();
+  const parseCachedColor = (raw: string | undefined): ParsedRgba | null => {
+    if (!raw) return null;
+    const hit = colorCache.get(raw);
+    if (hit !== undefined) return hit;
+    const parsed = parseCssRgba(raw) ?? null;
+    colorCache.set(raw, parsed);
+    return parsed;
+  };
+
+  let hasAnyOpaqueBg = false;
+  const ownBgByNode = new Map<number, ParsedRgba | "image">();
+  for (let i = 0; i < input.length; i++) {
+    const st = input[i].layout?.styles;
+    if (!st) continue;
+    const rawBgImg = st["background-image"];
+    if (rawBgImg && rawBgImg !== "none" && rawBgImg !== "initial") {
+      ownBgByNode.set(input[i].backendNodeId, "image");
+      continue;
+    }
+    const rawBg = st["background-color"];
+    if (!rawBg || rawBg === "rgba(0, 0, 0, 0)" || rawBg === "transparent") continue;
+    const parsed = parseCachedColor(rawBg);
+    if (parsed && parsed.a >= 0.15) {
+      ownBgByNode.set(input[i].backendNodeId, parsed);
+      if (parsed.a >= 0.9) hasAnyOpaqueBg = true;
+    }
+  }
+
+  const bgMemo = new Map<number, ParsedRgba | null>();
+  const resolveEffectiveBg = (id: number): ParsedRgba | null => {
+    if (!hasAnyOpaqueBg) return null;
+    const directMemo = bgMemo.get(id);
+    if (directMemo !== undefined) return directMemo;
+    const node = nodes.get(id);
+    if (!node) return null;
+    const own = ownBgByNode.get(id);
+    if (own !== undefined) {
+      const resolved = own === "image" ? null : own;
+      bgMemo.set(id, resolved);
+      return resolved;
+    }
+    const parentId = node.parentBackendNodeId;
+    if (parentId === null) {
+      bgMemo.set(id, null);
+      return null;
+    }
+    const parentMemo = bgMemo.get(parentId);
+    if (parentMemo !== undefined) {
+      bgMemo.set(id, parentMemo);
+      return parentMemo;
+    }
+    const chain: number[] = [id];
+    let cur: T | undefined = nodes.get(parentId);
+    let found: ParsedRgba | null = null;
+    let guard = 0;
+    while (cur && guard++ < 128) {
+      const m = bgMemo.get(cur.backendNodeId);
+      if (m !== undefined) {
+        found = m;
+        break;
+      }
+      const curOwn = ownBgByNode.get(cur.backendNodeId);
+      if (curOwn !== undefined) {
+        found = curOwn === "image" ? null : curOwn;
+        bgMemo.set(cur.backendNodeId, found);
+        break;
+      }
+      chain.push(cur.backendNodeId);
+      cur = cur.parentBackendNodeId === null ? undefined : nodes.get(cur.parentBackendNodeId);
+    }
+    for (let i = 0; i < chain.length; i++) bgMemo.set(chain[i], found);
+    return found;
+  };
+
+  let hasInheritedZeroContrast = false;
+  const candidates: Array<{
+    node: T;
+    order: number;
+    kind: StealthKind;
+    inheritedZeroContrast?: boolean;
+  }> = [];
+  for (let i = 0; i < input.length; i++) {
+    const item = input[i];
+    if (item.tag.charCodeAt(0) === 35) continue;
+    if (excludedBackendNodeIds.has(item.backendNodeId)) continue;
+    const styles = item.layout?.styles;
+    const inlineStyle = item.attrs.style;
+    if (!styles && !inlineStyle) continue;
+
+    const tag = item.tag.toLowerCase();
+    if (STEALTH_SKIP_SHELL_TAGS.has(tag)) continue;
+
+    let kind: StealthKind | undefined;
+    let inheritedZeroContrast = false;
+
+    const rawOpacity =
+      styles?.opacity || (inlineStyle ? INLINE_OPACITY_RE.exec(inlineStyle)?.[1] : undefined);
+    if (rawOpacity && rawOpacity !== "1") {
+      const op = Number.parseFloat(rawOpacity);
+      if (Number.isFinite(op) && op < 0.05) kind = "container";
+    }
+
+    const bounds = item.layout?.bounds;
+    if (
+      !kind &&
+      bounds &&
+      bounds.length >= 4 &&
+      Number.isFinite(bounds[0]) &&
+      Number.isFinite(bounds[1]) &&
+      Number.isFinite(bounds[2]) &&
+      Number.isFinite(bounds[3])
+    ) {
+      if (bounds[0] + bounds[2] < -500 || bounds[1] + bounds[3] < -500) {
+        kind = "container";
+      } else if (bounds[2] > 0 && bounds[2] < 2 && bounds[3] > 0 && bounds[3] < 2) {
+        const ox = styles?.["overflow-x"];
+        const oy = styles?.["overflow-y"];
+        if (ox !== undefined || oy !== undefined) {
+          if (ox === "hidden" || ox === "clip" || oy === "hidden" || oy === "clip") {
+            kind = "container";
+          }
+        } else if (inlineStyle && INLINE_CLIP_OVERFLOW_RE.test(inlineStyle)) {
+          kind = "container";
+        } else {
+          kind = "microbox";
+        }
+      }
+    }
+
+    if (!kind) {
+      const rawFontSize =
+        styles?.["font-size"] ||
+        (inlineStyle ? INLINE_FONT_SIZE_RE.exec(inlineStyle)?.[1] : undefined);
+      if (
+        rawFontSize &&
+        rawFontSize !== "16px" &&
+        rawFontSize !== "12px" &&
+        rawFontSize !== "14px"
+      ) {
+        const fs = Number.parseFloat(rawFontSize);
+        if (Number.isFinite(fs) && fs <= 1.5) kind = "textstyle";
+      }
+    }
+
+    if (!kind && styles?.color) {
+      const fg = parseCachedColor(styles.color);
+      if (fg) {
+        if (fg.a < 0.05) {
+          kind = "textstyle";
+        } else if (hasAnyOpaqueBg) {
+          const bg = resolveEffectiveBg(item.backendNodeId);
+          if (bg && bg.a >= 0.9 && fg.r === bg.r && fg.g === bg.g && fg.b === bg.b) {
+            kind = "textstyle";
+            if (ownBgByNode.get(item.backendNodeId) === undefined) {
+              inheritedZeroContrast = true;
+              hasInheritedZeroContrast = true;
+            }
+          }
+        }
+      }
+    }
+
+    if (kind) {
+      candidates.push({
+        node: item,
+        order: i,
+        kind,
+        ...(inheritedZeroContrast ? { inheritedZeroContrast: true } : {}),
+      });
+    }
+  }
+
+  if (candidates.length === 0) return;
+
+  const childrenByParent = new Map<number, T[]>();
+  const idToNode = new Map<string, T>();
+  const ariaRefIds = new Set<string>();
+  const interactiveIds = new Set<number>();
+
+  for (let i = 0; i < input.length; i++) {
+    const item = input[i];
+    if (item.parentBackendNodeId !== null) {
+      let list = childrenByParent.get(item.parentBackendNodeId);
+      if (!list) {
+        list = [];
+        childrenByParent.set(item.parentBackendNodeId, list);
+      }
+      list.push(item);
+    }
+    const idAttr = item.attrs.id?.trim();
+    if (idAttr) idToNode.set(idAttr, item);
+    const labelledBy = item.attrs["aria-labelledby"];
+    if (labelledBy) {
+      for (const tok of labelledBy.split(/\s+/)) if (tok) ariaRefIds.add(tok);
+    }
+    const describedBy = item.attrs["aria-describedby"];
+    if (describedBy) {
+      for (const tok of describedBy.split(/\s+/)) if (tok) ariaRefIds.add(tok);
+    }
+    if (isInteractiveFactsNode(item)) {
+      interactiveIds.add(item.backendNodeId);
+    }
+  }
+
+  const hasInteractiveDescendant = new Set<number>();
+  for (const intId of interactiveIds) {
+    let cur = nodes.get(intId)?.parentBackendNodeId ?? null;
+    let guard = 0;
+    while (cur !== null && !hasInteractiveDescendant.has(cur) && guard++ < 512) {
+      hasInteractiveDescendant.add(cur);
+      cur = nodes.get(cur)?.parentBackendNodeId ?? null;
+    }
+  }
+
+  const subtreeTextLenMemo = new Map<number, number>();
+  const subtreeTextLen = (id: number, visiting: Set<number>): number => {
+    const cached = subtreeTextLenMemo.get(id);
+    if (cached !== undefined) return cached;
+    if (visiting.has(id)) return 0;
+    const n = nodes.get(id);
+    if (!n) return 0;
+    visiting.add(id);
+    let own = n.textContent ? n.textContent.replace(/\s+/g, " ").trim().length : 0;
+    const kids = childrenByParent.get(id);
+    if (own === 0 && kids) {
+      for (let i = 0; i < kids.length; i++) {
+        const ch = kids[i];
+        if ((ch.tag === "#text" || ch.tag === "#cdata-section") && ch.textContent) {
+          own += ch.textContent.replace(/\s+/g, " ").trim().length;
+        }
+      }
+    }
+    let total = own;
+    if (kids) {
+      for (let i = 0; i < kids.length; i++) {
+        const ch = kids[i];
+        if (ch.tag.startsWith("#")) continue;
+        total += subtreeTextLen(ch.backendNodeId, visiting);
+        if (total > MAX_SR_ONLY_LABEL_CHARS + 1) break;
+      }
+    }
+    visiting.delete(id);
+    subtreeTextLenMemo.set(id, total);
+    return total;
+  };
+
+  const subtreeLabelAttrMemo = new Map<number, boolean>();
+  const subtreeHasLabelAttr = (id: number, visiting: Set<number>): boolean => {
+    const cached = subtreeLabelAttrMemo.get(id);
+    if (cached !== undefined) return cached;
+    if (visiting.has(id)) return false;
+    const n = nodes.get(id);
+    if (!n) return false;
+    const a = n.attrs;
+    if (
+      a["aria-label"]?.trim() ||
+      a["aria-description"]?.trim() ||
+      a["aria-roledescription"]?.trim() ||
+      a["aria-valuetext"]?.trim() ||
+      a.alt?.trim() ||
+      a.title?.trim() ||
+      a.placeholder?.trim()
+    ) {
+      subtreeLabelAttrMemo.set(id, true);
+      return true;
+    }
+    visiting.add(id);
+    let found = false;
+    for (const ch of childrenByParent.get(id) ?? []) {
+      if (ch.tag.startsWith("#")) continue;
+      if (subtreeHasLabelAttr(ch.backendNodeId, visiting)) {
+        found = true;
+        break;
+      }
+    }
+    visiting.delete(id);
+    subtreeLabelAttrMemo.set(id, found);
+    return found;
+  };
+
+  const exemptSubtreeIds = new Set<number>();
+  const markExemptSubtree = (rootId: number): void => {
+    const queue = [rootId];
+    while (queue.length > 0) {
+      const curId = queue.pop()!;
+      if (exemptSubtreeIds.has(curId)) continue;
+      exemptSubtreeIds.add(curId);
+      for (const ch of childrenByParent.get(curId) ?? []) {
+        queue.push(ch.backendNodeId);
+      }
+    }
+  };
+
+  for (const refId of ariaRefIds) {
+    const target = idToNode.get(refId);
+    if (target) markExemptSubtree(target.backendNodeId);
+  }
+
+  for (let i = 0; i < input.length; i++) {
+    const item = input[i];
+    if (
+      item.tag.toLowerCase() === "label" &&
+      item.attrs.for?.trim() &&
+      subtreeTextLen(item.backendNodeId, new Set()) <= MAX_SR_ONLY_LABEL_CHARS
+    ) {
+      markExemptSubtree(item.backendNodeId);
+    }
+  }
+
+  const hasInteractiveAncestor = (id: number): boolean => {
+    let cur = nodes.get(id)?.parentBackendNodeId ?? null;
+    let guard = 0;
+    while (cur !== null && guard++ < 64) {
+      if (interactiveIds.has(cur)) return true;
+      cur = nodes.get(cur)?.parentBackendNodeId ?? null;
+    }
+    return false;
+  };
+
+  const hasOverflowingVisibleChild = (id: number): boolean => {
+    const stack = [...(childrenByParent.get(id) ?? [])];
+    let guard = 0;
+    while (stack.length > 0 && guard++ < 256) {
+      const ch = stack.pop()!;
+      if (ch.tag.startsWith("#")) continue;
+      const b = ch.layout?.bounds;
+      if (b && b.length >= 4 && b[2] >= 2 && b[3] >= 2) return true;
+      for (const grand of childrenByParent.get(ch.backendNodeId) ?? []) stack.push(grand);
+    }
+    return false;
+  };
+
+  const candidateStyleIds = new Set<number>();
+  for (const c of candidates) {
+    if (c.kind === "textstyle") candidateStyleIds.add(c.node.backendNodeId);
+  }
+
+  const hasNonStealthElementDescendant = (id: number): boolean => {
+    const stack = [...(childrenByParent.get(id) ?? [])];
+    let guard = 0;
+    while (stack.length > 0 && guard++ < 512) {
+      const ch = stack.pop()!;
+      if (ch.tag.startsWith("#") || STEALTH_SKIP_SHELL_TAGS.has(ch.tag.toLowerCase())) continue;
+      if (!candidateStyleIds.has(ch.backendNodeId)) return true;
+      for (const grand of childrenByParent.get(ch.backendNodeId) ?? []) stack.push(grand);
+    }
+    return false;
+  };
+
+  const excludeSubtree = (rootId: number): void => {
+    const queue = [rootId];
+    while (queue.length > 0) {
+      const curId = queue.pop()!;
+      if (
+        excludedBackendNodeIds.has(curId) ||
+        interactiveIds.has(curId) ||
+        hasInteractiveDescendant.has(curId) ||
+        exemptSubtreeIds.has(curId)
+      ) {
+        continue;
+      }
+      excludedBackendNodeIds.add(curId);
+      for (const ch of childrenByParent.get(curId) ?? []) {
+        queue.push(ch.backendNodeId);
+      }
+    }
+  };
+
+  let mediaBackdrops:
+    | Array<{ x: number; y: number; r: number; b: number; paintOrder: number; order: number }>
+    | undefined;
+  if (hasInheritedZeroContrast) {
+    mediaBackdrops = [];
+    for (let i = 0; i < input.length; i++) {
+      const m = input[i];
+      const mTag = m.tag.toLowerCase();
+      const isMediaEl = mTag === "img" || mTag === "video" || mTag === "canvas";
+      const isBgImgEl = ownBgByNode.get(m.backendNodeId) === "image";
+      if (!isMediaEl && !isBgImgEl) continue;
+      const mb = m.layout?.bounds;
+      if (!mb || mb.length < 4 || mb[2] < 8 || mb[3] < 8) continue;
+      mediaBackdrops.push({
+        x: mb[0],
+        y: mb[1],
+        r: mb[0] + mb[2],
+        b: mb[1] + mb[3],
+        paintOrder: m.paintOrder,
+        order: i,
+      });
+    }
+  }
+
+  const overlapsUnderneathMedia = (cand: T, candOrder: number): boolean => {
+    if (!mediaBackdrops || mediaBackdrops.length === 0) return false;
+    const cb = cand.layout?.bounds;
+    if (!cb || cb.length < 4 || cb[2] <= 0 || cb[3] <= 0) return false;
+    const cx = cb[0];
+    const cy = cb[1];
+    const cr = cx + cb[2];
+    const cbot = cy + cb[3];
+    for (let i = 0; i < mediaBackdrops.length; i++) {
+      const m = mediaBackdrops[i];
+      if (
+        m.paintOrder > cand.paintOrder ||
+        (m.paintOrder === cand.paintOrder && m.order >= candOrder)
+      ) {
+        continue;
+      }
+      const ox = Math.min(cr, m.r) - Math.max(cx, m.x);
+      const oy = Math.min(cbot, m.b) - Math.max(cy, m.y);
+      if (ox > 1 && oy > 1) return true;
+    }
+    return false;
+  };
+
+  for (const { node: cand, order: candOrder, kind, inheritedZeroContrast } of candidates) {
+    const id = cand.backendNodeId;
+    if (
+      excludedBackendNodeIds.has(id) ||
+      interactiveIds.has(id) ||
+      hasInteractiveDescendant.has(id) ||
+      exemptSubtreeIds.has(id)
+    ) {
+      continue;
+    }
+    const textLen = subtreeTextLen(id, new Set());
+    if (textLen === 0 && !subtreeHasLabelAttr(id, new Set())) {
+      continue;
+    }
+    if (inheritedZeroContrast && overlapsUnderneathMedia(cand, candOrder)) {
+      markExemptSubtree(id);
+      continue;
+    }
+    if (hasInteractiveAncestor(id) && textLen <= MAX_SR_ONLY_LABEL_CHARS) {
+      markExemptSubtree(id);
+      continue;
+    }
+    if (kind === "microbox" && hasOverflowingVisibleChild(id)) {
+      continue;
+    }
+    if (kind === "textstyle" && hasNonStealthElementDescendant(id)) {
+      for (const ch of childrenByParent.get(id) ?? []) {
+        if (ch.tag === "#text" || ch.tag === "#cdata-section") {
+          excludedBackendNodeIds.add(ch.backendNodeId);
+        }
+      }
+      continue;
+    }
+    excludeSubtree(id);
+  }
+}
+
 /** Bounds retain their raw snapshot document layout units until normalization. */
 export interface SnapshotLayout {
   readonly boundsSpace: "snapshot-document-layout";
@@ -132,6 +739,7 @@ export async function buildDocumentIndex<T extends DecodedNode>(
       if (overlay) excludedBackendNodeIds.add(item.backendNodeId);
     }
   }
+  applyStealthPromptInjectionExclusions(input, nodes, excludedBackendNodeIds);
   return { nodes, ...(ancestryComplete ? { ancestryComplete } : {}), excludedBackendNodeIds };
 }
 

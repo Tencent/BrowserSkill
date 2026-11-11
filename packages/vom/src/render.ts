@@ -124,6 +124,19 @@ const WEAK_ACTION_LABELS = new Set([
 ]);
 
 const ACTIVE_REGION_POSITIONS = new Set(["fixed", "absolute", "sticky"]);
+const LABELABLE_INPUT_ROLES = new Set(["textbox", "searchbox", "combobox", "spinbutton"]);
+const TABLE_CELL_ROLES = new Set(["cell", "gridcell", "columnheader", "rowheader"]);
+const MAX_INLINE_SELECT_OPTIONS = 10;
+const MAX_INLINE_OPTION_VALUE_CHARS = 36;
+const MAX_INLINE_OPTION_LABEL_CHARS = 48;
+const MIN_FOLDABLE_TABLE_ROWS = 3;
+
+const NON_CAPTION_TOKEN_RE =
+  /^(?:[\d\s\p{P}\p{S}]+|(?:kg|g|mg|lb|lbs|oz|km|m|cm|mm|px|pt|rem|em|vw|vh|ms|s|sec|secs|min|mins|hr|hrs|hz|khz|mhz|ghz|kb|mb|gb|tb|kbps|mbps|kcal|℃|°c|°f|元|万元|亿元|件|个|次|天|月|年|to|至|到))$/iu;
+const NON_CAPTION_VALIDATION_RE =
+  /(?:不正确|无效|不能为空|必填|格式错误|请输入|不匹配|已存在|至少\s*\d|不能超过|\binvalid\b|\brequired\b|\bmust be\b|\bcannot be\b|\btoo short\b|\btoo long\b)/i;
+const NON_CAPTION_ATTR_CLASS_RE =
+  /(?:^|[-_\s])(?:err|error|errors|invalid|warn|warning|alert|feedback|helper|hint|unit|suffix|addon)(?:$|[-_\s])/i;
 
 function cleaned(value: string | undefined): string | undefined {
   const trimmed = value?.replace(/\s+/g, " ").trim();
@@ -797,6 +810,60 @@ function handleContext(node: VomNode, state: RenderState): string[] {
   ]);
 }
 
+function capCodePoints(raw: string, maxChars: number): string {
+  const cps = [...raw];
+  return cps.length > maxChars ? `${cps.slice(0, maxChars).join("").trimEnd()}…` : raw;
+}
+
+function formatOptionToken(val: string, lbl: string, selected: boolean): string {
+  const star = selected ? "*" : "";
+  const cappedLbl = capCodePoints(lbl, MAX_INLINE_OPTION_LABEL_CHARS);
+  if (val === lbl) return `${JSON.stringify(cappedLbl)}${star}`;
+  const cappedVal = capCodePoints(val, MAX_INLINE_OPTION_VALUE_CHARS);
+  const key = /^[A-Za-z0-9_.:/-]+$/.test(cappedVal) ? cappedVal : JSON.stringify(cappedVal);
+  return `${key}=${JSON.stringify(cappedLbl)}${star}`;
+}
+
+function formatInlineSelectOptions(node: VomNode, state?: RenderState): string | undefined {
+  if (node.selectOptions && node.selectOptions.length > 0) {
+    const specs = node.selectOptions
+      .slice(0, MAX_INLINE_SELECT_OPTIONS)
+      .map((opt) => formatOptionToken(opt.value, cleaned(opt.label) ?? "", opt.selected === true));
+    if (node.selectOptionsTruncated || node.selectOptions.length > MAX_INLINE_SELECT_OPTIONS) {
+      specs.push("…");
+    }
+    return specs.join(" | ");
+  }
+  if (!state) return undefined;
+  const specs: string[] = [];
+  const selVal = cleaned(node.value);
+  const stack = [...(state.children.get(node.id) ?? [])].reverse();
+  while (stack.length > 0) {
+    const child = stack.pop() as VomNode;
+    const cTag = normalizedTag(child);
+    const cRole = normalizedRole(child);
+    if (cTag === "optgroup" || (cRole === "group" && cTag !== "option")) {
+      const nested = state.children.get(child.id) ?? [];
+      for (let i = nested.length - 1; i >= 0; i -= 1) stack.push(nested[i]);
+      continue;
+    }
+    if (cTag !== "option" && cRole !== "option") continue;
+    if (specs.length >= MAX_INLINE_SELECT_OPTIONS) {
+      specs.push("…");
+      break;
+    }
+    const lbl = cleaned(child.attrs?.label) ?? cleaned(child.name) ?? cleaned(child.text) ?? "";
+    const val = child.attrs?.value ?? lbl;
+    const selected =
+      child.checked === true ||
+      child.attrs?.["aria-selected"] === "true" ||
+      Object.prototype.hasOwnProperty.call(child.attrs ?? {}, "selected") ||
+      (selVal !== undefined && val === selVal);
+    specs.push(formatOptionToken(val, lbl, selected));
+  }
+  return specs.length > 0 ? specs.join(" | ") : undefined;
+}
+
 function renderNodeLine(
   node: VomNode,
   depth: number,
@@ -804,13 +871,24 @@ function renderNodeLine(
   context: string[] = [],
   surface: CondSurface | undefined = undefined,
   redactValues = false,
+  state?: RenderState,
 ): string {
+  const isNativeSelect = normalizedTag(node) === "select";
   let line = `${"  ".repeat(depth)}${ref ? `@${ref} ` : ""}${node.role ?? "generic"}`;
 
   const hint = dragHint(node);
   if (hint) line += ` [${hint}]`;
-  const name = cleaned(node.name);
+  const suppressRedundantTableName =
+    normalizedRole(node) === "table" &&
+    state?.foldedTableIds.has(node.id) === true &&
+    !node.attrs?.["aria-label"]?.trim() &&
+    !node.attrs?.["aria-labelledby"]?.trim() &&
+    !node.attrs?.title?.trim() &&
+    descendantTextCoveredByName(node, state);
+  const name = suppressRedundantTableName ? undefined : cleaned(node.name);
   if (name) line += ` ${JSON.stringify(name)}`;
+  const boundField = !name ? state?.boundFieldLabels.get(node.id) : undefined;
+  if (boundField) line += ` [field: ${JSON.stringify(boundField)}]`;
   if (context.length > 0) line += ` [ctx: ${context.join(" > ")}]`;
 
   // For link nodes with an external href, annotate so the agent can
@@ -843,6 +921,14 @@ function renderNodeLine(
       : rawValue?.slice(0, MAX_VALUE_LENGTH);
   if (value !== undefined) line += ` =${JSON.stringify(value)}`;
 
+  if (isNativeSelect && !node.sensitive && !redactValues) {
+    const inlineOpts = formatInlineSelectOptions(node, state);
+    if (inlineOpts) line += ` [options: ${inlineOpts}]`;
+  } else if (role === "combobox" && !isNativeSelect && !isEditableCombobox(node)) {
+    const expanded = node.attrs?.["aria-expanded"]?.toLowerCase() === "true";
+    line += expanded ? " [custom-dropdown: expanded]" : " [custom-dropdown: click to open]";
+  }
+
   if (surface && surface.subItems.length > 0) {
     const items = surface.subItems.slice(0, MAX_SURFACE_ITEMS).join(" | ");
     const suffix = surface.subItems.length > MAX_SURFACE_ITEMS ? " | …" : "";
@@ -852,6 +938,20 @@ function renderNodeLine(
   }
 
   return line;
+}
+
+function isEditableCombobox(node: VomNode): boolean {
+  const tag = normalizedTag(node);
+  const attrs = node.attrs ?? {};
+  const isReadonly =
+    Object.prototype.hasOwnProperty.call(attrs, "readonly") ||
+    attrs["aria-readonly"]?.trim().toLowerCase() === "true";
+  if ((tag === "input" || tag === "textarea") && !isReadonly) return true;
+  const ce = attrs.contenteditable?.trim().toLowerCase();
+  if (ce === "" || ce === "true" || ce === "plaintext-only") return true;
+  const auto = attrs["aria-autocomplete"]?.trim().toLowerCase();
+  if (auto && auto !== "none") return true;
+  return false;
 }
 
 function shouldSkipRedundantRefChildren(node: VomNode): boolean {
@@ -911,6 +1011,12 @@ interface RenderState {
   duplicateRefNames: Set<string>;
   surfaceMap: Map<number, CondSurface>;
   scopeMap: Map<number, ActiveScopeBlock>;
+  hasInteractiveDescendant: Set<number>;
+  boundFieldLabels: Map<number, string>;
+  consumedCaptionIds: Set<number>;
+  foldedRowCells: Map<number, string>;
+  foldedTableIds: Set<number>;
+  transparentRowgroupIds: Set<number>;
 }
 
 export interface RenderRow {
@@ -932,6 +1038,20 @@ function pushRenderChildren(
   }
 }
 
+function collectSubtreeText(node: VomNode, children: Map<number | null, VomNode[]>): string {
+  const kids = children.get(node.id) ?? [];
+  const ownName = cleaned(node.name);
+  if (kids.length === 0) {
+    return ownName ?? cleaned(node.text) ?? cleaned(node.value) ?? "";
+  }
+  const kidTexts = kids.map((child) => collectSubtreeText(child, children)).filter(Boolean);
+  if (ownName && (kidTexts.length === 0 || kidTexts.every((text) => ownName.includes(text)))) {
+    return ownName;
+  }
+  if (kidTexts.length > 0) return kidTexts.join(" ");
+  return ownName ?? cleaned(node.text) ?? cleaned(node.value) ?? "";
+}
+
 function* renderTreeRows(
   children: Map<number | null, VomNode[]>,
   state: RenderState,
@@ -944,8 +1064,33 @@ function* renderTreeRows(
   while (stack.length > 0) {
     const { node, depth } = stack.pop() as { node: VomNode; depth: number };
 
-    if (representedSources?.has(node.id) || (node.visualKey === undefined && !shouldRender(node))) {
+    if (state.consumedCaptionIds.has(node.id)) {
+      continue;
+    }
+
+    if (
+      state.transparentRowgroupIds.has(node.id) ||
+      representedSources?.has(node.id) ||
+      (node.visualKey === undefined && !shouldRender(node))
+    ) {
       pushRenderChildren(stack, children.get(node.id) ?? [], depth);
+      continue;
+    }
+
+    const rawParent = node.parentId === null ? undefined : state.nodesById.get(node.parentId);
+    const rawParentLabel = rawParent ? cleaned(rawParent.name) : undefined;
+
+    // CJK-safe exact parent-child echo deduplication: fold statictext only when verbatim equal (`===`).
+    if (
+      node.visualKey === undefined &&
+      !isVomReferenceNode(node) &&
+      !state.hasInteractiveDescendant.has(node.id) &&
+      normalizedRole(node) === "statictext" &&
+      rawParent &&
+      shouldRender(rawParent) &&
+      rawParentLabel !== undefined &&
+      cleaned(node.name) === rawParentLabel
+    ) {
       continue;
     }
 
@@ -953,6 +1098,23 @@ function* renderTreeRows(
       state.truncated = true;
       if (observation && state.visualAncestors.has(node.id))
         pushRenderChildren(stack, children.get(node.id) ?? [], depth);
+      continue;
+    }
+
+    const foldedCells = state.foldedRowCells.get(node.id);
+    if (foldedCells !== undefined && node.visualKey === undefined) {
+      const parent = observation ? rawParent : undefined;
+      const parentLabel = parent ? rawParentLabel : undefined;
+      const indent = "  ".repeat(Math.min(depth, state.maxDepth, 32));
+      yield {
+        ...(parent
+          ? {
+              context: `@context ${parent.role ?? parent.tag}${parentLabel ? ` ${JSON.stringify(Array.from(parentLabel).slice(0, 80).join(""))}` : ""}`,
+            }
+          : {}),
+        frameId: node.frameId,
+        text: `${indent}row ${JSON.stringify(foldedCells)}`,
+      };
       continue;
     }
 
@@ -966,14 +1128,15 @@ function* renderTreeRows(
     const indent = "  ".repeat(Math.min(depth, state.maxDepth, 32));
     const minimal = visual ? `${indent}@${ref} canvas [visual:screenshot]` : undefined;
     const label = cleaned(node.name);
+    const effectiveRefName = label ?? (!visual ? state.boundFieldLabels.get(node.id) : undefined);
+    const rowAnchor = ref && !visual ? node.rowAnchor : undefined;
     const text = visual
       ? label
         ? `${indent}@${ref} canvas ${JSON.stringify(Array.from(label).slice(0, 160).join(""))} [visual:screenshot]`
         : minimal!
-      : renderNodeLine(node, depth, ref, context, surface, state.redactValues);
-    const parent =
-      observation && node.parentId !== null ? state.nodesById.get(node.parentId) : undefined;
-    const parentLabel = parent ? cleaned(parent.name) : undefined;
+      : renderNodeLine(node, depth, ref, context, surface, state.redactValues, state);
+    const parent = observation ? rawParent : undefined;
+    const parentLabel = parent ? rawParentLabel : undefined;
     yield {
       ...(parent
         ? {
@@ -991,8 +1154,9 @@ function* renderTreeRows(
               ...(visual ? { visualKey: node.visualKey } : {}),
               ...(node.frameId ? { frameId: node.frameId } : {}),
               ...(node.role ? { role: node.role } : {}),
-              ...(label ? { name: label } : {}),
+              ...(effectiveRefName ? { name: effectiveRefName } : {}),
               ...(context.length > 0 ? { ctx: context.join(" > ") } : {}),
+              ...(rowAnchor ? { rowAnchor } : {}),
               line: 0,
             },
           }
@@ -1015,6 +1179,141 @@ function* renderTreeRows(
     }
     pushRenderChildren(stack, children.get(node.id) ?? [], depth + 1);
   }
+}
+
+function pureStaticCaptionText(
+  candidate: VomNode,
+  children: Map<number | null, VomNode[]>,
+  state: RenderState,
+): string | undefined {
+  if (
+    candidate.visualKey !== undefined ||
+    isVomReferenceNode(candidate) ||
+    state.hasInteractiveDescendant.has(candidate.id) ||
+    state.visualAncestors.has(candidate.id)
+  ) {
+    return undefined;
+  }
+  const role = normalizedRole(candidate);
+  if (!["statictext", "labeltext", "text", ""].includes(role)) return undefined;
+  const attrs = candidate.attrs;
+  if (attrs) {
+    const live = attrs["aria-live"]?.trim().toLowerCase();
+    if (live && live !== "off") return undefined;
+    const cls = attrs.class?.trim();
+    if (cls && NON_CAPTION_ATTR_CLASS_RE.test(cls)) return undefined;
+    const idAttr = attrs.id?.trim();
+    if (idAttr && NON_CAPTION_ATTR_CLASS_RE.test(idAttr)) return undefined;
+  }
+  const kids = children.get(candidate.id) ?? [];
+  let text: string | undefined;
+  if (kids.length === 0) {
+    text = cleaned(candidate.name) ?? cleaned(candidate.text);
+  } else if (
+    kids.length === 1 &&
+    normalizedRole(kids[0]) === "statictext" &&
+    (children.get(kids[0].id) ?? []).length === 0
+  ) {
+    text =
+      cleaned(kids[0].name) ??
+      cleaned(kids[0].text) ??
+      cleaned(candidate.name) ??
+      cleaned(candidate.text);
+  } else {
+    return undefined;
+  }
+  if (!text || text.length > 64 || isNoisyText(text)) return undefined;
+  if (NON_CAPTION_TOKEN_RE.test(text) || NON_CAPTION_VALIDATION_RE.test(text)) return undefined;
+  return text;
+}
+
+function isTrailingSuffixOfPreviousControl(
+  prevControl: VomNode | undefined,
+  captionNode: VomNode,
+  curInput: VomNode,
+  state: RenderState,
+): boolean {
+  if (!prevControl) return false;
+  const isControl =
+    isVomReferenceNode(prevControl) ||
+    LABELABLE_INPUT_ROLES.has(normalizedRole(prevControl)) ||
+    state.hasInteractiveDescendant.has(prevControl.id);
+  if (!isControl) return false;
+  // In `[input1] "text" [input2]`, if `input1` itself had no name or bound caption,
+  // this is a compound/range group (`[min] "至" [max]`), not `[label, input]` pairs.
+  if (
+    LABELABLE_INPUT_ROLES.has(normalizedRole(prevControl)) &&
+    !cleaned(prevControl.name) &&
+    !state.boundFieldLabels.has(prevControl.id)
+  ) {
+    return true;
+  }
+  const pr = prevControl.rect;
+  const cr = captionNode.rect;
+  const nr = curInput.rect;
+  if (pr && cr && nr && pr.h > 0 && cr.h > 0 && nr.h > 0) {
+    const prevMidY = pr.y + pr.h / 2;
+    const capMidY = cr.y + cr.h / 2;
+    const sameRowAsPrev =
+      cr.x >= pr.x + pr.w - 4 && Math.abs(capMidY - prevMidY) <= Math.max(pr.h, 16) * 0.65;
+    const curBelowPrev = nr.y >= pr.y + pr.h * 0.7;
+    if (sameRowAsPrev && curBelowPrev) return true;
+  }
+  return false;
+}
+
+function extractPureReadOnlyRowText(
+  row: VomNode,
+  children: Map<number | null, VomNode[]>,
+  state: RenderState,
+): string | undefined {
+  if (
+    row.visualKey !== undefined ||
+    state.visualAncestors.has(row.id) ||
+    normalizedRole(row) !== "row" ||
+    isVomReferenceNode(row) ||
+    state.hasInteractiveDescendant.has(row.id)
+  ) {
+    return undefined;
+  }
+  const kids = children.get(row.id) ?? [];
+  if (kids.length === 0) return undefined;
+  const cells: string[] = [];
+  for (const kid of kids) {
+    if (
+      kid.visualKey !== undefined ||
+      state.visualAncestors.has(kid.id) ||
+      !TABLE_CELL_ROLES.has(normalizedRole(kid))
+    ) {
+      return undefined;
+    }
+    cells.push(collectSubtreeText(kid, children));
+  }
+  if (cells.every((cell) => !cell)) return undefined;
+  return cells.join(" | ");
+}
+
+function recordFoldedRowRuns(
+  seq: readonly VomNode[],
+  children: Map<number | null, VomNode[]>,
+  state: RenderState,
+): void {
+  let run: Array<{ id: number; text: string }> = [];
+  const flush = () => {
+    if (run.length >= MIN_FOLDABLE_TABLE_ROWS) {
+      for (const item of run) state.foldedRowCells.set(item.id, item.text);
+    }
+    run = [];
+  };
+  for (const item of seq) {
+    const rowText = extractPureReadOnlyRowText(item, children, state);
+    if (rowText !== undefined) {
+      run.push({ id: item.id, text: rowText });
+    } else {
+      flush();
+    }
+  }
+  flush();
 }
 
 function createRenderState(
@@ -1053,16 +1352,120 @@ function createRenderState(
     duplicateRefNames,
     surfaceMap: new Map(surfaces.map((surface) => [surface.triggerId, surface])),
     scopeMap: new Map(activeScopeBlocks.map((scope) => [scope.triggerId, scope])),
+    hasInteractiveDescendant: new Set(),
+    boundFieldLabels: new Map(),
+    consumedCaptionIds: new Set(),
+    foldedRowCells: new Map(),
+    foldedTableIds: new Set(),
+    transparentRowgroupIds: new Set(),
   };
 
   for (const node of nodes) {
-    if (node.visualKey === undefined) continue;
-    let id = node.parentId;
-    while (id !== null && !state.visualAncestors.has(id)) {
-      state.visualAncestors.add(id);
-      id = state.parentMap.get(id) ?? null;
+    if (node.visualKey !== undefined) {
+      let id = node.parentId;
+      while (id !== null && !state.visualAncestors.has(id)) {
+        state.visualAncestors.add(id);
+        id = state.parentMap.get(id) ?? null;
+      }
+    }
+    if (node.visualKey !== undefined || isVomReferenceNode(node)) {
+      let pid = state.parentMap.get(node.id) ?? null;
+      let guard = 0;
+      while (pid !== null && guard++ <= state.parentMap.size) {
+        if (state.hasInteractiveDescendant.has(pid)) break;
+        state.hasInteractiveDescendant.add(pid);
+        pid = state.parentMap.get(pid) ?? null;
+      }
     }
   }
+
+  for (const siblings of children.values()) {
+    for (let i = 0; i < siblings.length; i++) {
+      const cur = siblings[i];
+      if (!LABELABLE_INPUT_ROLES.has(normalizedRole(cur)) || cleaned(cur.name)) continue;
+      let bound = false;
+      if (i > 0) {
+        const prev = siblings[i - 1];
+        const prevBefore = i >= 2 ? siblings[i - 2] : undefined;
+        if (
+          prev.visualKey === undefined &&
+          !isVomReferenceNode(prev) &&
+          !state.hasInteractiveDescendant.has(prev.id) &&
+          !state.consumedCaptionIds.has(prev.id) &&
+          !isTrailingSuffixOfPreviousControl(prevBefore, prev, cur, state)
+        ) {
+          const caption = pureStaticCaptionText(prev, children, state);
+          if (caption) {
+            state.boundFieldLabels.set(cur.id, caption);
+            state.consumedCaptionIds.add(prev.id);
+            bound = true;
+          }
+        }
+      }
+      if (!bound && cur.nearbyText) {
+        const near = cleanSemanticText(cur.nearbyText);
+        if (
+          near &&
+          near.length <= 48 &&
+          !NON_CAPTION_TOKEN_RE.test(near) &&
+          !NON_CAPTION_VALIDATION_RE.test(near)
+        ) {
+          state.boundFieldLabels.set(cur.id, near);
+        }
+      }
+    }
+  }
+
+  for (const container of nodes) {
+    const cRole = normalizedRole(container);
+    if (cRole === "table" || cRole === "grid") {
+      const seq: VomNode[] = [];
+      const inlineRowgroups: VomNode[] = [];
+      for (const ch of children.get(container.id) ?? []) {
+        const hasExplicitRgLabel = Boolean(
+          ch.attrs?.["aria-label"]?.trim() ||
+            ch.attrs?.["aria-labelledby"]?.trim() ||
+            ch.attrs?.title?.trim(),
+        );
+        const chRole = normalizedRole(ch);
+        const chTag = normalizedTag(ch);
+        const isPureRg =
+          ch.visualKey === undefined &&
+          !isVomReferenceNode(ch) &&
+          !hasExplicitRgLabel &&
+          (chRole === "rowgroup" ||
+            chTag === "thead" ||
+            chTag === "tbody" ||
+            chTag === "tfoot" ||
+            !shouldRender(ch)) &&
+          (!cleaned(ch.name) || descendantTextCoveredByName(ch, state));
+        if (isPureRg) {
+          inlineRowgroups.push(ch);
+          seq.push(...(children.get(ch.id) ?? []));
+        } else {
+          seq.push(ch);
+        }
+      }
+      const prevFoldedCount = state.foldedRowCells.size;
+      recordFoldedRowRuns(seq, children, state);
+      if (state.foldedRowCells.size > prevFoldedCount) {
+        state.foldedTableIds.add(container.id);
+      }
+      for (const rg of inlineRowgroups) {
+        const rgKids = children.get(rg.id) ?? [];
+        if (rgKids.length > 0 && rgKids.every((rk) => state.foldedRowCells.has(rk.id))) {
+          state.transparentRowgroupIds.add(rg.id);
+        }
+      }
+    } else if (cRole === "rowgroup") {
+      const parentId = state.parentMap.get(container.id) ?? null;
+      const parentRole = parentId === null ? "" : normalizedRole(state.nodesById.get(parentId)!);
+      if (parentRole !== "table" && parentRole !== "grid") {
+        recordFoldedRowRuns(children.get(container.id) ?? [], children, state);
+      }
+    }
+  }
+
   return state;
 }
 

@@ -105,6 +105,7 @@ fn main() {
     // still come from the catalog; this list cannot hide a method from generation.
     for (name, file) in [
         ("PendingJavaScriptDialog", "pending_javascript_dialog"),
+        ("RpcErrorReason", "rpc_error_reason"),
         ("DialogHandleParams", "tool_dialog_handle_params"),
         ("OperationParams", "tool_operation_params"),
         ("ActionExpectation", "action_expectation"),

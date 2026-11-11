@@ -70,6 +70,7 @@ export interface ResolvedActionTarget {
   frameId?: string;
   usedRef?: string;
   usedSelector?: string;
+  rowAnchor?: string;
 }
 
 const DEFAULT_TIMEOUT_MS = 30_000;
@@ -158,6 +159,7 @@ export async function resolveBackendNode(
       frameId?: string;
       usedRef?: string;
       usedSelector?: string;
+      rowAnchor?: string;
     }
   | RpcError
 > {
@@ -186,6 +188,7 @@ export async function resolveBackendNode(
       },
       ...(resolved.frameId ? { frameId: resolved.frameId } : {}),
       usedRef: resolved.refKey,
+      ...(resolved.rowAnchor ? { rowAnchor: resolved.rowAnchor } : {}),
     };
   }
   // selector path
@@ -944,8 +947,11 @@ type SelectMutationResult =
     }
   | {
       ok: false;
-      reason: "option_not_found" | "target_disabled";
+      reason: "option_not_found" | "option_ambiguous" | "target_disabled";
       missing?: string;
+      ambiguous?: string;
+      count?: number;
+      available?: string[];
     };
 
 // ---------------------------------------------------------------------------
@@ -1960,10 +1966,13 @@ export async function handleSelect(
       { backendNodeId: node.backendNodeId },
     );
     if (!described.node || (described.node.nodeName ?? "").toUpperCase() !== "SELECT") {
+      const targetHint = node.usedRef ? `@${node.usedRef}` : (node.usedSelector ?? "@ref");
+      const recovery = `Click ${targetHint} first to expand the custom dropdown, then click the desired option.`;
       return rpcError(
         "invalid_params",
         "target_not_select",
-        `element ${described.node?.nodeName ?? "?"} not a <select>`,
+        `element ${described.node?.nodeName ?? "?"} is not a native <select>; ${recovery}`,
+        { recovery },
       );
     }
     const attrs = described.node.attributes ?? [];
@@ -2016,19 +2025,84 @@ export async function handleSelect(
           return { ok: false, reason: 'target_disabled' };
         }
         const multiple = select.multiple;
-        const known = new Set(Array.from(select.options).map((o) => o.value));
+        const opts = Array.from(select.options);
+        const norm = (s) => String(s || '').replace(/\\s+/g, ' ').trim();
+        const formatCandidate = (o) => {
+          const lbl = norm(o.getAttribute('label')) || norm(o.text);
+          if (!lbl || o.value === lbl) return JSON.stringify(o.value);
+          return (o.value === '' ? '""' : o.value) + '=' + JSON.stringify(lbl);
+        };
+        const available = opts.slice(0, 12).map(formatCandidate);
+        const selectedIndices = new Set();
         for (const v of values) {
-          if (!known.has(v)) {
-            return { ok: false, reason: 'option_not_found', missing: v };
+          const byValue = [];
+          for (let i = 0; i < opts.length; i++) {
+            if (opts[i].value === v) byValue.push(i);
           }
+          if (byValue.length > 0) {
+            for (const idx of byValue) selectedIndices.add(idx);
+            continue;
+          }
+          const vTrim = norm(v);
+          if (vTrim) {
+            const byExactLabel = [];
+            for (let i = 0; i < opts.length; i++) {
+              const attrLbl = norm(opts[i].getAttribute('label'));
+              const txtLbl = norm(opts[i].text);
+              if ((attrLbl && attrLbl === vTrim) || (txtLbl && txtLbl === vTrim)) {
+                byExactLabel.push(i);
+              }
+            }
+            if (byExactLabel.length === 1) {
+              selectedIndices.add(byExactLabel[0]);
+              continue;
+            }
+            if (byExactLabel.length > 1) {
+              return {
+                ok: false,
+                reason: 'option_ambiguous',
+                ambiguous: v,
+                count: byExactLabel.length,
+                available,
+              };
+            }
+            const vLower = vTrim.toLowerCase();
+            const byLowerLabel = [];
+            for (let i = 0; i < opts.length; i++) {
+              const attrLbl = norm(opts[i].getAttribute('label')).toLowerCase();
+              const txtLbl = norm(opts[i].text).toLowerCase();
+              if ((attrLbl && attrLbl === vLower) || (txtLbl && txtLbl === vLower)) {
+                byLowerLabel.push(i);
+              }
+            }
+            if (byLowerLabel.length === 1) {
+              selectedIndices.add(byLowerLabel[0]);
+              continue;
+            }
+            if (byLowerLabel.length > 1) {
+              return {
+                ok: false,
+                reason: 'option_ambiguous',
+                ambiguous: v,
+                count: byLowerLabel.length,
+                available,
+              };
+            }
+          }
+          return { ok: false, reason: 'option_not_found', missing: v, available };
         }
-        const want = new Set(values);
-        for (const opt of select.options) {
-          opt.selected = want.has(opt.value);
+        if (multiple) {
+          for (let i = 0; i < opts.length; i++) {
+            opts[i].selected = selectedIndices.has(i);
+          }
+        } else {
+          const firstIdx = selectedIndices.size > 0 ? Array.from(selectedIndices)[0] : -1;
+          select.selectedIndex = firstIdx;
+          if (firstIdx >= 0 && opts[firstIdx]) opts[firstIdx].selected = true;
         }
         select.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
         select.dispatchEvent(new Event('change', { bubbles: true }));
-        const selected = Array.from(select.selectedOptions);
+        const selected = opts.filter((o) => o.selected);
         return {
           ok: true,
           multiple,
@@ -2044,11 +2118,33 @@ export async function handleSelect(
       if (mutation?.reason === "target_disabled") {
         return { code: "invalid_params", message: "select requires an enabled <select>" };
       }
+      if (mutation?.reason === "option_ambiguous") {
+        const suffix = mutation.available?.length
+          ? ` (available: ${mutation.available.join(" | ")})`
+          : "";
+        return rpcError(
+          "invalid_params",
+          "option_ambiguous",
+          `option label "${mutation.ambiguous ?? "?"}" matched ${mutation.count ?? 2} options in <select>; pass an explicit option value instead${suffix}`,
+          {
+            ...(mutation.ambiguous !== undefined ? { ambiguous: mutation.ambiguous } : {}),
+            ...(mutation.count !== undefined ? { count: mutation.count } : {}),
+            ...(mutation.available ? { available: mutation.available } : {}),
+          },
+        );
+      }
       if (mutation?.reason === "option_not_found") {
+        const suffix = mutation.available?.length
+          ? ` (available: ${mutation.available.join(" | ")})`
+          : "";
         return rpcError(
           "invalid_params",
           "option_not_found",
-          `option value ${mutation.missing ?? "?"} not found in <select>`,
+          `option value ${mutation.missing ?? "?"} not found in <select>${suffix}`,
+          {
+            ...(mutation.missing !== undefined ? { missing: mutation.missing } : {}),
+            ...(mutation.available ? { available: mutation.available } : {}),
+          },
         );
       }
       return { code: "cdp_failed", message: "select mutation returned an unexpected result" };
