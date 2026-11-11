@@ -357,4 +357,50 @@ describe("computed-style stealth prompt-injection stripper", () => {
     const index = await buildDocumentIndex(nodes);
     expect([...index.excludedBackendNodeIds]).toEqual([]);
   });
+
+  it("preserves text-free modal backdrops, empty layout spacers and white text on dark translucent scrims", async () => {
+    const nodes: DecodedNode[] = [
+      styledNode(1, null, "body", {
+        bounds: [0, 0, 1000, 800],
+        styles: { "background-color": "rgb(255, 255, 255)" },
+      }),
+      // Semi-transparent modal backdrop (#0008 -> rgba(0, 0, 0, 0.533)) with default black UA color
+      styledNode(10, 1, "div", {
+        attrs: { id: "backdrop" },
+        bounds: [0, 0, 1000, 800],
+        styles: {
+          position: "fixed",
+          color: "rgb(0, 0, 0)",
+          "background-color": "rgba(0, 0, 0, 0.533)",
+        },
+      }),
+      // Opaque black empty backdrop / spacer (no text content)
+      styledNode(11, 1, "div", {
+        bounds: [0, 0, 1000, 800],
+        styles: {
+          position: "fixed",
+          color: "rgb(0, 0, 0)",
+          "background-color": "rgb(0, 0, 0)",
+        },
+      }),
+      // Empty opacity:0 non-rendered div (used by layout / visibility checks)
+      styledNode(12, 1, "div", {
+        bounds: [10, 90, 100, 30],
+        styles: { opacity: "0" },
+      }),
+      // Dark translucent banner over white body with readable white heading text
+      styledNode(20, 1, "div", {
+        bounds: [0, 0, 1000, 200],
+        styles: { "background-color": "rgba(0, 0, 0, 0.6)" },
+      }),
+      styledNode(21, 20, "h2", {
+        styles: { color: "rgb(255, 255, 255)" },
+        textContent: "账单核对中心",
+      }),
+      styledNode(22, 21, "#text", { textContent: "账单核对中心" }),
+    ];
+
+    const index = await buildDocumentIndex(nodes);
+    expect([...index.excludedBackendNodeIds]).toEqual([]);
+  });
 });

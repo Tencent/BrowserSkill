@@ -887,7 +887,7 @@ function createRowAnchorResolver(graph: SemanticGraph, indexes: ResolveIndexes) 
     if (!row?.dom) return undefined;
 
     const ancestors = new Set<SemanticNodeId>();
-    let walk = node.domParentId;
+    let walk: SemanticNodeId | undefined = node.domParentId;
     let guard = 0;
     while (walk && walk !== row.id && guard++ < 16) {
       ancestors.add(walk);

@@ -187,9 +187,9 @@ function applyStealthPromptInjectionExclusions<T extends DecodedNode>(
     const rawBg = input[i].layout?.styles["background-color"];
     if (!rawBg || rawBg === "rgba(0, 0, 0, 0)" || rawBg === "transparent") continue;
     const parsed = parseCachedColor(rawBg);
-    if (parsed && parsed.a >= 0.05) {
+    if (parsed && parsed.a >= 0.15) {
       ownBgByNode.set(input[i].backendNodeId, parsed);
-      hasAnyOpaqueBg = true;
+      if (parsed.a >= 0.9) hasAnyOpaqueBg = true;
     }
   }
 
@@ -308,7 +308,7 @@ function applyStealthPromptInjectionExclusions<T extends DecodedNode>(
           kind = "textstyle";
         } else if (hasAnyOpaqueBg) {
           const bg = resolveEffectiveBg(item.backendNodeId);
-          if (bg && fg.r === bg.r && fg.g === bg.g && fg.b === bg.b) {
+          if (bg && bg.a >= 0.9 && fg.r === bg.r && fg.g === bg.g && fg.b === bg.b) {
             kind = "textstyle";
           }
         }
@@ -368,15 +368,62 @@ function applyStealthPromptInjectionExclusions<T extends DecodedNode>(
     const n = nodes.get(id);
     if (!n) return 0;
     visiting.add(id);
-    let total = n.textContent ? n.textContent.replace(/\s+/g, " ").trim().length : 0;
-    for (const ch of childrenByParent.get(id) ?? []) {
-      if (ch.tag.startsWith("#")) continue;
-      total += subtreeTextLen(ch.backendNodeId, visiting);
-      if (total > MAX_SR_ONLY_LABEL_CHARS + 1) break;
+    let own = n.textContent ? n.textContent.replace(/\s+/g, " ").trim().length : 0;
+    const kids = childrenByParent.get(id);
+    if (own === 0 && kids) {
+      for (let i = 0; i < kids.length; i++) {
+        const ch = kids[i];
+        if (ch.tag.startsWith("#") && ch.textContent) {
+          own += ch.textContent.replace(/\s+/g, " ").trim().length;
+        }
+      }
+    }
+    let total = own;
+    if (kids) {
+      for (let i = 0; i < kids.length; i++) {
+        const ch = kids[i];
+        if (ch.tag.startsWith("#")) continue;
+        total += subtreeTextLen(ch.backendNodeId, visiting);
+        if (total > MAX_SR_ONLY_LABEL_CHARS + 1) break;
+      }
     }
     visiting.delete(id);
     subtreeTextLenMemo.set(id, total);
     return total;
+  };
+
+  const subtreeLabelAttrMemo = new Map<number, boolean>();
+  const subtreeHasLabelAttr = (id: number, visiting: Set<number>): boolean => {
+    const cached = subtreeLabelAttrMemo.get(id);
+    if (cached !== undefined) return cached;
+    if (visiting.has(id)) return false;
+    const n = nodes.get(id);
+    if (!n) return false;
+    const a = n.attrs;
+    if (
+      a["aria-label"]?.trim() ||
+      a["aria-description"]?.trim() ||
+      a["aria-roledescription"]?.trim() ||
+      a["aria-valuetext"]?.trim() ||
+      a.alt?.trim() ||
+      a.title?.trim() ||
+      a.placeholder?.trim()
+    ) {
+      subtreeLabelAttrMemo.set(id, true);
+      return true;
+    }
+    visiting.add(id);
+    let found = false;
+    for (const ch of childrenByParent.get(id) ?? []) {
+      if (ch.tag.startsWith("#")) continue;
+      if (subtreeHasLabelAttr(ch.backendNodeId, visiting)) {
+        found = true;
+        break;
+      }
+    }
+    visiting.delete(id);
+    subtreeLabelAttrMemo.set(id, found);
+    return found;
   };
 
   const exemptSubtreeIds = new Set<number>();
@@ -477,7 +524,11 @@ function applyStealthPromptInjectionExclusions<T extends DecodedNode>(
     ) {
       continue;
     }
-    if (hasInteractiveAncestor(id) && subtreeTextLen(id, new Set()) <= MAX_SR_ONLY_LABEL_CHARS) {
+    const textLen = subtreeTextLen(id, new Set());
+    if (textLen === 0 && !subtreeHasLabelAttr(id, new Set())) {
+      continue;
+    }
+    if (hasInteractiveAncestor(id) && textLen <= MAX_SR_ONLY_LABEL_CHARS) {
       markExemptSubtree(id);
       continue;
     }
