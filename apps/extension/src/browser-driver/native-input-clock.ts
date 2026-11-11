@@ -54,6 +54,12 @@ interface Calibration {
 const MAX_AGE_MS = 60_000;
 const CLOCK_CHANGE_PRECISION_MS = 0.25;
 const PROBE_PRECISION_MS = 0.25;
+const MAX_SAMPLE_SPAN_MS = 0.5;
+// Each sample's truncated `Date.now()` interval has width `1 + 2 * PROBE_PRECISION_MS + (after - before)`
+// (`1.5..2.0ms`), so narrow fractional-millisecond phase spread across probes stays `<= 2.0ms`
+// while still bounding midpoint error within `<= 1.0ms` (`< INPUT_CLOCK_PRECISION_MS = 1.5ms`).
+const MAX_CALIBRATION_SPAN_MS = 1 + 2 * PROBE_PRECISION_MS + MAX_SAMPLE_SPAN_MS;
+const MAX_CALIBRATION_ATTEMPTS = 3;
 
 function reading(): Reading {
   for (let attempt = 0; attempt < 3; attempt++) {
@@ -92,44 +98,81 @@ export class NativeInputClock {
 
   private async calibrate(): Promise<void> {
     const revision = this.revision;
-    const reference = reading();
-    const samples = await this.sample();
-    let earliest = -Infinity;
-    let latest = Infinity;
-    if (samples.length < 3) throw new NativeInputClockError("Native clock probes were incomplete");
-    for (const sample of samples) {
-      if (
-        ![sample.timestamp, sample.eventTimestamp, sample.before, sample.wall, sample.after].every(
-          Number.isFinite,
-        ) ||
-        sample.eventTimestamp <= 0 ||
-        sample.after < sample.before ||
-        sample.after - sample.before > 0.5
-      )
-        throw new NativeInputClockError("The browser returned an invalid native clock sample");
-      // Date.now truncates; the true wall sample is in [wall, wall+1).
-      earliest = Math.max(
-        earliest,
-        sample.eventTimestamp - sample.after - sample.timestamp + sample.wall - PROBE_PRECISION_MS,
-      );
-      latest = Math.min(
-        latest,
-        sample.eventTimestamp -
-          sample.before -
-          sample.timestamp +
-          sample.wall +
-          1 +
-          PROBE_PRECISION_MS,
-      );
+    let lastError: NativeInputClockError | undefined;
+    for (let attempt = 0; attempt < MAX_CALIBRATION_ATTEMPTS; attempt++) {
+      if (attempt > 0) await Promise.resolve();
+      if (this.revision !== revision) {
+        throw new NativeInputClockError("The browser's native input clock is not stable");
+      }
+      let reference: Reading;
+      try {
+        reference = reading();
+      } catch (error) {
+        if (error instanceof NativeInputClockError) {
+          lastError = error;
+          continue;
+        }
+        throw error;
+      }
+      const samples = await this.sample();
+      if (samples.length < 3) {
+        throw new NativeInputClockError("Native clock probes were incomplete");
+      }
+      try {
+        let earliest = -Infinity;
+        let latest = Infinity;
+        for (const sample of samples) {
+          if (
+            ![
+              sample.timestamp,
+              sample.eventTimestamp,
+              sample.before,
+              sample.wall,
+              sample.after,
+            ].every(Number.isFinite) ||
+            sample.eventTimestamp <= 0 ||
+            sample.after < sample.before ||
+            sample.after - sample.before > MAX_SAMPLE_SPAN_MS
+          ) {
+            throw new NativeInputClockError("The browser returned an invalid native clock sample");
+          }
+          // Date.now truncates; the true wall sample is in [wall, wall+1).
+          earliest = Math.max(
+            earliest,
+            sample.eventTimestamp -
+              sample.after -
+              sample.timestamp +
+              sample.wall -
+              PROBE_PRECISION_MS,
+          );
+          latest = Math.min(
+            latest,
+            sample.eventTimestamp -
+              sample.before -
+              sample.timestamp +
+              sample.wall +
+              1 +
+              PROBE_PRECISION_MS,
+          );
+        }
+        if (
+          this.revision !== revision ||
+          latest < earliest ||
+          latest - earliest > MAX_CALIBRATION_SPAN_MS ||
+          !sameClock(reference, reading())
+        ) {
+          throw new NativeInputClockError("The browser's native input clock is not stable");
+        }
+        this.calibration = { offset: (earliest + latest) / 2, reference };
+        return;
+      } catch (error) {
+        if (!(error instanceof NativeInputClockError) || this.revision !== revision) {
+          throw error;
+        }
+        lastError = error;
+      }
     }
-    if (
-      this.revision !== revision ||
-      latest < earliest ||
-      latest - earliest > 1 ||
-      !sameClock(reference, reading())
-    )
-      throw new NativeInputClockError("The browser's native input clock is not stable");
-    this.calibration = { offset: (earliest + latest) / 2, reference };
+    throw lastError ?? new NativeInputClockError("The browser's native input clock is not stable");
   }
 
   async prepare(): Promise<NativeInputTimestamp> {

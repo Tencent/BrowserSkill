@@ -186,7 +186,9 @@ export interface ChromiumCdpOptions {
   onDocumentChanged?: (tabId: number) => void;
   /**
    * Sliding idle duration (ms) before soft-detaching `chrome.debugger` from a
-   * tab when all 4 safety guards pass. Defaults to `75_000`; `<= 0` disables it.
+   * tab when all 4 safety guards pass. Defaults to `75_000` when wired to the
+   * production `chromeDebuggerApi` (or `0` when an injected test `CdpDebuggerApi`
+   * omits `idleDetachMs`); `<= 0` disables it.
    */
   idleDetachMs?: number;
 }
@@ -909,7 +911,8 @@ export class ChromiumCdp {
   }
 
   private idleDetachDelayMs(): number {
-    return this.options.idleDetachMs ?? DEFAULT_IDLE_DETACH_MS;
+    if (this.options.idleDetachMs !== undefined) return this.options.idleDetachMs;
+    return this.api === chromeDebuggerApi ? DEFAULT_IDLE_DETACH_MS : 0;
   }
 
   private clearIdleTimer(tabId: number): void {

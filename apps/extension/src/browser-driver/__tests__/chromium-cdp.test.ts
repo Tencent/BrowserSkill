@@ -2162,7 +2162,10 @@ describe("idle soft-detach and immediate close/return detach", () => {
     vi.useFakeTimers();
     const { api, onEvent } = fakeApi();
     const changed = vi.fn();
-    const cdp = new ChromiumCdp(api, { onDocumentChanged: changed });
+    const cdp = new ChromiumCdp(api, {
+      onDocumentChanged: changed,
+      idleDetachMs: DEFAULT_IDLE_DETACH_MS,
+    });
     try {
       expect(DEFAULT_IDLE_DETACH_MS).toBe(75_000);
       cdp.trackSessionTab("sess-1", 41);
@@ -2371,23 +2374,26 @@ describe("idle soft-detach and immediate close/return detach", () => {
   it("detaches in 0ms on releaseSessionTab / detachSession and cleans up idle timers", async () => {
     vi.useFakeTimers();
     const { api } = fakeApi();
-    const cdp = new ChromiumCdp(api);
+    const cdp = new ChromiumCdp(api, { idleDetachMs: DEFAULT_IDLE_DETACH_MS });
     try {
       cdp.trackSessionTab("sess-a", 46);
       cdp.trackSessionTab("sess-b", 47);
       await cdp.ensureAttached(46);
       await cdp.ensureAttached(47);
+      expect(vi.getTimerCount()).toBe(2);
 
       // 0ms immediate detach on `bsk tab return` (`releaseSessionTab`) and `bsk close` (`detachSession`)
       // without advancing fake timers at all.
       await cdp.releaseSessionTab("sess-a", 46);
       expect(api.detach).toHaveBeenCalledExactlyOnceWith({ tabId: 46 });
       expect(cdp.isAttached(46)).toBe(false);
+      expect(vi.getTimerCount()).toBe(1);
 
       await cdp.detachSession("sess-b");
       expect(api.detach).toHaveBeenCalledTimes(2);
       expect(api.detach).toHaveBeenLastCalledWith({ tabId: 47 });
       expect(cdp.isAttached(47)).toBe(false);
+      expect(vi.getTimerCount()).toBe(0);
 
       // Advancing past 75s triggers zero orphaned timer calls.
       await vi.advanceTimersByTimeAsync(100_000);
