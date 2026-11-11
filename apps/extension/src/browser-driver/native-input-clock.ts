@@ -54,11 +54,10 @@ interface Calibration {
 const MAX_AGE_MS = 60_000;
 const CLOCK_CHANGE_PRECISION_MS = 0.25;
 const PROBE_PRECISION_MS = 0.25;
+// Each sample enforces `after - before <= 0.5`, so its truncated `Date.now()` interval has width
+// `1 + 2 * PROBE_PRECISION_MS + (after - before) <= 2.0ms`. Any non-empty intersection (`earliest <= latest`)
+// is a subset of each sample's interval, keeping midpoint error `<= 1.0ms` (`< INPUT_CLOCK_PRECISION_MS = 1.5ms`).
 const MAX_SAMPLE_SPAN_MS = 0.5;
-// Each sample's truncated `Date.now()` interval has width `1 + 2 * PROBE_PRECISION_MS + (after - before)`
-// (`1.5..2.0ms`), so narrow fractional-millisecond phase spread across probes stays `<= 2.0ms`
-// while still bounding midpoint error within `<= 1.0ms` (`< INPUT_CLOCK_PRECISION_MS = 1.5ms`).
-const MAX_CALIBRATION_SPAN_MS = 1 + 2 * PROBE_PRECISION_MS + MAX_SAMPLE_SPAN_MS;
 const MAX_CALIBRATION_ATTEMPTS = 3;
 
 function reading(): Reading {
@@ -155,12 +154,7 @@ export class NativeInputClock {
               PROBE_PRECISION_MS,
           );
         }
-        if (
-          this.revision !== revision ||
-          latest < earliest ||
-          latest - earliest > MAX_CALIBRATION_SPAN_MS ||
-          !sameClock(reference, reading())
-        ) {
+        if (this.revision !== revision || latest < earliest || !sameClock(reference, reading())) {
           throw new NativeInputClockError("The browser's native input clock is not stable");
         }
         this.calibration = { offset: (earliest + latest) / 2, reference };

@@ -228,6 +228,23 @@ pub fn full_handler(status: DaemonStatus, state: Arc<DaemonState>) -> RpcHandler
                     }
                 })
                 .flatten();
+            let tab_transition = matches!(
+                method,
+                Method::ToolTabCreate
+                    | Method::ToolTabSelect
+                    | Method::ToolTabBorrow
+                    | Method::ToolTabClose
+                    | Method::ToolTabReturn
+            )
+            .then(|| {
+                let sid = params
+                    .get("session_id")
+                    .and_then(Value::as_str)
+                    .filter(|s| !s.is_empty())
+                    .map(|s| SessionId(s.to_string()))?;
+                Some((sid, method.clone(), params.clone()))
+            })
+            .flatten();
             let mut ticket = if method.is_tool() {
                 match state.audit.begin(params.get("session_id").and_then(Value::as_str).unwrap_or(""), &method, &params) {
                     Ok(ticket) => ticket,
@@ -414,6 +431,13 @@ pub fn full_handler(status: DaemonStatus, state: Arc<DaemonState>) -> RpcHandler
                 {
                     obj.insert("_scope_meta".into(), recorded);
                 }
+            }
+            if let (Some((sid, req_method, req_params)), ResponseBody::Ok(value)) =
+                (&tab_transition, &body)
+            {
+                state
+                    .scopes
+                    .record_tab_transition(sid, req_method, req_params, value);
             }
             if let Some(ticket) = ticket {
                 state.audit.finish(ticket, &body);
@@ -1501,6 +1525,14 @@ pub(super) async fn handle_session_start_scoped(
     };
 
     let scope = scope_meta.caller_scope.as_deref().unwrap_or("default");
+    let binds_caller_scope = scope_meta.bind_scope
+        || scope_meta.reuse_or_start_scope
+        || super::scopes::is_isolated_scope(scope);
+    let scope_lock = binds_caller_scope.then(|| state.scopes.scope_start_lock(scope));
+    let _scope_guard = match &scope_lock {
+        Some(lock) => Some(lock.lock().await),
+        None => None,
+    };
     if scope_meta.reuse_or_start_scope
         && let Some((binding, live)) = state.scopes.active_binding(scope, &state.sessions)
     {

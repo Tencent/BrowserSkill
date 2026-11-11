@@ -194,6 +194,7 @@ pub fn dispatch_open(args: OpenArgs, format: Format) -> Result<(), CliError> {
         args.wait_for.as_deref(),
         args.wait_not.as_deref(),
         wait_budget,
+        "committed",
     )?;
 
     render_state_receipt(
@@ -230,6 +231,7 @@ pub fn dispatch_sync(args: SyncArgs, format: Format) -> Result<(), CliError> {
         args.wait_for.as_deref(),
         args.wait_not.as_deref(),
         wait_budget,
+        "none",
     )?;
 
     render_state_receipt(
@@ -443,6 +445,7 @@ fn settled_sync_with_conditions(
     wait_for: Option<&str>,
     wait_not: Option<&str>,
     wait_budget_ms: u32,
+    prior_effect_state: &'static str,
 ) -> Result<Value, CliError> {
     let sock_buf: PathBuf = sock.to_path_buf();
     let start = Instant::now();
@@ -474,19 +477,26 @@ fn settled_sync_with_conditions(
         })?;
         cooperate::verify_policy(&reply, Some(control_policy))?;
         if reply["settle"]["outcome"] == "not_ready" {
+            let mut data = json!({
+                "reason": "control_held",
+                "effect_state": prior_effect_state,
+            });
+            if let Some(sid) = explicit_session.filter(|s| !s.is_empty()) {
+                data["session_id"] = Value::String(sid.to_string());
+            }
+            if let Some(tid) = tab_id {
+                data["tab_id"] = Value::from(tid);
+            }
             return Err(CliError::from_rpc(RpcError {
                 code: ErrorCode::PermissionDenied,
                 message: "tab control is currently held by the user; wait for hand-back and run 'bsk sync'".into(),
-                data: Some(json!({
-                    "reason": "control_held",
-                    "effect_state": "none",
-                })),
+                data: Some(data),
             }));
         }
 
-        let vom_text = extract_vom_text(&reply);
-        let for_ok = wait_for.is_none_or(|needle| vom_text.contains(needle));
-        let not_ok = wait_not.is_none_or(|needle| !vom_text.contains(needle));
+        let searchable = searchable_sync_text(&reply);
+        let for_ok = wait_for.is_none_or(|needle| searchable.contains(needle));
+        let not_ok = wait_not.is_none_or(|needle| !searchable.contains(needle));
         if for_ok && not_ok {
             if let Some(obj) = reply.as_object_mut() {
                 obj.remove("settle");
@@ -503,31 +513,98 @@ fn settled_sync_with_conditions(
             if !not_ok && let Some(w) = wait_not {
                 unmet.push(format!("--wait-not {w:?}"));
             }
+            let mut data = json!({
+                "effect_state": prior_effect_state,
+            });
+            if let Some(sid) = explicit_session.filter(|s| !s.is_empty()) {
+                data["session_id"] = Value::String(sid.to_string());
+            }
+            if let Some(tid) = tab_id {
+                data["tab_id"] = Value::from(tid);
+            }
             return Err(CliError::from_rpc(RpcError {
                 code: ErrorCode::Timeout,
                 message: format!(
                     "timed out after {wait_budget_ms}ms waiting for VOM condition ({})",
                     unmet.join(", ")
                 ),
-                data: Some(json!({
-                    "effect_state": "none",
-                })),
+                data: Some(data),
             }));
         }
         std::thread::sleep(WAIT_POLL_INTERVAL.min(deadline - elapsed));
     }
 }
 
-fn extract_vom_text(reply: &Value) -> &str {
-    reply
-        .pointer("/observation/text")
-        .and_then(Value::as_str)
-        .or_else(|| {
-            reply
-                .pointer("/_scope_meta/cached_vom")
+fn searchable_sync_text(reply: &Value) -> std::borrow::Cow<'_, str> {
+    if let Some(text) = reply.pointer("/observation/text").and_then(Value::as_str) {
+        return std::borrow::Cow::Borrowed(text);
+    }
+    if reply
+        .pointer("/_scope_meta/cache_reusable")
+        .and_then(Value::as_bool)
+        == Some(true)
+        && let Some(cached) = reply
+            .pointer("/_scope_meta/cached_vom")
+            .and_then(Value::as_str)
+    {
+        return std::borrow::Cow::Borrowed(cached);
+    }
+    if reply.get("kind").and_then(Value::as_str) == Some("delta") {
+        let lines = format_delta_change_lines(reply);
+        if !lines.is_empty() {
+            return std::borrow::Cow::Owned(lines.join("\n"));
+        }
+    }
+    std::borrow::Cow::Borrowed("")
+}
+
+fn format_delta_change_lines(reply: &Value) -> Vec<String> {
+    let Some(changes) = reply.get("changes").and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    changes
+        .iter()
+        .map(|change| {
+            let label = change.get("label").and_then(Value::as_str).unwrap_or("");
+            let value = change.get("value").and_then(Value::as_str).unwrap_or("");
+            let quoted_label = serde_json::to_string(label).unwrap_or_else(|_| "\"\"".into());
+            let quoted_value = serde_json::to_string(value).unwrap_or_else(|_| "\"\"".into());
+            let mut parts = Vec::with_capacity(4);
+            if let Some(id) = change
+                .get("id")
                 .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+            {
+                let quoted_id = serde_json::to_string(id).unwrap_or_else(|_| "\"\"".into());
+                parts.push(format!("id={quoted_id}"));
+            }
+            parts.push(format!("label={quoted_label}"));
+            if let Some(prev) = change.get("previous_value").and_then(Value::as_str) {
+                let quoted_prev = serde_json::to_string(prev).unwrap_or_else(|_| "\"\"".into());
+                parts.push(format!("previous={quoted_prev}"));
+            }
+            parts.push(format!("value={quoted_value}"));
+            format!("[change {}]", parts.join(" "))
         })
-        .unwrap_or("")
+        .collect()
+}
+
+fn format_activity_lines(reply: &Value) -> Vec<String> {
+    let Some(activity) = reply.get("activity").and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    activity
+        .iter()
+        .map(|event| {
+            let kind = event
+                .get("type")
+                .and_then(Value::as_str)
+                .unwrap_or("activity");
+            let label = event.get("label").and_then(Value::as_str).unwrap_or("");
+            let quoted_label = serde_json::to_string(label).unwrap_or_else(|_| "\"\"".into());
+            format!("[activity type={kind} label={quoted_label}]")
+        })
+        .collect()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -547,12 +624,21 @@ fn render_state_receipt(
         .and_then(|obj| obj.remove("_scope_meta"))
         .unwrap_or(Value::Null);
 
-    let unchanged = reply.get("kind").and_then(Value::as_str) == Some("unchanged")
+    let kind = reply.get("kind").and_then(Value::as_str).map(str::to_owned);
+    let is_delta = kind.as_deref() == Some("delta");
+    let unchanged = kind.as_deref() == Some("unchanged")
         || reply.get("unchanged").and_then(Value::as_bool) == Some(true);
+    let cache_reusable = meta
+        .get("cache_reusable")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let history_incomplete = reply.get("history_complete").and_then(Value::as_bool) == Some(false);
 
-    // Hydrate `observation.text` from cached `last_vom` when the extension returned
-    // `unchanged` (or delta without text) so Agent never suffers an empty-VOM re-read.
+    // Hydrate `observation.text` from cached `last_vom` ONLY when `_scope_meta`
+    // confirms an exact unchanged predecessor (`cache_reusable == true`). Never
+    // hydrate stale VOM onto a `delta` or incomplete-history reply.
     if reply.pointer("/observation/text").is_none()
+        && cache_reusable
         && let Some(cached_vom) = meta.get("cached_vom").and_then(Value::as_str)
     {
         if !reply.get("observation").is_some_and(Value::is_object) {
@@ -634,6 +720,22 @@ fn render_state_receipt(
             if emit_unchanged_flag || unchanged {
                 out["unchanged"] = Value::Bool(unchanged);
             }
+            if is_delta {
+                out["kind"] = Value::String("delta".into());
+            }
+            if let Some(changes) = reply.get("changes").and_then(Value::as_array)
+                && (is_delta || !changes.is_empty())
+            {
+                out["changes"] = Value::Array(changes.clone());
+            }
+            if let Some(activity) = reply.get("activity").and_then(Value::as_array)
+                && !activity.is_empty()
+            {
+                out["activity"] = Value::Array(activity.clone());
+            }
+            if history_incomplete {
+                out["history_complete"] = Value::Bool(false);
+            }
             println!(
                 "{}",
                 serde_json::to_string_pretty(&out).map_err(|e| CliError::Local(e.into()))?
@@ -642,17 +744,35 @@ fn render_state_receipt(
         Format::Human => {
             let quoted_url = serde_json::to_string(url).unwrap_or_else(|_| "\"\"".into());
             let quoted_title = serde_json::to_string(title).unwrap_or_else(|_| "\"\"".into());
+            let mut extra_flags = String::new();
             if emit_unchanged_flag && unchanged {
-                println!(
-                    "[state session={session_id} tab={tab_id} ctx={short_ctx} unchanged=true url={quoted_url} title={quoted_title}]"
-                );
-            } else {
-                println!(
-                    "[state session={session_id} tab={tab_id} ctx={short_ctx} url={quoted_url} title={quoted_title}]"
-                );
+                extra_flags.push_str(" unchanged=true");
+            } else if is_delta {
+                extra_flags.push_str(" delta=true");
             }
+            if history_incomplete {
+                extra_flags.push_str(" history_complete=false");
+            }
+            println!(
+                "[state session={session_id} tab={tab_id} ctx={short_ctx}{extra_flags} url={quoted_url} title={quoted_title}]"
+            );
             if !vom.is_empty() {
                 println!("{vom}");
+            }
+            if is_delta
+                || reply
+                    .get("changes")
+                    .and_then(Value::as_array)
+                    .is_some_and(|c| !c.is_empty())
+            {
+                for line in format_delta_change_lines(&reply) {
+                    println!("{line}");
+                }
+            }
+            if is_delta || vom.is_empty() {
+                for line in format_activity_lines(&reply) {
+                    println!("{line}");
+                }
             }
         }
     }

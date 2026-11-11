@@ -418,7 +418,7 @@ pub fn info_for_error(code: ErrorCode, data: Option<&serde_json::Value>) -> Rend
         (ErrorCode::InvalidParams, reason::AMBIGUOUS_IMPLICIT_SESSION) => RenderInfo {
             summary: "active sessions exist in other scopes; refusing to hijack implicitly",
             hint: Some(
-                "pass `--session <id>` (see `bsk session list`), set `--scope <name>` / `BSK_SCOPE`, or run `bsk open <url>` in your own scope",
+                "pass `--session <id>` (see `bsk session list`), set `BSK_SCOPE=<name>`, or run `bsk open --scope <name> <url>`",
             ),
             exit_code: base.exit_code,
         },

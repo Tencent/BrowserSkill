@@ -816,3 +816,280 @@ fn skill_md_budget_and_rt05_safety_invariants_gate() {
     assert!(content.contains("bsk tab borrow <tab-id>"));
     assert!(content.contains("Automation settings"));
 }
+
+#[tokio::test]
+async fn strict_policy_delta_sync_and_open_wait_committed_effect_state() {
+    let sync_seq = Arc::new(Mutex::new(0u32));
+    let sync_seq_ext = Arc::clone(&sync_seq);
+
+    let env = IsolatedEnv::start(move |req| match &req.method {
+        Method::ToolNavigate => ResponseBody::Ok(json!({
+            "tab_id": 7,
+            "url": "https://app.test/form",
+            "final_url": "https://app.test/form",
+            "reached": "load"
+        })),
+        Method::ToolCooperate => {
+            let mut n = sync_seq_ext.lock().unwrap();
+            *n += 1;
+            match *n {
+                1 => ResponseBody::Ok(json!({
+                    "tab_id": 7,
+                    "control_policy": "strict",
+                    "context_id": "11111111-1111-4111-8111-111111111111",
+                    "kind": "baseline",
+                    "observation": {
+                        "tab_id": 7,
+                        "url": "https://app.test/form",
+                        "title": "Form",
+                        "text": "@e1 textbox \"Email\" value=\"old@app.test\"",
+                        "ref_count": 1,
+                        "truncated": false
+                    },
+                    "state": { "mode": "ready", "revision": 1 }
+                })),
+                2 => ResponseBody::Ok(json!({
+                    "tab_id": 7,
+                    "control_policy": "strict",
+                    "context_id": "22222222-2222-4222-8222-222222222222",
+                    "previous_context_id": "11111111-1111-4111-8111-111111111111",
+                    "kind": "delta",
+                    "history_complete": true,
+                    "changes": [{
+                        "frame_id": 0,
+                        "label": "Email",
+                        "previous_value": "old@app.test",
+                        "value": "new@app.test"
+                    }],
+                    "activity": [{ "sequence": 1, "type": "input", "label": "Email" }],
+                    "state": { "mode": "ready", "revision": 2 }
+                })),
+                _ => ResponseBody::Ok(json!({
+                    "tab_id": 7,
+                    "control_policy": "strict",
+                    "context_id": "33333333-3333-4333-8333-333333333333",
+                    "previous_context_id": "22222222-2222-4222-8222-222222222222",
+                    "kind": "unchanged",
+                    "history_complete": true,
+                    "changes": [],
+                    "state": { "mode": "ready", "revision": 2 }
+                })),
+            }
+        }
+        other => panic!("unexpected extension method: {other:?}"),
+    })
+    .await;
+
+    // 1. `bsk open` establishes baseline VOM (`old@app.test`).
+    let open_out = env.run_bsk(&["open", "https://app.test/form"], &[]).await;
+    assert!(open_out.status.success());
+
+    // 2. `bsk sync --policy strict --wait-for new@app.test` receives `kind: "delta"`:
+    //    must match `new@app.test` from `changes`, emit `delta=true` + `[change ...]`,
+    //    and NEVER print stale `old@app.test` VOM!
+    let delta_out = env
+        .run_bsk(
+            &[
+                "sync",
+                "--policy",
+                "strict",
+                "--wait-for",
+                "new@app.test",
+                "--timeout-ms",
+                "1000",
+            ],
+            &[],
+        )
+        .await;
+    assert!(delta_out.status.success());
+    let delta_stdout = String::from_utf8(delta_out.stdout).unwrap();
+    assert!(delta_stdout.contains(" delta=true "), "got: {delta_stdout}");
+    assert!(
+        delta_stdout
+            .contains("[change label=\"Email\" previous=\"old@app.test\" value=\"new@app.test\"]"),
+        "got: {delta_stdout}"
+    );
+    assert!(
+        !delta_stdout.contains("@e1 textbox \"Email\" value=\"old@app.test\""),
+        "must not print stale pre-delta VOM: {delta_stdout}"
+    );
+
+    // 3. Follow-up `unchanged` after `delta` must NOT resurrect stale pre-delta VOM either!
+    let post_delta = env
+        .run_bsk(&["sync", "--policy", "strict", "--json"], &[])
+        .await;
+    assert!(post_delta.status.success());
+    let post_json: Value = serde_json::from_slice(&post_delta.stdout).unwrap();
+    assert_eq!(post_json["unchanged"], true);
+    assert_eq!(post_json["vom"], "");
+
+    // 4. `bsk open --wait-for` timeout after navigation must report `effect_state: "committed"`,
+    //    whereas `bsk sync --wait-for` timeout reports `effect_state: "none"`.
+    let open_timeout = env
+        .run_bsk(
+            &[
+                "open",
+                "https://app.test/form",
+                "--wait-for",
+                "NEVER_APPEARS",
+                "--timeout-ms",
+                "50",
+                "--json",
+            ],
+            &[],
+        )
+        .await;
+    assert!(!open_timeout.status.success());
+    let open_err: Value = serde_json::from_slice(&open_timeout.stdout).unwrap();
+    assert_eq!(open_err["data"]["effect_state"], "committed");
+
+    let sync_timeout = env
+        .run_bsk(
+            &[
+                "sync",
+                "--policy",
+                "strict",
+                "--wait-for",
+                "NEVER_APPEARS",
+                "--timeout-ms",
+                "50",
+                "--json",
+            ],
+            &[],
+        )
+        .await;
+    assert!(!sync_timeout.status.success());
+    let sync_err: Value = serde_json::from_slice(&sync_timeout.stdout).unwrap();
+    assert_eq!(sync_err["data"]["effect_state"], "none");
+
+    env.shutdown().await;
+}
+
+#[tokio::test]
+async fn concurrent_open_in_same_scope_serializes_and_tab_create_isolates_implicit_context() {
+    let env = IsolatedEnv::start(move |req| match &req.method {
+        Method::ToolNavigate => ResponseBody::Ok(json!({
+            "tab_id": 7,
+            "url": "https://app.test/one",
+            "final_url": "https://app.test/one",
+            "reached": "load"
+        })),
+        Method::ToolCooperate => ResponseBody::Ok(json!({
+            "tab_id": 7,
+            "control_policy": "target",
+            "context_id": "aaaaaaaa-1111-4111-8111-111111111111",
+            "observation_id": "bbbbbbbb-1111-4111-8111-111111111111",
+            "observation": {
+                "tab_id": 7,
+                "url": "https://app.test/one",
+                "title": "One",
+                "text": "@e1 button \"First\"",
+                "ref_count": 1,
+                "truncated": false
+            },
+            "state": { "mode": "ready", "revision": 1 }
+        })),
+        Method::ToolTabCreate => ResponseBody::Ok(json!({
+            "tab_id": 8,
+            "window_id": 100,
+            "url": "https://app.test/two"
+        })),
+        Method::ToolClick => ResponseBody::Ok(json!({ "tab_id": 8, "x": 10.0, "y": 10.0 })),
+        other => panic!("unexpected extension method: {other:?}"),
+    })
+    .await;
+
+    // 1. Two concurrent `bsk open` invocations in the SAME unbound `BSK_SCOPE` must start only ONE session
+    //    (never leaking an orphaned second Agent Window); if their `tool.navigate` calls overlap on that
+    //    single shared session, the loser receives `session_busy` rather than creating a second session.
+    let (res1, res2) = tokio::join!(
+        env.run_bsk(
+            &["open", "https://app.test/one", "--json"],
+            &[("BSK_SCOPE", "shared-worker")]
+        ),
+        env.run_bsk(
+            &["open", "https://app.test/one", "--json"],
+            &[("BSK_SCOPE", "shared-worker")]
+        ),
+    );
+    assert!(
+        res1.status.success() || res2.status.success(),
+        "at least one concurrent bsk open must succeed"
+    );
+    for res in [&res1, &res2] {
+        let j: Value = serde_json::from_slice(&res.stdout).unwrap();
+        if res.status.success() {
+            assert_eq!(j["ctx"], "c1");
+        } else {
+            assert_eq!(
+                j["data"]["reason"], "session_busy",
+                "unexpected failure: {j}"
+            );
+        }
+    }
+
+    let start_calls = env
+        .take_requests()
+        .into_iter()
+        .filter(|r| r.method == Method::ToolSessionStart)
+        .count();
+    assert_eq!(
+        start_calls, 1,
+        "concurrent bsk open in same scope must start exactly 1 session"
+    );
+    let sessions_out = env.run_bsk(&["session", "list", "--json"], &[]).await;
+    assert!(sessions_out.status.success());
+    let sessions_json: Value = serde_json::from_slice(&sessions_out.stdout).unwrap();
+    assert_eq!(
+        sessions_json.as_array().unwrap().len(),
+        1,
+        "must not leak an orphaned session"
+    );
+
+    // Identical `context_id` UUID on follow-up sync reuses `c1` without alias churn!
+    let sync_again = env
+        .run_bsk(&["sync", "--json"], &[("BSK_SCOPE", "shared-worker")])
+        .await;
+    assert!(sync_again.status.success());
+    let sync_json: Value = serde_json::from_slice(&sync_again.stdout).unwrap();
+    assert_eq!(sync_json["ctx"], "c1");
+    let _ = env.take_requests();
+
+    // 2. Creating a new active tab (`tab_id = 8`) prevents implicit `click` without `--tab-id`
+    //    from injecting tab 7's `context_id`!
+    let create_out = env
+        .run_bsk(
+            &["tab", "create", "--url", "https://app.test/two"],
+            &[("BSK_SCOPE", "shared-worker")],
+        )
+        .await;
+    assert!(create_out.status.success());
+    let _ = env.take_requests();
+
+    let click_new_tab = env
+        .run_bsk(&["click", "@e1"], &[("BSK_SCOPE", "shared-worker")])
+        .await;
+    assert!(click_new_tab.status.success());
+    let reqs = env.take_requests();
+    assert_eq!(reqs.len(), 1);
+    assert!(
+        reqs[0].params.as_ref().unwrap().get("context_id").is_none(),
+        "must NOT inject tab 7's context_id when active tab switched to unsynced tab 8"
+    );
+
+    // Explicit `--tab-id 7` still resolves tab 7's `context_id`!
+    let click_tab7 = env
+        .run_bsk(
+            &["click", "@e1", "--tab-id", "7"],
+            &[("BSK_SCOPE", "shared-worker")],
+        )
+        .await;
+    assert!(click_tab7.status.success());
+    let reqs = env.take_requests();
+    assert_eq!(
+        reqs[0].params.as_ref().unwrap()["context_id"],
+        "aaaaaaaa-1111-4111-8111-111111111111"
+    );
+
+    env.shutdown().await;
+}
