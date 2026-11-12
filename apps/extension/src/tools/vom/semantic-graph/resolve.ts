@@ -12,6 +12,7 @@ import {
   VIRTUAL_POOL_EXCLUDED_TAGS,
   VOLATILE_ROW_TEXT_RE,
 } from "../row-anchor-spec";
+import { NON_TEXT_CONTAINER_TAGS } from "../snapshot";
 import { stableIdentifierName } from "./name-evidence";
 import type {
   ResolvedSemanticGraph,
@@ -325,7 +326,11 @@ function buildIndexes(graph: SemanticGraph): ResolveIndexes {
     if (textMemo.has(nodeId)) return textMemo.get(nodeId);
     if (resolvingText.has(nodeId)) return undefined;
     const node = graph.nodes.get(nodeId);
-    if (!node || node.excluded) {
+    if (
+      !node ||
+      node.excluded ||
+      (node.dom !== undefined && NON_TEXT_CONTAINER_TAGS.has(node.dom.tag.toLowerCase()))
+    ) {
       textMemo.set(nodeId, undefined);
       return undefined;
     }
@@ -1022,7 +1027,7 @@ export function resolveSemanticGraph(
     const inForm = node.dom?.inForm;
     const nearby = nearbyText(node, indexes);
     const placeholder = clean(node.dom?.formPlaceholder ?? attrs.placeholder);
-    const textContent = clean(node.dom?.textContent);
+    const textContent = NON_TEXT_CONTAINER_TAGS.has(tag) ? undefined : clean(node.dom?.textContent);
     const selectInfo =
       tag === "select" && !isSensitive
         ? extractSelectOptions(node, sourceValue, graph, indexes)
