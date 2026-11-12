@@ -47,6 +47,49 @@ and screenshots are written to the ignored `evals/browser/results/` directory.
 `pnpm run eval:browser -- coverage` is also supported. The CLI intentionally accepts pnpm's leading
 `--` separator.
 
+## Optional Agent-driven PR self-check
+
+For substantial changes to browser interactions, observations, control policy, or CLI/extension
+communication, we recommend [BrowserSkill release test](skills/browserskill-release-test/SKILL.md)
+before opening a PR. This is optional: not running it, or encountering an environment blocker,
+does not prevent opening or merging a PR. Keep running the existing checks appropriate to your change.
+
+Give an Agent with repository and browser access this instruction; no skill installation is required:
+
+```text
+Read evals/browser/skills/browserskill-release-test/SKILL.md in this checkout.
+Run the optional end-to-end self-check against my current branch HEAD using Bsk.
+Build the CLI and test extension from the same candidate source, record each operation,
+and report the tested scope, failures, and blockers without claiming untested cases passed.
+```
+
+The skill includes 90 workflow/edge/regression cases and discovers additional command coverage cases
+(including `bsk plan`, `bsk recipe`, and `bsk read`) from the candidate CLI. It exercises synthetic
+HTML (including plan/recipe drift labs, a local video portal, and a developer forum hub) and eight
+public sites (OceanEngine, Taobao, Bilibili video site, V2EX forum site, MDN, GitHub, Books to
+Scrape, and Hacker News), including active carousels and per-second updates with
+`evaluate`/`read`/`wheel`, while recording benchmark metrics (success rate, interaction turns,
+actions-per-turn compression ratio, and P50/P95 latency). It is a separate Agent-guided workflow;
+it is not automatically added to the `core` suite, `pnpm eval:browser`, or required CI checks.
+
+The Python helpers need Python 3.9+ and only the standard library. Full execution also needs
+a real Chromium browser, the candidate Bsk CLI and matching extension, and human participation
+for cooperation/recording cases. Choose runtime paths, browser selectors, and free ports locally.
+For PR checks, pin the current branch HEAD; use a specified main/release commit for release checks.
+Record dirty changes explicitly rather than attributing them to a clean commit.
+
+Write run artifacts under the ignored `evals/browser/results/<unique-run>/` directory. In the PR,
+optionally summarize the candidate SHA, coverage, failures/blockers, and relevant sanitized evidence.
+If you request only a subset, label it partial coverage. A full pass still requires all planned
+cases and discovered commands to pass; that result is evidence, not a mandatory PR approval gate.
+Never commit raw browsing logs, login screenshots, production HTML, credentials, or local builds.
+
+The helper's own tests do not open a browser:
+
+```sh
+python3 evals/browser/skills/browserskill-release-test/scripts/test_release_audit.py
+```
+
 ## Suites and selection
 
 | Suite | Intended use | Default execution |

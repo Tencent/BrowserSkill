@@ -17,7 +17,7 @@ use bsk_protocol::{ErrorCode, Method};
 use clap::{Args, Subcommand};
 use serde::{Deserialize, Serialize};
 
-use crate::cli::ensure_daemon::ensure_daemon;
+use crate::cli::ensure_daemon::ensure_daemon_optimistic as ensure_daemon;
 use crate::cli::error::{self, CliError, Format, RenderExtras};
 use crate::daemon::browsers::EXTENSION_CONNECT_WAIT;
 
@@ -96,10 +96,14 @@ pub struct SessionStartArgs {
     /// Bring the new Agent Window to the foreground.
     #[arg(long)]
     pub focus: bool,
+
+    /// Optional caller scope name to bind this session to.
+    #[arg(long)]
+    pub scope: Option<String>,
 }
 
 /// Parse a `--width` / `--height` Agent Window dimension (CSS pixels).
-fn window_size(s: &str) -> Result<u32, String> {
+pub(crate) fn window_size(s: &str) -> Result<u32, String> {
     let value: u32 = s
         .parse()
         .map_err(|_| format!("invalid window dimension {s:?}: expected a positive integer"))?;
@@ -233,6 +237,7 @@ pub fn dispatch(cmd: SessionCmd, format: Format) -> Result<(), CliError> {
 }
 
 fn run_start(sock: PathBuf, args: SessionStartArgs, format: Format) -> Result<(), CliError> {
+    crate::cli::business_rpc::set_caller_scope(args.scope.clone());
     if args.unattended {
         crate::cli::interaction_policy::warn_legacy_override("--unattended");
     }
@@ -322,33 +327,30 @@ pub fn start_session(sock: PathBuf, opts: SessionStartOptions) -> Result<StartRe
             .validate()
             .map_err(|err| CliError::Local(anyhow::anyhow!(err)))?;
     }
-    if opts.incognito {
-        crate::cli::protocol::require_daemon_support(
-            &sock,
-            "session start --incognito",
-            bsk_protocol::tools::INCOGNITO_SESSION_PROTOCOL,
-            bsk_protocol::tools::supports_incognito_sessions,
-        )?;
+    let method = if opts.request_id.is_some() {
+        Method::SessionStartTracked
+    } else {
+        Method::SessionStart
+    };
+    let mut payload = serde_json::to_value(StartParams {
+        controller: opts.controller,
+        incognito: opts.incognito,
+        request_id: opts.request_id,
+        task_name: opts.name,
+        browser_instance_id: opts.browser,
+        width: opts.width,
+        height: opts.height,
+        focused: Some(opts.focused.unwrap_or(false)),
+    })
+    .map_err(|e| CliError::Local(anyhow::anyhow!(e)))?;
+    let caller_scope = crate::cli::business_rpc::current_caller_scope();
+    if crate::daemon::scopes::is_isolated_scope(&caller_scope)
+        && let Some(obj) = payload.as_object_mut()
+    {
+        obj.insert("_caller_scope".into(), caller_scope.into());
+        obj.insert("_bind_scope".into(), true.into());
     }
-    call(
-        sock,
-        if opts.request_id.is_some() {
-            Method::SessionStartTracked
-        } else {
-            Method::SessionStart
-        },
-        Some(StartParams {
-            controller: opts.controller,
-            incognito: opts.incognito,
-            request_id: opts.request_id,
-            task_name: opts.name,
-            browser_instance_id: opts.browser,
-            width: opts.width,
-            height: opts.height,
-            focused: Some(opts.focused.unwrap_or(false)),
-        }),
-        SESSION_START_IPC_TIMEOUT,
-    )
+    call(sock, method, Some(payload), SESSION_START_IPC_TIMEOUT)
 }
 
 /// Stop a single session by id.
@@ -380,7 +382,7 @@ pub fn stop_session(sock: PathBuf, session_id: &str) -> Result<StopReply, CliErr
 /// ambiguous-label) via the [`RenderExtras`] hook. In `--json` mode
 /// the structured payload still rides inside `error.data` so script
 /// consumers can read it without parsing prose.
-fn handle_start_error(err: CliError, format: Format) -> CliError {
+pub(crate) fn handle_start_error(err: CliError, format: Format) -> CliError {
     if matches!(format, Format::Json) {
         return err;
     }

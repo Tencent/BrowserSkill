@@ -1,48 +1,14 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "title": "ConsoleResult",
-  "type": "object",
-  "required": [
-    "next_since",
-    "tab_id"
-  ],
-  "properties": {
-    "entries": {
-      "type": "array",
-      "items": {
-        "$ref": "#/definitions/ConsoleEntry"
-      }
-    },
-    "next_since": {
-      "type": "integer",
-      "format": "uint64",
-      "minimum": 0.0
-    },
-    "tab_id": {
-      "type": "integer",
-      "format": "int64"
-    },
-    "truncated": {
-      "default": false,
-      "type": "boolean"
-    }
-  },
   "definitions": {
     "ConsoleEntry": {
-      "type": "object",
-      "required": [
-        "kind",
-        "level",
-        "sequence",
-        "text"
-      ],
       "properties": {
         "column": {
+          "format": "int64",
           "type": [
             "integer",
             "null"
-          ],
-          "format": "int64"
+          ]
         },
         "kind": {
           "$ref": "#/definitions/ConsoleEntryKind"
@@ -51,32 +17,32 @@
           "type": "string"
         },
         "line": {
+          "format": "int64",
           "type": [
             "integer",
             "null"
-          ],
-          "format": "int64"
+          ]
         },
         "sequence": {
-          "type": "integer",
           "format": "uint64",
-          "minimum": 0.0
+          "minimum": 0,
+          "type": "integer"
         },
         "stack_trace": {
-          "type": "array",
           "items": {
             "$ref": "#/definitions/ConsoleStackFrame"
-          }
+          },
+          "type": "array"
         },
         "text": {
           "type": "string"
         },
         "timestamp": {
+          "format": "double",
           "type": [
             "number",
             "null"
-          ],
-          "format": "double"
+          ]
         },
         "truncated": {
           "default": false,
@@ -88,25 +54,31 @@
             "null"
           ]
         }
-      }
+      },
+      "required": [
+        "sequence",
+        "kind",
+        "level",
+        "text"
+      ],
+      "type": "object"
     },
     "ConsoleEntryKind": {
-      "type": "string",
       "enum": [
         "console",
         "exception",
         "log"
-      ]
+      ],
+      "type": "string"
     },
     "ConsoleStackFrame": {
-      "type": "object",
       "properties": {
         "column": {
+          "format": "int64",
           "type": [
             "integer",
             "null"
-          ],
-          "format": "int64"
+          ]
         },
         "function_name": {
           "type": [
@@ -115,11 +87,11 @@
           ]
         },
         "line": {
+          "format": "int64",
           "type": [
             "integer",
             "null"
-          ],
-          "format": "int64"
+          ]
         },
         "url": {
           "type": [
@@ -127,7 +99,36 @@
             "null"
           ]
         }
-      }
+      },
+      "type": "object"
     }
-  }
+  },
+  "properties": {
+    "entries": {
+      "default": [],
+      "items": {
+        "$ref": "#/definitions/ConsoleEntry"
+      },
+      "type": "array"
+    },
+    "next_since": {
+      "format": "uint64",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "tab_id": {
+      "format": "int64",
+      "type": "integer"
+    },
+    "truncated": {
+      "default": false,
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "tab_id",
+    "next_since"
+  ],
+  "title": "ConsoleResult",
+  "type": "object"
 }

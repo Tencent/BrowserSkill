@@ -1,40 +1,91 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "title": "FocusParams",
-  "type": "object",
-  "required": [
-    "session_id"
-  ],
+  "definitions": {
+    "ActionExpectation": {
+      "additionalProperties": false,
+      "description": "Caller-supplied facts checked immediately before starting an action.",
+      "properties": {
+        "attribute": {
+          "description": "Required only for field=attribute, measured in Unicode code points.",
+          "maxLength": 256,
+          "minLength": 1,
+          "type": "string"
+        },
+        "equals": {
+          "$ref": "#/definitions/ExpectedValue",
+          "description": "text/value require a string; checked/exists require a boolean;\nattribute accepts a string or null for absence. Text is exact textContent."
+        },
+        "field": {
+          "$ref": "#/definitions/ExpectationField"
+        },
+        "target": {
+          "description": "Observed ref or main-document CSS selector, measured in Unicode code points.",
+          "maxLength": 1024,
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "target",
+        "field",
+        "equals"
+      ],
+      "type": "object"
+    },
+    "ExpectationField": {
+      "enum": [
+        "text",
+        "value",
+        "checked",
+        "attribute",
+        "exists"
+      ],
+      "type": "string"
+    },
+    "ExpectedValue": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "boolean"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    }
+  },
   "properties": {
     "context_id": {
-      "description": "Context actually returned by sync. Reusable for target-policy DOM actions; strict policy consumes it after one action. Never fill it from cached state.",
+      "description": "Context actually returned by sync. Reusable for target-policy DOM actions;\nstrict policy consumes it after one action. Never fill it from cached state.",
       "type": "string"
     },
     "depends_on": {
-      "description": "Strict policy only: observed decision regions. Target policy requires exact business facts in expect; regions cannot be translated to facts automatically.",
-      "type": "array",
+      "description": "Strict policy only: observed decision regions. Target policy requires exact\nbusiness facts in expect; regions cannot be translated to facts automatically.",
       "items": {
         "type": "string"
       },
-      "maxItems": 16
+      "maxItems": 16,
+      "type": "array"
     },
     "expect": {
-      "description": "Literal conditions checked before input. Selectors search the main document; use observed refs for iframe/shadow-root targets. Text includes all whitespace.",
-      "type": "array",
+      "description": "Literal conditions checked before input. Selectors search the main document;\nuse observed refs for iframe/shadow-root targets. Text includes all whitespace.",
       "items": {
         "$ref": "#/definitions/ActionExpectation"
       },
-      "maxItems": 16
+      "maxItems": 16,
+      "type": "array"
     },
     "observation_id": {
-      "description": "Sync's single-use baseline for untargeted/visual actions under target policy, including scripts, untargeted keys and displacement-only drags. Drags with a target ref/selector need only context_id. Strict-policy drag instead accepts its legacy ref-map observation token.",
+      "description": "Sync's single-use baseline for untargeted/visual actions under target policy,\nincluding untargeted keys and displacement-only drags. Drags with a\ntarget ref/selector need only context_id. A script needs it only when it\nstates no expect facts; passing both checks the whole page as well.\nStrict-policy drag instead accepts its legacy ref-map observation token.",
       "type": [
         "string",
         "null"
       ]
     },
     "ref": {
-      "description": "Optional `@e<N>` ref allocated by the last observation. Mutually exclusive with `selector`.",
+      "description": "Optional `@e<N>` ref allocated by the last observation.\nMutually exclusive with `selector`.",
       "type": [
         "string",
         "null"
@@ -51,79 +102,24 @@
     },
     "tab_id": {
       "description": "Target tab. Defaults to the Agent Window's active tab.",
+      "format": "int64",
       "type": [
         "integer",
         "null"
-      ],
-      "format": "int64"
+      ]
     },
     "timeout_ms": {
+      "format": "uint32",
+      "minimum": 1,
       "type": [
         "integer",
         "null"
-      ],
-      "format": "uint32",
-      "minimum": 1.0
+      ]
     }
   },
-  "definitions": {
-    "ActionExpectation": {
-      "description": "Caller-supplied facts checked immediately before starting an action.",
-      "type": "object",
-      "required": [
-        "equals",
-        "field",
-        "target"
-      ],
-      "properties": {
-        "attribute": {
-          "description": "Required only for field=attribute, measured in Unicode code points.",
-          "type": "string",
-          "maxLength": 256,
-          "minLength": 1
-        },
-        "equals": {
-          "description": "text/value require a string; checked/exists require a boolean; attribute accepts a string or null for absence. Text is exact textContent.",
-          "allOf": [
-            {
-              "$ref": "#/definitions/ExpectedValue"
-            }
-          ]
-        },
-        "field": {
-          "$ref": "#/definitions/ExpectationField"
-        },
-        "target": {
-          "description": "Observed ref or main-document CSS selector, measured in Unicode code points.",
-          "type": "string",
-          "maxLength": 1024,
-          "minLength": 1
-        }
-      },
-      "additionalProperties": false
-    },
-    "ExpectationField": {
-      "type": "string",
-      "enum": [
-        "text",
-        "value",
-        "checked",
-        "attribute",
-        "exists"
-      ]
-    },
-    "ExpectedValue": {
-      "anyOf": [
-        {
-          "type": "string"
-        },
-        {
-          "type": "boolean"
-        },
-        {
-          "type": "null"
-        }
-      ]
-    }
-  }
+  "required": [
+    "session_id"
+  ],
+  "title": "FocusParams",
+  "type": "object"
 }

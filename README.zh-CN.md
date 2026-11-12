@@ -61,6 +61,8 @@ https://github.com/user-attachments/assets/959cb520-80ba-4b9e-b6d8-d94523b03693
   </tr>
 </table>
 
+Qoder 和 Qoder CN 作为 skill-only 目标支持：`bsk install-skill --harness qoder` 和 `--harness qoder-cn`。
+
 这些 Agent，以及其他能调用 Shell 的 Agent，都可以通过同一套 **`bsk` CLI** 使用。**[DeepSeek Harness](#deepseek-harness-插件)** 还提供专用插件，直接使用浏览器工具并查看任务预览。Agent 和模型由你选择，BrowserSkill 负责连接浏览器。
 
 ## 能做什么
@@ -128,7 +130,7 @@ bsk --version
 
 #### 2. 连接扩展
 
-从 [Chrome Web Store](https://chromewebstore.google.com/detail/hhcmgoofomhgciiibhipgmgkgnoenaoi) 或 [Edge 加载项商店](https://microsoftedge.microsoft.com/addons/detail/browserskill/emacgiaaaiojkkpkddmmdfhmokgmnikg) 安装扩展。打开弹窗，开启本地连接，在 CLI 启动后检查连接状态。
+从 [Chrome Web Store](https://chromewebstore.google.com/detail/hhcmgoofomhgciiibhipgmgkgnoenaoi) 或 [Edge 加载项商店](https://microsoftedge.microsoft.com/addons/detail/browserskill/emacgiaaaiojkkpkddmmdfhmokgmnikg) 安装扩展，开启连接后即可使用。本机配对是可选的：未配对仍可正常使用，扩展会提示连接身份未经验证。如需配对，运行 `bsk daemon pair`，将链接粘贴到**连接设置 → 配对链接**并保存。重启和升级后无需重复配对；已配对后验证失败不会自动跳过验证。详见[本机配对指南](docs/local-pairing.zh-CN.md)。
 
 #### 3. 给 Agent 安装 skill
 
@@ -336,6 +338,8 @@ dsh plugin --profile web update @wxg-prc-cpg/browser-skill-dsh-plugin --latest
 | 录制并保存任务视频 | [任务视频录制](docs/video-recording.md) |
 | 导出表格或列表 | [结构化提取](docs/structured-extraction.md) |
 | 等待元素条件 | [元素等待](docs/wait-for-element.md) |
+| 一次执行多个已决定的动作 | [Plan 命令](docs/plan.md) |
+| 保存并回放已审阅的流程 | [Recipe 命令](docs/recipes.md) |
 | 使用指定账号或 Profile | [浏览器 Profile](docs/browser-profiles.md) |
 | 连接服务器上的 Agent | [远程浏览器连接](docs/remote-extension-connection.md) |
 | 在沙盒中使用 | [沙盒环境配置](docs/sandboxed-agents.md) |
@@ -365,6 +369,8 @@ CLI 产物位于 `target/release/`；将 `apps/extension/dist/chrome-mv3/` 作�
 | `evals/browser` | 本地测试页面与浏览器能力评测 |
 
 相关检查包括 `cargo test --workspace --locked`、`pnpm ext:test` 和 `pnpm lint`。可复现的浏览器用例见[评测指南](evals/browser/README.zh-CN.md)。欢迎通过 [GitHub Issues](https://github.com/Tencent/BrowserSkill/issues) 报告问题，或提交聚焦的 PR；附上浏览器证据前，请移除敏感数据。
+
+对浏览器交互、页面观察、控制策略或 CLI／扩展通信等较大改动，推荐在提交 PR 前使用[可选的 Agent 端到端自测 Skill](evals/browser/README.zh-CN.md#可选的-agent-pr-前自测)，通过 Bsk 测试当前分支并记录真实链路证据。这不是提交或合并 PR 的强制要求，也不替代上述检查。
 
 扩展界面支持英语、简体中文、繁体中文、韩语、日语、法语、意大利语、西班牙语、德语和巴西葡萄牙语。翻译贡献见[多语言说明](packages/i18n/README.md)。
 
@@ -429,3 +435,11 @@ CLI 产物位于 `target/release/`；将 `apps/extension/dist/chrome-mv3/` 作�
 ## 许可证
 
 [MIT](LICENSE)
+
+### 动态页面读取（未发布，协议 1.9）
+
+持续动画中的 DOM 字段使用 `bsk read`，表格/列表使用 `extract`；MCP、DSH 对应
+`bsk_inspect(action=read)`。脚本只声明 `--expect` 事实时只校验这些事实，传入 `--observation` 时仍比对整页，
+`evaluate --unverified` 是最后手段；读取结果不会更新操作凭证，
+业务判断须用 expect 保护。查询格式、安全边界、兼容性和可复现浏览器测试见
+[动态页面读取说明](docs/dynamic-reading.md)。

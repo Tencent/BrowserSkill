@@ -142,7 +142,7 @@ fn human_errors_keep_useful_subcommand_suggestions() {
 #[test]
 fn all_argument_failures_use_the_json_contract() {
     for args in [
-        vec!["--json", "click"],              // missing required session
+        vec!["--json", "open"],               // missing required URL
         vec!["click", "--json", "--session"], // missing option value
         vec!["click", "--session", "s1", "--tab-id", "bad", "--json"],
         vec!["click", "--session", "s1", "--button", "bad", "--json"],
@@ -151,7 +151,7 @@ fn all_argument_failures_use_the_json_contract() {
         vec!["--json"],        // missing command
         vec!["tab", "--json"], // missing nested command
         vec!["--json", "tab"], // bare subcommand group renders help
-        vec!["--quiet", "--json", "click"],
+        vec!["--quiet", "--json", "open"],
         vec!["--json", "--json", "status"], // conflicting flag
     ] {
         json_usage_error(&bsk(&args));
@@ -160,16 +160,16 @@ fn all_argument_failures_use_the_json_contract() {
 
 #[test]
 fn json_message_is_the_clap_summary_and_details_keep_the_full_text() {
-    let missing = json_usage_error(&bsk(&["--json", "click"]));
+    let missing = json_usage_error(&bsk(&["--json", "open"]));
     assert_eq!(
         missing["message"],
-        "the following required arguments were not provided: --session <SESSION>"
+        "the following required arguments were not provided: <URL>"
     );
     assert!(
         missing["data"]["details"]
             .as_str()
             .unwrap()
-            .contains(&usage("click --session <SESSION>"))
+            .contains(&usage("open <URL>"))
     );
 
     let invalid = json_usage_error(&bsk(&[
@@ -281,14 +281,10 @@ fn human_usage_errors_keep_stderr_and_replace_the_misleading_suggestion() {
         // clap's did-you-mean pointed `--session` at `--version` (#387).
         assert!(!stderr.contains("--version"), "{stderr}");
     }
-    let output = bsk(&["click"]);
+    let output = bsk(&["open"]);
     assert_eq!(output.status.code(), Some(1));
     assert!(output.stdout.is_empty());
-    assert!(
-        String::from_utf8(output.stderr)
-            .unwrap()
-            .contains("--session")
-    );
+    assert!(String::from_utf8(output.stderr).unwrap().contains("<URL>"));
 }
 
 #[test]
@@ -312,16 +308,16 @@ fn help_and_version_remain_successful_text_even_with_json() {
 #[test]
 fn json_inside_a_value_or_after_double_dash_does_not_select_json_output() {
     for args in [
-        vec!["click", "--", "--json"],
-        vec!["click", "--selector=--json"],
-        vec!["click", "--selector=#submit --json"],
+        vec!["fill", "--", "--json"],
+        vec!["fill", "--selector=--json"],
+        vec!["fill", "--selector=#submit --json"],
     ] {
         let output = bsk(&args);
         assert_eq!(output.status.code(), Some(1));
         assert!(output.stdout.is_empty(), "{args:?}: {output:?}");
         assert!(!output.stderr.is_empty());
     }
-    json_usage_error(&bsk(&["--json", "click", "--", "--json"]));
+    json_usage_error(&bsk(&["--json", "fill", "--", "--json"]));
 }
 
 #[test]

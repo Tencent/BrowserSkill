@@ -2,6 +2,7 @@ import {
   type CaptureTargetDescriptor,
   describeEventTarget,
   describeTarget,
+  INTERACTIVE_SELECTOR,
   resolveClickableElement,
   resolveHoverElement,
 } from "@/lib/describe-target";
@@ -92,19 +93,40 @@ function isTextFillable(el: Element): el is FillableElement {
   if (el instanceof HTMLTextAreaElement) return true;
   if (!(el instanceof HTMLInputElement)) return false;
   const type = el.type.toLowerCase();
-  return type !== "checkbox" && type !== "radio" && type !== "file" && type !== "button";
+  return !["checkbox", "radio", "file", "button", "submit", "reset", "image", "hidden"].includes(
+    type,
+  );
 }
 
 function fillableFromTarget(target: EventTarget | null): FillableElement | null {
   if (!(target instanceof Element)) return null;
   if (isTextFillable(target)) return target;
   const el = target.closest('input,textarea,[contenteditable]:not([contenteditable="false"])');
-  if (el && isTextFillable(el)) return el;
-  return null;
+  if (!el || !isTextFillable(el) || isControlInNonEditableRegion(target, el)) return null;
+  return el;
+}
+
+/**
+ * Buttons and links inside a contenteditable="false" region of an editor, such
+ * as attachment or embed actions, are page actions rather than editor text.
+ */
+function isControlInNonEditableRegion(target: Element, editor: Element): boolean {
+  const region = target.closest('[contenteditable="false"]');
+  if (!region || !editor.contains(region)) return false;
+  const control = resolveClickableElement(target);
+  return control !== null && region.contains(control);
 }
 
 /** Clicks on search chrome that only focus the nearby input should not become steps. */
 function nearbyFillableFromSearchChrome(target: Element): FillableElement | null {
+  // Form actions remain clicks, even when they contain an icon beside a search field.
+  if (
+    target.closest(
+      'button,input[type="button"],input[type="submit"],input[type="reset"],input[type="image"]',
+    )
+  ) {
+    return null;
+  }
   const container = target.closest(
     '[id*="chat-input"], [id*="search"], [class*="search"], form, [role="search"]',
   );
@@ -113,14 +135,18 @@ function nearbyFillableFromSearchChrome(target: Element): FillableElement | null
     'textarea, input[type="search"], input[name="q"], #chat-textarea',
   );
   if (
-    fillable instanceof HTMLElement &&
-    isTextFillable(fillable) &&
-    fillable !== target &&
-    !fillable.contains(target)
+    !(fillable instanceof HTMLElement) ||
+    !isTextFillable(fillable) ||
+    fillable === target ||
+    fillable.contains(target)
   ) {
-    return fillable;
+    return null;
   }
-  return null;
+  // Results, filters and actions that share the search form are page actions; only
+  // the field's own wrapper (e.g. a role="combobox" box) counts as focus chrome.
+  const control = target.closest(INTERACTIVE_SELECTOR);
+  if (control && !control.contains(fillable)) return null;
+  return fillable;
 }
 
 function captureGeometry(el: Element): RecordStepPayload["geometry"] {
@@ -135,9 +161,7 @@ function geometryForEventTarget(
   target: EventTarget | null,
 ): RecordStepPayload["geometry"] | undefined {
   if (!(target instanceof Element)) return undefined;
-  const clickable = target.closest(
-    'a,button,input,select,textarea,[role="button"],[role="link"],[role="menuitem"],[contenteditable="true"]',
-  );
+  const clickable = resolveClickableElement(target);
   return captureGeometry(clickable ?? target);
 }
 
@@ -817,7 +841,14 @@ export function startRecordCapture(
   };
 
   const onInput = (event: Event) => {
-    const target = fillableFromTarget(eventTarget(event));
+    const rawTarget = eventTarget(event);
+    // A native <select> in a shadow root fires a non-composed `change` that
+    // never reaches the document; its composed `input` does.
+    if (rawTarget instanceof HTMLSelectElement && rawTarget.getRootNode() instanceof ShadowRoot) {
+      recordSelect(rawTarget);
+      return;
+    }
+    const target = fillableFromTarget(rawTarget);
     if (!target) return;
     if (composing) return;
     ensureFillSession(target);
@@ -837,25 +868,31 @@ export function startRecordCapture(
     }
   };
 
-  const onChange = (event: Event) => {
+  const recordSelect = (target: HTMLSelectElement) => {
     commitFillSession();
+    emitHoverCandidateBeforeAction(target);
+    const values = Array.from(target.selectedOptions).map((opt) => opt.value);
+    const labels = Array.from(target.selectedOptions).map((opt) =>
+      (opt.label || opt.textContent || opt.value).trim(),
+    );
+    const desc = describeTarget(target);
+    markNavigationAction();
+    emitStep({
+      op: "select",
+      target: desc,
+      geometry: captureGeometry(target),
+      values,
+      labels,
+      expects_navigation: true,
+    });
+  };
+
+  const onChange = (event: Event) => {
     const target = eventTarget(event);
     if (target instanceof HTMLSelectElement) {
-      emitHoverCandidateBeforeAction(target);
-      const values = Array.from(target.selectedOptions).map((opt) => opt.value);
-      const labels = Array.from(target.selectedOptions).map((opt) =>
-        (opt.label || opt.textContent || opt.value).trim(),
-      );
-      const desc = describeTarget(target);
-      markNavigationAction();
-      emitStep({
-        op: "select",
-        target: desc,
-        geometry: captureGeometry(target),
-        values,
-        labels,
-        expects_navigation: true,
-      });
+      recordSelect(target);
+    } else {
+      commitFillSession();
     }
   };
 

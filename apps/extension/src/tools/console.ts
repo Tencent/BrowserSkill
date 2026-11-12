@@ -43,9 +43,9 @@ export async function handleConsole(
   }
 
   try {
+    deps.cdp.trackSessionTab?.(ctxOrErr.sessionId, target.tabId);
     await deps.cdp.ensureConsoleCapture(target.tabId, signal);
     if (signal?.aborted) return { code: "cancelled", message: "console aborted" };
-    deps.cdp.trackSessionTab?.(ctxOrErr.sessionId, target.tabId);
     return deps.cdp.consoleEntriesSince(
       target.tabId,
       bounds.since,

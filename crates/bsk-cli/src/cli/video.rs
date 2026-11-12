@@ -42,7 +42,9 @@ pub enum VideoCommand {
 #[derive(Debug, Clone, Args)]
 pub struct StartArgs {
     #[arg(long)]
-    pub session: String,
+    pub session: Option<String>,
+    #[arg(long)]
+    pub scope: Option<String>,
     #[arg(long)]
     pub tab_id: Option<i64>,
     #[arg(long, visible_alias = "max-duration", default_value = "60s", value_parser = parse_duration)]
@@ -268,11 +270,13 @@ pub fn dispatch(cmd: VideoCmd, format: Format) -> Result<(), CliError> {
     let sock = super::ensure_daemon::ensure_daemon()?.sock_path;
     match cmd.command {
         VideoCommand::Start(args) => {
-            capabilities(&sock, None, Some(args.session.clone()))?;
+            business_rpc::set_caller_scope(args.scope);
+            let session = args.session.unwrap_or_default();
+            capabilities(&sock, None, Some(session.clone()))?;
             let result: CachedGrant = call(
                 &sock,
                 VideoParams::Start {
-                    session_id: args.session,
+                    session_id: session,
                     tab_id: args.tab_id,
                     max_duration_ms: args.duration,
                     quality: if args.quality == "clear" {

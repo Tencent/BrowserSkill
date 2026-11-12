@@ -121,3 +121,11 @@ it("migrates a legacy grant before restoring ordinary settings access", async ()
   expect(values.bsk_remote_endpoint).toBeUndefined();
   expect(chrome.storage.local.setAccessLevel).toHaveBeenCalledOnce();
 });
+
+it("L20: keeps a remote authorization when switching to local", async () => {
+  availableDatabase();
+  await storage.writeRemoteConnection(endpoint);
+  await storage.writeRemoteConnection(null);
+  expect(await storage.readRemoteConnection()).toBeNull();
+  expect(await storage.readSavedRemoteConnection()).toEqual(endpoint);
+});

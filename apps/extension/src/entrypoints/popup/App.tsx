@@ -3,7 +3,7 @@ import { Badge, Button, Input, Label } from "@browser-skill/ui";
 import { RiArrowLeftLine, RiArrowRightSLine, RiCheckLine, RiFileCopyLine } from "@remixicon/react";
 import { type ChangeEvent, useEffect, useState } from "react";
 import { AuditPanel } from "@/components/audit-panel";
-import { compareProtocol } from "@/lib/semver";
+import { supportsFeature } from "@/transport/compatibility";
 import { PROTOCOL_VERSION } from "@/transport/handshake";
 import functionIconUrl from "../../../assets/function.svg";
 import { BrowserProfile } from "./browser-profile";
@@ -87,8 +87,8 @@ export function App() {
       : null;
   const daemonVersion = snapshot.handshake?.version ?? daemonUpgrade?.daemonVersion ?? "—";
   const daemonProtocol = snapshot.handshake?.protocol_version ?? "—";
-  const interactionProtocolOrder = compareProtocol(daemonProtocol, "1.3");
-  const legacyInteraction = interactionProtocolOrder !== null && interactionProtocolOrder < 0;
+  const legacyInteraction =
+    connectionLive && !supportsFeature("interaction_policy", "daemon", daemonProtocol);
   const extensionVersion = snapshot.extensionVersion || "—";
   const instanceId = snapshot.instanceId || "—";
 
@@ -203,12 +203,49 @@ export function App() {
           >
             <div className="flex items-center justify-between gap-2" data-slot="popup-status">
               <div className="flex min-w-0 items-center gap-2">
-                <ConnectionStatusIndicator state={statusState} />
+                <ConnectionStatusIndicator
+                  state={statusState}
+                  className={
+                    statusState === "disabled"
+                      ? undefined
+                      : ["pairing_required", "server_unverified", "daemon_too_old"].includes(
+                            snapshot.localAuth?.state ?? "",
+                          )
+                        ? "bg-destructive"
+                        : undefined
+                  }
+                />
                 <span className="truncate text-sm font-medium" data-slot="popup-state-label">
-                  {t(STATE_LABEL_KEYS[statusState])}
+                  {t(
+                    statusState !== "disabled" && snapshot.localAuth?.state === "pairing_required"
+                      ? "popup.localAuth.required"
+                      : STATE_LABEL_KEYS[statusState],
+                  )}
                 </span>
               </div>
               <div className="flex shrink-0 items-center gap-2">
+                {connectionLive && snapshot.localAuth === null && (
+                  <Badge variant="outline" className="px-1.5 py-0 text-[10px]">
+                    {t("popup.connectionRemote")}
+                  </Badge>
+                )}
+                {connectionLive &&
+                  snapshot.localAuth &&
+                  ["verified", "unverified_local"].includes(snapshot.localAuth.state) && (
+                    <Badge
+                      variant="outline"
+                      className="px-1.5 py-0 text-[10px]"
+                      data-slot="local-auth-badge"
+                    >
+                      {t(
+                        snapshot.localAuth.state === "verified"
+                          ? "popup.localAuth.verified"
+                          : snapshot.localAuth.reason === "unpaired"
+                            ? "popup.localAuth.unpaired"
+                            : "popup.localAuth.unverified",
+                      )}
+                    </Badge>
+                  )}
                 {isSkewed && (
                   <Badge
                     variant="outline"
@@ -255,6 +292,8 @@ export function App() {
             <ConnectionSettings
               connectionEnabled={snapshot.connectionEnabled}
               disconnected={isDisconnected && !snapshot.lastError && !daemonUpgrade}
+              localAuth={snapshot.localAuth}
+              instanceId={snapshot.instanceId}
             />
           </section>
 

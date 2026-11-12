@@ -1,6 +1,6 @@
 use super::{
     TOOL_IPC_TIMEOUT, business_rpc,
-    ensure_daemon::ensure_daemon,
+    ensure_daemon::ensure_daemon_optimistic as ensure_daemon,
     error::{CliError, Format},
 };
 use anyhow::Context;
@@ -46,7 +46,9 @@ pub struct CooperateArgs {
     #[arg(value_enum)]
     pub action: Action,
     #[arg(long)]
-    pub session: String,
+    pub session: Option<String>,
+    #[arg(long)]
+    pub scope: Option<String>,
     /// Session control policy (sync/enable only). Auto preserves an existing choice or starts target control.
     #[arg(long, value_enum)]
     pub policy: Option<Policy>,
@@ -102,7 +104,7 @@ pub fn dispatch(args: CooperateArgs, _format: Format) -> Result<(), CliError> {
         .as_deref()
         .map(super::observation_view::read)
         .transpose()?;
-    let session = args.session.clone();
+    let session = args.session.clone().unwrap_or_default();
     let saved = args
         .save_full
         .as_ref()
@@ -111,10 +113,11 @@ pub fn dispatch(args: CooperateArgs, _format: Format) -> Result<(), CliError> {
     if matches!(control_policy, Some(ControlPolicy::Target)) {
         business_rpc::set_target_policy_requested();
     }
+    business_rpc::set_caller_scope(args.scope.clone());
     let daemon = ensure_daemon().context("ensure daemon is running")?;
     let params = CooperateParams {
         control_policy,
-        session_id: args.session,
+        session_id: session.clone(),
         tab_id: args.tab_id,
         action: match args.action {
             Action::Enable => CooperateAction::Enable,

@@ -1,6 +1,7 @@
 import type { SessionManager } from "@/session-manager/manager";
 import { CooperationController } from "./controller";
-import { FrameCollectionError } from "./frame-error";
+import { FrameCollectionError, FrameUnresponsiveError } from "./frame-error";
+import { provenHiddenFrames } from "./hidden-frames";
 import {
   COOPERATION_ARM,
   COOPERATION_CONTROL,
@@ -14,6 +15,7 @@ import {
   type FrameIdentity,
   type FrameRepairs,
   type FrameState,
+  type HiddenFrames,
   type InputExpectation,
 } from "./types";
 
@@ -108,7 +110,7 @@ async function readFrame(
         return active ? request() : undefined;
       })(),
       new Promise<never>((_, reject) => {
-        timer = setTimeout(() => reject(new Error("A page frame is not responding")), 1200);
+        timer = setTimeout(() => reject(new FrameUnresponsiveError([frameIdentity(frame)])), 1200);
       }),
     ]);
     if (!validFrame(value))
@@ -128,11 +130,14 @@ export async function collectCooperationFrames(
   lease: string,
   input?: InputExpectation,
   repairs: FrameRepairs = new Map(),
+  hidden: HiddenFrames = new Set(),
+  replacementPass = false,
 ): Promise<CooperationFrames> {
   const frames = await chrome.webNavigation.getAllFrames({ tabId });
   const documents = new Set(frames?.map((frame) => frame.documentId));
   for (const documentId of repairs.keys())
     if (!documents.has(documentId)) repairs.delete(documentId);
+  for (const documentId of hidden) if (!documents.has(documentId)) hidden.delete(documentId);
   if (!frames?.length) throw new Error("No observable document in this tab");
   const gaps: FrameGap[] = [];
   const live = frames.filter((frame) => {
@@ -148,19 +153,70 @@ export async function collectCooperationFrames(
     }
     return true;
   });
+  // A child that already failed while hidden is not awaited again while its
+  // element stays hidden. Release still messages every document.
+  const remembered =
+    kind === COOPERATION_DISABLE
+      ? []
+      : live.filter((frame) => frame.frameId !== 0 && hidden.has(frame.documentId));
+  const skipped = remembered.length
+    ? await provenHiddenFrames(tabId, frames, remembered)
+    : new Set<number>();
+  for (const frame of remembered) if (!skipped.has(frame.frameId)) hidden.delete(frame.documentId);
+  const targets = live.filter((frame) => !skipped.has(frame.frameId));
   const results = await Promise.allSettled(
-    live.map(async (frame) => {
+    targets.map(async (frame) => {
       return [
         frame.frameId,
         await readFrame(tabId, frame, { kind, input, lease }, repairs),
       ] as const;
     }),
   );
-  const failures = results.filter((result) => result.status === "rejected");
+  const failed = targets.filter((_frame, i) => results[i].status === "rejected");
+  if (failed.length && !replacementPass && kind !== COOPERATION_DISABLE) {
+    // A document-addressed message can race a child navigation after inventory.
+    // Recollect once only when every failed document is provably retired. Never
+    // hide an active unobservable document, a root replacement or further churn.
+    const current = await chrome.webNavigation.getAllFrames({ tabId });
+    if (
+      current?.find((frame) => frame.frameId === 0)?.documentId ===
+        frames.find((frame) => frame.frameId === 0)?.documentId &&
+      failed.every(
+        (old) =>
+          old.frameId !== 0 &&
+          !current?.some(
+            (frame) =>
+              frame.documentId === old.documentId &&
+              !frame.errorOccurred &&
+              (!frame.documentLifecycle || frame.documentLifecycle === "active"),
+          ),
+      )
+    )
+      return collectCooperationFrames(tabId, kind, lease, input, repairs, hidden, true);
+  }
+  // People cannot point at or type into a hidden child document, so only such a
+  // document may stay uncollected. A failed main page or displayed frame still fails.
+  const concealed =
+    failed.length && kind !== COOPERATION_DISABLE && !failed.some((frame) => frame.frameId === 0)
+      ? await provenHiddenFrames(tabId, frames, failed, skipped)
+      : new Set<number>();
+  for (const frame of live)
+    if (skipped.has(frame.frameId) || concealed.has(frame.frameId)) {
+      hidden.add(frame.documentId);
+      gaps.push({ ...frameIdentity(frame), reason: "hidden_frame" });
+    }
+  const failures = results.filter(
+    (result, i): result is PromiseRejectedResult =>
+      result.status === "rejected" && !concealed.has(targets[i].frameId),
+  );
   const unobservable = failures.flatMap((result) =>
     result.reason instanceof FrameCollectionError ? result.reason.frames : [],
   );
   if (unobservable.length) throw new FrameCollectionError("frame_unobservable", unobservable);
+  const unresponsive = failures.flatMap((result) =>
+    result.reason instanceof FrameUnresponsiveError ? result.reason.frames : [],
+  );
+  if (unresponsive.length) throw new FrameUnresponsiveError(unresponsive);
   if (failures.length) throw failures[0].reason;
   return {
     frames: new Map(
@@ -179,16 +235,17 @@ export function attachCooperation(
     sessions,
     changed,
     sessionActivity,
-    readFrames: (tabId, input, lease, repairs) =>
+    readFrames: (tabId, input, lease, repairs, hidden) =>
       collectCooperationFrames(
         tabId,
         input ? COOPERATION_ARM : COOPERATION_READ,
         lease,
         input,
         repairs,
+        hidden,
       ),
-    resumeFrames: async (tabId, lease, repairs) => {
-      await collectCooperationFrames(tabId, COOPERATION_RESUME, lease, undefined, repairs);
+    resumeFrames: async (tabId, lease, repairs, hidden) => {
+      await collectCooperationFrames(tabId, COOPERATION_RESUME, lease, undefined, repairs, hidden);
     },
     releaseFrames: async (tabId, lease) => {
       await collectCooperationFrames(tabId, COOPERATION_DISABLE, lease);

@@ -17,9 +17,7 @@ use super::start::DaemonConfig;
 use super::ws::WsHandle;
 
 pub const DAEMON_VERSION: &str = env!("CARGO_PKG_VERSION");
-pub const PROTOCOL_VERSION: &str = "1.8";
-/// Base wire compatibility. New interaction semantics are checked per operation.
-pub const MIN_COMPATIBLE_PROTOCOL: &str = "1.0";
+pub use bsk_protocol::catalog::{MIN_COMPATIBLE_PROTOCOL, PROTOCOL_VERSION};
 /// Legacy app-semver floor used only when `HandshakeResult.min_compatible_peer`
 /// is emitted for old extensions. New code ignores this on read.
 pub const LEGACY_MIN_COMPATIBLE_PEER: &str = "0.0.0";
@@ -29,6 +27,9 @@ pub const SERVER_NAME: &str = "browser-skill-daemon";
 pub struct DaemonState {
     pub audit: Arc<super::audit::AuditStore>,
     pub config: DaemonConfig,
+    pub local_auth: Arc<super::local_auth::LocalAuth>,
+    last_unpaired_attempt:
+        std::sync::Mutex<Option<(std::time::Instant, bsk_protocol::system::UnpairedAttempt)>>,
     pub browsers: Arc<BrowserRegistry>,
     pub sessions: Arc<SessionRegistry>,
     pub session_requests: super::session_requests::SessionRequests,
@@ -58,6 +59,12 @@ pub struct DaemonState {
     /// Operation-scoped local file staging. The extension only sees paths
     /// minted here; agent-facing RPCs use opaque transfer ids.
     pub transfers: Arc<TransferRegistry>,
+    /// What each live session did, for recipe drafts. Metadata only, in memory.
+    pub run_logs: super::run_log::RunLogs,
+    /// Caller-scoped implicit session bindings, short `cN`/`oN` tokens, and `last_vom`.
+    pub scopes: super::scopes::ImplicitScopeRegistry,
+    /// `<3ms` write-ahead intent ledger guarding against blind replay (`RM-03`).
+    pub intent_wal: super::intent_wal::IntentWal,
 }
 
 impl DaemonState {
@@ -81,12 +88,60 @@ impl DaemonState {
             self.transfers.release_session(&session.id.0);
             self.dialog_operations.remove_session(&session.id.0);
             self.sessions.remember_end(&session.id, end_reason);
+            self.scopes.on_session_ended(&session.id, end_reason);
+            self.intent_wal.on_session_ended(&session.id);
             tracing::debug!(session = %session.id, note);
         }
     }
 }
 
 impl DaemonState {
+    pub fn record_unpaired(&self, version: Option<&str>) {
+        let extension_version = version
+            .and_then(|v| semver::Version::parse(v).ok())
+            .map(|v| v.to_string());
+        let at = time::OffsetDateTime::now_utc()
+            .format(&time::format_description::well_known::Rfc3339)
+            .expect("current timestamp");
+        *self.last_unpaired_attempt.lock().unwrap() = Some((
+            std::time::Instant::now(),
+            bsk_protocol::system::UnpairedAttempt {
+                at,
+                extension_version,
+            },
+        ));
+    }
+    pub fn recent_unpaired(&self) -> Option<bsk_protocol::system::UnpairedAttempt> {
+        if self.local_auth.mode().accepts_legacy() {
+            return None;
+        }
+        self.last_unpaired_attempt
+            .lock()
+            .unwrap()
+            .as_ref()
+            .filter(|(when, _)| when.elapsed() < std::time::Duration::from_secs(300))
+            .map(|(_, attempt)| attempt.clone())
+    }
+    pub fn local_auth_status(&self) -> Option<bsk_protocol::system::LocalAuthStatus> {
+        if self.config.server.is_some() {
+            return None;
+        }
+        Some(bsk_protocol::system::LocalAuthStatus {
+            mode: serde_json::to_value(self.local_auth.mode())
+                .expect("local policy")
+                .as_str()
+                .unwrap()
+                .into(),
+            paired_devices: self
+                .local_auth
+                .store
+                .devices()
+                .iter()
+                .filter(|d| d.status == super::local_auth::store::DeviceStatus::Active)
+                .count(),
+            last_unpaired_attempt: self.recent_unpaired(),
+        })
+    }
     pub fn new(config: DaemonConfig) -> Self {
         if crate::cli::human_loop::legacy_help_override_requested() {
             crate::cli::interaction_policy::warn_legacy_override("BSK_REQUEST_HELP=off");
@@ -106,6 +161,8 @@ impl DaemonState {
         let transfers = Arc::new(TransferRegistry::new().expect("initialise transfer staging"));
         Self {
             audit,
+            local_auth: Arc::new(super::local_auth::LocalAuth::memory(config.local_auth)),
+            last_unpaired_attempt: Default::default(),
             config,
             browsers,
             sessions,
@@ -116,6 +173,9 @@ impl DaemonState {
             dialog_operations: Default::default(),
             session_interrupts,
             transfers,
+            run_logs: Default::default(),
+            scopes: Default::default(),
+            intent_wal: super::intent_wal::IntentWal::new(super::paths::intent_ledger_path().ok()),
         }
     }
 }

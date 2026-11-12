@@ -14,7 +14,7 @@ use bsk_protocol::tools::{
 };
 use clap::{Args, ValueEnum};
 
-use crate::cli::ensure_daemon::ensure_daemon;
+use crate::cli::ensure_daemon::ensure_daemon_optimistic as ensure_daemon;
 use crate::cli::error::{CliError, Format};
 use crate::cli::interaction::split_target;
 use crate::cli::navigate::parse_timeout_ms;
@@ -50,7 +50,9 @@ pub struct UploadArgs {
     #[arg(long, value_enum, default_value_t)]
     pub mode: UploadModeArg,
     #[arg(long)]
-    pub session: String,
+    pub session: Option<String>,
+    #[arg(long)]
+    pub scope: Option<String>,
     #[arg(long = "tab-id")]
     pub tab_id: Option<i64>,
     #[arg(long, default_value = "2m", value_parser = parse_timeout_ms)]
@@ -59,16 +61,27 @@ pub struct UploadArgs {
 
 pub fn dispatch(args: UploadArgs, format: Format) -> Result<(), CliError> {
     if args.files.len() > crate::daemon::file_transfer::MAX_UPLOAD_FILES {
-        return Err(CliError::Local(anyhow::anyhow!(
+        return Err(CliError::invalid_params(anyhow::anyhow!(
             "upload accepts at most {} files",
             crate::daemon::file_transfer::MAX_UPLOAD_FILES
         )));
     }
+    let (ref_, selector) =
+        split_target(args.target, args.ref_, args.selector).map_err(|error| match error {
+            CliError::Local(error) => CliError::invalid_params(error),
+            error => error,
+        })?;
+    let sources = args
+        .files
+        .iter()
+        .map(|path| UploadSource::open(path))
+        .collect::<Result<Vec<_>, _>>()?;
+    crate::cli::business_rpc::set_caller_scope(args.scope);
+    let session = args.session.unwrap_or_default();
     let info = ensure_daemon().context("ensure daemon is running")?;
-    let (ref_, selector) = split_target(args.target, args.ref_, args.selector)?;
     let mut staged = Vec::new();
-    for path in &args.files {
-        if let Err(err) = stage_file(&info.sock_path, &args.session, path, &mut staged) {
+    for source in sources {
+        if let Err(err) = stage_file(&info.sock_path, &session, source, &mut staged) {
             let _ = crate::cli::business_rpc::release_transfers(
                 &info.sock_path,
                 staged.iter().map(|(id, _)| id.as_str()),
@@ -77,7 +90,7 @@ pub fn dispatch(args: UploadArgs, format: Format) -> Result<(), CliError> {
         }
     }
     let params = UploadParams {
-        session_id: args.session,
+        session_id: session,
         ref_,
         selector,
         tab_id: args.tab_id,
@@ -126,31 +139,59 @@ pub fn dispatch(args: UploadArgs, format: Format) -> Result<(), CliError> {
     Ok(())
 }
 
+struct UploadSource {
+    file: File,
+    name: String,
+    byte_size: u64,
+}
+
+impl UploadSource {
+    /// Open every source before starting the daemon or staging any transfer.
+    fn open(path: &Path) -> Result<Self, CliError> {
+        let file_error = |error| {
+            CliError::file_validation(
+                error,
+                "check --file: provide an existing readable regular file",
+            )
+        };
+        let file = File::open(path)
+            .with_context(|| format!("open upload file {}", path.display()))
+            .map_err(file_error)?;
+        let meta = file
+            .metadata()
+            .with_context(|| format!("read upload file metadata {}", path.display()))
+            .map_err(file_error)?;
+        if !meta.is_file() {
+            return Err(file_error(anyhow::anyhow!(
+                "upload source is not a regular file: {}",
+                path.display()
+            )));
+        }
+        let name = path
+            .file_name()
+            .and_then(|v| v.to_str())
+            .filter(|v| !v.is_empty())
+            .ok_or_else(|| file_error(anyhow::anyhow!("upload file has no valid basename")))?
+            .to_string();
+        Ok(Self {
+            file,
+            name,
+            byte_size: meta.len(),
+        })
+    }
+}
+
 fn stage_file(
     sock: &Path,
     session: &str,
-    path: &PathBuf,
+    source: UploadSource,
     staged: &mut Vec<(String, String)>,
 ) -> Result<(), CliError> {
-    let mut file = File::open(path)
-        .with_context(|| format!("open upload file {}", path.display()))
-        .map_err(CliError::Local)?;
-    let meta = file
-        .metadata()
-        .with_context(|| format!("read upload file metadata {}", path.display()))
-        .map_err(CliError::Local)?;
-    if !meta.is_file() {
-        return Err(CliError::Local(anyhow::anyhow!(
-            "upload source is not a regular file: {}",
-            path.display()
-        )));
-    }
-    let name = path
-        .file_name()
-        .and_then(|v| v.to_str())
-        .filter(|v| !v.is_empty())
-        .ok_or_else(|| CliError::Local(anyhow::anyhow!("upload file has no valid basename")))?
-        .to_string();
+    let UploadSource {
+        mut file,
+        name,
+        byte_size,
+    } = source;
     let begin: TransferBeginResult = crate::cli::business_rpc::call(
         sock.to_path_buf(),
         "transfer-begin",
@@ -158,7 +199,7 @@ fn stage_file(
         Some(TransferBeginParams {
             session_id: session.to_string(),
             name: name.clone(),
-            byte_size: meta.len(),
+            byte_size,
         }),
         Duration::from_secs(10),
     )?;

@@ -1,30 +1,30 @@
 ---
 name: browser-skill
-description: Use injected bsk_* tools with the user's logged-in Chromium to read pages, fill forms, manage tabs, debug websites, or test UIs.
+description: Use injected bsk_* tools in logged-in Chromium to read pages, fill forms, manage tabs, debug sites or test UIs.
 ---
 
-# browser-skill for DeepSeek Harness
+# DeepSeek Harness
 
-All browser work must use the injected tools directly, in an Agent Window with existing logins.
+All browser work must use the injected tools directly in an Agent Window.
 Never control the browser through another process. Follow the loaded action schemas.
 Never extract credentials, cookies, tokens, or other secrets.
 
 ## Before acting
 
-Human collaboration is automatic. Read [cooperation](references/cooperation.md) before acting; no enable/share call is needed.
+Read [cooperation](references/cooperation.md) first; collaboration needs no enable/share call.
 
-If a browser profile is required, read [tabs and profiles](references/tabs-and-profiles.md)
-before starting. Verify its instance mapping and bind every new session explicitly.
+If a profile is required, read [tabs and profiles](references/tabs-and-profiles.md)
+first. Verify its instance mapping and bind every new session explicitly.
 Never omit `browser` or substitute another instance to recover.
 Borrow confirmation and human help follow the extension's Automation settings;
 never change them or switch backends to bypass a prompt.
-For remote setup/pairing, follow the [remote guide](https://github.com/Tencent/BrowserSkill/blob/main/docs/remote-extension-connection.md).
+On `unsupported_feature`, keep options; use `recovery`. For remote setup/pairing, see the [remote guide](https://github.com/Tencent/BrowserSkill/blob/main/docs/remote-extension-connection.md).
 
 ## Mandatory workflow
 
-1. Define success. Start a session and retain `sessionId`. Include the verified `browser`
-   when a profile is required. For debugging or requested video, read the matching
-   reference below and start capture before navigation. Leave capture off otherwise.
+1. Define success. Start a session, retain `sessionId`, and pass verified `browser`
+   when a profile is required. For debugging or requested video, read its
+   reference below and start capture before navigation; leave capture off otherwise.
    For a new page:
 
    ```text
@@ -36,7 +36,7 @@ For remote setup/pairing, follow the [remote guide](https://github.com/Tencent/B
 2. For existing tabs, read [tab borrowing](references/tabs-and-profiles.md). Use actual IDs/refs.
    Pass `session` when several exist; never use foreign IDs.
 3. Pass sync's `context_id` as `contextId`. Target-policy DOM actions and extra reads reuse it;
-   protect business facts with `expect`. Untargeted/visual actions also need sync's `observationId`.
+   protect business facts with `expect`. Untargeted keys and visual actions also need sync's `observationId`.
    After intervention/navigation, sync and replan; wait-user while the person is active.
    Verify success. Stop requested video first, then on success or failure call
    `bsk_session({ action: "stop", session: "<id>" })` unless keeping the session
@@ -59,7 +59,7 @@ bsk_interact({ action: "fill", session: "<id>", target: "@e3", value: "text", co
 
 DOM refs survive reads; navigation invalidates them. Use refs for frames/shadow roots;
 selectors search the main document.
-Select options by value, not visible label.
+Dynamic pages: [read/extract](references/extraction.md) first. Scripts: target `expect` without `observationId`; strict `dependsOn`; `unverified` last. Select options by value.
 
 Inspect unknown effects before retrying. On an error or two attempts without progress,
 read [human help and recovery](references/help-and-recovery.md) for `bsk_assist`.
@@ -72,13 +72,13 @@ The agent decides native dialogs. On `dialog_pending`,
 
 ## Read details only when needed
 
-Resolve references from the harness-provided skill directory. Read only the matching file.
+Read matching references from the harness skill directory.
 
 | When | Read |
 | --- | --- |
-| Website failures, request/performance debugging, or HTTP experiments | [Website debugging](references/debugging.md) |
+| Website failures, request/performance debugging or HTTP experiments | [Website debugging](references/debugging.md) |
 | Required profile, borrowing/returning user tabs with `bsk_tabs`, or remote tab ownership | [Tabs and profiles](references/tabs-and-profiles.md) |
-| Drag, step, saved views, hover menus, scrolling, `nextCursor`, console/network, or window/device settings | [Interaction details](references/interaction-details.md) |
+| Drag, step, plan, recipes, saved views, hover menus, scrolling, `nextCursor`, console/network, or window/device settings | [Interaction details](references/interaction-details.md) |
 | Screenshot or `[visual:screenshot]`/Canvas interaction | [Screenshots and Canvas](references/screenshots-and-canvas.md) |
 | Video recording or MP4 export | [Video](references/video.md) |
 | Login/CAPTCHA/OTP/consent/payment confirmation, disabled help, failed operations, or interrupted cleanup | [Human help and recovery](references/help-and-recovery.md) |

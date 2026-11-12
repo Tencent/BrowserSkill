@@ -15,7 +15,7 @@ use clap::Args;
 use uuid::Uuid;
 
 use crate::cli::atomic_output;
-use crate::cli::ensure_daemon::ensure_daemon;
+use crate::cli::ensure_daemon::ensure_daemon_optimistic as ensure_daemon;
 use crate::cli::error::{CliError, Format};
 use crate::cli::interaction::split_target;
 use crate::cli::navigate::parse_timeout_ms;
@@ -31,7 +31,9 @@ pub struct DownloadArgs {
     #[arg(long)]
     pub out: PathBuf,
     #[arg(long)]
-    pub session: String,
+    pub session: Option<String>,
+    #[arg(long)]
+    pub scope: Option<String>,
     #[arg(long = "tab-id")]
     pub tab_id: Option<i64>,
     #[arg(long, default_value = "2m", value_parser = parse_timeout_ms)]
@@ -42,15 +44,17 @@ pub struct DownloadArgs {
 
 pub fn dispatch(args: DownloadArgs, format: Format) -> Result<(), CliError> {
     if args.out.exists() && !args.overwrite {
-        return Err(CliError::Local(anyhow::anyhow!(
-            "output already exists (pass --overwrite to replace it): {}",
-            args.out.display()
-        )));
+        return Err(output_exists(&args.out));
     }
+    let (ref_, selector) =
+        split_target(args.target, args.ref_, args.selector).map_err(|error| match error {
+            CliError::Local(error) => CliError::invalid_params(error),
+            error => error,
+        })?;
+    crate::cli::business_rpc::set_caller_scope(args.scope.clone());
     let info = ensure_daemon().context("ensure daemon is running")?;
-    let (ref_, selector) = split_target(args.target, args.ref_, args.selector)?;
     let params = DownloadParams {
-        session_id: args.session.clone(),
+        session_id: args.session.clone().unwrap_or_default(),
         ref_,
         selector,
         tab_id: args.tab_id,
@@ -76,9 +80,20 @@ pub fn dispatch(args: DownloadArgs, format: Format) -> Result<(), CliError> {
         {
             let out = std::path::absolute(&args.out).unwrap_or_else(|_| args.out.clone());
             let mut command = vec![
-                "bsk".to_string(), "operation".into(), "await".into(), operation_id.into(),
-                "--session".into(), args.session.clone(), "--out".into(), out.to_string_lossy().into_owned(),
+                "bsk".to_string(),
+                "operation".into(),
+                "await".into(),
+                operation_id.into(),
             ];
+            if let Some(session) = &args.session {
+                command.push("--session".into());
+                command.push(session.clone());
+            } else if let Some(scope) = &args.scope {
+                command.push("--scope".into());
+                command.push(scope.clone());
+            }
+            command.push("--out".into());
+            command.push(out.to_string_lossy().into_owned());
             if args.overwrite { command.push("--overwrite".into()); }
             command.push("--json".into());
             data["download_output"] = serde_json::json!({
@@ -110,6 +125,16 @@ pub fn dispatch(args: DownloadArgs, format: Format) -> Result<(), CliError> {
     Ok(())
 }
 
+fn output_exists(out: &Path) -> CliError {
+    CliError::file_validation(
+        anyhow::anyhow!(
+            "output already exists (pass --overwrite to replace it): {}",
+            out.display()
+        ),
+        "choose a new --out path, or pass --overwrite to replace the existing file",
+    )
+}
+
 pub(super) fn write_transfer(
     sock: &Path,
     id: &str,
@@ -117,10 +142,7 @@ pub(super) fn write_transfer(
     overwrite: bool,
 ) -> Result<(), CliError> {
     if out.exists() && !overwrite {
-        return Err(CliError::Local(anyhow::anyhow!(
-            "output already exists (pass --overwrite to replace it): {}",
-            out.display()
-        )));
+        return Err(output_exists(out));
     }
     let parent = out
         .parent()

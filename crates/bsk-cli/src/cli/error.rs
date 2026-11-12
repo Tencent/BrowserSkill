@@ -28,8 +28,8 @@ use crate::daemon::start_error::recovery_hint;
 /// a transport / setup failure (`anyhow::Error`).
 #[derive(Debug, Error)]
 pub enum CliError {
-    /// Structured error reported by the daemon (or extension via the
-    /// daemon's RPC layer).
+    /// Structured validation error, reported locally or by the daemon
+    /// (including extension errors forwarded through its RPC layer).
     #[error("{message}")]
     Rpc {
         code: ErrorCode,
@@ -61,6 +61,35 @@ pub enum CliError {
 }
 
 impl CliError {
+    /// Caller-side validation uses the same stable contract as RPC validation,
+    /// without suggesting that a healthy daemon needs to be restarted.
+    pub(crate) fn invalid_params(error: Error) -> Self {
+        Self::Rpc {
+            code: ErrorCode::InvalidParams,
+            message: format!("{error:#}"),
+            data: None,
+            source: Some(error),
+        }
+    }
+
+    /// Classify a local file preflight while retaining its filesystem cause.
+    pub(crate) fn file_validation(error: Error, recovery: &str) -> Self {
+        let code = match error.downcast_ref::<std::io::Error>().map(|e| e.kind()) {
+            Some(std::io::ErrorKind::NotFound) => ErrorCode::NotFound,
+            Some(std::io::ErrorKind::PermissionDenied) => ErrorCode::PermissionDenied,
+            _ => ErrorCode::InvalidParams,
+        };
+        Self::Rpc {
+            code,
+            message: format!("{error:#}"),
+            data: Some(serde_json::json!({
+                "reason": "local_file_error",
+                "recovery": recovery,
+            })),
+            source: Some(error),
+        }
+    }
+
     pub fn from_rpc(err: RpcError) -> Self {
         CliError::Rpc {
             code: err.code,
@@ -805,5 +834,42 @@ mod tests {
             serde_json::from_str(&json_error_string(&error, 1, hint)).unwrap();
         assert_eq!(rendered["data"]["expected"], "$12");
         assert_eq!(rendered["data"]["effect_state"], "none");
+    }
+}
+
+#[cfg(test)]
+mod action_timeout_render_tests {
+    use super::*;
+
+    #[test]
+    fn cli_and_mcp_preserve_timeout_evidence_without_blind_retry_advice() {
+        for effect in ["none", "unknown", "committed"] {
+            let data = serde_json::json!({
+                "reason": "action_deadline",
+                "phase": "execution",
+                "effect_state": effect,
+                "operation": "tool.fill"
+            });
+            let error = CliError::from_rpc(RpcError {
+                code: ErrorCode::Timeout,
+                message: "tool RPC timed out after 400ms".into(),
+                data: Some(data.clone()),
+            });
+            let mcp = json_error_value(&error);
+            let render_info = render_info_for(&error);
+            let cli: serde_json::Value = serde_json::from_str(&json_error_string(
+                &error,
+                error.exit_code(),
+                hint_for(&error, render_info.as_ref()),
+            ))
+            .unwrap();
+            assert_eq!(cli, mcp);
+            assert_eq!(cli["data"], data);
+            assert_eq!(cli["exit_code"], 4);
+            let hint = cli["hint"].as_str().unwrap();
+            assert!(hint.contains("inspect the application result"));
+            assert!(hint.contains("do not replay"));
+            assert!(!hint.contains("retry the command"));
+        }
     }
 }

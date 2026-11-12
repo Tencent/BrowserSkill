@@ -100,11 +100,43 @@ requires explicit reconciliation. Pages the person touched survive session stop.
 human-participation idle protection continues while awaiting the person; untouched task pages
 keep normal idle cleanup. Explicit stop, window closure and disconnect retain their existing rules.
 
-## Scripts and file transfers
+## Scripts
 
-Use `bsk_interact` with `action: "evaluate"`, `expression`, `contextId` and `observationId` for scripts.
+Use `bsk_interact` with `action: "evaluate"`, `expression` and `contextId` for scripts.
 `awaitPromise` and `returnByValue` default to true. Scripts can have arbitrary or deferred effects
 and cannot be rolled back after dispatch. Inspect application evidence after an unknown result.
+
+Only you know what a script relies on, so say it. Use the first of these that fits:
+
+1. **State what the script relies on.** Then only that is checked, and unrelated text, structure
+   and media may keep changing (clocks, feeds, carousels, players).
+   - Target policy: `expect` facts and no `observationId`. The context is reused, and a child
+     frame may navigate unless a fact uses a ref inside a frame. Adding `observationId` asks for
+     the whole page as well.
+   - Strict policy: `dependsOn` refs/selectors. Their regions, form values and modal layers stay
+     exact; a child-frame navigation still revokes a strict context.
+2. **Declare nothing.** The whole page must still match the sync: pass `observationId` under
+   target policy. Suitable only for pages that hold still.
+3. **`unverified: true`, the last resort,** when what the script relies on cannot be stated.
+
+`unverified` compares nothing about the page: not text, structure, dialogs, media or child
+frames. It still requires a valid `contextId`, so human intervention, a replaced main document
+or a stopped task refuse it. It cannot be combined with `expect`, `observationId` or `dependsOn`.
+Strict contexts still authorize only one action.
+The result carries `verified: false`, and nothing guarantees the page is as you last saw it:
+make the script check its own preconditions and `throw` when they do not hold. A script bypasses
+hit testing, so a dialog that opened meanwhile does not stop it. When that matters, use the
+declared-facts path with an `exists` check for the dialog.
+
+Requires daemon and extension protocol 1.9 or later compatible 1.x. Peers below 1.9 are rejected
+before dispatch. Earlier 1.9 development builds cannot be distinguished by this version gate;
+update the CLI, restart its daemon and reload the matching extension together.
+
+A refusal carries `observed_changes`: how many nodes changed, were added or removed, with up to
+five examples. Read it and choose from the list above. Do not resubmit the same script in a sync
+loop, and do not reach for `unverified` when a fact can be stated.
+
+## File transfers
 
 Use `action: "upload"` with an observed `target`, `files` and optional `mode: "input" | "drop"`.
 Use `action: "download"` with an observed `target` and local `output`; `overwrite: true` explicitly
@@ -112,3 +144,14 @@ permits replacing a destination. Both retain existing staging, cancellation and 
 Human intervention revokes further input; once a browser download ID is uniquely attributed,
 receipt collection continues within its original deadline. Keep that result and reconcile.
 Explicit task stop, tab closure or cancellation still releases only owned resources.
+
+## Safe reads during page changes
+
+Use read/extract for current DOM fields and complex table/list data; see
+[extraction](extraction.md). Fixed isolated synchronous queries accept no caller
+JavaScript. Ordinary reads tolerate unrelated clocks, carousels, media and frame
+changes without consuming or replacing action evidence. A sample does not prove
+that business facts remain true: use exact expect checks before input. Main
+SPA route changes (including hash routes) revoke prior contexts and refs, even
+if the URL returns. Read current state without old context, then sync and decide
+again before input. A script that declares nothing keeps its strict observation checks.

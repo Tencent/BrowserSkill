@@ -1435,13 +1435,44 @@ describe("handleFocus and handleBlur", () => {
 function successfulFillScript(params: unknown) {
   const script = params as { arguments?: Array<{ value: unknown }>; functionDeclaration: string };
   const args = script.arguments ?? [];
+  if (script.functionDeclaration.startsWith("async function(value, clearBefore")) {
+    const expected = String(args[0]?.value ?? "");
+    const clearBefore = Boolean(args[1]?.value ?? true);
+    return {
+      result: {
+        value: {
+          before: "",
+          expected,
+          write: "insert",
+          native: true,
+          supportsSelection: true,
+          isSensitive: false,
+          focused: true,
+          hasFocus: true,
+          cleared: clearBefore,
+          readyForInsert: true,
+        },
+      },
+    };
+  }
+  if (script.functionDeclaration.startsWith("async function(notifyInput, expected")) {
+    const expected = String(args[1]?.value ?? "");
+    return {
+      result: {
+        value: {
+          connected: true,
+          matches: true,
+          valueLength: expected.length,
+          sensitive: false,
+          actualValue: expected,
+          formatted: false,
+        },
+      },
+    };
+  }
   return {
     result: {
-      value: script.functionDeclaration.startsWith("function(value, clearBefore")
-        ? { before: "", expected: args[0].value, write: "insert" }
-        : script.functionDeclaration.startsWith("function(expected)")
-          ? { connected: true, matches: true, valueLength: String(args[0].value).length }
-          : "ready",
+      value: "ready",
     },
   };
 }
@@ -1465,9 +1496,17 @@ describe("handleFill", () => {
     const ctx = await sm.start("aa11");
     ctx.refStore.set("e1", 100, { tabId: 4 });
     const fake = makeFakeCdp({
-      "DOM.describeNode": () => ({
-        node: { backendNodeId: 100, nodeName: "BUTTON", attributes: [] },
+      "DOM.resolveNode": () => ({ object: { objectId: "obj-btn" } }),
+      "Runtime.callFunctionOn": () => ({
+        result: {
+          value: {
+            reason: "target_not_fillable",
+            error:
+              "fill requires an enabled text input, textarea, date/time control, or contenteditable editing host",
+          },
+        },
       }),
+      "Runtime.releaseObject": () => ({}),
     });
     const res = await handleFill(
       sm,
@@ -1476,7 +1515,7 @@ describe("handleFill", () => {
     );
     expect(res).toMatchObject({
       code: "invalid_params",
-      message: /not fillable/i,
+      message: /text input|not fillable/i,
       data: { reason: "target_not_fillable" },
     });
   });
@@ -1486,11 +1525,6 @@ describe("handleFill", () => {
     const ctx = await sm.start("aa11");
     ctx.refStore.set("e1", 555, { tabId: 4 });
     const fake = makeFakeCdp({
-      "DOM.describeNode": () => ({
-        node: { backendNodeId: 555, nodeName: "INPUT", attributes: ["type", "text"] },
-      }),
-      "DOM.scrollIntoViewIfNeeded": () => ({}),
-      "DOM.focus": () => ({}),
       "DOM.resolveNode": () => ({ object: { objectId: "obj-1" } }),
       "Runtime.callFunctionOn": successfulFillScript,
       "Runtime.releaseObject": () => ({}),
@@ -1507,9 +1541,9 @@ describe("handleFill", () => {
     expect(res.used_ref).toBe("e1");
     const insert = fake.sent.find((c) => c.method === "Input.insertText");
     expect(insert?.params).toEqual({ text: "hello" });
-    // Foreground replacement needs no extra caret-positioning round trip.
+    // Optimistic 3-step fast path runs Step 1 prepare + Step 3 verify (2 script calls).
     const callFns = fake.sent.filter((c) => c.method === "Runtime.callFunctionOn");
-    expect(callFns).toHaveLength(5);
+    expect(callFns).toHaveLength(2);
   });
 
   it("passes clear_before=false to preparation and verifies the result", async () => {
@@ -1517,20 +1551,14 @@ describe("handleFill", () => {
     const ctx = await sm.start("aa11");
     ctx.refStore.set("e1", 1, { tabId: 4 });
     const fake = makeFakeCdp({
-      "DOM.describeNode": () => ({
-        node: { backendNodeId: 1, nodeName: "TEXTAREA", attributes: [] },
-      }),
-      "DOM.scrollIntoViewIfNeeded": () => ({}),
-      "DOM.focus": () => ({}),
       "DOM.resolveNode": () => ({ object: { objectId: "obj-2" } }),
       "Runtime.callFunctionOn": (p) => {
         const script = p as { arguments?: Array<{ value: unknown }>; functionDeclaration: string };
-        if (script.functionDeclaration.startsWith("function(value, clearBefore")) {
+        if (script.functionDeclaration.startsWith("async function(value, clearBefore")) {
           expect(script.arguments?.[1].value).toBe(false);
         }
         return successfulFillScript(p);
       },
-      "Input.dispatchKeyEvent": () => ({}),
       "Runtime.releaseObject": () => ({}),
       "Input.insertText": () => ({}),
     });
@@ -1548,15 +1576,6 @@ describe("handleFill", () => {
     const ctx = await sm.start("aa11");
     ctx.refStore.set("e1", 7, { tabId: 4 });
     const fake = makeFakeCdp({
-      "DOM.describeNode": () => ({
-        node: {
-          backendNodeId: 7,
-          nodeName: "DIV",
-          attributes: ["contenteditable", "true"],
-        },
-      }),
-      "DOM.scrollIntoViewIfNeeded": () => ({}),
-      "DOM.focus": () => ({}),
       "DOM.resolveNode": () => ({ object: { objectId: "obj-3" } }),
       "Runtime.callFunctionOn": successfulFillScript,
       "Runtime.releaseObject": () => ({}),
@@ -1576,16 +1595,12 @@ describe("handleFill", () => {
     ctx.refStore.set("e1", 555, { tabId: 4 });
     const abort = new AbortController();
     const fake = makeFakeCdp({
-      "DOM.describeNode": () => ({
-        node: { backendNodeId: 555, nodeName: "INPUT", attributes: ["type", "text"] },
-      }),
-      "DOM.scrollIntoViewIfNeeded": () => ({}),
-      "DOM.focus": () => ({}),
       "DOM.resolveNode": () => ({ object: { objectId: "obj-1" } }),
       "Runtime.callFunctionOn": () => {
         abort.abort();
         return { result: { type: "undefined" } };
       },
+      "Runtime.releaseObject": () => ({}),
       "Input.insertText": () => ({}),
     });
 
@@ -1602,12 +1617,9 @@ describe("handleFill", () => {
   it("stops before focus when abort fires after fill scroll", async () => {
     const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
     const ctx = await sm.start("aa11");
-    ctx.refStore.set("e1", 555, { tabId: 4 });
+    ctx.refStore.set("e1", 555, { tabId: 4, frameId: "subframe-1" });
     const abort = new AbortController();
     const fake = makeFakeCdp({
-      "DOM.describeNode": () => ({
-        node: { backendNodeId: 555, nodeName: "INPUT", attributes: ["type", "text"] },
-      }),
       "DOM.scrollIntoViewIfNeeded": () => {
         abort.abort();
         return {};
@@ -1616,6 +1628,18 @@ describe("handleFill", () => {
       "DOM.resolveNode": () => ({ object: { objectId: "fill-target" } }),
       "Runtime.callFunctionOn": successfulFillScript,
       "Runtime.releaseObject": () => ({}),
+    });
+    fake.cdp.getFrameGraph = async () => ({
+      rootFrameId: "root",
+      frames: [
+        { frameId: "root", target: { tabId: 4 } },
+        {
+          frameId: "subframe-1",
+          parentFrameId: "root",
+          ownerBackendNodeId: 900,
+          target: { tabId: 4 },
+        },
+      ],
     });
 
     const res = await handleFill(
@@ -1626,6 +1650,7 @@ describe("handleFill", () => {
 
     expect(res).toMatchObject({ code: "cancelled" });
     expect(fake.sent.some((c) => c.method === "DOM.focus")).toBe(false);
+    expect(fake.sent.some((c) => c.method === "DOM.resolveNode")).toBe(false);
   });
 });
 
@@ -1696,6 +1721,30 @@ describe("resolveKeyDescriptor", () => {
     expect(resolveKeyDescriptor("arrowdown")).toMatchObject({ code: "ArrowDown" });
     expect(resolveKeyDescriptor("space")).toMatchObject({ key: " ", code: "Space" });
   });
+  // A code-less descriptor makes Chromium report `code: ""`/`keyCode: 0`,
+  // so `Ctrl+/` never reaches a handler that keys off `event.code`.
+  it("maps common punctuation to its physical code and virtual key code", () => {
+    expect(resolveKeyDescriptor("/")).toEqual({
+      key: "/",
+      code: "Slash",
+      text: "/",
+      windowsVirtualKeyCode: 191,
+    });
+    expect(resolveKeyDescriptor("-")).toMatchObject({ code: "Minus", windowsVirtualKeyCode: 189 });
+    expect(resolveKeyDescriptor("=")).toMatchObject({ code: "Equal", windowsVirtualKeyCode: 187 });
+    expect(resolveKeyDescriptor(";")).toMatchObject({
+      code: "Semicolon",
+      windowsVirtualKeyCode: 186,
+    });
+    // Shifted glyphs live on the same physical key.
+    expect(resolveKeyDescriptor("?")).toEqual({
+      key: "?",
+      code: "Slash",
+      text: "?",
+      windowsVirtualKeyCode: 191,
+    });
+    expect(resolveKeyDescriptor(":")).toMatchObject({ code: "Semicolon" });
+  });
 });
 
 // PressResult also has a `code` field (the CDP keyboard code), so
@@ -1747,6 +1796,27 @@ describe("handlePress", () => {
     ]);
     expect(calls[0].params).not.toHaveProperty("text");
     expect(calls[1].params).toMatchObject({ text: "a" });
+  });
+
+  it("dispatches Enter keydown and text atomically before releasing the key", async () => {
+    const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
+    await sm.start("aa11");
+    const fake = makeFakeCdp({ "Input.dispatchKeyEvent": () => ({}) });
+    const result = await handlePress(sm, { session_id: "aa11", key: "Enter" }, fake);
+    expectPressOk(result);
+    expect(
+      fake.sent.filter((c) => c.method === "Input.dispatchKeyEvent").map((c) => c.params),
+    ).toEqual([
+      {
+        type: "keyDown",
+        key: "Enter",
+        code: "Enter",
+        windowsVirtualKeyCode: 13,
+        modifiers: 0,
+        text: "\r",
+      },
+      { type: "keyUp", key: "Enter", code: "Enter", windowsVirtualKeyCode: 13, modifiers: 0 },
+    ]);
   });
 
   it("handles compound expressions and folds modifiers", async () => {
@@ -1830,6 +1900,31 @@ describe("handlePress", () => {
     expect(keyDown?.params).toMatchObject({ key: "A", code: "KeyA", modifiers: 2 });
   });
 
+  it("dispatches Ctrl+/ with a Slash code and key code", async () => {
+    const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
+    await sm.start("aa11");
+    const fake = makeFakeCdp({ "Input.dispatchKeyEvent": () => ({}) });
+    const res = await handlePress(
+      sm,
+      { session_id: "aa11", key: "Ctrl+/" },
+      { cdp: fake.cdp, tabsApi: fake.tabsApi },
+    );
+    expectPressOk(res);
+    expect(res).toMatchObject({ key: "/", code: "Slash", modifiers: ["ctrl"] });
+    const keyDown = fake.sent.find(
+      (call) =>
+        call.method === "Input.dispatchKeyEvent" &&
+        (call.params as { type?: string }).type === "rawKeyDown",
+    );
+    expect(keyDown?.params).toMatchObject({
+      key: "/",
+      code: "Slash",
+      windowsVirtualKeyCode: 191,
+      modifiers: 2,
+    });
+    expect(keyDown?.params).not.toHaveProperty("text");
+  });
+
   it("focuses an optional target before dispatch", async () => {
     const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
     const ctx = await sm.start("aa11");
@@ -1866,7 +1961,7 @@ describe("handlePress", () => {
         return {};
       },
       "Input.dispatchKeyEvent": (params) => {
-        if ((params as { type: string }).type === "rawKeyDown") {
+        if ((params as { type: string }).type === "keyDown") {
           if (step === "key") throw new Error("key acknowledgement lost");
           if (step === "cancel") abort.abort();
         }
@@ -2100,10 +2195,15 @@ describe("handleSelect", () => {
     expect(res.multiple).toBe(true);
     expect(res.selected_values).toEqual(["us", "ca"]);
     expect(res.selected_labels).toEqual(["United States", "Canada"]);
-    const callFn = fake.sent.find((c) => c.method === "Runtime.callFunctionOn");
-    expect(callFn?.params).toMatchObject({
-      arguments: [{ value: ["us", "ca"] }],
-    });
+    // Validation (commit=false) runs before scrolling and focusing; the write follows.
+    expect(
+      fake.sent
+        .filter((c) => c.method === "Runtime.callFunctionOn")
+        .map((c) => (c.params as { arguments: unknown }).arguments),
+    ).toEqual([
+      [{ value: ["us", "ca"] }, { value: false }],
+      [{ value: ["us", "ca"] }, { value: true }],
+    ]);
   });
 
   it("sets a single value on a single-select <select>", async () => {
@@ -2146,7 +2246,83 @@ describe("handleSelect", () => {
     );
     expect(res).toMatchObject({
       code: "invalid_params",
-      data: { reason: "option_not_found" },
+      // Matching runs before any option changes, so the select was not written.
+      data: { reason: "option_not_found", effect_state: "none", phase: "precondition" },
+    });
+  });
+
+  it("rejects a missing option before scrolling or focusing the select", async () => {
+    const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
+    const ctx = await sm.start("aa11");
+    ctx.refStore.set("e1", 555, { tabId: 4 });
+    const fake = makeFakeCdp(
+      selectHandlers({ ok: false, reason: "option_not_found", missing: "zz" }),
+    );
+    const res = await handleSelect(
+      sm,
+      { session_id: "aa11", ref: "e1", values: ["zz"] },
+      { cdp: fake.cdp, tabsApi: fake.tabsApi },
+    );
+    expect(res).toMatchObject({
+      data: { reason: "option_not_found", effect_state: "none", phase: "precondition" },
+    });
+    // Focusing can blur another field and run its handlers, so a pre-write
+    // rejection must come before any scroll or focus.
+    expect(fake.sent.map((c) => c.method)).not.toContain("DOM.focus");
+    expect(fake.sent.map((c) => c.method)).not.toContain("DOM.scrollIntoViewIfNeeded");
+  });
+
+  it("keeps an unknown effect when the select becomes disabled after focus", async () => {
+    const select = document.createElement("select");
+    select.innerHTML = '<option value="us">US</option><option value="ca">Canada</option>';
+    const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
+    const ctx = await sm.start("aa11");
+    ctx.refStore.set("e1", 555, { tabId: 4 });
+    const fake = makeFakeCdp({
+      ...selectHandlers({ ok: true }),
+      "DOM.focus": () => {
+        select.disabled = true;
+        return {};
+      },
+      "Runtime.callFunctionOn": (params) => {
+        const script = params as {
+          functionDeclaration: string;
+          arguments: Array<{ value: unknown }>;
+        };
+        const fn = new Function(`return (${script.functionDeclaration})`)();
+        return {
+          result: {
+            value: fn.apply(
+              select,
+              script.arguments.map((arg) => arg.value),
+            ),
+          },
+        };
+      },
+    });
+    const res = await handleSelect(
+      sm,
+      { session_id: "aa11", ref: "e1", values: ["ca"] },
+      { cdp: fake.cdp, tabsApi: fake.tabsApi },
+    );
+    expect(res).toMatchObject({ code: "invalid_params", data: { reason: "target_disabled" } });
+    expect((res as { data?: { effect_state?: string } }).data?.effect_state).toBeUndefined();
+    expect(select.value).toBe("us");
+  });
+
+  it("reports a disabled select as a pre-write failure", async () => {
+    const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
+    const ctx = await sm.start("aa11");
+    ctx.refStore.set("e1", 555, { tabId: 4 });
+    const fake = makeFakeCdp(selectHandlers({ ok: false, reason: "target_disabled" }));
+    const res = await handleSelect(
+      sm,
+      { session_id: "aa11", ref: "e1", values: ["us"] },
+      { cdp: fake.cdp, tabsApi: fake.tabsApi },
+    );
+    expect(res).toMatchObject({
+      code: "invalid_params",
+      data: { effect_state: "none", phase: "precondition" },
     });
   });
 
@@ -2305,7 +2481,117 @@ describe("handleSelect", () => {
       { cdp: fake.cdp, tabsApi: fake.tabsApi, signal: abort.signal },
     );
     expect(res).toMatchObject({ code: "cancelled" });
-    expect(fake.sent.some((c) => c.method === "Runtime.callFunctionOn")).toBe(false);
+    // Only the read-only validation ran; the option write did not.
+    expect(
+      fake.sent
+        .filter((c) => c.method === "Runtime.callFunctionOn")
+        .map((c) => (c.params as { arguments: Array<{ value: unknown }> }).arguments[1]),
+    ).toEqual([{ value: false }]);
+  });
+
+  it("selects by unique visible label (exact and case-insensitive), rejects ambiguous labels, and lists available options", async () => {
+    const select = document.createElement("select");
+    select.innerHTML = [
+      '<option value="east">华东大区</option>',
+      '<option value="south">South Region</option>',
+      '<option value="dup_a">同名项</option>',
+      '<option value="dup_b">同名项</option>',
+    ].join("");
+    const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
+    const ctx = await sm.start("aa11");
+    ctx.refStore.set("e1", 555, { tabId: 4 });
+    const fake = makeFakeCdp({
+      ...selectHandlers({ ok: true, multiple: false }),
+      "Runtime.callFunctionOn": (params) => {
+        const script = params as {
+          functionDeclaration: string;
+          arguments: Array<{ value: unknown }>;
+        };
+        const fn = new Function(`return (${script.functionDeclaration})`)();
+        return {
+          result: {
+            value: fn.apply(
+              select,
+              script.arguments.map((arg) => arg.value),
+            ),
+          },
+        };
+      },
+    });
+
+    const byExactCjkLabel = await handleSelect(
+      sm,
+      { session_id: "aa11", ref: "e1", values: ["华东大区"] },
+      { cdp: fake.cdp, tabsApi: fake.tabsApi },
+    );
+    expect(byExactCjkLabel).toMatchObject({
+      selected_values: ["east"],
+      selected_labels: ["华东大区"],
+    });
+
+    const byCaseInsensitiveLabel = await handleSelect(
+      sm,
+      { session_id: "aa11", ref: "e1", values: ["south region"] },
+      { cdp: fake.cdp, tabsApi: fake.tabsApi },
+    );
+    expect(byCaseInsensitiveLabel).toMatchObject({
+      selected_values: ["south"],
+      selected_labels: ["South Region"],
+    });
+
+    const ambiguous = await handleSelect(
+      sm,
+      { session_id: "aa11", ref: "e1", values: ["同名项"] },
+      { cdp: fake.cdp, tabsApi: fake.tabsApi },
+    );
+    expect(ambiguous).toMatchObject({
+      code: "invalid_params",
+      data: {
+        reason: "option_ambiguous",
+        effect_state: "none",
+        ambiguous: "同名项",
+        count: 2,
+      },
+    });
+
+    const missing = await handleSelect(
+      sm,
+      { session_id: "aa11", ref: "e1", values: ["不存在的大区"] },
+      { cdp: fake.cdp, tabsApi: fake.tabsApi },
+    );
+    expect(missing).toMatchObject({
+      code: "invalid_params",
+      data: {
+        reason: "option_not_found",
+        effect_state: "none",
+        missing: "不存在的大区",
+        available: ['east="华东大区"', 'south="South Region"', 'dup_a="同名项"', 'dup_b="同名项"'],
+      },
+    });
+  });
+
+  it("returns actionable click-to-expand guidance when target_not_select hits a custom dropdown", async () => {
+    const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
+    const ctx = await sm.start("aa11");
+    ctx.refStore.set("e7", 100, { tabId: 4 });
+    const fake = makeFakeCdp({
+      "DOM.describeNode": () => ({
+        node: { backendNodeId: 100, nodeName: "DIV", attributes: ["role", "combobox"] },
+      }),
+    });
+    const res = await handleSelect(
+      sm,
+      { session_id: "aa11", ref: "e7", values: ["月结45天"] },
+      { cdp: fake.cdp, tabsApi: fake.tabsApi },
+    );
+    expect(res).toMatchObject({
+      code: "invalid_params",
+      message: expect.stringContaining("Click @e7"),
+      data: {
+        reason: "target_not_select",
+        recovery: expect.stringContaining("Click @e7"),
+      },
+    });
   });
 });
 
@@ -2346,7 +2632,7 @@ it.each([
   if (kind === "click")
     expect(order).toEqual(["prepare", "mouseMoved", "arm", "mousePressed", "arm", "mouseReleased"]);
   else {
-    expect(order.indexOf("arm")).toBeLessThan(order.indexOf("rawKeyDown"));
+    expect(order.indexOf("arm")).toBeLessThan(order.indexOf("keyDown"));
     expect(order.at(-2)).toBe("arm");
     expect(order.at(-1)).toBe("keyUp");
   }

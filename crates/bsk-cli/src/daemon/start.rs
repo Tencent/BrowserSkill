@@ -56,11 +56,10 @@ pub(crate) const DAEMON_REPLACEMENT_WAIT_ENV: &str = "BSK_DAEMON_REPLACES_PID";
 #[derive(Debug, Clone)]
 pub struct DaemonConfig {
     pub server: Option<super::remote::ServerConfig>,
+    pub local_auth: super::local_auth::LocalAuthMode,
     pub ws_port: u16,
     pub session_idle: Duration,
     pub daemon_idle: Duration,
-    /// Skip the Origin allow-list (tests / `--insecure-origin`).
-    pub allow_any_origin: bool,
     /// How long `session.start` polls for an extension handshake before
     /// returning `no_browser_connected`.
     pub extension_connect_wait: Duration,
@@ -86,16 +85,21 @@ impl DaemonConfig {
     pub fn new(port: u16) -> Self {
         Self {
             server: None,
+            local_auth: Default::default(),
             ws_port: port,
             session_idle: Duration::from_secs(60 * 5),
             daemon_idle: Duration::from_secs(60 * 30),
-            allow_any_origin: false,
             extension_connect_wait: EXTENSION_CONNECT_WAIT,
             browser_liveness_timeout: BROWSER_LIVENESS_TIMEOUT,
             browser_liveness_tick: BROWSER_LIVENESS_TICK,
             detached: false,
             replaces: None,
         }
+    }
+
+    pub fn with_local_auth(mut self, mode: super::local_auth::LocalAuthMode) -> Self {
+        self.local_auth = mode;
+        self
     }
 
     pub fn with_extension_connect_wait(mut self, wait: Duration) -> Self {
@@ -123,10 +127,10 @@ impl From<&StartArgs> for DaemonConfig {
     fn from(args: &StartArgs) -> Self {
         Self {
             server: None,
+            local_auth: Default::default(),
             ws_port: args.resolved_port(),
             session_idle: args.resolved_session_idle(),
             daemon_idle: args.resolved_daemon_idle(),
-            allow_any_origin: false,
             extension_connect_wait: EXTENSION_CONNECT_WAIT,
             browser_liveness_timeout: BROWSER_LIVENESS_TIMEOUT,
             browser_liveness_tick: BROWSER_LIVENESS_TICK,
@@ -410,7 +414,7 @@ fn run_daemon(cfg: &DaemonConfig) -> Result<()> {
     );
     let startup = acquire_daemon_lock(cfg.replaces).and_then(|lock| {
         info!(?lock, "daemon lock acquired");
-        serve(cfg, None).map(|stopped| (lock, stopped))
+        serve(cfg, &lock, None).map(|stopped| (lock, stopped))
     });
     let (mut lock, mut stopped) = match startup {
         Ok(started) => started,
@@ -441,7 +445,7 @@ fn run_daemon(cfg: &DaemonConfig) -> Result<()> {
                 record
             }
         };
-        stopped = match serve(&resumed_cfg, Some(&mut record)) {
+        stopped = match serve(&resumed_cfg, &lock, Some(&mut record)) {
             Ok(stopped) => stopped,
             Err(err) => {
                 record.serving_failed(&err);
@@ -454,24 +458,38 @@ fn run_daemon(cfg: &DaemonConfig) -> Result<()> {
 /// Take the daemon lock. A replacement waits for its predecessor, which
 /// keeps serving until the replacement has started and then releases it.
 fn acquire_daemon_lock(predecessor: Option<u32>) -> Result<lockfile::DaemonLock> {
-    let Some(pid) = predecessor else {
-        return lockfile::acquire().context("acquire daemon lock");
+    let wait = if let Some(pid) = predecessor {
+        info!(
+            predecessor = pid,
+            "replacement daemon waiting for the daemon lock"
+        );
+        handover::REPLACEMENT_LOCK_WAIT
+    } else {
+        Duration::from_secs(2)
     };
-    info!(
-        predecessor = pid,
-        "replacement daemon waiting for its predecessor to release the daemon lock"
-    );
-    let deadline = Instant::now() + handover::REPLACEMENT_LOCK_WAIT;
+    let deadline = Instant::now() + wait;
+    let initial_info = daemon_info::read()?;
+    let mut contended = false;
     loop {
+        if predecessor.is_none() && contended && daemon_info::read()? != initial_info {
+            anyhow::bail!("another daemon won startup while waiting for the lifecycle lock");
+        }
         match lockfile::acquire() {
             Ok(lock) => return Ok(lock),
             Err(err) if err.is::<lockfile::AlreadyLocked>() && Instant::now() < deadline => {
-                std::thread::sleep(Duration::from_millis(50));
+                // Retry a short offline-maintenance lock, but stop as soon as
+                // another daemon is serving. A losing starter must not linger
+                // and take over when that daemon is explicitly stopped.
+                if predecessor.is_none()
+                    && matches!(probe::probe(PROBE_TIMEOUT), Ok(Probe::Ready(_)))
+                {
+                    return Err(err).context("another daemon is already serving");
+                }
+                contended = true;
+                std::thread::sleep(Duration::from_millis(10));
             }
             Err(err) => {
-                return Err(
-                    err.context(format!("acquire daemon lock released by predecessor {pid}"))
-                );
+                return Err(err.context("acquire daemon lifecycle lock"));
             }
         }
     }
@@ -531,7 +549,11 @@ fn lock_slot(slot: &TransactionSlot) -> std::sync::MutexGuard<'_, Option<Transac
 /// with every endpoint released except the daemon lock, which the caller holds.
 /// `resumed` records a failed handover whose previous version serves again
 /// here; it is confirmed once `daemon.json` is published.
-fn serve(cfg: &DaemonConfig, resumed: Option<&mut UpdateRecord>) -> Result<Stopped> {
+fn serve(
+    cfg: &DaemonConfig,
+    lock: &lockfile::DaemonLock,
+    resumed: Option<&mut UpdateRecord>,
+) -> Result<Stopped> {
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -554,7 +576,11 @@ fn serve(cfg: &DaemonConfig, resumed: Option<&mut UpdateRecord>) -> Result<Stopp
             .await
             .with_context(|| format!("bind IPC endpoint {}", sock_path.display()))?;
 
-        let state = Arc::new(DaemonState::new(cfg.clone()));
+        // serve is entered only while holding daemon.lock, including handover
+        // recovery. Never preload authorization before acquiring that lock.
+        let mut daemon_state = DaemonState::new(cfg.clone());
+        daemon_state.local_auth = Arc::new(super::local_auth::LocalAuth::open(lock)?);
+        let state = Arc::new(daemon_state);
         state
             .transfers
             .initialize()
@@ -585,7 +611,8 @@ fn serve(cfg: &DaemonConfig, resumed: Option<&mut UpdateRecord>) -> Result<Stopp
             ws_port,
             env!("CARGO_PKG_VERSION"),
         )
-        .with_host_managed(!cfg.detached);
+        .with_host_managed(!cfg.detached)
+        .with_protocol_version(crate::daemon::state::PROTOCOL_VERSION);
         daemon_info::write(&info).context("write daemon.json")?;
         info!(
             pid = info.pid,
@@ -752,7 +779,9 @@ fn serve(cfg: &DaemonConfig, resumed: Option<&mut UpdateRecord>) -> Result<Stopp
         let _ = browser_liveness_task.await;
         update_check_task.abort();
         let _ = update_check_task.await;
-        ws_handle.shutdown.notify_waiters();
+        // There is one accept loop. Retain a permit if it is between accepts
+        // or has not polled yet; notify_waiters would lose that shutdown.
+        ws_handle.shutdown.notify_one();
         let _ = ws_handle.task.await;
 
         let _ = daemon_info::remove();
@@ -885,6 +914,10 @@ pub(crate) fn spawn_session_idle_reaper(state: Arc<DaemonState>) -> tokio::task:
                         state
                             .sessions
                             .remember_end(&session_id, crate::rpc_reason::SESSION_IDLE_TIMEOUT);
+                        state
+                            .scopes
+                            .on_session_ended(&session_id, crate::rpc_reason::SESSION_IDLE_TIMEOUT);
+                        state.intent_wal.on_session_ended(&session_id);
                         info!(session = %session_id, "idle session stopped");
                     }
                     Err(StopSessionError::SessionBusy | StopSessionError::Stopping) => {
@@ -899,6 +932,10 @@ pub(crate) fn spawn_session_idle_reaper(state: Arc<DaemonState>) -> tokio::task:
                             None,
                         );
                         state.transfers.release_session(&session_id.0);
+                        state
+                            .scopes
+                            .on_session_ended(&session_id, crate::rpc_reason::SESSION_IDLE_TIMEOUT);
+                        state.intent_wal.on_session_ended(&session_id);
                     }
                     Err(err) => {
                         warn!(session = %session_id, error = %err, "failed to stop idle session");

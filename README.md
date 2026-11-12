@@ -61,6 +61,8 @@ https://github.com/user-attachments/assets/6111d978-baa6-4a76-92c4-4f51d47ae617
   </tr>
 </table>
 
+Qoder and Qoder CN are supported as skill-only targets: `bsk install-skill --harness qoder` and `--harness qoder-cn`.
+
 These and other agents that can run shell commands use the same **`bsk` CLI**. **[DeepSeek Harness](#deepseek-harness-plugin)** has a dedicated plugin with native browser tools and task previews. You choose the agent and model; BrowserSkill connects it to your browser.
 
 ## What you can do
@@ -128,7 +130,7 @@ If an already-running agent cannot find `bsk`, restart it to pick up the new PAT
 
 #### 2. Connect the extension
 
-Install it from the [Chrome Web Store](https://chromewebstore.google.com/detail/hhcmgoofomhgciiibhipgmgkgnoenaoi) or [Edge Add-ons](https://microsoftedge.microsoft.com/addons/detail/browserskill/emacgiaaaiojkkpkddmmdfhmokgmnikg). Open its popup, enable the local connection, and check its status after starting the CLI.
+Install it from the [Chrome Web Store](https://chromewebstore.google.com/detail/hhcmgoofomhgciiibhipgmgkgnoenaoi) or [Edge Add-ons](https://microsoftedge.microsoft.com/addons/detail/browserskill/emacgiaaaiojkkpkddmmdfhmokgmnikg), enable the connection and start using it. Local pairing is optional: an unpaired connection stays usable and shows an identity warning. To verify the connection, run `bsk daemon pair` and paste its link into **Connection settings → Pairing link**. Pairing is remembered across restarts and upgrades; a paired connection never automatically skips verification after a failure. See [local pairing](docs/local-pairing.md).
 
 #### 3. Install the skill for your agent
 
@@ -345,6 +347,8 @@ Stop the daemon in its owning host or supervisor, update with `bsk update --yes 
 | Record and save a task video | [Task video recording](docs/video-recording.md) |
 | Export tables or lists | [Structured extraction](docs/structured-extraction.md) |
 | Wait for an element condition | [Element waits](docs/wait-for-element.md) |
+| Run several decided actions together | [Plans](docs/plan.md) |
+| Save and replay a reviewed flow | [Recipes](docs/recipes.md) |
 | Use a specific account or profile | [Browser profiles](docs/browser-profiles.md) |
 | Connect a server-side agent | [Remote browser connections](docs/remote-extension-connection.md) |
 | Run in a sandbox | [Sandboxed agents](docs/sandboxed-agents.md) |
@@ -374,6 +378,8 @@ The CLI is built under `target/release/`; load `apps/extension/dist/chrome-mv3/`
 | `evals/browser` | Local test pages and browser capability evaluations |
 
 Run `cargo test --workspace --locked`, `pnpm ext:test`, and `pnpm lint` for the relevant checks. See the [browser evaluation guide](evals/browser/README.md) for reproducible browser cases. Bug reports and focused contributions are welcome through [GitHub Issues](https://github.com/Tencent/BrowserSkill/issues) and pull requests; remove sensitive data before attaching browser evidence.
+
+For substantial changes to browser interactions, observations, control policy, or CLI/extension communication, we recommend the optional [Agent-driven PR self-check](evals/browser/README.md#optional-agent-driven-pr-self-check) before opening a PR. It tests your current branch through Bsk and records end-to-end evidence. This is not a requirement for opening or merging a PR and does not replace the checks above.
 
 The extension interface supports English, Simplified and Traditional Chinese, Korean, Japanese, French, Italian, Spanish, German, and Brazilian Portuguese. See [localization](packages/i18n/README.md) to contribute translations.
 
@@ -438,3 +444,12 @@ Thank you to everyone who contributes code, documentation, translations, and fee
 ## License
 
 [MIT](LICENSE)
+
+### Reading dynamic pages (unreleased, protocol 1.9)
+
+Use `bsk read` for current DOM fields during animation, and `extract` for tables/
+lists. MCP and DSH expose it as `bsk_inspect(action=read)`. A script is checked
+against the `--expect` facts it states, or the whole page when it passes `--observation`;
+`evaluate --unverified` is the last resort. Read results never renew action authority: protect
+business facts with expect. See [dynamic reading](docs/dynamic-reading.md) for
+query fields, safety boundaries, compatibility and reproducible browser tests.

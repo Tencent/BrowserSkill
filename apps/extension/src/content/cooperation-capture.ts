@@ -1,8 +1,10 @@
+import { describeFrameOwners } from "@/cooperation/hidden-frames";
 import { playbackProgressMedia } from "@/cooperation/media-progress";
 import {
   COOPERATION_ARM,
   COOPERATION_DISABLE,
   COOPERATION_MESSAGE,
+  COOPERATION_OWNERS,
   COOPERATION_READ,
   COOPERATION_READY,
   COOPERATION_RESUME,
@@ -186,7 +188,15 @@ export function attachCooperationCapture() {
       if (nested) yield* controls(nested);
     }
   };
+  let documentUrl = location.href;
   const read = () => {
+    // SPA routes retain the DOM document, but cannot retain its action authority.
+    // This also covers child frames; root CDP route events catch away-and-back.
+    if (documentUrl !== location.href) {
+      documentUrl = location.href;
+      state.document = createRandomUuid();
+      state.revision++;
+    }
     mutations(observer.takeRecords());
     const active = activeElement();
     if (editingTarget && (active !== editingTarget || !editable(editingTarget))) {
@@ -330,7 +340,11 @@ export function attachCooperationCapture() {
           expected_event_time: nativeTime,
           event_timestamp: event.timeStamp,
         };
-    if (match) expectation = undefined;
+    if (match)
+      expectation =
+        expected.type === "keydown" && expected.keypress
+          ? { ...expected, type: "keypress" }
+          : undefined;
     return match;
   };
   const humanInput = (event: Event, target: EventTarget | null) => {
@@ -529,9 +543,13 @@ export function attachCooperationCapture() {
         releasedPending = true;
       }
       clearTimeout(eventTimer);
+      const keypress = expectation?.keypress ? expectation : undefined;
       // beforeinput, input and keyboard activation inherit only this event task.
       eventTimer = setTimeout(() => {
         eventAgent = undefined;
+        // A cancelled keydown may produce no keypress. Its expectation cannot
+        // outlive the native task or authorize a later person's submission.
+        if (keypress && expectation === keypress) expectation = undefined;
       }, 0);
       if (state.editing || releasedPending) publish();
       return;
@@ -614,9 +632,16 @@ export function attachCooperationCapture() {
   const onWindowBlur = () => {
     if (
       !enabled ||
-      (!pointer && !composing && !dragging && keys.size === 0 && !eventAgent && !inputSource)
+      (!pointer &&
+        !composing &&
+        !dragging &&
+        !state.editing &&
+        keys.size === 0 &&
+        !eventAgent &&
+        !inputSource)
     )
       return;
+    clearTimeout(focusTimer);
     clearTimeout(pointerTimer);
     clearTimeout(eventTimer);
     clearTimeout(inputTimer);
@@ -624,6 +649,8 @@ export function attachCooperationCapture() {
     composing = false;
     dragging = false;
     dragAgent = undefined;
+    state.editing = false;
+    editingTarget = undefined;
     keys.clear();
     eventAgent = undefined;
     inputSource = undefined;
@@ -636,6 +663,12 @@ export function attachCooperationCapture() {
     _sender: chrome.runtime.MessageSender,
     reply: (value: unknown) => void,
   ) => {
+    if (message.kind === COOPERATION_OWNERS) {
+      // Layout facts for proving a child frame hidden. It grants nothing, so it
+      // needs no lease and leaves collection state untouched.
+      reply(describeFrameOwners(document, shadowRoot));
+      return false;
+    }
     if (typeof message.lease !== "string") return false;
     if (message.kind === COOPERATION_READ) {
       if (retired.has(message.lease)) {

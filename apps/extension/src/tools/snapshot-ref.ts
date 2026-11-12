@@ -12,6 +12,7 @@ export interface SnapshotRefLookup {
   refKey: string;
   frameId?: string;
   cdpSessionId?: string;
+  rowAnchor?: string;
 }
 
 /** Typed lookup never turns a visual anchor into a DOM operation target. */
@@ -45,6 +46,7 @@ export function lookupSnapshotRef(
     refKey,
     ...(entry.frameId ? { frameId: entry.frameId } : {}),
     ...(entry.cdpSessionId ? { cdpSessionId: entry.cdpSessionId } : {}),
+    ...(entry.rowAnchor ? { rowAnchor: entry.rowAnchor } : {}),
   };
 }
 

@@ -9,6 +9,11 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
+import {
+  attachPairingBackground,
+  copyPairingExtension,
+  pairLocalBrowser,
+} from "../../../local-pairing.mjs";
 import { withChrome } from "../snapshot-coordinates/chrome.mjs";
 
 const exec = promisify(execFile);
@@ -113,23 +118,19 @@ try {
       executable: chrome,
       deviceScale: 1,
       zoom: 1,
-      extensionPath: extension,
+      extensionPath: baseline
+        ? extension
+        : await copyPairingExtension(extension, join(bskHome, "extension"), port),
       extensionViaCdp: process.env.BSK_DIALOG_LOAD_CDP === "1",
       headless: false,
     },
     async (send) => {
       const version = await send("Browser.getVersion");
-      const worker = await eventually(async () => {
-        const targets = (await send("Target.getTargets")).targetInfos;
-        const target = targets.find(
-          (target) =>
-            target.type === "service_worker" &&
-            target.url.startsWith("chrome-extension://") &&
-            target.url.endsWith("/background.js"),
-        );
-        assert(target, "Built extension service worker not found");
-        return target;
-      });
+      // The pre-dialog baseline also predates local pairing.
+      if (!baseline) {
+        const worker = await attachPairingBackground(send, extension);
+        await pairLocalBrowser(send, { executable: bsk, env, worker });
+      }
       const browsers = await eventually(async () => {
         const reply = await cli(["browsers"]);
         assert.equal((Array.isArray(reply) ? reply : reply.browsers).length, 1);
@@ -327,10 +328,15 @@ try {
         const saved = await cli(download.data.download_output.resume_argv.slice(1));
         assert.equal(saved.result.saved, true);
         assert.equal(await readFile(downloadPath, "utf8"), "BrowserSkill dialog download\n");
-        await cli(
+        // An existing output is a local file validation error: exit 1 with a
+        // structured reason, and the saved file stays untouched.
+        const exists = await cli(
           ["operation", "await", download.data.operation_id, ...sessionArgs, "--out", downloadPath],
-          2,
+          1,
         );
+        assert.equal(exists.code, "invalid_params");
+        assert.equal(exists.data?.reason, "local_file_error");
+        assert.equal(await readFile(downloadPath, "utf8"), "BrowserSkill dialog download\n");
         await cli([
           "operation",
           "await",

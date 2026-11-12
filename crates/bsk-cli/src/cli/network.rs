@@ -8,14 +8,18 @@ use bsk_protocol::tools::{NetworkEntry, NetworkParams, NetworkResult};
 use clap::Args;
 
 use crate::cli::TOOL_IPC_TIMEOUT;
-use crate::cli::ensure_daemon::ensure_daemon;
+use crate::cli::ensure_daemon::ensure_daemon_optimistic as ensure_daemon;
 use crate::cli::error::{CliError, Format};
 
 #[derive(Debug, Clone, Args)]
 pub struct NetworkArgs {
-    /// Session id (must be active).
+    /// Session id (omit to resolve via caller scope).
     #[arg(long)]
-    pub session: String,
+    pub session: Option<String>,
+
+    /// Explicit caller scope name for multi-agent isolation.
+    #[arg(long)]
+    pub scope: Option<String>,
 
     /// Target tab. Defaults to the Agent Window's active tab.
     #[arg(long = "tab-id")]
@@ -35,13 +39,14 @@ pub struct NetworkArgs {
 }
 
 pub fn dispatch(args: NetworkArgs, format: Format) -> Result<(), CliError> {
+    crate::cli::business_rpc::set_caller_scope(args.scope.clone());
     let info = ensure_daemon().context("ensure daemon is running")?;
     run(info.sock_path, args, format)
 }
 
 fn run(sock: PathBuf, args: NetworkArgs, format: Format) -> Result<(), CliError> {
     let params = NetworkParams {
-        session_id: args.session,
+        session_id: args.session.unwrap_or_default(),
         tab_id: args.tab_id,
         since: args.since,
         limit: args.limit,

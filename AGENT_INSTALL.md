@@ -111,8 +111,18 @@ for Chrome and other Chromium browsers,
 [Edge Add-ons](https://microsoftedge.microsoft.com/addons/detail/browserskill/emacgiaaaiojkkpkddmmdfhmokgmnikg)
 for Microsoft Edge — and ask them to install it on the computer with that browser.
 
-- **Local:** ask the user to open the popup, enable the connection and confirm the
-  port matches the local daemon; wait for the connected status.
+- **Local:** enable the connection and continue when connected. Pairing is optional;
+  an unpaired warning does not block installation or browser use. Do not make the
+  user pair or update the other component just to complete setup. Explain the
+  warning and offer pairing when the user wants connection identity verification.
+  Run `bsk daemon pair` with the intended daemon's `BSK_HOME` and ask the user to
+  paste its private link into **Connection settings → Pairing link**. The command
+  reuses or starts the daemon; with `BSK_AUTO_START=0`, the host must start it first.
+  Keep the link out of logs, issues and shared transcripts. Successful pairing
+  shows **Connected · Verified**. On `already_paired`, retain the current pairing;
+  use `--replace BROWSER_ID` only for an intended replacement. An already-paired
+  browser must not automatically skip verification after an authentication failure.
+  See [local pairing](docs/local-pairing.md).
 - **Remote:** ask the user to select **Remote connection**, paste the pairing link
   and save it. Follow the [remote verification steps](docs/remote-extension-connection.md#pair-and-verify);
   installing the extension or generating a link alone does not establish a connection.

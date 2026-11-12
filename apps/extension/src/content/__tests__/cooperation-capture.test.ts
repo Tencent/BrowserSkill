@@ -607,6 +607,18 @@ it("publishes scroll transitions once per burst and ignores idle window blur", (
   vi.useRealTimers();
 });
 
+it("releases an editing hold when the window blurs so switching back to chat hands control back", () => {
+  document.body.innerHTML = '<input aria-label="City" value="Shanghai">';
+  const read = collector();
+  read();
+  const target = document.querySelector("input")!;
+  edit(target, "Beijing");
+  expect(read()).toMatchObject({ human: 1, editing: true, busy: false });
+
+  window.dispatchEvent(new Event("blur"));
+  expect(read()).toMatchObject({ human: 1, editing: false, busy: false, pending: false });
+});
+
 it("clears text attribution when preparation fails before native dispatch", async () => {
   document.body.innerHTML = "<input>";
   const read = collector();
@@ -1016,4 +1028,43 @@ it("collects source and recipient changes inside closed shadow roots", () => {
   expect(changed.focus).not.toBe(first.focus);
   expect(changed.media).not.toEqual(first.media);
   expect(changed.revision).toBeGreaterThan(first.revision);
+});
+
+it.each([
+  "matched",
+  "wrong-time",
+  "expired",
+] as const)("attributes an atomic Enter keypress only in its native task (%s)", async (scenario) => {
+  document.body.innerHTML = '<form><input aria-label="Query"></form>';
+  const target = document.querySelector("input")!;
+  const form = document.querySelector("form")!;
+  const read = collector();
+  read();
+  const timestamp = Date.now();
+  const key = (type: string, offset = 0) => {
+    const event = new KeyboardEvent(type, { key: "Enter", bubbles: true });
+    Object.defineProperties(event, {
+      isTrusted: { value: true },
+      timeStamp: { value: timestamp + offset - performance.timeOrigin },
+    });
+    target.dispatchEvent(event);
+  };
+  const submit = () => {
+    const event = new Event("submit", { bubbles: true });
+    Object.defineProperty(event, "isTrusted", { value: true });
+    form.dispatchEvent(event);
+  };
+  read(COOPERATION_ARM, "first", { type: "keydown", key: "Enter", timestamp, keypress: true });
+  key("keydown");
+  if (scenario === "expired") await new Promise((resolve) => setTimeout(resolve, 0));
+  key("keypress", scenario === "wrong-time" ? 5 : 0);
+  submit();
+  key("keyup");
+  expect(read()?.human).toBe(scenario === "matched" ? 0 : 1);
+  // A later unarmed person still owns their keypress and submission.
+  key("keydown", 10);
+  key("keypress", 10);
+  submit();
+  key("keyup", 10);
+  expect(read()?.human).toBe(scenario === "matched" ? 1 : 2);
 });

@@ -50,7 +50,8 @@
       "!**/.output/**",
       "!**/pnpm-lock.yaml",
       "!**/Cargo.lock",
-      "!crates/**/schema/**"
+      "!crates/**/schema/**",
+      "!apps/extension/src/transport/generated/**"
     ]
   }
 }

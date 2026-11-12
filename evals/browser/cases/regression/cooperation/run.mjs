@@ -11,6 +11,8 @@ import { attachExtensionWorker, runCompatibilityScenarios } from "./compatibilit
 import { runLegacyStrictDshScenario } from "./dsh-client.mjs";
 import { runFrameObservabilityScenarios } from "./frame-observability.mjs";
 import { runLifetimeScenario } from "./lifetime.mjs";
+import { runPlanScenarios } from "./plan.mjs";
+import { runRecipeScenarios } from "./recipes.mjs";
 import { runGenericScenarios } from "./scenarios.mjs";
 import { runTargetPolicyScenarios } from "./target-policy.mjs";
 
@@ -23,6 +25,7 @@ const loadExtensionOverCdp = process.env.BSK_COOP_LOAD_CDP === "1";
 const compatibilityOnly = process.env.BSK_COOP_COMPAT_ONLY === "1";
 const targetOnly = process.env.BSK_COOP_TARGET_ONLY === "1";
 const framesOnly = process.env.BSK_COOP_FRAMES_ONLY === "1";
+const recipesOnly = process.env.BSK_COOP_RECIPES_ONLY === "1";
 const fullIdle = process.env.BSK_COOP_FULL_IDLE === "1";
 const headful = process.env.BSK_COOP_HEADFUL === "1";
 const deviceScale = Number(process.env.BSK_COOP_DPR ?? 1);
@@ -31,7 +34,7 @@ const idleWaitMs = fullIdle ? 360500 : 12500;
 if (artifacts) await mkdir(artifacts, { recursive: true });
 assert(executable, "Set BSK_COOP_CHROME to an isolated Chromium executable");
 assert(
-  [compatibilityOnly, targetOnly, framesOnly].filter(Boolean).length <= 1,
+  [compatibilityOnly, targetOnly, framesOnly, recipesOnly].filter(Boolean).length <= 1,
   "Choose one coverage subset",
 );
 assert(port !== 52800 && Number.isInteger(port));
@@ -110,9 +113,21 @@ const poll = async (read, label = "setup") => {
 const html = await readFile(new URL("fixture.html", import.meta.url));
 const targetHtml = await readFile(new URL("target-policy.html", import.meta.url));
 const brokenFrameHtml = await readFile(new URL("broken-frame.html", import.meta.url));
+const recipeHtml = await readFile(new URL("recipes.html", import.meta.url));
 const submissions = [];
+const recipeRequests = [];
 const server = createServer(async (req, res) => {
-  if (req.url === "/submit") {
+  if (req.url?.startsWith("/recipe/")) {
+    if (req.method === "POST") {
+      let body = "";
+      for await (const chunk of req) body += chunk;
+      recipeRequests.push({ path: req.url, body });
+      res.end("{}");
+    } else {
+      res.setHeader("content-type", "text/html; charset=utf-8");
+      res.end(recipeHtml);
+    }
+  } else if (req.url === "/submit") {
     let body = "";
     for await (const chunk of req) body += chunk;
     const submission = JSON.parse(body);
@@ -135,6 +150,8 @@ const server = createServer(async (req, res) => {
 let browserVersion;
 let compatibility;
 let targetPolicy;
+let plan;
+let recipes;
 let frameObservability;
 let daemon;
 let daemonOutput = "";
@@ -152,7 +169,7 @@ try {
       "--port",
       String(port),
       // Capability-only runs must not inherit the accelerated idle-test clock.
-      ...(fullIdle || compatibilityOnly || targetOnly || framesOnly
+      ...(fullIdle || compatibilityOnly || targetOnly || framesOnly || recipesOnly
         ? []
         : ["--session-idle", "8s"]),
     ],
@@ -213,11 +230,19 @@ try {
       };
       browserVersion = (await send("Browser.getVersion")).product;
       await poll(async () => (await bsk(["browsers"])).length, "extension connection");
+      const scenarios = { send, bsk: runBsk, cli, env, base, requests: recipeRequests };
+      if (recipesOnly) {
+        recipes = await runRecipeScenarios(scenarios);
+        return;
+      }
       if (!compatibilityOnly && !targetOnly)
         frameObservability = await runFrameObservabilityScenarios({ send, bsk: runBsk, base });
       if (framesOnly) return;
-      if (!compatibilityOnly)
+      if (!compatibilityOnly) {
         targetPolicy = await runTargetPolicyScenarios({ send, bsk: runBsk, cli, env, base });
+        plan = await runPlanScenarios({ send, bsk: runBsk, cli, env, base });
+        recipes = await runRecipeScenarios(scenarios);
+      }
       if (targetOnly) return;
       for (const seed of compatibilityOnly ? [] : [4, 7, 14]) {
         const { session_id: session } = await bsk(["session", "start"]);
@@ -881,18 +906,24 @@ try {
   );
   const report = {
     passed: true,
-    suite: framesOnly
-      ? "frame-observability"
-      : targetOnly
-        ? "target-policy"
-        : compatibilityOnly
-          ? "legacy-strict-compatibility"
-          : "legacy-strict-with-target-smoke",
+    suite: recipesOnly
+      ? "recipes"
+      : framesOnly
+        ? "frame-observability"
+        : targetOnly
+          ? "target-policy"
+          : compatibilityOnly
+            ? "legacy-strict-compatibility"
+            : "legacy-strict-with-target-smoke",
     browserVersion,
     headful,
-    ...(!targetOnly && !framesOnly ? { closedTaskTabFailsClosed: true, legacyStrict: true } : {}),
+    ...(!targetOnly && !framesOnly && !recipesOnly
+      ? { closedTaskTabFailsClosed: true, legacyStrict: true }
+      : {}),
     frameObservability,
     targetPolicy,
+    plan,
+    recipes,
     compatibility,
     submissions,
     evidence,

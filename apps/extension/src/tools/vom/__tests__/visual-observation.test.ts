@@ -597,8 +597,8 @@ it.each([
   expect(send.mock.calls.some((c) => c[1] === "Page.captureScreenshot")).toBe(false);
   await handleSnapshot(manager, { session_id: "test" }, deps);
   const captures = send.mock.calls.filter((c) => c[1] === "DOMSnapshot.captureSnapshot");
-  expect(captures[0][2]?.computedStyles).toHaveLength(20);
-  expect(captures[1][2]?.computedStyles).toHaveLength(5);
+  expect(captures[0][2]?.computedStyles).toHaveLength(24);
+  expect(captures[1][2]?.computedStyles).toHaveLength(9);
   expect([...ctx.refStore.entries()].some(([, entry]) => entry.kind === "visual-region")).toBe(
     false,
   );

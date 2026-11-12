@@ -8,18 +8,25 @@ pub mod dialog_operations;
 pub mod file_transfer;
 pub mod inflight;
 pub mod info;
+pub mod intent_wal;
 pub mod ipc;
+pub(crate) mod json_store;
+pub mod local_auth;
 pub mod lockfile;
 pub mod paths;
+pub(crate) mod peer_authorization;
 pub(crate) mod probe;
 pub mod queue;
 pub mod remote;
+pub mod run_log;
+pub mod scopes;
 pub mod session_interrupt;
 pub mod session_requests;
 pub mod sessions;
 pub mod start;
 pub(crate) mod start_error;
 pub mod state;
+mod tool_policy;
 pub mod ws;
 
 #[cfg(test)]

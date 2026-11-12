@@ -4,6 +4,8 @@ export interface InputExpectation {
   x?: number;
   y?: number;
   key?: string;
+  /** This keydown also dispatches text/keypress in the same native browser task. */
+  keypress?: boolean;
   /** Native event time in epoch milliseconds, shared across frame coordinate spaces. */
   timestamp?: number;
   /** One-shot insertText attribution, cleared when the native command settles. Never logged. */
@@ -72,9 +74,13 @@ export interface FrameIdentity {
   url: string;
 }
 
-/** Documents that cannot receive page input and need no interaction collector. */
+/**
+ * Documents that cannot receive page input and need no interaction collector.
+ * `hidden_frame` is a child document that failed collection while its frame
+ * element was proven not displayed, without area, or invisible, and unfocused.
+ */
 export interface FrameGap extends FrameIdentity {
-  reason: "load_error" | "inactive_document";
+  reason: "load_error" | "inactive_document" | "hidden_frame";
 }
 
 export interface CooperationFrames {
@@ -84,6 +90,13 @@ export interface CooperationFrames {
 
 /** Shared by concurrent collections; pruned against the tab's document inventory. */
 export type FrameRepairs = Map<string, Promise<void>>;
+
+/**
+ * Child documents that failed collection while hidden. Later collections
+ * recheck the frame element instead of waiting for the document again.
+ * Pruned against the tab's document inventory, like FrameRepairs.
+ */
+export type HiddenFrames = Set<string>;
 
 export interface CooperationView {
   target?: { x: number; y: number; expires: number };
@@ -109,3 +122,5 @@ export const COOPERATION_READ = "cooperation.read";
 export const COOPERATION_ARM = "cooperation.arm";
 export const COOPERATION_RESUME = "cooperation.resume";
 export const COOPERATION_DISABLE = "cooperation.disable";
+/** Read-only layout facts about a document's frame elements; carries no lease or authority. */
+export const COOPERATION_OWNERS = "cooperation.owners";

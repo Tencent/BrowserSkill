@@ -7,7 +7,7 @@ members = [
 default-members = ["crates/bsk-cli"]
 
 [workspace.package]
-version = "0.4.1"
+version = "0.4.2"
 edition = "2024"
 rust-version = "1.85"
 license = "MIT"
@@ -20,7 +20,7 @@ futures-util = "0.3"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 semver = { version = "1", features = ["serde"] }
-schemars = { version = "0.8", features = ["derive"] }
+schemars = { version = "1.2.2", features = ["derive"] }
 thiserror = "2"
 anyhow = "1"
 tracing = "0.1"
@@ -43,7 +43,7 @@ rand = "0.8"
 uuid = { version = "1", features = ["v4", "serde"] }
 
 # Workspace crates (version required for `cargo publish` of dependents)
-bsk-protocol = { version = "0.4.1", path = "crates/bsk-protocol" }
+bsk-protocol = { version = "0.4.2", path = "crates/bsk-protocol" }
 
 [profile.release]
 strip = "symbols"

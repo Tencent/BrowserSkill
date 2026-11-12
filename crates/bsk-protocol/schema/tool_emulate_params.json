@@ -1,107 +1,39 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "title": "EmulateParams",
-  "type": "object",
-  "required": [
-    "session_id"
-  ],
-  "properties": {
-    "context_id": {
-      "description": "Context actually returned by sync. Reusable for target-policy DOM actions; strict policy consumes it after one action. Never fill it from cached state.",
-      "type": "string"
-    },
-    "depends_on": {
-      "description": "Strict policy only: observed decision regions. Target policy requires exact business facts in expect; regions cannot be translated to facts automatically.",
-      "type": "array",
-      "items": {
-        "type": "string"
-      },
-      "maxItems": 16
-    },
-    "expect": {
-      "description": "Literal conditions checked before input. Selectors search the main document; use observed refs for iframe/shadow-root targets. Text includes all whitespace.",
-      "type": "array",
-      "items": {
-        "$ref": "#/definitions/ActionExpectation"
-      },
-      "maxItems": 16
-    },
-    "observation_id": {
-      "description": "Sync's single-use baseline for untargeted/visual actions under target policy, including scripts, untargeted keys and displacement-only drags. Drags with a target ref/selector need only context_id. Strict-policy drag instead accepts its legacy ref-map observation token.",
-      "type": [
-        "string",
-        "null"
-      ]
-    },
-    "off": {
-      "description": "Clear every emulation override on the tab and restore its real environment. Mutually exclusive with `overrides`.",
-      "type": [
-        "boolean",
-        "null"
-      ]
-    },
-    "overrides": {
-      "description": "Overrides to apply. Required unless `off` is set.",
-      "anyOf": [
-        {
-          "$ref": "#/definitions/EmulateOverrides"
-        },
-        {
-          "type": "null"
-        }
-      ]
-    },
-    "session_id": {
-      "type": "string"
-    },
-    "tab_id": {
-      "description": "Target tab. Defaults to the Agent Window's active tab.",
-      "type": [
-        "integer",
-        "null"
-      ],
-      "format": "int64"
-    }
-  },
   "definitions": {
     "ActionExpectation": {
+      "additionalProperties": false,
       "description": "Caller-supplied facts checked immediately before starting an action.",
-      "type": "object",
-      "required": [
-        "equals",
-        "field",
-        "target"
-      ],
       "properties": {
         "attribute": {
           "description": "Required only for field=attribute, measured in Unicode code points.",
-          "type": "string",
           "maxLength": 256,
-          "minLength": 1
+          "minLength": 1,
+          "type": "string"
         },
         "equals": {
-          "description": "text/value require a string; checked/exists require a boolean; attribute accepts a string or null for absence. Text is exact textContent.",
-          "allOf": [
-            {
-              "$ref": "#/definitions/ExpectedValue"
-            }
-          ]
+          "$ref": "#/definitions/ExpectedValue",
+          "description": "text/value require a string; checked/exists require a boolean;\nattribute accepts a string or null for absence. Text is exact textContent."
         },
         "field": {
           "$ref": "#/definitions/ExpectationField"
         },
         "target": {
           "description": "Observed ref or main-document CSS selector, measured in Unicode code points.",
-          "type": "string",
           "maxLength": 1024,
-          "minLength": 1
+          "minLength": 1,
+          "type": "string"
         }
       },
-      "additionalProperties": false
+      "required": [
+        "target",
+        "field",
+        "equals"
+      ],
+      "type": "object"
     },
     "EmulateOverrides": {
-      "description": "Concrete emulation overrides for one tab. Field presence drives the extension: only the overrides whose fields are set are touched, so a call may change just the UA, just the viewport, or any combination.",
-      "type": "object",
+      "description": "Concrete emulation overrides for one tab. Field presence drives the\nextension: only the overrides whose fields are set are touched, so a\ncall may change just the UA, just the viewport, or any combination.",
       "properties": {
         "accept_language": {
           "description": "`Accept-Language` header override. Requires `user_agent`.",
@@ -111,40 +43,40 @@
           ]
         },
         "device_scale_factor": {
-          "description": "Device scale factor (device pixel ratio). Only meaningful with `width`/`height`; the extension maps `None` to CDP's `0` (\"use the display's native factor\").",
+          "description": "Device scale factor (device pixel ratio). Only meaningful with\n`width`/`height`; the extension maps `None` to CDP's `0`\n(\"use the display's native factor\").",
+          "format": "double",
           "type": [
             "number",
             "null"
-          ],
-          "format": "double"
+          ]
         },
         "height": {
           "description": "Viewport height in CSS pixels. Requires `width`.",
+          "format": "uint32",
+          "minimum": 0,
           "type": [
             "integer",
             "null"
-          ],
-          "format": "uint32",
-          "minimum": 0.0
+          ]
         },
         "max_touch_points": {
-          "description": "Touch points reported while touch emulation is on (CDP defaults to 1 when omitted).",
+          "description": "Touch points reported while touch emulation is on (CDP defaults\nto 1 when omitted).",
+          "format": "uint32",
+          "minimum": 0,
           "type": [
             "integer",
             "null"
-          ],
-          "format": "uint32",
-          "minimum": 0.0
+          ]
         },
         "mobile": {
-          "description": "Emulate a mobile viewport (meta-viewport handling, overlay scrollbars). Only meaningful with `width`/`height`.",
+          "description": "Emulate a mobile viewport (meta-viewport handling, overlay\nscrollbars). Only meaningful with `width`/`height`.",
           "type": [
             "boolean",
             "null"
           ]
         },
         "touch": {
-          "description": "Enable/disable touch emulation (`Emulation.setTouchEmulationEnabled`). When omitted while `max_touch_points` is set, touch is enabled.",
+          "description": "Enable/disable touch emulation\n(`Emulation.setTouchEmulationEnabled`). When omitted while\n`max_touch_points` is set, touch is enabled.",
           "type": [
             "boolean",
             "null"
@@ -158,7 +90,6 @@
           ]
         },
         "user_agent_metadata": {
-          "description": "UA client-hints metadata. Requires `user_agent`.",
           "anyOf": [
             {
               "$ref": "#/definitions/UserAgentMetadata"
@@ -166,28 +97,30 @@
             {
               "type": "null"
             }
-          ]
+          ],
+          "description": "UA client-hints metadata. Requires `user_agent`."
         },
         "width": {
           "description": "Viewport width in CSS pixels. Requires `height`.",
+          "format": "uint32",
+          "minimum": 0,
           "type": [
             "integer",
             "null"
-          ],
-          "format": "uint32",
-          "minimum": 0.0
+          ]
         }
-      }
+      },
+      "type": "object"
     },
     "ExpectationField": {
-      "type": "string",
       "enum": [
         "text",
         "value",
         "checked",
         "attribute",
         "exists"
-      ]
+      ],
+      "type": "string"
     },
     "ExpectedValue": {
       "anyOf": [
@@ -204,11 +137,6 @@
     },
     "UserAgentBrandVersion": {
       "description": "One entry of CDP `Emulation.UserAgentBrandVersion` (UA client hints).",
-      "type": "object",
-      "required": [
-        "brand",
-        "version"
-      ],
       "properties": {
         "brand": {
           "type": "string"
@@ -216,11 +144,15 @@
         "version": {
           "type": "string"
         }
-      }
+      },
+      "required": [
+        "brand",
+        "version"
+      ],
+      "type": "object"
     },
     "UserAgentMetadata": {
-      "description": "Mirror of CDP `Emulation.UserAgentMetadata`; every field is optional and only sent when present.",
-      "type": "object",
+      "description": "Mirror of CDP `Emulation.UserAgentMetadata`; every field is optional\nand only sent when present.",
       "properties": {
         "architecture": {
           "type": [
@@ -229,13 +161,13 @@
           ]
         },
         "brands": {
+          "items": {
+            "$ref": "#/definitions/UserAgentBrandVersion"
+          },
           "type": [
             "array",
             "null"
-          ],
-          "items": {
-            "$ref": "#/definitions/UserAgentBrandVersion"
-          }
+          ]
         },
         "full_version": {
           "type": [
@@ -267,7 +199,71 @@
             "null"
           ]
         }
-      }
+      },
+      "type": "object"
     }
-  }
+  },
+  "properties": {
+    "context_id": {
+      "description": "Context actually returned by sync. Reusable for target-policy DOM actions;\nstrict policy consumes it after one action. Never fill it from cached state.",
+      "type": "string"
+    },
+    "depends_on": {
+      "description": "Strict policy only: observed decision regions. Target policy requires exact\nbusiness facts in expect; regions cannot be translated to facts automatically.",
+      "items": {
+        "type": "string"
+      },
+      "maxItems": 16,
+      "type": "array"
+    },
+    "expect": {
+      "description": "Literal conditions checked before input. Selectors search the main document;\nuse observed refs for iframe/shadow-root targets. Text includes all whitespace.",
+      "items": {
+        "$ref": "#/definitions/ActionExpectation"
+      },
+      "maxItems": 16,
+      "type": "array"
+    },
+    "observation_id": {
+      "description": "Sync's single-use baseline for untargeted/visual actions under target policy,\nincluding untargeted keys and displacement-only drags. Drags with a\ntarget ref/selector need only context_id. A script needs it only when it\nstates no expect facts; passing both checks the whole page as well.\nStrict-policy drag instead accepts its legacy ref-map observation token.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "off": {
+      "description": "Clear every emulation override on the tab and restore its real\nenvironment. Mutually exclusive with `overrides`.",
+      "type": [
+        "boolean",
+        "null"
+      ]
+    },
+    "overrides": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/EmulateOverrides"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Overrides to apply. Required unless `off` is set."
+    },
+    "session_id": {
+      "type": "string"
+    },
+    "tab_id": {
+      "description": "Target tab. Defaults to the Agent Window's active tab.",
+      "format": "int64",
+      "type": [
+        "integer",
+        "null"
+      ]
+    }
+  },
+  "required": [
+    "session_id"
+  ],
+  "title": "EmulateParams",
+  "type": "object"
 }

@@ -141,12 +141,15 @@ export async function normalizeDocument(
       rect: null,
       rendered:
         bounds.length >= 4 &&
-        bounds.slice(0, 4).every(Number.isFinite) &&
+        Number.isFinite(bounds[0]) &&
+        Number.isFinite(bounds[1]) &&
+        Number.isFinite(bounds[2]) &&
+        Number.isFinite(bounds[3]) &&
         bounds[2] > 0 &&
         bounds[3] > 0 &&
         visibility !== "hidden" &&
         visibility !== "collapse" &&
-        (Number.parseFloat(opacity) || 0) > 0,
+        (Number.parseFloat(opacity) || 0) >= 0.05,
     });
   }
   const index = await buildDocumentIndex(nodes, signal, profile.includeVisualFacts);
