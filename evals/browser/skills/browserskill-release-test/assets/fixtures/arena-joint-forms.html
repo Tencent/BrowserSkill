@@ -575,7 +575,7 @@
         <h2 id="sec-receipt-title">四、联合申报执行回执与审计对账下载</h2>
         <div style="display:flex;gap:10px">
           <button type="button" class="btn" id="btn-reset-dirty">清除未保存脏标记</button>
-          <a class="btn" id="download-joint-statement" href="/download?scene=joint-filing" download style="pointer-events:none;opacity:0.5">下载联合申报核定单 CSV</a>
+          <a class="btn" id="download-joint-statement" role="link" aria-disabled="true" data-gate="locked" download style="pointer-events:none;opacity:0.5">下载联合申报核定单 CSV</a>
         </div>
       </div>
       <output id="joint-submit-receipt">尚未提交联合申报</output>
@@ -1097,10 +1097,15 @@
     }
     isDirty = false;
     const dl = $('#download-joint-statement');
+    const receiptNo = 'JNT-COMMIT-2026-9901';
+    // The statement link only gains an href after a fully validated submission; the
+    // server additionally rejects (403) any joint-filing download without the receipt.
     dl.style.pointerEvents = 'auto';
     dl.style.opacity = '1';
-    dl.href = `/download?scene=joint-filing&org=${encodeURIComponent(snap.leadOrgName)}&gross=${encodeURIComponent(snap.grossTotalWan)}`;
-    const resultPayload = { ok: true, receiptNo: 'JNT-COMMIT-2026-9901', snapshot: snap };
+    dl.removeAttribute('aria-disabled');
+    dl.dataset.gate = 'unlocked';
+    dl.href = `/download?scene=joint-filing&receipt=${receiptNo}&org=${encodeURIComponent(snap.leadOrgName)}&gross=${encodeURIComponent(snap.grossTotalWan)}`;
+    const resultPayload = { ok: true, receiptNo, snapshot: snap };
     $('#joint-submit-receipt').textContent = JSON.stringify(resultPayload, null, 2);
     emit('joint-filing-submitted', resultPayload);
   });

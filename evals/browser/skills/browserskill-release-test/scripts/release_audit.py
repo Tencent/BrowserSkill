@@ -288,6 +288,8 @@ def extract_metrics(cmd, exit_code, parsed, elapsed_ms):
         rpc_calls = 3 if exit_code == 0 else 1
         browser_calls = 2 if exit_code == 0 else 0
     elif cmd == "open":
+        # `bsk open` = resolve/start session RPC + tool.navigate + settled sync
+        # (crates/bsk-cli/src/cli/lifecycle.rs::dispatch_open); the latter two hit the browser.
         rpc_calls = 3 if exit_code == 0 else 1
         browser_calls = 2 if exit_code == 0 else 0
     elif cmd in ("ledger status", "ledger resolve"):

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Serve run-owned synthetic fixtures on loopback. Never fetch public site content."""
 
-import argparse, hashlib, json, mimetypes, threading, time
+import argparse, csv, hashlib, io, json, mimetypes, threading, time
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 from urllib.parse import urlparse, parse_qs
@@ -15,6 +15,28 @@ EXTRA_MIMES = {
     ".json": "application/json; charset=utf-8",
     ".csv": "text/csv; charset=utf-8",
 }
+
+# bfcache is only blocked by `no-store` on the main resource. `no-cache` keeps the page
+# eligible while forcing revalidation, so a real (reused) Chrome profile never serves a
+# stale fixture from the HTTP cache across runs.
+BFCACHE_CACHE_CONTROL = "no-cache"
+
+JOINT_RECEIPT = "JNT-COMMIT-2026-9901"
+
+
+def csv_cell(value):
+    """Neutralize spreadsheet formula prefixes (CWE-1236) in caller-controlled cells."""
+    text = str(value)
+    return "'" + text if text[:1] in ("=", "+", "-", "@", "\t", "\r") else text
+
+
+def csv_bytes(rows):
+    buf = io.StringIO()
+    writer = csv.writer(buf, lineterminator="\n")
+    for row in rows:
+        writer.writerow([csv_cell(cell) for cell in row])
+    return buf.getvalue().encode("utf-8")
+
 
 BFCACHE_PATHS = {
     "/arena-bfcache-detail",
@@ -40,6 +62,15 @@ def make_server(root, port):
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *a):
             pass
+
+        @property
+        def is_head(self):
+            return self.command == "HEAD"
+
+        def record(self, data):
+            # HEAD probes must not create business evidence (downloads, redirects, ...).
+            if not self.is_head:
+                emit(data)
 
         def send(
             self, status, data, mime="application/json; charset=utf-8", headers=None
@@ -127,7 +158,7 @@ def make_server(root, port):
                 )
             if p == "/api/search":
                 time.sleep(0.35)
-                emit({"type": "api-search", "query": q})
+                self.record({"type": "api-search", "query": q})
                 return self.send(
                     200,
                     json.dumps(
@@ -169,7 +200,7 @@ def make_server(root, port):
                     f"http://{target_host}:{srv_port}"
                     f"/arena-bfcache-detail?from=cross_origin_302&bfcache=1"
                 )
-                emit(
+                self.record(
                     {
                         "type": "redirect-cross-origin",
                         "from_host": host_hdr,
@@ -188,8 +219,9 @@ def make_server(root, port):
                 except ValueError:
                     delay_ms = 650
                 delay_ms = max(0, min(3000, delay_ms))
-                time.sleep(delay_ms / 1000.0)
-                emit({"type": "slow-doc", "delay_ms": delay_ms})
+                if not self.is_head:
+                    time.sleep(delay_ms / 1000.0)
+                self.record({"type": "slow-doc", "delay_ms": delay_ms})
                 html = (
                     f'<!doctype html><meta charset="utf-8"><title>Slow Document ({delay_ms}ms)</title>'
                     f'<main id="slow-doc-ready" data-delay-ms="{delay_ms}">'
@@ -200,14 +232,29 @@ def make_server(root, port):
             if p == "/download":
                 scene = q.get("scene", [""])[0]
                 if scene == "joint-filing":
-                    org = q.get("org", ["未命名牵头单位"])[0]
-                    gross = q.get("gross", ["0.00"])[0]
-                    data = (
-                        f"核定单号,牵头单位,含税总额(万元),状态\n"
-                        f"JNT-COMMIT-2026-9901,{org},{gross},已联合核定 ✅\n"
-                    ).encode("utf-8")
+                    receipt = q.get("receipt", [""])[0]
+                    org = q.get("org", [""])[0]
+                    gross = q.get("gross", [""])[0]
+                    if receipt != JOINT_RECEIPT or not org or not gross:
+                        # The statement only exists after a successful joint submission.
+                        self.record(
+                            {
+                                "type": "download-rejected",
+                                "scene": "joint-filing",
+                                "reason": "not-committed",
+                            }
+                        )
+                        return self.send(
+                            403, '{"error":"joint-filing-not-committed"}'
+                        )
+                    data = csv_bytes(
+                        [
+                            ["核定单号", "牵头单位", "含税总额(万元)", "状态"],
+                            [receipt, org, gross, "已联合核定 ✅"],
+                        ]
+                    )
                     sha = hashlib.sha256(data).hexdigest()
-                    emit(
+                    self.record(
                         {
                             "type": "download",
                             "scene": "joint-filing",
@@ -225,7 +272,9 @@ def make_server(root, port):
                         },
                     )
                 data = "编号,名称\n42,中文文件 ✅\n".encode()
-                emit({"type": "download", "sha256": hashlib.sha256(data).hexdigest()})
+                self.record(
+                    {"type": "download", "sha256": hashlib.sha256(data).hexdigest()}
+                )
                 return self.send(
                     200,
                     data,
@@ -240,21 +289,26 @@ def make_server(root, port):
                     chunk_ms = max(0, min(500, int(q.get("chunk_ms", ["50"])[0])))
                 except ValueError:
                     chunks, chunk_ms = 4, 50
+                # Default: true streaming with unknown total size (no Content-Length; the
+                # HTTP/1.0 connection close ends the body). `known_length=1` adds it back.
+                known_length = q.get("known_length") == ["1"]
                 parts = ["批次,条目,校验标记\n"] + [
                     f"{idx},流式对账分片-{idx},OK ✅\n" for idx in range(1, chunks + 1)
                 ]
                 raw_parts = [s.encode("utf-8") for s in parts]
                 full_bytes = b"".join(raw_parts)
-                emit(
+                self.record(
                     {
                         "type": "download-stream",
                         "chunks": chunks,
+                        "known_length": known_length,
                         "sha256": hashlib.sha256(full_bytes).hexdigest(),
                     }
                 )
                 self.send_response(200)
                 self.send_header("Content-Type", "text/csv; charset=utf-8")
-                self.send_header("Content-Length", str(len(full_bytes)))
+                if known_length:
+                    self.send_header("Content-Length", str(len(full_bytes)))
                 self.send_header("Cache-Control", "no-store")
                 self.send_header("Access-Control-Allow-Origin", "*")
                 self.send_header(
@@ -262,6 +316,8 @@ def make_server(root, port):
                     "attachment; filename*=UTF-8''%E6%B5%81%E5%BC%8F%E5%AF%B9%E8%B4%A6%E5%8D%95.csv",
                 )
                 self.end_headers()
+                if self.is_head:
+                    return
                 try:
                     for part in raw_parts:
                         if chunk_ms:
@@ -288,7 +344,7 @@ def make_server(root, port):
             )
             hdrs = {}
             if p in BFCACHE_PATHS or q.get("bfcache") == ["1"]:
-                hdrs["Cache-Control"] = "public, max-age=300"
+                hdrs["Cache-Control"] = BFCACHE_CACHE_CONTROL
             return self.send_static(file.read_bytes(), mime, hdrs)
 
         def do_POST(self):

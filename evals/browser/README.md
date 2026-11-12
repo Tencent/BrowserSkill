@@ -63,19 +63,21 @@ Build the CLI and test extension from the same candidate source, record each ope
 and report the tested scope, failures, and blockers without claiming untested cases passed.
 ```
 
-The skill includes 98 workflow/edge/adversarial-arena/regression cases and discovers additional
+The skill includes 111 workflow/edge/adversarial-arena/regression cases and discovers additional
 command coverage cases (including `bsk plan`, `bsk recipe`, and `bsk read`) from the candidate CLI.
-It exercises high-complexity adversarial synthetic HTML (linked 3-form enterprise joint filing,
-3-tier nested Open/Closed Shadow DOM and same/cross-origin nested iframes, dual HTML5 `<video>` +
-`<audio>` media studio with WebVTT tracks and canvas pixel sampling, modern SPA hydration/real
-`bfcache`/5,000-row virtual grid/`oklch()` vs steganography traps, plan/recipe drift labs, a local
-video portal, and a developer forum hub) and eight public sites (OceanEngine, Taobao, Bilibili video
-site, V2EX forum site, MDN, GitHub, Books to Scrape, and Hacker News), including active carousels
-and per-second updates with `evaluate`/`read`/`wheel`, while recording benchmark metrics (success
-rate, interaction turns, actions-per-turn compression ratio, and P50/P95 latency). Full browser
-execution is a separate Agent-guided workflow (not part of the `core` suite or `pnpm eval:browser`),
-while its audit harness, HTTP `Range`/BFCache server routes, scenario schema, and fixture SHA-256
-manifest are verified in CI (`test_release_audit.py`).
+It exercises synthetic HTML — including 21 focused `ARENA-*` cases on high-density fixtures (linked
+3-form joint filing, nested Open/Closed Shadow DOM and same/cross-origin nested iframes, native
+`<video>`/`<audio>` with WebVTT tracks and canvas frame sampling, SPA hydration, real `bfcache`,
+keyed and slot-pooled 5,000-row virtual grids, `oklch()`/gradient text vs hidden-text canaries,
+and cross-channel sensitive-field redaction), plan/recipe drift labs, a local video portal, and a
+developer forum hub — and eight public sites (OceanEngine, Taobao, Bilibili video site, V2EX forum
+site, MDN, GitHub, Books to Scrape, and Hacker News), including active carousels and per-second
+updates with `evaluate`/`read`/`wheel`, while recording benchmark metrics (success rate,
+interaction turns, actions-per-turn compression ratio, and P50/P95 latency). Full browser execution
+is a separate Agent-guided workflow (not part of the `core` suite or `pnpm eval:browser`); the
+audit harness, fixture server routes (`Range`, `bfcache`, gated/streamed downloads, HEAD safety),
+scenario schema (including that every `required_argv` flag exists on its CLI command), and the
+fixture SHA-256 manifest are verified in CI (`test_release_audit.py`).
 
 The Python helpers need Python 3.9+ and only the standard library. Full execution also needs
 a real Chromium browser, the candidate Bsk CLI and matching extension, and human participation

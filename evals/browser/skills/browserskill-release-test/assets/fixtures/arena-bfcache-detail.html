@@ -60,7 +60,7 @@
 <body>
 <main class="box" id="bfcache-detail-root" data-bfcache-restored="false" data-pageshow-count="0">
   <h1 id="detail-heading">履约订单穿透审计详情页（BFCache Eligible）</h1>
-  <p id="detail-subtitle">本页响应头启用 <code>Cache-Control: public, max-age=300</code> 且不注册 <code>unload</code>，用于真实触发 Chrome 往返缓存（bfcache）。</p>
+  <p id="detail-subtitle">本页响应头使用 <code>Cache-Control: no-cache</code>（仅 <code>no-store</code> 会阻止 bfcache）且不注册 <code>unload</code>，用于真实触发 Chrome 往返缓存（bfcache）。</p>
 
   <div class="meta-grid">
     <div class="meta-card">

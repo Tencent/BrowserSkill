@@ -275,7 +275,7 @@
       </table>
 
       <details id="secret-vault-details" open style="margin-top:10px;padding:8px 10px;border:1px solid #cbd5e1;border-radius:6px;background:#f8fafc">
-        <summary style="cursor:pointer;font-weight:600">风控密钥抽屉（检验 observe vs observe --redact-values 与 VOM 行折叠表脱敏）</summary>
+        <summary style="cursor:pointer;font-weight:600">风控密钥抽屉（检验 observe / sync / snapshot / read 对密码与 autocomplete 敏感字段的跨通道脱敏，以及普通字段不被过度脱敏）</summary>
         <div style="margin-top:8px;display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;align-items:end">
           <label style="font-size:12px;font-weight:600">风控明文令牌 <input id="vault-api-token" type="text" value="REDACT-CANARY-9941" style="width:100%;padding:4px 7px"></label>
           <label style="font-size:12px;font-weight:600">风控密钥集群
@@ -285,6 +285,7 @@
             </select>
           </label>
           <label style="font-size:12px;font-weight:600">审计口令 (始终脱敏) <input id="vault-pin-password" type="password" value="ALWAYS-MASKED-PIN" style="width:100%;padding:4px 7px"></label>
+          <label style="font-size:12px;font-weight:600">短信动态码 (autocomplete 敏感) <input id="vault-otp-code" type="text" inputmode="numeric" autocomplete="one-time-code" value="OTP-CANARY-5517" style="width:100%;padding:4px 7px"></label>
         </div>
         <table class="fin" id="vault-folded-table" style="margin-top:8px">
           <caption>风控密钥轮换只读折叠审计表</caption>
@@ -378,6 +379,47 @@
     const viewport = $('#virtual-grid-viewport');
     const spacer = $('#virtual-grid-spacer');
 
+    // Row DOM strategy (both are real-world patterns):
+    // - keyed (default, react-window / TanStack Virtual): rows that stay inside the window
+    //   keep their DOM node; only entering rows are created and leaving rows unmounted.
+    // - ?vgrid=pool (ag-grid style): a fixed pool of row slots is re-bound in place on
+    //   every scroll, so a stale ref silently points at a different business row.
+    const vgridMode = params.get('vgrid') === 'pool' ? 'pool' : 'keyed';
+    viewport.dataset.vgridMode = vgridMode;
+    const keyedRows = new Map();
+    const poolRows = [];
+
+    function createRow() {
+      const row = document.createElement('div');
+      row.className = 'vgrid-row';
+      row.innerHTML = `
+          <code></code>
+          <strong></strong>
+          <span data-cell="region"></span>
+          <span data-cell="amount"></span>
+          <em></em>
+          <button type="button" class="act-btn btn-inspect-order" style="padding:3px 8px;font-size:12px">核验此单</button>
+        `;
+      row.querySelector('.btn-inspect-order').addEventListener('click', (ev) => {
+        const targetId = ev.currentTarget.dataset.orderId;
+        $('#vgrid-action-output').textContent = `selectedOrder=${targetId}`;
+        emit('virtual-order-inspected', { orderId: targetId, mode: vgridMode });
+      });
+      return row;
+    }
+
+    function bindRow(row, ord, pos) {
+      row.dataset.rowKey = ord.id;
+      row.dataset.rowIndex = String(ord.index);
+      row.style.top = `${pos * ROW_HEIGHT}px`;
+      row.querySelector('code').textContent = ord.id;
+      row.querySelector('strong').textContent = ord.title;
+      row.querySelector('[data-cell="region"]').textContent = ord.reg;
+      row.querySelector('[data-cell="amount"]').textContent = `¥${ord.amt}`;
+      row.querySelector('em').textContent = ord.sla;
+      row.querySelector('.btn-inspect-order').dataset.orderId = ord.id;
+    }
+
     function renderVirtualWindow() {
       spacer.style.height = `${filteredIndices.length * ROW_HEIGHT}px`;
       const scrollTop = viewport.scrollTop;
@@ -385,34 +427,49 @@
       const visibleCount = Math.ceil(viewport.clientHeight / ROW_HEIGHT) + BUFFER * 2;
       const last = Math.min(filteredIndices.length, first + visibleCount);
 
-      const frag = document.createDocumentFragment();
-      for (let pos = first; pos < last; pos++) {
-        const rawIdx = filteredIndices[pos];
-        const ord = buildOrder(rawIdx);
-        const row = document.createElement('div');
-        row.className = 'vgrid-row';
-        row.dataset.rowKey = ord.id;
-        row.dataset.rowIndex = String(rawIdx);
-        row.style.top = `${pos * ROW_HEIGHT}px`;
-        row.innerHTML = `
-          <code>${ord.id}</code>
-          <strong>${ord.title}</strong>
-          <span>${ord.reg}</span>
-          <span>¥${ord.amt}</span>
-          <em>${ord.sla}</em>
-          <button type="button" class="act-btn btn-inspect-order" data-order-id="${ord.id}" style="padding:3px 8px;font-size:12px">核验此单</button>
-        `;
-        row.querySelector('.btn-inspect-order').addEventListener('click', (ev) => {
-          const targetId = ev.currentTarget.dataset.orderId;
-          $('#vgrid-action-output').textContent = `selectedOrder=${targetId}`;
-          emit('virtual-order-inspected', { orderId: targetId });
-        });
-        frag.appendChild(row);
+      const ordered = [];
+      if (vgridMode === 'pool') {
+        while (poolRows.length < last - first) poolRows.push(createRow());
+        for (let pos = first; pos < last; pos++) {
+          const row = poolRows[pos - first];
+          bindRow(row, buildOrder(filteredIndices[pos]), pos);
+          ordered.push(row);
+        }
+      } else {
+        const live = new Set();
+        for (let pos = first; pos < last; pos++) {
+          const ord = buildOrder(filteredIndices[pos]);
+          let row = keyedRows.get(ord.id);
+          if (!row) {
+            row = createRow();
+            keyedRows.set(ord.id, row);
+          }
+          bindRow(row, ord, pos);
+          live.add(ord.id);
+          ordered.push(row);
+        }
+        for (const [key, row] of keyedRows) {
+          if (!live.has(key)) {
+            keyedRows.delete(key);
+            row.remove();
+          }
+        }
       }
-      spacer.replaceChildren(frag);
+      // Minimal reconciliation: kept rows are never detached/re-inserted, only entering
+      // rows are inserted at their sorted position and stale trailing nodes are dropped.
+      let cursor = spacer.firstElementChild;
+      for (const row of ordered) {
+        if (row === cursor) cursor = cursor.nextElementSibling;
+        else spacer.insertBefore(row, cursor);
+      }
+      while (cursor) {
+        const next = cursor.nextElementSibling;
+        cursor.remove();
+        cursor = next;
+      }
       const firstOrd = filteredIndices[first] ?? 0;
       const lastOrd = filteredIndices[Math.max(0, last - 1)] ?? 0;
-      $('#vgrid-range-indicator').textContent = `当前挂载: #${firstOrd} ~ #${lastOrd}（共 ${last - first} 个真实 DOM 行）`;
+      $('#vgrid-range-indicator').textContent = `当前挂载: #${firstOrd} ~ #${lastOrd}（共 ${last - first} 个真实 DOM 行 · ${vgridMode}）`;
     }
 
     viewport.addEventListener('scroll', renderVirtualWindow);

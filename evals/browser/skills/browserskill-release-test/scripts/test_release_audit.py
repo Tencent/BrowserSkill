@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Behavioral tests of the audit helper, not BrowserSkill product tests."""
 
-import contextlib, importlib.util, io, json, tempfile, unittest
+import contextlib, csv, importlib.util, io, json, tempfile, time, unittest
 from pathlib import Path
 from types import SimpleNamespace as NS
 from unittest.mock import patch
@@ -627,9 +627,9 @@ else:
                 self.assertEqual(r.headers.get("Cache-Control"), "no-store")
                 self.assertEqual(r.headers.get("Access-Control-Allow-Origin"), "*")
             with urllib.request.urlopen(url + "/arena-bfcache-detail") as r:
-                self.assertEqual(r.headers.get("Cache-Control"), "public, max-age=300")
+                self.assertEqual(r.headers.get("Cache-Control"), "no-cache")
             with urllib.request.urlopen(url + "/minimal?bfcache=1") as r:
-                self.assertEqual(r.headers.get("Cache-Control"), "public, max-age=300")
+                self.assertEqual(r.headers.get("Cache-Control"), "no-cache")
             with urllib.request.urlopen(url + "/captions-zh.vtt") as r:
                 self.assertEqual(r.headers.get("Content-Type"), "text/vtt; charset=utf-8")
             with urllib.request.urlopen(url + "/arena-audio.wav") as r:
@@ -689,19 +689,63 @@ else:
                 self.assertIn(b"slow-doc-ready", r.read())
             with urllib.request.urlopen(url + "/download") as r:
                 self.assertEqual(r.read(), "编号,名称\n42,中文文件 ✅\n".encode("utf-8"))
+            # The joint statement is gated on the submission receipt.
+            with self.assertRaises(urllib.error.HTTPError) as gate:
+                urllib.request.urlopen(
+                    url + "/download?scene=joint-filing&org=TestOrg&gross=1272.00"
+                )
+            self.assertEqual(gate.exception.code, 403)
+            joint = (
+                url
+                + "/download?scene=joint-filing&receipt=JNT-COMMIT-2026-9901"
+                + "&org=%E7%94%B2%2C%E4%B9%99&gross=1272.00"
+            )
+            with urllib.request.urlopen(joint) as r:
+                joint_csv = r.read().decode("utf-8")
+            rows = list(csv.reader(io.StringIO(joint_csv)))
+            self.assertEqual(
+                rows[1], ["JNT-COMMIT-2026-9901", "甲,乙", "1272.00", "已联合核定 ✅"]
+            )
             with urllib.request.urlopen(
-                url + "/download?scene=joint-filing&org=TestOrg&gross=1272.00"
+                url
+                + "/download?scene=joint-filing&receipt=JNT-COMMIT-2026-9901"
+                + "&org=%3DHYPERLINK(1)&gross=1"
             ) as r:
-                joint_csv = r.read()
-                self.assertIn(b"JNT-COMMIT-2026-9901,TestOrg,1272.00", joint_csv)
+                rows = list(csv.reader(io.StringIO(r.read().decode("utf-8"))))
+            self.assertEqual(rows[1][1], "'=HYPERLINK(1)")
             with urllib.request.urlopen(url + "/download-stream?chunks=2&chunk_ms=5") as r:
+                self.assertIsNone(r.headers.get("Content-Length"))
                 stream_csv = r.read().decode("utf-8")
                 self.assertIn("流式对账分片-2", stream_csv)
+            with urllib.request.urlopen(
+                url + "/download-stream?chunks=2&chunk_ms=0&known_length=1"
+            ) as r:
+                body = r.read()
+                self.assertEqual(r.headers.get("Content-Length"), str(len(body)))
             with urllib.request.urlopen(url + "/events") as r:
-                ev_types = [e.get("type") for e in json.load(r)]
-                self.assertIn("redirect-cross-origin", ev_types)
-                self.assertIn("slow-doc", ev_types)
-                self.assertIn("download-stream", ev_types)
+                before_head = json.load(r)
+            # HEAD probes return headers only and never create business evidence.
+            for head_path in (
+                "/download",
+                "/download?scene=joint-filing&receipt=JNT-COMMIT-2026-9901&org=A&gross=1",
+                "/download-stream?chunks=3&chunk_ms=200",
+                "/slow-doc?delay_ms=3000",
+            ):
+                started = time.monotonic()
+                with urllib.request.urlopen(
+                    urllib.request.Request(url + head_path, method="HEAD")
+                ) as r:
+                    self.assertEqual(r.status, 200)
+                    self.assertEqual(r.read(), b"")
+                self.assertLess(time.monotonic() - started, 1.0, head_path)
+            with urllib.request.urlopen(url + "/events") as r:
+                events_after = json.load(r)
+            self.assertEqual(len(events_after), len(before_head))
+            ev_types = [e.get("type") for e in events_after]
+            self.assertIn("redirect-cross-origin", ev_types)
+            self.assertIn("slow-doc", ev_types)
+            self.assertIn("download-stream", ev_types)
+            self.assertIn("download-rejected", ev_types)
         finally:
             server.shutdown()
             server.server_close()
@@ -794,7 +838,7 @@ else:
 
         real_skill = Path(__file__).resolve().parents[1]
         scenarios = audit.load(real_skill / "references/scenarios.json")
-        self.assertGreaterEqual(len(scenarios), 98)
+        self.assertEqual(len(scenarios), 111)
         ids = [s["id"] for s in scenarios]
         self.assertEqual(len(ids), len(set(ids)))
         for required_id in [
@@ -812,16 +856,58 @@ else:
             "PUBLIC-BILIBILI-PLAYER",
             "PUBLIC-FORUM-TOPICS",
             "PUBLIC-FORUM-THREAD",
-            "ARENA-JOINT-FORMS",
-            "ARENA-NEG-FORM-BOUNDARIES",
-            "ARENA-SHADOW-MATRIX",
-            "ARENA-IFRAME-FEDERATION",
-            "ARENA-MEDIA-STUDIO",
-            "ARENA-MODERN-SPA-BFCACHE",
-            "ARENA-VIRTUAL-GRID-STEGANO",
-            "ARENA-NEG-VIRTUAL-RECYCLE",
         ]:
             self.assertIn(required_id, ids)
+        arena_ids = [i for i in ids if i.startswith("ARENA-")]
+        self.assertEqual(
+            arena_ids,
+            [
+                "ARENA-JOINT-LEAD-FORM",
+                "ARENA-JOINT-PARTNERS-BUDGET",
+                "ARENA-JOINT-SUBMIT-DOWNLOAD",
+                "ARENA-NEG-FORM-READONLY-DISABLED",
+                "ARENA-NEG-SELECT-DISABLED-OPTION",
+                "ARENA-NEG-DOWNLOAD-GATE",
+                "ARENA-SHADOW-NESTED-OPEN",
+                "ARENA-SHADOW-CLOSED-VISUAL",
+                "ARENA-IFRAME-FEDERATION",
+                "ARENA-IFRAME-RELOAD-ISOLATION",
+                "ARENA-MEDIA-VIDEO-TRANSPORT",
+                "ARENA-MEDIA-CAPTIONS-FRAME",
+                "ARENA-MEDIA-AUDIO-PLAYLIST",
+                "ARENA-SPA-HYDRATION-ROUTES",
+                "ARENA-BFCACHE-HISTORY",
+                "ARENA-ASYNC-NAV-DOWNLOAD",
+                "ARENA-CSS-STEGANO",
+                "ARENA-SENSITIVE-VAULT",
+                "ARENA-VIRTUAL-GRID-KEYED",
+                "ARENA-MEGA-VOM-DELTA",
+                "ARENA-NEG-VIRTUAL-RECYCLE",
+            ],
+        )
+        # Every required_argv flag must be declared on that exact CLI command
+        # (guards against e.g. requiring `observe --redact-values`, a `record` flag).
+        cli_dir = real_skill.parents[3] / "crates/bsk-cli/src/cli"
+        for sc in scenarios:
+            for variant in sc.get("required_argv", []):
+                src = (cli_dir / (variant["command"].split()[0] + ".rs")).read_text(
+                    encoding="utf-8"
+                )
+                for flag in variant["args"]:
+                    if not flag.startswith("--"):
+                        continue
+                    name = flag[2:]
+                    declared = f'long = "{name}"' in src or _re.search(
+                        r"#\[arg\(long\b[^\]]*\]\s*(?:///[^\n]*\n\s*)*pub "
+                        + name.replace("-", "_")
+                        + r"\b",
+                        src,
+                    )
+                    self.assertTrue(
+                        declared,
+                        f"Scenario {sc['id']} requires {variant['command']} {flag}, "
+                        "which that command does not declare",
+                    )
         corpus = "\n".join(
             p.read_text(encoding="utf-8")
             for p in [

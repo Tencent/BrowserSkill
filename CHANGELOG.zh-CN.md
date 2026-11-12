@@ -7,11 +7,6 @@ CLI、扩展和 DSH 插件可以分别发布，能否连接由协议兼容性决
 
 ### 新增
 
-- 新增高仿真对抗级发版评测靶场（`evals/browser/skills/browserskill-release-test`，98 个场景）并接入
-  `release-protocol` CI 门禁：覆盖三表联动复杂企业联合申报工作台、三层嵌套 Open/Closed Shadow DOM 与
-  `127.0.0.1 -> localhost -> 127.0.0.1` 双跳跨源再入 OOPIF 联邦、支持 RFC 9110 `Range`（`206`/`416`）
-  字节寻址的 H5 原生 `<video>` + `<audio>` 双轨演播室（中英双语 WebVTT 字幕与 `<canvas>` 寻址帧像素采样），
-  以及 `>200KB` 全量 VOM 现代 SPA 水合替换、5,000 行视口卸载虚拟滚动表、真实 `bfcache`、`oklch()`／渐变字与隐写注入对抗及 `--redact-values` 脱敏验证。
 - 新增 daemon 本地 `<3ms` 预写意图账本（`$BSK_HOME/intent_ledger.jsonl`，`0600` 权限）与
   `bsk ledger status | resolve` 子命令：在派发层统一覆盖所有变异操作（`click`、`fill`、`press`、
   `select`、`upload`、`drag`、`evaluate`），无论使用 `--ref`、原始 CSS `--selector` 还是视觉坐标
