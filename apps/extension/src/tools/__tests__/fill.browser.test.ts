@@ -95,6 +95,20 @@ async function withFillBrowser(
     };
     await evaluate(`document.body.innerHTML = ${JSON.stringify(markup)}`);
     expect(await evaluate("document.hasFocus()")).toBe(!background);
+    // fill picks its background focus flush from document.visibilityState (pointer
+    // move when visible, no-op key press when hidden). Chrome applies a new tab's
+    // visibility asynchronously, and on Linux CI a background tab can still report
+    // "visible" for a few frames, which made hidden-tab cases take the pointer path.
+    // Wait for the state each case is named after instead of racing it.
+    const expectedVisibility = background && !ownWindow ? "hidden" : "visible";
+    const visibilityDeadline = Date.now() + 5_000;
+    while (
+      (await evaluate("document.visibilityState")) !== expectedVisibility &&
+      Date.now() < visibilityDeadline
+    ) {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    expect(await evaluate("document.visibilityState")).toBe(expectedVisibility);
     const manager = new SessionManager({
       agentWindow: {
         create: async () => ({ windowId: 100, initialTabIds: [] }),
@@ -773,12 +787,9 @@ describe.skipIf(!process.env.BSK_FILL_CHROME)("date-like fill regressions", () =
           ]);
           await h.activate();
           expect(await h.evaluate("document.querySelector('#target').value")).toBe("");
-          expect(
-            h.calls.some(
-              (method) =>
-                method === "Input.dispatchMouseEvent" || method === "Input.dispatchKeyEvent",
-            ),
-          ).toBe(true);
+          // The harness guarantees a hidden tab, which flushes focus with a key press.
+          expect(h.calls).toContain("Input.dispatchKeyEvent");
+          expect(h.calls).not.toContain("Input.dispatchMouseEvent");
           expect(h.calls).not.toContain("Input.insertText");
         },
       );
