@@ -71,6 +71,13 @@ export function pointerTransactionDeps(
     dialogCursor: deps.cdp.dialogCursor?.bind(deps.cdp),
     dialogsSince: deps.cdp.dialogsSince?.bind(deps.cdp),
     getAttachmentId: deps.cdp.getAttachmentId?.bind(deps.cdp),
+    resolveTarget: deps.cdp.resolveTarget?.bind(deps.cdp),
+    reattachIfSoftDetached: deps.cdp.reattachIfSoftDetached
+      ? (tabId) => {
+          check();
+          return deps.cdp.reattachIfSoftDetached!(tabId);
+        }
+      : undefined,
     getFrameGraph: deps.cdp.getFrameGraph
       ? (tabId) => {
           check();

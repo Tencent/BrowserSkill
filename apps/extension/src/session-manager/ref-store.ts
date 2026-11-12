@@ -176,6 +176,73 @@ export class RefStore {
     }
   }
 
+  /** Drop child-frame refs whose OOPIF session disappeared or navigated across soft-detach. */
+  invalidateChildFrames(
+    tabId: number,
+    stale: { sessionIds: ReadonlySet<string>; frameIds: ReadonlySet<string> },
+    forceRevisionBump = false,
+  ): void {
+    if (stale.sessionIds.size === 0 && stale.frameIds.size === 0) return;
+    const tabIdentities = this.identities.get(tabId);
+    if (tabIdentities) {
+      for (const key of tabIdentities.keys()) {
+        try {
+          const parsed = JSON.parse(key) as [unknown, unknown, unknown, unknown];
+          const frameId = typeof parsed[1] === "string" ? parsed[1] : undefined;
+          const sessionId = typeof parsed[2] === "string" ? parsed[2] : undefined;
+          if (
+            (sessionId !== undefined && stale.sessionIds.has(sessionId)) ||
+            (frameId !== undefined && stale.frameIds.has(frameId))
+          ) {
+            tabIdentities.delete(key);
+          }
+        } catch {
+          tabIdentities.delete(key);
+        }
+      }
+      if (tabIdentities.size === 0) this.identities.delete(tabId);
+    }
+    let changed = false;
+    for (const [ref, entry] of this.map) {
+      if (entry.kind === "dom") {
+        if (
+          entry.tabId === tabId &&
+          ((entry.cdpSessionId !== undefined && stale.sessionIds.has(entry.cdpSessionId)) ||
+            (entry.frameId !== undefined && stale.frameIds.has(entry.frameId)))
+        ) {
+          this.map.delete(ref);
+          changed = true;
+        }
+        continue;
+      }
+      if (entry.candidate.document.target.tabId !== tabId) continue;
+      let framePath = entry.candidate.framePath;
+      let isStaleVisual =
+        stale.frameIds.has(entry.candidate.document.frameId) ||
+        (entry.candidate.document.target.sessionId !== undefined &&
+          stale.sessionIds.has(entry.candidate.document.target.sessionId));
+      while (!isStaleVisual && framePath) {
+        if (
+          stale.frameIds.has(framePath.document.frameId) ||
+          (framePath.document.target.sessionId !== undefined &&
+            stale.sessionIds.has(framePath.document.target.sessionId))
+        ) {
+          isStaleVisual = true;
+          break;
+        }
+        framePath = framePath.parent?.frame;
+      }
+      if (isStaleVisual) {
+        this.map.delete(ref);
+        changed = true;
+      }
+    }
+    if (changed || forceRevisionBump) {
+      this.generation++;
+      this.observationToken = crypto.randomUUID();
+    }
+  }
+
   clear(): void {
     this.generation++;
     this.map.clear();

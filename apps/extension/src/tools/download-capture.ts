@@ -334,7 +334,8 @@ export async function captureBrowserDownload(
     reconcile();
   };
   const cdpSubscription = options.cdp.onEvent?.((source, method, raw) => {
-    if (settled || method !== "Page.downloadWillBegin" || !sameTarget(source, options.target))
+    const expectedTarget = options.cdp.resolveTarget?.(options.target) ?? options.target;
+    if (settled || method !== "Page.downloadWillBegin" || !sameTarget(source, expectedTarget))
       return;
     if (capturedId !== undefined && options.inputSignal?.aborted) return;
     const event = raw as { url?: unknown; suggestedFilename?: unknown; frameId?: unknown };
@@ -357,6 +358,7 @@ export async function captureBrowserDownload(
   if (!cdpSubscription) {
     return captureError("CDP download intent subscription unavailable", "none", "arm");
   }
+  const releaseTabAttachment = options.cdp.retainTabAttachment?.(options.target.tabId);
 
   options.downloads.onDeterminingFilename.addListener(determiningListener);
   options.downloads.onCreated.addListener(createdListener);
@@ -480,6 +482,8 @@ export async function captureBrowserDownload(
       }
     } catch {
       if (failureResult?.data) failureResult.data.cleanup_state = "failed";
+    } finally {
+      releaseTabAttachment?.();
     }
   }
 }

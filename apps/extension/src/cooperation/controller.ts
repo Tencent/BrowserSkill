@@ -624,6 +624,16 @@ export class CooperationController implements ControlAuthority {
     state.unresponsive = undefined;
     this.changed(state);
   }
+  invalidateChildFrames(tabId: number) {
+    const state = this.tabs.get(tabId);
+    if (!state) return;
+    state.accessibilityLease.markNeedsEnable();
+    state.frameEpoch++;
+    this.changed(state);
+  }
+  markAccessibilityNeedsEnable(tabId: number) {
+    this.tabs.get(tabId)?.accessibilityLease.markNeedsEnable();
+  }
   async control(tabId: number, revision: number, action: "hold" | "resume") {
     const state = this.tabs.get(tabId);
     if (!state || state.revision !== revision) return { ok: false, state: this.view(tabId) };
@@ -857,6 +867,8 @@ export class CooperationController implements ControlAuthority {
       }
       if (state.held || state.working || this.humanActive(state))
         return failure("The user is still operating this tab; wait for hand-back");
+      await cdp.reconcileSoftDetachedFrames?.(state.tabId);
+      if (state.stopped) return stopped();
       const previousRefs = session.refStore;
       const previousRefRevision = previousRefs.revision;
       const refStore = session.controlPolicy ? previousRefs : previousRefs.createObservationStore();

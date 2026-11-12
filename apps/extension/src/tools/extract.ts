@@ -234,10 +234,16 @@ export async function handleExtract(
     let expectedIdentity: DocumentIdentity | undefined;
     if (params.target_id) {
       if (!saved || saved.identity.target.tabId !== tab.tabId) stale();
-      expectedIdentity = saved.identity;
+      const resolvedSavedTarget = deps.cdp.resolveTarget
+        ? deps.cdp.resolveTarget(saved.identity.target)
+        : saved.identity.target;
+      expectedIdentity =
+        resolvedSavedTarget === saved.identity.target
+          ? saved.identity
+          : { ...saved.identity, target: resolvedSavedTarget };
       backendNodeId = saved.backendNodeId;
       const frame = graph!.frames.find((frame) => frame.frameId === saved.identity.frameId);
-      if (!frame || frame.target.sessionId !== saved.identity.target.sessionId) stale();
+      if (!frame || frame.target.sessionId !== resolvedSavedTarget.sessionId) stale();
       selectedFrame = frame;
     } else if (params.ref) {
       const ref = resolveSnapshotRef(ctx, params.ref, tab.tabId);
@@ -245,7 +251,11 @@ export async function handleExtract(
       const frame = graph!.frames.find(
         (frame) => frame.frameId === (ref.frameId ?? graph!.rootFrameId),
       );
-      if (!frame || frame.target.sessionId !== ref.cdpSessionId) stale();
+      const expectedSessionId = ref.cdpSessionId
+        ? (deps.cdp.resolveTarget?.({ tabId: tab.tabId, sessionId: ref.cdpSessionId })?.sessionId ??
+          ref.cdpSessionId)
+        : undefined;
+      if (!frame || frame.target.sessionId !== expectedSessionId) stale();
       selectedFrame = frame;
       backendNodeId = ref.backendNodeId;
     }

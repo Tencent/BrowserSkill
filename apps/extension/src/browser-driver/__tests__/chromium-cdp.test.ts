@@ -2572,4 +2572,495 @@ describe("idle soft-detach and immediate close/return detach", () => {
       cdp.dispose();
     }
   });
+
+  it("preserves attachmentId across soft-detach when root document is unchanged and rotates it when root document changed", async () => {
+    vi.useFakeTimers();
+    const { api } = fakeApi();
+    let loaderId = "loader-v1";
+    let url = "https://visual.test/v1";
+    let backendNodeId = 501;
+    vi.mocked(api.sendCommand).mockImplementation(async (_target, method) => {
+      if (method === "Page.getFrameTree") {
+        return { frameTree: { frame: { id: "root", loaderId, url } } };
+      }
+      if (method === "DOM.getDocument") {
+        return { root: { backendNodeId, documentURL: url } };
+      }
+      return {};
+    });
+    const changed = vi.fn();
+    const cdp = new ChromiumCdp(api, {
+      onDocumentChanged: changed,
+      idleDetachMs: DEFAULT_IDLE_DETACH_MS,
+    });
+    try {
+      await cdp.ensureAttached(50);
+      const initialAttachmentId = cdp.getAttachmentId(50);
+      expect(initialAttachmentId).toEqual(expect.any(String));
+
+      // Soft-detach after 75s idle, then reattach via `reattachIfSoftDetached` with unchanged root doc.
+      await vi.advanceTimersByTimeAsync(DEFAULT_IDLE_DETACH_MS);
+      expect(cdp.isAttached(50)).toBe(false);
+      expect(cdp.getAttachmentId(50)).toBeUndefined();
+
+      await cdp.reattachIfSoftDetached(50);
+      expect(cdp.isAttached(50)).toBe(true);
+      expect(cdp.getAttachmentId(50)).toBe(initialAttachmentId);
+      expect(changed).not.toHaveBeenCalled();
+
+      // Soft-detach again, mutate root document while detached, then reattach -> rotates attachmentId.
+      await vi.advanceTimersByTimeAsync(DEFAULT_IDLE_DETACH_MS);
+      expect(cdp.isAttached(50)).toBe(false);
+      loaderId = "loader-v2";
+      url = "https://visual.test/v2";
+      backendNodeId = 502;
+
+      await cdp.ensureAttached(50);
+      const rotatedAttachmentId = cdp.getAttachmentId(50);
+      expect(rotatedAttachmentId).toEqual(expect.any(String));
+      expect(rotatedAttachmentId).not.toBe(initialAttachmentId);
+      expect(changed).toHaveBeenCalledExactlyOnceWith(50);
+
+      // Hard detach must NOT reattach on `reattachIfSoftDetached`.
+      const attachCallsBeforeHardDetach = vi.mocked(api.attach).mock.calls.length;
+      await cdp.detach(50);
+      expect(cdp.isAttached(50)).toBe(false);
+      await cdp.reattachIfSoftDetached(50);
+      expect(cdp.isAttached(50)).toBe(false);
+      expect(api.attach).toHaveBeenCalledTimes(attachCallsBeforeHardDetach);
+    } finally {
+      cdp.dispose();
+    }
+  });
+
+  it("captures JS modal dialogs opened while soft-detached during Page.enable without hanging probeRootDocumentSignature, and touches activity on dialog opening", async () => {
+    vi.useFakeTimers();
+    const { api, onEvent } = fakeApi();
+    let loaderId = "dlg-loader-1";
+    let url = "https://dialog.test/page-1";
+    let backendNodeId = 601;
+    let dialogOpenOnPageEnable: string | null = null;
+    let domGetDocumentWhileDialogOpen = 0;
+
+    vi.mocked(api.sendCommand).mockImplementation(async (target, method) => {
+      if (target.tabId === 51 && method === "Page.enable" && dialogOpenOnPageEnable !== null) {
+        const message = dialogOpenOnPageEnable;
+        dialogOpenOnPageEnable = null;
+        onEvent.fire({ tabId: 51 }, "Page.javascriptDialogOpening", {
+          type: "alert",
+          message,
+          url,
+        });
+        return {};
+      }
+      if (target.tabId === 51 && method === "Page.handleJavaScriptDialog") {
+        onEvent.fire({ tabId: 51 }, "Page.javascriptDialogClosed", { result: true });
+        return {};
+      }
+      if (method === "Page.getFrameTree") {
+        return { frameTree: { frame: { id: "root", loaderId, url } } };
+      }
+      if (method === "DOM.getDocument") {
+        if (target.tabId === 51 && cdp.pendingDialogs(51).length > 0) {
+          domGetDocumentWhileDialogOpen += 1;
+          return new Promise(() => {});
+        }
+        return { root: { backendNodeId, documentURL: url } };
+      }
+      return {};
+    });
+
+    const changed = vi.fn();
+    let gateControlResolve = undefined as ((allowed: boolean) => void) | undefined;
+    const cdp = new ChromiumCdp(api, {
+      canControlDialog: async (tabId) => {
+        if (tabId === 52 && gateControlResolve === undefined) {
+          return await new Promise<boolean>((resolve) => {
+            gateControlResolve = resolve;
+          });
+        }
+        await Promise.resolve();
+        return true;
+      },
+      onDocumentChanged: changed,
+      idleDetachMs: DEFAULT_IDLE_DETACH_MS,
+    });
+    const cdpShortIdle = new ChromiumCdp(api, {
+      canControlDialog: async () =>
+        await new Promise<boolean>((resolve) => {
+          gateControlResolve = resolve;
+        }),
+      idleDetachMs: 1_000,
+    });
+
+    try {
+      // 1. Unchanged root doc + alert opened while soft-detached:
+      await cdp.ensureAttached(51);
+      const initialAttachmentId = cdp.getAttachmentId(51);
+
+      await vi.advanceTimersByTimeAsync(DEFAULT_IDLE_DETACH_MS);
+      expect(cdp.isAttached(51)).toBe(false);
+      dialogOpenOnPageEnable = "Alert opened while soft-detached";
+
+      await cdp.ensureAttached(51);
+      expect(domGetDocumentWhileDialogOpen).toBe(0);
+      expect(cdp.getAttachmentId(51)).toBe(initialAttachmentId);
+      expect(changed).not.toHaveBeenCalled();
+      expect(cdp.pendingDialogs(51)).toMatchObject([
+        { type: "alert", message: "Alert opened while soft-detached" },
+      ]);
+      await cdp.resolveDialog(cdp.pendingDialogs(51)[0].id, true);
+      expect(cdp.pendingDialogs(51)).toHaveLength(0);
+
+      // 2. Navigated root doc + alert opened while soft-detached:
+      await vi.advanceTimersByTimeAsync(DEFAULT_IDLE_DETACH_MS);
+      expect(cdp.isAttached(51)).toBe(false);
+      loaderId = "dlg-loader-2";
+      url = "https://dialog.test/page-2";
+      backendNodeId = 602;
+      dialogOpenOnPageEnable = "Alert after navigation while soft-detached";
+
+      await cdp.ensureAttached(51);
+      expect(domGetDocumentWhileDialogOpen).toBe(0);
+      expect(cdp.getAttachmentId(51)).not.toBe(initialAttachmentId);
+      expect(changed).toHaveBeenCalledExactlyOnceWith(51);
+      expect(cdp.pendingDialogs(51)).toMatchObject([
+        { type: "alert", message: "Alert after navigation while soft-detached" },
+      ]);
+      // Pending dialog's attachmentId was rotated in lockstep so resolveDialog succeeds!
+      await expect(cdp.resolveDialog(cdp.pendingDialogs(51)[0].id, true)).resolves.toMatchObject({
+        message: "Alert after navigation while soft-detached",
+      });
+
+      // 3. `onJavaScriptDialogOpening` touches tab activity and blocks soft-detach while `canControlDialog` awaits:
+      await cdpShortIdle.ensureAttached(52);
+      const detachCountBefore = vi.mocked(api.detach).mock.calls.length;
+      await vi.advanceTimersByTimeAsync(900);
+      onEvent.fire({ tabId: 52 }, "Page.javascriptDialogOpening", {
+        type: "confirm",
+        message: "Slow permission check",
+      });
+      await vi.advanceTimersByTimeAsync(500);
+      expect(api.detach).toHaveBeenCalledTimes(detachCountBefore);
+      gateControlResolve?.(false);
+      await vi.advanceTimersByTimeAsync(0);
+      // Uncontrolled dialog returns without pending entry, and touched activity keeps tab alive until fresh 1000ms elapses.
+      await vi.advanceTimersByTimeAsync(400);
+      expect(api.detach).toHaveBeenCalledTimes(detachCountBefore);
+    } finally {
+      gateControlResolve?.(false);
+      cdpShortIdle.dispose();
+      cdp.dispose();
+    }
+  });
+
+  it("remaps unchanged cross-origin OOPIF sessionIds across chained soft-detaches and invalidates stale child frames when OOPIFs change or disappear", async () => {
+    vi.useFakeTimers();
+    const { api, onEvent } = fakeApi();
+    let attachGeneration = 0;
+    let childBState: { present: boolean; loaderId: string; url: string } = {
+      present: true,
+      loaderId: "child-b-loader-1",
+      url: "https://oopif-b.test/form",
+    };
+    const activeChildSessions = new Set<string>();
+
+    vi.mocked(api.attach).mockImplementation(async () => {
+      attachGeneration += 1;
+      activeChildSessions.clear();
+    });
+    vi.mocked(api.detach).mockImplementation(async () => {
+      activeChildSessions.clear();
+    });
+    vi.mocked(api.sendCommand).mockImplementation(async (target, method) => {
+      if (target.sessionId && !activeChildSessions.has(target.sessionId)) {
+        throw new Error(`Session with given id not found: ${target.sessionId}`);
+      }
+      if (!target.sessionId && method === "Target.setAutoAttach") {
+        const sA = `s${attachGeneration}-a`;
+        activeChildSessions.add(sA);
+        onEvent.fire({ tabId: 53 }, "Target.attachedToTarget", {
+          sessionId: sA,
+          targetInfo: { type: "iframe", targetId: "t-a", url: "https://oopif-a.test/pay" },
+        });
+        if (childBState.present) {
+          const sB = `s${attachGeneration}-b`;
+          activeChildSessions.add(sB);
+          onEvent.fire({ tabId: 53 }, "Target.attachedToTarget", {
+            sessionId: sB,
+            targetInfo: { type: "iframe", targetId: "t-b", url: childBState.url },
+          });
+        }
+        return {};
+      }
+      if (method === "Page.getFrameTree") {
+        if (!target.sessionId) {
+          return {
+            frameTree: {
+              frame: { id: "root", loaderId: "root-loader-1", url: "https://host.test/" },
+              childFrames: [
+                { frame: { id: "child-a", parentId: "root", url: "https://oopif-a.test/pay" } },
+                ...(childBState.present
+                  ? [{ frame: { id: "child-b", parentId: "root", url: childBState.url } }]
+                  : []),
+              ],
+            },
+          };
+        }
+        if (target.sessionId.endsWith("-a")) {
+          return {
+            frameTree: {
+              frame: {
+                id: "child-a",
+                parentId: "root",
+                loaderId: "child-a-loader-1",
+                url: "https://oopif-a.test/pay",
+              },
+            },
+          };
+        }
+        if (target.sessionId.endsWith("-b")) {
+          return {
+            frameTree: {
+              frame: {
+                id: "child-b",
+                parentId: "root",
+                loaderId: childBState.loaderId,
+                url: childBState.url,
+              },
+            },
+          };
+        }
+      }
+      if (method === "DOM.getDocument") {
+        return { root: { backendNodeId: 1, documentURL: "https://host.test/" } };
+      }
+      if (method === "DOM.resolveNode") {
+        return { routedSessionId: target.sessionId };
+      }
+      return { routedSessionId: target.sessionId };
+    });
+
+    const refs = new RefStore();
+    const docChanged = vi.fn((tabId: number) => refs.invalidateTab(tabId));
+    const childInvalidated = vi.fn(
+      (
+        tabId: number,
+        stale: { sessionIds: ReadonlySet<string>; frameIds: ReadonlySet<string> },
+      ) => {
+        refs.invalidateChildFrames(tabId, stale);
+      },
+    );
+    const cdp = new ChromiumCdp(api, {
+      onDocumentChanged: docChanged,
+      onChildFramesInvalidated: childInvalidated,
+      idleDetachMs: DEFAULT_IDLE_DETACH_MS,
+    });
+
+    try {
+      await cdp.ensureAttached(53);
+      // Let frame discovery quiet timer settle so initial child frame trees are recorded.
+      await vi.advanceTimersByTimeAsync(50);
+
+      refs.set("e1", 10, { tabId: 53, frameId: "root" });
+      refs.set("e2", 20, { tabId: 53, frameId: "child-a", cdpSessionId: "s1-a" });
+      refs.set("e3", 30, { tabId: 53, frameId: "child-b", cdpSessionId: "s1-b" });
+      const initialRevision = refs.revision;
+
+      // Soft-detach #1 -> reattach with unchanged OOPIFs (`s2-a`, `s2-b`).
+      await vi.advanceTimersByTimeAsync(DEFAULT_IDLE_DETACH_MS);
+      expect(cdp.isAttached(53)).toBe(false);
+
+      const resolvedGen2 = await cdp.sendToTarget<{ routedSessionId: string }>(
+        { tabId: 53, sessionId: "s1-a" },
+        "DOM.resolveNode",
+        { backendNodeId: 20 },
+      );
+      expect(resolvedGen2.routedSessionId).toBe("s2-a");
+
+      const guardedGen2 = await cdp.sendGuarded<{ routedSessionId: string }>(
+        { tabId: 53, sessionId: "s1-b" },
+        "DOM.resolveNode",
+        { backendNodeId: 30 },
+        {},
+      );
+      expect(guardedGen2.routedSessionId).toBe("s2-b");
+      expect(docChanged).not.toHaveBeenCalled();
+      expect(childInvalidated).not.toHaveBeenCalled();
+      expect(refs.revision).toBe(initialRevision);
+
+      // Soft-detach #2 -> `child-a` gets `s3-a` (unchanged), `child-b` navigates (`child-b-loader-2`).
+      await vi.advanceTimersByTimeAsync(DEFAULT_IDLE_DETACH_MS);
+      expect(cdp.isAttached(53)).toBe(false);
+      childBState = {
+        present: true,
+        loaderId: "child-b-loader-2",
+        url: "https://oopif-b.test/submitted",
+      };
+
+      const resolvedGen3FromS1 = await cdp.sendToTarget<{ routedSessionId: string }>(
+        { tabId: 53, sessionId: "s1-a" },
+        "DOM.resolveNode",
+        { backendNodeId: 20 },
+      );
+      expect(resolvedGen3FromS1.routedSessionId).toBe("s3-a");
+      expect(cdp.resolveTarget({ tabId: 53, sessionId: "s2-a" })).toEqual({
+        tabId: 53,
+        sessionId: "s3-a",
+      });
+
+      expect(docChanged).not.toHaveBeenCalled();
+      expect(childInvalidated).toHaveBeenCalledExactlyOnceWith(53, {
+        frameIds: new Set(["child-b"]),
+        sessionIds: new Set(["s2-b", "s1-b"]),
+      });
+      // Main ref `@e1` and unchanged OOPIF ref `@e2` remain valid; navigated OOPIF `@e3` is invalidated and revision bumped!
+      expect(refs.resolve("e1", { tabId: 53 })).toBe(10);
+      expect(refs.resolve("e2", { tabId: 53 })).toBe(20);
+      expect(refs.resolve("e3", { tabId: 53 })).toBeNull();
+      expect(refs.revision).toBeGreaterThan(initialRevision);
+
+      // Hard detach clears remapped sessions.
+      await cdp.detach(53);
+      expect(cdp.resolveTarget({ tabId: 53, sessionId: "s1-a" })).toEqual({
+        tabId: 53,
+        sessionId: "s1-a",
+      });
+    } finally {
+      cdp.dispose();
+    }
+  });
+
+  it("retains debugger attachment across >75s idle while retainTabAttachment lease is held and soft-detaches 75s after release", async () => {
+    vi.useFakeTimers();
+    const { api } = fakeApi();
+    const cdp = new ChromiumCdp(api, { idleDetachMs: DEFAULT_IDLE_DETACH_MS });
+    try {
+      await cdp.ensureAttached(54);
+      const releaseA = cdp.retainTabAttachment(54);
+      const releaseB = cdp.retainTabAttachment(54);
+
+      await vi.advanceTimersByTimeAsync(120_000);
+      expect(api.detach).not.toHaveBeenCalled();
+      expect(cdp.isAttached(54)).toBe(true);
+
+      // Releasing one of two leases (idempotently) still holds the attachment.
+      releaseA();
+      releaseA();
+      await vi.advanceTimersByTimeAsync(80_000);
+      expect(api.detach).not.toHaveBeenCalled();
+      expect(cdp.isAttached(54)).toBe(true);
+
+      // Releasing the final lease re-arms the full 75s idle window.
+      releaseB();
+      await vi.advanceTimersByTimeAsync(DEFAULT_IDLE_DETACH_MS - 1);
+      expect(api.detach).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(1);
+      expect(api.detach).toHaveBeenCalledExactlyOnceWith({ tabId: 54 });
+      expect(cdp.isAttached(54)).toBe(false);
+    } finally {
+      cdp.dispose();
+    }
+  });
+
+  it("cleans up buffers, soft-detach state, and fires onDocumentChanged when hard detach races softDetachIdleTab or runs while soft-detached, and cleans unowned soft-detached tabs in syncSessions", async () => {
+    vi.useFakeTimers();
+    const { api, onEvent } = fakeApi();
+    let blockDetach56 = undefined as (() => void) | undefined;
+    vi.mocked(api.detach).mockImplementation(async (target) => {
+      if (target.tabId === 56 && blockDetach56 === undefined) {
+        await new Promise<void>((resolve) => {
+          blockDetach56 = resolve;
+        });
+      }
+    });
+    vi.mocked(api.sendCommand).mockImplementation(async (_target, method) => {
+      if (method === "Page.getFrameTree") {
+        return { frameTree: { frame: { id: "root", loaderId: "l1", url: "https://clean.test/" } } };
+      }
+      if (method === "DOM.getDocument") {
+        return { root: { backendNodeId: 1, documentURL: "https://clean.test/" } };
+      }
+      return {};
+    });
+
+    const changed = vi.fn();
+    const cdp = new ChromiumCdp(api, {
+      onDocumentChanged: changed,
+      idleDetachMs: DEFAULT_IDLE_DETACH_MS,
+    });
+
+    try {
+      // Case A: Hard `detach(55)` called while tab 55 is already in `softDetachedTabs`.
+      await cdp.ensureAttached(55);
+      onEvent.fire({ tabId: 55 }, "Runtime.consoleAPICalled", {
+        type: "log",
+        args: [{ type: "string", value: "hello before soft-detach" }],
+      });
+      onEvent.fire({ tabId: 55 }, "Network.requestWillBeSent", {
+        requestId: "r-55",
+        request: { url: "https://clean.test/api", method: "GET" },
+        type: "Fetch",
+      });
+      onEvent.fire({ tabId: 55 }, "Network.responseReceived", {
+        requestId: "r-55",
+        type: "Fetch",
+        response: { url: "https://clean.test/api", status: 200 },
+      });
+
+      await vi.advanceTimersByTimeAsync(DEFAULT_IDLE_DETACH_MS);
+      expect(cdp.isAttached(55)).toBe(false);
+      expect(changed).not.toHaveBeenCalled();
+      expect(cdp.consoleEntriesSince(55, undefined, 10, 200, false).entries).toHaveLength(1);
+      expect(cdp.networkEntriesSince(55, undefined, 10, 200).entries).toHaveLength(1);
+
+      const detachCountAfterSoft = vi.mocked(api.detach).mock.calls.length;
+      await cdp.detach(55);
+      expect(api.detach).toHaveBeenCalledTimes(detachCountAfterSoft);
+      expect(changed).toHaveBeenCalledExactlyOnceWith(55);
+      expect(cdp.consoleEntriesSince(55, undefined, 10, 200, false).entries).toHaveLength(0);
+      expect(cdp.networkEntriesSince(55, undefined, 10, 200).entries).toHaveLength(0);
+
+      // Case B: Hard `detach(56)` called while `softDetachIdleTab(56)`'s `api.detach` is in flight.
+      changed.mockClear();
+      await cdp.ensureAttached(56);
+      onEvent.fire({ tabId: 56 }, "Runtime.consoleAPICalled", {
+        type: "error",
+        args: [{ type: "string", value: "racing error" }],
+      });
+      await vi.advanceTimersByTimeAsync(DEFAULT_IDLE_DETACH_MS);
+      expect(blockDetach56).toBeTypeOf("function");
+
+      const detachCallsDuringRace = vi
+        .mocked(api.detach)
+        .mock.calls.filter((c) => c[0].tabId === 56).length;
+      expect(detachCallsDuringRace).toBe(1);
+
+      const hardDetachPromise = cdp.detach(56);
+      blockDetach56!();
+      await hardDetachPromise;
+
+      expect(vi.mocked(api.detach).mock.calls.filter((c) => c[0].tabId === 56)).toHaveLength(1);
+      expect(changed).toHaveBeenCalledExactlyOnceWith(56);
+      expect(cdp.consoleEntriesSince(56, undefined, 10, 200, false).entries).toHaveLength(0);
+
+      // Case C: `syncSessions` detaches unowned tabs even when they are soft-detached.
+      changed.mockClear();
+      cdp.trackSessionTab("sess-owned", 57);
+      await cdp.ensureAttached(57);
+      onEvent.fire({ tabId: 57 }, "Runtime.consoleAPICalled", {
+        type: "warn",
+        args: [{ type: "string", value: "orphan session log" }],
+      });
+      await vi.advanceTimersByTimeAsync(DEFAULT_IDLE_DETACH_MS);
+      expect(cdp.isAttached(57)).toBe(false);
+
+      await cdp.syncSessions(new Set());
+      expect(changed).toHaveBeenCalledExactlyOnceWith(57);
+      expect(cdp.consoleEntriesSince(57, undefined, 10, 200, false).entries).toHaveLength(0);
+    } finally {
+      blockDetach56?.();
+      cdp.dispose();
+    }
+  });
 });

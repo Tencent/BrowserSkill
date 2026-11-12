@@ -179,6 +179,16 @@ export class SessionManager {
     for (const ctx of this.sessions.values()) ctx.refStore.invalidateTab(tabId);
   }
 
+  invalidateTabChildFrames(
+    tabId: number,
+    stale: { sessionIds: ReadonlySet<string>; frameIds: ReadonlySet<string> },
+  ): void {
+    for (const ctx of this.sessions.values()) {
+      const ownsTab = isAgentControlledTab(ctx, tabId) || Boolean(ctx.observedTabs?.has(tabId));
+      ctx.refStore.invalidateChildFrames(tabId, stale, ownsTab);
+    }
+  }
+
   /**
    * Forget a tab Chrome has removed, including any uncommitted borrow.
    * Whole-window closures keep committed borrows until the window-removed

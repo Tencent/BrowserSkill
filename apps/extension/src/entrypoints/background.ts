@@ -165,6 +165,13 @@ export default defineBackground(() => {
       sessions.invalidateTabRefs(tabId);
       cooperation.invalidate(tabId);
     },
+    onChildFramesInvalidated: (tabId, stale) => {
+      sessions.invalidateTabChildFrames(tabId, stale);
+      cooperation.invalidateChildFrames(tabId);
+    },
+    onSoftDetached: (tabId) => {
+      cooperation.markAccessibilityNeedsEnable(tabId);
+    },
     canControlDialog: async (tabId) => {
       const tab = await chrome.tabs.get(tabId);
       const session = sessions.findByWindowId(tab.windowId);
