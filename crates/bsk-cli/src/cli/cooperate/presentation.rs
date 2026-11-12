@@ -145,7 +145,7 @@ mod tests {
                 ));
             }
         }
-        json!({"context_id":"ctx","state":{"mode":"ready"},"activity":[{"type":"edit"}],"guidance":"keep",
+        json!({"context_id":"ctx","state":{"mode":"ready"},"activity":[{"type":"edit"}],
             "history_complete":false,"observation":{"text":text,"observation_id":"obs","ref_count":630,"truncated":false,"next_cursor":"cursor"}})
     }
     #[test]
@@ -161,13 +161,7 @@ mod tests {
             assert!(output.contains(line), "lost {line}");
         }
         assert!(output.len() < text.len());
-        for key in [
-            "context_id",
-            "state",
-            "activity",
-            "guidance",
-            "history_complete",
-        ] {
+        for key in ["context_id", "state", "activity", "history_complete"] {
             assert_eq!(v[key], original[key]);
         }
         for key in ["observation_id", "ref_count", "next_cursor"] {

@@ -1,11 +1,16 @@
 import type { VomNode, VomScene } from "@browser-skill/vom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { ChromiumCdp } from "@/browser-driver/chromium-cdp";
+import {
+  type CdpDebuggee,
+  type CdpDebuggerApi,
+  ChromiumCdp,
+  DEFAULT_IDLE_DETACH_MS,
+} from "@/browser-driver/chromium-cdp";
 import { SessionManager } from "@/session-manager/manager";
 import { handleEmulate } from "@/tools/emulate";
 import { resolveActionTarget } from "@/tools/interaction";
 import { captureVomObservation, handleSnapshot } from "@/tools/observation";
-import type { CdpRunner } from "@/tools/shared";
+import { type CdpRunner, sessionCdpRunner } from "@/tools/shared";
 import { handleTabBorrow, handleTabCreate, handleTabReturn, handleTabSelect } from "@/tools/tabs";
 import { CooperationController } from "./controller";
 import { FrameCollectionError, FrameUnresponsiveError } from "./frame-error";
@@ -3697,4 +3702,270 @@ it("hands an exclusive tab to the person for action recording and waits for expl
   f.advance(60_000);
   expect(await f.command("sync")).not.toHaveProperty("context_id");
   expect(f.controller.view(7)?.mode).toBe("held");
+});
+
+describe("tool.record_start cooperation guard", () => {
+  it("rejects record_start when the task was stopped", async () => {
+    const f = await fixture();
+    f.controller.stopSession("shared");
+    const invoke = vi.fn(async () => ({ tab_id: 7, recording: true }));
+    const result = await f.controller.run(
+      { id: "rec-stopped", method: "tool.record_start", params: { session_id: "shared" } },
+      f.cdp,
+      f.abort.signal,
+      invoke,
+    );
+    expect(result).toMatchObject({
+      code: "user_aborted",
+      data: { effect_state: "none" },
+    });
+    expect(invoke).not.toHaveBeenCalled();
+  });
+
+  it("rejects record_start while the user is actively holding control", async () => {
+    const f = await fixture();
+    const view = f.controller.view(7)!;
+    await f.controller.control(7, view.revision, "hold");
+    const invoke = vi.fn(async () => ({ tab_id: 7, recording: true }));
+    const result = await f.controller.run(
+      { id: "rec-held", method: "tool.record_start", params: { session_id: "shared" } },
+      f.cdp,
+      f.abort.signal,
+      invoke,
+    );
+    expect(result).toMatchObject({
+      code: "permission_denied",
+      message: "The user is still operating this tab; wait for hand-back",
+      data: { reason: "cooperation_sync_required", effect_state: "none" },
+    });
+    expect(invoke).not.toHaveBeenCalled();
+  });
+
+  it("invalidates prior control contexts when record_start begins on an owned tab", async () => {
+    const f = await fixture();
+    const invoke = vi.fn(async () => ({ tab_id: 7, recording: true }));
+    const started = await f.controller.run(
+      { id: "rec-ok", method: "tool.record_start", params: { session_id: "shared" } },
+      f.cdp,
+      f.abort.signal,
+      invoke,
+    );
+    expect(started).toEqual({ tab_id: 7, recording: true });
+    expect(invoke).toHaveBeenCalledOnce();
+
+    const followUp = await f.act(f.first.context_id);
+    expect(followUp).toMatchObject({
+      code: "permission_denied",
+      data: { effect_state: "none" },
+    });
+    expect(f.native).not.toHaveBeenCalled();
+  });
+
+  it("omits static guidance text from cooperate sync replies under both policies", async () => {
+    for (const controlPolicy of ["strict", "target"] as const) {
+      const f = await fixture({ sync: false });
+      const synced = await f.controller.command(
+        {
+          session_id: "shared",
+          action: "sync",
+          control_policy: controlPolicy,
+        },
+        f.cdp,
+        f.abort.signal,
+      );
+      expect(synced).toMatchObject({
+        tab_id: 7,
+        control_policy: controlPolicy,
+      });
+      expect(synced).not.toHaveProperty("guidance");
+    }
+  });
+
+  it("remaps unchanged OOPIF @eN sessions across idle soft-detach and refreshes sync snapshot when an OOPIF changes or disappears", async () => {
+    vi.useFakeTimers();
+    const listeners = new Set<(source: CdpDebuggee, method: string, params: unknown) => void>();
+    const onEvent = {
+      addListener: (cb: (source: CdpDebuggee, method: string, params: unknown) => void) =>
+        listeners.add(cb),
+      removeListener: (cb: (source: CdpDebuggee, method: string, params: unknown) => void) =>
+        listeners.delete(cb),
+      fire: (source: CdpDebuggee, method: string, params: unknown) => {
+        for (const cb of listeners) cb(source, method, params);
+      },
+    };
+    const detachListeners = new Set<(source: chrome.debugger.Debuggee, reason: string) => void>();
+    const onDetach = {
+      addListener: (cb: (source: chrome.debugger.Debuggee, reason: string) => void) =>
+        detachListeners.add(cb),
+      removeListener: (cb: (source: chrome.debugger.Debuggee, reason: string) => void) =>
+        detachListeners.delete(cb),
+    };
+
+    let attachGen = 0;
+    let oopifPresent = true;
+    const activeChildSessions = new Set<string>();
+    const api: CdpDebuggerApi = {
+      attach: vi.fn(async () => {
+        attachGen += 1;
+        activeChildSessions.clear();
+      }),
+      detach: vi.fn(async () => {
+        activeChildSessions.clear();
+      }),
+      sendCommand: vi.fn(async (target, method) => {
+        if (target.sessionId && !activeChildSessions.has(target.sessionId)) {
+          throw new Error(`Session with given id not found: ${target.sessionId}`);
+        }
+        if (!target.sessionId && method === "Target.setAutoAttach") {
+          if (oopifPresent) {
+            const childSession = `oopif-${attachGen}`;
+            activeChildSessions.add(childSession);
+            onEvent.fire({ tabId: 7 }, "Target.attachedToTarget", {
+              sessionId: childSession,
+              targetInfo: { type: "iframe", targetId: "child-t", url: "https://oopif.test/form" },
+            });
+          }
+          return {};
+        }
+        if (method === "Page.getFrameTree") {
+          if (!target.sessionId) {
+            return {
+              frameTree: {
+                frame: { id: "root", loaderId: "root-l1", url: "https://fixture.test" },
+                ...(oopifPresent
+                  ? {
+                      childFrames: [
+                        {
+                          frame: { id: "child", parentId: "root", url: "https://oopif.test/form" },
+                        },
+                      ],
+                    }
+                  : {}),
+              },
+            };
+          }
+          return {
+            frameTree: {
+              frame: {
+                id: "child",
+                parentId: "root",
+                loaderId: "child-l1",
+                url: "https://oopif.test/form",
+              },
+            },
+          };
+        }
+        if (method === "DOM.getDocument") {
+          return { root: { backendNodeId: 1, documentURL: "https://fixture.test" } };
+        }
+        if (method === "DOM.resolveNode") {
+          return { sessionId: target.sessionId };
+        }
+        return {};
+      }),
+      // biome-ignore lint/suspicious/noExplicitAny: minimal chrome.events.Event shim
+      onEvent: onEvent as any,
+      // biome-ignore lint/suspicious/noExplicitAny: minimal chrome.events.Event shim
+      onDetach: onDetach as any,
+    };
+
+    const f = await fixture({ sync: false });
+    const cdp = new ChromiumCdp(api, {
+      idleDetachMs: DEFAULT_IDLE_DETACH_MS,
+      onDocumentChanged: (tabId) => {
+        f.sessions.invalidateTabRefs(tabId);
+      },
+      onChildFramesInvalidated: (tabId, stale) => {
+        f.sessions.invalidateTabChildFrames(tabId, stale);
+        f.controller.invalidateChildFrames(tabId);
+      },
+      onSoftDetached: (tabId) => {
+        f.controller.markAccessibilityNeedsEnable(tabId);
+      },
+    });
+    const runner = sessionCdpRunner(cdp, "shared", () => f.sessions.has("shared"));
+
+    let snapshotCount = 0;
+    vi.mocked(handleSnapshot).mockImplementation(async (_mgr, _params, deps) => {
+      snapshotCount += 1;
+      await deps!.cdp.send(7, "Accessibility.getFullAXTree", {});
+      await vi.advanceTimersByTimeAsync(50);
+      deps!.refStore?.replace(
+        oopifPresent
+          ? [
+              ["e1", { backendNodeId: 10, tabId: 7, frameId: "root" }],
+              [
+                "e2",
+                {
+                  backendNodeId: 20,
+                  tabId: 7,
+                  frameId: "child",
+                  cdpSessionId: `oopif-${attachGen}`,
+                },
+              ],
+            ]
+          : [["e1", { backendNodeId: 10, tabId: 7, frameId: "root" }]],
+      );
+      return {
+        text: oopifPresent ? "Main [ref=@e1]; Child [ref=@e2]" : "Main [ref=@e1]",
+        ref_count: oopifPresent ? 2 : 1,
+        tab_id: 7,
+        truncated: false,
+      };
+    });
+
+    try {
+      const initialSync = await f.controller.command(
+        { session_id: "shared", tab_id: 7, action: "sync", timeout_ms: 0 },
+        runner,
+        f.abort.signal,
+      );
+      expect(initialSync).toMatchObject({ kind: "baseline" });
+      expect(snapshotCount).toBe(1);
+      expect(f.sessions.get("shared")?.refStore.resolve("e2", { tabId: 7 })).toBe(20);
+
+      // 1. Soft-detach after 75s idle; OOPIF remains unchanged (`oopif-1` -> `oopif-2`).
+      await vi.advanceTimersByTimeAsync(DEFAULT_IDLE_DETACH_MS);
+      expect(cdp.isAttached(7)).toBe(false);
+
+      const unchanged = f.controller.command(
+        { session_id: "shared", tab_id: 7, action: "sync", timeout_ms: 0 },
+        runner,
+        f.abort.signal,
+      );
+      await vi.advanceTimersByTimeAsync(50);
+      expect(await unchanged).toMatchObject({ kind: "unchanged" });
+      expect(snapshotCount).toBe(1);
+
+      // Existing `@e2` bound to pre-soft-detach `oopif-1` transparently routes to `oopif-2`!
+      const resolved = await runner.sendToTarget!<{ sessionId: string }>(
+        { tabId: 7, sessionId: "oopif-1" },
+        "DOM.resolveNode",
+        { backendNodeId: 20 },
+      );
+      expect(resolved.sessionId).toBe("oopif-2");
+
+      // 2. Soft-detach again; OOPIF disappears while soft-detached -> `sync` MUST self-heal via full snapshot!
+      await vi.advanceTimersByTimeAsync(DEFAULT_IDLE_DETACH_MS);
+      expect(cdp.isAttached(7)).toBe(false);
+      oopifPresent = false;
+
+      const healed = f.controller.command(
+        { session_id: "shared", tab_id: 7, action: "sync", timeout_ms: 0 },
+        runner,
+        f.abort.signal,
+      );
+      await vi.advanceTimersByTimeAsync(50);
+      expect(await healed).toMatchObject({
+        kind: "baseline",
+        observation: { text: "Main [ref=@e1]", ref_count: 1 },
+      });
+      expect(snapshotCount).toBe(2);
+      expect(f.sessions.get("shared")?.refStore.resolve("e2", { tabId: 7 })).toBeNull();
+      expect(f.sessions.get("shared")?.refStore.resolve("e1", { tabId: 7 })).toBe(10);
+    } finally {
+      cdp.dispose();
+      vi.useRealTimers();
+    }
+  });
 });

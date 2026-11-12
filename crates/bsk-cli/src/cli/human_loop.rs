@@ -29,7 +29,10 @@ fn is_off_value(value: Option<&str>) -> bool {
 #[derive(Debug, Clone, Args)]
 pub struct RequestHelpArgs {
     #[arg(long)]
-    pub session: String,
+    pub session: Option<String>,
+
+    #[arg(long)]
+    pub scope: Option<String>,
 
     /// Message shown to the user explaining what they need to do.
     #[arg(long)]
@@ -85,8 +88,6 @@ pub fn dispatch(args: RequestHelpArgs, format: Format) -> Result<(), CliError> {
     if legacy_help_override_requested() {
         crate::cli::interaction_policy::warn_legacy_override("BSK_REQUEST_HELP=off");
     }
-    let info = ensure_daemon().context("ensure daemon is running")?;
-    crate::cli::interaction_policy::require_help_support(&info.sock_path)?;
     let targets: Vec<HelpTarget> = args.target.iter().map(|t| parse_target(t)).collect();
     let completion_criteria = args
         .completion_criteria
@@ -94,8 +95,10 @@ pub fn dispatch(args: RequestHelpArgs, format: Format) -> Result<(), CliError> {
         .map(serde_json::from_str::<HelpCompletionCriteria>)
         .transpose()
         .context("parse --completion-criteria JSON")?;
+    crate::cli::business_rpc::set_caller_scope(args.scope);
+    let info = ensure_daemon().context("ensure daemon is running")?;
     let params = RequestHelpParams {
-        session_id: args.session,
+        session_id: args.session.unwrap_or_default(),
         tab_id: args.tab_id,
         prompt: args.prompt,
         title: args.title,

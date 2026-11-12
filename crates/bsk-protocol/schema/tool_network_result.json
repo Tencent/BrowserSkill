@@ -1,39 +1,7 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "title": "NetworkResult",
-  "type": "object",
-  "required": [
-    "next_since",
-    "tab_id"
-  ],
-  "properties": {
-    "entries": {
-      "type": "array",
-      "items": {
-        "$ref": "#/definitions/NetworkEntry"
-      }
-    },
-    "next_since": {
-      "type": "integer",
-      "format": "uint64",
-      "minimum": 0.0
-    },
-    "tab_id": {
-      "type": "integer",
-      "format": "int64"
-    },
-    "truncated": {
-      "default": false,
-      "type": "boolean"
-    }
-  },
   "definitions": {
     "NetworkEntry": {
-      "type": "object",
-      "required": [
-        "kind",
-        "sequence"
-      ],
       "properties": {
         "error_text": {
           "description": "CDP failure reason (`failure` entries only).",
@@ -64,18 +32,18 @@
           ]
         },
         "sequence": {
-          "type": "integer",
           "format": "uint64",
-          "minimum": 0.0
+          "minimum": 0,
+          "type": "integer"
         },
         "status": {
           "description": "HTTP status code (`response` entries only).",
+          "format": "uint32",
+          "minimum": 0,
           "type": [
             "integer",
             "null"
-          ],
-          "format": "uint32",
-          "minimum": 0.0
+          ]
         },
         "status_text": {
           "type": [
@@ -84,11 +52,11 @@
           ]
         },
         "timestamp": {
+          "format": "double",
           "type": [
             "number",
             "null"
-          ],
-          "format": "double"
+          ]
         },
         "truncated": {
           "default": false,
@@ -100,25 +68,54 @@
             "null"
           ]
         }
-      }
+      },
+      "required": [
+        "sequence",
+        "kind"
+      ],
+      "type": "object"
     },
     "NetworkEntryKind": {
       "oneOf": [
         {
+          "const": "response",
           "description": "A response was received (`Network.responseReceived`).",
-          "type": "string",
-          "enum": [
-            "response"
-          ]
+          "type": "string"
         },
         {
+          "const": "failure",
           "description": "The request failed before completing (`Network.loadingFailed`).",
-          "type": "string",
-          "enum": [
-            "failure"
-          ]
+          "type": "string"
         }
       ]
     }
-  }
+  },
+  "properties": {
+    "entries": {
+      "default": [],
+      "items": {
+        "$ref": "#/definitions/NetworkEntry"
+      },
+      "type": "array"
+    },
+    "next_since": {
+      "format": "uint64",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "tab_id": {
+      "format": "int64",
+      "type": "integer"
+    },
+    "truncated": {
+      "default": false,
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "tab_id",
+    "next_since"
+  ],
+  "title": "NetworkResult",
+  "type": "object"
 }

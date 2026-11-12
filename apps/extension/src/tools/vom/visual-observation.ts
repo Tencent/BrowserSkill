@@ -327,6 +327,7 @@ export async function publishObservationPage(
       ref.ref,
       {
         ...(ref.name ? { name: ref.name } : {}),
+        ...(ref.rowAnchor ? { rowAnchor: ref.rowAnchor } : {}),
         backendNodeId: ref.backendNodeId,
         tabId,
         frameId: ref.frameId,

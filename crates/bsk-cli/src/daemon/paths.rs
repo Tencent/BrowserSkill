@@ -140,6 +140,11 @@ pub fn record_recovery_path() -> Result<PathBuf> {
     Ok(bsk_home()?.join("record-recovery.json"))
 }
 
+/// Path to the append-only Intent WAL ledger (`intent_ledger.jsonl`, `RM-03`).
+pub fn intent_ledger_path() -> Result<PathBuf> {
+    Ok(bsk_home()?.join("intent_ledger.jsonl"))
+}
+
 /// Windows named-pipe name. Include the resolved `BSK_HOME` path in the
 /// token so test homes and custom installs do not share a predictable
 /// per-username pipe.

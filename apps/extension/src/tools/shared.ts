@@ -8,6 +8,7 @@
 
 import type { CdpDebuggee, CdpDispatchGuard, DialogCursor } from "@/browser-driver/chromium-cdp";
 import type { CdpFrameGraph, CdpTarget } from "@/browser-driver/frame-graph";
+import type { NativeInputTimestamp } from "@/browser-driver/native-input-clock";
 import { shareScreencasts } from "@/browser-driver/screencast-coordinator";
 import {
   isAgentControlledTab,
@@ -62,6 +63,8 @@ export type { DialogCursor };
  * teardown.
  */
 export interface CdpRunner {
+  /** Measure the browser's native epoch conversion before arming page input. */
+  prepareInputTimestamp?(): Promise<NativeInputTimestamp>;
   /** Fence a browser API effect at invocation, after asynchronous ownership checks. */
   runBrowserMutation?<T>(operation: () => Promise<T>): Promise<T>;
   /** Only release resources acquired by this request; never restore page/user state. */
@@ -87,6 +90,10 @@ export interface CdpRunner {
   detach?(tabId: number, expectedAttachmentId?: string): Promise<void>;
   getFrameGraph?(tabId: number, signal?: AbortSignal): Promise<CdpFrameGraph>;
   getAttachmentId?(tabId: number): string | undefined;
+  resolveTarget?<T extends CdpDebuggee>(target: T): T;
+  retainTabAttachment?(tabId: number): () => void;
+  reattachIfSoftDetached?(tabId: number): Promise<void>;
+  reconcileSoftDetachedFrames?(tabId: number): Promise<void>;
   ensureAttachedToUrl?(tabId: number, expectedUrl: string | undefined): Promise<void>;
   acquireBackgroundExecution?(sessionId: string, tabId: number): Promise<void>;
   /** Whether this session requests the persistent override, regardless of applied CDP state. */

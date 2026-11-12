@@ -24,7 +24,7 @@ use bsk_protocol::tools::{
 };
 use bsk_protocol::{ErrorCode, Method, RpcError};
 use schemars::JsonSchema;
-use schemars::r#gen::SchemaSettings;
+use schemars::generate::SchemaSettings;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
@@ -224,13 +224,36 @@ fn tool<T: JsonSchema>(name: &str, title: &str, description: &str, hints: Hints)
 fn input_schema<T: JsonSchema>() -> Value {
     let settings = SchemaSettings::draft07().with(|settings| {
         settings.inline_subschemas = true;
-        settings.option_add_null_type = false;
-        settings.option_nullable = false;
     });
     let schema = settings.into_generator().into_root_schema_for::<T>();
     let mut value = serde_json::to_value(schema).unwrap_or_default();
     strip_schema(&mut value, 0);
     value
+}
+
+fn strip_optional_null(property: &mut Map<String, Value>) {
+    if let Some(Value::Array(types)) = property.get_mut("type") {
+        types.retain(|item| item.as_str() != Some("null"));
+        if types.len() == 1
+            && let Some(single) = types.pop()
+        {
+            property.insert("type".into(), single);
+        }
+    }
+    for keyword in ["anyOf", "oneOf"] {
+        let collapse = if let Some(Value::Array(variants)) = property.get_mut(keyword) {
+            variants.retain(|item| item != &json!({ "type": "null" }));
+            (variants.len() == 1).then(|| variants.pop()).flatten()
+        } else {
+            None
+        };
+        if let Some(Value::Object(single)) = collapse {
+            property.remove(keyword);
+            for (k, v) in single {
+                property.entry(k).or_insert(v);
+            }
+        }
+    }
 }
 
 fn strip_schema(schema: &mut Value, depth: usize) {
@@ -244,8 +267,23 @@ fn strip_schema(schema: &mut Value, depth: usize) {
     if depth != 1 {
         object.remove("description");
     }
+    let required: Vec<String> = object
+        .get("required")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| item.as_str().map(str::to_owned))
+                .collect()
+        })
+        .unwrap_or_default();
     if let Some(properties) = object.get_mut("properties").and_then(Value::as_object_mut) {
-        for property in properties.values_mut() {
+        for (name, property) in properties.iter_mut() {
+            if !required.iter().any(|req| req == name)
+                && let Some(prop_obj) = property.as_object_mut()
+            {
+                strip_optional_null(prop_obj);
+            }
             strip_schema(property, depth + 1);
         }
     }
@@ -302,15 +340,35 @@ struct Link {
     sock: PathBuf,
     protocol: String,
     control: Arc<CallControl>,
+    conn_scope: Option<String>,
 }
 
 impl Link {
     async fn rpc(
         &self,
         method: Method,
-        params: Value,
+        mut params: Value,
         timeout: Duration,
     ) -> Result<Value, CliError> {
+        if let Some(object) = params.as_object_mut() {
+            let resolved_scope = || {
+                crate::daemon::scopes::resolve_caller_scope_from_env(
+                    None,
+                    self.conn_scope.as_deref(),
+                )
+            };
+            if matches!(method, Method::SessionStart | Method::SessionStartTracked) {
+                object.insert("_caller_scope".into(), resolved_scope().into());
+                object.insert("_bind_scope".into(), Value::Bool(true));
+            } else {
+                let has_empty_session = object.get("session_id").is_some_and(|v| {
+                    v.is_null() || v.as_str().is_some_and(|s| s.trim().is_empty())
+                });
+                if has_empty_session {
+                    object.insert("_caller_scope".into(), resolved_scope().into());
+                }
+            }
+        }
         let rpc_id = format!("mcp-{}", uuid::Uuid::new_v4());
         {
             let mut current = self.control.current.lock().unwrap();
@@ -408,10 +466,11 @@ impl Reply {
 pub(crate) async fn call(
     daemon: &Daemon,
     control: &Arc<CallControl>,
+    conn_scope: Option<&str>,
     name: &str,
     arguments: Value,
 ) -> Value {
-    match run(daemon, control, name, arguments).await {
+    match run(daemon, control, conn_scope, name, arguments).await {
         Ok(reply) => render(reply),
         Err(err) => json!({
             "content": [{ "type": "text", "text": json_error_value(&err).to_string() }],
@@ -447,6 +506,7 @@ fn render(reply: Reply) -> Value {
 async fn run(
     daemon: &Daemon,
     control: &Arc<CallControl>,
+    conn_scope: Option<&str>,
     name: &str,
     arguments: Value,
 ) -> Result<Reply, CliError> {
@@ -460,25 +520,31 @@ async fn run(
         _ => return Err(invalid("arguments must be a JSON object")),
     };
     match name {
-        "bsk_session" => session(daemon, control, parse(&arguments)?, &arguments).await,
-        "bsk_page" => page(daemon, control, parse(&arguments)?, &arguments).await,
-        "bsk_inspect" => inspect(daemon, control, parse(&arguments)?, &arguments).await,
+        "bsk_session" => session(daemon, control, conn_scope, parse(&arguments)?, &arguments).await,
+        "bsk_page" => page(daemon, control, conn_scope, parse(&arguments)?, &arguments).await,
+        "bsk_inspect" => inspect(daemon, control, conn_scope, parse(&arguments)?, &arguments).await,
         "bsk_interact" => {
             let prepared = interact_prepare(parse(&arguments)?)?;
-            interact(&connect(daemon, control).await?, prepared).await
+            interact(&connect(daemon, control, conn_scope).await?, prepared).await
         }
         "bsk_plan" => {
             let prepared = plan_prepare(parse(&arguments)?)?;
-            run_plan(&connect(daemon, control).await?, prepared).await
+            run_plan(&connect(daemon, control, conn_scope).await?, prepared).await
         }
-        RECIPE_TOOL if recipe::enabled() => run_recipe(daemon, control, parse(&arguments)?).await,
-        "bsk_tabs" => tabs(daemon, control, parse(&arguments)?, &arguments).await,
-        "bsk_assist" => assist(daemon, control, parse(&arguments)?, &arguments).await,
+        RECIPE_TOOL if recipe::enabled() => {
+            run_recipe(daemon, control, conn_scope, parse(&arguments)?).await
+        }
+        "bsk_tabs" => tabs(daemon, control, conn_scope, parse(&arguments)?, &arguments).await,
+        "bsk_assist" => assist(daemon, control, conn_scope, parse(&arguments)?, &arguments).await,
         _ => Err(invalid(format!("unknown tool: {name}"))),
     }
 }
 
-async fn connect(daemon: &Daemon, control: &Arc<CallControl>) -> Result<Link, CliError> {
+async fn connect(
+    daemon: &Daemon,
+    control: &Arc<CallControl>,
+    conn_scope: Option<&str>,
+) -> Result<Link, CliError> {
     if control.is_cancelled() {
         return Err(CliError::from_rpc(RpcError {
             code: ErrorCode::Cancelled,
@@ -503,6 +569,7 @@ async fn connect(daemon: &Daemon, control: &Arc<CallControl>) -> Result<Link, Cl
         sock,
         protocol,
         control: Arc::clone(control),
+        conn_scope: conn_scope.map(str::to_owned),
     })
 }
 
@@ -676,7 +743,7 @@ impl From<Policy> for cooperate::Policy {
 #[serde(deny_unknown_fields)]
 struct SessionArgs {
     action: SessionAction,
-    /// Session id returned by start. Required for stop, sync, wait and status.
+    /// Session id returned by start; omit on stop, sync, wait and status to use this caller scope's active session.
     session: Option<String>,
     /// Recoverable start token (<expiry-unix-ms>:<UUID>). request_prepare creates one if omitted;
     /// retain it before passing it to start. Required for the other request actions.
@@ -710,14 +777,11 @@ struct SessionArgs {
 async fn session(
     daemon: &Daemon,
     control: &Arc<CallControl>,
+    conn_scope: Option<&str>,
     args: SessionArgs,
     arguments: &Value,
 ) -> Result<Reply, CliError> {
-    let required = || {
-        args.session
-            .clone()
-            .ok_or_else(|| invalid("session is required"))
-    };
+    let session_or_implicit = || args.session.clone().unwrap_or_default();
     match args.action {
         SessionAction::Browsers => {
             only(arguments, "browsers", &[])?;
@@ -727,7 +791,7 @@ async fn session(
             let params = bsk_protocol::system::BrowserListParams {
                 wait_for_browser_ms: crate::cli::browser_wait::wait_for_browser_ms(wait),
             };
-            let value = connect(daemon, control)
+            let value = connect(daemon, control, conn_scope)
                 .await?
                 .rpc(
                     Method::BrowserList,
@@ -762,7 +826,7 @@ async fn session(
                 }
             }
             let incognito = args.incognito.unwrap_or(false);
-            let link = connect(daemon, control).await?;
+            let link = connect(daemon, control, conn_scope).await?;
             if incognito && !bsk_protocol::tools::supports_incognito_sessions(&link.protocol) {
                 return Err(unsupported(
                     "session start incognito",
@@ -800,8 +864,8 @@ async fn session(
         }
         SessionAction::Stop => {
             only(arguments, "stop", &["session"])?;
-            let params = json!({ "session_id": required()?, "all": false });
-            let value = connect(daemon, control)
+            let params = json!({ "session_id": session_or_implicit(), "all": false });
+            let value = connect(daemon, control, conn_scope)
                 .await?
                 .rpc(Method::SessionStop, params, SESSION_STOP_TIMEOUT)
                 .await?;
@@ -809,7 +873,7 @@ async fn session(
         }
         SessionAction::List => {
             only(arguments, "list", &[])?;
-            let value = connect(daemon, control)
+            let value = connect(daemon, control, conn_scope)
                 .await?
                 .rpc(Method::SessionList, json!({}), Duration::from_secs(5))
                 .await?;
@@ -837,7 +901,7 @@ async fn session(
                 SessionAction::RequestCancel => "cancel",
                 _ => "status",
             };
-            let value = connect(daemon, control)
+            let value = connect(daemon, control, conn_scope)
                 .await?
                 .rpc(
                     Method::SessionRequest,
@@ -870,13 +934,13 @@ async fn session(
                 .then(|| cooperate::Policy::from(args.policy.unwrap_or(Policy::Auto)).into());
             let params = CooperateParams {
                 control_policy: policy,
-                session_id: required()?,
+                session_id: session_or_implicit(),
                 action,
                 tab_id: args.tab_id,
                 timeout_ms: args.timeout_ms,
                 max_tokens: args.max_tokens,
             };
-            let link = connect(daemon, control).await?;
+            let link = connect(daemon, control, conn_scope).await?;
             if args.policy == Some(Policy::Target) {
                 business_rpc::require_target_control(&link.protocol, true, false)
                     .map_err(CliError::Local)?;
@@ -940,8 +1004,8 @@ enum PageAction {
 )]
 struct PageArgs {
     action: PageAction,
-    /// Session id.
-    session: String,
+    /// Session id; omit to use this caller scope's active session.
+    session: Option<String>,
     /// Task tab; defaults to the session's current task tab.
     tab_id: Option<i64>,
     /// navigate: destination URL.
@@ -971,9 +1035,11 @@ struct PageArgs {
 async fn page(
     daemon: &Daemon,
     control: &Arc<CallControl>,
+    conn_scope: Option<&str>,
     args: PageArgs,
     arguments: &Value,
 ) -> Result<Reply, CliError> {
+    let session = args.session.as_deref().unwrap_or("");
     let meta = ["context", "observation"];
     let load = ("wait_until", json!("load"));
     let (method, params) = match args.action {
@@ -981,7 +1047,7 @@ async fn page(
             Method::ToolNavigate,
             protocol::<NavigateParams>(
                 arguments,
-                &args.session,
+                session,
                 &meta,
                 &[load, ("timeout_ms", json!(30_000))],
             )?,
@@ -990,7 +1056,7 @@ async fn page(
             Method::ToolNavigateBack,
             protocol::<NavigateBackParams>(
                 arguments,
-                &args.session,
+                session,
                 &meta,
                 &[load, ("timeout_ms", json!(15_000))],
             )?,
@@ -999,7 +1065,7 @@ async fn page(
             Method::ToolNavigateForward,
             protocol::<NavigateForwardParams>(
                 arguments,
-                &args.session,
+                session,
                 &meta,
                 &[load, ("timeout_ms", json!(15_000))],
             )?,
@@ -1008,7 +1074,7 @@ async fn page(
             Method::ToolReload,
             protocol::<ReloadParams>(
                 arguments,
-                &args.session,
+                session,
                 &meta,
                 &[load, ("timeout_ms", json!(15_000))],
             )?,
@@ -1017,7 +1083,7 @@ async fn page(
             Method::ToolWaitForNavigation,
             protocol::<WaitForNavigationParams>(
                 arguments,
-                &args.session,
+                session,
                 &meta,
                 &[load, ("timeout_ms", json!(30_000))],
             )?,
@@ -1025,7 +1091,7 @@ async fn page(
         PageAction::WaitForElement => {
             let params = protocol::<WaitForElementParams>(
                 arguments,
-                &args.session,
+                session,
                 &meta,
                 &[("state", json!("visible")), ("timeout_ms", json!(10_000))],
             )?;
@@ -1034,7 +1100,7 @@ async fn page(
         }
     };
     let evidence = Evidence::new(args.context, args.observation, None, None)?;
-    let link = connect(daemon, control).await?;
+    let link = connect(daemon, control, conn_scope).await?;
     evidence.check(&link.protocol, false)?;
     let timeout = timeout_of(&params, 30_000);
     let value = link.rpc(method, evidence.attach(params)?, timeout).await?;
@@ -1073,8 +1139,8 @@ enum InspectAction {
 )]
 struct InspectArgs {
     action: InspectAction,
-    /// Session id.
-    session: String,
+    /// Session id; omit to use this caller scope's active session.
+    session: Option<String>,
     /// Tab to read; defaults to the session's current task tab.
     tab_id: Option<i64>,
     /// observe, snapshot: approximate token cap for the rendered tree.
@@ -1121,16 +1187,17 @@ struct InspectArgs {
 async fn inspect(
     daemon: &Daemon,
     control: &Arc<CallControl>,
+    conn_scope: Option<&str>,
     args: InspectArgs,
     arguments: &Value,
 ) -> Result<Reply, CliError> {
-    let session = &args.session;
+    let session = args.session.as_deref().unwrap_or("");
     let (method, params, vom) = match args.action {
         InspectAction::Read => {
             let mut input = arguments.as_object().cloned().unwrap();
             input.remove("action");
             input.remove("session");
-            input.insert("session_id".into(), session.as_str().into());
+            input.insert("session_id".into(), session.into());
             if let Some(fields) = input.remove("read_fields") {
                 input.insert("fields".into(), fields);
             }
@@ -1182,7 +1249,7 @@ async fn inspect(
             let mut input = arguments.as_object().cloned().unwrap();
             input.remove("extract_action");
             input.remove("session");
-            input.insert("session_id".into(), session.as_str().into());
+            input.insert("session_id".into(), session.into());
             input.insert("action".into(), serde_json::to_value(action).unwrap());
             let params = step::typed::<ExtractParams>(&Value::Object(input))
                 .map_err(|err| invalid(format!("{err:#}")))?;
@@ -1211,7 +1278,7 @@ async fn inspect(
             (Method::ToolExtract, params, None)
         }
     };
-    let link = connect(daemon, control).await?;
+    let link = connect(daemon, control, conn_scope).await?;
     if method == Method::ToolRead && !bsk_protocol::tools::supports_dom_read(&link.protocol) {
         return Err(unsupported(
             "read",
@@ -1251,8 +1318,8 @@ enum InteractAction {
 #[serde(deny_unknown_fields)]
 struct InteractArgs {
     action: InteractAction,
-    /// Session id.
-    session: String,
+    /// Session id; omit to use this caller scope's active session.
+    session: Option<String>,
     /// Task tab; defaults to the session's current task tab.
     tab_id: Option<i64>,
     /// Action fields with protocol names. Targets: ref (observed @eN) or selector (main-document
@@ -1340,7 +1407,7 @@ fn interact_prepare(args: InteractArgs) -> Result<Prepared, CliError> {
                 ));
             }
             let mut params = Value::Object(args.params);
-            params["session_id"] = args.session.into();
+            params["session_id"] = args.session.unwrap_or_default().into();
             if let Some(tab_id) = args.tab_id {
                 params["tab_id"] = tab_id.into();
             }
@@ -1371,6 +1438,7 @@ fn interact_prepare(args: InteractArgs) -> Result<Prepared, CliError> {
     let policy = args.policy.unwrap_or(Policy::Auto);
     let step_args = step::StepArgs {
         session: args.session,
+        scope: None,
         policy: policy.into(),
         tab_id: args.tab_id,
         action: step_action,
@@ -1535,6 +1603,7 @@ impl RecipeArgs {
 async fn run_recipe(
     daemon: &Daemon,
     control: &Arc<CallControl>,
+    conn_scope: Option<&str>,
     args: RecipeArgs,
 ) -> Result<Reply, CliError> {
     let local = |(value, exit): (Value, u8)| Reply {
@@ -1566,12 +1635,9 @@ async fn run_recipe(
         RecipeAction::Draft => {
             args.only("draft", &["name", "session", "description"])?;
             let name = args.required_name()?.to_owned();
-            let session = args
-                .session
-                .clone()
-                .ok_or_else(|| invalid("session is required"))?;
+            let session = args.session.clone().unwrap_or_default();
             let description = args.description.clone().unwrap_or_default();
-            let link = connect(daemon, control).await?;
+            let link = connect(daemon, control, conn_scope).await?;
             let value = link
                 .blocking(move |rpc| recipe::draft(&session, &name, &description, rpc))
                 .await??;
@@ -1607,7 +1673,7 @@ async fn run_recipe(
                 keep_session: args.keep_session.unwrap_or(false),
                 checked: args.checked,
             };
-            let link = connect(daemon, control).await?;
+            let link = connect(daemon, control, conn_scope).await?;
             plan::check_protocol(&link.protocol).map_err(CliError::Local)?;
             let (value, exit) = link.blocking(move |rpc| recipe::run(&request, rpc)).await?;
             Ok(Reply {
@@ -1625,8 +1691,8 @@ async fn run_recipe(
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct PlanArgs {
-    /// Session id.
-    session: String,
+    /// Session id; omit to use this caller scope's active session.
+    session: Option<String>,
     /// Task tab; defaults to the session's current task tab.
     tab_id: Option<i64>,
     /// 1-20 steps in order. A step is an action with bsk_interact's params fields beside it:
@@ -1654,8 +1720,13 @@ fn plan_prepare(args: PlanArgs) -> Result<plan::Plan, CliError> {
     step::check_follow_args(args.until_visible.as_deref(), &[])
         .map_err(|err| invalid(format!("{err:#}")))?;
     let steps = Value::Array(args.steps.into_iter().map(Value::Object).collect());
-    let mut prepared = plan::Plan::prepare(args.session, &steps, args.context, args.observation)
-        .map_err(|err| invalid(format!("{err:#}")))?;
+    let mut prepared = plan::Plan::prepare(
+        args.session.unwrap_or_default(),
+        &steps,
+        args.context,
+        args.observation,
+    )
+    .map_err(|err| invalid(format!("{err:#}")))?;
     prepared.tab_id = args.tab_id;
     prepared.until_visible = args.until_visible;
     prepared.wait_timeout_ms = wait_timeout_ms;
@@ -1694,8 +1765,8 @@ enum TabsAction {
 )]
 struct TabsArgs {
     action: TabsAction,
-    /// Session id.
-    session: String,
+    /// Session id; omit to use this caller scope's active session.
+    session: Option<String>,
     /// select, close, borrow, return: tab id from list or create.
     tab_id: Option<i64>,
     /// list: user (the person's windows), agent (the Agent Window) or all. Default all.
@@ -1717,11 +1788,12 @@ struct TabsArgs {
 async fn tabs(
     daemon: &Daemon,
     control: &Arc<CallControl>,
+    conn_scope: Option<&str>,
     args: TabsArgs,
     arguments: &Value,
 ) -> Result<Reply, CliError> {
     let meta = ["context", "observation"];
-    let session = &args.session;
+    let session = args.session.as_deref().unwrap_or("");
     let mut timeout = TOOL_IPC_TIMEOUT;
     let (method, params) = match args.action {
         TabsAction::List => (
@@ -1757,7 +1829,7 @@ async fn tabs(
         }
     };
     let evidence = Evidence::new(args.context, args.observation, None, None)?;
-    let link = connect(daemon, control).await?;
+    let link = connect(daemon, control, conn_scope).await?;
     if args.confirmation_timeout_ms.is_some()
         && !bsk_protocol::tools::supports_borrow_confirmation_timeout(&link.protocol)
     {
@@ -1797,8 +1869,8 @@ enum AssistAction {
 )]
 struct AssistArgs {
     action: AssistAction,
-    /// Session id.
-    session: String,
+    /// Session id; omit to use this caller scope's active session.
+    session: Option<String>,
     /// resize: Agent Window dimensions; emulate: optional viewport dimensions.
     width: Option<u32>,
     height: Option<u32>,
@@ -1835,10 +1907,11 @@ struct AssistArgs {
 async fn assist(
     daemon: &Daemon,
     control: &Arc<CallControl>,
+    conn_scope: Option<&str>,
     args: AssistArgs,
     arguments: &Value,
 ) -> Result<Reply, CliError> {
-    let session = &args.session;
+    let session = args.session.as_deref().unwrap_or("");
     let (method, params, timeout) = match args.action {
         AssistAction::Resize => {
             only(
@@ -1852,7 +1925,7 @@ async fn assist(
                 return Err(invalid("window dimensions must be 100..=7680"));
             }
             let evidence = Evidence::new(args.context, args.observation, None, None)?;
-            let link = connect(daemon, control).await?;
+            let link = connect(daemon, control, conn_scope).await?;
             evidence.check(&link.protocol, false)?;
             let params =
                 evidence.attach(json!({"session_id":session, "width":width, "height":height}))?;
@@ -1885,7 +1958,8 @@ async fn assist(
                 return Err(invalid("viewport dimensions must be 1..=7680"));
             }
             let params = crate::cli::emulate::build_params(&crate::cli::emulate::EmulateArgs {
-                session: session.clone(),
+                session: args.session.clone(),
+                scope: None,
                 tab_id: args.tab_id,
                 device: args.device,
                 width: args.width,
@@ -1901,7 +1975,7 @@ async fn assist(
                 off: args.off.unwrap_or(false),
             })?;
             let evidence = Evidence::new(args.context, args.observation, None, None)?;
-            let link = connect(daemon, control).await?;
+            let link = connect(daemon, control, conn_scope).await?;
             evidence.check(&link.protocol, false)?;
             let params = evidence
                 .attach(serde_json::to_value(params).map_err(|e| invalid(e.to_string()))?)?;
@@ -1967,7 +2041,7 @@ async fn assist(
             )
         }
     };
-    let value = connect(daemon, control)
+    let value = connect(daemon, control, conn_scope)
         .await?
         .rpc(method, params, timeout)
         .await?;
@@ -2057,6 +2131,7 @@ mod tests {
         let error = inspect(
             &daemon,
             &Arc::new(CallControl::default()),
+            None,
             parse(&input).unwrap(),
             &input,
         )
@@ -2084,7 +2159,7 @@ mod tests {
         assert!(schema.get("title").is_none());
         // A property literally named `title` must survive keyword stripping.
         assert!(schema["properties"]["title"].is_object());
-        assert_eq!(schema["required"], json!(["action", "session"]));
+        assert_eq!(schema["required"], json!(["action"]));
         let interact = input_schema::<InteractArgs>();
         assert_eq!(interact["properties"]["params"]["type"], "object");
         assert_eq!(interact["properties"]["expect"]["type"], "array");
@@ -2250,6 +2325,7 @@ mod tests {
         let reply = call(
             &daemon,
             &control,
+            None,
             "bsk_session",
             json!({"action":"stop","session":"s1","browser":"Work"}),
         )
@@ -2264,6 +2340,7 @@ mod tests {
         let reply = call(
             &daemon,
             &control,
+            None,
             "bsk_session",
             json!({"action":"start","width":800}),
         )
@@ -2277,6 +2354,7 @@ mod tests {
         let reply = call(
             &daemon,
             &control,
+            None,
             "bsk_session",
             json!({"action":"start","incognito":true}),
         )
@@ -2288,6 +2366,7 @@ mod tests {
                 protocol: "1.3".into(),
             },
             &control,
+            None,
             "bsk_session",
             json!({"action":"start","incognito":true}),
         )

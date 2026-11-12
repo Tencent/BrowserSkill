@@ -1,3 +1,5 @@
+import { PROTOCOL_VERSION } from "./generated/methods";
+import { decodeHandshakeResult } from "./protocol";
 import type { Transport } from "./transport";
 import type {
   HandshakeParams,
@@ -7,8 +9,9 @@ import type {
   ResponseFrame,
   RpcError,
 } from "./types";
+import { isResponseFrame } from "./types";
 
-export const PROTOCOL_VERSION = "1.10";
+export { PROTOCOL_VERSION } from "./generated/methods";
 /**
  * Extension semver, injected at build time from `package.json` via
  * Vite's `define` (see `wxt.config.ts` and `vitest.config.ts`).
@@ -119,8 +122,11 @@ export function performHandshake(
         options.onRejected?.(error);
         return;
       }
-      const result = r.result as HandshakeResult;
-      resolve({ params, result });
+      try {
+        resolve({ params, result: decodeHandshakeResult(r.result) });
+      } catch (error) {
+        reject(error);
+      }
     });
 
     function cleanup() {
@@ -145,11 +151,7 @@ export function performHandshake(
 }
 
 function isResponseFor(msg: ProtocolFrame, id: string): boolean {
-  return (
-    typeof (msg as ResponseFrame).id === "string" &&
-    (msg as ResponseFrame).id === id &&
-    ("result" in (msg as object) || "error" in (msg as object))
-  );
+  return isResponseFrame(msg) && msg.id === id;
 }
 
 /**

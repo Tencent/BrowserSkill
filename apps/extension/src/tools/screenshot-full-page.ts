@@ -167,7 +167,9 @@ export async function handleFullPageScreenshot(
   let frames = 0;
   let progress = 0;
   const cursor = markDialogCursor(deps.cdp, target.tabId);
+  let releaseTabAttachment: (() => void) | undefined;
   try {
+    releaseTabAttachment = deps.cdp.retainTabAttachment?.(target.tabId);
     await deps.exports.prepare();
     // Attach before measuring: the debugger infobar can change viewport geometry.
     // The dispatcher owns background execution; this job never toggles it.
@@ -321,6 +323,7 @@ export async function handleFullPageScreenshot(
     );
   } finally {
     await stopRendering();
+    releaseTabAttachment?.();
     clearTimeout(deadline);
     signal?.removeEventListener("abort", abort);
     chrome.webNavigation.onBeforeNavigate.removeListener(navigated);

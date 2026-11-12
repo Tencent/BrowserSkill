@@ -1,131 +1,46 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "title": "ObserveParams",
-  "description": "Parameters for `tool.observe` — produce a semantic VOM observation for one tab plus a fresh `@e<N>` ref-store on the extension side.\n\nUnlike `tool.snapshot`, this path may run bounded perception probes such as hover-surface discovery, but only when `probe_hover` asks for them. It must not submit input, click, navigate, or otherwise commit page state.",
-  "type": "object",
-  "required": [
-    "session_id"
-  ],
-  "properties": {
-    "context_id": {
-      "description": "Context actually returned by sync. Reusable for target-policy DOM actions; strict policy consumes it after one action. Never fill it from cached state.",
-      "type": "string"
-    },
-    "cursor": {
-      "description": "Continue a retained observation; does not recapture the page.",
-      "type": [
-        "string",
-        "null"
-      ]
-    },
-    "debug_surfaces": {
-      "description": "Include implementation diagnostics for conditional surface probes.",
-      "default": false,
-      "type": "boolean"
-    },
-    "depends_on": {
-      "description": "Strict policy only: observed decision regions. Target policy requires exact business facts in expect; regions cannot be translated to facts automatically.",
-      "type": "array",
-      "items": {
-        "type": "string"
-      },
-      "maxItems": 16
-    },
-    "expect": {
-      "description": "Literal conditions checked before input. Selectors search the main document; use observed refs for iframe/shadow-root targets. Text includes all whitespace.",
-      "type": "array",
-      "items": {
-        "$ref": "#/definitions/ActionExpectation"
-      },
-      "maxItems": 16
-    },
-    "max_depth": {
-      "description": "Cap the depth of the rendered VOM tree.",
-      "type": [
-        "integer",
-        "null"
-      ],
-      "format": "uint32",
-      "minimum": 0.0
-    },
-    "max_tokens": {
-      "description": "Soft cap on rendered tokens (approximate; extension uses a best-effort heuristic based on character count).",
-      "type": [
-        "integer",
-        "null"
-      ],
-      "format": "uint32",
-      "minimum": 0.0
-    },
-    "observation_id": {
-      "description": "Sync's single-use baseline for untargeted/visual actions under target policy, including untargeted keys and displacement-only drags. Drags with a target ref/selector need only context_id. A script needs it only when it states no expect facts; passing both checks the whole page as well. Strict-policy drag instead accepts its legacy ref-map observation token.",
-      "type": [
-        "string",
-        "null"
-      ]
-    },
-    "probe_hover": {
-      "description": "Opt in to active hover probing: the extension moves the real cursor over a bounded set of controls to discover hover-only menus and tooltips.\n\nOff by default. Probing costs seconds of wall clock, mutates the live page, and pays off only on pages whose content is genuinely hidden behind hover. Request it when a static observation looks like it is missing hover-revealed structure.",
-      "default": false,
-      "type": "boolean"
-    },
-    "session_id": {
-      "type": "string"
-    },
-    "tab_id": {
-      "description": "Optional target tab. Defaults to the Agent Window's currently active tab.",
-      "type": [
-        "integer",
-        "null"
-      ],
-      "format": "int64"
-    }
-  },
   "definitions": {
     "ActionExpectation": {
+      "additionalProperties": false,
       "description": "Caller-supplied facts checked immediately before starting an action.",
-      "type": "object",
-      "required": [
-        "equals",
-        "field",
-        "target"
-      ],
       "properties": {
         "attribute": {
           "description": "Required only for field=attribute, measured in Unicode code points.",
-          "type": "string",
           "maxLength": 256,
-          "minLength": 1
+          "minLength": 1,
+          "type": "string"
         },
         "equals": {
-          "description": "text/value require a string; checked/exists require a boolean; attribute accepts a string or null for absence. Text is exact textContent.",
-          "allOf": [
-            {
-              "$ref": "#/definitions/ExpectedValue"
-            }
-          ]
+          "$ref": "#/definitions/ExpectedValue",
+          "description": "text/value require a string; checked/exists require a boolean;\nattribute accepts a string or null for absence. Text is exact textContent."
         },
         "field": {
           "$ref": "#/definitions/ExpectationField"
         },
         "target": {
           "description": "Observed ref or main-document CSS selector, measured in Unicode code points.",
-          "type": "string",
           "maxLength": 1024,
-          "minLength": 1
+          "minLength": 1,
+          "type": "string"
         }
       },
-      "additionalProperties": false
+      "required": [
+        "target",
+        "field",
+        "equals"
+      ],
+      "type": "object"
     },
     "ExpectationField": {
-      "type": "string",
       "enum": [
         "text",
         "value",
         "checked",
         "attribute",
         "exists"
-      ]
+      ],
+      "type": "string"
     },
     "ExpectedValue": {
       "anyOf": [
@@ -140,5 +55,86 @@
         }
       ]
     }
-  }
+  },
+  "description": "Parameters for `tool.observe` — produce a semantic VOM observation\nfor one tab plus a fresh `@e<N>` ref-store on the extension side.\n\nUnlike `tool.snapshot`, this path may run bounded perception probes\nsuch as hover-surface discovery, but only when `probe_hover` asks for\nthem. It must not submit input, click, navigate, or otherwise commit\npage state.",
+  "properties": {
+    "context_id": {
+      "description": "Context actually returned by sync. Reusable for target-policy DOM actions;\nstrict policy consumes it after one action. Never fill it from cached state.",
+      "type": "string"
+    },
+    "cursor": {
+      "description": "Continue a retained observation; does not recapture the page.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "debug_surfaces": {
+      "default": false,
+      "description": "Include implementation diagnostics for conditional surface probes.",
+      "type": "boolean"
+    },
+    "depends_on": {
+      "description": "Strict policy only: observed decision regions. Target policy requires exact\nbusiness facts in expect; regions cannot be translated to facts automatically.",
+      "items": {
+        "type": "string"
+      },
+      "maxItems": 16,
+      "type": "array"
+    },
+    "expect": {
+      "description": "Literal conditions checked before input. Selectors search the main document;\nuse observed refs for iframe/shadow-root targets. Text includes all whitespace.",
+      "items": {
+        "$ref": "#/definitions/ActionExpectation"
+      },
+      "maxItems": 16,
+      "type": "array"
+    },
+    "max_depth": {
+      "description": "Cap the depth of the rendered VOM tree.",
+      "format": "uint32",
+      "minimum": 0,
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "max_tokens": {
+      "description": "Soft cap on rendered tokens (approximate; extension uses a\nbest-effort heuristic based on character count).",
+      "format": "uint32",
+      "minimum": 0,
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "observation_id": {
+      "description": "Sync's single-use baseline for untargeted/visual actions under target policy,\nincluding untargeted keys and displacement-only drags. Drags with a\ntarget ref/selector need only context_id. A script needs it only when it\nstates no expect facts; passing both checks the whole page as well.\nStrict-policy drag instead accepts its legacy ref-map observation token.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "probe_hover": {
+      "default": false,
+      "description": "Opt in to active hover probing: the extension moves the real cursor\nover a bounded set of controls to discover hover-only menus and\ntooltips.\n\nOff by default. Probing costs seconds of wall clock, mutates the live\npage, and pays off only on pages whose content is genuinely hidden\nbehind hover. Request it when a static observation looks like it is\nmissing hover-revealed structure.",
+      "type": "boolean"
+    },
+    "session_id": {
+      "type": "string"
+    },
+    "tab_id": {
+      "description": "Optional target tab. Defaults to the Agent Window's currently\nactive tab.",
+      "format": "int64",
+      "type": [
+        "integer",
+        "null"
+      ]
+    }
+  },
+  "required": [
+    "session_id"
+  ],
+  "title": "ObserveParams",
+  "type": "object"
 }

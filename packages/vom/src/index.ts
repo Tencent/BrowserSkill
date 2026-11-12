@@ -22,4 +22,5 @@ export type {
   VomRef,
   VomResult,
   VomScene,
+  VomSelectOption,
 } from "./types";

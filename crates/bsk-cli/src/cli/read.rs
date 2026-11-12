@@ -1,21 +1,22 @@
 //! Bounded DOM reads: data parameters, never caller JavaScript.
 use super::{
     TOOL_IPC_TIMEOUT, business_rpc,
-    ensure_daemon::ensure_daemon,
+    ensure_daemon::ensure_daemon_optimistic as ensure_daemon,
     error::{CliError, Format},
-    protocol::require_daemon_support,
 };
 use anyhow::Context;
 use bsk_protocol::{
     Method,
-    tools::{DOM_READ_PROTOCOL, ReadField, ReadParams, ReadResult, supports_dom_read},
+    tools::{ReadField, ReadParams, ReadResult},
 };
 use clap::Args;
 
 #[derive(Debug, Clone, Args)]
 pub struct ReadArgs {
     #[arg(long)]
-    pub session: String,
+    pub session: Option<String>,
+    #[arg(long)]
+    pub scope: Option<String>,
     #[arg(long)]
     pub tab_id: Option<i64>,
     /// CSS selector in the main document. Reads all matches, up to max-nodes.
@@ -42,16 +43,12 @@ pub fn dispatch(args: ReadArgs, _format: Format) -> Result<(), CliError> {
         .map(serde_json::from_str)
         .transpose()
         .context("parse --fields-json as a DOM read field array")?;
+    business_rpc::set_caller_scope(args.scope);
     let info = ensure_daemon().context("ensure daemon is running")?;
-    require_daemon_support(
-        &info.sock_path,
-        "read",
-        DOM_READ_PROTOCOL,
-        supports_dom_read,
-    )?;
     let params = ReadParams {
-        session_id: args.session,
+        session_id: args.session.unwrap_or_default(),
         tab_id: args.tab_id,
+        context_id: None,
         selector: args.selector,
         ref_: args.ref_,
         fields,

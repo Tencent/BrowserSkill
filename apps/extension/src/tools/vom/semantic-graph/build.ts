@@ -18,11 +18,11 @@ export interface BuildSemanticGraphInput {
 }
 
 function domNodeId(frameId: string, backendNodeId: number): SemanticNodeId {
-  return JSON.stringify([frameId, "dom", backendNodeId]);
+  return `${frameId.length}:${frameId}:d:${backendNodeId}`;
 }
 
 function axNodeId(frameId: string, nodeId: string): SemanticNodeId {
-  return JSON.stringify([frameId, "ax", nodeId]);
+  return `${frameId.length}:${frameId}:a:${nodeId}`;
 }
 
 export function buildSemanticGraph(input: BuildSemanticGraphInput): SemanticGraph {

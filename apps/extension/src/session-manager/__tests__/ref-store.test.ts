@@ -98,18 +98,50 @@ describe("stable DOM references", () => {
     expect(store.resolve(second)).toBe(43);
   });
 
-  it("separates tabs, frames and CDP sessions even when backend node IDs overlap", () => {
+  it("separates tabs, frames and CDP sessions even when backend node IDs overlap, while keeping OOPIF refs stable across session rotation", () => {
     const store = new RefStore();
     store.enableStableRefs();
     const inputs = [
       button,
       { ...button, tabId: 8 },
       { ...button, frameId: "child" },
-      { ...button, frameId: "child", cdpSessionId: "oopif" },
+      { ...button, frameId: "child", cdpSessionId: "oopif-1" },
     ];
     const refs = publish(store, inputs);
     expect(new Set(refs).size).toBe(inputs.length);
     expect(publish(store, [...inputs].reverse())).toEqual([...refs].reverse());
+
+    // Live cross-origin OOPIF navigation (without soft-detach remap) spawns a new cdpSessionId (`oopif-live-nav`)
+    // on the same frameId (`child`) and MUST allocate a distinct `@eN`!
+    const [liveNavRef] = publish(store, [
+      { ...button, frameId: "child", cdpSessionId: "oopif-live-nav" },
+    ]);
+    expect(liveNavRef).not.toBe(refs[3]);
+
+    // After soft-detach + reattach with an unchanged OOPIF, `remapChildFrameSessions` migrates `oopif-1 -> oopif-2`,
+    // preserving the exact `@eN` ID and updating its stored `cdpSessionId` without leaking duplicates!
+    store.remapChildFrameSessions(7, new Map([["oopif-1", "oopif-2"]]));
+    const rotated = [
+      inputs[0],
+      inputs[1],
+      inputs[2],
+      { ...button, frameId: "child", cdpSessionId: "oopif-2" },
+    ];
+    expect(publish(store, rotated)).toEqual(refs);
+    expect(store.resolveEntry(refs[3])).toMatchObject({
+      kind: "dom",
+      frameId: "child",
+      cdpSessionId: "oopif-2",
+    });
+
+    // Once `invalidateChildFrames` invalidates `child`, the next observation allocates a brand-new `@eN`.
+    store.invalidateChildFrames(7, {
+      sessionIds: new Set(["oopif-2"]),
+      frameIds: new Set(["child"]),
+    });
+    expect(store.resolve(refs[3])).toBeNull();
+    const [freshOopif] = publish(store, [{ ...button, frameId: "child", cdpSessionId: "oopif-3" }]);
+    expect(freshOopif).not.toBe(refs[3]);
   });
 
   it("never reuses a name after document replacement, including reserved unpublished rows", () => {

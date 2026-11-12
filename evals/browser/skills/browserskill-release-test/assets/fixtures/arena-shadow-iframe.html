@@ -1,0 +1,445 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>对抗靶场 · 三层 Shadow DOM 组件树与跨源多层 Iframe 联邦控制台</title>
+<style>
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font: 14px/1.5 system-ui, -apple-system, sans-serif;
+    background: #f1f5f9;
+    color: #0f172a;
+  }
+  header.console-top {
+    position: sticky;
+    top: 0;
+    z-index: 30;
+    background: #090d16;
+    color: #f8fafc;
+    padding: 10px 20px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 12px;
+  }
+  .badge {
+    display: inline-block;
+    padding: 3px 9px;
+    border-radius: 999px;
+    font-size: 12px;
+    background: #1e293b;
+    border: 1px solid #475569;
+    color: #e2e8f0;
+  }
+  .workspace {
+    max-width: 1600px;
+    margin: 0 auto;
+    padding: 16px 20px 64px;
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 16px;
+  }
+  @media (max-width: 1120px) {
+    .workspace { grid-template-columns: 1fr; }
+  }
+  .card {
+    background: #fff;
+    border: 1px solid #cbd5e1;
+    border-radius: 10px;
+    padding: 16px;
+  }
+  .card.full { grid-column: 1 / -1; }
+  .card h2 {
+    margin: 0 0 10px;
+    font-size: 16px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
+  .btn {
+    padding: 7px 12px;
+    border-radius: 6px;
+    border: 1px solid #475569;
+    background: #fff;
+    color: #0f172a;
+    font: inherit;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  .btn.primary {
+    background: #2563eb;
+    border-color: #2563eb;
+    color: #fff;
+  }
+  iframe.fed-frame {
+    width: 100%;
+    border: 2px solid #64748b;
+    border-radius: 8px;
+    background: #fff;
+  }
+  output {
+    display: block;
+    margin-top: 8px;
+    padding: 8px 10px;
+    background: #f8fafc;
+    border: 1px solid #cbd5e1;
+    border-radius: 6px;
+    font-family: ui-monospace, monospace;
+    font-size: 12px;
+    white-space: pre-wrap;
+  }
+  .topology-scroll {
+    max-height: 240px;
+    overflow: auto;
+    border: 1px solid #cbd5e1;
+    border-radius: 8px;
+  }
+  table.topo {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 12.5px;
+  }
+  table.topo th, table.topo td {
+    border: 1px solid #cbd5e1;
+    padding: 6px 8px;
+    text-align: left;
+  }
+  table.topo thead th { background: #f1f5f9; position: sticky; top: 0; }
+</style>
+</head>
+<body>
+<header class="console-top" role="banner">
+  <nav aria-label="微前端联邦主导航" style="display:flex;align-items:center;gap:14px">
+    <strong>云原生多租户微前端联邦靶场</strong>
+    <arena-nav-chip id="header-shadow-chip"></arena-nav-chip>
+    <button type="button" class="btn" id="btn-host-independent-action">主文档独立健康心跳 (+1)</button>
+  </nav>
+  <div style="display:flex;gap:10px;align-items:center">
+    <span class="badge" id="host-heartbeat-count" data-count="0">主文档心跳: 0</span>
+    <span class="badge" id="shadow-dom-node-stats">节点统计加载中</span>
+  </div>
+</header>
+
+<main class="workspace">
+  <!-- SECTION 1: 3-Level Nested Open Shadow DOM + Slot Projection + Closed Shadow Key -->
+  <section class="card full" aria-labelledby="shadow-sec-heading">
+    <h2 id="shadow-sec-heading">
+      <span>一、三层嵌套 Open Shadow DOM 组件树（含 Slot 投影 / Lit 注释与 CSS 隔离探针）+ Closed Shadow 边界</span>
+      <span class="badge">L1 → L2 → L3 Composed Shadow Tree</span>
+    </h2>
+
+    <arena-cloud-console id="shadow-l1-host">
+      <div slot="tenant-banner" id="projected-light-banner" style="padding:8px 12px;background:#fef3c7;border:1px solid #f59e0b;border-radius:6px;font-size:13px">
+        <strong>[Light-DOM Slot 投影横幅]</strong> 当前活跃租户：<span id="projected-tenant-code">TENANT-CN-HZ-01</span>（通过具名 Slot 投射进入 L1 Shadow Root）
+      </div>
+    </arena-cloud-console>
+
+    <div style="margin-top:14px;display:grid;grid-template-columns:1fr 1fr;gap:14px;align-items:center">
+      <div style="padding:12px;border:1px dashed #64748b;border-radius:8px;background:#f8fafc">
+        <div style="font-weight:700;margin-bottom:6px">Closed Shadow Root 物理硬件密钥确认区（DOM Ref 隔离边界 + 视觉坐标点击）</div>
+        <arena-hardware-key id="closed-key-host"></arena-hardware-key>
+      </div>
+      <div>
+        <div style="font-weight:700;margin-bottom:4px">Shadow 组件树与 Closed Root 事件总线回执</div>
+        <output id="shadow-bus-output">waiting-shadow-actions</output>
+      </div>
+    </div>
+  </section>
+
+  <!-- SECTION 2: Same-Origin L1 Iframe -->
+  <section class="card" aria-labelledby="same-frame-heading">
+    <h2 id="same-frame-heading">
+      <span>二、同源子应用 Iframe（127.0.0.1 清分中心）</span>
+      <button type="button" class="btn" id="btn-refresh-same-frame">仅刷新同源子帧</button>
+    </h2>
+    <iframe
+      id="same-origin-billing-frame"
+      class="fed-frame"
+      style="height:360px"
+      title="Same-Origin Billing Subframe"
+      src="/arena-frame-inner?role=billing"
+    ></iframe>
+  </section>
+
+  <!-- SECTION 3: Cross-Origin L1 Outer Gateway -> Nested L2 Security Audit Frame -->
+  <section class="card" aria-labelledby="cross-frame-heading">
+    <h2 id="cross-frame-heading">
+      <span>三、跨源双层嵌套 Iframe（localhost L1 网关 → L2 审计帧）</span>
+      <span class="badge">3-Tier Document Tree</span>
+    </h2>
+    <iframe
+      id="cross-origin-outer-frame"
+      class="fed-frame"
+      style="height:560px"
+      title="Cross-Origin L1 Gateway Frame"
+      src="http://localhost:4187/arena-frame-outer"
+    ></iframe>
+  </section>
+
+  <!-- SECTION 4: Federation postMessage Bus + High-Density 55-Service Topology Matrix -->
+  <section class="card full" aria-labelledby="fed-bus-heading">
+    <h2 id="fed-bus-heading">
+      <span>四、跨帧 postMessage 联邦对账总线与 55 节点微服务拓扑矩阵</span>
+      <span class="badge" id="postmessage-counter">收到跨帧消息: 0</span>
+    </h2>
+    <output id="federation-message-log">[]</output>
+    <div class="topology-scroll" style="margin-top:12px" id="topology-scroll-box">
+      <table class="topo" id="host-topology-table">
+        <caption>主文档全局微服务治理拓扑表（55 个服务实例）</caption>
+        <thead>
+          <tr>
+            <th>服务实例ID</th>
+            <th>所属平面</th>
+            <th>网格协议</th>
+            <th>P99延迟</th>
+            <th>熔断状态</th>
+            <th>责任团队</th>
+          </tr>
+        </thead>
+        <tbody id="host-topology-tbody"></tbody>
+      </table>
+    </div>
+  </section>
+</main>
+
+<script>
+(() => {
+  const emit = (type, data = {}) =>
+    fetch('/event', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ type, page: 'arena-shadow-iframe', ...data })
+    }).catch(() => {});
+
+  // 0. Header compact open-shadow Lit-style probe (verifies <style> & comments never leak into banner/nav label)
+  const navChipRoot = document.getElementById('header-shadow-chip').attachShadow({ mode: 'open' });
+  navChipRoot.innerHTML = `<!--lit-part NAV_CHIP_901--><style>:host{display:inline-flex}.internal-only-rule{color:rgb(18,52,86);letter-spacing:1px}</style><!--?lit$77123$--><button id="nav-chip-btn" style="padding:5px 10px;border-radius:5px;border:1px solid #60a5fa;background:#1e3a8a;color:#fff;cursor:pointer">租户拓扑自检</button><!--/lit-part-->`;
+  navChipRoot.getElementById('nav-chip-btn').addEventListener('click', () => {
+    const out = document.getElementById('shadow-bus-output');
+    out.textContent = JSON.stringify({ event: 'nav-chip-clicked', cleanLabel: true });
+    emit('shadow-nav-chip-clicked', { ok: true });
+  });
+
+  // 1. Define L3 Nested Open Shadow Component: <arena-action-drawer>
+  class ArenaActionDrawer extends HTMLElement {
+    connectedCallback() {
+      const root = this.attachShadow({ mode: 'open' });
+      root.innerHTML = `
+        <!--lit-part L3_DRAWER-->
+        <style>
+          :host { display: block; margin-top: 10px; padding: 12px; background: #eff6ff; border: 1px solid #93c5fd; border-radius: 8px; }
+          .l3-row { display: grid; grid-template-columns: 1fr auto auto; gap: 8px; align-items: center; }
+          input, button { padding: 6px 10px; border-radius: 5px; border: 1px solid #64748b; font: inherit; }
+          button.commit { background: #1d4ed8; color: #fff; border-color: #1d4ed8; font-weight: 600; cursor: pointer; }
+          .hover-menu-wrap { position: relative; display: inline-block; }
+          .hover-pop { display: none; position: absolute; right: 0; top: 100%; background: #0f172a; color: #fff; padding: 8px; border-radius: 6px; min-width: 190px; z-index: 20; }
+          .hover-menu-wrap:hover .hover-pop, .hover-menu-wrap[data-open="true"] .hover-pop { display: block; }
+        </style>
+        <div class="l3-row">
+          <label>L3 深层策略批注 <input id="shadow-l3-note" type="text" placeholder="输入第3层 Shadow 批注"></label>
+          <div class="hover-menu-wrap" id="shadow-l3-hover-wrap">
+            <button type="button" id="shadow-l3-menu-trigger" aria-haspopup="menu">L3 快捷模板</button>
+            <div class="hover-pop" role="menu">
+              <button type="button" id="shadow-l3-template-fill" role="menuitem" style="width:100%;background:#334155;color:#fff;border:none;cursor:pointer">填入零信任应急模板</button>
+            </div>
+          </div>
+          <button type="button" class="commit" id="shadow-l3-commit">提交三层Shadow策略</button>
+        </div>
+      `;
+      root.getElementById('shadow-l3-template-fill').addEventListener('click', () => {
+        root.getElementById('shadow-l3-note').value = 'ZERO-TRUST-EMERGENCY-APPROVED';
+      });
+      root.getElementById('shadow-l3-commit').addEventListener('click', () => {
+        const note = root.getElementById('shadow-l3-note').value.trim();
+        this.dispatchEvent(new CustomEvent('arena-shadow-commit', {
+          bubbles: true,
+          composed: true,
+          detail: { level: 3, note }
+        }));
+      });
+    }
+  }
+  customElements.define('arena-action-drawer', ArenaActionDrawer);
+
+  // 2. Define L2 Nested Open Shadow Component: <arena-policy-card>
+  class ArenaPolicyCard extends HTMLElement {
+    connectedCallback() {
+      const root = this.attachShadow({ mode: 'open' });
+      root.innerHTML = `
+        <!--lit-part L2_CARD-->
+        <style>
+          :host { display: block; margin-top: 10px; padding: 12px; background: #ffffff; border: 1px solid #cbd5e1; border-radius: 8px; }
+          .bar { display: flex; justify-content: space-between; align-items: center; gap: 10px; margin-bottom: 10px; }
+          select, input { padding: 6px 9px; border: 1px solid #94a3b8; border-radius: 5px; font: inherit; }
+          table { width: 100%; border-collapse: collapse; font-size: 12.5px; margin-top: 8px; }
+          th, td { border: 1px solid #cbd5e1; padding: 5px 8px; text-align: left; }
+          thead th { background: #f8fafc; }
+        </style>
+        <div class="bar">
+          <div><strong>L2 Shadow 配额策略卡</strong> · <slot name="policy-badge"></slot></div>
+          <label>配额档位
+            <select id="shadow-l2-quota">
+              <option value="BURST-5K">弹性突发 5,000 QPS</option>
+              <option value="DEDICATED-20K" selected>独享专线 20,000 QPS</option>
+              <option value="GLOBAL-100K">全球多活 100,000 QPS</option>
+            </select>
+          </label>
+        </div>
+        <table id="shadow-l2-table">
+          <caption>Shadow L2 内部访问控制规则表</caption>
+          <thead>
+            <tr><th>规则ID</th><th>源命名空间</th><th>目标服务</th><th>动作</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>ACL-S1</td><td>ns-gateway</td><td>svc-ledger</td><td>ALLOW</td></tr>
+            <tr><td>ACL-S2</td><td>ns-public</td><td>svc-vault</td><td>DENY</td></tr>
+            <tr><td>ACL-S3</td><td>ns-audit</td><td>svc-ledger</td><td>ALLOW_READONLY</td></tr>
+          </tbody>
+        </table>
+        <arena-action-drawer id="shadow-l3-host"></arena-action-drawer>
+      `;
+    }
+  }
+  customElements.define('arena-policy-card', ArenaPolicyCard);
+
+  // 3. Define L1 Outer Open Shadow Component: <arena-cloud-console>
+  class ArenaCloudConsole extends HTMLElement {
+    connectedCallback() {
+      const root = this.attachShadow({ mode: 'open' });
+      root.innerHTML = `
+        <!--lit-part L1_CONSOLE-->
+        <style>
+          :host { display: block; padding: 14px; background: #f8fafc; border: 2px solid #94a3b8; border-radius: 10px; }
+          .l1-controls { display: grid; grid-template-columns: 1fr auto; gap: 10px; align-items: center; margin-top: 10px; }
+          input { width: 100%; padding: 7px 10px; border: 1px solid #64748b; border-radius: 6px; font: inherit; }
+        </style>
+        <slot name="tenant-banner"></slot>
+        <div class="l1-controls">
+          <label>L1 Shadow 租户搜索过滤 <input id="shadow-l1-filter" type="text" value="prod-core" placeholder="输入租户环境标签"></label>
+          <label style="display:inline-flex;align-items:center;gap:6px;font-weight:600">
+            <input id="shadow-l1-enforce" type="checkbox" checked> 强制跨区审计加密
+          </label>
+        </div>
+        <arena-policy-card id="shadow-l2-host">
+          <span slot="policy-badge" id="l2-projected-slot-tag" style="color:#0f766e;font-weight:700">SLOT-POLICY-V3</span>
+        </arena-policy-card>
+      `;
+
+      this.addEventListener('arena-shadow-commit', (e) => {
+        const l1Filter = root.getElementById('shadow-l1-filter').value.trim();
+        const l1Enforce = root.getElementById('shadow-l1-enforce').checked;
+        const l2Host = root.getElementById('shadow-l2-host');
+        const l2Quota = l2Host.shadowRoot.getElementById('shadow-l2-quota').value;
+        const summary = {
+          event: 'shadow-3level-committed',
+          l1Filter,
+          l1Enforce,
+          l2Quota,
+          l3Note: e.detail.note
+        };
+        document.getElementById('shadow-bus-output').textContent = JSON.stringify(summary, null, 2);
+        emit('shadow-3level-committed', summary);
+      });
+    }
+  }
+  customElements.define('arena-cloud-console', ArenaCloudConsole);
+
+  // 4. Define Closed Shadow Component: <arena-hardware-key>
+  class ArenaHardwareKey extends HTMLElement {
+    connectedCallback() {
+      const closed = this.attachShadow({ mode: 'closed' });
+      let activations = 0;
+      closed.innerHTML = `
+        <style>
+          button.hw-pad {
+            width: 240px;
+            height: 58px;
+            border-radius: 8px;
+            border: 2px solid #047857;
+            background: #10b981;
+            color: #052e16;
+            font: 700 15px/1 system-ui, sans-serif;
+            cursor: pointer;
+          }
+        </style>
+        <button type="button" class="hw-pad">CLOSED KEY CONFIRM</button>
+      `;
+      closed.querySelector('button').addEventListener('click', (ev) => {
+        activations += 1;
+        const payload = {
+          event: 'closed-hardware-key-activated',
+          activations,
+          offsetX: Math.round(ev.offsetX),
+          offsetY: Math.round(ev.offsetY)
+        };
+        document.getElementById('shadow-bus-output').textContent = JSON.stringify(payload, null, 2);
+        emit('closed-hardware-key-activated', payload);
+      });
+    }
+  }
+  customElements.define('arena-hardware-key', ArenaHardwareKey);
+
+  // 5. Populate 55-service topology matrix (>=1,800 total DOM elements in host + shadow roots)
+  const planes = ['data-plane-hz', 'control-plane-sz', 'audit-plane-su', 'edge-ingress-gz'];
+  const teams = ['Core-Mesh', 'Zero-Trust', 'FinOps-Ledger', 'Observability'];
+  document.getElementById('host-topology-tbody').innerHTML = Array.from({ length: 55 }, (_, i) => {
+    const svc = `svc-mesh-node-${String(i + 1).padStart(3, '0')}`;
+    const plane = planes[i % planes.length];
+    const proto = i % 3 === 0 ? 'gRPC-mTLS' : 'HTTP/2-Strict';
+    const lat = `${(1.8 + (i % 13) * 0.7).toFixed(1)} ms`;
+    const cb = i % 11 === 0 ? 'HALF_OPEN' : 'CLOSED_HEALTHY';
+    const team = teams[i % teams.length];
+    const az = `AZ-${(i % 3) + 1}`;
+    return `<tr><td><code>${svc}</code> <small><span>[${az}]</span> <i><span>L7</span></i></small></td><td><span>${plane}</span> <small><code>MESH</code> <i><span>V2</span></i></small></td><td><span>${proto}</span> <small><em>TLS1.3</em></small></td><td><strong>${lat}</strong> <small><span>P99</span></small></td><td><em>${cb}</em> <b><span>SYNC</span></b> <small><i><span>SLA</span></i></small></td><td><span>${team}</span> <small><span>ONCALL</span></small></td></tr>`;
+  }).join('');
+
+  const crossHost = location.hostname === 'localhost' ? '127.0.0.1' : 'localhost';
+  const portSuffix = location.port ? `:${location.port}` : '';
+  const crossFrameEl = document.getElementById('cross-origin-outer-frame');
+  const desiredOuterSrc = `${location.protocol}//${crossHost}${portSuffix}/arena-frame-outer`;
+  if (crossFrameEl.src !== desiredOuterSrc) {
+    crossFrameEl.src = desiredOuterSrc;
+  }
+
+  // 6. Host independent action & selective child-frame refresh
+  let hb = 0;
+  document.getElementById('btn-host-independent-action').addEventListener('click', () => {
+    hb += 1;
+    const badge = document.getElementById('host-heartbeat-count');
+    badge.dataset.count = String(hb);
+    badge.textContent = `主文档心跳: ${hb}`;
+    emit('host-heartbeat', { count: hb });
+  });
+
+  let sameRefreshSeq = 0;
+  document.getElementById('btn-refresh-same-frame').addEventListener('click', () => {
+    sameRefreshSeq += 1;
+    document.getElementById('same-origin-billing-frame').src =
+      `/arena-frame-inner?role=billing&refresh=${sameRefreshSeq}`;
+    emit('same-frame-refreshed', { seq: sameRefreshSeq });
+  });
+
+  // 7. Cross-frame postMessage bus listener
+  const fedMessages = [];
+  window.addEventListener('message', (e) => {
+    if (!e.data || typeof e.data !== 'object' || !String(e.data.source || '').startsWith('arena-frame-')) return;
+    fedMessages.push(e.data);
+    document.getElementById('postmessage-counter').textContent = `收到跨帧消息: ${fedMessages.length}`;
+    document.getElementById('federation-message-log').textContent = JSON.stringify(fedMessages, null, 2);
+  });
+
+  const lightCount = document.getElementsByTagName('*').length;
+  const l1Root = document.getElementById('shadow-l1-host').shadowRoot;
+  const l2Root = l1Root?.getElementById('shadow-l2-host')?.shadowRoot;
+  const l3Root = l2Root?.getElementById('shadow-l3-host')?.shadowRoot;
+  const shadowCount = [navChipRoot, l1Root, l2Root, l3Root].reduce(
+    (sum, r) => sum + (r ? r.querySelectorAll('*').length : 0),
+    0
+  );
+  document.getElementById('shadow-dom-node-stats').textContent = `DOM 节点: ${lightCount + shadowCount} (Light ${lightCount} + Shadow ${shadowCount} + 3 Iframes)`;
+})();
+</script>
+</body>
+</html>

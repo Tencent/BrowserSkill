@@ -22,7 +22,7 @@ use clap::Args;
 
 use crate::cli::business_rpc::{self, ipc_timeout};
 use crate::cli::dialogs::print_dialog_summaries;
-use crate::cli::ensure_daemon::ensure_daemon_with_protocol;
+use crate::cli::ensure_daemon::ensure_daemon_optimistic_with_protocol as ensure_daemon_with_protocol;
 use crate::cli::error::{CliError, Format};
 use crate::cli::navigate::parse_timeout_ms;
 
@@ -34,9 +34,13 @@ pub struct EvaluateArgs {
     /// statement's).
     pub expression: String,
 
-    /// Session id (must be active).
+    /// Session id (omit to resolve via caller scope).
     #[arg(long)]
-    pub session: String,
+    pub session: Option<String>,
+
+    /// Explicit caller scope name for multi-agent isolation.
+    #[arg(long)]
+    pub scope: Option<String>,
 
     /// Target tab. Defaults to the Agent Window's active tab.
     #[arg(long = "tab-id")]
@@ -75,13 +79,14 @@ pub fn dispatch(args: EvaluateArgs, format: Format) -> Result<(), CliError> {
             "--unverified skips page verification; omit --expect, --observation and --depends-on, or omit --unverified to have them checked"
         )));
     }
+    business_rpc::set_caller_scope(args.scope);
     let (info, protocol) = ensure_daemon_with_protocol().context("ensure daemon is running")?;
     business_rpc::check_daemon_protocol(&protocol)?;
     if args.unverified {
         require_unverified_script(&protocol)?;
     }
     let params = EvaluateParams {
-        session_id: args.session,
+        session_id: args.session.unwrap_or_default(),
         expression: args.expression,
         tab_id: args.tab_id,
         await_promise: Some(args.await_promise),

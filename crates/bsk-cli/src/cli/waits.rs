@@ -29,7 +29,7 @@ use clap::{Args, ValueEnum};
 
 use crate::cli::business_rpc::ipc_timeout;
 use crate::cli::dialogs::print_dialog_summaries;
-use crate::cli::ensure_daemon::ensure_daemon;
+use crate::cli::ensure_daemon::ensure_daemon_optimistic as ensure_daemon;
 use crate::cli::error::{CliError, Format};
 use crate::cli::interaction::split_target;
 use crate::cli::navigate::{CliWaitUntil, parse_timeout_ms};
@@ -41,7 +41,10 @@ use crate::cli::navigate::{CliWaitUntil, parse_timeout_ms};
 #[derive(Debug, Clone, Args)]
 pub struct WaitForNavigationArgs {
     #[arg(long)]
-    pub session: String,
+    pub session: Option<String>,
+
+    #[arg(long)]
+    pub scope: Option<String>,
 
     /// Target tab. Defaults to the Agent Window's active tab.
     #[arg(long = "tab-id")]
@@ -60,9 +63,10 @@ pub fn dispatch_wait_for_navigation(
     args: WaitForNavigationArgs,
     format: Format,
 ) -> Result<(), CliError> {
+    crate::cli::business_rpc::set_caller_scope(args.scope);
     let info = ensure_daemon().context("ensure daemon is running")?;
     let params = WaitForNavigationParams {
-        session_id: args.session,
+        session_id: args.session.unwrap_or_default(),
         tab_id: args.tab_id,
         wait_until: Some(args.wait_until.into()),
         timeout_ms: Some(args.timeout),
@@ -168,7 +172,10 @@ pub struct WaitForElementArgs {
     pub poll_ms: u32,
 
     #[arg(long)]
-    pub session: String,
+    pub session: Option<String>,
+
+    #[arg(long)]
+    pub scope: Option<String>,
 
     /// Target tab. Defaults to the Agent Window's active tab.
     #[arg(long = "tab-id")]
@@ -190,9 +197,10 @@ pub fn dispatch_wait_for_element(args: WaitForElementArgs, format: Format) -> Re
         )));
     }
     let state: ElementState = args.state.into();
+    crate::cli::business_rpc::set_caller_scope(args.scope);
     let info = ensure_daemon().context("ensure daemon is running")?;
     let params = WaitForElementParams {
-        session_id: args.session,
+        session_id: args.session.unwrap_or_default(),
         ref_,
         selector,
         state,

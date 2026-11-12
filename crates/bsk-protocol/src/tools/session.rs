@@ -6,38 +6,30 @@ use serde::{Deserialize, Serialize};
 use crate::ErrorCode;
 
 /// Protocol 1.3 makes browser Automation settings authoritative.
-pub const INTERACTION_POLICY_PROTOCOL: &str = "1.3";
+pub const INTERACTION_POLICY_PROTOCOL: &str = crate::compatibility::Feature::InteractionPolicy
+    .requirement()
+    .daemon;
+pub const INCOGNITO_SESSION_PROTOCOL: &str = crate::compatibility::Feature::IncognitoSessions
+    .requirement()
+    .daemon;
 
 /// Protocol 1.10 supports opt-in session input locking.
-pub const INPUT_LOCK_PROTOCOL: &str = "1.10";
+pub const INPUT_LOCK_PROTOCOL: &str = crate::compatibility::Feature::InputLock
+    .requirement()
+    .daemon;
 
 pub fn supports_input_lock(protocol: &str) -> bool {
-    crate::system::compare_protocol(protocol, "2.0") == Some(std::cmp::Ordering::Less)
-        && matches!(
-            crate::system::compare_protocol(protocol, INPUT_LOCK_PROTOCOL),
-            Some(std::cmp::Ordering::Equal | std::cmp::Ordering::Greater)
-        )
+    crate::compatibility::Feature::InputLock.supports(crate::compatibility::Peer::Daemon, protocol)
 }
-
-/// Protocol 1.4 supports explicitly requested incognito Agent Windows.
-pub const INCOGNITO_SESSION_PROTOCOL: &str = "1.4";
 
 pub fn supports_incognito_sessions(protocol: &str) -> bool {
-    crate::system::compare_protocol(protocol, "2.0") == Some(std::cmp::Ordering::Less)
-        && matches!(
-            crate::system::compare_protocol(protocol, INCOGNITO_SESSION_PROTOCOL),
-            Some(std::cmp::Ordering::Equal | std::cmp::Ordering::Greater)
-        )
+    crate::compatibility::Feature::IncognitoSessions
+        .supports(crate::compatibility::Peer::Daemon, protocol)
 }
 
-/// Stay within protocol major 1, matching handshake compatibility. A future
-/// major version must explicitly establish support rather than inherit it.
 pub fn supports_interaction_policy(protocol: &str) -> bool {
-    crate::system::compare_protocol(protocol, "2.0") == Some(std::cmp::Ordering::Less)
-        && matches!(
-            crate::system::compare_protocol(protocol, INTERACTION_POLICY_PROTOCOL),
-            Some(std::cmp::Ordering::Equal | std::cmp::Ordering::Greater)
-        )
+    crate::compatibility::Feature::InteractionPolicy
+        .supports(crate::compatibility::Peer::Daemon, protocol)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -162,6 +154,15 @@ pub struct SessionStopResult {
     pub return_failures: Vec<ReturnFailure>,
 }
 
+/// Full extension response, including whether a window was left with the user.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct SessionStopOutcome {
+    #[serde(flatten)]
+    pub returned: SessionStopResult,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window_released: Option<bool>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -246,8 +247,8 @@ mod tests {
 
     #[test]
     fn legacy_unattended_is_accepted_but_never_forwarded() {
-        let schema = schemars::schema_for!(SessionStartParams);
-        let object = schema.schema.object.unwrap();
+        let schema = crate::catalog::schema_for::<SessionStartParams>();
+        let object = schema.as_object().unwrap();
         for unattended in [false, true] {
             let params: SessionStartParams = serde_json::from_value(json!({
                 "session_id": "abcd", "unattended": unattended
@@ -255,14 +256,20 @@ mod tests {
             .unwrap();
             let encoded = serde_json::to_value(params).unwrap();
             assert_eq!(encoded, json!({"session_id": "abcd"}));
-            for required in &object.required {
+            for required in object["required"].as_array().unwrap() {
+                let required = required.as_str().unwrap();
                 assert!(
                     encoded.get(required).is_some(),
                     "schema requires omitted field {required}"
                 );
             }
         }
-        assert!(!object.properties.contains_key("unattended"));
+        assert!(
+            !object["properties"]
+                .as_object()
+                .unwrap()
+                .contains_key("unattended")
+        );
     }
 
     #[test]
@@ -317,7 +324,35 @@ mod tests {
 #[cfg(test)]
 mod input_lock_tests {
     use super::*;
+    use crate::{
+        Method,
+        compatibility::{Peer, check_request},
+    };
     use serde_json::json;
+
+    #[test]
+    fn every_session_start_route_negotiates_input_lock_without_restricting_shared_input() {
+        for method in [
+            Method::SessionStart,
+            Method::SessionStartTracked,
+            Method::ToolSessionStart,
+        ] {
+            for peer in [Peer::Daemon, Peer::Extension] {
+                for params in [json!({}), json!({"lock_input":false})] {
+                    assert!(check_request(&method, &params, peer, "1.0").is_ok());
+                }
+                let params = json!({"lock_input":true});
+                let error = check_request(&method, &params, peer, "1.9").unwrap_err();
+                assert_eq!(error.code, ErrorCode::Unsupported);
+                let details = error.data.unwrap();
+                assert_eq!(details["component"], peer.name());
+                assert_eq!(details["required_protocol"], "1.10");
+                assert_eq!(details["effect_state"], "none");
+                assert!(check_request(&method, &params, peer, "1.10").is_ok());
+                assert!(check_request(&method, &params, peer, "2.0").is_err());
+            }
+        }
+    }
 
     #[test]
     fn input_lock_is_opt_in_and_round_trips() {

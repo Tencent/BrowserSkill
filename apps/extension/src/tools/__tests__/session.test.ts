@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AgentWindowCreateOptions } from "@/session-manager/agent-window";
 import { createDisconnectCleanup } from "@/session-manager/disconnect-cleanup";
 import { SessionManager } from "@/session-manager/manager";
+import { decodeToolRequest } from "@/transport/protocol";
 import * as humanLoop from "../human-loop";
 import * as recording from "../record";
 import { handleSessionStart, handleSessionStop } from "../session";
@@ -875,6 +876,24 @@ describe("handleSessionStop window release (issue #57)", () => {
 });
 
 describe("session input locking", () => {
+  it.each([
+    undefined,
+    false,
+    true,
+  ])("preserves lock_input=%j through protocol decoding", (lock_input) => {
+    const decoded = decodeToolRequest({
+      id: "start",
+      method: "tool.session_start",
+      params: { session_id: "task", ...(lock_input === undefined ? {} : { lock_input }) },
+    });
+    expect(decoded.ok).toBe(true);
+    if (!decoded.ok) throw new Error(decoded.error.message);
+    expect(decoded.request.params).toEqual({
+      session_id: "task",
+      ...(lock_input === undefined ? {} : { lock_input }),
+    });
+  });
+
   it("is opt-in, session-scoped, and never leaks into window creation options", async () => {
     const windows = fakeAgentWindow([100, 200, 300]);
     const manager = new SessionManager({ agentWindow: windows });
@@ -901,6 +920,13 @@ describe("session input locking", () => {
   ])("rejects invalid lock_input before creating a window: %j", async (lock_input) => {
     const windows = fakeAgentWindow([100]);
     const manager = new SessionManager({ agentWindow: windows });
+    expect(
+      decodeToolRequest({
+        id: "invalid-start",
+        method: "tool.session_start",
+        params: { session_id: "task", lock_input },
+      }),
+    ).toMatchObject({ ok: false, error: { code: "invalid_params" } });
     expect(
       await handleSessionStart(manager, { session_id: "task", lock_input } as never),
     ).toMatchObject({ code: "invalid_params" });

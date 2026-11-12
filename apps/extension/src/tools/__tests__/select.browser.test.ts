@@ -125,11 +125,16 @@ describe.skipIf(!process.env.BSK_SELECT_CHROME)("select disabled state in Chrome
       );
       expect(result).toMatchObject(
         disabled
-          ? focusDisables
-            ? { code: "invalid_params", message: "select requires an enabled <select>" }
-            : { code: "cdp_failed" }
+          ? { code: "invalid_params", message: "select requires an enabled <select>" }
           : { selected_values: ["ca"] },
       );
+      if (disabled) {
+        // Only a select rejected before scrolling or focusing is free of page
+        // effects; one disabled by its own focus handler keeps an unknown effect.
+        expect((result as { data?: { effect_state?: string } }).data?.effect_state).toBe(
+          focusDisables ? undefined : "none",
+        );
+      }
       expect(
         await evaluate(
           "({ value: document.querySelector('select').value, events: window.events })",

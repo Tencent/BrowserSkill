@@ -93,7 +93,9 @@ Shared Rust types + JSON Schema generation. TypeScript mirrors frame shapes in
 ### Session input ownership
 
 Protocol 1.10 adds optional `lock_input` to `tool.session_start`, exposed by
-`bsk session start --lock-input`. CLI and daemon check peer support before dispatch.
+`bsk session start --lock-input`. The `bsk-protocol` feature catalog drives CLI and
+daemon compatibility checks and the generated extension contract, rejecting unsupported
+peers before creating the session or dispatching the request.
 The session manager retains the option independently of `control_policy`; the background
 publishes the current lock only for owned tabs. Explicit hold, stop, help and recording
 release page input. Exclusive holds require an explicit hand-back, including after idle sync.

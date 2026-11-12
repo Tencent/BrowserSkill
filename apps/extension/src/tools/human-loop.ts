@@ -253,13 +253,15 @@ async function resolveHelpTargets(
             : true;
       resolved.push({ matched, selector: tgt.selector });
     } else if (tgt.ref) {
+      await deps.cdp?.reattachIfSoftDetached?.(tabId);
       const looked = ctx ? lookupSnapshotRef(ctx, tgt.ref, tabId) : null;
       let rect: HelpHighlightRect | null = null;
       if (looked && deps.cdp) {
-        const target = {
+        const rawTarget = {
           tabId,
           ...(looked.cdpSessionId ? { sessionId: looked.cdpSessionId } : {}),
         };
+        const target = deps.cdp.resolveTarget ? deps.cdp.resolveTarget(rawTarget) : rawTarget;
         const geometry = await resolveNodeGeometry(
           deps.cdp,
           tabId,

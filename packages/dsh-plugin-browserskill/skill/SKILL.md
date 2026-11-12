@@ -11,20 +11,20 @@ Never extract credentials, cookies, tokens, or other secrets.
 
 ## Before acting
 
-Read [cooperation](references/cooperation.md) before acting. Human collaboration needs no enable/share call.
+Read [cooperation](references/cooperation.md) first; collaboration needs no enable/share call.
 
-If a browser profile is required, read [tabs and profiles](references/tabs-and-profiles.md)
-before starting. Verify its instance mapping and bind every new session explicitly.
+If a profile is required, read [tabs and profiles](references/tabs-and-profiles.md)
+first. Verify its instance mapping and bind every new session explicitly.
 Never omit `browser` or substitute another instance to recover.
 Borrow confirmation and human help follow the extension's Automation settings;
 never change them or switch backends to bypass a prompt.
-For remote setup, follow the [remote guide](https://github.com/Tencent/BrowserSkill/blob/main/docs/remote-extension-connection.md).
+On `unsupported_feature`, keep options; use `recovery`. For remote setup/pairing, see the [remote guide](https://github.com/Tencent/BrowserSkill/blob/main/docs/remote-extension-connection.md).
 
 ## Mandatory workflow
 
-1. Define success. Start a session and retain `sessionId`. Include the verified `browser`
-   when a profile is required. For debugging or requested video, read the matching
-   reference below and start capture before navigation. Leave capture off otherwise.
+1. Define success. Start a session, retain `sessionId`, and pass verified `browser`
+   when a profile is required. For debugging or requested video, read its
+   reference below and start capture before navigation; leave capture off otherwise.
    For a new page:
 
    ```text

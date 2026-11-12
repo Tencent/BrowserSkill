@@ -17,9 +17,7 @@ use super::start::DaemonConfig;
 use super::ws::WsHandle;
 
 pub const DAEMON_VERSION: &str = env!("CARGO_PKG_VERSION");
-pub const PROTOCOL_VERSION: &str = "1.10";
-/// Base wire compatibility. New interaction semantics are checked per operation.
-pub const MIN_COMPATIBLE_PROTOCOL: &str = "1.0";
+pub use bsk_protocol::catalog::{MIN_COMPATIBLE_PROTOCOL, PROTOCOL_VERSION};
 /// Legacy app-semver floor used only when `HandshakeResult.min_compatible_peer`
 /// is emitted for old extensions. New code ignores this on read.
 pub const LEGACY_MIN_COMPATIBLE_PEER: &str = "0.0.0";
@@ -63,6 +61,10 @@ pub struct DaemonState {
     pub transfers: Arc<TransferRegistry>,
     /// What each live session did, for recipe drafts. Metadata only, in memory.
     pub run_logs: super::run_log::RunLogs,
+    /// Caller-scoped implicit session bindings, short `cN`/`oN` tokens, and `last_vom`.
+    pub scopes: super::scopes::ImplicitScopeRegistry,
+    /// `<3ms` write-ahead intent ledger guarding against blind replay (`RM-03`).
+    pub intent_wal: super::intent_wal::IntentWal,
 }
 
 impl DaemonState {
@@ -86,6 +88,8 @@ impl DaemonState {
             self.transfers.release_session(&session.id.0);
             self.dialog_operations.remove_session(&session.id.0);
             self.sessions.remember_end(&session.id, end_reason);
+            self.scopes.on_session_ended(&session.id, end_reason);
+            self.intent_wal.on_session_ended(&session.id);
             tracing::debug!(session = %session.id, note);
         }
     }
@@ -170,6 +174,8 @@ impl DaemonState {
             session_interrupts,
             transfers,
             run_logs: Default::default(),
+            scopes: Default::default(),
+            intent_wal: super::intent_wal::IntentWal::new(super::paths::intent_ledger_path().ok()),
         }
     }
 }

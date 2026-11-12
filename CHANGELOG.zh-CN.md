@@ -8,6 +8,20 @@ CLI、扩展和 DSH 插件可以分别发布，能否连接由协议兼容性决
 ### 新增
 
 - 可选的 `bsk session start --lock-input` 在自有和借用标签页中阻止人工误触，保留 Agent 输入及暂停、交回、停止入口。默认仍为共享控制；协议 1.10 检查会明确拒绝不支持的组件（[#576](https://github.com/Tencent/BrowserSkill/issues/576)）。
+- 新增 daemon 本地 `<3ms` 预写意图账本（`$BSK_HOME/intent_ledger.jsonl`，`0600` 权限）与
+  `bsk ledger status | resolve` 子命令：在派发层统一覆盖所有变异操作（`click`、`fill`、`press`、
+  `select`、`upload`、`drag`、`evaluate`），无论使用 `--ref`、原始 CSS `--selector` 还是视觉坐标
+  `(image_x, image_y)` 均提取脱敏目标摘要保护（绝不落盘 `fill` 明文输入或 `evaluate` 脚本内容）。
+  当调用因超时、取消、断连或 `effect_state: "unknown"` 结束（含 daemon 重启恢复残留 `DISPATCHED`
+  记录）时进入 `UNKNOWN` 冻结态，在 `<1ms` 内以 `uncertain_prior_effect` 拦截同标签页盲目变异重放，
+  100% 放行只读与诊断命令，并在执行 `bsk sync` 时零摩擦自动对账解锁。
+- 新增零仪式生命周期命令（`bsk open`、`bsk sync`、`bsk close`）与 daemon 内存级
+  `ImplicitScopeRegistry`：提供确定性 `caller_scope` 并发隔离（`--session` >
+  `--scope` / `BSK_SESSION` / `BSK_SCOPE` > `bsk mcp` 进程级连接作用域 > 宿主子代理环境变量 >
+  防静默抢占 `"default"` 槽位）、单调短证据别名（`c1..cN`、`o1..oN`）、可选 `--session` /
+  `target` 策略省略 `--context` 自动还原以及 `unchanged` 缓存 VOM 补齐，且保持扩展侧共驾安全校验不变。
+- 动作可供性增强的 VOM 渲染与 `<select>` 标签选择：无名输入控件绑定紧邻前置静态文本为 `[field: "..."]` 并消除消费标签重复输出；中文父子文本回声去重收紧为精确全等匹配；非敏感原生 `<select>` 内联展示前 10 个选项（`[options: val="Label"* | ...]`），`select` 支持按唯一无歧义可见标签选择、以 `option_ambiguous` 拒绝同名歧义标签、在 `option_not_found` 中附带前 12 个合法候选，并对自定义 ARIA 下拉（`[custom-dropdown: ...]`）给出先点击展开的恢复引导；同一表内连续 3 行及以上的纯只读数据行无损折叠为单行管道格式。
+- 基于计算样式的隐形提示注入剥离与零额外 RPC 虚拟滚动行主键守卫：静态采集与悬停探测自动剥离通过 `opacity < 0.05`、`font-size <= 1.5px`、前景背景零对比度、远屏外偏移或 `< 2px` 裁剪隐藏的非交互注入子树（完整保留交互元素、按钮内部 `.sr-only` 无障碍名称、`<label for>` 及 `aria-labelledby`/`aria-describedby` 引用目标）；位于表格行、列表项或虚拟行池内的 `@eN` 引用在发布时记录归一化业务行锚点 `rowAnchor`，并在 `checkActionTarget` 单次 `SAMPLE_TARGET` 采样中原子核验，在动作派发前阻断原地复用的虚拟列表 DOM 节点（`virtual_row_recycled`，`effect_state: none`）。
 - 新增 Qoder 和 Qoder CN 的 skill 安装目标，可使用 `bsk install-skill --harness qoder` 和
   `--harness qoder-cn`。
 - 本机配对支持双向身份验证、持久化密钥轮换和中断恢复。已配对连接在发送业务请求前验证 daemon，激活后原链接失效。撤销与浏览器注册串行执行，撤销成功后对应连接已清理。
@@ -35,6 +49,19 @@ CLI、扩展和 DSH 插件可以分别发布，能否连接由协议兼容性决
 
 ### 变更
 
+- 单步交互热路径提速并削减约 85% 冗余串行 IPC/CDP 往返：`target` 共驾策略下在动作入口完成单次
+  `verifyDecision()` 预检后，对不会产生原生 `isTrusted` 输入的内部准备/脚本类 CDP 步骤采用同步零 RPC
+  内存级栅栏（完整保留推送式真实人类介入毫秒级中断与 `strict` 策略兼容），消除 `beforeinput`
+  双重跨帧广播轮询并优化未介入 Agent 窗口标签页的 `finishInput` 收尾开销；将 `handleFill`
+  压缩为 3–4 步乐观极速通道，废除页面自动格式化导致的 `fill_value_mismatch` 硬报错并为非敏感控件回传
+  `actual_value` 与 `formatted`；业务 CLI 命令升级为基于 `daemon.json` 的乐观单次 UDS 直连，仅在首次
+  `connect()` 未连接阶段按需回退自动拉起 daemon，确保零重复派发风险。
+- 将 CLI 内置 `SKILL.md` 重写为零预读闭环（`<= 2,000` UTF-8 字节）并完整保留四大安全红线，
+  移除 `cooperate sync` 回执中每回合重复的静态 `guidance` 文本，同时为 `ChromiumCdp` 增加
+  75 秒四重硬守卫空闲软卸载（保留会话归属、控制台/网络 `since` 游标、未变化页面的 `@vN` 与跨源
+  OOPIF `@eN` 引用、待处理原生弹窗，以及下载/上传/导航等待/录屏流的连接租约，支持下一命令无感重连）及
+  `bsk close` / `bsk tab return` 时的 0 秒立即卸载。
+- 协作同步与严格动作前置校验按标签页复用 10 秒滑动 TTL 的 `Accessibility` 域租约，在仅比对场景的证据校验和增量刷新中跳过无用的 VOM 文本渲染，采用流式逐节点比对替代全页证据序列化，并降低大页面语义图与 VOM 渲染的内存分配开销。
 - 扩展弹窗的连接设置不再折叠，始终展开。未配对的建议收起为标题旁的三角警示图标，点击后展开；
   已跳过验证和阻断连接的状态仍直接显示。当前地址显示在所选模式下方，配对步骤改为点击信息图标查看，
   “使用新的配对链接”改为按钮，保存后果的说明只在有可保存的有效修改时显示。
@@ -42,15 +69,31 @@ CLI、扩展和 DSH 插件可以分别发布，能否连接由协议兼容性决
 - Recipe 的运行和修改共用互斥锁；安全状态不可读或运行标记不可写时拒绝回放，宿主进程仍存活时也保留中断运行的核实要求。DSH 完整收集取消后的 plan 和 recipe 回执。
 
 - 扩展 0.4.3 移除过时的迁移标志和版本限制，继续采用可选配对。
+- `bsk-protocol` 统一承载方法元数据、JSON Schema、TypeScript 请求与回执编解码、daemon 与扩展的穷尽执行策略表，以及协议 1.2–1.9 对端能力兼容检查（`pnpm protocol:check`）。
 
 ### 修复
 
+- 加固 VOM 隐形提示注入剥离器对 CSS Color 4/5、渐变裁切文字、HiDPI 微盒、内部滚动容器及混合文本容器的判定精度：将 `oklch`/`oklab`/`lab`/`lch`/`hsl`/`hwb`/`color()`/`color-mix()` 统一解析为 sRGB 以覆盖跨色域零对比度与零透明度检测（含 Tailwind v4 `oklch()` 背景栅栏及 `currentColor 0%` 混合色）；在保留真实 `background-clip: text` / `-webkit-background-clip: text` 渐变标题的同时剥离全透明、零跨度色标及与背景同色的伪渐变注入；按 HiDPI/Retina 缩放比例归一化 `1px` 微盒与屏外偏移阈值；结合 `DOMSnapshot` 内部滚动偏移（`scrollRects`）与 `#text` 字形边界保留真实已滚动行列并拦截未滚动容器内的 `left: -99999px` / `-2000px` / `text-indent: -9999px` 离屏注入；同时清理保留容器上的直属隐形文本与受污染的无障碍 `name`（[#709](https://github.com/Tencent/BrowserSkill/pull/709)）。
+- `wait-for-navigation` 不再在待等待的导航尚未开始或仍在进行时直接按旧页面返回。已加载完成的页面需在短暂宽限期内没有主框架导航开始才视为已到达；一旦导航开始或 Chrome 报告有待提交的导航，只有新文档能满足等待。同文档导航和往返缓存恢复仍会立即完成（[#700](https://github.com/Tencent/BrowserSkill/issues/700)）。
+- VOM 快照解码与语义图 DOM 文本回退解析排除 `<style>`、`<script>`、`<noscript>` 与 `<template>`
+  子树（以及 HTML 注释节点），避免缺少无障碍名称的控件将 CSS、脚本或模板内容泄漏为标签文本
+  （[#694](https://github.com/Tencent/BrowserSkill/issues/694)）。
+- 原生点击、按键和滚轮输入会校准 Chromium 的输入时钟，避免长时间运行的浏览器在休眠或校时后
+  将自身输入误判成人工介入。校准在扩展的隐藏文档中进行，保留现有输入检查，并在派发前报告时钟故障
+  （[#665](https://github.com/Tencent/BrowserSkill/issues/665)）。
+- `tool.record_start` 执行共享标签页归属、任务终止与人工持有检查，并在启动录制时使旧控制凭证失效；`tool.tab_return` 对本地会话和远程会话同样清理进行中的录制。
+- `navigate back` 和 `navigate forward` 在 Chrome 从往返缓存恢复历史记录时不再等待超时。恢复的文档已经加载完成，不会再发出新的加载生命周期事件，因此恢复提交即视为达到 `domcontentloaded` 和 `load`，并在恢复的文档上重新启用生命周期事件重放，使此前已空闲页面的 `networkidle` 等待也能正常完成（[#701](https://github.com/Tencent/BrowserSkill/issues/701)）。
 - daemon 关闭时保留 WebSocket 停止通知，避免接收循环尚未等待时丢失通知，导致 `daemon stop` 等待不结束。
 - 网站调试将 Agent 发起的上传和下载归入对应传输操作，不再把产生的文件变更和点击误记为人工输入。
+- 预写意图账本不再在动作确定未生效时冻结标签页。仅滚动后即被拒绝的点击（`effect_state: "unknown"` 且 `press_sent: false`）以及报告 `dispatched: false` 的失败现在都判为已结算。`select` 在滚动或聚焦元素之前校验所选选项，`fill` 在清空之前校验输入值；在这些位置发现的拒绝（`option_not_found`、`option_ambiguous`、`<select>` 被禁用、`fill_value_invalid`、`target_not_fillable`）报告 `effect_state: "none"` 与 `phase: "precondition"`，修正参数后重试既不需要 `bsk ledger resolve`，也不会丢失共享控制凭证。若同类原因在 `select` 移动焦点之后或 `fill` 清空字段之后才报告，仍保持效果未知。本已禁用的 `<select>` 现在报告 `invalid_params`，而不是聚焦失败的 `cdp_failed`（[#702](https://github.com/Tencent/BrowserSkill/issues/702)）。
 - upload、download、plan 和 step 的本地校验失败返回稳定的参数或文件错误码，并提供对应修复提示。上传源文件在连接 daemon 或暂存任何文件前完成检查。
+- `bsk get-html --json --out <file>` 不再把 HTML 输出到标准输出。指定 `--out` 时，JSON 结果只报告 `tab_id`、`path`、`written_bytes`、`byte_size`、`truncated` 以及可能出现的对话框，避免大页面进入调用方上下文；未指定 `--out` 时 JSON 结果仍包含 `html`（[#715](https://github.com/Tencent/BrowserSkill/issues/715)）。
+- 在没有焦点的页面（后台标签页，或其他窗口获得焦点时的 Agent 窗口）中，`fill` 会在校验和清空字段之前先送达焦点，设置默认值的焦点监听器不再把默认值留在输入内容前面，也不会在标签页激活时恢复默认值。可见页面通过移到视口之外、不会落到任何元素上的指针移动获得焦点；隐藏页面或指针悬停中的页面仍使用原来的空按键，页面可以观察到一次空键。密码、银行卡和一次性验证码字段被截断或改写时报告 `formatted: true`（人类可读的 CLI 输出同样显示），但不返回 `actual_value`；名称类似密码的文本输入框（例如“显示密码”切换后的字段）也按敏感字段处理（[#713](https://github.com/Tencent/BrowserSkill/issues/713)）。
 - `fill` 对每个最终值只通知一次。原生插入或清空步骤已经派发 `input`，完成阶段不再重复派发
   （[#624](https://github.com/Tencent/BrowserSkill/issues/624)）。
+- 借用仍显示 `about:blank` 或浏览器空白新标签页（`chrome://newtab/`、`edge://newtab/`、`about:newtab`，含带查询串或 `#hash` 的变体）的用户标签页后，不再导致会话内标签页管理与初始导航死锁。没有采集脚本的初始空白或新标签页根文档在标签页管理准备阶段会被跳过并允许执行首次引导导航；若借用的标签页停留在浏览器受限页面或根文档加载失败页，`tab return` 也可在不销毁会话的情况下将其归还。已注入采集器的 `about:blank` 弹窗、其他无法观察的普通网页及子框架仍须先同步或按原规则拒绝（[#703](https://github.com/Tencent/BrowserSkill/issues/703)）。
 - 窗口失焦时释放已完成的文本编辑保持；任务静置间隙后的新同步在无进行中手势或近期输入时自动恢复暂停或编辑状态，避免跨任务指令时重复提示手动交回控制权。
+- `bsk sync` 与 `bsk open` 按完整页面判断 `--wait-for` 和 `--wait-not`。strict 策略下的 `delta` 帧，以及没有缓存页面的 `unchanged` 帧，会通过 `tool.snapshot` 读取一次完整页面，不再只匹配 `[change ...]` 行或空文本；被 `--max-tokens` 截断的页面会先完整读取，`--wait-not` 才认定文本已消失。经过多轮轮询才返回的等待，也会报告未返回的帧中的字段改动、活动记录和 `history_complete=false`。读取页面失败时继续轮询，不再直接结束等待（[#714](https://github.com/Tencent/BrowserSkill/issues/714)）。
 - 录制保留名称超过 48 个字符的按钮和链接的点击，例如 GOV.UK 分步指南的展开按钮和较长的新闻标题。
 - 录制保留与搜索框同在一个表单中的链接、筛选折叠项、复选框等控件的点击，例如 GOV.UK 的搜索结果和筛选条件。
 - 页面滚动或目标尺寸变化后，录制的步骤仍能关联到元素 ref：位置对不上时，使用唯一一个同标签、同角色、同名的 ref。点击 `<summary>`、标签页或选项内部的文字时，按该控件本身取位置。

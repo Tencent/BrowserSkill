@@ -5,11 +5,7 @@ use serde::{Deserialize, Serialize};
 
 pub const DOM_READ_PROTOCOL: &str = "1.9";
 pub fn supports_dom_read(protocol: &str) -> bool {
-    crate::system::compare_protocol(protocol, "2.0") == Some(std::cmp::Ordering::Less)
-        && matches!(
-            crate::system::compare_protocol(protocol, DOM_READ_PROTOCOL),
-            Some(std::cmp::Ordering::Equal | std::cmp::Ordering::Greater)
-        )
+    crate::compatibility::Feature::DomRead.supports(crate::compatibility::Peer::Extension, protocol)
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -42,6 +38,9 @@ pub struct ReadParams {
     pub session_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tab_id: Option<i64>,
+    /// Optional cooperation context validated by the extension without renewing control.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_id: Option<String>,
     /// CSS in the main document. All matches, up to max_nodes; no selector means the root.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(length(min = 1, max = 2048))]
