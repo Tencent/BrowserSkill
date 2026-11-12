@@ -1108,7 +1108,7 @@ pub async fn stop_session(
                 queues.reopen(session_id);
                 return Err(StopSessionError::ReturnFailures(result));
             }
-            sessions.remove(session_id);
+            sessions.remove_with_end_reason(session_id, crate::rpc_reason::SESSION_STOPPED);
             drop_session_local(queues, interrupts, session_id);
             Ok(result)
         }
@@ -1121,10 +1121,21 @@ pub async fn stop_session(
             // leaving an orphan row visible to `bsk session list`
             // (review M4/M5 round 3 I-R3-2).
             if matches!(err.code, bsk_protocol::ErrorCode::NotFound) {
+                // The queue can also return not_found before forwarding
+                // when a disconnect has already purged the browser or session.
+                if registry.get(&session.browser_id).is_none() {
+                    return Err(StopSessionError::BrowserGone);
+                }
+                if sessions.get(session_id).is_none() {
+                    return Err(StopSessionError::NotFound);
+                }
                 if let Some(audit) = &sessions.audit {
                     audit.session_ended(&session_id.0, "interrupted");
                 }
-                if sessions.remove(session_id).is_some() {
+                if sessions
+                    .remove_with_end_reason(session_id, crate::rpc_reason::SESSION_STOPPED)
+                    .is_some()
+                {
                     tracing::info!(
                         session = %session_id,
                         "session forgotten locally; extension reported not_found (likely SW restart)"
