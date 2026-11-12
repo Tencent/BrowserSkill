@@ -1,108 +1,21 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "title": "ExtractResult",
-  "type": "object",
-  "required": [
-    "columns",
-    "coverage",
-    "kind",
-    "row_sources",
-    "rows",
-    "schema_version",
-    "source",
-    "spans",
-    "tab_id",
-    "warnings"
-  ],
-  "properties": {
-    "columns": {
-      "type": "array",
-      "items": {
-        "$ref": "#/definitions/ExtractColumn"
-      }
-    },
-    "coverage": {
-      "$ref": "#/definitions/ExtractCoverage"
-    },
-    "kind": {
-      "$ref": "#/definitions/ExtractAction"
-    },
-    "row_sources": {
-      "type": "array",
-      "items": {
-        "$ref": "#/definitions/ExtractRowSource"
-      }
-    },
-    "rows": {
-      "description": "Each row's keys follow `columns` order.",
-      "type": "array",
-      "items": {
-        "type": "object",
-        "additionalProperties": {
-          "type": [
-            "string",
-            "null"
-          ]
-        }
-      }
-    },
-    "schema_version": {
-      "type": "integer",
-      "format": "uint32",
-      "minimum": 0.0
-    },
-    "source": {
-      "$ref": "#/definitions/ExtractSource"
-    },
-    "spans": {
-      "type": "array",
-      "items": {
-        "$ref": "#/definitions/ExtractSpan"
-      }
-    },
-    "tab_id": {
-      "type": "integer",
-      "format": "int64"
-    },
-    "targets": {
-      "type": [
-        "array",
-        "null"
-      ],
-      "items": {
-        "$ref": "#/definitions/ExtractTarget"
-      }
-    },
-    "warnings": {
-      "type": "array",
-      "items": {
-        "type": "string"
-      }
-    }
-  },
   "definitions": {
     "ExtractAction": {
-      "type": "string",
       "enum": [
         "discover",
         "table",
         "list"
-      ]
+      ],
+      "type": "string"
     },
     "ExtractColumn": {
-      "type": "object",
-      "required": [
-        "header_path",
-        "key",
-        "name",
-        "name_source"
-      ],
       "properties": {
         "header_path": {
-          "type": "array",
           "items": {
             "type": "string"
-          }
+          },
+          "type": "array"
         },
         "key": {
           "type": "string"
@@ -113,45 +26,45 @@
         "name_source": {
           "$ref": "#/definitions/ExtractNameSource"
         }
-      }
+      },
+      "required": [
+        "key",
+        "name",
+        "header_path",
+        "name_source"
+      ],
+      "type": "object"
     },
     "ExtractCompleteness": {
-      "type": "string",
       "enum": [
         "unknown",
         "incomplete"
-      ]
+      ],
+      "type": "string"
     },
     "ExtractCoverage": {
-      "type": "object",
-      "required": [
-        "dataset_complete",
-        "rows_returned",
-        "scope",
-        "truncated"
-      ],
       "properties": {
         "dataset_complete": {
           "$ref": "#/definitions/ExtractCompleteness"
         },
         "declared_columns": {
+          "format": "int64",
           "type": [
             "integer",
             "null"
-          ],
-          "format": "int64"
+          ]
         },
         "declared_rows": {
+          "format": "int64",
           "type": [
             "integer",
             "null"
-          ],
-          "format": "int64"
+          ]
         },
         "rows_returned": {
-          "type": "integer",
           "format": "uint32",
-          "minimum": 0.0
+          "minimum": 0,
+          "type": "integer"
         },
         "scope": {
           "$ref": "#/definitions/ExtractScope"
@@ -165,65 +78,64 @@
         "truncated": {
           "type": "boolean"
         }
-      }
+      },
+      "required": [
+        "scope",
+        "rows_returned",
+        "truncated",
+        "dataset_complete"
+      ],
+      "type": "object"
     },
     "ExtractNameSource": {
-      "type": "string",
       "enum": [
         "header",
         "generated",
         "field"
-      ]
+      ],
+      "type": "string"
     },
     "ExtractRowKind": {
-      "type": "string",
       "enum": [
         "data",
         "footer"
-      ]
+      ],
+      "type": "string"
     },
     "ExtractRowSource": {
-      "type": "object",
-      "required": [
-        "locator",
-        "row",
-        "row_kind",
-        "source_row"
-      ],
       "properties": {
         "locator": {
           "type": "string"
         },
         "row": {
-          "type": "integer",
           "format": "uint32",
-          "minimum": 0.0
+          "minimum": 0,
+          "type": "integer"
         },
         "row_kind": {
           "$ref": "#/definitions/ExtractRowKind"
         },
         "source_row": {
-          "type": "integer",
           "format": "uint32",
-          "minimum": 0.0
+          "minimum": 0,
+          "type": "integer"
         }
-      }
+      },
+      "required": [
+        "row",
+        "source_row",
+        "row_kind",
+        "locator"
+      ],
+      "type": "object"
     },
     "ExtractScope": {
-      "type": "string",
       "enum": [
         "loaded_dom"
-      ]
+      ],
+      "type": "string"
     },
     "ExtractSource": {
-      "type": "object",
-      "required": [
-        "captured_at",
-        "frame_id",
-        "frame_url",
-        "page_url",
-        "title"
-      ],
       "properties": {
         "captured_at": {
           "type": "string"
@@ -252,53 +164,52 @@
         "title": {
           "type": "string"
         }
-      }
+      },
+      "required": [
+        "page_url",
+        "frame_url",
+        "frame_id",
+        "title",
+        "captured_at"
+      ],
+      "type": "object"
     },
     "ExtractSpan": {
-      "type": "object",
-      "required": [
-        "column",
-        "column_span",
-        "row",
-        "row_span"
-      ],
       "properties": {
         "column": {
           "type": "string"
         },
         "column_span": {
-          "type": "integer",
           "format": "uint32",
-          "minimum": 0.0
+          "minimum": 0,
+          "type": "integer"
         },
         "row": {
-          "type": "integer",
           "format": "uint32",
-          "minimum": 0.0
+          "minimum": 0,
+          "type": "integer"
         },
         "row_span": {
-          "type": "integer",
           "format": "uint32",
-          "minimum": 0.0
+          "minimum": 0,
+          "type": "integer"
         }
-      }
+      },
+      "required": [
+        "row",
+        "column",
+        "row_span",
+        "column_span"
+      ],
+      "type": "object"
     },
     "ExtractTarget": {
-      "type": "object",
-      "required": [
-        "columns",
-        "frame_id",
-        "frame_url",
-        "kind",
-        "name",
-        "target_id"
-      ],
       "properties": {
         "columns": {
-          "type": "array",
           "items": {
             "type": "string"
-          }
+          },
+          "type": "array"
         },
         "frame_id": {
           "type": "string"
@@ -315,14 +226,103 @@
         "target_id": {
           "type": "string"
         }
-      }
+      },
+      "required": [
+        "target_id",
+        "kind",
+        "name",
+        "frame_url",
+        "frame_id",
+        "columns"
+      ],
+      "type": "object"
     },
     "ExtractTargetKind": {
-      "type": "string",
       "enum": [
         "table",
         "list"
-      ]
+      ],
+      "type": "string"
     }
-  }
+  },
+  "properties": {
+    "columns": {
+      "items": {
+        "$ref": "#/definitions/ExtractColumn"
+      },
+      "type": "array"
+    },
+    "coverage": {
+      "$ref": "#/definitions/ExtractCoverage"
+    },
+    "kind": {
+      "$ref": "#/definitions/ExtractAction"
+    },
+    "row_sources": {
+      "items": {
+        "$ref": "#/definitions/ExtractRowSource"
+      },
+      "type": "array"
+    },
+    "rows": {
+      "description": "Each row's keys follow `columns` order.",
+      "items": {
+        "additionalProperties": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "schema_version": {
+      "format": "uint32",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "source": {
+      "$ref": "#/definitions/ExtractSource"
+    },
+    "spans": {
+      "items": {
+        "$ref": "#/definitions/ExtractSpan"
+      },
+      "type": "array"
+    },
+    "tab_id": {
+      "format": "int64",
+      "type": "integer"
+    },
+    "targets": {
+      "items": {
+        "$ref": "#/definitions/ExtractTarget"
+      },
+      "type": [
+        "array",
+        "null"
+      ]
+    },
+    "warnings": {
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "schema_version",
+    "kind",
+    "tab_id",
+    "source",
+    "columns",
+    "rows",
+    "row_sources",
+    "spans",
+    "coverage",
+    "warnings"
+  ],
+  "title": "ExtractResult",
+  "type": "object"
 }

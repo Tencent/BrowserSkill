@@ -1,4 +1,3 @@
-import { DEBUG_ACTIONS } from "@/debug/capabilities";
 import {
   isAgentControlledTab,
   type SessionContext,
@@ -6,6 +5,7 @@ import {
 } from "@/session-manager/manager";
 import { type ResolvedActionTarget, resolveActionTarget } from "@/tools/interaction";
 import { captureVomObservation, handleSnapshot } from "@/tools/observation";
+import { isPassiveDebugAction, toolPolicy } from "@/tools/policy";
 import {
   type CdpRunner,
   chromeTabsApi,
@@ -14,6 +14,7 @@ import {
   sessionCdpRunner,
 } from "@/tools/shared";
 import { lookupSnapshotRef } from "@/tools/snapshot-ref";
+import { AccessibilityLease } from "@/tools/vom/capture-coordinator";
 import type { DragTarget, RequestFrame, RpcError } from "@/transport/types";
 import {
   ActionCheckError,
@@ -22,7 +23,7 @@ import {
   checkExpectations,
   parseExpectations,
 } from "./action-checks";
-import { guardedRunner } from "./action-guard";
+import { guardedRunner, isInternalActionStep } from "./action-guard";
 import { type ControlAuthority, ControlAuthorityError } from "./control-authority";
 import { FrameCollectionError, FrameUnresponsiveError } from "./frame-error";
 import {
@@ -71,6 +72,7 @@ type Activity = FrameState["events"][number] & {
 };
 interface TabState {
   lease: string;
+  accessibilityLease: AccessibilityLease;
   /** Only the untouched, agent-created blank tab may bootstrap without an observation. */
   bootstrap: boolean;
   /** Only actual human participation changes the original tab/idle cleanup policy. */
@@ -140,49 +142,6 @@ export interface CooperationDeps {
   sessionActivity?(sessionId: string, idleProtected: boolean): void;
   now?: () => number;
 }
-/** Only operations whose complete input recipient is a resolved DOM target. */
-const TARGET_ACTIONS = new Set([
-  "tool.click",
-  "tool.fill",
-  "tool.press",
-  "tool.select",
-  "tool.hover",
-  "tool.focus",
-  "tool.blur",
-  "tool.scroll_to",
-  "tool.wheel",
-  "tool.upload",
-  "tool.download",
-  "tool.drag",
-]);
-const READS = new Set([
-  "tool.snapshot",
-  "tool.observe",
-  "tool.get_html",
-  "tool.screenshot",
-  "tool.console",
-  "tool.network",
-  "tool.read",
-  "tool.extract",
-  "tool.wait_for_element",
-  "tool.wait_for_navigation",
-  "tool.record_start",
-]);
-const SESSION_TOOLS = new Set([
-  "tool.session_start",
-  "tool.session_stop",
-  "tool.tab_list",
-  "tool.screenshot_read",
-  "tool.screenshot_release",
-  "tool.record_stop",
-  "tool.record_await",
-]);
-const PASSIVE_DEBUG = new Set<string>(
-  DEBUG_ACTIONS.filter(
-    (action) =>
-      !["rule_add", "rule_enable", "rule_disable", "rule_remove", "replay"].includes(action),
-  ),
-);
 const QUIET_MS = 2_000;
 /** Idle gap after which a fresh `cooperate sync`/`enable` automatically resumes a paused or editing tab. */
 const IDLE_RESUME_MS = 3_000;
@@ -392,6 +351,7 @@ export class CooperationController implements ControlAuthority {
     if (existing) return existing;
     const state: TabState = {
       lease: crypto.randomUUID(),
+      accessibilityLease: new AccessibilityLease(tabId),
       bootstrap,
       intervened: false,
       sessionId: session.sessionId,
@@ -481,6 +441,7 @@ export class CooperationController implements ControlAuthority {
     state.interruption?.abort(reason);
     state.completion?.abort(reason);
     this.tabs.delete(tabId);
+    void state.accessibilityLease.dispose();
     void this.deps.releaseFrames?.(tabId, state.lease).catch(() => {});
     this.deps.changed(tabId);
     this.sessionActivity(state.sessionId);
@@ -558,7 +519,7 @@ export class CooperationController implements ControlAuthority {
     const authorityRevision = state.authorityRevision;
     const epoch = state.epoch;
     const inputDeadline = Math.min(deadline, Date.now() + 25000);
-    await this.refresh(state, input?.type === "beforeinput" ? undefined : input);
+    await this.refresh(state, input);
     let waited = false;
     while (
       !state.held &&
@@ -587,7 +548,7 @@ export class CooperationController implements ControlAuthority {
       await this.refresh(state);
       waited = true;
     }
-    if ((waited && input) || input?.type === "beforeinput") {
+    if (waited && input) {
       if (
         !this.humanActive(state) &&
         !state.held &&
@@ -656,6 +617,7 @@ export class CooperationController implements ControlAuthority {
   invalidate(tabId: number) {
     const state = this.tabs.get(tabId);
     if (!state) return;
+    state.accessibilityLease.markNeedsEnable();
     state.epoch++;
     state.context = undefined;
     state.unavailable = true;
@@ -700,6 +662,7 @@ export class CooperationController implements ControlAuthority {
         const reason = new Error("The user stopped this task");
         state.interruption?.abort(reason);
         state.completion?.abort(reason);
+        void state.accessibilityLease.release();
         state.epoch++;
         state.context = undefined;
         this.changed(state);
@@ -753,7 +716,10 @@ export class CooperationController implements ControlAuthority {
       }
     }
     const documentsChanged = state.frames.size > 0 && !sameFrames(state.frames, frames, "document");
-    if (documentsChanged) state.frameEpoch++;
+    if (documentsChanged) {
+      state.frameEpoch++;
+      state.accessibilityLease.markNeedsEnable();
+    }
     const mainDocumentChanged =
       documentsChanged && state.frames.get(0)?.document !== frames.get(0)?.document;
     // Child documents revoke observation evidence through frameEpoch, rather
@@ -919,6 +885,8 @@ export class CooperationController implements ControlAuthority {
         if (delta && !sameFields(baseline.frames, before))
           await captureVomObservation(guardedRunner(cdp), state.tabId, target.url, {
             signal,
+            accessibilityLease: state.accessibilityLease,
+            skipRender: true,
             conditionalSurfaceProbe: false,
             onScene: (scene) => {
               evidence = observationEvidence(scene);
@@ -933,6 +901,7 @@ export class CooperationController implements ControlAuthority {
                 cdp: guardedRunner(cdp),
                 tabsApi: chromeTabsApi,
                 refStore,
+                accessibilityLease: state.accessibilityLease,
                 onScene: (scene) => {
                   evidence = observationEvidence(scene);
                 },
@@ -1046,9 +1015,6 @@ export class CooperationController implements ControlAuthority {
               );
             }),
           state: { ...this.view(state.tabId), mode: "ready" },
-          guidance: targetPolicy
-            ? "Reuse this context for DOM-targeted actions and supplementary reads. Human intervention or main-document replacement requires sync. Actions using an iframe target or precondition require a fresh sync when frame documents change. Use explicit expect checks for business facts such as price, recipient or record ID. Use read/extract for current DOM data even during animation; they never renew action evidence. Untargeted keys, visual clicks and scripts without stated facts require this sync's top-level observation_id (not observation.observation_id) and retain strict content checks. A script with explicit expect checks and no observation_id is verified against those facts only and reuses this context; prefer that on pages that keep changing. evaluate with unverified compares nothing about the page and is the last resort when the facts cannot be stated. Never replay an uncertain action; inspect its result first."
-            : "Continue toward the assigned goal using this current state. Incorporate helpful progress and correct recoverable mistakes. Page activity is not a change of goal. Each context authorizes one action; sync after it. By default the whole page is checked. Text that changes by itself (clocks, counters) is reported once; after the next sync it no longer blocks actions on a ref or selector unless it shares a form, list, dialog, panel or other container with the target. Keys without a ref or selector can use explicit dependencies, while their actual focused region stays protected; uncertain focus and other untargeted actions keep the exact whole-page check. A script with --depends-on is checked against those regions, form values and modal layers only; evaluate with unverified compares nothing about the page and is the last resort when the regions cannot be named. To tolerate other unrelated updates, declare all observed decision regions with --depends-on refs/selectors (plugin: dependsOn); the target region and form values remain protected. Verify completion and prior submissions from application evidence.",
         };
       } finally {
         state.working = false;
@@ -1256,14 +1222,21 @@ export class CooperationController implements ControlAuthority {
           target?: DragTarget;
         }
       | undefined;
-    if (req.method === "tool.session_start") {
+    const policy = toolPolicy(req.method);
+    if (policy?.cooperation === "session_start") {
       const result = await invoke(cdp);
       if (!isRpcError(result) && params?.session_id) this.startSession(params.session_id);
       return result;
     }
-    if (req.method === "tool.cooperate")
+    if (policy?.cooperation === "cooperate")
       return this.command(params as CooperationParams, cdp, signal);
-    if (!params?.session_id || SESSION_TOOLS.has(req.method)) return invoke(cdp);
+    if (
+      !params?.session_id ||
+      !policy ||
+      policy.cooperation === "session" ||
+      policy.cooperation === "dialog"
+    )
+      return invoke(cdp);
     const session = this.deps.sessions.get(params.session_id);
     if (!session) return invoke(cdp);
     cdp = sessionCdpRunner(
@@ -1274,15 +1247,11 @@ export class CooperationController implements ControlAuthority {
     const targetPolicy = session.controlPolicy === "target";
     this.startSession(session.sessionId);
     if (
-      !READS.has(req.method) &&
+      policy.cooperation !== "passive_read" &&
       [...this.tabs.values()].some((s) => s.sessionId === params.session_id && s.stopped)
     )
       return stopped();
-    if (
-      ["tool.tab_create", "tool.tab_borrow", "tool.tab_select", "tool.tab_return"].includes(
-        req.method,
-      )
-    ) {
+    if (policy.cooperation === "manage_tabs") {
       if (
         req.method === "tool.tab_select" &&
         (params.tab_id === undefined || !isAgentControlledTab(session, params.tab_id))
@@ -1310,7 +1279,7 @@ export class CooperationController implements ControlAuthority {
       }
       return result;
     }
-    if (req.method === "tool.request_help") {
+    if (policy.cooperation === "request_help") {
       const target = await resolveTargetTab(
         this.deps.sessions,
         session,
@@ -1350,12 +1319,50 @@ export class CooperationController implements ControlAuthority {
         this.changed(state);
       }
     }
-    const read = READS.has(req.method) && !params.probe_hover;
+    if (policy.cooperation === "record_start") {
+      const target = await resolveTargetTab(
+        this.deps.sessions,
+        session,
+        params.tab_id ?? this.defaultTabs.get(session.sessionId),
+        chromeTabsApi,
+      );
+      if (isRpcError(target)) return target;
+      if (!isAgentControlledTab(session, target.tabId))
+        return failure("Actions require an owned task tab; borrow user tabs explicitly");
+      const state = this.track(session, target.tabId);
+      if (state.working) return failure("Another operation is settling on this tab");
+      if ((state.held || this.humanActive(state)) && this.canAutoResumeIdle(state, this.now())) {
+        try {
+          await this.resumeIdleControl(state);
+        } catch {
+          /* Fall through to held/humanActive check below. */
+        }
+        if (state.stopped) return stopped();
+      }
+      if (state.held || this.humanActive(state))
+        return failure("The user is still operating this tab; wait for hand-back");
+      req.params = { ...params, tab_id: target.tabId };
+      state.bootstrap = false;
+      state.working = true;
+      state.context = undefined;
+      state.baseline = undefined;
+      state.epoch++;
+      this.changed(state);
+      try {
+        const result = await invoke(cdp);
+        if (!isRpcError(result)) await this.observeTab(state.tabId);
+        return result;
+      } finally {
+        state.working = false;
+        this.changed(state);
+      }
+    }
+    const read = policy.cooperation === "passive_read" && !params.probe_hover;
     // History/status remain usable after a task tab closes; their handlers enforce ownership.
     const action = (req.params as { action?: string }).action;
     if (
-      (req.method === "tool.debug" && PASSIVE_DEBUG.has(action ?? "")) ||
-      (req.method === "tool.video" &&
+      (policy.cooperation === "debug" && isPassiveDebugAction(action)) ||
+      (policy.cooperation === "video" &&
         ["start", "stop", "status", "read", "list", "capabilities"].includes(action ?? ""))
     ) {
       req.params = { ...params, tab_id: params.tab_id ?? this.defaultTabs.get(session.sessionId) };
@@ -1394,13 +1401,7 @@ export class CooperationController implements ControlAuthority {
     }
     const state = this.track(session, target.tabId);
     if (state.bootstrap && !isInitialBlank(target)) state.bootstrap = false;
-    if (
-      state.bootstrap &&
-      ["tool.navigate", "tool.emulate", "tool.window_resize", "tool.tab_close"].includes(
-        req.method,
-      ) &&
-      !params.context_id
-    ) {
+    if (state.bootstrap && policy.bootstrapAllowed && !params.context_id) {
       if (
         params.expect !== undefined ||
         params.observation_id !== undefined ||
@@ -1494,7 +1495,7 @@ export class CooperationController implements ControlAuthority {
     const targeted =
       targetPolicy &&
       (scopedScript ||
-        (TARGET_ACTIONS.has(req.method) &&
+        (policy.domTargeted &&
           !visual &&
           !!(primaryTarget?.ref || primaryTarget?.selector) &&
           (req.method !== "tool.drag" || !!(params.target?.ref || params.target?.selector))));
@@ -1552,6 +1553,15 @@ export class CooperationController implements ControlAuthority {
         ? { press_sent: false }
         : {};
     const describeFailure = (message: string, effect: "none" | "unknown"): RpcError => {
+      if (
+        checkFailure?.data?.reason === "input_clock_unavailable" &&
+        !intervention.signal.aborted &&
+        state.authorityRevision === authorityRevision
+      )
+        return {
+          ...checkFailure,
+          data: { ...checkFailure.data, effect_state: effect, ...unpressed(effect) },
+        };
       const diagnosis = observed
         ? {
             observed_change: observed,
@@ -1696,6 +1706,8 @@ export class CooperationController implements ControlAuthority {
       let evidence: ObservationEvidence | undefined;
       await captureVomObservation(guardedRunner(cdp), state.tabId, target.url, {
         signal,
+        accessibilityLease: state.accessibilityLease,
+        skipRender: true,
         conditionalSurfaceProbe: false,
         onScene: (scene) => {
           evidence = observationEvidence(scene);
@@ -1743,7 +1755,7 @@ export class CooperationController implements ControlAuthority {
       // Native focus/hover may add or remove an identified input decoration.
       // Keep all other decision evidence exact, especially explicit dependencies
       // and actions without a DOM target (including visual clicks).
-      const decorations = prepared && anchored && !visual && TARGET_ACTIONS.has(req.method);
+      const decorations = prepared && anchored && !visual && policy.domTargeted;
       const preparation = { focus: preparationFocus, hover: preparationHover };
       const preparedEvidence = decorations
         ? preparationEvidence(context.evidence, evidence, actionTarget!, preparation)
@@ -2036,9 +2048,15 @@ export class CooperationController implements ControlAuthority {
       this.changed(state);
       let result = await invoke(
         guardedRunner(cdp, {
+          onInputClockError: (error) => {
+            checkFailure = error.toRpcError();
+          },
           scriptedEffect: req.method === "tool.evaluate",
           prepare: async (input, method) => {
             assert();
+            if (targeted && isInternalActionStep(input, method, req.method === "tool.evaluate")) {
+              return;
+            }
             await this.prepareFrames(state, operationSignal, input, method, deadline);
             assert();
             if (
@@ -2049,15 +2067,18 @@ export class CooperationController implements ControlAuthority {
               state.target = { x: input.x!, y: input.y!, expires: this.now() + 650 };
               this.changed(state);
             }
-            if (!nativeInputStarted)
-              await verifyDecision(
-                targeted && req.method === "tool.press" && input?.type === "keydown",
-              );
+            if (!nativeInputStarted) {
+              if (!targeted) {
+                await verifyDecision(false);
+              } else if (req.method === "tool.press" && input?.type === "keydown") {
+                await verifyDecision(true);
+              }
+            }
           },
           finishInput: async (input) => {
             // Retire only this command's one-shot text expectation. A late
             // acknowledgement must not clear another action's expectation.
-            await this.deps
+            const clear = this.deps
               .readFrames(
                 state.tabId,
                 { type: "clear", id: input.id },
@@ -2066,6 +2087,9 @@ export class CooperationController implements ControlAuthority {
                 state.hiddenFrames,
               )
               .catch(() => {});
+            if (!session.agentCreatedTabs.has(state.tabId) || state.intervened || state.held) {
+              await clear;
+            }
           },
           dispatch: (startsInput, method) => {
             assert();
@@ -2087,6 +2111,11 @@ export class CooperationController implements ControlAuthority {
             }
           },
           beginDomMutation: async () => {
+            if (targeted) {
+              assert();
+              nativeInputStarted = true;
+              return;
+            }
             await this.refresh(state);
             assert();
             if (!nativeInputStarted) await verifyDecision();

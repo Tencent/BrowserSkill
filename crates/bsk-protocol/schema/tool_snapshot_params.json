@@ -1,40 +1,40 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "title": "SnapshotParams",
-  "description": "Parameters for `tool.snapshot` — produce an indented accessibility tree for one tab plus a fresh `@e<N>` ref-store on the extension side (design §4 / §7).",
-  "type": "object",
-  "required": [
-    "session_id"
-  ],
+  "description": "Parameters for `tool.snapshot` — produce an indented accessibility\ntree for one tab plus a fresh `@e<N>` ref-store on the extension\nside (design §4 / §7).",
   "properties": {
     "max_depth": {
-      "description": "Cap the depth of the rendered tree (defense against very deep pages). Implementation-defined default; agents typically use `Some(16)` for \"browse and read\" prompts.",
+      "description": "Cap the depth of the rendered tree (defense against very deep\npages). Implementation-defined default; agents typically use\n`Some(16)` for \"browse and read\" prompts.",
+      "format": "uint32",
+      "minimum": 0,
       "type": [
         "integer",
         "null"
-      ],
-      "format": "uint32",
-      "minimum": 0.0
+      ]
     },
     "max_tokens": {
-      "description": "Soft cap on rendered tokens (approximate; extension uses a best-effort heuristic based on character count).",
+      "description": "Soft cap on rendered tokens (approximate; extension uses a\nbest-effort heuristic based on character count).",
+      "format": "uint32",
+      "minimum": 0,
       "type": [
         "integer",
         "null"
-      ],
-      "format": "uint32",
-      "minimum": 0.0
+      ]
     },
     "session_id": {
       "type": "string"
     },
     "tab_id": {
-      "description": "Optional target tab. Defaults to the Agent Window's currently active tab.",
+      "description": "Optional target tab. Defaults to the Agent Window's currently\nactive tab.",
+      "format": "int64",
       "type": [
         "integer",
         "null"
-      ],
-      "format": "int64"
+      ]
     }
-  }
+  },
+  "required": [
+    "session_id"
+  ],
+  "title": "SnapshotParams",
+  "type": "object"
 }

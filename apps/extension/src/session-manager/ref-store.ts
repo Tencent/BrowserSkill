@@ -5,6 +5,7 @@ export type BackendNodeId = number;
 export interface DomRefEntry {
   readonly kind: "dom";
   name?: string;
+  rowAnchor?: string;
   backendNodeId: BackendNodeId;
   tabId: number | null;
   frameId?: string;
@@ -21,6 +22,7 @@ export type RefEntry = DomRefEntry | (VisualRefInput & { readonly generation: nu
 
 export interface DomRefInput {
   name?: string;
+  rowAnchor?: string;
   backendNodeId: BackendNodeId;
   tabId: number;
   frameId?: string;
@@ -137,6 +139,7 @@ export class RefStore {
       tabId?: number;
       frameId?: string;
       cdpSessionId?: string;
+      rowAnchor?: string;
     } = {},
   ): void {
     this.reserveRef(ref);
@@ -146,6 +149,7 @@ export class RefStore {
       tabId: opts.tabId ?? null,
       ...(opts.frameId ? { frameId: opts.frameId } : {}),
       ...(opts.cdpSessionId ? { cdpSessionId: opts.cdpSessionId } : {}),
+      ...(opts.rowAnchor ? { rowAnchor: opts.rowAnchor } : {}),
       generation: this.generation,
     });
   }
@@ -215,6 +219,7 @@ export class RefStore {
     return {
       kind: "dom",
       ...(input.name ? { name: input.name } : {}),
+      ...(input.rowAnchor ? { rowAnchor: input.rowAnchor } : {}),
       backendNodeId: input.backendNodeId,
       tabId: input.tabId,
       ...(input.frameId ? { frameId: input.frameId } : {}),

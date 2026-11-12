@@ -13,14 +13,18 @@ use clap::Args;
 
 use crate::cli::TOOL_IPC_TIMEOUT;
 use crate::cli::dialogs::print_dialog_summaries;
-use crate::cli::ensure_daemon::ensure_daemon;
+use crate::cli::ensure_daemon::ensure_daemon_optimistic as ensure_daemon;
 use crate::cli::error::{CliError, Format};
 
 #[derive(Debug, Clone, Args)]
 pub struct GetHtmlArgs {
-    /// Session id (must be active).
+    /// Session id (omit to resolve via caller scope).
     #[arg(long)]
-    pub session: String,
+    pub session: Option<String>,
+
+    /// Explicit caller scope name for multi-agent isolation.
+    #[arg(long)]
+    pub scope: Option<String>,
 
     /// Target tab. Defaults to the Agent Window's active tab.
     #[arg(long = "tab-id")]
@@ -41,13 +45,14 @@ pub struct GetHtmlArgs {
 }
 
 pub fn dispatch(args: GetHtmlArgs, format: Format) -> Result<(), CliError> {
+    crate::cli::business_rpc::set_caller_scope(args.scope.clone());
     let info = ensure_daemon().context("ensure daemon is running")?;
     run(info.sock_path, args, format)
 }
 
 fn run(sock: PathBuf, args: GetHtmlArgs, format: Format) -> Result<(), CliError> {
     let params = GetHtmlParams {
-        session_id: args.session.clone(),
+        session_id: args.session.clone().unwrap_or_default(),
         tab_id: args.tab_id,
         ref_: args.ref_.clone(),
         max_bytes: args.max_bytes,

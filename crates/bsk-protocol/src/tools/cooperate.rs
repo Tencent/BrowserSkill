@@ -29,11 +29,8 @@ pub struct CooperateParams {
 pub const TARGET_CONTROL_PROTOCOL: &str = "1.8";
 
 pub fn supports_target_control(protocol: &str) -> bool {
-    crate::system::compare_protocol(protocol, "2.0") == Some(std::cmp::Ordering::Less)
-        && matches!(
-            crate::system::compare_protocol(protocol, TARGET_CONTROL_PROTOCOL),
-            Some(std::cmp::Ordering::Equal | std::cmp::Ordering::Greater)
-        )
+    crate::compatibility::Feature::TargetControl
+        .supports(crate::compatibility::Peer::Extension, protocol)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

@@ -7,7 +7,7 @@ use clap::Args;
 
 use crate::cli::business_rpc::ipc_timeout;
 use crate::cli::dialogs::print_dialog_summaries;
-use crate::cli::ensure_daemon::ensure_daemon;
+use crate::cli::ensure_daemon::ensure_daemon_optimistic as ensure_daemon;
 use crate::cli::error::{CliError, Format};
 use crate::cli::interaction::split_target;
 use crate::cli::navigate::parse_timeout_ms;
@@ -24,7 +24,10 @@ pub struct ScrollToArgs {
     pub selector: Option<String>,
 
     #[arg(long)]
-    pub session: String,
+    pub session: Option<String>,
+
+    #[arg(long)]
+    pub scope: Option<String>,
 
     #[arg(long = "tab-id")]
     pub tab_id: Option<i64>,
@@ -35,9 +38,10 @@ pub struct ScrollToArgs {
 
 pub fn dispatch(args: ScrollToArgs, format: Format) -> Result<(), CliError> {
     let (ref_, selector) = split_target(args.target, args.ref_, args.selector)?;
+    crate::cli::business_rpc::set_caller_scope(args.scope);
     let info = ensure_daemon().context("ensure daemon is running")?;
     let params = ScrollToParams {
-        session_id: args.session,
+        session_id: args.session.unwrap_or_default(),
         ref_,
         selector,
         tab_id: args.tab_id,

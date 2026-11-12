@@ -252,6 +252,15 @@ pub struct FillResult {
     /// UTF-16 code-unit length of the value that was finally typed
     /// (matches what `input.value.length` would report in the page).
     pub value_length: u32,
+    /// Final readback value for non-sensitive controls (truncated to 200 chars).
+    /// Always omitted (`None`) for password, card, or one-time-code controls.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actual_value: Option<String>,
+    /// Set to `Some(true)` when the control's final value differs from the
+    /// normalized requested value due to page formatting or truncation. Also set
+    /// for sensitive controls, whose `actual_value` stays omitted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub formatted: Option<bool>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub dialogs: Vec<JavaScriptDialogInfo>,
 }

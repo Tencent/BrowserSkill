@@ -54,6 +54,8 @@ pub mod reason {
     pub const FILL_FAILED: &str = "fill_failed";
     pub const TARGET_NOT_SELECT: &str = "target_not_select";
     pub const OPTION_NOT_FOUND: &str = "option_not_found";
+    pub const OPTION_AMBIGUOUS: &str = "option_ambiguous";
+    pub const VIRTUAL_ROW_RECYCLED: &str = "virtual_row_recycled";
     pub const SINGLE_SELECT_VALUE_COUNT: &str = "single_select_value_count";
     pub const TAB_NOT_ACTIVE: &str = "tab_not_active";
     pub const CDP_EXTENSION_ACCESS_DENIED: &str = "cdp_extension_access_denied";
@@ -85,6 +87,12 @@ pub mod reason {
     pub const OBSERVE_IDENTITY_RELOAD_LOOP: &str = crate::rpc_reason::OBSERVE_IDENTITY_RELOAD_LOOP;
     pub const BORROW_AGENT_WINDOW_TAB: &str = crate::rpc_reason::BORROW_AGENT_WINDOW_TAB;
     pub const RECORD_START_PAGE_UNREACHABLE: &str = "record_start_page_unreachable";
+    pub const NO_ACTIVE_SESSION: &str = crate::rpc_reason::NO_ACTIVE_SESSION;
+    pub const AMBIGUOUS_IMPLICIT_SESSION: &str = crate::rpc_reason::AMBIGUOUS_IMPLICIT_SESSION;
+    pub const SESSION_STOPPED: &str = crate::rpc_reason::SESSION_STOPPED;
+    pub const SCOPE_BROWSER_CONFLICT: &str = crate::rpc_reason::SCOPE_BROWSER_CONFLICT;
+    pub const SCOPE_INCOGNITO_CONFLICT: &str = crate::rpc_reason::SCOPE_INCOGNITO_CONFLICT;
+    pub const UNCERTAIN_PRIOR_EFFECT: &str = crate::rpc_reason::UNCERTAIN_PRIOR_EFFECT;
 }
 
 /// Per-code rendering metadata. The `summary` is what the CLI prints
@@ -245,6 +253,22 @@ pub fn info_for_error(code: ErrorCode, data: Option<&serde_json::Value>) -> Rend
         return base;
     };
     match (code, reason) {
+        (ErrorCode::Unsupported, "unsupported_feature") => RenderInfo {
+            summary: "a connected component does not support the requested feature",
+            hint: match data
+                .and_then(|data| data.get("component"))
+                .and_then(|value| value.as_str())
+            {
+                Some("daemon") => Some(bsk_protocol::compatibility::Peer::Daemon.upgrade_hint()),
+                Some("extension") => {
+                    Some(bsk_protocol::compatibility::Peer::Extension.upgrade_hint())
+                }
+                _ => Some(
+                    "Run `bsk status --json` for feature availability; update the component named in this error before retrying this feature",
+                ),
+            },
+            ..base
+        },
         (ErrorCode::NoBrowserConnected, "local_pairing_required") => RenderInfo {
             summary: "the extension needs local pairing",
             hint: Some(
@@ -294,6 +318,13 @@ pub fn info_for_error(code: ErrorCode, data: Option<&serde_json::Value>) -> Rend
             summary: "the browser did not become ready for native input",
             hint: Some(
                 "no click, key press or wheel input was sent; observe the page again before retrying",
+            ),
+            ..base
+        },
+        (_, "input_clock_unavailable") => RenderInfo {
+            summary: "the browser's native input clock could not be calibrated",
+            hint: Some(
+                "synchronize and inspect the application result before deciding again; do not replay an uncertain submission",
             ),
             ..base
         },
@@ -375,8 +406,50 @@ pub fn info_for_error(code: ErrorCode, data: Option<&serde_json::Value>) -> Rend
         },
         (_, "control_context_invalid" | "document_changed") => RenderInfo {
             summary: "the control context no longer belongs to the current document or control state",
-            hint: Some("synchronize this tab and reconsider the action using the current page"),
+            hint: Some(
+                "run `bsk sync` to synchronize this tab and reconsider the action using the current page",
+            ),
             ..base
+        },
+        (ErrorCode::NotFound, reason::NO_ACTIVE_SESSION) => RenderInfo {
+            summary: "no active session is bound to the current caller scope",
+            hint: Some(
+                "run `bsk open <url>` first to start a session and synchronize, or pass `--session <id>`",
+            ),
+            exit_code: base.exit_code,
+        },
+        (ErrorCode::InvalidParams, reason::AMBIGUOUS_IMPLICIT_SESSION) => RenderInfo {
+            summary: "active sessions exist in other scopes; refusing to hijack implicitly",
+            hint: Some(
+                "pass `--session <id>` (see `bsk session list`), set `BSK_SCOPE=<name>`, or run `bsk open --scope <name> <url>`",
+            ),
+            exit_code: base.exit_code,
+        },
+        (ErrorCode::NotFound, reason::SESSION_STOPPED) => RenderInfo {
+            summary: "the session previously bound to this scope has ended",
+            hint: Some("run `bsk open <url>` to start a fresh session in this scope"),
+            exit_code: base.exit_code,
+        },
+        (ErrorCode::InvalidParams, reason::SCOPE_BROWSER_CONFLICT) => RenderInfo {
+            summary: "the active session in this scope is bound to a different browser profile",
+            hint: Some(
+                "run `bsk close` first, or pass `--scope <new-scope>` to open another browser profile in parallel",
+            ),
+            exit_code: base.exit_code,
+        },
+        (ErrorCode::InvalidParams, reason::SCOPE_INCOGNITO_CONFLICT) => RenderInfo {
+            summary: "the active session in this scope has a different incognito mode",
+            hint: Some(
+                "run `bsk close` first, or pass `--scope <new-scope>` to run normal and incognito sessions in parallel",
+            ),
+            exit_code: base.exit_code,
+        },
+        (ErrorCode::PermissionDenied, reason::UNCERTAIN_PRIOR_EFFECT) => RenderInfo {
+            summary: "mutating action blocked because a prior action on this tab has an unconfirmed side effect",
+            hint: Some(
+                "run `bsk sync` to observe the current page state and auto-reconcile, or inspect with `bsk read` / `bsk network` and run `bsk ledger resolve`; do not blindly replay the prior action",
+            ),
+            exit_code: base.exit_code,
         },
         (_, "observation_required" | "observation_changed") => RenderInfo {
             summary: "this action needs an explicit current observation",
@@ -393,6 +466,13 @@ pub fn info_for_error(code: ErrorCode, data: Option<&serde_json::Value>) -> Rend
             summary: "the selected target is not currently actionable",
             hint: Some(
                 "inspect or wait for the target; unrelated page updates do not require a new control context",
+            ),
+            ..base
+        },
+        (_, reason::VIRTUAL_ROW_RECYCLED) => RenderInfo {
+            summary: "the target row was recycled in place and now belongs to a different record",
+            hint: Some(
+                "nothing was sent; run `bsk cooperate sync` (or `bsk observe`) to refresh row refs before acting on the intended record",
             ),
             ..base
         },
@@ -582,14 +662,21 @@ pub fn info_for_error(code: ErrorCode, data: Option<&serde_json::Value>) -> Rend
         (ErrorCode::InvalidParams, reason::TARGET_NOT_SELECT) => RenderInfo {
             summary: "target element is not a <select>",
             hint: Some(
-                "choose a native <select> ref or selector from the latest snapshot, or use `bsk click` / `bsk fill` for other controls",
+                "choose a native <select> ref or selector from the latest snapshot, or for custom ARIA dropdowns use `bsk click` on the combobox trigger first and then click the desired option",
             ),
             exit_code: base.exit_code,
         },
         (ErrorCode::InvalidParams, reason::OPTION_NOT_FOUND) => RenderInfo {
             summary: "option value not found in <select>",
             hint: Some(
-                "rerun `bsk snapshot` or `bsk get-html` to list valid option values, then pass them via `--value`",
+                "check the inline `[options: ...]` candidates in the VOM observation or rerun `bsk snapshot`, then pass a valid value or unique option label via `--value`",
+            ),
+            exit_code: base.exit_code,
+        },
+        (ErrorCode::InvalidParams, reason::OPTION_AMBIGUOUS) => RenderInfo {
+            summary: "option label matches multiple <select> options",
+            hint: Some(
+                "multiple <option> elements share that visible label; pass the exact unambiguous option value via `--value`",
             ),
             exit_code: base.exit_code,
         },
@@ -779,13 +866,16 @@ mod tests {
         // errors (exit 1).
         assert_eq!(exit_code_for(ErrorCode::UnknownMethod), 5);
         assert_eq!(exit_code_for(ErrorCode::VersionTooOld), 5);
+
+        assert_eq!(exit_code_for(ErrorCode::DialogPending), 6);
+        assert_eq!(exit_code_for(ErrorCode::PairingRequired), 1);
     }
 
     /// Every code must carry a non-empty summary; an empty `summary`
     /// would render `error: ` with nothing after it.
     #[test]
     fn every_code_has_a_summary() {
-        for code in EVERY_CODE {
+        for code in ErrorCode::ALL {
             let info = info_for(*code);
             assert!(
                 !info.summary.is_empty(),
@@ -800,30 +890,11 @@ mod tests {
     /// lands without thinking about UX.
     #[test]
     fn every_code_has_a_hint_today() {
-        for code in EVERY_CODE {
+        for code in ErrorCode::ALL {
             let info = info_for(*code);
             assert!(info.hint.is_some(), "hint missing for {code:?}");
         }
     }
-
-    /// Exhaustive list used by the table-driven assertions above. Kept
-    /// here (rather than in bsk-protocol) so a test failure shows up
-    /// next to the rendering data the test is guarding.
-    const EVERY_CODE: &[ErrorCode] = &[
-        ErrorCode::UnknownMethod,
-        ErrorCode::Unsupported,
-        ErrorCode::InvalidParams,
-        ErrorCode::NotFound,
-        ErrorCode::PermissionDenied,
-        ErrorCode::Timeout,
-        ErrorCode::CdpFailed,
-        ErrorCode::ProtocolError,
-        ErrorCode::Cancelled,
-        ErrorCode::UserAborted,
-        ErrorCode::VersionTooOld,
-        ErrorCode::MultipleBrowsersOnline,
-        ErrorCode::NoBrowserConnected,
-    ];
 
     #[test]
     fn fill_reasons_provide_recovery_without_changing_exit_codes() {
@@ -1113,6 +1184,22 @@ mod tests {
         let info = info_for_error(ErrorCode::InvalidParams, Some(&data));
         assert_eq!(info.summary, "option value not found in <select>");
         assert!(info.hint.unwrap().contains("--value"));
+    }
+
+    #[test]
+    fn option_ambiguous_and_virtual_row_recycled_provide_targeted_hints() {
+        let amb = serde_json::json!({ "reason": reason::OPTION_AMBIGUOUS });
+        let amb_info = info_for_error(ErrorCode::InvalidParams, Some(&amb));
+        assert_eq!(
+            amb_info.summary,
+            "option label matches multiple <select> options"
+        );
+        assert!(amb_info.hint.unwrap().contains("--value"));
+
+        let rec = serde_json::json!({ "reason": reason::VIRTUAL_ROW_RECYCLED });
+        let rec_info = info_for_error(ErrorCode::PermissionDenied, Some(&rec));
+        assert!(rec_info.summary.contains("recycled in place"));
+        assert!(rec_info.hint.unwrap().contains("cooperate sync"));
     }
 
     #[test]

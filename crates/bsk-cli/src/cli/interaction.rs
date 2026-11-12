@@ -18,7 +18,7 @@ use clap::{Args, ValueEnum};
 
 use crate::cli::business_rpc::ipc_timeout;
 use crate::cli::dialogs::print_dialog_summaries;
-use crate::cli::ensure_daemon::ensure_daemon;
+use crate::cli::ensure_daemon::ensure_daemon_optimistic as ensure_daemon;
 use crate::cli::error::{CliError, Format};
 use crate::cli::navigate::parse_timeout_ms;
 
@@ -124,7 +124,10 @@ pub struct ClickArgs {
     pub selector: Option<String>,
 
     #[arg(long)]
-    pub session: String,
+    pub session: Option<String>,
+
+    #[arg(long)]
+    pub scope: Option<String>,
 
     #[arg(long = "tab-id")]
     pub tab_id: Option<i64>,
@@ -150,7 +153,6 @@ pub struct ClickArgs {
 }
 
 pub fn dispatch_click(args: ClickArgs, format: Format) -> Result<(), CliError> {
-    let info = ensure_daemon().context("ensure daemon is running")?;
     let (ref_, selector) = split_target(
         args.target.clone(),
         args.ref_.clone(),
@@ -158,11 +160,13 @@ pub fn dispatch_click(args: ClickArgs, format: Format) -> Result<(), CliError> {
     )?;
     let modifiers = parse_modifiers(&args.modifiers)
         .map_err(|e| CliError::Local(anyhow::anyhow!("--modifiers: {e}")))?;
+    crate::cli::business_rpc::set_caller_scope(args.scope.clone());
+    let info = ensure_daemon().context("ensure daemon is running")?;
     let params = ClickParams {
         capture_id: args.capture_id.clone(),
         image_x: args.image_x,
         image_y: args.image_y,
-        session_id: args.session.clone(),
+        session_id: args.session.clone().unwrap_or_default(),
         ref_,
         selector,
         tab_id: args.tab_id,
@@ -221,7 +225,10 @@ pub struct HoverArgs {
     pub selector: Option<String>,
 
     #[arg(long)]
-    pub session: String,
+    pub session: Option<String>,
+
+    #[arg(long)]
+    pub scope: Option<String>,
 
     #[arg(long = "tab-id")]
     pub tab_id: Option<i64>,
@@ -239,7 +246,6 @@ pub struct HoverArgs {
 }
 
 pub fn dispatch_hover(args: HoverArgs, format: Format) -> Result<(), CliError> {
-    let info = ensure_daemon().context("ensure daemon is running")?;
     let (ref_, selector) = split_target(
         args.target.clone(),
         args.ref_.clone(),
@@ -247,8 +253,10 @@ pub fn dispatch_hover(args: HoverArgs, format: Format) -> Result<(), CliError> {
     )?;
     let modifiers = parse_modifiers(&args.modifiers)
         .map_err(|e| CliError::Local(anyhow::anyhow!("--modifiers: {e}")))?;
+    crate::cli::business_rpc::set_caller_scope(args.scope.clone());
+    let info = ensure_daemon().context("ensure daemon is running")?;
     let params = HoverParams {
-        session_id: args.session.clone(),
+        session_id: args.session.clone().unwrap_or_default(),
         ref_,
         selector,
         tab_id: args.tab_id,
@@ -304,7 +312,10 @@ pub struct FocusArgs {
     pub selector: Option<String>,
 
     #[arg(long)]
-    pub session: String,
+    pub session: Option<String>,
+
+    #[arg(long)]
+    pub scope: Option<String>,
 
     #[arg(long = "tab-id")]
     pub tab_id: Option<i64>,
@@ -314,10 +325,11 @@ pub struct FocusArgs {
 }
 
 pub fn dispatch_focus(args: FocusArgs, format: Format) -> Result<(), CliError> {
-    let info = ensure_daemon().context("ensure daemon is running")?;
     let (ref_, selector) = split_target(args.target, args.ref_, args.selector)?;
+    crate::cli::business_rpc::set_caller_scope(args.scope);
+    let info = ensure_daemon().context("ensure daemon is running")?;
     let params = FocusParams {
-        session_id: args.session,
+        session_id: args.session.unwrap_or_default(),
         ref_,
         selector,
         tab_id: args.tab_id,
@@ -361,7 +373,10 @@ pub struct BlurArgs {
     pub selector: Option<String>,
 
     #[arg(long)]
-    pub session: String,
+    pub session: Option<String>,
+
+    #[arg(long)]
+    pub scope: Option<String>,
 
     #[arg(long = "tab-id")]
     pub tab_id: Option<i64>,
@@ -371,10 +386,11 @@ pub struct BlurArgs {
 }
 
 pub fn dispatch_blur(args: BlurArgs, format: Format) -> Result<(), CliError> {
-    let info = ensure_daemon().context("ensure daemon is running")?;
     let (ref_, selector) = split_target(args.target, args.ref_, args.selector)?;
+    crate::cli::business_rpc::set_caller_scope(args.scope);
+    let info = ensure_daemon().context("ensure daemon is running")?;
     let params = BlurParams {
-        session_id: args.session,
+        session_id: args.session.unwrap_or_default(),
         ref_,
         selector,
         tab_id: args.tab_id,
@@ -427,7 +443,10 @@ pub struct FillArgs {
     pub selector: Option<String>,
 
     #[arg(long)]
-    pub session: String,
+    pub session: Option<String>,
+
+    #[arg(long)]
+    pub scope: Option<String>,
 
     #[arg(long = "tab-id")]
     pub tab_id: Option<i64>,
@@ -441,14 +460,15 @@ pub struct FillArgs {
 }
 
 pub fn dispatch_fill(args: FillArgs, format: Format) -> Result<(), CliError> {
-    let info = ensure_daemon().context("ensure daemon is running")?;
     let (ref_, selector) = split_target(
         args.target.clone(),
         args.ref_.clone(),
         args.selector.clone(),
     )?;
+    crate::cli::business_rpc::set_caller_scope(args.scope.clone());
+    let info = ensure_daemon().context("ensure daemon is running")?;
     let params = FillParams {
-        session_id: args.session.clone(),
+        session_id: args.session.clone().unwrap_or_default(),
         value: args.value.clone(),
         ref_,
         selector,
@@ -472,12 +492,7 @@ pub fn dispatch_fill(args: FillArgs, format: Format) -> Result<(), CliError> {
             );
         }
         Format::Human => {
-            let target =
-                format_used_target(reply.used_ref.as_deref(), reply.used_selector.as_deref());
-            println!(
-                "fill ok tab={} target={target} length={}",
-                reply.tab_id, reply.value_length
-            );
+            println!("{}", fill_summary(&reply));
             print_dialog_summaries(&reply.dialogs);
         }
     }
@@ -494,7 +509,10 @@ pub struct PressArgs {
     pub key: String,
 
     #[arg(long)]
-    pub session: String,
+    pub session: Option<String>,
+
+    #[arg(long)]
+    pub scope: Option<String>,
 
     #[arg(long = "tab-id")]
     pub tab_id: Option<i64>,
@@ -520,11 +538,12 @@ pub struct PressArgs {
 }
 
 pub fn dispatch_press(args: PressArgs, format: Format) -> Result<(), CliError> {
-    let info = ensure_daemon().context("ensure daemon is running")?;
     let modifiers = parse_modifiers(&args.modifiers)
         .map_err(|e| CliError::Local(anyhow::anyhow!("--modifiers: {e}")))?;
+    crate::cli::business_rpc::set_caller_scope(args.scope.clone());
+    let info = ensure_daemon().context("ensure daemon is running")?;
     let params = PressParams {
-        session_id: args.session.clone(),
+        session_id: args.session.clone().unwrap_or_default(),
         key: args.key.clone(),
         modifiers: if modifiers.is_empty() {
             None
@@ -597,7 +616,10 @@ pub struct SelectArgs {
     pub selector: Option<String>,
 
     #[arg(long)]
-    pub session: String,
+    pub session: Option<String>,
+
+    #[arg(long)]
+    pub scope: Option<String>,
 
     #[arg(long = "tab-id")]
     pub tab_id: Option<i64>,
@@ -607,14 +629,15 @@ pub struct SelectArgs {
 }
 
 pub fn dispatch_select(args: SelectArgs, format: Format) -> Result<(), CliError> {
-    let info = ensure_daemon().context("ensure daemon is running")?;
     let (ref_, selector) = split_target(
         args.target.clone(),
         args.ref_.clone(),
         args.selector.clone(),
     )?;
+    crate::cli::business_rpc::set_caller_scope(args.scope.clone());
+    let info = ensure_daemon().context("ensure daemon is running")?;
     let params = SelectParams {
-        session_id: args.session.clone(),
+        session_id: args.session.clone().unwrap_or_default(),
         values: args.values.clone(),
         ref_,
         selector,
@@ -651,6 +674,22 @@ pub fn dispatch_select(args: SelectArgs, format: Format) -> Result<(), CliError>
     Ok(())
 }
 
+/// Human fill receipt. A sensitive control reports `formatted` without its value.
+fn fill_summary(reply: &FillResult) -> String {
+    let target = format_used_target(reply.used_ref.as_deref(), reply.used_selector.as_deref());
+    let mut line = format!(
+        "fill ok tab={} target={target} length={}",
+        reply.tab_id, reply.value_length
+    );
+    if reply.formatted == Some(true) {
+        match reply.actual_value.as_deref() {
+            Some(actual) => line.push_str(&format!(" actual_value={actual:?}")),
+            None => line.push_str(" formatted=true"),
+        }
+    }
+    line
+}
+
 fn format_used_target(used_ref: Option<&str>, used_selector: Option<&str>) -> String {
     used_ref
         .map(|r| format!("@{r}"))
@@ -684,6 +723,32 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fill_summary_reports_formatting_without_a_sensitive_value() {
+        let reply = |actual_value: Option<&str>, formatted: Option<bool>| FillResult {
+            tab_id: 4,
+            used_ref: Some("e1".into()),
+            used_selector: None,
+            value_length: 6,
+            actual_value: actual_value.map(Into::into),
+            formatted,
+            dialogs: Vec::new(),
+        };
+        assert_eq!(
+            fill_summary(&reply(None, None)),
+            "fill ok tab=4 target=@e1 length=6"
+        );
+        assert_eq!(
+            fill_summary(&reply(Some("(555)"), Some(true))),
+            "fill ok tab=4 target=@e1 length=6 actual_value=\"(555)\""
+        );
+        // Password and card fields omit the value but still report the change.
+        assert_eq!(
+            fill_summary(&reply(None, Some(true))),
+            "fill ok tab=4 target=@e1 length=6 formatted=true"
+        );
+    }
 
     #[test]
     fn looks_like_ref_handles_both_forms() {
@@ -737,7 +802,7 @@ mod tests {
                 .expect("fill args should parse");
         assert_eq!(parsed.args.target.as_deref(), Some("@e138"));
         assert_eq!(parsed.args.value, "deepseek");
-        assert_eq!(parsed.args.session, "ohli");
+        assert_eq!(parsed.args.session.as_deref(), Some("ohli"));
     }
 
     #[test]
@@ -764,6 +829,6 @@ mod tests {
         .expect("select args should parse");
         assert_eq!(parsed.args.target.as_deref(), Some("@e138"));
         assert_eq!(parsed.args.values, vec!["us", "ca"]);
-        assert_eq!(parsed.args.session, "ohli");
+        assert_eq!(parsed.args.session.as_deref(), Some("ohli"));
     }
 }

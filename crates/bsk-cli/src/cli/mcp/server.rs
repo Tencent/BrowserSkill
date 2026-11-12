@@ -49,6 +49,7 @@ pub enum Daemon {
 
 struct Server {
     daemon: Daemon,
+    conn_scope: String,
     out: mpsc::UnboundedSender<Value>,
     calls: Mutex<HashMap<String, Arc<CallControl>>>,
 }
@@ -76,8 +77,11 @@ where
         }
         anyhow::Ok(())
     });
+    let nonce = uuid::Uuid::new_v4().simple().to_string();
+    let conn_scope = format!("mcp:{}:{}", std::process::id(), &nonce[..16]);
     let server = Arc::new(Server {
         daemon,
+        conn_scope,
         out,
         calls: Mutex::default(),
     });
@@ -233,7 +237,14 @@ impl Server {
         }
         let server = Arc::clone(self);
         tasks.spawn(async move {
-            let outcome = tools::call(&server.daemon, &control, &name, arguments).await;
+            let outcome = tools::call(
+                &server.daemon,
+                &control,
+                Some(&server.conn_scope),
+                &name,
+                arguments,
+            )
+            .await;
             server.calls.lock().unwrap().remove(&key);
             // A cancelled request gets no response.
             if !control.is_cancelled() {

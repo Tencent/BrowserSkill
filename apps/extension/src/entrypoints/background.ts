@@ -70,7 +70,7 @@ import { type RemoteEndpoint, remoteSocket } from "@/transport/remote-endpoint";
 import type { Transport } from "@/transport/transport";
 import { WSTransport } from "@/transport/ws-transport";
 import { attachVideoBridge } from "@/video/bridge";
-import { BrowserVideoHost } from "@/video/host";
+import { browserVideoHost } from "@/video/host";
 import { VideoManager } from "@/video/manager";
 import { VIDEO_OVERLAY } from "@/video/overlay";
 
@@ -173,7 +173,7 @@ export default defineBackground(() => {
   });
   const debug = new DebugManager(sessions, cdp, chrome.tabs, Date.now, new LocalDebugArchive());
   attachDebugBridge(sessions, debug);
-  const videoHost = new BrowserVideoHost();
+  const videoHost = browserVideoHost;
   let upgradeNotice: ReturnType<typeof attachDaemonUpgradeNotice> | undefined;
   const video = new VideoManager({
     sessions,

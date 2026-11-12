@@ -622,7 +622,10 @@ export class VideoManager {
     this.deps.changed?.();
   }
 
-  async rpc(params: VideoParams, signal?: AbortSignal): Promise<unknown> {
+  async rpc(
+    params: VideoParams,
+    signal?: AbortSignal,
+  ): Promise<import("@/transport/types").VideoResult> {
     const owner = this.deps.owner();
     if (params.action === "capabilities")
       return { version: VIDEO_VERSION, format: "mp4", audio: false, max_duration_ms: 600_000 };

@@ -134,7 +134,12 @@ function hoverStateExpression(): string {
       const style = getComputedStyle(el);
       const rect = el.getBoundingClientRect();
       if (rect.width <= 0 || rect.height <= 0) return;
-      if (style.display === "none" || style.visibility === "hidden" || style.opacity === "0") return;
+      if (
+        style.display === "none" ||
+        style.visibility === "hidden" ||
+        style.visibility === "collapse" ||
+        (Number.parseFloat(style.opacity || "1") < 0.05)
+      ) return;
       const text = String(
         el.getAttribute("aria-label") ||
         el.getAttribute("title") ||
