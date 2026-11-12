@@ -76,6 +76,7 @@ CLI、扩展和 DSH 插件可以分别发布，能否连接由协议兼容性决
   将自身输入误判成人工介入。校准在扩展的隐藏文档中进行，保留现有输入检查，并在派发前报告时钟故障
   （[#665](https://github.com/Tencent/BrowserSkill/issues/665)）。
 - `tool.record_start` 执行共享标签页归属、任务终止与人工持有检查，并在启动录制时使旧控制凭证失效；`tool.tab_return` 对本地会话和远程会话同样清理进行中的录制。
+- `navigate back` 和 `navigate forward` 在 Chrome 从往返缓存恢复历史记录时不再等待超时。恢复的文档已经加载完成，不会再发出新的加载生命周期事件，因此恢复提交即视为达到 `domcontentloaded` 和 `load`，并在恢复的文档上重新启用生命周期事件重放，使此前已空闲页面的 `networkidle` 等待也能正常完成（[#701](https://github.com/Tencent/BrowserSkill/issues/701)）。
 - daemon 关闭时保留 WebSocket 停止通知，避免接收循环尚未等待时丢失通知，导致 `daemon stop` 等待不结束。
 - 网站调试将 Agent 发起的上传和下载归入对应传输操作，不再把产生的文件变更和点击误记为人工输入。
 - upload、download、plan 和 step 的本地校验失败返回稳定的参数或文件错误码，并提供对应修复提示。上传源文件在连接 daemon 或暂存任何文件前完成检查。

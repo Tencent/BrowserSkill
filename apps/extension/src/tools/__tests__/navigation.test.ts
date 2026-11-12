@@ -177,9 +177,11 @@ function makeFakeCdp(opts?: {
     fireFrameNavigated(
       frameId = opts?.navigateFrameId ?? "frame-1",
       loaderId = opts?.navigateLoaderId ?? "loader-after",
+      type?: string,
     ) {
       const payload = {
         frame: { id: frameId, loaderId, url: opts?.finalUrl ?? "https://example.com/" },
+        ...(type ? { type } : {}),
       };
       for (const listener of [...events]) listener({ tabId: 4 }, "Page.frameNavigated", payload);
     },
@@ -559,6 +561,71 @@ describe("handleNavigateBack / Forward", () => {
     const navigateCall = fake.sent.find((c) => c.method === "Page.navigateToHistoryEntry");
     expect(navigateCall?.params).toEqual({ entryId: 11 });
     expect(res.previous_url).toBe("https://b.example/");
+  });
+
+  it.each([
+    "commit",
+    "domcontentloaded",
+    "load",
+  ] as const)("completes back at %s when Chrome restores the entry from the back/forward cache", async (waitUntil) => {
+    const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
+    await sm.start("aa11");
+    const fake = makeFakeCdp({ readyState: "complete", finalUrl: "https://a.example/" });
+    const navP = handleNavigateBack(
+      sm,
+      { session_id: "aa11", wait_until: waitUntil, timeout_ms: 1_000 },
+      { cdp: fake.cdp, tabsApi: fake.tabsApi },
+    );
+    await new Promise((r) => setTimeout(r, 5));
+    // A restored document reports only paint/idle phases, never a new load.
+    fake.fireFrameNavigated("frame-1", "loader-restored", "BackForwardCacheRestore");
+    const res = await navP;
+    if ("code" in res) throw new Error(`unexpected error: ${JSON.stringify(res)}`);
+    expect(res).toMatchObject({ reached: waitUntil, final_url: "https://a.example/" });
+    expect(fake.listeners.length).toBe(0);
+  });
+
+  it("re-enables lifecycle replay and waits for networkidle after a back/forward-cache restore", async () => {
+    const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
+    await sm.start("aa11");
+    const fake = makeFakeCdp({ readyState: "complete" });
+    const navP = handleNavigateBack(
+      sm,
+      { session_id: "aa11", wait_until: "networkidle", timeout_ms: 1_000 },
+      { cdp: fake.cdp, tabsApi: fake.tabsApi },
+    );
+    await new Promise((r) => setTimeout(r, 5));
+    const enablesBeforeRestore = fake.sent.filter(
+      (c) => c.method === "Page.setLifecycleEventsEnabled",
+    ).length;
+    fake.fireFrameNavigated("frame-1", "loader-restored", "BackForwardCacheRestore");
+    await new Promise((r) => setTimeout(r, 20));
+    expect(
+      fake.sent.filter((c) => c.method === "Page.setLifecycleEventsEnabled").length,
+    ).toBeGreaterThan(enablesBeforeRestore);
+    expect(fake.listeners.length).toBe(1);
+    fake.fireLifecycle("networkIdle", "frame-1", "loader-restored");
+    const res = await navP;
+    if ("code" in res) throw new Error(`unexpected error: ${JSON.stringify(res)}`);
+    expect(res.reached).toBe("networkidle");
+  });
+
+  it("does not treat an ordinary commit as a completed history load", async () => {
+    const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
+    await sm.start("aa11");
+    const fake = makeFakeCdp({ readyState: "complete" });
+    const res = await (async () => {
+      const navP = handleNavigateBack(
+        sm,
+        { session_id: "aa11", wait_until: "load", timeout_ms: 60 },
+        { cdp: fake.cdp, tabsApi: fake.tabsApi },
+      );
+      await new Promise((r) => setTimeout(r, 5));
+      fake.fireFrameNavigated("frame-1", "loader-after", "Navigation");
+      return navP;
+    })();
+    if ("code" in res) throw new Error(`unexpected error: ${JSON.stringify(res)}`);
+    expect(res.reached).toBe("timeout");
   });
 
   it("returns invalid_params when there is no previous history", async () => {
