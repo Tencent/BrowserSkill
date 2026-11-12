@@ -12,7 +12,10 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
 use super::error::{CliError, Format};
-use super::{TOOL_IPC_TIMEOUT, atomic_output, business_rpc, ensure_daemon::ensure_daemon};
+use super::{
+    TOOL_IPC_TIMEOUT, atomic_output, business_rpc,
+    ensure_daemon::ensure_daemon_optimistic as ensure_daemon,
+};
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
 pub enum Action {
@@ -32,7 +35,9 @@ pub struct ExtractArgs {
     #[arg(value_enum)]
     pub action: Action,
     #[arg(long)]
-    pub session: String,
+    pub session: Option<String>,
+    #[arg(long)]
+    pub scope: Option<String>,
     #[arg(long)]
     pub tab_id: Option<i64>,
     /// Unique CSS container selector in the top-level document.
@@ -125,7 +130,7 @@ fn params(args: &ExtractArgs) -> anyhow::Result<ExtractParams> {
             Action::Table => ExtractAction::Table,
             Action::List => ExtractAction::List,
         },
-        session_id: args.session.clone(),
+        session_id: args.session.clone().unwrap_or_default(),
         tab_id: args.tab_id,
         selector: args.selector.clone(),
         target_id: args.target.clone(),
@@ -154,6 +159,7 @@ pub fn dispatch(args: ExtractArgs, format: Format) -> Result<(), CliError> {
             preflight(&metadata_path(path), args.overwrite).map_err(CliError::Local)?;
         }
     }
+    business_rpc::set_caller_scope(args.scope.clone());
     let daemon = ensure_daemon().context("ensure daemon is running")?;
     let mut reply: ExtractResult = business_rpc::call(
         daemon.sock_path, "extract", Method::ToolExtract, Some(params), TOOL_IPC_TIMEOUT,

@@ -118,4 +118,95 @@ describe("semantic sibling context", () => {
       nearbyText: "DOM first DOM last",
     });
   });
+
+  it("extracts up to 10 native <select> options penetrating <optgroup> and omits them on sensitive selects", () => {
+    const optionNodes: CapturedNode[] = Array.from({ length: 11 }, (_, idx) => ({
+      ...dom(10 + idx, "option", `大区 ${idx + 1}`),
+      parentBackendNodeId: idx < 5 ? 3 : 4,
+      attrs: { value: `reg_${idx + 1}` },
+      ...(idx === 1 ? { checked: true } : { checked: false }),
+    }));
+    const resolved = resolveSemanticGraph(
+      graph([
+        dom(1, "form"),
+        { ...dom(2, "select"), parentBackendNodeId: 1, formValue: "reg_2" },
+        { ...dom(3, "optgroup"), parentBackendNodeId: 2, attrs: { label: "南方" } },
+        { ...dom(4, "optgroup"), parentBackendNodeId: 2, attrs: { label: "北方" } },
+        ...optionNodes,
+        {
+          ...dom(30, "select"),
+          parentBackendNodeId: 1,
+          attrs: { autocomplete: "cc-exp-month" },
+        },
+        { ...dom(31, "option", "01"), parentBackendNodeId: 30, attrs: { value: "01" } },
+      ]),
+    );
+    const selectVom = byBackend(resolved, 2);
+    expect(selectVom?.selectOptions).toHaveLength(10);
+    expect(selectVom?.selectOptionsTruncated).toBe(true);
+    expect(selectVom?.selectOptions?.[1]).toEqual({
+      value: "reg_2",
+      label: "大区 2",
+      selected: true,
+    });
+    expect(byBackend(resolved, 30)?.selectOptions).toBeUndefined();
+  });
+
+  it("computes distinguishing rowAnchor for table rows and virtual-row pools while ignoring timers and form rows", () => {
+    const vrows: CapturedNode[] = [];
+    for (let slot = 0; slot < 6; slot++) {
+      const rowId = 100 + slot * 10;
+      vrows.push(
+        { ...dom(rowId, "div"), parentBackendNodeId: 50, attrs: { class: "vrow" } },
+        {
+          ...dom(rowId + 1, "span", `TK-100${slot} | P1 | 网关续期`),
+          parentBackendNodeId: rowId,
+        },
+        { ...dom(rowId + 2, "button", "批准发布"), parentBackendNodeId: rowId },
+      );
+    }
+    const resolved = resolveSemanticGraph(
+      graph([
+        dom(1, "main"),
+        { ...dom(10, "table"), parentBackendNodeId: 1 },
+        { ...dom(11, "tr"), parentBackendNodeId: 10 },
+        { ...dom(12, "td", "00:15"), parentBackendNodeId: 11 },
+        { ...dom(13, "td", "ORD-8841"), parentBackendNodeId: 11 },
+        { ...dom(14, "td"), parentBackendNodeId: 11 },
+        { ...dom(15, "button", "退款"), parentBackendNodeId: 14 },
+        { ...dom(50, "div"), parentBackendNodeId: 1, attrs: { id: "pool" } },
+        ...vrows,
+      ]),
+    );
+    expect(byBackend(resolved, 15)?.rowAnchor).toBe("ORD-8841");
+    expect(byBackend(resolved, 102)?.rowAnchor).toBe("TK-1000 | P1 | 网关续期");
+  });
+
+  it("skips volatile progress percentages, stops at shadow boundaries, and keeps snapshot/in-page rowAnchor spec in parity", () => {
+    const resolved = resolveSemanticGraph(
+      graph([
+        dom(1, "main"),
+        { ...dom(10, "table"), parentBackendNodeId: 1 },
+        { ...dom(11, "tr"), parentBackendNodeId: 10 },
+        // Selection cell with empty checkbox wrapper (after comment-node stripping in snapshot.ts)
+        { ...dom(12, "td"), parentBackendNodeId: 11 },
+        { ...dom(13, "label"), parentBackendNodeId: 12, attrs: { class: "el-checkbox" } },
+        { ...dom(14, "span"), parentBackendNodeId: 13 },
+        // Volatile progress percentage cell ("45%") skipped in favor of stable filename
+        { ...dom(15, "td", "45%"), parentBackendNodeId: 11 },
+        { ...dom(16, "td", "settlement-2026Q4.csv"), parentBackendNodeId: 11 },
+        { ...dom(17, "td"), parentBackendNodeId: 11 },
+        { ...dom(18, "button", "导出"), parentBackendNodeId: 17 },
+        // Button inside a ShadowRoot (#document-fragment, nodeType=11) must NOT leak across host <tr>
+        { ...dom(20, "tr"), parentBackendNodeId: 10 },
+        { ...dom(21, "td", "HOST-ROW-99"), parentBackendNodeId: 20 },
+        { ...dom(22, "td"), parentBackendNodeId: 20 },
+        { ...dom(23, "x-widget"), parentBackendNodeId: 22 },
+        { ...dom(24, "#document-fragment"), parentBackendNodeId: 23, nodeType: 11 } as CapturedNode,
+        { ...dom(25, "button", "内部操作"), parentBackendNodeId: 24 },
+      ]),
+    );
+    expect(byBackend(resolved, 18)?.rowAnchor).toBe("settlement-2026Q4.csv");
+    expect(byBackend(resolved, 25)?.rowAnchor).toBeUndefined();
+  });
 });

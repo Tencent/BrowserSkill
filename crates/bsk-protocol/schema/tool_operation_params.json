@@ -1,11 +1,5 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "title": "OperationParams",
-  "type": "object",
-  "required": [
-    "operation_id",
-    "session_id"
-  ],
   "properties": {
     "operation_id": {
       "type": "string"
@@ -14,12 +8,18 @@
       "type": "string"
     },
     "wait_ms": {
+      "format": "uint32",
+      "minimum": 0,
       "type": [
         "integer",
         "null"
-      ],
-      "format": "uint32",
-      "minimum": 0.0
+      ]
     }
-  }
+  },
+  "required": [
+    "session_id",
+    "operation_id"
+  ],
+  "title": "OperationParams",
+  "type": "object"
 }

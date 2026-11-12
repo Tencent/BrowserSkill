@@ -1,26 +1,26 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "title": "WindowResizeResult",
-  "type": "object",
-  "required": [
-    "height",
-    "width",
-    "window_id"
-  ],
   "properties": {
     "height": {
-      "type": "integer",
       "format": "uint32",
-      "minimum": 0.0
+      "minimum": 0,
+      "type": "integer"
     },
     "width": {
-      "type": "integer",
       "format": "uint32",
-      "minimum": 0.0
+      "minimum": 0,
+      "type": "integer"
     },
     "window_id": {
-      "type": "integer",
-      "format": "int64"
+      "format": "int64",
+      "type": "integer"
     }
-  }
+  },
+  "required": [
+    "window_id",
+    "width",
+    "height"
+  ],
+  "title": "WindowResizeResult",
+  "type": "object"
 }

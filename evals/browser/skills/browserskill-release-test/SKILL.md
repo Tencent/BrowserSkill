@@ -1,6 +1,6 @@
 ---
 name: browserskill-release-test
-description: 使用 Bsk 执行 BrowserSkill 的 PR 前可选端到端自测、发版全量测评与多轮 Benchmark：验证当前分支或指定候选构建，覆盖复杂 HTML、边缘场景、八大真实公网网站（含轮播、电商、视频网站、论坛社区、文档与 SPA）及全部动态发现的 CLI 命令（含 bsk plan、bsk recipe、bsk read 等），保存逐步证据并统计运行成功率、交互轮次、动作压缩比与耗时分布。不用于普通网页浏览。
+description: 使用 Bsk 执行 BrowserSkill 的 PR 前可选端到端自测、发版全量测评与多轮 Benchmark：验证当前分支或指定候选构建，覆盖对抗级高仿真本地靶场（高密度 DOM、三表联动复杂表单、三层嵌套 Shadow DOM 与同/跨源嵌套 iframe、H5 原生 video/audio 双轨演播室、现代 SPA/真实 bfcache/5000行虚拟滚动/oklch 与隐写剥离）、边缘场景、八大真实公网网站及全部动态发现的 CLI 命令，保存逐步证据并统计运行成功率、交互轮次、动作压缩比与耗时分布。不用于普通网页浏览。
 ---
 
 # BrowserSkill 发版前测试与真实场景 Benchmark
@@ -23,15 +23,15 @@ description: 使用 Bsk 执行 BrowserSkill 的 PR 前可选端到端自测、�
   - `bsk plan`：验证单次 sync 后多步表单/级联控件/步骤级 `expect`/内嵌 `wait-for-element`/`--until-visible` 的单轮次批量执行，以及中段 `expect` 失败、等待超时、无目标动作位置约束的精确停机（`stopped`、`not_run`、`effect_state`）。
   - `bsk recipe`（测试环境默认由 `release_audit.py` 开启 `BSK_RECIPES=1` 以同时覆盖 CLI 与 MCP `bsk_recipe`）：验证 `draft -> save -> approve -> list -> show -> run -> rm` 全生命周期、良性页面漂移（`ids/order/late/popup/rerender`）下的零模型轮次回放、多 `segments` 跨页执行，以及语义漂移下的安全交接（`status: "handoff"`，连续 3 次同位偏离标为 `stale`）与高风险提交步骤/降级未审批拒止（`commit` step 拒绝保存、`approval_required` 与非终端 `approval_needs_person` 拒止）。
   - `bsk read`：验证零 JS 注入的有界 DOM 读取（`--selector`、`--ref`、`--fields-json`、`--max-nodes`、`--max-bytes`）。
-  - 边缘场景：覆盖虚拟列表视口卸载与行回收、双层叠加弹窗遮罩（`@layers` 逐层关闭）、富文本编辑器根节点与内部子节点填充边界、同文档 `pushState` 路由切换竞态（其中预期非零退出的负例记录按合同单列归入对应 `NEG-*` 用例）。
+  - 边缘与对抗靶场（21 个聚焦的 `ARENA-*` 场景，每个只验证一类能力，失败可直接定位）：联合申报表单（`/arena-joint-forms`：Form A 级联/敏感输入/延迟焦点、Form B/C 权重配平/跨表精算/富文本根/拖拽/上传/抽表、端到端提交与门禁下载，以及只读/禁用/非编辑根填充、禁用 option 选择、未提交下载三个负例）；Shadow DOM 与 iframe（`/arena-shadow-iframe`：三层 Open Shadow 穿透、Closed Shadow 视觉兜底、`127.0.0.1 -> localhost -> 127.0.0.1` 跨源再入 iframe 联邦、子帧局部重载隔离）；原生媒体（`/arena-media-studio`：视频传输控制、WebVTT 字幕切换与 Canvas 帧采样、音频与节目单分开测）；现代 SPA（`/arena-modern-spa-grid`：水合替换与 pushState、`no-cache` 下的真实 bfcache 往返、650ms 延迟导航/慢文档/跨源 302/无 Content-Length 流式下载、`oklch()`/渐变字保留与隐藏文本诱饵剥离、密码与 `autocomplete=one-time-code` 跨通道脱敏且普通字段不过度脱敏、键控虚拟表不误报、`?mega=1` 大页面复用/增量、`?vgrid=pool` 滚动槽位复用负例）。预期非零退出的负例记录按合同单列归入对应 `NEG-*` / `ARENA-NEG-*` 用例；`ARENA-NEG-SELECT-DISABLED-OPTION` 是已知产品缺口，修复前如实记 failed。
 - 人机接管、借用、录制遵守实际 Automation 设置；不改设置绕过确认，不伪造真人输入。缺人工协作、登录、验证码、网络限制或能力不可用均记 blocked/unverified，不能跳过后声称 100%。继续能独立完成的其他项目。
 - 只操作本轮自建/明确借用的标签和 session。daemon 生命周期/配对只在独立 admin runtime 和端口测试；不得重启共享 daemon。公网仅公开浏览，不购买、发消息、发弹幕、点赞投币、发帖回帖、发布内容或提交销售线索。
 - 意外失败后先查实际副作用，禁止盲重放。修复/重试成功保留首次失败，该轮仍不能放行。文档明确的 `dialog_pending` 是可恢复的中间状态，必须结束原 operation，不能重复触发动作。
 
 ## 执行
 
-1. **建立候选与清单。** 读 [candidate-setup.md](references/candidate-setup.md)；以当前 CLI 的递归帮助（含隐藏的实验子命令树 `bsk recipe`）发现命令及枚举动作，不能沿用旧版本固定数量。读 [evidence-contract.md](references/evidence-contract.md)，运行 `scripts/release_audit.py init` 生成全命令用例及 [scenarios.json](references/scenarios.json) 的全部 90 个必测场景。帮助只算发现，不算操作覆盖。
-2. **搭建本轮合成页面。** init 会复制 assets（含 `workbench`、`plan-recipe-lab`、`video-portal`、`forum-hub`、`edgecases`、`extra`、`carousel`、`live-update` 等）到全新 RUN；用 `scripts/serve.py --root RUN/fixtures --port PORT` 启动 loopback 服务器。每轮重新建立事件、上传和输出文件，不能复制旧通过记录。
+1. **建立候选与清单。** 读 [candidate-setup.md](references/candidate-setup.md)；以当前 CLI 的递归帮助（含隐藏的实验子命令树 `bsk recipe`）发现命令及枚举动作，不能沿用旧版本固定数量。读 [evidence-contract.md](references/evidence-contract.md)，运行 `scripts/release_audit.py init` 生成全命令用例及 [scenarios.json](references/scenarios.json) 的全部 111 个必测场景。帮助只算发现，不算操作覆盖。
+2. **搭建本轮合成页面。** init 会复制 assets（含高复杂度对抗靶场 `arena-joint-forms`、`arena-shadow-iframe`、`arena-frame-outer`、`arena-frame-inner`、`arena-media-studio`、`arena-modern-spa-grid`、`arena-bfcache-detail` 以及 `workbench`、`plan-recipe-lab`、`video-portal`、`forum-hub`、`edgecases`、`extra`、`carousel`、`live-update` 等）到全新 RUN；用 `scripts/serve.py --root RUN/fixtures --port PORT` 启动 loopback 服务器。每轮重新建立事件、上传和输出文件，不能复制旧通过记录。
 3. **逐步操作并检查实际结果。** 读 [command-recipes.md](references/command-recipes.md)。每秒变化页及轮播页另按 [dynamic-pages.md](references/dynamic-pages.md) 测试 evaluate/read/wheel。每次 Bsk 调用通过 recorder，读取原始输出后再构造下一条命令；session start 和依赖它的命令分开。每项检查 DOM/业务事件/目标记录/文件内容等 oracle，不能仅看 exit 0。MCP 通道同样使用候选 `bsk mcp`，保留协议输入输出和逐工具（含 `bsk_recipe`）检查。
 4. **完成八个公网站点实战。** 读 [public-sites.md](references/public-sites.md)：
    - **轮播与电商**：巨量引擎（`oceanengine.com`）、淘宝（`taobao.com`）；

@@ -1,129 +1,46 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "title": "EvaluateParams",
-  "type": "object",
-  "required": [
-    "expression",
-    "session_id"
-  ],
-  "properties": {
-    "await_promise": {
-      "description": "Await the expression when it resolves to a Promise (CDP `Runtime.evaluate(awaitPromise=...)`). Defaults to `true`.",
-      "type": [
-        "boolean",
-        "null"
-      ]
-    },
-    "context_id": {
-      "description": "Context actually returned by sync. Reusable for target-policy DOM actions; strict policy consumes it after one action. Never fill it from cached state.",
-      "type": "string"
-    },
-    "depends_on": {
-      "description": "Strict policy only: observed decision regions. Target policy requires exact business facts in expect; regions cannot be translated to facts automatically.",
-      "type": "array",
-      "items": {
-        "type": "string"
-      },
-      "maxItems": 16
-    },
-    "expect": {
-      "description": "Literal conditions checked before input. Selectors search the main document; use observed refs for iframe/shadow-root targets. Text includes all whitespace.",
-      "type": "array",
-      "items": {
-        "$ref": "#/definitions/ActionExpectation"
-      },
-      "maxItems": 16
-    },
-    "expression": {
-      "type": "string"
-    },
-    "observation_id": {
-      "description": "Sync's single-use baseline for untargeted/visual actions under target policy, including untargeted keys and displacement-only drags. Drags with a target ref/selector need only context_id. A script needs it only when it states no expect facts; passing both checks the whole page as well. Strict-policy drag instead accepts its legacy ref-map observation token.",
-      "type": [
-        "string",
-        "null"
-      ]
-    },
-    "return_by_value": {
-      "description": "Ask CDP to serialise the result by value (vs. returning a `RemoteObject` id we cannot use). Defaults to `true`.",
-      "type": [
-        "boolean",
-        "null"
-      ]
-    },
-    "session_id": {
-      "type": "string"
-    },
-    "tab_id": {
-      "description": "Target tab. Defaults to the Agent Window's currently active tab.",
-      "type": [
-        "integer",
-        "null"
-      ],
-      "format": "int64"
-    },
-    "timeout_ms": {
-      "description": "Hard upper bound on the evaluation. Defaults to 30s.",
-      "type": [
-        "integer",
-        "null"
-      ],
-      "format": "uint32",
-      "minimum": 1.0
-    },
-    "unverified": {
-      "description": "Run without comparing the page with any observation. Control authority, document identity and tab ownership are still enforced. Cannot be combined with `expect`, `depends_on` or `observation_id`. Prefer stating what the script relies on; use this only when that cannot be stated.",
-      "type": [
-        "boolean",
-        "null"
-      ]
-    }
-  },
   "definitions": {
     "ActionExpectation": {
+      "additionalProperties": false,
       "description": "Caller-supplied facts checked immediately before starting an action.",
-      "type": "object",
-      "required": [
-        "equals",
-        "field",
-        "target"
-      ],
       "properties": {
         "attribute": {
           "description": "Required only for field=attribute, measured in Unicode code points.",
-          "type": "string",
           "maxLength": 256,
-          "minLength": 1
+          "minLength": 1,
+          "type": "string"
         },
         "equals": {
-          "description": "text/value require a string; checked/exists require a boolean; attribute accepts a string or null for absence. Text is exact textContent.",
-          "allOf": [
-            {
-              "$ref": "#/definitions/ExpectedValue"
-            }
-          ]
+          "$ref": "#/definitions/ExpectedValue",
+          "description": "text/value require a string; checked/exists require a boolean;\nattribute accepts a string or null for absence. Text is exact textContent."
         },
         "field": {
           "$ref": "#/definitions/ExpectationField"
         },
         "target": {
           "description": "Observed ref or main-document CSS selector, measured in Unicode code points.",
-          "type": "string",
           "maxLength": 1024,
-          "minLength": 1
+          "minLength": 1,
+          "type": "string"
         }
       },
-      "additionalProperties": false
+      "required": [
+        "target",
+        "field",
+        "equals"
+      ],
+      "type": "object"
     },
     "ExpectationField": {
-      "type": "string",
       "enum": [
         "text",
         "value",
         "checked",
         "attribute",
         "exists"
-      ]
+      ],
+      "type": "string"
     },
     "ExpectedValue": {
       "anyOf": [
@@ -138,5 +55,84 @@
         }
       ]
     }
-  }
+  },
+  "properties": {
+    "await_promise": {
+      "description": "Await the expression when it resolves to a Promise (CDP\n`Runtime.evaluate(awaitPromise=...)`). Defaults to `true`.",
+      "type": [
+        "boolean",
+        "null"
+      ]
+    },
+    "context_id": {
+      "description": "Context actually returned by sync. Reusable for target-policy DOM actions;\nstrict policy consumes it after one action. Never fill it from cached state.",
+      "type": "string"
+    },
+    "depends_on": {
+      "description": "Strict policy only: observed decision regions. Target policy requires exact\nbusiness facts in expect; regions cannot be translated to facts automatically.",
+      "items": {
+        "type": "string"
+      },
+      "maxItems": 16,
+      "type": "array"
+    },
+    "expect": {
+      "description": "Literal conditions checked before input. Selectors search the main document;\nuse observed refs for iframe/shadow-root targets. Text includes all whitespace.",
+      "items": {
+        "$ref": "#/definitions/ActionExpectation"
+      },
+      "maxItems": 16,
+      "type": "array"
+    },
+    "expression": {
+      "type": "string"
+    },
+    "observation_id": {
+      "description": "Sync's single-use baseline for untargeted/visual actions under target policy,\nincluding untargeted keys and displacement-only drags. Drags with a\ntarget ref/selector need only context_id. A script needs it only when it\nstates no expect facts; passing both checks the whole page as well.\nStrict-policy drag instead accepts its legacy ref-map observation token.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "return_by_value": {
+      "description": "Ask CDP to serialise the result by value (vs. returning a\n`RemoteObject` id we cannot use). Defaults to `true`.",
+      "type": [
+        "boolean",
+        "null"
+      ]
+    },
+    "session_id": {
+      "type": "string"
+    },
+    "tab_id": {
+      "description": "Target tab. Defaults to the Agent Window's currently active tab.",
+      "format": "int64",
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "timeout_ms": {
+      "description": "Hard upper bound on the evaluation. Defaults to 30s.",
+      "format": "uint32",
+      "minimum": 1,
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "unverified": {
+      "description": "Run without comparing the page with any observation. Control authority,\ndocument identity and tab ownership are still enforced. Cannot be\ncombined with `expect`, `depends_on` or `observation_id`. Prefer stating\nwhat the script relies on; use this only when that cannot be stated.",
+      "type": [
+        "boolean",
+        "null"
+      ]
+    }
+  },
+  "required": [
+    "session_id",
+    "expression"
+  ],
+  "title": "EvaluateParams",
+  "type": "object"
 }

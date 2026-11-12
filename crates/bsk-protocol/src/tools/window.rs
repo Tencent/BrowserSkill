@@ -8,6 +8,9 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct WindowResizeParams {
     pub session_id: String,
+    /// Optional target tab bound by cooperation before resizing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tab_id: Option<i64>,
     /// New Agent Window outer width in CSS pixels (100..=7680).
     pub width: u32,
     /// New Agent Window outer height in CSS pixels (100..=7680).

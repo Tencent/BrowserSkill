@@ -50,6 +50,21 @@ pub(crate) fn read(path: &Path) -> anyhow::Result<Value> {
 
 /// Reuse only an explicitly supplied, exact unchanged predecessor. Never rebase an action.
 pub(crate) fn attach(reply: &mut Value, session: &str, baseline: Option<&Value>) {
+    let resolved_session = if session.trim().is_empty() {
+        reply
+            .pointer("/state/session_id")
+            .and_then(Value::as_str)
+            .or_else(|| {
+                reply
+                    .pointer("/_scope_meta/session_id")
+                    .and_then(Value::as_str)
+            })
+            .unwrap_or(session)
+            .to_owned()
+    } else {
+        session.to_owned()
+    };
+    let session = resolved_session.as_str();
     if reply.get("observation").is_some() {
         reply["observation_origin"] = json!({"kind":"capture","session_id":session,
             "capture_context_id":reply["context_id"],"payload_sha256":digest(&reply["observation"])});

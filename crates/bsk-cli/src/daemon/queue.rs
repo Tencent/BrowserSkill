@@ -50,6 +50,7 @@ use super::abort::AbortToken;
 use super::browsers::BrowserRegistry;
 use super::inflight::{PromoteOutcome, ToolInflightEntry};
 use super::sessions::{SessionId, SessionRegistry};
+use super::tool_policy::{Outcome, execution_policy};
 
 /// Bounded queue capacity per session. Picked per design §5 ("tokio
 /// mpsc channel(64)"). A queue overflowing this many in-flight jobs
@@ -370,9 +371,7 @@ impl ToolQueueRegistry {
             queue_state.active = Some(DebugActivity {
                 state: "running".into(),
                 command_id: inflight.as_ref().map(|entry| entry.cli_rpc_id.clone()),
-                method: serde_json::to_value(&method)
-                    .ok()
-                    .and_then(|value| value.as_str().map(str::to_owned)),
+                method: Some(method.wire_name().to_owned()),
                 started_at: Some(epoch_ms()),
                 elapsed_ms: Some(0),
                 wait_complete: None,
@@ -1096,7 +1095,10 @@ fn not_dispatched_error(
     dispatched: Option<Result<oneshot::Receiver<ResponseFrame>, super::browsers::SendError>>,
 ) -> RpcError {
     match dispatched {
-        Some(Err(super::browsers::SendError::Terminated(cause))) => cause,
+        Some(Err(
+            super::browsers::SendError::Terminated(cause)
+            | super::browsers::SendError::UnsupportedFeature(cause),
+        )) => cause,
         _ => RpcError {
             code: ErrorCode::ProtocolError,
             message: "browser sink closed before request was queued".into(),
@@ -1106,24 +1108,7 @@ fn not_dispatched_error(
 }
 
 fn is_effect_aware_action(method: &Method) -> bool {
-    matches!(
-        method,
-        Method::ToolClick
-            | Method::ToolPress
-            | Method::ToolWheel
-            | Method::ToolDrag
-            | Method::ToolFill
-            | Method::ToolSelect
-            | Method::ToolFocus
-            | Method::ToolBlur
-            | Method::ToolHover
-            | Method::ToolScrollTo
-            | Method::ToolEvaluate
-            | Method::ToolNavigate
-            | Method::ToolNavigateBack
-            | Method::ToolNavigateForward
-            | Method::ToolReload
-    )
+    execution_policy(method).outcome == Outcome::EffectAwareAction
 }
 
 // Preserve the extension's knowledge of whether input was sent. A missing
@@ -1168,11 +1153,7 @@ fn input_effect_data(method: &Method, response: Option<&ResponseBody>, phase: &s
 // deadlines cannot account for transit delays. Keep the queue held for cleanup.
 // Human interaction deadlines also dismiss their pending UI before releasing the queue.
 fn waits_for_deadline_cleanup(method: &Method) -> bool {
-    matches!(
-        method,
-        Method::ToolScreenshotFullPage | Method::ToolTabBorrow | Method::ToolRequestHelp
-    ) || is_effect_aware_action(method)
-        || is_effect_aware_transfer(method)
+    execution_policy(method).cancel_at_deadline
 }
 
 fn unknown_borrow_error(code: ErrorCode) -> RpcError {
@@ -1188,7 +1169,7 @@ fn unknown_borrow_error(code: ErrorCode) -> RpcError {
 }
 
 fn is_effect_aware_transfer(method: &Method) -> bool {
-    matches!(method, Method::ToolUpload | Method::ToolDownload)
+    execution_policy(method).outcome == Outcome::FileTransfer
 }
 
 fn transfer_effect(err: &RpcError) -> Option<&str> {

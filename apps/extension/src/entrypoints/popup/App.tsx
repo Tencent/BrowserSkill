@@ -3,7 +3,7 @@ import { Badge, Button, Input, Label } from "@browser-skill/ui";
 import { RiArrowLeftLine, RiArrowRightSLine, RiCheckLine, RiFileCopyLine } from "@remixicon/react";
 import { type ChangeEvent, useEffect, useState } from "react";
 import { AuditPanel } from "@/components/audit-panel";
-import { compareProtocol } from "@/lib/semver";
+import { supportsFeature } from "@/transport/compatibility";
 import { PROTOCOL_VERSION } from "@/transport/handshake";
 import functionIconUrl from "../../../assets/function.svg";
 import { BrowserProfile } from "./browser-profile";
@@ -87,8 +87,8 @@ export function App() {
       : null;
   const daemonVersion = snapshot.handshake?.version ?? daemonUpgrade?.daemonVersion ?? "—";
   const daemonProtocol = snapshot.handshake?.protocol_version ?? "—";
-  const interactionProtocolOrder = compareProtocol(daemonProtocol, "1.3");
-  const legacyInteraction = interactionProtocolOrder !== null && interactionProtocolOrder < 0;
+  const legacyInteraction =
+    connectionLive && !supportsFeature("interaction_policy", "daemon", daemonProtocol);
   const extensionVersion = snapshot.extensionVersion || "—";
   const instanceId = snapshot.instanceId || "—";
 

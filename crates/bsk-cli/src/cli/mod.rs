@@ -6,6 +6,7 @@ mod atomic_output;
 pub mod browser_wait;
 pub mod browsers;
 pub mod business_rpc;
+pub(crate) mod compatibility;
 pub mod console;
 pub mod cooperate;
 pub mod daemon;
@@ -25,6 +26,8 @@ pub mod human_loop;
 pub mod install_skill;
 pub mod interaction;
 pub(crate) mod interaction_policy;
+pub mod ledger;
+pub mod lifecycle;
 pub mod logs;
 pub mod mcp;
 pub mod navigate;
@@ -89,6 +92,9 @@ pub const TOOL_IPC_TIMEOUT: Duration = Duration::from_secs(35);
 /// Global flags shared by every subcommand.
 #[derive(Debug, Clone, Args, Default)]
 pub struct GlobalFlags {
+    /// Explicit caller scope name for multi-agent session isolation.
+    #[arg(long)]
+    pub scope: Option<String>,
     /// Control context returned by cooperate sync. Required for shared-tab actions.
     #[arg(long, global = true)]
     pub context: Option<String>,
@@ -136,6 +142,14 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
+    /// Start or reuse a scoped session, navigate to a URL, and return a settled VOM snapshot.
+    Open(lifecycle::OpenArgs),
+    /// Synchronize the active tab's VOM snapshot and refresh its short context alias.
+    Sync(lifecycle::SyncArgs),
+    /// Stop the active session, return borrowed tabs, and detach the debugger immediately.
+    Close(lifecycle::CloseArgs),
+    /// Inspect or manually reconcile pending `UNKNOWN` actions in the Intent WAL.
+    Ledger(ledger::LedgerCmd),
     /// Decide native JavaScript dialogs (alert, confirm, prompt, beforeunload).
     Dialog(dialog_control::DialogCmd),
     /// Retrieve or cancel the original operation suspended by a native dialog.

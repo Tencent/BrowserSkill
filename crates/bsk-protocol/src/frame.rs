@@ -2,6 +2,7 @@
 
 use std::fmt;
 
+use schemars::JsonSchema;
 use serde::de::{self, MapAccess, Visitor};
 use serde::ser::SerializeStruct;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -38,7 +39,7 @@ pub struct EventFrame {
     pub payload: serde_json::Value,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 pub enum EventKind {
     #[serde(rename = "audit.context")]
     AuditContext,
@@ -67,6 +68,36 @@ pub enum EventKind {
     BrowserDisconnected,
     #[serde(rename = "browser.connected")]
     BrowserConnected,
+}
+
+impl EventKind {
+    pub const ALL: &'static [Self] = &[
+        Self::AuditContext,
+        Self::DialogChanged,
+        Self::SystemHeartbeat,
+        Self::SessionActivity,
+        Self::SessionWindowClosed,
+        Self::SessionEnded,
+        Self::SessionUserInterrupt,
+        Self::SessionInteractionChanged,
+        Self::BrowserDisconnected,
+        Self::BrowserConnected,
+    ];
+
+    pub const fn wire_name(&self) -> &'static str {
+        match self {
+            Self::AuditContext => "audit.context",
+            Self::DialogChanged => "dialog.changed",
+            Self::SystemHeartbeat => "system.heartbeat",
+            Self::SessionActivity => "session.activity",
+            Self::SessionWindowClosed => "session.window_closed",
+            Self::SessionEnded => "session.ended",
+            Self::SessionUserInterrupt => "session.user_interrupt",
+            Self::SessionInteractionChanged => "session.interaction_changed",
+            Self::BrowserDisconnected => "browser.disconnected",
+            Self::BrowserConnected => "browser.connected",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -307,6 +338,18 @@ mod tests {
         let frame: Frame = serde_json::from_value(wire.clone()).unwrap();
         assert!(matches!(&frame, Frame::Event(event) if event.event == EventKind::SessionEnded));
         assert_eq!(serde_json::to_value(frame).unwrap(), wire);
+    }
+
+    #[test]
+    fn event_kind_all_matches_wire_names_uniquely() {
+        let mut seen = std::collections::HashSet::new();
+        for &kind in EventKind::ALL {
+            assert!(seen.insert(kind), "duplicate EventKind in ALL: {kind:?}");
+            assert_eq!(
+                serde_json::to_value(kind).unwrap(),
+                serde_json::Value::String(kind.wire_name().to_owned()),
+            );
+        }
     }
 
     #[test]

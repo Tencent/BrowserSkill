@@ -1,20 +1,22 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "title": "PendingJavaScriptDialog",
-  "type": "object",
-  "required": [
-    "decision_deadline",
-    "id",
-    "message",
-    "sequence",
-    "tab_id",
-    "type"
-  ],
+  "definitions": {
+    "JavaScriptDialogType": {
+      "description": "Native JS dialog kind reported by CDP.",
+      "enum": [
+        "alert",
+        "confirm",
+        "prompt",
+        "beforeunload"
+      ],
+      "type": "string"
+    }
+  },
   "properties": {
     "decision_deadline": {
-      "type": "integer",
       "format": "uint64",
-      "minimum": 0.0
+      "minimum": 0,
+      "type": "integer"
     },
     "default_prompt": {
       "type": [
@@ -29,13 +31,13 @@
       "type": "string"
     },
     "sequence": {
-      "type": "integer",
       "format": "uint64",
-      "minimum": 0.0
+      "minimum": 0,
+      "type": "integer"
     },
     "tab_id": {
-      "type": "integer",
-      "format": "int64"
+      "format": "int64",
+      "type": "integer"
     },
     "type": {
       "$ref": "#/definitions/JavaScriptDialogType"
@@ -47,16 +49,14 @@
       ]
     }
   },
-  "definitions": {
-    "JavaScriptDialogType": {
-      "description": "Native JS dialog kind reported by CDP.",
-      "type": "string",
-      "enum": [
-        "alert",
-        "confirm",
-        "prompt",
-        "beforeunload"
-      ]
-    }
-  }
+  "required": [
+    "id",
+    "tab_id",
+    "type",
+    "message",
+    "sequence",
+    "decision_deadline"
+  ],
+  "title": "PendingJavaScriptDialog",
+  "type": "object"
 }

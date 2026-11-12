@@ -8,7 +8,7 @@ use bsk_protocol::tools::{WindowResizeParams, WindowResizeResult};
 use clap::{Args, Subcommand};
 
 use crate::cli::TOOL_IPC_TIMEOUT;
-use crate::cli::ensure_daemon::ensure_daemon;
+use crate::cli::ensure_daemon::ensure_daemon_optimistic as ensure_daemon;
 use crate::cli::error::{CliError, Format};
 
 #[derive(Debug, Clone, Args)]
@@ -25,9 +25,13 @@ pub enum WindowSub {
 
 #[derive(Debug, Clone, Args)]
 pub struct WindowResizeArgs {
-    /// Session id (must be active).
+    /// Session id (omit to resolve via caller scope).
     #[arg(long)]
-    pub session: String,
+    pub session: Option<String>,
+
+    /// Explicit caller scope name for multi-agent isolation.
+    #[arg(long)]
+    pub scope: Option<String>,
 
     /// New Agent Window outer width in CSS pixels (100..=7680).
     #[arg(long, value_parser = window_size)]
@@ -60,8 +64,10 @@ pub fn dispatch(cmd: WindowCmd, format: Format) -> Result<(), CliError> {
 }
 
 fn run_resize(sock: PathBuf, args: WindowResizeArgs, format: Format) -> Result<(), CliError> {
+    crate::cli::business_rpc::set_caller_scope(args.scope);
     let params = WindowResizeParams {
-        session_id: args.session,
+        session_id: args.session.unwrap_or_default(),
+        tab_id: None,
         width: args.width,
         height: args.height,
     };

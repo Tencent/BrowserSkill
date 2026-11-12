@@ -1,9 +1,17 @@
 //! Namespaced RPC methods (§4.3).
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+use crate::catalog::{MethodDescriptor, MethodOwner};
+use crate::compatibility::Feature;
+use crate::system::*;
+use crate::tools::*;
+use crate::{CancelParams, CancelResult};
+
 /// Observable browser-side effect class for a protocol method.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
 pub enum MethodEffect {
     /// Reads browser/session state without dispatching page input.
     PassiveRead,
@@ -18,305 +26,180 @@ pub enum MethodEffect {
     ControlPlane,
 }
 
-/// Namespaced method string (`system.handshake`, `tool.tab_list`, …).
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum Method {
-    #[serde(rename = "tool.cooperate")]
-    ToolCooperate,
-    #[serde(rename = "local_auth.pair")]
-    LocalAuthPair,
-    #[serde(rename = "local_auth.devices")]
-    LocalAuthDevices,
-    #[serde(rename = "local_auth.revoke")]
-    LocalAuthRevoke,
-    #[serde(rename = "local_auth.rotate")]
-    LocalAuthRotate,
-    #[serde(rename = "local_auth.set_mode")]
-    LocalAuthSetMode,
-    #[serde(rename = "tool.video")]
-    ToolVideo,
-    /// Extension-only local history API; browser identity comes from the peer.
-    #[serde(rename = "audit.request")]
-    AuditRequest,
-    #[serde(rename = "system.handshake")]
-    SystemHandshake,
-    #[serde(rename = "system.ping")]
-    SystemPing,
-    #[serde(rename = "system.status")]
-    SystemStatus,
+/// The method catalog is the only list of wire methods and their payloads.
+/// Adding a method requires an owner, effect classification, action-metadata
+/// composition flag, both payload types, and an explicit list of feature
+/// requirements.
+macro_rules! methods {
+    ($($variant:ident => ($wire:literal, $owner:ident, $effect:ident, $action_metadata:literal, $params:ty, $result:ty, [$($feature:ident),*])),* $(,)?) => {
+        #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+        pub enum Method {
+            $(#[serde(rename = $wire)] $variant,)*
+        }
 
-    #[serde(rename = "session.start")]
-    SessionStart,
-    /// Recoverable CLI start; distinct method prevents unsafe fallback on old daemons.
-    #[serde(rename = "session.start_tracked")]
-    SessionStartTracked,
-    #[serde(rename = "session.request")]
-    SessionRequest,
-    #[serde(rename = "session.stop")]
-    SessionStop,
-    #[serde(rename = "session.stop_all")]
-    SessionStopAll,
-    #[serde(rename = "session.list")]
-    SessionList,
-    /// Daemon-local metadata of what a session did; recipes draft from it.
-    #[serde(rename = "session.run_log")]
-    SessionRunLog,
+        impl Method {
+            pub const ALL: &'static [Method] = &[$(Self::$variant,)*];
 
-    #[serde(rename = "browser.list")]
-    BrowserList,
+            pub const fn wire_name(&self) -> &'static str {
+                match self { $(Self::$variant => $wire,)* }
+            }
 
-    #[serde(rename = "tool.session_start")]
-    ToolSessionStart,
-    #[serde(rename = "tool.session_stop")]
-    ToolSessionStop,
-    #[serde(rename = "tool.window_resize")]
-    ToolWindowResize,
-    #[serde(rename = "tool.emulate")]
-    ToolEmulate,
-    #[serde(rename = "tool.tab_list")]
-    ToolTabList,
-    #[serde(rename = "tool.tab_create")]
-    ToolTabCreate,
-    #[serde(rename = "tool.tab_close")]
-    ToolTabClose,
-    #[serde(rename = "tool.tab_borrow")]
-    ToolTabBorrow,
-    #[serde(rename = "tool.tab_return")]
-    ToolTabReturn,
-    #[serde(rename = "tool.tab_select")]
-    ToolTabSelect,
-    #[serde(rename = "tool.navigate")]
-    ToolNavigate,
-    #[serde(rename = "tool.navigate_back")]
-    ToolNavigateBack,
-    #[serde(rename = "tool.navigate_forward")]
-    ToolNavigateForward,
-    #[serde(rename = "tool.reload")]
-    ToolReload,
-    #[serde(rename = "tool.click")]
-    ToolClick,
-    #[serde(rename = "tool.hover")]
-    ToolHover,
-    #[serde(rename = "tool.drag")]
-    ToolDrag,
-    #[serde(rename = "tool.wheel")]
-    ToolWheel,
-    #[serde(rename = "tool.scroll_to")]
-    ToolScrollTo,
-    #[serde(rename = "tool.focus")]
-    ToolFocus,
-    #[serde(rename = "tool.blur")]
-    ToolBlur,
-    #[serde(rename = "tool.fill")]
-    ToolFill,
-    #[serde(rename = "tool.press")]
-    ToolPress,
-    #[serde(rename = "tool.select")]
-    ToolSelect,
-    #[serde(rename = "tool.upload")]
-    ToolUpload,
-    #[serde(rename = "tool.download")]
-    ToolDownload,
-    #[serde(rename = "tool.snapshot")]
-    ToolSnapshot,
-    #[serde(rename = "tool.observe")]
-    ToolObserve,
-    #[serde(rename = "tool.get_html")]
-    ToolGetHtml,
-    #[serde(rename = "tool.read")]
-    ToolRead,
-    #[serde(rename = "tool.extract")]
-    ToolExtract,
-    #[serde(rename = "tool.screenshot")]
-    ToolScreenshot,
-    #[serde(rename = "tool.screenshot_full_page")]
-    ToolScreenshotFullPage,
-    #[serde(rename = "tool.screenshot_read")]
-    ToolScreenshotRead,
-    #[serde(rename = "tool.screenshot_release")]
-    ToolScreenshotRelease,
-    #[serde(rename = "tool.console")]
-    ToolConsole,
-    #[serde(rename = "tool.debug")]
-    ToolDebug,
-    #[serde(rename = "tool.network")]
-    ToolNetwork,
-    #[serde(rename = "tool.evaluate")]
-    ToolEvaluate,
-    #[serde(rename = "tool.dialog_status")]
-    ToolDialogStatus,
-    #[serde(rename = "tool.dialog_accept")]
-    ToolDialogAccept,
-    #[serde(rename = "tool.dialog_dismiss")]
-    ToolDialogDismiss,
-    #[serde(rename = "tool.operation_await")]
-    ToolOperationAwait,
-    #[serde(rename = "tool.operation_cancel")]
-    ToolOperationCancel,
-    #[serde(rename = "tool.wait_for_navigation")]
-    ToolWaitForNavigation,
-    #[serde(rename = "tool.wait_for_element")]
-    ToolWaitForElement,
-    #[serde(rename = "tool.wait_ms")]
-    ToolWaitMs,
-    #[serde(rename = "tool.request_help")]
-    ToolRequestHelp,
-    #[serde(rename = "tool.record_start")]
-    ToolRecordStart,
-    #[serde(rename = "tool.record_stop")]
-    ToolRecordStop,
-    #[serde(rename = "tool.record_await")]
-    ToolRecordAwait,
+            pub const fn owner(&self) -> MethodOwner {
+                match self { $(Self::$variant => MethodOwner::$owner,)* }
+            }
 
-    #[serde(rename = "transfer.begin")]
-    TransferBegin,
-    #[serde(rename = "transfer.chunk")]
-    TransferChunk,
-    #[serde(rename = "transfer.finish")]
-    TransferFinish,
-    #[serde(rename = "transfer.read")]
-    TransferRead,
-    #[serde(rename = "transfer.release")]
-    TransferRelease,
+            /// **Judgment calls** (read these before adding new variants):
+            ///
+            /// * `tool.evaluate` is classified as browser-mutating because the
+            ///   daemon cannot statically distinguish a `document.title`
+            ///   read from a `form.submit()` write.
+            /// * `tool.observe` is classified as transient input: its bounded
+            ///   hover probes do not commit browser state, but they dispatch real
+            ///   page input events and therefore must be gated like automation.
+            /// * `tool.wait_*` are classified as read-only: they do not
+            ///   initiate any browser action; they observe state only.
+            /// * `session.*` and `tool.session_*` are NOT gated. Blocking
+            ///   `session.stop` would prevent the agent from gracefully
+            ///   tearing down after observing the user's interrupt.
+            /// * `cancel`, `tool.dialog_dismiss`, and `tool.operation_cancel` are
+            ///   control-plane operations so cleanup/teardown remains available
+            ///   after a user stop.
+            pub const fn effect(&self) -> MethodEffect {
+                match self { $(Self::$variant => MethodEffect::$effect,)* }
+            }
 
-    #[serde(rename = "cancel")]
-    Cancel,
+            /// Whether the wire parameter contract merges [`ActionMetadata`]
+            /// (`context_id`, `observation_id`, `depends_on`, `expect`).
+            pub const fn accepts_action_metadata(&self) -> bool {
+                match self { $(Self::$variant => $action_metadata,)* }
+            }
+
+            /// Whether this method belongs to the `tool.*` namespace audited and
+            /// logged per session operation.
+            pub const fn is_tool(&self) -> bool {
+                matches!(self.wire_name().as_bytes(), [b't', b'o', b'o', b'l', b'.', ..])
+            }
+
+            pub const fn features(&self) -> &'static [Feature] {
+                match self { $(Self::$variant => &[$(Feature::$feature),*],)* }
+            }
+
+            pub fn describe(&self, generator: &mut schemars::SchemaGenerator) -> MethodDescriptor {
+                match self {
+                    $(Self::$variant => MethodDescriptor::new::<$params, $result>(
+                        $wire,
+                        MethodOwner::$owner,
+                        MethodEffect::$effect,
+                        $action_metadata,
+                        self.features(),
+                        generator,
+                    ),)*
+                }
+            }
+        }
+    };
+}
+
+methods! {
+    ToolCooperate => ("tool.cooperate", Extension, ControlPlane, false, CooperateParams, serde_json::Value, [TargetControl]),
+    LocalAuthPair => ("local_auth.pair", Daemon, ControlPlane, false, serde_json::Value, serde_json::Value, []),
+    LocalAuthDevices => ("local_auth.devices", Daemon, ControlPlane, false, serde_json::Value, serde_json::Value, []),
+    LocalAuthRevoke => ("local_auth.revoke", Daemon, ControlPlane, false, serde_json::Value, serde_json::Value, []),
+    LocalAuthRotate => ("local_auth.rotate", Daemon, ControlPlane, false, serde_json::Value, serde_json::Value, []),
+    LocalAuthSetMode => ("local_auth.set_mode", Daemon, ControlPlane, false, serde_json::Value, serde_json::Value, []),
+    AuditRequest => ("audit.request", Daemon, ControlPlane, false, serde_json::Value, serde_json::Value, []),
+    LedgerRequest => ("ledger.request", Daemon, ControlPlane, false, serde_json::Value, serde_json::Value, []),
+    SystemHandshake => ("system.handshake", Daemon, ControlPlane, false, HandshakeRequest, HandshakeResponse, []),
+    SystemPing => ("system.ping", Daemon, ControlPlane, false, PingParams, PingResult, []),
+    SystemStatus => ("system.status", Daemon, ControlPlane, false, StatusParams, StatusResult, []),
+    SessionStart => ("session.start", Daemon, ControlPlane, false, serde_json::Value, serde_json::Value, [IncognitoSessions]),
+    SessionStartTracked => ("session.start_tracked", Daemon, ControlPlane, false, serde_json::Value, serde_json::Value, [IncognitoSessions]),
+    SessionRequest => ("session.request", Daemon, ControlPlane, false, serde_json::Value, serde_json::Value, []),
+    SessionStop => ("session.stop", Daemon, ControlPlane, false, serde_json::Value, serde_json::Value, []),
+    SessionStopAll => ("session.stop_all", Daemon, ControlPlane, false, serde_json::Value, serde_json::Value, []),
+    SessionList => ("session.list", Daemon, ControlPlane, false, serde_json::Value, serde_json::Value, []),
+    SessionRunLog => ("session.run_log", Daemon, ControlPlane, false, serde_json::Value, serde_json::Value, []),
+    BrowserList => ("browser.list", Daemon, ControlPlane, false, BrowserListParams, serde_json::Value, []),
+    ToolSessionStart => ("tool.session_start", Extension, ControlPlane, false, SessionStartParams, SessionStartResult, [IncognitoSessions]),
+    ToolSessionStop => ("tool.session_stop", Extension, ControlPlane, false, SessionStopParams, SessionStopOutcome, []),
+    ToolWindowResize => ("tool.window_resize", Extension, BrowserMutation, true, WindowResizeParams, WindowResizeResult, [ActionConditions]),
+    ToolEmulate => ("tool.emulate", Extension, BrowserMutation, true, EmulateParams, EmulateResult, [ActionConditions]),
+    ToolTabList => ("tool.tab_list", Extension, PassiveRead, false, TabListParams, TabListResult, []),
+    ToolTabCreate => ("tool.tab_create", Extension, BrowserMutation, false, TabCreateParams, TabCreateResult, []),
+    ToolTabClose => ("tool.tab_close", Extension, BrowserMutation, true, TabCloseParams, TabCloseResult, [ActionConditions]),
+    ToolTabBorrow => ("tool.tab_borrow", Extension, BrowserMutation, false, TabBorrowParams, TabBorrowResult, [BorrowConfirmationTimeout]),
+    ToolTabReturn => ("tool.tab_return", Extension, BrowserMutation, false, TabReturnParams, TabReturnResult, []),
+    ToolTabSelect => ("tool.tab_select", Extension, BrowserMutation, false, TabSelectParams, TabSelectResult, []),
+    ToolNavigate => ("tool.navigate", Extension, BrowserMutation, true, NavigateParams, NavigateResult, [ActionConditions]),
+    ToolNavigateBack => ("tool.navigate_back", Extension, BrowserMutation, true, NavigateBackParams, NavigateBackResult, [ActionConditions]),
+    ToolNavigateForward => ("tool.navigate_forward", Extension, BrowserMutation, true, NavigateForwardParams, NavigateForwardResult, [ActionConditions]),
+    ToolReload => ("tool.reload", Extension, BrowserMutation, true, ReloadParams, ReloadResult, [ActionConditions]),
+    ToolClick => ("tool.click", Extension, BrowserMutation, true, ClickParams, ClickResult, [ActionConditions]),
+    ToolHover => ("tool.hover", Extension, TransientInput, true, HoverParams, HoverResult, [ActionConditions]),
+    ToolDrag => ("tool.drag", Extension, BrowserMutation, true, DragParams, DragResult, [ClickMoveClick, ActionConditions]),
+    ToolWheel => ("tool.wheel", Extension, BrowserMutation, true, WheelParams, WheelResult, [ActionConditions]),
+    ToolScrollTo => ("tool.scroll_to", Extension, BrowserMutation, true, ScrollToParams, ScrollToResult, [ActionConditions]),
+    ToolFocus => ("tool.focus", Extension, BrowserMutation, true, FocusParams, FocusResult, [ActionConditions]),
+    ToolBlur => ("tool.blur", Extension, BrowserMutation, true, BlurParams, BlurResult, [ActionConditions]),
+    ToolFill => ("tool.fill", Extension, BrowserMutation, true, FillParams, FillResult, [ActionConditions]),
+    ToolPress => ("tool.press", Extension, BrowserMutation, true, PressParams, PressResult, [ActionConditions]),
+    ToolSelect => ("tool.select", Extension, BrowserMutation, true, SelectParams, SelectResult, [ActionConditions]),
+    ToolUpload => ("tool.upload", Extension, BrowserMutation, true, UploadParams, UploadResult, [ActionConditions]),
+    ToolDownload => ("tool.download", Extension, BrowserMutation, true, DownloadParams, DownloadResult, [ActionConditions]),
+    ToolSnapshot => ("tool.snapshot", Extension, PassiveRead, false, SnapshotParams, SnapshotResult, []),
+    ToolObserve => ("tool.observe", Extension, TransientInput, true, ObserveParams, ObserveResult, [ActionConditions]),
+    ToolGetHtml => ("tool.get_html", Extension, PassiveRead, false, GetHtmlParams, GetHtmlResult, []),
+    ToolRead => ("tool.read", Extension, PassiveRead, false, ReadParams, ReadResult, [DomRead]),
+    ToolExtract => ("tool.extract", Extension, PassiveRead, false, ExtractParams, ExtractResult, []),
+    ToolScreenshot => ("tool.screenshot", Extension, PassiveRead, false, ScreenshotParams, ScreenshotResult, []),
+    ToolScreenshotFullPage => ("tool.screenshot_full_page", Extension, TransientInput, true, ScreenshotFullPageParams, ScreenshotFullPageResult, [ActionConditions]),
+    ToolScreenshotRead => ("tool.screenshot_read", Extension, PassiveRead, false, ScreenshotReadParams, ScreenshotReadResult, []),
+    ToolScreenshotRelease => ("tool.screenshot_release", Extension, ControlPlane, false, ScreenshotReleaseParams, ScreenshotReleaseResult, []),
+    ToolConsole => ("tool.console", Extension, PassiveRead, false, ConsoleParams, ConsoleResult, []),
+    ToolDebug => ("tool.debug", Extension, ControlPlane, true, DebugParams, DebugResult, [ActionConditions]),
+    ToolNetwork => ("tool.network", Extension, PassiveRead, false, NetworkParams, NetworkResult, []),
+    ToolEvaluate => ("tool.evaluate", Extension, BrowserMutation, true, EvaluateParams, EvaluateResult, [UnverifiedScript, ActionConditions]),
+    ToolDialogStatus => ("tool.dialog_status", Extension, PassiveRead, false, DialogStatusParams, DialogStatusResult, [DialogControl]),
+    ToolDialogAccept => ("tool.dialog_accept", Extension, BrowserMutation, false, DialogHandleParams, DialogHandleResult, [DialogControl]),
+    ToolDialogDismiss => ("tool.dialog_dismiss", Extension, ControlPlane, false, DialogHandleParams, DialogHandleResult, [DialogControl]),
+    ToolOperationAwait => ("tool.operation_await", Daemon, PassiveRead, false, OperationParams, serde_json::Value, [DialogControl]),
+    ToolOperationCancel => ("tool.operation_cancel", Daemon, ControlPlane, false, OperationParams, CancelResult, [DialogControl]),
+    ToolWaitForNavigation => ("tool.wait_for_navigation", Extension, PassiveRead, false, WaitForNavigationParams, WaitForNavigationResult, []),
+    ToolWaitForElement => ("tool.wait_for_element", Extension, PassiveRead, false, WaitForElementParams, WaitForElementResult, []),
+    ToolWaitMs => ("tool.wait_ms", Daemon, PassiveRead, false, WaitMsParams, WaitMsResult, []),
+    ToolRequestHelp => ("tool.request_help", Extension, PassiveRead, false, RequestHelpParams, RequestHelpResult, [InteractionPolicy]),
+    ToolRecordStart => ("tool.record_start", Extension, BrowserMutation, false, RecordStartParams, RecordStartResult, []),
+    ToolRecordStop => ("tool.record_stop", Extension, PassiveRead, false, RecordStopParams, RecordStopResult, []),
+    ToolRecordAwait => ("tool.record_await", Extension, PassiveRead, false, RecordAwaitParams, RecordAwaitResult, []),
+    ToolVideo => ("tool.video", Extension, ControlPlane, false, VideoParams, VideoResult, []),
+    TransferBegin => ("transfer.begin", Daemon, ControlPlane, false, serde_json::Value, serde_json::Value, []),
+    TransferChunk => ("transfer.chunk", Daemon, ControlPlane, false, serde_json::Value, serde_json::Value, []),
+    TransferFinish => ("transfer.finish", Daemon, ControlPlane, false, serde_json::Value, serde_json::Value, []),
+    TransferRead => ("transfer.read", Daemon, ControlPlane, false, serde_json::Value, serde_json::Value, []),
+    TransferRelease => ("transfer.release", Daemon, ControlPlane, false, serde_json::Value, serde_json::Value, []),
+    Cancel => ("cancel", Shared, ControlPlane, false, CancelParams, CancelResult, []),
 }
 
 impl Method {
-    /// Browser-side effect classification for this method.
-    ///
-    /// Used by the daemon's pending-interrupt machinery: when the
-    /// user has clicked the agent-window mask's stop button, the
-    /// next tool call that dispatches browser/page input for that
-    /// session is rejected with `ErrorCode::UserAborted`. Passive reads
-    /// and control-plane RPCs pass through transparently.
-    ///
-    /// **Compile-time enforcement.** The match below is exhaustive
-    /// (no `_ =>` fallthrough). Adding a new `Method` variant is a
-    /// compile error here, so classification cannot silently be
-    /// skipped — the author has to make a deliberate choice.
-    ///
-    /// **Judgment calls** (read these before adding new variants):
-    ///
-    /// * `tool.evaluate` is classified as browser-mutating because the
-    ///   daemon cannot statically distinguish a `document.title`
-    ///   read from a `form.submit()` write.
-    /// * `tool.observe` is classified as transient input: its bounded
-    ///   hover probes do not commit browser state, but they dispatch real
-    ///   page input events and therefore must be gated like automation.
-    /// * `tool.wait_*` are classified as read-only: they do not
-    ///   initiate any browser action; they observe state only.
-    /// * `session.*` and `tool.session_*` are NOT gated. Blocking
-    ///   `session.stop` would prevent the agent from gracefully
-    ///   tearing down after observing the user's interrupt.
-    /// * `cancel` is NOT gated. It's a control-plane operation
-    ///   (stops another in-flight RPC), not a browser action.
-    pub fn effect(&self) -> MethodEffect {
-        match self {
-            // Browser/page mutations — gated by pending-interrupt.
-            Method::ToolTabCreate
-            | Method::ToolTabClose
-            | Method::ToolTabBorrow
-            | Method::ToolTabReturn
-            | Method::ToolTabSelect
-            | Method::ToolWindowResize
-            | Method::ToolEmulate
-            | Method::ToolNavigate
-            | Method::ToolNavigateBack
-            | Method::ToolNavigateForward
-            | Method::ToolReload
-            | Method::ToolClick
-            | Method::ToolDrag
-            | Method::ToolWheel
-            | Method::ToolScrollTo
-            | Method::ToolFocus
-            | Method::ToolBlur
-            | Method::ToolFill
-            | Method::ToolPress
-            | Method::ToolSelect
-            | Method::ToolUpload
-            | Method::ToolDownload
-            | Method::ToolEvaluate
-            | Method::ToolDialogAccept
-            // May navigate via optional `url` and changes Agent Window
-            // chrome; gate behind pending-interrupt like other writes.
-            | Method::ToolRecordStart => MethodEffect::BrowserMutation,
-
-            // Transient input — no committed browser action, but still page
-            // input. It must be stopped by pending user interrupts.
-            Method::ToolHover | Method::ToolObserve | Method::ToolScreenshotFullPage => MethodEffect::TransientInput,
-
-            // Passive reads — transparent.
-            // `record_stop` / `record_await` observe / finish a recording
-            // without driving new automation gestures, so they stay
-            // ungated (teardown after interrupt must still work).
-            Method::ToolTabList
-            | Method::ToolSnapshot
-            | Method::ToolGetHtml
-            | Method::ToolRead
-            | Method::ToolExtract
-            | Method::ToolScreenshot
-            | Method::ToolScreenshotRead
-            | Method::ToolConsole
-            | Method::ToolNetwork
-            | Method::ToolWaitForNavigation
-            | Method::ToolWaitForElement
-            | Method::ToolWaitMs
-            | Method::ToolRequestHelp
-            | Method::ToolRecordStop
-            | Method::ToolRecordAwait => MethodEffect::PassiveRead,
-
-            Method::ToolDialogStatus | Method::ToolOperationAwait => MethodEffect::PassiveRead,
-            // Rejecting a modal / cancelling an operation must remain possible after stop.
-            Method::ToolDialogDismiss | Method::ToolOperationCancel => MethodEffect::ControlPlane,
-
-            // Session lifecycle — not gated.
-            Method::SessionStart
-            | Method::SessionStartTracked
-            | Method::SessionRequest
-            | Method::SessionStop
-            | Method::SessionStopAll
-            | Method::SessionList
-            | Method::SessionRunLog
-            | Method::ToolSessionStart
-            | Method::ToolSessionStop => MethodEffect::ControlPlane,
-
-            // System / control — not gated.
-            Method::ToolCooperate
-            | Method::ToolDebug
-            | Method::ToolVideo
-            | Method::AuditRequest
-            | Method::SystemHandshake
-            | Method::SystemPing
-            | Method::SystemStatus
-            | Method::BrowserList
-            | Method::TransferBegin
-            | Method::TransferChunk
-            | Method::TransferFinish
-            | Method::TransferRead
-            | Method::TransferRelease
-            | Method::ToolScreenshotRelease
-            | Method::Cancel
-            | Method::LocalAuthPair
-            | Method::LocalAuthDevices
-            | Method::LocalAuthRevoke
-            | Method::LocalAuthRotate
-            | Method::LocalAuthSetMode => MethodEffect::ControlPlane,
-        }
-    }
-
     /// Debug reads/teardown remain available after interruption, while explicit
     /// network interventions and replay are gated like other browser writes.
     pub fn requires_interrupt_gate_with_params(&self, params: &serde_json::Value) -> bool {
-        self.requires_interrupt_gate()
-            || (matches!(self, Method::ToolVideo)
-                && params.get("action").and_then(|value| value.as_str()) == Some("start"))
-            || (matches!(self, Method::ToolDebug)
-                && matches!(
-                    params.get("action").and_then(|value| value.as_str()),
-                    Some("rule_add" | "rule_enable" | "replay")
-                ))
+        let effect = if matches!(self, Method::ToolDebug) {
+            params
+                .get("action")
+                .cloned()
+                .and_then(|action| serde_json::from_value::<DebugAction>(action).ok())
+                .map(|action| action.effect())
+                .unwrap_or(self.effect())
+        } else {
+            self.effect()
+        };
+        (matches!(self, Method::ToolVideo)
+            && params.get("action").and_then(|value| value.as_str()) == Some("start"))
+            || matches!(
+                effect,
+                MethodEffect::BrowserMutation | MethodEffect::TransientInput
+            )
     }
 
     /// Whether this RPC drives browser/page state in the traditional sense.
@@ -338,6 +221,24 @@ mod tests {
     use super::*;
     use crate::{CancelParams, CancelResult};
     use serde_json::json;
+
+    #[test]
+    fn action_metadata_methods_always_declare_action_conditions_feature() {
+        for method in Method::ALL {
+            assert_eq!(
+                method.accepts_action_metadata(),
+                method.features().contains(&Feature::ActionConditions),
+                "{} must keep accepts_action_metadata and Feature::ActionConditions in sync",
+                method.wire_name(),
+            );
+            assert_eq!(
+                method.is_tool(),
+                method.wire_name().starts_with("tool."),
+                "{} is_tool mismatch",
+                method.wire_name(),
+            );
+        }
+    }
 
     #[test]
     fn video_start_respects_interrupts_but_teardown_and_artifact_reads_remain_available() {
@@ -442,11 +343,16 @@ mod tests {
         assert!(!Method::ToolHover.is_mutating());
         assert!(!Method::ToolObserve.is_mutating());
         assert!(!Method::ToolGetHtml.is_mutating());
+        assert!(!Method::ToolRead.is_mutating());
         assert_eq!(Method::ToolExtract.effect(), MethodEffect::PassiveRead);
         assert!(!Method::ToolExtract.is_mutating());
         assert!(!Method::ToolScreenshot.is_mutating());
         assert!(!Method::ToolConsole.is_mutating());
         assert!(!Method::ToolNetwork.is_mutating());
+        assert!(!Method::ToolDialogStatus.is_mutating());
+        assert!(!Method::ToolDialogDismiss.is_mutating());
+        assert!(!Method::ToolOperationAwait.is_mutating());
+        assert!(!Method::ToolOperationCancel.is_mutating());
         assert!(!Method::ToolWaitForNavigation.is_mutating());
         assert!(!Method::ToolWaitForElement.is_mutating());
         assert!(!Method::ToolWaitMs.is_mutating());
@@ -464,6 +370,7 @@ mod tests {
         assert!(Method::ToolNavigateForward.is_mutating());
         assert!(Method::ToolReload.is_mutating());
         assert!(Method::ToolClick.is_mutating());
+        assert!(Method::ToolDrag.is_mutating());
         assert!(Method::ToolWheel.is_mutating());
         assert!(Method::ToolScrollTo.is_mutating());
         assert!(Method::ToolFocus.is_mutating());
@@ -472,6 +379,7 @@ mod tests {
         assert!(Method::ToolPress.is_mutating());
         assert!(Method::ToolSelect.is_mutating());
         assert!(Method::ToolEvaluate.is_mutating());
+        assert!(Method::ToolDialogAccept.is_mutating());
         assert!(Method::ToolRecordStart.is_mutating());
         assert!(Method::ToolWindowResize.is_mutating());
         assert!(Method::ToolEmulate.is_mutating());
@@ -485,14 +393,11 @@ mod tests {
 
     #[test]
     fn is_mutating_classifies_session_lifecycle_as_non_mutating() {
-        // Session lifecycle RPCs are not "mutating" for the purposes
-        // of pending-interrupt gating — gating them would prevent the
-        // agent from gracefully tearing down after observing the
-        // user's interrupt.
         assert!(!Method::SessionStart.is_mutating());
         assert!(!Method::SessionStop.is_mutating());
         assert!(!Method::SessionStopAll.is_mutating());
         assert!(!Method::SessionList.is_mutating());
+        assert!(!Method::SessionRunLog.is_mutating());
         assert!(!Method::ToolSessionStart.is_mutating());
         assert!(!Method::ToolSessionStop.is_mutating());
     }

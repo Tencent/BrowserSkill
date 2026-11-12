@@ -1,7 +1,7 @@
 //! `bsk drag`: a bounded held drag or click-move-click gesture in one request.
 use super::{
     dialogs::print_dialog_summaries,
-    ensure_daemon::ensure_daemon,
+    ensure_daemon::ensure_daemon_optimistic as ensure_daemon,
     error::{CliError, Format},
     interaction::{CliMouseButton, parse_modifiers, split_target},
     navigate::parse_timeout_ms,
@@ -9,10 +9,9 @@ use super::{
 use anyhow::Context;
 use bsk_protocol::{
     Method,
-    tools::{DragMode, DragParams, DragPoint, DragResult, DragTarget, supports_click_move_click},
+    tools::{DragMode, DragParams, DragPoint, DragResult, DragTarget},
 };
 use clap::{Args, ValueEnum};
-use std::path::PathBuf;
 use std::time::Duration;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -45,7 +44,9 @@ pub struct DragArgs {
     #[arg(long, requires = "to", allow_negative_numbers = true)]
     pub to_offset_y: Option<f64>,
     #[arg(long)]
-    pub session: String,
+    pub session: Option<String>,
+    #[arg(long)]
+    pub scope: Option<String>,
     #[arg(long)]
     pub tab_id: Option<i64>,
     #[arg(long)]
@@ -78,16 +79,6 @@ fn target(value: String, x: f64, y: f64) -> Result<DragTarget, CliError> {
             Some(DragPoint { x, y })
         },
     })
-}
-
-pub(super) fn require_click_move_click_daemon(sock: PathBuf) -> Result<(), CliError> {
-    let status = super::status::query_sock_with_wait(sock, Duration::ZERO)?;
-    if !supports_click_move_click(&status.protocol_version) {
-        return Err(CliError::Local(anyhow::anyhow!(
-            "click-move-click requires daemon protocol 1.7; use the matching daemon"
-        )));
-    }
-    Ok(())
 }
 
 pub fn dispatch(args: DragArgs, format: Format) -> Result<(), CliError> {
@@ -128,8 +119,9 @@ pub fn dispatch(args: DragArgs, format: Format) -> Result<(), CliError> {
     }
     let modifiers =
         parse_modifiers(&args.modifiers).map_err(|e| CliError::Local(anyhow::anyhow!(e)))?;
+    super::business_rpc::set_caller_scope(args.scope);
     let params = DragParams {
-        session_id: args.session,
+        session_id: args.session.unwrap_or_default(),
         tab_id: args.tab_id,
         source,
         mode: match args.mode {
@@ -146,9 +138,6 @@ pub fn dispatch(args: DragArgs, format: Format) -> Result<(), CliError> {
         observation_id: args.observation_id,
     };
     let info = ensure_daemon().context("ensure daemon is running")?;
-    if args.mode == CliDragMode::ClickMoveClick {
-        require_click_move_click_daemon(info.sock_path.clone())?;
-    }
     let reply: DragResult = super::business_rpc::call(
         info.sock_path,
         "drag-1",

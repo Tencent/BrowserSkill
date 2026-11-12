@@ -14,7 +14,7 @@ use bsk_protocol::tools::{
 };
 use clap::{Args, ValueEnum};
 
-use crate::cli::ensure_daemon::ensure_daemon;
+use crate::cli::ensure_daemon::ensure_daemon_optimistic as ensure_daemon;
 use crate::cli::error::{CliError, Format};
 use crate::cli::interaction::split_target;
 use crate::cli::navigate::parse_timeout_ms;
@@ -50,7 +50,9 @@ pub struct UploadArgs {
     #[arg(long, value_enum, default_value_t)]
     pub mode: UploadModeArg,
     #[arg(long)]
-    pub session: String,
+    pub session: Option<String>,
+    #[arg(long)]
+    pub scope: Option<String>,
     #[arg(long = "tab-id")]
     pub tab_id: Option<i64>,
     #[arg(long, default_value = "2m", value_parser = parse_timeout_ms)]
@@ -74,10 +76,12 @@ pub fn dispatch(args: UploadArgs, format: Format) -> Result<(), CliError> {
         .iter()
         .map(|path| UploadSource::open(path))
         .collect::<Result<Vec<_>, _>>()?;
+    crate::cli::business_rpc::set_caller_scope(args.scope);
+    let session = args.session.unwrap_or_default();
     let info = ensure_daemon().context("ensure daemon is running")?;
     let mut staged = Vec::new();
     for source in sources {
-        if let Err(err) = stage_file(&info.sock_path, &args.session, source, &mut staged) {
+        if let Err(err) = stage_file(&info.sock_path, &session, source, &mut staged) {
             let _ = crate::cli::business_rpc::release_transfers(
                 &info.sock_path,
                 staged.iter().map(|(id, _)| id.as_str()),
@@ -86,7 +90,7 @@ pub fn dispatch(args: UploadArgs, format: Format) -> Result<(), CliError> {
         }
     }
     let params = UploadParams {
-        session_id: args.session,
+        session_id: session,
         ref_,
         selector,
         tab_id: args.tab_id,

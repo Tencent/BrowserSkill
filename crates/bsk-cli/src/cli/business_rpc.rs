@@ -47,6 +47,7 @@ static OBSERVATION_CONTEXT: std::sync::OnceLock<Option<String>> = std::sync::Onc
 static ACTION_EVIDENCE: std::sync::OnceLock<(Option<String>, Option<serde_json::Value>)> =
     std::sync::OnceLock::new();
 static TARGET_POLICY_REQUESTED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+static EXPLICIT_CALLER_SCOPE: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
 
 // Keep the user's stop request even if the in-flight RPC finishes successfully.
 // One CLI process is one command, including its follow-up reads.
@@ -71,6 +72,17 @@ pub fn set_action_evidence(observation: Option<String>, expect: Option<serde_jso
 
 pub fn set_target_policy_requested() {
     let _ = TARGET_POLICY_REQUESTED.set(true);
+}
+
+pub fn set_caller_scope(scope: Option<String>) {
+    if let Some(scope) = scope.filter(|s| !s.trim().is_empty()) {
+        *EXPLICIT_CALLER_SCOPE.lock().unwrap() = Some(scope);
+    }
+}
+
+pub fn current_caller_scope() -> String {
+    let explicit = EXPLICIT_CALLER_SCOPE.lock().unwrap().clone();
+    crate::daemon::scopes::resolve_caller_scope_from_env(explicit.as_deref(), None)
 }
 
 /// Whether the caller attached anything asking for the page to be checked.
@@ -144,6 +156,12 @@ pub(crate) fn with_context<P: Serialize>(
                 if let Some(expect) = expect {
                     object.insert("expect".into(), expect.clone());
                 }
+                let has_empty_session = object.get("session_id").is_some_and(|v| {
+                    v.is_null() || v.as_str().is_some_and(|s| s.trim().is_empty())
+                });
+                if has_empty_session && !object.contains_key("_caller_scope") {
+                    object.insert("_caller_scope".into(), current_caller_scope().into());
+                }
             }
             Ok(value)
         })
@@ -173,6 +191,17 @@ where
     })
 }
 
+fn is_daemon_absent_connect_error(err: &anyhow::Error) -> bool {
+    err.chain().any(|cause| {
+        cause.downcast_ref::<std::io::Error>().is_some_and(|io| {
+            matches!(
+                io.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused
+            )
+        })
+    })
+}
+
 /// Same as [`call`] but assumes a pre-existing tokio runtime context.
 pub async fn call_async<P, R>(
     sock: PathBuf,
@@ -185,6 +214,7 @@ where
     P: Serialize + Send + 'static,
     R: DeserializeOwned + Send + 'static,
 {
+    let mut sock = super::ensure_daemon::resolve_effective_sock(&sock);
     let parent_cancel = stdin_cancellation();
     if cancel_requested() || parent_cancel.as_ref().is_some_and(|rx| *rx.borrow()) {
         CANCEL_REQUESTED.store(true, Ordering::Relaxed);
@@ -209,11 +239,56 @@ where
             .get()
             .and_then(|(_, expect)| expect.as_ref()),
     )?;
-    let mut client = IpcClient::connect(sock.clone()).await?;
+    let mut prechecked = super::protocol::precheck_cached_daemon_support(
+        &sock,
+        &method,
+        params.as_ref().unwrap_or(&serde_json::Value::Null),
+    )?;
+    // Optimistic single-UDS fast path: connect once and send the target RPC directly.
+    // Fail-safe auto-spawn: ONLY if initial connect() fails before any bytes are written
+    // (NotFound / ConnectionRefused on an unverified optimistic daemon.json candidate),
+    // fall back to ensure_daemon_with_protocol() and connect once to the fresh daemon.
+    let was_optimistic = super::ensure_daemon::take_optimistic_candidate(&sock);
+    let mut client = match IpcClient::connect(sock.clone()).await {
+        Ok(client) => client,
+        Err(connect_err) if was_optimistic && is_daemon_absent_connect_error(&connect_err) => {
+            let stale_sock = sock.clone();
+            let (fresh_info, fresh_protocol) =
+                tokio::task::spawn_blocking(super::ensure_daemon::ensure_daemon_with_protocol)
+                    .await
+                    .context("join daemon auto-spawn task")
+                    .map_err(CliError::Local)?
+                    .context("ensure daemon is running")
+                    .map_err(CliError::Local)?;
+            check_daemon_protocol(&fresh_protocol).map_err(CliError::Local)?;
+            super::ensure_daemon::record_redirected_sock(&stale_sock, &fresh_info.sock_path);
+            sock = fresh_info.sock_path;
+            prechecked = super::protocol::precheck_cached_daemon_support(
+                &sock,
+                &method,
+                params.as_ref().unwrap_or(&serde_json::Value::Null),
+            )?;
+            IpcClient::connect(sock.clone()).await?
+        }
+        Err(connect_err) => return Err(connect_err.into()),
+    };
     let rpc_id_for_call = rpc_id.clone();
     let rpc_id_for_cancel = rpc_id.clone();
+    let action_started = std::sync::atomic::AtomicBool::new(false);
+    let action_started_ref = &action_started;
 
     let main_fut = async move {
+        if !prechecked
+            && let Err(error) = super::protocol::check_daemon_support(
+                &mut client,
+                &method,
+                params.as_ref().unwrap_or(&serde_json::Value::Null),
+            )
+            .await?
+        {
+            return Ok(Err(error));
+        }
+        action_started_ref.store(true, std::sync::atomic::Ordering::Relaxed);
         client
             .call_with_id::<serde_json::Value, R>(rpc_id_for_call, method, params, call_timeout)
             .await
@@ -226,6 +301,17 @@ where
         sig = wait_for_cancel(parent_cancel) => {
             sig.context("wait for cancellation").map_err(CliError::Local)?;
             CANCEL_REQUESTED.store(true, Ordering::Relaxed);
+            // The feature probe has no browser effects. Dropping it here must
+            // also prevent the action from being sent after cancellation.
+            if !action_started.load(std::sync::atomic::Ordering::Relaxed) {
+                return Err(CliError::from_rpc(RpcError {
+                    code: ErrorCode::Cancelled,
+                    message: "request cancelled before dispatch".into(),
+                    data: Some(serde_json::json!({
+                        "reason": "cancelled_before_dispatch", "effect_state": "none"
+                    })),
+                }));
+            }
             debug!(rpc_id = %rpc_id_for_cancel, "forwarding cancel to daemon");
             // Separate IPC connections can deliver cancel before the business
             // request is registered. Keep polling that request while confirming

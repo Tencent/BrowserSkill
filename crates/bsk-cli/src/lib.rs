@@ -21,6 +21,20 @@ pub mod rpc_reason {
     pub const OBSERVE_IDENTITY_RELOAD_LOOP: &str = "observe_identity_reload_loop";
     /// Extension-side: borrow target already lives in an Agent Window.
     pub const BORROW_AGENT_WINDOW_TAB: &str = "borrow_agent_window_tab";
+    /// Daemon-side: caller scope has no bound session (and no ambiguity).
+    pub const NO_ACTIVE_SESSION: &str = "no_active_session";
+    /// Daemon-side: default scope is unbound while other live sessions exist.
+    pub const AMBIGUOUS_IMPLICIT_SESSION: &str = "ambiguous_implicit_session";
+    /// Daemon-side: caller scope's bound session was explicitly closed/stopped.
+    pub const SESSION_STOPPED: &str = "session_stopped";
+    /// Daemon-side: `bsk open --browser` conflicts with the scope's bound browser.
+    pub const SCOPE_BROWSER_CONFLICT: &str = "scope_browser_conflict";
+    /// Daemon-side: `bsk open --incognito` conflicts with the scope's bound session.
+    pub const SCOPE_INCOGNITO_CONFLICT: &str = "scope_incognito_conflict";
+    /// Daemon-side (`RM-03` Intent WAL): prior mutating action on this session/tab
+    /// ended with an unconfirmed effect (`Timeout`, `Cancelled`, transport loss, or
+    /// `effect_state == "unknown"`), blocking blind replay until reconciled.
+    pub const UNCERTAIN_PRIOR_EFFECT: &str = "uncertain_prior_effect";
 }
 pub mod skill_install;
 

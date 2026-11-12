@@ -173,7 +173,7 @@ const MAX_PROTOCOL_MAJOR: u64 = (1u64 << 53) - 1;
 /// matches the TS side's `!Number.isSafeInteger(n)` reject so the
 /// `MAX_SAFE_INTEGER < n <= u64::MAX` band (which `u64::from_str`
 /// would otherwise happily accept) is rejected on both peers.
-fn parse_major(value: &str) -> Option<u64> {
+pub(crate) fn parse_major(value: &str) -> Option<u64> {
     let head = value.split('.').next()?;
     if head.is_empty() || !head.bytes().all(|b| b.is_ascii_digit()) {
         return None;
@@ -464,6 +464,26 @@ pub struct HandshakeResult {
     /// Lowest peer protocol version this daemon accepts.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub min_compatible_protocol: Option<String>,
+}
+
+/// Current handshake envelope. The flattened identity remains source-compatible
+/// with older Rust callers constructing `HandshakeParams` directly.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct HandshakeRequest {
+    #[serde(flatten)]
+    pub identity: HandshakeParams,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audit_enabled: Option<bool>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct HandshakeResponse {
+    #[serde(flatten)]
+    pub identity: HandshakeResult,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audit_version: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audit_ready: Option<bool>,
 }
 
 #[cfg(test)]
