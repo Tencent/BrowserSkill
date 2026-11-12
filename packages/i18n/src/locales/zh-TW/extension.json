@@ -747,5 +747,36 @@
     "agentHint": "Tell your agent to record before starting the task. It will start and stop recording for you; preview and save the result here.",
     "manual": "Record a running task manually",
     "copyFailed": "Could not copy the prompt. Please try again."
+  },
+  "pairPage": {
+    "badge": "BrowserSkill · 本機引導配對",
+    "title": "將 BrowserSkill 與本機 CLI 配對",
+    "description": "請確認是否將目前瀏覽器設定檔與本機正在執行的 bsk 服務建立雙向驗證連線。",
+    "loading": "正在讀取配對請求…",
+    "endpointLabel": "目標端點",
+    "daemonLabel": "Daemon 指紋",
+    "deviceLabel": "裝置指紋",
+    "browserLabel": "目前瀏覽器執行個體",
+    "statusLabel": "目前配對狀態",
+    "statusUnpaired": "尚未配對",
+    "statusSameDaemon": "已與目前 Daemon 配對（如需重新綁定請使用替換配對）",
+    "statusOtherDaemon": "已與其他本機 Daemon 配對（核准後將切換至此 Daemon）",
+    "securityHint": "點擊核准後將完成本機雙向身分驗證，防止本機其他程式冒充 bsk 控制瀏覽器。",
+    "approveButton": "核准並配對",
+    "approvingButton": "正在驗證並配對…",
+    "connectedBadge": "✓ Connected · Verified",
+    "connectedSubtitle": "目前瀏覽器已與本機 CLI 完成安全配對與驗證。現在可以關閉此分頁並返回終端機。",
+    "connectedDisabledHint": "已完成配對驗證。擴充功能工具列彈窗中的連線開關目前為關閉狀態，開啟後即可接收自動化任務。",
+    "errorTitle": "未能完成配對",
+    "errors": {
+      "missing_ticket": "目前頁面缺少配對票據。請在終端機執行 bsk setup 重新發起配對。",
+      "ticket_expired": "此一次性配對票據已過期或已被使用。請在終端機重新執行 bsk setup 開啟新的確認頁。",
+      "already_paired": "目前瀏覽器已完成與這台本機 bsk 的配對（{{browser}}）。如需重新綁定請在終端機執行 bsk setup --re-pair。",
+      "replace_mismatch": "目前瀏覽器執行個體為 {{instance}}，而該替換連結目標是 {{browser}}。請在終端機執行 bsk setup --re-pair 或 bsk setup --replace {{instance}}。",
+      "server_unverified": "本機服務未通過身分驗證。請確認對應連接埠的 bsk 服務仍在執行，然後在終端機重新執行 bsk setup。",
+      "daemon_too_old": "目前執行的 bsk 服務版本過舊，不支援本機雙向配對驗證。請先執行 bsk update 後重試 bsk setup。",
+      "busy": "另一個連線正在驗證此裝置，請稍後在終端機重新執行 bsk setup。",
+      "pairing_failed": "配對未能完成。請確認本機 bsk 服務正在執行，然後在終端機重新執行 bsk setup。"
+    }
   }
 }

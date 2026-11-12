@@ -130,11 +130,340 @@ const MAX_LOCAL_WS_CONNECTIONS: usize = 64;
 /// first-frame timeout below.
 const WS_UPGRADE_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// Upper bound on plain-HTTP request headers for the `GET /pair` fallback
+/// landing page (`RM-09`). Fragment secrets (`#bsk-local.v1...`) are never
+/// transmitted by browsers over HTTP.
+const PAIR_HTTP_HEADER_CAP: usize = 4096;
+
+const PAIR_LANDING_HTML: &str = r#"<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>BrowserSkill — Extension Required</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      --bg: #f8fafc;
+      --card: #ffffff;
+      --border: #e2e8f0;
+      --text: #0f172a;
+      --muted: #475569;
+      --accent: #ea580c;
+      --accent-fg: #ffffff;
+      --secondary-bg: #f1f5f9;
+      --code-bg: #f1f5f9;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #090d16;
+        --card: #111827;
+        --border: #1f2937;
+        --text: #f8fafc;
+        --muted: #94a3b8;
+        --accent: #f97316;
+        --accent-fg: #0f172a;
+        --secondary-bg: #1e293b;
+        --code-bg: #1e293b;
+      }
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 24px;
+      background: var(--bg);
+      color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      line-height: 1.55;
+    }
+    main {
+      width: 100%;
+      max-width: 560px;
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      padding: 28px;
+      box-shadow: 0 12px 32px rgba(15, 23, 42, 0.08);
+    }
+    .badge {
+      display: inline-block;
+      font-size: 12px;
+      font-weight: 600;
+      padding: 3px 10px;
+      border-radius: 999px;
+      background: var(--secondary-bg);
+      color: var(--accent);
+      margin-bottom: 12px;
+    }
+    h1 {
+      margin: 0 0 6px;
+      font-size: 20px;
+      line-height: 1.35;
+    }
+    .subtitle {
+      margin: 0 0 18px;
+      font-size: 14px;
+      color: var(--muted);
+    }
+    p {
+      margin: 0 0 14px;
+      font-size: 14px;
+      color: var(--muted);
+    }
+    .actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin: 20px 0;
+    }
+    a.btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      padding: 10px 16px;
+      border-radius: 10px;
+      font-size: 14px;
+      font-weight: 600;
+      text-decoration: none;
+    }
+    a.btn-primary {
+      background: var(--accent);
+      color: var(--accent-fg);
+    }
+    a.btn-secondary {
+      background: var(--secondary-bg);
+      color: var(--text);
+      border: 1px solid var(--border);
+    }
+    .steps {
+      margin: 18px 0 0;
+      padding: 14px 16px;
+      border-radius: 12px;
+      background: var(--secondary-bg);
+      font-size: 13px;
+      color: var(--muted);
+    }
+    .steps ol {
+      margin: 8px 0 0;
+      padding-left: 20px;
+    }
+    .steps li { margin-bottom: 6px; }
+    code {
+      padding: 2px 6px;
+      border-radius: 6px;
+      background: var(--code-bg);
+      color: var(--text);
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 12px;
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <span class="badge">BrowserSkill Setup</span>
+    <h1>Active BrowserSkill extension not detected</h1>
+    <p class="subtitle">未在当前浏览器检测到启用的 BrowserSkill 扩展</p>
+    <p>
+      When the BrowserSkill extension is installed and enabled in this browser profile, this page automatically opens the extension's trusted confirmation screen.
+    </p>
+    <p>
+      安装并启用新版 BrowserSkill 扩展后，访问此页面会自动跳转至扩展内置的一键配对确认页。若停留在当前页面，说明当前浏览器配置尚未安装、未启用或需更新扩展。
+    </p>
+    <div class="actions">
+      <a class="btn btn-primary" href="https://chromewebstore.google.com/detail/hhcmgoofomhgciiibhipgmgkgnoenaoi" target="_blank" rel="noopener noreferrer">Chrome Web Store</a>
+      <a class="btn btn-secondary" href="https://microsoftedge.microsoft.com/addons/detail/browserskill/emacgiaaaiojkkpkddmmdfhmokgmnikg" target="_blank" rel="noopener noreferrer">Edge Add-ons</a>
+    </div>
+    <div class="steps">
+      <strong>Next steps / 下一步：</strong>
+      <ol>
+        <li>Install or enable the BrowserSkill extension in your target browser profile.<br />在目标浏览器 Profile 中安装并启用 BrowserSkill 扩展。</li>
+        <li>Re-run <code>bsk setup</code> in your terminal, or paste the backup <code>ws://127.0.0.1:…</code> pairing link from your terminal into the extension's Connection Settings.<br />回到终端重新运行 <code>bsk setup</code>，或在扩展「连接设置」中粘贴终端打印的备用 <code>ws://127.0.0.1:…</code> 配对链接。</li>
+      </ol>
+    </div>
+  </main>
+</body>
+</html>
+"#;
+
+fn might_be_pair_get_prefix(bytes: &[u8]) -> bool {
+    const P_SPACE: &[u8] = b"GET /pair ";
+    const P_QUERY: &[u8] = b"GET /pair?";
+    if bytes.len() < P_SPACE.len() {
+        P_SPACE.starts_with(bytes) || P_QUERY.starts_with(bytes)
+    } else {
+        bytes.starts_with(P_SPACE) || bytes.starts_with(P_QUERY)
+    }
+}
+
+fn find_double_crlf(bytes: &[u8]) -> Option<usize> {
+    bytes.windows(4).position(|window| window == b"\r\n\r\n")
+}
+
+fn is_plain_pair_get_request(header_bytes: &[u8]) -> bool {
+    let Ok(text) = std::str::from_utf8(header_bytes) else {
+        return false;
+    };
+    let mut lines = text.split("\r\n");
+    let Some(request_line) = lines.next() else {
+        return false;
+    };
+    let mut parts = request_line.split_whitespace();
+    let (Some(method), Some(target), Some(version), None) =
+        (parts.next(), parts.next(), parts.next(), parts.next())
+    else {
+        return false;
+    };
+    if method != "GET" || !version.starts_with("HTTP/1.") {
+        return false;
+    }
+    if target != "/pair" && !target.starts_with("/pair?") {
+        return false;
+    }
+    for line in lines {
+        if line.is_empty() {
+            break;
+        }
+        if let Some((name, value)) = line.split_once(':')
+            && name.trim().eq_ignore_ascii_case("upgrade")
+            && value
+                .split(',')
+                .any(|token| token.trim().eq_ignore_ascii_case("websocket"))
+        {
+            return false;
+        }
+    }
+    true
+}
+
+fn has_websocket_upgrade_header(header_prefix: &[u8]) -> bool {
+    let text = String::from_utf8_lossy(header_prefix);
+    text.split("\r\n").skip(1).any(|line| {
+        line.split_once(':').is_some_and(|(name, value)| {
+            name.trim().eq_ignore_ascii_case("upgrade")
+                && value
+                    .split(',')
+                    .any(|token| token.trim().eq_ignore_ascii_case("websocket"))
+        })
+    })
+}
+
+/// Inspect the initial bytes on a local loopback TCP socket without consuming
+/// WebSocket upgrades. Returns `Ok(true)` when the connection was handled (or
+/// timed out / closed cleanly) and `Ok(false)` when normal WebSocket upgrade
+/// handling should proceed with zero bytes consumed.
+async fn maybe_serve_pair_landing_page(
+    stream: &mut TcpStream,
+    peer: SocketAddr,
+    deadline: tokio::time::Instant,
+) -> anyhow::Result<bool> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let mut buf = [0u8; PAIR_HTTP_HEADER_CAP];
+    let mut last_len = 0usize;
+
+    loop {
+        let peeked = match tokio::time::timeout_at(deadline, stream.peek(&mut buf)).await {
+            Ok(Ok(n)) => n,
+            Ok(Err(err)) => return Err(err.into()),
+            Err(_) => {
+                debug!(
+                    ?peer,
+                    timeout_secs = WS_UPGRADE_TIMEOUT.as_secs(),
+                    "ws upgrade timed out; dropping connection"
+                );
+                return Ok(true);
+            }
+        };
+        if peeked == 0 {
+            return Ok(true);
+        }
+        if !might_be_pair_get_prefix(&buf[..peeked]) {
+            return Ok(false);
+        }
+        if let Some(pos) = find_double_crlf(&buf[..peeked]) {
+            let header_len = pos + 4;
+            if !is_plain_pair_get_request(&buf[..header_len]) {
+                return Ok(false);
+            }
+            tokio::time::timeout_at(deadline, stream.read_exact(&mut buf[..header_len])).await??;
+            let body = PAIR_LANDING_HTML.as_bytes();
+            let headers = format!(
+                "HTTP/1.1 200 OK\r\n\
+                 Content-Type: text/html; charset=utf-8\r\n\
+                 Cache-Control: no-store\r\n\
+                 X-Frame-Options: DENY\r\n\
+                 Content-Security-Policy: default-src 'none'; style-src 'unsafe-inline'\r\n\
+                 Content-Length: {}\r\n\
+                 Connection: close\r\n\r\n",
+                body.len()
+            );
+            tokio::time::timeout_at(deadline, async {
+                stream.write_all(headers.as_bytes()).await?;
+                stream.write_all(body).await?;
+                stream.shutdown().await
+            })
+            .await??;
+            return Ok(true);
+        }
+        if peeked == PAIR_HTTP_HEADER_CAP {
+            if has_websocket_upgrade_header(&buf[..peeked]) {
+                return Ok(false);
+            }
+            tokio::time::timeout_at(deadline, stream.read_exact(&mut buf)).await??;
+            let resp = b"HTTP/1.1 431 Request Header Fields Too Large\r\n\
+                         Cache-Control: no-store\r\n\
+                         X-Frame-Options: DENY\r\n\
+                         Content-Security-Policy: default-src 'none'\r\n\
+                         Content-Length: 0\r\n\
+                         Connection: close\r\n\r\n";
+            let _ = tokio::time::timeout_at(deadline, async {
+                stream.write_all(resp).await?;
+                stream.shutdown().await
+            })
+            .await;
+            // Drain a bounded tail briefly so loopback TCP stacks do not send RST
+            // before the peer reads the 431 status line.
+            let _ = tokio::time::timeout(Duration::from_millis(50), async {
+                let mut discard = [0u8; 1024];
+                for _ in 0..8 {
+                    if matches!(stream.read(&mut discard).await, Ok(0) | Err(_)) {
+                        break;
+                    }
+                }
+            })
+            .await;
+            return Ok(true);
+        }
+        if peeked == last_len
+            && tokio::time::timeout_at(deadline, tokio::time::sleep(Duration::from_millis(5)))
+                .await
+                .is_err()
+        {
+            debug!(
+                ?peer,
+                timeout_secs = WS_UPGRADE_TIMEOUT.as_secs(),
+                "ws upgrade timed out; dropping connection"
+            );
+            return Ok(true);
+        }
+        last_len = peeked;
+    }
+}
+
 async fn handle_connection(
     state: Arc<DaemonState>,
-    stream: TcpStream,
+    mut stream: TcpStream,
     peer: SocketAddr,
 ) -> anyhow::Result<()> {
+    let upgrade_deadline = tokio::time::Instant::now() + WS_UPGRADE_TIMEOUT;
+    if maybe_serve_pair_landing_page(&mut stream, peer, upgrade_deadline).await? {
+        return Ok(());
+    }
+
     let captured_origin: std::sync::Arc<std::sync::Mutex<Option<String>>> =
         std::sync::Arc::new(std::sync::Mutex::new(None));
     let captured_origin_for_cb = std::sync::Arc::clone(&captured_origin);
@@ -164,8 +493,8 @@ async fn handle_connection(
     };
 
     let (stream, read_limit) = super::local_auth::read_limit::AuthReadLimit::new(stream);
-    let mut ws = match tokio::time::timeout(
-        WS_UPGRADE_TIMEOUT,
+    let mut ws = match tokio::time::timeout_at(
+        upgrade_deadline,
         tokio_tungstenite::accept_hdr_async(stream, callback),
     )
     .await
@@ -1345,6 +1674,121 @@ mod ws_connection_limit_tests {
         })
         .await
         .expect("slot released after clients closed");
+        handle.shutdown.notify_one();
+    }
+}
+
+#[cfg(test)]
+mod pair_landing_page_tests {
+    use super::*;
+    use crate::daemon::start::DaemonConfig;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+    use tokio_tungstenite::tungstenite::http::header::{HeaderName, HeaderValue};
+
+    async fn bind_test_server() -> WsHandle {
+        let state = std::sync::Arc::new(DaemonState::new(DaemonConfig::new(0)));
+        WsServer::new(state)
+            .bind("127.0.0.1:0".parse().expect("loopback addr"))
+            .await
+            .expect("bound test ws server")
+    }
+
+    #[tokio::test]
+    async fn pair_landing_page_serves_strict_csp_static_html_for_get_pair_and_query() {
+        let handle = bind_test_server().await;
+
+        for path in ["/pair", "/pair?from=cli"] {
+            let mut conn = tokio::net::TcpStream::connect(handle.local_addr)
+                .await
+                .expect("tcp connect");
+            // Split across two writes to exercise partial TCP peek handling.
+            conn.write_all(b"GET /pa").await.unwrap();
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            let rest = format!(
+                "{} HTTP/1.1\r\nHost: {}\r\nAccept: text/html\r\n\r\n",
+                &path[3..],
+                handle.local_addr
+            );
+            conn.write_all(rest.as_bytes()).await.unwrap();
+
+            let mut raw = Vec::new();
+            conn.read_to_end(&mut raw).await.unwrap();
+            let text = String::from_utf8(raw).expect("utf-8 html response");
+            let (head, body) = text.split_once("\r\n\r\n").expect("http header/body split");
+            assert!(head.starts_with("HTTP/1.1 200 OK\r\n"), "head was: {head}");
+            let lower_head = head.to_ascii_lowercase();
+            assert!(lower_head.contains("content-type: text/html; charset=utf-8"));
+            assert!(lower_head.contains("cache-control: no-store"));
+            assert!(lower_head.contains("x-frame-options: deny"));
+            assert!(lower_head.contains(
+                "content-security-policy: default-src 'none'; style-src 'unsafe-inline'"
+            ));
+            assert!(
+                !body.to_ascii_lowercase().contains("<script"),
+                "fallback HTML must never embed JavaScript"
+            );
+            assert!(
+                body.contains("chromewebstore.google.com/detail/hhcmgoofomhgciiibhipgmgkgnoenaoi")
+            );
+            assert!(body.contains("microsoftedge.microsoft.com/addons/detail/browserskill/emacgiaaaiojkkpkddmmdfhmokgmnikg"));
+            assert!(body.contains("bsk setup"));
+        }
+
+        handle.shutdown.notify_one();
+    }
+
+    #[tokio::test]
+    async fn pair_landing_page_preserves_websocket_upgrades_and_rejects_oversized_headers() {
+        let handle = bind_test_server().await;
+
+        for ws_path in ["/", "/pair"] {
+            let url = format!("ws://{}{ws_path}", handle.local_addr);
+            let mut req = url.into_client_request().unwrap();
+            req.headers_mut().insert(
+                HeaderName::from_static("origin"),
+                HeaderValue::from_static("chrome-extension://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaap"),
+            );
+            let (mut ws, resp) = tokio_tungstenite::connect_async(req)
+                .await
+                .expect("ws upgrade should still succeed");
+            assert_eq!(
+                resp.headers()
+                    .get("x-bsk-server")
+                    .and_then(|v| v.to_str().ok()),
+                Some("browser-skill-daemon")
+            );
+            let _ = ws.close(None).await;
+        }
+
+        // Plain GET / (not /pair) must not return the 200 landing page.
+        let mut root_http = tokio::net::TcpStream::connect(handle.local_addr)
+            .await
+            .unwrap();
+        root_http
+            .write_all(b"GET / HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
+            .await
+            .unwrap();
+        let mut root_resp = Vec::new();
+        root_http.read_to_end(&mut root_resp).await.unwrap();
+        let root_text = String::from_utf8_lossy(&root_resp);
+        assert!(!root_text.starts_with("HTTP/1.1 200 OK"));
+
+        // Oversized (> 4 KiB) headers on GET /pair return 431 cleanly.
+        let mut huge = tokio::net::TcpStream::connect(handle.local_addr)
+            .await
+            .unwrap();
+        let filler = "a".repeat(PAIR_HTTP_HEADER_CAP);
+        let req = format!("GET /pair HTTP/1.1\r\nHost: 127.0.0.1\r\nX-Pad: {filler}\r\n\r\n");
+        let _ = huge.write_all(req.as_bytes()).await;
+        let mut huge_resp = Vec::new();
+        huge.read_to_end(&mut huge_resp).await.unwrap();
+        let huge_text = String::from_utf8_lossy(&huge_resp);
+        assert!(
+            huge_text.starts_with("HTTP/1.1 431 "),
+            "unexpected oversized response: {huge_text}"
+        );
+
         handle.shutdown.notify_one();
     }
 }
