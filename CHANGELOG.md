@@ -11,6 +11,13 @@ determines which versions can connect.
 
 ### Added
 
+- High-fidelity adversarial release-audit arena (`evals/browser/skills/browserskill-release-test`,
+  98 scenarios) and CI verification in `release-protocol`: adds linked 3-form enterprise joint
+  filing, 3-tier nested Open/Closed Shadow DOM with `127.0.0.1 -> localhost -> 127.0.0.1`
+  re-entrant cross-origin OOPIFs, RFC 9110 `Range` (`206`/`416`) HTML5 `<video>` + `<audio>`
+  media studio with dual-language WebVTT tracks and `<canvas>` sought-frame pixel sampling,
+  and a `>200KB` VOM modern SPA / 5,000-row virtual-scroll / real `bfcache` / `oklch()` &
+  gradient-text vs. prompt-steganography / `--redact-values` benchmark suite.
 - Daemon-local `<3ms` Intent Write-Ahead Ledger (`$BSK_HOME/intent_ledger.jsonl`, `0600`)
   and `bsk ledger status | resolve`: intercepts all mutating tools (`click`, `fill`,
   `press`, `select`, `upload`, `drag`, `evaluate`) regardless of `--ref`, raw CSS

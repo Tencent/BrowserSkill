@@ -381,7 +381,7 @@
   }
   customElements.define('arena-hardware-key', ArenaHardwareKey);
 
-  // 5. Populate 55-service topology matrix (>1,700 total DOM elements in host + shadow roots)
+  // 5. Populate 55-service topology matrix (>=1,800 total DOM elements in host + shadow roots)
   const planes = ['data-plane-hz', 'control-plane-sz', 'audit-plane-su', 'edge-ingress-gz'];
   const teams = ['Core-Mesh', 'Zero-Trust', 'FinOps-Ledger', 'Observability'];
   document.getElementById('host-topology-tbody').innerHTML = Array.from({ length: 55 }, (_, i) => {
@@ -391,8 +391,17 @@
     const lat = `${(1.8 + (i % 13) * 0.7).toFixed(1)} ms`;
     const cb = i % 11 === 0 ? 'HALF_OPEN' : 'CLOSED_HEALTHY';
     const team = teams[i % teams.length];
-    return `<tr><td><code>${svc}</code></td><td><span>${plane}</span></td><td><span>${proto}</span></td><td><strong>${lat}</strong></td><td><em>${cb}</em></td><td><span>${team}</span></td></tr>`;
+    const az = `AZ-${(i % 3) + 1}`;
+    return `<tr><td><code>${svc}</code> <small><span>[${az}]</span> <i><span>L7</span></i></small></td><td><span>${plane}</span> <small><code>MESH</code> <i><span>V2</span></i></small></td><td><span>${proto}</span> <small><em>TLS1.3</em></small></td><td><strong>${lat}</strong> <small><span>P99</span></small></td><td><em>${cb}</em> <b><span>SYNC</span></b> <small><i><span>SLA</span></i></small></td><td><span>${team}</span> <small><span>ONCALL</span></small></td></tr>`;
   }).join('');
+
+  const crossHost = location.hostname === 'localhost' ? '127.0.0.1' : 'localhost';
+  const portSuffix = location.port ? `:${location.port}` : '';
+  const crossFrameEl = document.getElementById('cross-origin-outer-frame');
+  const desiredOuterSrc = `${location.protocol}//${crossHost}${portSuffix}/arena-frame-outer`;
+  if (crossFrameEl.src !== desiredOuterSrc) {
+    crossFrameEl.src = desiredOuterSrc;
+  }
 
   // 6. Host independent action & selective child-frame refresh
   let hb = 0;
@@ -422,7 +431,14 @@
   });
 
   const lightCount = document.getElementsByTagName('*').length;
-  document.getElementById('shadow-dom-node-stats').textContent = `Light DOM: ${lightCount} + 4 Shadow Roots + 3 Iframes`;
+  const l1Root = document.getElementById('shadow-l1-host').shadowRoot;
+  const l2Root = l1Root?.getElementById('shadow-l2-host')?.shadowRoot;
+  const l3Root = l2Root?.getElementById('shadow-l3-host')?.shadowRoot;
+  const shadowCount = [navChipRoot, l1Root, l2Root, l3Root].reduce(
+    (sum, r) => sum + (r ? r.querySelectorAll('*').length : 0),
+    0
+  );
+  document.getElementById('shadow-dom-node-stats').textContent = `DOM 节点: ${lightCount + shadowCount} (Light ${lightCount} + Shadow ${shadowCount} + 3 Iframes)`;
 })();
 </script>
 </body>

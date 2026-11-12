@@ -13,6 +13,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import threading
 import uuid
 
@@ -465,10 +466,10 @@ def init(args):
     target = out / "fixtures"
     shutil.copytree(assets, target)
     for p in target.glob("*.html"):
-        p.write_text(
-            p.read_text().replace("localhost:4187", f"localhost:{args.port}"),
-            encoding="utf-8",
-        )
+        text = p.read_text(encoding="utf-8")
+        text = text.replace("localhost:4187", f"localhost:{args.port}")
+        text = text.replace("127.0.0.1:4187", f"127.0.0.1:{args.port}")
+        p.write_text(text, encoding="utf-8")
     (target / "empty.txt").write_bytes(b"")
     (target / "upload 中文.txt").write_text(
         "合成上传内容 👋\n第二行\n", encoding="utf-8"
@@ -490,11 +491,14 @@ def init(args):
 def resolve_admin_home(root):
     admin_dir = Path(root).resolve() / "admin-runtime"
     admin_dir.mkdir(parents=True, exist_ok=True)
+    if sys.platform == "win32":
+        return str(admin_dir)
     sock_probe = str(admin_dir / "run" / "daemon.sock")
     if len(sock_probe.encode("utf-8")) <= 96:
         return str(admin_dir)
     tag = hashlib.sha256(str(admin_dir).encode("utf-8")).hexdigest()[:12]
-    link = Path("/tmp") / f"bsk-adm-{tag}"
+    tmp_root = Path("/tmp") if Path("/tmp").is_dir() else Path(tempfile.gettempdir())
+    link = tmp_root / f"bsk-adm-{tag}"
     try:
         if link.is_symlink() or link.exists():
             if link.resolve() == admin_dir:
@@ -742,6 +746,14 @@ def assertion(root, check):
         return isinstance(value, str) and bool(re.search(expected, value))
     if op == "len_eq":
         return len(value) == expected
+    if op in ("gt", "gte", "lt", "lte"):
+        if (
+            isinstance(value, bool)
+            or isinstance(expected, bool)
+            or not isinstance(value, (int, float))
+            or not isinstance(expected, (int, float))
+        ):
+            return False
     if op == "gt":
         return value > expected
     if op == "gte":

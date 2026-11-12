@@ -116,12 +116,19 @@
 <iframe
   id="nested-l2-iframe"
   title="Nested L2 Security Audit Frame"
-  src="http://localhost:4187/arena-frame-inner?role=nested-audit"
+  src="http://127.0.0.1:4187/arena-frame-inner?role=nested-audit"
 ></iframe>
 
 <script>
 (() => {
   document.getElementById('outer-host-tag').textContent = `origin=${location.origin}`;
+  const l2Host = location.hostname === 'localhost' ? '127.0.0.1' : 'localhost';
+  const l2Port = location.port ? `:${location.port}` : '';
+  const frameEl = document.getElementById('nested-l2-iframe');
+  const desiredInitial = `${location.protocol}//${l2Host}${l2Port}/arena-frame-inner?role=nested-audit`;
+  if (frameEl.src !== desiredInitial) {
+    frameEl.src = desiredInitial;
+  }
   let l2ReloadSeq = 0;
 
   document.getElementById('outer-sync-btn').addEventListener('click', () => {
@@ -146,7 +153,7 @@
   document.getElementById('btn-reload-nested-l2').addEventListener('click', () => {
     l2ReloadSeq += 1;
     const frame = document.getElementById('nested-l2-iframe');
-    frame.src = `http://localhost:4187/arena-frame-inner?role=nested-audit&refresh=${l2ReloadSeq}`;
+    frame.src = `${location.protocol}//${l2Host}${l2Port}/arena-frame-inner?role=nested-audit&refresh=${l2ReloadSeq}`;
     fetch('/event', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },

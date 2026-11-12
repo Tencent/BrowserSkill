@@ -353,8 +353,8 @@
             <input id="lead-disabled-code" name="disabledBatch" type="text" value="BATCH-LOCKED-04" disabled>
           </div>
           <div class="field">
-            <label for="lead-short-code">项目代号简称（Maxlength=8 截断契约）</label>
-            <input id="lead-short-code" name="shortCode" type="text" maxlength="8" value="INIT">
+            <label for="lead-short-code">项目代号简称（Maxlength=12 截断契约）</label>
+            <input id="lead-short-code" name="shortCode" type="text" maxlength="12" value="INIT2026">
           </div>
 
           <div class="field">
@@ -429,9 +429,10 @@
           </div>
 
           <div class="field">
-            <label for="delayed-focus-proxy">异步延迟焦点代理备注框（聚焦 70ms 激活真实输入）</label>
-            <div id="delayed-focus-shell" style="display:flex;gap:6px">
-              <input id="delayed-focus-proxy" type="text" value="原始摘要" data-focus-handoff="pending">
+            <label for="delayed-focus-proxy">异步延迟焦点代理壳（点击/聚焦 70ms 后解锁并转移焦点至 #delayed-focus-target）</label>
+            <div id="delayed-focus-shell" style="display:flex;gap:6px;align-items:center">
+              <button type="button" class="btn" id="delayed-focus-proxy" data-focus-handoff="idle">激活代理备注</button>
+              <input id="delayed-focus-target" type="text" value="原始摘要" disabled data-focus-handoff="pending" aria-label="延迟焦点目标备注框">
             </div>
           </div>
         </div>
@@ -443,7 +444,7 @@
       <div class="section-head">
         <h2 id="sec-partners-title">二、联合申报成员与出资权重矩阵（Form B ↔ Form C 双向联动）</h2>
         <div style="display:flex;gap:8px;align-items:center">
-          <span class="pill" id="share-sum-badge">当前权重合计: 95%（须精确等于 100%）</span>
+          <span class="pill" id="share-sum-badge">当前权重合计: 80%（须精确等于 100%）</span>
           <button type="button" class="btn" id="btn-balance-shares">一键补齐末行差额至 100%</button>
           <button type="button" class="btn" id="btn-add-partner">+ 新增联合体成员</button>
         </div>
@@ -469,10 +470,10 @@
           <tfoot>
             <tr>
               <th colspan="3">联合体汇总核对</th>
-              <th id="tfoot-share-total">95%</th>
+              <th id="tfoot-share-total">80%</th>
               <th id="tfoot-allocated-total">0.00</th>
               <th id="tfoot-self-fund-total">0.00</th>
-              <th id="tfoot-partner-count">3 家</th>
+              <th id="tfoot-partner-count">2 家</th>
             </tr>
           </tfoot>
         </table>
@@ -522,11 +523,11 @@
           </div>
 
           <div class="field span-2">
-            <span class="field-label">联合知识产权与违约连带责任补充条款（ContentEditable 富文本根）</span>
-            <div id="joint-clause-editor" class="editor-box" role="textbox" aria-label="联合补充条款正文" contenteditable="true"><p>各方承诺按出资权重共享底层专利成果。</p></div>
-            <div style="margin-top:6px;font-size:12px;color:var(--muted)">
-              固定法务锚点（非根不可直接填充对照）：<span id="clause-locked-chip" class="locked-chip">法务锁死条款 #L-902</span>
+            <span class="field-label">联合知识产权与违约连带责任补充条款（ContentEditable 富文本根 vs 内部非根不可填充子节点）</span>
+            <div id="clause-preamble-host" class="editor-box" style="min-height:auto;background:#f8fafc;margin-bottom:6px;padding:6px 10px" role="textbox" aria-label="法务固定导语富文本宿主" contenteditable="true">
+              <p id="clause-preamble-para" style="margin:0;font-size:12px;color:var(--muted)">固定法务锚点（富文本内部非根不可直接填充对照）：<span id="clause-locked-chip" class="locked-chip" contenteditable="false" tabindex="0">法务锁死条款 #L-902</span></p>
             </div>
+            <div id="joint-clause-editor" class="editor-box" role="textbox" aria-label="联合补充条款正文" contenteditable="true"><p id="clause-inner-para">各方承诺按出资权重共享底层专利成果。</p></div>
           </div>
 
           <div class="field">
@@ -590,7 +591,7 @@
 </div>
 
 <footer class="sticky-footer" role="contentinfo">
-  <div id="footer-summary-line">牵头方: 未填写 · 联合体: 3 家 (95%) · 含税总额: ¥1272.00 万</div>
+  <div id="footer-summary-line">牵头方: 未填写 · 联合体: 2 家 (80%) · 含税总额: ¥1272.00 万</div>
   <div style="display:flex;gap:10px;align-items:center">
     <button type="button" class="btn" id="btn-preview-joint">生成联合预审快照</button>
     <button type="button" class="btn primary" id="submit-joint-filing">正式提交联合申报</button>
@@ -653,26 +654,26 @@
 
   let partners = [
     { id: 'P1', name: '星海智算（牵头主体）', role: 'lead', share: 50, selfFundRatio: 0.6 },
-    { id: 'P2', name: '江南高等研究院', role: 'research', share: 30, selfFundRatio: 0.3 },
-    { id: 'P3', name: '云枢精密算力设备有限公司', role: 'supply', share: 15, selfFundRatio: 0.5 }
+    { id: 'P2', name: '江南高等研究院', role: 'research', share: 30, selfFundRatio: 0.3 }
   ];
   let uploadedFiles = [];
   let approvalOrder = ['TECH', 'FIN', 'LEGAL', 'BOARD'];
   let isDirty = false;
   let focusLog = [];
 
-  // 1. Populate dense enterprise sidebar tree + 45-row historical reference table (>1,600 DOM nodes)
+  // 1. Populate dense enterprise sidebar tree + 45-row historical reference table (>=1,650 DOM elements)
   const navChapters = [
-    ['立项总则与联合体资格', ['主体信用穿透核验', '跨境免税名录比对', '股权关联回避声明', '知识产权共有章程', '科研诚信红线承诺']],
-    ['三级属地与产业园政策', ['省级专项配套系数', '设区市人才补贴包', '保税研发设备清单', '能耗与PUE碳排指标', '数据出境安全评估']],
-    ['联合预算与税务精算', ['牵头与成员分摊矩阵', '增值税抵扣链条核验', '自筹资金银行资信函', '风险准备金专户监管', '阶段性里程碑拨付']],
-    ['会签流转与归档审计', ['技术专家盲评意见', '联合财务中心复核', '法务连带条款锁定', '投委会终审签章包', '电子回执哈希存证']]
+    ['立项总则与联合体资格', ['主体信用穿透核验', '跨境免税名录比对', '股权关联回避声明', '知识产权共有章程', '科研诚信红线承诺', '受益所有人实名穿透', '历史重大违约清零', '牵头主体存续核验']],
+    ['三级属地与产业园政策', ['省级专项配套系数', '设区市人才补贴包', '保税研发设备清单', '能耗与PUE碳排指标', '数据出境安全评估', '园区载体产学研协议', '跨境算力绿色通道', '环评与安评双备案']],
+    ['联合预算与税务精算', ['牵头与成员分摊矩阵', '增值税抵扣链条核验', '自筹资金银行资信函', '风险准备金专户监管', '阶段性里程碑拨付', '跨境外币折算锚点', '财政补贴上限复核', '研发加计扣除台账']],
+    ['会签流转与归档审计', ['技术专家盲评意见', '联合财务中心复核', '法务连带条款锁定', '投委会终审签章包', '电子回执哈希存证', '年度绩效跟踪门禁', '知识产权质押排除', '结项审计底稿归档']],
+    ['持续履约与风控应急', ['核心设备交付里程碑', '成员退出替补预案', '联合资金池双签复核', '季度研发工时审计', '国密时间戳存证核验', '中期评估红黄牌规则', '结余资金按比例退缴', '跨省协同验收联签']]
   ];
   $('#compliance-tree').innerHTML = navChapters.map(([group, items], gi) => `
-    <details ${gi < 3 ? 'open' : ''}>
-      <summary>${gi + 1}. ${group}</summary>
+    <details ${gi < 4 ? 'open' : ''}>
+      <summary><span>${gi + 1}. ${group}</span></summary>
       <ul>
-        ${items.map((it, ii) => `<li data-nav-code="C${gi + 1}-${ii + 1}"><span>${it}</span><strong>§${gi + 1}.${ii + 1}</strong></li>`).join('')}
+        ${items.map((it, ii) => `<li data-nav-code="C${gi + 1}-${ii + 1}"><code>C${gi + 1}.${ii + 1}</code><span>${it}</span><em>MANDATORY</em><strong>§${gi + 1}.${ii + 1}</strong></li>`).join('')}
       </ul>
     </details>
   `).join('');
@@ -680,9 +681,10 @@
   $('#historical-ledger-tbody').innerHTML = Array.from({ length: 45 }, (_, idx) => {
     const code = `HIS-2026-${String(idx + 101).padStart(4, '0')}`;
     const zone = ['之江先导园', '河套合作区', '独墅湖科创区', '琶洲数经区'][idx % 4];
+    const batch = `B${(idx % 6) + 1}`;
     const amt = (480 + (idx * 37) % 1900).toFixed(2);
     const st = idx % 7 === 0 ? '复核中' : '已归档';
-    return `<tr data-ledger-row="${idx + 1}"><td><code>${code}</code></td><td><span>${zone}</span></td><td><strong>¥${amt}万</strong></td><td><em>${st}</em></td></tr>`;
+    return `<tr data-ledger-row="${idx + 1}"><td><code>${code}</code> <small><span>[${batch}]</span> <b><span>2026</span></b></small></td><td><span>${zone}</span> <small><em>CN</em> <i><span>Z1</span></i></small></td><td><strong>¥${amt}万</strong> <small><span>CNY</span> <i><span>TAX-6%</span></i></small></td><td><em>${st}</em> <b><span>OK</span></b> <small><b><span>AUDITED</span></b></small></td></tr>`;
   }).join('');
 
   // 2. Live FX background ticker (600ms localized DOM mutation)
@@ -698,19 +700,33 @@
     }
   }, 600);
 
-  // 3. Delayed focus handoff input trap
-  const proxyInput = $('#delayed-focus-proxy');
-  proxyInput.addEventListener('focus', () => {
-    focusLog.push('proxy-focus');
-    setTimeout(() => {
-      proxyInput.dataset.focusHandoff = 'ready';
+  // 3. Genuine 70ms delayed focus-transfer proxy shell -> unlocks & focuses #delayed-focus-target
+  const proxyTrigger = $('#delayed-focus-proxy');
+  const proxyTarget = $('#delayed-focus-target');
+  let handoffTimer = null;
+  function triggerDelayedHandoff(via) {
+    focusLog.push(`proxy-${via}`);
+    proxyTrigger.dataset.focusHandoff = 'arming';
+    clearTimeout(handoffTimer);
+    handoffTimer = setTimeout(() => {
+      proxyTarget.disabled = false;
+      proxyTarget.dataset.focusHandoff = 'ready';
+      proxyTrigger.dataset.focusHandoff = 'transferred';
+      proxyTarget.focus({ preventScroll: true });
       focusLog.push('handoff-ready');
-      $('#joint-event-log').textContent = JSON.stringify({ focusLog, activeId: document.activeElement?.id || null });
+      $('#joint-event-log').textContent = JSON.stringify({
+        focusLog,
+        activeId: document.activeElement?.id || null,
+        handoff: proxyTarget.dataset.focusHandoff
+      });
+      emit('delayed-focus-transferred', { via, activeId: document.activeElement?.id || null });
     }, 70);
-  });
-  proxyInput.addEventListener('blur', () => {
-    focusLog.push('proxy-blur');
-    $('#joint-event-log').textContent = JSON.stringify({ focusLog, value: proxyInput.value });
+  }
+  proxyTrigger.addEventListener('click', () => triggerDelayedHandoff('click'));
+  proxyTrigger.addEventListener('focus', () => triggerDelayedHandoff('focus'));
+  proxyTarget.addEventListener('blur', () => {
+    focusLog.push('target-blur');
+    $('#joint-event-log').textContent = JSON.stringify({ focusLog, value: proxyTarget.value });
   });
 
   // Credit code mask: uppercase + strip spaces/hyphens
@@ -1015,7 +1031,7 @@
     return { allOk, shareSum, grossWan, subsidyCap, rules };
   }
 
-  ['lead-org-name', 'lead-auth-pin', 'lead-short-code', 'total-budget-wan', 'settlement-currency',
+  ['lead-org-name', 'lead-auth-pin', 'lead-short-code', 'delayed-focus-target', 'total-budget-wan', 'settlement-currency',
    'reserve-ratio-range', 'joint-date', 'joint-time-sec', 'joint-datetime', 'joint-month', 'joint-week',
    'explicit-tax-exempt', 'wrapped-cross-border'].forEach(id => {
     const el = $('#' + id);
@@ -1037,6 +1053,8 @@
       authPinLength: $('#lead-auth-pin').value.length,
       readonlySerial: $('#lead-readonly-serial').value,
       shortCode: $('#lead-short-code').value,
+      delayedNote: $('#delayed-focus-target').value,
+      delayedFocusHandoff: $('#delayed-focus-target').dataset.focusHandoff,
       province: $('#cascade-province').value,
       city: $('#cascade-city').value,
       park: $('#cascade-park').value,

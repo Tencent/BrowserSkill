@@ -248,8 +248,8 @@
     <div class="transport-row" role="group" aria-label="视频演播控制栏">
       <button type="button" class="sbtn primary" id="btn-video-toggle">播放 / 暂停视频</button>
       <button type="button" class="sbtn" id="btn-video-chap-1" data-seek="0.2">第1章 (0.2s)</button>
-      <button type="button" class="sbtn" id="btn-video-chap-2" data-seek="1.6">第2章 (1.6s)</button>
-      <button type="button" class="sbtn" id="btn-video-chap-3" data-seek="3.1">第3章 (3.1s)</button>
+      <button type="button" class="sbtn" id="btn-video-chap-2" data-seek="1.8">第2章 (1.8s)</button>
+      <button type="button" class="sbtn" id="btn-video-chap-3" data-seek="3.5">第3章 (3.5s)</button>
       <button type="button" class="sbtn" id="btn-video-step-fwd">快进 +0.8s</button>
       <button type="button" class="sbtn" id="btn-video-mute" aria-pressed="false">视频静音切换</button>
       <button type="button" class="sbtn" id="btn-video-loop" aria-pressed="false">循环播放切换</button>
@@ -452,10 +452,11 @@
   let audioSeekCount = 0;
   let activeEpisode = 'EP-01';
 
-  // Populate 16-strip mixer & 48-row timecode cue table (>1,500 DOM nodes)
+  // Populate 16-strip mixer & 48-row timecode cue table (>=1,600 DOM elements)
   $('#studio-mixer-rack').innerHTML = Array.from({ length: 16 }, (_, i) => {
     const db = (-18 + (i * 3) % 16).toFixed(1);
-    return `<div class="mixer-strip" data-ch="CH-${i + 1}"><div><strong>CH-${String(i + 1).padStart(2, '0')}</strong></div><div><span>${db} dB</span></div><div><em>ONLINE</em></div></div>`;
+    const pan = i % 2 === 0 ? 'L15' : 'R15';
+    return `<div class="mixer-strip" data-ch="CH-${i + 1}"><div><strong>CH-${String(i + 1).padStart(2, '0')}</strong> <small><span>${pan}</span></small></div><div><span>${db} dB</span> <code><span>PK</span></code></div><div><em>ONLINE</em> <b><span>48k</span></b></div></div>`;
   }).join('');
 
   $('#transcript-cue-tbody').innerHTML = Array.from({ length: 48 }, (_, i) => {
@@ -464,7 +465,7 @@
     const note = `第 ${i + 1} 号审片时间轴锚点 · 多轨声画帧同步核对正常`;
     const lufs = (-16.5 + (i % 7) * 0.4).toFixed(1);
     const st = i % 5 === 0 ? 'NEEDS_REVIEW' : 'APPROVED';
-    return `<tr data-cue-idx="${i + 1}"><td><code>CUE-${String(i + 1).padStart(3, '0')}</code></td><td><span>${tc}</span></td><td><span>${kind}</span></td><td><span>${note}</span></td><td><strong>${lufs}</strong></td><td><em>${st}</em></td></tr>`;
+    return `<tr data-cue-idx="${i + 1}"><td><code>CUE-${String(i + 1).padStart(3, '0')}</code> <small><span>#${i + 1}</span></small></td><td><span>${tc}</span> <small><code>SMPTE</code> <i><span>24fps</span></i></small></td><td><span>${kind}</span> <small><em>BUS</em></small></td><td><span>${note}</span> <small><span>QC</span></small></td><td><strong>${lufs}</strong> <small><span>LUFS</span> <i><span>EBU</span></i></small></td><td><em>${st}</em> <b><span>OK</span></b></td></tr>`;
   }).join('');
 
   // Sync video state panel
@@ -547,11 +548,15 @@
   video.addEventListener('seeked', () => { videoSeekCount += 1; syncVideoPanel('seeked'); });
   audio.addEventListener('seeked', () => { audioSeekCount += 1; syncAudioPanel('seeked'); });
 
-  // WebVTT Caption Track binding
+  // WebVTT Caption Track binding (keep inactive language track in 'hidden' so cues stay loaded)
   function applyCaptionMode(lang) {
     const tracks = Array.from(video.textTracks || []);
     tracks.forEach(t => {
-      t.mode = (lang !== 'off' && t.language === lang) ? 'showing' : 'disabled';
+      if (lang === 'off') {
+        t.mode = 'disabled';
+      } else {
+        t.mode = t.language === lang ? 'showing' : 'hidden';
+      }
     });
     $('#video-state-panel').dataset.captionLang = lang;
     $('#active-caption-banner').dataset.lang = lang;

@@ -634,6 +634,50 @@ else:
                 self.assertEqual(r.headers.get("Content-Type"), "text/vtt; charset=utf-8")
             with urllib.request.urlopen(url + "/arena-audio.wav") as r:
                 self.assertEqual(r.headers.get("Content-Type"), "audio/wav")
+                self.assertEqual(r.headers.get("Accept-Ranges"), "bytes")
+                self.assertEqual(r.read(), b"RIFF\x24\x00\x00\x00WAVE")
+            with urllib.request.urlopen(
+                urllib.request.Request(
+                    url + "/arena-audio.wav", headers={"Range": "bytes=0-3"}
+                )
+            ) as r:
+                self.assertEqual(r.status, 206)
+                self.assertEqual(r.headers.get("Content-Range"), "bytes 0-3/12")
+                self.assertEqual(r.read(), b"RIFF")
+            with urllib.request.urlopen(
+                urllib.request.Request(
+                    url + "/arena-audio.wav", headers={"Range": "bytes=8-"}
+                )
+            ) as r:
+                self.assertEqual(r.status, 206)
+                self.assertEqual(r.headers.get("Content-Range"), "bytes 8-11/12")
+                self.assertEqual(r.read(), b"WAVE")
+            with urllib.request.urlopen(
+                urllib.request.Request(
+                    url + "/arena-audio.wav", headers={"Range": "bytes=-4"}
+                )
+            ) as r:
+                self.assertEqual(r.status, 206)
+                self.assertEqual(r.headers.get("Content-Range"), "bytes 8-11/12")
+                self.assertEqual(r.read(), b"WAVE")
+            for invalid_range in ("bytes=999-", "bytes=8-2", "bytes=-0", "bytes=bad"):
+                with self.assertRaises(urllib.error.HTTPError) as r_err:
+                    urllib.request.urlopen(
+                        urllib.request.Request(
+                            url + "/arena-audio.wav", headers={"Range": invalid_range}
+                        )
+                    )
+                self.assertEqual(r_err.exception.code, 416)
+                self.assertEqual(
+                    r_err.exception.headers.get("Content-Range"), "bytes */12"
+                )
+            with urllib.request.urlopen(
+                urllib.request.Request(url + "/arena-audio.wav", method="HEAD")
+            ) as r:
+                self.assertEqual(r.status, 200)
+                self.assertEqual(r.headers.get("Accept-Ranges"), "bytes")
+                self.assertEqual(r.headers.get("Content-Length"), "12")
+                self.assertEqual(r.read(), b"")
             with self.assertRaises(urllib.error.HTTPError) as ctx:
                 opener.open(url + "/redirect-cross-origin")
             self.assertEqual(ctx.exception.code, 302)
@@ -664,10 +708,16 @@ else:
             thread.join()
 
     def test_wave_commands_range_assertions_and_long_admin_home(self):
+        (self.skill / "assets/fixtures/arena-frame-outer.html").write_text(
+            '<iframe src="http://localhost:4187/a"></iframe><iframe src="http://127.0.0.1:4187/b"></iframe>'
+        )
         self.init()
+        rewritten = (self.root / "fixtures/arena-frame-outer.html").read_text()
+        self.assertIn("http://localhost:4567/a", rewritten)
+        self.assertIn("http://127.0.0.1:4567/b", rewritten)
         rid = self.execute()
         d = self.root / "commands" / rid
-        (d / "stdout.txt").write_text('{"ok": true, "size": 42}')
+        (d / "stdout.txt").write_text('{"ok": true, "size": 42, "label": "9"}')
         m = audit.load(d / "meta.json")
         m["stdout_sha256"] = audit.digest(d / "stdout.txt")
         audit.write(d / "meta.json", m)
@@ -686,6 +736,19 @@ else:
                 self.root, {"record": rid, "pointer": "/json/size", "op": "gte", "value": 42}
             )
         )
+        for op, ptr, val in [
+            ("gte", "/json/ok", 1),
+            ("lte", "/json/ok", 1),
+            ("gt", "/json/ok", 0),
+            ("gte", "/json/size", True),
+            ("gt", "/json/label", "10"),
+        ]:
+            self.assertFalse(
+                audit.assertion(
+                    self.root, {"record": rid, "pointer": ptr, "op": op, "value": val}
+                ),
+                f"Expected strict numeric rejection for {op} on {ptr} vs {val!r}",
+            )
         m_open = audit.extract_metrics(
             "open", 0, {"vom": "@vom 2\npage", "elapsed_ms": 20}, 25.0
         )
@@ -715,6 +778,9 @@ else:
             / "candidate_run_directory"
         )
         deep_run.mkdir(parents=True)
+        with patch.object(audit.sys, "platform", "win32"):
+            win_home = audit.resolve_admin_home(deep_run)
+            self.assertEqual(Path(win_home), (deep_run / "admin-runtime").resolve())
         resolved = Path(audit.resolve_admin_home(deep_run))
         try:
             self.assertLessEqual(len(str(resolved / "run" / "daemon.sock")), 96)
@@ -724,6 +790,8 @@ else:
                 resolved.unlink()
 
     def test_shipped_scenarios_and_fixture_manifest_integrity(self):
+        import re as _re
+
         real_skill = Path(__file__).resolve().parents[1]
         scenarios = audit.load(real_skill / "references/scenarios.json")
         self.assertGreaterEqual(len(scenarios), 98)
@@ -754,6 +822,25 @@ else:
             "ARENA-NEG-VIRTUAL-RECYCLE",
         ]:
             self.assertIn(required_id, ids)
+        corpus = "\n".join(
+            p.read_text(encoding="utf-8")
+            for p in [
+                *(real_skill / "assets/fixtures").glob("arena-*.html"),
+                real_skill / "scripts/serve.py",
+            ]
+        )
+        known_dom_ids = set(_re.findall(r'id=["\']([A-Za-z0-9_-]+)["\']', corpus))
+        for sc in scenarios:
+            if not sc["id"].startswith("ARENA-"):
+                continue
+            for sel_id in _re.findall(r"#([A-Za-z][A-Za-z0-9_-]*)", sc.get("goal", "")):
+                if sel_id.endswith("..3"):
+                    sel_id = sel_id[:-3]
+                self.assertIn(
+                    sel_id,
+                    known_dom_ids,
+                    f"Scenario {sc['id']} references #{sel_id} missing from arena fixtures",
+                )
         manifest = audit.load(real_skill / "references/fixture-manifest.json")
         actual_files = {
             f.relative_to(real_skill / "assets").as_posix()

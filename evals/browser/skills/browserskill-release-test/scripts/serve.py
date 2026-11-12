@@ -52,15 +52,55 @@ def make_server(root, port):
             self.send_header("Content-Length", str(len(body)))
             self.send_header("Cache-Control", cache_control)
             self.send_header("Access-Control-Allow-Origin", "*")
-            self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-            self.send_header("Access-Control-Allow-Headers", "Content-Type")
+            self.send_header("Access-Control-Allow-Methods", "GET, HEAD, POST, OPTIONS")
+            self.send_header("Access-Control-Allow-Headers", "Content-Type, Range")
+            self.send_header(
+                "Access-Control-Expose-Headers",
+                "Accept-Ranges, Content-Length, Content-Range",
+            )
             for k, v in hdrs.items():
                 self.send_header(k, v)
             self.end_headers()
+            if self.command == "HEAD":
+                return
             try:
                 self.wfile.write(body)
             except (BrokenPipeError, ConnectionResetError):
                 pass
+
+        def send_static(self, raw, mime, headers=None):
+            hdrs = dict(headers or {})
+            hdrs["Accept-Ranges"] = "bytes"
+            range_hdr = self.headers.get("Range", "").strip()
+            if not range_hdr or not range_hdr.startswith("bytes=") or "," in range_hdr:
+                return self.send(200, raw, mime, hdrs)
+            total = len(raw)
+            spec = range_hdr[6:].strip()
+            if total == 0 or "-" not in spec:
+                hdrs["Content-Range"] = f"bytes */{total}"
+                return self.send(416, b"", mime, hdrs)
+            start_s, end_s = spec.split("-", 1)
+            try:
+                if start_s == "":
+                    suffix = int(end_s)
+                    if suffix <= 0:
+                        raise ValueError("empty suffix")
+                    start = max(0, total - suffix)
+                    end = total - 1
+                else:
+                    start = int(start_s)
+                    raw_end = total - 1 if end_s == "" else int(end_s)
+                    if start < 0 or start >= total or raw_end < start:
+                        raise ValueError("out of bounds")
+                    end = min(total - 1, raw_end)
+            except ValueError:
+                hdrs["Content-Range"] = f"bytes */{total}"
+                return self.send(416, b"", mime, hdrs)
+            hdrs["Content-Range"] = f"bytes {start}-{end}/{total}"
+            return self.send(206, raw[start : end + 1], mime, hdrs)
+
+        def do_HEAD(self):
+            self.do_GET()
 
         def do_OPTIONS(self):
             self.send(204, b"", "text/plain; charset=utf-8")
@@ -153,7 +193,8 @@ def make_server(root, port):
                 html = (
                     f'<!doctype html><meta charset="utf-8"><title>Slow Document ({delay_ms}ms)</title>'
                     f'<main id="slow-doc-ready" data-delay-ms="{delay_ms}">'
-                    f'<h1>Delayed Document Ready</h1><p id="slow-doc-meta">delay_ms={delay_ms}</p></main>'
+                    f'<h1>Delayed Document Ready</h1><p id="slow-doc-meta">delay_ms={delay_ms}</p>'
+                    f'<a id="slow-doc-back" href="/arena-modern-spa-grid">返回 SPA 主大盘</a></main>'
                 )
                 return self.send(200, html, "text/html; charset=utf-8")
             if p == "/download":
@@ -248,7 +289,7 @@ def make_server(root, port):
             hdrs = {}
             if p in BFCACHE_PATHS or q.get("bfcache") == ["1"]:
                 hdrs["Cache-Control"] = "public, max-age=300"
-            return self.send(200, file.read_bytes(), mime, hdrs)
+            return self.send_static(file.read_bytes(), mime, hdrs)
 
         def do_POST(self):
             n = int(self.headers.get("Content-Length", "0"))

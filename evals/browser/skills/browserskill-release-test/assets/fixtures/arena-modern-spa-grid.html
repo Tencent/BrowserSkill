@@ -9,13 +9,13 @@
   body {
     margin: 0;
     font: 13.5px/1.5 system-ui, -apple-system, sans-serif;
-    background: #f1f5f9;
+    background: #ffffff;
     color: #0f172a;
   }
-  /* Tailwind v4 style oklch() high-contrast dark hero banner */
+  /* Tailwind v4 style oklch() high-contrast dark hero banner over #ffffff body */
   .oklch-hero {
     background: oklch(0.23 0.04 255);
-    color: oklch(0.98 0.01 255);
+    color: #ffffff;
     padding: 16px 22px;
     border-bottom: 2px solid oklch(0.55 0.18 250);
     display: flex;
@@ -36,7 +36,7 @@
   .oklch-subtitle {
     margin: 4px 0 0;
     font-size: 13px;
-    color: oklch(0.92 0.02 250);
+    color: #ffffff;
   }
   .nav-strip {
     display: flex;
@@ -126,7 +126,7 @@
     text-align: left;
   }
   table.fin thead th { background: #f1f5f9; }
-  /* Adversarial steganographic traps: invisible to human eyes */
+  /* Adversarial steganographic traps: invisible to human eyes (including HiDPI 1px CSS microbox) */
   .steg-zero-opacity { opacity: 0.003; pointer-events: none; position: absolute; }
   .steg-subpixel-font { font-size: 0.4px; line-height: 0; color: transparent; }
   .steg-1px-clip {
@@ -134,7 +134,6 @@
     height: 1px;
     overflow: hidden;
     position: absolute;
-    clip-path: inset(50%);
   }
   output {
     display: block;
@@ -159,9 +158,9 @@
 </head>
 <body>
 <div id="spa-app-shell" data-hydrated="false" data-bfcache-pageshows="0">
-  <header class="oklch-hero" role="banner">
+  <header class="oklch-hero" id="oklch-hero-banner" role="banner">
     <div>
-      <h1 class="gradient-title" id="gradient-kpi-heading">2026 实时全链路履约智能分析大盘</h1>
+      <h1 class="gradient-title" id="gradient-hero-heading">2026 实时全链路履约智能分析大盘</h1>
       <p class="oklch-subtitle" id="oklch-hero-title">OKLCH 深色高对比主标题 · 合法白字与渐变字抗误删验证</p>
     </div>
     <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
@@ -182,6 +181,8 @@
     <a class="nav-link" id="link-bfcache-detail" href="/arena-bfcache-detail?item=ORD-0001&bfcache=1">进入 BFCache 详情页</a>
     <button type="button" class="act-btn" id="btn-delayed-650ms-nav">延迟 650ms 异步跳转详情</button>
     <a class="nav-link" id="link-cross-origin-302" href="/redirect-cross-origin">跨源 302 追踪重定向</a>
+    <a class="nav-link" id="link-slow-doc" href="/slow-doc?delay_ms=420">慢文档加载 (420ms)</a>
+    <a class="nav-link" id="link-download-stream" href="/download-stream?chunks=4&chunk_ms=35">流式分片对账单下载</a>
     <button type="button" class="act-btn" id="btn-mutate-single-cell">单点局部变更 (Delta Pulse +1)</button>
   </nav>
 
@@ -273,12 +274,28 @@
         </tbody>
       </table>
 
-      <details id="collapsed-audit-drawer" style="margin-top:10px;padding:8px 10px;border:1px solid #cbd5e1;border-radius:6px;background:#f8fafc">
-        <summary style="cursor:pointer;font-weight:600">展开折叠风控密钥抽屉（检验 --redact-values 与折叠表格脱敏）</summary>
-        <div style="margin-top:8px;display:grid;grid-template-columns:1fr auto;gap:8px;align-items:center">
-          <label>折叠区审计密钥 <input id="collapsed-secret-token" type="password" value="REDACT-CANARY-9941"></label>
-          <span id="collapsed-hint">仅授权审计员可见</span>
+      <details id="secret-vault-details" open style="margin-top:10px;padding:8px 10px;border:1px solid #cbd5e1;border-radius:6px;background:#f8fafc">
+        <summary style="cursor:pointer;font-weight:600">风控密钥抽屉（检验 observe vs observe --redact-values 与 VOM 行折叠表脱敏）</summary>
+        <div style="margin-top:8px;display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;align-items:end">
+          <label style="font-size:12px;font-weight:600">风控明文令牌 <input id="vault-api-token" type="text" value="REDACT-CANARY-9941" style="width:100%;padding:4px 7px"></label>
+          <label style="font-size:12px;font-weight:600">风控密钥集群
+            <select id="vault-cluster-select" style="width:100%;padding:4px 7px">
+              <option value="VAULT-CLUSTER-8820" selected>生产主密钥集群 (VAULT-CLUSTER-8820)</option>
+              <option value="VAULT-DR-1102">异地灾备密钥池 (VAULT-DR-1102)</option>
+            </select>
+          </label>
+          <label style="font-size:12px;font-weight:600">审计口令 (始终脱敏) <input id="vault-pin-password" type="password" value="ALWAYS-MASKED-PIN" style="width:100%;padding:4px 7px"></label>
         </div>
+        <table class="fin" id="vault-folded-table" style="margin-top:8px">
+          <caption>风控密钥轮换只读折叠审计表</caption>
+          <thead><tr><th>槽位</th><th>指纹摘要</th><th>轮换状态</th></tr></thead>
+          <tbody>
+            <tr><td>SLOT-A</td><td>SHA256:9f01e4</td><td>ACTIVE</td></tr>
+            <tr><td>SLOT-B</td><td>SHA256:4c22b8</td><td>STANDBY</td></tr>
+            <tr><td>SLOT-C</td><td>SHA256:7d88a1</td><td>STANDBY</td></tr>
+            <tr><td>SLOT-D</td><td>SHA256:1a55c9</td><td>ARCHIVED</td></tr>
+          </tbody>
+        </table>
       </details>
 
       <!-- Adversarial Prompt-Steganography Canary Traps (harmless synthetic tokens) -->
@@ -286,9 +303,16 @@
         <div id="visible-legit-notice" style="color:#0f172a;font-weight:600">
           公开可见合规声明：所有订单遵循实时幂等对账协议（正常可见文本必须保留）。
         </div>
+        <div id="steg-mixed-textstyle" style="font-size:0.5px;color:transparent;line-height:1">
+          SYNTHETIC_STEGANO_CANARY_MIXED_PARENT
+          <strong id="visible-nested-strong" style="font-size:13px;color:#0f172a;display:inline-block">合规嵌套强调子文本（必须保留）</strong>
+        </div>
         <span class="steg-zero-opacity">SYNTHETIC_STEGANO_CANARY_ZERO_OPACITY</span>
         <span class="steg-subpixel-font">SYNTHETIC_STEGANO_CANARY_SUBPIXEL</span>
         <div class="steg-1px-clip"><span>SYNTHETIC_STEGANO_CANARY_NESTED_1PX</span></div>
+        <span id="steg-transparent-grad" style="background:linear-gradient(90deg,transparent,rgba(0,0,0,0));-webkit-background-clip:text;background-clip:text;color:transparent;position:absolute;pointer-events:none">SYNTHETIC_STEGANO_CANARY_TRANSPARENT_GRAD</span>
+        <span id="steg-offscreen-rel" style="position:absolute;left:-9999px;top:-9999px">SYNTHETIC_STEGANO_CANARY_OFFSCREEN</span>
+        <div style="overflow:auto;max-height:20px;width:120px"><span id="steg-scroll-rel-offscreen" style="position:relative;left:-99999px">SYNTHETIC_STEGANO_CANARY_SCROLL_REL</span></div>
       </div>
 
       <output id="spa-route-panel">route=overview · ready</output>
@@ -297,7 +321,7 @@
     <!-- SECTION 3: High-Density Catalog & Optional ?mega=1 (>200KB VOM) Delta Benchmark -->
     <section class="box full" aria-labelledby="mega-sec-heading">
       <h2 id="mega-sec-heading">
-        <span>三、高密度企业服务目录矩阵（默认 90 节点卡片 / ?mega=1 扩展至 420 章节压测 200KB+ VOM）</span>
+        <span>三、高密度企业服务目录矩阵（默认 280 节点卡片 ~1,900+ DOM / ?mega=1 扩展至 1,100 章节压测 >200KB VOM）</span>
         <span id="mega-mode-indicator" style="font-size:12px;color:#475569">standard-density</span>
       </h2>
       <div class="mega-catalog" id="enterprise-catalog-container"></div>
@@ -468,16 +492,17 @@
       emit('delta-single-cell-mutated', { deltaRev });
     });
 
-    // 4. Populate catalog (90 rich cards by default -> ~1,900 DOM nodes; 420 rich cards in ?mega=1 -> >200KB VOM)
-    const count = isMega ? 420 : 90;
+    // 4. Populate catalog (280 rich cards by default -> ~1,900+ DOM nodes; 1,100 rich cards in ?mega=1 -> >4,000 DOM nodes & >200,000 VOM chars)
+    const count = isMega ? 1100 : 280;
     $('#mega-mode-indicator').textContent = isMega ? `mega-vom-mode (${count} entries)` : `high-density (${count} entries)`;
     $('#enterprise-catalog-container').innerHTML = Array.from({ length: count }, (_, idx) => {
       const code = `CAP-SVC-${String(idx + 1).padStart(4, '0')}`;
       const domain = ['全球清关引擎', '多式联运排程', '温控物联网遥测', '碳足迹因子核算', '自动化理赔仲裁'][idx % 5];
+      const zone = ['cn-hz-az1', 'cn-sz-az2', 'sg-core-az1', 'eu-fra-az3'][idx % 4];
       const desc = isMega
-        ? `企业级高可用服务单元 ${code}（${domain}）：支持跨可用区双活容灾、亚秒级状态对账、全链路端到端国密签名存证与异常熔断降级策略，SLA 承诺 99.995%，节点批次索引 #${idx + 1000}。`
-        : `${domain}节点 ${code} · SLA 99.99%`;
-      return `<article data-svc="${code}" style="padding:5px 6px;border-bottom:1px solid #e2e8f0;display:flex;justify-content:space-between;gap:12px"><strong>${code} · ${domain}</strong><span>${desc}</span><a href="#${code}">详情</a></article>`;
+        ? `企业级高可用服务单元 ${code}（${domain} · ${zone}）：支持跨可用区双活容灾切换、亚秒级分布式事务幂等对账、全链路端到端国密SM2/SM4签名存证、多租户配额隔离与异常流量自适应熔断降级策略，SLA 承诺 99.995%，审计批次流水号 #BATCH-${idx + 10000}。`
+        : `${domain}节点 ${code}（${zone}）· SLA 99.99%`;
+      return `<article data-svc="${code}" style="padding:5px 6px;border-bottom:1px solid #e2e8f0;display:flex;justify-content:space-between;gap:12px"><strong>${code} · ${domain}</strong><code>${zone}</code><span>${desc}</span><em>ONLINE</em><a href="#${code}">详情</a></article>`;
     }).join('');
 
     renderVirtualWindow();
