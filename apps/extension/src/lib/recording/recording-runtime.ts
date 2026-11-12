@@ -64,6 +64,20 @@ export class RecordingObservationRuntime {
               }
             : undefined,
           getAttachmentId: input.cdp.getAttachmentId?.bind(input.cdp),
+          resolveTarget: input.cdp.resolveTarget?.bind(input.cdp),
+          retainTabAttachment: input.cdp.retainTabAttachment?.bind(input.cdp),
+          reattachIfSoftDetached: input.cdp.reattachIfSoftDetached
+            ? async (tabId) => {
+                check(tabId);
+                return input.cdp.reattachIfSoftDetached!(tabId);
+              }
+            : undefined,
+          reconcileSoftDetachedFrames: input.cdp.reconcileSoftDetachedFrames
+            ? async (tabId) => {
+                check(tabId);
+                return input.cdp.reconcileSoftDetachedFrames!(tabId);
+              }
+            : undefined,
           ensureAttachedToUrl: input.cdp.ensureAttachedToUrl
             ? async (tabId, url) => {
                 check(tabId);

@@ -90,6 +90,10 @@ export interface CdpRunner {
   detach?(tabId: number, expectedAttachmentId?: string): Promise<void>;
   getFrameGraph?(tabId: number, signal?: AbortSignal): Promise<CdpFrameGraph>;
   getAttachmentId?(tabId: number): string | undefined;
+  resolveTarget?<T extends CdpDebuggee>(target: T): T;
+  retainTabAttachment?(tabId: number): () => void;
+  reattachIfSoftDetached?(tabId: number): Promise<void>;
+  reconcileSoftDetachedFrames?(tabId: number): Promise<void>;
   ensureAttachedToUrl?(tabId: number, expectedUrl: string | undefined): Promise<void>;
   acquireBackgroundExecution?(sessionId: string, tabId: number): Promise<void>;
   /** Whether this session requests the persistent override, regardless of applied CDP state. */

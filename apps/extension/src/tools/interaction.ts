@@ -15,7 +15,10 @@ import { isAbortError } from "./vom/capture-abort";
 
 import { ChromiumCdp } from "@/browser-driver/chromium-cdp";
 import type { CdpTarget } from "@/browser-driver/frame-graph";
-import { RECORD_PASSWORD_ATTRIBUTE } from "@/lib/sensitive-autocomplete";
+import {
+  RECORD_PASSWORD_ATTRIBUTE,
+  SENSITIVE_AUTOCOMPLETE_SELECTOR,
+} from "@/lib/sensitive-autocomplete";
 import type { SessionContext, SessionManager } from "@/session-manager/manager";
 import type {
   BlurParams,
@@ -39,7 +42,7 @@ import type {
 import { type ClickOverlayDeps, withClickOverlay } from "./click-overlay";
 import { attachDialogs, markDialogCursor } from "./dialogs";
 import { backendNodeToObject } from "./element-geometry";
-import { rpcError } from "./errors";
+import { cdpError, rpcError } from "./errors";
 import { FOCUS_CHECK } from "./focus-state";
 import { resolveNodeGeometry, scrollElementAndFramesIntoView } from "./frame-geometry";
 import {
@@ -179,14 +182,30 @@ export async function resolveBackendNode(
     };
   }
   if (hasRef) {
-    const resolved = resolveSnapshotRef(ctx, params.ref as string, target.tabId);
+    const ref = params.ref as string;
+    let resolved = resolveSnapshotRef(ctx, ref, target.tabId);
     if (isRpcError(resolved)) return resolved;
+    const reconcile =
+      cdp.reattachIfSoftDetached ??
+      (resolved.cdpSessionId ? cdp.reconcileSoftDetachedFrames : undefined);
+    if (reconcile) {
+      cdp.trackSessionTab?.(ctx.sessionId, target.tabId);
+      try {
+        await reconcile.call(cdp, target.tabId);
+      } catch (error) {
+        if (isAbortError(error)) return { code: "cancelled", message: `${toolName} aborted` };
+        return cdpError(error);
+      }
+      resolved = resolveSnapshotRef(ctx, ref, target.tabId);
+      if (isRpcError(resolved)) return resolved;
+    }
+    const rawTarget: CdpTarget = {
+      tabId: target.tabId,
+      ...(resolved.cdpSessionId ? { sessionId: resolved.cdpSessionId } : {}),
+    };
     return {
       backendNodeId: resolved.backendNodeId,
-      cdpTarget: {
-        tabId: target.tabId,
-        ...(resolved.cdpSessionId ? { sessionId: resolved.cdpSessionId } : {}),
-      },
+      cdpTarget: cdp.resolveTarget ? cdp.resolveTarget(rawTarget) : rawTarget,
       ...(resolved.frameId ? { frameId: resolved.frameId } : {}),
       usedRef: resolved.refKey,
       ...(resolved.rowAnchor ? { rowAnchor: resolved.rowAnchor } : {}),
@@ -280,6 +299,19 @@ function focusCdp(cdp: CdpRunner, signal: AbortSignal | undefined): CdpRunner {
     send: (tabId, method, params) => send({ tabId }, method, params),
     sendToTarget: send,
     trackSessionTab: cdp.trackSessionTab?.bind(cdp),
+    resolveTarget: cdp.resolveTarget?.bind(cdp),
+    reattachIfSoftDetached: cdp.reattachIfSoftDetached
+      ? (tabId) => {
+          checkFocusAbort(signal);
+          return cdp.reattachIfSoftDetached!(tabId);
+        }
+      : undefined,
+    reconcileSoftDetachedFrames: cdp.reconcileSoftDetachedFrames
+      ? (tabId) => {
+          checkFocusAbort(signal);
+          return cdp.reconcileSoftDetachedFrames!(tabId);
+        }
+      : undefined,
     getFrameGraph: cdp.getFrameGraph
       ? (tabId) => {
           checkFocusAbort(signal);
@@ -738,6 +770,8 @@ export async function handleHover(
 
   const node = await resolveBackendNode(deps.cdp, ctx, target, params, "hover");
   if (isRpcError(node)) return node;
+  const cancelled = throwIfAborted(deps.signal);
+  if (cancelled) return cancelled;
 
   deps.cdp.trackSessionTab?.(ctx.sessionId, target.tabId);
   const geometry = await resolveNodeGeometry(
@@ -966,8 +1000,8 @@ type FillFailureReason =
   | "fill_focus_lost"
   | "fill_failed";
 
-type FillPreparation =
-  | { before: string; expected: string; write: "insert" | "value" }
+type FillFallbackPreparation =
+  | { before: string; expected: string; write: "insert" | "value"; focused: boolean }
   | { reason: FillFailureReason; error: string };
 
 type FillStep1Result =
@@ -981,6 +1015,10 @@ type FillStep1Result =
       isSensitive: boolean;
       focused: boolean;
       hasFocus: boolean;
+      /** Background only: the pointer hovers this document or a same-origin ancestor; `null` when an ancestor is cross-origin. */
+      hovered: boolean | null;
+      /** Background only: the document renders frames, so pointer input is processed. */
+      visible: boolean;
       cleared: boolean;
       readyForInsert: boolean;
     };
@@ -998,13 +1036,27 @@ type FillReadiness = "ready" | "background" | "fill_target_changed" | "fill_focu
 
 const FILL_MAX_ACTUAL_VALUE_CHARS = 200;
 
-function fillError(reason: FillFailureReason, message: string): RpcError {
+/**
+ * Validation failures detected before the requested value is written. Scrolling
+ * or focusing the target is preparation, not the requested write, so the action
+ * may be retried with a corrected parameter.
+ */
+const PRE_WRITE_FAILURE = { effect_state: "none", phase: "precondition" } as const;
+
+/**
+ * `preWrite` must be set only by a caller that knows the field has not been
+ * cleared or typed into and no key event has reached the page. The same
+ * reasons are also reported after clearing (for example when focus cannot be
+ * restored to a target that became disabled), where the write did happen.
+ */
+function fillError(reason: FillFailureReason, message: string, preWrite = false): RpcError {
   return rpcError(
     reason === "target_not_fillable" || reason === "fill_value_invalid"
       ? "invalid_params"
       : "cdp_failed",
     reason,
     message,
+    preWrite ? PRE_WRITE_FAILURE : undefined,
   );
 }
 
@@ -1012,6 +1064,9 @@ interface FillScriptReply<T> {
   result?: { value?: T };
   exceptionDetails?: unknown;
 }
+
+/** A visible page processes a pointer move on its next frame. */
+const FILL_POINTER_FLUSH_TIMEOUT_MS = 500;
 
 // Date-like controls accept a programmatic value, but Chrome's Input.insertText
 // leaves them empty. Fill them via the input value setter instead of typing.
@@ -1028,6 +1083,9 @@ const FILL_EDITABLE_FUNCTION = `function() {
   return this.isConnected && supported && !this.readOnly && !this.matches(':disabled');
 }`;
 
+// The shared rule (password type, recording marker, sensitive autocomplete) plus
+// a "show password" toggle: it switches type to text, so also match password-like
+// names and ids, and the broader secret tokens fill has always withheld.
 const FILL_SENSITIVE_FUNCTION = `function() {
   if (!this || this.nodeType !== 1) return false;
   const tag = this.tagName.toLowerCase();
@@ -1036,7 +1094,11 @@ const FILL_SENSITIVE_FUNCTION = `function() {
     if (rawType === 'password' || this.hasAttribute(${JSON.stringify(RECORD_PASSWORD_ATTRIBUTE)})) {
       return true;
     }
+    if (/pass(?:word|wd|code)|pwd/i.test((this.getAttribute('name') ?? '') + ' ' + (this.id ?? ''))) {
+      return true;
+    }
   }
+  if (this.matches(${JSON.stringify(SENSITIVE_AUTOCOMPLETE_SELECTOR)})) return true;
   const ac = (this.getAttribute('autocomplete') ?? '').toLowerCase().trim();
   if (ac) {
     const tokens = ac.split(/[\\t\\n\\f\\r ]+/);
@@ -1160,23 +1222,33 @@ const FILL_STEP1_FUNCTION = `async function(value, clearBefore, scrollInPage) {
   const focused = root.activeElement === this;
   const hasFocus = Boolean(this.ownerDocument?.hasFocus?.());
   const supportsSelection = native && typeof this.selectionStart === 'number';
-  if (!focused) {
+  if (!focused || !hasFocus) {
+    // A background flush moves the pointer off the page unless something is
+    // hovered there; report hover so a hovered menu is not closed.
+    let hovered = false;
+    try {
+      for (let view = this.ownerDocument.defaultView; view; view = view.parent) {
+        if (view.document.querySelector(':hover')) { hovered = true; break; }
+        if (view.parent === view) break;
+      }
+    } catch {
+      hovered = null;
+    }
     return {
       ...plan,
       native,
       supportsSelection,
       isSensitive,
-      focused: false,
+      focused,
       hasFocus,
+      hovered,
+      visible: this.ownerDocument.visibilityState === 'visible',
       cleared: false,
       readyForInsert: false,
     };
   }
-  const canClearNow =
-    clearBefore &&
-    (plan.write === 'value' || hasFocus || (plan.write === 'insert' && value !== '' && native));
   let cleared = false;
-  if (canClearNow) {
+  if (clearBefore) {
     if (native) {
       const proto = tag === 'textarea' ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
       Object.getOwnPropertyDescriptor(proto, 'value').set.call(this, '');
@@ -1198,11 +1270,13 @@ const FILL_STEP1_FUNCTION = `async function(value, clearBefore, scrollInPage) {
         isSensitive,
         focused: false,
         hasFocus,
+        hovered: false,
+        visible: true,
         cleared: true,
         readyForInsert: false,
       };
     }
-  } else if (!clearBefore && plan.write === 'insert' && value !== '' && native && supportsSelection) {
+  } else if (plan.write === 'insert' && value !== '' && native && supportsSelection) {
     const end = this.value.length;
     this.setSelectionRange(end, end);
   }
@@ -1210,8 +1284,8 @@ const FILL_STEP1_FUNCTION = `async function(value, clearBefore, scrollInPage) {
     plan.write === 'insert'
       ? value !== ''
         ? native && (clearBefore || supportsSelection)
-        : hasFocus
-      : hasFocus;
+        : true
+      : true;
   return {
     ...plan,
     native,
@@ -1219,6 +1293,8 @@ const FILL_STEP1_FUNCTION = `async function(value, clearBefore, scrollInPage) {
     isSensitive,
     focused: true,
     hasFocus,
+    hovered: false,
+    visible: true,
     cleared,
     readyForInsert,
   };
@@ -1235,11 +1311,11 @@ const FILL_STEP3_FUNCTION = `async function(notifyInput, expected, wasSensitive,
   const connected = Boolean(this.isConnected);
   const value = (${FILL_VALUE_FUNCTION}).call(this);
   const matches = value === expected;
+  const formatted = !matches;
   const sensitive = Boolean(wasSensitive || (${FILL_SENSITIVE_FUNCTION}).call(this));
   if (sensitive) {
-    return { connected, matches, valueLength: value.length, sensitive: true };
+    return { connected, matches, valueLength: value.length, sensitive: true, formatted };
   }
-  const formatted = !matches;
   const chars = value.length > maxChars ? Array.from(value) : null;
   const actualValue = chars && chars.length > maxChars ? chars.slice(0, maxChars).join('') : value;
   return { connected, matches, valueLength: value.length, sensitive: false, actualValue, formatted };
@@ -1267,6 +1343,7 @@ export async function handleFill(
 
   const node = await resolveBackendNode(deps.cdp, ctx, target, params, "fill");
   if (isRpcError(node)) return node;
+  if (throwIfAborted(deps.signal)) return { code: "cancelled", message: "fill aborted" };
   const nodeCdp = cdpRunnerForTarget(deps.cdp, node.cdpTarget);
   deps.cdp.trackSessionTab?.(ctx.sessionId, target.tabId);
 
@@ -1313,7 +1390,12 @@ export async function handleFill(
     }
     const step1 = step1Reply.result.value;
     if ("error" in step1) {
-      return fillError(step1.reason, step1.error);
+      // Step 1 reports these validation errors only before clearing; its focus is
+      // preparation, so the requested write never started. `fill_target_changed`
+      // is reported after clearing and keeps an unknown effect.
+      const preWrite =
+        step1.reason === "target_not_fillable" || step1.reason === "fill_value_invalid";
+      return fillError(step1.reason, step1.error, preWrite);
     }
     if (
       typeof step1.before !== "string" ||
@@ -1415,124 +1497,210 @@ export async function handleFill(
       }
     };
 
-    let cleared = step1.cleared;
-    // Fallback path only when Step 1 could not finish preparation in-place
-    // (e.g. DOM.focus fallback, contenteditable range placement, number/email
-    // --no-clear append, or empty/date fill in an unfocused background tab).
-    if (!step1.focused) {
+    // An unfocused page applies focus(), but runs its focus listeners only when
+    // the renderer receives focus with the next Input command. Deliver it before
+    // clearing or writing, so listeners that set defaults cannot run in between.
+    // On a visible page, a pointer move outside the viewport (sent to the tab,
+    // which also focuses OOPIF widgets) reaches no element and grants no user
+    // activation. A hidden page processes pointer moves only on its next frame,
+    // and a hovered page would see the pointer leave, so those, and a move that
+    // does not deliver focus, use a no-op key press, which pages can observe as
+    // an empty key.
+    let pointerFlush: boolean | undefined;
+    const canFlushWithPointer = async (): Promise<boolean> => {
+      if (pointerFlush !== undefined) return pointerFlush;
+      pointerFlush = step1.visible && step1.hovered === false;
+      if (step1.visible && step1.hovered === null && node.cdpTarget.sessionId) {
+        // The target's frame cannot read a cross-origin parent; ask the tab.
+        const top = await deps.cdp
+          .send<{ result?: { value?: unknown } }>(target.tabId, "Runtime.evaluate", {
+            expression: "document.querySelector(':hover') === null",
+            returnByValue: true,
+          })
+          .catch(() => undefined);
+        pointerFlush = top?.result?.value === true;
+      }
+      return pointerFlush;
+    };
+    const focusDelivered = async (): Promise<boolean> => {
+      const reply = await nodeCdp.send<FillScriptReply<boolean>>(
+        target.tabId,
+        "Runtime.callFunctionOn",
+        {
+          objectId,
+          functionDeclaration: "function() { return Boolean(this.ownerDocument?.hasFocus?.()); }",
+          returnByValue: true,
+        },
+      );
+      return !reply.exceptionDetails && reply.result?.value === true;
+    };
+    const flushBackgroundFocus = async (): Promise<void> => {
+      if (await canFlushWithPointer()) {
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        const moved = await Promise.race([
+          deps.cdp
+            .send(target.tabId, "Input.dispatchMouseEvent", { type: "mouseMoved", x: -1, y: -1 })
+            // A refused or late move falls back to the key press below.
+            .then(
+              () => true,
+              () => false,
+            ),
+          // The page became hidden after Step 1; its move waits for a frame.
+          new Promise<false>((resolve) => {
+            timer = setTimeout(() => resolve(false), FILL_POINTER_FLUSH_TIMEOUT_MS);
+          }),
+        ]).finally(() => clearTimeout(timer));
+        if (throwIfAborted(deps.signal)) return;
+        if (moved && (await focusDelivered())) return;
+        pointerFlush = false;
+      }
+      try {
+        await deps.cdp.send(target.tabId, "Input.dispatchKeyEvent", {
+          type: "rawKeyDown",
+          commands: [],
+        });
+      } finally {
+        await deps.cdp.send(target.tabId, "Input.dispatchKeyEvent", { type: "keyUp" });
+      }
+    };
+
+    const verifyRestoredFocus = async (expectedBefore: string): Promise<RpcError | null> => {
       const focusErr = await focusViaCdp();
       if (focusErr) return focusErr;
       if (throwIfAborted(deps.signal)) return { code: "cancelled", message: "fill aborted" };
+      if (!step1.hasFocus) {
+        await flushBackgroundFocus();
+        if (throwIfAborted(deps.signal)) return { code: "cancelled", message: "fill aborted" };
+      }
+      const restored = await nodeCdp.send<FillScriptReply<FillReadiness>>(
+        target.tabId,
+        "Runtime.callFunctionOn",
+        {
+          objectId,
+          functionDeclaration: `async function(before) {
+            await Promise.resolve();
+            await Promise.resolve();
+            if (!(${FILL_EDITABLE_FUNCTION}).call(this) || (${FILL_VALUE_FUNCTION}).call(this) !== before) return 'fill_target_changed';
+            if (this.getRootNode().activeElement !== this) return 'fill_focus_lost';
+            return this.ownerDocument.hasFocus() ? 'ready' : 'background';
+          }`,
+          arguments: [{ value: expectedBefore }],
+          awaitPromise: true,
+          returnByValue: true,
+        },
+      );
+      if (throwIfAborted(deps.signal)) return { code: "cancelled", message: "fill aborted" };
+      const state = restored.result?.value;
+      if (restored.exceptionDetails || (state !== "ready" && state !== "background")) {
+        return fillError(
+          state === "fill_target_changed" || state === "fill_focus_lost" ? state : "fill_failed",
+          "fill target changed or lost focus after restoring focus",
+        );
+      }
+      return null;
+    };
+
+    const runFallbackPrep = async (): Promise<FillFallbackPreparation | RpcError> => {
+      const fallbackPrep = await nodeCdp.send<FillScriptReply<FillFallbackPreparation>>(
+        target.tabId,
+        "Runtime.callFunctionOn",
+        {
+          objectId,
+          functionDeclaration: `async function(value, clearBefore) {
+            await Promise.resolve();
+            await Promise.resolve();
+            const preparation = (${FILL_PREPARATION_FUNCTION}).call(this, value, clearBefore);
+            if ('error' in preparation) return preparation;
+            if (this.getRootNode().activeElement !== this) return { reason: 'fill_focus_lost', error: 'fill target does not have focus' };
+            const tag = this.tagName.toLowerCase();
+            const native = tag === 'input' || tag === 'textarea';
+            if (clearBefore) {
+              if (native) {
+                const proto = tag === 'textarea' ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+                Object.getOwnPropertyDescriptor(proto, 'value').set.call(this, '');
+              } else {
+                this.textContent = '';
+              }
+              this.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
+              await Promise.resolve();
+              await Promise.resolve();
+              if (!(${FILL_EDITABLE_FUNCTION}).call(this) || (${FILL_VALUE_FUNCTION}).call(this) !== '') {
+                return { reason: 'fill_target_changed', error: 'fill target changed while clearing' };
+              }
+            } else if (preparation.write === 'insert' && value !== '' && native && typeof this.selectionStart === 'number') {
+              const end = this.value.length;
+              this.setSelectionRange(end, end);
+            }
+            return { ...preparation, focused: this.getRootNode().activeElement === this };
+          }`,
+          arguments: [{ value: params.value }, { value: clearBefore }],
+          awaitPromise: true,
+          returnByValue: true,
+        },
+      );
+      if (throwIfAborted(deps.signal)) return { code: "cancelled", message: "fill aborted" };
+      if (fallbackPrep.exceptionDetails || !fallbackPrep.result?.value) {
+        return fillError("fill_failed", "fill preparation script failed");
+      }
+      return fallbackPrep.result.value;
+    };
+
+    let cleared = step1.cleared;
+    let usedCdpFocus = false;
+    // Fallback path only when Step 1 could not finish preparation in-place
+    // (e.g. DOM.focus fallback, contenteditable range placement, number/email
+    // --no-clear append, or unfocused background tab requiring deferred-focus flush).
+    if (!step1.focused) {
+      usedCdpFocus = true;
       if (cleared) {
         // Clearing lost focus once; verify focus and empty value after restoring focus once.
-        const restored = await nodeCdp.send<FillScriptReply<FillReadiness>>(
-          target.tabId,
-          "Runtime.callFunctionOn",
-          {
-            objectId,
-            functionDeclaration: `async function() {
-              await Promise.resolve();
-              await Promise.resolve();
-              if (!(${FILL_EDITABLE_FUNCTION}).call(this) || (${FILL_VALUE_FUNCTION}).call(this) !== '') return 'fill_target_changed';
-              if (this.getRootNode().activeElement !== this) return 'fill_focus_lost';
-              return this.ownerDocument.hasFocus() ? 'ready' : 'background';
-            }`,
-            awaitPromise: true,
-            returnByValue: true,
-          },
-        );
+        const restoreErr = await verifyRestoredFocus("");
+        if (restoreErr) return restoreErr;
+      } else {
+        const focusErr = await focusViaCdp();
+        if (focusErr) return focusErr;
         if (throwIfAborted(deps.signal)) return { code: "cancelled", message: "fill aborted" };
-        const state = restored.result?.value;
-        if (restored.exceptionDetails || (state !== "ready" && state !== "background")) {
-          return fillError(
-            state === "fill_target_changed" || state === "fill_focus_lost" ? state : "fill_failed",
-            "fill target changed or lost focus after restoring focus",
-          );
-        }
       }
     }
 
     if (!step1.readyForInsert || !step1.focused) {
-      if (step1.write === "insert" && params.value === "" && !step1.hasFocus) {
-        try {
-          await deps.cdp.send(target.tabId, "Input.dispatchKeyEvent", {
-            type: "rawKeyDown",
-            commands: [],
-          });
-        } finally {
-          await deps.cdp.send(target.tabId, "Input.dispatchKeyEvent", { type: "keyUp" });
-        }
+      if (!step1.hasFocus) {
+        await flushBackgroundFocus();
         if (throwIfAborted(deps.signal)) return { code: "cancelled", message: "fill aborted" };
       }
 
-      if (!cleared) {
-        const fallbackPrep = await nodeCdp.send<FillScriptReply<FillPreparation>>(
-          target.tabId,
-          "Runtime.callFunctionOn",
-          {
-            objectId,
-            functionDeclaration: `async function(value, clearBefore) {
-              const preparation = (${FILL_PREPARATION_FUNCTION}).call(this, value, clearBefore);
-              if ('error' in preparation) return preparation;
-              if (this.getRootNode().activeElement !== this) return { reason: 'fill_focus_lost', error: 'fill target does not have focus' };
-              const tag = this.tagName.toLowerCase();
-              if (clearBefore) {
-                if (tag === 'input' || tag === 'textarea') {
-                  const proto = tag === 'textarea' ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
-                  Object.getOwnPropertyDescriptor(proto, 'value').set.call(this, '');
-                } else {
-                  this.textContent = '';
-                }
-                this.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
-                await Promise.resolve();
-                await Promise.resolve();
-                if (!(${FILL_EDITABLE_FUNCTION}).call(this) || (${FILL_VALUE_FUNCTION}).call(this) !== '') {
-                  return { reason: 'fill_target_changed', error: 'fill target changed while clearing' };
-                }
-              }
-              return preparation;
-            }`,
-            arguments: [{ value: params.value }, { value: clearBefore }],
-            awaitPromise: true,
-            returnByValue: true,
-          },
-        );
-        if (throwIfAborted(deps.signal)) return { code: "cancelled", message: "fill aborted" };
-        if (fallbackPrep.exceptionDetails || !fallbackPrep.result?.value) {
-          return fillError("fill_failed", "fill preparation script failed");
+      if (!cleared && (clearBefore || !step1.focused || !step1.hasFocus)) {
+        let prepVal = await runFallbackPrep();
+        if (isRpcError(prepVal)) return prepVal;
+        if ("error" in prepVal && prepVal.reason === "fill_focus_lost" && !usedCdpFocus) {
+          usedCdpFocus = true;
+          const focusErr = await focusViaCdp();
+          if (focusErr) return focusErr;
+          if (throwIfAborted(deps.signal)) return { code: "cancelled", message: "fill aborted" };
+          if (!step1.hasFocus) {
+            await flushBackgroundFocus();
+            if (throwIfAborted(deps.signal)) return { code: "cancelled", message: "fill aborted" };
+          }
+          prepVal = await runFallbackPrep();
+          if (isRpcError(prepVal)) return prepVal;
         }
-        const prepVal = fallbackPrep.result.value;
         if ("error" in prepVal) return fillError(prepVal.reason, prepVal.error);
         step1.before = prepVal.before;
         step1.expected = prepVal.expected;
         cleared = clearBefore;
 
-        if (clearBefore) {
-          let ready = await checkReady();
-          if (throwIfAborted(deps.signal)) return { code: "cancelled", message: "fill aborted" };
-          if (ready === "fill_focus_lost") {
-            const focusErr = await focusViaCdp();
-            if (focusErr) return focusErr;
-            if (throwIfAborted(deps.signal)) return { code: "cancelled", message: "fill aborted" };
-            ready = await checkReady();
-            if (throwIfAborted(deps.signal)) return { code: "cancelled", message: "fill aborted" };
-          }
-          if (typeof ready !== "string") return ready;
-          if (ready !== "ready" && ready !== "background") {
-            return fillError(ready, "fill target changed or lost focus before typing");
-          }
+        if (!prepVal.focused) {
+          const restoreErr = await verifyRestoredFocus(step1.before);
+          if (restoreErr) return restoreErr;
         }
       }
 
       if (step1.write === "insert" && params.value !== "") {
-        const needsKeyPositionOrFlush =
-          (!step1.native && !step1.hasFocus) ||
-          (step1.native && !clearBefore && !step1.supportsSelection);
-        if (needsKeyPositionOrFlush) {
+        if (step1.native && !clearBefore && !step1.supportsSelection) {
           try {
             await deps.cdp.send(target.tabId, "Input.dispatchKeyEvent", {
               type: "rawKeyDown",
-              commands: step1.native ? ["moveToEndOfDocument"] : [],
+              commands: ["moveToEndOfDocument"],
             });
           } finally {
             await deps.cdp.send(target.tabId, "Input.dispatchKeyEvent", { type: "keyUp" });
@@ -1560,48 +1728,7 @@ export async function handleFill(
     // Step 2: Core write.
     let valueAssigned = false;
     if (step1.write === "value") {
-      if (!step1.hasFocus) {
-        try {
-          await deps.cdp.send(target.tabId, "Input.dispatchKeyEvent", {
-            type: "rawKeyDown",
-            commands: ["moveToEndOfDocument"],
-          });
-        } finally {
-          await deps.cdp.send(target.tabId, "Input.dispatchKeyEvent", { type: "keyUp" });
-        }
-        if (throwIfAborted(deps.signal)) return { code: "cancelled", message: "fill aborted" };
-        const focusReply = await nodeCdp.send<FillScriptReply<FillReadiness>>(
-          target.tabId,
-          "Runtime.callFunctionOn",
-          {
-            objectId,
-            functionDeclaration: `function() {
-              if (!(${FILL_EDITABLE_FUNCTION}).call(this)) return 'fill_target_changed';
-              if (this.getRootNode().activeElement !== this) return 'fill_focus_lost';
-              return this.ownerDocument.hasFocus() ? 'ready' : 'background';
-            }`,
-            returnByValue: true,
-          },
-        );
-        if (throwIfAborted(deps.signal)) return { code: "cancelled", message: "fill aborted" };
-        const ready = focusReply.result?.value;
-        if (
-          focusReply.exceptionDetails ||
-          (ready !== "ready" &&
-            ready !== "background" &&
-            ready !== "fill_target_changed" &&
-            ready !== "fill_focus_lost")
-        ) {
-          return fillError(
-            "fill_failed",
-            "fill readiness script failed or returned an unexpected result",
-          );
-        }
-        if (ready !== "ready" && ready !== "background") {
-          return fillError(ready, "fill target changed or lost focus before assigning the value");
-        }
-      }
-      if (!(cleared && step1.expected === "" && step1.hasFocus)) {
+      if (!(cleared && step1.expected === "")) {
         const assigned = await nodeCdp.send<FillScriptReply<boolean>>(
           target.tabId,
           "Runtime.callFunctionOn",
@@ -1679,7 +1806,7 @@ export async function handleFill(
       ...(!verification.sensitive && typeof verification.actualValue === "string"
         ? { actual_value: verification.actualValue }
         : {}),
-      ...(!verification.sensitive && verification.formatted ? { formatted: true } : {}),
+      ...(verification.formatted ? { formatted: true } : {}),
     });
   } catch (err) {
     return fillError("fill_failed", err instanceof Error ? err.message : String(err));
@@ -2032,6 +2159,102 @@ export async function handlePress(
 // tool.select
 // ---------------------------------------------------------------------------
 
+// Matches every requested value before changing any option. With commit=false
+// it only validates, so a rejected select can run before scrolling or focusing.
+const SELECT_OPTIONS_FUNCTION = `function(values, commit) {
+  const select = this;
+  if (select.matches(':disabled')) {
+    return { ok: false, reason: 'target_disabled' };
+  }
+  const multiple = select.multiple;
+  const opts = Array.from(select.options);
+  const norm = (s) => String(s || '').replace(/\\s+/g, ' ').trim();
+  const formatCandidate = (o) => {
+    const lbl = norm(o.getAttribute('label')) || norm(o.text);
+    if (!lbl || o.value === lbl) return JSON.stringify(o.value);
+    return (o.value === '' ? '""' : o.value) + '=' + JSON.stringify(lbl);
+  };
+  const available = opts.slice(0, 12).map(formatCandidate);
+  const selectedIndices = new Set();
+  for (const v of values) {
+    const byValue = [];
+    for (let i = 0; i < opts.length; i++) {
+      if (opts[i].value === v) byValue.push(i);
+    }
+    if (byValue.length > 0) {
+      for (const idx of byValue) selectedIndices.add(idx);
+      continue;
+    }
+    const vTrim = norm(v);
+    if (vTrim) {
+      const byExactLabel = [];
+      for (let i = 0; i < opts.length; i++) {
+        const attrLbl = norm(opts[i].getAttribute('label'));
+        const txtLbl = norm(opts[i].text);
+        if ((attrLbl && attrLbl === vTrim) || (txtLbl && txtLbl === vTrim)) {
+          byExactLabel.push(i);
+        }
+      }
+      if (byExactLabel.length === 1) {
+        selectedIndices.add(byExactLabel[0]);
+        continue;
+      }
+      if (byExactLabel.length > 1) {
+        return {
+          ok: false,
+          reason: 'option_ambiguous',
+          ambiguous: v,
+          count: byExactLabel.length,
+          available,
+        };
+      }
+      const vLower = vTrim.toLowerCase();
+      const byLowerLabel = [];
+      for (let i = 0; i < opts.length; i++) {
+        const attrLbl = norm(opts[i].getAttribute('label')).toLowerCase();
+        const txtLbl = norm(opts[i].text).toLowerCase();
+        if ((attrLbl && attrLbl === vLower) || (txtLbl && txtLbl === vLower)) {
+          byLowerLabel.push(i);
+        }
+      }
+      if (byLowerLabel.length === 1) {
+        selectedIndices.add(byLowerLabel[0]);
+        continue;
+      }
+      if (byLowerLabel.length > 1) {
+        return {
+          ok: false,
+          reason: 'option_ambiguous',
+          ambiguous: v,
+          count: byLowerLabel.length,
+          available,
+        };
+      }
+    }
+    return { ok: false, reason: 'option_not_found', missing: v, available };
+  }
+  // Validation only: report the outcome without changing options or dispatching events.
+  if (!commit) return { ok: true, multiple };
+  if (multiple) {
+    for (let i = 0; i < opts.length; i++) {
+      opts[i].selected = selectedIndices.has(i);
+    }
+  } else {
+    const firstIdx = selectedIndices.size > 0 ? Array.from(selectedIndices)[0] : -1;
+    select.selectedIndex = firstIdx;
+    if (firstIdx >= 0 && opts[firstIdx]) opts[firstIdx].selected = true;
+  }
+  select.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
+  select.dispatchEvent(new Event('change', { bubbles: true }));
+  const selected = opts.filter((o) => o.selected);
+  return {
+    ok: true,
+    multiple,
+    selected_values: selected.map((o) => o.value),
+    selected_labels: selected.map((o) => o.getAttribute('label') || o.text),
+  };
+}`;
+
 export async function handleSelect(
   manager: SessionManager,
   params: SelectParams,
@@ -2059,6 +2282,7 @@ export async function handleSelect(
   if (isRpcError(node)) return node;
   const nodeCdp = cdpRunnerForTarget(deps.cdp, node.cdpTarget);
 
+  let objectId: string;
   try {
     deps.cdp.trackSessionTab?.(ctx.sessionId, target.tabId);
     const described = await nodeCdp.send<{ node?: DescribedNode }>(
@@ -2087,6 +2311,25 @@ export async function handleSelect(
         "single-select <select> requires exactly one value",
       );
     }
+    const objectIdOrErr = await backendNodeToObject(nodeCdp, target.tabId, node.backendNodeId);
+    if (isRpcError(objectIdOrErr)) return objectIdOrErr;
+    objectId = objectIdOrErr;
+    // Validate the requested options before scrolling or focusing: moving focus
+    // can blur another field and run its change or autosave handlers, so only a
+    // rejection reported here is free of page effects.
+    const validated = await nodeCdp.send<{
+      result?: { value?: SelectMutationResult | { ok: true; multiple: boolean } | null };
+    }>(target.tabId, "Runtime.callFunctionOn", {
+      objectId,
+      functionDeclaration: SELECT_OPTIONS_FUNCTION,
+      arguments: [{ value: params.values }, { value: false }],
+      returnByValue: true,
+    });
+    const validation = validated.result?.value;
+    if (!validation?.ok) return selectFailure(validation, true);
+    if (throwIfAborted(deps.signal)) {
+      return { code: "cancelled", message: "select aborted" };
+    }
     const scrollErr = await scrollElementAndFramesIntoView(
       deps.cdp,
       target.tabId,
@@ -2110,146 +2353,20 @@ export async function handleSelect(
     return { code: "cancelled", message: "select aborted" };
   }
 
-  const objectIdOrErr = await backendNodeToObject(nodeCdp, target.tabId, node.backendNodeId);
-  if (isRpcError(objectIdOrErr)) return objectIdOrErr;
-  const objectId = objectIdOrErr;
-
   try {
     await deps.cdp.beginDomMutation?.();
     const evaluated = await nodeCdp.send<{
       result?: { value?: SelectMutationResult | null };
     }>(target.tabId, "Runtime.callFunctionOn", {
       objectId,
-      functionDeclaration: `function(values) {
-        const select = this;
-        if (select.matches(':disabled')) {
-          return { ok: false, reason: 'target_disabled' };
-        }
-        const multiple = select.multiple;
-        const opts = Array.from(select.options);
-        const norm = (s) => String(s || '').replace(/\\s+/g, ' ').trim();
-        const formatCandidate = (o) => {
-          const lbl = norm(o.getAttribute('label')) || norm(o.text);
-          if (!lbl || o.value === lbl) return JSON.stringify(o.value);
-          return (o.value === '' ? '""' : o.value) + '=' + JSON.stringify(lbl);
-        };
-        const available = opts.slice(0, 12).map(formatCandidate);
-        const selectedIndices = new Set();
-        for (const v of values) {
-          const byValue = [];
-          for (let i = 0; i < opts.length; i++) {
-            if (opts[i].value === v) byValue.push(i);
-          }
-          if (byValue.length > 0) {
-            for (const idx of byValue) selectedIndices.add(idx);
-            continue;
-          }
-          const vTrim = norm(v);
-          if (vTrim) {
-            const byExactLabel = [];
-            for (let i = 0; i < opts.length; i++) {
-              const attrLbl = norm(opts[i].getAttribute('label'));
-              const txtLbl = norm(opts[i].text);
-              if ((attrLbl && attrLbl === vTrim) || (txtLbl && txtLbl === vTrim)) {
-                byExactLabel.push(i);
-              }
-            }
-            if (byExactLabel.length === 1) {
-              selectedIndices.add(byExactLabel[0]);
-              continue;
-            }
-            if (byExactLabel.length > 1) {
-              return {
-                ok: false,
-                reason: 'option_ambiguous',
-                ambiguous: v,
-                count: byExactLabel.length,
-                available,
-              };
-            }
-            const vLower = vTrim.toLowerCase();
-            const byLowerLabel = [];
-            for (let i = 0; i < opts.length; i++) {
-              const attrLbl = norm(opts[i].getAttribute('label')).toLowerCase();
-              const txtLbl = norm(opts[i].text).toLowerCase();
-              if ((attrLbl && attrLbl === vLower) || (txtLbl && txtLbl === vLower)) {
-                byLowerLabel.push(i);
-              }
-            }
-            if (byLowerLabel.length === 1) {
-              selectedIndices.add(byLowerLabel[0]);
-              continue;
-            }
-            if (byLowerLabel.length > 1) {
-              return {
-                ok: false,
-                reason: 'option_ambiguous',
-                ambiguous: v,
-                count: byLowerLabel.length,
-                available,
-              };
-            }
-          }
-          return { ok: false, reason: 'option_not_found', missing: v, available };
-        }
-        if (multiple) {
-          for (let i = 0; i < opts.length; i++) {
-            opts[i].selected = selectedIndices.has(i);
-          }
-        } else {
-          const firstIdx = selectedIndices.size > 0 ? Array.from(selectedIndices)[0] : -1;
-          select.selectedIndex = firstIdx;
-          if (firstIdx >= 0 && opts[firstIdx]) opts[firstIdx].selected = true;
-        }
-        select.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
-        select.dispatchEvent(new Event('change', { bubbles: true }));
-        const selected = opts.filter((o) => o.selected);
-        return {
-          ok: true,
-          multiple,
-          selected_values: selected.map((o) => o.value),
-          selected_labels: selected.map((o) => o.getAttribute('label') || o.text),
-        };
-      }`,
-      arguments: [{ value: params.values }],
+      functionDeclaration: SELECT_OPTIONS_FUNCTION,
+      arguments: [{ value: params.values }, { value: true }],
       returnByValue: true,
     });
     const mutation = evaluated.result?.value;
-    if (!mutation?.ok) {
-      if (mutation?.reason === "target_disabled") {
-        return { code: "invalid_params", message: "select requires an enabled <select>" };
-      }
-      if (mutation?.reason === "option_ambiguous") {
-        const suffix = mutation.available?.length
-          ? ` (available: ${mutation.available.join(" | ")})`
-          : "";
-        return rpcError(
-          "invalid_params",
-          "option_ambiguous",
-          `option label "${mutation.ambiguous ?? "?"}" matched ${mutation.count ?? 2} options in <select>; pass an explicit option value instead${suffix}`,
-          {
-            ...(mutation.ambiguous !== undefined ? { ambiguous: mutation.ambiguous } : {}),
-            ...(mutation.count !== undefined ? { count: mutation.count } : {}),
-            ...(mutation.available ? { available: mutation.available } : {}),
-          },
-        );
-      }
-      if (mutation?.reason === "option_not_found") {
-        const suffix = mutation.available?.length
-          ? ` (available: ${mutation.available.join(" | ")})`
-          : "";
-        return rpcError(
-          "invalid_params",
-          "option_not_found",
-          `option value ${mutation.missing ?? "?"} not found in <select>${suffix}`,
-          {
-            ...(mutation.missing !== undefined ? { missing: mutation.missing } : {}),
-            ...(mutation.available ? { available: mutation.available } : {}),
-          },
-        );
-      }
-      return { code: "cdp_failed", message: "select mutation returned an unexpected result" };
-    }
+    // The page changed after validation, and focus already moved; keep the
+    // effect unknown even though no option was changed.
+    if (!mutation?.ok) return selectFailure(mutation, false);
     return attachDialogs(deps.cdp, target.tabId, dialogCursor, {
       tab_id: target.tabId,
       used_ref: node.usedRef,
@@ -2264,6 +2381,53 @@ export async function handleSelect(
       message: err instanceof Error ? err.message : String(err),
     };
   }
+}
+
+/** Maps a rejected option match. `preWrite` only before scrolling or focusing. */
+function selectFailure(
+  mutation: Extract<SelectMutationResult, { ok: false }> | null | undefined,
+  preWrite: boolean,
+): RpcError {
+  const effect = preWrite ? PRE_WRITE_FAILURE : {};
+  if (mutation?.reason === "target_disabled") {
+    return {
+      code: "invalid_params",
+      message: "select requires an enabled <select>",
+      data: { reason: "target_disabled", ...effect },
+    };
+  }
+  if (mutation?.reason === "option_ambiguous") {
+    const suffix = mutation.available?.length
+      ? ` (available: ${mutation.available.join(" | ")})`
+      : "";
+    return rpcError(
+      "invalid_params",
+      "option_ambiguous",
+      `option label "${mutation.ambiguous ?? "?"}" matched ${mutation.count ?? 2} options in <select>; pass an explicit option value instead${suffix}`,
+      {
+        ...effect,
+        ...(mutation.ambiguous !== undefined ? { ambiguous: mutation.ambiguous } : {}),
+        ...(mutation.count !== undefined ? { count: mutation.count } : {}),
+        ...(mutation.available ? { available: mutation.available } : {}),
+      },
+    );
+  }
+  if (mutation?.reason === "option_not_found") {
+    const suffix = mutation.available?.length
+      ? ` (available: ${mutation.available.join(" | ")})`
+      : "";
+    return rpcError(
+      "invalid_params",
+      "option_not_found",
+      `option value ${mutation.missing ?? "?"} not found in <select>${suffix}`,
+      {
+        ...effect,
+        ...(mutation.missing !== undefined ? { missing: mutation.missing } : {}),
+        ...(mutation.available ? { available: mutation.available } : {}),
+      },
+    );
+  }
+  return { code: "cdp_failed", message: "select mutation returned an unexpected result" };
 }
 
 export const __testing__ = {

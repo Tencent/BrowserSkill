@@ -45,7 +45,16 @@ if (process.env.BSK_FILL_CHROME) {
 }
 
 async function withFillBrowser(
-  { background, markup }: { background: boolean; markup: string },
+  {
+    background,
+    markup,
+    window: ownWindow = false,
+  }: {
+    background: boolean;
+    markup: string;
+    /** With `background`, a visible page in an unfocused window instead of a hidden tab. */
+    window?: boolean;
+  },
   run: (h: {
     evaluate: (expression: string) => Promise<unknown>;
     ref: (expression: string) => Promise<void>;
@@ -67,6 +76,7 @@ async function withFillBrowser(
   const { targetId } = await send<{ targetId: string }>("Target.createTarget", {
     url: "about:blank",
     background,
+    ...(ownWindow ? { newWindow: true } : {}),
   });
   try {
     const { sessionId } = await send<{ sessionId: string }>("Target.attachToTarget", {
@@ -311,6 +321,30 @@ describe.skipIf(!process.env.BSK_FILL_CHROME)("native controls and editing hosts
       );
     }, 30_000);
 
+    it("flags password maxlength truncation with formatted: true without leaking actual_value", async () => {
+      await withFillBrowser(
+        { background, markup: guard + '<input id="target" type="password" maxlength="6">' },
+        async (h) => {
+          await h.ref("document.querySelector('#target')");
+          const truncated = await h.fill("supersecret");
+          expect(truncated).toMatchObject({
+            value_length: 6,
+            formatted: true,
+          });
+          expect(truncated).not.toHaveProperty("actual_value");
+          expect(JSON.stringify(truncated)).not.toMatch(/supers|supersecret/);
+          expect(await h.evaluate("document.querySelector('#target').value")).toBe("supers");
+
+          const exact = await h.fill("secret");
+          expect(exact).toMatchObject({ value_length: 6 });
+          expect(exact).not.toHaveProperty("formatted");
+          expect(exact).not.toHaveProperty("actual_value");
+          expect(JSON.stringify(exact)).not.toContain("secret");
+          expect(await h.evaluate("document.querySelector('#target').value")).toBe("secret");
+        },
+      );
+    }, 30_000);
+
     it("uses the same contract for selectors", async () => {
       await withFillBrowser({ background, markup: editorMarkup }, async (h) => {
         expect(await h.fill("hello", true, undefined, "#paragraph")).toMatchObject({
@@ -538,24 +572,84 @@ describe.skipIf(!process.env.BSK_FILL_CHROME)("fill lifecycle and discoverabilit
 
 describe.skipIf(!process.env.BSK_FILL_CHROME)("fill focus changes", () => {
   it.each([
-    ["input", '<input id="target" value="old">', "value"],
-    ["textarea", '<textarea id="target">old</textarea>', "value"],
-    ["contenteditable", '<div id="target" contenteditable="true">old</div>', "textContent"],
+    ["input", "hidden tab", '<input id="target" value="old">', "value"],
+    ["textarea", "hidden tab", '<textarea id="target">old</textarea>', "value"],
+    [
+      "contenteditable",
+      "hidden tab",
+      '<div id="target" contenteditable="true">old</div>',
+      "textContent",
+    ],
+    ["input", "unfocused window", '<input id="target" value="old">', "value"],
+    [
+      "contenteditable",
+      "unfocused window",
+      '<div id="target" contenteditable="true">old</div>',
+      "textContent",
+    ],
   ] as const)(
-    "keeps a background %s clear after tab activation",
-    async (_name, markup, field) => {
-      await withFillBrowser({ background: true, markup: guard + markup }, async (h) => {
-        await h.ref("document.querySelector('#target')");
-        await h.evaluate(`document.querySelector('#target').addEventListener('focus', () => {
-        document.querySelector('#target').${field} = 'default';
-      })`);
-        expect(await h.fill("")).toMatchObject({ value_length: 0 });
-        expect(await h.evaluate(`document.querySelector('#target').${field}`)).toBe("");
-        await h.activate();
-        expect(await h.evaluate(`document.querySelector('#target').${field}`)).toBe("");
-        expect(h.calls).toContain("Input.dispatchKeyEvent");
-        expect(h.calls).not.toContain("Input.insertText");
-      });
+    "clears focus-initialized defaults on a background non-empty %s fill in a %s",
+    async (_name, where, markup, field) => {
+      const ownWindow = where === "unfocused window";
+      await withFillBrowser(
+        { background: true, window: ownWindow, markup: guard + markup },
+        async (h) => {
+          await h.ref("document.querySelector('#target')");
+          await h.evaluate(`document.querySelector('#target').addEventListener('focus', () => {
+            document.querySelector('#target').${field} = 'default';
+          })`);
+          expect(await h.fill("hello")).toMatchObject({ value_length: 5, actual_value: "hello" });
+          expect(await h.evaluate(`document.querySelector('#target').${field}`)).toBe("hello");
+          await h.activate();
+          expect(await h.evaluate(`document.querySelector('#target').${field}`)).toBe("hello");
+          // A visible page takes focus from a pointer move outside the viewport;
+          // a hidden tab processes pointer input only when it renders again.
+          if (ownWindow) {
+            expect(h.calls).toContain("Input.dispatchMouseEvent");
+            expect(h.calls).not.toContain("Input.dispatchKeyEvent");
+          } else {
+            expect(h.calls).not.toContain("Input.dispatchMouseEvent");
+            expect(h.calls).toContain("Input.dispatchKeyEvent");
+          }
+        },
+      );
+    },
+    30_000,
+  );
+
+  it.each([
+    ["input", '<input id="target" value="old">'],
+    ["date", '<input id="target" type="date" value="2026-01-01">'],
+    ["contenteditable", '<div id="target" contenteditable="true">old</div>'],
+  ] as const)(
+    "flushes focus in an unfocused window on a %s without key or pointer events the page can see",
+    async (name, markup) => {
+      await withFillBrowser(
+        { background: true, window: true, markup: guard + markup },
+        async (h) => {
+          await h.ref("document.querySelector('#target')");
+          await h.evaluate(`(() => {
+          window.seen = [];
+          for (const type of ['keydown', 'keyup', 'keypress', 'pointermove', 'mousemove',
+            'pointerover', 'mouseover', 'pointerout', 'mouseout']) {
+            window.addEventListener(type, (event) => window.seen.push(type + ':' + event.isTrusted), true);
+          }
+          // One-time-code fields often move focus to the next box on keyup.
+          document.querySelector('#target').addEventListener('keyup', () => {
+            document.querySelector('#guard').focus();
+          });
+        })()`);
+          const value = name === "date" ? "2026-10-14" : "4";
+          expect(await h.fill(value)).toMatchObject({ value_length: value.length });
+          expect(
+            await h.evaluate(
+              `document.querySelector('#target').${name === "contenteditable" ? "textContent" : "value"}`,
+            ),
+          ).toBe(value);
+          expect(await h.evaluate("window.seen")).toEqual([]);
+          expect(await h.evaluate("document.querySelector('#guard').value")).toBe("untouched");
+        },
+      );
     },
     30_000,
   );
@@ -570,6 +664,28 @@ describe.skipIf(!process.env.BSK_FILL_CHROME)("fill focus changes", () => {
         })`);
         expect(await h.fill("")).toMatchObject({ data: { reason: "fill_focus_lost" } });
         expect(await h.evaluate("document.querySelector('#target').value")).toBe("old");
+      },
+    );
+  }, 30_000);
+
+  it("does not type into or delete from another input when deferred background focus redirects", async () => {
+    await withFillBrowser(
+      {
+        background: true,
+        markup: guard + '<input id="target" type="password" value="old-secret">',
+      },
+      async (h) => {
+        await h.ref("document.querySelector('#target')");
+        await h.evaluate(`document.querySelector('#target').addEventListener('focus', () => {
+          const g = document.querySelector('#guard');
+          g.focus();
+          g.select();
+        })`);
+        const result = await h.fill("super-secret-password");
+        expect(result).toMatchObject({ data: { reason: "fill_focus_lost" } });
+        expect(await h.evaluate("document.querySelector('#guard').value")).toBe("untouched");
+        expect(await h.evaluate("document.querySelector('#target').value")).toBe("old-secret");
+        expect(h.calls).not.toContain("Input.insertText");
       },
     );
   }, 30_000);
@@ -652,19 +768,38 @@ describe.skipIf(!process.env.BSK_FILL_CHROME)("date-like fill regressions", () =
           expect(await h.fill("")).toMatchObject({ value_length: 0 });
           expect(await h.evaluate("document.querySelector('#target').value")).toBe("");
           expect(await h.evaluate("window.fillEvents")).toEqual([
-            "input:",
             `focus:${defaultValue}`,
             "input:",
           ]);
           await h.activate();
           expect(await h.evaluate("document.querySelector('#target').value")).toBe("");
-          expect(h.calls).toContain("Input.dispatchKeyEvent");
+          expect(
+            h.calls.some(
+              (method) =>
+                method === "Input.dispatchMouseEvent" || method === "Input.dispatchKeyEvent",
+            ),
+          ).toBe(true);
           expect(h.calls).not.toContain("Input.insertText");
         },
       );
     },
     30_000,
   );
+
+  it("does not clear a background date input before deferred focus redirects away", async () => {
+    await withFillBrowser(
+      { background: true, markup: guard + '<input id="target" type="date" value="2026-10-14">' },
+      async (h) => {
+        await h.ref("document.querySelector('#target')");
+        await h.evaluate(`document.querySelector('#target').addEventListener('focus', () => {
+          document.querySelector('#guard').focus();
+        })`);
+        expect(await h.fill("2026-12-31")).toMatchObject({ data: { reason: "fill_focus_lost" } });
+        expect(await h.evaluate("document.querySelector('#target').value")).toBe("2026-10-14");
+        expect(await h.evaluate("document.querySelector('#guard').value")).toBe("untouched");
+      },
+    );
+  }, 30_000);
 
   it.each([
     ["date", "2026-10-14", "2026-10-15"],
