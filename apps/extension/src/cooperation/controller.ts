@@ -164,6 +164,24 @@ function isInitialBlank(tab: { url?: string; pendingUrl?: string }): boolean {
   );
 }
 
+const UNOBSERVABLE_INITIAL_TAB_URLS = new Set([
+  "about:blank",
+  "about:newtab",
+  "chrome://newtab/",
+  "chrome://new-tab-page/",
+  "edge://newtab/",
+  "brave://newtab/",
+]);
+
+function isUnobservableInitialTab(tab: { url?: string; pendingUrl?: string }): boolean {
+  const current = tab.url || tab.pendingUrl;
+  return (
+    !!current &&
+    UNOBSERVABLE_INITIAL_TAB_URLS.has(current) &&
+    (!tab.pendingUrl || UNOBSERVABLE_INITIAL_TAB_URLS.has(tab.pendingUrl))
+  );
+}
+
 function sameFrames(
   a: Frames,
   b: Frames,
@@ -1095,12 +1113,17 @@ export class CooperationController implements ControlAuthority {
   }
 
   /** Tab activation/movement affects the whole task window, not just its destination. */
-  /** Collection failed only because the tab still shows an empty initial document. */
+  /** Collection failed only because the tab still shows an empty initial/new-tab document. */
   private async unobservableBlank(state: TabState, error: unknown): Promise<boolean> {
-    if (!(error instanceof FrameCollectionError) || error.reason !== "frame_unobservable")
+    if (
+      !(error instanceof FrameCollectionError) ||
+      error.reason !== "frame_unobservable" ||
+      error.frames.length === 0 ||
+      error.frames.some((frame) => frame.frame_id !== 0)
+    )
       return false;
     const tab = await chromeTabsApi.get(state.tabId).catch(() => undefined);
-    return !!tab && isInitialBlank(tab);
+    return !!tab && isUnobservableInitialTab(tab);
   }
   private async manageTabs<T extends CdpRunner>(
     session: SessionContext,

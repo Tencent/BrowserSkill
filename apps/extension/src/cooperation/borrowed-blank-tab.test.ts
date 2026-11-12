@@ -26,7 +26,10 @@ const frame: FrameState = {
 };
 
 /** Owned page 7 plus a borrowed user tab 9 whose collector cannot be installed. */
-async function fixture(borrowedUrl: string) {
+async function fixture(
+  borrowedUrl: string,
+  options: { pendingUrl?: string; failedFrameId?: number } = {},
+) {
   const sessions = new SessionManager({
     agentWindow: {
       create: async () => ({ windowId: 100, initialTabIds: [7] }),
@@ -37,7 +40,13 @@ async function fixture(borrowedUrl: string) {
   const ctx = await sessions.start("shared");
   const tabs: Record<number, chrome.tabs.Tab> = {
     7: { id: 7, windowId: 100, active: false, url: "https://fixture.test" } as chrome.tabs.Tab,
-    9: { id: 9, windowId: 100, active: true, url: borrowedUrl } as chrome.tabs.Tab,
+    9: {
+      id: 9,
+      windowId: 100,
+      active: true,
+      url: borrowedUrl,
+      ...(options.pendingUrl ? { pendingUrl: options.pendingUrl } : {}),
+    } as chrome.tabs.Tab,
   };
   vi.stubGlobal("chrome", {
     tabs: {
@@ -47,7 +56,9 @@ async function fixture(borrowedUrl: string) {
   });
   const readFrames = vi.fn(async (tabId: number): Promise<CooperationFrames> => {
     if (tabId === 9)
-      throw new FrameCollectionError("frame_unobservable", [{ frame_id: 0, url: "about:" }]);
+      throw new FrameCollectionError("frame_unobservable", [
+        { frame_id: options.failedFrameId ?? 0, url: "about:" },
+      ]);
     return { frames: new Map([[0, structuredClone(frame)]]), gaps: [] };
   });
   const cdp = { send: vi.fn(async () => ({})) } as unknown as CdpRunner;
@@ -89,8 +100,13 @@ async function fixture(borrowedUrl: string) {
   return { manage, readFrames };
 }
 
-it("keeps tab management available after borrowing an unobservable blank tab", async () => {
-  const f = await fixture("about:blank");
+it.each([
+  "about:blank",
+  "about:newtab",
+  "chrome://newtab/",
+  "edge://newtab/",
+])("keeps tab management available after borrowing an unobservable %s tab", async (url) => {
+  const f = await fixture(url);
   expect(await f.manage("tool.tab_select", 7)).toEqual({ result: { tab_id: 7 }, invoked: 1 });
   expect(await f.manage("tool.tab_create", 11)).toEqual({ result: { tab_id: 11 }, invoked: 1 });
   expect(await f.manage("tool.tab_return", 9)).toEqual({ result: { tab_id: 9 }, invoked: 1 });
@@ -102,6 +118,20 @@ it("keeps tab management available after borrowing an unobservable blank tab", a
     expect.anything(),
     expect.anything(),
   );
+});
+
+it("still refuses tab management when an about:blank tab is navigating to a real page", async () => {
+  const f = await fixture("about:blank", { pendingUrl: "https://user.test/form" });
+  const { result, invoked } = await f.manage("tool.tab_return", 9);
+  expect(invoked).toBe(0);
+  expect(result).toMatchObject({ code: "permission_denied" });
+});
+
+it("still refuses tab management when a child frame on an about:blank document is unobservable", async () => {
+  const f = await fixture("about:blank", { failedFrameId: 2 });
+  const { result, invoked } = await f.manage("tool.tab_return", 9);
+  expect(invoked).toBe(0);
+  expect(result).toMatchObject({ code: "permission_denied" });
 });
 
 it("still refuses tab management when a non-blank tab cannot be observed", async () => {
