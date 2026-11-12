@@ -134,7 +134,7 @@ dependencies = [
 
 [[package]]
 name = "bsk"
-version = "0.4.2"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "base64",
@@ -179,7 +179,7 @@ dependencies = [
 
 [[package]]
 name = "bsk-protocol"
-version = "0.4.2"
+version = "0.5.0"
 dependencies = [
  "base64",
  "hmac",

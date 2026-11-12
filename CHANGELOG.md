@@ -7,7 +7,7 @@ See the [Chinese changelog](CHANGELOG.zh-CN.md). Update both versions in the sam
 The CLI, extension, and DSH plugin may release separately. Protocol compatibility
 determines which versions can connect.
 
-## [Unreleased]
+## [0.5.0] - 2026-11-12
 
 ### Added
 
@@ -130,7 +130,7 @@ determines which versions can connect.
   safety state or an unwritable run marker, and retains interrupted-run holds even
   when the host process remains alive. DSH drains cancelled plan and recipe receipts.
 
-- Extension 0.4.3 removes obsolete migration flags and version gates while keeping
+- The extension removes obsolete migration flags and version gates while keeping
   pairing optional. There is no automatic enforcement deadline.
 - `bsk-protocol` is the single source of truth for method metadata, JSON schemas,
   TypeScript request/result codecs, exhaustive daemon/extension execution policies,
@@ -138,6 +138,12 @@ determines which versions can connect.
 
 ### Fixed
 
+- Stopping a recording coordinates cleanup of the recording session and preserves
+  the captured steps if cleanup needs to be retried ([#720](https://github.com/Tencent/BrowserSkill/pull/720)).
+- The DSH skill and plugin documentation explain how to call BrowserSkill tools
+  through `run_code` in PTC mode ([#721](https://github.com/Tencent/BrowserSkill/pull/721)).
+- Idle debugger detach preserves element references across reattach and waits for
+  open dialogs and active downloads to finish ([#711](https://github.com/Tencent/BrowserSkill/pull/711)).
 - A target-policy `cooperate sync` no longer re-sends the whole VOM when the only page
   activity since the last observation replaced visible text in place. The content script
   logs text-only mutation batches separately from structural ones, and the extension
@@ -318,16 +324,10 @@ determines which versions can connect.
 - Recording preserves clicks on submit, reset and image input buttons, including
   actions beside search fields, and uses reset buttons' visible values as names.
 
-### Fixed
-
 - Cooperative status updates preserve an active click-passthrough lease, so the
   control panel and its minimized arrow do not swallow automated page clicks.
 - Recording keeps clicks on buttons and links inside an editor's `contenteditable="false"`
   regions, such as attachment actions, instead of treating them as editor input.
-
-## [Unreleased]
-
-### Fixed
 
 - `extract` applies CSS `uppercase` and `lowercase` to text in table cells,
   headers, list fields and discovery previews, respecting nested style overrides
