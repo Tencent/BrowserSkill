@@ -108,8 +108,10 @@ determines which versions can connect.
 - Rewrote the CLI `SKILL.md` into a zero-preread workflow (`<= 2,000` UTF-8 bytes)
   preserving all four cooperative safety invariants, removed repeated static `guidance`
   prose from `cooperate sync` replies, and added 75-second four-guard idle
-  `chrome.debugger` soft-detach (preserving `tabOwners` and console/network `since`
-  cursors with transparent reattach) alongside immediate 0ms detach on `bsk close` and
+  `chrome.debugger` soft-detach (preserving `tabOwners`, console/network `since`
+  cursors, unchanged `@vN` and cross-origin OOPIF `@eN` refs, pending JavaScript
+  dialogs, and active download/upload/navigation/screencast attachment leases across
+  transparent reattach) alongside immediate 0ms detach on `bsk close` and
   `bsk tab return`.
 - Cooperative synchronization and strict pre-action verification reuse a sliding
   10-second `Accessibility` domain lease per tab, skip unused VOM text rendering on

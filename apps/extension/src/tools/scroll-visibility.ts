@@ -80,6 +80,7 @@ async function visibleRect(
 }
 
 async function projectRect(
+  cdp: CdpRunner,
   context: GeometryContext,
   address: NodeAddress,
   rect: ViewportRect,
@@ -87,9 +88,12 @@ async function projectRect(
   let region: Region = [rectPolygon({ x: rect.x, y: rect.y, w: rect.width, h: rect.height })];
   if (!address.frameId) return region;
   const frame = await context.frame(address.frameId);
-  if (!frame || cdpTargetKey(frame.target) !== cdpTargetKey(address.target)) {
+  const resolvedTarget = cdp.resolveTarget ? cdp.resolveTarget(address.target) : address.target;
+  if (!frame || cdpTargetKey(frame.target) !== cdpTargetKey(resolvedTarget)) {
     throw new Error("scroll-to frame no longer belongs to its target");
   }
+  const resolvedAddress =
+    resolvedTarget === address.target ? address : { ...address, target: resolvedTarget };
   const parent = frame.parentFrameId ? await context.frame(frame.parentFrameId) : undefined;
   if (parent && cdpTargetKey(parent.target) === cdpTargetKey(frame.target)) {
     // DOM rectangles are document-local. Same-target iframe quads are already
@@ -98,7 +102,12 @@ async function projectRect(
     if (frame.ownerBackendNodeId === undefined || !viewport) {
       throw new Error("scroll-to could not resolve the frame viewport");
     }
-    const local = await context.snapshotProjection(address, frame.ownerBackendNodeId, [], viewport);
+    const local = await context.snapshotProjection(
+      resolvedAddress,
+      frame.ownerBackendNodeId,
+      [],
+      viewport,
+    );
     if (local.status !== "available") throw new Error("scroll-to could not project the frame");
     region = projectRegionToViewport(region, local.projection.geometry);
   }
@@ -117,7 +126,7 @@ export async function scrollVisibleBounds(
   const context = new GeometryContext(cdp, tabId);
   const rect = await visibleRect(cdp, address, deadline);
   if (!rect) return null;
-  let region = await projectRect(context, address, rect);
+  let region = await projectRect(cdp, context, address, rect);
   if (address.frameId) {
     const ancestry = await context.ancestry(address.frameId);
     if (!ancestry) throw new Error("scroll-to could not resolve the frame ancestry");
@@ -134,7 +143,7 @@ export async function scrollVisibleBounds(
       // A visible child document can still have a hidden or clipped iframe.
       const ownerRect = await visibleRect(cdp, owner, deadline);
       if (!ownerRect) return null;
-      const clips = await projectRect(context, owner, ownerRect);
+      const clips = await projectRect(cdp, context, owner, ownerRect);
       region = region.flatMap((polygon) => clips.map((clip) => clipPolygon(polygon, clip)));
     }
   }

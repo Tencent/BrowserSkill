@@ -346,10 +346,11 @@ export async function handleScreenshot(
     const node = resolveSnapshotRef(ctx, ref, target.tabId);
     if (isRpcError(node)) return node;
     const cdp = deps.cdp;
-    const nodeTarget = {
+    const rawTarget = {
       tabId: target.tabId,
       ...(node.cdpSessionId ? { sessionId: node.cdpSessionId } : {}),
     };
+    const nodeTarget = cdp.resolveTarget ? cdp.resolveTarget(rawTarget) : rawTarget;
     const captured = await withExtensionOverlayHidden(
       target.tabId,
       () =>
@@ -846,12 +847,13 @@ export async function handleGetHtml(
     if (params.ref) {
       const resolved = resolveSnapshotRef(ctx, params.ref, target.tabId);
       if (isRpcError(resolved)) return resolved;
+      const rawTarget = {
+        tabId: target.tabId,
+        ...(resolved.cdpSessionId ? { sessionId: resolved.cdpSessionId } : {}),
+      };
       const resp = await sendToCdpTarget<{ outerHTML?: string }>(
         deps.cdp,
-        {
-          tabId: target.tabId,
-          ...(resolved.cdpSessionId ? { sessionId: resolved.cdpSessionId } : {}),
-        },
+        deps.cdp.resolveTarget ? deps.cdp.resolveTarget(rawTarget) : rawTarget,
         "DOM.getOuterHTML",
         { backendNodeId: resolved.backendNodeId },
       );

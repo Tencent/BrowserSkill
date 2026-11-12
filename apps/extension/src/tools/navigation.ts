@@ -244,6 +244,7 @@ function startLifecycleWait(
   let beforeUnloadDecision: Promise<boolean | undefined> | undefined;
   let resolveBeforeUnload: ((accepted: boolean | undefined) => void) | undefined;
   let tryProbe = async (_mode: LifecycleProbeMode, _beforeReadyState?: string | null) => {};
+  const releaseAttachment = cdp.retainTabAttachment?.(expectedTabId);
   const promise = new Promise<WaitOutcome>((resolve) => {
     let settled = false;
     let sawRelevantLifecycle = false;
@@ -592,7 +593,7 @@ function startLifecycleWait(
   });
 
   return {
-    promise,
+    promise: promise.finally(releaseAttachment),
     refresh: () => refresh(),
     dialogDecision: () => beforeUnloadDecision ?? Promise.resolve(undefined),
     tryProbe: (mode, beforeReadyState) => tryProbe(mode, beforeReadyState),
@@ -649,6 +650,7 @@ export function waitForLifecyclePassive(
     0,
     Math.min(options.startGraceMs ?? DEFAULT_NAVIGATION_START_GRACE_MS, timeoutMs),
   );
+  const releaseAttachment = cdp.retainTabAttachment?.(expectedTabId);
   return new Promise<PassiveWaitOutcome>((resolve) => {
     let settled = false;
     let lastLifecycle: string | undefined;
@@ -932,7 +934,7 @@ export function waitForLifecyclePassive(
       for (const event of replay) handle(event.method, event.params);
       void probe();
     })();
-  });
+  }).finally(releaseAttachment);
 }
 
 interface MainFrameInfo {
