@@ -155,12 +155,14 @@ determines which versions can connect.
   dispatch `input`; the completion step no longer repeats it
   ([#624](https://github.com/Tencent/BrowserSkill/issues/624)).
 - Borrowing a user tab that still shows `about:blank` or the browser's empty New
-  Tab page (`chrome://newtab/`, `edge://newtab/`, `about:newtab`) no longer
-  blocks every tab operation in the session. Tab management prepares each owned
-  tab first; an empty initial/new-tab root page without a collector is now
-  skipped instead of failing with `frame_unobservable`, so `tab select`,
-  `tab create` and `tab return` work again. Other unobservable pages and
-  subframes are still refused
+  Tab page (`chrome://newtab/`, `edge://newtab/`, `about:newtab`, including
+  query/fragment variants) no longer deadlocks tab management or initial
+  navigation in the session. Empty initial/new-tab root pages without a
+  collector are skipped during tab-management preparation and may perform an
+  initial bootstrap navigation, and `tab return` can also hand back a borrowed
+  tab stuck on a browser-restricted page or failed root load without tearing
+  down the session. Observable `about:blank` popups, other unobservable web
+  pages, and subframes are still refused without synchronization
   ([#703](https://github.com/Tencent/BrowserSkill/issues/703)).
 - Window blur releases completed text-editing holds, and new task synchronizations
   after an idle gap automatically resume paused or editing tabs when no gesture or

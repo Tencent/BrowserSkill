@@ -28,7 +28,12 @@ const frame: FrameState = {
 /** Owned page 7 plus a borrowed user tab 9 whose collector cannot be installed. */
 async function fixture(
   borrowedUrl: string,
-  options: { pendingUrl?: string; failedFrameId?: number } = {},
+  options: {
+    pendingUrl?: string;
+    failedFrameId?: number;
+    failureReason?: "frame_unobservable" | "page_load_failed";
+    observableBorrowed?: boolean;
+  } = {},
 ) {
   const sessions = new SessionManager({
     agentWindow: {
@@ -54,14 +59,19 @@ async function fixture(
       query: async () => Object.values(tabs),
     },
   });
+  let borrowedObservable = options.observableBorrowed ?? false;
   const readFrames = vi.fn(async (tabId: number): Promise<CooperationFrames> => {
-    if (tabId === 9)
-      throw new FrameCollectionError("frame_unobservable", [
-        { frame_id: options.failedFrameId ?? 0, url: "about:" },
+    if (tabId === 9 && !borrowedObservable)
+      throw new FrameCollectionError(options.failureReason ?? "frame_unobservable", [
+        { frame_id: options.failedFrameId ?? 0, url: borrowedUrl || "about:" },
       ]);
     return { frames: new Map([[0, structuredClone(frame)]]), gaps: [] };
   });
-  const cdp = { send: vi.fn(async () => ({})) } as unknown as CdpRunner;
+  const send = vi.fn(async () => ({}));
+  const cdp = {
+    send,
+    runBrowserMutation: async <T>(op: () => Promise<T>) => op(),
+  } as unknown as CdpRunner;
   const controller = new CooperationController({
     sessions,
     readFrames: readFrames as never,
@@ -97,14 +107,30 @@ async function fixture(
     );
     return { result, invoked: invoke.mock.calls.length };
   };
-  return { manage, readFrames };
+  return {
+    manage,
+    readFrames,
+    send,
+    tabs,
+    controller,
+    cdp,
+    signal,
+    setBorrowedObservable: (next: boolean) => {
+      borrowedObservable = next;
+    },
+  };
 }
 
 it.each([
   "about:blank",
+  "about:blank#section",
+  "about:blank?from=popup#section",
   "about:newtab",
   "chrome://newtab/",
-  "edge://newtab/",
+  "chrome://newtab?espv=2",
+  "chrome://new-tab-page/",
+  "edge://newtab",
+  "brave://newtab/",
 ])("keeps tab management available after borrowing an unobservable %s tab", async (url) => {
   const f = await fixture(url);
   expect(await f.manage("tool.tab_select", 7)).toEqual({ result: { tab_id: 7 }, invoked: 1 });
@@ -118,6 +144,111 @@ it.each([
     expect.anything(),
     expect.anything(),
   );
+});
+
+it.each([
+  "about:blank",
+  "about:blank#section",
+  "chrome://newtab/",
+])("allows bootstrap navigation out of an unobservable borrowed %s tab once", async (url) => {
+  const f = await fixture(url);
+  expect(
+    await f.controller.run(
+      {
+        id: "navigate-expect",
+        method: "tool.navigate",
+        params: {
+          session_id: "shared",
+          tab_id: 9,
+          expect: [{ target: "#ready", field: "exists", equals: true }],
+        },
+      },
+      f.cdp,
+      f.signal,
+      async () => ({ tab_id: 9 }),
+    ),
+  ).toMatchObject({
+    code: "invalid_params",
+    data: { phase: "precondition", effect_state: "none" },
+  });
+
+  const navResult = await f.controller.run(
+    { id: "navigate", method: "tool.navigate", params: { session_id: "shared", tab_id: 9 } },
+    f.cdp,
+    f.signal,
+    async (runner) => {
+      if (url.startsWith("chrome://")) {
+        await runner.runBrowserMutation!(async () => {
+          f.tabs[9]!.url = "https://fixture.test/landed";
+          f.setBorrowedObservable(true);
+        });
+      } else {
+        await runner.send(9, "Page.navigate", { url: "https://fixture.test/landed" });
+        f.tabs[9]!.url = "https://fixture.test/landed";
+        f.setBorrowedObservable(true);
+      }
+      return { tab_id: 9, final_url: "https://fixture.test/landed" };
+    },
+  );
+  expect(navResult).toEqual({ tab_id: 9, final_url: "https://fixture.test/landed" });
+
+  // Once the borrowed tab reaches an observable web page, a context is required.
+  expect(
+    await f.controller.run(
+      {
+        id: "navigate-again",
+        method: "tool.navigate",
+        params: { session_id: "shared", tab_id: 9 },
+      },
+      f.cdp,
+      f.signal,
+      async (runner) => runner.send(9, "Page.navigate", { url: "https://fixture.test/next" }),
+    ),
+  ).toMatchObject({
+    code: "permission_denied",
+    data: { reason: "cooperation_sync_required", effect_state: "none" },
+  });
+});
+
+it("still requires synchronization when a borrowed about:blank popup has an active collector", async () => {
+  const f = await fixture("about:blank", { observableBorrowed: true });
+  expect(
+    await f.controller.run(
+      { id: "navigate", method: "tool.navigate", params: { session_id: "shared", tab_id: 9 } },
+      f.cdp,
+      f.signal,
+      async (runner) => runner.send(9, "Page.navigate", { url: "https://fixture.test/overwrite" }),
+    ),
+  ).toMatchObject({
+    code: "permission_denied",
+    data: { reason: "cooperation_sync_required", effect_state: "none" },
+  });
+  expect(f.send).not.toHaveBeenCalled();
+});
+
+it.each([
+  { url: "chrome://settings/", reason: "frame_unobservable" as const },
+  { url: "https://unreachable.invalid/", reason: "page_load_failed" as const },
+])("allows returning a borrowed tab stuck on $url ($reason) while refusing other tab switches", async ({
+  url,
+  reason,
+}) => {
+  const f = await fixture(url, { failureReason: reason });
+  expect(await f.manage("tool.tab_select", 7)).toMatchObject({
+    invoked: 0,
+    result: { code: "permission_denied" },
+  });
+  expect(await f.manage("tool.tab_return", 9)).toEqual({ result: { tab_id: 9 }, invoked: 1 });
+});
+
+it("still refuses tab_return when a page_load_failed borrowed tab has an in-flight pendingUrl", async () => {
+  const f = await fixture("https://unreachable.invalid/", {
+    failureReason: "page_load_failed",
+    pendingUrl: "https://user.test/retry",
+  });
+  const { result, invoked } = await f.manage("tool.tab_return", 9);
+  expect(invoked).toBe(0);
+  expect(result).toMatchObject({ code: "permission_denied" });
 });
 
 it("still refuses tab management when an about:blank tab is navigating to a real page", async () => {
