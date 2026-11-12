@@ -1,7 +1,7 @@
 //! One explicit action, optional positive readiness condition, then read-only sync.
 use super::{
     TOOL_IPC_TIMEOUT, business_rpc, cooperate,
-    ensure_daemon::ensure_daemon,
+    ensure_daemon::ensure_daemon_optimistic as ensure_daemon,
     error::{CliError, Format},
     observation_view,
 };
@@ -31,7 +31,9 @@ pub enum Action {
 #[derive(Debug, Clone, Args)]
 pub struct StepArgs {
     #[arg(long)]
-    pub session: String,
+    pub session: Option<String>,
+    #[arg(long)]
+    pub scope: Option<String>,
     /// Post-action sync policy. Auto preserves an existing choice or starts target control.
     /// Use cooperate sync first when choosing a policy before the action.
     #[arg(long, value_enum, default_value = "auto")]
@@ -143,7 +145,12 @@ pub(crate) fn reject_reserved(fields: &serde_json::Map<String, Value>) -> anyhow
 pub(crate) fn prepare(args: &StepArgs) -> anyhow::Result<(Method, Value)> {
     check_follow_args(args.until_visible.as_deref(), &args.match_text)?;
     let params: Value = serde_json::from_str(&args.params).context("parse --params JSON")?;
-    action_params(&args.session, args.tab_id, args.action, params)
+    action_params(
+        args.session.as_deref().unwrap_or_default(),
+        args.tab_id,
+        args.action,
+        params,
+    )
 }
 /// Validate one action's protocol fields against its protocol type.
 pub(crate) fn action_params(
@@ -312,9 +319,10 @@ pub(crate) fn run(
         rpc_calls += 1;
         call(method, params, timeout)
     };
+    let session = args.session.as_deref().unwrap_or_default();
     if let Some(selector) = &args.until_visible {
         if await_ready(
-            &args.session,
+            session,
             tab,
             selector,
             args.wait_timeout_ms,
@@ -331,14 +339,7 @@ pub(crate) fn run(
         result["readiness"] = json!({"requested":false});
     }
     let ready_ms = start.elapsed().as_millis() - action_ms;
-    post_sync(
-        &args.session,
-        args.policy,
-        tab,
-        &mut result,
-        &mut exit,
-        &mut call,
-    );
+    post_sync(session, args.policy, tab, &mut result, &mut exit, &mut call);
     result["phase"] = if exit == 0 {
         "observed"
     } else {
@@ -370,13 +371,27 @@ impl<'a> Output<'a> {
         save_full: Option<&'a Path>,
         match_text: &'a [String],
         context_lines: u32,
-    ) -> anyhow::Result<Self> {
+    ) -> Result<Self, CliError> {
         Ok(Self {
             session,
-            baseline: baseline.map(observation_view::read).transpose()?,
+            baseline: baseline
+                .map(observation_view::read)
+                .transpose()
+                .map_err(|error| {
+                    CliError::file_validation(
+                        error,
+                        "check --baseline: provide a readable, valid saved reply",
+                    )
+                })?,
             saved: save_full
                 .map(cooperate::saved_reply::SavedReply::prepare)
-                .transpose()?,
+                .transpose()
+                .map_err(|error| {
+                    CliError::file_validation(
+                        error,
+                        "check --save-full: use a new path in a writable directory",
+                    )
+                })?,
             save_full,
             match_text,
             context_lines,
@@ -421,9 +436,10 @@ impl<'a> Output<'a> {
 }
 
 pub fn dispatch(args: StepArgs, _format: Format) -> Result<(), CliError> {
-    let (method, params) = prepare(&args)?;
+    let (method, params) = prepare(&args).map_err(CliError::invalid_params)?;
+    let session = args.session.as_deref().unwrap_or_default();
     let output = Output::prepare(
-        &args.session,
+        session,
         args.baseline.as_deref(),
         args.save_full.as_deref(),
         &args.match_text,
@@ -432,9 +448,13 @@ pub fn dispatch(args: StepArgs, _format: Format) -> Result<(), CliError> {
     if matches!(args.policy, cooperate::Policy::Target) {
         business_rpc::set_target_policy_requested();
     }
+    business_rpc::set_caller_scope(args.scope.clone());
     let daemon = ensure_daemon().context("ensure daemon is running")?;
     if matches!(args.action, Action::Drag) && params["mode"] == "click-move-click" {
-        super::drag::require_click_move_click_daemon(daemon.sock_path.clone())?;
+        super::protocol::require_feature_on_daemon(
+            &daemon.sock_path,
+            bsk_protocol::compatibility::Feature::ClickMoveClick,
+        )?;
     }
     let (reply, exit) = run(&args, method, params, |method, params, timeout| {
         business_rpc::call(

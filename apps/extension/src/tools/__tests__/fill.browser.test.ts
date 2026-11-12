@@ -279,26 +279,37 @@ describe.skipIf(!process.env.BSK_FILL_CHROME)("native controls and editing hosts
       );
     }, 30_000);
 
-    it.each([
-      ['<input id="target" type="number" value="12">', "invalid"],
-      ['<input id="target" maxlength="3" value="old">', "longer"],
-    ])(
-      "rejects invalid values before focus: %s",
-      async (markup, value) => {
-        await withFillBrowser({ background, markup: guard + markup }, async (h) => {
+    it("rejects invalid number values before focus", async () => {
+      await withFillBrowser(
+        { background, markup: guard + '<input id="target" type="number" value="12">' },
+        async (h) => {
           await h.ref("document.querySelector('#target')");
           await h.evaluate("document.querySelector('#guard').focus(); window.fillEvents = []");
           const before = await h.evaluate(unchangedState);
-          expect(await h.fill(value)).toMatchObject({
+          expect(await h.fill("invalid")).toMatchObject({
             code: "invalid_params",
             data: { reason: "fill_value_invalid" },
           });
           expect(await h.evaluate(unchangedState)).toBe(before);
           expect(h.calls).not.toContain("DOM.focus");
-        });
-      },
-      30_000,
-    );
+        },
+      );
+    }, 30_000);
+
+    it("accepts maxlength truncation optimistically and reports actual_value", async () => {
+      await withFillBrowser(
+        { background, markup: guard + '<input id="target" maxlength="3" value="old">' },
+        async (h) => {
+          await h.ref("document.querySelector('#target')");
+          expect(await h.fill("longer")).toMatchObject({
+            value_length: 3,
+            actual_value: "lon",
+            formatted: true,
+          });
+          expect(await h.evaluate("document.querySelector('#target').value")).toBe("lon");
+        },
+      );
+    }, 30_000);
 
     it("uses the same contract for selectors", async () => {
       await withFillBrowser({ background, markup: editorMarkup }, async (h) => {
@@ -324,7 +335,8 @@ describe.skipIf(!process.env.BSK_FILL_CHROME)("native controls and editing hosts
         `);
         await h.ref("document.querySelector('#host').shadowRoot.querySelector('input')");
         expect(await h.fill("")).toMatchObject({ value_length: 0 });
-        expect(await h.evaluate("window.inputValues")).toEqual(["", ""]);
+        // Clearing notifies once; the completion step no longer repeats it.
+        expect(await h.evaluate("window.inputValues")).toEqual([""]);
       });
     });
   });
@@ -450,12 +462,9 @@ describe.skipIf(!process.env.BSK_FILL_CHROME)("fill lifecycle and discoverabilit
 
   it.each([
     ["DOM.resolveNode", "old"],
-    ["DOM.scrollIntoViewIfNeeded", "old"],
-    ["DOM.focus", "old"],
     ["cleared", ""],
     ["Input.insertText", "hello"],
-    ["notified", "hello"],
-    ["verified", "hello"],
+    ["finalized", "hello"],
   ])(
     "cancels after %s without leaving temporary content",
     async (phase, expected) => {
@@ -470,8 +479,7 @@ describe.skipIf(!process.env.BSK_FILL_CHROME)("fill lifecycle and discoverabilit
             const matched =
               method === phase ||
               (phase === "cleared" && declaration.includes("this.textContent = ''")) ||
-              (phase === "notified" && declaration.includes("new Event('change'")) ||
-              (phase === "verified" && declaration.startsWith("function(expected)"));
+              (phase === "finalized" && declaration.includes("new Event('change'"));
             if (matched) controller.abort();
           });
           expect(await h.fill("hello", true, controller.signal)).toMatchObject({
@@ -632,11 +640,22 @@ describe.skipIf(!process.env.BSK_FILL_CHROME)("date-like fill regressions", () =
         },
         async (h) => {
           await h.ref("document.querySelector('#target')");
-          await h.evaluate(`document.querySelector('#target').addEventListener('focus', () => {
-            document.querySelector('#target').value = '${defaultValue}';
-          })`);
+          await h.evaluate(`window.fillEvents = [];
+            const target = document.querySelector('#target');
+            target.addEventListener('focus', () => {
+              target.value = '${defaultValue}';
+              window.fillEvents.push('focus:' + target.value);
+            });
+            target.addEventListener('input', () => {
+              window.fillEvents.push('input:' + target.value);
+            });`);
           expect(await h.fill("")).toMatchObject({ value_length: 0 });
           expect(await h.evaluate("document.querySelector('#target').value")).toBe("");
+          expect(await h.evaluate("window.fillEvents")).toEqual([
+            "input:",
+            `focus:${defaultValue}`,
+            "input:",
+          ]);
           await h.activate();
           expect(await h.evaluate("document.querySelector('#target').value")).toBe("");
           expect(h.calls).toContain("Input.dispatchKeyEvent");
@@ -798,6 +817,159 @@ describe.skipIf(!process.env.BSK_FILL_CHROME)("date-like fill regressions", () =
 });
 
 describe.skipIf(!process.env.BSK_FILL_CHROME)("fill caret validation", () => {
+  it.each([
+    [
+      "nested text",
+      "<p><strong>old</strong></p>",
+      "editor.querySelector('strong').firstChild",
+      "3",
+      "old",
+    ],
+    ["empty paragraph", "<p><br></p>", "editor.firstChild", "0", ""],
+    ["inline padding break", "old<br>", "editor.firstChild", "3", "old"],
+  ])(
+    "appends after an editor normalizes its end caret into %s",
+    async (_name: string, content: string, node: string, offset: string, before: string) => {
+      await withFillBrowser(
+        {
+          background: false,
+          markup:
+            guard +
+            `<div id="target" contenteditable="true" style="white-space:pre-wrap">${content}</div>`,
+        },
+        async (h) => {
+          await h.ref("document.querySelector('#target')");
+          h.afterCommand(async (method, params) => {
+            const script = params as {
+              functionDeclaration?: string;
+              arguments?: { value: unknown }[];
+            };
+            if (
+              method === "Runtime.callFunctionOn" &&
+              script.functionDeclaration?.startsWith("function(before, placeCaret") &&
+              script.arguments?.[1].value === true
+            ) {
+              await h.evaluate(`(() => {
+              const editor = document.querySelector('#target');
+              document.getSelection().collapse(${node}, ${offset});
+            })()`);
+            }
+          });
+          expect(await h.fill("hello", false)).toMatchObject({ value_length: before.length + 5 });
+          expect(await h.evaluate("document.querySelector('#target').textContent")).toBe(
+            `${before}hello`,
+          );
+          expect(await h.evaluate("document.querySelector('#guard').value")).toBe("untouched");
+          expect(h.calls.filter((method) => method === "Input.insertText")).toHaveLength(1);
+        },
+      );
+    },
+    30_000,
+  );
+
+  it("replaces a draft after selection synchronization in an empty rich-text paragraph", async () => {
+    const value = "A long message for the editor. ".repeat(40);
+    await withFillBrowser(
+      {
+        background: false,
+        markup:
+          guard +
+          '<div id="target" contenteditable="true" style="white-space:pre-wrap"><p>existing draft</p></div>',
+      },
+      async (h) => {
+        await h.ref("document.querySelector('#target')");
+        await h.evaluate(`(() => {
+          const editor = document.querySelector('#target');
+          editor.addEventListener('input', () => {
+            if (!editor.textContent) editor.innerHTML = '<p><br></p>';
+          });
+          document.addEventListener('selectionchange', () => {
+            const selection = document.getSelection();
+            if (selection?.isCollapsed && selection.anchorNode === editor &&
+                selection.anchorOffset === editor.childNodes.length && !editor.textContent)
+              selection.collapse(editor.firstChild, 0);
+          });
+        })()`);
+        h.afterCommand(async (method, params) => {
+          const script = params as {
+            functionDeclaration?: string;
+            arguments?: { value: unknown }[];
+          };
+          if (
+            method === "Runtime.callFunctionOn" &&
+            script.functionDeclaration?.startsWith("function(before, placeCaret") &&
+            script.arguments?.[1].value === true
+          )
+            await new Promise((resolve) => setTimeout(resolve, 20));
+        });
+        expect(await h.fill(value)).toMatchObject({ value_length: value.length });
+        expect(await h.evaluate("document.querySelector('#target').textContent")).toBe(value);
+        expect(await h.evaluate("document.querySelector('#guard').value")).toBe("untouched");
+        expect(h.calls.filter((method) => method === "Input.insertText")).toHaveLength(1);
+      },
+    );
+  }, 30_000);
+
+  it.each([
+    ["text in the middle", "<p>old</p>", "editor.firstChild.firstChild", "1"],
+    ["before an image", '<p>old<img alt=""></p>', "editor.firstChild.firstChild", "3"],
+    ["inside an image", '<p>old<img alt=""></p>', "editor.querySelector('img')", "0"],
+    ["before two line breaks", "<p>old<br><br></p>", "editor.firstChild.firstChild", "3"],
+    ["before another block", "<p>old</p><p><br></p>", "editor.firstChild.firstChild", "3"],
+    ["before a separate break", "<p>old</p><br>", "editor.firstChild.firstChild", "3"],
+    [
+      "inside a noneditable atom",
+      '<p>old<span contenteditable="false">atom</span></p>',
+      "editor.querySelector('span').firstChild",
+      "4",
+    ],
+    [
+      "inside an independent editing host",
+      '<p>old<span contenteditable="false"><span contenteditable="true">inner</span></span></p>',
+      "editor.querySelector('[contenteditable=true]').firstChild",
+      "5",
+    ],
+  ])(
+    "refuses an editor caret moved %s",
+    async (_name: string, content: string, node: string, offset: string) => {
+      await withFillBrowser(
+        {
+          background: false,
+          markup:
+            guard +
+            `<div id="target" contenteditable="true" style="white-space:pre-wrap">${content}</div>`,
+        },
+        async (h) => {
+          await h.ref("document.querySelector('#target')");
+          const before = await h.evaluate("document.querySelector('#target').innerHTML");
+          h.afterCommand(async (method, params) => {
+            const script = params as {
+              functionDeclaration?: string;
+              arguments?: { value: unknown }[];
+            };
+            if (
+              method === "Runtime.callFunctionOn" &&
+              script.functionDeclaration?.startsWith("function(before, placeCaret") &&
+              script.arguments?.[1].value === true
+            ) {
+              await h.evaluate(`(() => {
+              const editor = document.querySelector('#target');
+              document.getSelection().collapse(${node}, ${offset});
+            })()`);
+            }
+          });
+          expect(await h.fill("hello", false)).toMatchObject({
+            data: { reason: "fill_focus_lost" },
+          });
+          expect(await h.evaluate("document.querySelector('#target').innerHTML")).toBe(before);
+          expect(await h.evaluate("document.querySelector('#guard').value")).toBe("untouched");
+          expect(h.calls).not.toContain("Input.insertText");
+        },
+      );
+    },
+    30_000,
+  );
+
   it("stops if page code moves the caret within the same editor", async () => {
     await withFillBrowser(
       { background: false, markup: guard + '<div id="target" contenteditable="true">old</div>' },
@@ -824,4 +996,43 @@ describe.skipIf(!process.env.BSK_FILL_CHROME)("fill caret validation", () => {
       },
     );
   }, 30_000);
+});
+
+describe.skipIf(!process.env.BSK_FILL_CHROME)("fill native event deduplication", () => {
+  it.each([
+    ["input append", '<input id="target">', "value", "hello", false, ["hello"]],
+    ["input clear", '<input id="target" value="old">', "value", "hello", true, ["", "hello"]],
+    ["input clear to empty", '<input id="target" value="old">', "value", "", true, [""]],
+    ["textarea append", '<textarea id="target"></textarea>', "value", "hello", false, ["hello"]],
+    [
+      "contenteditable append",
+      '<div id="target" contenteditable="true"></div>',
+      "textContent",
+      "hello",
+      false,
+      ["hello"],
+    ],
+    [
+      "contenteditable clear",
+      '<div id="target" contenteditable="true">old</div>',
+      "textContent",
+      "hello",
+      true,
+      ["", "hello"],
+    ],
+  ] as const)(
+    "does not duplicate the native input for %s",
+    async (_name, markup, field, value, clearBefore, expected) => {
+      await withFillBrowser({ background: false, markup: guard + markup }, async (h) => {
+        await h.ref("document.querySelector('#target')");
+        await h.evaluate(`window.fillInputs = [];
+          document.querySelector('#target').addEventListener('input', (event) => {
+            window.fillInputs.push(event.target.${field});
+          });`);
+        expect(await h.fill(value, clearBefore)).toMatchObject({ value_length: value.length });
+        expect(await h.evaluate("window.fillInputs")).toEqual(expected);
+      });
+    },
+    30_000,
+  );
 });

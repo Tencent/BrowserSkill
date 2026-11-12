@@ -47,6 +47,8 @@ struct Script {
     die_on: Option<&'static str>,
     /// Answer this method as a daemon that does not know it.
     rejects: Option<&'static str>,
+    /// Answer this method as a daemon whose session is gone.
+    missing: Option<&'static str>,
     run_log: Value,
 }
 
@@ -57,6 +59,7 @@ impl Default for Script {
             pages: vec![FORM, DONE],
             die_on: None,
             rejects: None,
+            missing: None,
             run_log: json!({"steps":[],"observations":0,"truncated":false,"borrowed_tabs":[]}),
         }
     }
@@ -179,6 +182,14 @@ async fn serve(
             write.write_all(&response).await.unwrap();
             continue;
         }
+        if script.missing == Some(method) {
+            let frame = json!({"id":request["id"],"error":{"code":"not_found",
+                "message":"session not registered or already stopped"}});
+            let mut response = serde_json::to_vec(&frame).unwrap();
+            response.push(b'\n');
+            write.write_all(&response).await.unwrap();
+            continue;
+        }
         let result = match method {
             "system.status" => json!({"daemon_version":"0.4.0","protocol_version":script.protocol,
                 "pid":std::process::id(),"uptime_secs":0,"ws_port":0,"sock_path":sock,
@@ -229,14 +240,21 @@ fn inputs(requests: &[Value]) -> Vec<&Value> {
 }
 
 #[tokio::test]
-async fn without_the_switch_nothing_runs_and_no_daemon_is_needed() {
+async fn the_cli_needs_no_switch_and_lists_the_command() {
     let home = Home::new();
     let mut command = home.command(&["recipe", "list"]);
     command.env_remove("BSK_RECIPES");
     let output = command.spawn().unwrap().wait_with_output().await.unwrap();
-    assert!(!output.status.success());
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("BSK_RECIPES=1"), "{stderr}");
+    assert!(output.status.success(), "{output:?}");
+    let listed: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(listed["recipes"], json!([]));
+
+    let mut command = home.command(&["--help"]);
+    command.env_remove("BSK_RECIPES");
+    let output = command.spawn().unwrap().wait_with_output().await.unwrap();
+    let help = String::from_utf8_lossy(&output.stdout);
+    assert!(help.contains("recipe"), "{help}");
+    assert!(!help.contains("experimental"), "{help}");
 }
 
 #[tokio::test]
@@ -282,6 +300,97 @@ async fn an_invalid_file_is_refused_with_the_cause() {
     assert_eq!(
         home.local(&["recipe", "list"]).await.1["recipes"],
         json!([])
+    );
+}
+
+#[tokio::test]
+async fn a_session_that_is_gone_is_refused_and_never_makes_a_recipe_stale() {
+    let home = Home::new();
+    home.save();
+    let args = [
+        "recipe",
+        "run",
+        "sales",
+        "--param",
+        "region=East",
+        "--session",
+        "gone",
+    ];
+    // Whether the daemon or the browser no longer knows the session.
+    for missing in [
+        "session.run_log",
+        "tool.tab_list",
+        "tool.tab_list",
+        "tool.tab_list",
+    ] {
+        let script = Script {
+            missing: Some(missing),
+            ..Script::default()
+        };
+        let (output, reply, requests) = home.with_daemon(script, &args).await;
+        assert_eq!(output.status.code(), Some(2), "{output:?}");
+        assert_eq!(reply["status"], "refused", "{reply}");
+        assert_eq!(reply["reason"], "session_unavailable");
+        let message = reply["message"].as_str().unwrap();
+        assert!(!message.contains("restart"), "{message}");
+        assert!(inputs(&requests).is_empty());
+    }
+    let (_, shown) = home.local(&["recipe", "show", "sales"]).await;
+    assert_eq!(shown["state"]["status"], "draft");
+    assert_eq!(shown["state"]["handoff_streak"], 0);
+
+    // A draft from a session that is gone says so, rather than "recorded no action".
+    let script = Script {
+        missing: Some("session.run_log"),
+        ..Script::default()
+    };
+    let args = ["recipe", "draft", "--session", "gone", "--name", "fresh"];
+    let (output, _, _) = home.with_daemon(script, &args).await;
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("session not registered"), "{stderr}");
+    assert!(!stderr.contains("restart"), "{stderr}");
+}
+
+#[tokio::test]
+async fn a_lowered_risk_runs_only_after_a_person_approves_it_at_a_terminal() {
+    let home = Home::new();
+    let mut lowered = recipe();
+    lowered["segments"][0]["steps"][1]["target"]["name"] = "Save filters".into();
+    lowered["segments"][0]["steps"][1]["risk"] = "reversible".into();
+    let file = home.write("lowered.json", &lowered);
+    let (output, saved) = home.local(&["recipe", "save", "--file", &file]).await;
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(saved["approval"], "required");
+    assert_eq!(saved["summary"]["risk_downgrades"][0]["inferred"], "commit");
+    assert_eq!(
+        home.local(&["recipe", "list"]).await.1["recipes"][0]["approval"],
+        "required"
+    );
+
+    // Refused before any daemon or session is involved.
+    let (output, reply) = home
+        .local(&["recipe", "run", "sales", "--param", "region=East"])
+        .await;
+    assert_eq!(output.status.code(), Some(2), "{output:?}");
+    assert_eq!(reply["reason"], "approval_required");
+    let message = reply["message"].as_str().unwrap();
+    assert!(message.contains("bsk recipe approve sales"), "{message}");
+
+    // An agent's piped input is not a person at a terminal, whatever it types.
+    let mut command = home.command(&["recipe", "approve", "sales"]);
+    command.stdin(Stdio::piped());
+    let mut child = command.spawn().unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    stdin.write_all(b"sales\n").await.unwrap();
+    drop(stdin);
+    let output = child.wait_with_output().await.unwrap();
+    assert_eq!(output.status.code(), Some(2), "{output:?}");
+    let reply: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(reply["reason"], "approval_needs_person");
+    assert_eq!(
+        home.local(&["recipe", "show", "sales"]).await.1["approval"],
+        "required"
     );
 }
 
@@ -453,6 +562,118 @@ async fn a_daemon_dying_during_a_click_is_uncertain_and_the_click_is_never_repea
     let (_, shown) = home.local(&["recipe", "show", "sales"]).await;
     assert_eq!(shown["state"]["uncertain"], 1);
     assert_eq!(shown["state"]["status"], "draft");
+
+    // The recipe stays held, with no daemon running, until the caller names that run.
+    let run_id = reply["run_id"].as_str().unwrap().to_owned();
+    let (_, listed) = home.local(&["recipe", "list"]).await;
+    assert_eq!(listed["recipes"][0]["unchecked_run"], run_id.as_str());
+    for checked in [None, Some("r-someother")] {
+        let mut again = args.to_vec();
+        if let Some(checked) = checked {
+            again.extend(["--checked", checked]);
+        }
+        let (output, held) = home.local(&again).await;
+        assert_eq!(output.status.code(), Some(2), "{held}");
+        assert_eq!(held["reason"], "effect_unchecked");
+        let message = held["message"].as_str().unwrap();
+        assert!(
+            message.contains(&format!("--checked {run_id}")),
+            "{message}"
+        );
+    }
+    let mut checked = args.to_vec();
+    checked.extend(["--checked", &run_id]);
+    let (output, reply, _) = home.with_daemon(Script::default(), &checked).await;
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(reply["status"], "completed", "{reply}");
+    let (_, listed) = home.local(&["recipe", "list"]).await;
+    assert!(listed["recipes"][0].get("unchecked_run").is_none());
+}
+
+#[tokio::test]
+async fn concurrent_run_save_and_remove_are_refused_before_contacting_the_daemon() {
+    let home = Home::new();
+    home.save();
+    let lock_path = std::fs::read_dir(home.dir.path().join("recipes/.locks"))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .find(|path| {
+            path.file_name()
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .starts_with("recipe-")
+        })
+        .unwrap();
+    let lock = std::fs::OpenOptions::new()
+        .write(true)
+        .open(lock_path)
+        .unwrap();
+    fs2::FileExt::lock_exclusive(&lock).unwrap();
+    let mut next = recipe();
+    next["revision"] = 1.into();
+    let file = home.write("next.json", &next);
+    for args in [
+        vec!["recipe", "run", "sales", "--param", "region=East"],
+        vec!["recipe", "save", "--file", &file],
+        vec!["recipe", "rm", "sales"],
+    ] {
+        let (output, reply) = home.local(&args).await;
+        assert_eq!(output.status.code(), Some(2), "{output:?}");
+        assert_eq!(reply["reason"], "recipe_busy", "{reply}");
+    }
+}
+
+#[tokio::test]
+async fn missing_or_corrupt_safety_state_refuses_replay_before_contacting_the_daemon() {
+    let home = Home::new();
+    home.save();
+    let path = home.dir.path().join("recipes/sales/state.json");
+    std::fs::write(&path, b"broken state").unwrap();
+    for missing in [false, true] {
+        if missing {
+            std::fs::remove_file(&path).unwrap();
+        }
+        let (output, reply) = home
+            .local(&["recipe", "run", "sales", "--param", "region=East"])
+            .await;
+        assert_eq!(output.status.code(), Some(2), "{output:?}");
+        assert_eq!(reply["reason"], "storage_unavailable", "{reply}");
+    }
+}
+
+#[tokio::test]
+async fn an_unwritable_run_marker_refuses_input_and_closes_the_new_session() {
+    use std::os::unix::fs::PermissionsExt;
+    let home = Home::new();
+    home.save();
+    let directory = home.dir.path().join("recipes/sales");
+    std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o500)).unwrap();
+    let (output, reply, requests) = home
+        .with_daemon(
+            Script::default(),
+            &["recipe", "run", "sales", "--param", "region=East"],
+        )
+        .await;
+    std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700)).unwrap();
+    assert_eq!(output.status.code(), Some(2), "{output:?}");
+    assert_eq!(reply["reason"], "storage_unavailable", "{reply}");
+    assert_eq!(reply["session_stopped"], true, "{reply}");
+    assert!(inputs(&requests).is_empty());
+    assert!(methods(&requests).contains(&"session.start"));
+    assert!(methods(&requests).contains(&"session.stop"));
+}
+
+#[tokio::test]
+async fn oversized_documents_are_refused_before_saving() {
+    let home = Home::new();
+    let mut large = recipe();
+    large["segments"][0]["steps"][0]["values"][0] = "x".repeat(256 * 1024).into();
+    let file = home.write("large.json", &large);
+    let (output, reply) = home.local(&["recipe", "save", "--file", &file]).await;
+    assert_eq!(output.status.code(), Some(2), "{output:?}");
+    assert_eq!(reply["reason"], "invalid_recipe", "{reply}");
+    assert!(!home.dir.path().join("recipes/sales/recipe.json").exists());
 }
 
 #[tokio::test]
@@ -552,7 +773,7 @@ async fn a_draft_comes_from_the_daemons_log_and_can_be_saved_after_review() {
         "--out",
         out,
     ];
-    let (output, reply, _) = home.with_daemon(script, &args).await;
+    let (output, reply, _) = home.with_daemon(script.clone(), &args).await;
     assert!(output.status.success(), "{output:?}");
     assert_eq!(reply["errors"], json!([]));
     let warnings = reply["warnings"].to_string();
@@ -574,6 +795,19 @@ async fn a_draft_comes_from_the_daemons_log_and_can_be_saved_after_review() {
     // The file is not overwritten by a later draft.
     let (output, _, _) = home.with_daemon(Script::default(), &args).await;
     assert!(!output.status.success());
+
+    // Nor is the saved recipe: a later draft under its name warns, and saving it is refused.
+    let (output, reply, _) = home.with_daemon(script, &args[..8]).await;
+    assert!(output.status.success(), "{output:?}");
+    let warnings = reply["warnings"].to_string();
+    assert!(
+        warnings.contains("already exists at revision 1"),
+        "{warnings}"
+    );
+    let again = home.write("again.json", &reply["draft"]);
+    let (output, refused) = home.local(&["recipe", "save", "--file", &again]).await;
+    assert_eq!(output.status.code(), Some(2), "{refused}");
+    assert_eq!(refused["reason"], "recipe_exists");
 }
 
 /// One JSON-RPC exchange over `bsk mcp`.
@@ -648,6 +882,8 @@ async fn mcp_clients_get_the_same_recipes_when_the_switch_is_on() {
                 8,
                 json!({"action":"run","name":"sales","session":"s","browser":"b"}),
             ),
+            // Only a person at a terminal approves a lowered risk.
+            tool_call(9, json!({"action":"approve","name":"sales"})),
         ],
     )
     .await;

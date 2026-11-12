@@ -185,6 +185,32 @@ describe("fill result verification", () => {
     expect(h.insert).not.toHaveBeenCalled();
   });
 
+  it("does not repeat the empty input notification when clearing a date", async () => {
+    const h = await setup('<input type="date" value="2026-01-01">');
+    const inputs: string[] = [];
+    h.element.addEventListener("input", () => inputs.push(h.element.value));
+    expect(await h.fill("")).toMatchObject({ value_length: 0 });
+    expect(inputs).toEqual([""]);
+  });
+
+  it.each([
+    ["clear then type", '<input value="old">', "hello", true, ["", "hello"]],
+    ["append without clearing", '<input value="old">', "hello", false, ["oldhello"]],
+    ["clear to empty", '<input value="old">', "", true, [""]],
+    ["append empty to empty", "<input>", "", false, [""]],
+  ] as const)("dispatches one input per value change when it %s", async (_name, markup, value, clearBefore, expected) => {
+    const h = await setup(markup);
+    const inputs: string[] = [];
+    let changes = 0;
+    h.element.addEventListener("input", () => inputs.push(h.element.value));
+    h.element.addEventListener("change", () => changes++);
+    expect(await h.fill(value, clearBefore)).toMatchObject({
+      value_length: expected.at(-1)!.length,
+    });
+    expect(inputs).toEqual(expected);
+    expect(changes).toBe(1);
+  });
+
   it("flushes deferred background focus before a date value write", async () => {
     const h = await setup('<input type="date" value="">');
     vi.spyOn(document, "hasFocus").mockReturnValue(false);
@@ -215,6 +241,7 @@ describe("fill result verification", () => {
   it("clears a background date after deferred focus restores a value", async () => {
     const h = await setup('<input type="date" value="2026-01-01">');
     vi.spyOn(document, "hasFocus").mockReturnValue(false);
+    const inputs: string[] = [];
     const send = h.send.getMockImplementation()!;
     h.send.mockImplementation(async (tabId, method, params) => {
       const reply = await send(tabId, method, params);
@@ -223,12 +250,15 @@ describe("fill result verification", () => {
         (params as { type: string }).type === "rawKeyDown"
       ) {
         h.element.value = "2026-01-01";
+        inputs.push(`focus:${h.element.value}`);
       }
       return reply;
     });
+    h.element.addEventListener("input", () => inputs.push(h.element.value));
 
     expect(await h.fill("")).toMatchObject({ value_length: 0 });
     expect(h.element.value).toBe("");
+    expect(inputs).toEqual(["", "focus:2026-01-01", ""]);
     expect(h.insert).not.toHaveBeenCalled();
   });
 
@@ -400,22 +430,23 @@ describe("fill result verification", () => {
     expect(hostInputs.every((event) => event.composed && event.bubbles)).toBe(true);
   });
 
-  it("rejects an overlong value before clearing", async () => {
+  it("accepts maxlength truncation optimistically and reports actual_value + formatted", async () => {
     const h = await setup('<input maxlength="3" value="old">');
     expect(await h.fill()).toMatchObject({
-      code: "invalid_params",
-      message: /maxlength/,
-      data: { reason: "fill_value_invalid" },
+      value_length: 3,
+      actual_value: "hel",
+      formatted: true,
     });
-    expect(h.element.value).toBe("old");
-    expect(h.insert).not.toHaveBeenCalled();
+    expect(h.element.value).toBe("hel");
+    expect(h.insert).toHaveBeenCalledOnce();
   });
 
   it.each([
     true,
     false,
-  ])("classifies a DOM.focus rejection on a disabled=%s target", async (disabled) => {
+  ])("classifies a DOM.focus fallback rejection on a disabled=%s target", async (disabled) => {
     const h = await setup(`<input ${disabled ? "disabled" : ""} value="old">`);
+    vi.spyOn(h.element, "focus").mockImplementation(() => {});
     const send = h.send.getMockImplementation()!;
     h.send.mockImplementation(async (tabId, method, params) => {
       if (method === "DOM.focus") throw new Error("Element is not focusable");
@@ -430,11 +461,20 @@ describe("fill result verification", () => {
     expect(h.release).toHaveBeenCalledOnce();
   });
 
-  it("fills a background document without requiring foreground browser focus", async () => {
+  it("fills a background document on the 4-call fast path without DOM.focus or dispatchKeyEvent", async () => {
     const h = await setup();
     vi.spyOn(document, "hasFocus").mockReturnValue(false);
-    expect(await h.fill()).toMatchObject({ value_length: 5 });
+    const result = await h.fill();
+    expect(result).toMatchObject({ value_length: 5, actual_value: "hello" });
+    expect(result).not.toHaveProperty("formatted");
     expect(h.element.value).toBe("hello");
+    expect(h.send.mock.calls.map(([, method]) => method)).toEqual([
+      "DOM.resolveNode",
+      "Runtime.callFunctionOn",
+      "Input.insertText",
+      "Runtime.callFunctionOn",
+      "Runtime.releaseObject",
+    ]);
   });
 
   it("restores focus once after clearing without typing into another field", async () => {
@@ -442,10 +482,10 @@ describe("fill result verification", () => {
     const other = document.createElement("input");
     document.body.append(other);
     h.element.addEventListener("input", () => other.focus());
-    expect(await h.fill()).toMatchObject({ value_length: 5 });
+    expect(await h.fill()).toMatchObject({ value_length: 5, actual_value: "hello" });
     expect(h.element.value).toBe("hello");
     expect(other.value).toBe("");
-    expect(h.send.mock.calls.filter(([, method]) => method === "DOM.focus")).toHaveLength(2);
+    expect(h.send.mock.calls.filter(([, method]) => method === "DOM.focus")).toHaveLength(1);
   });
 
   it.each([
@@ -472,7 +512,7 @@ describe("fill result verification", () => {
     });
     expect(other.value).toBe("");
     expect(h.insert).not.toHaveBeenCalled();
-    expect(h.send.mock.calls.filter(([, method]) => method === "DOM.focus")).toHaveLength(2);
+    expect(h.send.mock.calls.filter(([, method]) => method === "DOM.focus")).toHaveLength(1);
   });
 
   it.each([
@@ -498,17 +538,26 @@ describe("fill result verification", () => {
     expect(h.insert).not.toHaveBeenCalled();
   });
 
-  it("fails when insertText is acknowledged without changing the value", async () => {
-    const h = await setup();
-    h.insert.mockImplementation(async () => {});
-    expect(await h.fill()).toMatchObject({
-      code: "cdp_failed",
-      data: { reason: "fill_value_mismatch" },
+  it("succeeds optimistically and returns actual_value + formatted when page formats phone numbers", async () => {
+    const h = await setup('<input type="tel" value="">');
+    h.element.addEventListener("input", () => {
+      const digits = h.element.value.replace(/\D/g, "");
+      if (digits.length === 11) {
+        h.element.value = `${digits.slice(0, 3)} ${digits.slice(3, 7)} ${digits.slice(7)}`;
+      }
     });
+    const result = await h.fill("13800138000");
+    expect(result).toMatchObject({
+      value_length: 13,
+      actual_value: "138 0013 8000",
+      formatted: true,
+    });
+    expect(h.element.value).toBe("138 0013 8000");
+    expect(h.insert).toHaveBeenCalledOnce();
     expect(h.release).toHaveBeenCalledOnce();
   });
 
-  it("detects truncation when maxlength changes after preparation", async () => {
+  it("reports dynamic maxlength truncation optimistically with actual_value + formatted", async () => {
     const h = await setup();
     h.element.addEventListener(
       "input",
@@ -518,8 +567,9 @@ describe("fill result verification", () => {
       { once: true },
     );
     expect(await h.fill()).toMatchObject({
-      code: "cdp_failed",
-      data: { reason: "fill_value_mismatch" },
+      value_length: 3,
+      actual_value: "hel",
+      formatted: true,
     });
     expect(h.element.value).toBe("hel");
   });
@@ -528,26 +578,47 @@ describe("fill result verification", () => {
     "input",
     "change",
     "microtask-change",
-  ])("detects a value reverted by the %s handler", async (event) => {
-    const h = await setup();
+  ])("returns post-handler actual_value when %s handler rewrites the field", async (event) => {
+    const h = await setup('<input value="">');
     h.element.addEventListener(event === "microtask-change" ? "change" : event, () => {
       if (event === "microtask-change")
         queueMicrotask(() => {
-          h.element.value = "";
+          h.element.value = "100.00";
         });
-      else h.element.value = "";
+      else if (h.element.value) h.element.value = "100.00";
     });
-    expect(await h.fill()).toMatchObject({ code: "cdp_failed", message: /expected value/ });
+    expect(await h.fill("100")).toMatchObject({
+      value_length: 6,
+      actual_value: "100.00",
+      formatted: true,
+    });
   });
 
-  it("compares content rather than length without including field values in the error", async () => {
-    const h = await setup('<input type="password">');
+  it.each([
+    '<input type="password">',
+    '<input type="text" autocomplete="one-time-code">',
+    '<input type="text" autocomplete="billing cc-number">',
+  ])("never exposes actual_value or formatted for sensitive control %s", async (markup) => {
+    const h = await setup(markup);
     h.element.addEventListener("change", () => {
       h.element.value = "other-secret";
     });
     const result = await h.fill("given-secret");
-    expect(result).toMatchObject({ code: "cdp_failed", message: /expected value/ });
+    expect(result).toMatchObject({ value_length: "other-secret".length });
+    expect(result).not.toHaveProperty("actual_value");
+    expect(result).not.toHaveProperty("formatted");
     expect(JSON.stringify(result)).not.toMatch(/given-secret|other-secret/);
+  });
+
+  it("truncates actual_value to 200 characters while keeping full value_length", async () => {
+    const h = await setup("<textarea></textarea>");
+    const longText = "x".repeat(260);
+    const result = await h.fill(longText);
+    expect(result).toMatchObject({
+      value_length: 260,
+      actual_value: "x".repeat(200),
+    });
+    expect(result).not.toHaveProperty("formatted");
   });
 
   it("does not report success for a target replaced by a change handler", async () => {
@@ -560,7 +631,7 @@ describe("fill result verification", () => {
   });
 
   it.each([
-    1, 2, 3, 4, 5,
+    1, 2,
   ])("rejects script exceptions at phase %s and releases the target", async (phase) => {
     const h = await setup();
     vi.spyOn(document, "hasFocus").mockReturnValue(false);
@@ -572,11 +643,11 @@ describe("fill result verification", () => {
     const result = await h.fill();
     expect(result).toMatchObject({ code: "cdp_failed", data: { reason: "fill_failed" } });
     expect(JSON.stringify(result)).not.toContain("page secret");
-    if (phase <= 4) expect(h.insert).not.toHaveBeenCalled();
+    if (phase === 1) expect(h.insert).not.toHaveBeenCalled();
     expect(h.release).toHaveBeenCalledOnce();
   });
 
-  it.each([1, 2, 3, 4, 6])("rejects missing results at phase %s", async (phase) => {
+  it.each([1, 2])("rejects missing results at phase %s", async (phase) => {
     const h = await setup();
     vi.spyOn(document, "hasFocus").mockReturnValue(false);
     const run = h.script.getMockImplementation()!;
@@ -585,20 +656,23 @@ describe("fill result verification", () => {
       ++count === phase ? { result: { type: "undefined" } } : run(params),
     );
     expect(await h.fill()).toMatchObject({ code: "cdp_failed" });
-    if (phase <= 4) expect(h.insert).not.toHaveBeenCalled();
+    if (phase === 1) expect(h.insert).not.toHaveBeenCalled();
   });
 
-  it.each(["input", "change"])("checks state after nested microtasks from %s", async (event) => {
+  it("stops before typing when nested microtasks from clearing mutate the field", async () => {
     const h = await setup();
-    h.element.addEventListener(event, () => {
+    h.element.addEventListener("input", () => {
       queueMicrotask(() =>
         queueMicrotask(() => {
           h.element.value = "reverted";
         }),
       );
     });
-    expect(await h.fill()).toMatchObject({ code: "cdp_failed" });
-    if (event === "input") expect(h.insert).not.toHaveBeenCalled();
+    expect(await h.fill()).toMatchObject({
+      code: "cdp_failed",
+      data: { reason: "fill_target_changed" },
+    });
+    expect(h.insert).not.toHaveBeenCalled();
   });
 
   it.each([
@@ -701,14 +775,15 @@ describe("fill result verification", () => {
   it.each([
     "number",
     "email",
-  ])("does not report successful %s append when the caret command is ignored", async (type) => {
+  ])("surfaces actual_value + formatted when %s append caret command is ignored", async (type) => {
     const h = await setup(`<input type="${type}" value="12">`);
     vi.spyOn(h.element, "selectionStart", "get").mockReturnValue(null);
     vi.spyOn(h.element, "selectionEnd", "get").mockReturnValue(null);
     h.moveToEnd.mockResolvedValueOnce(undefined);
     expect(await h.fill("3", false)).toMatchObject({
-      code: "cdp_failed",
-      data: { reason: "fill_value_mismatch" },
+      value_length: 3,
+      actual_value: "312",
+      formatted: true,
     });
     expect(h.element.value).toBe("312");
     expect(h.insert).toHaveBeenCalledOnce();
@@ -724,14 +799,15 @@ describe("fill result verification", () => {
     expect(h.insert).not.toHaveBeenCalled();
   });
 
-  it("reports page formatting as unconfirmed without retrying the write", async () => {
+  it("returns formatted uppercase value without failing or retrying the write", async () => {
     const h = await setup();
     h.element.addEventListener("change", () => {
       h.element.value = h.element.value.toUpperCase();
     });
     expect(await h.fill()).toMatchObject({
-      code: "cdp_failed",
-      data: { reason: "fill_value_mismatch" },
+      value_length: 5,
+      actual_value: "HELLO",
+      formatted: true,
     });
     expect(h.element.value).toBe("HELLO");
     expect(h.insert).toHaveBeenCalledOnce();
@@ -747,7 +823,9 @@ describe("fill result verification", () => {
     ["throw", false],
     ["throw", true],
   ] as const)("stops when positioning triggers %s (clear=%s) and releases the key", async (action, clearBefore) => {
-    const h = await setup();
+    const h = await setup('<div contenteditable="true" tabindex="0">old</div>');
+    Object.defineProperty(h.element, "isContentEditable", { get: () => true });
+    Object.defineProperty(h.element, "innerText", { get: () => h.element.textContent ?? "" });
     vi.spyOn(document, "hasFocus").mockReturnValue(false);
     const controller = new AbortController();
     const other = document.createElement("input");
@@ -760,7 +838,7 @@ describe("fill result verification", () => {
         (params as { type: string }).type === "rawKeyDown"
       ) {
         if (action === "focus") other.focus();
-        if (action === "value") h.element.value = "changed";
+        if (action === "value") h.element.textContent = "changed";
         if (action === "cancel") controller.abort();
         if (action === "throw") throw new Error("dispatch failed");
       }
@@ -836,7 +914,7 @@ describe("fill result verification", () => {
     const controller = new AbortController();
     h.insert.mockImplementation(async () => controller.abort());
     expect(await h.fill("hello", true, controller.signal)).toMatchObject({ code: "cancelled" });
-    expect(h.script).toHaveBeenCalledTimes(3);
+    expect(h.script).toHaveBeenCalledTimes(1);
     expect(h.release).toHaveBeenCalledOnce();
   });
 

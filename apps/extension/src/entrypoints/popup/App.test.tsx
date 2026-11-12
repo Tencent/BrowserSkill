@@ -81,7 +81,8 @@ describe("App", () => {
     render(<App />);
     expect(screen.getByText("已连接")).toBeTruthy();
     expect(screen.getByText("未配对")).toBeTruthy();
-    expect(screen.getByRole("link", { name: "为什么建议配对？" })).toBeTruthy();
+    const warning = screen.getByRole("button", { name: "未配对" });
+    expect(warning.getAttribute("aria-expanded")).toBe("false");
     expect(screen.queryByRole("alertdialog")).toBeNull();
     expect(setConnectionEnabled).not.toHaveBeenCalled();
   });

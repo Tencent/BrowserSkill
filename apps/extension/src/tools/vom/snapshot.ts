@@ -9,6 +9,10 @@ export const REQUESTED_STYLES = [
   "cursor",
   "visibility",
   "opacity",
+  "font-size",
+  "color",
+  "background-color",
+  "background-image",
 ] as const;
 export const VISUAL_STYLES = [
   ...REQUESTED_STYLES,
@@ -171,6 +175,16 @@ export async function decodeDocument(
       }
       const nvIdx = dn.nodeValue[n] ?? -1;
       if (nvIdx < 0) continue;
+      // Chromium's DOMSnapshot emits `nodeValue` for Comment nodes (`nodeType === 8`,
+      // e.g. Vue `<!--v-if-->`) as well as Text/CDATA nodes. Only Text (3) and CDATA (4)
+      // contribute to element `textContent`.
+      const nt = dn.nodeType?.[n];
+      if (nt !== undefined) {
+        if (nt !== 3 && nt !== 4) continue;
+      } else {
+        const rawName = str(strings, dn.nodeName?.[n]).toLowerCase();
+        if (rawName && rawName !== "#text" && rawName !== "#cdata-section") continue;
+      }
       const text = str(strings, nvIdx).trim();
       if (!text) continue;
       const parentIdx = dn.parentIndex?.[n] ?? -1;
@@ -201,21 +215,22 @@ export async function decodeDocument(
     }
 
     const li = layoutByNode.get(n);
-    const styleRow = li === undefined ? [] : (dl?.styles?.[li] ?? []);
-    const styles: Record<string, string> = {};
-    for (let i = 0; i < profile.computedStyles.length; i++)
-      styles[profile.computedStyles[i]] = str(strings, styleRow[i]);
-    const layout =
-      li === undefined
-        ? undefined
-        : {
-            boundsSpace: "snapshot-document-layout" as const,
-            bounds: dl?.bounds?.[li],
-            ...(profile.includeVisualFacts && dl?.clientRects?.[li]
-              ? { clientRect: dl.clientRects[li] }
-              : {}),
-            styles,
-          };
+    let styles: Record<string, string> | undefined;
+    let layout: DecodedNode["layout"];
+    if (li !== undefined && tag !== "#text") {
+      const styleRow = dl?.styles?.[li] ?? [];
+      styles = {};
+      for (let i = 0; i < profile.computedStyles.length; i++)
+        styles[profile.computedStyles[i]] = str(strings, styleRow[i]);
+      layout = {
+        boundsSpace: "snapshot-document-layout" as const,
+        bounds: dl?.bounds?.[li],
+        ...(profile.includeVisualFacts && dl?.clientRects?.[li]
+          ? { clientRect: dl.clientRects[li] }
+          : {}),
+        styles,
+      };
+    }
 
     const textContent = nodeTextContent.get(n)?.join(" ");
 
@@ -231,7 +246,7 @@ export async function decodeDocument(
       Object.prototype.hasOwnProperty.call(attrs, "value"),
       sensitive,
     );
-    if (sensitive) delete attrs.value;
+    if (sensitive && "value" in attrs) delete attrs.value;
 
     nodes.push({
       backendNodeId,
@@ -245,9 +260,9 @@ export async function decodeDocument(
       attrs,
       layout,
       paintOrder: li === undefined ? 0 : (dl?.paintOrders?.[li] ?? 0),
-      position: styles.position || "static",
-      pointerEvents: styles["pointer-events"] || "auto",
-      cursor: styles.cursor || "auto",
+      position: styles?.position || "static",
+      pointerEvents: styles?.["pointer-events"] || "auto",
+      cursor: styles?.cursor || "auto",
       ...(clickableNodes.has(n) ? { clickable: true } : {}),
 
       textContent,
@@ -261,6 +276,9 @@ export async function decodeDocument(
         : {}),
       ...(tag === "input" && ["checkbox", "radio"].includes((attrs.type ?? "").toLowerCase())
         ? { checked: checkedInputs.has(n) }
+        : {}),
+      ...(tag === "option" && dn.optionSelected !== undefined
+        ? { checked: selectedOptions.has(n) }
         : {}),
       ...(selectedOptions.has(n) ? { formValue: attrs.value ?? textContent ?? "" } : {}),
     });

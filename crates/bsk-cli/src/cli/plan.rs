@@ -48,7 +48,9 @@ const RECEIPT_NOISE: [&str; 15] = [
 #[derive(Debug, Clone, Args)]
 pub struct PlanArgs {
     #[arg(long)]
-    pub session: String,
+    pub session: Option<String>,
+    #[arg(long)]
+    pub scope: Option<String>,
     #[arg(long)]
     pub tab_id: Option<i64>,
     /// JSON array of 1-20 steps. Each is an object with `action` (click, fill, select,
@@ -383,7 +385,7 @@ fn prepare(args: &PlanArgs, flags: &GlobalFlags) -> anyhow::Result<Plan> {
     step::check_follow_args(args.until_visible.as_deref(), &args.match_text)?;
     let steps: Value = serde_json::from_str(&args.steps).context("parse --steps JSON")?;
     let mut plan = Plan::prepare(
-        args.session.clone(),
+        args.session.clone().unwrap_or_default(),
         &steps,
         flags.context.clone(),
         flags.observation.clone(),
@@ -395,16 +397,18 @@ fn prepare(args: &PlanArgs, flags: &GlobalFlags) -> anyhow::Result<Plan> {
 }
 
 pub fn dispatch(args: PlanArgs, flags: &GlobalFlags, _format: Format) -> Result<(), CliError> {
-    let plan = prepare(&args, flags)?;
+    let plan = prepare(&args, flags).map_err(CliError::invalid_params)?;
+    let session = args.session.as_deref().unwrap_or_default();
     let output = step::Output::prepare(
-        &args.session,
+        session,
         args.baseline.as_deref(),
         args.save_full.as_deref(),
         &args.match_text,
         args.context_lines,
     )?;
-    let (daemon, protocol) =
-        ensure_daemon::ensure_daemon_with_protocol().context("ensure daemon is running")?;
+    business_rpc::set_caller_scope(args.scope.clone());
+    let (daemon, protocol) = ensure_daemon::ensure_daemon_optimistic_with_protocol()
+        .context("ensure daemon is running")?;
     check_protocol(&protocol)?;
     let (reply, exit) = run(&plan, |method, params, timeout| {
         business_rpc::call(

@@ -80,6 +80,180 @@ async function collectTasks<T>(
   if (failed) throw failure;
 }
 
+export const ACCESSIBILITY_LEASE_TTL_MS = 10_000;
+
+interface LeasedAccessibilityTarget {
+  target: CdpTarget;
+  attachmentId: string;
+  needsEnable: boolean;
+}
+
+const leasesByTab = new Map<number, Set<AccessibilityLease>>();
+
+function registerTabLease(tabId: number, lease: AccessibilityLease): void {
+  let set = leasesByTab.get(tabId);
+  if (!set) {
+    set = new Set();
+    leasesByTab.set(tabId, set);
+  }
+  set.add(lease);
+}
+
+function unregisterTabLease(tabId: number, lease: AccessibilityLease): void {
+  const set = leasesByTab.get(tabId);
+  if (!set) return;
+  set.delete(lease);
+  if (set.size === 0) leasesByTab.delete(tabId);
+}
+
+function isTargetLeased(tabId: number, target: CdpTarget, attachmentId: string): boolean {
+  const set = leasesByTab.get(tabId);
+  if (!set) return false;
+  for (const lease of set) {
+    if (lease.holdsAttachment(target, attachmentId)) return true;
+  }
+  return false;
+}
+
+/**
+ * Sliding idle lease for `Accessibility.enable` across back-to-back cooperative
+ * captures on the same tab/attachment. Avoids tearing down and rebuilding
+ * Blink's full renderer AX tree on every sync/verify cycle while still
+ * disabling the domain after idle expiry, session stop, tab release, or error.
+ */
+export class AccessibilityLease {
+  private readonly entries = new Map<string, LeasedAccessibilityTarget>();
+  private cdp?: CdpRunner;
+  private timer?: ReturnType<typeof setTimeout>;
+  private activeUsers = 0;
+  private disposed = false;
+
+  constructor(
+    readonly tabId: number,
+    private readonly ttlMs = ACCESSIBILITY_LEASE_TTL_MS,
+  ) {}
+
+  hasActive(target: CdpTarget, attachmentId: string | undefined): boolean {
+    if (this.disposed || attachmentId === undefined) return false;
+    const entry = this.entries.get(cdpTargetKey(target));
+    return entry !== undefined && entry.attachmentId === attachmentId && !entry.needsEnable;
+  }
+
+  holdsAttachment(target: CdpTarget, attachmentId: string): boolean {
+    if (this.disposed) return false;
+    const entry = this.entries.get(cdpTargetKey(target));
+    return entry !== undefined && entry.attachmentId === attachmentId;
+  }
+
+  beginUse(): void {
+    this.activeUsers++;
+    this.clearTimer();
+  }
+
+  endUse(): void {
+    if (this.activeUsers > 0) this.activeUsers--;
+    this.syncState();
+  }
+
+  markNeedsEnable(): void {
+    for (const entry of this.entries.values()) {
+      entry.needsEnable = true;
+    }
+  }
+
+  forgetTimedOut(error: CdpReadTimeoutError): void {
+    if (error.tabId !== this.tabId) return;
+    for (const [key, entry] of this.entries) {
+      if (!error.sessionId || entry.target.sessionId === error.sessionId) {
+        this.entries.delete(key);
+      }
+    }
+    this.syncState();
+  }
+
+  retain(
+    cdp: CdpRunner,
+    enabled: ReadonlyMap<CdpTarget, string | undefined>,
+  ): Map<CdpTarget, string | undefined> {
+    const unretained = new Map<CdpTarget, string | undefined>();
+    if (this.disposed) {
+      for (const [target, attachmentId] of enabled) unretained.set(target, attachmentId);
+      return unretained;
+    }
+    const currentAttachmentId = cdp.getAttachmentId?.(this.tabId);
+    for (const [key, entry] of this.entries) {
+      if (entry.attachmentId !== currentAttachmentId) {
+        this.entries.delete(key);
+        unretained.set(entry.target, entry.attachmentId);
+      }
+    }
+    for (const [target, attachmentId] of enabled) {
+      if (attachmentId !== undefined && attachmentId === currentAttachmentId) {
+        this.entries.set(cdpTargetKey(target), {
+          target,
+          attachmentId,
+          needsEnable: false,
+        });
+      } else {
+        unretained.set(target, attachmentId);
+      }
+    }
+    this.cdp = cdp;
+    this.syncState();
+    return unretained;
+  }
+
+  takeEntries(): Map<CdpTarget, string | undefined> {
+    this.clearTimer();
+    unregisterTabLease(this.tabId, this);
+    const drained = new Map<CdpTarget, string | undefined>();
+    for (const entry of this.entries.values()) {
+      drained.set(entry.target, entry.attachmentId);
+    }
+    this.entries.clear();
+    return drained;
+  }
+
+  async release(cdpOverride?: CdpRunner): Promise<void> {
+    const runner = cdpOverride ?? this.cdp;
+    const drained = this.takeEntries();
+    if (drained.size > 0 && runner) {
+      await releaseAccessibility(runner, this.tabId, drained);
+    }
+  }
+
+  async dispose(cdpOverride?: CdpRunner): Promise<void> {
+    this.disposed = true;
+    await this.release(cdpOverride);
+  }
+
+  private clearTimer(): void {
+    if (this.timer !== undefined) {
+      clearTimeout(this.timer);
+      this.timer = undefined;
+    }
+  }
+
+  private syncState(): void {
+    this.clearTimer();
+    if (this.disposed || this.entries.size === 0 || !this.cdp) {
+      unregisterTabLease(this.tabId, this);
+      return;
+    }
+    registerTabLease(this.tabId, this);
+    if (this.activeUsers > 0) return;
+    const runner = this.cdp;
+    this.timer = setTimeout(() => {
+      this.timer = undefined;
+      const drained = this.takeEntries();
+      if (drained.size > 0) {
+        void releaseAccessibility(runner, this.tabId, drained);
+      }
+    }, this.ttlMs);
+    (this.timer as { unref?: () => void }).unref?.();
+  }
+}
+
 /** `Accessibility.enable` keeps the renderer's accessibility tree live, updated
  * and reported on every page change, until the domain is disabled again. A
  * capture needs it only for its own reads, so each target that enabled it
@@ -95,6 +269,7 @@ async function releaseAccessibility(
   await collectTasks([...enabled], async ([target, attachmentId]) => {
     // A detach already disabled every domain of that attachment.
     if (cdp.getAttachmentId?.(tabId) !== attachmentId) return;
+    if (attachmentId !== undefined && isTargetLeased(tabId, target, attachmentId)) return;
     const disabled =
       cdp.sendGuarded && attachmentId !== undefined
         ? cdp.sendGuarded(target, "Accessibility.disable", {}, { attachmentId })
@@ -106,12 +281,17 @@ async function releaseAccessibility(
 /** Never queue cleanup behind a timed-out read. A pending root command gates
  * every frame on the tab; a child command gates only its original target. */
 function forgetPendingAccessibility(
+  tabId: number,
   enabled: Map<CdpTarget, string | undefined>,
   error: unknown,
 ): void {
   if (!(error instanceof CdpReadTimeoutError)) return;
   for (const target of enabled.keys())
     if (!error.sessionId || target.sessionId === error.sessionId) enabled.delete(target);
+  const leases = leasesByTab.get(tabId);
+  if (leases) {
+    for (const lease of [...leases]) lease.forgetTimedOut(error);
+  }
 }
 
 export function captureObservationFacts<T extends FrameOwnedAxNode>(
@@ -119,7 +299,7 @@ export function captureObservationFacts<T extends FrameOwnedAxNode>(
   tabId: number,
   signal?: AbortSignal,
   pageUrl?: string,
-  options: { includeVisualFacts?: boolean } = {},
+  options: { includeVisualFacts?: boolean; accessibilityLease?: AccessibilityLease } = {},
 ): Promise<ObservationFacts<T>> {
   return withObservationFacts(
     cdp,
@@ -140,19 +320,40 @@ export async function withObservationFacts<T extends FrameOwnedAxNode, R>(
   consume: (facts: ObservationFacts<T>) => R | Promise<R>,
   signal?: AbortSignal,
   pageUrl?: string,
-  options: { includeVisualFacts?: boolean } = {},
+  options: { includeVisualFacts?: boolean; accessibilityLease?: AccessibilityLease } = {},
 ): Promise<R> {
   const axEnabled = new Map<CdpTarget, string | undefined>();
+  const lease = options.accessibilityLease;
+  lease?.beginUse();
+  let toRelease = axEnabled;
   let result: R;
   try {
     const facts = await collectObservationFacts<T>(cdp, tabId, axEnabled, signal, pageUrl, options);
     throwCaptureAborted(signal);
     result = await consume(facts);
+    throwCaptureAborted(signal);
+    if (lease) {
+      toRelease = lease.retain(cdp, axEnabled);
+    }
   } catch (error) {
-    forgetPendingAccessibility(axEnabled, error);
+    forgetPendingAccessibility(tabId, axEnabled, error);
+    if (lease) {
+      const seenKeys = new Set([...axEnabled.keys()].map(cdpTargetKey));
+      for (const [target, attachmentId] of lease.takeEntries()) {
+        if (!seenKeys.has(cdpTargetKey(target))) {
+          axEnabled.set(target, attachmentId);
+        }
+      }
+    }
     throw error;
   } finally {
-    await releaseAccessibility(cdp, tabId, axEnabled);
+    lease?.endUse();
+    if (toRelease.size > 0) {
+      await releaseAccessibility(cdp, tabId, toRelease);
+    }
+  }
+  if (signal?.aborted && lease) {
+    await lease.release(cdp);
   }
   throwCaptureAborted(signal);
   return result;
@@ -164,7 +365,7 @@ async function collectObservationFacts<T extends FrameOwnedAxNode>(
   axEnabled: Map<CdpTarget, string | undefined>,
   signal: AbortSignal | undefined,
   pageUrl: string | undefined,
-  options: { includeVisualFacts?: boolean },
+  options: { includeVisualFacts?: boolean; accessibilityLease?: AccessibilityLease },
 ): Promise<ObservationFacts<T>> {
   const profile = options.includeVisualFacts ? VISUAL_SNAPSHOT : BASIC_SNAPSHOT;
   const startedAt = Date.now();
@@ -173,7 +374,7 @@ async function collectObservationFacts<T extends FrameOwnedAxNode>(
   try {
     graph = await cdp.getFrameGraph?.(tabId, signal);
   } catch (error) {
-    forgetPendingAccessibility(axEnabled, error);
+    forgetPendingAccessibility(tabId, axEnabled, error);
     if (isCaptureAbort(error)) throw error;
   }
   throwCaptureAborted(signal);
@@ -291,7 +492,7 @@ async function collectObservationFacts<T extends FrameOwnedAxNode>(
         for (const frame of batch.frames)
           if (!present.has(frame.frameId)) unavailable(batch, "dom", frame.frameId);
       } catch (error) {
-        forgetPendingAccessibility(axEnabled, error);
+        forgetPendingAccessibility(tabId, axEnabled, error);
         throwCaptureAborted(signal);
         if (isolateChildTimeout(error, batch)) return;
         if (isCaptureAbort(error)) throw error;
@@ -310,9 +511,12 @@ async function collectObservationFacts<T extends FrameOwnedAxNode>(
         ];
       try {
         throwCaptureAborted(signal);
-        await scoped.send(tabId, "Accessibility.enable", {});
+        const currentAttachmentId = cdp.getAttachmentId?.(tabId);
+        if (!options.accessibilityLease?.hasActive(batch.target, currentAttachmentId)) {
+          await scoped.send(tabId, "Accessibility.enable", {});
+        }
       } catch (error) {
-        forgetPendingAccessibility(axEnabled, error);
+        forgetPendingAccessibility(tabId, axEnabled, error);
         throwCaptureAborted(signal);
         if (isolateChildTimeout(error, batch)) return;
         if (isCaptureAbort(error)) throw error;
@@ -346,7 +550,7 @@ async function collectObservationFacts<T extends FrameOwnedAxNode>(
         throwCaptureAborted(signal);
         task.result = { frame, nodes: result.nodes ?? [] };
       } catch (error) {
-        forgetPendingAccessibility(axEnabled, error);
+        forgetPendingAccessibility(tabId, axEnabled, error);
         // Chrome may still be running this read; queue no cleanup behind it.
         throwCaptureAborted(signal);
         if (isolateChildTimeout(error, batch)) return;
@@ -425,7 +629,7 @@ async function collectObservationFacts<T extends FrameOwnedAxNode>(
         try {
           verified = await verifyDocumentIdentity(cdp, identity, signal);
         } catch (error) {
-          forgetPendingAccessibility(axEnabled, error);
+          forgetPendingAccessibility(tabId, axEnabled, error);
           throwCaptureAborted(signal);
           if (!isolateChildTimeout(error, batch)) throw error;
           for (const id of unavailableFrameIds) invalid.add(id);
@@ -454,7 +658,7 @@ async function collectObservationFacts<T extends FrameOwnedAxNode>(
       const measured = cssViewport(await geometry.layoutMetrics({ tabId }));
       viewport = { width: measured.width, height: measured.height };
     } catch (error) {
-      forgetPendingAccessibility(axEnabled, error);
+      forgetPendingAccessibility(tabId, axEnabled, error);
       throwCaptureAborted(signal);
       if (error instanceof CdpReadTimeoutError) layoutTimedOut = true;
       else if (isCaptureAbort(error)) throw error;
@@ -487,7 +691,7 @@ async function collectObservationFacts<T extends FrameOwnedAxNode>(
               profile,
             );
           } catch (error) {
-            forgetPendingAccessibility(axEnabled, error);
+            forgetPendingAccessibility(tabId, axEnabled, error);
             throwCaptureAborted(signal);
             if (!isolateChildTimeout(error, batch)) throw error;
           }

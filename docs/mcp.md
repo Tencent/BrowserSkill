@@ -72,7 +72,7 @@ See [plan](plan.md) for its rules.
 With `BSK_RECIPES=1` in the server's environment, `bsk_recipe` also appears. It replays a
 saved flow by name and returns its outputs, so a repeated task takes about two turns. See
 [recipes](recipes.md). The tool stays out of `tools/list` otherwise, so clients pay nothing
-for it.
+for it; the CLI's `bsk recipe` needs no switch.
 
 `bsk_inspect` can return a screenshot as MCP image content, as well as bounded
 observations, HTML, console/network entries, and loaded-DOM extraction. Screenshots
@@ -106,5 +106,6 @@ Fixed synchronous isolated-world code accepts no JavaScript or deferred work.
 Returns current title/URLs, refs/values, redactions and truncation. max_nodes
 is 100 by default, at most 1000; max_bytes is 262144 by default, at most 1048576.
 Reads never renew contexts or observations; use explicit expect before input.
-Old peers fail explicitly; evaluate keeps strict guards. See
-[dynamic reading](dynamic-reading.md).
+Old peers fail explicitly. A script is checked against the `expect` facts it states,
+or the whole page when it passes `observation`; `params.unverified=true` is the last resort
+and returns `verified=false`. See [dynamic reading](dynamic-reading.md).

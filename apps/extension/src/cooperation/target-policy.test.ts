@@ -64,7 +64,9 @@ async function fixture(policy: "strict" | "target" = "target") {
   const controller = new CooperationController({
     sessions,
     readFrames,
-    resumeFrames: async () => {},
+    resumeFrames: async () => {
+      frame = { ...frame, editing: false, revision: frame.revision + 1 };
+    },
     changed: () => {},
     now: () => now,
   });
@@ -401,6 +403,100 @@ describe.each(["strict", "target"] as const)("completed action receipts (%s)", (
     expect(await f.run()).toHaveProperty("code");
     expect(f.send).toHaveBeenCalledOnce();
   });
+
+  it("preserves set_file_input_failed when upload cleanup detaches the debugger", async () => {
+    const f = await fixture(policy);
+    f.cdp.detach = vi.fn(async (tabId: number) => {
+      // Production background.ts wires ChromiumCdp.onDocumentChanged to
+      // invalidateTabRefs + cooperation.invalidate on every debugger detach.
+      f.session.refStore.invalidateTab(tabId);
+      f.controller.invalidate(tabId);
+    });
+    const refusal = {
+      code: "cdp_failed" as const,
+      message: "DOM.setFileInputFiles failed: -32000 Not allowed",
+      data: {
+        reason: "set_file_input_failed",
+        phase: "set_files",
+        effect_state: "unknown" as const,
+        recovery:
+          "Inspect the page before retrying; the file input may or may not have been updated.",
+      },
+    };
+
+    const result = await f.run({ ref: "e1" }, "tool.upload", async (runner) => {
+      await runner.send(7, "Page.setInterceptFileChooserDialog", { enabled: true });
+      await runner.send(7, "DOM.setFileInputFiles", {
+        backendNodeId: 4,
+        files: ["/stage/tiny.txt"],
+      });
+      await runner.detach?.(7);
+      return refusal;
+    });
+
+    expect(result).toEqual(refusal);
+    expect(f.cdp.detach).toHaveBeenCalledExactlyOnceWith(7, undefined);
+    expect(f.controller.view(7)).toMatchObject({ mode: "syncing" });
+    expect(await f.run()).toMatchObject({
+      code: "permission_denied",
+      data: {
+        reason: policy === "target" ? "control_context_invalid" : "cooperation_sync_required",
+        effect_state: "none",
+      },
+    });
+    const next = await f.sync();
+    expect(next.context_id).not.toBe(f.first.context_id);
+  });
+
+  it("preserves file_drop_failed with effect_state none when drag_enter is rejected", async () => {
+    const f = await fixture(policy);
+    const refusal = {
+      code: "cdp_failed" as const,
+      message: "Input.dispatchDragEvent failed: -32000 Not allowed",
+      data: {
+        reason: "file_drop_failed",
+        phase: "drag_enter",
+        effect_state: "none" as const,
+        recovery:
+          "Retry the drop when the target is ready, or upload through a file input instead.",
+      },
+    };
+
+    const result = await f.run({ ref: "e1", mode: "drop" }, "tool.upload", async (runner) => {
+      await runner.send(7, "Runtime.callFunctionOn", {
+        objectId: "drop-target",
+        functionDeclaration: "function() { return true; }",
+      });
+      return refusal;
+    });
+
+    expect(result).toEqual(refusal);
+    if (policy === "target") expect(await f.run()).toEqual({});
+  });
+
+  it("preserves an upload refusal when the post-action collector is unavailable", async () => {
+    const f = await fixture(policy);
+    const refusal = {
+      code: "invalid_params" as const,
+      message: "Target did not open a file chooser and is not an <input type=file>",
+      data: {
+        reason: "upload_target_not_file_input",
+        phase: "open_chooser",
+        effect_state: "none" as const,
+        recovery: "Choose the <input type=file> or the control that opens the file chooser.",
+      },
+    };
+
+    const result = await f.run({ ref: "e1" }, "tool.upload", async (runner) => {
+      await runner.send(7, "Page.setInterceptFileChooserDialog", { enabled: true });
+      f.readFrames.mockRejectedValueOnce(new Error("frame is loading"));
+      return refusal;
+    });
+
+    expect(result).toEqual(refusal);
+    expect(f.controller.view(7)).toMatchObject({ mode: "unavailable" });
+    expect(await f.run()).toMatchObject({ code: "permission_denied" });
+  });
 });
 
 describe("negotiated target control", () => {
@@ -514,6 +610,31 @@ describe("negotiated target control", () => {
     expect(await f.run({ context_id: next.context_id })).toEqual({});
   });
 
+  it.each([
+    "held",
+    "editing",
+  ] as const)("reports control_context_invalid and auto-resumes %s on the next sync after an idle gap", async (mode) => {
+    const f = await fixture();
+    if (mode === "held") {
+      await f.controller.control(7, f.controller.view(7)!.revision, "hold");
+    } else {
+      f.change({ human: 1, editing: true, lastInput: 10_000 });
+    }
+    f.advance();
+    expect(await f.run()).toMatchObject({
+      data: { reason: "control_context_invalid", phase: "control", effect_state: "none" },
+    });
+    expect(f.send).not.toHaveBeenCalled();
+    const next = await f.sync();
+    expect(next).toMatchObject({
+      context_id: expect.any(String),
+      state: { mode: "ready" },
+    });
+    expect(next.context_id).not.toBe(f.first.context_id);
+    expect(await f.run({ context_id: next.context_id })).toEqual({});
+    expect(f.send).toHaveBeenCalledOnce();
+  });
+
   it("fences input if the user takes control during target checking", async () => {
     const f = await fixture();
     vi.mocked(checkActionTarget).mockImplementationOnce(async () => {
@@ -559,20 +680,18 @@ describe("negotiated target control", () => {
     expect(await f.run()).toEqual({});
   });
 
-  it("validates again immediately before input and never replays an action", async () => {
+  it("validates once at entry and never replays an action", async () => {
     const f = await fixture();
-    vi.mocked(checkExpectations)
-      .mockResolvedValueOnce(undefined)
-      .mockResolvedValueOnce({
-        code: "permission_denied",
-        message: "Recipient changed during preparation",
-        data: { reason: "precondition_failed", effect_state: "none" },
-      });
+    vi.mocked(checkExpectations).mockResolvedValueOnce({
+      code: "permission_denied",
+      message: "Recipient changed before dispatch",
+      data: { reason: "precondition_failed", effect_state: "none" },
+    });
     expect(await f.run()).toMatchObject({
       data: { reason: "precondition_failed", effect_state: "none" },
     });
     expect(f.send).not.toHaveBeenCalled();
-    expect(checkExpectations).toHaveBeenCalledTimes(2);
+    expect(checkExpectations).toHaveBeenCalledTimes(1);
   });
 
   it("requires explicit immutable observations for scripts and consumes only that observation", async () => {
@@ -717,7 +836,7 @@ describe("negotiated target control", () => {
     "tool.blur",
     "tool.hover",
     "tool.scroll_to",
-  ])("checks conditions at the primary effect of %s", async (method) => {
+  ])("checks conditions at entry before %s", async (method) => {
     const f = await fixture();
     const effects: Record<string, string> = {
       "tool.focus": "DOM.focus",
@@ -725,13 +844,11 @@ describe("negotiated target control", () => {
       "tool.hover": "Input.dispatchMouseEvent",
       "tool.scroll_to": "DOM.scrollIntoViewIfNeeded",
     };
-    vi.mocked(checkExpectations)
-      .mockResolvedValueOnce(undefined)
-      .mockResolvedValueOnce({
-        code: "permission_denied",
-        message: "Changed during preparation",
-        data: { reason: "precondition_failed", effect_state: "none" },
-      });
+    vi.mocked(checkExpectations).mockResolvedValueOnce({
+      code: "permission_denied",
+      message: "Changed before primary effect",
+      data: { reason: "precondition_failed", effect_state: "none" },
+    });
     expect(
       await f.run({ ref: "e1" }, method, (runner) => runner.send(7, effects[method], {})),
     ).toMatchObject({ data: { reason: "precondition_failed", effect_state: "none" } });
@@ -757,25 +874,12 @@ describe("negotiated target control", () => {
     expect(f.send).toHaveBeenCalledTimes(1);
   });
 
-  it("requires reconciliation when a condition fails after a preparation effect", async () => {
+  it("requires reconciliation when human intervention arrives after a preparation effect", async () => {
     const f = await fixture();
-    vi.mocked(checkExpectations)
-      .mockResolvedValueOnce(undefined)
-      .mockResolvedValueOnce(undefined)
-      .mockResolvedValueOnce({
-        code: "permission_denied",
-        message: "Recipient changed after scrolling",
-        data: {
-          reason: "precondition_failed",
-          effect_state: "none",
-          expected: "Alice",
-          actual: "Bob",
-          recovery: "A new control context is not required.",
-        },
-      });
     expect(
       await f.run({}, "tool.click", async (runner) => {
         await runner.send(7, "DOM.scrollIntoViewIfNeeded", { backendNodeId: 4 });
+        f.change({ human: 1, lastInput: 10_000 });
         return runner.send(7, "Input.dispatchMouseEvent", {
           type: "mousePressed",
           button: "left",
@@ -785,18 +889,19 @@ describe("negotiated target control", () => {
       }),
     ).toMatchObject({
       data: {
-        reason: "precondition_failed",
+        reason: "human_intervention",
         effect_state: "unknown",
-        expected: "Alice",
-        actual: "Bob",
+        press_sent: false,
         recovery: expect.stringContaining("synchronize"),
       },
     });
     expect(f.send).toHaveBeenCalledExactlyOnceWith(7, "DOM.scrollIntoViewIfNeeded", {
       backendNodeId: 4,
     });
-    expect(await f.run()).toMatchObject({ data: { reason: "control_context_invalid" } });
+    expect(await f.run()).toMatchObject({ data: { reason: "human_intervention" } });
     expect(f.send).toHaveBeenCalledTimes(1);
+    f.advance();
+    expect(await f.run()).toMatchObject({ data: { reason: "control_context_invalid" } });
     const next = await f.sync();
     expect(next.context_id).not.toBe(f.first.context_id);
     expect(await f.run({ context_id: next.context_id })).toEqual({});
@@ -816,19 +921,15 @@ describe("negotiated target control", () => {
     expect(f.readFrames).toHaveBeenCalledTimes(2);
   });
 
-  it("keeps a failed precondition latched through the real scroll fallback", async () => {
+  it("blocks entry preconditions before running any scroll fallback", async () => {
     const f = await fixture();
     f.send.mockResolvedValue({ object: { objectId: "button" } });
-    vi.mocked(checkExpectations)
-      .mockResolvedValueOnce(undefined)
-      .mockResolvedValueOnce({
-        code: "permission_denied",
-        message: "Changed price",
-        data: { reason: "precondition_failed", phase: "precondition", effect_state: "none" },
-      });
+    vi.mocked(checkExpectations).mockResolvedValueOnce({
+      code: "permission_denied",
+      message: "Changed price",
+      data: { reason: "precondition_failed", phase: "precondition", effect_state: "none" },
+    });
     const result = await f.run({}, "tool.click", async (runner) => {
-      // The fallback catches its own error too. Even a handler that continues
-      // after it must not dispatch input after any failed business check.
       await scrollNodeIntoView(runner, 7, 4);
       return runner.send(7, "Input.dispatchMouseEvent", {
         type: "mousePressed",
@@ -838,8 +939,8 @@ describe("negotiated target control", () => {
     expect(result).toMatchObject({
       data: { reason: "precondition_failed", phase: "precondition", effect_state: "none" },
     });
-    expect(checkExpectations).toHaveBeenCalledTimes(2);
-    expect(f.send).toHaveBeenCalledExactlyOnceWith(7, "DOM.resolveNode", { backendNodeId: 4 });
+    expect(checkExpectations).toHaveBeenCalledTimes(1);
+    expect(f.send).not.toHaveBeenCalled();
   });
 
   it("reports invalidated control instead of the previous readiness failure", async () => {
@@ -919,7 +1020,7 @@ describe("negotiated target control", () => {
         data: { reason: "target_disabled", effect_state: "none" },
       });
     expect(await f.run({ timeout_ms: 1_000 })).toEqual({});
-    expect(checkActionTarget).toHaveBeenCalledTimes(5);
+    expect(checkActionTarget).toHaveBeenCalledTimes(4);
     expect(f.readFrames).toHaveBeenCalledTimes(2);
     expect(handleSnapshot).not.toHaveBeenCalled();
     expect(f.send).toHaveBeenCalledTimes(1);
@@ -1126,4 +1227,66 @@ it("passive DOM reads do not revive contexts retained only as strict baselines",
     scope: "current_dom",
   });
   expect(invoke).toHaveBeenCalledOnce();
+});
+
+describe("targeted optimistic fast-path", () => {
+  it("skips cross-frame readFrames broadcasts and target resampling on internal CDP steps", async () => {
+    const f = await fixture("target");
+    f.readFrames.mockClear();
+    vi.mocked(checkActionTarget).mockClear();
+    vi.mocked(checkExpectations).mockClear();
+
+    const result = await f.run({ ref: "e1" }, "tool.fill", async (runner) => {
+      await runner.send(7, "DOM.resolveNode", { backendNodeId: 4 });
+      await runner.send(7, "Runtime.callFunctionOn", {
+        objectId: "obj-1",
+        functionDeclaration: "function() { this.focus(); return true; }",
+      });
+      await runner.send(7, "DOM.focus", { backendNodeId: 4 });
+      await runner.beginDomMutation?.();
+      await runner.send(7, "Input.insertText", { text: "hello" });
+      await runner.send(7, "Runtime.callFunctionOn", {
+        objectId: "obj-1",
+        functionDeclaration: "function() { return this.value; }",
+      });
+      return { tab_id: 7, value_length: 5 };
+    });
+
+    expect(result).toEqual({ tab_id: 7, value_length: 5 });
+    // Entry preflight runs checkActionTarget & checkExpectations once.
+    expect(checkActionTarget).toHaveBeenCalledTimes(1);
+    expect(checkExpectations).toHaveBeenCalledTimes(1);
+    // readFrames is called at entry refresh (undefined), once to arm beforeinput (not twice),
+    // plus non-blocking clear cleanup for beforeinput.
+    const armCalls = f.readFrames.mock.calls.filter(
+      ([, input]) => input !== undefined && input.type !== "clear",
+    );
+    const pollCalls = f.readFrames.mock.calls.filter(([, input]) => input === undefined);
+    expect(pollCalls).toHaveLength(1);
+    expect(armCalls).toHaveLength(1);
+    expect(armCalls[0]?.[1]).toMatchObject({ type: "beforeinput", text: "hello" });
+  });
+
+  it("immediately aborts internal targeted steps when push-based receive() reports human input", async () => {
+    const f = await fixture("target");
+    const result = await f.run({ ref: "e1" }, "tool.fill", async (runner) => {
+      await runner.send(7, "DOM.focus", { backendNodeId: 4 });
+      // Human intervenes via content-script push while internal scripts are running.
+      f.change({ human: 1, editing: true, lastInput: 10_000 }, true);
+      await runner.send(7, "Runtime.callFunctionOn", {
+        objectId: "obj-1",
+        functionDeclaration: "function() { this.value = ''; }",
+      });
+      await runner.send(7, "Input.insertText", { text: "never-sent" });
+      return { tab_id: 7, value_length: 10 };
+    });
+
+    expect(result).toMatchObject({
+      code: "permission_denied",
+      data: { reason: "human_intervention", effect_state: "unknown" },
+    });
+    expect(f.send).toHaveBeenCalledExactlyOnceWith(7, "DOM.focus", { backendNodeId: 4 });
+    f.advance();
+    expect(await f.run()).toMatchObject({ data: { reason: "control_context_invalid" } });
+  });
 });

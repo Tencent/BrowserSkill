@@ -12,6 +12,7 @@ import {
   type ResolvedTargetTab,
   sendToCdpTarget,
 } from "@/tools/shared";
+import { buildInPageRowAnchorSnippet } from "@/tools/vom/row-anchor-spec";
 import type { RpcError, RpcErrorReason } from "@/transport/types";
 
 export interface ActionExpectation {
@@ -83,20 +84,24 @@ export function parseExpectations(value: unknown): ActionExpectation[] | RpcErro
 }
 
 /** Fixed read-only probes; page text and supplied expected values are never code. */
-const SAMPLE_TARGET = `function(field, attribute) {
+const SAMPLE_TARGET = `function(field, attribute, needRowAnchor) {
   if (!this.isConnected) return { connected: false };
   if (field === 'exists') return { connected: true, value: true };
   if (field === 'text') return { connected: true, value: this.textContent };
-  const sensitive = this.matches('input[type="password"],input[type="file"],input[type="hidden"],' + ${JSON.stringify(`[${RECORD_PASSWORD_ATTRIBUTE}],${SENSITIVE_AUTOCOMPLETE_SELECTOR}`)});
+  const sensitiveSelector = 'input[type="password"],input[type="file"],input[type="hidden"],' + ${JSON.stringify(`[${RECORD_PASSWORD_ATTRIBUTE}],${SENSITIVE_AUTOCOMPLETE_SELECTOR}`)};
+  const sensitive = this.matches(sensitiveSelector);
   if (field === 'attribute') return { connected: true, value: this.getAttribute(attribute), redacted: sensitive && attribute.toLowerCase() === 'value' };
   if (field) return { connected: true, value: this[field] ?? null, redacted: sensitive && field === 'value' };
   const style = getComputedStyle(this);
+  let rowAnchor = null;
+  if (needRowAnchor) ${buildInPageRowAnchorSnippet()}
   return {
     connected: true,
     visible: (this.getClientRects().length > 0 || style.display === 'contents') && style.visibility !== 'hidden' && style.visibility !== 'collapse',
     disabled: this.matches(':disabled') || this.getAttribute('aria-disabled') === 'true' || !!this.closest('[inert]'),
     readOnly: this.readOnly === true,
-    focused: (${FOCUS_CHECK}).call(this)
+    focused: (${FOCUS_CHECK}).call(this),
+    ...(needRowAnchor ? { rowAnchor } : {})
   };
 }`;
 
@@ -108,6 +113,7 @@ interface Sample {
   readOnly?: boolean;
   focused?: boolean;
   redacted?: boolean;
+  rowAnchor?: string | null;
 }
 
 async function sample(
@@ -129,7 +135,11 @@ async function sample(
       {
         objectId: resolved.object.objectId,
         functionDeclaration: SAMPLE_TARGET,
-        arguments: [{ value: check?.field ?? null }, { value: check?.attribute ?? null }],
+        arguments: [
+          { value: check?.field ?? null },
+          { value: check?.attribute ?? null },
+          { value: !check && Boolean(target.usedRef && target.rowAnchor) },
+        ],
         returnByValue: true,
       },
     );
@@ -165,6 +175,26 @@ export async function checkActionTarget(
 ): Promise<RpcError | undefined> {
   const facts = await sample(cdp, target);
   if (isRpcError(facts)) return facts;
+  if (
+    facts.connected &&
+    target.usedRef &&
+    target.rowAnchor &&
+    facts.rowAnchor !== target.rowAnchor
+  ) {
+    return actionError(
+      "virtual_row_recycled",
+      `Target @${target.usedRef} belonged to row "${target.rowAnchor}", but its DOM slot now renders "${facts.rowAnchor ?? "(empty)"}"`,
+      "target",
+      "Run cooperate sync (or observe) to refresh refs for the updated rows before retrying.",
+      {
+        target: `@${target.usedRef}`,
+        expected_row: target.rowAnchor,
+        actual_row: facts.rowAnchor ?? null,
+        backend_node_id: target.backendNodeId,
+        ...(target.frameId ? { frame_id: target.frameId } : {}),
+      },
+    );
+  }
   const reason = !facts.connected
     ? "target_detached"
     : !facts.visible && !["tool.upload", "tool.blur"].includes(method)

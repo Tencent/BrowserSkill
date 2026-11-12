@@ -61,6 +61,8 @@ https://github.com/user-attachments/assets/959cb520-80ba-4b9e-b6d8-d94523b03693
   </tr>
 </table>
 
+Qoder 和 Qoder CN 作为 skill-only 目标支持：`bsk install-skill --harness qoder` 和 `--harness qoder-cn`。
+
 这些 Agent，以及其他能调用 Shell 的 Agent，都可以通过同一套 **`bsk` CLI** 使用。**[DeepSeek Harness](#deepseek-harness-插件)** 还提供专用插件，直接使用浏览器工具并查看任务预览。Agent 和模型由你选择，BrowserSkill 负责连接浏览器。
 
 ## 能做什么
@@ -336,6 +338,8 @@ dsh plugin --profile web update @wxg-prc-cpg/browser-skill-dsh-plugin --latest
 | 录制并保存任务视频 | [任务视频录制](docs/video-recording.md) |
 | 导出表格或列表 | [结构化提取](docs/structured-extraction.md) |
 | 等待元素条件 | [元素等待](docs/wait-for-element.md) |
+| 一次执行多个已决定的动作 | [Plan 命令](docs/plan.md) |
+| 保存并回放已审阅的流程 | [Recipe 命令](docs/recipes.md) |
 | 使用指定账号或 Profile | [浏览器 Profile](docs/browser-profiles.md) |
 | 连接服务器上的 Agent | [远程浏览器连接](docs/remote-extension-connection.md) |
 | 在沙盒中使用 | [沙盒环境配置](docs/sandboxed-agents.md) |
@@ -435,6 +439,7 @@ CLI 产物位于 `target/release/`；将 `apps/extension/dist/chrome-mv3/` 作�
 ### 动态页面读取（未发布，协议 1.9）
 
 持续动画中的 DOM 字段使用 `bsk read`，表格/列表使用 `extract`；MCP、DSH 对应
-`bsk_inspect(action=read)`。任意 evaluate 仍要求严格观察；读取结果不会更新操作凭证，
+`bsk_inspect(action=read)`。脚本只声明 `--expect` 事实时只校验这些事实，传入 `--observation` 时仍比对整页，
+`evaluate --unverified` 是最后手段；读取结果不会更新操作凭证，
 业务判断须用 expect 保护。查询格式、安全边界、兼容性和可复现浏览器测试见
 [动态页面读取说明](docs/dynamic-reading.md)。

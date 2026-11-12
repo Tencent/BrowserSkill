@@ -190,7 +190,27 @@ describe("createBskRunner", () => {
     expect(result).toMatchObject({ code: null, aborted: true });
   });
 
-  it("drains a gracefully cancelled step receipt after exit", async () => {
+  it.each([
+    {
+      args: ["step"],
+      payload: { ...successfulStep, ok: false, phase: "cancelled", cancelled: true },
+      options: { allowStepResult: true },
+    },
+    {
+      args: ["plan"],
+      payload: { ok: false, completed: 1, total: 2, elapsed_ms: 10, cancelled: true },
+      options: { allowPlanResult: true },
+    },
+    {
+      args: ["recipe", "run", "sales"],
+      payload: { status: "uncertain", reason: "effect_unknown", cancelled: true },
+      options: { allowRecipeResult: true },
+    },
+  ])("drains a gracefully cancelled receipt after exit: $args", async ({
+    args,
+    payload,
+    options,
+  }) => {
     vi.useFakeTimers();
     const child = new FakeChild();
     child.kill = (signal: string) => {
@@ -199,9 +219,8 @@ describe("createBskRunner", () => {
     };
     const runner = createBskRunner("bsk", fakeSpawn([child]));
     const controller = new AbortController();
-    const promise = runner.run(["step"], { signal: controller.signal });
+    const promise = runner.run(args, { signal: controller.signal });
     controller.abort();
-    const payload = { ...successfulStep, ok: false, phase: "cancelled", cancelled: true };
     const stdout = JSON.stringify(payload);
     const middle = Math.floor(stdout.length / 2);
     child.stdout.emit("data", stdout.slice(0, middle));
@@ -212,7 +231,7 @@ describe("createBskRunner", () => {
     child.emit("close", 2);
     const result = await promise;
     expect(result).toMatchObject({ code: 2, aborted: true, stdout });
-    expect(parseBskJson(result, "step", { allowStepResult: true })).toEqual(payload);
+    expect(parseBskJson(result, args.join(" "), options)).toEqual(payload);
     expect(vi.getTimerCount()).toBe(0);
   });
 
@@ -770,6 +789,50 @@ describe("parseBskJson", () => {
     expect(() =>
       parseBskJson({ ...base, code: 4, stdout: JSON.stringify(payload) }, "navigate"),
     ).toThrow(/failed/);
+  });
+
+  describe("plan and recipe receipts", () => {
+    const plan = {
+      ok: false,
+      completed: 1,
+      total: 3,
+      elapsed_ms: 12,
+      stopped: { index: 1, action: "click", effect_state: "unknown" },
+      not_run: [2],
+    };
+    it("preserves a stopped plan and rejects contradictory progress", () => {
+      const parse = (payload: unknown, code: number) =>
+        parseBskJson({ ...base, code, stdout: JSON.stringify(payload) }, "plan", {
+          allowPlanResult: true,
+        });
+      expect(parse(plan, 2)).toEqual(plan);
+      for (const payload of [
+        { ...plan, ok: true },
+        { ...plan, not_run: [] },
+        { ...plan, not_run: [1] },
+        { ...plan, completed: 3 },
+      ])
+        expect(() => parse(payload, 0)).toThrow("valid plan result");
+    });
+
+    it("preserves uncertain recipe effects during acknowledged cancellation", () => {
+      const payload = { status: "uncertain", reason: "effect_unknown", cancelled: true };
+      const result = { ...base, code: 2, stdout: JSON.stringify(payload), aborted: true };
+      expect(parseBskJson(result, "recipe run", { allowRecipeResult: true })).toEqual(payload);
+      expect(() =>
+        parseBskJson(
+          { ...result, stdout: JSON.stringify({ ...payload, cancelled: undefined }) },
+          "recipe run",
+          { allowRecipeResult: true },
+        ),
+      ).toThrow("aborted");
+    });
+
+    it("keeps completed outputs if cancellation arrived after the work", () => {
+      const payload = { status: "completed", outputs: { total: "42" }, cancelled: true };
+      const result = { ...base, code: 2, stdout: JSON.stringify(payload), aborted: true };
+      expect(parseBskJson(result, "recipe run", { allowRecipeResult: true })).toEqual(payload);
+    });
   });
 
   describe("step receipts", () => {

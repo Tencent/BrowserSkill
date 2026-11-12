@@ -20,6 +20,8 @@ fn command(home: &Path, args: &[&str]) -> Command {
         .env("HOME", home)
         .env_remove("BSK_AUTO_START")
         .env("BSK_AUTO_UPDATE", "off")
+        // Disabling installation still allows a background manifest fetch.
+        .env("BSK_UPDATE_MANIFEST_URL", "http://127.0.0.1:1/disabled")
         .env("BSK_BROWSER_WAIT_MS", "0")
         .env("BSK_DOCTOR_BROWSER_WAIT_MS", "0")
         .env("RUST_LOG", "warn");
@@ -77,12 +79,13 @@ fn status_and_pair_auto_spawn_from_an_empty_home() {
 
     // Pairing must print a usable link, not leave the user with an offline
     // daemon. Run sequentially with the status case to share the default port.
+    let stop = command(&home, &["daemon", "stop"]).output().unwrap();
     assert!(
-        command(&home, &["daemon", "stop"])
-            .output()
-            .unwrap()
-            .status
-            .success()
+        stop.status.success(),
+        "daemon stop failed: {:?}\nstdout: {}\nstderr: {}",
+        stop.status,
+        String::from_utf8_lossy(&stop.stdout),
+        String::from_utf8_lossy(&stop.stderr)
     );
     let pair_home = tmp.path().join("pair");
     let _pair_cleanup = StopOnDrop(pair_home.clone());
@@ -151,7 +154,14 @@ fn ensure_daemon_idempotent_when_already_running() {
     assert_eq!(pid_before, pid_after, "daemon pid should not change");
 
     // Clean up.
-    let _ = command(&home, &["daemon", "stop"]).output();
+    let stop = command(&home, &["daemon", "stop"]).output().unwrap();
+    assert!(
+        stop.status.success(),
+        "daemon stop failed: {:?}\nstdout: {}\nstderr: {}",
+        stop.status,
+        String::from_utf8_lossy(&stop.stdout),
+        String::from_utf8_lossy(&stop.stderr)
+    );
     assert!(wait_for_pid_exit(pid_before, Duration::from_secs(5)));
 }
 
@@ -280,7 +290,13 @@ fn disabled_auto_start_allows_explicit_start_and_reuses_daemon_across_commands()
         .env("BSK_AUTO_START", "0")
         .output()
         .unwrap();
-    assert!(stop.status.success());
+    assert!(
+        stop.status.success(),
+        "daemon stop failed: {:?}\nstdout: {}\nstderr: {}",
+        stop.status,
+        String::from_utf8_lossy(&stop.stdout),
+        String::from_utf8_lossy(&stop.stderr)
+    );
     assert!(!home.join("daemon.json").exists());
     let status = command(&home, &["--json", "status"])
         .env("BSK_AUTO_START", "0")

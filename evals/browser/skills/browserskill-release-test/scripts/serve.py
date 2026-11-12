@@ -101,6 +101,10 @@ def make_server(root, port):
                         "Content-Disposition": "attachment; filename*=UTF-8''%E6%B5%8B%E8%AF%95%20%E6%8A%A5%E5%91%8A.csv"
                     },
                 )
+            if p in ("/recipe/report", "/recipe/form", "/recipe/login"):
+                lab = (root / "plan-recipe-lab.html").resolve()
+                if lab.is_file():
+                    return self.send(200, lab.read_bytes(), "text/html; charset=utf-8")
             name = "workbench.html" if p == "/" else p.lstrip("/")
             if "." not in name:
                 name += ".html"

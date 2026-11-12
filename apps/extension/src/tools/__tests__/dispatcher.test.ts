@@ -12,7 +12,11 @@ import type {
   RequestFrame,
 } from "@/transport/types";
 import { ToolDispatcher } from "../dispatcher";
-import { resetBrowserObservationForTests, setBrowserObservationAttachForTests } from "../record";
+import {
+  hasActiveRecording,
+  resetBrowserObservationForTests,
+  setBrowserObservationAttachForTests,
+} from "../record";
 
 type TestDispatcherCdp = NonNullable<ConstructorParameters<typeof ToolDispatcher>[0]["cdp"]>;
 
@@ -162,6 +166,51 @@ describe("ToolDispatcher", () => {
       error: {
         code: "dialog_pending",
         data: { dispatched: false, dialog: { id: "async-dialog" } },
+      },
+    });
+    expect(cdp.send).not.toHaveBeenCalled();
+    dispatcher.stop();
+  });
+
+  it("marks a request refused behind a settling operation as retryable", async () => {
+    const { transport, sent, deliver } = fakeTransport();
+    const sessions = new SessionManager({
+      agentWindow: {
+        create: vi.fn(async () => ({ windowId: 42, initialTabIds: [7] })),
+        remove: vi.fn(),
+        ensureActiveTab: vi.fn(),
+      },
+    });
+    await sessions.start("owner");
+    const cdp = { send: vi.fn(), pendingDialogs: () => [] } as unknown as TestDispatcherCdp;
+    // The first operation (for example a cancelled screenshot) has not settled.
+    const debug = { before: vi.fn(() => new Promise(() => {})), after: vi.fn(), dispose: vi.fn() };
+    const dispatcher = new ToolDispatcher({ transport, sessions, cdp, debug: debug as never });
+    dispatcher.start();
+    deliver({
+      id: "capture",
+      method: "tool.screenshot",
+      params: { session_id: "owner", _operation_id: "op-1" },
+    });
+    await vi.waitFor(() => expect(debug.before).toHaveBeenCalled());
+    deliver({
+      id: "sync",
+      method: "tool.cooperate",
+      params: { session_id: "owner", action: "sync", _operation_id: "op-2" },
+    });
+    await vi.waitFor(() => expect(sent).toHaveLength(1));
+    expect(sent[0]).toMatchObject({
+      id: "sync",
+      error: {
+        code: "cdp_failed",
+        message: "Previous operation is still settling; this action was not dispatched",
+        data: {
+          dispatched: false,
+          reason: "operation_settling",
+          retryable: true,
+          retry_after_ms: 1000,
+          settling_method: "tool.screenshot",
+        },
       },
     });
     expect(cdp.send).not.toHaveBeenCalled();
@@ -375,7 +424,7 @@ describe("ToolDispatcher", () => {
     deliver(makeRequest("tool.session_start", { session_id: "private", incognito }));
     await flushMicrotasks();
     expect(sent[0]).toMatchObject({
-      error: { code: "invalid_params", message: "incognito must be a boolean" },
+      error: { code: "invalid_params", message: "tool.session_start: /incognito must be boolean" },
     });
     expect(create).not.toHaveBeenCalled();
     dispatcher.stop();
@@ -432,7 +481,7 @@ describe("ToolDispatcher", () => {
     dispatcher.start();
 
     deliver(makeRequest("tool.session_stop", { session_id: "aa11" }));
-    await flushMicrotasks();
+    await vi.waitFor(() => expect(sent).toHaveLength(1));
     expect(sessions.has("aa11")).toBe(false);
     expect(release).toHaveBeenCalledExactlyOnceWith("aa11");
     expect(cooperation.hasSession("aa11")).toBe(false);
@@ -460,7 +509,12 @@ describe("ToolDispatcher", () => {
     dispatcher.start();
     try {
       deliver(
-        makeRequest("tool.video", { action: "status", recording_id: "video", capability: "test" }),
+        makeRequest("tool.video", {
+          action: "status",
+          browser: "chrome",
+          recording_id: "video",
+          capability: "test",
+        }),
       );
       await vi.waitFor(() => expect(sent).toHaveLength(1));
       expect(sent[0]).toEqual({ id: "r-1", error });
@@ -735,7 +789,9 @@ describe("ToolDispatcher", () => {
     // ...and the window is released rather than closed, so the user's tab survives.
     expect(closeWindow).not.toHaveBeenCalled();
     expect(sessions.has("aa11")).toBe(false);
-    expect(sent[0]).toEqual({ id: "r-1", result: { window_released: true } });
+    await vi.waitFor(() =>
+      expect(sent[0]).toEqual({ id: "r-1", result: { window_released: true } }),
+    );
   });
 
   it("routes tool.console through the CDP console buffer", async () => {
@@ -1934,7 +1990,7 @@ it.each([
   });
   dispatcher.start();
   try {
-    f.deliver({ id: "open", method, params: { session_id: "popup", tab_id: 10 } });
+    f.deliver({ id: "open", method, params: { session_id: "popup", tab_id: 10, key: "Enter" } });
     await vi.waitFor(() => expect(f.sent.some((r) => "id" in r && r.id === "open")).toBe(true));
     expect(task.observedTabs?.has(20)).toBe(true);
     expect(task.agentCreatedTabs.has(20)).toBe(false);
@@ -1994,7 +2050,11 @@ it("passes dispatcher cancellation to popup tracking before the tool settles", a
     });
   dispatcher.start();
   try {
-    f.deliver({ id: "open", method: "tool.press", params: { session_id: "popup", tab_id: 10 } });
+    f.deliver({
+      id: "open",
+      method: "tool.press",
+      params: { session_id: "popup", tab_id: 10, key: "Enter" },
+    });
     await vi.waitFor(() => expect(invoke).toHaveBeenCalled());
     f.deliver({ id: "cancel", method: "cancel", params: { rpc_id: "open" } });
     await vi.waitFor(() =>
@@ -2391,6 +2451,184 @@ describe("implicit auto-borrow when confirmTabBorrow is false", () => {
       expect(ctx.borrowedTabs.has(8)).toBe(false);
     } finally {
       dispatcher.stop();
+    }
+  });
+
+  it("automatically binds session ownership for CDP commands so session_stop detaches the debugger", async () => {
+    const tab = {
+      id: 7,
+      windowId: 100,
+      active: true,
+      url: "https://example.test",
+    } as chrome.tabs.Tab;
+    let windowSize = { width: 800, height: 600 };
+    vi.stubGlobal("chrome", {
+      tabs: {
+        get: vi.fn(async () => tab),
+        query: vi.fn(async () => [tab]),
+        remove: vi.fn(async () => {}),
+      },
+      windows: {
+        get: vi.fn(async () => ({ id: 100, ...windowSize })),
+        update: vi.fn(async (_id: number, next: { width: number; height: number }) => {
+          windowSize = next;
+          return { id: 100, ...windowSize };
+        }),
+      },
+    });
+    const api: CdpDebuggerApi = {
+      attach: vi.fn(async () => {}),
+      detach: vi.fn(async () => {}),
+      sendCommand: vi.fn(async (_target, method) => {
+        if (method === "Page.getLayoutMetrics") {
+          return {
+            cssLayoutViewport: { clientWidth: windowSize.width, clientHeight: windowSize.height },
+          };
+        }
+        return {};
+      }),
+      onEvent: {
+        addListener: vi.fn(),
+        removeListener: vi.fn(),
+      } as unknown as CdpDebuggerApi["onEvent"],
+      onDetach: {
+        addListener: vi.fn(),
+        removeListener: vi.fn(),
+      } as unknown as CdpDebuggerApi["onDetach"],
+    };
+    const cdp = new ChromiumCdp(api);
+    const { transport, sent, deliver } = fakeTransport();
+    const sessions = new SessionManager({
+      agentWindow: {
+        create: vi.fn(async () => ({ windowId: 100, initialTabIds: [7] })),
+        remove: vi.fn(async () => {}),
+        ensureActiveTab: vi.fn(async () => 7),
+      },
+    });
+    await sessions.start("aa11");
+    const dispatcher = new ToolDispatcher({ transport, sessions, cdp });
+    dispatcher.start();
+    try {
+      // tool.window_resize is not in pageTools for prepareBackgroundExecution and does not
+      // call trackSessionTab directly; dispatcher's session-scoped CDP runner must track it.
+      deliver({
+        id: "resize-1",
+        method: "tool.window_resize",
+        params: { session_id: "aa11", width: 1024, height: 768 },
+      });
+      await vi.waitFor(() => expect(sent).toHaveLength(1));
+      expect(sent[0]).toEqual({
+        id: "resize-1",
+        result: { window_id: 100, width: 1024, height: 768 },
+      });
+      expect(cdp.isAttached(7)).toBe(true);
+
+      deliver({
+        id: "stop-1",
+        method: "tool.session_stop",
+        params: { session_id: "aa11" },
+      });
+      await vi.waitFor(() => expect(sent).toHaveLength(2));
+      expect(cdp.isAttached(7)).toBe(false);
+      expect(api.detach).toHaveBeenCalledWith({ tabId: 7 });
+    } finally {
+      dispatcher.stop();
+      cdp.dispose();
+    }
+  });
+
+  it("clears active action recordings on tool.tab_return for local sessions too", async () => {
+    const borrowedTab = {
+      id: 8,
+      windowId: 100,
+      index: 0,
+      active: true,
+      pinned: false,
+      status: "complete",
+      url: "https://example.com/borrowed",
+    } as chrome.tabs.Tab;
+    vi.stubGlobal("chrome", {
+      tabs: {
+        get: vi.fn(async () => borrowedTab),
+        query: vi.fn(async () => [borrowedTab]),
+        move: vi.fn(async (_tabId: number, props: chrome.tabs.MoveProperties) => {
+          if (props.windowId !== undefined)
+            (borrowedTab as { windowId?: number }).windowId = props.windowId;
+          if (props.index !== undefined)
+            (borrowedTab as { index?: number }).index = props.index === -1 ? 0 : props.index;
+          return borrowedTab;
+        }),
+        sendMessage: vi.fn(async () => ({ ok: true })),
+      },
+      windows: {
+        get: vi.fn(async (windowId: number) => ({ id: windowId, incognito: false })),
+      },
+    });
+    const { transport, sent, deliver } = fakeTransport();
+    const sessions = new SessionManager({
+      agentWindow: {
+        create: vi.fn(async () => ({ windowId: 100, initialTabIds: [8] })),
+        remove: vi.fn(async () => {}),
+        ensureActiveTab: vi.fn(async () => 8),
+      },
+    });
+    const ctx = await sessions.start("aa11");
+    ctx.borrowedTabs.set(8, { tabId: 8, originalWindowId: 200, originalIndex: 0 });
+    expect(ctx.remote).toBeFalsy();
+    const frameCoordinator = {
+      begin: vi.fn(),
+      armTab: vi.fn(async () => true),
+      sourceFor: vi.fn(() => null),
+      stop: vi.fn(async () => true),
+      cancel: vi.fn(),
+    };
+    setBrowserObservationAttachForTests(
+      () => () => {},
+      () => () => {},
+    );
+    const cdp = {
+      send: vi.fn(async <T>() => ({}) as T),
+      detachSession: vi.fn(async () => {}),
+      releaseSessionTab: vi.fn(async () => {}),
+    };
+    const dispatcher = new ToolDispatcher({
+      transport,
+      sessions,
+      cdp: cdp as unknown as TestDispatcherCdp,
+      recording: {
+        tabsApi: {
+          get: vi.fn(async () => borrowedTab),
+          query: vi.fn(async () => [borrowedTab]),
+        },
+        frameCoordinator,
+        sendToTab: vi.fn(async () => ({ ok: true })),
+      },
+    });
+    dispatcher.start();
+    try {
+      deliver({
+        id: "rec-local",
+        method: "tool.record_start",
+        params: { session_id: "aa11", tab_id: 8 },
+      });
+      await vi.waitFor(() => expect(sent).toHaveLength(1));
+      expect(sent[0]).toMatchObject({ id: "rec-local", result: { tab_id: 8, recording: true } });
+      expect(hasActiveRecording("aa11")).toBe(true);
+
+      deliver({
+        id: "return-local",
+        method: "tool.tab_return",
+        params: { session_id: "aa11", tab_id: 8 },
+      });
+      await vi.waitFor(() => expect(sent).toHaveLength(2));
+      expect(sent[1]).toMatchObject({
+        id: "return-local",
+        result: { tab_id: 8, returned_to_window_id: 200 },
+      });
+      expect(hasActiveRecording("aa11")).toBe(false);
+    } finally {
+      dispatcher.stop();
+      resetBrowserObservationForTests();
     }
   });
 });

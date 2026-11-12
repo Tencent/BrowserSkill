@@ -52,7 +52,7 @@ import {
   requestBorrowConfirmation,
 } from "@/tools/borrow-confirmation";
 import { ToolDispatcher } from "@/tools/dispatcher";
-import { hasActiveHelp } from "@/tools/human-loop";
+import { clearHelpForSession, hasActiveHelp } from "@/tools/human-loop";
 import {
   attachRecordFinishListener,
   attachRecordQueryListener,
@@ -70,7 +70,7 @@ import { type RemoteEndpoint, remoteSocket } from "@/transport/remote-endpoint";
 import type { Transport } from "@/transport/transport";
 import { WSTransport } from "@/transport/ws-transport";
 import { attachVideoBridge } from "@/video/bridge";
-import { BrowserVideoHost } from "@/video/host";
+import { browserVideoHost } from "@/video/host";
 import { VideoManager } from "@/video/manager";
 import { VIDEO_OVERLAY } from "@/video/overlay";
 
@@ -123,7 +123,10 @@ export default defineBackground(() => {
     onSessionReleased: (ctx) => {
       dispatcher.cancelSession(ctx.sessionId);
       cooperation.release(ctx.sessionId);
+      debug.releaseSession(ctx.sessionId);
+      void video.stopSession(ctx.sessionId).catch(() => {});
       clearRecordingForSession(ctx.sessionId);
+      clearHelpForSession(ctx.sessionId);
     },
     onSessionsChanged: onOverlaySessionStateChanged,
   });
@@ -170,7 +173,7 @@ export default defineBackground(() => {
   });
   const debug = new DebugManager(sessions, cdp, chrome.tabs, Date.now, new LocalDebugArchive());
   attachDebugBridge(sessions, debug);
-  const videoHost = new BrowserVideoHost();
+  const videoHost = browserVideoHost;
   let upgradeNotice: ReturnType<typeof attachDaemonUpgradeNotice> | undefined;
   const video = new VideoManager({
     sessions,
@@ -368,6 +371,9 @@ export default defineBackground(() => {
     for (const sessionId of minimizedControlSessions) {
       if (!liveSessionIds.has(sessionId)) minimizedControlSessions.delete(sessionId);
     }
+    void cdp.syncSessions?.(liveSessionIds)?.catch((error) => {
+      console.debug("[bsk] session CDP sync failed", error);
+    });
     pushAllAgentOverlayStates();
     for (const refresh of popupSnapshotRefreshers) refresh();
   }
@@ -416,6 +422,7 @@ export default defineBackground(() => {
     void video.stopTab(tabId, "tab_closed").catch(() => {});
     debug.stopTab(tabId, "tab_closed");
     sessions.forgetClosedTab(tabId, { isWindowClosing: removeInfo.isWindowClosing });
+    cdp.forgetClosedTab?.(tabId);
     debug.sync();
   });
   // Re-sync the storage.session flag on SW startup so a previous SW's

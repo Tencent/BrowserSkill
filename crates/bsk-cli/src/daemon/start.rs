@@ -611,7 +611,8 @@ fn serve(
             ws_port,
             env!("CARGO_PKG_VERSION"),
         )
-        .with_host_managed(!cfg.detached);
+        .with_host_managed(!cfg.detached)
+        .with_protocol_version(crate::daemon::state::PROTOCOL_VERSION);
         daemon_info::write(&info).context("write daemon.json")?;
         info!(
             pid = info.pid,
@@ -778,7 +779,9 @@ fn serve(
         let _ = browser_liveness_task.await;
         update_check_task.abort();
         let _ = update_check_task.await;
-        ws_handle.shutdown.notify_waiters();
+        // There is one accept loop. Retain a permit if it is between accepts
+        // or has not polled yet; notify_waiters would lose that shutdown.
+        ws_handle.shutdown.notify_one();
         let _ = ws_handle.task.await;
 
         let _ = daemon_info::remove();
@@ -911,6 +914,10 @@ pub(crate) fn spawn_session_idle_reaper(state: Arc<DaemonState>) -> tokio::task:
                         state
                             .sessions
                             .remember_end(&session_id, crate::rpc_reason::SESSION_IDLE_TIMEOUT);
+                        state
+                            .scopes
+                            .on_session_ended(&session_id, crate::rpc_reason::SESSION_IDLE_TIMEOUT);
+                        state.intent_wal.on_session_ended(&session_id);
                         info!(session = %session_id, "idle session stopped");
                     }
                     Err(StopSessionError::SessionBusy | StopSessionError::Stopping) => {
@@ -925,6 +932,10 @@ pub(crate) fn spawn_session_idle_reaper(state: Arc<DaemonState>) -> tokio::task:
                             None,
                         );
                         state.transfers.release_session(&session_id.0);
+                        state
+                            .scopes
+                            .on_session_ended(&session_id, crate::rpc_reason::SESSION_IDLE_TIMEOUT);
+                        state.intent_wal.on_session_ended(&session_id);
                     }
                     Err(err) => {
                         warn!(session = %session_id, error = %err, "failed to stop idle session");

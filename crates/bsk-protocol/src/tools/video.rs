@@ -118,3 +118,29 @@ pub struct VideoReadResult {
     pub next_offset: u64,
     pub data_base64: String,
 }
+
+/// Action-dependent wire replies from the extension's video service.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(untagged)]
+pub enum VideoResult {
+    Grant(VideoGrant),
+    Capabilities {
+        version: u32,
+        format: String,
+        audio: bool,
+        max_duration_ms: u32,
+    },
+    List {
+        recordings: Vec<VideoGrant>,
+    },
+    Recording {
+        recording: VideoRecording,
+    },
+    Read(VideoReadResult),
+    Discarded {
+        discarded: bool,
+    },
+    Exported {
+        exported: bool,
+    },
+}

@@ -8,6 +8,7 @@ turn instead of one per action.
 | --- | --- |
 | CLI | `bsk plan` |
 | MCP | `bsk_plan` |
+| DSH plugin | `bsk_interact` with `action: "plan"` |
 | Wire protocol | None; the client sends each step's existing `tool.*` request |
 
 ## Usage
@@ -25,6 +26,20 @@ optional `expect`. Actions are `click`, `fill`, `select`, `press`, `hover`, `scr
 `wheel` and `drag`, plus `wait-for-element` (`ref` or `selector`, `state`, `timeout_ms`)
 for a condition that later steps need. `_` and `-` are interchangeable in these names.
 A plan holds 1 to 20 steps.
+
+`bsk plan` and `bsk_plan` are available by default. DSH exposes the same workflow
+inside its existing interaction tool, after the browser skill is activated:
+
+```json
+{"action":"plan","session":"abcd","contextId":"CURRENT","steps":[
+  {"action":"fill","ref":"@e3","value":"Ada"},
+  {"action":"select","ref":"@e4","values":["CN"]}
+]}
+```
+
+Use `contextId` and, for an untargeted first step, `observationId` on the outer DSH
+call. Steps use protocol names such as `ref` and `timeout_ms`; put `expect` on the
+step it protects. Saved observation options and `untilVisible` work as with `step`.
 
 ## Reply
 

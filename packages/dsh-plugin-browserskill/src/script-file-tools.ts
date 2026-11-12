@@ -41,7 +41,7 @@ export function registerScriptFileTools(
     defineTool({
       name: "interact.evaluate",
       description:
-        "Evaluate JavaScript in an owned task tab. Use bsk_inspect(action=read) or extract for data on dynamic pages. Arbitrary scripts may write or defer effects; strict observation is required even for apparently read-only code. A script already dispatched cannot be rolled back. Check application state after an uncertain result before retrying.",
+        "Evaluate JavaScript in an owned task tab. Use bsk_inspect(action=read) or extract for data on dynamic pages. Arbitrary scripts may write or defer effects, so a script is checked before it runs, in this order of preference: expect without observationId (target policy) or dependsOn (strict policy) states what the script relies on, and only that is checked, so it also runs on a page that keeps changing; observationId requires the whole page to still match; unverified, only when what the script relies on cannot be stated, compares nothing about the page and returns verified=false. A script already dispatched cannot be rolled back. Check application state after an uncertain result before retrying.",
       parameters: {
         session: SESSION_PARAM,
         tabId: TAB_ID_PARAM,
@@ -53,17 +53,38 @@ export function registerScriptFileTools(
         },
         awaitPromise: { type: "boolean", description: "Wait for promises (default true)." },
         returnByValue: { type: "boolean", description: "Return a JSON value (default true)." },
+        unverified: {
+          type: "boolean",
+          description:
+            "Last resort: run without comparing the page with any observation. Not with observationId, expect or dependsOn.",
+        },
       },
       output,
       async execute(args, exec) {
         requireNonEmpty(args.expression, "expression");
         requirePositive(args.timeoutMs, "timeoutMs");
+        // Asking for a page check and for none at once is a contradiction.
+        const evidence = exec as ToolRunContext & {
+          observationDependencies?: string[];
+          observationId?: string;
+          actionExpectations?: unknown[];
+        };
+        if (
+          args.unverified === true &&
+          (evidence.observationId !== undefined ||
+            evidence.actionExpectations !== undefined ||
+            evidence.observationDependencies?.length)
+        )
+          throw new Error(
+            "unverified skips page verification; omit observationId, expect and dependsOn, or omit unverified to have them checked",
+          );
         const session = deps.registry.resolve(args.session, "bsk_interact(action=evaluate)");
         const command = ["evaluate", args.expression, "--session", session];
         appendTabId(command, args.tabId);
         if (args.awaitPromise === false) command.push("--await-promise", "false");
         if (args.returnByValue === false) command.push("--return-by-value", "false");
         if (args.timeoutMs !== undefined) command.push("--timeout", `${args.timeoutMs}ms`);
+        if (args.unverified === true) command.push("--unverified");
         return run(exec, session, command, args.timeoutMs ?? 30000);
       },
       presentResult: runtime.presentTerminalResult,

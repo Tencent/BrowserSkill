@@ -1,52 +1,16 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "title": "WaitForNavigationResult",
-  "description": "Outcome of a wait_for_navigation. `reached` is the wire name of the lifecycle phase the extension actually observed before returning — either the requested `wait_until`, or `\"timeout\"` when the wait expired before that event fired.",
-  "type": "object",
-  "required": [
-    "reached",
-    "tab_id"
-  ],
-  "properties": {
-    "dialogs": {
-      "type": "array",
-      "items": {
-        "$ref": "#/definitions/JavaScriptDialogInfo"
-      }
-    },
-    "error_text": {
-      "type": [
-        "string",
-        "null"
-      ]
-    },
-    "reached": {
-      "$ref": "#/definitions/WaitForNavigationReached"
-    },
-    "tab_id": {
-      "type": "integer",
-      "format": "int64"
-    }
-  },
   "definitions": {
     "JavaScriptDialogHandledAction": {
       "description": "How the extension resolved the dialog so CDP could continue.",
-      "type": "string",
       "enum": [
         "accepted",
         "dismissed"
-      ]
+      ],
+      "type": "string"
     },
     "JavaScriptDialogInfo": {
       "description": "One observed + handled JavaScript dialog during a tool call.",
-      "type": "object",
-      "required": [
-        "handled",
-        "message",
-        "sequence",
-        "tab_id",
-        "type"
-      ],
       "properties": {
         "default_prompt": {
           "type": [
@@ -68,13 +32,13 @@
         },
         "sequence": {
           "description": "Monotonic per-tab sequence for ordering within a session.",
-          "type": "integer",
           "format": "uint64",
-          "minimum": 0.0
+          "minimum": 0,
+          "type": "integer"
         },
         "tab_id": {
-          "type": "integer",
-          "format": "int64"
+          "format": "int64",
+          "type": "integer"
         },
         "type": {
           "$ref": "#/definitions/JavaScriptDialogType"
@@ -85,27 +49,63 @@
             "null"
           ]
         }
-      }
+      },
+      "required": [
+        "tab_id",
+        "type",
+        "message",
+        "handled",
+        "sequence"
+      ],
+      "type": "object"
     },
     "JavaScriptDialogType": {
       "description": "Native JS dialog kind reported by CDP.",
-      "type": "string",
       "enum": [
         "alert",
         "confirm",
         "prompt",
         "beforeunload"
-      ]
+      ],
+      "type": "string"
     },
     "WaitForNavigationReached": {
-      "type": "string",
       "enum": [
         "load",
         "domcontentloaded",
         "networkidle",
         "commit",
         "timeout"
-      ]
+      ],
+      "type": "string"
     }
-  }
+  },
+  "description": "Outcome of a wait_for_navigation. `reached` is the wire name of the\nlifecycle phase the extension actually observed before returning —\neither the requested `wait_until`, or `\"timeout\"` when the wait\nexpired before that event fired.",
+  "properties": {
+    "dialogs": {
+      "items": {
+        "$ref": "#/definitions/JavaScriptDialogInfo"
+      },
+      "type": "array"
+    },
+    "error_text": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "reached": {
+      "$ref": "#/definitions/WaitForNavigationReached"
+    },
+    "tab_id": {
+      "format": "int64",
+      "type": "integer"
+    }
+  },
+  "required": [
+    "tab_id",
+    "reached"
+  ],
+  "title": "WaitForNavigationResult",
+  "type": "object"
 }

@@ -13,6 +13,12 @@ export interface Viewport {
 
 export type LayerKind = "page" | "modal" | "mask";
 
+export interface VomSelectOption {
+  value: string;
+  label: string;
+  selected?: boolean;
+}
+
 /**
  * CDP-free data slice consumed by packages/vom.
  * The extension joins AX semantics and DOMSnapshot geometry by backendNodeId
@@ -44,6 +50,9 @@ export interface VomNode {
   href?: string; // hostname of external link target; omitted for same-origin links
   text?: string;
   nearbyText?: string;
+  selectOptions?: VomSelectOption[];
+  selectOptionsTruncated?: boolean;
+  rowAnchor?: string;
 
   tag: string;
   rect: Rect | null;
@@ -131,6 +140,7 @@ export interface RenderedRef extends VomRef {
   role?: string;
   name?: string;
   ctx?: string;
+  rowAnchor?: string;
   /** Zero-based line index in `VomResult.text`. */
   line: number;
 }

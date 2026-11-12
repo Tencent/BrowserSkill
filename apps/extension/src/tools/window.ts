@@ -5,7 +5,7 @@ import {
   type SessionContext,
   type SessionManager,
 } from "@/session-manager/manager";
-import type { RpcError } from "@/transport/types";
+import type { RpcError, WindowResizeParams, WindowResizeResult } from "@/transport/types";
 import type { LayoutMetrics } from "./geometry/frame-context";
 import { validateWindowSize } from "./session";
 import {
@@ -16,19 +16,7 @@ import {
   resolveTargetTab,
 } from "./shared";
 
-/** The cooperation controller binds the current observation's tab to the request. */
-export interface WindowResizeParams {
-  session_id: string;
-  tab_id?: number;
-  width: number;
-  height: number;
-}
-
-export interface WindowResizeResult {
-  window_id: number;
-  width: number;
-  height: number;
-}
+export type { WindowResizeParams, WindowResizeResult } from "@/transport/types";
 
 type Size = { width: number; height: number };
 type WindowBounds = { width?: number; height?: number };

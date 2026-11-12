@@ -11,6 +11,40 @@ determines which versions can connect.
 
 ### Added
 
+- Daemon-local `<3ms` Intent Write-Ahead Ledger (`$BSK_HOME/intent_ledger.jsonl`, `0600`)
+  and `bsk ledger status | resolve`: intercepts all mutating tools (`click`, `fill`,
+  `press`, `select`, `upload`, `drag`, `evaluate`) regardless of `--ref`, raw CSS
+  `--selector`, or visual `(image_x, image_y)` targeting while persisting only redacted
+  target summaries (never plaintext `fill` values or `evaluate` scripts). Transitions
+  timed-out, cancelled, disconnected, or `effect_state: "unknown"` actions (plus leftover
+  `DISPATCHED` entries across daemon restarts) to `UNKNOWN`, blocking blind mutating
+  replays on that tab in `<1ms` (`uncertain_prior_effect`) while allowing 100% of
+  read-only/diagnostic commands and auto-reconciling on `bsk sync`.
+- Zero-ceremony lifecycle commands (`bsk open`, `bsk sync`, `bsk close`) and a
+  daemon-memory `ImplicitScopeRegistry` with deterministic `caller_scope` isolation
+  (`--session` > `--scope` / `BSK_SESSION` / `BSK_SCOPE` > per-process MCP stdio
+  `conn_scope` > host subagent IDs > anti-silent-hijack `"default"`), monotonic short
+  evidence aliases (`c1..cN`, `o1..oN`), omitted `--session` / target-policy
+  `--context` resolution, and `unchanged` VOM hydration without altering extension-side
+  cooperative safety verification.
+- Affordance-typed VOM rendering and `<select>` label selection: bare input controls bind
+  preceding static captions as `[field: "..."]` without duplicating consumed labels; CJK
+  parent-child text deduplication requires exact equality; non-sensitive native `<select>`
+  elements inline up to 10 options (`[options: val="Label"* | ...]`), while `select`
+  accepts unique visible option labels, rejects ambiguous duplicate labels
+  (`option_ambiguous`), lists up to 12 available candidates on `option_not_found`, and
+  guides callers to click custom ARIA comboboxes (`[custom-dropdown: ...]`); runs of 3 or
+  more consecutive pure read-only table rows fold into compact pipe-delimited rows.
+- Computed-style stealth prompt-injection stripping and zero-extra-RPC virtual-scroll row
+  business-key guards: observation and hover probes strip non-interactive subtrees hidden
+  via `opacity < 0.05`, `font-size <= 1.5px`, zero foreground/background contrast,
+  far-offscreen layout bounds, or `< 2px` clipped boxes (preserving interactive controls,
+  `.sr-only` accessible button labels, `<label for>` and `aria-labelledby`/`aria-describedby`
+  targets); `@eN` refs inside table, list, or virtual rows record a normalized `rowAnchor`
+  and verify it atomically in `checkActionTarget`'s single `SAMPLE_TARGET` probe, blocking
+  in-place recycled DOM slots before dispatch (`virtual_row_recycled`, `effect_state: none`).
+- Qoder and Qoder CN are available as skill-only install targets through
+  `bsk install-skill --harness qoder` and `--harness qoder-cn`.
 - Local pairing with mutual proofs, durable key rotation and interruption recovery.
   Paired connections verify the daemon before sending business traffic; activation
   invalidates the original link. Device revocation and browser registration are
@@ -32,26 +66,108 @@ determines which versions can connect.
   call, then return the synchronized state, so a form or a set of filters takes one
   model turn instead of one per action. Each step keeps the checks of its own command,
   and the first step that does not complete stops the plan without any retry.
-- `bsk recipe` and the MCP tool `bsk_recipe` (experimental, `BSK_RECIPES=1`) save a
-  verified flow as a local file and replay it, returning its outputs without a model
-  turn per step. Targets match exactly by role, name and context, and a run stops at the
-  first deviation and hands the page back. This version replays only read and reversible
-  steps. See `docs/recipes.md`.
+- The DSH plugin runs decided actions together with `bsk_interact(action=plan)`, with the
+  same checks, stopping rule and receipt as `bsk plan`.
+- The DSH plugin offers `bsk_recipe` when its `recipes` option or `BSK_RECIPES=1` is set.
+  A run uses an owned session, keeps the receipt of a run that did not complete, and has
+  no approve action.
+- `bsk recipe` saves a verified flow as a local file and replays it, returning its
+  outputs without a model turn per step; MCP lists `bsk_recipe` with `BSK_RECIPES=1`.
+  Targets match exactly by role, name and context, and a run stops at the first deviation
+  and hands the page back. This version replays only read and reversible steps: a lowered
+  risk runs only after a person approves it with `bsk recipe approve`, and an uncertain run
+  holds its recipe until the caller checks it. See `docs/recipes.md`.
 - `bsk read`, MCP and DSH `bsk_inspect(action=read)` sample bounded DOM fields
   through fixed synchronous isolated-world queries. Agents can read current title,
   URLs, text, attributes and control state across unrelated animation, then act
   with explicit business conditions. No caller JavaScript, callbacks or delayed
   effects are accepted; sensitive fields are masked.
 - DOM reads negotiate protocol 1.9 and reject older peers explicitly, without
-  script fallback. Arbitrary evaluate and visual/untargeted input retain strict guards.
+  script fallback. Visual/untargeted input retains strict guards.
+- `bsk evaluate --unverified` (MCP `params.unverified`, DSH `unverified`) runs a script
+  without comparing the page with any observation, for pages that never hold still and
+  scripts whose dependencies cannot be stated. Control authority, main-document identity
+  and tab ownership are still enforced; it cannot be combined with `--expect`,
+  `--observation` or `--depends-on`, and its result carries `verified: false`. It needs
+  protocol 1.9 on the daemon and extension; peers below 1.9 are rejected before dispatch.
+  Earlier 1.9 development builds require updating the CLI, daemon and extension together.
 
 ### Changed
 
+- Accelerated single-step interaction hot paths by ~85%: under `target` cooperation
+  policy, internal non-input CDP steps (`Runtime.callFunctionOn`, `DOM.focus`,
+  `DOM.scrollIntoViewIfNeeded`, `Emulation.*`, `DOM.getBoxModel`) run against a zero-RPC
+  in-memory push-interruption fence after a single entry `verifyDecision()` (preserving
+  real-time `isTrusted` human takeover cancellation and strict-policy semantics), merged
+  duplicate `beforeinput` cross-frame refreshes, and made `finishInput` cleanup
+  non-blocking on untouched Agent Window tabs; compressed `handleFill` to a 3–4 step CDP
+  fast path that retires hard `fill_value_mismatch` errors on auto-formatted inputs and
+  returns `actual_value` / `formatted` on non-sensitive fields; switched business CLI
+  commands to optimistic single-UDS direct connection via `daemon.json` with zero-replay
+  connect-failure auto-spawn fallback.
+- Rewrote the CLI `SKILL.md` into a zero-preread workflow (`<= 2,000` UTF-8 bytes)
+  preserving all four cooperative safety invariants, removed repeated static `guidance`
+  prose from `cooperate sync` replies, and added 75-second four-guard idle
+  `chrome.debugger` soft-detach (preserving `tabOwners` and console/network `since`
+  cursors with transparent reattach) alongside immediate 0ms detach on `bsk close` and
+  `bsk tab return`.
+- Cooperative synchronization and strict pre-action verification reuse a sliding
+  10-second `Accessibility` domain lease per tab, skip unused VOM text rendering on
+  scene-only evidence and delta captures, stream unrelaxed whole-page evidence
+  comparison without per-node serialization, and reduce semantic-graph and VOM
+  allocations on large pages.
+- The extension popup always shows Connection settings instead of hiding them behind
+  a disclosure. The optional-pairing advice collapses to a warning-triangle icon beside
+  the heading and expands on click; skipped verification and states that block the
+  connection stay visible. The current address sits under the selected mode, the
+  pairing steps move behind an info icon, "Use a new pairing link" is a button, and the
+  save notice appears only once there is a valid change to save.
+- `bsk plan` and `bsk recipe` are documented standard CLI workflows, with packaged
+  guidance for batching and replay; recipe schemas remain opt-in in MCP and DSH.
+- Recipe execution and edits share an exclusive lock. Replay refuses unreadable
+  safety state or an unwritable run marker, and retains interrupted-run holds even
+  when the host process remains alive. DSH drains cancelled plan and recipe receipts.
+
 - Extension 0.4.3 removes obsolete migration flags and version gates while keeping
   pairing optional. There is no automatic enforcement deadline.
+- `bsk-protocol` is the single source of truth for method metadata, JSON schemas,
+  TypeScript request/result codecs, exhaustive daemon/extension execution policies,
+  and protocol 1.2–1.9 peer feature compatibility checks (`pnpm protocol:check`).
 
 ### Fixed
 
+- Native clicks, key presses and wheel input calibrate Chromium's input clock so
+  long-running browsers do not misclassify their own input as human intervention
+  after sleep or clock changes. Calibration uses the extension's hidden document,
+  preserves the existing input checks, and reports clock failures before dispatch
+  ([#665](https://github.com/Tencent/BrowserSkill/issues/665)).
+- `tool.record_start` enforces shared-tab cooperation ownership, stop, and human-control
+  guards and invalidates stale control contexts when starting recording; `tool.tab_return`
+  clears active recordings for local sessions as well as remote ones.
+- Daemon shutdown retains its WebSocket stop notification when the accept loop is
+  between waits, avoiding a lost notification that can leave `daemon stop` waiting.
+- Website debugging attributes agent uploads and downloads to their transfer
+  operations instead of recording the resulting file changes and clicks as human input.
+- Local validation failures in upload, download, plan and step return stable
+  parameter/file error codes and relevant recovery hints. Upload sources are checked
+  before contacting the daemon or staging any files.
+- `fill` notifies each final value once. Native insertion and clearing already
+  dispatch `input`; the completion step no longer repeats it
+  ([#624](https://github.com/Tencent/BrowserSkill/issues/624)).
+- Window blur releases completed text-editing holds, and new task synchronizations
+  after an idle gap automatically resume paused or editing tabs when no gesture or
+  recent input is active, avoiding unnecessary manual hand-back prompts between tasks.
+- Recording keeps clicks on buttons and links whose name is longer than 48 characters,
+  such as GOV.UK step-by-step sections and long news headlines.
+- Recording keeps clicks on links, filter disclosures, checkboxes and other controls
+  that share a form with a search field, such as GOV.UK search results and filters.
+- Recorded steps keep their element ref after the page scrolls or the target changes size:
+  when no position matches, the only same-tag ref with the same role and name is used.
+  A click on text inside a `<summary>`, tab or option is measured on that control.
+- Recipe save refuses oversized input and formatted documents before publishing a
+  revision that its own reader could not open.
+- `press` maps US-layout punctuation to its physical `code` and virtual key code,
+  so shortcuts such as `Ctrl+/` reach handlers that check `event.code`.
 - Main-document SPA route changes, including away-and-back and hash routes,
   invalidate old control contexts and refs. Supplementary reads never renew them.
   This also covers passive reads of already loaded tabs and fresh debugger attachments.
@@ -60,8 +176,56 @@ determines which versions can connect.
   `read_target_stale` instead of a generic CDP failure.
 - CLI, MCP, DSH and bundled skills direct dynamic-page data gathering to read/extract
   instead of repeated sync/evaluate refusals.
+- A script that states what it relies on is checked against that instead of the whole
+  page, so unrelated clocks, feeds and media no longer refuse it in a loop. Under target
+  policy, `evaluate` with `--expect` and no `--observation` reuses its context and is not
+  refused when a child frame navigates; passing `--observation` as well still checks the
+  whole page. Under strict policy, `evaluate` with
+  `--depends-on` checks those regions, form values and modal layers only; it previously
+  also required the whole page to match. A script that states nothing is checked as before.
+- A refusal caused by a changed observation also reports `observed_changes`: the number
+  of changed, added and removed nodes with up to five examples. For scripts, the recovery
+  text and the bundled skills give the order to try: state the facts, and use
+  `--unverified` only when they cannot be stated.
 - Control-state sampling recollects once after the browser proves that a failed child document retired; an active unobservable frame still blocks input.
+- A frame that does not answer collection in time is named in the error message and
+  `data.frames` (frame ID with the sanitized origin and path; tab operations add the tab).
+  The refusal remains `cooperation_sync_required`, so `--settle`, recipes and DSH still
+  retry it, and its recovery explains how to leave a frame that keeps failing
+  ([#614](https://github.com/Tencent/BrowserSkill/issues/614)).
+- A child frame that cannot be collected while its element is not displayed, has no area
+  or is invisible, and does not hold focus, is listed in `frame_gaps` as `hidden_frame`
+  instead of blocking the tab, as with micro-frontend sandbox iframes. Later collections
+  recheck the element instead of waiting for the frame again, and a displayed frame still
+  blocks input ([#614](https://github.com/Tencent/BrowserSkill/issues/614)).
 - Removed nodes already collected by CDP report target_detached with node identity, consistently with detached nodes that remain inspectable; other CDP failures remain target_unavailable.
+- Recording captures option changes on native `<select>` controls inside open shadow roots,
+  whose `change` events do not reach the document.
+- Strict DOM-targeted actions tolerate added or removed noninteractive tooltips after their
+  own hover, and character counters tied to a focused text field by `maxlength` or
+  `aria-describedby` after their own focus. Target meaning, links, ordinary text, form state,
+  modal contents and explicit dependencies stay exact. Scripts, untargeted keys and visual
+  clicks retain the full observation check, including during preparation
+  ([#540](https://github.com/Tencent/BrowserSkill/issues/540)).
+- A targeted strict action without `--depends-on` tolerates a positively identified media
+  timeline elsewhere on the page, as it already did with dependencies. Unnamed, submitted and
+  in-form sliders, and untargeted actions, stay exact.
+- Evidence refusals report `observed_change` (the first differing node, field and check, and
+  whether it happened before or during preparation) without values or sensitive text. Strict
+  click refusals after preparation also report `press_sent: false`.
+- A request refused because an earlier command on the session is still settling (for
+  example a cancelled observation screenshot) now carries `reason: operation_settling`,
+  `retryable` and `retry_after_ms`. `cooperate sync --settle` pauses and syncs again
+  (up to 5 s, also for older extensions), and the CLI no longer suggests a reload that needs
+  the same sync ([#527](https://github.com/Tencent/BrowserSkill/issues/527)).
+- `upload` preserves its concrete handler failure receipts (`set_file_input_failed` and
+  `file_drop_failed`, such as `-32000 Not allowed` when Chrome's "Allow access to file URLs"
+  extension toggle is off) when transaction cleanup detaches the debugger or post-action
+  frame collection fails, instead of masking them as `control_context_invalid`. Pre-drop
+  `dragEnter` refusals also keep `effect_state: none` without dispatching a redundant
+  `dragCancel` ([#636](https://github.com/Tencent/BrowserSkill/issues/636)).
+- Recording preserves clicks on submit, reset and image input buttons, including
+  actions beside search fields, and uses reset buttons' visible values as names.
 
 ### Fixed
 
@@ -69,6 +233,20 @@ determines which versions can connect.
   control panel and its minimized arrow do not swallow automated page clicks.
 - Structured list extraction includes slot-assigned items while preserving
   rendered order, nested-list ownership, visibility and collection limits.
+- Recording keeps clicks on buttons and links inside an editor's `contenteditable="false"`
+  regions, such as attachment actions, instead of treating them as editor input.
+
+## [Unreleased]
+
+### Fixed
+
+- `extract` applies CSS `uppercase` and `lowercase` to text in table cells,
+  headers, list fields and discovery previews, respecting nested style overrides
+  and language-specific casing. Transformed text remains subject to the byte
+  budget ([#597](https://github.com/Tencent/BrowserSkill/issues/597)).
+- Closing a retained Agent Window or stopping the last session detaches remaining
+  CDP debugger attachments and cancels active session operations, so the browser's
+  debugging infobar does not linger after the task window is closed.
 
 ## [0.4.2] - 2026-11-05
 

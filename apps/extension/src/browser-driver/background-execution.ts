@@ -20,6 +20,10 @@ export class BackgroundExecution {
     return this.owners.get(tabId)?.has(sessionId) ?? false;
   }
 
+  hasAny(tabId: number): boolean {
+    return (this.owners.get(tabId)?.size ?? 0) > 0;
+  }
+
   release(sessionId: string, tabId: number): void {
     const owners = this.owners.get(tabId);
     owners?.delete(sessionId);

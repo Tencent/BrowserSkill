@@ -1,12 +1,6 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "title": "TabBorrowParams",
-  "description": "Params for `tool.tab_borrow`. Moves a *user* tab into the requesting session's Agent Window, recording its original window / index so `tab_return` (or session_stop) can put it back.",
-  "type": "object",
-  "required": [
-    "session_id",
-    "tab_id"
-  ],
+  "description": "Params for `tool.tab_borrow`. Moves a *user* tab into the\nrequesting session's Agent Window, recording its original window /\nindex so `tab_return` (or session_stop) can put it back.",
   "properties": {
     "confirm": {
       "description": "Legacy input, ignored. Browser settings decide whether confirmation is required.",
@@ -17,19 +11,25 @@
     },
     "confirmation_timeout_ms": {
       "description": "Maximum time to wait for user confirmation (default 60 seconds).",
+      "format": "uint32",
+      "minimum": 0,
       "type": [
         "integer",
         "null"
-      ],
-      "format": "uint32",
-      "minimum": 0.0
+      ]
     },
     "session_id": {
       "type": "string"
     },
     "tab_id": {
-      "type": "integer",
-      "format": "int64"
+      "format": "int64",
+      "type": "integer"
     }
-  }
+  },
+  "required": [
+    "tab_id",
+    "session_id"
+  ],
+  "title": "TabBorrowParams",
+  "type": "object"
 }

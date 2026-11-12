@@ -177,7 +177,7 @@ export async function uploadThroughFileDrop(
             );
           } catch (error) {
             const unsupported = methodUnavailable(error);
-            if (type === "dragEnter" && unsupported) dragStarted = false;
+            if (type === "dragEnter" && !(error instanceof BoundedWaitError)) dragStarted = false;
             return failure(
               unsupported
                 ? "unsupported"

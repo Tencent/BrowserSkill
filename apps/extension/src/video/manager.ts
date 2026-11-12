@@ -290,8 +290,8 @@ export class VideoManager {
       if (overlay.interactive)
         throw new Error("Finish the current browser confirmation before starting a video");
       check();
-      await captureReply(cdp.send(tab, "Page.enable"), signal);
       cdp.trackSessionTab?.(session, tab);
+      await captureReply(cdp.send(tab, "Page.enable"), signal);
       if (cdp.acquireBackgroundExecution)
         await captureReply(cdp.acquireBackgroundExecution(session, tab), signal);
       const first = await captureReply(
@@ -622,7 +622,10 @@ export class VideoManager {
     this.deps.changed?.();
   }
 
-  async rpc(params: VideoParams, signal?: AbortSignal): Promise<unknown> {
+  async rpc(
+    params: VideoParams,
+    signal?: AbortSignal,
+  ): Promise<import("@/transport/types").VideoResult> {
     const owner = this.deps.owner();
     if (params.action === "capabilities")
       return { version: VIDEO_VERSION, format: "mp4", audio: false, max_duration_ms: 600_000 };

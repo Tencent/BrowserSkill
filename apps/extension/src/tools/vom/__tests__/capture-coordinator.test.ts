@@ -12,7 +12,12 @@ import { OVERLAY_HOST_MARKER_ATTR } from "@/lib/overlay-bridge";
 import { RefStore } from "@/session-manager/ref-store";
 import { captureVomObservation } from "../../observation";
 import type { CdpRunner } from "../../shared";
-import { captureObservationFacts, semanticCapture } from "../capture-coordinator";
+import {
+  ACCESSIBILITY_LEASE_TTL_MS,
+  AccessibilityLease,
+  captureObservationFacts,
+  semanticCapture,
+} from "../capture-coordinator";
 import { buildSemanticGraph, buildSemanticVomScene } from "../semantic-graph";
 import { REQUESTED_STYLES, type SnapshotReply, VISUAL_STYLES } from "../snapshot";
 import { deduplicateVisualCandidates } from "../visual-dedup";
@@ -140,6 +145,9 @@ function fixture(
             "none",
             "0px",
             "normal",
+            "16px",
+            "rgb(0, 0, 0)",
+            "rgba(0, 0, 0, 0)",
           ],
           documents: frames
             .filter(
@@ -196,9 +204,10 @@ function fixture(
                   styles: Array.from({ length: 2 }, () =>
                     requested.map(
                       (name) =>
-                        [7, 8, 8, 5, 6, 9, 5, 5, 10, 6, 10, 10, 10, 10, 10, 8, 10, 5, 12, 11][
-                          VISUAL_STYLES.indexOf(name as (typeof VISUAL_STYLES)[number])
-                        ],
+                        [
+                          7, 8, 8, 5, 6, 13, 14, 15, 10, 9, 5, 5, 10, 6, 10, 10, 10, 10, 10, 8, 10,
+                          5, 12, 11,
+                        ][VISUAL_STYLES.indexOf(name as (typeof VISUAL_STYLES)[number])],
                     ),
                   ),
                 },
@@ -1925,6 +1934,120 @@ describe("Accessibility domain lifetime", () => {
     ).rejects.toBe(error);
     expect(axCalls(logs).at(-1)).toBe("Accessibility.disable");
     expect(axCalls(logs, "remote").at(-1)).toBe("Accessibility.disable");
+  });
+
+  it("reuses AX across back-to-back leased captures and disables after sliding idle TTL", async () => {
+    vi.useFakeTimers();
+    try {
+      const { cdp, logs } = fixture();
+      const sendGuarded = vi.fn(async () => ({}) as never);
+      cdp.sendGuarded = sendGuarded;
+      const lease = new AccessibilityLease(4);
+
+      await captureObservationFacts(cdp, 4, undefined, undefined, { accessibilityLease: lease });
+      expect(sendGuarded).not.toHaveBeenCalled();
+      expect(axCalls(logs).filter((m) => m === "Accessibility.enable")).toHaveLength(1);
+      expect(axCalls(logs, "remote").filter((m) => m === "Accessibility.enable")).toHaveLength(1);
+
+      await vi.advanceTimersByTimeAsync(ACCESSIBILITY_LEASE_TTL_MS - 1_000);
+      expect(sendGuarded).not.toHaveBeenCalled();
+
+      // A second capture resets the sliding TTL without re-enabling or disabling AX.
+      await captureObservationFacts(cdp, 4, undefined, undefined, { accessibilityLease: lease });
+      expect(axCalls(logs).filter((m) => m === "Accessibility.enable")).toHaveLength(1);
+      expect(axCalls(logs, "remote").filter((m) => m === "Accessibility.enable")).toHaveLength(1);
+
+      await vi.advanceTimersByTimeAsync(2_000);
+      expect(sendGuarded).not.toHaveBeenCalled();
+
+      await vi.advanceTimersByTimeAsync(ACCESSIBILITY_LEASE_TTL_MS - 2_000);
+      expect(sendGuarded).toHaveBeenCalledTimes(2);
+      for (const target of [{ tabId: 4 }, { tabId: 4, sessionId: "remote" }])
+        expect(sendGuarded).toHaveBeenCalledWith(
+          target,
+          "Accessibility.disable",
+          {},
+          { attachmentId: "attachment" },
+        );
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("re-enables AX after markNeedsEnable and cleans up immediately on release", async () => {
+    vi.useFakeTimers();
+    try {
+      const { cdp, logs } = fixture();
+      const lease = new AccessibilityLease(4);
+
+      await captureObservationFacts(cdp, 4, undefined, undefined, { accessibilityLease: lease });
+      expect(axCalls(logs).filter((m) => m === "Accessibility.enable")).toHaveLength(1);
+      expect(axCalls(logs).filter((m) => m === "Accessibility.disable")).toHaveLength(0);
+
+      // Unleased capture on the same tab/attachment does not disable AX underneath an active lease.
+      await captureObservationFacts(cdp, 4);
+      expect(axCalls(logs).filter((m) => m === "Accessibility.disable")).toHaveLength(0);
+
+      // Navigation / invalidation requires re-sending Accessibility.enable on the next capture.
+      lease.markNeedsEnable();
+      await captureObservationFacts(cdp, 4, undefined, undefined, { accessibilityLease: lease });
+      expect(axCalls(logs).filter((m) => m === "Accessibility.enable")).toHaveLength(3);
+      expect(axCalls(logs).filter((m) => m === "Accessibility.disable")).toHaveLength(0);
+
+      await lease.release();
+      expect(axCalls(logs).at(-1)).toBe("Accessibility.disable");
+      expect(axCalls(logs, "remote").at(-1)).toBe("Accessibility.disable");
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("evicts timed-out targets from an active lease so idle expiry never queues behind a stuck gate", async () => {
+    vi.useFakeTimers();
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const f = fixture();
+      const gate = new CdpReadGate();
+      const original = f.cdp.sendToTarget!;
+      let hangRemote = false;
+      f.cdp.sendToTarget = (target, method, params) =>
+        gate.run(target, method, () => {
+          if (
+            hangRemote &&
+            target.sessionId === "remote" &&
+            method === "Accessibility.getFullAXTree"
+          ) {
+            f.logs.push({ target, method, params: (params ?? {}) as Record<string, unknown> });
+            return new Promise<never>(() => {});
+          }
+          return original(target, method, params);
+        });
+      f.cdp.send = (tabId, method, params) => f.cdp.sendToTarget!({ tabId }, method, params);
+
+      const lease = new AccessibilityLease(4);
+      await captureObservationFacts(f.cdp, 4, undefined, undefined, { accessibilityLease: lease });
+
+      hangRemote = true;
+      const work = captureObservationFacts(f.cdp, 4, undefined, undefined, {
+        accessibilityLease: lease,
+      });
+      await vi.advanceTimersByTimeAsync(CAPTURE_READ_TIMEOUT_MS);
+      await work;
+
+      await vi.advanceTimersByTimeAsync(ACCESSIBILITY_LEASE_TTL_MS);
+      expect(axCalls(f.logs).at(-1)).toBe("Accessibility.disable");
+      expect(axCalls(f.logs, "remote")).toEqual([
+        "Accessibility.enable",
+        "Accessibility.getFullAXTree",
+        "Accessibility.getFullAXTree",
+      ]);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+      vi.restoreAllMocks();
+    }
   });
 });
 

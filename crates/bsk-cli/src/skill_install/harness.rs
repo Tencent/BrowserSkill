@@ -19,6 +19,8 @@ pub enum HarnessId {
     OpenclawInternal,
     Codebuddy,
     Workbuddy,
+    Qoder,
+    QoderCn,
     PiAgent,
     Hermes,
     KimiCode,
@@ -35,6 +37,8 @@ impl HarnessId {
         HarnessId::OpenclawInternal,
         HarnessId::Codebuddy,
         HarnessId::Workbuddy,
+        HarnessId::Qoder,
+        HarnessId::QoderCn,
         HarnessId::PiAgent,
         HarnessId::Hermes,
         HarnessId::KimiCode,
@@ -55,6 +59,8 @@ impl HarnessId {
             HarnessId::OpenclawInternal => "openclaw-internal",
             HarnessId::Codebuddy => "codebuddy",
             HarnessId::Workbuddy => "workbuddy",
+            HarnessId::Qoder => "qoder",
+            HarnessId::QoderCn => "qoder-cn",
             HarnessId::PiAgent => "pi",
             HarnessId::Hermes => "hermes",
             HarnessId::KimiCode => "kimi-code",
@@ -72,6 +78,8 @@ impl HarnessId {
             HarnessId::OpenclawInternal => "OpenClaw (internal)",
             HarnessId::Codebuddy => "CodeBuddy",
             HarnessId::Workbuddy => "WorkBuddy",
+            HarnessId::Qoder => "Qoder",
+            HarnessId::QoderCn => "Qoder CN",
             HarnessId::PiAgent => "Pi",
             HarnessId::Hermes => "Hermes Agent",
             HarnessId::KimiCode => "Kimi Code",
@@ -89,6 +97,8 @@ impl HarnessId {
             HarnessId::OpenclawInternal => home.join(".openclaw-internal").join("skills"),
             HarnessId::Codebuddy => home.join(".codebuddy").join("skills"),
             HarnessId::Workbuddy => home.join(".workbuddy").join("skills"),
+            HarnessId::Qoder => home.join(".qoder").join("skills"),
+            HarnessId::QoderCn => home.join(".qoder-cn").join("skills"),
             HarnessId::PiAgent => home.join(".pi").join("agent").join("skills"),
             HarnessId::Hermes => hermes_home_for_user_home(home).join("skills"),
             // Kimi Code CLI 用户级 skills 目录：`$KIMI_CODE_HOME/skills`，
@@ -203,6 +213,26 @@ impl HarnessId {
                     push("`workbuddy` on PATH");
                 }
             }
+            HarnessId::Qoder => {
+                if home.join(".qoder").is_dir() {
+                    push("~/.qoder");
+                }
+                for cmd in ["qoder", "qodercli"] {
+                    if command_exists(cmd) {
+                        signals.push(format!("`{cmd}` on PATH"));
+                    }
+                }
+            }
+            HarnessId::QoderCn => {
+                if home.join(".qoder-cn").is_dir() {
+                    push("~/.qoder-cn");
+                }
+                for cmd in ["qodercn", "qoderclicn"] {
+                    if command_exists(cmd) {
+                        signals.push(format!("`{cmd}` on PATH"));
+                    }
+                }
+            }
             HarnessId::PiAgent => {
                 if home.join(".pi").join("agent").is_dir() {
                     push("~/.pi/agent");
@@ -288,6 +318,8 @@ pub fn parse_harness_id(raw: &str) -> Result<HarnessId> {
         }
         "codebuddy" | "code-body" | "codebody" | "code-buddy" => Ok(HarnessId::Codebuddy),
         "workbuddy" | "work-buddy" => Ok(HarnessId::Workbuddy),
+        "qoder" | "qoder-cli" | "qodercli" => Ok(HarnessId::Qoder),
+        "qoder-cn" | "qoder_cn" | "qodercn" | "qoderclicn" => Ok(HarnessId::QoderCn),
         "pi" | "pi-agent" | "pi_agent" | "piagent" => Ok(HarnessId::PiAgent),
         "hermes" | "hermes-agent" | "hermes_agent" | "hermesagent" => Ok(HarnessId::Hermes),
         "kimi-code" | "kimi" | "kimicode" | "kimi-cli" | "kimi_cli" => Ok(HarnessId::KimiCode),
@@ -443,6 +475,10 @@ mod tests {
     #[test]
     fn parse_aliases() {
         assert_eq!(parse_harness_id("codebody").unwrap(), HarnessId::Codebuddy);
+        assert_eq!(parse_harness_id("qoder").unwrap(), HarnessId::Qoder);
+        assert_eq!(parse_harness_id("qodercli").unwrap(), HarnessId::Qoder);
+        assert_eq!(parse_harness_id("qoder-cn").unwrap(), HarnessId::QoderCn);
+        assert_eq!(parse_harness_id("qoderclicn").unwrap(), HarnessId::QoderCn);
         assert_eq!(
             parse_harness_id("claude-internal").unwrap(),
             HarnessId::ClaudeCodeInternal
@@ -503,6 +539,14 @@ mod tests {
             PathBuf::from("/home/user/.workbuddy/skills")
         );
         assert_eq!(
+            HarnessId::Qoder.skills_dir_for_home(home),
+            PathBuf::from("/home/user/.qoder/skills")
+        );
+        assert_eq!(
+            HarnessId::QoderCn.skills_dir_for_home(home),
+            PathBuf::from("/home/user/.qoder-cn/skills")
+        );
+        assert_eq!(
             HarnessId::PiAgent.skills_dir_for_home(home),
             PathBuf::from("/home/user/.pi/agent/skills")
         );
@@ -556,6 +600,30 @@ mod tests {
         let report = HarnessId::Workbuddy.report_for_home(home);
         assert!(report.detected);
         assert_eq!(report.skills_dir, home.join(".workbuddy").join("skills"));
+    }
+
+    #[test]
+    fn detects_qoder_from_home_layout() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let home = tmp.path();
+        std::fs::create_dir_all(home.join(".qoder")).unwrap();
+        let report = HarnessId::Qoder.report_for_home(home);
+        assert!(report.detected);
+        assert_eq!(report.skills_dir, home.join(".qoder").join("skills"));
+        assert_eq!(HarnessId::Qoder.cli_name(), "qoder");
+        assert_eq!(HarnessId::Qoder.display_name(), "Qoder");
+    }
+
+    #[test]
+    fn detects_qoder_cn_from_home_layout() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let home = tmp.path();
+        std::fs::create_dir_all(home.join(".qoder-cn")).unwrap();
+        let report = HarnessId::QoderCn.report_for_home(home);
+        assert!(report.detected);
+        assert_eq!(report.skills_dir, home.join(".qoder-cn").join("skills"));
+        assert_eq!(HarnessId::QoderCn.cli_name(), "qoder-cn");
+        assert_eq!(HarnessId::QoderCn.display_name(), "Qoder CN");
     }
 
     #[test]
