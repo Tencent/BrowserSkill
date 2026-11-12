@@ -1095,6 +1095,13 @@ export class CooperationController implements ControlAuthority {
   }
 
   /** Tab activation/movement affects the whole task window, not just its destination. */
+  /** Collection failed only because the tab still shows an empty initial document. */
+  private async unobservableBlank(state: TabState, error: unknown): Promise<boolean> {
+    if (!(error instanceof FrameCollectionError) || error.reason !== "frame_unobservable")
+      return false;
+    const tab = await chromeTabsApi.get(state.tabId).catch(() => undefined);
+    return !!tab && isInitialBlank(tab);
+  }
   private async manageTabs<T extends CdpRunner>(
     session: SessionContext,
     cdp: T,
@@ -1139,7 +1146,16 @@ export class CooperationController implements ControlAuthority {
       // Blank tabs have no collector. Other owned pages must confirm that no
       // human input was missed while a browser lookup/borrow approval was pending.
       try {
-        for (const state of states) if (!state.bootstrap) await this.prepareFrames(state, signal);
+        for (const state of states) {
+          if (state.bootstrap) continue;
+          try {
+            await this.prepareFrames(state, signal);
+          } catch (error) {
+            // A blank page offers no human input to miss. A borrowed one has no
+            // collector, and refusing here would also block returning it.
+            if (!(await this.unobservableBlank(state, error))) throw error;
+          }
+        }
         assert();
       } catch (error) {
         revoked ??= error instanceof Error ? error.message : String(error);

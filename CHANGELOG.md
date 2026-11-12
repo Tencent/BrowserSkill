@@ -154,6 +154,12 @@ determines which versions can connect.
 - `fill` notifies each final value once. Native insertion and clearing already
   dispatch `input`; the completion step no longer repeats it
   ([#624](https://github.com/Tencent/BrowserSkill/issues/624)).
+- Borrowing a user tab that still shows `about:blank` no longer blocks every tab
+  operation in the session. Tab management prepares each owned tab first; a blank
+  page without a collector is now skipped instead of failing with
+  `frame_unobservable`, so `tab select`, `tab create` and `tab return` work again.
+  Other unobservable pages are still refused
+  ([#703](https://github.com/Tencent/BrowserSkill/issues/703)).
 - Window blur releases completed text-editing holds, and new task synchronizations
   after an idle gap automatically resume paused or editing tabs when no gesture or
   recent input is active, avoiding unnecessary manual hand-back prompts between tasks.
