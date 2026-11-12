@@ -1720,40 +1720,56 @@ mod tests {
     }
 
     #[test]
-    fn a_dynamic_page_takes_one_full_read_per_poll() {
-        // Field values change on every poll, so each sync is a delta. A poll that
-        // does not match does not sync again; the next sync is then a baseline.
-        let mut methods = Vec::new();
-        let mut coop_count = 0usize;
-        let err = settled_sync_with_conditions_using(
+    fn a_nonmatching_delta_snapshot_defers_sync_until_the_next_poll() {
+        let poll = std::cell::Cell::new(1);
+        let mut calls = Vec::new();
+        let reply = settled_sync_with_conditions_using(
             Some("s1"),
             Some(7),
             ControlPolicy::Strict,
             None,
             Some("Done"),
             None,
-            1,
+            DEFAULT_WAIT_BUDGET_MS,
             "none",
             |_prefix, method, _req| {
-                methods.push(method.clone());
-                match method {
-                    Method::ToolSnapshot => Ok(json!({ "text": "Progress", "ref_count": 0, "tab_id": 7, "truncated": false })),
-                    Method::ToolCooperate => {
-                        coop_count += 1;
-                        Ok(if coop_count % 2 == 1 {
-                            json!({ "tab_id": 7, "context_id": format!("ctx-{coop_count}"), "kind": "delta", "changes": [{ "label": "Clock", "value": coop_count.to_string() }] })
-                        } else {
-                            json!({ "tab_id": 7, "context_id": format!("ctx-{coop_count}"), "kind": "baseline", "observation": { "text": "Progress" } })
-                        })
-                    }
-                    other => panic!("unexpected method: {other:?}"),
+                let poll_number = poll.get();
+                calls.push((method.clone(), poll_number));
+                match (poll_number, method) {
+                    (1, Method::ToolCooperate) => Ok(json!({
+                        "tab_id": 7,
+                        "context_id": "ctx-1",
+                        "kind": "delta",
+                        "changes": [{ "label": "Clock", "value": "1" }]
+                    })),
+                    (1, Method::ToolSnapshot) => Ok(json!({
+                        "text": "Progress",
+                        "ref_count": 0,
+                        "tab_id": 7,
+                        "truncated": false
+                    })),
+                    (2, Method::ToolCooperate) => Ok(json!({
+                        "tab_id": 7,
+                        "context_id": "ctx-2",
+                        "kind": "baseline",
+                        "observation": { "text": "Done" }
+                    })),
+                    (_, other) => panic!("unexpected method in poll {poll_number}: {other:?}"),
                 }
             },
-            |_| std::thread::sleep(Duration::from_millis(2)),
+            |_| poll.set(poll.get() + 1),
         )
-        .unwrap_err();
-        assert!(err.to_string().contains("timed out"), "{err}");
-        assert_eq!(methods, vec![Method::ToolCooperate, Method::ToolSnapshot]);
+        .unwrap();
+
+        assert_eq!(reply["context_id"], "ctx-2");
+        assert_eq!(
+            calls,
+            [
+                (Method::ToolCooperate, 1),
+                (Method::ToolSnapshot, 1),
+                (Method::ToolCooperate, 2),
+            ]
+        );
     }
 
     #[test]
@@ -1799,55 +1815,64 @@ mod tests {
     fn wait_not_checks_the_whole_page_when_the_budget_truncated_it() {
         let scopes = ImplicitScopeRegistry::new();
         let sid = SessionId("s1".into());
+        let mut frames = [
+            json!({
+                "tab_id": 7,
+                "context_id": "ctx-1",
+                "kind": "baseline",
+                "observation": { "text": "Header", "truncated": true }
+            }),
+            json!({
+                "tab_id": 7,
+                "context_id": "ctx-2",
+                "previous_context_id": "ctx-1",
+                "kind": "unchanged",
+                "history_complete": true,
+                "changes": []
+            }),
+            json!({
+                "tab_id": 7,
+                "context_id": "ctx-3",
+                "kind": "baseline",
+                "observation": { "text": "Ready", "truncated": false }
+            }),
+        ]
+        .into_iter();
         let mut snapshot_budgets = Vec::new();
-        let mut coop_count = 0usize;
-        let mut call = |method: Method, req: Value| -> Result<Value, CliError> {
-            match method {
-                Method::ToolSnapshot => {
-                    snapshot_budgets.push(req["max_tokens"].clone());
-                    // The spinner is below the token budget.
-                    Ok(
-                        json!({ "text": "Header\nLoading...", "ref_count": 0, "tab_id": 7, "truncated": false }),
-                    )
-                }
-                Method::ToolCooperate => {
-                    coop_count += 1;
-                    let raw = match coop_count {
-                        1 => {
-                            json!({ "tab_id": 7, "context_id": "ctx-1", "kind": "baseline", "history_complete": true, "changes": [],
-                            "observation": { "text": "Header", "truncated": true } })
-                        }
-                        _ => {
-                            json!({ "tab_id": 7, "context_id": format!("ctx-{coop_count}"), "previous_context_id": format!("ctx-{}", coop_count - 1),
-                            "kind": "unchanged", "history_complete": true, "changes": [] })
-                        }
-                    };
-                    Ok(attach_recorded_meta(&scopes, &sid, raw))
-                }
-                other => panic!("unexpected method: {other:?}"),
-            }
-        };
-        let err = settled_sync_with_conditions_using(
+        let reply = settled_sync_with_conditions_using(
             None,
             None,
             ControlPolicy::Strict,
             Some(20),
             None,
             Some("Loading"),
-            1,
+            DEFAULT_WAIT_BUDGET_MS,
             "none",
-            |_prefix, method, req| call(method, req),
-            |_| std::thread::sleep(Duration::from_millis(2)),
+            |_prefix, method, req| match method {
+                Method::ToolSnapshot => {
+                    snapshot_budgets.push(req["max_tokens"].clone());
+                    // The spinner is below the token budget.
+                    Ok(json!({
+                        "text": "Header\nLoading...",
+                        "ref_count": 0,
+                        "tab_id": 7,
+                        "truncated": false
+                    }))
+                }
+                Method::ToolCooperate => {
+                    let frame = frames.next().expect("unexpected sync");
+                    Ok(attach_recorded_meta(&scopes, &sid, frame))
+                }
+                other => panic!("unexpected method: {other:?}"),
+            },
+            |_| {},
         )
-        .unwrap_err();
-        assert!(err.to_string().contains("--wait-not"), "{err}");
+        .unwrap();
+
         // The truncated baseline and the cached, truncated unchanged frame were
         // both checked against the untruncated page.
-        assert!(!snapshot_budgets.is_empty());
-        assert!(
-            snapshot_budgets.iter().all(Value::is_null),
-            "{snapshot_budgets:?}"
-        );
+        assert_eq!(reply["context_id"], "ctx-3");
+        assert_eq!(snapshot_budgets, [Value::Null, Value::Null]);
     }
 
     #[test]
