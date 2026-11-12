@@ -144,11 +144,11 @@ determines which versions can connect.
 - `tool.record_start` enforces shared-tab cooperation ownership, stop, and human-control
   guards and invalidates stale control contexts when starting recording; `tool.tab_return`
   clears active recordings for local sessions as well as remote ones.
-- `navigate back` and `navigate forward` no longer time out at the default `load`
-  (or `domcontentloaded`) when Chrome restores the history entry from the
-  back/forward cache. A restored document is already loaded and emits no new load
-  lifecycle event, so the restore commit now satisfies those phases; `networkidle`
-  still waits for Chrome's idle signal
+- `navigate back` and `navigate forward` no longer time out when Chrome restores
+  the history entry from the back/forward cache. A restored document is already
+  loaded and emits no new load lifecycle event, so the restore commit now
+  satisfies `domcontentloaded` and `load`, and re-enables lifecycle replay on the
+  restored document so `networkidle` also completes on previously idle pages
   ([#701](https://github.com/Tencent/BrowserSkill/issues/701)).
 - Daemon shutdown retains its WebSocket stop notification when the accept loop is
   between waits, avoiding a lost notification that can leave `daemon stop` waiting.

@@ -506,13 +506,18 @@ function startLifecycleWait(
                 sawRelevantLifecycle = false;
                 lastLifecycle = undefined;
                 // A back/forward-cache restore re-activates a document that has
-                // already loaded; Chrome emits no new DOMContentLoaded or load.
+                // already loaded; Chrome emits no new DOMContentLoaded or load,
+                // and replays a recorded networkIdle only when lifecycle events
+                // are re-enabled on the restored document.
                 if (p.type === "BackForwardCacheRestore") {
                   noteRelevantLifecycle("load");
                   if (lifecycleMeetsOrExceeds("load", targetName)) {
                     finish({ reached: "match", lastLifecycle: "load" });
                     return;
                   }
+                  void cdp
+                    .send(expectedTabId, "Page.setLifecycleEventsEnabled", { enabled: true })
+                    .catch(() => {});
                 }
               }
             }

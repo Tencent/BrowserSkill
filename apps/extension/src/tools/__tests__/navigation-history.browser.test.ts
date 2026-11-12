@@ -96,18 +96,29 @@ describe.skipIf(!process.env.BSK_NAV_CHROME)("real browser history navigation", 
             tabsApi: { get: tab, query: async () => [await tab()] },
             defaultTimeoutMs: 5_000,
           };
-          const params = { session_id: "history", wait_until: "load" } as const;
+          const settledParams = { session_id: "history", wait_until: "networkidle" } as const;
           for (const path of ["/a", "/b"])
             expect(
-              await handleNavigate(manager, { ...params, url: origin + path }, deps),
-            ).toMatchObject({ reached: "load" });
+              await handleNavigate(manager, { ...settledParams, url: origin + path }, deps),
+            ).toMatchObject({ reached: "networkidle" });
 
-          const back = await handleNavigateBack(manager, params, deps);
-          expect(back).toMatchObject({ reached: "load", final_url: `${origin}/a` });
-          const forward = await handleNavigateForward(manager, params, deps);
-          expect(forward).toMatchObject({ reached: "load", final_url: `${origin}/b` });
+          const expectedRestores: string[] = [];
+          for (const waitUntil of ["commit", "domcontentloaded", "load", "networkidle"] as const) {
+            const params = { session_id: "history", wait_until: waitUntil };
+            const back = await handleNavigateBack(manager, params, deps);
+            expect(back, `back/${waitUntil}`).toMatchObject({
+              reached: waitUntil,
+              final_url: `${origin}/a`,
+            });
+            const forward = await handleNavigateForward(manager, params, deps);
+            expect(forward, `forward/${waitUntil}`).toMatchObject({
+              reached: waitUntil,
+              final_url: `${origin}/b`,
+            });
+            expectedRestores.push("/a", "/b");
+          }
           // The regression only covers restores; fail loudly if Chrome stopped using bfcache.
-          expect(restores).toEqual(["/a", "/b"]);
+          expect(restores).toEqual(expectedRestores);
           expect(listeners.size).toBe(0);
         },
       );

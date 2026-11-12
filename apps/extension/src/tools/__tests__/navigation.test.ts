@@ -574,6 +574,7 @@ describe("handleNavigateBack / Forward", () => {
   });
 
   it.each([
+    "commit",
     "domcontentloaded",
     "load",
   ] as const)("completes back at %s when Chrome restores the entry from the back/forward cache", async (waitUntil) => {
@@ -594,7 +595,7 @@ describe("handleNavigateBack / Forward", () => {
     expect(fake.listeners.length).toBe(0);
   });
 
-  it("still waits for networkidle after a back/forward-cache restore", async () => {
+  it("re-enables lifecycle replay and waits for networkidle after a back/forward-cache restore", async () => {
     const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
     await sm.start("aa11");
     const fake = makeFakeCdp({ readyState: "complete" });
@@ -604,8 +605,14 @@ describe("handleNavigateBack / Forward", () => {
       { cdp: fake.cdp, tabsApi: fake.tabsApi },
     );
     await new Promise((r) => setTimeout(r, 5));
+    const enablesBeforeRestore = fake.sent.filter(
+      (c) => c.method === "Page.setLifecycleEventsEnabled",
+    ).length;
     fake.fireFrameNavigated("frame-1", "loader-restored", "BackForwardCacheRestore");
     await new Promise((r) => setTimeout(r, 20));
+    expect(
+      fake.sent.filter((c) => c.method === "Page.setLifecycleEventsEnabled").length,
+    ).toBeGreaterThan(enablesBeforeRestore);
     expect(fake.listeners.length).toBe(1);
     fake.fireLifecycle("networkIdle", "frame-1", "loader-restored");
     const res = await navP;
