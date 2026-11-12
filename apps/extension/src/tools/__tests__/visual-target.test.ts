@@ -279,7 +279,9 @@ describe("visual target across idle CDP soft-detach", () => {
           query: async () => [],
         },
       });
-      const resolved = await resolveVisualRegionNow(txDeps.deps.cdp, f.candidate);
+      const resolution = resolveVisualRegionNow(txDeps.deps.cdp, f.candidate);
+      await vi.advanceTimersByTimeAsync(50);
+      const resolved = await resolution;
       expect(resolved).toMatchObject({
         crop: f.candidate.region.crop,
       });
@@ -291,7 +293,9 @@ describe("visual target across idle CDP soft-detach", () => {
       await vi.advanceTimersByTimeAsync(DEFAULT_IDLE_DETACH_MS);
       expect(f.cdp.isAttached(4)).toBe(false);
 
-      const shot = await captureVisualScreenshot(f.runner, f.candidate);
+      const capture = captureVisualScreenshot(f.runner, f.candidate);
+      await vi.advanceTimersByTimeAsync(50);
+      const shot = await capture;
       expect(shot).toMatchObject({
         width: oopif ? 200 : 100,
         height: oopif ? 80 : 40,

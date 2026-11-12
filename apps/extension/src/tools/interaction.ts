@@ -42,7 +42,7 @@ import type {
 import { type ClickOverlayDeps, withClickOverlay } from "./click-overlay";
 import { attachDialogs, markDialogCursor } from "./dialogs";
 import { backendNodeToObject } from "./element-geometry";
-import { rpcError } from "./errors";
+import { cdpError, rpcError } from "./errors";
 import { FOCUS_CHECK } from "./focus-state";
 import { resolveNodeGeometry, scrollElementAndFramesIntoView } from "./frame-geometry";
 import {
@@ -182,15 +182,21 @@ export async function resolveBackendNode(
     };
   }
   if (hasRef) {
-    let resolved = resolveSnapshotRef(ctx, params.ref as string, target.tabId);
+    const ref = params.ref as string;
+    let resolved = resolveSnapshotRef(ctx, ref, target.tabId);
     if (isRpcError(resolved)) return resolved;
-    if (cdp.reattachIfSoftDetached) {
-      await cdp.reattachIfSoftDetached(target.tabId);
-      resolved = resolveSnapshotRef(ctx, params.ref as string, target.tabId);
-      if (isRpcError(resolved)) return resolved;
-    } else if (resolved.cdpSessionId && cdp.reconcileSoftDetachedFrames) {
-      await cdp.reconcileSoftDetachedFrames(target.tabId);
-      resolved = resolveSnapshotRef(ctx, params.ref as string, target.tabId);
+    const reconcile =
+      cdp.reattachIfSoftDetached ??
+      (resolved.cdpSessionId ? cdp.reconcileSoftDetachedFrames : undefined);
+    if (reconcile) {
+      cdp.trackSessionTab?.(ctx.sessionId, target.tabId);
+      try {
+        await reconcile.call(cdp, target.tabId);
+      } catch (error) {
+        if (isAbortError(error)) return { code: "cancelled", message: `${toolName} aborted` };
+        return cdpError(error);
+      }
+      resolved = resolveSnapshotRef(ctx, ref, target.tabId);
       if (isRpcError(resolved)) return resolved;
     }
     const rawTarget: CdpTarget = {
@@ -764,6 +770,8 @@ export async function handleHover(
 
   const node = await resolveBackendNode(deps.cdp, ctx, target, params, "hover");
   if (isRpcError(node)) return node;
+  const cancelled = throwIfAborted(deps.signal);
+  if (cancelled) return cancelled;
 
   deps.cdp.trackSessionTab?.(ctx.sessionId, target.tabId);
   const geometry = await resolveNodeGeometry(
@@ -1335,6 +1343,7 @@ export async function handleFill(
 
   const node = await resolveBackendNode(deps.cdp, ctx, target, params, "fill");
   if (isRpcError(node)) return node;
+  if (throwIfAborted(deps.signal)) return { code: "cancelled", message: "fill aborted" };
   const nodeCdp = cdpRunnerForTarget(deps.cdp, node.cdpTarget);
   deps.cdp.trackSessionTab?.(ctx.sessionId, target.tabId);
 

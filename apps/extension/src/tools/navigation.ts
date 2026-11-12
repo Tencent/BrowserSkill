@@ -244,6 +244,7 @@ function startLifecycleWait(
   let beforeUnloadDecision: Promise<boolean | undefined> | undefined;
   let resolveBeforeUnload: ((accepted: boolean | undefined) => void) | undefined;
   let tryProbe = async (_mode: LifecycleProbeMode, _beforeReadyState?: string | null) => {};
+  const releaseAttachment = cdp.retainTabAttachment?.(expectedTabId);
   const promise = new Promise<WaitOutcome>((resolve) => {
     let settled = false;
     let sawRelevantLifecycle = false;
@@ -255,7 +256,6 @@ function startLifecycleWait(
     let pendingLifecycle: { name: string; frameId?: string; loaderId?: string } | null = null;
     let pendingSameDocument: { frameId: string; revision: number } | undefined;
     let listenerSub: { dispose(): void } | null = null;
-    let releaseTabAttachment: (() => void) | undefined;
     let timer: ReturnType<typeof setTimeout> | null = null;
     let dialogBudgetUsed = false;
     let beforeUnloadPending = false;
@@ -302,8 +302,6 @@ function startLifecycleWait(
         signal.removeEventListener("abort", abortHandler);
         abortHandler = null;
       }
-      releaseTabAttachment?.();
-      releaseTabAttachment = undefined;
     };
 
     const finish = (outcome: WaitOutcome) => {
@@ -398,8 +396,6 @@ function startLifecycleWait(
       finish({ reached: "cancelled", lastLifecycle });
       return;
     }
-
-    releaseTabAttachment = cdp.retainTabAttachment?.(expectedTabId);
 
     if (cdp.onEvent) {
       listenerSub = cdp.onEvent(
@@ -597,7 +593,7 @@ function startLifecycleWait(
   });
 
   return {
-    promise,
+    promise: promise.finally(releaseAttachment),
     refresh: () => refresh(),
     dialogDecision: () => beforeUnloadDecision ?? Promise.resolve(undefined),
     tryProbe: (mode, beforeReadyState) => tryProbe(mode, beforeReadyState),
@@ -654,6 +650,7 @@ export function waitForLifecyclePassive(
     0,
     Math.min(options.startGraceMs ?? DEFAULT_NAVIGATION_START_GRACE_MS, timeoutMs),
   );
+  const releaseAttachment = cdp.retainTabAttachment?.(expectedTabId);
   return new Promise<PassiveWaitOutcome>((resolve) => {
     let settled = false;
     let lastLifecycle: string | undefined;
@@ -680,7 +677,6 @@ export function waitForLifecyclePassive(
     let probeRevision = 0;
     let dialogBudgetUsed = false;
     let listenerSub: { dispose(): void } | null = null;
-    let releaseTabAttachment: (() => void) | undefined;
     let timer: ReturnType<typeof setTimeout> | null = null;
     let graceTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -691,8 +687,6 @@ export function waitForLifecyclePassive(
       if (graceTimer) clearTimeout(graceTimer);
       timer = graceTimer = null;
       signal?.removeEventListener("abort", onAbort);
-      releaseTabAttachment?.();
-      releaseTabAttachment = undefined;
     };
     const finish = (outcome: PassiveWaitOutcome) => {
       if (settled) return;
@@ -881,7 +875,6 @@ export function waitForLifecyclePassive(
       finish({ reached: "cancelled" });
       return;
     }
-    releaseTabAttachment = cdp.retainTabAttachment?.(expectedTabId);
     signal?.addEventListener("abort", onAbort, { once: true });
     timer = setTimeout(onTimeout, timeoutMs);
 
@@ -941,7 +934,7 @@ export function waitForLifecyclePassive(
       for (const event of replay) handle(event.method, event.params);
       void probe();
     })();
-  });
+  }).finally(releaseAttachment);
 }
 
 interface MainFrameInfo {

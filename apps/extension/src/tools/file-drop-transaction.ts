@@ -266,25 +266,28 @@ export async function uploadThroughFileDrop(
     return outcome;
   } finally {
     try {
-      await waitBounded(
-        sendToCdpTarget(options.cdp, target, "Runtime.releaseObjectGroup", { objectGroup }),
-        Date.now() + CLEANUP_TIMEOUT_MS,
-        undefined,
-        "releasing file-drop object group timed out",
-      );
-    } catch {
-      cleanupFailed = true;
-    }
+      try {
+        await waitBounded(
+          sendToCdpTarget(options.cdp, target, "Runtime.releaseObjectGroup", { objectGroup }),
+          Date.now() + CLEANUP_TIMEOUT_MS,
+          undefined,
+          "releasing file-drop object group timed out",
+        );
+      } catch {
+        cleanupFailed = true;
+      }
 
-    const effect = isRpcError(outcome)
-      ? (outcome.data?.effect_state as TransferEffectState | undefined)
-      : "committed";
-    if (effect === "unknown" || cleanupFailed) {
-      await options.cdp.detach?.(target.tabId);
+      const effect = isRpcError(outcome)
+        ? (outcome.data?.effect_state as TransferEffectState | undefined)
+        : "committed";
+      if (effect === "unknown" || cleanupFailed) {
+        await options.cdp.detach?.(target.tabId);
+      }
+      if (cleanupFailed && isRpcError(outcome)) {
+        outcome.data = { ...outcome.data, cleanup_state: "failed" };
+      }
+    } finally {
+      releaseTabAttachment?.();
     }
-    if (cleanupFailed && isRpcError(outcome)) {
-      outcome.data = { ...outcome.data, cleanup_state: "failed" };
-    }
-    releaseTabAttachment?.();
   }
 }

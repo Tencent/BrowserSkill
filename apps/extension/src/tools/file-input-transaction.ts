@@ -404,79 +404,82 @@ export async function uploadThroughActivatedFileInput(
       return outcome;
     }
   } finally {
-    chooserSubscription?.dispose();
-    let cleanupFailed = false;
-    if (options.cleanupTrigger) {
-      const cleanupDeadline = Date.now() + CLEANUP_TIMEOUT_MS;
-      try {
-        await waitBounded(
-          options.cleanupTrigger(cleanupDeadline),
-          cleanupDeadline,
-          undefined,
-          "upload trigger cleanup timed out",
-        );
-      } catch {
-        cleanupFailed = true;
-      }
-    }
-    if (probeArmed && triggerObjectId) {
-      try {
-        await waitBounded(
-          callOnTrigger(
-            { ...resolvedOptions, cdp: options.cdp.resourceCleanup ?? options.cdp },
-            triggerObjectId,
-            `function(key) {
-              const owner = this.ownerDocument.defaultView;
-              const state = owner?.[key];
-              if (state?.listener) this.ownerDocument.removeEventListener("click", state.listener, true);
-              if (owner) delete owner[key];
-            }`,
-            [stateKey],
-            true,
-          ),
-          Date.now() + CLEANUP_TIMEOUT_MS,
-          undefined,
-          "cleaning file input probe timed out",
-        );
-      } catch {
-        cleanupFailed = true;
-      }
-    }
-    if (interceptionArmed) {
-      try {
-        await waitBounded(
-          sendToCdpTarget(options.cdp, target, "Page.setInterceptFileChooserDialog", {
-            enabled: false,
-            cancel: true,
-          }),
-          Date.now() + CLEANUP_TIMEOUT_MS,
-          undefined,
-          "disabling file chooser interception timed out",
-        );
-      } catch {
-        cleanupFailed = true;
-      }
-    }
     try {
-      await waitBounded(
-        sendToCdpTarget(options.cdp, target, "Runtime.releaseObjectGroup", { objectGroup }),
-        Date.now() + CLEANUP_TIMEOUT_MS,
-        undefined,
-        "releasing upload object group timed out",
-      );
-    } catch {
-      cleanupFailed = true;
-    }
+      chooserSubscription?.dispose();
+      let cleanupFailed = false;
+      if (options.cleanupTrigger) {
+        const cleanupDeadline = Date.now() + CLEANUP_TIMEOUT_MS;
+        try {
+          await waitBounded(
+            options.cleanupTrigger(cleanupDeadline),
+            cleanupDeadline,
+            undefined,
+            "upload trigger cleanup timed out",
+          );
+        } catch {
+          cleanupFailed = true;
+        }
+      }
+      if (probeArmed && triggerObjectId) {
+        try {
+          await waitBounded(
+            callOnTrigger(
+              { ...resolvedOptions, cdp: options.cdp.resourceCleanup ?? options.cdp },
+              triggerObjectId,
+              `function(key) {
+                const owner = this.ownerDocument.defaultView;
+                const state = owner?.[key];
+                if (state?.listener) this.ownerDocument.removeEventListener("click", state.listener, true);
+                if (owner) delete owner[key];
+              }`,
+              [stateKey],
+              true,
+            ),
+            Date.now() + CLEANUP_TIMEOUT_MS,
+            undefined,
+            "cleaning file input probe timed out",
+          );
+        } catch {
+          cleanupFailed = true;
+        }
+      }
+      if (interceptionArmed) {
+        try {
+          await waitBounded(
+            sendToCdpTarget(options.cdp, target, "Page.setInterceptFileChooserDialog", {
+              enabled: false,
+              cancel: true,
+            }),
+            Date.now() + CLEANUP_TIMEOUT_MS,
+            undefined,
+            "disabling file chooser interception timed out",
+          );
+        } catch {
+          cleanupFailed = true;
+        }
+      }
+      try {
+        await waitBounded(
+          sendToCdpTarget(options.cdp, target, "Runtime.releaseObjectGroup", { objectGroup }),
+          Date.now() + CLEANUP_TIMEOUT_MS,
+          undefined,
+          "releasing upload object group timed out",
+        );
+      } catch {
+        cleanupFailed = true;
+      }
 
-    const effect = isRpcError(outcome)
-      ? (outcome.data?.effect_state as TransferEffectState | undefined)
-      : "committed";
-    if (effect === "unknown" || cleanupFailed) {
-      await options.cdp.detach?.(target.tabId);
+      const effect = isRpcError(outcome)
+        ? (outcome.data?.effect_state as TransferEffectState | undefined)
+        : "committed";
+      if (effect === "unknown" || cleanupFailed) {
+        await options.cdp.detach?.(target.tabId);
+      }
+      if (cleanupFailed && isRpcError(outcome)) {
+        outcome.data = { ...outcome.data, cleanup_state: "failed" };
+      }
+    } finally {
+      releaseTabAttachment?.();
     }
-    if (cleanupFailed && isRpcError(outcome)) {
-      outcome.data = { ...outcome.data, cleanup_state: "failed" };
-    }
-    releaseTabAttachment?.();
   }
 }

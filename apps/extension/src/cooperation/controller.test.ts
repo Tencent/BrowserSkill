@@ -3896,12 +3896,13 @@ describe("tool.record_start cooperation guard", () => {
       await vi.advanceTimersByTimeAsync(DEFAULT_IDLE_DETACH_MS);
       expect(cdp.isAttached(7)).toBe(false);
 
-      const unchangedSync = await f.controller.command(
+      const unchanged = f.controller.command(
         { session_id: "shared", tab_id: 7, action: "sync", timeout_ms: 0 },
         runner,
         f.abort.signal,
       );
-      expect(unchangedSync).toMatchObject({ kind: "unchanged" });
+      await vi.advanceTimersByTimeAsync(50);
+      expect(await unchanged).toMatchObject({ kind: "unchanged" });
       expect(snapshotCount).toBe(1);
 
       // Existing `@e2` bound to pre-soft-detach `oopif-1` transparently routes to `oopif-2`!
@@ -3917,12 +3918,13 @@ describe("tool.record_start cooperation guard", () => {
       expect(cdp.isAttached(7)).toBe(false);
       oopifPresent = false;
 
-      const healedSync = await f.controller.command(
+      const healed = f.controller.command(
         { session_id: "shared", tab_id: 7, action: "sync", timeout_ms: 0 },
         runner,
         f.abort.signal,
       );
-      expect(healedSync).toMatchObject({
+      await vi.advanceTimersByTimeAsync(50);
+      expect(await healed).toMatchObject({
         kind: "baseline",
         observation: { text: "Main [ref=@e1]", ref_count: 1 },
       });
