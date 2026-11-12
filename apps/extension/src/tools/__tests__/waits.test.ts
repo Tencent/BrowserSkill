@@ -275,11 +275,123 @@ describe("handleWaitForNavigation", () => {
       { cdp: fake.cdp, tabsApi: fake.tabsApi, navigationStartGraceMs: 2_000 },
     );
     await new Promise((r) => setTimeout(r, 5));
+    // Chromium wraps same-document navigations in frameStartedNavigating/frameStartedLoading.
+    fake.fire("Page.frameStartedNavigating", {
+      frameId: "frame-1",
+      navigationType: "historySameDocument",
+    });
+    fake.fire("Page.frameStartedLoading", { frameId: "frame-1" });
     fake.fire("Page.navigatedWithinDocument", { frameId: "frame-1", url: "https://x.test/#b" });
+    fake.fire("Page.frameStoppedLoading", { frameId: "frame-1" });
     const res = await p;
     if ("code" in res) throw new Error(`unexpected error: ${JSON.stringify(res)}`);
     expect(res.reached).toBe("load");
     expect(Date.now() - started).toBeLessThan(1_000);
+  });
+
+  it("does not time out on a settled page when timeout_ms is within the start grace", async () => {
+    const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
+    await sm.start("aa11");
+    const fake = makeFakeCdp({ readyState: "complete", loaderId: "loader-1" });
+    const res = await handleWaitForNavigation(
+      sm,
+      { session_id: "aa11", wait_until: "load", timeout_ms: 40 },
+      { cdp: fake.cdp, tabsApi: fake.tabsApi },
+    );
+    if ("code" in res) throw new Error(`unexpected error: ${JSON.stringify(res)}`);
+    expect(res.reached).toBe("load");
+    expect(fake.listeners.length).toBe(0);
+  });
+
+  it("follows a client redirect started by an intermediate committed page", async () => {
+    const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
+    await sm.start("aa11");
+    const fake = makeFakeCdp({ readyState: "complete", loaderId: "loader-a" });
+    let done = false;
+    const p = handleWaitForNavigation(
+      sm,
+      { session_id: "aa11", wait_until: "load", timeout_ms: 2_000 },
+      { cdp: fake.cdp, tabsApi: fake.tabsApi, navigationStartGraceMs: 30 },
+    ).finally(() => {
+      done = true;
+    });
+    await new Promise((r) => setTimeout(r, 5));
+    fake.fire("Page.frameRequestedNavigation", { frameId: "frame-1", disposition: "currentTab" });
+    fake.commit("loader-b", "loading");
+    fake.fire("Page.frameRequestedNavigation", { frameId: "frame-1", disposition: "currentTab" });
+    fake.fireLifecycle("DOMContentLoaded", 4, "frame-1", "loader-b");
+    fake.fireLifecycle("load", 4, "frame-1", "loader-b");
+    await new Promise((r) => setTimeout(r, 30));
+    expect(done).toBe(false);
+    fake.commit("loader-c", "loading");
+    fake.fireLifecycle("load", 4, "frame-1", "loader-c");
+    const res = await p;
+    if ("code" in res) throw new Error(`unexpected error: ${JSON.stringify(res)}`);
+    expect(res.reached).toBe("load");
+  });
+
+  it("replays networkIdle on settled, same-document and bfcache-restored documents while honoring grace", async () => {
+    const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
+    await sm.start("aa11");
+    let idle = true;
+    let activeLoader = "loader-1";
+    const fake = makeFakeCdp({
+      readyState: "complete",
+      loaderId: activeLoader,
+      handlers: {
+        "Page.setLifecycleEventsEnabled": () => {
+          if (idle) {
+            queueMicrotask(() => fake.fireLifecycle("networkIdle", 4, "frame-1", activeLoader));
+          }
+          return {};
+        },
+      },
+    });
+
+    // 1. Settled idle page resolves after grace.
+    const settledStart = Date.now();
+    const settledRes = await handleWaitForNavigation(
+      sm,
+      { session_id: "aa11", wait_until: "networkidle", timeout_ms: 2_000 },
+      { cdp: fake.cdp, tabsApi: fake.tabsApi, navigationStartGraceMs: 35 },
+    );
+    expect(settledRes).toMatchObject({ reached: "networkidle" });
+    expect(Date.now() - settledStart).toBeGreaterThanOrEqual(25);
+
+    // 2. Old complete page emitting networkIdle before a scheduled navigation does not return early.
+    idle = false;
+    let scheduledDone = false;
+    const scheduled = handleWaitForNavigation(
+      sm,
+      { session_id: "aa11", wait_until: "networkidle", timeout_ms: 2_000 },
+      { cdp: fake.cdp, tabsApi: fake.tabsApi, navigationStartGraceMs: 60 },
+    ).finally(() => {
+      scheduledDone = true;
+    });
+    await new Promise((r) => setTimeout(r, 10));
+    fake.fireLifecycle("networkIdle", 4, "frame-1", "loader-1");
+    await new Promise((r) => setTimeout(r, 15));
+    expect(scheduledDone).toBe(false);
+    fake.fire("Page.frameRequestedNavigation", { frameId: "frame-1", disposition: "currentTab" });
+    activeLoader = "loader-2";
+    fake.commit("loader-2", "complete");
+    await new Promise((r) => setTimeout(r, 50));
+    expect(scheduledDone).toBe(false);
+    fake.fireLifecycle("networkIdle", 4, "frame-1", "loader-2");
+    expect(await scheduled).toMatchObject({ reached: "networkidle" });
+
+    // 3. BFCache restore replays networkIdle without timing out.
+    idle = true;
+    const bfcache = handleWaitForNavigation(
+      sm,
+      { session_id: "aa11", wait_until: "networkidle", timeout_ms: 2_000 },
+      { cdp: fake.cdp, tabsApi: fake.tabsApi, navigationStartGraceMs: 1_000 },
+    );
+    await new Promise((r) => setTimeout(r, 5));
+    fake.fire("Page.frameStartedLoading", { frameId: "frame-1" });
+    activeLoader = "loader-restored";
+    fake.commit("loader-restored", "complete", "BackForwardCacheRestore");
+    expect(await bfcache).toMatchObject({ reached: "networkidle" });
   });
 
   it("resolves on the requested lifecycle event (defaults to load)", async () => {

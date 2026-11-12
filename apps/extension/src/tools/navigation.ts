@@ -627,6 +627,7 @@ export function waitForLifecyclePassive(
   signal: AbortSignal | undefined,
   options: PassiveLifecycleWaitOptions = {},
 ): Promise<PassiveWaitOutcome> {
+  const startedAt = Date.now();
   const graceMs = Math.max(
     0,
     Math.min(options.startGraceMs ?? DEFAULT_NAVIGATION_START_GRACE_MS, timeoutMs),
@@ -640,12 +641,20 @@ export function waitForLifecyclePassive(
     let buffered: PassiveEvent[] | null = [];
     /** A main-frame navigation started; the baseline document no longer counts. */
     let navigating = false;
+    /** A cross-document navigation started and has not committed or stopped yet. */
+    let crossDocumentPending = false;
+    /** A committed successor started another current-tab navigation (e.g. client redirect). */
+    let successorPending = false;
     /** `loaderId` of the document committed after the wait started, if any. */
     let committed: string | null = null;
     /** The baseline document changed URL without a new document. */
     let sameDocument = false;
+    /** Baseline had already settled at entry; accept its lifecycle only after grace. */
+    let baselineRequiresGrace = false;
     /** The baseline already reached the phase; only the grace period can accept it. */
     let baselineSettled = false;
+    let settledLifecycle: string | undefined;
+    let initialReplayRequested = false;
     let probeRevision = 0;
     let dialogBudgetUsed = false;
     let listenerSub: { dispose(): void } | null = null;
@@ -667,16 +676,38 @@ export function waitForLifecyclePassive(
       resolve(outcome);
     };
     const onAbort = () => finish({ reached: "cancelled", lastLifecycle });
-    const isMainFrame = (id: string | undefined) => id === frameId;
-    /** Documents whose lifecycle can satisfy the wait right now. */
-    const relevantLoader = (loaderId: string | undefined): boolean => {
-      if (committed) return loaderId === committed;
-      if (navigating || baselineSettled) return false;
-      return !baseline || !loaderId || loaderId === baseline;
+    const onTimeout = () => {
+      if (baselineSettled && !navigating && !committed && !successorPending) {
+        finish({ reached: "match", lastLifecycle: settledLifecycle ?? targetName });
+        return;
+      }
+      finish({ reached: "timeout", lastLifecycle });
     };
+    const isMainFrame = (id: string | undefined) => id === frameId;
     const stopGrace = () => {
       if (graceTimer) clearTimeout(graceTimer);
       graceTimer = null;
+    };
+    const replayLifecycleEvents = () => {
+      void cdp
+        .send(expectedTabId, "Page.setLifecycleEventsEnabled", { enabled: true })
+        .catch(() => {});
+    };
+    const settleBaseline = (lifecycle: string) => {
+      if (settled || navigating || committed || successorPending) return;
+      if (sameDocument) {
+        finish({ reached: "match", lastLifecycle: lifecycle });
+        return;
+      }
+      baselineSettled = true;
+      settledLifecycle = lifecycle;
+      if (graceTimer) return;
+      const remainingGrace = Math.max(0, graceMs - (Date.now() - startedAt));
+      graceTimer = setTimeout(() => {
+        graceTimer = null;
+        if (!navigating && !committed && !successorPending)
+          finish({ reached: "match", lastLifecycle: settledLifecycle ?? targetName });
+      }, remainingGrace);
     };
 
     // Inspect the document the browser currently shows. A settled baseline
@@ -692,42 +723,62 @@ export function waitForLifecyclePassive(
         expectedLoader ? readMainFrameInfo(cdp, expectedTabId) : undefined,
       ]);
       if (settled || revision !== probeRevision || readyState === null) return;
-      if (!lifecycleAlreadyReached(readyState, targetName)) return;
       if (expectedLoader) {
-        if (committed === expectedLoader && frame?.loaderId === expectedLoader)
+        if (
+          !successorPending &&
+          committed === expectedLoader &&
+          frame?.loaderId === expectedLoader &&
+          lifecycleAlreadyReached(readyState, targetName)
+        )
           finish({ reached: "match", lastLifecycle: targetName });
         return;
       }
-      if (navigating || committed) return;
-      if (sameDocument) {
-        finish({ reached: "match", lastLifecycle: targetName });
+      if (committed) return;
+      if (readyState === "complete" || lifecycleAlreadyReached(readyState, targetName))
+        baselineRequiresGrace = true;
+      if (navigating) return;
+      if (lifecycleAlreadyReached(readyState, targetName)) {
+        settleBaseline(targetName);
         return;
       }
-      baselineSettled = true;
-      if (graceTimer) return;
-      graceTimer = setTimeout(() => {
-        graceTimer = null;
-        if (!navigating && !committed) finish({ reached: "match", lastLifecycle: targetName });
-      }, graceMs);
+      if (targetName === "networkIdle" && readyState === "complete" && !initialReplayRequested) {
+        initialReplayRequested = true;
+        replayLifecycleEvents();
+      }
     };
 
     const handle = (method: string, params: unknown) => {
       if (settled) return;
       const p = (params ?? {}) as {
         name?: string;
+        type?: string;
         frameId?: string;
         loaderId?: string;
         disposition?: string;
+        navigationType?: string;
         frame?: { id?: string; parentId?: string; loaderId?: string };
       };
       switch (method) {
         case "Page.frameRequestedNavigation":
           if (isMainFrame(p.frameId) && (!p.disposition || p.disposition === "currentTab")) {
             navigating = true;
+            crossDocumentPending = true;
+            if (committed) successorPending = true;
             stopGrace();
           }
           return;
         case "Page.frameStartedNavigating":
+          if (
+            isMainFrame(p.frameId) &&
+            p.navigationType !== "sameDocument" &&
+            p.navigationType !== "historySameDocument"
+          ) {
+            navigating = true;
+            crossDocumentPending = true;
+            if (committed) successorPending = true;
+            stopGrace();
+          }
+          return;
         case "Page.frameStartedLoading":
           if (isMainFrame(p.frameId)) {
             navigating = true;
@@ -736,18 +787,29 @@ export function waitForLifecyclePassive(
           return;
         case "Page.frameStoppedLoading":
           // A started navigation that never committed (204, download,
-          // cancellation) leaves the baseline document in place.
-          if (isMainFrame(p.frameId) && navigating && !committed) {
-            navigating = false;
-            void probe();
+          // cancellation) leaves the current document in place.
+          if (isMainFrame(p.frameId)) {
+            if (successorPending) {
+              successorPending = false;
+              crossDocumentPending = false;
+              void probe();
+            } else if (navigating && !committed) {
+              navigating = false;
+              crossDocumentPending = false;
+              void probe();
+            }
           }
           return;
         case "Page.navigatedWithinDocument":
-          // Same-document navigation reuses an already loaded document.
-          if (isMainFrame(p.frameId) && !navigating && !committed) {
+          // Same-document navigation reuses an already loaded document; Chrome
+          // precedes it with `Page.frameStartedLoading` on the same document.
+          if (isMainFrame(p.frameId) && !crossDocumentPending && !committed) {
             sameDocument = true;
+            navigating = false;
             lastLifecycle = "commit";
+            stopGrace();
             if (targetName === "commit") finish({ reached: "match", lastLifecycle: "commit" });
+            else if (targetName === "networkIdle") replayLifecycleEvents();
             else void probe();
           }
           return;
@@ -757,18 +819,34 @@ export function waitForLifecyclePassive(
           // A replayed commit of the baseline only counts when its start was seen.
           if (frame.loaderId === baseline && !committed && !navigating) return;
           navigating = true;
+          crossDocumentPending = false;
+          successorPending = false;
           committed = frame.loaderId;
           lastLifecycle = "commit";
           stopGrace();
           if (targetName === "commit") finish({ reached: "match", lastLifecycle: "commit" });
+          else if (p.type === "BackForwardCacheRestore" && targetName === "networkIdle")
+            replayLifecycleEvents();
           else void probe();
           return;
         }
         case "Page.lifecycleEvent": {
-          if (!p.name || !isMainFrame(p.frameId) || !relevantLoader(p.loaderId)) return;
+          if (!p.name || !isMainFrame(p.frameId)) return;
+          if (committed) {
+            if (successorPending || p.loaderId !== committed) return;
+            lastLifecycle = p.name;
+            if (lifecycleMeetsOrExceeds(p.name, targetName))
+              finish({ reached: "match", lastLifecycle: p.name });
+            return;
+          }
+          if (navigating || (baseline && p.loaderId && p.loaderId !== baseline)) return;
           lastLifecycle = p.name;
-          if (lifecycleMeetsOrExceeds(p.name, targetName))
-            finish({ reached: "match", lastLifecycle: p.name });
+          if (!lifecycleMeetsOrExceeds(p.name, targetName)) return;
+          if (baselineRequiresGrace && !sameDocument) {
+            settleBaseline(p.name);
+            return;
+          }
+          finish({ reached: "match", lastLifecycle: p.name });
           return;
         }
       }
@@ -779,7 +857,7 @@ export function waitForLifecyclePassive(
       return;
     }
     signal?.addEventListener("abort", onAbort, { once: true });
-    timer = setTimeout(() => finish({ reached: "timeout", lastLifecycle }), timeoutMs);
+    timer = setTimeout(onTimeout, timeoutMs);
 
     listenerSub =
       cdp.onEvent?.((source, method, params) => {
@@ -789,10 +867,7 @@ export function waitForLifecyclePassive(
           if (!dialogBudgetUsed) {
             dialogBudgetUsed = true;
             if (timer) clearTimeout(timer);
-            timer = setTimeout(
-              () => finish({ reached: "timeout", lastLifecycle }),
-              timeoutMs + 60_000,
-            );
+            timer = setTimeout(onTimeout, timeoutMs + 60_000);
           }
           return;
         }
@@ -831,7 +906,10 @@ export function waitForLifecyclePassive(
       }
       frameId = frame.id;
       baseline = frame.loaderId ?? null;
-      if (pending) navigating = true;
+      if (pending) {
+        navigating = true;
+        crossDocumentPending = true;
+      }
       const replay = buffered ?? [];
       buffered = null;
       for (const event of replay) handle(event.method, event.params);

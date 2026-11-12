@@ -19,17 +19,26 @@ interface CdpEvent {
 }
 
 const START_PAGE = `<!doctype html><title>Start</title>
-<button id="delayed" onclick="setTimeout(() => { location.href = '/next'; }, 600)">Delayed</button>
+<button id="delayed" onclick="setTimeout(() => { location.href = '/next'; }, 120)">Delayed</button>
 <a id="link" href="/next">Next</a>
-<button id="noop">No navigation</button>`;
+<a id="redirect" href="/callback">Redirect</a>
+<a id="hash" href="#section">Hash</a>
+<button id="noop">No navigation</button>
+<div id="section">Section</div>`;
 
 describe.skipIf(!process.env.BSK_NAV_CHROME)("real browser wait_for_navigation", () => {
-  it("waits for scheduled and in-flight navigations instead of the settled page", async () => {
+  it("waits for scheduled, in-flight, client-redirected and same-document navigations", async () => {
     const server = createServer((request, response) => {
       response.setHeader("Content-Type", "text/html");
+      if (request.url === "/callback") {
+        response.end(
+          "<!doctype html><title>Callback</title><script>location.replace('/next')</script>",
+        );
+        return;
+      }
       if (request.url === "/next") {
-        // Keep the successor in flight for a moment so the old page stays complete.
-        setTimeout(() => response.end("<!doctype html><title>Next</title>Next"), 150);
+        // Longer than navigationStartGraceMs (300ms) so in-flight detection is required.
+        setTimeout(() => response.end("<!doctype html><title>Next</title>Next"), 500);
         return;
       }
       response.end(START_PAGE);
@@ -37,6 +46,7 @@ describe.skipIf(!process.env.BSK_NAV_CHROME)("real browser wait_for_navigation",
     await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
     const url = `http://127.0.0.1:${(server.address() as { port: number }).port}/`;
     let sessionId: string | undefined;
+    let pendingUrl: string | undefined;
     const listeners = new Set<Listener>();
     try {
       const { withChrome } = await import(
@@ -52,9 +62,26 @@ describe.skipIf(!process.env.BSK_NAV_CHROME)("real browser wait_for_navigation",
           zoom: 1,
           startupTimeout: 30_000,
           onEvent: (event: CdpEvent) => {
-            if (sessionId && event.sessionId === sessionId)
-              for (const listener of [...listeners])
-                listener({ tabId: 4 }, event.method, event.params);
+            if (!sessionId || event.sessionId !== sessionId) return;
+            const p = (event.params ?? {}) as {
+              url?: string;
+              navigationType?: string;
+              frame?: { parentId?: string };
+            };
+            if (
+              event.method === "Page.frameStartedNavigating" &&
+              p.navigationType !== "sameDocument" &&
+              p.navigationType !== "historySameDocument"
+            ) {
+              pendingUrl = p.url;
+            } else if (
+              (event.method === "Page.frameNavigated" && !p.frame?.parentId) ||
+              event.method === "Page.frameStoppedLoading"
+            ) {
+              pendingUrl = undefined;
+            }
+            for (const listener of [...listeners])
+              listener({ tabId: 4 }, event.method, event.params);
           },
         },
         async (send: Send) => {
@@ -65,6 +92,7 @@ describe.skipIf(!process.env.BSK_NAV_CHROME)("real browser wait_for_navigation",
             targetId,
             flatten: true,
           }));
+          await send("Page.enable", {}, sessionId);
           const evaluate = async <T>(expression: string): Promise<T> => {
             const reply = await send<{ result: { value: T }; exceptionDetails?: unknown }>(
               "Runtime.evaluate",
@@ -75,12 +103,14 @@ describe.skipIf(!process.env.BSK_NAV_CHROME)("real browser wait_for_navigation",
             return reply.result.value;
           };
           const load = async () => {
+            pendingUrl = undefined;
             await send("Page.navigate", { url }, sessionId);
             await expect
               .poll(() =>
                 evaluate("document.title === 'Start' && document.readyState === 'complete'"),
               )
               .toBe(true);
+            pendingUrl = undefined;
           };
           const manager = new SessionManager({
             agentWindow: {
@@ -104,16 +134,21 @@ describe.skipIf(!process.env.BSK_NAV_CHROME)("real browser wait_for_navigation",
               windowId: 100,
               active: true,
               url: await evaluate<string>("location.href"),
+              ...(pendingUrl ? { pendingUrl } : {}),
             }) as chrome.tabs.Tab;
-          const deps = { cdp, tabsApi: { get: tab, query: async () => [await tab()] } };
-          const wait = () =>
+          const deps = {
+            cdp,
+            tabsApi: { get: tab, query: async () => [await tab()] },
+            navigationStartGraceMs: 300,
+          };
+          const wait = (waitUntil: "load" | "networkidle" = "load", graceMs = 300) =>
             handleWaitForNavigation(
               manager,
-              { session_id: "wait-nav", wait_until: "load", timeout_ms: 5_000 },
-              deps,
+              { session_id: "wait-nav", wait_until: waitUntil, timeout_ms: 5_000 },
+              { ...deps, navigationStartGraceMs: graceMs },
             );
 
-          for (const trigger of ["#delayed", "#link"]) {
+          for (const trigger of ["#delayed", "#link", "#redirect"]) {
             await load();
             await evaluate(`document.querySelector(${JSON.stringify(trigger)}).click(), true`);
             const result = await wait();
@@ -123,13 +158,34 @@ describe.skipIf(!process.env.BSK_NAV_CHROME)("real browser wait_for_navigation",
             expect(listeners.size).toBe(0);
           }
 
+          for (const phase of ["load", "networkidle"] as const) {
+            await load();
+            const hashStart = Date.now();
+            const hashWait = wait(phase, 2_000);
+            setTimeout(() => {
+              void evaluate("document.querySelector('#hash').click(), true");
+            }, 60);
+            expect(await hashWait, `hash/${phase}`).toMatchObject({ reached: phase });
+            expect(Date.now() - hashStart, `hash/${phase}`).toBeLessThan(1_200);
+            expect(await evaluate("location.hash"), `hash/${phase}`).toBe("#section");
+            expect(listeners.size).toBe(0);
+          }
+
           await load();
-          await evaluate("document.querySelector('#noop').click(), true");
-          const started = Date.now();
-          expect(await wait()).toMatchObject({ reached: "load" });
-          expect(Date.now() - started).toBeLessThan(4_000);
-          expect(await evaluate("location.pathname")).toBe("/");
+          await evaluate("document.querySelector('#delayed').click(), true");
+          expect(await wait("networkidle", 300)).toMatchObject({ reached: "networkidle" });
+          expect(await evaluate("location.pathname")).toBe("/next");
           expect(listeners.size).toBe(0);
+
+          for (const phase of ["load", "networkidle"] as const) {
+            await load();
+            await evaluate("document.querySelector('#noop').click(), true");
+            const started = Date.now();
+            expect(await wait(phase, 300), `noop/${phase}`).toMatchObject({ reached: phase });
+            expect(Date.now() - started, `noop/${phase}`).toBeLessThan(2_000);
+            expect(await evaluate("location.pathname")).toBe("/");
+            expect(listeners.size).toBe(0);
+          }
         },
       );
     } finally {
