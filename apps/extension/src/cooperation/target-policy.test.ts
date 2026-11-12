@@ -1314,3 +1314,217 @@ describe("targeted optimistic fast-path", () => {
     expect(await f.run()).toMatchObject({ data: { reason: "control_context_invalid" } });
   });
 });
+
+describe("text deltas under target control", () => {
+  const VOM = [
+    "L1 page",
+    '  banner "Board Version: rev-0"',
+    '    StaticText "Board"',
+    '    StaticText "Version: rev-0"',
+    '  @e1 button "Continue"',
+  ].join("\n");
+  const logged = (sequence: number, previous_value: string, value: string) => ({
+    sequence,
+    id: "9",
+    label: "span#cell",
+    previous_value,
+    value,
+  });
+  const snapshots = vi.mocked(handleSnapshot);
+  let original: ReturnType<typeof snapshots.getMockImplementation>;
+  beforeEach(() => {
+    original = snapshots.getMockImplementation();
+    snapshots.mockImplementation(async () => ({
+      text: VOM,
+      ref_count: 1,
+      tab_id: 7,
+      truncated: false,
+    }));
+  });
+  afterEach(() => {
+    snapshots.mockImplementation(original!);
+  });
+  /** A page whose collector vouches for focus styles, observed once in full. */
+  async function observed() {
+    const f = await fixture();
+    f.change({ focus: "1", focusIsDocument: true, focusNeutral: true, textual: 0, texts: [] });
+    // A collector that never vouched for focus styles cannot have its focus move patched.
+    const full = await f.sync();
+    expect(full).toMatchObject({ kind: "baseline", baseline_reason: "focus_changed" });
+    return { f, full, captures: snapshots.mock.calls.length };
+  }
+
+  it("answers baseline, unchanged, delta, delta, unchanged with one capture", async () => {
+    const { f, full, captures } = await observed();
+    expect(f.first).toMatchObject({ kind: "baseline", baseline_reason: "no_previous_observation" });
+    const same = await f.sync();
+    expect(same).toMatchObject({ kind: "unchanged", previous_observation_id: full.observation_id });
+
+    // The agent's click: pointer events, focus on the button, one text replaced.
+    f.change({
+      revision: 9,
+      structure: 1,
+      textual: 1,
+      texts: [logged(1, "Version: rev-0", "Version: rev-1")],
+      focus: "5",
+      focusIsDocument: false,
+    });
+    const first = await f.sync();
+    expect(first).toMatchObject({
+      kind: "delta",
+      context_id: full.context_id,
+      previous_context_id: full.context_id,
+      previous_observation_id: same.observation_id,
+      observation_patch: {
+        lines: [
+          {
+            line: 2,
+            previous: '  banner "Board Version: rev-0"',
+            text: '  banner "Board Version: rev-1"',
+          },
+          {
+            line: 4,
+            previous: '    StaticText "Version: rev-0"',
+            text: '    StaticText "Version: rev-1"',
+          },
+        ],
+      },
+      changes: [
+        {
+          frame_id: 0,
+          kind: "text",
+          label: "span#cell",
+          previous_value: "Version: rev-0",
+          value: "Version: rev-1",
+          lines: [2, 4],
+        },
+      ],
+    });
+    expect(first).not.toHaveProperty("observation");
+    expect(first).not.toHaveProperty("baseline_reason");
+
+    f.change({
+      structure: 2,
+      textual: 2,
+      texts: [
+        logged(1, "Version: rev-0", "Version: rev-1"),
+        logged(2, "Version: rev-1", "Version: rev-2"),
+      ],
+    });
+    const second = await f.sync();
+    expect(second).toMatchObject({
+      kind: "delta",
+      previous_observation_id: first.observation_id,
+      observation_patch: {
+        lines: [
+          { line: 2, previous: '  banner "Board Version: rev-1"' },
+          { line: 4, text: '    StaticText "Version: rev-2"' },
+        ],
+      },
+    });
+    expect(await f.sync()).toMatchObject({
+      kind: "unchanged",
+      changes: [],
+      previous_observation_id: second.observation_id,
+    });
+    expect(snapshots).toHaveBeenCalledTimes(captures);
+  });
+
+  it.each<[string, Partial<FrameState>]>([
+    // A node was added or removed, or an attribute the page can show changed.
+    ["structure_changed", { structure: 1 }],
+    ["structure_changed", { structure: 2, textual: 1, texts: [logged(1, "Board", "Panel")] }],
+    ["human_activity", { human: 1 }],
+    ["focus_changed", { focus: "5", focusIsDocument: false, focusNeutral: false }],
+    // The bounded log dropped replacements this agent never received.
+    ["text_log_gap", { structure: 3, textual: 3, textFloor: 2, texts: [logged(3, "a", "b")] }],
+    // Hidden, or beyond where the observation was cut.
+    [
+      "text_outside_observation",
+      { structure: 1, textual: 1, texts: [logged(1, "Hidden: 1", "Hidden: 2")] },
+    ],
+    // The text names a control, whose ref keeps that name.
+    ["text_ambiguous", { structure: 1, textual: 1, texts: [logged(1, "Continue", "Next")] }],
+  ])("captures afresh and says %s", async (reason, patch) => {
+    const { f, captures } = await observed();
+    f.change(patch);
+    const reply = await f.sync();
+    expect(reply).toMatchObject({
+      kind: "baseline",
+      baseline_reason: reason,
+      observation: { text: VOM },
+    });
+    expect(reply).not.toHaveProperty("observation_patch");
+    expect(snapshots).toHaveBeenCalledTimes(captures + 1);
+  });
+
+  it("captures afresh when the document, the refs or the token budget were replaced", async () => {
+    const text = [logged(1, "Version: rev-0", "Version: rev-1")];
+    const { f } = await observed();
+    f.change({ structure: 1, textual: 1, texts: text });
+    f.session.refStore.clear();
+    expect(await f.sync()).toMatchObject({ kind: "baseline", baseline_reason: "refs_replaced" });
+    f.change({ structure: 2, textual: 2, texts: text });
+    expect(
+      await f.controller.command(
+        { session_id: "s", tab_id: 7, action: "sync", max_tokens: 500 },
+        f.cdp,
+        f.signal,
+      ),
+    ).toMatchObject({ kind: "baseline", baseline_reason: "token_budget_changed" });
+    // A new document in the frame: nothing logged for the old one applies.
+    f.change({ document: "next", structure: 0, textual: 1, texts: text }, false);
+    const replaced = await f.sync();
+    expect(replaced).toMatchObject({ kind: "baseline", observation: { text: VOM } });
+    expect(replaced).not.toHaveProperty("observation_patch");
+  });
+
+  it("leaves strict control re-capturing on every structural batch", async () => {
+    const f = await fixture("strict");
+    f.change({ focusNeutral: true, textual: 0, texts: [] });
+    await f.sync();
+    f.change({ structure: 1, textual: 1, texts: [logged(1, "Version: rev-0", "Version: rev-1")] });
+    const reply = await f.sync();
+    expect(reply).toMatchObject({ kind: "baseline", baseline_reason: "structure_changed" });
+    expect(reply).not.toHaveProperty("observation_patch");
+  });
+
+  it("keeps the action guards: target identity is checked, a stale strict observation refused", async () => {
+    const { f } = await observed();
+    f.change({ structure: 1, textual: 1, texts: [logged(1, "Version: rev-0", "Version: rev-1")] });
+    const delta = await f.sync();
+    expect(delta).toMatchObject({ kind: "delta" });
+
+    // A DOM-targeted action still passes through the target identity check.
+    vi.mocked(checkActionTarget).mockClear();
+    expect(await f.run({ context_id: delta.context_id })).not.toHaveProperty("code");
+    expect(checkActionTarget).toHaveBeenCalled();
+
+    // The page moved on after the delta. An action bound to that strict
+    // observation has no evidence to compare against and is refused untouched.
+    f.send.mockClear();
+    f.change({});
+    const script = (runner: CdpRunner) =>
+      runner.send(7, "Runtime.evaluate", { expression: "submit()" });
+    expect(
+      await f.run(
+        { context_id: delta.context_id, ref: "e1", observation_id: delta.observation_id },
+        "tool.evaluate",
+        script,
+      ),
+    ).toMatchObject({ code: expect.any(String), data: { effect_state: "none" } });
+    expect(f.send).not.toHaveBeenCalled();
+
+    // That refusal ends the patching: the next sync captures the page, with
+    // evidence, so a page that keeps changing cannot refuse the action forever.
+    f.change({
+      structure: 2,
+      textual: 2,
+      texts: [
+        logged(1, "Version: rev-0", "Version: rev-1"),
+        logged(2, "Version: rev-1", "Version: rev-2"),
+      ],
+    });
+    expect(await f.sync()).toMatchObject({ kind: "baseline", baseline_reason: "no_held_text" });
+  });
+});

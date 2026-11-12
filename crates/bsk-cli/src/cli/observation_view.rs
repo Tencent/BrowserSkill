@@ -48,7 +48,35 @@ pub(crate) fn read(path: &Path) -> anyhow::Result<Value> {
     Ok(value)
 }
 
-/// Reuse only an explicitly supplied, exact unchanged predecessor. Never rebase an action.
+/// The saved text with a text delta's line replacements applied. Every replaced
+/// line must still read as the extension saw it; anything else is not this text.
+fn patched(reply: &Value, text: &str) -> Option<String> {
+    if reply["kind"] != "delta" {
+        return None;
+    }
+    let patch = reply.pointer("/observation_patch/lines")?.as_array()?;
+    // Field values are not part of the saved text, so they cannot be merged into it.
+    if !reply["changes"]
+        .as_array()?
+        .iter()
+        .all(|c| c["kind"] == "text")
+    {
+        return None;
+    }
+    let mut lines: Vec<&str> = text.split('\n').collect();
+    for entry in patch {
+        let index = usize::try_from(entry["line"].as_u64()?.checked_sub(1)?).ok()?;
+        let replacement = entry["text"].as_str()?;
+        if *lines.get(index)? != entry["previous"].as_str()? || replacement.contains('\n') {
+            return None;
+        }
+        lines[index] = replacement;
+    }
+    Some(lines.join("\n"))
+}
+
+/// Reuse only an explicitly supplied, exact predecessor: as it is for an unchanged
+/// reply, with its lines patched for a text delta. Never rebase an action.
 pub(crate) fn attach(reply: &mut Value, session: &str, baseline: Option<&Value>) {
     let resolved_session = if session.trim().is_empty() {
         reply
@@ -71,26 +99,54 @@ pub(crate) fn attach(reply: &mut Value, session: &str, baseline: Option<&Value>)
         return;
     }
     let Some(old) = baseline else { return };
-    let reusable = reply["kind"] == "unchanged"
-        && reply["history_complete"] == true
-        && reply["changes"].as_array().is_some_and(Vec::is_empty)
+    let text = old.pointer("/observation/text").and_then(Value::as_str);
+    let predecessor = reply["history_complete"] == true
         && reply["previous_context_id"]
             .as_str()
             .is_some_and(|c| old["context_id"] == c)
+        // Target control keeps one context id across observations; this names the exact one.
+        && reply
+            .get("previous_observation_id")
+            .is_none_or(|id| old["observation_id"] == *id)
         && reply["tab_id"].as_i64().is_some_and(|t| old["tab_id"] == t)
         && old["observation_origin"]["session_id"] == session
-        && old
-            .pointer("/observation/text")
-            .and_then(Value::as_str)
-            .is_some()
+        && text.is_some()
         && old["presentation"]["filtered"] != true
         && old["observation_origin"]["payload_sha256"] == digest(&old["observation"]);
-    reply["cache_reuse"] = json!({"used":reusable,
-        "reason":if reusable {"exact_unchanged_predecessor"} else {"no_exact_unchanged_predecessor"}});
-    if reusable {
+    let unchanged = predecessor
+        && reply["kind"] == "unchanged"
+        && reply["changes"].as_array().is_some_and(Vec::is_empty);
+    let merged = text
+        .filter(|_| predecessor && !unchanged)
+        .and_then(|text| patched(reply, text));
+    let delta = reply.get("observation_patch").is_some();
+    reply["cache_reuse"] = json!({"used":unchanged || merged.is_some(),
+    "reason":match (unchanged, &merged, delta) {
+        (true, ..) => "exact_unchanged_predecessor",
+        (_, Some(_), _) => "exact_text_delta_predecessor",
+        (_, _, true) => "no_exact_text_delta_predecessor",
+        _ => "no_exact_unchanged_predecessor",
+    }});
+    if unchanged || merged.is_some() {
         reply["observation"] = old["observation"].clone();
         reply["observation_origin"] = old["observation_origin"].clone();
         reply["observation_origin"]["kind"] = "reused".into();
+    }
+    if let Some(text) = merged {
+        reply["observation"]["text"] = text.into();
+        reply["observation_origin"]["kind"] = "merged".into();
+        reply["observation_origin"]["payload_sha256"] = digest(&reply["observation"]).into();
+    }
+}
+
+/// A merged observation differs from its saved predecessor in the lines the reply
+/// already lists. Once saved it is not printed again; `bsk view` reads the file.
+pub(crate) fn omit_saved_merge(reply: &mut Value) {
+    if reply["observation_origin"]["kind"] == "merged" {
+        if let Some(object) = reply.as_object_mut() {
+            object.remove("observation");
+        }
+        reply["cache_reuse"]["observation"] = "saved".into();
     }
 }
 
@@ -196,6 +252,101 @@ mod tests {
             assert!(v.get("observation").is_none(), "variant {variant}");
             assert_eq!(v["cache_reuse"]["used"], false);
         }
+    }
+    /// A text delta against `old()`: the alert on line 5 now reads differently.
+    fn delta() -> Value {
+        json!({"context_id":"c1","previous_context_id":"c1","previous_observation_id":"o1",
+            "observation_id":"o2","tab_id":42,"kind":"delta","history_complete":true,
+            "changes":[{"kind":"text","previous_value":"Price changed","value":"Price settled","lines":[5]}],
+            "observation_patch":{"lines":[{"line":5,"previous":"  alert \"Price changed\"","text":"  alert \"Price settled\""}]}})
+    }
+    fn targeted() -> Value {
+        let mut old = old();
+        old["observation_id"] = "o1".into();
+        old
+    }
+    #[test]
+    fn text_delta_patches_the_exact_predecessor_and_chains_from_the_saved_merge() {
+        let old = targeted();
+        let mut v = delta();
+        attach(&mut v, "s", Some(&old));
+        assert_eq!(
+            v["cache_reuse"],
+            json!({"used":true,"reason":"exact_text_delta_predecessor"})
+        );
+        assert_eq!(
+            v["observation"]["text"],
+            "@vom 1\nL1 page\n  @e1 button \"A\"\n  @e2 button \"A\"\n  alert \"Price settled\""
+        );
+        assert_eq!(v["observation_origin"]["kind"], "merged");
+        assert_eq!(v["observation_origin"]["capture_context_id"], "c1");
+        assert_eq!(
+            v["observation_origin"]["payload_sha256"],
+            digest(&v["observation"])
+        );
+        // The saved merge is the predecessor of the next reply, changed or not.
+        let mut same = unchanged();
+        same["previous_context_id"] = "c1".into();
+        same["previous_observation_id"] = "o2".into();
+        attach(&mut same, "s", Some(&v));
+        assert_eq!(same["observation"], v["observation"]);
+        let mut next = delta();
+        next["previous_observation_id"] = "o2".into();
+        next["observation_patch"]["lines"][0]["previous"] = "  alert \"Price settled\"".into();
+        next["observation_patch"]["lines"][0]["text"] = "  alert \"Price final\"".into();
+        attach(&mut next, "s", Some(&v));
+        assert!(
+            next["observation"]["text"]
+                .as_str()
+                .unwrap()
+                .ends_with("alert \"Price final\"")
+        );
+        // Once saved, the merged page is not printed again; viewing reads the file.
+        let args = ViewArgs {
+            file: "saved.json".into(),
+            start_line: 1,
+            line_count: 3,
+            find: Some("Price".into()),
+        };
+        let view = project(&next, &args).unwrap();
+        assert_eq!(view["browser_calls"], 0);
+        assert_eq!(view["matching_lines"], json!([5]));
+        omit_saved_merge(&mut next);
+        assert!(next.get("observation").is_none());
+        assert_eq!(next["cache_reuse"]["observation"], "saved");
+        omit_saved_merge(&mut same);
+        assert!(same.get("observation").is_some());
+    }
+    #[test]
+    fn text_delta_never_patches_another_version_or_a_line_that_differs() {
+        for variant in 0..9 {
+            let mut old = targeted();
+            let mut v = delta();
+            let session = if variant == 0 { "other" } else { "s" };
+            match variant {
+                // Target control reuses the context id: an older file of the same context.
+                1 => old["observation_id"] = "o0".into(),
+                2 => v["previous_context_id"] = "other".into(),
+                3 => v["history_complete"] = false.into(),
+                4 => v["changes"] = json!([{"label":"City","value":"Oslo"}]),
+                5 => v["observation_patch"]["lines"][0]["previous"] = "  alert \"Other\"".into(),
+                6 => v["observation_patch"]["lines"][0]["line"] = 9.into(),
+                7 => v["observation_patch"]["lines"][0]["text"] = "a\nb".into(),
+                8 => old["observation"]["text"] = "edited cached contents".into(),
+                _ => {}
+            }
+            attach(&mut v, session, Some(&old));
+            assert!(v.get("observation").is_none(), "variant {variant}");
+            assert_eq!(
+                v["cache_reuse"],
+                json!({"used":false,"reason":"no_exact_text_delta_predecessor"})
+            );
+        }
+        // The same guard now tells apart two unchanged predecessors of one context.
+        let mut v = unchanged();
+        v["previous_observation_id"] = "o9".into();
+        attach(&mut v, "s", Some(&targeted()));
+        assert_eq!(v["cache_reuse"]["used"], false);
     }
     #[test]
     fn new_capture_wins_and_truncation_is_not_repaired_by_cache() {

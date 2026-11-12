@@ -410,7 +410,12 @@ impl<'a> Output<'a> {
         }
         if let Some(saved) = self.saved {
             match saved.finish(&reply) {
-                Ok(()) => reply["full_output_path"] = json!(self.save_full),
+                Ok(()) => {
+                    reply["full_output_path"] = json!(self.save_full);
+                    if let Some(post) = reply.get_mut("post") {
+                        observation_view::omit_saved_merge(post);
+                    }
+                }
                 Err(e) => {
                     reply["storage_error"] = e.to_string().into();
                     reply["ok"] = false.into();

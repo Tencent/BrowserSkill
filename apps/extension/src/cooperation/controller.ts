@@ -42,6 +42,7 @@ import {
   sameObservationEvidence,
 } from "./observation-evidence";
 import { pointerTargetValidator } from "./pointer-target";
+import { type HeldText, textDelta } from "./text-delta";
 import type {
   CooperationFrames,
   CooperationParams,
@@ -65,6 +66,8 @@ interface Context {
   activityCursor: number;
   observationId?: string;
   consumed?: boolean;
+  /** Target control: the page text the agent holds, kept current by text deltas. */
+  held?: HeldText;
 }
 type Activity = FrameState["events"][number] & {
   frame_id: number;
@@ -917,15 +920,46 @@ export class CooperationController implements ControlAuthority {
         const frameEpoch = state.frameEpoch;
         const baseline = state.baseline;
         let evidence = baseline?.evidence;
-        const delta =
+        const fieldsComplete = [...before.values()].every(
+          (frame) => frame.fieldsComplete !== false,
+        );
+        const comparable =
           baseline &&
           baseline.frameEpoch === frameEpoch &&
-          (!targetPolicy || sameFrames(baseline.frames, before, "revision")) &&
-          [...before.values()].every((frame) => frame.fieldsComplete !== false) &&
+          fieldsComplete &&
           baseline.refs === session.refStore.revision &&
-          sameFrames(baseline.frames, before, "structure") &&
-          sameFocus(baseline.frames, before) &&
           sameMedia(baseline.frames, before);
+        const exact =
+          comparable &&
+          (!targetPolicy || sameFrames(baseline.frames, before, "revision")) &&
+          sameFrames(baseline.frames, before, "structure") &&
+          sameFocus(baseline.frames, before);
+        // Target control otherwise re-captures after any activity. When all of it
+        // is text a frame logged in full, patch the text the agent already holds.
+        const patched =
+          baseline && comparable && !exact && targetPolicy
+            ? textDelta(baseline.held, params.max_tokens, baseline.frames, before)
+            : undefined;
+        const text = typeof patched === "object" ? patched : undefined;
+        const delta = baseline && (exact || !!text);
+        const baselineReason = delta
+          ? undefined
+          : !baseline
+            ? "no_previous_observation"
+            : baseline.frameEpoch !== frameEpoch
+              ? "frame_replaced"
+              : !fieldsComplete
+                ? "fields_incomplete"
+                : baseline.refs !== session.refStore.revision
+                  ? "refs_replaced"
+                  : !sameMedia(baseline.frames, before)
+                    ? "media_changed"
+                    : (patched ??
+                      (!sameFrames(baseline.frames, before, "structure")
+                        ? "structure_changed"
+                        : "focus_changed"));
+        // The private evidence describes the text and focus as they were captured.
+        if (text && (text.lines.length || text.focusMoved)) evidence = undefined;
         // A delta updates the model's field values. Refresh private semantic
         // evidence too, without replacing refs or repeating page text to the model.
         if (delta && !sameFields(baseline.frames, before))
@@ -994,6 +1028,19 @@ export class CooperationController implements ControlAuthority {
           evidence,
           activityCursor: state.activitySequence,
           observationId: crypto.randomUUID(),
+          ...(targetPolicy
+            ? {
+                held: observation
+                  ? {
+                      text: observation.text,
+                      truncated: observation.truncated,
+                      maxTokens: params.max_tokens,
+                    }
+                  : text && baseline?.held
+                    ? { ...baseline.held, text: text.text }
+                    : baseline?.held,
+              }
+            : {}),
         };
         state.context = context;
         state.baseline = context;
@@ -1022,31 +1069,40 @@ export class CooperationController implements ControlAuthority {
           ...(state.frameGaps.length ? { frame_gaps: state.frameGaps } : {}),
           ...(targetPolicy ? { observation_id: context.observationId } : {}),
           kind: delta
-            ? sameFrames(baseline.frames, after, "revision")
+            ? !text && sameFrames(baseline.frames, after, "revision")
               ? "unchanged"
               : "delta"
             : "baseline",
+          ...(baselineReason ? { baseline_reason: baselineReason } : {}),
           ...(delta
             ? {
                 previous_context_id: baseline.id,
-                changes: [...after].flatMap(([frameId, frame]) =>
-                  frame.fields.flatMap((field) => {
-                    const previous = baseline.frames
-                      .get(frameId)
-                      ?.fields.find((old) =>
-                        field.id ? old.id === field.id : old.label === field.label,
-                      );
-                    return previous?.value === field.value
-                      ? []
-                      : [
-                          {
-                            frame_id: frameId,
-                            ...field,
-                            ...(previous ? { previous_value: previous.value } : {}),
-                          },
-                        ];
-                  }),
-                ),
+                // One context id spans many observations under target control.
+                ...(targetPolicy && baseline.observationId
+                  ? { previous_observation_id: baseline.observationId }
+                  : {}),
+                ...(text ? { observation_patch: { lines: text.lines } } : {}),
+                changes: [
+                  ...(text?.changes ?? []),
+                  ...[...after].flatMap(([frameId, frame]) =>
+                    frame.fields.flatMap((field) => {
+                      const previous = baseline.frames
+                        .get(frameId)
+                        ?.fields.find((old) =>
+                          field.id ? old.id === field.id : old.label === field.label,
+                        );
+                      return previous?.value === field.value
+                        ? []
+                        : [
+                            {
+                              frame_id: frameId,
+                              ...field,
+                              ...(previous ? { previous_value: previous.value } : {}),
+                            },
+                          ];
+                    }),
+                  ),
+                ],
               }
             : { observation }),
           activity,
@@ -1811,8 +1867,12 @@ export class CooperationController implements ControlAuthority {
     const verifyEvidence = async () => {
       if (!context || !verifiedFrames) throw new Error((revoked = "Synchronize before acting"));
       if (sameFrames(verifiedFrames, state.frames, "revision")) return;
-      if (!context.evidence)
+      if (!context.evidence) {
+        // A text delta carries no evidence. Have the next sync capture the page,
+        // or a page that keeps changing would refuse this action after every delta.
+        if (state.baseline) state.baseline.held = undefined;
         throw new Error((revoked = "Page changed; synchronize before choosing an action"));
+      }
       // Scrolling, focus or hover sent by this action can change text and
       // layout on their own; native input has not started, or verification
       // would not run. Read-only probes do not count.

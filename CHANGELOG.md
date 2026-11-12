@@ -138,6 +138,20 @@ determines which versions can connect.
 
 ### Fixed
 
+- A target-policy `cooperate sync` no longer re-sends the whole VOM when the only page
+  activity since the last observation replaced visible text in place. The content script
+  logs text-only mutation batches separately from structural ones, and the extension
+  answers `kind: "delta"` with `observation_patch.lines`, `kind: "text"` entries in
+  `changes` (previous value, value, touched VOM lines) and `previous_observation_id`.
+  With `--baseline` on the exact predecessor the CLI applies the patch, saves the merged
+  observation through `--save-full` and keeps the page text out of stdout; `view` reads
+  the merged version with zero browser calls. On the 6,857-node `ARENA-MEGA-VOM-DELTA`
+  fixture the third sync went from about 2.2 s and 574 KB to about 0.2 s and 2 KB, and
+  the merged text equals a fresh capture. Structural changes, replaced documents or
+  refs, human activity, field changes, focus moves under focus-dependent styles, log
+  gaps, text outside or ambiguous in the held observation, child frames and token-budget
+  shifts still return a fresh `baseline`, now with a `baseline_reason`. Strict-policy
+  behaviour and the target and observation guards are unchanged.
 - Hardened VOM stealth prompt-injection stripping against CSS Color 4/5, gradient-clip
   text, HiDPI microboxes, inner scroll containers, and mixed textstyle containers:
   resolves `oklch`/`oklab`/`lab`/`lch`/`hsl`/`hwb`/`color()`/`color-mix()` to sRGB for

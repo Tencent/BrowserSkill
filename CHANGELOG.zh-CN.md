@@ -72,6 +72,7 @@ CLI、扩展和 DSH 插件可以分别发布，能否连接由协议兼容性决
 
 ### 修复
 
+- `target` 策略下的 `cooperate sync` 在上次观察之后页面只发生可见文本原位替换时，不再重传整页 VOM。内容脚本把纯文本的 mutation 批次与结构性批次分开计数并记录；扩展返回 `kind: "delta"`，附带 `observation_patch.lines`、`changes` 中的 `kind: "text"` 条目（旧值、新值、涉及的 VOM 行号）以及 `previous_observation_id`。`--baseline` 指向精确前驱时，CLI 应用该补丁，通过 `--save-full` 保存合并后的观察，并且不在 stdout 输出整页文本；`view` 以零浏览器调用读取合并后的版本。在 6,857 个节点的 `ARENA-MEGA-VOM-DELTA` 夹具上，第三次同步由约 2.2 秒、574 KB 降到约 0.2 秒、2 KB，合并文本与新鲜抓取完全一致。结构变化、文档或 ref 被替换、人工操作、字段变化、存在焦点相关样式时的焦点移动、记录缺口、文本不在已持有观察内或有歧义、子帧以及 token 预算偏移仍返回新鲜的 `baseline`，并新增 `baseline_reason` 说明原因。`strict` 策略的行为以及目标和观察守卫保持不变。
 - 加固 VOM 隐形提示注入剥离器对 CSS Color 4/5、渐变裁切文字、HiDPI 微盒、内部滚动容器及混合文本容器的判定精度：将 `oklch`/`oklab`/`lab`/`lch`/`hsl`/`hwb`/`color()`/`color-mix()` 统一解析为 sRGB 以覆盖跨色域零对比度与零透明度检测（含 Tailwind v4 `oklch()` 背景栅栏及 `currentColor 0%` 混合色）；在保留真实 `background-clip: text` / `-webkit-background-clip: text` 渐变标题的同时剥离全透明、零跨度色标及与背景同色的伪渐变注入；按 HiDPI/Retina 缩放比例归一化 `1px` 微盒与屏外偏移阈值；结合 `DOMSnapshot` 内部滚动偏移（`scrollRects`）与 `#text` 字形边界保留真实已滚动行列并拦截未滚动容器内的 `left: -99999px` / `-2000px` / `text-indent: -9999px` 离屏注入；同时清理保留容器上的直属隐形文本与受污染的无障碍 `name`（[#709](https://github.com/Tencent/BrowserSkill/pull/709)）。
 - `wait-for-navigation` 不再在待等待的导航尚未开始或仍在进行时直接按旧页面返回。已加载完成的页面需在短暂宽限期内没有主框架导航开始才视为已到达；一旦导航开始或 Chrome 报告有待提交的导航，只有新文档能满足等待。同文档导航和往返缓存恢复仍会立即完成（[#700](https://github.com/Tencent/BrowserSkill/issues/700)）。
 - VOM 快照解码与语义图 DOM 文本回退解析排除 `<style>`、`<script>`、`<noscript>` 与 `<template>`
