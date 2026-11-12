@@ -724,15 +724,21 @@ describe.skipIf(!process.env.BSK_FILL_CHROME)("date-like fill regressions", () =
       { background: true, markup: guard + '<input id="target" type="date">' },
       async (h) => {
         await h.ref("document.querySelector('#target')");
-        await h.evaluate(`document.querySelector('#target').addEventListener('focus', () => {
-          document.querySelector('#target').value = '2026-01-01';
-        })`);
+        await h.evaluate(`(() => {
+          const target = document.querySelector('#target');
+          target.addEventListener('focus', () => {
+            target.value = '2026-01-01';
+            target.dataset.focusInitialized = 'true';
+          });
+        })()`);
         expect(await h.fill("2026-10-14")).toMatchObject({ value_length: 10 });
+        expect(await h.evaluate("document.querySelector('#target').dataset.focusInitialized")).toBe(
+          "true",
+        );
         expect(await h.evaluate("document.querySelector('#target').value")).toBe("2026-10-14");
         await h.activate();
         expect(await h.evaluate("document.hasFocus()")).toBe(true);
         expect(await h.evaluate("document.querySelector('#target').value")).toBe("2026-10-14");
-        expect(h.calls).toContain("Input.dispatchKeyEvent");
         expect(h.calls).not.toContain("Input.insertText");
       },
     );

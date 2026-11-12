@@ -189,6 +189,11 @@ determines which versions can connect.
 - Local validation failures in upload, download, plan and step return stable
   parameter/file error codes and relevant recovery hints. Upload sources are checked
   before contacting the daemon or staging any files.
+- `bsk get-html --json --out <file>` no longer prints the HTML to stdout. With
+  `--out`, JSON output reports `tab_id`, `path`, `written_bytes`, `byte_size`,
+  `truncated` and any dialogs, so large pages stay out of the caller's context;
+  without `--out`, the JSON result still includes `html`
+  ([#715](https://github.com/Tencent/BrowserSkill/issues/715)).
 - `fill` on a page without focus (a background tab, or the agent window while
   another window is focused) delivers focus before validating and clearing the
   field, so focus listeners that set a default value no longer leave it in front of
