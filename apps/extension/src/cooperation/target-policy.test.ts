@@ -1229,6 +1229,30 @@ it("passive DOM reads do not revive contexts retained only as strict baselines",
   expect(invoke).toHaveBeenCalledOnce();
 });
 
+describe("pre-write validation failures", () => {
+  it("keep the control context when select rejects an option after focusing", async () => {
+    const f = await fixture();
+    const result = await f.run({ ref: "e1", values: ["zz"] }, "tool.select", async (runner) => {
+      await runner.send(7, "DOM.scrollIntoViewIfNeeded", { backendNodeId: 4 });
+      await runner.send(7, "DOM.focus", { backendNodeId: 4 });
+      return {
+        code: "invalid_params",
+        message: "option value zz not found in <select>",
+        data: { reason: "option_not_found", effect_state: "none", phase: "precondition" },
+      };
+    });
+    expect(result).toMatchObject({
+      code: "invalid_params",
+      data: { reason: "option_not_found", effect_state: "none", phase: "precondition" },
+    });
+    expect((result as { data: Record<string, unknown> }).data).not.toHaveProperty("press_sent");
+    // The same decision remains usable for the corrected value.
+    expect(
+      await f.run({ ref: "e1", values: ["us"] }, "tool.select", async () => ({ tab_id: 7 })),
+    ).toEqual({ tab_id: 7 });
+  });
+});
+
 describe("targeted optimistic fast-path", () => {
   it("skips cross-frame readFrames broadcasts and target resampling on internal CDP steps", async () => {
     const f = await fixture("target");

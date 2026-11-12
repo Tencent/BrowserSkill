@@ -334,7 +334,8 @@ export async function captureBrowserDownload(
     reconcile();
   };
   const cdpSubscription = options.cdp.onEvent?.((source, method, raw) => {
-    if (settled || method !== "Page.downloadWillBegin" || !sameTarget(source, options.target))
+    const expectedTarget = options.cdp.resolveTarget?.(options.target) ?? options.target;
+    if (settled || method !== "Page.downloadWillBegin" || !sameTarget(source, expectedTarget))
       return;
     if (capturedId !== undefined && options.inputSignal?.aborted) return;
     const event = raw as { url?: unknown; suggestedFilename?: unknown; frameId?: unknown };
@@ -357,31 +358,33 @@ export async function captureBrowserDownload(
   if (!cdpSubscription) {
     return captureError("CDP download intent subscription unavailable", "none", "arm");
   }
-
-  options.downloads.onDeterminingFilename.addListener(determiningListener);
-  options.downloads.onCreated.addListener(createdListener);
-  options.downloads.onChanged.addListener(changedListener);
-  options.navigationTargets?.onCreatedNavigationTarget.addListener(navigationTargetListener);
-  options.signal?.addEventListener("abort", onAbort, { once: true });
-  options.inputSignal?.addEventListener("abort", onInputAbort, { once: true });
-  operationTimer = setTimeout(
-    () => fail(new Error("download did not complete before timeout")),
-    options.timeoutMs,
-  );
-  sizePoll = setInterval(() => {
-    if (capturedId === undefined || settled || options.maxByteSize === undefined) return;
-    void options.downloads
-      .search({ id: capturedId })
-      .then(([item]) => {
-        if (!item || settled) return;
-        if (item.bytesReceived > (options.maxByteSize as number)) {
-          fail(new Error(`download exceeds transfer limit ${options.maxByteSize}`));
-        }
-      })
-      .catch((err) => fail(err instanceof Error ? err : new Error(String(err))));
-  }, SIZE_POLL_MS);
+  let releaseTabAttachment: (() => void) | undefined;
 
   try {
+    releaseTabAttachment = options.cdp.retainTabAttachment?.(options.target.tabId);
+    options.downloads.onDeterminingFilename.addListener(determiningListener);
+    options.downloads.onCreated.addListener(createdListener);
+    options.downloads.onChanged.addListener(changedListener);
+    options.navigationTargets?.onCreatedNavigationTarget.addListener(navigationTargetListener);
+    options.signal?.addEventListener("abort", onAbort, { once: true });
+    options.inputSignal?.addEventListener("abort", onInputAbort, { once: true });
+    operationTimer = setTimeout(
+      () => fail(new Error("download did not complete before timeout")),
+      options.timeoutMs,
+    );
+    sizePoll = setInterval(() => {
+      if (capturedId === undefined || settled || options.maxByteSize === undefined) return;
+      void options.downloads
+        .search({ id: capturedId })
+        .then(([item]) => {
+          if (!item || settled) return;
+          if (item.bytesReceived > (options.maxByteSize as number)) {
+            fail(new Error(`download exceeds transfer limit ${options.maxByteSize}`));
+          }
+        })
+        .catch((err) => fail(err instanceof Error ? err : new Error(String(err))));
+    }, SIZE_POLL_MS);
+
     if (options.signal?.aborted || options.inputSignal?.aborted)
       throw new DOMException("aborted", "AbortError");
     // A failed completion can stop a pending trigger, while successful file
@@ -480,6 +483,8 @@ export async function captureBrowserDownload(
       }
     } catch {
       if (failureResult?.data) failureResult.data.cleanup_state = "failed";
+    } finally {
+      releaseTabAttachment?.();
     }
   }
 }
