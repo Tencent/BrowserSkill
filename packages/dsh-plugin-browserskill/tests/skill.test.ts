@@ -45,7 +45,10 @@ describe("registerBskSkill", () => {
     expect(content).not.toMatch(/\bbsk\b/i);
     expect(content).not.toMatch(/```(?:bash|sh|shell)\b/i);
     expect(content).not.toMatch(/--[a-z]/);
-    expect(content).toMatch(/All browser work\s+must use the injected tools directly/);
+    expect(content).toContain("Use only BrowserSkill tools in an Agent Window");
+    expect(content).toMatch(
+      /In PTC mode, call them inside\s+`run_code` as `await tools\.<name>\(args\)`/,
+    );
     expect(content).toContain("Mandatory workflow");
     expect(content).toContain("DOM refs survive reads; navigation invalidates them");
     expect(content).toContain("Interaction recording is not exposed");
@@ -156,7 +159,7 @@ describe("armAgentScopedBskSkill", () => {
     await pluginCtx.serial(scopeTarget(agent, agentKey), "agent/created", payload);
 
     const after = await skillFiber.ctx.skills.get("browser-skill", { scope: agentKey });
-    expect(after?.content).toMatch(/All browser work\s+must use the injected tools directly/);
+    expect(after?.content).toContain("Use only BrowserSkill tools in an Agent Window");
     expect(after?.content).not.toMatch(/\bbsk\b/i);
     expect(after?.source).toBe("bundled");
     expect(after?.resourceBase?.kind).toBe("directory");

@@ -192,6 +192,19 @@ Actions on shared tabs require the `contextId` returned by `sync` or a step's
 `post.context_id`. Target-policy DOM actions can reuse it; strict-policy contexts
 remain single-use. The plugin never infers context or observation receipts from its cache.
 
+### Missing browser tools
+
+Open a new `standard` conversation and send `/browser-skill`. The six `bsk_*`
+tools should appear in the next model request. In the `ptc` preset, DSH exposes
+`run_code` and lists the `bsk_*` tools in its generated SDK. In the default
+TypeScript runtime, use `return await tools.bsk_session({ action: "list" })`
+inside `run_code` to check the binding. If loading the skill through
+`tools.skill`, wait until the next model step to use the browser bindings.
+
+If the tools are still missing in `standard`, verify the plugin is enabled in
+the active profile and check the DSH Host log for `BrowserSkill tool activation
+failed` or a plugin load error.
+
 ### Activation failures
 
 The six tools register as a complete suite. If any registration fails, the plugin
