@@ -1256,3 +1256,48 @@ it("strips direct hidden #text from textstyle stealth containers while preservin
   expect(renderedText).not.toContain("HIDDEN_EMPTY_SPAN_PAYLOAD");
   expect(renderedText).not.toContain("HIDDEN_HEADING_PAYLOAD");
 });
+
+it("excludes style/script/noscript/template subtrees from DOM label and sibling fallbacks (#694)", () => {
+  const scene = buildSemanticVomScene({
+    viewport: { width: 800, height: 600 },
+    rootFrameId: "main",
+    documents: [
+      document(
+        "main",
+        [],
+        [
+          dom(1, null, "body"),
+          // <div role="button"><style>.leak{color:red}</style></div> -> no label
+          dom(2, 1, "div", { role: "button" }),
+          dom(3, 2, "style", {}, ".leak{color:red}"),
+          // <div role="button"><style>.x{}</style><noscript><span>fallback</span></noscript><span>工具栏2</span></div>
+          dom(4, 1, "div", { role: "button" }),
+          dom(5, 4, "style", {}, ".x{display:flex}"),
+          dom(6, 4, "noscript"),
+          dom(7, 6, "span", {}, "fallback"),
+          dom(8, 4, "template"),
+          dom(9, 8, "span", {}, "tpl"),
+          dom(10, 4, "span", {}, "工具栏2"),
+          // Sibling <style>/<script> before an unlabelled <input> must not become preceding/nearby label
+          dom(11, 1, "div"),
+          dom(12, 11, "style", {}, ".input{border:0}"),
+          dom(13, 11, "script", {}, "initInput()"),
+          dom(14, 11, "input", { type: "text" }),
+        ],
+      ),
+    ],
+  });
+  const styleOnlyBtn = scene.nodes.find((n) => n.backendNodeId === 2);
+  const mixedBtn = scene.nodes.find((n) => n.backendNodeId === 4);
+  const bareInput = scene.nodes.find((n) => n.backendNodeId === 14);
+  expect(styleOnlyBtn?.name).toBeUndefined();
+  expect(mixedBtn?.name).toBe("工具栏2");
+  expect(bareInput?.name).toBeUndefined();
+  expect(bareInput?.nearbyText).toBeUndefined();
+  const rendered = renderVom(scene).text;
+  expect(rendered).not.toContain(".leak");
+  expect(rendered).not.toContain("fallback");
+  expect(rendered).not.toContain("tpl");
+  expect(rendered).not.toContain("initInput");
+  expect(rendered).toContain('button "工具栏2"');
+});

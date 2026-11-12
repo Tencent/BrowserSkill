@@ -158,6 +158,61 @@ describe("document facts", () => {
     );
   });
 
+  it("ignores text inside style/script/noscript/template subtrees while preserving shadow root text", async () => {
+    const strings = [
+      "div", // 0
+      "style", // 1
+      "script", // 2
+      "noscript", // 3
+      "template", // 4
+      "#document-fragment", // 5
+      "p", // 6
+      "span", // 7
+      "x-button", // 8
+      "#text", // 9
+      ".leak{color:red}", // 10
+      "run()", // 11
+      "fallback", // 12
+      "nested-noscript", // 13
+      "tpl-direct", // 14
+      "tpl-nested", // 15
+      "Shadow label", // 16
+      "Hello", // 17
+    ];
+    const { nodes } = await decodeDocument(
+      {
+        nodes: {
+          // 0: div (root)
+          // 1: <style> -> 2: #text(".leak{color:red}")
+          // 3: <script> -> 4: #text("run()")
+          // 5: <noscript> -> 6: #text("fallback"), 7: <p> -> 8: #text("nested-noscript")
+          // 9: <template> -> 10: #document-fragment -> 11: #text("tpl-direct"), 12: <span> -> 13: #text("tpl-nested")
+          // 14: <x-button> -> 15: #document-fragment (ShadowRoot) -> 16: <span> -> 17: #text("Shadow label")
+          // 18: <div> -> 19: #text("Hello")
+          backendNodeId: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20],
+          parentIndex: [-1, 0, 1, 0, 3, 0, 5, 5, 7, 0, 9, 10, 10, 12, 0, 14, 15, 16, 0, 18],
+          nodeType: [1, 1, 3, 1, 3, 1, 3, 1, 3, 1, 11, 3, 1, 3, 1, 11, 1, 3, 1, 3],
+          nodeName: [0, 1, 9, 2, 9, 3, 9, 6, 9, 4, 5, 9, 7, 9, 8, 5, 7, 9, 0, 9],
+          nodeValue: [
+            -1, -1, 10, -1, 11, -1, 12, -1, 13, -1, -1, 14, -1, 15, -1, -1, -1, 16, -1, 17,
+          ],
+        },
+      },
+      strings,
+    );
+    // Code/markup containers and their descendant subtrees must not contribute label text.
+    expect(nodes[1].textContent).toBeUndefined(); // <style>
+    expect(nodes[3].textContent).toBeUndefined(); // <script>
+    expect(nodes[5].textContent).toBeUndefined(); // <noscript>
+    expect(nodes[7].textContent).toBeUndefined(); // <noscript><p>
+    expect(nodes[9].textContent).toBeUndefined(); // <template>
+    expect(nodes[10].textContent).toBeUndefined(); // <template> #document-fragment
+    expect(nodes[12].textContent).toBeUndefined(); // <template> #document-fragment <span>
+    // Shadow root text under custom elements and ordinary visible text still contribute.
+    expect(nodes[16].textContent).toBe("Shadow label"); // <x-button> shadow <span>
+    expect(nodes[18].textContent).toBe("Hello"); // <div>Hello</div>
+  });
+
   it("keeps short blocks synchronous and checks cancellation after yielding", async () => {
     const clock = vi.spyOn(performance, "now").mockReturnValue(0);
     try {
