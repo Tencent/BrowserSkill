@@ -103,6 +103,21 @@ export async function handleWheel(
     send: (tabId, method, args) => send({ tabId }, method, args),
     sendToTarget: send,
     trackSessionTab: deps.cdp.trackSessionTab?.bind(deps.cdp),
+    resolveTarget: deps.cdp.resolveTarget?.bind(deps.cdp),
+    reattachIfSoftDetached: deps.cdp.reattachIfSoftDetached
+      ? async (tabId) => {
+          checkActive();
+          await deps.cdp.reattachIfSoftDetached!(tabId);
+          checkActive();
+        }
+      : undefined,
+    reconcileSoftDetachedFrames: deps.cdp.reconcileSoftDetachedFrames
+      ? async (tabId) => {
+          checkActive();
+          await deps.cdp.reconcileSoftDetachedFrames!(tabId);
+          checkActive();
+        }
+      : undefined,
     getFrameGraph: deps.cdp.getFrameGraph
       ? async (tabId) => {
           checkActive();

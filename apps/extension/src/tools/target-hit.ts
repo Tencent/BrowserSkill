@@ -101,11 +101,16 @@ export async function pointReachesTarget(
   };
   try {
     let local = point;
+    let resolvedTarget = target;
     if (target.cdpTarget.sessionId) {
       if (!target.frameId) return false;
       const context = new GeometryContext(cdp, target.tabId);
       const frame = await context.frame(target.frameId);
-      if (!frame || cdpTargetKey(frame.target) !== cdpTargetKey(target.cdpTarget)) return false;
+      const resolvedCdpTarget = cdp.resolveTarget
+        ? cdp.resolveTarget(target.cdpTarget)
+        : target.cdpTarget;
+      if (!frame || cdpTargetKey(frame.target) !== cdpTargetKey(resolvedCdpTarget)) return false;
+      resolvedTarget = { ...target, cdpTarget: resolvedCdpTarget };
       const ancestry = await context.ancestry(target.frameId);
       const projection = await context.targetProjection(target.frameId);
       if (!ancestry || !projection) return false;
@@ -132,7 +137,7 @@ export async function pointReachesTarget(
         local = projected;
       }
     }
-    return await hit(target, local);
+    return await hit(resolvedTarget, local);
   } finally {
     const cleanup = cdp.resourceCleanup ?? cdp;
     await Promise.all(

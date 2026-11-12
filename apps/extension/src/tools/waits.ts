@@ -342,6 +342,22 @@ export async function handleWaitForElement(
   const probeCdp: CdpRunner = {
     send: (tabId, method, args) => send({ tabId }, method, args),
     sendToTarget: send,
+    trackSessionTab: deps.cdp.trackSessionTab?.bind(deps.cdp),
+    resolveTarget: deps.cdp.resolveTarget?.bind(deps.cdp),
+    reattachIfSoftDetached: deps.cdp.reattachIfSoftDetached
+      ? async (tabId) => {
+          checkBudget(deadline, deps.signal);
+          await deps.cdp.reattachIfSoftDetached!(tabId);
+          checkBudget(deadline, deps.signal);
+        }
+      : undefined,
+    reconcileSoftDetachedFrames: deps.cdp.reconcileSoftDetachedFrames
+      ? async (tabId) => {
+          checkBudget(deadline, deps.signal);
+          await deps.cdp.reconcileSoftDetachedFrames!(tabId);
+          checkBudget(deadline, deps.signal);
+        }
+      : undefined,
   };
   let probe: Probe | undefined;
 

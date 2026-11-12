@@ -70,6 +70,7 @@ export async function handleRead(
       send: (tabId, method, args) => send({ tabId }, method, args),
       sendToTarget: (target, method, args) => send(target, method, args),
       getAttachmentId: (id) => deps.cdp.getAttachmentId?.(id),
+      resolveTarget: deps.cdp.resolveTarget?.bind(deps.cdp),
     };
     const send = async <T>(target: CdpTarget, method: string, args?: object): Promise<T> => {
       if (method !== "Runtime.releaseObjectGroup") check();
@@ -104,8 +105,12 @@ export async function handleRead(
       if (ref.cdpSessionId || (ref.frameId && ref.frameId !== root.frameId)) {
         const graph = await deps.cdp.getFrameGraph?.(tab.tabId);
         check();
+        const expectedSessionId = ref.cdpSessionId
+          ? (deps.cdp.resolveTarget?.({ tabId: tab.tabId, sessionId: ref.cdpSessionId })
+              ?.sessionId ?? ref.cdpSessionId)
+          : undefined;
         const selected = graph?.frames.find(
-          (f) => f.frameId === ref.frameId && f.target.sessionId === ref.cdpSessionId,
+          (f) => f.frameId === ref.frameId && f.target.sessionId === expectedSessionId,
         );
         if (!selected) return stale();
         frame = selected;
