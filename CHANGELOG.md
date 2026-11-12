@@ -136,6 +136,12 @@ determines which versions can connect.
 
 ### Fixed
 
+- `wait-for-navigation` no longer returns on the old page when the navigation it waits
+  for is scheduled or still in flight. A settled page counts as reached only after a
+  short grace period without a main-frame navigation start; once a navigation starts
+  or Chrome reports one as pending, only the successor document can satisfy the wait.
+  Same-document and back/forward-cache restores still complete immediately
+  ([#700](https://github.com/Tencent/BrowserSkill/issues/700)).
 - Native clicks, key presses and wheel input calibrate Chromium's input clock so
   long-running browsers do not misclassify their own input as human intervention
   after sleep or clock changes. Calibration uses the extension's hidden document,

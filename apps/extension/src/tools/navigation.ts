@@ -145,14 +145,12 @@ export function lifecycleAlreadyReached(readyState: string, targetName: string):
 }
 
 /** When a readyState probe may short-circuit an in-flight lifecycle wait. */
-export type LifecycleProbeMode = "passive" | "after-navigation";
+export type LifecycleProbeMode = "after-navigation";
 
 /**
  * Decide whether `document.readyState` is safe to treat as "already
  * done" for the requested lifecycle target.
  *
- * * `passive` — `wait_for_navigation` on a settled page (no navigation
- *   initiated by this handler).
  * * `after-navigation` — following `navigate` / `reload` / history;
  *   rejects `complete`→`complete` with no observed lifecycle events so
  *   we do not confuse the previous document for the new load.
@@ -167,7 +165,6 @@ export function shouldTrustReadyStateProbe(
   },
 ): boolean {
   if (!lifecycleAlreadyReached(readyState, targetName)) return false;
-  if (context.mode === "passive") return true;
   if (context.sawRelevantLifecycle) return true;
   if (context.beforeReadyState === "complete" && readyState === "complete") {
     return false;
@@ -586,20 +583,261 @@ function startLifecycleWait(
 }
 
 /**
- * Wait for a lifecycle phase on an already-settled page (`passive`
- * readyState probe). Used by `wait_for_navigation`.
+ * How long `wait_for_navigation` watches a settled document for a navigation
+ * to start before reporting that the current document already satisfies the
+ * wait. Covers navigations scheduled shortly after the preceding action.
  */
-export async function waitForLifecyclePassive(
+export const DEFAULT_NAVIGATION_START_GRACE_MS = 1_000;
+
+export interface PassiveLifecycleWaitOptions {
+  /** Whether the browser already reports a started, uncommitted navigation. */
+  readNavigationPending?: () => Promise<boolean>;
+  /** Override {@link DEFAULT_NAVIGATION_START_GRACE_MS}. */
+  startGraceMs?: number;
+}
+
+export type PassiveWaitOutcome = WaitOutcome | { reached: "no_main_frame"; message: string };
+
+interface PassiveEvent {
+  method: string;
+  params: unknown;
+}
+
+/**
+ * Wait for a lifecycle phase on a navigation this handler did not start.
+ * Used by `wait_for_navigation`.
+ *
+ * The current document's `readyState` only answers the wait when no
+ * navigation is pending: a page that is still loading is followed to the
+ * requested phase, and a settled page is watched for `startGraceMs` before
+ * it counts as already reached. Once a main-frame navigation starts, only
+ * the successor document can satisfy the wait. This keeps a click followed
+ * by `wait_for_navigation` from returning on the old page while its
+ * navigation is still scheduled or in flight.
+ *
+ * The listener is installed before the main frame is read; events received
+ * meanwhile are replayed against that baseline, so a navigation that commits
+ * during setup is still followed.
+ */
+export function waitForLifecyclePassive(
   cdp: CdpRunner,
   expectedTabId: number,
-  frameId: string,
   targetName: string,
   timeoutMs: number,
   signal: AbortSignal | undefined,
-): Promise<WaitOutcome> {
-  const wait = startLifecycleWait(cdp, expectedTabId, frameId, targetName, timeoutMs, signal);
-  await wait.tryProbe("passive");
-  return wait.promise;
+  options: PassiveLifecycleWaitOptions = {},
+): Promise<PassiveWaitOutcome> {
+  const graceMs = Math.max(
+    0,
+    Math.min(options.startGraceMs ?? DEFAULT_NAVIGATION_START_GRACE_MS, timeoutMs),
+  );
+  return new Promise<PassiveWaitOutcome>((resolve) => {
+    let settled = false;
+    let lastLifecycle: string | undefined;
+    let frameId = "";
+    let baseline: string | null = null;
+    /** Events received before the baseline document is known. */
+    let buffered: PassiveEvent[] | null = [];
+    /** A main-frame navigation started; the baseline document no longer counts. */
+    let navigating = false;
+    /** `loaderId` of the document committed after the wait started, if any. */
+    let committed: string | null = null;
+    /** The baseline document changed URL without a new document. */
+    let sameDocument = false;
+    /** The baseline already reached the phase; only the grace period can accept it. */
+    let baselineSettled = false;
+    let probeRevision = 0;
+    let dialogBudgetUsed = false;
+    let listenerSub: { dispose(): void } | null = null;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    let graceTimer: ReturnType<typeof setTimeout> | null = null;
+
+    const cleanup = () => {
+      listenerSub?.dispose();
+      listenerSub = null;
+      if (timer) clearTimeout(timer);
+      if (graceTimer) clearTimeout(graceTimer);
+      timer = graceTimer = null;
+      signal?.removeEventListener("abort", onAbort);
+    };
+    const finish = (outcome: PassiveWaitOutcome) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      resolve(outcome);
+    };
+    const onAbort = () => finish({ reached: "cancelled", lastLifecycle });
+    const isMainFrame = (id: string | undefined) => id === frameId;
+    /** Documents whose lifecycle can satisfy the wait right now. */
+    const relevantLoader = (loaderId: string | undefined): boolean => {
+      if (committed) return loaderId === committed;
+      if (navigating || baselineSettled) return false;
+      return !baseline || !loaderId || loaderId === baseline;
+    };
+    const stopGrace = () => {
+      if (graceTimer) clearTimeout(graceTimer);
+      graceTimer = null;
+    };
+
+    // Inspect the document the browser currently shows. A settled baseline
+    // document must stay settled for the grace period; a committed successor
+    // (including a back/forward-cache restore, which emits no new load) is
+    // accepted as soon as it reaches the requested phase.
+    const probe = async () => {
+      if (settled) return;
+      const revision = ++probeRevision;
+      const expectedLoader = committed;
+      const [readyState, frame] = await Promise.all([
+        probeMainFrameReadyState(cdp, expectedTabId),
+        expectedLoader ? readMainFrameInfo(cdp, expectedTabId) : undefined,
+      ]);
+      if (settled || revision !== probeRevision || readyState === null) return;
+      if (!lifecycleAlreadyReached(readyState, targetName)) return;
+      if (expectedLoader) {
+        if (committed === expectedLoader && frame?.loaderId === expectedLoader)
+          finish({ reached: "match", lastLifecycle: targetName });
+        return;
+      }
+      if (navigating || committed) return;
+      if (sameDocument) {
+        finish({ reached: "match", lastLifecycle: targetName });
+        return;
+      }
+      baselineSettled = true;
+      if (graceTimer) return;
+      graceTimer = setTimeout(() => {
+        graceTimer = null;
+        if (!navigating && !committed) finish({ reached: "match", lastLifecycle: targetName });
+      }, graceMs);
+    };
+
+    const handle = (method: string, params: unknown) => {
+      if (settled) return;
+      const p = (params ?? {}) as {
+        name?: string;
+        frameId?: string;
+        loaderId?: string;
+        disposition?: string;
+        frame?: { id?: string; parentId?: string; loaderId?: string };
+      };
+      switch (method) {
+        case "Page.frameRequestedNavigation":
+          if (isMainFrame(p.frameId) && (!p.disposition || p.disposition === "currentTab")) {
+            navigating = true;
+            stopGrace();
+          }
+          return;
+        case "Page.frameStartedNavigating":
+        case "Page.frameStartedLoading":
+          if (isMainFrame(p.frameId)) {
+            navigating = true;
+            stopGrace();
+          }
+          return;
+        case "Page.frameStoppedLoading":
+          // A started navigation that never committed (204, download,
+          // cancellation) leaves the baseline document in place.
+          if (isMainFrame(p.frameId) && navigating && !committed) {
+            navigating = false;
+            void probe();
+          }
+          return;
+        case "Page.navigatedWithinDocument":
+          // Same-document navigation reuses an already loaded document.
+          if (isMainFrame(p.frameId) && !navigating && !committed) {
+            sameDocument = true;
+            lastLifecycle = "commit";
+            if (targetName === "commit") finish({ reached: "match", lastLifecycle: "commit" });
+            else void probe();
+          }
+          return;
+        case "Page.frameNavigated": {
+          const frame = p.frame;
+          if (!frame || frame.parentId || !isMainFrame(frame.id) || !frame.loaderId) return;
+          // A replayed commit of the baseline only counts when its start was seen.
+          if (frame.loaderId === baseline && !committed && !navigating) return;
+          navigating = true;
+          committed = frame.loaderId;
+          lastLifecycle = "commit";
+          stopGrace();
+          if (targetName === "commit") finish({ reached: "match", lastLifecycle: "commit" });
+          else void probe();
+          return;
+        }
+        case "Page.lifecycleEvent": {
+          if (!p.name || !isMainFrame(p.frameId) || !relevantLoader(p.loaderId)) return;
+          lastLifecycle = p.name;
+          if (lifecycleMeetsOrExceeds(p.name, targetName))
+            finish({ reached: "match", lastLifecycle: p.name });
+          return;
+        }
+      }
+    };
+
+    if (signal?.aborted) {
+      finish({ reached: "cancelled" });
+      return;
+    }
+    signal?.addEventListener("abort", onAbort, { once: true });
+    timer = setTimeout(() => finish({ reached: "timeout", lastLifecycle }), timeoutMs);
+
+    listenerSub =
+      cdp.onEvent?.((source, method, params) => {
+        if (settled || source.tabId !== expectedTabId) return;
+        if (method === "Page.javascriptDialogOpening") {
+          // A blocking dialog (for example beforeunload) pauses the page.
+          if (!dialogBudgetUsed) {
+            dialogBudgetUsed = true;
+            if (timer) clearTimeout(timer);
+            timer = setTimeout(
+              () => finish({ reached: "timeout", lastLifecycle }),
+              timeoutMs + 60_000,
+            );
+          }
+          return;
+        }
+        if (buffered) buffered.push({ method, params });
+        else handle(method, params);
+      }) ?? null;
+
+    void (async () => {
+      let frame: { id?: string; loaderId?: string } | undefined;
+      let pending = false;
+      try {
+        const [tree, isPending] = await Promise.all([
+          cdp.send<{ frameTree?: { frame?: { id?: string; loaderId?: string } } }>(
+            expectedTabId,
+            "Page.getFrameTree",
+            {},
+          ),
+          options.readNavigationPending?.().catch(() => false) ?? Promise.resolve(false),
+        ]);
+        frame = tree.frameTree?.frame;
+        pending = isPending;
+      } catch (err) {
+        finish({
+          reached: "no_main_frame",
+          message: err instanceof Error ? err.message : String(err),
+        });
+        return;
+      }
+      if (settled) return;
+      if (!frame?.id) {
+        finish({
+          reached: "no_main_frame",
+          message: "Page.getFrameTree did not return a main frame id",
+        });
+        return;
+      }
+      frameId = frame.id;
+      baseline = frame.loaderId ?? null;
+      if (pending) navigating = true;
+      const replay = buffered ?? [];
+      buffered = null;
+      for (const event of replay) handle(event.method, event.params);
+      void probe();
+    })();
+  });
 }
 
 interface MainFrameInfo {
