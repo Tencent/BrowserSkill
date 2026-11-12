@@ -151,6 +151,16 @@ determines which versions can connect.
 - Local validation failures in upload, download, plan and step return stable
   parameter/file error codes and relevant recovery hints. Upload sources are checked
   before contacting the daemon or staging any files.
+- `fill` on a page without focus (a background tab, or the agent window while
+  another window is focused) delivers focus before validating and clearing the
+  field, so focus listeners that set a default value no longer leave it in front of
+  the typed text or restore it when the tab is activated. A visible page receives
+  focus from a pointer move outside the viewport, which reaches no element; a hidden
+  or hovered page keeps the previous no-op key press, which pages can observe as an
+  empty key. Truncated or reformatted password, card and one-time-code fills report
+  `formatted: true` (also in the human CLI output) without `actual_value`, and text
+  inputs named like passwords, as left by a "show password" toggle, are treated as
+  sensitive ([#713](https://github.com/Tencent/BrowserSkill/issues/713)).
 - `fill` notifies each final value once. Native insertion and clearing already
   dispatch `input`; the completion step no longer repeats it
   ([#624](https://github.com/Tencent/BrowserSkill/issues/624)).

@@ -15,7 +15,10 @@ import { isAbortError } from "./vom/capture-abort";
 
 import { ChromiumCdp } from "@/browser-driver/chromium-cdp";
 import type { CdpTarget } from "@/browser-driver/frame-graph";
-import { RECORD_PASSWORD_ATTRIBUTE } from "@/lib/sensitive-autocomplete";
+import {
+  RECORD_PASSWORD_ATTRIBUTE,
+  SENSITIVE_AUTOCOMPLETE_SELECTOR,
+} from "@/lib/sensitive-autocomplete";
 import type { SessionContext, SessionManager } from "@/session-manager/manager";
 import type {
   BlurParams,
@@ -981,6 +984,10 @@ type FillStep1Result =
       isSensitive: boolean;
       focused: boolean;
       hasFocus: boolean;
+      /** Background only: the pointer hovers this document or a same-origin ancestor; `null` when an ancestor is cross-origin. */
+      hovered: boolean | null;
+      /** Background only: the document renders frames, so pointer input is processed. */
+      visible: boolean;
       cleared: boolean;
       readyForInsert: boolean;
     };
@@ -1013,6 +1020,9 @@ interface FillScriptReply<T> {
   exceptionDetails?: unknown;
 }
 
+/** A visible page processes a pointer move on its next frame. */
+const FILL_POINTER_FLUSH_TIMEOUT_MS = 500;
+
 // Date-like controls accept a programmatic value, but Chrome's Input.insertText
 // leaves them empty. Fill them via the input value setter instead of typing.
 const FILL_DATE_LIKE_TYPES = "['date', 'time', 'datetime-local', 'month', 'week']";
@@ -1028,6 +1038,9 @@ const FILL_EDITABLE_FUNCTION = `function() {
   return this.isConnected && supported && !this.readOnly && !this.matches(':disabled');
 }`;
 
+// The shared rule (password type, recording marker, sensitive autocomplete) plus
+// a "show password" toggle: it switches type to text, so also match password-like
+// names and ids, and the broader secret tokens fill has always withheld.
 const FILL_SENSITIVE_FUNCTION = `function() {
   if (!this || this.nodeType !== 1) return false;
   const tag = this.tagName.toLowerCase();
@@ -1036,7 +1049,11 @@ const FILL_SENSITIVE_FUNCTION = `function() {
     if (rawType === 'password' || this.hasAttribute(${JSON.stringify(RECORD_PASSWORD_ATTRIBUTE)})) {
       return true;
     }
+    if (/pass(?:word|wd|code)|pwd/i.test((this.getAttribute('name') ?? '') + ' ' + (this.id ?? ''))) {
+      return true;
+    }
   }
+  if (this.matches(${JSON.stringify(SENSITIVE_AUTOCOMPLETE_SELECTOR)})) return true;
   const ac = (this.getAttribute('autocomplete') ?? '').toLowerCase().trim();
   if (ac) {
     const tokens = ac.split(/[\\t\\n\\f\\r ]+/);
@@ -1161,6 +1178,17 @@ const FILL_STEP1_FUNCTION = `async function(value, clearBefore, scrollInPage) {
   const hasFocus = Boolean(this.ownerDocument?.hasFocus?.());
   const supportsSelection = native && typeof this.selectionStart === 'number';
   if (!focused || !hasFocus) {
+    // A background flush moves the pointer off the page unless something is
+    // hovered there; report hover so a hovered menu is not closed.
+    let hovered = false;
+    try {
+      for (let view = this.ownerDocument.defaultView; view; view = view.parent) {
+        if (view.document.querySelector(':hover')) { hovered = true; break; }
+        if (view.parent === view) break;
+      }
+    } catch {
+      hovered = null;
+    }
     return {
       ...plan,
       native,
@@ -1168,6 +1196,8 @@ const FILL_STEP1_FUNCTION = `async function(value, clearBefore, scrollInPage) {
       isSensitive,
       focused,
       hasFocus,
+      hovered,
+      visible: this.ownerDocument.visibilityState === 'visible',
       cleared: false,
       readyForInsert: false,
     };
@@ -1195,6 +1225,8 @@ const FILL_STEP1_FUNCTION = `async function(value, clearBefore, scrollInPage) {
         isSensitive,
         focused: false,
         hasFocus,
+        hovered: false,
+        visible: true,
         cleared: true,
         readyForInsert: false,
       };
@@ -1216,6 +1248,8 @@ const FILL_STEP1_FUNCTION = `async function(value, clearBefore, scrollInPage) {
     isSensitive,
     focused: true,
     hasFocus,
+    hovered: false,
+    visible: true,
     cleared,
     readyForInsert,
   };
@@ -1412,7 +1446,63 @@ export async function handleFill(
       }
     };
 
+    // An unfocused page applies focus(), but runs its focus listeners only when
+    // the renderer receives focus with the next Input command. Deliver it before
+    // clearing or writing, so listeners that set defaults cannot run in between.
+    // On a visible page, a pointer move outside the viewport (sent to the tab,
+    // which also focuses OOPIF widgets) reaches no element and grants no user
+    // activation. A hidden page processes pointer moves only on its next frame,
+    // and a hovered page would see the pointer leave, so those, and a move that
+    // does not deliver focus, use a no-op key press, which pages can observe as
+    // an empty key.
+    let pointerFlush: boolean | undefined;
+    const canFlushWithPointer = async (): Promise<boolean> => {
+      if (pointerFlush !== undefined) return pointerFlush;
+      pointerFlush = step1.visible && step1.hovered === false;
+      if (step1.visible && step1.hovered === null && node.cdpTarget.sessionId) {
+        // The target's frame cannot read a cross-origin parent; ask the tab.
+        const top = await deps.cdp
+          .send<{ result?: { value?: unknown } }>(target.tabId, "Runtime.evaluate", {
+            expression: "document.querySelector(':hover') === null",
+            returnByValue: true,
+          })
+          .catch(() => undefined);
+        pointerFlush = top?.result?.value === true;
+      }
+      return pointerFlush;
+    };
+    const focusDelivered = async (): Promise<boolean> => {
+      const reply = await nodeCdp.send<FillScriptReply<boolean>>(
+        target.tabId,
+        "Runtime.callFunctionOn",
+        {
+          objectId,
+          functionDeclaration: "function() { return Boolean(this.ownerDocument?.hasFocus?.()); }",
+          returnByValue: true,
+        },
+      );
+      return !reply.exceptionDetails && reply.result?.value === true;
+    };
     const flushBackgroundFocus = async (): Promise<void> => {
+      if (await canFlushWithPointer()) {
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        const moved = await Promise.race([
+          deps.cdp
+            .send(target.tabId, "Input.dispatchMouseEvent", { type: "mouseMoved", x: -1, y: -1 })
+            // A refused or late move falls back to the key press below.
+            .then(
+              () => true,
+              () => false,
+            ),
+          // The page became hidden after Step 1; its move waits for a frame.
+          new Promise<false>((resolve) => {
+            timer = setTimeout(() => resolve(false), FILL_POINTER_FLUSH_TIMEOUT_MS);
+          }),
+        ]).finally(() => clearTimeout(timer));
+        if (throwIfAborted(deps.signal)) return;
+        if (moved && (await focusDelivered())) return;
+        pointerFlush = false;
+      }
       try {
         await deps.cdp.send(target.tabId, "Input.dispatchKeyEvent", {
           type: "rawKeyDown",

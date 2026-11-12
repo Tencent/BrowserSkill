@@ -2546,8 +2546,9 @@ export interface FillResult {
   actual_value?: string;
   dialogs?: JavaScriptDialogInfo[];
   /**
-   * Set to `Some(true)` when a non-sensitive control's final value differs
-   * from the normalized requested value due to page formatting or truncation.
+   * Set to `Some(true)` when the control's final value differs from the
+   * normalized requested value due to page formatting or truncation. Also set
+   * for sensitive controls, whose `actual_value` stays omitted.
    */
   formatted?: boolean;
   tab_id: number;

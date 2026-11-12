@@ -45,7 +45,16 @@ if (process.env.BSK_FILL_CHROME) {
 }
 
 async function withFillBrowser(
-  { background, markup }: { background: boolean; markup: string },
+  {
+    background,
+    markup,
+    window: ownWindow = false,
+  }: {
+    background: boolean;
+    markup: string;
+    /** With `background`, a visible page in an unfocused window instead of a hidden tab. */
+    window?: boolean;
+  },
   run: (h: {
     evaluate: (expression: string) => Promise<unknown>;
     ref: (expression: string) => Promise<void>;
@@ -67,6 +76,7 @@ async function withFillBrowser(
   const { targetId } = await send<{ targetId: string }>("Target.createTarget", {
     url: "about:blank",
     background,
+    ...(ownWindow ? { newWindow: true } : {}),
   });
   try {
     const { sessionId } = await send<{ sessionId: string }>("Target.attachToTarget", {
@@ -562,66 +572,84 @@ describe.skipIf(!process.env.BSK_FILL_CHROME)("fill lifecycle and discoverabilit
 
 describe.skipIf(!process.env.BSK_FILL_CHROME)("fill focus changes", () => {
   it.each([
-    ["input", '<input id="target" value="old">', "value"],
-    ["textarea", '<textarea id="target">old</textarea>', "value"],
-    ["contenteditable", '<div id="target" contenteditable="true">old</div>', "textContent"],
+    ["input", "hidden tab", '<input id="target" value="old">', "value"],
+    ["textarea", "hidden tab", '<textarea id="target">old</textarea>', "value"],
+    [
+      "contenteditable",
+      "hidden tab",
+      '<div id="target" contenteditable="true">old</div>',
+      "textContent",
+    ],
+    ["input", "unfocused window", '<input id="target" value="old">', "value"],
+    [
+      "contenteditable",
+      "unfocused window",
+      '<div id="target" contenteditable="true">old</div>',
+      "textContent",
+    ],
   ] as const)(
-    "keeps a background %s clear after tab activation",
-    async (_name, markup, field) => {
-      await withFillBrowser({ background: true, markup: guard + markup }, async (h) => {
-        await h.ref("document.querySelector('#target')");
-        await h.evaluate(`document.querySelector('#target').addEventListener('focus', () => {
-        document.querySelector('#target').${field} = 'default';
-      })`);
-        expect(await h.fill("")).toMatchObject({ value_length: 0 });
-        expect(await h.evaluate(`document.querySelector('#target').${field}`)).toBe("");
-        await h.activate();
-        expect(await h.evaluate(`document.querySelector('#target').${field}`)).toBe("");
-        expect(h.calls).toContain("Input.dispatchKeyEvent");
-        expect(h.calls).not.toContain("Input.insertText");
-      });
+    "clears focus-initialized defaults on a background non-empty %s fill in a %s",
+    async (_name, where, markup, field) => {
+      const ownWindow = where === "unfocused window";
+      await withFillBrowser(
+        { background: true, window: ownWindow, markup: guard + markup },
+        async (h) => {
+          await h.ref("document.querySelector('#target')");
+          await h.evaluate(`document.querySelector('#target').addEventListener('focus', () => {
+            document.querySelector('#target').${field} = 'default';
+          })`);
+          expect(await h.fill("hello")).toMatchObject({ value_length: 5, actual_value: "hello" });
+          expect(await h.evaluate(`document.querySelector('#target').${field}`)).toBe("hello");
+          await h.activate();
+          expect(await h.evaluate(`document.querySelector('#target').${field}`)).toBe("hello");
+          // A visible page takes focus from a pointer move outside the viewport;
+          // a hidden tab processes pointer input only when it renders again.
+          if (ownWindow) {
+            expect(h.calls).toContain("Input.dispatchMouseEvent");
+            expect(h.calls).not.toContain("Input.dispatchKeyEvent");
+          } else {
+            expect(h.calls).not.toContain("Input.dispatchMouseEvent");
+            expect(h.calls).toContain("Input.dispatchKeyEvent");
+          }
+        },
+      );
     },
     30_000,
   );
 
-  it("fills a foreground text input on the 4-call fast path without dispatchKeyEvent", async () => {
-    await withFillBrowser(
-      { background: false, markup: guard + '<input id="target" value="old">' },
-      async (h) => {
-        await h.ref("document.querySelector('#target')");
-        const result = await h.fill("hello");
-        expect(result).toMatchObject({ value_length: 5, actual_value: "hello" });
-        expect(result).not.toHaveProperty("formatted");
-        expect(await h.evaluate("document.querySelector('#target').value")).toBe("hello");
-        expect(h.calls).toEqual([
-          "DOM.resolveNode",
-          "Runtime.callFunctionOn",
-          "Input.insertText",
-          "Runtime.callFunctionOn",
-          "Runtime.releaseObject",
-        ]);
-      },
-    );
-  }, 30_000);
-
   it.each([
-    ["input", '<input id="target" value="old">', "value"],
-    ["textarea", '<textarea id="target">old</textarea>', "value"],
-    ["contenteditable", '<div id="target" contenteditable="true">old</div>', "textContent"],
+    ["input", '<input id="target" value="old">'],
+    ["date", '<input id="target" type="date" value="2026-01-01">'],
+    ["contenteditable", '<div id="target" contenteditable="true">old</div>'],
   ] as const)(
-    "clears focus-initialized defaults on a background non-empty %s fill",
-    async (_name, markup, field) => {
-      await withFillBrowser({ background: true, markup: guard + markup }, async (h) => {
-        await h.ref("document.querySelector('#target')");
-        await h.evaluate(`document.querySelector('#target').addEventListener('focus', () => {
-          document.querySelector('#target').${field} = 'default';
-        })`);
-        expect(await h.fill("hello")).toMatchObject({ value_length: 5, actual_value: "hello" });
-        expect(await h.evaluate(`document.querySelector('#target').${field}`)).toBe("hello");
-        await h.activate();
-        expect(await h.evaluate(`document.querySelector('#target').${field}`)).toBe("hello");
-        expect(h.calls).toContain("Input.dispatchKeyEvent");
-      });
+    "flushes focus in an unfocused window on a %s without key or pointer events the page can see",
+    async (name, markup) => {
+      await withFillBrowser(
+        { background: true, window: true, markup: guard + markup },
+        async (h) => {
+          await h.ref("document.querySelector('#target')");
+          await h.evaluate(`(() => {
+          window.seen = [];
+          for (const type of ['keydown', 'keyup', 'keypress', 'pointermove', 'mousemove',
+            'pointerover', 'mouseover', 'pointerout', 'mouseout']) {
+            window.addEventListener(type, (event) => window.seen.push(type + ':' + event.isTrusted), true);
+          }
+          // One-time-code fields often move focus to the next box on keyup.
+          document.querySelector('#target').addEventListener('keyup', () => {
+            document.querySelector('#guard').focus();
+          });
+        })()`);
+          const value = name === "date" ? "2026-10-14" : "4";
+          expect(await h.fill(value)).toMatchObject({ value_length: value.length });
+          expect(
+            await h.evaluate(
+              `document.querySelector('#target').${name === "contenteditable" ? "textContent" : "value"}`,
+            ),
+          ).toBe(value);
+          expect(await h.evaluate("window.seen")).toEqual([]);
+          expect(await h.evaluate("document.querySelector('#guard').value")).toBe("untouched");
+        },
+      );
     },
     30_000,
   );
