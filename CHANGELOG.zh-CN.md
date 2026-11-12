@@ -77,7 +77,7 @@ CLI、扩展和 DSH 插件可以分别发布，能否连接由协议兼容性决
 - `tool.record_start` 执行共享标签页归属、任务终止与人工持有检查，并在启动录制时使旧控制凭证失效；`tool.tab_return` 对本地会话和远程会话同样清理进行中的录制。
 - daemon 关闭时保留 WebSocket 停止通知，避免接收循环尚未等待时丢失通知，导致 `daemon stop` 等待不结束。
 - 网站调试将 Agent 发起的上传和下载归入对应传输操作，不再把产生的文件变更和点击误记为人工输入。
-- 预写意图账本不再在动作确定未生效时冻结标签页。仅滚动后即被拒绝的点击（`effect_state: "unknown"` 且 `press_sent: false`）以及报告 `dispatched: false` 的失败现在都判为已结算；`select`（`option_not_found`、`option_ambiguous`、`<select>` 被禁用）与 `fill`（`fill_value_invalid`、`target_not_fillable`）在写入前发现的校验失败改为报告 `effect_state: "none"` 与 `phase: "precondition"`，修正参数后重试既不需要 `bsk ledger resolve`，也不会丢失共享控制凭证（[#702](https://github.com/Tencent/BrowserSkill/issues/702)）。
+- 预写意图账本不再在动作确定未生效时冻结标签页。仅滚动后即被拒绝的点击（`effect_state: "unknown"` 且 `press_sent: false`）以及报告 `dispatched: false` 的失败现在都判为已结算。`select` 在滚动或聚焦元素之前校验所选选项，`fill` 在清空之前校验输入值；在这些位置发现的拒绝（`option_not_found`、`option_ambiguous`、`<select>` 被禁用、`fill_value_invalid`、`target_not_fillable`）报告 `effect_state: "none"` 与 `phase: "precondition"`，修正参数后重试既不需要 `bsk ledger resolve`，也不会丢失共享控制凭证。若同类原因在 `select` 移动焦点之后或 `fill` 清空字段之后才报告，仍保持效果未知。本已禁用的 `<select>` 现在报告 `invalid_params`，而不是聚焦失败的 `cdp_failed`（[#702](https://github.com/Tencent/BrowserSkill/issues/702)）。
 - upload、download、plan 和 step 的本地校验失败返回稳定的参数或文件错误码，并提供对应修复提示。上传源文件在连接 daemon 或暂存任何文件前完成检查。
 - `fill` 对每个最终值只通知一次。原生插入或清空步骤已经派发 `input`，完成阶段不再重复派发
   （[#624](https://github.com/Tencent/BrowserSkill/issues/624)）。

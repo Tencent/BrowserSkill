@@ -488,6 +488,28 @@ describe("fill result verification", () => {
     expect(h.send.mock.calls.filter(([, method]) => method === "DOM.focus")).toHaveLength(1);
   });
 
+  it("does not report a post-clear target_not_fillable as a pre-write failure", async () => {
+    const h = await setup();
+    const other = document.createElement("input");
+    document.body.append(other);
+    // Clearing moves focus away, and restoring it fails because the page
+    // disabled the target: the field was already cleared.
+    h.element.addEventListener("input", () => other.focus(), { once: true });
+    const send = h.send.getMockImplementation()!;
+    h.send.mockImplementation(async (tabId, method, params) => {
+      if (method === "DOM.focus") {
+        h.element.disabled = true;
+        throw new Error("Element is not focusable");
+      }
+      return send(tabId, method, params);
+    });
+    const res = await h.fill();
+    expect(res).toMatchObject({ code: "invalid_params", data: { reason: "target_not_fillable" } });
+    expect((res as { data?: { effect_state?: string } }).data?.effect_state).toBeUndefined();
+    expect(h.element.value).toBe("");
+    expect(h.insert).not.toHaveBeenCalled();
+  });
+
   it.each([
     "focus",
     "value",

@@ -2195,10 +2195,15 @@ describe("handleSelect", () => {
     expect(res.multiple).toBe(true);
     expect(res.selected_values).toEqual(["us", "ca"]);
     expect(res.selected_labels).toEqual(["United States", "Canada"]);
-    const callFn = fake.sent.find((c) => c.method === "Runtime.callFunctionOn");
-    expect(callFn?.params).toMatchObject({
-      arguments: [{ value: ["us", "ca"] }],
-    });
+    // Validation (commit=false) runs before scrolling and focusing; the write follows.
+    expect(
+      fake.sent
+        .filter((c) => c.method === "Runtime.callFunctionOn")
+        .map((c) => (c.params as { arguments: unknown }).arguments),
+    ).toEqual([
+      [{ value: ["us", "ca"] }, { value: false }],
+      [{ value: ["us", "ca"] }, { value: true }],
+    ]);
   });
 
   it("sets a single value on a single-select <select>", async () => {
@@ -2244,6 +2249,65 @@ describe("handleSelect", () => {
       // Matching runs before any option changes, so the select was not written.
       data: { reason: "option_not_found", effect_state: "none", phase: "precondition" },
     });
+  });
+
+  it("rejects a missing option before scrolling or focusing the select", async () => {
+    const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
+    const ctx = await sm.start("aa11");
+    ctx.refStore.set("e1", 555, { tabId: 4 });
+    const fake = makeFakeCdp(
+      selectHandlers({ ok: false, reason: "option_not_found", missing: "zz" }),
+    );
+    const res = await handleSelect(
+      sm,
+      { session_id: "aa11", ref: "e1", values: ["zz"] },
+      { cdp: fake.cdp, tabsApi: fake.tabsApi },
+    );
+    expect(res).toMatchObject({
+      data: { reason: "option_not_found", effect_state: "none", phase: "precondition" },
+    });
+    // Focusing can blur another field and run its handlers, so a pre-write
+    // rejection must come before any scroll or focus.
+    expect(fake.sent.map((c) => c.method)).not.toContain("DOM.focus");
+    expect(fake.sent.map((c) => c.method)).not.toContain("DOM.scrollIntoViewIfNeeded");
+  });
+
+  it("keeps an unknown effect when the select becomes disabled after focus", async () => {
+    const select = document.createElement("select");
+    select.innerHTML = '<option value="us">US</option><option value="ca">Canada</option>';
+    const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
+    const ctx = await sm.start("aa11");
+    ctx.refStore.set("e1", 555, { tabId: 4 });
+    const fake = makeFakeCdp({
+      ...selectHandlers({ ok: true }),
+      "DOM.focus": () => {
+        select.disabled = true;
+        return {};
+      },
+      "Runtime.callFunctionOn": (params) => {
+        const script = params as {
+          functionDeclaration: string;
+          arguments: Array<{ value: unknown }>;
+        };
+        const fn = new Function(`return (${script.functionDeclaration})`)();
+        return {
+          result: {
+            value: fn.apply(
+              select,
+              script.arguments.map((arg) => arg.value),
+            ),
+          },
+        };
+      },
+    });
+    const res = await handleSelect(
+      sm,
+      { session_id: "aa11", ref: "e1", values: ["ca"] },
+      { cdp: fake.cdp, tabsApi: fake.tabsApi },
+    );
+    expect(res).toMatchObject({ code: "invalid_params", data: { reason: "target_disabled" } });
+    expect((res as { data?: { effect_state?: string } }).data?.effect_state).toBeUndefined();
+    expect(select.value).toBe("us");
   });
 
   it("reports a disabled select as a pre-write failure", async () => {
@@ -2417,7 +2481,12 @@ describe("handleSelect", () => {
       { cdp: fake.cdp, tabsApi: fake.tabsApi, signal: abort.signal },
     );
     expect(res).toMatchObject({ code: "cancelled" });
-    expect(fake.sent.some((c) => c.method === "Runtime.callFunctionOn")).toBe(false);
+    // Only the read-only validation ran; the option write did not.
+    expect(
+      fake.sent
+        .filter((c) => c.method === "Runtime.callFunctionOn")
+        .map((c) => (c.params as { arguments: Array<{ value: unknown }> }).arguments[1]),
+    ).toEqual([{ value: false }]);
   });
 
   it("selects by unique visible label (exact and case-insensitive), rejects ambiguous labels, and lists available options", async () => {

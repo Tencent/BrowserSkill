@@ -1005,11 +1005,17 @@ const FILL_MAX_ACTUAL_VALUE_CHARS = 200;
  */
 const PRE_WRITE_FAILURE = { effect_state: "none", phase: "precondition" } as const;
 
-function fillError(reason: FillFailureReason, message: string): RpcError {
-  // Both reasons come only from the read-only preparation check, before clearing.
-  const preWrite = reason === "target_not_fillable" || reason === "fill_value_invalid";
+/**
+ * `preWrite` must be set only by a caller that knows the field has not been
+ * cleared or typed into and no key event has reached the page. The same
+ * reasons are also reported after clearing (for example when focus cannot be
+ * restored to a target that became disabled), where the write did happen.
+ */
+function fillError(reason: FillFailureReason, message: string, preWrite = false): RpcError {
   return rpcError(
-    preWrite ? "invalid_params" : "cdp_failed",
+    reason === "target_not_fillable" || reason === "fill_value_invalid"
+      ? "invalid_params"
+      : "cdp_failed",
     reason,
     message,
     preWrite ? PRE_WRITE_FAILURE : undefined,
@@ -1321,7 +1327,12 @@ export async function handleFill(
     }
     const step1 = step1Reply.result.value;
     if ("error" in step1) {
-      return fillError(step1.reason, step1.error);
+      // Step 1 reports these validation errors only before clearing; its focus is
+      // preparation, so the requested write never started. `fill_target_changed`
+      // is reported after clearing and keeps an unknown effect.
+      const preWrite =
+        step1.reason === "target_not_fillable" || step1.reason === "fill_value_invalid";
+      return fillError(step1.reason, step1.error, preWrite);
     }
     if (
       typeof step1.before !== "string" ||
@@ -2040,6 +2051,102 @@ export async function handlePress(
 // tool.select
 // ---------------------------------------------------------------------------
 
+// Matches every requested value before changing any option. With commit=false
+// it only validates, so a rejected select can run before scrolling or focusing.
+const SELECT_OPTIONS_FUNCTION = `function(values, commit) {
+  const select = this;
+  if (select.matches(':disabled')) {
+    return { ok: false, reason: 'target_disabled' };
+  }
+  const multiple = select.multiple;
+  const opts = Array.from(select.options);
+  const norm = (s) => String(s || '').replace(/\\s+/g, ' ').trim();
+  const formatCandidate = (o) => {
+    const lbl = norm(o.getAttribute('label')) || norm(o.text);
+    if (!lbl || o.value === lbl) return JSON.stringify(o.value);
+    return (o.value === '' ? '""' : o.value) + '=' + JSON.stringify(lbl);
+  };
+  const available = opts.slice(0, 12).map(formatCandidate);
+  const selectedIndices = new Set();
+  for (const v of values) {
+    const byValue = [];
+    for (let i = 0; i < opts.length; i++) {
+      if (opts[i].value === v) byValue.push(i);
+    }
+    if (byValue.length > 0) {
+      for (const idx of byValue) selectedIndices.add(idx);
+      continue;
+    }
+    const vTrim = norm(v);
+    if (vTrim) {
+      const byExactLabel = [];
+      for (let i = 0; i < opts.length; i++) {
+        const attrLbl = norm(opts[i].getAttribute('label'));
+        const txtLbl = norm(opts[i].text);
+        if ((attrLbl && attrLbl === vTrim) || (txtLbl && txtLbl === vTrim)) {
+          byExactLabel.push(i);
+        }
+      }
+      if (byExactLabel.length === 1) {
+        selectedIndices.add(byExactLabel[0]);
+        continue;
+      }
+      if (byExactLabel.length > 1) {
+        return {
+          ok: false,
+          reason: 'option_ambiguous',
+          ambiguous: v,
+          count: byExactLabel.length,
+          available,
+        };
+      }
+      const vLower = vTrim.toLowerCase();
+      const byLowerLabel = [];
+      for (let i = 0; i < opts.length; i++) {
+        const attrLbl = norm(opts[i].getAttribute('label')).toLowerCase();
+        const txtLbl = norm(opts[i].text).toLowerCase();
+        if ((attrLbl && attrLbl === vLower) || (txtLbl && txtLbl === vLower)) {
+          byLowerLabel.push(i);
+        }
+      }
+      if (byLowerLabel.length === 1) {
+        selectedIndices.add(byLowerLabel[0]);
+        continue;
+      }
+      if (byLowerLabel.length > 1) {
+        return {
+          ok: false,
+          reason: 'option_ambiguous',
+          ambiguous: v,
+          count: byLowerLabel.length,
+          available,
+        };
+      }
+    }
+    return { ok: false, reason: 'option_not_found', missing: v, available };
+  }
+  // Validation only: report the outcome without changing options or dispatching events.
+  if (!commit) return { ok: true, multiple };
+  if (multiple) {
+    for (let i = 0; i < opts.length; i++) {
+      opts[i].selected = selectedIndices.has(i);
+    }
+  } else {
+    const firstIdx = selectedIndices.size > 0 ? Array.from(selectedIndices)[0] : -1;
+    select.selectedIndex = firstIdx;
+    if (firstIdx >= 0 && opts[firstIdx]) opts[firstIdx].selected = true;
+  }
+  select.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
+  select.dispatchEvent(new Event('change', { bubbles: true }));
+  const selected = opts.filter((o) => o.selected);
+  return {
+    ok: true,
+    multiple,
+    selected_values: selected.map((o) => o.value),
+    selected_labels: selected.map((o) => o.getAttribute('label') || o.text),
+  };
+}`;
+
 export async function handleSelect(
   manager: SessionManager,
   params: SelectParams,
@@ -2067,6 +2174,7 @@ export async function handleSelect(
   if (isRpcError(node)) return node;
   const nodeCdp = cdpRunnerForTarget(deps.cdp, node.cdpTarget);
 
+  let objectId: string;
   try {
     deps.cdp.trackSessionTab?.(ctx.sessionId, target.tabId);
     const described = await nodeCdp.send<{ node?: DescribedNode }>(
@@ -2095,6 +2203,25 @@ export async function handleSelect(
         "single-select <select> requires exactly one value",
       );
     }
+    const objectIdOrErr = await backendNodeToObject(nodeCdp, target.tabId, node.backendNodeId);
+    if (isRpcError(objectIdOrErr)) return objectIdOrErr;
+    objectId = objectIdOrErr;
+    // Validate the requested options before scrolling or focusing: moving focus
+    // can blur another field and run its change or autosave handlers, so only a
+    // rejection reported here is free of page effects.
+    const validated = await nodeCdp.send<{
+      result?: { value?: SelectMutationResult | { ok: true; multiple: boolean } | null };
+    }>(target.tabId, "Runtime.callFunctionOn", {
+      objectId,
+      functionDeclaration: SELECT_OPTIONS_FUNCTION,
+      arguments: [{ value: params.values }, { value: false }],
+      returnByValue: true,
+    });
+    const validation = validated.result?.value;
+    if (!validation?.ok) return selectFailure(validation, true);
+    if (throwIfAborted(deps.signal)) {
+      return { code: "cancelled", message: "select aborted" };
+    }
     const scrollErr = await scrollElementAndFramesIntoView(
       deps.cdp,
       target.tabId,
@@ -2118,153 +2245,20 @@ export async function handleSelect(
     return { code: "cancelled", message: "select aborted" };
   }
 
-  const objectIdOrErr = await backendNodeToObject(nodeCdp, target.tabId, node.backendNodeId);
-  if (isRpcError(objectIdOrErr)) return objectIdOrErr;
-  const objectId = objectIdOrErr;
-
   try {
     await deps.cdp.beginDomMutation?.();
     const evaluated = await nodeCdp.send<{
       result?: { value?: SelectMutationResult | null };
     }>(target.tabId, "Runtime.callFunctionOn", {
       objectId,
-      functionDeclaration: `function(values) {
-        const select = this;
-        if (select.matches(':disabled')) {
-          return { ok: false, reason: 'target_disabled' };
-        }
-        const multiple = select.multiple;
-        const opts = Array.from(select.options);
-        const norm = (s) => String(s || '').replace(/\\s+/g, ' ').trim();
-        const formatCandidate = (o) => {
-          const lbl = norm(o.getAttribute('label')) || norm(o.text);
-          if (!lbl || o.value === lbl) return JSON.stringify(o.value);
-          return (o.value === '' ? '""' : o.value) + '=' + JSON.stringify(lbl);
-        };
-        const available = opts.slice(0, 12).map(formatCandidate);
-        const selectedIndices = new Set();
-        for (const v of values) {
-          const byValue = [];
-          for (let i = 0; i < opts.length; i++) {
-            if (opts[i].value === v) byValue.push(i);
-          }
-          if (byValue.length > 0) {
-            for (const idx of byValue) selectedIndices.add(idx);
-            continue;
-          }
-          const vTrim = norm(v);
-          if (vTrim) {
-            const byExactLabel = [];
-            for (let i = 0; i < opts.length; i++) {
-              const attrLbl = norm(opts[i].getAttribute('label'));
-              const txtLbl = norm(opts[i].text);
-              if ((attrLbl && attrLbl === vTrim) || (txtLbl && txtLbl === vTrim)) {
-                byExactLabel.push(i);
-              }
-            }
-            if (byExactLabel.length === 1) {
-              selectedIndices.add(byExactLabel[0]);
-              continue;
-            }
-            if (byExactLabel.length > 1) {
-              return {
-                ok: false,
-                reason: 'option_ambiguous',
-                ambiguous: v,
-                count: byExactLabel.length,
-                available,
-              };
-            }
-            const vLower = vTrim.toLowerCase();
-            const byLowerLabel = [];
-            for (let i = 0; i < opts.length; i++) {
-              const attrLbl = norm(opts[i].getAttribute('label')).toLowerCase();
-              const txtLbl = norm(opts[i].text).toLowerCase();
-              if ((attrLbl && attrLbl === vLower) || (txtLbl && txtLbl === vLower)) {
-                byLowerLabel.push(i);
-              }
-            }
-            if (byLowerLabel.length === 1) {
-              selectedIndices.add(byLowerLabel[0]);
-              continue;
-            }
-            if (byLowerLabel.length > 1) {
-              return {
-                ok: false,
-                reason: 'option_ambiguous',
-                ambiguous: v,
-                count: byLowerLabel.length,
-                available,
-              };
-            }
-          }
-          return { ok: false, reason: 'option_not_found', missing: v, available };
-        }
-        if (multiple) {
-          for (let i = 0; i < opts.length; i++) {
-            opts[i].selected = selectedIndices.has(i);
-          }
-        } else {
-          const firstIdx = selectedIndices.size > 0 ? Array.from(selectedIndices)[0] : -1;
-          select.selectedIndex = firstIdx;
-          if (firstIdx >= 0 && opts[firstIdx]) opts[firstIdx].selected = true;
-        }
-        select.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
-        select.dispatchEvent(new Event('change', { bubbles: true }));
-        const selected = opts.filter((o) => o.selected);
-        return {
-          ok: true,
-          multiple,
-          selected_values: selected.map((o) => o.value),
-          selected_labels: selected.map((o) => o.getAttribute('label') || o.text),
-        };
-      }`,
-      arguments: [{ value: params.values }],
+      functionDeclaration: SELECT_OPTIONS_FUNCTION,
+      arguments: [{ value: params.values }, { value: true }],
       returnByValue: true,
     });
     const mutation = evaluated.result?.value;
-    if (!mutation?.ok) {
-      // The page function returns these before changing any option or dispatching events.
-      if (mutation?.reason === "target_disabled") {
-        return {
-          code: "invalid_params",
-          message: "select requires an enabled <select>",
-          data: { ...PRE_WRITE_FAILURE },
-        };
-      }
-      if (mutation?.reason === "option_ambiguous") {
-        const suffix = mutation.available?.length
-          ? ` (available: ${mutation.available.join(" | ")})`
-          : "";
-        return rpcError(
-          "invalid_params",
-          "option_ambiguous",
-          `option label "${mutation.ambiguous ?? "?"}" matched ${mutation.count ?? 2} options in <select>; pass an explicit option value instead${suffix}`,
-          {
-            ...PRE_WRITE_FAILURE,
-            ...(mutation.ambiguous !== undefined ? { ambiguous: mutation.ambiguous } : {}),
-            ...(mutation.count !== undefined ? { count: mutation.count } : {}),
-            ...(mutation.available ? { available: mutation.available } : {}),
-          },
-        );
-      }
-      if (mutation?.reason === "option_not_found") {
-        const suffix = mutation.available?.length
-          ? ` (available: ${mutation.available.join(" | ")})`
-          : "";
-        return rpcError(
-          "invalid_params",
-          "option_not_found",
-          `option value ${mutation.missing ?? "?"} not found in <select>${suffix}`,
-          {
-            ...PRE_WRITE_FAILURE,
-            ...(mutation.missing !== undefined ? { missing: mutation.missing } : {}),
-            ...(mutation.available ? { available: mutation.available } : {}),
-          },
-        );
-      }
-      return { code: "cdp_failed", message: "select mutation returned an unexpected result" };
-    }
+    // The page changed after validation, and focus already moved; keep the
+    // effect unknown even though no option was changed.
+    if (!mutation?.ok) return selectFailure(mutation, false);
     return attachDialogs(deps.cdp, target.tabId, dialogCursor, {
       tab_id: target.tabId,
       used_ref: node.usedRef,
@@ -2279,6 +2273,53 @@ export async function handleSelect(
       message: err instanceof Error ? err.message : String(err),
     };
   }
+}
+
+/** Maps a rejected option match. `preWrite` only before scrolling or focusing. */
+function selectFailure(
+  mutation: Extract<SelectMutationResult, { ok: false }> | null | undefined,
+  preWrite: boolean,
+): RpcError {
+  const effect = preWrite ? PRE_WRITE_FAILURE : {};
+  if (mutation?.reason === "target_disabled") {
+    return {
+      code: "invalid_params",
+      message: "select requires an enabled <select>",
+      data: { reason: "target_disabled", ...effect },
+    };
+  }
+  if (mutation?.reason === "option_ambiguous") {
+    const suffix = mutation.available?.length
+      ? ` (available: ${mutation.available.join(" | ")})`
+      : "";
+    return rpcError(
+      "invalid_params",
+      "option_ambiguous",
+      `option label "${mutation.ambiguous ?? "?"}" matched ${mutation.count ?? 2} options in <select>; pass an explicit option value instead${suffix}`,
+      {
+        ...effect,
+        ...(mutation.ambiguous !== undefined ? { ambiguous: mutation.ambiguous } : {}),
+        ...(mutation.count !== undefined ? { count: mutation.count } : {}),
+        ...(mutation.available ? { available: mutation.available } : {}),
+      },
+    );
+  }
+  if (mutation?.reason === "option_not_found") {
+    const suffix = mutation.available?.length
+      ? ` (available: ${mutation.available.join(" | ")})`
+      : "";
+    return rpcError(
+      "invalid_params",
+      "option_not_found",
+      `option value ${mutation.missing ?? "?"} not found in <select>${suffix}`,
+      {
+        ...effect,
+        ...(mutation.missing !== undefined ? { missing: mutation.missing } : {}),
+        ...(mutation.available ? { available: mutation.available } : {}),
+      },
+    );
+  }
+  return { code: "cdp_failed", message: "select mutation returned an unexpected result" };
 }
 
 export const __testing__ = {

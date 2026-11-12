@@ -150,11 +150,15 @@ determines which versions can connect.
   operations instead of recording the resulting file changes and clicks as human input.
 - The Intent WAL no longer freezes a tab after actions that provably never took
   effect. A click refused after only scrolling (`effect_state: "unknown"` with
-  `press_sent: false`) and any failure reporting `dispatched: false` now settle, and
-  `select` (`option_not_found`, `option_ambiguous`, disabled `<select>`) and `fill`
-  (`fill_value_invalid`, `target_not_fillable`) validation failures detected before
-  writing report `effect_state: "none"` with `phase: "precondition"`, so a corrected
-  retry neither needs `bsk ledger resolve` nor loses the shared-control context
+  `press_sent: false`) and any failure reporting `dispatched: false` now settle.
+  `select` checks the requested options before scrolling or focusing the element,
+  and `fill` validates the value before clearing; rejections found there
+  (`option_not_found`, `option_ambiguous`, disabled `<select>`, `fill_value_invalid`,
+  `target_not_fillable`) report `effect_state: "none"` with `phase: "precondition"`,
+  so a corrected retry neither needs `bsk ledger resolve` nor loses the
+  shared-control context. The same reasons reported later, after `select` moved
+  focus or after `fill` cleared the field, keep an unknown effect. A `<select>` that is already disabled is now
+  reported as `invalid_params` instead of a `cdp_failed` focus error
   ([#702](https://github.com/Tencent/BrowserSkill/issues/702)).
 - Local validation failures in upload, download, plan and step return stable
   parameter/file error codes and relevant recovery hints. Upload sources are checked
