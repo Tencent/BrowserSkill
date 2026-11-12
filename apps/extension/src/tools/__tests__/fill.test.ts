@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { RECORD_PASSWORD_ATTRIBUTE } from "@/lib/sensitive-autocomplete";
 import { SessionManager } from "@/session-manager/manager";
 import type { CdpRunner } from "@/tools/shared";
 import { handleFill } from "../interaction";
@@ -214,7 +215,7 @@ describe("fill result verification", () => {
   it("flushes deferred background focus before a date value write", async () => {
     const h = await setup('<input type="date" value="">');
     vi.spyOn(document, "hasFocus").mockReturnValue(false);
-    // Happy DOM fires focus synchronously on DOM.focus; inject the deferred
+    // Happy DOM fires focus synchronously on focus(); inject the deferred
     // background focus handler on the flush key event instead.
     const send = h.send.getMockImplementation()!;
     h.send.mockImplementation(async (tabId, method, params) => {
@@ -222,7 +223,8 @@ describe("fill result verification", () => {
       if (
         method === "Input.dispatchKeyEvent" &&
         (params as { type: string; commands?: string[] }).type === "rawKeyDown" &&
-        (params as { commands?: string[] }).commands?.includes("moveToEndOfDocument")
+        Array.isArray((params as { commands?: string[] }).commands) &&
+        (params as { commands?: string[] }).commands!.length === 0
       ) {
         h.element.value = "2026-01-01";
       }
@@ -234,7 +236,7 @@ describe("fill result verification", () => {
     expect(h.send).toHaveBeenCalledWith(
       4,
       "Input.dispatchKeyEvent",
-      expect.objectContaining({ type: "rawKeyDown", commands: ["moveToEndOfDocument"] }),
+      expect.objectContaining({ type: "rawKeyDown", commands: [] }),
     );
   });
 
@@ -258,7 +260,7 @@ describe("fill result verification", () => {
 
     expect(await h.fill("")).toMatchObject({ value_length: 0 });
     expect(h.element.value).toBe("");
-    expect(inputs).toEqual(["", "focus:2026-01-01", ""]);
+    expect(inputs).toEqual(["focus:2026-01-01", ""]);
     expect(h.insert).not.toHaveBeenCalled();
   });
 
@@ -461,9 +463,9 @@ describe("fill result verification", () => {
     expect(h.release).toHaveBeenCalledOnce();
   });
 
-  it("fills a background document on the 4-call fast path without DOM.focus or dispatchKeyEvent", async () => {
+  it("fills a foreground document on the 4-call fast path without DOM.focus or dispatchKeyEvent", async () => {
     const h = await setup();
-    vi.spyOn(document, "hasFocus").mockReturnValue(false);
+    vi.spyOn(document, "hasFocus").mockReturnValue(true);
     const result = await h.fill();
     expect(result).toMatchObject({ value_length: 5, actual_value: "hello" });
     expect(result).not.toHaveProperty("formatted");
@@ -475,6 +477,60 @@ describe("fill result verification", () => {
       "Runtime.callFunctionOn",
       "Runtime.releaseObject",
     ]);
+  });
+
+  it("flushes deferred focus on a background non-empty fill and clears focus-initialized defaults", async () => {
+    const h = await setup('<input value="">');
+    vi.spyOn(document, "hasFocus").mockReturnValue(false);
+    const send = h.send.getMockImplementation()!;
+    h.send.mockImplementation(async (tabId, method, params) => {
+      const reply = await send(tabId, method, params);
+      if (
+        method === "Input.dispatchKeyEvent" &&
+        (params as { type: string }).type === "rawKeyDown"
+      ) {
+        h.element.value = "default";
+      }
+      return reply;
+    });
+    const result = await h.fill("hello");
+    expect(result).toMatchObject({ value_length: 5, actual_value: "hello" });
+    expect(result).not.toHaveProperty("formatted");
+    expect(h.element.value).toBe("hello");
+    expect(h.send).toHaveBeenCalledWith(
+      4,
+      "Input.dispatchKeyEvent",
+      expect.objectContaining({ type: "rawKeyDown", commands: [] }),
+    );
+  });
+
+  it("stops a background non-empty fill when deferred focus redirects without touching other fields", async () => {
+    const h = await setup('<input type="password" value="old-secret">');
+    vi.spyOn(document, "hasFocus").mockReturnValue(false);
+    const other = document.createElement("input");
+    other.value = "keep-existing";
+    document.body.append(other);
+    const send = h.send.getMockImplementation()!;
+    h.send.mockImplementation(async (tabId, method, params) => {
+      const reply = await send(tabId, method, params);
+      if (
+        method === "Input.dispatchKeyEvent" &&
+        (params as { type: string }).type === "rawKeyDown"
+      ) {
+        other.focus();
+        other.select();
+      }
+      return reply;
+    });
+    const result = await h.fill("new-super-secret");
+    expect(result).toMatchObject({
+      code: "cdp_failed",
+      data: { reason: "fill_focus_lost" },
+    });
+    expect(h.element.value).toBe("old-secret");
+    expect(other.value).toBe("keep-existing");
+    expect(h.insert).not.toHaveBeenCalled();
+    expect(h.release).toHaveBeenCalledOnce();
   });
 
   it("restores focus once after clearing without typing into another field", async () => {
@@ -598,16 +654,36 @@ describe("fill result verification", () => {
     '<input type="password">',
     '<input type="text" autocomplete="one-time-code">',
     '<input type="text" autocomplete="billing cc-number">',
-  ])("never exposes actual_value or formatted for sensitive control %s", async (markup) => {
+    `<input type="text" ${RECORD_PASSWORD_ATTRIBUTE}="">`,
+  ])("flags formatted: true while redacting actual_value when sensitive control %s alters the value", async (markup) => {
     const h = await setup(markup);
     h.element.addEventListener("change", () => {
       h.element.value = "other-secret";
     });
     const result = await h.fill("given-secret");
-    expect(result).toMatchObject({ value_length: "other-secret".length });
+    expect(result).toMatchObject({
+      value_length: "other-secret".length,
+      formatted: true,
+    });
     expect(result).not.toHaveProperty("actual_value");
-    expect(result).not.toHaveProperty("formatted");
     expect(JSON.stringify(result)).not.toMatch(/given-secret|other-secret/);
+  });
+
+  it("flags password maxlength truncation with formatted: true without leaking actual_value", async () => {
+    const h = await setup('<input type="password" maxlength="6">');
+    const truncated = await h.fill("supersecret");
+    expect(truncated).toMatchObject({
+      value_length: 6,
+      formatted: true,
+    });
+    expect(truncated).not.toHaveProperty("actual_value");
+    expect(JSON.stringify(truncated)).not.toMatch(/supers|supersecret/);
+
+    const exact = await h.fill("secret");
+    expect(exact).toMatchObject({ value_length: 6 });
+    expect(exact).not.toHaveProperty("formatted");
+    expect(exact).not.toHaveProperty("actual_value");
+    expect(JSON.stringify(exact)).not.toContain("secret");
   });
 
   it("truncates actual_value to 200 characters while keeping full value_length", async () => {
@@ -816,13 +892,11 @@ describe("fill result verification", () => {
   it.each([
     ["focus", false],
     ["focus", true],
-    ["value", false],
-    ["value", true],
     ["cancel", false],
     ["cancel", true],
     ["throw", false],
     ["throw", true],
-  ] as const)("stops when positioning triggers %s (clear=%s) and releases the key", async (action, clearBefore) => {
+  ] as const)("stops when background focus flush triggers %s (clear=%s) and releases the key", async (action, clearBefore) => {
     const h = await setup('<div contenteditable="true" tabindex="0">old</div>');
     Object.defineProperty(h.element, "isContentEditable", { get: () => true });
     Object.defineProperty(h.element, "innerText", { get: () => h.element.textContent ?? "" });
@@ -838,13 +912,51 @@ describe("fill result verification", () => {
         (params as { type: string }).type === "rawKeyDown"
       ) {
         if (action === "focus") other.focus();
-        if (action === "value") h.element.textContent = "changed";
         if (action === "cancel") controller.abort();
         if (action === "throw") throw new Error("dispatch failed");
       }
       return reply;
     });
     const result = await h.fill("!", clearBefore, controller.signal);
+    expect(result).toMatchObject({ code: action === "cancel" ? "cancelled" : "cdp_failed" });
+    expect(h.insert).not.toHaveBeenCalled();
+    expect(other.value).toBe("");
+    expect(h.send).toHaveBeenCalledWith(
+      4,
+      "Input.dispatchKeyEvent",
+      expect.objectContaining({ type: "keyUp" }),
+    );
+    expect(h.release).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    "focus",
+    "value",
+    "cancel",
+    "throw",
+  ] as const)("stops when caret positioning triggers %s and releases the key", async (action) => {
+    const h = await setup('<input type="number" value="12">');
+    vi.spyOn(h.element, "selectionStart", "get").mockReturnValue(null);
+    vi.spyOn(h.element, "selectionEnd", "get").mockReturnValue(null);
+    const controller = new AbortController();
+    const other = document.createElement("input");
+    document.body.append(other);
+    const send = h.send.getMockImplementation()!;
+    h.send.mockImplementation(async (tabId, method, params) => {
+      const reply = await send(tabId, method, params);
+      if (
+        method === "Input.dispatchKeyEvent" &&
+        (params as { type: string; commands?: string[] }).type === "rawKeyDown" &&
+        (params as { commands?: string[] }).commands?.includes("moveToEndOfDocument")
+      ) {
+        if (action === "focus") other.focus();
+        if (action === "value") h.element.value = "99";
+        if (action === "cancel") controller.abort();
+        if (action === "throw") throw new Error("dispatch failed");
+      }
+      return reply;
+    });
+    const result = await h.fill("3", false, controller.signal);
     expect(result).toMatchObject({ code: action === "cancel" ? "cancelled" : "cdp_failed" });
     expect(h.insert).not.toHaveBeenCalled();
     expect(other.value).toBe("");
