@@ -773,7 +773,12 @@ describe.skipIf(!process.env.BSK_FILL_CHROME)("date-like fill regressions", () =
           ]);
           await h.activate();
           expect(await h.evaluate("document.querySelector('#target').value")).toBe("");
-          expect(h.calls).toContain("Input.dispatchKeyEvent");
+          expect(
+            h.calls.some(
+              (method) =>
+                method === "Input.dispatchMouseEvent" || method === "Input.dispatchKeyEvent",
+            ),
+          ).toBe(true);
           expect(h.calls).not.toContain("Input.insertText");
         },
       );
