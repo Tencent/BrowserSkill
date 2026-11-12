@@ -138,6 +138,18 @@ determines which versions can connect.
 
 ### Fixed
 
+- Hardened VOM stealth prompt-injection stripping against CSS Color 4/5, gradient-clip
+  text, HiDPI microboxes, inner scroll containers, and mixed textstyle containers:
+  resolves `oklch`/`oklab`/`lab`/`lch`/`hsl`/`hwb`/`color()`/`color-mix()` to sRGB for
+  accurate cross-space zero-contrast and zero-alpha detection (including Tailwind v4
+  `oklch()` backdrops and `currentColor 0%` mixes); preserves genuine
+  `background-clip: text` / `-webkit-background-clip: text` gradient headings while
+  stripping transparent, zero-span, or background-matching gradient stops; scales `1px`
+  microbox and offscreen bounds on HiDPI/Retina displays; verifies inner
+  `overflow: auto | scroll` scroll offsets (`scrollRects`) and `#text` glyph bounds so
+  legitimate scrolled rows remain intact while unscrolled `left: -99999px` / `-2000px` /
+  `text-indent: -9999px` injections are stripped; and clears direct stealth text and
+  tainted AX `name`s on retained containers ([#709](https://github.com/Tencent/BrowserSkill/pull/709)).
 - `wait-for-navigation` no longer returns on the old page when the navigation it waits
   for is scheduled or still in flight. A settled page counts as reached only after a
   short grace period without a main-frame navigation start; once a navigation starts

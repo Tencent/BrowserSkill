@@ -241,6 +241,7 @@ interface ResolveIndexes {
   axRoleLower: Map<SemanticNodeId, string>;
   domText: (nodeId: SemanticNodeId) => string | undefined;
   axText: (nodeId: SemanticNodeId) => string | undefined;
+  hasExcludedAxTextDescendant: (nodeId: SemanticNodeId) => boolean;
   hasNativeDescendant: (nodeId: SemanticNodeId) => boolean;
   isOrInsideNative: (nodeId: SemanticNodeId) => boolean;
   selfOrEnclosingLabel: (nodeId: SemanticNodeId) => SemanticNodeId | undefined;
@@ -394,6 +395,62 @@ function buildIndexes(graph: SemanticGraph): ResolveIndexes {
     return complete(parts.length === 0 ? undefined : clean(parts.join(" ").slice(0, 240)));
   };
 
+  const excludedAxSubtreeMemo = new Map<SemanticNodeId, boolean>();
+  const visitingExcludedAxSubtree = new Set<SemanticNodeId>();
+  const subtreeContainsAxText = (nodeId: SemanticNodeId): boolean => {
+    const cached = excludedAxSubtreeMemo.get(nodeId);
+    if (cached !== undefined) return cached;
+    if (visitingExcludedAxSubtree.has(nodeId)) return false;
+    const role = axRoleLower.get(nodeId) ?? "";
+    if (INTERACTIVE_ROLES.has(role)) {
+      excludedAxSubtreeMemo.set(nodeId, false);
+      return false;
+    }
+    if (TEXT_AX_ROLES.has(role)) {
+      excludedAxSubtreeMemo.set(nodeId, true);
+      return true;
+    }
+    visitingExcludedAxSubtree.add(nodeId);
+    let found = false;
+    for (const childId of axChildren.get(nodeId) ?? []) {
+      if (subtreeContainsAxText(childId)) {
+        found = true;
+        break;
+      }
+    }
+    visitingExcludedAxSubtree.delete(nodeId);
+    excludedAxSubtreeMemo.set(nodeId, found);
+    return found;
+  };
+
+  const excludedAxDescendantMemo = new Map<SemanticNodeId, boolean>();
+  const visitingExcludedAxDescendant = new Set<SemanticNodeId>();
+  const hasExcludedAxTextDescendant = (nodeId: SemanticNodeId): boolean => {
+    const cached = excludedAxDescendantMemo.get(nodeId);
+    if (cached !== undefined) return cached;
+    if (visitingExcludedAxDescendant.has(nodeId)) return false;
+    const role = axRoleLower.get(nodeId) ?? "";
+    if (role === "rootwebarea" || role === "webarea") {
+      excludedAxDescendantMemo.set(nodeId, false);
+      return false;
+    }
+    visitingExcludedAxDescendant.add(nodeId);
+    let found = false;
+    for (const childId of axChildren.get(nodeId) ?? []) {
+      const child = graph.nodes.get(childId);
+      if (!child) continue;
+      const childRole = axRoleLower.get(childId) ?? "";
+      if (INTERACTIVE_ROLES.has(childRole)) continue;
+      if (child.excluded ? subtreeContainsAxText(childId) : hasExcludedAxTextDescendant(childId)) {
+        found = true;
+        break;
+      }
+    }
+    visitingExcludedAxDescendant.delete(nodeId);
+    excludedAxDescendantMemo.set(nodeId, found);
+    return found;
+  };
+
   const nativeMemo = new Map<SemanticNodeId, boolean>();
   const hasNativeDescendant = (nodeId: SemanticNodeId): boolean => {
     const cached = nativeMemo.get(nodeId);
@@ -462,6 +519,7 @@ function buildIndexes(graph: SemanticGraph): ResolveIndexes {
     axRoleLower,
     domText,
     axText,
+    hasExcludedAxTextDescendant,
     hasNativeDescendant,
     isOrInsideNative,
     selfOrEnclosingLabel,
@@ -552,8 +610,10 @@ function resolvedName(
 ): string | undefined {
   const attrs = node.dom?.attrs ?? EMPTY_ATTRS;
   const axIgnored = node.ax?.ignored === true;
+  const skipTaintedAxName =
+    !axIgnored && node.ax !== undefined && indexes.hasExcludedAxTextDescendant(node.id);
   let name =
-    (axIgnored ? undefined : axValue(node.ax?.name)) ??
+    (axIgnored || skipTaintedAxName ? undefined : axValue(node.ax?.name)) ??
     (attrs["aria-labelledby"] ? ariaLabelledText(node, indexes) : undefined) ??
     clean(attrs["aria-label"]) ??
     nativeLabelText(node, indexes) ??
