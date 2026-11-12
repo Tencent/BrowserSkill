@@ -1,0 +1,504 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>对抗靶场 · 现代 SPA 水合、5000行虚拟大表与 OKLCH/隐写安全矩阵</title>
+<style>
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font: 13.5px/1.5 system-ui, -apple-system, sans-serif;
+    background: #f1f5f9;
+    color: #0f172a;
+  }
+  /* Tailwind v4 style oklch() high-contrast dark hero banner */
+  .oklch-hero {
+    background: oklch(0.23 0.04 255);
+    color: oklch(0.98 0.01 255);
+    padding: 16px 22px;
+    border-bottom: 2px solid oklch(0.55 0.18 250);
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 16px;
+    flex-wrap: wrap;
+  }
+  .gradient-title {
+    margin: 0;
+    font-size: 20px;
+    font-weight: 800;
+    background: linear-gradient(90deg, #38bdf8, #a78bfa, #34d399);
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+  }
+  .oklch-subtitle {
+    margin: 4px 0 0;
+    font-size: 13px;
+    color: oklch(0.92 0.02 250);
+  }
+  .nav-strip {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    align-items: center;
+    padding: 10px 22px;
+    background: #ffffff;
+    border-bottom: 1px solid #cbd5e1;
+  }
+  .tab-btn, .act-btn, .nav-link {
+    padding: 6px 12px;
+    border-radius: 6px;
+    border: 1px solid #64748b;
+    background: #f8fafc;
+    color: #0f172a;
+    font: inherit;
+    font-weight: 600;
+    text-decoration: none;
+    cursor: pointer;
+  }
+  .tab-btn[aria-selected="true"] {
+    background: #1d4ed8;
+    border-color: #1d4ed8;
+    color: #fff;
+  }
+  .arena-wrap {
+    max-width: 1640px;
+    margin: 0 auto;
+    padding: 16px 22px 64px;
+    display: grid;
+    grid-template-columns: 1.35fr 1fr;
+    gap: 16px;
+  }
+  @media (max-width: 1160px) {
+    .arena-wrap { grid-template-columns: 1fr; }
+  }
+  .box {
+    background: #fff;
+    border: 1px solid #cbd5e1;
+    border-radius: 10px;
+    padding: 15px;
+  }
+  .box.full { grid-column: 1 / -1; }
+  .box h2 {
+    margin: 0 0 10px;
+    font-size: 15.5px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
+  /* True viewport-windowed 5,000-row virtual scroll container */
+  .vgrid-viewport {
+    position: relative;
+    height: 342px;
+    overflow-y: auto;
+    border: 2px solid #475569;
+    border-radius: 8px;
+    background: #fff;
+  }
+  .vgrid-spacer {
+    position: relative;
+    width: 100%;
+  }
+  .vgrid-row {
+    position: absolute;
+    left: 0;
+    right: 0;
+    height: 38px;
+    display: grid;
+    grid-template-columns: 120px 1.4fr 110px 110px 110px 110px;
+    align-items: center;
+    padding: 0 10px;
+    border-bottom: 1px solid #e2e8f0;
+    font-size: 12.5px;
+    background: #fff;
+  }
+  .vgrid-row:nth-child(even) { background: #f8fafc; }
+  table.fin {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 12.5px;
+  }
+  table.fin th, table.fin td {
+    border: 1px solid #cbd5e1;
+    padding: 6px 8px;
+    text-align: left;
+  }
+  table.fin thead th { background: #f1f5f9; }
+  /* Adversarial steganographic traps: invisible to human eyes */
+  .steg-zero-opacity { opacity: 0.003; pointer-events: none; position: absolute; }
+  .steg-subpixel-font { font-size: 0.4px; line-height: 0; color: transparent; }
+  .steg-1px-clip {
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    position: absolute;
+    clip-path: inset(50%);
+  }
+  output {
+    display: block;
+    margin-top: 8px;
+    padding: 8px 10px;
+    background: #f8fafc;
+    border: 1px solid #cbd5e1;
+    border-radius: 6px;
+    font-family: ui-monospace, monospace;
+    font-size: 12px;
+    white-space: pre-wrap;
+  }
+  .mega-catalog {
+    max-height: 220px;
+    overflow: auto;
+    border: 1px solid #cbd5e1;
+    border-radius: 8px;
+    padding: 10px;
+    font-size: 12px;
+  }
+</style>
+</head>
+<body>
+<div id="spa-app-shell" data-hydrated="false" data-bfcache-pageshows="0">
+  <header class="oklch-hero" role="banner">
+    <div>
+      <h1 class="gradient-title" id="gradient-kpi-heading">2026 实时全链路履约智能分析大盘</h1>
+      <p class="oklch-subtitle" id="oklch-hero-title">OKLCH 深色高对比主标题 · 合法白字与渐变字抗误删验证</p>
+    </div>
+    <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+      <span id="hydration-badge" style="padding:4px 10px;border-radius:999px;background:oklch(0.32 0.07 250);color:oklch(0.97 0.01 250);font-size:12px">SSR 骨架态</span>
+      <span id="spa-dom-count-badge" style="padding:4px 10px;border-radius:999px;background:oklch(0.30 0.05 160);color:oklch(0.96 0.02 160);font-size:12px">DOM 统计中</span>
+      <span id="delta-pulse-cell" data-delta-rev="0" style="padding:4px 10px;border-radius:999px;background:oklch(0.30 0.06 40);color:oklch(0.97 0.02 40);font-size:12px">增量版本: rev-0</span>
+    </div>
+  </header>
+
+  <!-- Navigation & Adversarial Timing Traps -->
+  <nav class="nav-strip" aria-label="SPA 路由与对抗导航矩阵">
+    <div role="tablist" aria-label="视图切换" style="display:flex;gap:6px">
+      <button type="button" class="tab-btn" role="tab" id="spa-tab-overview" data-view="overview" aria-selected="true">履约总览 (Overview)</button>
+      <button type="button" class="tab-btn" role="tab" id="spa-tab-anomalies" data-view="anomalies" aria-selected="false">异常拦截池 (Anomalies)</button>
+      <button type="button" class="tab-btn" role="tab" id="spa-tab-ledger" data-view="ledger" aria-selected="false">多级财务矩阵 (Matrix)</button>
+    </div>
+    <span style="color:#94a3b8">|</span>
+    <a class="nav-link" id="link-bfcache-detail" href="/arena-bfcache-detail?item=ORD-0001&bfcache=1">进入 BFCache 详情页</a>
+    <button type="button" class="act-btn" id="btn-delayed-650ms-nav">延迟 650ms 异步跳转详情</button>
+    <a class="nav-link" id="link-cross-origin-302" href="/redirect-cross-origin">跨源 302 追踪重定向</a>
+    <button type="button" class="act-btn" id="btn-mutate-single-cell">单点局部变更 (Delta Pulse +1)</button>
+  </nav>
+
+  <main class="arena-wrap" id="spa-hydrated-main">
+    <!-- SECTION 1: 5,000-Row True Viewport-Unmounting Virtual Data Grid -->
+    <section class="box" aria-labelledby="vgrid-heading">
+      <h2 id="vgrid-heading">
+        <span>一、5,000 行视口裁剪卸载型虚拟列表（仅挂载可见 10~12 行）</span>
+        <span id="vgrid-range-indicator" style="font-size:12px;color:#475569">当前挂载: #0 ~ #11</span>
+      </h2>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px;align-items:center">
+        <label for="vgrid-filter-input" style="font-weight:600;font-size:12.5px">订单关键词筛选</label>
+        <input id="vgrid-filter-input" type="search" placeholder="例如：跨境冷链 / ORD-2405" style="padding:5px 9px;border:1px solid #94a3b8;border-radius:5px">
+        <button type="button" class="act-btn" id="btn-jump-row-2400">跳转第 2,400 行</button>
+        <button type="button" class="act-btn" id="btn-jump-row-0">回顶部第 0 行</button>
+        <button type="button" class="act-btn" id="btn-recycle-first-visible">原地复用首行槽位至 #9999</button>
+      </div>
+
+      <div class="vgrid-viewport" id="virtual-grid-viewport" role="region" aria-label="虚拟化履约订单流">
+        <div class="vgrid-spacer" id="virtual-grid-spacer"></div>
+      </div>
+      <output id="vgrid-action-output">selectedOrder=none</output>
+    </section>
+
+    <!-- SECTION 2: Multi-Level Rowspan/Colspan Financial Table + Collapsed Redaction Boundary -->
+    <section class="box" aria-labelledby="fin-matrix-heading">
+      <h2 id="fin-matrix-heading">
+        <span>二、三层合并表头（Rowspan/Colspan）大区经营矩阵与折叠敏感字段</span>
+        <span id="active-spa-route-label" style="font-size:12px;color:#1d4ed8">view=overview</span>
+      </h2>
+
+      <table class="fin" id="hierarchical-fin-table">
+        <caption>2026 跨大区双季度合并核算总表</caption>
+        <thead>
+          <tr>
+            <th rowspan="2">大区</th>
+            <th rowspan="2">业务单元</th>
+            <th colspan="2">Q3 实际交割</th>
+            <th colspan="3">Q4 滚动预测</th>
+            <th rowspan="2">风控评级</th>
+          </tr>
+          <tr>
+            <th>履约单量</th>
+            <th>GMV (万元)</th>
+            <th>预测单量</th>
+            <th>预测 GMV</th>
+            <th>同比增速</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td rowspan="2">华东战区</td>
+            <td>跨境智造专线</td>
+            <td>14,820</td>
+            <td>9,450.00</td>
+            <td>18,200</td>
+            <td>11,830.00</td>
+            <td>+25.2%</td>
+            <td>AAA</td>
+          </tr>
+          <tr>
+            <td>医药温控冷链</td>
+            <td>6,310</td>
+            <td>5,120.50</td>
+            <td>7,400</td>
+            <td>6,068.00</td>
+            <td>+18.5%</td>
+            <td>AA+</td>
+          </tr>
+          <tr>
+            <td rowspan="2">华南战区</td>
+            <td>保税仓配一体</td>
+            <td>21,090</td>
+            <td>12,300.00</td>
+            <td>25,500</td>
+            <td>14,917.50</td>
+            <td>+21.3%</td>
+            <td>AAA</td>
+          </tr>
+          <tr>
+            <td>海空联运快线</td>
+            <td>8,940</td>
+            <td>7,640.00</td>
+            <td>9,800</td>
+            <td>8,404.00</td>
+            <td>+10.0%</td>
+            <td>AA</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <details id="collapsed-audit-drawer" style="margin-top:10px;padding:8px 10px;border:1px solid #cbd5e1;border-radius:6px;background:#f8fafc">
+        <summary style="cursor:pointer;font-weight:600">展开折叠风控密钥抽屉（检验 --redact-values 与折叠表格脱敏）</summary>
+        <div style="margin-top:8px;display:grid;grid-template-columns:1fr auto;gap:8px;align-items:center">
+          <label>折叠区审计密钥 <input id="collapsed-secret-token" type="password" value="REDACT-CANARY-9941"></label>
+          <span id="collapsed-hint">仅授权审计员可见</span>
+        </div>
+      </details>
+
+      <!-- Adversarial Prompt-Steganography Canary Traps (harmless synthetic tokens) -->
+      <div id="steganography-trap-zone" aria-label="视觉对比度与隐写过滤测试区" style="position:relative;margin-top:10px;padding:10px;border:1px dashed #94a3b8;border-radius:6px">
+        <div id="visible-legit-notice" style="color:#0f172a;font-weight:600">
+          公开可见合规声明：所有订单遵循实时幂等对账协议（正常可见文本必须保留）。
+        </div>
+        <span class="steg-zero-opacity">SYNTHETIC_STEGANO_CANARY_ZERO_OPACITY</span>
+        <span class="steg-subpixel-font">SYNTHETIC_STEGANO_CANARY_SUBPIXEL</span>
+        <div class="steg-1px-clip"><span>SYNTHETIC_STEGANO_CANARY_NESTED_1PX</span></div>
+      </div>
+
+      <output id="spa-route-panel">route=overview · ready</output>
+    </section>
+
+    <!-- SECTION 3: High-Density Catalog & Optional ?mega=1 (>200KB VOM) Delta Benchmark -->
+    <section class="box full" aria-labelledby="mega-sec-heading">
+      <h2 id="mega-sec-heading">
+        <span>三、高密度企业服务目录矩阵（默认 90 节点卡片 / ?mega=1 扩展至 420 章节压测 200KB+ VOM）</span>
+        <span id="mega-mode-indicator" style="font-size:12px;color:#475569">standard-density</span>
+      </h2>
+      <div class="mega-catalog" id="enterprise-catalog-container"></div>
+    </section>
+  </main>
+</div>
+
+<script>
+(() => {
+  // Note: NO unload or beforeunload handler so this page stays 100% bfcache-eligible!
+  const $ = (s, r = document) => r.querySelector(s);
+  const $$ = (s, r = document) => Array.from(r.querySelectorAll(s));
+  const params = new URLSearchParams(location.search);
+  const hydrateMs = Number(params.get('hydrate_ms') || 0);
+  const isMega = params.get('mega') === '1';
+
+  const emit = (type, data = {}) =>
+    fetch('/event', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ type, page: 'arena-modern-spa-grid', ...data })
+    }).catch(() => {});
+
+  // 1. Track bfcache pageshow restores on the hub page too
+  let hubPageshows = 0;
+  window.addEventListener('pageshow', (ev) => {
+    hubPageshows += 1;
+    const shell = $('#spa-app-shell');
+    shell.dataset.bfcachePageshows = String(hubPageshows);
+    shell.dataset.lastPersisted = String(Boolean(ev.persisted));
+    if (ev.persisted) {
+      $('#spa-route-panel').textContent = `bfcache-restored=true · pageshows=${hubPageshows}`;
+    }
+  });
+
+  // 2. True 5,000-row viewport-windowed virtual list
+  const TOTAL_ROWS = 5000;
+  const ROW_HEIGHT = 38;
+  const BUFFER = 3;
+  const CATEGORIES = ['跨境冷链', '保税智造', '医药温控', '芯片急配', '绿色航运'];
+  const REGIONS = ['华东-HZ', '华南-SZ', '华北-BJ', '西南-CD', '海外-SG'];
+
+  function buildOrder(index) {
+    const id = `ORD-${String(index).padStart(4, '0')}`;
+    const cat = CATEGORIES[index % CATEGORIES.length];
+    const reg = REGIONS[index % REGIONS.length];
+    const amt = (120 + ((index * 29) % 4800)).toFixed(2);
+    const sla = index % 9 === 0 ? 'EXPEDITED' : 'ON_TRACK';
+    return { index, id, title: `${cat}履约批次 #${index}`, reg, amt, sla };
+  }
+
+  function mountInteractiveApp() {
+    let filteredIndices = Array.from({ length: TOTAL_ROWS }, (_, i) => i);
+    const viewport = $('#virtual-grid-viewport');
+    const spacer = $('#virtual-grid-spacer');
+
+    function renderVirtualWindow() {
+      spacer.style.height = `${filteredIndices.length * ROW_HEIGHT}px`;
+      const scrollTop = viewport.scrollTop;
+      const first = Math.max(0, Math.floor(scrollTop / ROW_HEIGHT) - BUFFER);
+      const visibleCount = Math.ceil(viewport.clientHeight / ROW_HEIGHT) + BUFFER * 2;
+      const last = Math.min(filteredIndices.length, first + visibleCount);
+
+      const frag = document.createDocumentFragment();
+      for (let pos = first; pos < last; pos++) {
+        const rawIdx = filteredIndices[pos];
+        const ord = buildOrder(rawIdx);
+        const row = document.createElement('div');
+        row.className = 'vgrid-row';
+        row.dataset.rowKey = ord.id;
+        row.dataset.rowIndex = String(rawIdx);
+        row.style.top = `${pos * ROW_HEIGHT}px`;
+        row.innerHTML = `
+          <code>${ord.id}</code>
+          <strong>${ord.title}</strong>
+          <span>${ord.reg}</span>
+          <span>¥${ord.amt}</span>
+          <em>${ord.sla}</em>
+          <button type="button" class="act-btn btn-inspect-order" data-order-id="${ord.id}" style="padding:3px 8px;font-size:12px">核验此单</button>
+        `;
+        row.querySelector('.btn-inspect-order').addEventListener('click', (ev) => {
+          const targetId = ev.currentTarget.dataset.orderId;
+          $('#vgrid-action-output').textContent = `selectedOrder=${targetId}`;
+          emit('virtual-order-inspected', { orderId: targetId });
+        });
+        frag.appendChild(row);
+      }
+      spacer.replaceChildren(frag);
+      const firstOrd = filteredIndices[first] ?? 0;
+      const lastOrd = filteredIndices[Math.max(0, last - 1)] ?? 0;
+      $('#vgrid-range-indicator').textContent = `当前挂载: #${firstOrd} ~ #${lastOrd}（共 ${last - first} 个真实 DOM 行）`;
+    }
+
+    viewport.addEventListener('scroll', renderVirtualWindow);
+    $('#vgrid-filter-input').addEventListener('input', (e) => {
+      const q = e.target.value.trim().toLowerCase();
+      if (!q) {
+        filteredIndices = Array.from({ length: TOTAL_ROWS }, (_, i) => i);
+      } else {
+        filteredIndices = [];
+        for (let i = 0; i < TOTAL_ROWS; i++) {
+          const ord = buildOrder(i);
+          if (ord.id.toLowerCase().includes(q) || ord.title.toLowerCase().includes(q) || ord.reg.toLowerCase().includes(q)) {
+            filteredIndices.push(i);
+          }
+        }
+      }
+      viewport.scrollTop = 0;
+      renderVirtualWindow();
+    });
+
+    $('#btn-jump-row-2400').addEventListener('click', () => {
+      viewport.scrollTop = 2400 * ROW_HEIGHT;
+      renderVirtualWindow();
+      emit('virtual-grid-jumped', { targetRow: 2400, scrollTop: viewport.scrollTop });
+    });
+    $('#btn-jump-row-0').addEventListener('click', () => {
+      viewport.scrollTop = 0;
+      renderVirtualWindow();
+    });
+    $('#btn-recycle-first-visible').addEventListener('click', () => {
+      const firstRow = spacer.querySelector('.vgrid-row');
+      if (firstRow) {
+        firstRow.dataset.rowKey = 'ORD-9999';
+        firstRow.querySelector('code').textContent = 'ORD-9999';
+        firstRow.querySelector('strong').textContent = '【原地槽位回收】异常重分配批次 #9999';
+        firstRow.querySelector('.btn-inspect-order').dataset.orderId = 'ORD-9999';
+        emit('virtual-row-recycled-in-place', { newOrderId: 'ORD-9999' });
+      }
+    });
+
+    // 3. SPA pushState tabs + 650ms delayed navigation + localized Delta pulse
+    function applySpaView(view, push = true) {
+      $$('.tab-btn').forEach(btn => {
+        btn.setAttribute('aria-selected', String(btn.dataset.view === view));
+      });
+      $('#active-spa-route-label').textContent = `view=${view}`;
+      $('#spa-route-panel').textContent = `route=${view} · pathname=${location.pathname}${location.search}`;
+      if (push) {
+        const nextUrl = new URL(location.href);
+        nextUrl.searchParams.set('view', view);
+        history.pushState({ view }, '', nextUrl);
+        emit('spa-view-pushed', { view, href: nextUrl.pathname + nextUrl.search });
+      }
+    }
+    $$('.tab-btn').forEach(btn => {
+      btn.addEventListener('click', () => applySpaView(btn.dataset.view, true));
+    });
+    window.addEventListener('popstate', () => {
+      const v = new URLSearchParams(location.search).get('view') || 'overview';
+      applySpaView(v, false);
+    });
+
+    $('#btn-delayed-650ms-nav').addEventListener('click', () => {
+      $('#spa-route-panel').textContent = 'delayed-navigation-scheduled=650ms';
+      emit('delayed-nav-scheduled', { delayMs: 650 });
+      setTimeout(() => {
+        location.assign('/arena-bfcache-detail?from=delayed_650ms&bfcache=1');
+      }, 650);
+    });
+
+    let deltaRev = 0;
+    $('#btn-mutate-single-cell').addEventListener('click', () => {
+      deltaRev += 1;
+      const cell = $('#delta-pulse-cell');
+      cell.dataset.deltaRev = String(deltaRev);
+      cell.textContent = `增量版本: rev-${deltaRev}`;
+      emit('delta-single-cell-mutated', { deltaRev });
+    });
+
+    // 4. Populate catalog (90 rich cards by default -> ~1,900 DOM nodes; 420 rich cards in ?mega=1 -> >200KB VOM)
+    const count = isMega ? 420 : 90;
+    $('#mega-mode-indicator').textContent = isMega ? `mega-vom-mode (${count} entries)` : `high-density (${count} entries)`;
+    $('#enterprise-catalog-container').innerHTML = Array.from({ length: count }, (_, idx) => {
+      const code = `CAP-SVC-${String(idx + 1).padStart(4, '0')}`;
+      const domain = ['全球清关引擎', '多式联运排程', '温控物联网遥测', '碳足迹因子核算', '自动化理赔仲裁'][idx % 5];
+      const desc = isMega
+        ? `企业级高可用服务单元 ${code}（${domain}）：支持跨可用区双活容灾、亚秒级状态对账、全链路端到端国密签名存证与异常熔断降级策略，SLA 承诺 99.995%，节点批次索引 #${idx + 1000}。`
+        : `${domain}节点 ${code} · SLA 99.99%`;
+      return `<article data-svc="${code}" style="padding:5px 6px;border-bottom:1px solid #e2e8f0;display:flex;justify-content:space-between;gap:12px"><strong>${code} · ${domain}</strong><span>${desc}</span><a href="#${code}">详情</a></article>`;
+    }).join('');
+
+    renderVirtualWindow();
+    const shell = $('#spa-app-shell');
+    shell.dataset.hydrated = 'true';
+    $('#hydration-badge').textContent = 'CSR 水合就绪 (hydrated=true)';
+    $('#spa-dom-count-badge').textContent = `DOM 节点: ${document.getElementsByTagName('*').length}`;
+    emit('spa-hydration-complete', { domNodes: document.getElementsByTagName('*').length, mega: isMega });
+  }
+
+  if (hydrateMs > 0) {
+    setTimeout(() => {
+      const main = $('#spa-hydrated-main');
+      const clone = main.cloneNode(true);
+      main.replaceWith(clone);
+      mountInteractiveApp();
+    }, hydrateMs);
+  } else {
+    mountInteractiveApp();
+  }
+})();
+</script>
+</body>
+</html>

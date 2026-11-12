@@ -19,6 +19,9 @@ import uuid
 SKILL = Path(__file__).resolve().parents[1]
 
 ACTION_COMMANDS = {
+    "open",
+    "close",
+    "ledger resolve",
     "click",
     "fill",
     "select",
@@ -49,6 +52,8 @@ ACTION_COMMANDS = {
 }
 
 READ_COMMANDS = {
+    "sync",
+    "ledger status",
     "read",
     "extract discover",
     "extract table",
@@ -281,6 +286,12 @@ def extract_metrics(cmd, exit_code, parsed, elapsed_ms):
     elif cmd == "recipe draft":
         rpc_calls = 3 if exit_code == 0 else 1
         browser_calls = 2 if exit_code == 0 else 0
+    elif cmd == "open":
+        rpc_calls = 3 if exit_code == 0 else 1
+        browser_calls = 2 if exit_code == 0 else 0
+    elif cmd in ("ledger status", "ledger resolve"):
+        rpc_calls = 1
+        browser_calls = 0
     elif isinstance(j.get("rpc_calls"), int):
         rpc_calls = j["rpc_calls"]
         browser_calls = j.get("browser_calls", rpc_calls)
@@ -309,10 +320,23 @@ def extract_metrics(cmd, exit_code, parsed, elapsed_ms):
     post = j.get("post") if isinstance(j.get("post"), dict) else {}
     obs = j.get("observation") if isinstance(j.get("observation"), dict) else {}
     post_obs = post.get("observation") if isinstance(post.get("observation"), dict) else {}
-    obs_text = obs.get("text") or post_obs.get("text") or ""
-    obs_kind = j.get("kind") or post.get("kind")
+    obs_text = (
+        obs.get("text")
+        or post_obs.get("text")
+        or (j.get("vom") if isinstance(j.get("vom"), str) else "")
+        or (j.get("delta") if isinstance(j.get("delta"), str) else "")
+    )
+    obs_kind = (
+        j.get("kind")
+        or post.get("kind")
+        or ("unchanged" if j.get("unchanged") is True else None)
+        or ("delta" if isinstance(j.get("delta"), str) else None)
+        or ("full" if isinstance(j.get("vom"), str) else None)
+    )
     origin = j.get("observation_origin") or post.get("observation_origin") or {}
-    reused = isinstance(origin, dict) and origin.get("kind") == "reused"
+    reused = (isinstance(origin, dict) and origin.get("kind") == "reused") or (
+        j.get("unchanged") is True
+    )
     tool_elapsed = j.get("elapsed_ms") if isinstance(j.get("elapsed_ms"), (int, float)) else None
 
     return {
@@ -362,8 +386,20 @@ def semantic_failure(meta, value):
     if cmd == "read":
         if not isinstance(j, dict) or not isinstance(j.get("items"), list):
             return "Machine-readable items array required for read"
+    if cmd in ["open", "sync"] and "--json" in (value.get("argv") or []):
+        if not isinstance(j, dict):
+            return "Machine-readable result required for " + cmd
     if (
-        cmd in ["navigate", "wait-for-navigation"]
+        cmd
+        in [
+            "open",
+            "navigate",
+            "navigate back",
+            "navigate forward",
+            "navigate-back",
+            "navigate-forward",
+            "wait-for-navigation",
+        ]
         and isinstance(j, dict)
         and j.get("reached") == "timeout"
     ):
@@ -451,6 +487,26 @@ def init(args):
     )
 
 
+def resolve_admin_home(root):
+    admin_dir = Path(root).resolve() / "admin-runtime"
+    admin_dir.mkdir(parents=True, exist_ok=True)
+    sock_probe = str(admin_dir / "run" / "daemon.sock")
+    if len(sock_probe.encode("utf-8")) <= 96:
+        return str(admin_dir)
+    tag = hashlib.sha256(str(admin_dir).encode("utf-8")).hexdigest()[:12]
+    link = Path("/tmp") / f"bsk-adm-{tag}"
+    try:
+        if link.is_symlink() or link.exists():
+            if link.resolve() == admin_dir:
+                return str(link)
+            if link.is_symlink():
+                link.unlink()
+        link.symlink_to(admin_dir, target_is_directory=True)
+        return str(link)
+    except OSError:
+        return str(admin_dir)
+
+
 def execute(args):
     root = Path(args.run).resolve()
     cfg = load(root / "run.json")
@@ -476,15 +532,17 @@ def execute(args):
         BSK_AUTO_UPDATE="off",
         BSK_RECIPES=os.environ.get("BSK_RECIPES", "1"),
     )
+    explicit_env = {}
     for item in getattr(args, "env", None) or []:
         if "=" not in item:
             raise ValueError("Environment override must be KEY=VALUE")
         k, v = item.split("=", 1)
-        env[k] = v
+        explicit_env[k] = v
     exe = cfg["bsk"]
     if args.lane == "admin":
         exe = cfg["binary"]
-        env["BSK_HOME"] = str(root / "admin-runtime")
+        env["BSK_HOME"] = resolve_admin_home(root)
+    env.update(explicit_env)
     stdin_path = within(root, args.stdin_file) if args.stdin_file else None
     cmd_name = canonical(argv, inv["commands"])
     started_iso = now()
@@ -686,6 +744,12 @@ def assertion(root, check):
         return len(value) == expected
     if op == "gt":
         return value > expected
+    if op == "gte":
+        return value >= expected
+    if op == "lt":
+        return value < expected
+    if op == "lte":
+        return value <= expected
     if op == "is_string":
         return isinstance(value, str) and bool(value)
     if op == "not_contains":
@@ -784,7 +848,9 @@ def compute_run_benchmark(root, passed_ids=None):
             rpc_calls += int(metrics.get("rpc_calls", 1))
             browser_calls += int(metrics.get("browser_calls", 1))
             vom_chars += int(metrics.get("vom_chars", 0))
-            if m.get("command") == "cooperate sync" or metrics.get("observation_kind"):
+            if m.get("command") in ("cooperate sync", "sync") or metrics.get(
+                "observation_kind"
+            ):
                 sync_count += 1
             if metrics.get("observation_reused"):
                 reused_count += 1

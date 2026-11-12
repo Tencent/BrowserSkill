@@ -63,14 +63,18 @@ Build the CLI and test extension from the same candidate source, record each ope
 and report the tested scope, failures, and blockers without claiming untested cases passed.
 ```
 
-The skill includes 90 workflow/edge/regression cases and discovers additional command coverage cases
-(including `bsk plan`, `bsk recipe`, and `bsk read`) from the candidate CLI. It exercises synthetic
-HTML (including plan/recipe drift labs, a local video portal, and a developer forum hub) and eight
-public sites (OceanEngine, Taobao, Bilibili video site, V2EX forum site, MDN, GitHub, Books to
-Scrape, and Hacker News), including active carousels and per-second updates with
-`evaluate`/`read`/`wheel`, while recording benchmark metrics (success rate, interaction turns,
-actions-per-turn compression ratio, and P50/P95 latency). It is a separate Agent-guided workflow;
-it is not automatically added to the `core` suite, `pnpm eval:browser`, or required CI checks.
+The skill includes 98 workflow/edge/adversarial-arena/regression cases and discovers additional
+command coverage cases (including `bsk plan`, `bsk recipe`, and `bsk read`) from the candidate CLI.
+It exercises high-complexity adversarial synthetic HTML (linked 3-form enterprise joint filing,
+3-tier nested Open/Closed Shadow DOM and same/cross-origin nested iframes, dual HTML5 `<video>` +
+`<audio>` media studio with WebVTT tracks and canvas pixel sampling, modern SPA hydration/real
+`bfcache`/5,000-row virtual grid/`oklch()` vs steganography traps, plan/recipe drift labs, a local
+video portal, and a developer forum hub) and eight public sites (OceanEngine, Taobao, Bilibili video
+site, V2EX forum site, MDN, GitHub, Books to Scrape, and Hacker News), including active carousels
+and per-second updates with `evaluate`/`read`/`wheel`, while recording benchmark metrics (success
+rate, interaction turns, actions-per-turn compression ratio, and P50/P95 latency). It is a separate
+Agent-guided workflow; it is not automatically added to the `core` suite, `pnpm eval:browser`, or
+required CI checks.
 
 The Python helpers need Python 3.9+ and only the standard library. Full execution also needs
 a real Chromium browser, the candidate Bsk CLI and matching extension, and human participation

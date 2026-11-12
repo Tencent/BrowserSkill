@@ -819,5 +819,157 @@
     "page_type": "forum-site",
     "goal": "真实论坛网站 https://www.v2ex.com/ 帖子详情与楼层阅读：从列表进入一条含多条回复的公开主题帖，等待正文与回复列表渲染，使用 read / get-html 读取主帖正文与前 N 楼回复（楼层号、作者、时间、正文内容），执行滚动与 navigate back 返回主题列表并核对 URL 与列表恢复。严禁发帖/回帖/感谢。",
     "required_commands": ["click", "cooperate sync", "read", "get-html", "wheel", "navigate back"]
+  },
+  {
+    "id": "ARENA-JOINT-FORMS",
+    "kind": "workflow",
+    "page_type": "joint-forms",
+    "goal": "/arena-joint-forms（~1,650+ DOM 节点三表联合申报工作台 + 600ms 实时汇率牌价）：端到端操作牵头主体主表（Form A）+ 动态联合体出资权重矩阵（Form B）+ 预算税率会签与附件表（Form C）。使用 plan / fill / select 完成省->市->95字符超长产业园三级异步级联（核对长选项未因省略号截断选错）、自动大写脱横杠信用代码、精确 8 位敏感授权码、maxlength=12 编码、70ms 延迟焦点转移代理输入、5 类 HTML5 时间控件、多选资质及显式 label[for] / 包裹式 label 复选框；在 Form B 新增第 3 家联合体成员并调平出资权重至精确 100%，用 read 核对与 Form C 总预算/币种/增值税档位联动的含税总规模、补贴上限及只读流水号不变；在 Form C 填充 contenteditable 补充条款根节点、drag 重排四级会签顺序、upload 挂载联合附件、extract table 提取动态成员表（含 tfoot）与 45 行历史台账；最终 click 提交联合申报并 download 下载核定单 CSV，逐项核验 /events 业务回执与文件 SHA-256。",
+    "required_commands": [
+      "navigate",
+      "cooperate sync",
+      "plan",
+      "fill",
+      "select",
+      "click",
+      "drag",
+      "upload",
+      "download",
+      "read",
+      "extract table"
+    ],
+    "required_command_counts": {
+      "fill": 3,
+      "read": 2,
+      "extract table": 2
+    }
+  },
+  {
+    "id": "ARENA-NEG-FORM-BOUNDARIES",
+    "kind": "workflow",
+    "page_type": "joint-forms",
+    "goal": "/arena-joint-forms 对抗表单边界负例：验证对 :disabled 下拉选项（GD-SZ-PARK-DISABLED）执行 select、对只读流水号 #lead-readonly-serial 或富文本内部锁死子节点 #clause-locked-chip 直接执行 fill 均被明确拒绝（不得静默返回成功或篡改只读/禁用值），核对错误码、effect_state:none 及 DOM / /events 零脏写。",
+    "required_commands": ["select", "fill"],
+    "negative": true
+  },
+  {
+    "id": "ARENA-SHADOW-MATRIX",
+    "kind": "workflow",
+    "page_type": "shadow-dom",
+    "goal": "/arena-shadow-iframe（~1,800+ DOM 节点深层 Web Components 矩阵）：先用 observe 与 snapshot 检查含内联 <style> 与 Lit 注释节点的 <arena-nav-chip>，证明样式规则与注释文本未污染可访问名称且命名 <slot> 投射可见；逐层穿透三层嵌套 Open Shadow DOM（L1 <arena-cloud-console> -> L2 <arena-policy-card> -> L3 <arena-action-drawer>），完成跨层 fill、select、hover 浮层菜单触发、L2 Shadow 内部表格 extract table 及 L3 提交按钮 click，通过 read #shadow-bus-output 与 /events 核验 composed:true 事件完整携带三层字段；对 Closed Shadow DOM <arena-hardware-key> 核对语义边界诚实暴露，再通过 screenshot + 视觉坐标 click 激活右侧绿色硬件确认垫并校验 /events。",
+    "required_commands": [
+      "navigate",
+      "cooperate sync",
+      "observe",
+      "snapshot",
+      "fill",
+      "select",
+      "hover",
+      "click",
+      "read",
+      "extract table",
+      "screenshot"
+    ],
+    "required_command_counts": {
+      "click": 2,
+      "extract table": 2
+    }
+  },
+  {
+    "id": "ARENA-IFRAME-FEDERATION",
+    "kind": "workflow",
+    "page_type": "iframe",
+    "goal": "/arena-shadow-iframe 三层同源/跨源嵌套 iframe 联邦：在宿主（127.0.0.1）页面同步发现并操作 ① 同源 L1 账单子帧（/arena-frame-inner?role=billing）、② 跨源 L1 网关外帧（http://localhost:PORT/arena-frame-outer）以及 ③ 嵌在跨源外帧内部的 L2 审计内帧（http://localhost:PORT/arena-frame-inner?role=nested-audit）。在全部三层子帧中分别执行 observe、fill、select、click、extract discover 与含 rowspan/colspan 的 extract table，通过 read #federation-message-log 与 /events 校验各帧真实 location.origin / host 来源与 postMessage 跨层中继；点击 #btn-reload-nested-l2 与 #btn-refresh-same-frame 局部重载子帧，证明宿主独立按钮 #btn-host-independent-action 仍可正常操作，且重载后的子帧经 fresh sync 后可继续精确交互。",
+    "required_commands": [
+      "cooperate sync",
+      "observe",
+      "fill",
+      "select",
+      "click",
+      "read",
+      "extract discover",
+      "extract table"
+    ],
+    "required_command_counts": {
+      "fill": 3,
+      "click": 4,
+      "extract table": 2
+    }
+  },
+  {
+    "id": "ARENA-MEDIA-STUDIO",
+    "kind": "workflow",
+    "page_type": "media",
+    "goal": "/arena-media-studio（~1,600+ DOM 节点 H5 原生音视频双轨演播室）：全面覆盖原生 <video controls> 与原生 <audio controls> 操作。对 <video> 验证 readyState>=2 与尺寸非零，执行播放/暂停、章节跳转（0.85s/1.45s）、1.5x 倍速切换（select #video-rate-select）、音量滑块调节（fill/drag #video-volume-range）、静音/循环切换、中英双语 WebVTT <track> 字幕切换（zh -> en -> off，核对 #video-caption-overlay 实时 cue 文本），并点击 #btn-grab-video-frame 触发 <canvas> 帧像素采样，核对非全黑解码像素均值与 /events；对 <audio> 验证 /arena-audio.wav 加载（duration>=2.0），执行播放/暂停、+0.6s/-0.5s 寻址、倍速切换、音量调节、静音/循环，并在 4 期播客节目单间切换曲目（extract list 抽取 #audio-playlist，核对 currentSrc 与节目元数据切换）；结合 wheel 滚动 #cue-scroll-box、extract table 提取 48 行打点台账、read 零 JS 读取音视频状态面板属性、evaluate 核验 HTMLMediaElement 精确属性并 screenshot 留证。",
+    "required_commands": [
+      "navigate",
+      "cooperate sync",
+      "click",
+      "select",
+      "fill",
+      "drag",
+      "wheel",
+      "read",
+      "evaluate",
+      "extract list",
+      "extract table",
+      "screenshot"
+    ],
+    "required_command_counts": {
+      "click": 5,
+      "select": 2,
+      "read": 2
+    }
+  },
+  {
+    "id": "ARENA-MODERN-SPA-BFCACHE",
+    "kind": "workflow",
+    "page_type": "adversarial-spa",
+    "goal": "/arena-modern-spa-grid?hydrate_ms=180&bfcache=1 对抗级现代 SPA 与真实 bfcache 导航：验证 180ms SSR->CSR 水合节点替换（data-hydrated=true）后交互不命中陈旧骨架，使用 step / plan 切换 pushState 路由 Tab；在启用真实 Cache-Control: public, max-age=300 且零 unload 监听的页面上递增内存计数后点击 #link-bfcache-detail 进入详情页，执行默认参数 navigate back 与 navigate forward（禁止用 --wait-until commit 绕过），证明 bfcache 页面恢复不发生 15s 超时且 pageshow persisted 状态与内存计数完整保留；点击 #btn-delayed-650ms-nav + wait-for-navigation 验证跨越 500ms 静默窗口的 650ms 异步导航准确落达新 URL，再点击 #link-cross-origin-302 验证 127.0.0.1 -> localhost 跨源 302 重定向及新源 ref 可用性。",
+    "required_commands": [
+      "navigate",
+      "cooperate sync",
+      "step",
+      "plan",
+      "click",
+      "navigate back",
+      "navigate forward",
+      "wait-for-navigation",
+      "read"
+    ]
+  },
+  {
+    "id": "ARENA-VIRTUAL-GRID-STEGANO",
+    "kind": "workflow",
+    "page_type": "adversarial-dom",
+    "goal": "/arena-modern-spa-grid?mega=1（4,000+ DOM 节点、>200KB 全量 VOM、5,000 行视口卸载虚拟滚动表与现代 CSS 对抗场）：① 在 observe / cooperate sync 输出中验证 Tailwind v4 oklch() 深色高对比度横幅（#oklch-hero-banner）与渐变字标题（#gradient-hero-heading）完整保留不误删，同时三类隐写注入诱饵（含嵌套子标签与 Retina 1px×1px 裁剪的 SYNTHETIC_STEGANO_CANARY_*）被彻底剥离不外泄；② 在 <details id=secret-vault-details> 折叠状态下执行 observe --redact-values，证明折叠容器内的密码/密钥明文被严格脱敏；③ 对 5,000 行虚拟滚动表执行 wheel / scroll-to 与 #btn-jump-row-2400 跳转，fresh sync 后点击当前可见行 #2405 动作按钮验证成功执行（不误报 virtual_row_recycled），并对三层复合表头 rowspan/colspan 财务表 #hierarchical-fin-table 执行 extract discover + extract table 核对列对齐；④ 在 >200KB VOM 模式下验证无变更重复 sync 命中复用（unchanged/reused）以及点击 #btn-mutate-single-cell 单格变更后精准同步。",
+    "required_commands": [
+      "navigate",
+      "cooperate sync",
+      "observe",
+      "wheel",
+      "scroll-to",
+      "click",
+      "read",
+      "extract discover",
+      "extract table"
+    ],
+    "required_argv": [
+      {
+        "command": "observe",
+        "args": ["--redact-values"]
+      }
+    ],
+    "required_command_counts": {
+      "cooperate sync": 3
+    }
+  },
+  {
+    "id": "ARENA-NEG-VIRTUAL-RECYCLE",
+    "kind": "workflow",
+    "page_type": "adversarial-dom",
+    "goal": "/arena-modern-spa-grid 虚拟列表原位槽位复用负例：在 #virtual-grid-viewport 同步获取首条可见虚拟行动作按钮的 ref 与 context，点击 #btn-recycle-first-visible 触发原位 DOM 槽位复用为 #3888 后，复用旧 ref/context/expect 执行 click 必须被安全拒绝，核对错误码、effect_state:none 且 /events 未产生对 #3888 的误触发。",
+    "required_commands": ["cooperate sync", "click"],
+    "negative": true
   }
 ]

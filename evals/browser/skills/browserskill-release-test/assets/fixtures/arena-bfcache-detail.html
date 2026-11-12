@@ -1,0 +1,133 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>对抗靶场 · BFCache 与跨源重定向落地详情页</title>
+<style>
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    padding: 28px;
+    font: 14px/1.55 system-ui, -apple-system, sans-serif;
+    background: #f8fafc;
+    color: #0f172a;
+  }
+  .box {
+    max-width: 920px;
+    margin: 0 auto;
+    background: #fff;
+    border: 1px solid #cbd5e1;
+    border-radius: 10px;
+    padding: 22px;
+  }
+  .meta-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 12px;
+    margin: 16px 0;
+  }
+  .meta-card {
+    padding: 10px 12px;
+    background: #f1f5f9;
+    border-radius: 8px;
+    border: 1px solid #cbd5e1;
+  }
+  .btn {
+    display: inline-block;
+    padding: 8px 14px;
+    border-radius: 6px;
+    border: 1px solid #2563eb;
+    background: #2563eb;
+    color: #fff;
+    text-decoration: none;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  output {
+    display: block;
+    margin-top: 12px;
+    padding: 10px;
+    background: #0f172a;
+    color: #e2e8f0;
+    border-radius: 6px;
+    font-family: ui-monospace, monospace;
+    font-size: 12.5px;
+    white-space: pre-wrap;
+  }
+</style>
+</head>
+<body>
+<main class="box" id="bfcache-detail-root" data-bfcache-restored="false" data-pageshow-count="0">
+  <h1 id="detail-heading">履约订单穿透审计详情页（BFCache Eligible）</h1>
+  <p id="detail-subtitle">本页响应头启用 <code>Cache-Control: public, max-age=300</code> 且不注册 <code>unload</code>，用于真实触发 Chrome 往返缓存（bfcache）。</p>
+
+  <div class="meta-grid">
+    <div class="meta-card">
+      <div>当前 Origin</div>
+      <strong id="detail-origin-proof">-</strong>
+    </div>
+    <div class="meta-card">
+      <div>来源路由参数 (from / item)</div>
+      <strong id="detail-arrival-source">-</strong>
+    </div>
+    <div class="meta-card">
+      <div>BFCache 恢复计数</div>
+      <strong id="detail-persisted-status">cold-load (0)</strong>
+    </div>
+  </div>
+
+  <div style="display:flex;gap:12px;align-items:center">
+    <button type="button" class="btn" id="btn-mutate-ephemeral-state">写入内存态标记 (+1)</button>
+    <a class="btn" id="link-return-spa-grid" href="/arena-modern-spa-grid?bfcache=1" style="background:#0f766e;border-color:#0f766e">原生链接返回大盘</a>
+  </div>
+
+  <output id="detail-state-output">{}</output>
+</main>
+
+<script>
+(() => {
+  // Deliberately NO unload/beforeunload listener so Chrome keeps full bfcache eligibility.
+  const params = new URLSearchParams(location.search);
+  const from = params.get('from') || 'direct';
+  const item = params.get('item') || 'ORD-0001';
+  let memoryCounter = 1;
+  let pageshowCount = 0;
+  let restoredCount = 0;
+
+  function render(persisted) {
+    const root = document.getElementById('bfcache-detail-root');
+    root.dataset.bfcacheRestored = String(Boolean(persisted));
+    root.dataset.pageshowCount = String(pageshowCount);
+    document.getElementById('detail-origin-proof').textContent = location.origin;
+    document.getElementById('detail-arrival-source').textContent = `from=${from} · item=${item}`;
+    document.getElementById('detail-persisted-status').textContent =
+      persisted ? `bfcache-restored (${restoredCount})` : `cold-load (${pageshowCount})`;
+    document.getElementById('detail-state-output').textContent = JSON.stringify({
+      origin: location.origin,
+      href: location.href,
+      from,
+      item,
+      memoryCounter,
+      pageshowCount,
+      restoredCount,
+      lastPersisted: Boolean(persisted)
+    }, null, 2);
+  }
+
+  window.addEventListener('pageshow', (ev) => {
+    pageshowCount += 1;
+    if (ev.persisted) restoredCount += 1;
+    render(ev.persisted);
+  });
+
+  document.getElementById('btn-mutate-ephemeral-state').addEventListener('click', () => {
+    memoryCounter += 1;
+    render(false);
+  });
+
+  render(false);
+})();
+</script>
+</body>
+</html>

@@ -4,7 +4,7 @@
 
 ## 覆盖定义与 Benchmark 口径
 
-四个维度分别报告：**动态命令清单、固定场景清单（90 项）、网页类型清单、Benchmark 效率与耗时指标**。命令至少有一次适用环境的实际成功调用且业务验收通过；场景需完成其全部动作与变体。CLI 退出 0、HTTP 200、截图文件存在、帮助能显示，均不等于业务通过。
+四个维度分别报告：**动态命令清单、固定场景清单（98 项，含 8 项对抗级高仿真靶场场景 `ARENA-*`）、网页类型清单、Benchmark 效率与耗时指标**。命令至少有一次适用环境的实际成功调用且业务验收通过；场景需完成其全部动作与变体。CLI 退出 0、HTTP 200、截图文件存在、帮助能显示，均不等于业务通过。
 
 网页类型×命令表记录实际用到的命令及证据。无语义组合（如 Canvas 内无 select）写清原因；不能用 N/A 删除必测行。`lifecycle` / `admin` / `mcp` / `batch-plan` / `recipe` 单独列能力域，表中的每一类网页都要有实测场景。
 
@@ -68,3 +68,7 @@ Benchmark 自动采集每次命令的**交互轮次（`interaction_turns`）、�
 | `/live-update` | 每 1000ms 更新 tick/时间/价格，长页与 nested 双向滚动，`evaluate` / `read` / `wheel` 独立必测 |
 | `/dialogs` | alert/confirm/prompt/delayed alert/beforeunload；arm 须由真实 Bsk 点击激活 |
 | `/frame` | 同/跨源 frame 输入保存、frame 表格，host/value 事件 |
+| **`/arena-joint-forms`** | **对抗级三表联合申报工作台（~1,650+ DOM 节点 + 600ms 汇率牌价）**：Form A（省/市/95字符超长产业园三级异步级联、`:disabled` 选项边界、自动脱横杠大写信用代码、精确 8 位敏感授权码、`readonly`/`disabled`/`maxlength`、70ms 延迟焦点转移代理、5 类时间输入、多选、`label[for]` 与包裹式 `label`）+ Form B（动态增删成员行、`sum==100%` 权重配平与 `tfoot` 汇总）+ Form C（预算/币种/增值税实时跨表精算、`contenteditable` 富文本与内部锁死子节点、四级拖拽会签排序、双通道上传、45 行台账抽取、门禁解锁 CSV 下载） |
+| **`/arena-shadow-iframe`** (`+ /arena-frame-outer`, `/arena-frame-inner`) | **对抗级三层嵌套 Shadow DOM + 三层同/跨源嵌套 iframe 联邦（~1,800+ DOM 节点）**：`<arena-nav-chip>` 内联 `<style>` 与 Lit 注释防污染探测；L1 `<arena-cloud-console>` -> L2 `<arena-policy-card>` -> L3 `<arena-action-drawer>` 三层 Open Shadow 穿透、命名 `<slot>` 投射、Shadow 内悬浮菜单与表格抽取、`composed:true` 跨边界事件；Closed Shadow `<arena-hardware-key>` 边界识别与视觉点击；同源 L1 账单帧 + 跨源 `localhost` L1 网关帧 + 跨源内嵌 L2 审计帧交互、`rowspan/colspan` 表格抽取、`postMessage` 中继与局部子帧重载 |
+| **`/arena-media-studio`** (`+ /arena-audio.wav`, `/captions-zh.vtt`, `/captions-en.vtt`) | **对抗级 H5 原生 `<video>` + `<audio>` 双轨演播室（~1,600+ DOM 节点）**：原生 `controls` 与演播台传输控制（播放/暂停、章节与偏移寻址、`playbackRate` 倍速、音量滑块 `fill`/`drag`、`muted`、`loop`）、中英双语 WebVTT `<track>` 字幕切换与实时 cue 叠加核验、`<canvas>` 视频帧像素采样（非全黑解码校验）、4 期 `<audio>` 播客节目单切歌、16 路调音台与 48 行打点表滚动抽取 |
+| **`/arena-modern-spa-grid`** (`+ /arena-bfcache-detail`, `/redirect-cross-origin`, `/slow-doc`, `/download-stream`) | **对抗级现代 SPA、真实 `bfcache`、5,000 行视口卸载虚拟表与现代 CSS 靶场（1,900~4,200+ DOM 节点，`?mega=1` 超 `200KB` VOM）**：`?hydrate_ms=180` SSR->CSR 水合替换竞态；真实 `Cache-Control: public, max-age=300` 零 `unload` 的 `bfcache` 前进/后退恢复（默认 `navigate back/forward` 不超时且保留 `pageshow.persisted` 内存态）；650ms 延迟异步导航与 `127.0.0.1 -> localhost` 跨源 `302` 重定向；Tailwind v4 `oklch()` / 渐变标题保留 vs 三类隐写诱饵（含嵌套子元素与 Retina `1px×1px`）剥离；折叠 `<details>` 内 `--redact-values` 脱敏；5,000 行虚拟滚动视口卸载与原位槽位复用正负例；三层 `rowspan/colspan` 财务表抽取与 `>200KB` VOM 增量/复用校验 |
