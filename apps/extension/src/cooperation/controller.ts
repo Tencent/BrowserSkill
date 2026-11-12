@@ -8,6 +8,7 @@ import { captureVomObservation, handleSnapshot } from "@/tools/observation";
 import { isPassiveDebugAction, toolPolicy } from "@/tools/policy";
 import {
   type CdpRunner,
+  cdpBlockedUrlReason,
   chromeTabsApi,
   isRpcError,
   resolveTargetTab,
@@ -162,6 +163,39 @@ function isInitialBlank(tab: { url?: string; pendingUrl?: string }): boolean {
     (tab.url || tab.pendingUrl) === "about:blank" &&
     (!tab.pendingUrl || tab.pendingUrl === "about:blank")
   );
+}
+
+const UNOBSERVABLE_INITIAL_TAB_URLS = new Set([
+  "about:blank",
+  "about:newtab",
+  "chrome://newtab/",
+  "chrome://new-tab-page/",
+  "chrome://new-tab-page-third-party/",
+  "edge://newtab/",
+  "brave://newtab/",
+  "vivaldi://newtab/",
+  "opera://startpage/",
+]);
+
+function normalizeInitialTabUrl(raw: string | undefined): string | undefined {
+  if (!raw) return undefined;
+  let parsed: URL;
+  try {
+    parsed = new URL(raw);
+  } catch {
+    return undefined;
+  }
+  if (parsed.protocol === "about:") return `about:${parsed.pathname}`;
+  const pathname = parsed.pathname || "/";
+  return `${parsed.protocol}//${parsed.host}${pathname}`;
+}
+
+function isUnobservableInitialTab(tab: { url?: string; pendingUrl?: string }): boolean {
+  const current = normalizeInitialTabUrl(tab.url || tab.pendingUrl);
+  if (!current || !UNOBSERVABLE_INITIAL_TAB_URLS.has(current)) return false;
+  if (!tab.pendingUrl) return true;
+  const pending = normalizeInitialTabUrl(tab.pendingUrl);
+  return !!pending && UNOBSERVABLE_INITIAL_TAB_URLS.has(pending);
 }
 
 function sameFrames(
@@ -1053,9 +1087,9 @@ export class CooperationController implements ControlAuthority {
     cdp: T,
     signal: AbortSignal,
     invoke: (cdp: T) => Promise<unknown>,
+    epoch = state.epoch,
   ): Promise<unknown> {
     if (state.working) return failure("Another operation is settling on this tab");
-    const epoch = state.epoch;
     let sent = false;
     let revoked: string | undefined;
     const assert = () => {
@@ -1076,7 +1110,10 @@ export class CooperationController implements ControlAuthority {
             assert();
             const tab = await chromeTabsApi.get(state.tabId);
             const session = this.deps.sessions.get(state.sessionId);
-            if (!session || tab.windowId !== session.agentWindowId || !isInitialBlank(tab))
+            const allowedBlank = state.bootstrap
+              ? isInitialBlank(tab)
+              : isUnobservableInitialTab(tab);
+            if (!session || tab.windowId !== session.agentWindowId || !allowedBlank)
               throw new Error(
                 (revoked = "The initial task tab changed; synchronize before acting"),
               );
@@ -1085,7 +1122,11 @@ export class CooperationController implements ControlAuthority {
           dispatch: (_input, nativeMethod) => {
             assert();
             sent = true;
-            if (nativeMethod === "Page.navigate") state.bootstrap = false;
+            if (
+              nativeMethod === "Page.navigate" ||
+              (method === "tool.navigate" && nativeMethod === "Browser.mutate")
+            )
+              state.bootstrap = false;
           },
         }),
       );
@@ -1107,11 +1148,56 @@ export class CooperationController implements ControlAuthority {
   }
 
   /** Tab activation/movement affects the whole task window, not just its destination. */
+  /** Collection failed only because the tab still shows an empty initial/new-tab document. */
+  private async unobservableBlank(state: TabState, error: unknown): Promise<boolean> {
+    if (
+      !(error instanceof FrameCollectionError) ||
+      error.reason !== "frame_unobservable" ||
+      error.frames.length === 0 ||
+      error.frames.some((frame) => frame.frame_id !== 0)
+    )
+      return false;
+    const tab = await chromeTabsApi.get(state.tabId).catch(() => undefined);
+    return !!tab && isUnobservableInitialTab(tab);
+  }
+  /**
+   * Returning a borrowed tab that is stuck on a browser-restricted page or a
+   * failed root-document load must remain possible without tearing down the
+   * whole session, while all other owned tabs are still prepared normally.
+   */
+  private async unobservableReturnTarget(
+    session: SessionContext,
+    state: TabState,
+    returningTabId: number | undefined,
+    error: unknown,
+  ): Promise<boolean> {
+    if (
+      returningTabId === undefined ||
+      state.tabId !== returningTabId ||
+      !session.borrowedTabs.has(state.tabId) ||
+      !(error instanceof FrameCollectionError) ||
+      error.frames.length === 0 ||
+      error.frames.some((frame) => frame.frame_id !== 0)
+    )
+      return false;
+    const tab = await chromeTabsApi.get(state.tabId).catch(() => undefined);
+    if (!tab) return false;
+    if (error.reason === "page_load_failed") return !tab.pendingUrl;
+    if (error.reason === "frame_unobservable") {
+      const current = tab.url || tab.pendingUrl;
+      return (
+        cdpBlockedUrlReason(current) !== null &&
+        (!tab.pendingUrl || cdpBlockedUrlReason(tab.pendingUrl) !== null)
+      );
+    }
+    return false;
+  }
   private async manageTabs<T extends CdpRunner>(
     session: SessionContext,
     cdp: T,
     signal: AbortSignal,
     invoke: (cdp: T, signal?: AbortSignal) => Promise<unknown>,
+    returningTabId?: number,
   ): Promise<unknown> {
     const states = [...this.tabs.values()].filter((state) => state.sessionId === session.sessionId);
     if (states.some((state) => state.working))
@@ -1151,7 +1237,20 @@ export class CooperationController implements ControlAuthority {
       // Blank tabs have no collector. Other owned pages must confirm that no
       // human input was missed while a browser lookup/borrow approval was pending.
       try {
-        for (const state of states) if (!state.bootstrap) await this.prepareFrames(state, signal);
+        for (const state of states) {
+          if (state.bootstrap) continue;
+          try {
+            await this.prepareFrames(state, signal);
+          } catch (error) {
+            // A blank page offers no human input to miss. A borrowed one has no
+            // collector, and refusing here would also block returning it.
+            if (
+              !(await this.unobservableBlank(state, error)) &&
+              !(await this.unobservableReturnTarget(session, state, returningTabId, error))
+            )
+              throw error;
+          }
+        }
         assert();
       } catch (error) {
         revoked ??= error instanceof Error ? error.message : String(error);
@@ -1273,7 +1372,11 @@ export class CooperationController implements ControlAuthority {
       // new tab navigable, as the initial session tab is.
       if (req.method === "tool.tab_create" && (req.params as { url?: string }).url === undefined)
         req.params = { ...params, url: "about:blank" };
-      const result = await this.manageTabs(session, cdp, signal, invoke);
+      const returningTabId =
+        req.method === "tool.tab_return" && typeof params.tab_id === "number"
+          ? params.tab_id
+          : undefined;
+      const result = await this.manageTabs(session, cdp, signal, invoke, returningTabId);
       if (req.method === "tool.tab_return") {
         if (!isRpcError(result) && params.tab_id !== undefined) this.releaseTab(params.tab_id);
         return result;
@@ -1935,6 +2038,7 @@ export class CooperationController implements ControlAuthority {
             },
           }
         : error;
+    let fallbackBootstrap = false;
     try {
       await this.refresh(state);
       assert();
@@ -2253,12 +2357,40 @@ export class CooperationController implements ControlAuthority {
           },
         };
       }
-      if (error instanceof ActionCheckError) checkFailure = error.rpcError;
-      if (error instanceof FrameCollectionError) return error.toRpcError(sent ? "unknown" : "none");
-      return reportFailure(
-        error instanceof Error ? error.message : String(error),
-        sent ? "unknown" : "none",
-      );
+      if (
+        !sent &&
+        policy.bootstrapAllowed &&
+        !params.context_id &&
+        (await this.unobservableBlank(state, error))
+      ) {
+        if (state.stopped) return stopped("none");
+        if (signal.aborted)
+          return {
+            code: "cancelled",
+            message: "Shared-tab action cancelled",
+            data: { effect_state: "none", phase: "precondition" },
+          };
+        if (
+          params.expect !== undefined ||
+          params.observation_id !== undefined ||
+          params.depends_on?.length
+        )
+          return {
+            code: "invalid_params",
+            message:
+              "The initial blank tab has no observed content; omit expect, observation_id and depends_on or synchronize first",
+            data: { phase: "precondition", effect_state: "none" },
+          };
+        fallbackBootstrap = true;
+      } else {
+        if (error instanceof ActionCheckError) checkFailure = error.rpcError;
+        if (error instanceof FrameCollectionError)
+          return error.toRpcError(sent ? "unknown" : "none");
+        return reportFailure(
+          error instanceof Error ? error.message : String(error),
+          sent ? "unknown" : "none",
+        );
+      }
     } finally {
       finished = true;
       if (sent && req.method === "tool.window_resize")
@@ -2269,5 +2401,8 @@ export class CooperationController implements ControlAuthority {
       state.working = false;
       this.changed(state);
     }
+    return fallbackBootstrap
+      ? this.bootstrap(state, req.method, cdp, signal, invoke, epoch)
+      : undefined;
   }
 }
