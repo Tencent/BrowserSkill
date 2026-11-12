@@ -29,6 +29,9 @@ fn foreground_daemon_starts_and_stops() {
             "60s",
         ])
         .env("BSK_HOME", &home)
+        // Shutdown waits for blocking update work, so keep the startup check local.
+        .env("BSK_UPDATE_MANIFEST_URL", "http://127.0.0.1:1/disabled")
+        .env("NO_PROXY", "127.0.0.1")
         .env("RUST_LOG", "info")
         .stdout(Stdio::null())
         .stderr(Stdio::null())

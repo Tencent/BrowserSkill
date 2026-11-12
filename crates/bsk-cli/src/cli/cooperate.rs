@@ -72,7 +72,8 @@ pub struct CooperateArgs {
     /// Save the unfiltered reply to a new local JSON file before presenting it (sync only).
     #[arg(long)]
     pub save_full: Option<PathBuf>,
-    /// Saved unfiltered predecessor; reuse its VOM only for an exact unchanged reply.
+    /// Saved unfiltered predecessor; its VOM is reused for an exact unchanged reply and
+    /// patched for an exact text delta. Save the merged reply with --save-full to keep the chain.
     #[arg(long)]
     pub baseline: Option<PathBuf>,
     /// Recover transient read-only sync refusals with wait then sync, at most 3 attempts.
@@ -157,6 +158,7 @@ pub fn dispatch(args: CooperateArgs, _format: Format) -> Result<(), CliError> {
     super::observation_view::attach(&mut reply, &session, baseline.as_ref());
     if let Some(saved) = saved {
         saved.finish(&reply)?;
+        super::observation_view::omit_saved_merge(&mut reply);
     }
     if !args.match_text.is_empty() {
         presentation::filter(

@@ -12,6 +12,7 @@ import {
   type FrameState,
   type HumanActivity,
   type InputExpectation,
+  type TextChange,
 } from "@/cooperation/types";
 import { OVERLAY_HOST_SELECTOR } from "@/lib/overlay-bridge";
 import { createRandomUuid } from "@/lib/random-uuid";
@@ -21,6 +22,31 @@ const MAX_CHANGES = 64;
 // CDP's native clock conversion and the DOM clock round independently.
 // This bound is fixed; renderer/dispatch delays never extend input attribution.
 const INPUT_CLOCK_PRECISION_MS = 1.5;
+const MAX_TEXT = 500;
+/** `data-*` attributes the observation reads; changing one can change what the model sees. */
+const OBSERVED_DATA_ATTRIBUTES = new Set([
+  "data-testid",
+  "data-test-id",
+  "data-state",
+  "data-selected",
+  "data-index",
+  "data-section",
+]);
+/**
+ * Text here names or configures something else, or is not rendered as plain prose.
+ * Rows and list items identify the refs inside them by their text (row anchors).
+ */
+const NOT_PLAIN_TEXT =
+  "tr,li,[role=row],[role=listitem],label,legend,caption,th,summary,figcaption,h1,h2,h3,h4,h5,h6,[role=heading],option,optgroup,title,style,script,noscript,template,textarea,svg,math";
+/** Declarations that restyle an element without showing or hiding content. */
+const COSMETIC =
+  /^(outline|box-shadow|cursor|transition|text-decoration|border|caret-color|accent-color)/;
+// ponytail: a focused element may also recolour itself. A control that hides its own
+// label while focused is not detected; compare computed colours if that ever matters.
+const SELF_COSMETIC =
+  /^(color|background|outline|box-shadow|cursor|transition|text-decoration|border|caret-color|accent-color)/;
+const cleanText = (value: string) => value.replace(/\s+/g, " ").trim();
+const isText = (node: Node | undefined): node is Text => node?.nodeType === 3;
 
 /** Isolated-world collection also covers frames; no page-world control API is exposed. */
 export function attachCooperationCapture() {
@@ -31,6 +57,8 @@ export function attachCooperationCapture() {
     document: createRandomUuid(),
     revision: 0,
     structure: 0,
+    textual: 0,
+    texts: [],
     human: 0,
     busy: false,
     editing: false,
@@ -141,21 +169,225 @@ export function attachCooperationCapture() {
   const schedule = () => {
     if (!timer) timer = setTimeout(publish, 60);
   };
+  const roots = new Set<Document | ShadowRoot>();
+  let styles: { key: string; readable: boolean; text: string; focus: string[] } | undefined;
+  /** What the page's style sheets say about attributes and focus. Unreadable sheets say nothing. */
+  const styleFacts = () => {
+    const sheets = [...roots].flatMap((root) => [
+      ...(root.styleSheets ?? []),
+      ...(root.adoptedStyleSheets ?? []),
+    ]);
+    const top = sheets.map((sheet) => {
+      try {
+        return sheet.cssRules;
+      } catch {
+        return undefined;
+      }
+    });
+    // ponytail: keyed by rule counts. A CSSOM rewrite that keeps every count is
+    // missed until a count changes; hash the rule text if that ever matters.
+    const key = top.map((rules) => rules?.length ?? -1).join();
+    if (styles?.key === key) return styles;
+    const facts = { key, readable: top.every(Boolean), text: "", focus: [] as string[] };
+    const walk = (rules: CSSRuleList, outer: boolean) => {
+      for (const rule of rules) {
+        if (outer) facts.text += `${rule.cssText.toLowerCase()}\n`;
+        const { selectorText, style } = rule as CSSStyleRule;
+        if (selectorText?.includes(":focus")) {
+          // Without nesting or functions, each comma-separated selector stands alone.
+          const plain = !/[(&]/.test(selectorText);
+          for (const selector of plain ? selectorText.split(",") : [selectorText]) {
+            if (!selector.includes(":focus")) continue;
+            // The focused element styles only itself when no combinator follows.
+            const self = plain && /:focus(-visible)?(?![-\w])[^\s>+~]*$/.test(selector.trim());
+            const cosmetic = self ? SELF_COSMETIC : COSMETIC;
+            for (let index = 0; index < style.length; index++)
+              if (!cosmetic.test(style.item(index))) {
+                facts.focus.push(selector);
+                break;
+              }
+          }
+        }
+        try {
+          if ("styleSheet" in rule) {
+            const imported = (rule as CSSImportRule).styleSheet;
+            if (imported) walk(imported.cssRules, true);
+            else facts.readable = false;
+          }
+          const nested = (rule as CSSGroupingRule).cssRules;
+          if (nested) walk(nested, false);
+        } catch {
+          facts.readable = false;
+        }
+      }
+    };
+    for (const rules of top) if (rules) walk(rules, true);
+    styles = facts;
+    return facts;
+  };
+  /** No style that applies because of the current focus may show or hide content. */
+  const focusNeutral = () => {
+    const facts = styleFacts();
+    return (
+      facts.readable &&
+      !facts.focus.some((selector) => {
+        try {
+          return selector.includes("&") || [...roots].some((root) => root.querySelector(selector));
+        } catch {
+          return true;
+        }
+      })
+    );
+  };
+  /** An attribute write the observation cannot see: unchanged, or page-private data no style reads. */
+  const invisibleAttribute = (r: MutationRecord) => {
+    const name = r.attributeName?.toLowerCase() ?? "";
+    if (r.target instanceof Element && r.target.getAttribute(name) === r.oldValue) return true;
+    if (
+      !name.startsWith("data-") ||
+      name.startsWith("data-bsk") ||
+      OBSERVED_DATA_ATTRIBUTES.has(name)
+    )
+      return false;
+    const facts = styleFacts();
+    return facts.readable && !facts.text.includes(name);
+  };
+  /** Prose whose replacement changes its own line and the names derived from it, nothing else. */
+  const plainText = (parent: Element) => {
+    if (
+      parent.closest(NOT_PLAIN_TEXT) ||
+      (parent instanceof HTMLElement && parent.isContentEditable)
+    )
+      return false;
+    const transform = getComputedStyle(parent).textTransform;
+    if (transform && transform !== "none") return false;
+    const root = parent.getRootNode() as Document | ShadowRoot;
+    const referenced = new Set(
+      [...root.querySelectorAll("[aria-labelledby],[aria-describedby]")].flatMap((element) =>
+        `${element.getAttribute("aria-labelledby") ?? ""} ${element.getAttribute("aria-describedby") ?? ""}`.split(
+          /\s+/,
+        ),
+      ),
+    );
+    for (let element: Element | null = parent; element; element = element.parentElement)
+      if (element.id && referenced.has(element.id)) return false;
+    return true;
+  };
+  /**
+   * The replacements a batch made when it changed nothing but visible text.
+   * Undefined for every other batch: those keep requiring a fresh observation.
+   */
+  const textChanges = (records: MutationRecord[]): Omit<TextChange, "sequence">[] | undefined => {
+    const replaced = new Map<Text, string>();
+    const removals = new Map<Node, MutationRecord>();
+    for (const r of records) {
+      if (r.type === "attributes") {
+        if (!invisibleAttribute(r)) return;
+        continue;
+      }
+      let node: Node | undefined = r.target;
+      let before = r.oldValue;
+      if (r.type === "childList") {
+        // One text node swapped for another in the same place: `textContent = value`
+        // on an element holding one text node, or a removal and then an insertion.
+        if (r.addedNodes.length > 1 || r.removedNodes.length > 1) return;
+        let removed = r.removedNodes[0];
+        node = r.addedNodes[0];
+        if (!node) {
+          if (removals.has(r.target)) return;
+          removals.set(r.target, r);
+          continue;
+        }
+        if (!removed) {
+          const removal = removals.get(r.target);
+          if (
+            removal?.previousSibling !== r.previousSibling ||
+            removal.nextSibling !== r.nextSibling
+          )
+            return;
+          removals.delete(r.target);
+          removed = removal.removedNodes[0];
+        }
+        if (!isText(removed)) return;
+        before = replaced.get(removed) ?? removed.data;
+        replaced.delete(removed);
+      }
+      if (!isText(node) || before === null) return;
+      if (!replaced.has(node)) replaced.set(node, before);
+    }
+    if (removals.size) return;
+    const changes: Omit<TextChange, "sequence">[] = [];
+    for (const [node, before] of replaced) {
+      const parent = node.parentElement;
+      const previous = cleanText(before);
+      const value = cleanText(node.data);
+      if (previous === value) continue;
+      if (
+        !parent ||
+        !previous ||
+        !value ||
+        previous.length > MAX_TEXT ||
+        value.length > MAX_TEXT ||
+        !plainText(parent)
+      )
+        return;
+      changes.push({
+        id: id(parent),
+        label: `${parent.localName}${parent.id ? `#${parent.id}` : ""}`.slice(0, 160),
+        previous_value: previous,
+        value,
+      });
+    }
+    if (changes.length && !unseenElsewhere(new Set(changes.map((c) => c.previous_value)))) return;
+    return changes;
+  };
+  let burstStart = 0;
+  let burst = 0;
+  /**
+   * A replaced text is located in the observation by its old value alone, so
+   * nothing else in this document may still read the same.
+   */
+  const unseenElsewhere = (texts: Set<string>) => {
+    // ponytail: one walk of the document's text per text-only batch, at most ten
+    // a second. Faster tickers re-capture; index text nodes if they need deltas.
+    const now = Date.now();
+    if (now - burstStart > 1000) {
+      burstStart = now;
+      burst = 0;
+    }
+    if (++burst > 10) return false;
+    for (const root of roots)
+      for (const parent of [root, ...root.querySelectorAll("*")]) {
+        for (const child of parent.childNodes)
+          if (isText(child) && texts.has(cleanText(child.data))) return false;
+        if (parent instanceof Element)
+          for (const name of ["aria-label", "title", "alt", "placeholder", "value"]) {
+            const value = parent.getAttribute(name);
+            if (value && texts.has(cleanText(value))) return false;
+          }
+      }
+    return true;
+  };
   const mutations = (records: MutationRecord[]) => {
     markFormerPasswords(records);
-    if (
-      !enabled ||
-      !records.some(
-        (r) => !overlay(r.target instanceof Element ? r.target : r.target.parentElement),
-      )
-    )
-      return;
+    const seen = records.filter(
+      (r) => !overlay(r.target instanceof Element ? r.target : r.target.parentElement),
+    );
+    if (!enabled || !seen.length) return;
     state.revision++;
     state.structure++;
+    const texts = textChanges(seen);
+    if (texts) {
+      const sequence = (state.textual ?? 0) + 1;
+      state.textual = sequence;
+      const log = [...(state.texts ?? []), ...texts.map((text) => ({ ...text, sequence }))];
+      const dropped = log.splice(0, Math.max(0, log.length - MAX_CHANGES));
+      if (dropped.length) state.textFloor = dropped[dropped.length - 1]!.sequence;
+      state.texts = log;
+    }
     schedule();
   };
   const observer = new MutationObserver(mutations);
-  const roots = new Set<Document | ShadowRoot>();
   // Page JS cannot see closed roots, but the extension can. Observation also
   // traverses these roots, so source and focus guards must cover the same DOM.
   const shadowRoot = (element: Element): ShadowRoot | null =>
@@ -178,6 +410,7 @@ export function attachCooperationCapture() {
         attributes: true,
         attributeOldValue: true,
         characterData: true,
+        characterDataOldValue: true,
       });
       roots.add(root);
     }
@@ -307,6 +540,8 @@ export function attachCooperationCapture() {
     // evidence fresh even when the page's mutation counter did not advance.
     if (state.media && JSON.stringify(state.media) !== JSON.stringify(media)) state.revision++;
     state.media = media;
+    // Every root is observed by now, so every style sheet is in view.
+    state.focusNeutral = focusNeutral();
     updateInteraction();
     state.fields = [...fields.values()];
     return { ...state };
