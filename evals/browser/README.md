@@ -63,14 +63,21 @@ Build the CLI and test extension from the same candidate source, record each ope
 and report the tested scope, failures, and blockers without claiming untested cases passed.
 ```
 
-The skill includes 90 workflow/edge/regression cases and discovers additional command coverage cases
-(including `bsk plan`, `bsk recipe`, and `bsk read`) from the candidate CLI. It exercises synthetic
-HTML (including plan/recipe drift labs, a local video portal, and a developer forum hub) and eight
-public sites (OceanEngine, Taobao, Bilibili video site, V2EX forum site, MDN, GitHub, Books to
-Scrape, and Hacker News), including active carousels and per-second updates with
-`evaluate`/`read`/`wheel`, while recording benchmark metrics (success rate, interaction turns,
-actions-per-turn compression ratio, and P50/P95 latency). It is a separate Agent-guided workflow;
-it is not automatically added to the `core` suite, `pnpm eval:browser`, or required CI checks.
+The skill includes 111 workflow/edge/adversarial-arena/regression cases and discovers additional
+command coverage cases (including `bsk plan`, `bsk recipe`, and `bsk read`) from the candidate CLI.
+It exercises synthetic HTML — including 21 focused `ARENA-*` cases on high-density fixtures (linked
+3-form joint filing, nested Open/Closed Shadow DOM and same/cross-origin nested iframes, native
+`<video>`/`<audio>` with WebVTT tracks and canvas frame sampling, SPA hydration, real `bfcache`,
+keyed and slot-pooled 5,000-row virtual grids, `oklch()`/gradient text vs hidden-text canaries,
+and cross-channel sensitive-field redaction), plan/recipe drift labs, a local video portal, and a
+developer forum hub — and eight public sites (OceanEngine, Taobao, Bilibili video site, V2EX forum
+site, MDN, GitHub, Books to Scrape, and Hacker News), including active carousels and per-second
+updates with `evaluate`/`read`/`wheel`, while recording benchmark metrics (success rate,
+interaction turns, actions-per-turn compression ratio, and P50/P95 latency). Full browser execution
+is a separate Agent-guided workflow (not part of the `core` suite or `pnpm eval:browser`); the
+audit harness, fixture server routes (`Range`, `bfcache`, gated/streamed downloads, HEAD safety),
+scenario schema (including that every `required_argv` flag exists on its CLI command), and the
+fixture SHA-256 manifest are verified in CI (`test_release_audit.py`).
 
 The Python helpers need Python 3.9+ and only the standard library. Full execution also needs
 a real Chromium browser, the candidate Bsk CLI and matching extension, and human participation

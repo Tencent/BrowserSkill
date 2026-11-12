@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Behavioral tests of the audit helper, not BrowserSkill product tests."""
 
-import contextlib, importlib.util, io, json, tempfile, unittest
+import contextlib, csv, importlib.util, io, json, tempfile, time, unittest
 from pathlib import Path
 from types import SimpleNamespace as NS
 from unittest.mock import patch
@@ -606,10 +606,239 @@ else:
         self.assertIn("PLAN-FLOW", md)
         self.assertIn("RECIPE-FLOW", md)
 
+    def test_adversarial_server_routes_bfcache_cors_and_media_mimes(self):
+        root = self.skill / "assets/fixtures"
+        (root / "arena-bfcache-detail.html").write_text("<title>bfcache</title>")
+        (root / "captions-zh.vtt").write_text("WEBVTT\n\n00:00.000 --> 00:01.000\n你好\n")
+        (root / "arena-audio.wav").write_bytes(b"RIFF\x24\x00\x00\x00WAVE")
+        server = serve.make_server(root, 0)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        port = server.server_port
+        url = f"http://127.0.0.1:{port}"
+
+        class NoRedirect(urllib.request.HTTPRedirectHandler):
+            def redirect_request(self, req, fp, code, msg, headers, newurl):
+                return None
+
+        opener = urllib.request.build_opener(NoRedirect)
+        try:
+            with urllib.request.urlopen(url + "/minimal") as r:
+                self.assertEqual(r.headers.get("Cache-Control"), "no-store")
+                self.assertEqual(r.headers.get("Access-Control-Allow-Origin"), "*")
+            with urllib.request.urlopen(url + "/arena-bfcache-detail") as r:
+                self.assertEqual(r.headers.get("Cache-Control"), "no-cache")
+            with urllib.request.urlopen(url + "/minimal?bfcache=1") as r:
+                self.assertEqual(r.headers.get("Cache-Control"), "no-cache")
+            with urllib.request.urlopen(url + "/captions-zh.vtt") as r:
+                self.assertEqual(r.headers.get("Content-Type"), "text/vtt; charset=utf-8")
+            with urllib.request.urlopen(url + "/arena-audio.wav") as r:
+                self.assertEqual(r.headers.get("Content-Type"), "audio/wav")
+                self.assertEqual(r.headers.get("Accept-Ranges"), "bytes")
+                self.assertEqual(r.read(), b"RIFF\x24\x00\x00\x00WAVE")
+            with urllib.request.urlopen(
+                urllib.request.Request(
+                    url + "/arena-audio.wav", headers={"Range": "bytes=0-3"}
+                )
+            ) as r:
+                self.assertEqual(r.status, 206)
+                self.assertEqual(r.headers.get("Content-Range"), "bytes 0-3/12")
+                self.assertEqual(r.read(), b"RIFF")
+            with urllib.request.urlopen(
+                urllib.request.Request(
+                    url + "/arena-audio.wav", headers={"Range": "bytes=8-"}
+                )
+            ) as r:
+                self.assertEqual(r.status, 206)
+                self.assertEqual(r.headers.get("Content-Range"), "bytes 8-11/12")
+                self.assertEqual(r.read(), b"WAVE")
+            with urllib.request.urlopen(
+                urllib.request.Request(
+                    url + "/arena-audio.wav", headers={"Range": "bytes=-4"}
+                )
+            ) as r:
+                self.assertEqual(r.status, 206)
+                self.assertEqual(r.headers.get("Content-Range"), "bytes 8-11/12")
+                self.assertEqual(r.read(), b"WAVE")
+            for invalid_range in ("bytes=999-", "bytes=8-2", "bytes=-0", "bytes=bad"):
+                with self.assertRaises(urllib.error.HTTPError) as r_err:
+                    urllib.request.urlopen(
+                        urllib.request.Request(
+                            url + "/arena-audio.wav", headers={"Range": invalid_range}
+                        )
+                    )
+                self.assertEqual(r_err.exception.code, 416)
+                self.assertEqual(
+                    r_err.exception.headers.get("Content-Range"), "bytes */12"
+                )
+            with urllib.request.urlopen(
+                urllib.request.Request(url + "/arena-audio.wav", method="HEAD")
+            ) as r:
+                self.assertEqual(r.status, 200)
+                self.assertEqual(r.headers.get("Accept-Ranges"), "bytes")
+                self.assertEqual(r.headers.get("Content-Length"), "12")
+                self.assertEqual(r.read(), b"")
+            with self.assertRaises(urllib.error.HTTPError) as ctx:
+                opener.open(url + "/redirect-cross-origin")
+            self.assertEqual(ctx.exception.code, 302)
+            self.assertEqual(
+                ctx.exception.headers.get("Location"),
+                f"http://localhost:{port}/arena-bfcache-detail?from=cross_origin_302&bfcache=1",
+            )
+            with urllib.request.urlopen(url + "/slow-doc?delay_ms=15") as r:
+                self.assertIn(b"slow-doc-ready", r.read())
+            with urllib.request.urlopen(url + "/download") as r:
+                self.assertEqual(r.read(), "编号,名称\n42,中文文件 ✅\n".encode("utf-8"))
+            # The joint statement is gated on the submission receipt.
+            with self.assertRaises(urllib.error.HTTPError) as gate:
+                urllib.request.urlopen(
+                    url + "/download?scene=joint-filing&org=TestOrg&gross=1272.00"
+                )
+            self.assertEqual(gate.exception.code, 403)
+            joint = (
+                url
+                + "/download?scene=joint-filing&receipt=JNT-COMMIT-2026-9901"
+                + "&org=%E7%94%B2%2C%E4%B9%99&gross=1272.00"
+            )
+            with urllib.request.urlopen(joint) as r:
+                joint_csv = r.read().decode("utf-8")
+            rows = list(csv.reader(io.StringIO(joint_csv)))
+            self.assertEqual(
+                rows[1], ["JNT-COMMIT-2026-9901", "甲,乙", "1272.00", "已联合核定 ✅"]
+            )
+            with urllib.request.urlopen(
+                url
+                + "/download?scene=joint-filing&receipt=JNT-COMMIT-2026-9901"
+                + "&org=%3DHYPERLINK(1)&gross=1"
+            ) as r:
+                rows = list(csv.reader(io.StringIO(r.read().decode("utf-8"))))
+            self.assertEqual(rows[1][1], "'=HYPERLINK(1)")
+            with urllib.request.urlopen(url + "/download-stream?chunks=2&chunk_ms=5") as r:
+                self.assertIsNone(r.headers.get("Content-Length"))
+                stream_csv = r.read().decode("utf-8")
+                self.assertIn("流式对账分片-2", stream_csv)
+            with urllib.request.urlopen(
+                url + "/download-stream?chunks=2&chunk_ms=0&known_length=1"
+            ) as r:
+                body = r.read()
+                self.assertEqual(r.headers.get("Content-Length"), str(len(body)))
+            with urllib.request.urlopen(url + "/events") as r:
+                before_head = json.load(r)
+            # HEAD probes return headers only and never create business evidence.
+            for head_path in (
+                "/download",
+                "/download?scene=joint-filing&receipt=JNT-COMMIT-2026-9901&org=A&gross=1",
+                "/download-stream?chunks=3&chunk_ms=200",
+                "/slow-doc?delay_ms=3000",
+            ):
+                started = time.monotonic()
+                with urllib.request.urlopen(
+                    urllib.request.Request(url + head_path, method="HEAD")
+                ) as r:
+                    self.assertEqual(r.status, 200)
+                    self.assertEqual(r.read(), b"")
+                self.assertLess(time.monotonic() - started, 1.0, head_path)
+            with urllib.request.urlopen(url + "/events") as r:
+                events_after = json.load(r)
+            self.assertEqual(len(events_after), len(before_head))
+            ev_types = [e.get("type") for e in events_after]
+            self.assertIn("redirect-cross-origin", ev_types)
+            self.assertIn("slow-doc", ev_types)
+            self.assertIn("download-stream", ev_types)
+            self.assertIn("download-rejected", ev_types)
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join()
+
+    def test_wave_commands_range_assertions_and_long_admin_home(self):
+        (self.skill / "assets/fixtures/arena-frame-outer.html").write_text(
+            '<iframe src="http://localhost:4187/a"></iframe><iframe src="http://127.0.0.1:4187/b"></iframe>'
+        )
+        self.init()
+        rewritten = (self.root / "fixtures/arena-frame-outer.html").read_text()
+        self.assertIn("http://localhost:4567/a", rewritten)
+        self.assertIn("http://127.0.0.1:4567/b", rewritten)
+        rid = self.execute()
+        d = self.root / "commands" / rid
+        (d / "stdout.txt").write_text('{"ok": true, "size": 42, "label": "9"}')
+        m = audit.load(d / "meta.json")
+        m["stdout_sha256"] = audit.digest(d / "stdout.txt")
+        audit.write(d / "meta.json", m)
+        self.assertTrue(
+            audit.assertion(
+                self.root, {"record": rid, "pointer": "/json/size", "op": "lt", "value": 50}
+            )
+        )
+        self.assertTrue(
+            audit.assertion(
+                self.root, {"record": rid, "pointer": "/json/size", "op": "lte", "value": 42}
+            )
+        )
+        self.assertTrue(
+            audit.assertion(
+                self.root, {"record": rid, "pointer": "/json/size", "op": "gte", "value": 42}
+            )
+        )
+        for op, ptr, val in [
+            ("gte", "/json/ok", 1),
+            ("lte", "/json/ok", 1),
+            ("gt", "/json/ok", 0),
+            ("gte", "/json/size", True),
+            ("gt", "/json/label", "10"),
+        ]:
+            self.assertFalse(
+                audit.assertion(
+                    self.root, {"record": rid, "pointer": ptr, "op": op, "value": val}
+                ),
+                f"Expected strict numeric rejection for {op} on {ptr} vs {val!r}",
+            )
+        m_open = audit.extract_metrics(
+            "open", 0, {"vom": "@vom 2\npage", "elapsed_ms": 20}, 25.0
+        )
+        self.assertEqual(m_open["execution_mode"], "single_action")
+        self.assertEqual(m_open["actions_executed"], 1)
+        self.assertEqual(m_open["observation_kind"], "full")
+        self.assertGreater(m_open["vom_chars"], 0)
+        m_sync = audit.extract_metrics("sync", 0, {"unchanged": True}, 8.0)
+        self.assertEqual(m_sync["execution_mode"], "read")
+        self.assertTrue(m_sync["observation_reused"])
+        self.assertEqual(m_sync["observation_kind"], "unchanged")
+        m_ledger = audit.extract_metrics("ledger status", 0, {"pending": []}, 5.0)
+        self.assertEqual(m_ledger["browser_calls"], 0)
+        self.assertIsNotNone(
+            audit.semantic_failure(
+                {"command": "navigate back"}, {"json": {"reached": "timeout"}, "argv": ["navigate", "back"]}
+            )
+        )
+        self.assertIsNotNone(
+            audit.semantic_failure(
+                {"command": "sync"}, {"json": None, "argv": ["sync", "--json"]}
+            )
+        )
+        deep_run = (
+            self.base
+            / ("very_deep_nested_segment_" * 4)
+            / "candidate_run_directory"
+        )
+        deep_run.mkdir(parents=True)
+        with patch.object(audit.sys, "platform", "win32"):
+            win_home = audit.resolve_admin_home(deep_run)
+            self.assertEqual(Path(win_home), (deep_run / "admin-runtime").resolve())
+        resolved = Path(audit.resolve_admin_home(deep_run))
+        try:
+            self.assertLessEqual(len(str(resolved / "run" / "daemon.sock")), 96)
+            self.assertEqual(resolved.resolve(), (deep_run / "admin-runtime").resolve())
+        finally:
+            if resolved.is_symlink():
+                resolved.unlink()
+
     def test_shipped_scenarios_and_fixture_manifest_integrity(self):
+        import re as _re
+
         real_skill = Path(__file__).resolve().parents[1]
         scenarios = audit.load(real_skill / "references/scenarios.json")
-        self.assertGreaterEqual(len(scenarios), 90)
+        self.assertEqual(len(scenarios), 111)
         ids = [s["id"] for s in scenarios]
         self.assertEqual(len(ids), len(set(ids)))
         for required_id in [
@@ -629,7 +858,82 @@ else:
             "PUBLIC-FORUM-THREAD",
         ]:
             self.assertIn(required_id, ids)
+        arena_ids = [i for i in ids if i.startswith("ARENA-")]
+        self.assertEqual(
+            arena_ids,
+            [
+                "ARENA-JOINT-LEAD-FORM",
+                "ARENA-JOINT-PARTNERS-BUDGET",
+                "ARENA-JOINT-SUBMIT-DOWNLOAD",
+                "ARENA-NEG-FORM-READONLY-DISABLED",
+                "ARENA-NEG-SELECT-DISABLED-OPTION",
+                "ARENA-NEG-DOWNLOAD-GATE",
+                "ARENA-SHADOW-NESTED-OPEN",
+                "ARENA-SHADOW-CLOSED-VISUAL",
+                "ARENA-IFRAME-FEDERATION",
+                "ARENA-IFRAME-RELOAD-ISOLATION",
+                "ARENA-MEDIA-VIDEO-TRANSPORT",
+                "ARENA-MEDIA-CAPTIONS-FRAME",
+                "ARENA-MEDIA-AUDIO-PLAYLIST",
+                "ARENA-SPA-HYDRATION-ROUTES",
+                "ARENA-BFCACHE-HISTORY",
+                "ARENA-ASYNC-NAV-DOWNLOAD",
+                "ARENA-CSS-STEGANO",
+                "ARENA-SENSITIVE-VAULT",
+                "ARENA-VIRTUAL-GRID-KEYED",
+                "ARENA-MEGA-VOM-DELTA",
+                "ARENA-NEG-VIRTUAL-RECYCLE",
+            ],
+        )
+        # Every required_argv flag must be declared on that exact CLI command
+        # (guards against e.g. requiring `observe --redact-values`, a `record` flag).
+        cli_dir = real_skill.parents[3] / "crates/bsk-cli/src/cli"
+        for sc in scenarios:
+            for variant in sc.get("required_argv", []):
+                src = (cli_dir / (variant["command"].split()[0] + ".rs")).read_text(
+                    encoding="utf-8"
+                )
+                for flag in variant["args"]:
+                    if not flag.startswith("--"):
+                        continue
+                    name = flag[2:]
+                    declared = f'long = "{name}"' in src or _re.search(
+                        r"#\[arg\(long\b[^\]]*\]\s*(?:///[^\n]*\n\s*)*pub "
+                        + name.replace("-", "_")
+                        + r"\b",
+                        src,
+                    )
+                    self.assertTrue(
+                        declared,
+                        f"Scenario {sc['id']} requires {variant['command']} {flag}, "
+                        "which that command does not declare",
+                    )
+        corpus = "\n".join(
+            p.read_text(encoding="utf-8")
+            for p in [
+                *(real_skill / "assets/fixtures").glob("arena-*.html"),
+                real_skill / "scripts/serve.py",
+            ]
+        )
+        known_dom_ids = set(_re.findall(r'id=["\']([A-Za-z0-9_-]+)["\']', corpus))
+        for sc in scenarios:
+            if not sc["id"].startswith("ARENA-"):
+                continue
+            for sel_id in _re.findall(r"#([A-Za-z][A-Za-z0-9_-]*)", sc.get("goal", "")):
+                if sel_id.endswith("..3"):
+                    sel_id = sel_id[:-3]
+                self.assertIn(
+                    sel_id,
+                    known_dom_ids,
+                    f"Scenario {sc['id']} references #{sel_id} missing from arena fixtures",
+                )
         manifest = audit.load(real_skill / "references/fixture-manifest.json")
+        actual_files = {
+            f.relative_to(real_skill / "assets").as_posix()
+            for f in (real_skill / "assets/fixtures").iterdir()
+            if f.is_file()
+        }
+        self.assertEqual(set(manifest.keys()), actual_files)
         for rel, expected_sha in manifest.items():
             full = real_skill / "assets" / rel
             self.assertTrue(full.is_file(), f"Missing fixture {rel}")

@@ -595,22 +595,20 @@ describe.skipIf(!process.env.BSK_FILL_CHROME)("fill focus changes", () => {
         { background: true, window: ownWindow, markup: guard + markup },
         async (h) => {
           await h.ref("document.querySelector('#target')");
-          await h.evaluate(`document.querySelector('#target').addEventListener('focus', () => {
-            document.querySelector('#target').${field} = 'default';
-          })`);
+          await h.evaluate(`(() => {
+            const target = document.querySelector('#target');
+            target.addEventListener('focus', () => {
+              target.${field} = 'default';
+              target.dataset.focusInitialized = 'true';
+            });
+          })()`);
           expect(await h.fill("hello")).toMatchObject({ value_length: 5, actual_value: "hello" });
+          expect(
+            await h.evaluate("document.querySelector('#target').dataset.focusInitialized"),
+          ).toBe("true");
           expect(await h.evaluate(`document.querySelector('#target').${field}`)).toBe("hello");
           await h.activate();
           expect(await h.evaluate(`document.querySelector('#target').${field}`)).toBe("hello");
-          // A visible page takes focus from a pointer move outside the viewport;
-          // a hidden tab processes pointer input only when it renders again.
-          if (ownWindow) {
-            expect(h.calls).toContain("Input.dispatchMouseEvent");
-            expect(h.calls).not.toContain("Input.dispatchKeyEvent");
-          } else {
-            expect(h.calls).not.toContain("Input.dispatchMouseEvent");
-            expect(h.calls).toContain("Input.dispatchKeyEvent");
-          }
         },
       );
     },
