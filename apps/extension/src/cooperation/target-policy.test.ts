@@ -1515,6 +1515,29 @@ describe("text deltas under target control", () => {
     ).toMatchObject({ code: expect.any(String), data: { effect_state: "none" } });
     expect(f.send).not.toHaveBeenCalled();
 
+    // A ref whose row reads differently after the delta: the next sync
+    // republishes the refs instead of answering unchanged.
+    const row = await observed();
+    row.f.change({
+      structure: 1,
+      textual: 1,
+      texts: [logged(1, "Version: rev-0", "Version: rev-1")],
+    });
+    const patched = await row.f.sync();
+    expect(patched).toMatchObject({ kind: "delta" });
+    vi.mocked(checkActionTarget).mockResolvedValueOnce({
+      code: "permission_denied",
+      message: "row",
+      data: { reason: "virtual_row_recycled", effect_state: "none" },
+    });
+    expect(await row.f.run({ context_id: patched.context_id })).toMatchObject({
+      data: { reason: "virtual_row_recycled" },
+    });
+    expect(await row.f.sync()).toMatchObject({
+      kind: "baseline",
+      baseline_reason: "no_previous_observation",
+    });
+
     // That refusal ends the patching: the next sync captures the page, with
     // evidence, so a page that keeps changing cannot refuse the action forever.
     f.change({

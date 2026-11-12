@@ -32,9 +32,12 @@ const OBSERVED_DATA_ATTRIBUTES = new Set([
   "data-index",
   "data-section",
 ]);
-/** Text here names or configures something else, or is not rendered as plain prose. */
+/**
+ * Text here names or configures something else, or is not rendered as plain prose.
+ * Rows and list items identify the refs inside them by their text (row anchors).
+ */
 const NOT_PLAIN_TEXT =
-  "label,legend,caption,th,summary,figcaption,h1,h2,h3,h4,h5,h6,[role=heading],option,optgroup,title,style,script,noscript,template,textarea,svg,math";
+  "tr,li,[role=row],[role=listitem],label,legend,caption,th,summary,figcaption,h1,h2,h3,h4,h5,h6,[role=heading],option,optgroup,title,style,script,noscript,template,textarea,svg,math";
 /** Declarations that restyle an element without showing or hiding content. */
 const COSMETIC =
   /^(outline|box-shadow|cursor|transition|text-decoration|border|caret-color|accent-color)/;

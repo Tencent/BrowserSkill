@@ -167,6 +167,11 @@ describe("textDelta", () => {
     // A control's name: its ref keeps that name.
     ["text_ambiguous", () => delta(after([text(1, "Refresh", "Reload")]))],
     ["text_names_other_content", () => delta(after([text(1, "Open rev-9", "Open rev-10")]))],
+    // A derived name is cut at 240 characters without a mark.
+    [
+      "text_names_other_content",
+      () => delta(after([text(1, "Version: rev-0", `Version: ${"x".repeat(240)}`)])),
+    ],
     // A label cut at 80 characters ends inside the text.
     [
       "text_cut_by_truncation",

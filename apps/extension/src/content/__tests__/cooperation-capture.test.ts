@@ -1134,6 +1134,9 @@ it.each<[string, () => unknown]>([
   ["styled data changes", () => document.querySelector("#cell")!.setAttribute("data-shown", "no")],
   ["a heading changes", () => (document.querySelector("h2")!.textContent = "Renamed")],
   ["a label changes", () => (document.querySelector("label")!.textContent = "Renamed")],
+  // Refs inside a row or list item are identified by its text.
+  ["a list item changes", () => (document.querySelector("li")!.textContent = "Renamed")],
+  ["a table cell changes", () => (document.querySelector("td")!.textContent = "Renamed")],
   ["a name source changes", () => (document.querySelector("#named")!.textContent = "Renamed")],
   ["the old text is not unique", () => (document.querySelector("#twin")!.textContent = "Solo")],
   [
@@ -1146,7 +1149,8 @@ it.each<[string, () => unknown]>([
 ])("keeps requiring a fresh observation when %s", (_name, change) => {
   document.body.innerHTML = `<style>[data-shown="no"] { display: none }</style>${page}
     <h2>Title</h2><label>Name</label><span id="named">Describes</span>
-    <button aria-describedby="named">Go</button><i id="twin">Twin</i><i>Twin</i>`;
+    <button aria-describedby="named">Go</button><i id="twin">Twin</i><i>Twin</i>
+    <ul><li>Item</li></ul><table><tbody><tr><td>Cell</td></tr></tbody></table>`;
   const read = collector();
   expect(across(read, change)).toMatchObject({ structure: 1, textual: 0, texts: [] });
 });

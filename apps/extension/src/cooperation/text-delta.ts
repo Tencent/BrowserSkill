@@ -8,6 +8,8 @@ export interface HeldText {
   text: string;
   truncated: boolean;
   maxTokens?: number;
+  /** A delta rewrote this text after the capture that published the refs. */
+  patched?: boolean;
 }
 
 /** One line of the held text, replaced in place. `line` is 1-based. */
@@ -50,6 +52,8 @@ export type TextDeltaRefusal =
   | "text_cut_by_truncation"
   | "token_budget_shift";
 
+/** A name derived from content is cut here without a mark (semantic-graph/resolve.ts). */
+const DERIVED_NAME_CAP = 240;
 /** Headroom for the header and notice lines, which a capture costs as one block. */
 const BUDGET_MARGIN = 64;
 /** Inner text of a rendered name: the renderer collapses whitespace and writes JSON strings. */
@@ -99,7 +103,13 @@ function replaceText(
       if (child === undefined) return "text_names_other_content";
       children.push(child);
     }
-    if (children.join(" ") !== name || name.split(old).length !== 2)
+    if (
+      children.join(" ") !== name ||
+      name.split(old).length !== 2 ||
+      // Escaped lengths are never shorter than the names themselves.
+      name.length >= DERIVED_NAME_CAP ||
+      name.length - old.length + next.length >= DERIVED_NAME_CAP
+    )
       return "text_names_other_content";
   }
   // A label cut short may end inside this text. Then no line holds the whole

@@ -135,7 +135,8 @@ a `baseline_reason`, for example `structure_changed`, `refs_replaced`, `frame_re
 `focus_changed`, `human_activity`, `text_log_gap`, `text_outside_observation`,
 `text_ambiguous`, `token_budget_changed` or `token_budget_shift`. Keep the same
 `--max-tokens` across syncs you want patched. Pages with child frames, and text inside
-controls, headings, labels or form fields, always take the baseline path.
+controls, headings, labels, form fields, table rows or list items, always take the
+baseline path.
 
 For readonly date pickers, click to open the picker instead of filling it. If VOM
 exposes only a containing control, inspect that observed ref with `get-html --ref`

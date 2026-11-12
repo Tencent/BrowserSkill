@@ -1037,7 +1037,7 @@ export class CooperationController implements ControlAuthority {
                       maxTokens: params.max_tokens,
                     }
                   : text && baseline?.held
-                    ? { ...baseline.held, text: text.text }
+                    ? { ...baseline.held, text: text.text, patched: true }
                     : baseline?.held,
               }
             : {}),
@@ -2058,6 +2058,14 @@ export class CooperationController implements ControlAuthority {
         for (const node of script ? [] : [actionTarget, destinationTarget]) {
           if (!node) continue;
           const error = await checkActionTarget(cdp, node, req.method, requireFocus);
+          // Refs were published before the text deltas since. A row one of them
+          // names may read differently now, so the next sync republishes them.
+          if (
+            error?.data &&
+            (error.data as { reason?: unknown }).reason === "virtual_row_recycled" &&
+            state.baseline?.held?.patched
+          )
+            state.baseline = undefined;
           if (error) throw new ActionCheckError((checkFailure = error));
         }
       } else await verifyEvidence();
