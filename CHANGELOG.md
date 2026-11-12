@@ -141,6 +141,13 @@ determines which versions can connect.
   after sleep or clock changes. Calibration uses the extension's hidden document,
   preserves the existing input checks, and reports clock failures before dispatch
   ([#665](https://github.com/Tencent/BrowserSkill/issues/665)).
+- VOM interaction recovery exposes per-row `@eN` refs for click-delegated list containers
+  (`<ul>`, `<ol>`, `<menu>`, ARIA list/menu/tree/tablist roles, single-child dropdown
+  wrappers, and vertically stacked homogeneous repeated rows) instead of collapsing the
+  container into one combined button, while keeping static lists ref-free, preserving
+  compound buttons and multi-slot cards as single controls, and remaining idempotent
+  across semantic-graph and render passes
+  ([#695](https://github.com/Tencent/BrowserSkill/issues/695)).
 - `tool.record_start` enforces shared-tab cooperation ownership, stop, and human-control
   guards and invalidates stale control contexts when starting recording; `tool.tab_return`
   clears active recordings for local sessions as well as remote ones.

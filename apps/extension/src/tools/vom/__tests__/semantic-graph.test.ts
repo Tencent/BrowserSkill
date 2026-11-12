@@ -1,4 +1,4 @@
-import { isVomReferenceNode, renderVom } from "@browser-skill/vom";
+import { isVomReferenceNode, prepareObservationRender, renderVom } from "@browser-skill/vom";
 import { describe, expect, it } from "vitest";
 import type { CapturedNode } from "../capture";
 import type { FrameDocument } from "../frame-document";
@@ -1034,4 +1034,286 @@ it.each([true, false])("retains AX selected=%s over styling hints", (selected) =
     ],
   });
   expect(renderVom(scene).text).toContain(selected ? "[selected]" : "[unselected]");
+});
+
+it("exposes individual row refs for delegated list and homogeneous div containers across semantic structure and render passes (#695)", () => {
+  const scene = buildSemanticVomScene({
+    viewport: { width: 800, height: 600 },
+    rootFrameId: "main",
+    documents: [
+      document(
+        "main",
+        [
+          {
+            nodeId: "root",
+            backendDOMNodeId: 1,
+            role: { type: "role", value: "RootWebArea" },
+            childIds: ["main"],
+          },
+          {
+            nodeId: "main",
+            parentId: "root",
+            backendDOMNodeId: 2,
+            role: { type: "role", value: "main" },
+            childIds: ["divA", "ulB", "ulC", "cardD", "wrapE"],
+          },
+          {
+            nodeId: "divA",
+            parentId: "main",
+            backendDOMNodeId: 10,
+            role: { type: "role", value: "generic" },
+            childIds: ["a1", "a2", "a3"],
+          },
+          {
+            nodeId: "a1",
+            parentId: "divA",
+            backendDOMNodeId: 11,
+            role: { type: "role", value: "generic" },
+            childIds: ["a1t"],
+          },
+          {
+            nodeId: "a1t",
+            parentId: "a1",
+            role: { type: "role", value: "StaticText" },
+            name: { type: "computedString", value: "甲一" },
+          },
+          {
+            nodeId: "a2",
+            parentId: "divA",
+            backendDOMNodeId: 12,
+            role: { type: "role", value: "generic" },
+            childIds: ["a2t"],
+          },
+          {
+            nodeId: "a2t",
+            parentId: "a2",
+            role: { type: "role", value: "StaticText" },
+            name: { type: "computedString", value: "甲二" },
+          },
+          {
+            nodeId: "a3",
+            parentId: "divA",
+            backendDOMNodeId: 13,
+            role: { type: "role", value: "generic" },
+            childIds: ["a3t"],
+          },
+          {
+            nodeId: "a3t",
+            parentId: "a3",
+            role: { type: "role", value: "StaticText" },
+            name: { type: "computedString", value: "甲三" },
+          },
+          {
+            nodeId: "ulB",
+            parentId: "main",
+            backendDOMNodeId: 20,
+            role: { type: "role", value: "list" },
+            childIds: ["b1", "bDiv", "b2", "b3"],
+          },
+          {
+            nodeId: "b1",
+            parentId: "ulB",
+            backendDOMNodeId: 21,
+            role: { type: "role", value: "listitem" },
+            childIds: ["b1t"],
+          },
+          {
+            nodeId: "b1t",
+            parentId: "b1",
+            role: { type: "role", value: "StaticText" },
+            name: { type: "computedString", value: "乙一" },
+          },
+          {
+            nodeId: "bDiv",
+            parentId: "ulB",
+            backendDOMNodeId: 24,
+            role: { type: "role", value: "listitem" },
+          },
+          {
+            nodeId: "b2",
+            parentId: "ulB",
+            backendDOMNodeId: 22,
+            role: { type: "role", value: "listitem" },
+            childIds: ["b2t"],
+          },
+          {
+            nodeId: "b2t",
+            parentId: "b2",
+            role: { type: "role", value: "StaticText" },
+            name: { type: "computedString", value: "乙二" },
+          },
+          {
+            nodeId: "b3",
+            parentId: "ulB",
+            backendDOMNodeId: 23,
+            role: { type: "role", value: "listitem" },
+            childIds: ["b3t"],
+          },
+          {
+            nodeId: "b3t",
+            parentId: "b3",
+            role: { type: "role", value: "StaticText" },
+            name: { type: "computedString", value: "乙三" },
+          },
+          {
+            nodeId: "ulC",
+            parentId: "main",
+            backendDOMNodeId: 30,
+            role: { type: "role", value: "list" },
+            childIds: ["c1", "c2", "c3"],
+          },
+          {
+            nodeId: "c1",
+            parentId: "ulC",
+            backendDOMNodeId: 31,
+            role: { type: "role", value: "listitem" },
+            name: { type: "computedString", value: "丙一" },
+          },
+          {
+            nodeId: "c2",
+            parentId: "ulC",
+            backendDOMNodeId: 32,
+            role: { type: "role", value: "listitem" },
+            name: { type: "computedString", value: "丙二" },
+          },
+          {
+            nodeId: "c3",
+            parentId: "ulC",
+            backendDOMNodeId: 33,
+            role: { type: "role", value: "listitem" },
+            name: { type: "computedString", value: "丙三" },
+          },
+          {
+            nodeId: "cardD",
+            parentId: "main",
+            backendDOMNodeId: 40,
+            role: { type: "role", value: "generic" },
+            childIds: ["d1", "d2"],
+          },
+          {
+            nodeId: "d1",
+            parentId: "cardD",
+            backendDOMNodeId: 41,
+            role: { type: "role", value: "generic" },
+            name: { type: "computedString", value: "标题" },
+          },
+          {
+            nodeId: "d2",
+            parentId: "cardD",
+            backendDOMNodeId: 42,
+            role: { type: "role", value: "generic" },
+            name: { type: "computedString", value: "副标题" },
+          },
+          {
+            nodeId: "wrapE",
+            parentId: "main",
+            backendDOMNodeId: 50,
+            role: { type: "role", value: "generic" },
+            childIds: ["ulE"],
+          },
+          {
+            nodeId: "ulE",
+            parentId: "wrapE",
+            backendDOMNodeId: 51,
+            role: { type: "role", value: "list" },
+            childIds: ["e1", "e2", "eFooter"],
+          },
+          {
+            nodeId: "e1",
+            parentId: "ulE",
+            backendDOMNodeId: 52,
+            role: { type: "role", value: "listitem" },
+            name: { type: "computedString", value: "历史一" },
+          },
+          {
+            nodeId: "e2",
+            parentId: "ulE",
+            backendDOMNodeId: 53,
+            role: { type: "role", value: "listitem" },
+            name: { type: "computedString", value: "历史二" },
+          },
+          {
+            nodeId: "eFooter",
+            parentId: "ulE",
+            backendDOMNodeId: 54,
+            role: { type: "role", value: "listitem" },
+            childIds: ["eClear"],
+          },
+          {
+            nodeId: "eClear",
+            parentId: "eFooter",
+            backendDOMNodeId: 55,
+            role: { type: "role", value: "button" },
+            name: { type: "computedString", value: "清空历史" },
+          },
+        ],
+        [
+          dom(1, null, "body"),
+          dom(2, 1, "main"),
+          {
+            ...dom(10, 2, "div", { id: "a" }),
+            clickable: true,
+            rect: { x: 0, y: 0, w: 240, h: 108 },
+          },
+          { ...dom(11, 10, "div", {}, "甲一"), rect: { x: 0, y: 0, w: 240, h: 36 } },
+          { ...dom(12, 10, "div", {}, "甲二"), rect: { x: 0, y: 36, w: 240, h: 36 } },
+          { ...dom(13, 10, "div", {}, "甲三"), rect: { x: 0, y: 72, w: 240, h: 36 } },
+          {
+            ...dom(20, 2, "ul", { id: "b" }),
+            clickable: true,
+            rect: { x: 0, y: 120, w: 240, h: 112 },
+          },
+          { ...dom(21, 20, "li", {}, "乙一"), rect: { x: 0, y: 120, w: 240, h: 36 } },
+          { ...dom(24, 20, "li", { class: "divider" }), rect: { x: 0, y: 156, w: 240, h: 4 } },
+          { ...dom(22, 20, "li", {}, "乙二"), rect: { x: 0, y: 160, w: 240, h: 36 } },
+          { ...dom(23, 20, "li", {}, "乙三"), rect: { x: 0, y: 196, w: 240, h: 36 } },
+          dom(30, 2, "ul", { id: "c" }),
+          dom(31, 30, "li", {}, "丙一"),
+          dom(32, 30, "li", {}, "丙二"),
+          dom(33, 30, "li", {}, "丙三"),
+          {
+            ...dom(40, 2, "div", { id: "d" }),
+            clickable: true,
+            rect: { x: 0, y: 260, w: 240, h: 72 },
+          },
+          { ...dom(41, 40, "div", {}, "标题"), rect: { x: 0, y: 260, w: 240, h: 36 } },
+          { ...dom(42, 40, "div", {}, "副标题"), rect: { x: 0, y: 296, w: 240, h: 36 } },
+          {
+            ...dom(50, 2, "div", { id: "e" }),
+            clickable: true,
+            rect: { x: 0, y: 340, w: 240, h: 120 },
+          },
+          { ...dom(51, 50, "ul"), rect: { x: 0, y: 340, w: 240, h: 120 } },
+          { ...dom(52, 51, "li", {}, "历史一"), rect: { x: 0, y: 340, w: 240, h: 36 } },
+          { ...dom(53, 51, "li", {}, "历史二"), rect: { x: 0, y: 376, w: 240, h: 36 } },
+          { ...dom(54, 51, "li"), rect: { x: 0, y: 412, w: 240, h: 36 } },
+          { ...dom(55, 54, "button", {}, "清空历史"), rect: { x: 0, y: 412, w: 120, h: 32 } },
+        ],
+      ),
+    ],
+  });
+
+  const rendered = renderVom(scene);
+  expect(
+    rendered.refs.map((ref) => ({ backendNodeId: ref.backendNodeId, name: ref.name })),
+  ).toEqual([
+    { backendNodeId: 11, name: "甲一" },
+    { backendNodeId: 12, name: "甲二" },
+    { backendNodeId: 13, name: "甲三" },
+    { backendNodeId: 21, name: "乙一" },
+    { backendNodeId: 22, name: "乙二" },
+    { backendNodeId: 23, name: "乙三" },
+    { backendNodeId: 40, name: "标题 副标题" },
+    { backendNodeId: 52, name: "历史一" },
+    { backendNodeId: 53, name: "历史二" },
+    { backendNodeId: 55, name: "清空历史" },
+  ]);
+  expect(rendered.text).not.toContain('button "甲一 甲二 甲三"');
+  expect(rendered.text).not.toContain('button "乙一 乙二 乙三"');
+
+  const prepared = prepareObservationRender(scene);
+  const preparedBackendIds = Array.from({ [Symbol.iterator]: () => prepared.rows })
+    .filter((row) => row.ref)
+    .map((row) => row.ref!.backendNodeId);
+  expect(preparedBackendIds).toEqual([11, 12, 13, 21, 22, 23, 40, 52, 53, 55]);
 });
