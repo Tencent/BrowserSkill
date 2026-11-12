@@ -490,7 +490,10 @@ function startLifecycleWait(
               return;
             }
             if (method === "Page.frameNavigated") {
-              const p = params as { frame?: { id?: string; parentId?: string; loaderId?: string } };
+              const p = params as {
+                frame?: { id?: string; parentId?: string; loaderId?: string };
+                type?: string;
+              };
               if (
                 !p.frame?.parentId &&
                 lifecycleEventMatchesFrame(p.frame?.id) &&
@@ -502,6 +505,15 @@ function startLifecycleWait(
                 pendingLifecycle = null;
                 sawRelevantLifecycle = false;
                 lastLifecycle = undefined;
+                // A back/forward-cache restore re-activates a document that has
+                // already loaded; Chrome emits no new DOMContentLoaded or load.
+                if (p.type === "BackForwardCacheRestore") {
+                  noteRelevantLifecycle("load");
+                  if (lifecycleMeetsOrExceeds("load", targetName)) {
+                    finish({ reached: "match", lastLifecycle: "load" });
+                    return;
+                  }
+                }
               }
             }
           }
