@@ -4,7 +4,7 @@
 //! it — the extension would otherwise apply the same default
 //! locally.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::Context;
 use bsk_protocol::Method;
@@ -39,7 +39,8 @@ pub struct GetHtmlArgs {
     #[arg(long = "max-bytes")]
     pub max_bytes: Option<u32>,
 
-    /// Write HTML to this path instead of stdout.
+    /// Write HTML to this path instead of stdout. With `--json`, stdout reports the
+    /// path and sizes without the HTML.
     #[arg(long)]
     pub out: Option<PathBuf>,
 }
@@ -65,7 +66,7 @@ fn run(sock: PathBuf, args: GetHtmlArgs, format: Format) -> Result<(), CliError>
     }
     match format {
         Format::Json => {
-            let json = serde_json::to_string_pretty(&reply)
+            let json = serde_json::to_string_pretty(&json_reply(&reply, args.out.as_deref()))
                 .map_err(|e| CliError::Local(anyhow::anyhow!(e)))?;
             println!("{json}");
         }
@@ -98,4 +99,61 @@ fn call(sock: PathBuf, params: GetHtmlParams) -> Result<GetHtmlResult, CliError>
         Some(params),
         TOOL_IPC_TIMEOUT,
     )
+}
+
+/// JSON output. With `--out` the HTML lives only in the file, so stdout reports
+/// where it went instead of repeating a payload that can be hundreds of KB.
+fn json_reply(reply: &GetHtmlResult, out: Option<&Path>) -> serde_json::Value {
+    let Some(out) = out else {
+        return serde_json::to_value(reply).unwrap_or(serde_json::Value::Null);
+    };
+    let mut json = serde_json::json!({
+        "tab_id": reply.tab_id,
+        "path": out.to_string_lossy(),
+        "written_bytes": reply.html.len(),
+        "byte_size": reply.byte_size,
+        "truncated": reply.truncated,
+    });
+    if !reply.dialogs.is_empty() {
+        json["dialogs"] = serde_json::to_value(&reply.dialogs).unwrap_or_default();
+    }
+    json
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn reply() -> GetHtmlResult {
+        GetHtmlResult {
+            html: "<html><body>secret page body</body></html>".into(),
+            truncated: true,
+            byte_size: 343_001,
+            tab_id: 7,
+            dialogs: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn json_with_out_reports_the_file_instead_of_the_html() {
+        let json = json_reply(&reply(), Some(Path::new("/tmp/page.html")));
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "tab_id": 7,
+                "path": "/tmp/page.html",
+                "written_bytes": 42,
+                "byte_size": 343_001,
+                "truncated": true,
+            })
+        );
+        assert!(!json.to_string().contains("secret page body"));
+    }
+
+    #[test]
+    fn json_without_out_still_returns_the_html() {
+        let json = json_reply(&reply(), None);
+        assert_eq!(json["html"], "<html><body>secret page body</body></html>");
+        assert_eq!(json["byte_size"], 343_001);
+    }
 }
