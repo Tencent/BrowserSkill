@@ -157,6 +157,14 @@ determines which versions can connect.
 - Window blur releases completed text-editing holds, and new task synchronizations
   after an idle gap automatically resume paused or editing tabs when no gesture or
   recent input is active, avoiding unnecessary manual hand-back prompts between tasks.
+- `bsk sync` and `bsk open` evaluate `--wait-for` and `--wait-not` against the full
+  page. A strict-policy `delta` frame or an `unchanged` frame without a cached page
+  is read once with `tool.snapshot` instead of matching only its `[change ...]` lines
+  or empty text, and a page cut by `--max-tokens` is read in full before `--wait-not`
+  accepts that text is gone. A wait that returns after several polls also reports
+  the field changes, activity and `history_complete=false` of the frames it did not
+  return. A failed page read keeps the wait polling instead of ending it
+  ([#714](https://github.com/Tencent/BrowserSkill/issues/714)).
 - Recording keeps clicks on buttons and links whose name is longer than 48 characters,
   such as GOV.UK step-by-step sections and long news headlines.
 - Recording keeps clicks on links, filter disclosures, checkboxes and other controls

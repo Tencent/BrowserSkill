@@ -135,6 +135,8 @@ struct TabContextCache {
     latest_obs_id: Option<String>,
     latest_short_obs: Option<String>,
     last_vom: Option<String>,
+    /// The cached VOM was cut to a `max_tokens` budget.
+    last_vom_truncated: bool,
     last_url: Option<String>,
     last_title: Option<String>,
 }
@@ -153,6 +155,7 @@ struct SessionContextSlot {
     latest_obs_id: Option<String>,
     latest_short_obs: Option<String>,
     last_vom: Option<String>,
+    last_vom_truncated: bool,
     last_url: Option<String>,
     last_title: Option<String>,
     tabs: HashMap<i64, TabContextCache>,
@@ -519,6 +522,10 @@ impl ImplicitScopeRegistry {
         };
 
         let obs_text = result.pointer("/observation/text").and_then(Value::as_str);
+        let obs_truncated = result
+            .pointer("/observation/truncated")
+            .and_then(Value::as_bool)
+            == Some(true);
         let obs_url = result
             .pointer("/observation/url")
             .and_then(Value::as_str)
@@ -528,7 +535,7 @@ impl ImplicitScopeRegistry {
             .and_then(Value::as_str)
             .or_else(|| result.pointer("/state/title").and_then(Value::as_str));
 
-        let (cached_vom, cached_url, cached_title, cache_reusable) =
+        let (cached_vom, cached_truncated, cached_url, cached_title, cache_reusable) =
             if let Some(tid) = effective_tab_id {
                 let tab_cache = slot.tabs.entry(tid).or_default();
                 if let Some((ref short, ref uuid)) = minted_ctx {
@@ -541,11 +548,13 @@ impl ImplicitScopeRegistry {
                 }
                 let reusable = if let Some(text) = obs_text {
                     tab_cache.last_vom = Some(text.to_string());
+                    tab_cache.last_vom_truncated = obs_truncated;
                     true
                 } else if exact_unchanged {
                     tab_cache.last_vom.is_some()
                 } else {
                     tab_cache.last_vom = None;
+                    tab_cache.last_vom_truncated = false;
                     false
                 };
                 if let Some(url) = obs_url {
@@ -556,6 +565,7 @@ impl ImplicitScopeRegistry {
                 }
                 (
                     tab_cache.last_vom.clone(),
+                    tab_cache.last_vom_truncated,
                     tab_cache.last_url.clone(),
                     tab_cache.last_title.clone(),
                     reusable,
@@ -563,11 +573,13 @@ impl ImplicitScopeRegistry {
             } else {
                 let reusable = if let Some(text) = obs_text {
                     slot.last_vom = Some(text.to_string());
+                    slot.last_vom_truncated = obs_truncated;
                     true
                 } else if exact_unchanged {
                     slot.last_vom.is_some()
                 } else {
                     slot.last_vom = None;
+                    slot.last_vom_truncated = false;
                     false
                 };
                 if let Some(url) = obs_url {
@@ -578,6 +590,7 @@ impl ImplicitScopeRegistry {
                 }
                 (
                     slot.last_vom.clone(),
+                    slot.last_vom_truncated,
                     slot.last_url.clone(),
                     slot.last_title.clone(),
                     reusable,
@@ -590,6 +603,7 @@ impl ImplicitScopeRegistry {
             "short_ctx": minted_ctx.map(|(s, _)| s).or_else(|| slot.latest_short_ctx.clone()),
             "short_obs": minted_obs.map(|(s, _)| s).or_else(|| slot.latest_short_obs.clone()),
             "cached_vom": cached_vom,
+            "cached_vom_truncated": cached_truncated,
             "cached_url": cached_url,
             "cached_title": cached_title,
             "cache_reusable": cache_reusable,
@@ -796,6 +810,45 @@ mod tests {
             Some("uuid-stable-ctx")
         );
         assert_eq!(scopes.expand_short_ctx(&sid, "c2"), None);
+    }
+
+    #[test]
+    fn cached_vom_remembers_a_token_budget_truncation() {
+        let scopes = ImplicitScopeRegistry::new();
+        let sid = SessionId("s-budget".into());
+        let baseline = scopes.record_cooperate_result(
+            &sid,
+            &json!({
+                "tab_id": 7,
+                "context_id": "ctx-1",
+                "kind": "baseline",
+                "observation": { "text": "Header", "truncated": true }
+            }),
+        );
+        assert_eq!(baseline["cached_vom_truncated"], true);
+        let unchanged = scopes.record_cooperate_result(
+            &sid,
+            &json!({
+                "tab_id": 7,
+                "context_id": "ctx-2",
+                "previous_context_id": "ctx-1",
+                "kind": "unchanged",
+                "history_complete": true,
+                "changes": []
+            }),
+        );
+        assert_eq!(unchanged["cache_reusable"], true);
+        assert_eq!(unchanged["cached_vom_truncated"], true);
+        let full = scopes.record_cooperate_result(
+            &sid,
+            &json!({
+                "tab_id": 7,
+                "context_id": "ctx-3",
+                "kind": "baseline",
+                "observation": { "text": "Header\nFooter", "truncated": false }
+            }),
+        );
+        assert_eq!(full["cached_vom_truncated"], false);
     }
 
     #[test]

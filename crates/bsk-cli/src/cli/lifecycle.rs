@@ -487,6 +487,10 @@ fn settled_sync_with_conditions_using(
 ) -> Result<Value, CliError> {
     let start = Instant::now();
     let deadline = Duration::from_millis(u64::from(wait_budget_ms));
+    // Every sync advances the extension's baseline, so changes, activity and
+    // missing history reported by a frame this wait does not return would be lost.
+    let mut carried = CarriedObservation::default();
+    let mut last_snapshot_error: Option<String> = None;
 
     loop {
         let mut reply = run_settled_cooperate_sync(
@@ -507,77 +511,72 @@ fn settled_sync_with_conditions_using(
             return Ok(reply);
         }
 
-        // Slim `delta` and uncached `unchanged` frames omit full `observation.text`.
-        // Evaluating `--wait-for` / `--wait-not` against partial `[change ...]` lines
-        // or empty text would falsely pass `--wait-not` while the substring is still
-        // visible or falsely time out `--wait-for` when the substring is in static VOM.
-        // Promote to an authoritative full baseline via `ToolSnapshot` (which bumps
-        // `session.refStore.revision`) followed immediately by `ToolCooperate(Sync)`
-        // so `context_id` stays synchronized (`context.refs === session.refStore.revision`)
-        // and `ScopeRegistry` caches `last_vom` for zero-extra-RPC reuse on later polls.
-        let fallback_snapshot_text = if has_authoritative_full_vom(&reply) {
-            None
-        } else {
-            let promoted_session_id = reply
-                .pointer("/_scope_meta/session_id")
-                .and_then(Value::as_str)
-                .or_else(|| reply.pointer("/state/session_id").and_then(Value::as_str))
-                .or(explicit_session)
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .unwrap_or_default()
-                .to_string();
-            let resolved_tab_id = reply
-                .get("tab_id")
-                .and_then(Value::as_i64)
-                .or_else(|| reply.pointer("/_scope_meta/tab_id").and_then(Value::as_i64))
-                .or(tab_id);
-            let snap_req = serde_json::to_value(SnapshotParams {
-                session_id: promoted_session_id.clone(),
-                tab_id: resolved_tab_id,
-                max_depth: None,
-                max_tokens,
-            })
-            .map_err(|e| CliError::Local(e.into()))?;
-            let snap_val = call_rpc("sync-snapshot", Method::ToolSnapshot, snap_req)?;
-            let snapshot: SnapshotResult =
-                serde_json::from_value(snap_val).map_err(|e| CliError::Local(e.into()))?;
-            reply = run_settled_cooperate_sync(
-                &promoted_session_id,
-                resolved_tab_id,
-                explicit_session,
-                tab_id,
-                control_policy,
-                max_tokens,
-                prior_effect_state,
-                &mut call_rpc,
-            )?;
-            Some(snapshot.text)
-        };
-
-        let (for_ok, not_ok, attach_fallback_vom) =
-            if let Some(vom_text) = authoritative_full_vom(&reply) {
-                (
-                    wait_for.is_none_or(|needle| vom_text.contains(needle)),
-                    wait_not.is_none_or(|needle| !vom_text.contains(needle)),
-                    None,
-                )
-            } else {
-                let snap_text = fallback_snapshot_text.as_deref().unwrap_or("");
-                (
-                    wait_for.is_none_or(|needle| snap_text.contains(needle)),
-                    wait_not.is_none_or(|needle| !snap_text.contains(needle)),
-                    fallback_snapshot_text,
-                )
-            };
+        // Slim `delta` and uncached `unchanged` frames carry no full VOM, and a
+        // `max_tokens` budget can cut text off. A substring check against
+        // `[change ...]` lines, empty text or a truncated page would pass
+        // `--wait-not` while the text is still visible, or time out `--wait-for`
+        // when it is in the static page. Read the full page with `tool.snapshot`
+        // instead. That replaces the session refs, so a matching wait syncs again
+        // for a current context; otherwise the next poll's sync is a baseline.
+        let mut refs_replaced = false;
+        let mut evaluation = authoritative_full_vom(&reply)
+            .map(|(text, truncated)| WaitEvaluation::new(text, truncated, wait_for, wait_not));
+        if evaluation.is_none() {
+            match read_snapshot(&reply, explicit_session, tab_id, max_tokens, &mut call_rpc) {
+                Ok((text, truncated)) => {
+                    refs_replaced = true;
+                    evaluation = Some(WaitEvaluation::new(&text, truncated, wait_for, wait_not));
+                }
+                Err(error) => last_snapshot_error = Some(error.to_string()),
+            }
+        }
+        // Absence in a truncated page is not proof; check the whole page once.
+        if let Some(found) = evaluation.as_mut()
+            && found.met()
+            && found.truncated
+            && let Some(needle) = wait_not
+        {
+            match read_snapshot(&reply, explicit_session, tab_id, None, &mut call_rpc) {
+                Ok((text, _)) => {
+                    refs_replaced = true;
+                    found.not_ok = !text.contains(needle);
+                }
+                Err(error) => {
+                    found.not_ok = false;
+                    last_snapshot_error = Some(error.to_string());
+                }
+            }
+        }
+        let (for_ok, not_ok) = evaluation
+            .as_ref()
+            .map_or((false, false), |found| (found.for_ok, found.not_ok));
 
         if for_ok && not_ok {
-            if let Some(snap_text) = attach_fallback_vom {
-                if !reply.get("observation").is_some_and(Value::is_object) {
-                    reply["observation"] = json!({});
+            if refs_replaced {
+                // The snapshot replaced the refs this frame's context names;
+                // synchronize the session and tab it read.
+                let (session_id, target_tab) = frame_target(&reply, explicit_session, tab_id);
+                let resynced = run_settled_cooperate_sync(
+                    &session_id,
+                    target_tab,
+                    explicit_session,
+                    tab_id,
+                    control_policy,
+                    max_tokens,
+                    prior_effect_state,
+                    &mut call_rpc,
+                )?;
+                carried.absorb(&reply);
+                reply = resynced;
+                if authoritative_full_vom(&reply).is_none() && start.elapsed() < deadline {
+                    // Another caller synchronized in between; poll again rather
+                    // than return a frame without the page it was checked against.
+                    carried.absorb(&reply);
+                    pause(WAIT_POLL_INTERVAL.min(deadline - start.elapsed()));
+                    continue;
                 }
-                reply["observation"]["text"] = Value::String(snap_text);
             }
+            carried.apply(&mut reply);
             if let Some(obj) = reply.as_object_mut() {
                 obj.remove("settle");
             }
@@ -602,6 +601,9 @@ fn settled_sync_with_conditions_using(
             if let Some(tid) = tab_id {
                 data["tab_id"] = Value::from(tid);
             }
+            if let Some(error) = &last_snapshot_error {
+                data["last_snapshot_error"] = Value::String(error.clone());
+            }
             return Err(CliError::from_rpc(RpcError {
                 code: ErrorCode::Timeout,
                 message: format!(
@@ -611,7 +613,151 @@ fn settled_sync_with_conditions_using(
                 data: Some(data),
             }));
         }
+        carried.absorb(&reply);
         pause(WAIT_POLL_INTERVAL.min(deadline - elapsed));
+    }
+}
+
+/// `--wait-for` / `--wait-not` outcome on one page text.
+struct WaitEvaluation {
+    for_ok: bool,
+    not_ok: bool,
+    truncated: bool,
+}
+
+impl WaitEvaluation {
+    fn new(text: &str, truncated: bool, wait_for: Option<&str>, wait_not: Option<&str>) -> Self {
+        Self {
+            for_ok: wait_for.is_none_or(|needle| text.contains(needle)),
+            not_ok: wait_not.is_none_or(|needle| !text.contains(needle)),
+            truncated,
+        }
+    }
+
+    fn met(&self) -> bool {
+        self.for_ok && self.not_ok
+    }
+}
+
+/// The session and tab a sync frame describes, falling back to the request.
+fn frame_target(
+    reply: &Value,
+    explicit_session: Option<&str>,
+    tab_id: Option<i64>,
+) -> (String, Option<i64>) {
+    let session_id = reply
+        .pointer("/_scope_meta/session_id")
+        .and_then(Value::as_str)
+        .or_else(|| reply.pointer("/state/session_id").and_then(Value::as_str))
+        .or(explicit_session)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or_default()
+        .to_string();
+    let tab_id = reply
+        .get("tab_id")
+        .and_then(Value::as_i64)
+        .or_else(|| reply.pointer("/_scope_meta/tab_id").and_then(Value::as_i64))
+        .or(tab_id);
+    (session_id, tab_id)
+}
+
+/// Reads the full page of the frame's session and tab with `tool.snapshot`.
+fn read_snapshot(
+    reply: &Value,
+    explicit_session: Option<&str>,
+    tab_id: Option<i64>,
+    max_tokens: Option<u32>,
+    call_rpc: &mut impl FnMut(&'static str, Method, Value) -> Result<Value, CliError>,
+) -> Result<(String, bool), CliError> {
+    let (session_id, tab_id) = frame_target(reply, explicit_session, tab_id);
+    let request = serde_json::to_value(SnapshotParams {
+        session_id,
+        tab_id,
+        max_depth: None,
+        max_tokens,
+    })
+    .map_err(|e| CliError::Local(e.into()))?;
+    let snapshot: SnapshotResult =
+        serde_json::from_value(call_rpc("sync-snapshot", Method::ToolSnapshot, request)?)
+            .map_err(|e| CliError::Local(e.into()))?;
+    Ok((snapshot.text, snapshot.truncated))
+}
+
+/// Changes, activity and history gaps from frames a wait polled but discarded.
+#[derive(Default)]
+struct CarriedObservation {
+    changes: Vec<Value>,
+    activity: Vec<Value>,
+    history_incomplete: bool,
+}
+
+impl CarriedObservation {
+    fn absorb(&mut self, reply: &Value) {
+        self.history_incomplete |=
+            reply.get("history_complete").and_then(Value::as_bool) == Some(false);
+        for change in reply
+            .get("changes")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            let key = |c: &Value| {
+                (
+                    c.get("frame_id").cloned(),
+                    c.get("id").or_else(|| c.get("label")).cloned(),
+                )
+            };
+            // A field changed twice keeps its first previous value and its last value.
+            match self.changes.iter_mut().find(|old| key(old) == key(change)) {
+                Some(old) => {
+                    let previous = old.get("previous_value").cloned();
+                    *old = change.clone();
+                    match previous {
+                        Some(previous) => old["previous_value"] = previous,
+                        None => {
+                            if let Some(obj) = old.as_object_mut() {
+                                obj.remove("previous_value");
+                            }
+                        }
+                    }
+                }
+                None => self.changes.push(change.clone()),
+            }
+        }
+        for event in reply
+            .get("activity")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            if !self.activity.contains(event) {
+                self.activity.push(event.clone());
+            }
+        }
+    }
+
+    /// Adds what the discarded frames reported to the frame the wait returns.
+    fn apply(mut self, reply: &mut Value) {
+        if !reply.is_object()
+            || (self.changes.is_empty() && self.activity.is_empty() && !self.history_incomplete)
+        {
+            return;
+        }
+        let carried_activity = !self.activity.is_empty();
+        self.absorb(reply);
+        if !self.changes.is_empty() {
+            reply["changes"] = Value::Array(self.changes);
+        }
+        if !self.activity.is_empty() {
+            reply["activity"] = Value::Array(self.activity);
+        }
+        if carried_activity {
+            reply["_carried_activity"] = Value::Bool(true);
+        }
+        if self.history_incomplete {
+            reply["history_complete"] = Value::Bool(false);
+        }
     }
 }
 
@@ -666,13 +812,15 @@ fn run_settled_cooperate_sync(
     Ok(reply)
 }
 
-fn has_authoritative_full_vom(reply: &Value) -> bool {
-    authoritative_full_vom(reply).is_some()
-}
-
-fn authoritative_full_vom(reply: &Value) -> Option<&str> {
+/// The frame's full page text, and whether a `max_tokens` budget cut it: a
+/// baseline's observation, or the cached VOM of an exact unchanged frame.
+fn authoritative_full_vom(reply: &Value) -> Option<(&str, bool)> {
     if let Some(text) = reply.pointer("/observation/text").and_then(Value::as_str) {
-        return Some(text);
+        let truncated = reply
+            .pointer("/observation/truncated")
+            .and_then(Value::as_bool)
+            == Some(true);
+        return Some((text, truncated));
     }
     let kind = reply.get("kind").and_then(Value::as_str);
     let is_unchanged = kind == Some("unchanged")
@@ -683,9 +831,14 @@ fn authoritative_full_vom(reply: &Value) -> Option<&str> {
             .and_then(Value::as_bool)
             == Some(true)
     {
+        let truncated = reply
+            .pointer("/_scope_meta/cached_vom_truncated")
+            .and_then(Value::as_bool)
+            == Some(true);
         return reply
             .pointer("/_scope_meta/cached_vom")
-            .and_then(Value::as_str);
+            .and_then(Value::as_str)
+            .map(|text| (text, truncated));
     }
     None
 }
@@ -792,6 +945,11 @@ fn format_state_receipt(
         .and_then(Value::as_bool)
         .unwrap_or(false);
     let history_incomplete = reply.get("history_complete").and_then(Value::as_bool) == Some(false);
+    // Activity from frames a wait discarded is reported even with a full page.
+    let carried_activity = reply
+        .as_object_mut()
+        .and_then(|obj| obj.remove("_carried_activity"))
+        .is_some();
 
     // Hydrate `observation.text` from cached `last_vom` ONLY when `_scope_meta`
     // confirms an exact unchanged predecessor (`cache_reusable == true`). Never
@@ -930,7 +1088,7 @@ fn format_state_receipt(
                     let _ = writeln!(rendered, "{line}");
                 }
             }
-            if is_delta || vom.is_empty() {
+            if is_delta || vom.is_empty() || carried_activity {
                 for line in format_activity_lines(&reply) {
                     let _ = writeln!(rendered, "{line}");
                 }
@@ -946,6 +1104,10 @@ mod tests {
     use crate::daemon::scopes::ImplicitScopeRegistry;
     use crate::daemon::sessions::SessionId;
 
+    fn authoritative_full_vom_is_some(reply: &Value) -> bool {
+        authoritative_full_vom(reply).is_some()
+    }
+
     fn attach_recorded_meta(
         scopes: &ImplicitScopeRegistry,
         sid: &SessionId,
@@ -958,18 +1120,18 @@ mod tests {
 
     #[test]
     fn has_authoritative_full_vom_distinguishes_baseline_cached_unchanged_and_slim_frames() {
-        assert!(has_authoritative_full_vom(&json!({
+        assert!(authoritative_full_vom_is_some(&json!({
             "kind": "baseline",
             "observation": { "text": "@e1 button \"Ready\"" }
         })));
-        assert!(has_authoritative_full_vom(&json!({
+        assert!(authoritative_full_vom_is_some(&json!({
             "kind": "unchanged",
             "_scope_meta": {
                 "cache_reusable": true,
                 "cached_vom": "@e1 button \"Ready\""
             }
         })));
-        assert!(has_authoritative_full_vom(&json!({
+        assert!(authoritative_full_vom_is_some(&json!({
             "unchanged": true,
             "_scope_meta": {
                 "cache_reusable": true,
@@ -978,7 +1140,7 @@ mod tests {
         })));
 
         // Delta frames never carry authoritative full VOM, even if changes exist.
-        assert!(!has_authoritative_full_vom(&json!({
+        assert!(!authoritative_full_vom_is_some(&json!({
             "kind": "delta",
             "changes": [{ "label": "Query", "value": "foo" }],
             "_scope_meta": {
@@ -987,17 +1149,17 @@ mod tests {
             }
         })));
         // Uncached `unchanged` frames (e.g. post-delta or incomplete history) are not authoritative.
-        assert!(!has_authoritative_full_vom(&json!({
+        assert!(!authoritative_full_vom_is_some(&json!({
             "kind": "unchanged",
             "_scope_meta": {
                 "cache_reusable": false,
                 "cached_vom": null
             }
         })));
-        assert!(!has_authoritative_full_vom(&json!({
+        assert!(!authoritative_full_vom_is_some(&json!({
             "kind": "unchanged"
         })));
-        assert!(!has_authoritative_full_vom(&json!({
+        assert!(!authoritative_full_vom_is_some(&json!({
             "kind": "delta",
             "unchanged": true,
             "_scope_meta": {
@@ -1131,12 +1293,12 @@ mod tests {
             ],
             "ToolSnapshot must be called once for baseline promotion and skipped on cached unchanged poll"
         );
-        // Verify resolved session_id, tab_id, and max_tokens were forwarded to ToolSnapshot + promoted sync.
+        // Verify resolved session_id, tab_id, and max_tokens were forwarded to ToolSnapshot.
         assert_eq!(calls[1].1["session_id"], "s1a2");
         assert_eq!(calls[1].1["tab_id"], 7);
         assert_eq!(calls[1].1["max_tokens"], 4096);
-        assert_eq!(calls[2].1["session_id"], "s1a2");
-        assert_eq!(calls[2].1["tab_id"], 7);
+        // "Loading..." is still in the full page, so this poll does not sync
+        // again: the next poll's sync returns the baseline.
         assert_eq!(calls[2].1["_return_scope_meta"], true);
 
         assert_eq!(reply["context_id"], "ctx-4-done");
@@ -1411,8 +1573,11 @@ mod tests {
     }
 
     #[test]
-    fn defensive_fallback_uses_snapshot_text_when_mock_peer_omits_post_snapshot_observation() {
+    fn a_frame_without_the_checked_page_after_the_snapshot_is_polled_again() {
+        // Another caller can sync between the snapshot and the wait's own sync,
+        // so that sync is a delta again. Return only a frame with the page.
         let mut coop_count = 0usize;
+        let mut pauses = 0usize;
         let reply = settled_sync_with_conditions_using(
             Some("s-mock"),
             Some(5),
@@ -1431,33 +1596,257 @@ mod tests {
                 })),
                 Method::ToolCooperate => {
                     coop_count += 1;
+                    if coop_count < 3 {
+                        return Ok(json!({
+                            "tab_id": 5,
+                            "context_id": format!("ctx-{coop_count}"),
+                            "control_policy": "strict",
+                            "kind": "delta",
+                            "changes": [{ "label": "Field", "value": "v2" }],
+                        }));
+                    }
                     Ok(json!({
                         "tab_id": 5,
-                        "context_id": format!("ctx-{coop_count}"),
+                        "context_id": "ctx-3",
                         "control_policy": "strict",
-                        "kind": "delta",
-                        "changes": [{ "label": "Field", "value": "v2" }],
-                        "_scope_meta": {
-                            "session_id": "s-mock",
-                            "tab_id": 5,
-                            "short_ctx": format!("c{coop_count}"),
-                            "cache_reusable": false,
-                            "cached_vom": null
-                        }
+                        "kind": "baseline",
+                        "observation": { "text": "Banner: Ready\n@e1 textbox \"Field\" value=\"v2\"" },
                     }))
                 }
                 other => panic!("unexpected method: {other:?}"),
             },
-            |_| panic!("must not sleep"),
+            |_| pauses += 1,
         )
         .unwrap();
 
-        assert_eq!(coop_count, 2);
-        assert_eq!(reply["context_id"], "ctx-2");
-        assert_eq!(reply["kind"], "delta");
+        assert_eq!(coop_count, 3);
+        assert_eq!(pauses, 1);
+        assert_eq!(reply["context_id"], "ctx-3");
+        assert_eq!(reply["kind"], "baseline");
+        // Both discarded deltas reported the field; it is still listed once.
         assert_eq!(
-            reply["observation"]["text"],
-            "Banner: Ready\n@e1 textbox \"Field\" value=\"v2\""
+            reply["changes"],
+            json!([{ "label": "Field", "value": "v2" }])
+        );
+    }
+
+    #[test]
+    fn discarded_frames_keep_human_changes_activity_and_missing_history() {
+        let mut coop_count = 0usize;
+        let reply = settled_sync_with_conditions_using(
+            Some("s1"),
+            Some(7),
+            ControlPolicy::Strict,
+            None,
+            Some("Total 1000"),
+            None,
+            5_000,
+            "none",
+            |_prefix, method, _req| match method {
+                Method::ToolSnapshot => Ok(json!({
+                    "text": "Total 10\n@e1 textbox \"Amount\" value=\"1000\"",
+                    "ref_count": 1,
+                    "tab_id": 7,
+                    "truncated": false
+                })),
+                Method::ToolCooperate => {
+                    coop_count += 1;
+                    Ok(match coop_count {
+                        // The user changed Amount; the extension reports it once.
+                        1 => json!({
+                            "tab_id": 7,
+                            "context_id": "ctx-1",
+                            "control_policy": "strict",
+                            "kind": "delta",
+                            "history_complete": false,
+                            "changes": [{ "frame_id": 0, "label": "Amount", "previous_value": "10", "value": "100" }],
+                            "activity": [{ "kind": "human_input", "label": "Amount" }],
+                        }),
+                        2 => json!({
+                            "tab_id": 7,
+                            "context_id": "ctx-2",
+                            "control_policy": "strict",
+                            "kind": "delta",
+                            "changes": [{ "frame_id": 0, "label": "Amount", "previous_value": "100", "value": "1000" }],
+                        }),
+                        _ => json!({
+                            "tab_id": 7,
+                            "context_id": "ctx-3",
+                            "control_policy": "strict",
+                            "kind": "baseline",
+                            "history_complete": true,
+                            "activity": [],
+                            "observation": { "text": "Total 1000\n@e1 textbox \"Amount\" value=\"1000\"" },
+                        }),
+                    })
+                }
+                other => panic!("unexpected method: {other:?}"),
+            },
+            |_| {},
+        )
+        .unwrap();
+
+        assert_eq!(reply["context_id"], "ctx-3");
+        assert_eq!(
+            reply["changes"],
+            json!([{ "frame_id": 0, "label": "Amount", "previous_value": "10", "value": "1000" }])
+        );
+        assert_eq!(
+            reply["activity"],
+            json!([{ "kind": "human_input", "label": "Amount" }])
+        );
+        assert_eq!(reply["history_complete"], false);
+        let human = format_state_receipt(
+            reply.clone(),
+            None,
+            None,
+            None,
+            None,
+            &[],
+            12,
+            true,
+            Format::Human,
+        )
+        .unwrap();
+        assert!(human.contains("history_complete=false"), "{human}");
+        assert!(human.contains("Amount"), "{human}");
+        let json_out: Value = serde_json::from_str(
+            &format_state_receipt(reply, None, None, None, None, &[], 12, true, Format::Json)
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(json_out["activity"][0]["kind"], "human_input");
+        assert!(json_out.get("_carried_activity").is_none());
+    }
+
+    #[test]
+    fn a_dynamic_page_takes_one_full_read_per_poll() {
+        // Field values change on every poll, so each sync is a delta. A poll that
+        // does not match does not sync again; the next sync is then a baseline.
+        let mut methods = Vec::new();
+        let mut coop_count = 0usize;
+        let err = settled_sync_with_conditions_using(
+            Some("s1"),
+            Some(7),
+            ControlPolicy::Strict,
+            None,
+            Some("Done"),
+            None,
+            1,
+            "none",
+            |_prefix, method, _req| {
+                methods.push(method.clone());
+                match method {
+                    Method::ToolSnapshot => Ok(json!({ "text": "Progress", "ref_count": 0, "tab_id": 7, "truncated": false })),
+                    Method::ToolCooperate => {
+                        coop_count += 1;
+                        Ok(if coop_count % 2 == 1 {
+                            json!({ "tab_id": 7, "context_id": format!("ctx-{coop_count}"), "kind": "delta", "changes": [{ "label": "Clock", "value": coop_count.to_string() }] })
+                        } else {
+                            json!({ "tab_id": 7, "context_id": format!("ctx-{coop_count}"), "kind": "baseline", "observation": { "text": "Progress" } })
+                        })
+                    }
+                    other => panic!("unexpected method: {other:?}"),
+                }
+            },
+            |_| std::thread::sleep(Duration::from_millis(2)),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("timed out"), "{err}");
+        assert_eq!(methods, vec![Method::ToolCooperate, Method::ToolSnapshot]);
+    }
+
+    #[test]
+    fn a_failed_snapshot_keeps_waiting_instead_of_ending_the_wait() {
+        let mut snapshots = 0usize;
+        let mut coop_count = 0usize;
+        let reply = settled_sync_with_conditions_using(
+            Some("s1"),
+            Some(7),
+            ControlPolicy::Strict,
+            None,
+            Some("Ready"),
+            None,
+            5_000,
+            "committed",
+            |_prefix, method, _req| match method {
+                Method::ToolSnapshot => {
+                    snapshots += 1;
+                    Err(CliError::from_rpc(RpcError {
+                        code: ErrorCode::CdpFailed,
+                        message: "Execution context was destroyed".into(),
+                        data: None,
+                    }))
+                }
+                Method::ToolCooperate => {
+                    coop_count += 1;
+                    Ok(if coop_count == 1 {
+                        json!({ "tab_id": 7, "context_id": "ctx-1", "kind": "delta", "changes": [] })
+                    } else {
+                        json!({ "tab_id": 7, "context_id": "ctx-2", "kind": "baseline", "observation": { "text": "Ready" } })
+                    })
+                }
+                other => panic!("unexpected method: {other:?}"),
+            },
+            |_| {},
+        )
+        .unwrap();
+        assert_eq!(snapshots, 1);
+        assert_eq!(reply["context_id"], "ctx-2");
+    }
+
+    #[test]
+    fn wait_not_checks_the_whole_page_when_the_budget_truncated_it() {
+        let scopes = ImplicitScopeRegistry::new();
+        let sid = SessionId("s1".into());
+        let mut snapshot_budgets = Vec::new();
+        let mut coop_count = 0usize;
+        let mut call = |method: Method, req: Value| -> Result<Value, CliError> {
+            match method {
+                Method::ToolSnapshot => {
+                    snapshot_budgets.push(req["max_tokens"].clone());
+                    // The spinner is below the token budget.
+                    Ok(
+                        json!({ "text": "Header\nLoading...", "ref_count": 0, "tab_id": 7, "truncated": false }),
+                    )
+                }
+                Method::ToolCooperate => {
+                    coop_count += 1;
+                    let raw = match coop_count {
+                        1 => {
+                            json!({ "tab_id": 7, "context_id": "ctx-1", "kind": "baseline", "history_complete": true, "changes": [],
+                            "observation": { "text": "Header", "truncated": true } })
+                        }
+                        _ => {
+                            json!({ "tab_id": 7, "context_id": format!("ctx-{coop_count}"), "previous_context_id": format!("ctx-{}", coop_count - 1),
+                            "kind": "unchanged", "history_complete": true, "changes": [] })
+                        }
+                    };
+                    Ok(attach_recorded_meta(&scopes, &sid, raw))
+                }
+                other => panic!("unexpected method: {other:?}"),
+            }
+        };
+        let err = settled_sync_with_conditions_using(
+            None,
+            None,
+            ControlPolicy::Strict,
+            Some(20),
+            None,
+            Some("Loading"),
+            1,
+            "none",
+            |_prefix, method, req| call(method, req),
+            |_| std::thread::sleep(Duration::from_millis(2)),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("--wait-not"), "{err}");
+        // The truncated baseline and the cached, truncated unchanged frame were
+        // both checked against the untruncated page.
+        assert!(!snapshot_budgets.is_empty());
+        assert!(
+            snapshot_budgets.iter().all(Value::is_null),
+            "{snapshot_budgets:?}"
         );
     }
 
