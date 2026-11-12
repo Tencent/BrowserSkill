@@ -77,6 +77,10 @@ const MAIN_HTML = `<!doctype html>
     <div style="background-image:linear-gradient(transparent, transparent)">
       <span style="color:#ffffff">INJ_TRANSPARENT_GRAD_BACKDROP</span>
     </div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;background:#121212 linear-gradient(to right, #fff 50%, #121212 50%)">
+      <h2 style="color:#121212">Order confirmed for pickup</h2>
+      <h2 style="color:#fff">Track your delivery</h2>
+    </div>
 
     <!-- 2. Unscrolled vs genuinely scrolled overflow:auto/scroll containers -->
     <div id="unscrolled-box" style="overflow:auto;width:240px;height:80px;position:relative">
@@ -184,6 +188,8 @@ const STEALTH_PAYLOADS = [
 const VISIBLE_CONTENT = [
   "Ship AI Agents",
   "10x Faster",
+  "Order confirmed for pickup",
+  "Track your delivery",
   "Visible Unscrolled Summary",
   "Brand Home",
   "Modal historical row #1",

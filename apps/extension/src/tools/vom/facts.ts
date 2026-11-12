@@ -675,8 +675,15 @@ function parseGradientVisibleColors(
     }
   }
 
-  const cycleSpan = stops[lastIdx].pos! - stops[0].pos!;
+  const firstStop = stops[0];
+  const lastStop = stops[lastIdx];
+  const cycleSpan = lastStop.pos! - firstStop.pos!;
+  const minVisibleSpan = 0.05;
   const visibleColors: ParsedRgba[] = [];
+  // A non-repeating gradient paints the endpoint colors outside the stop range.
+  if (!isRepeating && firstStop.pos! >= minVisibleSpan) {
+    visibleColors.push(firstStop.color);
+  }
   for (let i = 0; i < lastIdx; i++) {
     const p0 = stops[i].pos!;
     const p1 = stops[i + 1].pos!;
@@ -685,7 +692,7 @@ function parseGradientVisibleColors(
         ? (p1 - p0) / cycleSpan
         : 0
       : Math.max(0, Math.min(1, p1) - Math.max(0, p0));
-    if (relSpan < 0.05) continue;
+    if (relSpan < minVisibleSpan) continue;
     const c0 = stops[i].color;
     const c1 = stops[i + 1].color;
     visibleColors.push(c0, c1);
@@ -698,6 +705,9 @@ function parseGradientVisibleColors(
         a: clampAlpha(midA),
       });
     }
+  }
+  if (!isRepeating && 1 - lastStop.pos! >= minVisibleSpan) {
+    visibleColors.push(lastStop.color);
   }
   return visibleColors;
 }
