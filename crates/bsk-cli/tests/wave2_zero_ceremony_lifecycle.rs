@@ -821,6 +821,10 @@ fn skill_md_budget_and_rt05_safety_invariants_gate() {
 async fn strict_policy_delta_sync_and_open_wait_committed_effect_state() {
     let sync_seq = Arc::new(Mutex::new(0u32));
     let sync_seq_ext = Arc::clone(&sync_seq);
+    let promote_next_baseline = Arc::new(Mutex::new(false));
+    let promote_next_ext = Arc::clone(&promote_next_baseline);
+    let last_ctx = Arc::new(Mutex::new(String::new()));
+    let last_ctx_ext = Arc::clone(&last_ctx);
 
     let env = IsolatedEnv::start(move |req| match &req.method {
         Method::ToolNavigate => ResponseBody::Ok(json!({
@@ -829,20 +833,54 @@ async fn strict_policy_delta_sync_and_open_wait_committed_effect_state() {
             "final_url": "https://app.test/form",
             "reached": "load"
         })),
+        Method::ToolSnapshot => {
+            *promote_next_ext.lock().unwrap() = true;
+            ResponseBody::Ok(json!({
+                "tab_id": 7,
+                "text": "Status: Ready\n@e1 textbox \"Email\" value=\"new@app.test\"",
+                "ref_count": 1,
+                "truncated": false
+            }))
+        }
         Method::ToolCooperate => {
             let mut n = sync_seq_ext.lock().unwrap();
             *n += 1;
-            match *n {
-                1 => ResponseBody::Ok(json!({
+            let ctx = format!("{:08x}-1111-4111-8111-111111111111", *n);
+            let prev = last_ctx_ext.lock().unwrap().clone();
+            *last_ctx_ext.lock().unwrap() = ctx.clone();
+
+            let mut promoted = promote_next_ext.lock().unwrap();
+            if *promoted {
+                *promoted = false;
+                return ResponseBody::Ok(json!({
                     "tab_id": 7,
                     "control_policy": "strict",
-                    "context_id": "11111111-1111-4111-8111-111111111111",
+                    "context_id": ctx,
                     "kind": "baseline",
                     "observation": {
                         "tab_id": 7,
                         "url": "https://app.test/form",
                         "title": "Form",
-                        "text": "@e1 textbox \"Email\" value=\"old@app.test\"",
+                        "text": "Status: Ready\n@e1 textbox \"Email\" value=\"new@app.test\"",
+                        "ref_count": 1,
+                        "truncated": false
+                    },
+                    "state": { "mode": "ready", "revision": 2 }
+                }));
+            }
+            drop(promoted);
+
+            match *n {
+                1 => ResponseBody::Ok(json!({
+                    "tab_id": 7,
+                    "control_policy": "strict",
+                    "context_id": ctx,
+                    "kind": "baseline",
+                    "observation": {
+                        "tab_id": 7,
+                        "url": "https://app.test/form",
+                        "title": "Form",
+                        "text": "Status: Ready\n@e1 textbox \"Email\" value=\"old@app.test\"",
                         "ref_count": 1,
                         "truncated": false
                     },
@@ -851,8 +889,8 @@ async fn strict_policy_delta_sync_and_open_wait_committed_effect_state() {
                 2 => ResponseBody::Ok(json!({
                     "tab_id": 7,
                     "control_policy": "strict",
-                    "context_id": "22222222-2222-4222-8222-222222222222",
-                    "previous_context_id": "11111111-1111-4111-8111-111111111111",
+                    "context_id": ctx,
+                    "previous_context_id": prev,
                     "kind": "delta",
                     "history_complete": true,
                     "changes": [{
@@ -867,8 +905,8 @@ async fn strict_policy_delta_sync_and_open_wait_committed_effect_state() {
                 _ => ResponseBody::Ok(json!({
                     "tab_id": 7,
                     "control_policy": "strict",
-                    "context_id": "33333333-3333-4333-8333-333333333333",
-                    "previous_context_id": "22222222-2222-4222-8222-222222222222",
+                    "context_id": ctx,
+                    "previous_context_id": prev,
                     "kind": "unchanged",
                     "history_complete": true,
                     "changes": [],
@@ -883,24 +921,12 @@ async fn strict_policy_delta_sync_and_open_wait_committed_effect_state() {
     // 1. `bsk open` establishes baseline VOM (`old@app.test`).
     let open_out = env.run_bsk(&["open", "https://app.test/form"], &[]).await;
     assert!(open_out.status.success());
+    let _ = env.take_requests();
 
-    // 2. `bsk sync --policy strict --wait-for new@app.test` receives `kind: "delta"`:
-    //    must match `new@app.test` from `changes`, emit `delta=true` + `[change ...]`,
-    //    and NEVER print stale `old@app.test` VOM!
-    let delta_out = env
-        .run_bsk(
-            &[
-                "sync",
-                "--policy",
-                "strict",
-                "--wait-for",
-                "new@app.test",
-                "--timeout-ms",
-                "1000",
-            ],
-            &[],
-        )
-        .await;
+    // 2. Slim `bsk sync --policy strict` (without wait conditions) receives `kind: "delta"`:
+    //    emits `delta=true` + `[change ...]`, makes ZERO `tool.snapshot` calls,
+    //    and NEVER prints stale `old@app.test` VOM!
+    let delta_out = env.run_bsk(&["sync", "--policy", "strict"], &[]).await;
     assert!(delta_out.status.success());
     let delta_stdout = String::from_utf8(delta_out.stdout).unwrap();
     assert!(delta_stdout.contains(" delta=true "), "got: {delta_stdout}");
@@ -913,8 +939,11 @@ async fn strict_policy_delta_sync_and_open_wait_committed_effect_state() {
         !delta_stdout.contains("@e1 textbox \"Email\" value=\"old@app.test\""),
         "must not print stale pre-delta VOM: {delta_stdout}"
     );
+    let delta_reqs = env.take_requests();
+    assert_eq!(delta_reqs.len(), 1);
+    assert_eq!(delta_reqs[0].method, Method::ToolCooperate);
 
-    // 3. Follow-up `unchanged` after `delta` must NOT resurrect stale pre-delta VOM either!
+    // 3. Follow-up `unchanged` after `delta` (without wait conditions) must NOT resurrect stale pre-delta VOM!
     let post_delta = env
         .run_bsk(&["sync", "--policy", "strict", "--json"], &[])
         .await;
@@ -922,8 +951,45 @@ async fn strict_policy_delta_sync_and_open_wait_committed_effect_state() {
     let post_json: Value = serde_json::from_slice(&post_delta.stdout).unwrap();
     assert_eq!(post_json["unchanged"], true);
     assert_eq!(post_json["vom"], "");
+    let post_delta_reqs = env.take_requests();
+    assert_eq!(post_delta_reqs.len(), 1);
+    assert_eq!(post_delta_reqs[0].method, Method::ToolCooperate);
 
-    // 4. `bsk open --wait-for` timeout after navigation must report `effect_state: "committed"`,
+    // 4. `bsk sync --policy strict --wait-for "Status: Ready"` on uncached `unchanged` promotes
+    //    to full baseline via `tool.snapshot` + `tool.cooperate(sync)` and matches static VOM text!
+    let promoted_wait = env
+        .run_bsk(
+            &[
+                "sync",
+                "--policy",
+                "strict",
+                "--wait-for",
+                "Status: Ready",
+                "--wait-not",
+                "Loading...",
+                "--timeout-ms",
+                "1000",
+            ],
+            &[],
+        )
+        .await;
+    assert!(promoted_wait.status.success());
+    let promoted_stdout = String::from_utf8(promoted_wait.stdout).unwrap();
+    assert!(
+        promoted_stdout.contains("Status: Ready\n@e1 textbox \"Email\" value=\"new@app.test\""),
+        "got: {promoted_stdout}"
+    );
+    let promoted_reqs: Vec<Method> = env.take_requests().into_iter().map(|r| r.method).collect();
+    assert_eq!(
+        promoted_reqs,
+        vec![
+            Method::ToolCooperate,
+            Method::ToolSnapshot,
+            Method::ToolCooperate,
+        ]
+    );
+
+    // 5. `bsk open --wait-for` timeout after navigation must report `effect_state: "committed"`,
     //    whereas `bsk sync --wait-for` timeout reports `effect_state: "none"`.
     let open_timeout = env
         .run_bsk(

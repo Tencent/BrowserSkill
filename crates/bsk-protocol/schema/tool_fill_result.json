@@ -85,7 +85,7 @@
       "type": "array"
     },
     "formatted": {
-      "description": "Set to `Some(true)` when a non-sensitive control's final value differs\nfrom the normalized requested value due to page formatting or truncation.",
+      "description": "Set to `Some(true)` when the control's final value differs from the\nnormalized requested value due to page formatting or truncation. Also set\nfor sensitive controls, whose `actual_value` stays omitted.",
       "type": [
         "boolean",
         "null"

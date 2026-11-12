@@ -8,10 +8,12 @@ import { isMissingNode } from "./errors";
 // inside the Agent Window are allowed; user-window tabs are refused
 // with `permission_denied`.
 //
-// Implementation: reuses the M7 helpers `ensureCdpReady` +
-// `waitForLifecyclePassive` (readyState probe + event listener) from
-// navigation.ts. Reads the main frame via `Page.getFrameTree` so
-// subframe lifecycle events cannot satisfy a page-level wait.
+// Implementation: reuses the M7 helper `ensureCdpReady` and
+// `waitForLifecyclePassive` from navigation.ts. Reads the main frame via
+// `Page.getFrameTree` so subframe lifecycle events cannot satisfy a
+// page-level wait. A settled document only satisfies the wait after a short
+// grace period without a navigation start; once a navigation starts or is
+// already pending, only the successor document counts.
 //
 // `tool.wait_for_element` — wait until one element reaches a requested
 // state (`visible` / `hidden` / `attached` / `detached`). It is the
@@ -58,17 +60,11 @@ export interface WaitForNavigationDeps {
   /** Abort hook (full chain wired in M10.2). */
   signal?: AbortSignal;
   defaultTimeoutMs?: number;
+  /** Override how long a settled page is watched for a navigation to start. */
+  navigationStartGraceMs?: number;
 }
 
 const DEFAULT_WAIT_TIMEOUT_MS = 30_000;
-
-interface FrameTreeReply {
-  frameTree?: {
-    frame?: {
-      id?: string;
-    };
-  };
-}
 
 let defaultDeps: { cdp: ChromiumCdp; tabsApi: ChromeTabsApi } | null = null;
 function getDefaultDeps(): { cdp: ChromiumCdp; tabsApi: ChromeTabsApi } {
@@ -105,22 +101,24 @@ export async function handleWaitForNavigation(
     if (deps.signal?.aborted) {
       return { code: "cancelled", message: "wait_for_navigation aborted" };
     }
-    const frameTree = await deps.cdp.send<FrameTreeReply>(target.tabId, "Page.getFrameTree", {});
-    const mainFrameId = frameTree.frameTree?.frame?.id;
-    if (!mainFrameId) {
-      return { code: "cdp_failed", message: "Page.getFrameTree did not return a main frame id" };
-    }
-    if (deps.signal?.aborted) {
-      return { code: "cancelled", message: "wait_for_navigation aborted" };
-    }
     const outcome = await waitForLifecyclePassive(
       deps.cdp,
       target.tabId,
-      mainFrameId,
       expected,
       timeoutMs,
       deps.signal,
+      {
+        // Chrome exposes a started but uncommitted navigation as `pendingUrl`.
+        readNavigationPending: async () => {
+          const live = await deps.tabsApi.get(target.tabId);
+          return typeof live.pendingUrl === "string" && live.pendingUrl.length > 0;
+        },
+        startGraceMs: deps.navigationStartGraceMs,
+      },
     );
+    if (outcome.reached === "no_main_frame") {
+      return { code: "cdp_failed", message: outcome.message };
+    }
     if (outcome.reached === "cancelled") {
       return { code: "cancelled", message: "wait_for_navigation aborted" };
     }

@@ -2083,7 +2083,8 @@ it("preserves a navigation wait budget when its frame-tree read takes more than 
   const pending = handleWaitForNavigation(
     sm,
     { session_id: "aa11", wait_until: "load", timeout_ms: 30_000 },
-    { cdp, tabsApi },
+    // The settled-page start grace is covered by the wait_for_navigation tests.
+    { cdp, tabsApi, navigationStartGraceMs: 0 },
   );
   await vi.advanceTimersByTimeAsync(12_001);
   const result = await pending;

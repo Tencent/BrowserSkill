@@ -731,19 +731,22 @@ fn classify_dispatch_outcome(
 
 fn classify_rpc_error(method: &Method, err: &RpcError) -> IntentState {
     if let Some(data) = err.data.as_ref() {
-        let effect_state = data.get("effect_state").and_then(Value::as_str);
-        if effect_state == Some("unknown") {
-            return IntentState::Unknown;
-        }
-        if effect_state == Some("none") {
-            return IntentState::Settled;
-        }
+        // Proof that the action never reached the page wins over a generic
+        // `effect_state`: the extension reports a click refused after scrolling as
+        // `effect_state: "unknown"` *and* `press_sent: false`.
         if data.get("dispatched").and_then(Value::as_bool) == Some(false) {
             return IntentState::Settled;
         }
         if *method == Method::ToolClick
             && data.get("press_sent").and_then(Value::as_bool) == Some(false)
         {
+            return IntentState::Settled;
+        }
+        let effect_state = data.get("effect_state").and_then(Value::as_str);
+        if effect_state == Some("unknown") {
+            return IntentState::Unknown;
+        }
+        if effect_state == Some("none") {
             return IntentState::Settled;
         }
         if let Some(reason) = data.get("reason").and_then(Value::as_str) {
@@ -976,6 +979,68 @@ mod tests {
         assert_eq!(resolved.resolved_count, 1);
         assert_eq!(resolved.resolved[0].state, IntentState::Reconciled);
         assert!(wal.check_gate(&session, Some(7)).is_ok());
+    }
+
+    #[test]
+    fn unpressed_click_and_pre_write_validation_settle_with_extension_payloads() {
+        let session = sid("sess-unsent");
+        let settle = |method: Method, data: Value| {
+            let wal = IntentWal::memory();
+            let ticket = wal.begin_dispatch(
+                &session,
+                Some(1),
+                Some("op"),
+                &method,
+                &json!({ "ref": "e2" }),
+            );
+            let state = wal.finish_dispatch(
+                ticket,
+                &method,
+                &Err(DispatchError::Rpc(RpcError {
+                    code: ErrorCode::InvalidParams,
+                    message: "refused".into(),
+                    data: Some(data),
+                })),
+            );
+            (state, wal.check_gate(&session, Some(1)).is_ok())
+        };
+
+        // Shared control reports a click refused after scrolling as unknown *and* unpressed.
+        assert_eq!(
+            settle(
+                Method::ToolClick,
+                json!({ "reason": "target_covered", "effect_state": "unknown", "press_sent": false })
+            ),
+            (IntentState::Settled, true)
+        );
+        // `dispatched: false` is proof of absence regardless of the generic effect state.
+        assert_eq!(
+            settle(
+                Method::ToolFill,
+                json!({ "effect_state": "unknown", "dispatched": false })
+            ),
+            (IntentState::Settled, true)
+        );
+        // Pre-write select/fill validation reports `effect_state: none`.
+        assert_eq!(
+            settle(
+                Method::ToolSelect,
+                json!({ "reason": "option_not_found", "effect_state": "none", "phase": "precondition" })
+            ),
+            (IntentState::Settled, true)
+        );
+        // `press_sent` is a click-only fact; other unknown effects still freeze the tab.
+        assert_eq!(
+            settle(
+                Method::ToolFill,
+                json!({ "effect_state": "unknown", "press_sent": false })
+            ),
+            (IntentState::Unknown, false)
+        );
+        assert_eq!(
+            settle(Method::ToolClick, json!({ "effect_state": "unknown" })),
+            (IntentState::Unknown, false)
+        );
     }
 
     #[test]
