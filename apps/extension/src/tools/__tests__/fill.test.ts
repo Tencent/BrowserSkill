@@ -172,7 +172,7 @@ describe("fill result verification", () => {
     const h = await setup(`<input type="${type}" value="">`);
     expect(await h.fill("not-a-date")).toMatchObject({
       code: "invalid_params",
-      data: { reason: "fill_value_invalid" },
+      data: { reason: "fill_value_invalid", effect_state: "none", phase: "precondition" },
     });
     expect(h.element.value).toBe("");
     expect(h.insert).not.toHaveBeenCalled();

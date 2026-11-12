@@ -148,6 +148,14 @@ determines which versions can connect.
   between waits, avoiding a lost notification that can leave `daemon stop` waiting.
 - Website debugging attributes agent uploads and downloads to their transfer
   operations instead of recording the resulting file changes and clicks as human input.
+- The Intent WAL no longer freezes a tab after actions that provably never took
+  effect. A click refused after only scrolling (`effect_state: "unknown"` with
+  `press_sent: false`) and any failure reporting `dispatched: false` now settle, and
+  `select` (`option_not_found`, `option_ambiguous`, disabled `<select>`) and `fill`
+  (`fill_value_invalid`, `target_not_fillable`) validation failures detected before
+  writing report `effect_state: "none"` with `phase: "precondition"`, so a corrected
+  retry neither needs `bsk ledger resolve` nor loses the shared-control context
+  ([#702](https://github.com/Tencent/BrowserSkill/issues/702)).
 - Local validation failures in upload, download, plan and step return stable
   parameter/file error codes and relevant recovery hints. Upload sources are checked
   before contacting the daemon or staging any files.

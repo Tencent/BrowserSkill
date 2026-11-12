@@ -998,13 +998,21 @@ type FillReadiness = "ready" | "background" | "fill_target_changed" | "fill_focu
 
 const FILL_MAX_ACTUAL_VALUE_CHARS = 200;
 
+/**
+ * Validation failures detected before the requested value is written. Scrolling
+ * or focusing the target is preparation, not the requested write, so the action
+ * may be retried with a corrected parameter.
+ */
+const PRE_WRITE_FAILURE = { effect_state: "none", phase: "precondition" } as const;
+
 function fillError(reason: FillFailureReason, message: string): RpcError {
+  // Both reasons come only from the read-only preparation check, before clearing.
+  const preWrite = reason === "target_not_fillable" || reason === "fill_value_invalid";
   return rpcError(
-    reason === "target_not_fillable" || reason === "fill_value_invalid"
-      ? "invalid_params"
-      : "cdp_failed",
+    preWrite ? "invalid_params" : "cdp_failed",
     reason,
     message,
+    preWrite ? PRE_WRITE_FAILURE : undefined,
   );
 }
 
@@ -2216,8 +2224,13 @@ export async function handleSelect(
     });
     const mutation = evaluated.result?.value;
     if (!mutation?.ok) {
+      // The page function returns these before changing any option or dispatching events.
       if (mutation?.reason === "target_disabled") {
-        return { code: "invalid_params", message: "select requires an enabled <select>" };
+        return {
+          code: "invalid_params",
+          message: "select requires an enabled <select>",
+          data: { ...PRE_WRITE_FAILURE },
+        };
       }
       if (mutation?.reason === "option_ambiguous") {
         const suffix = mutation.available?.length
@@ -2228,6 +2241,7 @@ export async function handleSelect(
           "option_ambiguous",
           `option label "${mutation.ambiguous ?? "?"}" matched ${mutation.count ?? 2} options in <select>; pass an explicit option value instead${suffix}`,
           {
+            ...PRE_WRITE_FAILURE,
             ...(mutation.ambiguous !== undefined ? { ambiguous: mutation.ambiguous } : {}),
             ...(mutation.count !== undefined ? { count: mutation.count } : {}),
             ...(mutation.available ? { available: mutation.available } : {}),
@@ -2243,6 +2257,7 @@ export async function handleSelect(
           "option_not_found",
           `option value ${mutation.missing ?? "?"} not found in <select>${suffix}`,
           {
+            ...PRE_WRITE_FAILURE,
             ...(mutation.missing !== undefined ? { missing: mutation.missing } : {}),
             ...(mutation.available ? { available: mutation.available } : {}),
           },

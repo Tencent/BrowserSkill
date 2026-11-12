@@ -2241,7 +2241,24 @@ describe("handleSelect", () => {
     );
     expect(res).toMatchObject({
       code: "invalid_params",
-      data: { reason: "option_not_found" },
+      // Matching runs before any option changes, so the select was not written.
+      data: { reason: "option_not_found", effect_state: "none", phase: "precondition" },
+    });
+  });
+
+  it("reports a disabled select as a pre-write failure", async () => {
+    const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
+    const ctx = await sm.start("aa11");
+    ctx.refStore.set("e1", 555, { tabId: 4 });
+    const fake = makeFakeCdp(selectHandlers({ ok: false, reason: "target_disabled" }));
+    const res = await handleSelect(
+      sm,
+      { session_id: "aa11", ref: "e1", values: ["us"] },
+      { cdp: fake.cdp, tabsApi: fake.tabsApi },
+    );
+    expect(res).toMatchObject({
+      code: "invalid_params",
+      data: { effect_state: "none", phase: "precondition" },
     });
   });
 
@@ -2462,6 +2479,7 @@ describe("handleSelect", () => {
       code: "invalid_params",
       data: {
         reason: "option_ambiguous",
+        effect_state: "none",
         ambiguous: "同名项",
         count: 2,
       },
@@ -2476,6 +2494,7 @@ describe("handleSelect", () => {
       code: "invalid_params",
       data: {
         reason: "option_not_found",
+        effect_state: "none",
         missing: "不存在的大区",
         available: ['east="华东大区"', 'south="South Region"', 'dup_a="同名项"', 'dup_b="同名项"'],
       },
