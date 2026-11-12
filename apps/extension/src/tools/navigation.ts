@@ -258,6 +258,7 @@ function startLifecycleWait(
     let pendingLifecycle: { name: string; frameId?: string; loaderId?: string } | null = null;
     let pendingSameDocument: { frameId: string; revision: number } | undefined;
     let listenerSub: { dispose(): void } | null = null;
+    let releaseTabAttachment: (() => void) | undefined;
     let timer: ReturnType<typeof setTimeout> | null = null;
     let dialogBudgetUsed = false;
     let beforeUnloadPending = false;
@@ -304,6 +305,8 @@ function startLifecycleWait(
         signal.removeEventListener("abort", abortHandler);
         abortHandler = null;
       }
+      releaseTabAttachment?.();
+      releaseTabAttachment = undefined;
     };
 
     const finish = (outcome: WaitOutcome) => {
@@ -398,6 +401,8 @@ function startLifecycleWait(
       finish({ reached: "cancelled", lastLifecycle });
       return;
     }
+
+    releaseTabAttachment = cdp.retainTabAttachment?.(expectedTabId);
 
     if (cdp.onEvent) {
       listenerSub = cdp.onEvent(

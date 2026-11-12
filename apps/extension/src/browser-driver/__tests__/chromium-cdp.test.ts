@@ -2642,7 +2642,7 @@ describe("idle soft-detach and immediate close/return detach", () => {
     let dialogOpenOnPageEnable: string | null = null;
     let domGetDocumentWhileDialogOpen = 0;
 
-    vi.mocked(api.sendCommand).mockImplementation(async (target, method) => {
+    vi.mocked(api.sendCommand).mockImplementation(async (target, method, params) => {
       if (target.tabId === 51 && method === "Page.enable" && dialogOpenOnPageEnable !== null) {
         const message = dialogOpenOnPageEnable;
         dialogOpenOnPageEnable = null;
@@ -2654,7 +2654,9 @@ describe("idle soft-detach and immediate close/return detach", () => {
         return {};
       }
       if (target.tabId === 51 && method === "Page.handleJavaScriptDialog") {
-        onEvent.fire({ tabId: 51 }, "Page.javascriptDialogClosed", { result: true });
+        onEvent.fire({ tabId: 51 }, "Page.javascriptDialogClosed", {
+          result: Boolean((params as { accept?: boolean } | undefined)?.accept ?? true),
+        });
         return {};
       }
       if (method === "Page.getFrameTree") {
@@ -2732,7 +2734,34 @@ describe("idle soft-detach and immediate close/return detach", () => {
         message: "Alert after navigation while soft-detached",
       });
 
-      // 3. `onJavaScriptDialogOpening` touches tab activity and blocks soft-detach while `canControlDialog` awaits:
+      // 3. Same frameId/loaderId/url (`document.open()`) + alert opened while soft-detached:
+      // even if an `onDialogChanged` listener calls `resolveDialog` synchronously on notification,
+      // `resolveDialog` succeeds, and post-dismissal `DOM.getDocument` detects changed `backendNodeId`!
+      changed.mockClear();
+      const postNavAttachmentId = cdp.getAttachmentId(51);
+      await vi.advanceTimersByTimeAsync(DEFAULT_IDLE_DETACH_MS);
+      expect(cdp.isAttached(51)).toBe(false);
+      backendNodeId = 999; // Replaced via document.open() without changing loaderId or url!
+      dialogOpenOnPageEnable = "Alert after document.open while soft-detached";
+
+      let autoDismissPromise: Promise<unknown> | undefined;
+      const sub = cdp.onDialogChanged((tabId, dialog) => {
+        if (tabId === 51 && dialog) {
+          autoDismissPromise = cdp.resolveDialog(dialog.id, false);
+        }
+      });
+      await cdp.ensureAttached(51);
+      sub.dispose();
+      expect(domGetDocumentWhileDialogOpen).toBe(0);
+      expect(autoDismissPromise).toBeDefined();
+      await expect(autoDismissPromise).resolves.toMatchObject({
+        handled: "dismissed",
+        message: "Alert after document.open while soft-detached",
+      });
+      expect(cdp.getAttachmentId(51)).not.toBe(postNavAttachmentId);
+      expect(changed).toHaveBeenCalledExactlyOnceWith(51);
+
+      // 4. `onJavaScriptDialogOpening` touches tab activity and blocks soft-detach while `canControlDialog` awaits:
       await cdpShortIdle.ensureAttached(52);
       const detachCountBefore = vi.mocked(api.detach).mock.calls.length;
       await vi.advanceTimersByTimeAsync(900);
@@ -2958,6 +2987,68 @@ describe("idle soft-detach and immediate close/return detach", () => {
       await vi.advanceTimersByTimeAsync(1);
       expect(api.detach).toHaveBeenCalledExactlyOnceWith({ tabId: 54 });
       expect(cdp.isAttached(54)).toBe(false);
+    } finally {
+      cdp.dispose();
+    }
+  });
+
+  it("holds attachment across >75s static screencasts and invalidates unprobed child frames lacking loaderId", async () => {
+    vi.useFakeTimers();
+    const { screencasts } = await import("@/browser-driver/screencast-coordinator");
+    const { api, onEvent } = fakeApi();
+    let gen = 0;
+    vi.mocked(api.attach).mockImplementation(async () => {
+      gen += 1;
+    });
+    vi.mocked(api.sendCommand).mockImplementation(async (target, method) => {
+      if (method === "Target.setAutoAttach" && !target.sessionId) {
+        onEvent.fire({ tabId: 58 }, "Target.attachedToTarget", {
+          sessionId: `unprobed-${gen}`,
+          targetInfo: { type: "iframe", targetId: "child-u", url: "https://unprobed.test/" },
+        });
+        return {};
+      }
+      if (method === "Page.getFrameTree") {
+        if (target.sessionId) throw new Error("child tree read failed");
+        return {
+          frameTree: { frame: { id: "root", loaderId: "rl-1", url: "https://host.test/" } },
+        };
+      }
+      if (method === "DOM.getDocument") {
+        return { root: { backendNodeId: 1, documentURL: "https://host.test/" } };
+      }
+      return {};
+    });
+
+    const childInvalidated = vi.fn();
+    const cdp = new ChromiumCdp(api, {
+      idleDetachMs: DEFAULT_IDLE_DETACH_MS,
+      onChildFramesInvalidated: childInvalidated,
+    });
+    try {
+      await cdp.ensureAttached(58);
+      await vi.advanceTimersByTimeAsync(50);
+
+      // Active screencast lease on a static page (zero frames arriving) prevents 75s soft-detach.
+      const lease = await screencasts(cdp).acquire(58, {
+        format: "jpeg",
+        maxWidth: 800,
+        maxHeight: 600,
+      });
+      await vi.advanceTimersByTimeAsync(120_000);
+      expect(cdp.isAttached(58)).toBe(true);
+
+      // Releasing the screencast lease allows soft-detach after 75s.
+      await lease.release();
+      await vi.advanceTimersByTimeAsync(DEFAULT_IDLE_DETACH_MS);
+      expect(cdp.isAttached(58)).toBe(false);
+
+      // Reattaching when child `loaderId` was unprobed on both sides invalidates conservatively instead of matching undefined === undefined!
+      await cdp.ensureAttached(58);
+      expect(childInvalidated).toHaveBeenCalledExactlyOnceWith(58, {
+        frameIds: new Set(["child-u"]),
+        sessionIds: new Set(["unprobed-1"]),
+      });
     } finally {
       cdp.dispose();
     }

@@ -179,6 +179,12 @@ export class SessionManager {
     for (const ctx of this.sessions.values()) ctx.refStore.invalidateTab(tabId);
   }
 
+  remapTabChildFrames(tabId: number, remapped: ReadonlyMap<string, string>): void {
+    for (const ctx of this.sessions.values()) {
+      ctx.refStore.remapChildFrameSessions(tabId, remapped);
+    }
+  }
+
   invalidateTabChildFrames(
     tabId: number,
     stale: { sessionIds: ReadonlySet<string>; frameIds: ReadonlySet<string> },

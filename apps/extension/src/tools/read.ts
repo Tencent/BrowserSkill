@@ -70,6 +70,7 @@ export async function handleRead(
       send: (tabId, method, args) => send({ tabId }, method, args),
       sendToTarget: (target, method, args) => send(target, method, args),
       getAttachmentId: (id) => deps.cdp.getAttachmentId?.(id),
+      resolveTarget: deps.cdp.resolveTarget?.bind(deps.cdp),
     };
     const send = async <T>(target: CdpTarget, method: string, args?: object): Promise<T> => {
       if (method !== "Runtime.releaseObjectGroup") check();

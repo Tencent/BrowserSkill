@@ -186,6 +186,8 @@ export interface ChromiumCdpOptions {
   canControlDialog?: (tabId: number) => boolean | Promise<boolean>;
   /** Invalidate tab refs when the root document or debugger attachment changes. */
   onDocumentChanged?: (tabId: number) => void;
+  /** Notify tab observers when child OOPIF sessions are remapped across idle soft-detach. */
+  onChildFramesRemapped?: (tabId: number, remapped: ReadonlyMap<string, string>) => void;
   /** Invalidate child-frame refs when OOPIF targets disappear or navigate across idle soft-detach. */
   onChildFramesInvalidated?: (
     tabId: number,
@@ -216,6 +218,7 @@ interface RootDocumentSignature {
   url?: string;
   urlFragment?: string;
   backendNodeId?: number;
+  documentElementBackendNodeId?: number;
   documentUrl?: string;
 }
 
@@ -245,7 +248,11 @@ function sameRootDocumentSignature(
       hasFrameIdentity || (before.backendNodeId === undefined && before.documentUrl === undefined)
     );
   }
-  return before.backendNodeId === after.backendNodeId && before.documentUrl === after.documentUrl;
+  return (
+    before.backendNodeId === after.backendNodeId &&
+    before.documentElementBackendNodeId === after.documentElementBackendNodeId &&
+    before.documentUrl === after.documentUrl
+  );
 }
 
 function sameChildFrameSignature(
@@ -253,12 +260,15 @@ function sameChildFrameSignature(
   after: ChildFrameSignature | undefined,
 ): after is ChildFrameSignature {
   if (!after || !before.frameId || before.frameId !== after.frameId) return false;
+  if (!before.loaderId || !after.loaderId) return false;
   return (
     before.loaderId === after.loaderId &&
     before.url === after.url &&
     before.urlFragment === after.urlFragment
   );
 }
+
+const MAX_REMAPPED_CHILD_SESSIONS = 256;
 
 /**
  * Wrapper around `chrome.debugger` that owns the "attach once per
@@ -275,9 +285,15 @@ export class ChromiumCdp {
   private readonly softDetachedFrameSessions = new Map<number, Map<string, ChildFrameSignature>>();
   private readonly remappedChildSessions = new Map<number, Map<string, string>>();
   private readonly retainedAttachments = new Map<number, Set<object>>();
+  private readonly unverifiedDialogDocSignatures = new Map<
+    number,
+    { attachmentId: string; expected: RootDocumentSignature }
+  >();
+  private readonly postDialogVerifications = new Map<number, Promise<void>>();
   private readonly claimAttempts = new Map<number, Map<string, object>>();
   private readonly attachmentVersions = new Map<number, number>();
   private readonly attachmentIds = new Map<number, string>();
+  private readonly attachingIds = new Map<number, string>();
   private readonly attachInFlight = new Map<number, Promise<void>>();
   private readonly detachInFlight = new Map<number, Promise<void>>();
   private readonly inFlightCommands = new Map<number, number>();
@@ -299,6 +315,7 @@ export class ChromiumCdp {
       hasBrowserHandler?: boolean;
       source: CdpDebuggee;
       resolving: boolean;
+      emitOnAttach?: boolean;
       timer: ReturnType<typeof setTimeout>;
       closed: Set<(result: JavaScriptDialogInfo | Error) => void>;
     }
@@ -375,12 +392,20 @@ export class ChromiumCdp {
 
   /** Reattach `tabId` only when it was previously idle-soft-detached; never reconnects hard-detached tabs. */
   async reattachIfSoftDetached(tabId: number): Promise<void> {
+    const attaching = this.attachInFlight.get(tabId);
+    if (attaching) await attaching;
+    const verifying = this.postDialogVerifications.get(tabId);
+    if (verifying) await cleanupWait(verifying.catch(() => {}));
     if (!this.softDetachedTabs.has(tabId)) return;
     await this.ensureAttached(tabId);
   }
 
   /** Reattach a soft-detached tab that had tracked OOPIFs so `sync` reconciles child-frame sessions. */
   async reconcileSoftDetachedFrames(tabId: number): Promise<void> {
+    const attaching = this.attachInFlight.get(tabId);
+    if (attaching) await attaching;
+    const verifying = this.postDialogVerifications.get(tabId);
+    if (verifying) await cleanupWait(verifying.catch(() => {}));
     if (
       !this.softDetachedTabs.has(tabId) ||
       (this.softDetachedFrameSessions.get(tabId)?.size ?? 0) === 0
@@ -458,13 +483,19 @@ export class ChromiumCdp {
     // New observers must wait before opening the next connection to that tab.
     const detaching = this.detachInFlight.get(tabId);
     if (detaching) await detaching;
-    if (this.attachedTabs.has(tabId)) {
-      this.touchTabActivity(tabId);
-      return;
-    }
     const existing = this.attachInFlight.get(tabId);
     if (existing) {
       await existing;
+      const verifyingAfterAttach = this.postDialogVerifications.get(tabId);
+      if (verifyingAfterAttach) await cleanupWait(verifyingAfterAttach.catch(() => {}));
+      if (this.attachedTabs.has(tabId)) {
+        this.touchTabActivity(tabId);
+        return;
+      }
+    }
+    const verifying = this.postDialogVerifications.get(tabId);
+    if (verifying) await cleanupWait(verifying.catch(() => {}));
+    if (this.attachedTabs.has(tabId)) {
       this.touchTabActivity(tabId);
       return;
     }
@@ -487,7 +518,7 @@ export class ChromiumCdp {
       await this.api.attach({ tabId }, CDP_PROTOCOL_VERSION);
       try {
         check();
-        this.attachmentIds.set(tabId, currentAttachmentId);
+        this.attachingIds.set(tabId, currentAttachmentId);
         await this.enablePageDomain(tabId);
         check();
         await this.enableNetworkDomainBestEffort(tabId);
@@ -502,26 +533,46 @@ export class ChromiumCdp {
           );
           if (!rootDocumentUnchanged) {
             currentAttachmentId = crypto.randomUUID();
-            this.attachmentIds.set(tabId, currentAttachmentId);
+            this.attachingIds.set(tabId, currentAttachmentId);
             const pendingDialog = this.pendingDialogEntries.get(tabId);
             if (pendingDialog && pendingDialog.attachmentId === previousAttachmentId) {
               pendingDialog.attachmentId = currentAttachmentId;
             }
+            this.unverifiedDialogDocSignatures.delete(tabId);
             this.remappedChildSessions.delete(tabId);
             this.options.onDocumentChanged?.(tabId);
+          } else if (currentDocSignature.dialogOpen && previousDocSignature) {
+            this.unverifiedDialogDocSignatures.set(tabId, {
+              attachmentId: currentAttachmentId,
+              expected: previousDocSignature,
+            });
+          } else {
+            this.unverifiedDialogDocSignatures.delete(tabId);
           }
         }
-        this.attachedTabs.add(tabId);
-        this.softDetachedTabs.delete(tabId);
-        this.softDetachedDocSignatures.delete(tabId);
-        this.softDetachedAttachmentIds.delete(tabId);
-        this.softDetachedFrameSessions.delete(tabId);
         await this.enableFrameDiscovery({ tabId }).catch((err) => {
           console.debug("[bsk cdp] frame discovery unavailable", { tabId, err });
         });
         check();
         if (wasSoftDetached && rootDocumentUnchanged && previousChildFrames?.size) {
           await this.reconcileSoftDetachedChildFrames(tabId, previousChildFrames, check);
+        }
+        this.attachedTabs.add(tabId);
+        this.attachmentIds.set(tabId, currentAttachmentId);
+        this.attachingIds.delete(tabId);
+        this.softDetachedTabs.delete(tabId);
+        this.softDetachedDocSignatures.delete(tabId);
+        this.softDetachedAttachmentIds.delete(tabId);
+        this.softDetachedFrameSessions.delete(tabId);
+        const pendingDialog = this.pendingDialogEntries.get(tabId);
+        if (pendingDialog?.emitOnAttach) {
+          pendingDialog.emitOnAttach = false;
+          this.emitDialogChanged(tabId, pendingDialog.dialog);
+        }
+        if (!this.pendingDialogEntries.has(tabId)) {
+          this.schedulePostDialogVerification(tabId);
+          const verifyingNow = this.postDialogVerifications.get(tabId);
+          if (verifyingNow) await cleanupWait(verifyingNow.catch(() => {}));
         }
         this.touchTabActivity(tabId);
       } catch (err) {
@@ -535,17 +586,23 @@ export class ChromiumCdp {
         // (`this.detach()` is a no-op here because `attachedTabs` lacks
         // the id) so the next attempt starts from a clean slate.
         this.passiveNetworkEnabledTabs.delete(tabId);
+        if (this.attachingIds.get(tabId) === currentAttachmentId) {
+          this.attachingIds.delete(tabId);
+        }
+        if (this.unverifiedDialogDocSignatures.get(tabId)?.attachmentId === currentAttachmentId) {
+          this.unverifiedDialogDocSignatures.delete(tabId);
+        }
+        const pendingDialog = this.pendingDialogEntries.get(tabId);
+        if (pendingDialog && pendingDialog.attachmentId === currentAttachmentId) {
+          clearTimeout(pendingDialog.timer);
+          this.pendingDialogEntries.delete(tabId);
+          for (const close of pendingDialog.closed)
+            close(new Error("Debugger attachment changed; dialog outcome is unknown"));
+          this.emitDialogChanged(tabId, null);
+        }
         if (this.attachmentIds.get(tabId) === currentAttachmentId) {
           this.attachedTabs.delete(tabId);
           this.attachmentIds.delete(tabId);
-          const pendingDialog = this.pendingDialogEntries.get(tabId);
-          if (pendingDialog && pendingDialog.attachmentId === currentAttachmentId) {
-            clearTimeout(pendingDialog.timer);
-            this.pendingDialogEntries.delete(tabId);
-            for (const close of pendingDialog.closed)
-              close(new Error("Debugger attachment changed; dialog outcome is unknown"));
-            this.emitDialogChanged(tabId, null);
-          }
         }
         if ((this.attachmentVersions.get(tabId) ?? 0) !== version) {
           this.attachedTabs.delete(tabId);
@@ -565,7 +622,10 @@ export class ChromiumCdp {
         throw normalizeError(err);
       })
       .finally(() => {
-        if (this.attachInFlight.get(tabId) === attach) this.attachInFlight.delete(tabId);
+        if (this.attachInFlight.get(tabId) === attach) {
+          this.attachingIds.delete(tabId);
+          this.attachInFlight.delete(tabId);
+        }
       });
     this.attachInFlight.set(tabId, attach);
     await attach;
@@ -864,6 +924,9 @@ export class ChromiumCdp {
     this.softDetachedAttachmentIds.delete(tabId);
     this.softDetachedFrameSessions.delete(tabId);
     this.remappedChildSessions.delete(tabId);
+    this.unverifiedDialogDocSignatures.delete(tabId);
+    this.postDialogVerifications.delete(tabId);
+    this.attachingIds.delete(tabId);
   }
 
   /** Detach if attached; never throws. */
@@ -1010,7 +1073,10 @@ export class ChromiumCdp {
     this.softDetachedFrameSessions.clear();
     this.remappedChildSessions.clear();
     this.retainedAttachments.clear();
+    this.unverifiedDialogDocSignatures.clear();
+    this.postDialogVerifications.clear();
     this.dialogOpeningInFlight.clear();
+    this.attachingIds.clear();
     this.attachmentIds.clear();
     for (const tabId of new Set([...tabs, ...softTabs])) this.options.onDocumentChanged?.(tabId);
     for (const tabId of this.pendingDialogEntries.keys()) this.clearDialogState(tabId);
@@ -1167,8 +1233,13 @@ export class ChromiumCdp {
     if (this.backgroundExecution.hasAny(tabId) || this.hasActiveEmulation(tabId)) {
       return false;
     }
-    // Guard 4: No pending or opening native JavaScript dialog awaiting decision.
-    if (this.pendingDialogEntries.has(tabId) || this.dialogOpeningInFlight.has(tabId)) {
+    // Guard 4: No pending or opening native JavaScript dialog or post-dialog verification.
+    if (
+      this.pendingDialogEntries.has(tabId) ||
+      this.dialogOpeningInFlight.has(tabId) ||
+      this.unverifiedDialogDocSignatures.has(tabId) ||
+      this.postDialogVerifications.has(tabId)
+    ) {
       return false;
     }
     return true;
@@ -1223,18 +1294,28 @@ export class ChromiumCdp {
       }
       let docReply: unknown;
       const docOk = await cleanupWait(
-        this.api.sendCommand({ tabId }, "DOM.getDocument", { depth: 0 }).then((res) => {
+        this.api.sendCommand({ tabId }, "DOM.getDocument", { depth: 1 }).then((res) => {
           docReply = res;
         }),
       );
       if (!docOk) return { probed: false };
       const root = (
-        docReply as { root?: { backendNodeId?: number; documentURL?: string } } | undefined
+        docReply as
+          | {
+              root?: {
+                backendNodeId?: number;
+                documentURL?: string;
+                children?: { nodeType?: number; backendNodeId?: number }[];
+              };
+            }
+          | undefined
       )?.root;
+      const docElementId = root?.children?.find((child) => child.nodeType === 1)?.backendNodeId;
       return {
         probed: true,
         ...frameIdentity,
         backendNodeId: typeof root?.backendNodeId === "number" ? root.backendNodeId : undefined,
+        documentElementBackendNodeId: typeof docElementId === "number" ? docElementId : undefined,
         documentUrl: typeof root?.documentURL === "string" ? root.documentURL : undefined,
       };
     } catch {
@@ -1322,6 +1403,16 @@ export class ChromiumCdp {
       if (!(await cleanupWait(Promise.allSettled(pending)))) break;
       check();
     }
+    if (this.api === chromeDebuggerApi) {
+      const discoveredFrameIds = new Set(this.frameDiscovery.get(tabId)?.frameIds.values() ?? []);
+      const missingExpected = [...previousChildFrames.values()].some(
+        (sig) => sig.frameId !== undefined && !discoveredFrameIds.has(sig.frameId),
+      );
+      if (missingExpected) {
+        await this.drainFrameAttachTasks(tabId);
+        check();
+      }
+    }
     const currentChildFrames = await this.probeChildFrameSignatures(tabId);
     check();
     const currentByFrameId = new Map<string, ChildFrameSignature>();
@@ -1365,8 +1456,15 @@ export class ChromiumCdp {
         nextRemap.set(oldSessionId, newSessionId);
       }
     }
+    while (nextRemap.size > MAX_REMAPPED_CHILD_SESSIONS) {
+      const oldest = nextRemap.keys().next().value;
+      if (oldest === undefined) break;
+      nextRemap.delete(oldest);
+      staleSessionIds.add(oldest);
+    }
     if (nextRemap.size > 0) {
       this.remappedChildSessions.set(tabId, nextRemap);
+      this.options.onChildFramesRemapped?.(tabId, nextRemap);
     } else {
       this.remappedChildSessions.delete(tabId);
     }
@@ -1638,6 +1736,7 @@ export class ChromiumCdp {
             frame &&
             !frame.parentId))
       ) {
+        this.unverifiedDialogDocSignatures.delete(tabId);
         this.remappedChildSessions.delete(tabId);
         this.options.onDocumentChanged?.(tabId);
       }
@@ -1827,7 +1926,12 @@ export class ChromiumCdp {
     // Attach a rejection handler immediately, including when native dispatch fails first.
     void closed.catch(() => {});
     try {
-      await this.sendGuarded(
+      const activeAttachment = () =>
+        this.getAttachmentId(entry.dialog.tab_id) ?? this.attachingIds.get(entry.dialog.tab_id);
+      if (activeAttachment() !== entry.attachmentId) {
+        throw new Error("Debugger attachment changed before dispatch");
+      }
+      await this.command(
         { ...entry.source, tabId: entry.dialog.tab_id },
         "Page.handleJavaScriptDialog",
         {
@@ -1838,22 +1942,69 @@ export class ChromiumCdp {
             ? { promptText: text ?? entry.defaultPrompt ?? "" }
             : {}),
         },
-        {
-          signal: guard.signal,
-          attachmentId: entry.attachmentId,
-          onDispatch: () => {
-            if (this.pendingDialogEntries.get(entry.dialog.tab_id) !== entry)
-              throw new Error("Dialog changed before native dispatch");
-            guard.onDispatch?.();
-          },
+        undefined,
+        () => {
+          guard.signal?.throwIfAborted();
+          if (activeAttachment() !== entry.attachmentId)
+            throw new Error("Debugger attachment changed before dispatch");
+          if (this.pendingDialogEntries.get(entry.dialog.tab_id) !== entry)
+            throw new Error("Dialog changed before native dispatch");
+          guard.onDispatch?.();
         },
+        guard.signal,
       );
-      return await closed;
+      const result = await closed;
+      const verify = this.postDialogVerifications.get(entry.dialog.tab_id);
+      if (verify) await cleanupWait(verify.catch(() => {}));
+      return result;
     } finally {
       if (timeout) clearTimeout(timeout);
       if (closeListener) entry.closed.delete(closeListener);
       entry.resolving = false;
     }
+  }
+
+  private schedulePostDialogVerification(tabId: number): void {
+    const pending = this.unverifiedDialogDocSignatures.get(tabId);
+    if (!pending) return;
+    if (!this.attachedTabs.has(tabId)) {
+      if (this.attachingIds.get(tabId) !== pending.attachmentId) {
+        this.unverifiedDialogDocSignatures.delete(tabId);
+      }
+      return;
+    }
+    if (this.getAttachmentId(tabId) !== pending.attachmentId) {
+      this.unverifiedDialogDocSignatures.delete(tabId);
+      return;
+    }
+    if (this.pendingDialogEntries.has(tabId)) return;
+    this.unverifiedDialogDocSignatures.delete(tabId);
+    const task = (async () => {
+      const current = await this.probeRootDocumentSignature(tabId);
+      if (!this.attachedTabs.has(tabId) || this.getAttachmentId(tabId) !== pending.attachmentId) {
+        return;
+      }
+      if (current.dialogOpen) {
+        this.unverifiedDialogDocSignatures.set(tabId, pending);
+        if (!this.pendingDialogEntries.has(tabId)) {
+          queueMicrotask(() => this.schedulePostDialogVerification(tabId));
+        }
+        return;
+      }
+      if (!sameRootDocumentSignature(pending.expected, current)) {
+        this.attachmentIds.set(tabId, crypto.randomUUID());
+        this.remappedChildSessions.delete(tabId);
+        this.options.onDocumentChanged?.(tabId);
+      }
+    })().finally(() => {
+      if (this.postDialogVerifications.get(tabId) === task) {
+        this.postDialogVerifications.delete(tabId);
+      }
+      if (this.attachedTabs.has(tabId)) {
+        this.touchTabActivity(tabId);
+      }
+    });
+    this.postDialogVerifications.set(tabId, task);
   }
 
   private bindDialogHandler(): void {
@@ -1891,6 +2042,7 @@ export class ChromiumCdp {
         clearTimeout(entry.timer);
         this.pendingDialogEntries.delete(tabId);
         this.appendDialog(tabId, info);
+        this.schedulePostDialogVerification(tabId);
         for (const close of entry.closed) close(info);
         this.emitDialogChanged(tabId, null);
         this.touchTabActivity(tabId);
@@ -1908,13 +2060,13 @@ export class ChromiumCdp {
     const tabId = source.tabId;
     if (tabId === undefined) return;
     this.touchTabActivity(tabId);
-    const attachmentId = this.getAttachmentId(tabId);
+    const attachmentId = this.getAttachmentId(tabId) ?? this.attachingIds.get(tabId);
     if (!attachmentId) return;
     const attachmentVersion = this.attachmentVersions.get(tabId) ?? 0;
     const parsed = parseDialogOpeningParams(params);
     try {
       if (this.options.canControlDialog && !(await this.options.canControlDialog(tabId))) return;
-      const currentAttachmentId = this.getAttachmentId(tabId);
+      const currentAttachmentId = this.getAttachmentId(tabId) ?? this.attachingIds.get(tabId);
       if (
         !currentAttachmentId ||
         (this.attachmentVersions.get(tabId) ?? 0) !== attachmentVersion ||
@@ -1942,6 +2094,7 @@ export class ChromiumCdp {
         this.emitDialogChanged(tabId, dialog, "decision_timeout");
         void this.resolveDialog(dialog.id, false).catch(() => {});
       }, 60000);
+      const deferEmit = this.attachingIds.has(tabId) && !this.attachedTabs.has(tabId);
       this.pendingDialogEntries.set(tabId, {
         dialog,
         source,
@@ -1949,10 +2102,13 @@ export class ChromiumCdp {
         defaultPrompt: parsed.defaultPrompt,
         hasBrowserHandler: parsed.hasBrowserHandler,
         resolving: false,
+        ...(deferEmit ? { emitOnAttach: true } : {}),
         timer,
         closed: new Set(),
       });
-      this.emitDialogChanged(tabId, dialog);
+      if (!deferEmit) {
+        this.emitDialogChanged(tabId, dialog);
+      }
     } catch (error) {
       console.debug("[bsk cdp] dialog state unavailable", error);
     }

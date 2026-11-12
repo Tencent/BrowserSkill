@@ -219,6 +219,7 @@ export async function handleExtract(
       send: <T>(tabId: number, method: string, args?: object) => send<T>({ tabId }, method, args),
       sendToTarget: send,
       getAttachmentId: (tabId) => deps.cdp.getAttachmentId?.(tabId),
+      resolveTarget: deps.cdp.resolveTarget?.bind(deps.cdp),
     };
     const graph = await deps.cdp.getFrameGraph?.(tab.tabId);
     check();

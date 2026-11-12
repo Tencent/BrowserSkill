@@ -88,7 +88,10 @@ export async function uploadThroughFileDrop(
   options: FileDropTransactionOptions,
 ): Promise<FileDropTransactionResult | RpcError> {
   const deadline = Date.now() + options.timeoutMs;
-  const target = options.actionTarget.cdpTarget;
+  const rawTarget = options.actionTarget.cdpTarget;
+  let target = options.cdp.resolveTarget?.(rawTarget) ?? rawTarget;
+  let resolvedActionTarget =
+    target === rawTarget ? options.actionTarget : { ...options.actionTarget, cdpTarget: target };
   const objectGroup = `bsk-file-drop-${crypto.randomUUID()}`;
   const dragData: DragData = {
     items: [],
@@ -99,6 +102,7 @@ export async function uploadThroughFileDrop(
   let dropSent = false;
   let dragPoint = { x: 0, y: 0 };
   let cleanupFailed = false;
+  let releaseTabAttachment: (() => void) | undefined;
   let outcome: FileDropTransactionResult | RpcError = failure(
     "protocol_error",
     "file_drop_failed",
@@ -108,6 +112,20 @@ export async function uploadThroughFileDrop(
   );
 
   try {
+    releaseTabAttachment = options.cdp.retainTabAttachment?.(rawTarget.tabId);
+    if (options.cdp.reattachIfSoftDetached) {
+      await waitBounded(
+        options.cdp.reattachIfSoftDetached(rawTarget.tabId),
+        deadline,
+        options.signal,
+        "reattaching file-drop target timed out",
+      );
+      target = options.cdp.resolveTarget?.(rawTarget) ?? rawTarget;
+      resolvedActionTarget =
+        target === rawTarget
+          ? options.actionTarget
+          : { ...options.actionTarget, cdpTarget: target };
+    }
     const geometry = await waitBounded(
       resolveNodeGeometry(
         options.cdp,
@@ -134,7 +152,7 @@ export async function uploadThroughFileDrop(
       try {
         try {
           const belongs = await waitBounded(
-            pointBelongsToTarget(options.cdp, options.actionTarget, point.x, point.y, objectGroup),
+            pointBelongsToTarget(options.cdp, resolvedActionTarget, point.x, point.y, objectGroup),
             deadline,
             options.signal,
             "verifying file-drop target timed out",
@@ -267,5 +285,6 @@ export async function uploadThroughFileDrop(
     if (cleanupFailed && isRpcError(outcome)) {
       outcome.data = { ...outcome.data, cleanup_state: "failed" };
     }
+    releaseTabAttachment?.();
   }
 }

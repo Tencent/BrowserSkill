@@ -176,6 +176,39 @@ export class RefStore {
     }
   }
 
+  /** Migrate stable OOPIF ref keys and live DOM entries to their reattached `cdpSessionId`s. */
+  remapChildFrameSessions(tabId: number, remapped: ReadonlyMap<string, string>): void {
+    if (remapped.size === 0) return;
+    const tabIdentities = this.identities.get(tabId);
+    if (tabIdentities) {
+      const migrated = new Map<string, string>();
+      for (const [key, ref] of tabIdentities) {
+        try {
+          const parsed = JSON.parse(key) as [unknown, unknown, unknown, unknown];
+          const sessionId = typeof parsed[2] === "string" ? parsed[2] : undefined;
+          const nextSessionId = sessionId !== undefined ? remapped.get(sessionId) : undefined;
+          if (nextSessionId !== undefined && nextSessionId !== sessionId) {
+            parsed[2] = nextSessionId;
+            migrated.set(JSON.stringify(parsed), ref);
+            continue;
+          }
+        } catch {
+          // Preserve unparseable keys untouched; invalidateChildFrames cleans malformed entries.
+        }
+        migrated.set(key, ref);
+      }
+      this.identities.set(tabId, migrated);
+    }
+    for (const [ref, entry] of this.map) {
+      if (entry.kind === "dom" && entry.tabId === tabId && entry.cdpSessionId !== undefined) {
+        const nextSessionId = remapped.get(entry.cdpSessionId);
+        if (nextSessionId !== undefined && nextSessionId !== entry.cdpSessionId) {
+          this.map.set(ref, { ...entry, cdpSessionId: nextSessionId });
+        }
+      }
+    }
+  }
+
   /** Drop child-frame refs whose OOPIF session disappeared or navigated across soft-detach. */
   invalidateChildFrames(
     tabId: number,

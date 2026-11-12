@@ -632,7 +632,7 @@ export class CooperationController implements ControlAuthority {
     this.changed(state);
   }
   markAccessibilityNeedsEnable(tabId: number) {
-    this.tabs.get(tabId)?.accessibilityLease.markNeedsEnable();
+    this.tabs.get(tabId)?.accessibilityLease.takeEntries();
   }
   async control(tabId: number, revision: number, action: "hold" | "resume") {
     const state = this.tabs.get(tabId);
@@ -1938,6 +1938,10 @@ export class CooperationController implements ControlAuthority {
     try {
       await this.refresh(state);
       assert();
+      if (!mainDocumentAction) {
+        await cdp.reconcileSoftDetachedFrames?.(state.tabId);
+        assert();
+      }
       if (
         !context ||
         !state.context ||

@@ -179,14 +179,24 @@ export async function resolveBackendNode(
     };
   }
   if (hasRef) {
-    const resolved = resolveSnapshotRef(ctx, params.ref as string, target.tabId);
+    let resolved = resolveSnapshotRef(ctx, params.ref as string, target.tabId);
     if (isRpcError(resolved)) return resolved;
+    if (cdp.reattachIfSoftDetached) {
+      await cdp.reattachIfSoftDetached(target.tabId);
+      resolved = resolveSnapshotRef(ctx, params.ref as string, target.tabId);
+      if (isRpcError(resolved)) return resolved;
+    } else if (resolved.cdpSessionId && cdp.reconcileSoftDetachedFrames) {
+      await cdp.reconcileSoftDetachedFrames(target.tabId);
+      resolved = resolveSnapshotRef(ctx, params.ref as string, target.tabId);
+      if (isRpcError(resolved)) return resolved;
+    }
+    const rawTarget: CdpTarget = {
+      tabId: target.tabId,
+      ...(resolved.cdpSessionId ? { sessionId: resolved.cdpSessionId } : {}),
+    };
     return {
       backendNodeId: resolved.backendNodeId,
-      cdpTarget: {
-        tabId: target.tabId,
-        ...(resolved.cdpSessionId ? { sessionId: resolved.cdpSessionId } : {}),
-      },
+      cdpTarget: cdp.resolveTarget ? cdp.resolveTarget(rawTarget) : rawTarget,
       ...(resolved.frameId ? { frameId: resolved.frameId } : {}),
       usedRef: resolved.refKey,
       ...(resolved.rowAnchor ? { rowAnchor: resolved.rowAnchor } : {}),
@@ -280,6 +290,19 @@ function focusCdp(cdp: CdpRunner, signal: AbortSignal | undefined): CdpRunner {
     send: (tabId, method, params) => send({ tabId }, method, params),
     sendToTarget: send,
     trackSessionTab: cdp.trackSessionTab?.bind(cdp),
+    resolveTarget: cdp.resolveTarget?.bind(cdp),
+    reattachIfSoftDetached: cdp.reattachIfSoftDetached
+      ? (tabId) => {
+          checkFocusAbort(signal);
+          return cdp.reattachIfSoftDetached!(tabId);
+        }
+      : undefined,
+    reconcileSoftDetachedFrames: cdp.reconcileSoftDetachedFrames
+      ? (tabId) => {
+          checkFocusAbort(signal);
+          return cdp.reconcileSoftDetachedFrames!(tabId);
+        }
+      : undefined,
     getFrameGraph: cdp.getFrameGraph
       ? (tabId) => {
           checkFocusAbort(signal);
