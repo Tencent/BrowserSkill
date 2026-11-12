@@ -151,7 +151,8 @@ determines which versions can connect.
   refs, human activity, field changes, focus moves under focus-dependent styles, log
   gaps, text outside or ambiguous in the held observation, child frames and token-budget
   shifts still return a fresh `baseline`, now with a `baseline_reason`. Strict-policy
-  behaviour and the target and observation guards are unchanged.
+  behaviour and the target and observation guards are unchanged
+  ([#722](https://github.com/Tencent/BrowserSkill/pull/722)).
 - Hardened VOM stealth prompt-injection stripping against CSS Color 4/5, gradient-clip
   text, HiDPI microboxes, inner scroll containers, and mixed textstyle containers:
   resolves `oklch`/`oklab`/`lab`/`lch`/`hsl`/`hwb`/`color()`/`color-mix()` to sRGB for
