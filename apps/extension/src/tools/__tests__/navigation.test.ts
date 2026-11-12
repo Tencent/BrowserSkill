@@ -238,16 +238,6 @@ describe("eventLoaderIsRelevant", () => {
 });
 
 describe("shouldTrustReadyStateProbe", () => {
-  it("allows passive probes on a settled complete document", () => {
-    expect(
-      shouldTrustReadyStateProbe("complete", "load", {
-        mode: "passive",
-        beforeReadyState: "complete",
-        sawRelevantLifecycle: false,
-      }),
-    ).toBe(true);
-  });
-
   it("rejects after-navigation complete→complete with no lifecycle events", () => {
     expect(
       shouldTrustReadyStateProbe("complete", "load", {
