@@ -152,7 +152,12 @@ export async function normalizeDocument(
         (Number.parseFloat(opacity) || 0) >= 0.05,
     });
   }
-  const index = await buildDocumentIndex(nodes, signal, profile.includeVisualFacts);
+  const index = await buildDocumentIndex(
+    nodes,
+    signal,
+    profile.includeVisualFacts,
+    context.coordinates?.layoutUnitsPerCssPixel,
+  );
   await captureCustomProgressFormMembership(index, signal);
   const document: NormalizedDocument = {
     nodes: nodes.filter(

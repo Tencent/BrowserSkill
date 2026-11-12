@@ -13,12 +13,16 @@ export const REQUESTED_STYLES = [
   "color",
   "background-color",
   "background-image",
+  "background-clip",
+  "-webkit-background-clip",
+  "overflow-x",
+  "overflow-y",
+  "width",
+  "height",
 ] as const;
 export const VISUAL_STYLES = [
   ...REQUESTED_STYLES,
   "display",
-  "overflow-x",
-  "overflow-y",
   "transform",
   "zoom",
   "clip-path",
@@ -40,6 +44,7 @@ export const BASIC_SNAPSHOT = {
 } as const;
 export const VISUAL_SNAPSHOT = { includeVisualFacts: true, computedStyles: VISUAL_STYLES } as const;
 export type SnapshotProfile = typeof BASIC_SNAPSHOT | typeof VISUAL_SNAPSHOT;
+const EMPTY_STYLES: Readonly<Record<string, string>> = Object.freeze({});
 /** Sparse array format Chrome uses for infrequently-set per-node fields. */
 interface SparseArray {
   index: number[];
@@ -79,6 +84,7 @@ export interface SnapshotDocument {
     styles?: number[][];
     bounds?: number[][];
     clientRects?: number[][];
+    scrollRects?: number[][];
     paintOrders?: number[];
   };
 }
@@ -217,7 +223,7 @@ export async function decodeDocument(
     const li = layoutByNode.get(n);
     let styles: Record<string, string> | undefined;
     let layout: DecodedNode["layout"];
-    if (li !== undefined && tag !== "#text") {
+    if (li !== undefined && tag !== "#text" && tag !== "#cdata-section") {
       const styleRow = dl?.styles?.[li] ?? [];
       styles = {};
       for (let i = 0; i < profile.computedStyles.length; i++)
@@ -225,14 +231,27 @@ export async function decodeDocument(
       layout = {
         boundsSpace: "snapshot-document-layout" as const,
         bounds: dl?.bounds?.[li],
+        ...(dl?.scrollRects?.[li] ? { scrollRect: dl.scrollRects[li] } : {}),
         ...(profile.includeVisualFacts && dl?.clientRects?.[li]
           ? { clientRect: dl.clientRects[li] }
           : {}),
         styles,
       };
+    } else if (li !== undefined) {
+      const tb = dl?.bounds?.[li];
+      if (tb && tb.length >= 4 && (tb[0] + tb[2] < -100 || tb[1] + tb[3] < -100)) {
+        layout = {
+          boundsSpace: "snapshot-document-layout" as const,
+          bounds: tb,
+          styles: EMPTY_STYLES,
+        };
+      }
     }
 
-    const textContent = nodeTextContent.get(n)?.join(" ");
+    const textContent =
+      tag === "#text" || tag === "#cdata-section"
+        ? str(strings, dn.nodeValue?.[n]).trim() || undefined
+        : nodeTextContent.get(n)?.join(" ");
 
     const rawFormValueIndex = tag === "textarea" ? textValues.get(n) : inputValues.get(n);
     const rawFormValue =

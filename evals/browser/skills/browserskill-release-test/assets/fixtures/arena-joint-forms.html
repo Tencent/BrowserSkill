@@ -1,0 +1,1120 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>对抗靶场 · 企业多主体联合申报与级联审批工作台</title>
+<style>
+  :root {
+    --bg: #f1f5f9;
+    --surface: #ffffff;
+    --ink: #0f172a;
+    --muted: #475569;
+    --line: #cbd5e1;
+    --brand: #1d4ed8;
+    --brand-soft: #dbeafe;
+    --ok: #15803d;
+    --warn: #b45309;
+    --err: #b91c1c;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+    color: var(--ink);
+    background: var(--bg);
+  }
+  .topbar {
+    position: sticky;
+    top: 0;
+    z-index: 40;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    padding: 10px 20px;
+    background: #0f172a;
+    color: #f8fafc;
+    border-bottom: 1px solid #334155;
+  }
+  .topbar-badges {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    flex-wrap: wrap;
+    font-size: 12px;
+  }
+  .pill {
+    padding: 3px 9px;
+    border-radius: 999px;
+    background: #1e293b;
+    border: 1px solid #475569;
+    color: #e2e8f0;
+  }
+  .pill.ok { background: #052e16; border-color: #16a34a; color: #bbf7d0; }
+  .pill.warn { background: #451a03; border-color: #f59e0b; color: #fde68a; }
+  .shell {
+    display: grid;
+    grid-template-columns: 250px minmax(0, 1fr) 300px;
+    gap: 16px;
+    max-width: 1640px;
+    margin: 0 auto;
+    padding: 16px 20px 96px;
+  }
+  @media (max-width: 1180px) {
+    .shell { grid-template-columns: 1fr; }
+  }
+  .panel {
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    padding: 16px;
+    box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
+  }
+  .sidebar-nav details {
+    border-bottom: 1px solid #e2e8f0;
+    padding: 6px 0;
+  }
+  .sidebar-nav summary {
+    cursor: pointer;
+    font-weight: 600;
+    padding: 4px 2px;
+  }
+  .sidebar-nav ul {
+    margin: 4px 0 6px;
+    padding-left: 16px;
+    list-style: none;
+  }
+  .sidebar-nav li {
+    padding: 3px 6px;
+    border-radius: 5px;
+    font-size: 12.5px;
+    color: var(--muted);
+    display: flex;
+    justify-content: space-between;
+  }
+  .main-stack {
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+  }
+  .section-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    border-bottom: 1px solid #e2e8f0;
+    padding-bottom: 10px;
+    margin-bottom: 14px;
+  }
+  .section-head h2 {
+    margin: 0;
+    font-size: 16px;
+  }
+  .form-grid {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 12px 16px;
+  }
+  .form-grid.two {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .field {
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+  }
+  .field.span-2 { grid-column: span 2; }
+  .field.span-3 { grid-column: 1 / -1; }
+  .field label, .field .field-label {
+    font-weight: 600;
+    font-size: 12.5px;
+    color: #1e293b;
+  }
+  input[type="text"],
+  input[type="password"],
+  input[type="email"],
+  input[type="number"],
+  input[type="date"],
+  input[type="time"],
+  input[type="datetime-local"],
+  input[type="month"],
+  input[type="week"],
+  select,
+  textarea {
+    width: 100%;
+    padding: 7px 10px;
+    border: 1px solid #94a3b8;
+    border-radius: 6px;
+    font: inherit;
+    background: #fff;
+    color: var(--ink);
+  }
+  input[readonly] {
+    background: #f8fafc;
+    color: #334155;
+    border-style: dashed;
+  }
+  input:disabled, select:disabled, button:disabled {
+    background: #e2e8f0;
+    color: #64748b;
+    cursor: not-allowed;
+  }
+  .inline-checks {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 14px;
+    align-items: center;
+    padding: 8px 10px;
+    background: #f8fafc;
+    border: 1px solid #e2e8f0;
+    border-radius: 8px;
+  }
+  .check-pair {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .btn {
+    padding: 7px 13px;
+    border-radius: 6px;
+    border: 1px solid #64748b;
+    background: #fff;
+    color: var(--ink);
+    font: inherit;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  .btn.primary {
+    background: var(--brand);
+    border-color: var(--brand);
+    color: #fff;
+  }
+  .btn.danger {
+    border-color: #ef4444;
+    color: #b91c1c;
+  }
+  table.matrix {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 13px;
+  }
+  table.matrix th, table.matrix td {
+    border: 1px solid var(--line);
+    padding: 7px 9px;
+    text-align: left;
+    vertical-align: middle;
+  }
+  table.matrix thead th {
+    background: #f1f5f9;
+    font-weight: 700;
+  }
+  .editor-box {
+    min-height: 96px;
+    border: 1px solid #64748b;
+    border-radius: 8px;
+    padding: 10px 12px;
+    background: #fff;
+  }
+  .locked-chip {
+    display: inline-block;
+    padding: 1px 7px;
+    border-radius: 4px;
+    background: #fee2e2;
+    color: #991b1b;
+    font-size: 12px;
+    user-select: none;
+  }
+  .drag-list {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+  .drag-item {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 9px 12px;
+    border: 1px solid #94a3b8;
+    border-radius: 7px;
+    background: #f8fafc;
+    cursor: grab;
+  }
+  .drag-item.drag-over {
+    border-color: var(--brand);
+    background: var(--brand-soft);
+  }
+  .dropzone {
+    border: 2px dashed #64748b;
+    border-radius: 8px;
+    padding: 18px;
+    text-align: center;
+    background: #f8fafc;
+  }
+  .rule-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 7px;
+  }
+  .rule-item {
+    padding: 7px 9px;
+    border-radius: 6px;
+    border: 1px solid #e2e8f0;
+    font-size: 12.5px;
+    display: flex;
+    justify-content: space-between;
+    gap: 8px;
+  }
+  .rule-item[data-ok="true"] { background: #f0fdf4; border-color: #86efac; }
+  .rule-item[data-ok="false"] { background: #fef2f2; border-color: #fca5a5; }
+  .sticky-footer {
+    position: fixed;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    z-index: 35;
+    background: rgba(15, 23, 42, 0.96);
+    color: #fff;
+    padding: 10px 24px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    border-top: 1px solid #334155;
+  }
+  output {
+    display: block;
+    white-space: pre-wrap;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 12px;
+    background: #f8fafc;
+    border: 1px solid #cbd5e1;
+    border-radius: 6px;
+    padding: 8px 10px;
+  }
+  .ledger-scroll {
+    max-height: 220px;
+    overflow: auto;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+  }
+</style>
+</head>
+<body>
+<header class="topbar" role="banner">
+  <div>
+    <strong>企业多主体联合申报与跨表预算联动靶场</strong>
+    <span style="margin-left:10px;color:#94a3b8;font-size:12px">Adversarial Joint-Forms Workbench v2</span>
+  </div>
+  <div class="topbar-badges">
+    <span class="pill" id="fx-live-ticker" data-fx-seq="0">实时结算汇率 USD/CNY: 7.1820 · EUR/CNY: 7.7640</span>
+    <span class="pill" id="dom-complexity-badge">DOM 节点: 计算中</span>
+    <span class="pill warn" id="joint-readiness-pill">联合校验: 待补全</span>
+  </div>
+</header>
+
+<div class="shell">
+  <aside class="panel sidebar-nav" aria-label="申报章节导航树">
+    <h2 style="margin:0 0 10px;font-size:15px">联合合规章节树</h2>
+    <div id="compliance-tree"></div>
+  </aside>
+
+  <main class="main-stack">
+    <!-- FORM A: 牵头主体与三级异步级联 -->
+    <section class="panel" aria-labelledby="sec-lead-title">
+      <div class="section-head">
+        <h2 id="sec-lead-title">一、牵头申报主体与属地级联信息（Form A）</h2>
+        <span class="pill" id="lead-section-state">主表联动源</span>
+      </div>
+      <form id="form-lead-entity" onsubmit="return false">
+        <div class="form-grid">
+          <div class="field">
+            <label for="lead-org-name">牵头单位全称（必填 / 支持中文引号 Emoji）</label>
+            <input id="lead-org-name" name="leadOrgName" type="text" placeholder="例如：星海智算（杭州）联合实验室 🚀" required>
+          </div>
+          <div class="field">
+            <label for="lead-credit-code">统一信用代码（自动大写去空格掩码）</label>
+            <input id="lead-credit-code" name="leadCreditCode" type="text" value="91330100ma27x" placeholder="18位统一代码">
+          </div>
+          <div class="field">
+            <label for="lead-auth-pin">联合签章授权码（敏感密码框，须精确 8 位）</label>
+            <input id="lead-auth-pin" name="leadAuthPin" type="password" placeholder="输入 8 位签章码" autocomplete="off">
+          </div>
+
+          <div class="field">
+            <label for="lead-readonly-serial">系统核准流水号（只读 Readonly 契约）</label>
+            <input id="lead-readonly-serial" name="readonlySerial" type="text" value="JNT-2026-8801" readonly>
+          </div>
+          <div class="field">
+            <label for="lead-disabled-code">历史归档批次（Disabled 不可编辑）</label>
+            <input id="lead-disabled-code" name="disabledBatch" type="text" value="BATCH-LOCKED-04" disabled>
+          </div>
+          <div class="field">
+            <label for="lead-short-code">项目代号简称（Maxlength=12 截断契约）</label>
+            <input id="lead-short-code" name="shortCode" type="text" maxlength="12" value="INIT2026">
+          </div>
+
+          <div class="field">
+            <label for="cascade-province">所属省份（第 1 级异步级联）</label>
+            <select id="cascade-province" name="province">
+              <option value="">-- 请选择省份 --</option>
+              <option value="ZJ">浙江省 (Zhejiang)</option>
+              <option value="GD">广东省 (Guangdong)</option>
+              <option value="JS">江苏省 (Jiangsu)</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="cascade-city">所属设区市（第 2 级异步挂载）</label>
+            <select id="cascade-city" name="city" disabled>
+              <option value="">-- 先选省份 --</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="cascade-park">落地产业园区（含超长截断项与 :disabled 禁用项）</label>
+            <select id="cascade-park" name="park" disabled>
+              <option value="">-- 先选设区市 --</option>
+            </select>
+          </div>
+
+          <div class="field">
+            <label for="joint-date">立项基准日期 (date)</label>
+            <input id="joint-date" type="date" min="2026-01-01" max="2027-12-31" value="2026-11-12">
+          </div>
+          <div class="field">
+            <label for="joint-time-sec">窗口截止时刻 (time 秒级)</label>
+            <input id="joint-time-sec" type="time" step="1" value="14:30:15">
+          </div>
+          <div class="field">
+            <label for="joint-datetime">联席评审时间 (datetime-local)</label>
+            <input id="joint-datetime" type="datetime-local" step="1" value="2026-11-20T09:30:00">
+          </div>
+
+          <div class="field">
+            <label for="joint-month">首期拨付月份 (month)</label>
+            <input id="joint-month" type="month" value="2026-12">
+          </div>
+          <div class="field">
+            <label for="joint-week">审计排期周次 (week)</label>
+            <input id="joint-week" type="week" value="2026-W47">
+          </div>
+          <div class="field">
+            <label for="qual-multi">联合具备资质标签（多选 Select Multiple）</label>
+            <select id="qual-multi" multiple size="3">
+              <option value="ISO27001" selected>ISO/IEC 27001 信息安全</option>
+              <option value="CMMI5">CMMI-DEV 5 级认证</option>
+              <option value="CNAS">CNAS 国家级实验室资质</option>
+              <option value="GREEN_DC">国家绿色数据中心名录</option>
+            </select>
+          </div>
+
+          <div class="field span-2">
+            <span class="field-label">显式 label[for] 与包裹式 label 双形态对照 + 延迟焦点代理框</span>
+            <div class="inline-checks">
+              <span class="check-pair">
+                <input id="explicit-tax-exempt" type="checkbox">
+                <label for="explicit-tax-exempt">申请跨境研发设备免税备案</label>
+              </span>
+              <label class="check-pair">
+                <input id="wrapped-cross-border" type="checkbox">
+                <span>启用多币种联合资金池共管</span>
+              </label>
+              <span class="check-pair">
+                <input id="arm-beforeunload-guard" type="checkbox">
+                <label for="arm-beforeunload-guard">开启未提交离开拦截 (beforeunload)</label>
+              </span>
+            </div>
+          </div>
+
+          <div class="field">
+            <label for="delayed-focus-proxy">异步延迟焦点代理壳（点击/聚焦 70ms 后解锁并转移焦点至 #delayed-focus-target）</label>
+            <div id="delayed-focus-shell" style="display:flex;gap:6px;align-items:center">
+              <button type="button" class="btn" id="delayed-focus-proxy" data-focus-handoff="idle">激活代理备注</button>
+              <input id="delayed-focus-target" type="text" value="原始摘要" disabled data-focus-handoff="pending" aria-label="延迟焦点目标备注框">
+            </div>
+          </div>
+        </div>
+      </form>
+    </section>
+
+    <!-- FORM B: 联合体成员动态矩阵 -->
+    <section class="panel" aria-labelledby="sec-partners-title">
+      <div class="section-head">
+        <h2 id="sec-partners-title">二、联合申报成员与出资权重矩阵（Form B ↔ Form C 双向联动）</h2>
+        <div style="display:flex;gap:8px;align-items:center">
+          <span class="pill" id="share-sum-badge">当前权重合计: 80%（须精确等于 100%）</span>
+          <button type="button" class="btn" id="btn-balance-shares">一键补齐末行差额至 100%</button>
+          <button type="button" class="btn" id="btn-add-partner">+ 新增联合体成员</button>
+        </div>
+      </div>
+      <form id="form-co-applicants" onsubmit="return false">
+        <table class="matrix" id="partners-table">
+          <caption>联合申报体股权/出资与预算分摊实时表</caption>
+          <thead>
+            <tr>
+              <th rowspan="2">序号</th>
+              <th rowspan="2">成员单位名称</th>
+              <th rowspan="2">联合体角色</th>
+              <th colspan="2">联动出资与财政配比</th>
+              <th rowspan="2">自筹配套承诺</th>
+              <th rowspan="2">操作</th>
+            </tr>
+            <tr>
+              <th>出资权重 (%)</th>
+              <th>联动分摊预算 (万元)</th>
+            </tr>
+          </thead>
+          <tbody id="partners-tbody"></tbody>
+          <tfoot>
+            <tr>
+              <th colspan="3">联合体汇总核对</th>
+              <th id="tfoot-share-total">80%</th>
+              <th id="tfoot-allocated-total">0.00</th>
+              <th id="tfoot-self-fund-total">0.00</th>
+              <th id="tfoot-partner-count">2 家</th>
+            </tr>
+          </tfoot>
+        </table>
+      </form>
+    </section>
+
+    <!-- FORM C: 联合预算精算、富文本条款、拖拽审批流与双通道附件 -->
+    <section class="panel" aria-labelledby="sec-budget-title">
+      <div class="section-head">
+        <h2 id="sec-budget-title">三、联合预算核算、合同条款与签章附件（Form C）</h2>
+        <span class="pill" id="tax-formula-pill">税率联动生效中</span>
+      </div>
+      <form id="form-budget-settlement" onsubmit="return false">
+        <div class="form-grid">
+          <div class="field">
+            <label for="total-budget-wan">项目总预算基数（万元，联动重算全表）</label>
+            <input id="total-budget-wan" type="number" min="100" max="50000" step="10" value="1200">
+          </div>
+          <div class="field">
+            <label for="settlement-currency">主核算币种</label>
+            <select id="settlement-currency">
+              <option value="CNY" selected>人民币 (CNY)</option>
+              <option value="USD">美元折算 (USD)</option>
+              <option value="EUR">欧元折算 (EUR)</option>
+            </select>
+          </div>
+          <div class="field">
+            <span class="field-label">适用增值税核算档位</span>
+            <div class="inline-checks" role="radiogroup" aria-label="增值税档位">
+              <label class="check-pair"><input type="radio" name="vatRate" id="vat-6" value="0.06" checked><span>现代服务 6%</span></label>
+              <label class="check-pair"><input type="radio" name="vatRate" id="vat-9" value="0.09"><span>基建算力 9%</span></label>
+              <label class="check-pair"><input type="radio" name="vatRate" id="vat-13" value="0.13"><span>硬件采购 13%</span></label>
+            </div>
+          </div>
+
+          <div class="field">
+            <label for="computed-gross-total">含税总规模（联动只读精算）</label>
+            <input id="computed-gross-total" type="text" readonly value="1272.00">
+          </div>
+          <div class="field">
+            <label for="computed-subsidy-cap">专项补贴核定上限（联动只读）</label>
+            <input id="computed-subsidy-cap" type="text" readonly value="360.00">
+          </div>
+          <div class="field">
+            <label for="reserve-ratio-range">风险准备金计提比例 (<span id="reserve-ratio-label">8%</span>)</label>
+            <input id="reserve-ratio-range" type="range" min="5" max="20" step="1" value="8">
+          </div>
+
+          <div class="field span-2">
+            <span class="field-label">联合知识产权与违约连带责任补充条款（ContentEditable 富文本根 vs 内部非根不可填充子节点）</span>
+            <div id="clause-preamble-host" class="editor-box" style="min-height:auto;background:#f8fafc;margin-bottom:6px;padding:6px 10px" role="textbox" aria-label="法务固定导语富文本宿主" contenteditable="true">
+              <p id="clause-preamble-para" style="margin:0;font-size:12px;color:var(--muted)">固定法务锚点（富文本内部非根不可直接填充对照）：<span id="clause-locked-chip" class="locked-chip" contenteditable="false" tabindex="0">法务锁死条款 #L-902</span></p>
+            </div>
+            <div id="joint-clause-editor" class="editor-box" role="textbox" aria-label="联合补充条款正文" contenteditable="true"><p id="clause-inner-para">各方承诺按出资权重共享底层专利成果。</p></div>
+          </div>
+
+          <div class="field">
+            <span class="field-label">联合会签审批顺序（支持拖拽排序 Drag）</span>
+            <div class="drag-list" id="approval-chain-list" role="list" aria-label="会签审批顺序">
+              <div class="drag-item" draggable="true" data-stage="tech" id="stage-tech" role="listitem"><span>1. 技术专家委员会初审</span><small>TECH</small></div>
+              <div class="drag-item" draggable="true" data-stage="finance" id="stage-finance" role="listitem"><span>2. 联合财务资金池核验</span><small>FIN</small></div>
+              <div class="drag-item" draggable="true" data-stage="legal" id="stage-legal" role="listitem"><span>3. 合规与知识产权法务会签</span><small>LEGAL</small></div>
+              <div class="drag-item" draggable="true" data-stage="board" id="stage-board" role="listitem"><span>4. 牵头方投委会终审签发</span><small>BOARD</small></div>
+            </div>
+            <output id="approval-order-output">TECH -> FIN -> LEGAL -> BOARD</output>
+          </div>
+
+          <div class="field span-2">
+            <span class="field-label">联合申报协议附件（隐藏 File Chooser + 拖拽投放区双通道）</span>
+            <div style="display:flex;gap:12px;align-items:center;margin-bottom:8px">
+              <input id="joint-hidden-file" type="file" multiple hidden>
+              <button type="button" class="btn" id="btn-trigger-upload">选择联合签章附件</button>
+              <span id="upload-count-badge" style="font-size:12.5px;color:var(--muted)">已挂载 0 份附件</span>
+            </div>
+            <div id="joint-dropzone" class="dropzone" role="button" tabindex="0" aria-label="联合附件拖放区">
+              将联合协议补充包拖放到此处上传（支持中文文件名 / 空文件校验）
+            </div>
+            <output id="joint-files-output">[]</output>
+          </div>
+
+          <div class="field">
+            <span class="field-label">历史归档批次台账（高密度背景 DOM 与结构化抽取对照）</span>
+            <div class="ledger-scroll" id="historical-ledger-wrap">
+              <table class="matrix" id="historical-ledger-table">
+                <caption>历史联合立项参考台账（45 条）</caption>
+                <thead>
+                  <tr><th>立项号</th><th>园区</th><th>核定总额</th><th>状态</th></tr>
+                </thead>
+                <tbody id="historical-ledger-tbody"></tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      </form>
+    </section>
+
+    <section class="panel" aria-labelledby="sec-receipt-title">
+      <div class="section-head">
+        <h2 id="sec-receipt-title">四、联合申报执行回执与审计对账下载</h2>
+        <div style="display:flex;gap:10px">
+          <button type="button" class="btn" id="btn-reset-dirty">清除未保存脏标记</button>
+          <a class="btn" id="download-joint-statement" role="link" aria-disabled="true" data-gate="locked" download style="pointer-events:none;opacity:0.5">下载联合申报核定单 CSV</a>
+        </div>
+      </div>
+      <output id="joint-submit-receipt">尚未提交联合申报</output>
+    </section>
+  </main>
+
+  <aside class="panel" aria-label="联合合规实时校验抽屉">
+    <h2 style="margin:0 0 10px;font-size:15px">实时跨表联合校验（10 项门禁）</h2>
+    <ul class="rule-list" id="validation-rules-list"></ul>
+    <h3 style="margin:16px 0 8px;font-size:13.5px">事件与焦点追踪日志</h3>
+    <output id="joint-event-log">ready</output>
+  </aside>
+</div>
+
+<footer class="sticky-footer" role="contentinfo">
+  <div id="footer-summary-line">牵头方: 未填写 · 联合体: 2 家 (80%) · 含税总额: ¥1272.00 万</div>
+  <div style="display:flex;gap:10px;align-items:center">
+    <button type="button" class="btn" id="btn-preview-joint">生成联合预审快照</button>
+    <button type="button" class="btn primary" id="submit-joint-filing">正式提交联合申报</button>
+  </div>
+</footer>
+
+<script>
+(() => {
+  const $ = (s, r = document) => r.querySelector(s);
+  const $$ = (s, r = document) => Array.from(r.querySelectorAll(s));
+  const emit = (type, data = {}) =>
+    fetch('/event', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ type, page: 'arena-joint-forms', ...data })
+    }).catch(() => {});
+
+  const CITY_MAP = {
+    ZJ: [
+      { value: 'HZ', label: '杭州市 (Hangzhou)' },
+      { value: 'NB', label: '宁波市 (Ningbo)' },
+      { value: 'JX', label: '嘉兴市 (Jiaxing)' }
+    ],
+    GD: [
+      { value: 'SZ', label: '深圳市 (Shenzhen)' },
+      { value: 'GZ', label: '广州市 (Guangzhou)' }
+    ],
+    JS: [
+      { value: 'SU', label: '苏州市 (Suzhou)' },
+      { value: 'NJ', label: '南京市 (Nanjing)' }
+    ]
+  };
+
+  const PARK_MAP = {
+    HZ: [
+      { value: 'HZ_LEGACY_CLOSED', label: '【已封停不可选】杭州老城历史归档科创试验基地（仅存量查询）', disabled: true },
+      { value: 'HZ_ZHIJIANG_MEGA', label: '杭州之江国家新一代人工智能开放创新核心先导产业示范园区（含跨境算力协同保税研发中心二期超长名称截断抗性测试）', disabled: false },
+      { value: 'HZ_BINJIANG_HUB', label: '杭州高新区（滨江）物联网与工业互联网联合创新港', disabled: false }
+    ],
+    NB: [
+      { value: 'NB_YONGJIANG', label: '宁波甬江科创大走廊新材料与高端装备联合中试基地', disabled: false }
+    ],
+    JX: [
+      { value: 'JX_WUZHEN', label: '乌镇世界互联网大会永久会址数字经济算力产业园', disabled: false }
+    ],
+    SZ: [
+      { value: 'SZ_HETAO_COOP', label: '河套深港科技创新合作区深圳园区跨境联合实验室集群（超长全称截断测试节点）', disabled: false },
+      { value: 'SZ_QIANHAI_OLD', label: '【已封停不可选】前海一期旧规过渡试验申报点', disabled: true }
+    ],
+    GZ: [
+      { value: 'GZ_PAZHOU', label: '广州琶洲人工智能与数字经济试验区核心片区', disabled: false }
+    ],
+    SU: [
+      { value: 'SU_SIP_BIO', label: '苏州工业园区独墅湖科教创新区联合研发中心', disabled: false }
+    ],
+    NJ: [
+      { value: 'NJ_ZIJINSHAN', label: '南京紫金山未来网络与通信安全国家联合实验室园区', disabled: false }
+    ]
+  };
+
+  let partners = [
+    { id: 'P1', name: '星海智算（牵头主体）', role: 'lead', share: 50, selfFundRatio: 0.6 },
+    { id: 'P2', name: '江南高等研究院', role: 'research', share: 30, selfFundRatio: 0.3 }
+  ];
+  let uploadedFiles = [];
+  let approvalOrder = ['TECH', 'FIN', 'LEGAL', 'BOARD'];
+  let isDirty = false;
+  let focusLog = [];
+
+  // 1. Populate dense enterprise sidebar tree + 45-row historical reference table (>=1,650 DOM elements)
+  const navChapters = [
+    ['立项总则与联合体资格', ['主体信用穿透核验', '跨境免税名录比对', '股权关联回避声明', '知识产权共有章程', '科研诚信红线承诺', '受益所有人实名穿透', '历史重大违约清零', '牵头主体存续核验']],
+    ['三级属地与产业园政策', ['省级专项配套系数', '设区市人才补贴包', '保税研发设备清单', '能耗与PUE碳排指标', '数据出境安全评估', '园区载体产学研协议', '跨境算力绿色通道', '环评与安评双备案']],
+    ['联合预算与税务精算', ['牵头与成员分摊矩阵', '增值税抵扣链条核验', '自筹资金银行资信函', '风险准备金专户监管', '阶段性里程碑拨付', '跨境外币折算锚点', '财政补贴上限复核', '研发加计扣除台账']],
+    ['会签流转与归档审计', ['技术专家盲评意见', '联合财务中心复核', '法务连带条款锁定', '投委会终审签章包', '电子回执哈希存证', '年度绩效跟踪门禁', '知识产权质押排除', '结项审计底稿归档']],
+    ['持续履约与风控应急', ['核心设备交付里程碑', '成员退出替补预案', '联合资金池双签复核', '季度研发工时审计', '国密时间戳存证核验', '中期评估红黄牌规则', '结余资金按比例退缴', '跨省协同验收联签']]
+  ];
+  $('#compliance-tree').innerHTML = navChapters.map(([group, items], gi) => `
+    <details ${gi < 4 ? 'open' : ''}>
+      <summary><span>${gi + 1}. ${group}</span></summary>
+      <ul>
+        ${items.map((it, ii) => `<li data-nav-code="C${gi + 1}-${ii + 1}"><code>C${gi + 1}.${ii + 1}</code><span>${it}</span><em>MANDATORY</em><strong>§${gi + 1}.${ii + 1}</strong></li>`).join('')}
+      </ul>
+    </details>
+  `).join('');
+
+  $('#historical-ledger-tbody').innerHTML = Array.from({ length: 45 }, (_, idx) => {
+    const code = `HIS-2026-${String(idx + 101).padStart(4, '0')}`;
+    const zone = ['之江先导园', '河套合作区', '独墅湖科创区', '琶洲数经区'][idx % 4];
+    const batch = `B${(idx % 6) + 1}`;
+    const amt = (480 + (idx * 37) % 1900).toFixed(2);
+    const st = idx % 7 === 0 ? '复核中' : '已归档';
+    return `<tr data-ledger-row="${idx + 1}"><td><code>${code}</code> <small><span>[${batch}]</span> <b><span>2026</span></b></small></td><td><span>${zone}</span> <small><em>CN</em> <i><span>Z1</span></i></small></td><td><strong>¥${amt}万</strong> <small><span>CNY</span> <i><span>TAX-6%</span></i></small></td><td><em>${st}</em> <b><span>OK</span></b> <small><b><span>AUDITED</span></b></small></td></tr>`;
+  }).join('');
+
+  // 2. Live FX background ticker (600ms localized DOM mutation)
+  let fxSeq = 0;
+  setInterval(() => {
+    fxSeq += 1;
+    const usd = (7.18 + (fxSeq % 9) * 0.0015).toFixed(4);
+    const eur = (7.76 + (fxSeq % 7) * 0.0020).toFixed(4);
+    const el = $('#fx-live-ticker');
+    if (el) {
+      el.dataset.fxSeq = String(fxSeq);
+      el.textContent = `实时结算汇率 USD/CNY: ${usd} · EUR/CNY: ${eur} (#${fxSeq})`;
+    }
+  }, 600);
+
+  // 3. Genuine 70ms delayed focus-transfer proxy shell -> unlocks & focuses #delayed-focus-target
+  const proxyTrigger = $('#delayed-focus-proxy');
+  const proxyTarget = $('#delayed-focus-target');
+  let handoffTimer = null;
+  function triggerDelayedHandoff(via) {
+    focusLog.push(`proxy-${via}`);
+    proxyTrigger.dataset.focusHandoff = 'arming';
+    clearTimeout(handoffTimer);
+    handoffTimer = setTimeout(() => {
+      proxyTarget.disabled = false;
+      proxyTarget.dataset.focusHandoff = 'ready';
+      proxyTrigger.dataset.focusHandoff = 'transferred';
+      proxyTarget.focus({ preventScroll: true });
+      focusLog.push('handoff-ready');
+      $('#joint-event-log').textContent = JSON.stringify({
+        focusLog,
+        activeId: document.activeElement?.id || null,
+        handoff: proxyTarget.dataset.focusHandoff
+      });
+      emit('delayed-focus-transferred', { via, activeId: document.activeElement?.id || null });
+    }, 70);
+  }
+  proxyTrigger.addEventListener('click', () => triggerDelayedHandoff('click'));
+  proxyTrigger.addEventListener('focus', () => triggerDelayedHandoff('focus'));
+  proxyTarget.addEventListener('blur', () => {
+    focusLog.push('target-blur');
+    $('#joint-event-log').textContent = JSON.stringify({ focusLog, value: proxyTarget.value });
+  });
+
+  // Credit code mask: uppercase + strip spaces/hyphens
+  $('#lead-credit-code').addEventListener('input', (e) => {
+    isDirty = true;
+    const cleaned = e.target.value.toUpperCase().replace(/[\s-]+/g, '').slice(0, 18);
+    if (e.target.value !== cleaned) e.target.value = cleaned;
+    recomputeAll();
+  });
+
+  // 4. 3-level asynchronous cascading selects
+  let cascadeTimer = null;
+  $('#cascade-province').addEventListener('change', (e) => {
+    isDirty = true;
+    const prov = e.target.value;
+    const citySel = $('#cascade-city');
+    const parkSel = $('#cascade-park');
+    citySel.disabled = true;
+    citySel.innerHTML = '<option value="">加载设区市中...</option>';
+    parkSel.disabled = true;
+    parkSel.innerHTML = '<option value="">-- 先选设区市 --</option>';
+    clearTimeout(cascadeTimer);
+    if (!prov) {
+      citySel.innerHTML = '<option value="">-- 先选省份 --</option>';
+      recomputeAll();
+      return;
+    }
+    cascadeTimer = setTimeout(() => {
+      const cities = CITY_MAP[prov] || [];
+      citySel.innerHTML = '<option value="">-- 请选择设区市 --</option>' +
+        cities.map(c => `<option value="${c.value}">${c.label}</option>`).join('');
+      citySel.disabled = false;
+      recomputeAll();
+      emit('cascade-cities-loaded', { province: prov, count: cities.length });
+    }, 140);
+  });
+
+  $('#cascade-city').addEventListener('change', (e) => {
+    isDirty = true;
+    const city = e.target.value;
+    const parkSel = $('#cascade-park');
+    parkSel.disabled = true;
+    parkSel.innerHTML = '<option value="">加载落地园区中...</option>';
+    if (!city) {
+      parkSel.innerHTML = '<option value="">-- 先选设区市 --</option>';
+      recomputeAll();
+      return;
+    }
+    setTimeout(() => {
+      const parks = PARK_MAP[city] || [];
+      parkSel.innerHTML = '<option value="">-- 请选择落地产业园 --</option>' +
+        parks.map(p => `<option value="${p.value}" ${p.disabled ? 'disabled' : ''}>${p.label}</option>`).join('');
+      parkSel.disabled = false;
+      recomputeAll();
+      emit('cascade-parks-loaded', { city, count: parks.length });
+    }, 140);
+  });
+
+  $('#cascade-park').addEventListener('change', () => {
+    isDirty = true;
+    recomputeAll();
+  });
+
+  // 5. Render & bind Form B partners matrix
+  function renderPartners() {
+    const tbody = $('#partners-tbody');
+    const totalBudget = Number($('#total-budget-wan').value) || 0;
+    tbody.innerHTML = partners.map((p, i) => {
+      const alloc = ((totalBudget * (Number(p.share) || 0)) / 100).toFixed(2);
+      const selfFund = (Number(alloc) * p.selfFundRatio).toFixed(2);
+      return `
+        <tr data-partner-id="${p.id}">
+          <td>${i + 1}</td>
+          <td><input id="partner-name-${i}" data-idx="${i}" data-field="name" type="text" value="${p.name.replace(/"/g, '&quot;')}" aria-label="成员${i + 1}名称"></td>
+          <td>
+            <select id="partner-role-${i}" data-idx="${i}" data-field="role" aria-label="成员${i + 1}角色">
+              <option value="lead" ${p.role === 'lead' ? 'selected' : ''}>牵头申报方</option>
+              <option value="research" ${p.role === 'research' ? 'selected' : ''}>联合科研院所</option>
+              <option value="supply" ${p.role === 'supply' ? 'selected' : ''}>核心装备配套方</option>
+              <option value="pilot" ${p.role === 'pilot' ? 'selected' : ''}>场景验证应用方</option>
+            </select>
+          </td>
+          <td><input id="partner-share-${i}" data-idx="${i}" data-field="share" type="number" min="1" max="100" step="1" value="${p.share}" aria-label="成员${i + 1}出资权重"></td>
+          <td class="partner-alloc-cell" id="partner-alloc-${i}">${alloc}</td>
+          <td class="partner-selffund-cell" id="partner-selffund-${i}">${selfFund}</td>
+          <td>
+            <button type="button" class="btn danger btn-remove-partner" data-idx="${i}" ${partners.length <= 2 ? 'disabled' : ''}>移除</button>
+          </td>
+        </tr>
+      `;
+    }).join('');
+
+    tbody.querySelectorAll('input, select').forEach(el => {
+      el.addEventListener('input', onPartnerFieldChange);
+      el.addEventListener('change', onPartnerFieldChange);
+    });
+    tbody.querySelectorAll('.btn-remove-partner').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const idx = Number(btn.dataset.idx);
+        if (partners.length > 2) {
+          partners.splice(idx, 1);
+          isDirty = true;
+          renderPartners();
+          recomputeAll();
+        }
+      });
+    });
+  }
+
+  function onPartnerFieldChange(e) {
+    isDirty = true;
+    const idx = Number(e.target.dataset.idx);
+    const field = e.target.dataset.field;
+    if (!partners[idx]) return;
+    if (field === 'share') {
+      partners[idx].share = Number(e.target.value) || 0;
+      const totalBudget = Number($('#total-budget-wan').value) || 0;
+      partners.forEach((p, i) => {
+        const alloc = ((totalBudget * (Number(p.share) || 0)) / 100).toFixed(2);
+        const selfFund = (Number(alloc) * p.selfFundRatio).toFixed(2);
+        const aCell = $(`#partner-alloc-${i}`);
+        const sCell = $(`#partner-selffund-${i}`);
+        if (aCell) aCell.textContent = alloc;
+        if (sCell) sCell.textContent = selfFund;
+      });
+    } else {
+      partners[idx][field] = e.target.value;
+    }
+    recomputeAll();
+  }
+
+  $('#btn-add-partner').addEventListener('click', () => {
+    isDirty = true;
+    const nextNum = partners.length + 1;
+    partners.push({
+      id: `P${Date.now() % 10000}`,
+      name: `新增联合验证单位 #${nextNum}`,
+      role: 'pilot',
+      share: 5,
+      selfFundRatio: 0.4
+    });
+    renderPartners();
+    recomputeAll();
+    emit('partner-added', { count: partners.length });
+  });
+
+  $('#btn-balance-shares').addEventListener('click', () => {
+    isDirty = true;
+    const others = partners.slice(0, -1).reduce((acc, p) => acc + (Number(p.share) || 0), 0);
+    const remain = Math.max(1, 100 - others);
+    partners[partners.length - 1].share = remain;
+    renderPartners();
+    recomputeAll();
+    emit('shares-balanced', { lastShare: remain });
+  });
+
+  // 6. Drag-and-drop approval chain reordering
+  let draggedStage = null;
+  function bindDragChain() {
+    const list = $('#approval-chain-list');
+    $$('.drag-item', list).forEach(item => {
+      item.addEventListener('dragstart', (e) => {
+        draggedStage = item;
+        if (e.dataTransfer) e.dataTransfer.setData('text/plain', item.dataset.stage);
+      });
+      item.addEventListener('dragover', (e) => {
+        e.preventDefault();
+        item.classList.add('drag-over');
+      });
+      item.addEventListener('dragleave', () => item.classList.remove('drag-over'));
+      item.addEventListener('drop', (e) => {
+        e.preventDefault();
+        item.classList.remove('drag-over');
+        if (draggedStage && draggedStage !== item) {
+          const all = $$('.drag-item', list);
+          const fromIdx = all.indexOf(draggedStage);
+          const toIdx = all.indexOf(item);
+          if (fromIdx < toIdx) item.after(draggedStage);
+          else item.before(draggedStage);
+          approvalOrder = $$('.drag-item', list).map((el, idx) => {
+            const labelSpan = el.querySelector('span');
+            if (labelSpan) labelSpan.textContent = labelSpan.textContent.replace(/^\d+\./, `${idx + 1}.`);
+            return el.dataset.stage.toUpperCase();
+          });
+          $('#approval-order-output').textContent = approvalOrder.join(' -> ');
+          emit('approval-reordered', { order: approvalOrder });
+        }
+      });
+    });
+  }
+  bindDragChain();
+
+  // 7. Dual upload handlers
+  async function handleFiles(fileList, channel) {
+    isDirty = true;
+    const parsed = await Promise.all(Array.from(fileList).map(async f => ({
+      name: f.name,
+      size: f.size,
+      type: f.type || 'application/octet-stream',
+      preview: (await f.text()).slice(0, 80)
+    })));
+    uploadedFiles = parsed;
+    $('#upload-count-badge').textContent = `已挂载 ${parsed.length} 份附件（来源: ${channel}）`;
+    $('#joint-files-output').textContent = JSON.stringify(parsed);
+    recomputeAll();
+    emit('joint-files-uploaded', { channel, files: parsed });
+  }
+  $('#btn-trigger-upload').addEventListener('click', () => $('#joint-hidden-file').click());
+  $('#joint-hidden-file').addEventListener('change', (e) => handleFiles(e.target.files, 'chooser'));
+  $('#joint-dropzone').addEventListener('dragover', (e) => e.preventDefault());
+  $('#joint-dropzone').addEventListener('drop', (e) => {
+    e.preventDefault();
+    handleFiles(e.dataTransfer.files, 'dropzone');
+  });
+
+  // 8. Beforeunload protection
+  window.addEventListener('beforeunload', (e) => {
+    if ($('#arm-beforeunload-guard').checked && isDirty) {
+      e.preventDefault();
+      e.returnValue = '';
+    }
+  });
+  $('#btn-reset-dirty').addEventListener('click', () => {
+    isDirty = false;
+    $('#joint-event-log').textContent = 'dirty=false';
+  });
+
+  // 9. Cross-form live calculation & 10-rule compliance engine
+  function recomputeAll() {
+    const leadName = $('#lead-org-name').value.trim();
+    if (leadName && partners[0]) {
+      partners[0].name = leadName;
+      const p0Input = $('#partner-name-0');
+      if (p0Input && document.activeElement !== p0Input) p0Input.value = leadName;
+    }
+
+    const totalBudget = Number($('#total-budget-wan').value) || 0;
+    const vatRate = Number($('input[name="vatRate"]:checked')?.value || 0.06);
+    const currency = $('#settlement-currency').value;
+    const fxFactor = currency === 'USD' ? (1 / 7.18) : currency === 'EUR' ? (1 / 7.76) : 1;
+    const reservePct = Number($('#reserve-ratio-range').value) || 8;
+    $('#reserve-ratio-label').textContent = `${reservePct}%`;
+
+    const grossWan = (totalBudget * (1 + vatRate) * fxFactor).toFixed(2);
+    const subsidyCap = (totalBudget * 0.30 * fxFactor).toFixed(2);
+    $('#computed-gross-total').value = grossWan;
+    $('#computed-subsidy-cap').value = subsidyCap;
+    $('#tax-formula-pill').textContent = `${currency} · 税率 ${(vatRate * 100).toFixed(0)}% · 准备金 ${reservePct}%`;
+
+    let shareSum = 0;
+    let allocSum = 0;
+    let selfSum = 0;
+    partners.forEach((p, i) => {
+      const sh = Number(p.share) || 0;
+      shareSum += sh;
+      const alloc = (totalBudget * sh) / 100;
+      const sf = alloc * p.selfFundRatio;
+      allocSum += alloc;
+      selfSum += sf;
+      const aCell = $(`#partner-alloc-${i}`);
+      const sCell = $(`#partner-selffund-${i}`);
+      if (aCell) aCell.textContent = alloc.toFixed(2);
+      if (sCell) sCell.textContent = sf.toFixed(2);
+    });
+
+    $('#tfoot-share-total').textContent = `${shareSum}%`;
+    $('#tfoot-allocated-total').textContent = allocSum.toFixed(2);
+    $('#tfoot-self-fund-total').textContent = selfSum.toFixed(2);
+    $('#tfoot-partner-count').textContent = `${partners.length} 家`;
+    $('#share-sum-badge').textContent = `当前权重合计: ${shareSum}%${shareSum === 100 ? '（已配平 ✅）' : '（须精确等于 100%）'}`;
+    $('#share-sum-badge').className = `pill ${shareSum === 100 ? 'ok' : 'warn'}`;
+
+    const pin = $('#lead-auth-pin').value;
+    const park = $('#cascade-park').value;
+    const parkOpt = $('#cascade-park option:checked');
+    const parkValid = Boolean(park) && !(parkOpt && parkOpt.disabled);
+    const clauseText = $('#joint-clause-editor').innerText.trim();
+
+    const rules = [
+      ['R1 牵头单位名称已填写', leadName.length >= 2],
+      ['R2 统一信用代码规范 (>=10位大写)', /^[0-9A-Z]{10,18}$/.test($('#lead-credit-code').value)],
+      ['R3 敏感签章授权码精确 8 位', pin.length === 8],
+      ['R4 只读流水号未被篡改', $('#lead-readonly-serial').value === 'JNT-2026-8801'],
+      ['R5 省/市/产业园三级级联有效', Boolean($('#cascade-province').value && $('#cascade-city').value && parkValid)],
+      ['R6 联合体出资权重精确等于 100%', shareSum === 100],
+      ['R7 联合体不少于 3 家成员', partners.length >= 3],
+      ['R8 五类立项时间表齐全', ['joint-date', 'joint-time-sec', 'joint-datetime', 'joint-month', 'joint-week'].every(id => Boolean($('#' + id).value))],
+      ['R9 补充协议正文非空 (>=10字)', clauseText.length >= 10],
+      ['R10 总预算区间合规 (100~50000万)', totalBudget >= 100 && totalBudget <= 50000]
+    ];
+
+    $('#validation-rules-list').innerHTML = rules.map(([label, ok]) =>
+      `<li class="rule-item" data-ok="${ok}"><span>${label}</span><strong>${ok ? 'PASS' : 'WAIT'}</strong></li>`
+    ).join('');
+
+    const allOk = rules.every(([, ok]) => ok);
+    const pill = $('#joint-readiness-pill');
+    pill.textContent = allOk ? '联合校验: 10/10 全部通过' : `联合校验: ${rules.filter(([, ok]) => ok).length}/10 通过`;
+    pill.className = `pill ${allOk ? 'ok' : 'warn'}`;
+    $('#footer-summary-line').textContent =
+      `牵头方: ${leadName || '未填写'} · 联合体: ${partners.length} 家 (${shareSum}%) · 含税总额: ${currency} ${grossWan} 万`;
+    return { allOk, shareSum, grossWan, subsidyCap, rules };
+  }
+
+  ['lead-org-name', 'lead-auth-pin', 'lead-short-code', 'delayed-focus-target', 'total-budget-wan', 'settlement-currency',
+   'reserve-ratio-range', 'joint-date', 'joint-time-sec', 'joint-datetime', 'joint-month', 'joint-week',
+   'explicit-tax-exempt', 'wrapped-cross-border'].forEach(id => {
+    const el = $('#' + id);
+    if (el) {
+      el.addEventListener('input', () => { isDirty = true; recomputeAll(); });
+      el.addEventListener('change', () => { isDirty = true; recomputeAll(); });
+    }
+  });
+  $$('input[name="vatRate"]').forEach(r => r.addEventListener('change', () => { isDirty = true; recomputeAll(); }));
+  $('#qual-multi').addEventListener('change', () => { isDirty = true; recomputeAll(); });
+  $('#joint-clause-editor').addEventListener('input', () => { isDirty = true; recomputeAll(); });
+
+  function collectSnapshot(kind) {
+    const state = recomputeAll();
+    return {
+      kind,
+      leadOrgName: $('#lead-org-name').value.trim(),
+      creditCode: $('#lead-credit-code').value,
+      authPinLength: $('#lead-auth-pin').value.length,
+      readonlySerial: $('#lead-readonly-serial').value,
+      shortCode: $('#lead-short-code').value,
+      delayedNote: $('#delayed-focus-target').value,
+      delayedFocusHandoff: $('#delayed-focus-target').dataset.focusHandoff,
+      province: $('#cascade-province').value,
+      city: $('#cascade-city').value,
+      park: $('#cascade-park').value,
+      temporal: {
+        date: $('#joint-date').value,
+        time: $('#joint-time-sec').value,
+        datetime: $('#joint-datetime').value,
+        month: $('#joint-month').value,
+        week: $('#joint-week').value
+      },
+      qualifications: Array.from($('#qual-multi').selectedOptions).map(o => o.value),
+      taxExempt: $('#explicit-tax-exempt').checked,
+      crossBorderPool: $('#wrapped-cross-border').checked,
+      partners: partners.map(p => ({ id: p.id, name: p.name, role: p.role, share: p.share })),
+      shareSum: state.shareSum,
+      currency: $('#settlement-currency').value,
+      vatRate: $('input[name="vatRate"]:checked')?.value,
+      grossTotalWan: state.grossWan,
+      subsidyCapWan: state.subsidyCap,
+      reserveRatioPct: Number($('#reserve-ratio-range').value),
+      clauseText: $('#joint-clause-editor').innerText.trim(),
+      approvalOrder,
+      uploadedCount: uploadedFiles.length,
+      allRulesPassed: state.allOk
+    };
+  }
+
+  $('#btn-preview-joint').addEventListener('click', () => {
+    const snap = collectSnapshot('preview');
+    $('#joint-submit-receipt').textContent = JSON.stringify(snap, null, 2);
+    emit('joint-filing-preview', snap);
+  });
+
+  $('#submit-joint-filing').addEventListener('click', () => {
+    const snap = collectSnapshot('committed');
+    if (!snap.allRulesPassed) {
+      $('#joint-submit-receipt').textContent = JSON.stringify({ ok: false, error: 'VALIDATION_INCOMPLETE', snapshot: snap }, null, 2);
+      emit('joint-filing-rejected', { shareSum: snap.shareSum });
+      return;
+    }
+    isDirty = false;
+    const dl = $('#download-joint-statement');
+    const receiptNo = 'JNT-COMMIT-2026-9901';
+    // The statement link only gains an href after a fully validated submission; the
+    // server additionally rejects (403) any joint-filing download without the receipt.
+    dl.style.pointerEvents = 'auto';
+    dl.style.opacity = '1';
+    dl.removeAttribute('aria-disabled');
+    dl.dataset.gate = 'unlocked';
+    dl.href = `/download?scene=joint-filing&receipt=${receiptNo}&org=${encodeURIComponent(snap.leadOrgName)}&gross=${encodeURIComponent(snap.grossTotalWan)}`;
+    const resultPayload = { ok: true, receiptNo, snapshot: snap };
+    $('#joint-submit-receipt').textContent = JSON.stringify(resultPayload, null, 2);
+    emit('joint-filing-submitted', resultPayload);
+  });
+
+  renderPartners();
+  recomputeAll();
+  const nodeCount = document.getElementsByTagName('*').length;
+  $('#dom-complexity-badge').textContent = `DOM 节点: ${nodeCount}`;
+})();
+</script>
+</body>
+</html>
