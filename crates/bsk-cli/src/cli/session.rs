@@ -366,6 +366,27 @@ pub fn stop_session(sock: PathBuf, session_id: &str) -> Result<StopReply, CliErr
     )
 }
 
+pub(super) fn stop_record_session(sock: PathBuf, session_id: &str) -> Result<(), CliError> {
+    let reply: StopReply = call(
+        sock,
+        Method::SessionStop,
+        Some(serde_json::json!({ "session_id": session_id, "recording": true })),
+        SESSION_STOP_IPC_TIMEOUT,
+    )?;
+    if let Some(failure) = reply.failed.into_iter().next() {
+        return Err(CliError::Rpc {
+            code: failure.code,
+            message: failure.message,
+            data: Some(serde_json::json!({
+                "session_id": session_id,
+                "return_failures": reply.return_failures,
+            })),
+            source: None,
+        });
+    }
+    Ok(())
+}
+
 /// Render a `session.start` failure (review I3).
 ///
 /// The previous implementation hand-rolled `eprintln!("error: ...")`
