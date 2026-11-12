@@ -680,6 +680,7 @@ export function waitForLifecyclePassive(
     let probeRevision = 0;
     let dialogBudgetUsed = false;
     let listenerSub: { dispose(): void } | null = null;
+    let releaseTabAttachment: (() => void) | undefined;
     let timer: ReturnType<typeof setTimeout> | null = null;
     let graceTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -690,6 +691,8 @@ export function waitForLifecyclePassive(
       if (graceTimer) clearTimeout(graceTimer);
       timer = graceTimer = null;
       signal?.removeEventListener("abort", onAbort);
+      releaseTabAttachment?.();
+      releaseTabAttachment = undefined;
     };
     const finish = (outcome: PassiveWaitOutcome) => {
       if (settled) return;
@@ -878,6 +881,7 @@ export function waitForLifecyclePassive(
       finish({ reached: "cancelled" });
       return;
     }
+    releaseTabAttachment = cdp.retainTabAttachment?.(expectedTabId);
     signal?.addEventListener("abort", onAbort, { once: true });
     timer = setTimeout(onTimeout, timeoutMs);
 
