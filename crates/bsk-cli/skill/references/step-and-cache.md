@@ -116,8 +116,27 @@ bsk cooperate sync --session SID --baseline /absolute/new-step.json \
 the same session and tab, complete activity history, `kind:unchanged` and no field
 changes. The CLI adds the existing VOM to that reply and marks its original capture
 context with `observation_origin.kind:reused`. The newly issued context still comes
-only from the live sync. Mismatches, deltas, filtered files and missing history do
-not reuse the cached text; inspect the returned state. A new baseline always wins.
+only from the live sync. Mismatches, field deltas, filtered files and missing history
+do not reuse the cached text; inspect the returned state. A new baseline always wins.
+
+Under target policy a sync may also answer `kind:delta` with `observation_patch.lines`
+when the only page activity since the predecessor replaced visible text in place.
+`changes` then lists each `kind:text` replacement with its `previous_value`, `value`
+and the 1-based VOM `lines` it touched, and `previous_observation_id` names the exact
+version the patch applies to. With `--baseline` pointing at that version the CLI applies
+the patch, saves the merged observation through `--save-full`
+(`observation_origin.kind:merged`, `cache_reuse.reason:exact_text_delta_predecessor`)
+and leaves the page text out of stdout (`cache_reuse.observation:saved`); read it with
+`view`. Chain the next sync from the newly saved file. Without the exact predecessor
+nothing is merged: apply the line patch yourself or sync again for a baseline.
+
+Anything the extension cannot express as such a patch returns a fresh `baseline` with
+a `baseline_reason`, for example `structure_changed`, `refs_replaced`, `frame_replaced`,
+`focus_changed`, `human_activity`, `text_log_gap`, `text_outside_observation`,
+`text_ambiguous`, `token_budget_changed` or `token_budget_shift`. Keep the same
+`--max-tokens` across syncs you want patched. Pages with child frames, and text inside
+controls, headings, labels, form fields, table rows or list items, always take the
+baseline path.
 
 For readonly date pickers, click to open the picker instead of filling it. If VOM
 exposes only a containing control, inspect that observed ref with `get-html --ref`
