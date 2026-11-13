@@ -19,6 +19,9 @@ determines which versions can connect.
   passive inner wrappers, inherited `cursor: pointer` / click-skin descendants, and native
   `<input>` / `<textarea>` / `<select>` controls folded without duplicate refs; added
   required pre-release audit scenario `EDGE-NESTED-MENU-REFS`.
+- `bsk window resize` accepts the one-pixel frame Windows adds to the outer
+  bounds, so a resize that took effect no longer returns
+  `window_resize_constrained`.
 
 ## [0.5.0] - 2026-11-12
 
