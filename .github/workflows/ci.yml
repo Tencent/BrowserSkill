@@ -43,6 +43,7 @@ jobs:
       - uses: actions/checkout@v6
       - run: python3 scripts/windows-release.test.py
       - run: python3 scripts/macos-release.test.py
+      - run: python3 evals/browser/skills/browserskill-release-test/scripts/test_release_audit.py
       - run: node --test scripts/render-version-json.test.mjs
 
   rust:
@@ -289,7 +290,7 @@ jobs:
         working-directory: apps/extension
         env:
           BSK_CLICK_CHROME: google-chrome
-        run: pnpm exec vitest run src/tools/__tests__/*click*.browser.test.ts src/tools/__tests__/observation-layers.browser.test.ts src/debug/__tests__/*.browser.test.ts
+        run: pnpm exec vitest run src/tools/__tests__/*click*.browser.test.ts src/tools/__tests__/observation-layers.browser.test.ts src/tools/__tests__/stealth-stripper.browser.test.ts src/debug/__tests__/*.browser.test.ts
 
       - name: Run element wait browser regression
         working-directory: apps/extension
@@ -303,11 +304,11 @@ jobs:
           BSK_CLICK_CHROME: google-chrome
         run: pnpm exec vitest run src/cooperation/live-text.browser.test.ts
 
-      - name: Run same-document navigation and passive-read ref browser regressions
+      - name: Run navigation lifecycle and passive-read ref browser regressions
         working-directory: apps/extension
         env:
           BSK_NAV_CHROME: google-chrome
-        run: pnpm exec vitest run src/tools/__tests__/navigation-same-document.browser.test.ts
+        run: pnpm exec vitest run src/tools/__tests__/navigation*.browser.test.ts
 
       - name: Run emulation-lifecycle browser regression
         working-directory: apps/extension

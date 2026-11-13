@@ -13,12 +13,16 @@ import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import threading
 import uuid
 
 SKILL = Path(__file__).resolve().parents[1]
 
 ACTION_COMMANDS = {
+    "open",
+    "close",
+    "ledger resolve",
     "click",
     "fill",
     "select",
@@ -49,6 +53,8 @@ ACTION_COMMANDS = {
 }
 
 READ_COMMANDS = {
+    "sync",
+    "ledger status",
     "read",
     "extract discover",
     "extract table",
@@ -281,6 +287,14 @@ def extract_metrics(cmd, exit_code, parsed, elapsed_ms):
     elif cmd == "recipe draft":
         rpc_calls = 3 if exit_code == 0 else 1
         browser_calls = 2 if exit_code == 0 else 0
+    elif cmd == "open":
+        # `bsk open` = resolve/start session RPC + tool.navigate + settled sync
+        # (crates/bsk-cli/src/cli/lifecycle.rs::dispatch_open); the latter two hit the browser.
+        rpc_calls = 3 if exit_code == 0 else 1
+        browser_calls = 2 if exit_code == 0 else 0
+    elif cmd in ("ledger status", "ledger resolve"):
+        rpc_calls = 1
+        browser_calls = 0
     elif isinstance(j.get("rpc_calls"), int):
         rpc_calls = j["rpc_calls"]
         browser_calls = j.get("browser_calls", rpc_calls)
@@ -309,10 +323,23 @@ def extract_metrics(cmd, exit_code, parsed, elapsed_ms):
     post = j.get("post") if isinstance(j.get("post"), dict) else {}
     obs = j.get("observation") if isinstance(j.get("observation"), dict) else {}
     post_obs = post.get("observation") if isinstance(post.get("observation"), dict) else {}
-    obs_text = obs.get("text") or post_obs.get("text") or ""
-    obs_kind = j.get("kind") or post.get("kind")
+    obs_text = (
+        obs.get("text")
+        or post_obs.get("text")
+        or (j.get("vom") if isinstance(j.get("vom"), str) else "")
+        or (j.get("delta") if isinstance(j.get("delta"), str) else "")
+    )
+    obs_kind = (
+        j.get("kind")
+        or post.get("kind")
+        or ("unchanged" if j.get("unchanged") is True else None)
+        or ("delta" if isinstance(j.get("delta"), str) else None)
+        or ("full" if isinstance(j.get("vom"), str) else None)
+    )
     origin = j.get("observation_origin") or post.get("observation_origin") or {}
-    reused = isinstance(origin, dict) and origin.get("kind") == "reused"
+    reused = (isinstance(origin, dict) and origin.get("kind") == "reused") or (
+        j.get("unchanged") is True
+    )
     tool_elapsed = j.get("elapsed_ms") if isinstance(j.get("elapsed_ms"), (int, float)) else None
 
     return {
@@ -362,8 +389,20 @@ def semantic_failure(meta, value):
     if cmd == "read":
         if not isinstance(j, dict) or not isinstance(j.get("items"), list):
             return "Machine-readable items array required for read"
+    if cmd in ["open", "sync"] and "--json" in (value.get("argv") or []):
+        if not isinstance(j, dict):
+            return "Machine-readable result required for " + cmd
     if (
-        cmd in ["navigate", "wait-for-navigation"]
+        cmd
+        in [
+            "open",
+            "navigate",
+            "navigate back",
+            "navigate forward",
+            "navigate-back",
+            "navigate-forward",
+            "wait-for-navigation",
+        ]
         and isinstance(j, dict)
         and j.get("reached") == "timeout"
     ):
@@ -429,10 +468,10 @@ def init(args):
     target = out / "fixtures"
     shutil.copytree(assets, target)
     for p in target.glob("*.html"):
-        p.write_text(
-            p.read_text().replace("localhost:4187", f"localhost:{args.port}"),
-            encoding="utf-8",
-        )
+        text = p.read_text(encoding="utf-8")
+        text = text.replace("localhost:4187", f"localhost:{args.port}")
+        text = text.replace("127.0.0.1:4187", f"127.0.0.1:{args.port}")
+        p.write_text(text, encoding="utf-8")
     (target / "empty.txt").write_bytes(b"")
     (target / "upload 中文.txt").write_text(
         "合成上传内容 👋\n第二行\n", encoding="utf-8"
@@ -449,6 +488,29 @@ def init(args):
             ensure_ascii=False,
         )
     )
+
+
+def resolve_admin_home(root):
+    admin_dir = Path(root).resolve() / "admin-runtime"
+    admin_dir.mkdir(parents=True, exist_ok=True)
+    if sys.platform == "win32":
+        return str(admin_dir)
+    sock_probe = str(admin_dir / "run" / "daemon.sock")
+    if len(sock_probe.encode("utf-8")) <= 96:
+        return str(admin_dir)
+    tag = hashlib.sha256(str(admin_dir).encode("utf-8")).hexdigest()[:12]
+    tmp_root = Path("/tmp") if Path("/tmp").is_dir() else Path(tempfile.gettempdir())
+    link = tmp_root / f"bsk-adm-{tag}"
+    try:
+        if link.is_symlink() or link.exists():
+            if link.resolve() == admin_dir:
+                return str(link)
+            if link.is_symlink():
+                link.unlink()
+        link.symlink_to(admin_dir, target_is_directory=True)
+        return str(link)
+    except OSError:
+        return str(admin_dir)
 
 
 def execute(args):
@@ -476,15 +538,17 @@ def execute(args):
         BSK_AUTO_UPDATE="off",
         BSK_RECIPES=os.environ.get("BSK_RECIPES", "1"),
     )
+    explicit_env = {}
     for item in getattr(args, "env", None) or []:
         if "=" not in item:
             raise ValueError("Environment override must be KEY=VALUE")
         k, v = item.split("=", 1)
-        env[k] = v
+        explicit_env[k] = v
     exe = cfg["bsk"]
     if args.lane == "admin":
         exe = cfg["binary"]
-        env["BSK_HOME"] = str(root / "admin-runtime")
+        env["BSK_HOME"] = resolve_admin_home(root)
+    env.update(explicit_env)
     stdin_path = within(root, args.stdin_file) if args.stdin_file else None
     cmd_name = canonical(argv, inv["commands"])
     started_iso = now()
@@ -659,6 +723,344 @@ def read_record(root, record_id):
     }
 
 
+VOM_DRAG_HINTS = ("[draggable]", "[drop-target]", "[drag-handle]")
+VOM_NAME_STATES = (" [has-submenu]", " [expanded]")
+
+
+def normalize_ws(text):
+    return " ".join(str(text).split())
+
+
+def parse_vom_ref_rows(text):
+    if not isinstance(text, str):
+        return None
+    rows = []
+    has_header = False
+    scope_indent = None
+    decoder = json.JSONDecoder()
+    for raw in text.splitlines():
+        line = raw.lstrip(" ")
+        indent = len(raw) - len(line)
+        if scope_indent is not None:
+            if indent > scope_indent:
+                continue
+            scope_indent = None
+        if line.startswith("[§ active:"):
+            scope_indent = indent
+            continue
+        if line.startswith("@vom "):
+            has_header = True
+            continue
+        m = re.match(r"^@(e[0-9]+)\s+([A-Za-z][A-Za-z0-9]*)(?:\s+(.*))?$", line)
+        if not m:
+            continue
+        ref = "@" + m.group(1)
+        role = m.group(2)
+        rest = (m.group(3) or "").lstrip(" ")
+        for hint in VOM_DRAG_HINTS:
+            if rest.startswith(hint):
+                rest = rest[len(hint) :].lstrip(" ")
+        name = None
+        if rest.startswith('"'):
+            try:
+                parsed_name, _ = decoder.raw_decode(rest)
+                if isinstance(parsed_name, str):
+                    for state in VOM_NAME_STATES:
+                        if parsed_name.endswith(state):
+                            parsed_name = parsed_name[: -len(state)]
+                            break
+                    name = normalize_ws(parsed_name)
+            except ValueError:
+                name = None
+        rows.append({"ref": ref, "role": role, "name": name, "line": raw})
+    return rows if has_header else None
+
+
+def vom_has_no_ref(text, expected):
+    rows = parse_vom_ref_rows(text)
+    if rows is None or not isinstance(expected, list) or not expected:
+        return False
+    forbidden = {
+        normalize_ws(item["name"] if isinstance(item, dict) else item)
+        for item in expected
+    }
+    return all(
+        r["role"].lower() == "canvas" or r["name"] not in forbidden for r in rows
+    )
+
+
+def vom_distinct_item_refs(text, expected):
+    rows = parse_vom_ref_rows(text)
+    if rows is None or not isinstance(expected, list) or not expected:
+        return None
+    refs = []
+    for item in expected:
+        if not isinstance(item, dict) or "role" not in item or "name" not in item:
+            return None
+        role = str(item["role"]).lower()
+        name = normalize_ws(item["name"])
+        matches = [
+            r["ref"]
+            for r in rows
+            if r["role"].lower() == role and r["name"] == name
+        ]
+        if len(matches) != 1:
+            return None
+        refs.append(matches[0])
+    return refs if len(set(refs)) == len(refs) else None
+
+
+def record_vom_text(value):
+    j = value.get("json")
+    if isinstance(j, dict):
+        for ptr in ("/vom", "/observation/text", "/text"):
+            try:
+                cand = pointer(j, ptr)
+            except (KeyError, IndexError, TypeError, ValueError):
+                continue
+            if isinstance(cand, str) and "@vom " in cand:
+                return cand
+    out = value.get("stdout")
+    return out if isinstance(out, str) and "@vom " in out else None
+
+
+def extract_click_ref(argv):
+    tokens = list(argv or [])
+    if tokens and tokens[0] == "click":
+        tokens = tokens[1:]
+    if any(t == "--selector" or t.startswith("--selector=") for t in tokens):
+        return None
+    flags_with_value = {
+        "--session",
+        "--scope",
+        "--tab-id",
+        "--button",
+        "--click-count",
+        "--count",
+        "--context",
+        "--observation",
+        "--depends-on",
+        "--expect",
+        "--modifiers",
+        "--timeout",
+        "--capture",
+        "--image-x",
+        "--image-y",
+    }
+    skip_next = False
+    positional = []
+    for i, tok in enumerate(tokens):
+        if skip_next:
+            skip_next = False
+            continue
+        if tok == "--ref" and i + 1 < len(tokens):
+            cand = tokens[i + 1]
+            return ("@" + cand.lstrip("@")) if re.fullmatch(r"@?e[0-9]+", cand) else None
+        if tok.startswith("--ref="):
+            cand = tok.split("=", 1)[1]
+            return ("@" + cand.lstrip("@")) if re.fullmatch(r"@?e[0-9]+", cand) else None
+        if tok in flags_with_value:
+            skip_next = True
+            continue
+        if tok.startswith("-"):
+            continue
+        positional.append(tok)
+    if len(positional) == 1 and re.fullmatch(r"@?e[0-9]+", positional[0]):
+        return "@" + positional[0].lstrip("@")
+    return None
+
+
+def verify_nested_menu_contract(metas_and_values, contract):
+    items = contract["items"]
+    click_item = contract["click_item"]
+    expected_receipt = normalize_ws(contract["expected_receipt"])
+    obs_cmds = ("sync", "cooperate sync", "observe", "snapshot")
+    hover_indices = [
+        i
+        for i, (m, _) in enumerate(metas_and_values)
+        if m["command"] == "hover" and m["exit_code"] == 0
+    ]
+    if len(hover_indices) < 2:
+        raise ValueError("Nested menu contract requires two-level hover")
+    second_hover_idx = hover_indices[1]
+    pre_obs = [
+        (m, v)
+        for m, v in metas_and_values[:second_hover_idx]
+        if m["command"] in obs_cmds
+    ]
+    if not pre_obs:
+        raise ValueError("Missing pre-expansion VOM observation before secondary hover")
+    for m, v in pre_obs:
+        if not vom_has_no_ref(record_vom_text(v), items):
+            raise ValueError(
+                "Pre-expansion " + m["command"] + " exposed actionable child ref"
+            )
+    click_candidates = [
+        i
+        for i in range(second_hover_idx + 1, len(metas_and_values))
+        if metas_and_values[i][0]["command"] == "click"
+        and metas_and_values[i][0]["exit_code"] == 0
+        and extract_click_ref(metas_and_values[i][0]["argv"])
+    ]
+    if not click_candidates:
+        raise ValueError("Missing ref-based click after secondary hover")
+    click_idx = click_candidates[0]
+    post_slice = metas_and_values[second_hover_idx + 1 : click_idx]
+    sync_records = [
+        (m, v) for m, v in post_slice if m["command"] in ("sync", "cooperate sync")
+    ]
+    observe_records = [(m, v) for m, v in post_slice if m["command"] == "observe"]
+    snapshot_records = [(m, v) for m, v in post_slice if m["command"] == "snapshot"]
+    if not sync_records or not observe_records or not snapshot_records:
+        raise ValueError(
+            "Post-expansion requires sync, observe, and snapshot before click"
+        )
+    for m, v in post_slice:
+        if m["command"] in obs_cmds and not vom_distinct_item_refs(
+            record_vom_text(v), items
+        ):
+            raise ValueError(
+                "Post-expansion "
+                + m["command"]
+                + " lacks independent distinct menuitem lines"
+            )
+    latest_sync_vom = record_vom_text(sync_records[-1][1])
+    target_refs = vom_distinct_item_refs(latest_sync_vom, [click_item])
+    if not target_refs:
+        raise ValueError("Latest sync missing click target menuitem ref")
+    click_ref = extract_click_ref(metas_and_values[click_idx][0]["argv"])
+    if click_ref != target_refs[0]:
+        raise ValueError(
+            f"Click ref {click_ref} does not match latest sync ref {target_refs[0]}"
+        )
+    receipt_ok = False
+    for m, v in metas_and_values[click_idx + 1 :]:
+        if m["command"] == "read" and isinstance(v.get("json"), dict):
+            for it in v["json"].get("items") or []:
+                if isinstance(it, dict):
+                    vals = it.get("values") if isinstance(it.get("values"), dict) else {}
+                    txt = vals.get("text") if "text" in vals else it.get("text", "")
+                    if normalize_ws(txt) == expected_receipt:
+                        receipt_ok = True
+    if not receipt_ok:
+        raise ValueError("Post-click read did not confirm receipt " + expected_receipt)
+
+
+def _argv_flag(argv, flag):
+    tokens = list(argv or [])
+    for i, tok in enumerate(tokens):
+        if tok == flag and i + 1 < len(tokens):
+            return tokens[i + 1]
+        if tok.startswith(flag + "="):
+            return tok.split("=", 1)[1]
+    return None
+
+
+def verify_slotted_list_contract(metas_and_values, contract):
+    target_name = contract["target_name"]
+    discovered_target_id = None
+    discover_idx = None
+    for i, (m, v) in enumerate(metas_and_values):
+        if m["command"] == "extract discover" and m["exit_code"] == 0:
+            targets = (v.get("json") or {}).get("targets") or []
+            for t in targets:
+                if (
+                    isinstance(t, dict)
+                    and t.get("kind") == "list"
+                    and t.get("name") == target_name
+                    and isinstance(t.get("target_id"), str)
+                    and t["target_id"]
+                ):
+                    discovered_target_id = t["target_id"]
+                    discover_idx = i
+                    break
+        if discovered_target_id:
+            break
+    if not discovered_target_id:
+        raise ValueError(f"extract discover did not find list target {target_name!r}")
+
+    outer_json = None
+    for m, v in metas_and_values[discover_idx + 1 :]:
+        if (
+            m["command"] == "extract list"
+            and m["exit_code"] == 0
+            and _argv_flag(m["argv"], "--target-id") == discovered_target_id
+        ):
+            outer_json = v.get("json") if isinstance(v.get("json"), dict) else None
+            break
+    if not outer_json:
+        raise ValueError(
+            f"Missing extract list --target-id {discovered_target_id} after extract discover"
+        )
+
+    outer_rows = outer_json.get("rows") or []
+    expected_outer = contract["outer_items"]
+    if len(outer_rows) != len(expected_outer):
+        raise ValueError(
+            f"Slotted outer list row count {len(outer_rows)} != {len(expected_outer)}"
+        )
+    for row, spec in zip(outer_rows, expected_outer):
+        txt = str((row or {}).get("text") or "")
+        url = str((row or {}).get("url") or "")
+        if spec["text"] not in txt:
+            raise ValueError(f"Slotted list row {txt!r} missing {spec['text']!r}")
+        if not url.endswith(spec["url_suffix"]):
+            raise ValueError(
+                f"Slotted list row {spec['text']!r} url {url!r} does not end with {spec['url_suffix']!r}"
+            )
+        for forbidden in contract.get("forbidden_texts", []):
+            if forbidden in txt:
+                raise ValueError(f"Forbidden text {forbidden!r} leaked into outer row")
+
+    actual_sources = [
+        s.get("source_row")
+        for s in (outer_json.get("row_sources") or [])
+        if isinstance(s, dict)
+    ]
+    expected_sources = [spec["source_row"] for spec in expected_outer]
+    if actual_sources != expected_sources:
+        raise ValueError(
+            f"Slotted outer list source_row {actual_sources} != {expected_sources}"
+        )
+    if (outer_json.get("warnings") or []) != ["hidden_rows_omitted"]:
+        raise ValueError(
+            f"Unexpected slotted outer list warnings: {outer_json.get('warnings')}"
+        )
+    if (outer_json.get("coverage") or {}).get("dataset_complete") != "unknown":
+        raise ValueError("Slotted outer list with hidden rows must report dataset_complete=unknown")
+
+    inner_selector = contract["inner_selector"]
+    inner_json = None
+    for m, v in metas_and_values:
+        if (
+            m["command"] == "extract list"
+            and m["exit_code"] == 0
+            and _argv_flag(m["argv"], "--selector") == inner_selector
+        ):
+            inner_json = v.get("json") if isinstance(v.get("json"), dict) else None
+            break
+    if not inner_json:
+        raise ValueError(f"Missing extract list --selector {inner_selector}")
+    inner_rows = inner_json.get("rows") or []
+    expected_inner = contract["inner_items"]
+    if len(inner_rows) != len(expected_inner):
+        raise ValueError(
+            f"Nested inner list row count {len(inner_rows)} != {len(expected_inner)}"
+        )
+    for row, spec in zip(inner_rows, expected_inner):
+        txt = normalize_ws((row or {}).get("text"))
+        url = str((row or {}).get("url") or "")
+        if txt != normalize_ws(spec["text"]) or not url.endswith(spec["url_suffix"]):
+            raise ValueError(f"Nested inner list row mismatch: {row!r}")
+    inner_sources = [
+        s.get("source_row")
+        for s in (inner_json.get("row_sources") or [])
+        if isinstance(s, dict)
+    ]
+    if inner_sources != [spec["source_row"] for spec in expected_inner]:
+        raise ValueError(f"Nested inner list source_row mismatch: {inner_sources}")
+
+
 def assertion(root, check):
     if "record" in check:
         _, value = read_record(root, check["record"])
@@ -684,12 +1086,30 @@ def assertion(root, check):
         return isinstance(value, str) and bool(re.search(expected, value))
     if op == "len_eq":
         return len(value) == expected
+    if op in ("gt", "gte", "lt", "lte"):
+        if (
+            isinstance(value, bool)
+            or isinstance(expected, bool)
+            or not isinstance(value, (int, float))
+            or not isinstance(expected, (int, float))
+        ):
+            return False
     if op == "gt":
         return value > expected
+    if op == "gte":
+        return value >= expected
+    if op == "lt":
+        return value < expected
+    if op == "lte":
+        return value <= expected
     if op == "is_string":
         return isinstance(value, str) and bool(value)
     if op == "not_contains":
         return expected not in value
+    if op == "vom_no_ref":
+        return vom_has_no_ref(value, expected)
+    if op == "vom_distinct_refs":
+        return vom_distinct_item_refs(value, expected) is not None
     raise ValueError("Unknown assertion " + op)
 
 
@@ -784,7 +1204,9 @@ def compute_run_benchmark(root, passed_ids=None):
             rpc_calls += int(metrics.get("rpc_calls", 1))
             browser_calls += int(metrics.get("browser_calls", 1))
             vom_chars += int(metrics.get("vom_chars", 0))
-            if m.get("command") == "cooperate sync" or metrics.get("observation_kind"):
+            if m.get("command") in ("cooperate sync", "sync") or metrics.get(
+                "observation_kind"
+            ):
                 sync_count += 1
             if metrics.get("observation_reused"):
                 reused_count += 1
@@ -1389,6 +1811,16 @@ def gate(root):
                         raise ValueError("Missing intermediate assertion")
             if not all(assertion(root, x) for x in r["checks"]):
                 raise ValueError("Oracle assertion failed")
+            if c.get("nested_menu_contract"):
+                verify_nested_menu_contract(
+                    [read_record(root, k) for k in records],
+                    c["nested_menu_contract"],
+                )
+            if c.get("slotted_list_contract"):
+                verify_slotted_list_contract(
+                    [read_record(root, k) for k in records],
+                    c["slotted_list_contract"],
+                )
             if c.get("negative"):
                 negative_records.update(records)
                 # For commands executed inside a negative case that succeeded as setup

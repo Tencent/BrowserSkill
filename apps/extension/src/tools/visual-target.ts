@@ -229,6 +229,8 @@ export async function resolveVisualRegionNow(
   throwIfAborted(signal);
   if (!candidate.framePath || !sameIdentity(candidate.document, candidate.framePath.document))
     return stale("visual frame path unavailable");
+  await cdp.reattachIfSoftDetached?.(candidate.document.target.tabId);
+  throwIfAborted(signal);
   const path: { frame: VisualFramePath; anchor: number }[] = [];
   const seen = new Set<string>();
   let frame: VisualFramePath | undefined = candidate.framePath;

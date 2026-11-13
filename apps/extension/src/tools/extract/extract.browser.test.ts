@@ -4,6 +4,9 @@
 // isolated world, followed by the same normalizer and byte budget.
 import { createServer } from "node:http";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { SessionManager } from "@/session-manager/manager";
+import type { CdpRunner } from "@/tools/shared";
+import { handleExtract } from "../extract";
 import { collectExtractDom } from "./collector";
 import { fitExtractBudget, normalizeExtract } from "./normalize";
 import type { ExtractParams, ExtractResult, RawCapture } from "./types";
@@ -143,8 +146,8 @@ const fixtures: Record<string, string> = {
   orderedSlots: `<div id="host"><li slot="second">Second</li><li slot="first">First</li><li slot="unused">Unassigned</li></div><script>
     document.querySelector('#host').attachShadow({mode: 'open'}).innerHTML = '<ul id="l"><slot name="first"></slot><slot name="second"></slot><slot name="fallback"><li>Fallback</li></slot></ul>';
   </script>`,
-  nestedSlottedList: `<div id="host"><li>Outer<ul id="inner"><li>Inner</li></ul></li><li>Second</li></div><script>
-    document.querySelector('#host').attachShadow({mode: 'open'}).innerHTML = '<ul id="l"><slot></slot></ul>';
+  nestedSlottedList: `<div id="host"><li><a href="/outer">Outer</a><ul id="inner"><li><a href="/inner">Inner</a></li></ul></li><a slot="second" href="/slotted">Second</a></div><script>
+    document.querySelector('#host').attachShadow({mode: 'open'}).innerHTML = '<ul id="l"><slot></slot><li><slot name="second"></slot></li></ul>';
   </script>`,
   hiddenSlottedItem: `<div id="host"><li style="display:none">Hidden</li><li>Visible</li></div><script>
     document.querySelector('#host').attachShadow({mode: 'open'}).innerHTML = '<ul id="l"><slot></slot></ul>';
@@ -189,6 +192,11 @@ describe.skipIf(!process.env.BSK_CLICK_CHROME)("real browser structured extracti
     params: Omit<ExtractParams, "session_id">,
     anchor?: Anchor,
   ) => Promise<Outcome>;
+  let extractByTargetId: (
+    fixture: string,
+    targetName: string,
+    params: Omit<ExtractParams, "session_id" | "target_id">,
+  ) => Promise<ExtractResult>;
   let renderedText: (selector: string) => Promise<string>;
   let finish: () => Promise<void>;
 
@@ -226,14 +234,15 @@ describe.skipIf(!process.env.BSK_CLICK_CHROME)("real browser structured extracti
         });
         const local: Send = (method, params) => send(method, params, sessionId);
         await local("Page.enable");
-        renderedText = async (selector) => {
-          const reply = await local<{ result: { value: string } }>("Runtime.evaluate", {
-            expression: `document.querySelector(${JSON.stringify(selector)}).innerText`,
-            returnByValue: true,
-          });
-          return reply.result.value;
-        };
-        extract = async (fixture, params, anchor) => {
+        const manager = new SessionManager({
+          agentWindow: {
+            create: async () => ({ windowId: 1, initialTabIds: [1] }),
+            remove: async () => {},
+            ensureActiveTab: async () => 1,
+          },
+        });
+        await manager.start("s");
+        const navigate = async (fixture: string) => {
           await local("Page.navigate", { url: `${origin}/${fixture}` });
           await expect
             .poll(async () => {
@@ -244,9 +253,52 @@ describe.skipIf(!process.env.BSK_CLICK_CHROME)("real browser structured extracti
               return reply.result.value;
             })
             .toBe(fixture);
-          const { frameTree } = await local<{ frameTree: { frame: { id: string } } }>(
-            "Page.getFrameTree",
+          return local<{ frameTree: { frame: { id: string } } }>("Page.getFrameTree");
+        };
+        extractByTargetId = async (fixture, targetName, params) => {
+          const { frameTree } = await navigate(fixture);
+          const tab = {
+            id: 1,
+            windowId: 1,
+            active: true,
+            url: `${origin}/${fixture}`,
+          } as chrome.tabs.Tab;
+          const cdp: CdpRunner = {
+            send: (_tab, method, args) => local(method, args),
+            getAttachmentId: () => "a1",
+            ensureAttachedToUrl: async () => {},
+            getFrameGraph: async () => ({
+              rootFrameId: frameTree.frame.id,
+              frames: [{ frameId: frameTree.frame.id, target: { tabId: 1 }, url: tab.url }],
+            }),
+          };
+          const tabsApi = { get: async () => tab, query: async () => [tab] };
+          const discovered = await handleExtract(
+            manager,
+            { session_id: "s", action: "discover" },
+            { cdp, tabsApi },
           );
+          if ("code" in discovered) throw new Error(JSON.stringify(discovered));
+          const targetId = discovered.targets!.find(
+            (target) => target.name === targetName,
+          )!.target_id;
+          const result = await handleExtract(
+            manager,
+            { session_id: "s", ...params, target_id: targetId },
+            { cdp, tabsApi },
+          );
+          if ("code" in result) throw new Error(JSON.stringify(result));
+          return result;
+        };
+        renderedText = async (selector) => {
+          const reply = await local<{ result: { value: string } }>("Runtime.evaluate", {
+            expression: `document.querySelector(${JSON.stringify(selector)}).innerText`,
+            returnByValue: true,
+          });
+          return reply.result.value;
+        };
+        extract = async (fixture, params, anchor) => {
+          const { frameTree } = await navigate(fixture);
           const world = await local<{ executionContextId: number }>("Page.createIsolatedWorld", {
             frameId: frameTree.frame.id,
             worldName: "bsk-extract",
@@ -332,13 +384,9 @@ describe.skipIf(!process.env.BSK_CLICK_CHROME)("real browser structured extracti
   });
 
   it("follows slot order and fallback content without including unassigned items", async () => {
-    const { result } = await extract(
-      "orderedSlots",
-      { action: "list", ref: "list" },
-      { host: "#host", selector: "#l" },
-    );
-    expect(result!.rows.map((row) => row.text)).toEqual(["First", "Second", "Fallback"]);
-    expect(result!.row_sources.map((source) => source.source_row)).toEqual([1, 2, 3]);
+    const result = await extractByTargetId("orderedSlots", "l", { action: "list" });
+    expect(result.rows.map((row) => row.text)).toEqual(["First", "Second", "Fallback"]);
+    expect(result.row_sources.map((source) => source.source_row)).toEqual([1, 2, 3]);
   });
 
   it("keeps nested list items out of the slotted outer list", async () => {
@@ -349,10 +397,13 @@ describe.skipIf(!process.env.BSK_CLICK_CHROME)("real browser structured extracti
     );
     expect(outer.result!.rows).toHaveLength(2);
     expect(outer.result!.rows[0].text).toContain("Outer");
+    expect(outer.result!.rows[0].url).toMatch(/\/outer$/);
     expect(outer.result!.rows[1].text).toBe("Second");
+    expect(outer.result!.rows[1].url).toMatch(/\/slotted$/);
+    expect(outer.result!.warnings).toEqual([]);
     expect(outer.result!.row_sources.map((source) => source.source_row)).toEqual([1, 2]);
     const inner = await extract("nestedSlottedList", { action: "list", selector: "#inner" });
-    expect(inner.result!.rows).toEqual([{ text: "Inner", url: null }]);
+    expect(inner.result!.rows).toEqual([{ text: "Inner", url: expect.stringMatching(/\/inner$/) }]);
   });
 
   it("omits hidden slotted items while preserving their source positions", async () => {

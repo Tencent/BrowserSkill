@@ -69,17 +69,19 @@ async function scrollElementWithContext(
   frameId: string | undefined,
   context: GeometryContext,
 ): Promise<RpcError | null> {
+  let resolvedTarget = cdp.resolveTarget ? cdp.resolveTarget(target) : target;
   if (frameId) {
     const frame = await context.frame(frameId);
-    if (!frame || cdpTargetKey(frame.target) !== cdpTargetKey(target)) {
+    resolvedTarget = cdp.resolveTarget ? cdp.resolveTarget(target) : target;
+    if (!frame || cdpTargetKey(frame.target) !== cdpTargetKey(resolvedTarget)) {
       return geometryError("node frame does not belong to its target");
     }
     const error = await scrollFrameOwners(cdp, tabId, context, frameId);
     if (error) return error;
-  } else if (target.sessionId) {
+  } else if (resolvedTarget.sessionId) {
     return geometryError("an OOPIF node address requires frameId");
   }
-  return scrollNodeIntoView(cdpRunnerForTarget(cdp, target), tabId, backendNodeId);
+  return scrollNodeIntoView(cdpRunnerForTarget(cdp, resolvedTarget), tabId, backendNodeId);
 }
 
 export async function scrollElementAndFramesIntoView(
@@ -123,9 +125,10 @@ export async function resolveNodeGeometry(
     if (address.target.tabId !== tabId) return geometryError("node target belongs to another tab");
     const context = new GeometryContext(cdp, tabId);
     const graph = address.frameId ? await context.graph() : null;
+    const resolvedTarget = cdp.resolveTarget ? cdp.resolveTarget(address.target) : address.target;
     if (address.frameId && graph) {
       const frame = await context.frame(address.frameId);
-      if (!frame || cdpTargetKey(frame.target) !== cdpTargetKey(address.target)) {
+      if (!frame || cdpTargetKey(frame.target) !== cdpTargetKey(resolvedTarget)) {
         return geometryError("node frame does not belong to its target");
       }
     }
@@ -137,7 +140,7 @@ export async function resolveNodeGeometry(
       const scrollError = await scrollElementWithContext(
         cdp,
         tabId,
-        address.target,
+        resolvedTarget,
         address.backendNodeId,
         address.frameId,
         context,
@@ -147,7 +150,7 @@ export async function resolveNodeGeometry(
 
     // Only topology was read above. Begin live measurements after scrolling.
     const localRegion = await nodeContentRegion(
-      cdpRunnerForTarget(cdp, address.target),
+      cdpRunnerForTarget(cdp, resolvedTarget),
       tabId,
       address.backendNodeId,
     );
@@ -160,8 +163,8 @@ export async function resolveNodeGeometry(
       if (!projection)
         return geometryError(`could not resolve frame geometry for ${address.frameId}`);
       topVisibleRegions = projectRegionToViewport(localRegion, projection);
-      if (address.target.sessionId) {
-        const localViewport = await context.viewport(address.target);
+      if (resolvedTarget.sessionId) {
+        const localViewport = await context.viewport(resolvedTarget);
         if (!localViewport) return geometryError("could not resolve target viewport geometry");
         const localVisibleRegions = localRegion
           .map((polygon) =>

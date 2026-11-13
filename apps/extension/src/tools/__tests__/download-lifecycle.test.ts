@@ -1,9 +1,15 @@
 import { afterEach, expect, it, vi } from "vitest";
-import { type CdpDebuggee, type CdpDebuggerApi, ChromiumCdp } from "@/browser-driver/chromium-cdp";
+import {
+  type CdpDebuggee,
+  type CdpDebuggerApi,
+  ChromiumCdp,
+  DEFAULT_IDLE_DETACH_MS,
+} from "@/browser-driver/chromium-cdp";
 import type { InputPassthroughMessage } from "@/lib/input-passthrough-bridge";
 import { SessionManager } from "@/session-manager/manager";
 import { handleDownload } from "../download";
 import { pointerTransactionDeps } from "../pointer-transaction";
+import { sessionCdpRunner } from "../shared";
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -25,7 +31,7 @@ function event<T extends unknown[]>() {
   };
 }
 
-async function fixture() {
+async function fixture(options: { idleDetachMs?: number } = {}) {
   const onEvent = event<[CdpDebuggee, string, unknown]>();
   const onDetach = event<[chrome.debugger.Debuggee, string]>();
   const inputs: string[] = [];
@@ -52,7 +58,7 @@ async function fixture() {
     onEvent: onEvent as unknown as CdpDebuggerApi["onEvent"],
     onDetach: onDetach as unknown as CdpDebuggerApi["onDetach"],
   };
-  const cdp = new ChromiumCdp(api);
+  const cdp = new ChromiumCdp(api, options);
   const sessions = new SessionManager({
     agentWindow: {
       create: async () => ({ windowId: 100, initialTabIds: [7] }),
@@ -73,13 +79,16 @@ async function fixture() {
           (suggestion?: chrome.downloads.DownloadFilenameSuggestion) => void,
         ]
       >(),
-    search: async () => [],
+    search: async (
+      _query: chrome.downloads.DownloadQuery,
+    ): Promise<chrome.downloads.DownloadItem[]> => [],
     cancel: async () => {},
     removeFile: async () => {},
   };
   return {
     api,
     cdp,
+    onEvent,
     onDetach,
     inputs,
     sessions,
@@ -358,6 +367,86 @@ it.each([
     for (const held of press) held.resolve({});
     await vi.advanceTimersByTimeAsync(1_000);
     await Promise.all([pending, next]);
+    f.cdp.dispose();
+  }
+});
+
+it("holds retainTabAttachment lease across >75s passive download wait and soft-detaches 75s after completion", async () => {
+  vi.useFakeTimers();
+  const f = await fixture({ idleDetachMs: DEFAULT_IDLE_DETACH_MS });
+  const runner = sessionCdpRunner(f.cdp, "download-lifecycle", () => true);
+  let routedPath = "report.pdf";
+  const completedItem = () =>
+    ({
+      id: 901,
+      url: "https://files.test/report.pdf",
+      finalUrl: "https://files.test/report.pdf",
+      filename: routedPath,
+      fileSize: 4096,
+      totalBytes: 4096,
+      bytesReceived: 4096,
+      mime: "application/pdf",
+      danger: "safe",
+      state: "complete",
+    }) as chrome.downloads.DownloadItem;
+  f.deps.downloads.search = async ({ id }) => (id === 901 ? [completedItem()] : []);
+
+  const pending = handleDownload(
+    f.sessions,
+    { ...f.params, timeout_ms: 120_000 },
+    { ...f.deps, cdp: runner },
+  );
+  try {
+    // Advance 90s (well past the 75s idle soft-detach threshold) with zero CDP traffic after click:
+    // the active download lease MUST keep chrome.debugger attached so `Page.downloadWillBegin` arrives!
+    await vi.advanceTimersByTimeAsync(90_000);
+    expect(f.api.detach).not.toHaveBeenCalled();
+    expect(f.cdp.isAttached(7)).toBe(true);
+
+    f.onEvent.fire({ tabId: 7 }, "Page.downloadWillBegin", {
+      url: "https://files.test/report.pdf",
+      suggestedFilename: "report.pdf",
+      frameId: "root",
+    });
+    f.deps.downloads.onDeterminingFilename.fire(
+      {
+        ...completedItem(),
+        state: "in_progress",
+      },
+      (suggestion) => {
+        if (suggestion?.filename) routedPath = suggestion.filename;
+      },
+    );
+    f.deps.downloads.onCreated.fire({
+      ...completedItem(),
+      state: "in_progress",
+    });
+    await vi.advanceTimersByTimeAsync(100);
+    f.deps.downloads.onChanged.fire({
+      id: 901,
+      state: { previous: "in_progress", current: "complete" },
+    });
+    await vi.advanceTimersByTimeAsync(0);
+
+    const result = await pending;
+    expect(result).toEqual({
+      tab_id: 7,
+      used_ref: "e1",
+      used_selector: undefined,
+      suggested_filename: "report.pdf",
+      byte_size: 4096,
+      mime: "application/pdf",
+      danger: "safe",
+      browser_path: "BrowserSkill/lifecycle/report.pdf",
+    });
+
+    // Once `handleDownload` settles and releases its lease, the 75s idle soft-detach countdown re-arms!
+    await vi.advanceTimersByTimeAsync(DEFAULT_IDLE_DETACH_MS - 1);
+    expect(f.api.detach).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(f.api.detach).toHaveBeenCalledExactlyOnceWith({ tabId: 7 });
+    expect(f.cdp.isAttached(7)).toBe(false);
+  } finally {
     f.cdp.dispose();
   }
 });

@@ -9,6 +9,25 @@ determines which versions can connect.
 
 ## [Unreleased]
 
+### Fixed
+
+- VOM tree folding (`shouldSkipRedundantRefChildren` and `renderTreeRows`) preserves
+  independent interactive descendants under named interactive controls (such as Vue 3 +
+  Element Plus nested `<el-sub-menu>` popups inside a parent `menuitem` or custom ARIA
+  combobox popups) so each expanded, actionable child item renders on its own row with a
+  distinct `@eN` reference across `bsk sync`, `observe`, and `snapshot`, while keeping
+  passive inner wrappers, inherited `cursor: pointer` / click-skin descendants, and native
+  `<input>` / `<textarea>` / `<select>` controls folded without duplicate refs; added
+  required pre-release audit scenario `EDGE-NESTED-MENU-REFS`.
+- Structured list extraction (`extract list`) collects slot-assigned items and default
+  item links (`url`) across open Shadow DOM `<slot>` projections while preserving rendered
+  slot order, closed-`<details>` hidden row positions, nested-list item and link ownership,
+  visibility checks, and collection limits ([#588](https://github.com/Tencent/BrowserSkill/issues/588),
+  [#612](https://github.com/Tencent/BrowserSkill/pull/612)); added required pre-release
+  audit scenario `EDGE-SLOTTED-LIST-EXTRACT`.
+
+## [0.5.0] - 2026-11-12
+
 ### Added
 
 - Daemon-local `<3ms` Intent Write-Ahead Ledger (`$BSK_HOME/intent_ledger.jsonl`, `0600`)
@@ -108,8 +127,10 @@ determines which versions can connect.
 - Rewrote the CLI `SKILL.md` into a zero-preread workflow (`<= 2,000` UTF-8 bytes)
   preserving all four cooperative safety invariants, removed repeated static `guidance`
   prose from `cooperate sync` replies, and added 75-second four-guard idle
-  `chrome.debugger` soft-detach (preserving `tabOwners` and console/network `since`
-  cursors with transparent reattach) alongside immediate 0ms detach on `bsk close` and
+  `chrome.debugger` soft-detach (preserving `tabOwners`, console/network `since`
+  cursors, unchanged `@vN` and cross-origin OOPIF `@eN` refs, pending JavaScript
+  dialogs, and active download/upload/navigation/screencast attachment leases across
+  transparent reattach) alongside immediate 0ms detach on `bsk close` and
   `bsk tab return`.
 - Cooperative synchronization and strict pre-action verification reuse a sliding
   10-second `Accessibility` domain lease per tab, skip unused VOM text rendering on
@@ -128,7 +149,7 @@ determines which versions can connect.
   safety state or an unwritable run marker, and retains interrupted-run holds even
   when the host process remains alive. DSH drains cancelled plan and recipe receipts.
 
-- Extension 0.4.3 removes obsolete migration flags and version gates while keeping
+- The extension removes obsolete migration flags and version gates while keeping
   pairing optional. There is no automatic enforcement deadline.
 - `bsk-protocol` is the single source of truth for method metadata, JSON schemas,
   TypeScript request/result codecs, exhaustive daemon/extension execution policies,
@@ -136,6 +157,50 @@ determines which versions can connect.
 
 ### Fixed
 
+- Stopping a recording coordinates cleanup of the recording session and preserves
+  the captured steps if cleanup needs to be retried ([#720](https://github.com/Tencent/BrowserSkill/pull/720)).
+- The DSH skill and plugin documentation explain how to call BrowserSkill tools
+  through `run_code` in PTC mode ([#721](https://github.com/Tencent/BrowserSkill/pull/721)).
+- Idle debugger detach preserves element references across reattach and waits for
+  open dialogs and active downloads to finish ([#711](https://github.com/Tencent/BrowserSkill/pull/711)).
+- A target-policy `cooperate sync` no longer re-sends the whole VOM when the only page
+  activity since the last observation replaced visible text in place. The content script
+  logs text-only mutation batches separately from structural ones, and the extension
+  answers `kind: "delta"` with `observation_patch.lines`, `kind: "text"` entries in
+  `changes` (previous value, value, touched VOM lines) and `previous_observation_id`.
+  With `--baseline` on the exact predecessor the CLI applies the patch, saves the merged
+  observation through `--save-full` and keeps the page text out of stdout; `view` reads
+  the merged version with zero browser calls. On the 6,857-node `ARENA-MEGA-VOM-DELTA`
+  fixture the third sync went from about 2.2 s and 574 KB to about 0.2 s and 2 KB, and
+  the merged text equals a fresh capture. Structural changes, replaced documents or
+  refs, human activity, field changes, focus moves under focus-dependent styles, log
+  gaps, text outside or ambiguous in the held observation, child frames and token-budget
+  shifts still return a fresh `baseline`, now with a `baseline_reason`. Strict-policy
+  behaviour and the target and observation guards are unchanged
+  ([#722](https://github.com/Tencent/BrowserSkill/pull/722)).
+- Hardened VOM stealth prompt-injection stripping against CSS Color 4/5, gradient-clip
+  text, HiDPI microboxes, inner scroll containers, and mixed textstyle containers:
+  resolves `oklch`/`oklab`/`lab`/`lch`/`hsl`/`hwb`/`color()`/`color-mix()` to sRGB for
+  accurate cross-space zero-contrast and zero-alpha detection (including Tailwind v4
+  `oklch()` backdrops and `currentColor 0%` mixes); preserves genuine
+  `background-clip: text` / `-webkit-background-clip: text` gradient headings while
+  stripping transparent, zero-span, or background-matching gradient stops; scales `1px`
+  microbox and offscreen bounds on HiDPI/Retina displays; verifies inner
+  `overflow: auto | scroll` scroll offsets (`scrollRects`) and `#text` glyph bounds so
+  legitimate scrolled rows remain intact while unscrolled `left: -99999px` / `-2000px` /
+  `text-indent: -9999px` injections are stripped; and clears direct stealth text and
+  tainted AX `name`s on retained containers ([#709](https://github.com/Tencent/BrowserSkill/pull/709)).
+- `wait-for-navigation` no longer returns on the old page when the navigation it waits
+  for is scheduled or still in flight. A settled page counts as reached only after a
+  short grace period without a main-frame navigation start; once a navigation starts
+  or Chrome reports one as pending, only the successor document can satisfy the wait.
+  Same-document and back/forward-cache restores still complete immediately
+  ([#700](https://github.com/Tencent/BrowserSkill/issues/700)).
+- VOM snapshot decoding and semantic DOM text resolution exclude `<style>`, `<script>`,
+  `<noscript>`, and `<template>` subtrees (alongside HTML comment nodes) when collecting
+  fallback element text, preventing controls without an accessible name from leaking raw
+  CSS, script, or template markup as their label
+  ([#694](https://github.com/Tencent/BrowserSkill/issues/694)).
 - Native clicks, key presses and wheel input calibrate Chromium's input clock so
   long-running browsers do not misclassify their own input as human intervention
   after sleep or clock changes. Calibration uses the extension's hidden document,
@@ -144,19 +209,70 @@ determines which versions can connect.
 - `tool.record_start` enforces shared-tab cooperation ownership, stop, and human-control
   guards and invalidates stale control contexts when starting recording; `tool.tab_return`
   clears active recordings for local sessions as well as remote ones.
+- `navigate back` and `navigate forward` no longer time out when Chrome restores
+  the history entry from the back/forward cache. A restored document is already
+  loaded and emits no new load lifecycle event, so the restore commit now
+  satisfies `domcontentloaded` and `load`, and re-enables lifecycle replay on the
+  restored document so `networkidle` also completes on previously idle pages
+  ([#701](https://github.com/Tencent/BrowserSkill/issues/701)).
 - Daemon shutdown retains its WebSocket stop notification when the accept loop is
   between waits, avoiding a lost notification that can leave `daemon stop` waiting.
 - Website debugging attributes agent uploads and downloads to their transfer
   operations instead of recording the resulting file changes and clicks as human input.
+- The Intent WAL no longer freezes a tab after actions that provably never took
+  effect. A click refused after only scrolling (`effect_state: "unknown"` with
+  `press_sent: false`) and any failure reporting `dispatched: false` now settle.
+  `select` checks the requested options before scrolling or focusing the element,
+  and `fill` validates the value before clearing; rejections found there
+  (`option_not_found`, `option_ambiguous`, disabled `<select>`, `fill_value_invalid`,
+  `target_not_fillable`) report `effect_state: "none"` with `phase: "precondition"`,
+  so a corrected retry neither needs `bsk ledger resolve` nor loses the
+  shared-control context. The same reasons reported later, after `select` moved
+  focus or after `fill` cleared the field, keep an unknown effect. A `<select>` that is already disabled is now
+  reported as `invalid_params` instead of a `cdp_failed` focus error
+  ([#702](https://github.com/Tencent/BrowserSkill/issues/702)).
 - Local validation failures in upload, download, plan and step return stable
   parameter/file error codes and relevant recovery hints. Upload sources are checked
   before contacting the daemon or staging any files.
+- `bsk get-html --json --out <file>` no longer prints the HTML to stdout. With
+  `--out`, JSON output reports `tab_id`, `path`, `written_bytes`, `byte_size`,
+  `truncated` and any dialogs, so large pages stay out of the caller's context;
+  without `--out`, the JSON result still includes `html`
+  ([#715](https://github.com/Tencent/BrowserSkill/issues/715)).
+- `fill` on a page without focus (a background tab, or the agent window while
+  another window is focused) delivers focus before validating and clearing the
+  field, so focus listeners that set a default value no longer leave it in front of
+  the typed text or restore it when the tab is activated. A visible page receives
+  focus from a pointer move outside the viewport, which reaches no element; a hidden
+  or hovered page keeps the previous no-op key press, which pages can observe as an
+  empty key. Truncated or reformatted password, card and one-time-code fills report
+  `formatted: true` (also in the human CLI output) without `actual_value`, and text
+  inputs named like passwords, as left by a "show password" toggle, are treated as
+  sensitive ([#713](https://github.com/Tencent/BrowserSkill/issues/713)).
 - `fill` notifies each final value once. Native insertion and clearing already
   dispatch `input`; the completion step no longer repeats it
   ([#624](https://github.com/Tencent/BrowserSkill/issues/624)).
+- Borrowing a user tab that still shows `about:blank` or the browser's empty New
+  Tab page (`chrome://newtab/`, `edge://newtab/`, `about:newtab`, including
+  query/fragment variants) no longer deadlocks tab management or initial
+  navigation in the session. Empty initial/new-tab root pages without a
+  collector are skipped during tab-management preparation and may perform an
+  initial bootstrap navigation, and `tab return` can also hand back a borrowed
+  tab stuck on a browser-restricted page or failed root load without tearing
+  down the session. Observable `about:blank` popups, other unobservable web
+  pages, and subframes are still refused without synchronization
+  ([#703](https://github.com/Tencent/BrowserSkill/issues/703)).
 - Window blur releases completed text-editing holds, and new task synchronizations
   after an idle gap automatically resume paused or editing tabs when no gesture or
   recent input is active, avoiding unnecessary manual hand-back prompts between tasks.
+- `bsk sync` and `bsk open` evaluate `--wait-for` and `--wait-not` against the full
+  page. A strict-policy `delta` frame or an `unchanged` frame without a cached page
+  is read once with `tool.snapshot` instead of matching only its `[change ...]` lines
+  or empty text, and a page cut by `--max-tokens` is read in full before `--wait-not`
+  accepts that text is gone. A wait that returns after several polls also reports
+  the field changes, activity and `history_complete=false` of the frames it did not
+  return. A failed page read keeps the wait polling instead of ending it
+  ([#714](https://github.com/Tencent/BrowserSkill/issues/714)).
 - Recording keeps clicks on buttons and links whose name is longer than 48 characters,
   such as GOV.UK step-by-step sections and long news headlines.
 - Recording keeps clicks on links, filter disclosures, checkboxes and other controls
@@ -227,18 +343,10 @@ determines which versions can connect.
 - Recording preserves clicks on submit, reset and image input buttons, including
   actions beside search fields, and uses reset buttons' visible values as names.
 
-### Fixed
-
 - Cooperative status updates preserve an active click-passthrough lease, so the
   control panel and its minimized arrow do not swallow automated page clicks.
-- Structured list extraction includes slot-assigned items while preserving
-  rendered order, nested-list ownership, visibility and collection limits.
 - Recording keeps clicks on buttons and links inside an editor's `contenteditable="false"`
   regions, such as attachment actions, instead of treating them as editor input.
-
-## [Unreleased]
-
-### Fixed
 
 - `extract` applies CSS `uppercase` and `lowercase` to text in table cells,
   headers, list fields and discovery previews, respecting nested style overrides

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Behavioral tests of the audit helper, not BrowserSkill product tests."""
 
-import contextlib, importlib.util, io, json, tempfile, unittest
+import contextlib, csv, importlib.util, io, json, tempfile, time, unittest
 from pathlib import Path
 from types import SimpleNamespace as NS
 from unittest.mock import patch
@@ -606,10 +606,239 @@ else:
         self.assertIn("PLAN-FLOW", md)
         self.assertIn("RECIPE-FLOW", md)
 
+    def test_adversarial_server_routes_bfcache_cors_and_media_mimes(self):
+        root = self.skill / "assets/fixtures"
+        (root / "arena-bfcache-detail.html").write_text("<title>bfcache</title>")
+        (root / "captions-zh.vtt").write_text("WEBVTT\n\n00:00.000 --> 00:01.000\n你好\n")
+        (root / "arena-audio.wav").write_bytes(b"RIFF\x24\x00\x00\x00WAVE")
+        server = serve.make_server(root, 0)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        port = server.server_port
+        url = f"http://127.0.0.1:{port}"
+
+        class NoRedirect(urllib.request.HTTPRedirectHandler):
+            def redirect_request(self, req, fp, code, msg, headers, newurl):
+                return None
+
+        opener = urllib.request.build_opener(NoRedirect)
+        try:
+            with urllib.request.urlopen(url + "/minimal") as r:
+                self.assertEqual(r.headers.get("Cache-Control"), "no-store")
+                self.assertEqual(r.headers.get("Access-Control-Allow-Origin"), "*")
+            with urllib.request.urlopen(url + "/arena-bfcache-detail") as r:
+                self.assertEqual(r.headers.get("Cache-Control"), "no-cache")
+            with urllib.request.urlopen(url + "/minimal?bfcache=1") as r:
+                self.assertEqual(r.headers.get("Cache-Control"), "no-cache")
+            with urllib.request.urlopen(url + "/captions-zh.vtt") as r:
+                self.assertEqual(r.headers.get("Content-Type"), "text/vtt; charset=utf-8")
+            with urllib.request.urlopen(url + "/arena-audio.wav") as r:
+                self.assertEqual(r.headers.get("Content-Type"), "audio/wav")
+                self.assertEqual(r.headers.get("Accept-Ranges"), "bytes")
+                self.assertEqual(r.read(), b"RIFF\x24\x00\x00\x00WAVE")
+            with urllib.request.urlopen(
+                urllib.request.Request(
+                    url + "/arena-audio.wav", headers={"Range": "bytes=0-3"}
+                )
+            ) as r:
+                self.assertEqual(r.status, 206)
+                self.assertEqual(r.headers.get("Content-Range"), "bytes 0-3/12")
+                self.assertEqual(r.read(), b"RIFF")
+            with urllib.request.urlopen(
+                urllib.request.Request(
+                    url + "/arena-audio.wav", headers={"Range": "bytes=8-"}
+                )
+            ) as r:
+                self.assertEqual(r.status, 206)
+                self.assertEqual(r.headers.get("Content-Range"), "bytes 8-11/12")
+                self.assertEqual(r.read(), b"WAVE")
+            with urllib.request.urlopen(
+                urllib.request.Request(
+                    url + "/arena-audio.wav", headers={"Range": "bytes=-4"}
+                )
+            ) as r:
+                self.assertEqual(r.status, 206)
+                self.assertEqual(r.headers.get("Content-Range"), "bytes 8-11/12")
+                self.assertEqual(r.read(), b"WAVE")
+            for invalid_range in ("bytes=999-", "bytes=8-2", "bytes=-0", "bytes=bad"):
+                with self.assertRaises(urllib.error.HTTPError) as r_err:
+                    urllib.request.urlopen(
+                        urllib.request.Request(
+                            url + "/arena-audio.wav", headers={"Range": invalid_range}
+                        )
+                    )
+                self.assertEqual(r_err.exception.code, 416)
+                self.assertEqual(
+                    r_err.exception.headers.get("Content-Range"), "bytes */12"
+                )
+            with urllib.request.urlopen(
+                urllib.request.Request(url + "/arena-audio.wav", method="HEAD")
+            ) as r:
+                self.assertEqual(r.status, 200)
+                self.assertEqual(r.headers.get("Accept-Ranges"), "bytes")
+                self.assertEqual(r.headers.get("Content-Length"), "12")
+                self.assertEqual(r.read(), b"")
+            with self.assertRaises(urllib.error.HTTPError) as ctx:
+                opener.open(url + "/redirect-cross-origin")
+            self.assertEqual(ctx.exception.code, 302)
+            self.assertEqual(
+                ctx.exception.headers.get("Location"),
+                f"http://localhost:{port}/arena-bfcache-detail?from=cross_origin_302&bfcache=1",
+            )
+            with urllib.request.urlopen(url + "/slow-doc?delay_ms=15") as r:
+                self.assertIn(b"slow-doc-ready", r.read())
+            with urllib.request.urlopen(url + "/download") as r:
+                self.assertEqual(r.read(), "编号,名称\n42,中文文件 ✅\n".encode("utf-8"))
+            # The joint statement is gated on the submission receipt.
+            with self.assertRaises(urllib.error.HTTPError) as gate:
+                urllib.request.urlopen(
+                    url + "/download?scene=joint-filing&org=TestOrg&gross=1272.00"
+                )
+            self.assertEqual(gate.exception.code, 403)
+            joint = (
+                url
+                + "/download?scene=joint-filing&receipt=JNT-COMMIT-2026-9901"
+                + "&org=%E7%94%B2%2C%E4%B9%99&gross=1272.00"
+            )
+            with urllib.request.urlopen(joint) as r:
+                joint_csv = r.read().decode("utf-8")
+            rows = list(csv.reader(io.StringIO(joint_csv)))
+            self.assertEqual(
+                rows[1], ["JNT-COMMIT-2026-9901", "甲,乙", "1272.00", "已联合核定 ✅"]
+            )
+            with urllib.request.urlopen(
+                url
+                + "/download?scene=joint-filing&receipt=JNT-COMMIT-2026-9901"
+                + "&org=%3DHYPERLINK(1)&gross=1"
+            ) as r:
+                rows = list(csv.reader(io.StringIO(r.read().decode("utf-8"))))
+            self.assertEqual(rows[1][1], "'=HYPERLINK(1)")
+            with urllib.request.urlopen(url + "/download-stream?chunks=2&chunk_ms=5") as r:
+                self.assertIsNone(r.headers.get("Content-Length"))
+                stream_csv = r.read().decode("utf-8")
+                self.assertIn("流式对账分片-2", stream_csv)
+            with urllib.request.urlopen(
+                url + "/download-stream?chunks=2&chunk_ms=0&known_length=1"
+            ) as r:
+                body = r.read()
+                self.assertEqual(r.headers.get("Content-Length"), str(len(body)))
+            with urllib.request.urlopen(url + "/events") as r:
+                before_head = json.load(r)
+            # HEAD probes return headers only and never create business evidence.
+            for head_path in (
+                "/download",
+                "/download?scene=joint-filing&receipt=JNT-COMMIT-2026-9901&org=A&gross=1",
+                "/download-stream?chunks=3&chunk_ms=200",
+                "/slow-doc?delay_ms=3000",
+            ):
+                started = time.monotonic()
+                with urllib.request.urlopen(
+                    urllib.request.Request(url + head_path, method="HEAD")
+                ) as r:
+                    self.assertEqual(r.status, 200)
+                    self.assertEqual(r.read(), b"")
+                self.assertLess(time.monotonic() - started, 1.0, head_path)
+            with urllib.request.urlopen(url + "/events") as r:
+                events_after = json.load(r)
+            self.assertEqual(len(events_after), len(before_head))
+            ev_types = [e.get("type") for e in events_after]
+            self.assertIn("redirect-cross-origin", ev_types)
+            self.assertIn("slow-doc", ev_types)
+            self.assertIn("download-stream", ev_types)
+            self.assertIn("download-rejected", ev_types)
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join()
+
+    def test_wave_commands_range_assertions_and_long_admin_home(self):
+        (self.skill / "assets/fixtures/arena-frame-outer.html").write_text(
+            '<iframe src="http://localhost:4187/a"></iframe><iframe src="http://127.0.0.1:4187/b"></iframe>'
+        )
+        self.init()
+        rewritten = (self.root / "fixtures/arena-frame-outer.html").read_text()
+        self.assertIn("http://localhost:4567/a", rewritten)
+        self.assertIn("http://127.0.0.1:4567/b", rewritten)
+        rid = self.execute()
+        d = self.root / "commands" / rid
+        (d / "stdout.txt").write_text('{"ok": true, "size": 42, "label": "9"}')
+        m = audit.load(d / "meta.json")
+        m["stdout_sha256"] = audit.digest(d / "stdout.txt")
+        audit.write(d / "meta.json", m)
+        self.assertTrue(
+            audit.assertion(
+                self.root, {"record": rid, "pointer": "/json/size", "op": "lt", "value": 50}
+            )
+        )
+        self.assertTrue(
+            audit.assertion(
+                self.root, {"record": rid, "pointer": "/json/size", "op": "lte", "value": 42}
+            )
+        )
+        self.assertTrue(
+            audit.assertion(
+                self.root, {"record": rid, "pointer": "/json/size", "op": "gte", "value": 42}
+            )
+        )
+        for op, ptr, val in [
+            ("gte", "/json/ok", 1),
+            ("lte", "/json/ok", 1),
+            ("gt", "/json/ok", 0),
+            ("gte", "/json/size", True),
+            ("gt", "/json/label", "10"),
+        ]:
+            self.assertFalse(
+                audit.assertion(
+                    self.root, {"record": rid, "pointer": ptr, "op": op, "value": val}
+                ),
+                f"Expected strict numeric rejection for {op} on {ptr} vs {val!r}",
+            )
+        m_open = audit.extract_metrics(
+            "open", 0, {"vom": "@vom 2\npage", "elapsed_ms": 20}, 25.0
+        )
+        self.assertEqual(m_open["execution_mode"], "single_action")
+        self.assertEqual(m_open["actions_executed"], 1)
+        self.assertEqual(m_open["observation_kind"], "full")
+        self.assertGreater(m_open["vom_chars"], 0)
+        m_sync = audit.extract_metrics("sync", 0, {"unchanged": True}, 8.0)
+        self.assertEqual(m_sync["execution_mode"], "read")
+        self.assertTrue(m_sync["observation_reused"])
+        self.assertEqual(m_sync["observation_kind"], "unchanged")
+        m_ledger = audit.extract_metrics("ledger status", 0, {"pending": []}, 5.0)
+        self.assertEqual(m_ledger["browser_calls"], 0)
+        self.assertIsNotNone(
+            audit.semantic_failure(
+                {"command": "navigate back"}, {"json": {"reached": "timeout"}, "argv": ["navigate", "back"]}
+            )
+        )
+        self.assertIsNotNone(
+            audit.semantic_failure(
+                {"command": "sync"}, {"json": None, "argv": ["sync", "--json"]}
+            )
+        )
+        deep_run = (
+            self.base
+            / ("very_deep_nested_segment_" * 4)
+            / "candidate_run_directory"
+        )
+        deep_run.mkdir(parents=True)
+        with patch.object(audit.sys, "platform", "win32"):
+            win_home = audit.resolve_admin_home(deep_run)
+            self.assertEqual(Path(win_home), (deep_run / "admin-runtime").resolve())
+        resolved = Path(audit.resolve_admin_home(deep_run))
+        try:
+            self.assertLessEqual(len(str(resolved / "run" / "daemon.sock")), 96)
+            self.assertEqual(resolved.resolve(), (deep_run / "admin-runtime").resolve())
+        finally:
+            if resolved.is_symlink():
+                resolved.unlink()
+
     def test_shipped_scenarios_and_fixture_manifest_integrity(self):
+        import re as _re
+
         real_skill = Path(__file__).resolve().parents[1]
         scenarios = audit.load(real_skill / "references/scenarios.json")
-        self.assertGreaterEqual(len(scenarios), 90)
+        self.assertEqual(len(scenarios), 113)
         ids = [s["id"] for s in scenarios]
         self.assertEqual(len(ids), len(set(ids)))
         for required_id in [
@@ -621,6 +850,8 @@ else:
             "READ-DYNAMIC-BOUNDED",
             "EDGE-VIRTUAL-LIST-RECYCLE",
             "EDGE-STACKED-MODALS",
+            "EDGE-NESTED-MENU-REFS",
+            "EDGE-SLOTTED-LIST-EXTRACT",
             "LOCAL-VIDEO-PORTAL",
             "LOCAL-FORUM-HUB",
             "PUBLIC-BILIBILI-FEED",
@@ -629,11 +860,490 @@ else:
             "PUBLIC-FORUM-THREAD",
         ]:
             self.assertIn(required_id, ids)
+        arena_ids = [i for i in ids if i.startswith("ARENA-")]
+        self.assertEqual(
+            arena_ids,
+            [
+                "ARENA-JOINT-LEAD-FORM",
+                "ARENA-JOINT-PARTNERS-BUDGET",
+                "ARENA-JOINT-SUBMIT-DOWNLOAD",
+                "ARENA-NEG-FORM-READONLY-DISABLED",
+                "ARENA-NEG-SELECT-DISABLED-OPTION",
+                "ARENA-NEG-DOWNLOAD-GATE",
+                "ARENA-SHADOW-NESTED-OPEN",
+                "ARENA-SHADOW-CLOSED-VISUAL",
+                "ARENA-IFRAME-FEDERATION",
+                "ARENA-IFRAME-RELOAD-ISOLATION",
+                "ARENA-MEDIA-VIDEO-TRANSPORT",
+                "ARENA-MEDIA-CAPTIONS-FRAME",
+                "ARENA-MEDIA-AUDIO-PLAYLIST",
+                "ARENA-SPA-HYDRATION-ROUTES",
+                "ARENA-BFCACHE-HISTORY",
+                "ARENA-ASYNC-NAV-DOWNLOAD",
+                "ARENA-CSS-STEGANO",
+                "ARENA-SENSITIVE-VAULT",
+                "ARENA-VIRTUAL-GRID-KEYED",
+                "ARENA-MEGA-VOM-DELTA",
+                "ARENA-NEG-VIRTUAL-RECYCLE",
+            ],
+        )
+        # Every required_argv flag must be declared on that exact CLI command
+        # (guards against e.g. requiring `observe --redact-values`, a `record` flag).
+        cli_dir = real_skill.parents[3] / "crates/bsk-cli/src/cli"
+        for sc in scenarios:
+            for variant in sc.get("required_argv", []):
+                src = (cli_dir / (variant["command"].split()[0] + ".rs")).read_text(
+                    encoding="utf-8"
+                )
+                for flag in variant["args"]:
+                    if not flag.startswith("--"):
+                        continue
+                    name = flag[2:]
+                    declared = f'long = "{name}"' in src or _re.search(
+                        r"#\[arg\(long\b[^\]]*\]\s*(?:///[^\n]*\n\s*)*pub "
+                        + name.replace("-", "_")
+                        + r"\b",
+                        src,
+                    )
+                    self.assertTrue(
+                        declared,
+                        f"Scenario {sc['id']} requires {variant['command']} {flag}, "
+                        "which that command does not declare",
+                    )
+        corpus = "\n".join(
+            p.read_text(encoding="utf-8")
+            for p in [
+                *(real_skill / "assets/fixtures").glob("arena-*.html"),
+                real_skill / "scripts/serve.py",
+            ]
+        )
+        known_dom_ids = set(_re.findall(r'id=["\']([A-Za-z0-9_-]+)["\']', corpus))
+        for sc in scenarios:
+            if not sc["id"].startswith("ARENA-"):
+                continue
+            for sel_id in _re.findall(r"#([A-Za-z][A-Za-z0-9_-]*)", sc.get("goal", "")):
+                if sel_id.endswith("..3"):
+                    sel_id = sel_id[:-3]
+                self.assertIn(
+                    sel_id,
+                    known_dom_ids,
+                    f"Scenario {sc['id']} references #{sel_id} missing from arena fixtures",
+                )
         manifest = audit.load(real_skill / "references/fixture-manifest.json")
+        actual_files = {
+            f.relative_to(real_skill / "assets").as_posix()
+            for f in (real_skill / "assets/fixtures").iterdir()
+            if f.is_file()
+        }
+        self.assertEqual(set(manifest.keys()), actual_files)
         for rel, expected_sha in manifest.items():
             full = real_skill / "assets" / rel
             self.assertTrue(full.is_file(), f"Missing fixture {rel}")
             self.assertEqual(audit.digest(full), expected_sha, f"Hash mismatch for {rel}")
+
+    def test_nested_menu_vom_assertions_and_gate_contract(self):
+        nested_cli = """#!/usr/bin/env python3
+import json, os, sys
+args = sys.argv[1:]
+cmds = ["navigate", "sync", "hover", "wait-for-element", "observe", "snapshot", "click", "read"]
+if "--help" in args:
+    if args == ["--help"]:
+        body = "\\n".join(f"  {c:<18} run {c}" for c in cmds)
+        print(f"Usage: bsk [OPTIONS] <COMMAND>\\n\\nCommands:\\n{body}\\n\\nOptions:\\n  --help  Help")
+    else:
+        print(f"Usage: bsk {args[0]} [OPTIONS]")
+    sys.exit(0)
+mode = os.environ.get("FAKE_MENU_MODE", "fixed")
+cmd = args[0]
+if cmd == "navigate":
+    print(json.dumps({"ok": True, "url": args[1]}))
+elif cmd == "wait-for-element":
+    print(json.dumps({"satisfied": True}))
+elif cmd == "hover":
+    print(json.dumps({"ok": True}))
+elif cmd == "click":
+    print(json.dumps({"ok": True}))
+elif cmd == "read":
+    print(json.dumps({"items": [{"ref": "@e9", "values": {"text": "Selected audit"}, "redacted": []}]}))
+elif cmd in ("sync", "observe", "snapshot"):
+    phase = "post" if "--post" in args else "pre"
+    if phase == "pre":
+        vom = (
+            "@vom 1\\nmenubar \\"Console navigation\\"\\n"
+            "  @e1 menuitem \\"Overview\\"\\n"
+            "  @e2 menuitem \\"Workspace [has-submenu]\\""
+            + ("\\n  @e9 menuitem \\"Audit export\\"" if mode == "leaked_pre" else "")
+        )
+    elif mode == "v050":
+        vom = (
+            "@vom 1\\nmenubar \\"Console navigation\\"\\n"
+            "  @e1 menuitem \\"Overview\\"\\n"
+            "  @e2 menuitem \\"Workspace [expanded]\\"\\n"
+            "menu\\n"
+            "  @e3 menuitem \\"Members\\"\\n"
+            "  @e4 menuitem \\"Advanced Audit export Report history [expanded]\\""
+        )
+    elif mode == "dup_ref":
+        vom = (
+            "@vom 1\\nmenu\\n"
+            "  @e4 menuitem \\"Advanced Audit export Report history [expanded]\\"\\n"
+            "    @e5 menuitem \\"Audit export\\"\\n"
+            "    @e5 menuitem \\"Report history\\""
+        )
+    else:
+        audit_ref = "@e7" if cmd == "sync" else "@e5"
+        vom = (
+            "@vom 1\\nmenubar \\"Console navigation\\"\\n"
+            "  @e1 menuitem \\"Overview\\"\\n"
+            "  @e2 menuitem \\"Workspace [expanded]\\"\\n"
+            "menu\\n"
+            "  @e3 menuitem \\"Members\\"\\n"
+            "  @e4 menuitem \\"Advanced Audit export Report history [expanded]\\"\\n"
+            f"    {audit_ref} menuitem \\"Audit export\\"\\n"
+            "    @e8 menuitem \\"Report history\\""
+        )
+    key = "vom" if cmd == "sync" else "text"
+    print(json.dumps({key: vom}))
+"""
+        self.binary.write_text(nested_cli)
+        self.binary.chmod(0o755)
+        real_skill = Path(__file__).resolve().parents[1]
+        nested_scenario = next(
+            s
+            for s in audit.load(real_skill / "references/scenarios.json")
+            if s["id"] == "EDGE-NESTED-MENU-REFS"
+        )
+        items = nested_scenario["nested_menu_contract"]["items"]
+
+        def run_round(run_name, mode, click_ref="@e7"):
+            out_dir = self.base / run_name
+            audit.write(self.skill / "references/scenarios.json", [nested_scenario])
+            with contextlib.redirect_stdout(io.StringIO()):
+                audit.init(
+                    NS(
+                        out=str(out_dir),
+                        bsk=str(self.binary),
+                        binary=str(self.binary),
+                        browser="chrome",
+                        candidate=run_name,
+                        port=4567,
+                    )
+                )
+
+            def ex(argv, case="EDGE-NESTED-MENU-REFS"):
+                with contextlib.redirect_stdout(io.StringIO()):
+                    audit.execute(
+                        NS(
+                            run=str(out_dir),
+                            case=case,
+                            argv=argv,
+                            timeout=5,
+                            lane="browser",
+                            stdin_file=None,
+                            interactive=False,
+                            env=[f"FAKE_MENU_MODE={mode}"],
+                        )
+                    )
+                return max(
+                    (out_dir / "commands").glob("*/meta.json"),
+                    key=lambda p: p.stat().st_mtime_ns,
+                ).parent.name
+
+            r_nav = ex(["navigate", "http://127.0.0.1:4567/nested-menu"])
+            r_pre = ex(["sync", "--json"])
+            r_h1 = ex(["hover", "--ref", "@e2"])
+            r_w1 = ex(["wait-for-element", "#workspace-popper"])
+            r_h2 = ex(["hover", "--ref", "@e4"])
+            r_w2 = ex(["wait-for-element", "#advanced-popper"])
+            r_obs = ex(["observe", "--post", "--json"])
+            r_snap = ex(["snapshot", "--post", "--json"])
+            r_sync = ex(["sync", "--post", "--json"])
+            r_click = ex(["click", "--ref", click_ref])
+            r_read = ex(["read", "--selector", "#menu-selection-receipt"])
+            records = [r_nav, r_pre, r_h1, r_w1, r_h2, r_w2, r_obs, r_snap, r_sync, r_click, r_read]
+            checks = [
+                {"record": r_pre, "pointer": "/json/vom", "op": "vom_no_ref", "value": items},
+                {"record": r_obs, "pointer": "/json/text", "op": "vom_distinct_refs", "value": items},
+                {"record": r_snap, "pointer": "/json/text", "op": "vom_distinct_refs", "value": items},
+                {"record": r_sync, "pointer": "/json/vom", "op": "vom_distinct_refs", "value": items},
+                {"record": r_read, "pointer": "/json/items/0/values/text", "op": "eq", "value": "Selected audit"},
+            ]
+            return out_dir, records, checks
+
+        # 1) 0.5.0 parent-concatenated menuitem fails vom_distinct_refs and gate()
+        d_050, recs_050, checks_050 = run_round("r050", "v050")
+        self.assertTrue(audit.assertion(d_050, checks_050[0]))
+        for c in checks_050[1:4]:
+            self.assertFalse(audit.assertion(d_050, c))
+        audit.write(
+            d_050 / "results.json",
+            {
+                "cases": [
+                    {
+                        "id": "EDGE-NESTED-MENU-REFS",
+                        "status": "passed",
+                        "records": recs_050,
+                        "oracle_summary": "0.5.0 check",
+                        "checks": [{"record": recs_050[-1], "pointer": "/json/items/0/values/text", "op": "eq", "value": "Selected audit"}],
+                    }
+                ]
+            },
+        )
+        with contextlib.redirect_stdout(io.StringIO()):
+            code_050 = audit.gate(d_050)
+        gate_050 = audit.load(d_050 / "gate.json")
+        self.assertEqual(code_050, 1)
+        self.assertTrue(
+            any("EDGE-NESTED-MENU-REFS" in e and "independent distinct menuitem" in e for e in gate_050["errors"]),
+            gate_050["errors"],
+        )
+
+        # 2) Duplicate @eN fails vom_distinct_refs
+        d_dup, _, checks_dup = run_round("rdup", "dup_ref")
+        self.assertFalse(audit.assertion(d_dup, checks_dup[1]))
+
+        # 3) Pre-expansion leaked ref fails vom_no_ref and gate()
+        d_leak, recs_leak, checks_leak = run_round("rleak", "leaked_pre")
+        self.assertFalse(audit.assertion(d_leak, checks_leak[0]))
+        audit.write(
+            d_leak / "results.json",
+            {
+                "cases": [
+                    {
+                        "id": "EDGE-NESTED-MENU-REFS",
+                        "status": "passed",
+                        "records": recs_leak,
+                        "oracle_summary": "leaked pre check",
+                        "checks": [{"record": recs_leak[-1], "pointer": "/json/items/0/values/text", "op": "eq", "value": "Selected audit"}],
+                    }
+                ]
+            },
+        )
+        with contextlib.redirect_stdout(io.StringIO()):
+            audit.gate(d_leak)
+        gate_leak = audit.load(d_leak / "gate.json")
+        self.assertTrue(
+            any("Pre-expansion sync exposed actionable child ref" in e for e in gate_leak["errors"]),
+            gate_leak["errors"],
+        )
+
+        # 4) Clicking ref NOT taken from latest sync fails gate()
+        d_wrong_ref, recs_wrong, _ = run_round("rwrong", "fixed", click_ref="@e5")
+        audit.write(
+            d_wrong_ref / "results.json",
+            {
+                "cases": [
+                    {
+                        "id": "EDGE-NESTED-MENU-REFS",
+                        "status": "passed",
+                        "records": recs_wrong,
+                        "oracle_summary": "wrong ref check",
+                        "checks": [{"record": recs_wrong[-1], "pointer": "/json/items/0/values/text", "op": "eq", "value": "Selected audit"}],
+                    }
+                ]
+            },
+        )
+        with contextlib.redirect_stdout(io.StringIO()):
+            audit.gate(d_wrong_ref)
+        gate_wrong = audit.load(d_wrong_ref / "gate.json")
+        self.assertTrue(
+            any("Click ref @e5 does not match latest sync ref @e7" in e for e in gate_wrong["errors"]),
+            gate_wrong["errors"],
+        )
+
+        # 5) Fixed candidate passes every assertion and EDGE-NESTED-MENU-REFS in gate()
+        d_ok, recs_ok, checks_ok = run_round("rok", "fixed", click_ref="@e7")
+        for c in checks_ok:
+            self.assertTrue(audit.assertion(d_ok, c), c)
+        audit.write(
+            d_ok / "results.json",
+            {
+                "cases": [
+                    {
+                        "id": "EDGE-NESTED-MENU-REFS",
+                        "status": "passed",
+                        "records": recs_ok,
+                        "oracle_summary": "Verified nested menu refs and receipt",
+                        "checks": checks_ok,
+                    }
+                ]
+            },
+        )
+        with contextlib.redirect_stdout(io.StringIO()):
+            audit.gate(d_ok)
+        gate_ok = audit.load(d_ok / "gate.json")
+        self.assertIn("EDGE-NESTED-MENU-REFS", gate_ok["passed_ids"])
+
+    def test_slotted_list_extract_gate_contract(self):
+        slotted_cli = """#!/usr/bin/env python3
+import json, os, sys
+args = sys.argv[1:]
+if "--help" in args:
+    if args == ["--help"]:
+        print("Usage: bsk [OPTIONS] <COMMAND>\\n\\nCommands:\\n  navigate  Go\\n  extract   Extract\\n\\nOptions:\\n  --help  Help")
+    elif args == ["extract", "--help"]:
+        print("Usage: bsk extract <COMMAND>\\n\\nCommands:\\n  discover  Discover\\n  list      List\\n\\nOptions:\\n  --help  Help")
+    else:
+        print("Usage: bsk " + " ".join(args[:-1]) + " [OPTIONS]")
+    sys.exit(0)
+mode = os.environ.get("FAKE_SLOTTED_MODE", "fixed")
+if args[0] == "navigate":
+    print(json.dumps({"ok": True, "url": args[1]}))
+elif args[:2] == ["extract", "discover"]:
+    print(json.dumps({
+        "targets": [
+            {"target_id": "xt_slotted", "kind": "list", "name": "Shadow Slotted Runbook List", "columns": ["text", "url"]},
+            {"target_id": "xt_nested", "kind": "list", "name": "Nested mTLS Sub-checks", "columns": ["text", "url"]}
+        ]
+    }))
+elif args[:2] == ["extract", "list"]:
+    if "--selector" in args:
+        print(json.dumps({
+            "rows": [{"text": "Sub-check: mTLS cert pinned", "url": "http://127.0.0.1:4567/runbook/mtls"}],
+            "row_sources": [{"source_row": 1}],
+            "warnings": [],
+            "coverage": {"truncated": False, "dataset_complete": "complete"}
+        }))
+    elif mode == "v050":
+        print(json.dumps({
+            "rows": [{"text": "Fallback health gate", "url": "http://127.0.0.1:4567/runbook/fallback"}],
+            "row_sources": [{"source_row": 1}],
+            "warnings": [],
+            "coverage": {"truncated": False, "dataset_complete": "complete"}
+        }))
+    elif mode == "bad_details_pos":
+        print(json.dumps({
+            "rows": [
+                {"text": "Preflight quorum check", "url": "http://127.0.0.1:4567/runbook/preflight"},
+                {"text": "Canary traffic 10%\\nSub-check: mTLS cert pinned", "url": "http://127.0.0.1:4567/runbook/canary"},
+                {"text": "Fallback health gate", "url": "http://127.0.0.1:4567/runbook/fallback"}
+            ],
+            "row_sources": [{"source_row": 1}, {"source_row": 2}, {"source_row": 4}],
+            "warnings": ["hidden_rows_omitted"],
+            "coverage": {"truncated": False, "dataset_complete": "unknown"}
+        }))
+    elif mode == "ambiguous_nested_url":
+        print(json.dumps({
+            "rows": [
+                {"text": "Preflight quorum check", "url": "http://127.0.0.1:4567/runbook/preflight"},
+                {"text": "Canary traffic 10%\\nSub-check: mTLS cert pinned", "url": None},
+                {"text": "Fallback health gate", "url": "http://127.0.0.1:4567/runbook/fallback"}
+            ],
+            "row_sources": [{"source_row": 1}, {"source_row": 3}, {"source_row": 5}],
+            "warnings": ["hidden_rows_omitted", "ambiguous_default_url"],
+            "coverage": {"truncated": False, "dataset_complete": "unknown"}
+        }))
+    else:
+        print(json.dumps({
+            "rows": [
+                {"text": "Preflight quorum check", "url": "http://127.0.0.1:4567/runbook/preflight"},
+                {"text": "Canary traffic 10%\\nSub-check: mTLS cert pinned", "url": "http://127.0.0.1:4567/runbook/canary"},
+                {"text": "Fallback health gate", "url": "http://127.0.0.1:4567/runbook/fallback"}
+            ],
+            "row_sources": [{"source_row": 1}, {"source_row": 3}, {"source_row": 5}],
+            "warnings": ["hidden_rows_omitted"],
+            "coverage": {"truncated": False, "dataset_complete": "unknown"}
+        }))
+"""
+        self.binary.write_text(slotted_cli)
+        self.binary.chmod(0o755)
+        real_skill = Path(__file__).resolve().parents[1]
+        slotted_scenario = next(
+            s
+            for s in audit.load(real_skill / "references/scenarios.json")
+            if s["id"] == "EDGE-SLOTTED-LIST-EXTRACT"
+        )
+
+        def run_slotted(run_name, mode, target_id="xt_slotted"):
+            out_dir = self.base / run_name
+            audit.write(self.skill / "references/scenarios.json", [slotted_scenario])
+            with contextlib.redirect_stdout(io.StringIO()):
+                audit.init(
+                    NS(
+                        out=str(out_dir),
+                        bsk=str(self.binary),
+                        binary=str(self.binary),
+                        browser="chrome",
+                        candidate=run_name,
+                        port=4567,
+                    )
+                )
+
+            def ex(argv):
+                with contextlib.redirect_stdout(io.StringIO()):
+                    audit.execute(
+                        NS(
+                            run=str(out_dir),
+                            case="EDGE-SLOTTED-LIST-EXTRACT",
+                            argv=argv,
+                            timeout=5,
+                            lane="browser",
+                            stdin_file=None,
+                            interactive=False,
+                            env=[f"FAKE_SLOTTED_MODE={mode}"],
+                        )
+                    )
+                return max(
+                    (out_dir / "commands").glob("*/meta.json"),
+                    key=lambda p: p.stat().st_mtime_ns,
+                ).parent.name
+
+            r_nav = ex(["navigate", "http://127.0.0.1:4567/arena-shadow-iframe"])
+            r_disc = ex(["extract", "discover", "--json"])
+            r_outer = ex(["extract", "list", "--target-id", target_id, "--json"])
+            r_inner = ex(["extract", "list", "--selector", "#shadow-nested-sublist", "--json"])
+            recs = [r_nav, r_disc, r_outer, r_inner]
+            audit.write(
+                out_dir / "results.json",
+                {
+                    "cases": [
+                        {
+                            "id": "EDGE-SLOTTED-LIST-EXTRACT",
+                            "status": "passed",
+                            "records": recs,
+                            "oracle_summary": "slotted list check",
+                            "checks": [
+                                {
+                                    "record": r_inner,
+                                    "pointer": "/json/rows/0/text",
+                                    "op": "eq",
+                                    "value": "Sub-check: mTLS cert pinned",
+                                }
+                            ],
+                        }
+                    ]
+                },
+            )
+            with contextlib.redirect_stdout(io.StringIO()):
+                audit.gate(out_dir)
+            return audit.load(out_dir / "gate.json")
+
+        g_v050 = run_slotted("slotted_v050", "v050")
+        self.assertTrue(
+            any("Slotted outer list row count 1 != 3" in e for e in g_v050["errors"]),
+            g_v050["errors"],
+        )
+
+        g_pos = run_slotted("slotted_pos", "bad_details_pos")
+        self.assertTrue(
+            any("source_row [1, 2, 4] != [1, 3, 5]" in e for e in g_pos["errors"]),
+            g_pos["errors"],
+        )
+
+        g_url = run_slotted("slotted_url", "ambiguous_nested_url")
+        self.assertTrue(
+            any("does not end with '/runbook/canary'" in e for e in g_url["errors"]),
+            g_url["errors"],
+        )
+
+        g_tid = run_slotted("slotted_tid", "fixed", target_id="xt_wrong")
+        self.assertTrue(
+            any("Missing extract list --target-id xt_slotted" in e for e in g_tid["errors"]),
+            g_tid["errors"],
+        )
+
+        g_ok = run_slotted("slotted_ok", "fixed")
+        self.assertIn("EDGE-SLOTTED-LIST-EXTRACT", g_ok["passed_ids"])
 
 
 if __name__ == "__main__":

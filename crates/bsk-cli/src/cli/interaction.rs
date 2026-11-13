@@ -492,21 +492,7 @@ pub fn dispatch_fill(args: FillArgs, format: Format) -> Result<(), CliError> {
             );
         }
         Format::Human => {
-            let target =
-                format_used_target(reply.used_ref.as_deref(), reply.used_selector.as_deref());
-            if reply.formatted == Some(true)
-                && let Some(actual) = reply.actual_value.as_deref()
-            {
-                println!(
-                    "fill ok tab={} target={target} length={} actual_value={actual:?}",
-                    reply.tab_id, reply.value_length
-                );
-            } else {
-                println!(
-                    "fill ok tab={} target={target} length={}",
-                    reply.tab_id, reply.value_length
-                );
-            }
+            println!("{}", fill_summary(&reply));
             print_dialog_summaries(&reply.dialogs);
         }
     }
@@ -688,6 +674,22 @@ pub fn dispatch_select(args: SelectArgs, format: Format) -> Result<(), CliError>
     Ok(())
 }
 
+/// Human fill receipt. A sensitive control reports `formatted` without its value.
+fn fill_summary(reply: &FillResult) -> String {
+    let target = format_used_target(reply.used_ref.as_deref(), reply.used_selector.as_deref());
+    let mut line = format!(
+        "fill ok tab={} target={target} length={}",
+        reply.tab_id, reply.value_length
+    );
+    if reply.formatted == Some(true) {
+        match reply.actual_value.as_deref() {
+            Some(actual) => line.push_str(&format!(" actual_value={actual:?}")),
+            None => line.push_str(" formatted=true"),
+        }
+    }
+    line
+}
+
 fn format_used_target(used_ref: Option<&str>, used_selector: Option<&str>) -> String {
     used_ref
         .map(|r| format!("@{r}"))
@@ -721,6 +723,32 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fill_summary_reports_formatting_without_a_sensitive_value() {
+        let reply = |actual_value: Option<&str>, formatted: Option<bool>| FillResult {
+            tab_id: 4,
+            used_ref: Some("e1".into()),
+            used_selector: None,
+            value_length: 6,
+            actual_value: actual_value.map(Into::into),
+            formatted,
+            dialogs: Vec::new(),
+        };
+        assert_eq!(
+            fill_summary(&reply(None, None)),
+            "fill ok tab=4 target=@e1 length=6"
+        );
+        assert_eq!(
+            fill_summary(&reply(Some("(555)"), Some(true))),
+            "fill ok tab=4 target=@e1 length=6 actual_value=\"(555)\""
+        );
+        // Password and card fields omit the value but still report the change.
+        assert_eq!(
+            fill_summary(&reply(None, Some(true))),
+            "fill ok tab=4 target=@e1 length=6 formatted=true"
+        );
+    }
 
     #[test]
     fn looks_like_ref_handles_both_forms() {

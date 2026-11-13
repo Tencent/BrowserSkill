@@ -4,7 +4,7 @@
 
 ## 覆盖定义与 Benchmark 口径
 
-四个维度分别报告：**动态命令清单、固定场景清单（90 项）、网页类型清单、Benchmark 效率与耗时指标**。命令至少有一次适用环境的实际成功调用且业务验收通过；场景需完成其全部动作与变体。CLI 退出 0、HTTP 200、截图文件存在、帮助能显示，均不等于业务通过。
+四个维度分别报告：**动态命令清单、固定场景清单（113 项，含 21 项对抗靶场场景 `ARENA-*`）、网页类型清单、Benchmark 效率与耗时指标**。命令至少有一次适用环境的实际成功调用且业务验收通过；场景需完成其全部动作与变体。CLI 退出 0、HTTP 200、截图文件存在、帮助能显示，均不等于业务通过。
 
 网页类型×命令表记录实际用到的命令及证据。无语义组合（如 Canvas 内无 select）写清原因；不能用 N/A 删除必测行。`lifecycle` / `admin` / `mcp` / `batch-plan` / `recipe` 单独列能力域，表中的每一类网页都要有实测场景。
 
@@ -59,6 +59,7 @@ Benchmark 自动采集每次命令的**交互轮次（`interaction_turns`）、�
 | `/video-portal` | 本地确定性视频门户：HTML5 `<video>` 控制栏（倍速/弹幕/章节/简介）、双层叠加弹窗（`modal=1` / `modal=2`）、推荐流与异步评论加载 |
 | `/forum-hub` | 本地确定性开发者论坛：节点 Tab `pushState` 切换、热度/关键词筛选、置顶帖与零回复帖对齐、帖子详情楼层与代码块读取、虚拟列表视口行回收（Rows 20-25） |
 | `/minimal` | 简单静态页面/表单/SPA/表格，用作不受复杂布局干扰的对照 |
+| `/nested-menu` | Element Plus 风格两级动态悬停菜单（`Workspace -> Advanced`）：一级浮层 teleport 到 `body`，二级浮层嵌在父 `menuitem` 内，验证展开前后子项 `@eN` 独立引用与点击回执 `Selected audit` |
 | `/edgecases` | maxlength/readonly/disabled、目标替换、row42→99 复用、重复 CTA、遮挡、closed shadow、500 body |
 | `/extra` | 五种时间、focus/blur、等待节点替换、二维滚动、子 frame 刷新、hidden 文件、260 请求、once 计数 |
 | `/pointer-semantic` | Lit comments/style 污染、固定左右下角 CTA、原生导航 |
@@ -68,3 +69,7 @@ Benchmark 自动采集每次命令的**交互轮次（`interaction_turns`）、�
 | `/live-update` | 每 1000ms 更新 tick/时间/价格，长页与 nested 双向滚动，`evaluate` / `read` / `wheel` 独立必测 |
 | `/dialogs` | alert/confirm/prompt/delayed alert/beforeunload；arm 须由真实 Bsk 点击激活 |
 | `/frame` | 同/跨源 frame 输入保存、frame 表格，host/value 事件 |
+| **`/arena-joint-forms`** | 三表联动联合申报（~1,650 DOM 节点 + 600ms 汇率牌价）：Form A 三级异步级联（含 95 字符长选项与 `:disabled` 选项）、信用代码规范化、8 位敏感授权码、`readonly`/`disabled`/`maxlength`、70ms 延迟焦点代理、5 类时间控件、多选与两种 label；Form B 动态成员与 `sum==100%`；Form C 跨表精算、富文本根与 `contenteditable=false` 子节点、HTML5 拖拽会签、隐藏 chooser/拖放上传、45 行台账；全部校验通过并提交后核定单链接才获得 href，服务器对无回执下载返回 403，CSV 按 RFC 4180 转义并中和公式前缀 |
+| **`/arena-shadow-iframe`** (`+ /arena-frame-outer`, `/arena-frame-inner`) | 三层嵌套 Open Shadow（命名 `<slot>`、内联 `<style>`/Lit 注释防污染、`composed:true` 事件、Shadow 内悬浮菜单与表格）、Open Shadow 插槽列表 `#shadow-slotted-runbook`（具名/默认/回退 `<slot>` 顺序、闭合 `<details>` 隐藏行位置保留、嵌套子列表 `#shadow-nested-sublist` 隔离）、Closed Shadow 视觉坐标兜底；同源 L1 帧 + 跨源 `localhost` L1 帧 + 回切 `127.0.0.1` 的 L2 帧（A->B->A），`postMessage` 中继与子帧局部重载 |
+| **`/arena-media-studio`** (`+ /arena-audio.wav`, `/captions-zh.vtt`, `/captions-en.vtt`) | 原生 `<video controls>` 与 `<audio controls>`（服务器支持 HTTP `206 Range`）：章节寻址 `0.2s/1.8s/3.5s`、倍速、音量 `fill`/`drag`、静音/循环；中英 WebVTT 字幕 zh/en/off 切换与 `#active-caption-banner`；寻址后 `<canvas>` 帧像素采样；4 期节目单切歌与 48 行打点表 |
+| **`/arena-modern-spa-grid`** (`+ /arena-bfcache-detail`, `/redirect-cross-origin`, `/slow-doc`, `/download-stream`) | `?hydrate_ms=180` 水合替换与 pushState 路由；`Cache-Control: no-cache`、零 `unload` 的真实 bfcache 往返；650ms 延迟导航、慢文档、`127.0.0.1 -> localhost` 跨源 302、默认无 `Content-Length` 的流式下载（`known_length=1` 可加回）；`oklch()` 白字/渐变字保留 vs 隐藏文本诱饵；密码与 `autocomplete=one-time-code` 跨通道脱敏；5,000 行虚拟表默认键控复用（仍可见行保留 DOM 节点），`?vgrid=pool` 为 ag-grid 式滚动槽位就地重绑；三层 `rowspan/colspan` 财务表；`?mega=1` 约 6,800 节点、可见文本 >200KB。所有动态路由的 HEAD 请求只返回头部，不写事件、不等待 |

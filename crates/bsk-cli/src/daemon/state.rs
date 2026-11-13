@@ -1,7 +1,8 @@
 //! Daemon-wide shared state: config, browser registry, session registry.
 
+use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use tokio::task::JoinHandle;
 
@@ -9,10 +10,10 @@ use super::abort::AbortRegistry;
 use super::browsers::{BrowserId, BrowserRegistry};
 use super::file_transfer::TransferRegistry;
 use super::inflight::ToolInflightRegistry;
-use super::ipc::IpcHandle;
+use super::ipc::{IpcHandle, RecordSessionStop};
 use super::queue::ToolQueueRegistry;
 use super::session_interrupt::SessionInterruptRegistry;
-use super::sessions::SessionRegistry;
+use super::sessions::{SessionId, SessionRegistry};
 use super::start::DaemonConfig;
 use super::ws::WsHandle;
 
@@ -32,6 +33,7 @@ pub struct DaemonState {
         std::sync::Mutex<Option<(std::time::Instant, bsk_protocol::system::UnpairedAttempt)>>,
     pub browsers: Arc<BrowserRegistry>,
     pub sessions: Arc<SessionRegistry>,
+    pub(super) record_session_stops: Mutex<HashMap<SessionId, RecordSessionStop>>,
     pub session_requests: super::session_requests::SessionRequests,
     /// Per-session serial dispatch queues for `tool.*` RPCs (M6.5,
     /// design §5). Populated by `start_session`, drained by
@@ -166,6 +168,7 @@ impl DaemonState {
             config,
             browsers,
             sessions,
+            record_session_stops: Default::default(),
             session_requests: Default::default(),
             tool_queues,
             abort_registry,

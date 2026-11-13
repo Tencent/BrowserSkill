@@ -1,0 +1,178 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>Arena Cross-Origin Outer Gateway Frame</title>
+<style>
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    padding: 12px;
+    font: 13px/1.45 system-ui, -apple-system, sans-serif;
+    background: #eff6ff;
+    color: #0f172a;
+  }
+  .outer-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 7px 10px;
+    background: #1e3a8a;
+    color: #fff;
+    border-radius: 6px;
+    margin-bottom: 10px;
+    font-size: 12px;
+  }
+  .grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr auto auto;
+    gap: 8px;
+    align-items: end;
+    margin-bottom: 10px;
+  }
+  label { display: block; font-size: 12px; font-weight: 600; margin-bottom: 3px; }
+  input, select, button {
+    padding: 6px 9px;
+    border: 1px solid #64748b;
+    border-radius: 5px;
+    font: inherit;
+  }
+  button {
+    background: #1d4ed8;
+    border-color: #1d4ed8;
+    color: #fff;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  button.secondary {
+    background: #fff;
+    color: #1e293b;
+  }
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 12px;
+    background: #fff;
+    margin-bottom: 10px;
+  }
+  th, td { border: 1px solid #cbd5e1; padding: 5px 7px; text-align: left; }
+  thead th { background: #dbeafe; }
+  iframe {
+    width: 100%;
+    height: 295px;
+    border: 2px solid #3b82f6;
+    border-radius: 7px;
+    background: #fff;
+  }
+  output {
+    display: block;
+    margin: 8px 0;
+    padding: 6px 8px;
+    background: #fff;
+    border: 1px solid #93c5fd;
+    border-radius: 5px;
+    font-family: ui-monospace, monospace;
+    font-size: 11.5px;
+  }
+</style>
+</head>
+<body>
+<div class="outer-head">
+  <strong>L1 跨源联邦网关容器 (Cross-Origin Outer Gateway)</strong>
+  <span id="outer-host-tag">origin: pending</span>
+</div>
+
+<div class="grid">
+  <div>
+    <label for="outer-gateway-token">跨源网关路由口令</label>
+    <input id="outer-gateway-token" type="text" placeholder="例如：GW-TOKEN-77">
+  </div>
+  <div>
+    <label for="outer-region-select">联邦主可用区</label>
+    <select id="outer-region-select">
+      <option value="ap-shanghai">华东上海 (ap-shanghai)</option>
+      <option value="ap-shenzhen" selected>华南深圳 (ap-shenzhen)</option>
+      <option value="eu-frankfurt">欧洲法兰克福 (eu-frankfurt)</option>
+    </select>
+  </div>
+  <button type="button" id="outer-sync-btn">提交跨源L1策略</button>
+  <button type="button" class="secondary" id="btn-reload-nested-l2">仅刷新内嵌L2帧</button>
+</div>
+
+<table id="outer-routes-table">
+  <caption>跨源 L1 网关策略路由表</caption>
+  <thead>
+    <tr><th>路由ID</th><th>上游集群</th><th>限流阈值</th><th>TLS双向认证</th></tr>
+  </thead>
+  <tbody>
+    <tr><td>RT-01</td><td>cluster-core-hz</td><td>12,000 rps</td><td>mTLS-Strict</td></tr>
+    <tr><td>RT-02</td><td>cluster-edge-sz</td><td>8,500 rps</td><td>mTLS-Strict</td></tr>
+    <tr><td>RT-03</td><td>cluster-dr-su</td><td>4,000 rps</td><td>mTLS-Fallback</td></tr>
+  </tbody>
+</table>
+
+<output id="outer-gateway-output">waiting-l1-or-l2</output>
+
+<iframe
+  id="nested-l2-iframe"
+  title="Nested L2 Security Audit Frame"
+  src="http://127.0.0.1:4187/arena-frame-inner?role=nested-audit"
+></iframe>
+
+<script>
+(() => {
+  document.getElementById('outer-host-tag').textContent = `origin=${location.origin}`;
+  const l2Host = location.hostname === 'localhost' ? '127.0.0.1' : 'localhost';
+  const l2Port = location.port ? `:${location.port}` : '';
+  const frameEl = document.getElementById('nested-l2-iframe');
+  const desiredInitial = `${location.protocol}//${l2Host}${l2Port}/arena-frame-inner?role=nested-audit`;
+  if (frameEl.src !== desiredInitial) {
+    frameEl.src = desiredInitial;
+  }
+  let l2ReloadSeq = 0;
+
+  document.getElementById('outer-sync-btn').addEventListener('click', () => {
+    const token = document.getElementById('outer-gateway-token').value.trim();
+    const region = document.getElementById('outer-region-select').value;
+    const msg = {
+      source: 'arena-frame-outer',
+      hop: 'L1-cross-origin',
+      host: location.host,
+      token,
+      region
+    };
+    document.getElementById('outer-gateway-output').textContent = JSON.stringify(msg);
+    window.parent.postMessage(msg, '*');
+    fetch('/event', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ type: 'arena-outer-frame-saved', ...msg })
+    }).catch(() => {});
+  });
+
+  document.getElementById('btn-reload-nested-l2').addEventListener('click', () => {
+    l2ReloadSeq += 1;
+    const frame = document.getElementById('nested-l2-iframe');
+    frame.src = `${location.protocol}//${l2Host}${l2Port}/arena-frame-inner?role=nested-audit&refresh=${l2ReloadSeq}`;
+    fetch('/event', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ type: 'arena-l2-reloaded', seq: l2ReloadSeq })
+    }).catch(() => {});
+  });
+
+  window.addEventListener('message', (e) => {
+    if (e.data && e.data.source === 'arena-frame-inner') {
+      const relayed = {
+        ...e.data,
+        relayedBy: 'arena-frame-outer',
+        outerHost: location.host
+      };
+      document.getElementById('outer-gateway-output').textContent = JSON.stringify(relayed);
+      window.parent.postMessage(relayed, '*');
+    }
+  });
+})();
+</script>
+</body>
+</html>

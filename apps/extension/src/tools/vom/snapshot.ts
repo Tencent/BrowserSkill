@@ -3,6 +3,10 @@ import { RECORD_PASSWORD_ATTRIBUTE, sensitiveAutocomplete } from "@/lib/sensitiv
 import { createCaptureCheckpoint } from "./capture-abort";
 import type { CapturedNode } from "./capture-types";
 import type { DecodedDocument, DecodedNode } from "./facts";
+
+/** Elements whose subtrees hold code/markup rather than visible label text. */
+export const NON_TEXT_CONTAINER_TAGS = new Set(["style", "script", "noscript", "template"]);
+
 export const REQUESTED_STYLES = [
   "position",
   "pointer-events",
@@ -13,12 +17,16 @@ export const REQUESTED_STYLES = [
   "color",
   "background-color",
   "background-image",
+  "background-clip",
+  "-webkit-background-clip",
+  "overflow-x",
+  "overflow-y",
+  "width",
+  "height",
 ] as const;
 export const VISUAL_STYLES = [
   ...REQUESTED_STYLES,
   "display",
-  "overflow-x",
-  "overflow-y",
   "transform",
   "zoom",
   "clip-path",
@@ -40,6 +48,7 @@ export const BASIC_SNAPSHOT = {
 } as const;
 export const VISUAL_SNAPSHOT = { includeVisualFacts: true, computedStyles: VISUAL_STYLES } as const;
 export type SnapshotProfile = typeof BASIC_SNAPSHOT | typeof VISUAL_SNAPSHOT;
+const EMPTY_STYLES: Readonly<Record<string, string>> = Object.freeze({});
 /** Sparse array format Chrome uses for infrequently-set per-node fields. */
 interface SparseArray {
   index: number[];
@@ -79,6 +88,7 @@ export interface SnapshotDocument {
     styles?: number[][];
     bounds?: number[][];
     clientRects?: number[][];
+    scrollRects?: number[][];
     paintOrders?: number[];
   };
 }
@@ -168,6 +178,40 @@ export async function decodeDocument(
   // nodeValue is a parallel array: string index for text nodes, -1 otherwise.
   const nodeTextContent = new Map<number, string[]>();
   if (dn.nodeValue) {
+    // 0 = unvisited, 1 = visiting, 2 = allowed, 3 = inside style/script/noscript/template
+    const textSubtreeState = new Uint8Array(count);
+    const ancestorPath: number[] = [];
+    const isExcludedTextContainer = (startIdx: number): boolean => {
+      const cached = textSubtreeState[startIdx];
+      if (cached === 2) return false;
+      if (cached === 3) return true;
+      ancestorPath.length = 0;
+      let cur = startIdx;
+      let excluded = false;
+      while (cur >= 0 && cur < count) {
+        const state = textSubtreeState[cur];
+        if (state === 2 || state === 1) break;
+        if (state === 3) {
+          excluded = true;
+          break;
+        }
+        const tag = str(strings, dn.nodeName?.[cur]).toLowerCase();
+        if (NON_TEXT_CONTAINER_TAGS.has(tag)) {
+          textSubtreeState[cur] = 3;
+          excluded = true;
+          break;
+        }
+        textSubtreeState[cur] = 1;
+        ancestorPath.push(cur);
+        cur = dn.parentIndex?.[cur] ?? -1;
+      }
+      const finalState = excluded ? 3 : 2;
+      for (let i = 0; i < ancestorPath.length; i++) {
+        textSubtreeState[ancestorPath[i]] = finalState;
+      }
+      return excluded;
+    };
+
     for (let n = 0; n < count; n++) {
       if (n % 256 === 0) {
         const pending = checkpoint();
@@ -188,11 +232,14 @@ export async function decodeDocument(
       const text = str(strings, nvIdx).trim();
       if (!text) continue;
       const parentIdx = dn.parentIndex?.[n] ?? -1;
-      if (parentIdx >= 0) {
-        const existing = nodeTextContent.get(parentIdx);
-        if (existing) existing.push(text);
-        else nodeTextContent.set(parentIdx, [text]);
-      }
+      if (parentIdx < 0 || parentIdx >= count) continue;
+      // Text anywhere inside code/markup subtrees (including `<noscript><p>…</p></noscript>`
+      // and `<template>` -> `#document-fragment` -> descendants) is not visible content and
+      // must not become an element's textContent fallback.
+      if (isExcludedTextContainer(parentIdx)) continue;
+      const existing = nodeTextContent.get(parentIdx);
+      if (existing) existing.push(text);
+      else nodeTextContent.set(parentIdx, [text]);
     }
   }
 
@@ -217,7 +264,7 @@ export async function decodeDocument(
     const li = layoutByNode.get(n);
     let styles: Record<string, string> | undefined;
     let layout: DecodedNode["layout"];
-    if (li !== undefined && tag !== "#text") {
+    if (li !== undefined && tag !== "#text" && tag !== "#cdata-section") {
       const styleRow = dl?.styles?.[li] ?? [];
       styles = {};
       for (let i = 0; i < profile.computedStyles.length; i++)
@@ -225,14 +272,27 @@ export async function decodeDocument(
       layout = {
         boundsSpace: "snapshot-document-layout" as const,
         bounds: dl?.bounds?.[li],
+        ...(dl?.scrollRects?.[li] ? { scrollRect: dl.scrollRects[li] } : {}),
         ...(profile.includeVisualFacts && dl?.clientRects?.[li]
           ? { clientRect: dl.clientRects[li] }
           : {}),
         styles,
       };
+    } else if (li !== undefined) {
+      const tb = dl?.bounds?.[li];
+      if (tb && tb.length >= 4 && (tb[0] + tb[2] < -100 || tb[1] + tb[3] < -100)) {
+        layout = {
+          boundsSpace: "snapshot-document-layout" as const,
+          bounds: tb,
+          styles: EMPTY_STYLES,
+        };
+      }
     }
 
-    const textContent = nodeTextContent.get(n)?.join(" ");
+    const textContent =
+      tag === "#text" || tag === "#cdata-section"
+        ? str(strings, dn.nodeValue?.[n]).trim() || undefined
+        : nodeTextContent.get(n)?.join(" ");
 
     const rawFormValueIndex = tag === "textarea" ? textValues.get(n) : inputValues.get(n);
     const rawFormValue =

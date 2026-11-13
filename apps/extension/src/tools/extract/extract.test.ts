@@ -23,9 +23,18 @@ const searchResults = `<div id="search-results">
   <article class="result"><h3><a href="/docs/provenance">数据来源说明</a></h3></article>
 </div>`;
 
-function extract(selector: string, patch: Partial<ExtractParams> = {}) {
-  const options = validateExtract({ session_id: "test", action: "table", selector, ...patch });
-  const raw = collectExtractDom.call(document.documentElement, options);
+function extract(
+  selector: string | undefined,
+  patch: Partial<ExtractParams> = {},
+  context: Element = document.documentElement,
+) {
+  const options = validateExtract({
+    session_id: "test",
+    action: "table",
+    ...(selector ? { selector } : {}),
+    ...patch,
+  });
+  const raw = collectExtractDom.call(context, options);
   if (raw.error) throw new Error(`${raw.error.reason}: ${raw.error.message}`);
   return fitExtractBudget(
     normalizeExtract(raw, options, 7, {
@@ -34,7 +43,7 @@ function extract(selector: string, patch: Partial<ExtractParams> = {}) {
       title: raw.title,
       frame_id: "root",
       captured_at: raw.captured_at,
-      selector,
+      ...(selector ? { selector } : {}),
     }),
     options.max_bytes,
   );
@@ -445,5 +454,32 @@ describe("structured extraction facts", () => {
     document.body.innerHTML =
       '<div id="host" hidden><table id="t"><tr><td>Secret</td></tr></table></div>';
     expect(() => extract("#t")).toThrow("extract_target_hidden");
+  });
+
+  it("extracts slotted list items, slotted links and closed details positions without leaking nested lists", () => {
+    document.body.innerHTML = `<div id="host">
+      <li slot="second"><a href="/second">Second</a><ul id="inner"><li><a href="/inner">Inner</a></li></ul></li>
+      <li slot="first"><a href="/first">First</a></li>
+      <li slot="unused"><a href="/unused">Unused</a></li>
+      <a slot="slotted-link" href="/fourth">Fourth</a>
+    </div>`;
+    const shadow = document.querySelector("#host")!.attachShadow({ mode: "open" });
+    shadow.innerHTML = `<ul id="l">
+      <slot name="first"></slot>
+      <details><summary>More</summary><li>Hidden details</li></details>
+      <slot name="second"></slot>
+      <li><slot name="slotted-link"></slot></li>
+    </ul>`;
+    const outer = extract(undefined, { action: "list", ref: "list" }, shadow.querySelector("#l")!);
+    expect(outer.rows).toEqual([
+      { text: "First", url: new URL("/first", document.baseURI).href },
+      { text: "Second\nInner", url: new URL("/second", document.baseURI).href },
+      { text: "Fourth", url: new URL("/fourth", document.baseURI).href },
+    ]);
+    expect(outer.row_sources.map((row) => row.source_row)).toEqual([1, 3, 4]);
+    expect(outer.warnings).toEqual(["hidden_rows_omitted"]);
+
+    const inner = extract("#inner", { action: "list" });
+    expect(inner.rows).toEqual([{ text: "Inner", url: new URL("/inner", document.baseURI).href }]);
   });
 });

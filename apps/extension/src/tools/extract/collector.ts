@@ -513,10 +513,13 @@ export function collectExtractDom(this: Element, options: CollectorOptions): Raw
       // Walk the rendered composition lazily: selectors and closest() cannot
       // follow assigned slots. Include closed-details content so hidden items
       // still advance source positions and are handled by isHidden()/omit().
-      // Nested lists own their own items.
-      function* listItems(): Generator<Element> {
-        if (!root.matches(listSelector)) return;
-        const stack = [{ nodes: childrenOf(root, true), index: 0 }];
+      // Nested lists own their own items and default links.
+      function* listElements(
+        start: Element,
+        selector: string,
+        includeClosedDetails = false,
+      ): Generator<Element> {
+        const stack = [{ nodes: childrenOf(start, includeClosedDetails), index: 0 }];
         while (stack.length) {
           const frame = stack[stack.length - 1];
           if (frame.index === frame.nodes.length) {
@@ -526,12 +529,16 @@ export function collectExtractDom(this: Element, options: CollectorOptions): Raw
           tick();
           const node = frame.nodes[frame.index++];
           if (!(node instanceof Element) || node.matches(listSelector)) continue;
-          if (node.matches('li,[role="listitem"]')) yield node;
-          const nodes = childrenOf(node, true);
+          if (node.matches(selector)) yield node;
+          const nodes = childrenOf(node, includeClosedDetails);
           if (nodes.length) stack.push({ nodes, index: 0 });
         }
       }
-      const nodes = options.item_selector ? select(root, options.item_selector) : listItems();
+      const nodes = options.item_selector
+        ? select(root, options.item_selector)
+        : root.matches(listSelector)
+          ? listElements(root, 'li,[role="listitem"]', true)
+          : [];
       let sourceRow = 0;
       try {
         for (const item of nodes) {
@@ -557,7 +564,12 @@ export function collectExtractDom(this: Element, options: CollectorOptions): Raw
                   : Math.max(result.declared_rows, count);
           }
           for (const field of fields) {
-            const matches = field.selector === ":scope" ? [item] : select(item, field.selector);
+            const matches =
+              field.selector === ":scope"
+                ? [item]
+                : !options.fields && field.key === "url"
+                  ? listElements(item, field.selector)
+                  : select(item, field.selector);
             const visible: Element[] = [];
             for (const match of matches) {
               tick();

@@ -449,6 +449,85 @@ function isAncestorOf(
   return false;
 }
 
+const FOLDABLE_NAMED_REF_ROLES = new Set([
+  "button",
+  "link",
+  "menuitem",
+  "menuitemcheckbox",
+  "menuitemradio",
+  "option",
+  "tab",
+  "switch",
+  "checkbox",
+  "radio",
+  "combobox",
+]);
+
+const POPUP_OR_COMPOSITE_BOUNDARY_ROLES = new Set([
+  "menu",
+  "menubar",
+  "listbox",
+  "dialog",
+  "alertdialog",
+  "table",
+  "grid",
+  "list",
+  "tree",
+]);
+
+function pruneControlSkinRecoveries(
+  children: ReadonlyMap<number | null, VomNode[]>,
+  recoveredIds: Set<number>,
+): void {
+  const stack: Array<{
+    node: VomNode;
+    inControlSkin: boolean;
+    inheritedPointer: boolean;
+  }> = [];
+  for (const root of children.get(null) ?? []) {
+    stack.push({ node: root, inControlSkin: false, inheritedPointer: false });
+  }
+  const visited = new Set<number>();
+  while (stack.length > 0) {
+    const { node, inControlSkin, inheritedPointer } = stack.pop()!;
+    if (visited.has(node.id)) continue;
+    visited.add(node.id);
+
+    const role = normalizedRole(node);
+    const crossedBoundary =
+      POPUP_OR_COMPOSITE_BOUNDARY_ROLES.has(role) ||
+      node.position === "absolute" ||
+      node.position === "fixed";
+    const skinHere = !crossedBoundary && inControlSkin;
+    const pointerSkinHere = !crossedBoundary && inheritedPointer && node.cursor === "pointer";
+
+    if (recoveredIds.has(node.id) && (skinHere || (pointerSkinHere && !hasRecoveryHandler(node)))) {
+      const explicitRole = node.attrs?.role?.toLowerCase() ?? "";
+      if (
+        !isContentEditable(node) &&
+        !EXPLICIT_RECOVERY_ROLES.has(explicitRole) &&
+        explicitRole !== "combobox"
+      ) {
+        recoveredIds.delete(node.id);
+      }
+    }
+
+    const isAtomicSemantic =
+      isSemanticReferenceNode(node) && !POPUP_OR_COMPOSITE_BOUNDARY_ROLES.has(role);
+    const nextSkin = skinHere || (isAtomicSemantic && FOLDABLE_NAMED_REF_ROLES.has(role));
+    const nextPointer = pointerSkinHere || (isAtomicSemantic && node.cursor === "pointer");
+
+    for (const child of children.get(node.id) ?? []) {
+      const sameFrame = child.frameId === node.frameId;
+      stack.push({
+        node: child,
+        inControlSkin: sameFrame ? nextSkin : false,
+        inheritedPointer: sameFrame ? nextPointer : false,
+      });
+    }
+  }
+}
+
 export function applyVomInteractionRecovery(nodes: VomNode[]): VomNode[] {
   // CSS cursors inherit. Expose the handle once instead of assigning refs to
   // every decorative span inside it; retain explicit nested draggable/drop cues.
@@ -474,6 +553,15 @@ export function applyVomInteractionRecovery(nodes: VomNode[]): VomNode[] {
     }
   }
   if (eligible.length === 0) return nodes;
+
+  const hasAnyRecoverySignal = eligible.some(
+    (node) =>
+      node.cursor === "pointer" ||
+      hasRecoveryHandler(node) ||
+      isContentEditable(node) ||
+      isFocusable(node),
+  );
+  if (!hasAnyRecoverySignal) return nodes;
 
   const children = buildChildren(nodes);
   const recoveredIds = new Set<number>();
@@ -501,11 +589,16 @@ export function applyVomInteractionRecovery(nodes: VomNode[]): VomNode[] {
 
   if (recoveredIds.size === 0) return nodes;
 
+  pruneControlSkinRecoveries(children, recoveredIds);
+  if (recoveredIds.size === 0) return nodes;
+
   const parentMap = buildParentMap(nodes);
+  const prunedAncestors = new Set<number>();
   for (const nodeId of [...recoveredIds]) {
     let current = parentMap.get(nodeId) ?? null;
     let guard = 0;
-    while (current !== null && guard <= parentMap.size) {
+    while (current !== null && !prunedAncestors.has(current) && guard <= parentMap.size) {
+      prunedAncestors.add(current);
       recoveredIds.delete(current);
       current = parentMap.get(current) ?? null;
       guard += 1;
@@ -954,18 +1047,26 @@ function isEditableCombobox(node: VomNode): boolean {
   return false;
 }
 
-function shouldSkipRedundantRefChildren(node: VomNode): boolean {
+function isAlwaysFoldedRefControl(node: VomNode): boolean {
   const role = normalizedRole(node);
-  if (
-    ["textbox", "searchbox"].includes(role) &&
-    ["input", "textarea"].includes((node.tag ?? "").toLowerCase())
-  ) {
+  const tag = normalizedTag(node);
+  if (["textbox", "searchbox"].includes(role) && ["input", "textarea"].includes(tag)) {
     return true;
   }
-  if (!cleaned(node.name)) return false;
-  return ["button", "link", "menuitem", "tab", "switch", "checkbox", "radio", "combobox"].includes(
-    role,
+  return role === "combobox" && tag === "select" && Boolean(cleaned(node.name));
+}
+
+function isFoldableNamedRefControl(node: VomNode): boolean {
+  return (
+    !isAlwaysFoldedRefControl(node) &&
+    Boolean(cleaned(node.name)) &&
+    FOLDABLE_NAMED_REF_ROLES.has(normalizedRole(node))
   );
+}
+
+function shouldSkipRedundantRefChildren(node: VomNode, state: RenderState): boolean {
+  if (isAlwaysFoldedRefControl(node)) return true;
+  return isFoldableNamedRefControl(node) && !state.hasInteractiveDescendant.has(node.id);
 }
 
 function descendantTextCoveredByName(node: VomNode, state: RenderState): boolean {
@@ -1028,13 +1129,20 @@ export interface RenderRow {
   minimal?: string;
 }
 
+interface RenderStackEntry {
+  node: VomNode;
+  depth: number;
+  onlyInteractive?: boolean;
+}
+
 function pushRenderChildren(
-  stack: Array<{ node: VomNode; depth: number }>,
+  stack: RenderStackEntry[],
   children: readonly VomNode[],
   depth: number,
+  onlyInteractive = false,
 ): void {
   for (let index = children.length - 1; index >= 0; index -= 1) {
-    stack.push({ node: children[index], depth });
+    stack.push({ node: children[index], depth, onlyInteractive });
   }
 }
 
@@ -1058,13 +1166,23 @@ function* renderTreeRows(
   observation = false,
   representedSources?: ReadonlySet<number>,
 ): Generator<RenderRow> {
-  const stack: Array<{ node: VomNode; depth: number }> = [];
+  const stack: RenderStackEntry[] = [];
   pushRenderChildren(stack, children.get(null) ?? [], 1);
 
   while (stack.length > 0) {
-    const { node, depth } = stack.pop() as { node: VomNode; depth: number };
+    const { node, depth, onlyInteractive } = stack.pop() as RenderStackEntry;
 
     if (state.consumedCaptionIds.has(node.id)) {
+      continue;
+    }
+
+    if (onlyInteractive && node.visualKey === undefined && !isVomReferenceNode(node)) {
+      if (
+        state.hasInteractiveDescendant.has(node.id) ||
+        (observation && state.visualAncestors.has(node.id))
+      ) {
+        pushRenderChildren(stack, children.get(node.id) ?? [], depth, true);
+      }
       continue;
     }
 
@@ -1073,7 +1191,7 @@ function* renderTreeRows(
       representedSources?.has(node.id) ||
       (node.visualKey === undefined && !shouldRender(node))
     ) {
-      pushRenderChildren(stack, children.get(node.id) ?? [], depth);
+      pushRenderChildren(stack, children.get(node.id) ?? [], depth, onlyInteractive);
       continue;
     }
 
@@ -1097,7 +1215,7 @@ function* renderTreeRows(
     if (depth > state.maxDepth && node.visualKey === undefined) {
       state.truncated = true;
       if (observation && state.visualAncestors.has(node.id))
-        pushRenderChildren(stack, children.get(node.id) ?? [], depth);
+        pushRenderChildren(stack, children.get(node.id) ?? [], depth, onlyInteractive);
       continue;
     }
 
@@ -1173,11 +1291,19 @@ function* renderTreeRows(
 
     if (
       (!observation || !state.visualAncestors.has(node.id)) &&
-      ((ref && shouldSkipRedundantRefChildren(node)) || shouldSkipRedundantChildren(node, state))
+      ((ref && shouldSkipRedundantRefChildren(node, state)) ||
+        shouldSkipRedundantChildren(node, state))
     ) {
       continue;
     }
-    pushRenderChildren(stack, children.get(node.id) ?? [], depth + 1);
+    const resetsOnlyInteractive = ["dialog", "alertdialog"].includes(normalizedRole(node));
+    pushRenderChildren(
+      stack,
+      children.get(node.id) ?? [],
+      depth + 1,
+      (!resetsOnlyInteractive && Boolean(onlyInteractive)) ||
+        Boolean(ref && isFoldableNamedRefControl(node)),
+    );
   }
 }
 

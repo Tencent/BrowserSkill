@@ -111,13 +111,20 @@ export async function uploadThroughActivatedFileInput(
   options: FileInputTransactionOptions,
 ): Promise<FileInputTransactionResult | RpcError> {
   const deadline = Date.now() + options.timeoutMs;
-  const target = options.actionTarget.cdpTarget;
+  const rawTarget = options.actionTarget.cdpTarget;
+  let target = options.cdp.resolveTarget?.(rawTarget) ?? rawTarget;
+  let resolvedOptions =
+    target === rawTarget
+      ? options
+      : { ...options, actionTarget: { ...options.actionTarget, cdpTarget: target } };
   const objectGroup = `bsk-upload-${crypto.randomUUID()}`;
   const stateKey = `__bskUpload_${crypto.randomUUID().replaceAll("-", "")}`;
   const chooserEvents: ChooserEvent[] = [];
   let interceptionArmed = false;
   let probeArmed = false;
   let triggerObjectId: string | undefined;
+  let releaseTabAttachment: (() => void) | undefined;
+  let chooserSubscription: { dispose(): void } | undefined;
   let outcome: FileInputTransactionResult | RpcError = transferFailure(
     "protocol_error",
     "file_input_probe_failed",
@@ -126,14 +133,29 @@ export async function uploadThroughActivatedFileInput(
     "cleanup",
   );
 
-  const chooserSubscription = options.cdp.onEvent?.((source, method, raw) => {
-    if (method !== "Page.fileChooserOpened" || !sameTarget(source, target)) return;
-    const event = raw as ChooserEvent;
-    chooserEvents.push(event);
-  });
-
   try {
+    releaseTabAttachment = options.cdp.retainTabAttachment?.(rawTarget.tabId);
+    chooserSubscription = options.cdp.onEvent?.((source, method, raw) => {
+      const expectedTarget = options.cdp.resolveTarget?.(target) ?? target;
+      if (method !== "Page.fileChooserOpened" || !sameTarget(source, expectedTarget)) return;
+      const event = raw as ChooserEvent;
+      chooserEvents.push(event);
+    });
+
     try {
+      if (rawTarget.sessionId && options.cdp.reconcileSoftDetachedFrames) {
+        await waitBounded(
+          options.cdp.reconcileSoftDetachedFrames(rawTarget.tabId),
+          deadline,
+          options.signal,
+          "reconciling upload frame target timed out",
+        );
+        target = options.cdp.resolveTarget?.(rawTarget) ?? rawTarget;
+        resolvedOptions =
+          target === rawTarget
+            ? options
+            : { ...options, actionTarget: { ...options.actionTarget, cdpTarget: target } };
+      }
       await waitBounded(
         sendToCdpTarget(options.cdp, target, "Page.setInterceptFileChooserDialog", {
           enabled: true,
@@ -174,7 +196,7 @@ export async function uploadThroughActivatedFileInput(
 
       const armed = await waitBounded(
         callOnTrigger<RuntimeReply>(
-          options,
+          resolvedOptions,
           triggerObjectId,
           `function(key) {
             const doc = this.ownerDocument;
@@ -246,7 +268,7 @@ export async function uploadThroughActivatedFileInput(
       while (Date.now() < activationDeadline) {
         if (chooserEvents.length > 0) break;
         const reply = await callOnTrigger<RuntimeReply>(
-          options,
+          resolvedOptions,
           triggerObjectId,
           `function(key) {
             const state = this.ownerDocument.defaultView?.[key];
@@ -319,7 +341,7 @@ export async function uploadThroughActivatedFileInput(
           return outcome;
         }
         const input = await callOnTrigger<RuntimeReply>(
-          options,
+          resolvedOptions,
           triggerObjectId,
           `function(key) { return this.ownerDocument.defaultView?.[key]?.inputs[0]; }`,
           [stateKey],
@@ -382,78 +404,82 @@ export async function uploadThroughActivatedFileInput(
       return outcome;
     }
   } finally {
-    chooserSubscription?.dispose();
-    let cleanupFailed = false;
-    if (options.cleanupTrigger) {
-      const cleanupDeadline = Date.now() + CLEANUP_TIMEOUT_MS;
-      try {
-        await waitBounded(
-          options.cleanupTrigger(cleanupDeadline),
-          cleanupDeadline,
-          undefined,
-          "upload trigger cleanup timed out",
-        );
-      } catch {
-        cleanupFailed = true;
-      }
-    }
-    if (probeArmed && triggerObjectId) {
-      try {
-        await waitBounded(
-          callOnTrigger(
-            { ...options, cdp: options.cdp.resourceCleanup ?? options.cdp },
-            triggerObjectId,
-            `function(key) {
-              const owner = this.ownerDocument.defaultView;
-              const state = owner?.[key];
-              if (state?.listener) this.ownerDocument.removeEventListener("click", state.listener, true);
-              if (owner) delete owner[key];
-            }`,
-            [stateKey],
-            true,
-          ),
-          Date.now() + CLEANUP_TIMEOUT_MS,
-          undefined,
-          "cleaning file input probe timed out",
-        );
-      } catch {
-        cleanupFailed = true;
-      }
-    }
-    if (interceptionArmed) {
-      try {
-        await waitBounded(
-          sendToCdpTarget(options.cdp, target, "Page.setInterceptFileChooserDialog", {
-            enabled: false,
-            cancel: true,
-          }),
-          Date.now() + CLEANUP_TIMEOUT_MS,
-          undefined,
-          "disabling file chooser interception timed out",
-        );
-      } catch {
-        cleanupFailed = true;
-      }
-    }
     try {
-      await waitBounded(
-        sendToCdpTarget(options.cdp, target, "Runtime.releaseObjectGroup", { objectGroup }),
-        Date.now() + CLEANUP_TIMEOUT_MS,
-        undefined,
-        "releasing upload object group timed out",
-      );
-    } catch {
-      cleanupFailed = true;
-    }
+      chooserSubscription?.dispose();
+      let cleanupFailed = false;
+      if (options.cleanupTrigger) {
+        const cleanupDeadline = Date.now() + CLEANUP_TIMEOUT_MS;
+        try {
+          await waitBounded(
+            options.cleanupTrigger(cleanupDeadline),
+            cleanupDeadline,
+            undefined,
+            "upload trigger cleanup timed out",
+          );
+        } catch {
+          cleanupFailed = true;
+        }
+      }
+      if (probeArmed && triggerObjectId) {
+        try {
+          await waitBounded(
+            callOnTrigger(
+              { ...resolvedOptions, cdp: options.cdp.resourceCleanup ?? options.cdp },
+              triggerObjectId,
+              `function(key) {
+                const owner = this.ownerDocument.defaultView;
+                const state = owner?.[key];
+                if (state?.listener) this.ownerDocument.removeEventListener("click", state.listener, true);
+                if (owner) delete owner[key];
+              }`,
+              [stateKey],
+              true,
+            ),
+            Date.now() + CLEANUP_TIMEOUT_MS,
+            undefined,
+            "cleaning file input probe timed out",
+          );
+        } catch {
+          cleanupFailed = true;
+        }
+      }
+      if (interceptionArmed) {
+        try {
+          await waitBounded(
+            sendToCdpTarget(options.cdp, target, "Page.setInterceptFileChooserDialog", {
+              enabled: false,
+              cancel: true,
+            }),
+            Date.now() + CLEANUP_TIMEOUT_MS,
+            undefined,
+            "disabling file chooser interception timed out",
+          );
+        } catch {
+          cleanupFailed = true;
+        }
+      }
+      try {
+        await waitBounded(
+          sendToCdpTarget(options.cdp, target, "Runtime.releaseObjectGroup", { objectGroup }),
+          Date.now() + CLEANUP_TIMEOUT_MS,
+          undefined,
+          "releasing upload object group timed out",
+        );
+      } catch {
+        cleanupFailed = true;
+      }
 
-    const effect = isRpcError(outcome)
-      ? (outcome.data?.effect_state as TransferEffectState | undefined)
-      : "committed";
-    if (effect === "unknown" || cleanupFailed) {
-      await options.cdp.detach?.(target.tabId);
-    }
-    if (cleanupFailed && isRpcError(outcome)) {
-      outcome.data = { ...outcome.data, cleanup_state: "failed" };
+      const effect = isRpcError(outcome)
+        ? (outcome.data?.effect_state as TransferEffectState | undefined)
+        : "committed";
+      if (effect === "unknown" || cleanupFailed) {
+        await options.cdp.detach?.(target.tabId);
+      }
+      if (cleanupFailed && isRpcError(outcome)) {
+        outcome.data = { ...outcome.data, cleanup_state: "failed" };
+      }
+    } finally {
+      releaseTabAttachment?.();
     }
   }
 }
