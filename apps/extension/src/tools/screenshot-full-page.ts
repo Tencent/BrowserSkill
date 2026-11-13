@@ -186,7 +186,10 @@ export async function handleFullPageScreenshot(
       if (
         !keepUnselectedAwake ||
         rendering ||
-        !(await waitForReply(isHiddenCompositorSurface(active, target.windowId), controller.signal))
+        !(await waitForReply(
+          isHiddenCompositorSurface(active, target.windowId, { includeUnfocusedWindow: false }),
+          controller.signal,
+        ))
       )
         return;
       // Focus emulation keeps script execution alive, but Windows and Linux (Aura)

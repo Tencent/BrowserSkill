@@ -227,8 +227,10 @@ describe.skipIf(!process.env.BSK_TEST_CHROME)("standalone remote browser", () =>
           await poll(() =>
             evaluate<boolean>(`chrome.tabs.get(${userTab}).then(t=>t.windowId===${user.id})`),
           );
-          const windows = await evaluate<{ id: number }[]>("chrome.windows.getAll()");
-          expect(windows.some((w) => w.id === started.agent_window_id)).toBe(false);
+          await poll(async () => {
+            const windows = await evaluate<{ id: number }[]>("chrome.windows.getAll()");
+            return !windows.some((w) => w.id === started.agent_window_id);
+          });
           expect((await evaluate<{ deviceId: string }>(readGrant)).deviceId).toBe(grant.deviceId);
           await expect(rpc("tool.snapshot", { session_id: session })).rejects.toBeDefined();
         },

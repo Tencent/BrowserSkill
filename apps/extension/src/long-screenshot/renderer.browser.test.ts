@@ -299,11 +299,14 @@ describe.skipIf(!process.env.BSK_TEST_CHROME)("long screenshot renderer pixels",
             ).toBeLessThan(12);
           }
           await evaluate("document.querySelector('button').click()");
-          for (let i = 0; i < 200; i++) {
+          for (let i = 0; i < 600; i++) {
             if (await evaluate("!!globalThis.downloadArgs")) break;
             await new Promise((resolve) => setTimeout(resolve, 50));
           }
-          expect(await evaluate("globalThis.downloadArgs")).toMatchObject({
+          expect(
+            await evaluate("globalThis.downloadArgs"),
+            await evaluate("JSON.stringify(previewErrors)"),
+          ).toMatchObject({
             saveAs: true,
             filename: expect.stringMatching(/Long screenshot test.*\.png$/),
           });

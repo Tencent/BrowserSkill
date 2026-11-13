@@ -56,6 +56,16 @@ globalThis.run = async (url, overlay, active) => {
         if(await evaluate(tab.id,"document.readyState==='complete' && !!document.querySelector('#pattern')"))break;
         await new Promise(r=>setTimeout(r,50));
       }
+      if(active){
+        await new Promise(r=>setTimeout(r,250));
+        let lastHeight=-1,stable=0;
+        for(let i=0;i<20&&stable<3;i++){
+          await new Promise(r=>setTimeout(r,50));
+          const h=await evaluate(tab.id,'document.documentElement.clientHeight');
+          stable=h===lastHeight?stable+1:0;
+          lastHeight=h;
+        }
+      }
       await evaluate(tab.id, "scrollTo({top:"+(variant==='rows'?333:900)+",behavior:'instant'})");
       const original=await state(tab.id);
       let overlayPixels=0;

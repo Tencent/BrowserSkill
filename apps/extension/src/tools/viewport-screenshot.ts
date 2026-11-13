@@ -32,11 +32,13 @@ async function isAuraCompositorPlatform(): Promise<boolean> {
 export async function isHiddenCompositorSurface(
   active: boolean,
   windowId: number,
+  { includeUnfocusedWindow = true }: { includeUnfocusedWindow?: boolean } = {},
 ): Promise<boolean> {
   if (!active) return true;
   if (typeof chrome === "undefined" || typeof chrome.windows?.get !== "function") return false;
   const win = await chrome.windows.get(windowId).catch(() => undefined);
-  return win ? !win.focused || win.state === "minimized" : false;
+  if (!win) return false;
+  return win.state === "minimized" || (includeUnfocusedWindow && !win.focused);
 }
 
 /** Hold a minimal screencast consumer on Windows/Linux Aura while reading a hidden surface. */
