@@ -26,6 +26,25 @@ fn bsk(args: &[&str]) -> Output {
         .expect("run bsk")
 }
 
+#[test]
+fn navigate_requires_url_before_daemon_discovery() {
+    let home = tempfile::tempdir().unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_bsk"))
+        .args(["navigate", "--json"])
+        .env("BSK_HOME", home.path())
+        .env("BSK_AUTO_START", "0")
+        .env("BSK_AUTO_UPDATE", "off")
+        .output()
+        .expect("run bsk navigate");
+
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stderr.is_empty(), "{output:?}");
+    let error: Value = serde_json::from_slice(&output.stdout).expect("JSON navigate error");
+    assert_eq!(error["code"], "invalid_params");
+    assert_eq!(error["message"], "navigate requires a url");
+    assert!(!home.path().join("daemon.json").exists());
+}
+
 fn json_usage_error(output: &Output) -> Value {
     assert_eq!(output.status.code(), Some(1));
     assert!(

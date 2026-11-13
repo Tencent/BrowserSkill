@@ -173,7 +173,9 @@ pub fn dispatch_navigate_command(args: NavigateCommand, format: Format) -> Resul
 
 pub fn dispatch_navigate(args: NavigateArgs, format: Format) -> Result<(), CliError> {
     let Some(url) = args.url.clone() else {
-        return Err(CliError::Local(anyhow::anyhow!("navigate requires a url")));
+        return Err(CliError::invalid_params(anyhow::anyhow!(
+            "navigate requires a url"
+        )));
     };
     crate::cli::business_rpc::set_caller_scope(args.scope.clone());
     let info = ensure_daemon().context("ensure daemon is running")?;
