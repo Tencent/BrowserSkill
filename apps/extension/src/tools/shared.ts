@@ -7,7 +7,7 @@
 // handlers (review parity).
 
 import type { CdpDebuggee, CdpDispatchGuard, DialogCursor } from "@/browser-driver/chromium-cdp";
-import type { CdpFrameGraph, CdpTarget } from "@/browser-driver/frame-graph";
+import type { CdpFrameGraph, CdpFrameGraphOptions, CdpTarget } from "@/browser-driver/frame-graph";
 import type { NativeInputTimestamp } from "@/browser-driver/native-input-clock";
 import { shareScreencasts } from "@/browser-driver/screencast-coordinator";
 import {
@@ -52,7 +52,7 @@ export interface ResolvedTargetTab {
   pendingUrl?: string;
 }
 
-export type { DialogCursor };
+export type { CdpFrameGraphOptions, DialogCursor };
 
 /**
  * Minimal CDP surface every tool handler needs. Backed by
@@ -88,7 +88,11 @@ export interface CdpRunner {
     guard: CdpDispatchGuard,
   ): Promise<T>;
   detach?(tabId: number, expectedAttachmentId?: string): Promise<void>;
-  getFrameGraph?(tabId: number, signal?: AbortSignal): Promise<CdpFrameGraph>;
+  getFrameGraph?(
+    tabId: number,
+    signal?: AbortSignal,
+    options?: CdpFrameGraphOptions,
+  ): Promise<CdpFrameGraph>;
   getAttachmentId?(tabId: number): string | undefined;
   resolveTarget?<T extends CdpDebuggee>(target: T): T;
   retainTabAttachment?(tabId: number): () => void;

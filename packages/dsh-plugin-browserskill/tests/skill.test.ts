@@ -55,7 +55,7 @@ describe("registerBskSkill", () => {
     // Keep the lazily injected instructions inside a bounded prompt budget,
     // while the lower bound catches accidental truncation of the guidance.
     expect(content.length).toBeGreaterThan(3_000);
-    expect(content.length).toBeLessThan(4_500);
+    expect(content.length).toBeLessThan(4_600);
     const base = skill.resourceBase as { kind: string; path: string };
     expect(base.kind).toBe("directory");
     expect(isAbsolute(base.path)).toBe(true);

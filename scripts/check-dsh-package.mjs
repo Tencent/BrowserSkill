@@ -38,7 +38,7 @@ try {
   assert(typeof archive?.filename === "string", "npm pack did not return an archive");
   execFileSync("tar", ["-xzf", join(temp, archive.filename), "-C", temp]);
   const unpacked = join(temp, "package");
-  const options = { maxEntryBytes: 4_500, browserTools: DSH_BROWSER_TOOLS };
+  const options = { maxEntryBytes: 4_600, browserTools: DSH_BROWSER_TOOLS };
   const original = validateSkillDirectory(join(pkg, "skill"), options);
   const packed = validateSkillDirectory(join(unpacked, "skill"), options);
   assert.deepEqual(packed.files, original.files, "npm must ship every skill resource unchanged");

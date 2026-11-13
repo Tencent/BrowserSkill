@@ -1,4 +1,4 @@
-import { ChromiumCdp } from "@/browser-driver/chromium-cdp";
+import { type CdpDispatchGuard, ChromiumCdp } from "@/browser-driver/chromium-cdp";
 import { type CdpTarget, cdpTargetKey } from "@/browser-driver/frame-graph";
 import type { SessionManager } from "@/session-manager/manager";
 import type { RpcError, ScrollToParams, ScrollToResult } from "@/transport/types";
@@ -68,6 +68,37 @@ export async function handleScrollTo(
   const cdp: CdpRunner = {
     send: (tabId, method, args) => send({ tabId }, method, args),
     sendToTarget: send,
+    sendGuarded: deps.cdp.sendGuarded
+      ? async <T>(
+          target: CdpTarget,
+          method: string,
+          args: object | undefined,
+          guard: CdpDispatchGuard,
+        ) => {
+          checkActive();
+          if (method === "DOM.resolveNode") objectTargets.set(cdpTargetKey(target), target);
+          const combinedSignal =
+            guard.signal && deps.signal
+              ? AbortSignal.any([guard.signal, deps.signal])
+              : (guard.signal ?? deps.signal);
+          const result = await deps.cdp.sendGuarded!<T>(
+            target,
+            method,
+            method === "DOM.resolveNode" ? { ...args, objectGroup } : args,
+            {
+              ...guard,
+              signal: combinedSignal,
+              onDispatch: () => {
+                checkActive();
+                guard.onDispatch?.();
+              },
+            },
+          );
+          checkActive();
+          return result;
+        }
+      : undefined,
+    getAttachmentId: deps.cdp.getAttachmentId?.bind(deps.cdp),
     trackSessionTab: deps.cdp.trackSessionTab?.bind(deps.cdp),
     resolveTarget: deps.cdp.resolveTarget?.bind(deps.cdp),
     reattachIfSoftDetached: deps.cdp.reattachIfSoftDetached
@@ -85,10 +116,15 @@ export async function handleScrollTo(
         }
       : undefined,
     getFrameGraph: deps.cdp.getFrameGraph
-      ? async (tabId) => {
+      ? async (tabId, signal, options) => {
           checkActive();
-          graph ??= deps.cdp.getFrameGraph!(tabId);
-          const result = await graph;
+          const combinedSignal =
+            signal && deps.signal
+              ? AbortSignal.any([signal, deps.signal])
+              : (signal ?? deps.signal);
+          const promise = graph ?? deps.cdp.getFrameGraph!(tabId, combinedSignal, options);
+          if (options?.includeOwners !== false) graph ??= promise;
+          const result = await promise;
           checkActive();
           return result;
         }

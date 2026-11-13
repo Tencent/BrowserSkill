@@ -37,6 +37,7 @@ import { CdpReadGate, CdpReadTimeoutError, READ_TIMEOUT_MS } from "./command-dea
 import {
   buildFrameGraph,
   type CdpFrameGraph,
+  type CdpFrameGraphOptions,
   type CdpFrameTreeNode,
   type CdpFrameTreeSource,
   type CdpTarget,
@@ -159,6 +160,7 @@ interface FrameDiscoveryState {
   pending: Set<Promise<void>>;
   generation: number;
   enabled: Map<string, Promise<void>>;
+  settled: Set<string>;
   frameIds: Map<string, string>;
 }
 
@@ -661,21 +663,32 @@ export class ChromiumCdp {
     guard.signal?.throwIfAborted();
     if (guard.attachmentId === undefined) await this.ensureAttached(target.tabId);
     try {
-      return (await this.command(target, method, params ?? {}, undefined, () => {
-        guard.signal?.throwIfAborted();
-        if (
-          guard.attachmentId !== undefined &&
-          this.getAttachmentId(target.tabId) !== guard.attachmentId
-        )
-          throw new Error("Debugger attachment changed before dispatch");
-        guard.onDispatch?.();
-      })) as T;
+      return (await this.command(
+        target,
+        method,
+        params ?? {},
+        undefined,
+        () => {
+          guard.signal?.throwIfAborted();
+          if (
+            guard.attachmentId !== undefined &&
+            this.getAttachmentId(target.tabId) !== guard.attachmentId
+          )
+            throw new Error("Debugger attachment changed before dispatch");
+          guard.onDispatch?.();
+        },
+        guard.signal,
+      )) as T;
     } catch (err) {
       throw normalizeError(err);
     }
   }
 
-  async getFrameGraph(tabId: number, signal?: AbortSignal): Promise<CdpFrameGraph> {
+  async getFrameGraph(
+    tabId: number,
+    signal?: AbortSignal,
+    options?: CdpFrameGraphOptions,
+  ): Promise<CdpFrameGraph> {
     signal?.throwIfAborted();
     await this.ensureAttached(tabId);
     const attachmentId = this.getAttachmentId(tabId);
@@ -709,12 +722,24 @@ export class ChromiumCdp {
     // Ordinary configuration failures leave the graph to the root tree. A
     // timed-out read means the renderer is not answering: stop here instead of
     // queueing the tree, owner and snapshot reads behind the stuck command.
+    const discoveryWasSettled = this.frameDiscovery.get(tabId)?.settled.has("root") === true;
     await this.enableFrameDiscovery({ tabId }).catch(rethrowReadTimeout);
     check();
     this.retryChildFrameDiscovery(tabId);
-    await this.drainFrameAttachTasks(tabId);
-    check();
+    const stateAfterRetry = this.frameDiscovery.get(tabId);
+    const skipDrain =
+      options?.skipQuietWaitWhenIdle === true &&
+      discoveryWasSettled &&
+      (stateAfterRetry?.pending.size ?? 0) === 0;
+    if (!skipDrain) {
+      await this.drainFrameAttachTasks(tabId);
+      check();
+    }
 
+    const childReadTimeoutMs =
+      options?.childReadTimeoutMs !== undefined && options.childReadTimeoutMs > 0
+        ? options.childReadTimeoutMs
+        : READ_TIMEOUT_MS;
     const sources: CdpFrameTreeSource[] = [];
     const unavailable = new Map<string, CdpTarget>();
     const isolateChildTimeout = (error: unknown, target: CdpTarget) => {
@@ -747,7 +772,7 @@ export class ChromiumCdp {
             target,
             "Page.getFrameTree",
             {},
-            READ_TIMEOUT_MS,
+            childReadTimeoutMs,
           );
           if (reply.frameTree)
             this.frameDiscovery.get(tabId)?.frameIds.set(sessionId, reply.frameTree.frame.id);
@@ -765,6 +790,9 @@ export class ChromiumCdp {
     const discovered = buildFrameGraph(sources);
     if (!discovered) throw new Error("Page.getFrameTree returned no root frame");
     const graph = omitFrameSubtrees(discovered, unavailable);
+    if (options?.includeOwners === false) {
+      return graph;
+    }
     const frameById = new Map(graph.frames.map((frame) => [frame.frameId, frame]));
     await Promise.all(
       graph.frames.map(async (frame) => {
@@ -772,9 +800,12 @@ export class ChromiumCdp {
         const parent = frameById.get(frame.parentFrameId);
         if (!parent) return;
         try {
-          const owner = await read<{ backendNodeId?: number }>(parent.target, "DOM.getFrameOwner", {
-            frameId: frame.frameId,
-          });
+          const owner = await read<{ backendNodeId?: number }>(
+            parent.target,
+            "DOM.getFrameOwner",
+            { frameId: frame.frameId },
+            parent.target.sessionId ? childReadTimeoutMs : READ_TIMEOUT_MS,
+          );
           if (owner.backendNodeId !== undefined) frame.ownerBackendNodeId = owner.backendNodeId;
         } catch (err) {
           // The frame may have navigated between tree capture and owner lookup.
@@ -1615,10 +1646,16 @@ export class ChromiumCdp {
           filter: [{ type: "iframe", exclude: false }],
         }).then(
           () => {
-            if (state.enabled.get(key) === work) state.enabled.set(key, Promise.resolve());
+            if (state.enabled.get(key) === work) {
+              state.enabled.set(key, Promise.resolve());
+              state.settled.add(key);
+            }
           },
           (error) => {
-            if (state.enabled.get(key) === work) state.enabled.delete(key);
+            if (state.enabled.get(key) === work) {
+              state.enabled.delete(key);
+              state.settled.delete(key);
+            }
             throw error;
           },
         );
@@ -1626,8 +1663,13 @@ export class ChromiumCdp {
       .then(() => {})
       .catch((error) => {
         // Keep a timed-out configuration until Chrome actually settles it.
-        if ((!issued || !(error instanceof CdpReadTimeoutError)) && state.enabled.get(key) === work)
+        if (
+          (!issued || !(error instanceof CdpReadTimeoutError)) &&
+          state.enabled.get(key) === work
+        ) {
           state.enabled.delete(key);
+          state.settled.delete(key);
+        }
         throw error;
       });
     state.enabled.set(key, work);
@@ -1671,6 +1713,7 @@ export class ChromiumCdp {
       if (method === "Target.detachedFromTarget") {
         const state = this.frameDiscovery.get(tabId);
         state?.enabled.delete(sessionId);
+        state?.settled.delete(sessionId);
         state?.frameIds.delete(sessionId);
         const remapped = this.remappedChildSessions.get(tabId);
         if (remapped) {
@@ -1775,6 +1818,7 @@ export class ChromiumCdp {
       pending: new Set(),
       generation: 0,
       enabled: new Map(),
+      settled: new Set(),
       frameIds: new Map(),
     };
     this.frameDiscovery.set(tabId, created);

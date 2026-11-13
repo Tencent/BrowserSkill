@@ -57,8 +57,8 @@ To fill an observed field `@e3`:
 bsk_interact({ action: "fill", session: "<id>", target: "@e3", value: "text", contextId: "<observed-id>" })
 ```
 
-DOM refs survive reads; navigation invalidates them. Use refs for frames/shadow roots;
-selectors search the main document.
+DOM refs survive reads; navigation invalidates them. Prefer observed refs (required for
+shadow roots and frame `expect`; action selectors also search iframes).
 Dynamic pages: [read/extract](references/extraction.md) first. Scripts: target `expect` without `observationId`; strict `dependsOn`; `unverified` last. Select options by value.
 
 Inspect unknown effects before retrying. On an error or two attempts without progress,

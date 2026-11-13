@@ -89,8 +89,10 @@ export async function handleUpload(
       cleanupTrigger: (deadline) => trigger.cleanup(deadline),
     });
     if (isRpcError(transaction)) return transaction;
-    usedRef = transaction.click.used_ref;
-    usedSelector = transaction.click.used_selector;
+    if (transaction.click) {
+      usedRef = transaction.click.used_ref;
+      usedSelector = transaction.click.used_selector;
+    }
   }
   return {
     tab_id: target.tabId,

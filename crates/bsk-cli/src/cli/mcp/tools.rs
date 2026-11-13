@@ -1020,7 +1020,7 @@ struct PageArgs {
     /// wait_for_element: observed ref such as @e3.
     #[serde(rename = "ref")]
     ref_: Option<String>,
-    /// wait_for_element: main-document CSS selector.
+    /// wait_for_element: CSS selector (main document and accessible iframes).
     selector: Option<String>,
     /// wait_for_element: state to wait for. Default visible.
     state: Option<ElementState>,
@@ -1322,12 +1322,12 @@ struct InteractArgs {
     session: Option<String>,
     /// Task tab; defaults to the session's current task tab.
     tab_id: Option<i64>,
-    /// Action fields with protocol names. Targets: ref (observed @eN) or selector (main-document
-    /// CSS). click: button, click_count, modifiers. fill: value, clear_before. select: values.
-    /// press: key (Enter, a, Ctrl+A), modifiers, hold_ms. evaluate: expression, unverified (last
-    /// resort; not with observation, expect or depends_on). wheel: delta_x, delta_y. drag: source
-    /// and target ({ref} or {selector}) or delta ({x, y}), mode, hold_ms. All accept timeout_ms
-    /// (1-30000).
+    /// Action fields with protocol names. Targets: ref (observed @eN) or selector (CSS in the
+    /// main document or accessible iframes). click: button, click_count, modifiers. fill: value,
+    /// clear_before. select: values. press: key (Enter, a, Ctrl+A), modifiers, hold_ms. evaluate:
+    /// expression, unverified (last resort; not with observation, expect or depends_on). wheel:
+    /// delta_x, delta_y. drag: source and target ({ref} or {selector}) or delta ({x, y}), mode,
+    /// hold_ms. All accept timeout_ms (1-30000).
     #[serde(default)]
     params: Map<String, Value>,
     /// context_id from the latest sync. Required for actions on tabs under shared control.
@@ -1344,8 +1344,8 @@ struct InteractArgs {
     /// After the action, wait for until_visible (if given) and return the synchronized state in
     /// the same call, as `bsk step` does. Not available for focus and blur.
     sync_after: Option<bool>,
-    /// Main-document CSS selector expected to become visible after the action. Implies
-    /// sync_after.
+    /// CSS selector (main document and accessible iframes) expected to become visible after the
+    /// action. Implies sync_after.
     until_visible: Option<String>,
     /// Readiness budget for until_visible, 1-25000 ms. Default 5000.
     wait_timeout_ms: Option<u32>,
@@ -1705,7 +1705,8 @@ struct PlanArgs {
     context: Option<String>,
     /// observation_id from the latest sync. Required when the first step is untargeted.
     observation: Option<String>,
-    /// Main-document CSS selector expected to become visible after the last step.
+    /// CSS selector (main document and accessible iframes) expected to become visible after the
+    /// last step.
     until_visible: Option<String>,
     /// Readiness budget for until_visible, 1-25000 ms. Default 5000.
     wait_timeout_ms: Option<u32>,

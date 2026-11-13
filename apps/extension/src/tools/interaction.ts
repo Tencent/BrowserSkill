@@ -13,7 +13,7 @@ import { isAbortError } from "./vom/capture-abort";
 // 4. Honour `AbortSignal` so canceled calls don't issue follow-up CDP
 //    commands.
 
-import { ChromiumCdp } from "@/browser-driver/chromium-cdp";
+import { type CdpDispatchGuard, ChromiumCdp } from "@/browser-driver/chromium-cdp";
 import type { CdpTarget } from "@/browser-driver/frame-graph";
 import {
   RECORD_PASSWORD_ATTRIBUTE,
@@ -55,6 +55,7 @@ import {
   lookupSession,
   type ResolvedTargetTab,
   resolveTargetTab,
+  sendToCdpTarget,
 } from "./shared";
 import { resolveSnapshotRef } from "./snapshot-ref";
 
@@ -144,6 +145,408 @@ async function wait(ms: number, signal?: AbortSignal): Promise<void> {
   });
 }
 
+const CHILD_SELECTOR_TIMEOUT_MS = 1_500;
+const CHILD_SELECTOR_CONCURRENCY = 8;
+const CHILD_SELECTOR_RELEASE_TIMEOUT_MS = 200;
+
+class ChildFrameSelectorTimeoutError extends Error {
+  constructor() {
+    super("Child frame selector query timed out");
+    this.name = "TimeoutError";
+  }
+}
+
+class ChildFrameSelectorStoppedError extends Error {
+  constructor() {
+    super("Child frame selector search stopped");
+    this.name = "ChildFrameSelectorStoppedError";
+  }
+}
+
+const SELECTOR_SERIALIZATION = {
+  serialization: "deep",
+  additionalParameters: { maxNodeDepth: 0, includeShadowTree: "none" },
+} as const;
+
+interface DeepSelectorReply {
+  result?: {
+    objectId?: string;
+    value?: unknown;
+    deepSerializedValue?: { type?: string; value?: unknown };
+  };
+  exceptionDetails?: {
+    text?: string;
+    exception?: { description?: string; objectId?: string };
+  };
+}
+
+interface ChildFrameMatch {
+  backendNodeId: number;
+  cdpTarget: CdpTarget;
+  frameId: string;
+}
+
+async function queryChildFrameSelector(
+  cdp: CdpRunner,
+  frame: { frameId: string; target: CdpTarget },
+  selector: string,
+  strictSelector: boolean,
+  childTimeoutMs: number,
+  isStopped?: () => boolean,
+  registerLocalCancel?: (cancel: () => void) => () => void,
+): Promise<{ count: number; backendNodeId?: number; timedOut?: boolean }> {
+  if (isStopped?.()) return { count: 0 };
+  const objectGroup = `bsk-selector-${crypto.randomUUID()}`;
+  const target = cdp.resolveTarget ? cdp.resolveTarget(frame.target) : frame.target;
+  const isOopif = typeof target.sessionId === "string" && target.sessionId.length > 0;
+  const selectorJson = JSON.stringify(selector);
+  const expression = strictSelector
+    ? `(() => { const list = document.querySelectorAll(${selectorJson}); return list.length === 1 ? list[0] : list.length; })()`
+    : `document.querySelector(${selectorJson})`;
+
+  const timeoutError = new ChildFrameSelectorTimeoutError();
+  const stoppedError = new ChildFrameSelectorStoppedError();
+  const timeoutController = new AbortController();
+  const localStopController = new AbortController();
+  const timer = setTimeout(() => timeoutController.abort(timeoutError), childTimeoutMs);
+  const unregisterCancel = registerLocalCancel?.(() => localStopController.abort(stoppedError));
+
+  let releaseGroupTarget: { target: CdpTarget; attachmentId?: string } | undefined;
+
+  const raceBudget = <T>(work: Promise<T>): Promise<T> => {
+    if (timeoutController.signal.aborted) return Promise.reject(timeoutError);
+    if (localStopController.signal.aborted || isStopped?.()) return Promise.reject(stoppedError);
+    return new Promise<T>((resolve, reject) => {
+      const cleanup = () => {
+        timeoutController.signal.removeEventListener("abort", onTimeout);
+        localStopController.signal.removeEventListener("abort", onStop);
+      };
+      const onTimeout = () => {
+        cleanup();
+        reject(timeoutError);
+      };
+      const onStop = () => {
+        cleanup();
+        reject(stoppedError);
+      };
+      timeoutController.signal.addEventListener("abort", onTimeout, { once: true });
+      localStopController.signal.addEventListener("abort", onStop, { once: true });
+      work.then(
+        (value) => {
+          cleanup();
+          resolve(value);
+        },
+        (error) => {
+          cleanup();
+          reject(error);
+        },
+      );
+    });
+  };
+
+  const dispatch = <T>(method: string, params: object): Promise<T> => {
+    // Only pass the per-frame timeout signal to `sendGuarded` for OOPIF targets:
+    // aborting a guarded read on a shared root target (`!sessionId`) would block
+    // `"root"` in `CdpReadGate` for subsequent main-document commands.
+    const work =
+      isOopif && cdp.sendGuarded
+        ? cdp.sendGuarded<T>(target, method, params, { signal: timeoutController.signal })
+        : sendToCdpTarget<T>(cdp, target, method, params);
+    return raceBudget(work);
+  };
+
+  try {
+    const world = await dispatch<{ executionContextId?: number }>("Page.createIsolatedWorld", {
+      frameId: frame.frameId,
+      worldName: "bsk-selector",
+    });
+    if (typeof world.executionContextId !== "number" || isStopped?.()) {
+      return { count: 0 };
+    }
+    const reply = await dispatch<DeepSelectorReply>("Runtime.evaluate", {
+      expression,
+      contextId: world.executionContextId,
+      objectGroup,
+      serializationOptions: SELECTOR_SERIALIZATION,
+    });
+    const dsv = reply.result?.deepSerializedValue;
+    if (
+      reply.result?.objectId !== undefined ||
+      dsv?.type === "node" ||
+      reply.exceptionDetails?.exception?.objectId !== undefined
+    ) {
+      releaseGroupTarget = {
+        target,
+        attachmentId: cdp.getAttachmentId?.(target.tabId),
+      };
+    }
+    if (reply.exceptionDetails) return { count: 0 };
+    if (dsv?.type === "node") {
+      const backendNodeId = (dsv.value as { backendNodeId?: unknown } | undefined)?.backendNodeId;
+      return typeof backendNodeId === "number" ? { count: 1, backendNodeId } : { count: 0 };
+    }
+    if (strictSelector) {
+      const count =
+        typeof dsv?.value === "number"
+          ? dsv.value
+          : typeof reply.result?.value === "number"
+            ? reply.result.value
+            : 0;
+      return { count };
+    }
+    return { count: 0 };
+  } catch (error) {
+    if (error === stoppedError) return { count: 0 };
+    if (error === timeoutError) return { count: 0, timedOut: true };
+    const errObj = error as { name?: string; sessionId?: string } | null;
+    if (isAbortError(error) || errObj?.name === "CdpAttachmentChangedError") {
+      throw error;
+    }
+    if (errObj?.name === "CdpReadTimeoutError") {
+      if (isOopif && errObj.sessionId === target.sessionId) {
+        return { count: 0, timedOut: true };
+      }
+      throw error;
+    }
+    return { count: 0 };
+  } finally {
+    unregisterCancel?.();
+    clearTimeout(timer);
+    if (
+      releaseGroupTarget &&
+      !timeoutController.signal.aborted &&
+      !localStopController.signal.aborted &&
+      !isStopped?.()
+    ) {
+      const releaseWork =
+        releaseGroupTarget.attachmentId !== undefined && cdp.sendGuarded
+          ? cdp.sendGuarded(
+              releaseGroupTarget.target,
+              "Runtime.releaseObjectGroup",
+              { objectGroup },
+              { attachmentId: releaseGroupTarget.attachmentId },
+            )
+          : sendToCdpTarget(cdp, releaseGroupTarget.target, "Runtime.releaseObjectGroup", {
+              objectGroup,
+            });
+      let releaseTimer: ReturnType<typeof setTimeout> | undefined;
+      await Promise.race([
+        releaseWork.catch(() => {}),
+        new Promise<void>((resolve) => {
+          releaseTimer = setTimeout(resolve, CHILD_SELECTOR_RELEASE_TIMEOUT_MS);
+        }),
+      ]).finally(() => clearTimeout(releaseTimer));
+    }
+  }
+}
+
+async function listChildFrames(
+  cdp: CdpRunner,
+  tabId: number,
+  childTimeoutMs = CHILD_SELECTOR_TIMEOUT_MS,
+): Promise<Array<{ frameId: string; target: CdpTarget }>> {
+  if (!cdp.getFrameGraph) return [];
+  try {
+    const graph = await cdp.getFrameGraph(tabId, undefined, {
+      includeOwners: false,
+      childReadTimeoutMs: childTimeoutMs,
+      skipQuietWaitWhenIdle: true,
+    });
+    return graph.frames.filter((frame) => frame.frameId !== graph.rootFrameId);
+  } catch (error) {
+    const name = (error as { name?: string } | null)?.name;
+    if (
+      isAbortError(error) ||
+      name === "CdpAttachmentChangedError" ||
+      name === "CdpReadTimeoutError"
+    ) {
+      throw error;
+    }
+    return [];
+  }
+}
+
+async function findStrictChildFrameMatch(
+  cdp: CdpRunner,
+  frames: ReadonlyArray<{ frameId: string; target: CdpTarget }>,
+  selector: string,
+  mainDocMatches: number,
+  childTimeoutMs: number,
+  stopSignal?: AbortSignal,
+): Promise<{ totalMatches: number; childMatch?: ChildFrameMatch }> {
+  if (frames.length === 0) return { totalMatches: mainDocMatches };
+  if (stopSignal?.aborted) return { totalMatches: mainDocMatches };
+  return new Promise((resolve, reject) => {
+    let totalMatches = mainDocMatches;
+    let childMatch: ChildFrameMatch | undefined;
+    let nextIndex = 0;
+    let completed = 0;
+    let settled = false;
+    const cancelCallbacks = new Set<() => void>();
+
+    const registerCancel = (cancel: () => void) => {
+      cancelCallbacks.add(cancel);
+      return () => cancelCallbacks.delete(cancel);
+    };
+
+    const stopAll = () => {
+      stopSignal?.removeEventListener("abort", onExternalStop);
+      for (const cancel of [...cancelCallbacks]) cancel();
+      cancelCallbacks.clear();
+    };
+
+    const finishResolve = () => {
+      if (settled) return;
+      settled = true;
+      stopAll();
+      resolve({ totalMatches, childMatch });
+    };
+
+    const finishReject = (error: unknown) => {
+      if (settled) return;
+      settled = true;
+      stopAll();
+      reject(error);
+    };
+
+    const onExternalStop = () => finishResolve();
+    stopSignal?.addEventListener("abort", onExternalStop, { once: true });
+
+    const runWorker = async () => {
+      while (!settled) {
+        const index = nextIndex;
+        nextIndex += 1;
+        if (index >= frames.length) return;
+        const frame = frames[index];
+        const match = await queryChildFrameSelector(
+          cdp,
+          frame,
+          selector,
+          true,
+          childTimeoutMs,
+          () => settled,
+          registerCancel,
+        );
+        if (settled) return;
+        totalMatches += match.count;
+        if (match.count === 1 && match.backendNodeId !== undefined && !childMatch) {
+          childMatch = {
+            backendNodeId: match.backendNodeId,
+            cdpTarget: cdp.resolveTarget ? cdp.resolveTarget(frame.target) : frame.target,
+            frameId: frame.frameId,
+          };
+        }
+        completed += 1;
+        if (totalMatches > 1 || completed === frames.length) {
+          finishResolve();
+          return;
+        }
+      }
+    };
+
+    const workerCount = Math.min(CHILD_SELECTOR_CONCURRENCY, frames.length);
+    for (let i = 0; i < workerCount; i += 1) {
+      void runWorker().catch(finishReject);
+    }
+  });
+}
+
+async function findFirstOrderedChildFrameMatch(
+  cdp: CdpRunner,
+  frames: ReadonlyArray<{ frameId: string; target: CdpTarget }>,
+  selector: string,
+  childTimeoutMs: number,
+  stopSignal?: AbortSignal,
+): Promise<ChildFrameMatch | undefined> {
+  if (frames.length === 0) return undefined;
+  if (stopSignal?.aborted) return undefined;
+  return new Promise((resolve, reject) => {
+    const results: Array<{ done: boolean; match?: ChildFrameMatch }> = Array.from(
+      { length: frames.length },
+      () => ({ done: false }),
+    );
+    let nextIndex = 0;
+    let nextOrdered = 0;
+    let settled = false;
+    const cancelCallbacks = new Set<() => void>();
+
+    const registerCancel = (cancel: () => void) => {
+      cancelCallbacks.add(cancel);
+      return () => cancelCallbacks.delete(cancel);
+    };
+
+    const stopAll = () => {
+      stopSignal?.removeEventListener("abort", onExternalStop);
+      for (const cancel of [...cancelCallbacks]) cancel();
+      cancelCallbacks.clear();
+    };
+
+    const finishResolve = (match: ChildFrameMatch | undefined) => {
+      if (settled) return;
+      settled = true;
+      stopAll();
+      resolve(match);
+    };
+
+    const finishReject = (error: unknown) => {
+      if (settled) return;
+      settled = true;
+      stopAll();
+      reject(error);
+    };
+
+    const onExternalStop = () => finishResolve(undefined);
+    stopSignal?.addEventListener("abort", onExternalStop, { once: true });
+
+    const runWorker = async () => {
+      while (!settled) {
+        const index = nextIndex;
+        nextIndex += 1;
+        if (index >= frames.length) return;
+        const frame = frames[index];
+        const queryResult = await queryChildFrameSelector(
+          cdp,
+          frame,
+          selector,
+          false,
+          childTimeoutMs,
+          () => settled,
+          registerCancel,
+        );
+        if (settled) return;
+        results[index] = {
+          done: true,
+          match:
+            queryResult.backendNodeId !== undefined
+              ? {
+                  backendNodeId: queryResult.backendNodeId,
+                  cdpTarget: cdp.resolveTarget ? cdp.resolveTarget(frame.target) : frame.target,
+                  frameId: frame.frameId,
+                }
+              : undefined,
+        };
+        while (nextOrdered < frames.length && results[nextOrdered].done) {
+          const orderedMatch = results[nextOrdered].match;
+          if (orderedMatch) {
+            finishResolve(orderedMatch);
+            return;
+          }
+          nextOrdered += 1;
+        }
+        if (nextOrdered === frames.length) {
+          finishResolve(undefined);
+          return;
+        }
+      }
+    };
+
+    const workerCount = Math.min(CHILD_SELECTOR_CONCURRENCY, frames.length);
+    for (let i = 0; i < workerCount; i += 1) {
+      void runWorker().catch(finishReject);
+    }
+  });
+}
+
 /**
  * Resolve `{ref?, selector?}` into a `backendNodeId`. Returns an
  * `RpcError` if the caller supplied neither (or both), or if neither
@@ -156,6 +559,7 @@ export async function resolveBackendNode(
   params: { ref?: string; selector?: string },
   toolName: string,
   strictSelector = false,
+  options?: { childTimeoutMs?: number; stopSignal?: AbortSignal },
 ): Promise<
   | {
       backendNodeId: number;
@@ -211,7 +615,12 @@ export async function resolveBackendNode(
       ...(resolved.rowAnchor ? { rowAnchor: resolved.rowAnchor } : {}),
     };
   }
-  // selector path
+  // selector path (precondition checks in `expect` intentionally remain main-document-only)
+  const searchChildFrames = Boolean(cdp.getFrameGraph) && toolName !== "precondition";
+  const childTimeoutMs =
+    options?.childTimeoutMs !== undefined && options.childTimeoutMs > 0
+      ? Math.min(CHILD_SELECTOR_TIMEOUT_MS, options.childTimeoutMs)
+      : CHILD_SELECTOR_TIMEOUT_MS;
   try {
     // Selector lookup itself attaches CDP, even when no element is found.
     cdp.trackSessionTab?.(ctx.sessionId, target.tabId);
@@ -225,7 +634,8 @@ export async function resolveBackendNode(
         message: "DOM.getDocument returned no root nodeId",
       };
     }
-    const query = { nodeId: rootNodeId, selector: params.selector };
+    const selector = params.selector as string;
+    const query = { nodeId: rootNodeId, selector };
     let nodeId: number | undefined;
     if (strictSelector) {
       const found = await cdp.send<{ nodeIds: number[] }>(
@@ -233,21 +643,62 @@ export async function resolveBackendNode(
         "DOM.querySelectorAll",
         query,
       );
-      if (found.nodeIds.length > 1)
+      let totalMatches = found.nodeIds.length;
+      let childMatch: ChildFrameMatch | undefined;
+      if (searchChildFrames && totalMatches <= 1) {
+        const frames = await listChildFrames(cdp, target.tabId, childTimeoutMs);
+        const childResult = await findStrictChildFrameMatch(
+          cdp,
+          frames,
+          selector,
+          totalMatches,
+          childTimeoutMs,
+          options?.stopSignal,
+        );
+        totalMatches = childResult.totalMatches;
+        childMatch = childResult.childMatch;
+      }
+      if (totalMatches > 1)
         return {
           code: "invalid_params",
-          message: `${toolName}: selector matched ${found.nodeIds.length} elements; use a VOM ref or a narrower selector`,
+          message: `${toolName}: selector matched ${totalMatches} elements; use a VOM ref or a narrower selector`,
         };
+      if (totalMatches === 0) {
+        return rpcError(
+          "not_found",
+          "selector_not_found",
+          `selector ${selector} did not match any element`,
+        );
+      }
+      if (childMatch) {
+        return { ...childMatch, usedSelector: selector };
+      }
       nodeId = found.nodeIds[0];
     } else {
       nodeId = (await cdp.send<{ nodeId?: number }>(target.tabId, "DOM.querySelector", query))
         .nodeId;
+      if ((typeof nodeId !== "number" || nodeId === 0) && searchChildFrames) {
+        const frames = await listChildFrames(cdp, target.tabId, childTimeoutMs);
+        const childMatch = await findFirstOrderedChildFrameMatch(
+          cdp,
+          frames,
+          selector,
+          childTimeoutMs,
+          options?.stopSignal,
+        );
+        if (childMatch) {
+          return {
+            ...childMatch,
+            usedSelector: selector,
+          };
+        }
+      }
     }
     if (typeof nodeId !== "number" || nodeId === 0) {
       return rpcError(
         "not_found",
         "selector_not_found",
-        `selector ${params.selector} did not match any element`,
+        `selector ${selector} did not match any element`,
       );
     }
     const described = await cdp.send<{ node?: { backendNodeId?: number } }>(
@@ -262,8 +713,9 @@ export async function resolveBackendNode(
         message: "DOM.describeNode returned no backendNodeId",
       };
     }
-    return { backendNodeId, cdpTarget: { tabId: target.tabId }, usedSelector: params.selector };
+    return { backendNodeId, cdpTarget: { tabId: target.tabId }, usedSelector: selector };
   } catch (err) {
+    if (isAbortError(err)) return { code: "cancelled", message: `${toolName} aborted` };
     return {
       code: "cdp_failed",
       message: err instanceof Error ? err.message : String(err),
@@ -298,6 +750,29 @@ function focusCdp(cdp: CdpRunner, signal: AbortSignal | undefined): CdpRunner {
   return {
     send: (tabId, method, params) => send({ tabId }, method, params),
     sendToTarget: send,
+    sendGuarded: cdp.sendGuarded
+      ? <T = unknown>(
+          target: CdpTarget,
+          method: string,
+          params: object | undefined,
+          guard: CdpDispatchGuard,
+        ) => {
+          checkFocusAbort(signal);
+          const combinedSignal =
+            guard.signal && signal
+              ? AbortSignal.any([guard.signal, signal])
+              : (guard.signal ?? signal);
+          return cdp.sendGuarded!<T>(target, method, params, {
+            ...guard,
+            signal: combinedSignal,
+            onDispatch: () => {
+              checkFocusAbort(signal);
+              guard.onDispatch?.();
+            },
+          });
+        }
+      : undefined,
+    getAttachmentId: cdp.getAttachmentId?.bind(cdp),
     trackSessionTab: cdp.trackSessionTab?.bind(cdp),
     resolveTarget: cdp.resolveTarget?.bind(cdp),
     reattachIfSoftDetached: cdp.reattachIfSoftDetached
@@ -313,9 +788,13 @@ function focusCdp(cdp: CdpRunner, signal: AbortSignal | undefined): CdpRunner {
         }
       : undefined,
     getFrameGraph: cdp.getFrameGraph
-      ? (tabId) => {
+      ? (tabId, frameSignal, options) => {
           checkFocusAbort(signal);
-          return cdp.getFrameGraph!(tabId);
+          const combinedSignal =
+            frameSignal && signal
+              ? AbortSignal.any([frameSignal, signal])
+              : (frameSignal ?? signal);
+          return cdp.getFrameGraph!(tabId, combinedSignal, options);
         }
       : undefined,
   };

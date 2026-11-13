@@ -1,4 +1,6 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { type CdpDebuggee, type CdpDebuggerApi, ChromiumCdp } from "@/browser-driver/chromium-cdp";
+import { CdpReadTimeoutError } from "@/browser-driver/command-deadline";
 import {
   INPUT_PASSTHROUGH,
   INPUT_PASSTHROUGH_TTL_MS,
@@ -8,6 +10,7 @@ import { SessionManager } from "@/session-manager/manager";
 import type { CdpRunner } from "@/tools/shared";
 import { withInputReady } from "../input-readiness";
 import {
+  __testing__,
   handleBlur,
   handleClick,
   handleFill,
@@ -2636,4 +2639,387 @@ it.each([
     expect(order.at(-2)).toBe("arm");
     expect(order.at(-1)).toBe("keyUp");
   }
+});
+
+describe("resolveBackendNode multi-iframe selector handling", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+
+  const childFrames = [
+    { frameId: "main", target: { tabId: 4 } },
+    { frameId: "child-0", parentFrameId: "main", target: { tabId: 4 } },
+    { frameId: "child-1", parentFrameId: "main", target: { tabId: 4, sessionId: "oopif-1" } },
+    { frameId: "child-2", parentFrameId: "main", target: { tabId: 4, sessionId: "oopif-2" } },
+  ];
+
+  it("queries child frames concurrently, preserves frame-graph order, and skips unnecessary object-group releases", async () => {
+    vi.useFakeTimers();
+    const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
+    const ctx = await sm.start("multi-order");
+    const releaseCalls: string[] = [];
+    const cdp: CdpRunner = {
+      send: vi.fn(async (_tabId, method) => {
+        if (method === "DOM.getDocument") return { root: { nodeId: 1 } };
+        if (method === "DOM.querySelector") return { nodeId: 0 };
+        if (method === "Page.createIsolatedWorld") return { executionContextId: 10 };
+        if (method === "Runtime.evaluate") {
+          // Frame 0 finishes slower (30ms) than Frame 1 (5ms), and BOTH match:
+          // Frame 0 must win deterministically in frame-graph order.
+          await new Promise((resolve) => setTimeout(resolve, 30));
+          return {
+            result: { deepSerializedValue: { type: "node", value: { backendNodeId: 1001 } } },
+          };
+        }
+        if (method === "Runtime.releaseObjectGroup") {
+          releaseCalls.push("root");
+          return {};
+        }
+        throw new Error(`unexpected root method ${method}`);
+      }) as CdpRunner["send"],
+      sendToTarget: vi.fn(async (target, method) => {
+        if (method === "Page.createIsolatedWorld") {
+          return { executionContextId: target.sessionId === "oopif-1" ? 11 : 12 };
+        }
+        if (method === "Runtime.evaluate") {
+          if (target.sessionId === "oopif-1") {
+            await new Promise((resolve) => setTimeout(resolve, 5));
+            return {
+              result: { deepSerializedValue: { type: "node", value: { backendNodeId: 1002 } } },
+            };
+          }
+          // Frame 2 is completely hung — must NOT block Frame 0 winning!
+          return new Promise(() => {});
+        }
+        if (method === "Runtime.releaseObjectGroup") {
+          releaseCalls.push(target.sessionId ?? "root");
+          return {};
+        }
+        throw new Error(`unexpected child method ${method}`);
+      }) as CdpRunner["sendToTarget"],
+      getFrameGraph: vi.fn(async (_tabId, _signal, options) => {
+        expect(options).toMatchObject({
+          includeOwners: false,
+          skipQuietWaitWhenIdle: true,
+        });
+        return { rootFrameId: "main", frames: childFrames };
+      }),
+    };
+
+    const pending = __testing__.resolveBackendNode(
+      cdp,
+      ctx,
+      { tabId: 4 },
+      { selector: ".target" },
+      "click",
+      false,
+    );
+    await vi.advanceTimersByTimeAsync(35);
+    const result = await pending;
+    expect(result).toEqual({
+      backendNodeId: 1001,
+      cdpTarget: { tabId: 4 },
+      frameId: "child-0",
+      usedSelector: ".target",
+    });
+    expect(vi.getTimerCount()).toBe(0);
+    expect(releaseCalls).toContain("root");
+  });
+
+  it("short-circuits strictSelector ambiguity immediately without waiting for hung child frames", async () => {
+    vi.useFakeTimers();
+    const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
+    const ctx = await sm.start("strict-short-circuit");
+    const releaseCalls: string[] = [];
+    const cdp: CdpRunner = {
+      send: vi.fn(async (_tabId, method) => {
+        if (method === "DOM.getDocument") return { root: { nodeId: 1 } };
+        if (method === "DOM.querySelectorAll") return { nodeIds: [11] };
+        if (method === "Page.createIsolatedWorld") return { executionContextId: 10 };
+        if (method === "Runtime.evaluate") {
+          // Hung same-origin frame
+          return new Promise(() => {});
+        }
+        if (method === "Runtime.releaseObjectGroup") {
+          releaseCalls.push("root");
+          return {};
+        }
+        throw new Error(`unexpected root method ${method}`);
+      }) as CdpRunner["send"],
+      sendToTarget: vi.fn(async (target, method) => {
+        if (method === "Page.createIsolatedWorld") return { executionContextId: 11 };
+        if (method === "Runtime.evaluate") {
+          if (target.sessionId === "oopif-1") {
+            return {
+              result: { deepSerializedValue: { type: "node", value: { backendNodeId: 2002 } } },
+            };
+          }
+          // Hung second OOPIF
+          return new Promise(() => {});
+        }
+        if (method === "Runtime.releaseObjectGroup") {
+          releaseCalls.push(target.sessionId ?? "root");
+          return {};
+        }
+        throw new Error(`unexpected child method ${method}`);
+      }) as CdpRunner["sendToTarget"],
+      getFrameGraph: vi.fn(async () => ({ rootFrameId: "main", frames: childFrames })),
+    };
+
+    const pending = __testing__.resolveBackendNode(
+      cdp,
+      ctx,
+      { tabId: 4 },
+      { selector: ".dup" },
+      "click",
+      true,
+    );
+    const result = await pending;
+    expect(result).toMatchObject({
+      code: "invalid_params",
+      message: expect.stringContaining("selector matched 2 elements"),
+    });
+    expect(vi.getTimerCount()).toBe(0);
+    expect(releaseCalls).toEqual(["oopif-1"]);
+  });
+
+  it("isolates a timed-out child iframe when the main document uniquely matches under strictSelector", async () => {
+    vi.useFakeTimers();
+    const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
+    const ctx = await sm.start("strict-hung-child");
+    const releaseCalls: string[] = [];
+    const cdp: CdpRunner = {
+      send: vi.fn(async (_tabId, method) => {
+        if (method === "DOM.getDocument") return { root: { nodeId: 1 } };
+        if (method === "DOM.querySelectorAll") return { nodeIds: [42] };
+        if (method === "DOM.describeNode") return { node: { backendNodeId: 420 } };
+        if (method === "Page.createIsolatedWorld") return { executionContextId: 10 };
+        if (method === "Runtime.evaluate") {
+          return { result: { deepSerializedValue: { type: "number", value: 0 } } };
+        }
+        if (method === "Runtime.releaseObjectGroup") {
+          releaseCalls.push("root");
+          return {};
+        }
+        throw new Error(`unexpected root method ${method}`);
+      }) as CdpRunner["send"],
+      sendToTarget: vi.fn(async (target, method) => {
+        if (target.sessionId === "oopif-1") {
+          // Hung OOPIF never responds (even to Page.createIsolatedWorld)
+          return new Promise(() => {});
+        }
+        if (method === "Page.createIsolatedWorld") return { executionContextId: 12 };
+        if (method === "Runtime.evaluate") {
+          return { result: { deepSerializedValue: { type: "number", value: 0 } } };
+        }
+        if (method === "Runtime.releaseObjectGroup") {
+          releaseCalls.push(target.sessionId ?? "root");
+          return {};
+        }
+        throw new Error(`unexpected child method ${method}`);
+      }) as CdpRunner["sendToTarget"],
+      getFrameGraph: vi.fn(async () => ({ rootFrameId: "main", frames: childFrames })),
+    };
+
+    const pending = __testing__.resolveBackendNode(
+      cdp,
+      ctx,
+      { tabId: 4 },
+      { selector: "#main-only" },
+      "click",
+      true,
+    );
+    await vi.advanceTimersByTimeAsync(1_600);
+    const result = await pending;
+    expect(result).toEqual({
+      backendNodeId: 420,
+      cdpTarget: { tabId: 4 },
+      usedSelector: "#main-only",
+    });
+    expect(vi.getTimerCount()).toBe(0);
+    // Non-matching number results do not allocate remote objects or releaseObjectGroup calls.
+    expect(releaseCalls).toEqual([]);
+  });
+
+  it("isolates child OOPIF timeouts without poisoning root CdpReadGate on same-origin frame timeouts", async () => {
+    vi.useFakeTimers();
+    const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
+    const ctx = await sm.start("gate-isolation");
+    const listeners = new Set<(source: CdpDebuggee, method: string, params: unknown) => void>();
+    const api: CdpDebuggerApi = {
+      attach: vi.fn(async () => {}),
+      detach: vi.fn(async () => {}),
+      sendCommand: vi.fn(async (target, method) => {
+        if (method === "Page.getFrameTree") {
+          if (target.sessionId === "oopif-hung") {
+            return { frameTree: { frame: { id: "oopif-frame", parentId: "main" } } };
+          }
+          return {
+            frameTree: {
+              frame: { id: "main" },
+              childFrames: [
+                { frame: { id: "same-hung", parentId: "main" } },
+                { frame: { id: "oopif-frame", parentId: "main" } },
+              ],
+            },
+          };
+        }
+        if (method === "DOM.getDocument") return { root: { nodeId: 1 } };
+        if (method === "DOM.querySelectorAll") return { nodeIds: [77] };
+        if (method === "DOM.describeNode") return { node: { backendNodeId: 770 } };
+        if (method === "Page.createIsolatedWorld") {
+          // Both same-origin frame and OOPIF hang at isolated world creation
+          return new Promise(() => {});
+        }
+        return {};
+      }),
+      onEvent: {
+        addListener: (fn: (source: CdpDebuggee, method: string, params: unknown) => void) =>
+          listeners.add(fn),
+        removeListener: (fn: (source: CdpDebuggee, method: string, params: unknown) => void) =>
+          listeners.delete(fn),
+      } as unknown as CdpDebuggerApi["onEvent"],
+      onDetach: {
+        addListener: () => {},
+        removeListener: () => {},
+      } as unknown as CdpDebuggerApi["onDetach"],
+    };
+    const cdp = new ChromiumCdp(api);
+    try {
+      await cdp.ensureAttached(4);
+      for (const fn of listeners) {
+        fn({ tabId: 4 }, "Target.attachedToTarget", {
+          sessionId: "oopif-hung",
+          targetInfo: { type: "iframe", targetId: "oopif-frame" },
+        });
+      }
+      const first = __testing__.resolveBackendNode(
+        cdp,
+        ctx,
+        { tabId: 4 },
+        { selector: "#main-btn" },
+        "click",
+        true,
+      );
+      await vi.advanceTimersByTimeAsync(1_600);
+      expect(await first).toEqual({
+        backendNodeId: 770,
+        cdpTarget: { tabId: 4 },
+        usedSelector: "#main-btn",
+      });
+      // Main document root must remain unblocked in CdpReadGate for subsequent reads!
+      await expect(cdp.send(4, "DOM.getDocument", { depth: 0 })).resolves.toEqual({
+        root: { nodeId: 1 },
+      });
+      // Hung OOPIF is gated immediately in CdpReadGate until it settles.
+      await expect(
+        cdp.sendToTarget({ tabId: 4, sessionId: "oopif-hung" }, "Runtime.evaluate", {
+          expression: "1",
+        }),
+      ).rejects.toThrow(CdpReadTimeoutError);
+    } finally {
+      cdp.dispose();
+    }
+  });
+
+  it("propagates root CdpReadTimeoutError and CdpAttachmentChangedError while ignoring child CdpReadTimeoutError", async () => {
+    const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
+    const ctx = await sm.start("error-propagation");
+
+    const attachmentChanged = new Error("detached");
+    attachmentChanged.name = "CdpAttachmentChangedError";
+    const cdpChanged: CdpRunner = {
+      send: vi.fn(async (_tabId, method) => {
+        if (method === "DOM.getDocument") return { root: { nodeId: 1 } };
+        if (method === "DOM.querySelector") return { nodeId: 0 };
+        throw new Error(`unexpected ${method}`);
+      }) as CdpRunner["send"],
+      getFrameGraph: vi.fn(async () => {
+        throw attachmentChanged;
+      }),
+    };
+    expect(
+      await __testing__.resolveBackendNode(
+        cdpChanged,
+        ctx,
+        { tabId: 4 },
+        { selector: "#x" },
+        "click",
+        false,
+      ),
+    ).toMatchObject({ code: "cdp_failed", message: "detached" });
+
+    const cdpRootTimeout: CdpRunner = {
+      send: vi.fn(async (_tabId, method) => {
+        if (method === "DOM.getDocument") return { root: { nodeId: 1 } };
+        if (method === "DOM.querySelector") return { nodeId: 0 };
+        if (method === "Page.createIsolatedWorld") {
+          throw new CdpReadTimeoutError("Page.createIsolatedWorld", 4, 1000, undefined);
+        }
+        throw new Error(`unexpected ${method}`);
+      }) as CdpRunner["send"],
+      getFrameGraph: vi.fn(async () => ({
+        rootFrameId: "main",
+        frames: [
+          { frameId: "main", target: { tabId: 4 } },
+          { frameId: "child", parentFrameId: "main", target: { tabId: 4 } },
+        ],
+      })),
+    };
+    expect(
+      await __testing__.resolveBackendNode(
+        cdpRootTimeout,
+        ctx,
+        { tabId: 4 },
+        { selector: "#x" },
+        "click",
+        false,
+      ),
+    ).toMatchObject({ code: "cdp_failed", message: expect.stringContaining("timed out") });
+
+    const cdpChildTimeout: CdpRunner = {
+      send: vi.fn(async (_tabId, method) => {
+        if (method === "DOM.getDocument") return { root: { nodeId: 1 } };
+        if (method === "DOM.querySelector") return { nodeId: 0 };
+        throw new Error(`unexpected ${method}`);
+      }) as CdpRunner["send"],
+      sendToTarget: vi.fn(async (target, method) => {
+        if (target.sessionId === "oopif-1" && method === "Page.createIsolatedWorld") {
+          throw CdpReadTimeoutError.stillPending("Page.createIsolatedWorld", 4, "oopif-1");
+        }
+        if (method === "Page.createIsolatedWorld") return { executionContextId: 2 };
+        if (method === "Runtime.evaluate") {
+          return {
+            result: { deepSerializedValue: { type: "node", value: { backendNodeId: 99 } } },
+          };
+        }
+        if (method === "Runtime.releaseObjectGroup") return {};
+        throw new Error(`unexpected ${method}`);
+      }) as CdpRunner["sendToTarget"],
+      getFrameGraph: vi.fn(async () => ({
+        rootFrameId: "main",
+        frames: [
+          { frameId: "main", target: { tabId: 4 } },
+          { frameId: "c1", parentFrameId: "main", target: { tabId: 4, sessionId: "oopif-1" } },
+          { frameId: "c2", parentFrameId: "main", target: { tabId: 4, sessionId: "oopif-2" } },
+        ],
+      })),
+    };
+    expect(
+      await __testing__.resolveBackendNode(
+        cdpChildTimeout,
+        ctx,
+        { tabId: 4 },
+        { selector: "#x" },
+        "click",
+        false,
+      ),
+    ).toEqual({
+      backendNodeId: 99,
+      cdpTarget: { tabId: 4, sessionId: "oopif-2" },
+      frameId: "c2",
+      usedSelector: "#x",
+    });
+  });
 });

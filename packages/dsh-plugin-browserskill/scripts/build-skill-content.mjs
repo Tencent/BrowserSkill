@@ -6,7 +6,7 @@ import { DSH_BROWSER_TOOLS, validateSkillDirectory } from "./validate-skill.mjs"
 
 const pkg = join(dirname(fileURLToPath(import.meta.url)), "..");
 const { name, description, content } = validateSkillDirectory(join(pkg, "skill"), {
-  maxEntryBytes: 4_500,
+  maxEntryBytes: 4_600,
   browserTools: DSH_BROWSER_TOOLS,
 });
 const banner =

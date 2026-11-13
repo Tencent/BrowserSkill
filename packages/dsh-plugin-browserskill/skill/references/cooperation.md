@@ -48,9 +48,9 @@ and restart its daemon before using this plugin.
 bsk_interact({ action: "click", session: "<id>", target: "@e3", contextId: "<context>", expect: [{ target: "#price", field: "text", equals: "$100" }] })
 ```
 
-Use refs/selectors actually observed on the page. Selectors search only the main document;
-use refs for iframe/shadow-root targets. A missing main-document selector does not establish
-absence in other frames. Target and attribute names are limited to 1024 and 256 Unicode code
+Use refs/selectors actually observed on the page. In `expect`, selectors search only the main
+document; use refs for iframe/shadow-root targets. A missing main-document selector does not
+establish absence in other frames. Target and attribute names are limited to 1024 and 256 Unicode code
 points respectively. `expect` accepts at most 16 literal conditions:
 
 | Field | `equals` | Meaning |

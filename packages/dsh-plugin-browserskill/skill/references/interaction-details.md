@@ -11,8 +11,9 @@ actual one. Skip waiting when the page is already ready.
 
 Prefer a fresh ref for an existing node, including frame/shadow-root targets; do
 not fetch HTML just to replace a usable ref with a selector. A known
-CSS selector can find a node that will appear or be replaced; it checks only the
-first match in the main document, so scope it to the intended component. Do not
+CSS selector can find a node that will appear or be replaced; it checks the
+first match in the main document, then child frames in frame order, so scope it
+to the intended component (shadow roots require refs). Do not
 invent selectors: inspect bounded HTML if the current observation lacks one.
 Only CSS selectors are supported, not `text=...`, XPath, or Playwright locators.
 
