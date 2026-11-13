@@ -31,6 +31,12 @@ supplementary reads do not replace this strict baseline. Read its evidence befor
 operation and sync again for the next strict action. Prefer a targeted key when the recipient is
 known. Never substitute new receipts into stale decisions.
 
+Under target policy, every successful sync returns a new top-level receipt, including
+`kind: "unchanged"`. Sync again after a refused or failed untargeted attempt too, and
+inspect the new evidence before choosing the next action. If the plugin cannot accept
+`observationId`, update it along with the CLI, running daemon and extension, then reload
+`/browser-skill`; repeated sync cannot repair an older tool schema.
+
 To retain legacy whole-page checks, set `policy: "strict"` on the first sync. With
 protocol-1.8-capable peers, later syncs and steps preserve it. Policy is fixed for the session.
 Strict contexts authorize one action and refs follow the latest observation. `dependsOn` is
