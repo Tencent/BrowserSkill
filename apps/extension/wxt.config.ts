@@ -34,6 +34,7 @@ export default defineConfig({
   modules: ["@wxt-dev/module-react"],
   manifest: {
     name: "BrowserSkill",
+    options_ui: { page: "connection-diagnostics.html", open_in_tab: true },
     description:
       "Let AI agents use your logged-in browser in a separate Agent Window—without interrupting your work. Powered by the bsk CLI.",
     // Flat debugger sessions are required to address out-of-process iframes.

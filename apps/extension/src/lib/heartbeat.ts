@@ -22,6 +22,7 @@
  */
 
 import type { ProtocolFrame } from "@/transport/types";
+import { recordDiagnostic } from "./connection-diagnostics";
 
 export const HEARTBEAT_EVENT = "system.heartbeat";
 /** 20s: the interval Chrome's own WebSocket keepalive sample recommends. */
@@ -75,6 +76,7 @@ export function startHeartbeat(options: HeartbeatOptions): HeartbeatHandle {
     try {
       options.send({ event: HEARTBEAT_EVENT, payload: {} });
     } catch (err) {
+      recordDiagnostic("heartbeat.send-failed", { outcome: "error" });
       // The socket raced a close between the state change and this
       // tick. The transport's own reconnect path recovers; swallow so
       // the interval keeps running (it is cleared on the disconnect
