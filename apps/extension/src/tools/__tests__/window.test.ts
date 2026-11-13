@@ -183,6 +183,34 @@ describe("handleWindowResize", () => {
     expect(f.wait).toHaveBeenCalledTimes(20);
   });
 
+  it("accepts outer bounds one frame pixel larger than requested", async () => {
+    // Windows returns 900x701 for a 900x700 request: the resize frame is added
+    // after rounding, so an exact-match requirement fails every call.
+    const sm = await makeManager();
+    const f = resizeFixture({ actual: { width: 900, height: 701 } });
+    const result = await handleWindowResize(
+      sm,
+      { session_id: "aa11", width: 900, height: 700 },
+      f.deps,
+    );
+    expect(result).toEqual({ window_id: 100, width: 900, height: 701 });
+    expect(f.wait).not.toHaveBeenCalled();
+  });
+
+  it("still reports bounds that differ by more than the frame", async () => {
+    const sm = await makeManager();
+    const f = resizeFixture({ actual: { width: 900, height: 703 } });
+    const result = await handleWindowResize(
+      sm,
+      { session_id: "aa11", width: 900, height: 700 },
+      f.deps,
+    );
+    expect(result).toMatchObject({
+      code: "protocol_error",
+      data: { reason: "window_resize_constrained", actual_window: { width: 900, height: 703 } },
+    });
+  });
+
   it("reports a viewport that remains fixed despite the window changing", async () => {
     const sm = await makeManager();
     const f = resizeFixture({ frozenViewport: true });

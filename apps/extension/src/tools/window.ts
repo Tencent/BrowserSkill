@@ -30,6 +30,19 @@ function sameSize(a: Size, b: Size): boolean {
   return a.width === b.width && a.height === b.height;
 }
 
+// Windows adds the resize frame after rounding the requested bounds, so a
+// 900x700 request comes back as 900x701. That is the size that took effect, not
+// a constraint the caller can act on, and the reply reports it verbatim.
+const FRAME_ROUNDING_TOLERANCE = 1;
+
+/** True when the reported bounds are the requested ones up to the resize frame. */
+function withinFrameRounding(actual: Size, requested: Size): boolean {
+  return (
+    Math.abs(actual.width - requested.width) <= FRAME_ROUNDING_TOLERANCE &&
+    Math.abs(actual.height - requested.height) <= FRAME_ROUNDING_TOLERANCE
+  );
+}
+
 function clearUnconfirmed(ctx: SessionContext, tabId: number): void {
   unconfirmed.get(ctx)?.delete(tabId);
 }
@@ -241,8 +254,7 @@ export async function handleWindowResize(
       if (!actualWindow) throw new Error("the browser did not return usable window bounds");
       actualViewport = await viewport(deps.cdp, target.tabId);
       if (
-        actualWindow.width === requested.width &&
-        actualWindow.height === requested.height &&
+        withinFrameRounding(actualWindow, requested) &&
         viewportFollowed(beforeViewport, actualViewport, beforeWindow, actualWindow)
       ) {
         clearUnconfirmed(ctx, target.tabId);
@@ -278,7 +290,7 @@ export async function handleWindowResize(
     tabs.set(target.tabId, { window: actualWindow, viewport: actualViewport.size });
     unconfirmed.set(ctx, tabs);
   }
-  if (actualWindow?.width !== requested.width || actualWindow?.height !== requested.height)
+  if (!actualWindow || !withinFrameRounding(actualWindow, requested))
     return {
       code: "protocol_error",
       message: `Window resize requested ${requested.width}x${requested.height}, but the browser reports ${actualWindow?.width ?? "?"}x${actualWindow?.height ?? "?"}.`,
