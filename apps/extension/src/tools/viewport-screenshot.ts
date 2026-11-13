@@ -28,7 +28,7 @@ async function isAuraCompositorPlatform(): Promise<boolean> {
   );
 }
 
-/** True when Aura suspends compositor surface frames (unselected tab or minimized window). */
+/** True when Aura may suspend compositor surface frames (unselected tab, occluded/unfocused window, or minimized window). */
 export async function isHiddenCompositorSurface(
   active: boolean,
   windowId: number,
@@ -36,7 +36,7 @@ export async function isHiddenCompositorSurface(
   if (!active) return true;
   if (typeof chrome === "undefined" || typeof chrome.windows?.get !== "function") return false;
   const win = await chrome.windows.get(windowId).catch(() => undefined);
-  return win?.state === "minimized";
+  return win ? !win.focused || win.state === "minimized" : false;
 }
 
 /** Hold a minimal screencast consumer on Windows/Linux Aura while reading a hidden surface. */

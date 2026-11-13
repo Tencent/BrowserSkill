@@ -24,7 +24,16 @@ assert(
 );
 await mkdir(artifacts, { recursive: true });
 const home = await mkdtemp(join(tmpdir(), "bsk-dynamic-read-"));
-const env = { ...process.env, BSK_HOME: home, BSK_AUTO_START: "0", BSK_AUTO_UPDATE: "off" };
+const env = {
+  ...process.env,
+  HOME: home,
+  DSH_HOME: home,
+  BSK_HOME: home,
+  BSK_AUTO_START: "0",
+  BSK_AUTO_UPDATE: "off",
+};
+delete env.BSK_SESSION;
+delete env.BSK_SCOPE;
 const exec = promisify(execFile);
 const evidence = [];
 const delay = (ms) => new Promise((r) => setTimeout(r, ms));

@@ -187,7 +187,8 @@ globalThis.run=async(url,soak)=>{
   check(!(await chrome.windows.get(task.agentWindowId)).focused,'routing stole focus');
   // Let the host open a URL through Chrome's process singleton, as external
   // applications do. Deliberately view the task first to reproduce misrouting.
-  await chrome.windows.update(task.agentWindowId,{focused:true});
+  await chrome.windows.update(task.agentWindowId,{state:'normal',focused:true});
+  await wait(async()=>(await chrome.windows.get(task.agentWindowId)).focused,'task foreground');
   globalThis.phase='native external link';
   await wait(async()=>(await chrome.tabs.query({url:url+'/external-native'})).some(t=>t.windowId===user.id),'native external routing');
   await wait(async()=>(await chrome.windows.get(user.id)).focused,'external link foreground');
@@ -204,7 +205,8 @@ globalThis.run=async(url,soak)=>{
   // Include a fresh task home: an external URL must not be confused with
   // agent navigation just because the selected page is still about:blank.
   await chrome.tabs.update([...task.agentCreatedTabs][0],{active:true});
-  await chrome.windows.update(task.agentWindowId,{focused:true});
+  await chrome.windows.update(task.agentWindowId,{state:'normal',focused:true});
+  await wait(async()=>(await chrome.windows.get(task.agentWindowId)).focused,'task fallback foreground');
   globalThis.phase='native fallback link';
   let nativeFallback;
   await wait(async()=>{

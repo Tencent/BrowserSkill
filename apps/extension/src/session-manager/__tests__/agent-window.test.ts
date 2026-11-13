@@ -164,4 +164,46 @@ describe("chromeAgentWindowApi.create", () => {
     ).rejects.toThrow("Incognito mode is disabled by policy");
     expect(create).toHaveBeenCalledTimes(1);
   });
+
+  it("seeds an inactive tab on Linux so unfocused Agent Windows bypass X11 Navigate() focus theft and cleans up on failure", async () => {
+    const getAll = vi.fn().mockResolvedValue([{ id: 10, focused: true, incognito: false }]);
+    const tabCreate = vi.fn().mockResolvedValue({ id: 42 });
+    const tabRemove = vi.fn().mockResolvedValue(undefined);
+    vi.stubGlobal("chrome", {
+      windows: { create, getAll },
+      tabs: { create: tabCreate, remove: tabRemove },
+      runtime: { getPlatformInfo: vi.fn().mockResolvedValue({ os: "linux" }) },
+      extension: { isAllowedIncognitoAccess },
+    });
+    create.mockResolvedValueOnce({ id: 100, tabs: [{ id: 42 }] });
+
+    expect(
+      await chromeAgentWindowApi.create(AGENT_WINDOW_HOME, { size: { width: 800, height: 600 } }),
+    ).toEqual({
+      windowId: 100,
+      initialTabIds: [42],
+      incognito: undefined,
+    });
+    expect(tabCreate).toHaveBeenCalledWith({
+      windowId: 10,
+      url: AGENT_WINDOW_HOME,
+      active: false,
+    });
+    expect(create).toHaveBeenCalledWith({
+      type: "normal",
+      focused: false,
+      incognito: false,
+      tabId: 42,
+      width: 800,
+      height: 600,
+    });
+    expect(tabRemove).not.toHaveBeenCalled();
+
+    tabCreate.mockResolvedValueOnce({ id: 43 });
+    create.mockRejectedValueOnce(new Error("X11 window creation failed"));
+    await expect(chromeAgentWindowApi.create(AGENT_WINDOW_HOME)).rejects.toThrow(
+      "X11 window creation failed",
+    );
+    expect(tabRemove).toHaveBeenCalledWith(43);
+  });
 });

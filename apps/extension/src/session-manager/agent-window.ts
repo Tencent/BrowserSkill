@@ -41,6 +41,14 @@ export interface AgentWindowCreateOptions {
 /** Initial tab URL for every new session's Agent Window. */
 export const AGENT_WINDOW_HOME = "about:blank";
 
+async function isLinuxPlatform(): Promise<boolean> {
+  if (typeof chrome === "undefined" || typeof chrome.runtime?.getPlatformInfo !== "function") {
+    return false;
+  }
+  const info = await chrome.runtime.getPlatformInfo().catch(() => undefined);
+  return info?.os === "linux";
+}
+
 export const chromeAgentWindowApi: AgentWindowApi = {
   async create(url: string, opts: AgentWindowCreateOptions = {}): Promise<AgentWindowCreation> {
     if (opts.incognito && !(await chrome.extension.isAllowedIncognitoAccess())) {
@@ -48,22 +56,55 @@ export const chromeAgentWindowApi: AgentWindowApi = {
         "Incognito access is disabled. Open chrome://extensions → BrowserSkill → Details → Allow in incognito, then retry.",
       );
     }
-    const win = await chrome.windows.create({
-      type: "normal",
-      focused: opts.focused ?? false,
-      incognito: opts.incognito ?? false,
-      url,
-      ...(opts.size ? { width: opts.size.width, height: opts.size.height } : {}),
-    });
-    if (typeof win?.id !== "number") {
-      throw new Error("[bh] chrome.windows.create returned no window id");
+    const focused = opts.focused ?? false;
+    const incognito = opts.incognito ?? false;
+    const size = opts.size ? { width: opts.size.width, height: opts.size.height } : {};
+    // On Linux/X11, `chrome.windows.create({ focused: false, url })` runs `Navigate()`
+    // on an empty window (`kShowWindow` -> `X11Window::Show(false)`) before reaching
+    // `ShowInactive()`, stealing X11 focus. Moving a pre-created inactive tab via
+    // `tabId` skips `Navigate()` so `ShowInactive()` maps with `_NET_WM_USER_TIME=0`.
+    let seedTabId: number | undefined;
+    if (
+      !focused &&
+      typeof chrome.windows.getAll === "function" &&
+      typeof chrome.tabs?.create === "function" &&
+      (await isLinuxPlatform())
+    ) {
+      const windows = await chrome.windows.getAll({ windowTypes: ["normal"] }).catch(() => []);
+      const candidates = windows.filter(
+        (w) => typeof w.id === "number" && Boolean(w.incognito) === incognito,
+      );
+      const donor = candidates.find((w) => w.focused) ?? candidates[0];
+      if (typeof donor?.id === "number") {
+        const seeded = await chrome.tabs
+          .create({ windowId: donor.id, url, active: false })
+          .catch(() => undefined);
+        if (typeof seeded?.id === "number") seedTabId = seeded.id;
+      }
     }
+    let win: chrome.windows.Window | undefined;
+    try {
+      win = await chrome.windows.create({
+        type: "normal",
+        focused,
+        incognito,
+        ...(seedTabId !== undefined ? { tabId: seedTabId } : { url }),
+        ...size,
+      });
+      if (typeof win?.id !== "number") {
+        throw new Error("[bh] chrome.windows.create returned no window id");
+      }
+    } catch (err) {
+      if (seedTabId !== undefined) {
+        await chrome.tabs?.remove?.(seedTabId).catch(() => {});
+      }
+      throw err;
+    }
+    const tabIds = (win.tabs ?? []).flatMap((tab) => (typeof tab.id === "number" ? [tab.id] : []));
     return {
       windowId: win.id,
       incognito: win.incognito,
-      initialTabIds: (win.tabs ?? []).flatMap((tab) =>
-        typeof tab.id === "number" ? [tab.id] : [],
-      ),
+      initialTabIds: tabIds.length > 0 || seedTabId === undefined ? tabIds : [seedTabId],
     };
   },
   async remove(windowId: number): Promise<void> {
