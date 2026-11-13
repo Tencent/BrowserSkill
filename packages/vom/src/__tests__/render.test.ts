@@ -2138,5 +2138,289 @@ describe("selection evidence", () => {
       expect(chromeAxTable.text).toContain('      row "CHK-101 | 常规"');
       expect(chromeAxTable.text).toContain('      row "CHK-102 | 提示"');
     });
+
+    it("emits independent @eN rows for expanded nested menuitem descendants while keeping collapsed menus and native <select> folded", () => {
+      const collapsedNodes = [
+        node({ id: 1, parentId: null, tag: "ul", role: "menubar" }),
+        node({
+          id: 2,
+          parentId: 1,
+          backendNodeId: 102,
+          tag: "li",
+          role: "menuitem",
+          name: "Overview",
+        }),
+        node({
+          id: 3,
+          parentId: 1,
+          backendNodeId: 103,
+          tag: "li",
+          role: "menuitem",
+          name: "Workspace",
+        }),
+        node({ id: 4, parentId: null, tag: "ul", role: "menu" }),
+        node({
+          id: 5,
+          parentId: 4,
+          backendNodeId: 105,
+          tag: "li",
+          role: "menuitem",
+          name: "Members",
+          cursor: "pointer",
+        }),
+        node({
+          id: 6,
+          parentId: 4,
+          backendNodeId: 106,
+          tag: "li",
+          role: "menuitem",
+          name: "Advanced",
+          cursor: "pointer",
+        }),
+        node({
+          id: 60,
+          parentId: 6,
+          tag: "div",
+          role: "generic",
+          text: "Advanced ▸",
+          clickable: true,
+          cursor: "pointer",
+        }),
+        node({
+          id: 7,
+          parentId: 60,
+          tag: "span",
+          role: "generic",
+          text: "Advanced",
+          cursor: "pointer",
+        }),
+        node({
+          id: 8,
+          parentId: 60,
+          tag: "i",
+          role: "img",
+          name: "chevron-right",
+          cursor: "pointer",
+        }),
+      ];
+      const collapsed = renderVom(scene(collapsedNodes));
+      expect(collapsed.refs.map((r) => [r.ref, r.name])).toEqual([
+        ["e1", "Overview"],
+        ["e2", "Workspace"],
+        ["e3", "Members"],
+        ["e4", "Advanced"],
+      ]);
+      expect(collapsed.text).not.toContain("Audit export");
+      expect(collapsed.text).not.toContain("Report history");
+      expect(collapsed.text).not.toContain("chevron-right");
+
+      const expandedScene = scene([
+        ...collapsedNodes.slice(0, 5),
+        node({
+          id: 6,
+          parentId: 4,
+          backendNodeId: 106,
+          tag: "li",
+          role: "menuitem",
+          name: "Advanced Audit export Report history",
+          cursor: "pointer",
+        }),
+        node({
+          id: 60,
+          parentId: 6,
+          tag: "div",
+          role: "generic",
+          text: "Advanced ▸",
+          clickable: true,
+          cursor: "pointer",
+        }),
+        node({
+          id: 7,
+          parentId: 60,
+          tag: "span",
+          role: "generic",
+          text: "Advanced",
+          cursor: "pointer",
+        }),
+        node({
+          id: 8,
+          parentId: 60,
+          tag: "i",
+          role: "img",
+          name: "chevron-right",
+          cursor: "pointer",
+        }),
+        node({
+          id: 9,
+          parentId: 6,
+          tag: "div",
+          role: "generic",
+          position: "absolute",
+          cursor: "pointer",
+        }),
+        node({ id: 10, parentId: 9, tag: "ul", role: "none", cursor: "pointer" }),
+        node({
+          id: 11,
+          parentId: 10,
+          backendNodeId: 111,
+          tag: "li",
+          role: "menuitem",
+          name: "Audit export",
+          cursor: "pointer",
+        }),
+        node({
+          id: 12,
+          parentId: 11,
+          tag: "span",
+          role: "generic",
+          text: "Audit export",
+          cursor: "pointer",
+        }),
+        node({
+          id: 13,
+          parentId: 10,
+          backendNodeId: 113,
+          tag: "li",
+          role: "menuitem",
+          name: "Report history CSV archive",
+          cursor: "pointer",
+        }),
+        node({
+          id: 14,
+          parentId: 13,
+          tag: "span",
+          role: "generic",
+          text: "Report history",
+          cursor: "pointer",
+        }),
+        node({
+          id: 15,
+          parentId: 13,
+          backendNodeId: 115,
+          tag: "li",
+          role: "menuitem",
+          name: "CSV archive",
+          cursor: "pointer",
+        }),
+      ]);
+
+      const full = renderVom(expandedScene);
+      expect(full.text.split("\n")).toEqual([
+        "@vom 1",
+        "@view 1280x720",
+        "@layers 1 focus=L1",
+        "L1 page",
+        '  @e1 menuitem "Overview"',
+        '  @e2 menuitem "Workspace"',
+        '  @e3 menuitem "Members"',
+        '  @e4 menuitem "Advanced Audit export Report history"',
+        '    @e5 menuitem "Audit export"',
+        '    @e6 menuitem "Report history CSV archive"',
+        '      @e7 menuitem "CSV archive"',
+      ]);
+      expect(coreRefs(full.refs)).toEqual([
+        { ref: "e1", backendNodeId: 102 },
+        { ref: "e2", backendNodeId: 103 },
+        { ref: "e3", backendNodeId: 105 },
+        { ref: "e4", backendNodeId: 106 },
+        { ref: "e5", backendNodeId: 111 },
+        { ref: "e6", backendNodeId: 113 },
+        { ref: "e7", backendNodeId: 115 },
+      ]);
+
+      const prepared = prepareObservationRender(expandedScene);
+      const obsRows = Array.from({ [Symbol.iterator]: () => prepared.rows });
+      expect([...prepared.headers, ...obsRows.map((row) => row.text)].join("\n")).toBe(full.text);
+      expect(obsRows.filter((row) => row.ref).map((row) => [row.ref!.ref, row.ref!.name])).toEqual([
+        ["e1", "Overview"],
+        ["e2", "Workspace"],
+        ["e3", "Members"],
+        ["e4", "Advanced Audit export Report history"],
+        ["e5", "Audit export"],
+        ["e6", "Report history CSV archive"],
+        ["e7", "CSV archive"],
+      ]);
+
+      // Isomorphic siblings: custom ARIA combobox / named button keep nested interactive refs,
+      // whereas native single-select <select> keeps options folded inline without child @eN rows.
+      const siblings = renderVom(
+        scene([
+          node({
+            id: 1,
+            backendNodeId: 201,
+            tag: "div",
+            role: "combobox",
+            name: "Filter status",
+            attrs: { "aria-expanded": "true" },
+          }),
+          node({ id: 2, parentId: 1, tag: "span", role: "StaticText", name: "Filter status" }),
+          node({ id: 3, parentId: 1, tag: "div", role: "listbox", referenceable: false }),
+          node({
+            id: 4,
+            parentId: 3,
+            backendNodeId: 204,
+            tag: "div",
+            role: "option",
+            name: "Active",
+          }),
+          node({
+            id: 5,
+            parentId: 3,
+            backendNodeId: 205,
+            tag: "div",
+            role: "option",
+            name: "Archived",
+          }),
+          node({
+            id: 6,
+            backendNodeId: 206,
+            tag: "select",
+            role: "combobox",
+            name: "Region",
+            value: "cn",
+          }),
+          node({
+            id: 7,
+            parentId: 6,
+            backendNodeId: 207,
+            tag: "option",
+            role: "option",
+            name: "China",
+            attrs: { value: "cn", selected: "" },
+          }),
+          node({
+            id: 8,
+            parentId: 6,
+            backendNodeId: 208,
+            tag: "option",
+            role: "option",
+            name: "US",
+            attrs: { value: "us" },
+          }),
+          node({ id: 9, backendNodeId: 209, tag: "div", role: "button", name: "Order #88 Remove" }),
+          node({ id: 10, parentId: 9, tag: "span", role: "StaticText", name: "Order #88" }),
+          node({
+            id: 11,
+            parentId: 9,
+            backendNodeId: 211,
+            tag: "button",
+            role: "button",
+            name: "Remove",
+          }),
+        ]),
+      );
+      expect(siblings.text.split("\n")).toEqual([
+        "@vom 1",
+        "@view 1280x720",
+        "@layers 1 focus=L1",
+        "L1 page",
+        '  @e1 combobox "Filter status" [custom-dropdown: expanded]',
+        '    @e2 option "Active"',
+        '    @e3 option "Archived"',
+        '  @e4 combobox "Region" ="cn" [options: cn="China"* | us="US"]',
+        '  @e5 button "Order #88 Remove"',
+        '    @e6 button "Remove"',
+      ]);
+    });
   });
 });

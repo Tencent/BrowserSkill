@@ -449,6 +449,70 @@ function isAncestorOf(
   return false;
 }
 
+const PRESENTATIONAL_CHILD_CONTROL_ROLES = new Set([
+  "button",
+  "link",
+  "menuitem",
+  "menuitemcheckbox",
+  "menuitemradio",
+  "option",
+  "tab",
+  "switch",
+  "checkbox",
+  "radio",
+  "combobox",
+]);
+
+const POPUP_OR_COMPOSITE_BOUNDARY_ROLES = new Set([
+  "menu",
+  "menubar",
+  "listbox",
+  "dialog",
+  "alertdialog",
+  "table",
+  "grid",
+  "list",
+  "tree",
+]);
+
+function isPresentationalDescendantOfControl(
+  node: VomNode,
+  byId: ReadonlyMap<number, VomNode>,
+  parentMap: ReadonlyMap<number, number | null>,
+): boolean {
+  if (isContentEditable(node)) return false;
+  const explicitRole = node.attrs?.role?.toLowerCase() ?? "";
+  if (EXPLICIT_RECOVERY_ROLES.has(explicitRole) || explicitRole === "combobox") return false;
+  const pointerOnly = !hasRecoveryHandler(node) && node.cursor === "pointer";
+  let crossedBoundary = false;
+  let cur = parentMap.get(node.id) ?? null;
+  let guard = 0;
+  while (cur !== null && guard++ <= parentMap.size) {
+    const anc = byId.get(cur);
+    if (!anc || anc.frameId !== node.frameId) return false;
+    if (pointerOnly && anc.cursor === "pointer" && isSemanticReferenceNode(anc)) {
+      return true;
+    }
+    const ancRole = normalizedRole(anc);
+    if (
+      POPUP_OR_COMPOSITE_BOUNDARY_ROLES.has(ancRole) ||
+      anc.position === "absolute" ||
+      anc.position === "fixed"
+    ) {
+      crossedBoundary = true;
+    }
+    if (
+      !crossedBoundary &&
+      isSemanticReferenceNode(anc) &&
+      PRESENTATIONAL_CHILD_CONTROL_ROLES.has(ancRole)
+    ) {
+      return true;
+    }
+    cur = parentMap.get(cur) ?? null;
+  }
+  return false;
+}
+
 export function applyVomInteractionRecovery(nodes: VomNode[]): VomNode[] {
   // CSS cursors inherit. Expose the handle once instead of assigning refs to
   // every decorative span inside it; retain explicit nested draggable/drop cues.
@@ -466,10 +530,16 @@ export function applyVomInteractionRecovery(nodes: VomNode[]): VomNode[] {
     });
   }
 
+  const byId = new Map(nodes.map((node) => [node.id, node]));
+  const parentMap = buildParentMap(nodes);
   const eligible: VomNode[] = [];
   for (const node of nodes) {
     // Drag evidence adds a capability; it must not suppress existing role/name recovery.
-    if (!isSemanticReferenceNode(node) && passesStaticRecoveryGuards(node)) {
+    if (
+      !isSemanticReferenceNode(node) &&
+      passesStaticRecoveryGuards(node) &&
+      !isPresentationalDescendantOfControl(node, byId, parentMap)
+    ) {
       eligible.push(node);
     }
   }
@@ -501,7 +571,6 @@ export function applyVomInteractionRecovery(nodes: VomNode[]): VomNode[] {
 
   if (recoveredIds.size === 0) return nodes;
 
-  const parentMap = buildParentMap(nodes);
   for (const nodeId of [...recoveredIds]) {
     let current = parentMap.get(nodeId) ?? null;
     let guard = 0;
@@ -954,18 +1023,37 @@ function isEditableCombobox(node: VomNode): boolean {
   return false;
 }
 
-function shouldSkipRedundantRefChildren(node: VomNode): boolean {
+const FOLDABLE_NAMED_REF_ROLES = new Set([
+  "button",
+  "link",
+  "menuitem",
+  "tab",
+  "switch",
+  "checkbox",
+  "radio",
+  "combobox",
+]);
+
+function isAlwaysFoldedRefControl(node: VomNode): boolean {
   const role = normalizedRole(node);
-  if (
-    ["textbox", "searchbox"].includes(role) &&
-    ["input", "textarea"].includes((node.tag ?? "").toLowerCase())
-  ) {
+  const tag = normalizedTag(node);
+  if (["textbox", "searchbox"].includes(role) && ["input", "textarea"].includes(tag)) {
     return true;
   }
-  if (!cleaned(node.name)) return false;
-  return ["button", "link", "menuitem", "tab", "switch", "checkbox", "radio", "combobox"].includes(
-    role,
+  return role === "combobox" && tag === "select" && Boolean(cleaned(node.name));
+}
+
+function isFoldableNamedRefControl(node: VomNode): boolean {
+  return (
+    !isAlwaysFoldedRefControl(node) &&
+    Boolean(cleaned(node.name)) &&
+    FOLDABLE_NAMED_REF_ROLES.has(normalizedRole(node))
   );
+}
+
+function shouldSkipRedundantRefChildren(node: VomNode, state: RenderState): boolean {
+  if (isAlwaysFoldedRefControl(node)) return true;
+  return isFoldableNamedRefControl(node) && !state.hasInteractiveDescendant.has(node.id);
 }
 
 function descendantTextCoveredByName(node: VomNode, state: RenderState): boolean {
@@ -1028,13 +1116,20 @@ export interface RenderRow {
   minimal?: string;
 }
 
+interface RenderStackEntry {
+  node: VomNode;
+  depth: number;
+  onlyInteractive?: boolean;
+}
+
 function pushRenderChildren(
-  stack: Array<{ node: VomNode; depth: number }>,
+  stack: RenderStackEntry[],
   children: readonly VomNode[],
   depth: number,
+  onlyInteractive = false,
 ): void {
   for (let index = children.length - 1; index >= 0; index -= 1) {
-    stack.push({ node: children[index], depth });
+    stack.push({ node: children[index], depth, onlyInteractive });
   }
 }
 
@@ -1058,13 +1153,23 @@ function* renderTreeRows(
   observation = false,
   representedSources?: ReadonlySet<number>,
 ): Generator<RenderRow> {
-  const stack: Array<{ node: VomNode; depth: number }> = [];
+  const stack: RenderStackEntry[] = [];
   pushRenderChildren(stack, children.get(null) ?? [], 1);
 
   while (stack.length > 0) {
-    const { node, depth } = stack.pop() as { node: VomNode; depth: number };
+    const { node, depth, onlyInteractive } = stack.pop() as RenderStackEntry;
 
     if (state.consumedCaptionIds.has(node.id)) {
+      continue;
+    }
+
+    if (onlyInteractive && node.visualKey === undefined && !isVomReferenceNode(node)) {
+      if (
+        state.hasInteractiveDescendant.has(node.id) ||
+        (observation && state.visualAncestors.has(node.id))
+      ) {
+        pushRenderChildren(stack, children.get(node.id) ?? [], depth, true);
+      }
       continue;
     }
 
@@ -1073,7 +1178,7 @@ function* renderTreeRows(
       representedSources?.has(node.id) ||
       (node.visualKey === undefined && !shouldRender(node))
     ) {
-      pushRenderChildren(stack, children.get(node.id) ?? [], depth);
+      pushRenderChildren(stack, children.get(node.id) ?? [], depth, onlyInteractive);
       continue;
     }
 
@@ -1097,7 +1202,7 @@ function* renderTreeRows(
     if (depth > state.maxDepth && node.visualKey === undefined) {
       state.truncated = true;
       if (observation && state.visualAncestors.has(node.id))
-        pushRenderChildren(stack, children.get(node.id) ?? [], depth);
+        pushRenderChildren(stack, children.get(node.id) ?? [], depth, onlyInteractive);
       continue;
     }
 
@@ -1173,11 +1278,17 @@ function* renderTreeRows(
 
     if (
       (!observation || !state.visualAncestors.has(node.id)) &&
-      ((ref && shouldSkipRedundantRefChildren(node)) || shouldSkipRedundantChildren(node, state))
+      ((ref && shouldSkipRedundantRefChildren(node, state)) ||
+        shouldSkipRedundantChildren(node, state))
     ) {
       continue;
     }
-    pushRenderChildren(stack, children.get(node.id) ?? [], depth + 1);
+    pushRenderChildren(
+      stack,
+      children.get(node.id) ?? [],
+      depth + 1,
+      Boolean(ref) && isFoldableNamedRefControl(node),
+    );
   }
 }
 

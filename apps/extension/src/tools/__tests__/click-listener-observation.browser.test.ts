@@ -1,8 +1,9 @@
 // @vitest-environment node
 // Opt in with BSK_CLICK_CHROME; the harness owns an isolated browser/profile.
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { SessionManager } from "@/session-manager/manager";
-import { handleClick } from "../interaction";
+import { handleClick, handleHover } from "../interaction";
 import { handleObserve, handleSnapshot } from "../observation";
 import type { CdpRunner } from "../shared";
 
@@ -183,6 +184,134 @@ describe.skipIf(!process.env.BSK_CLICK_CHROME)("click listener observations", ()
           "code",
         );
         expect(await evaluate("clicks.at(-1)")).toEqual({ id: "modal-item", trusted: true });
+      },
+    );
+  }, 30_000);
+
+  it("exposes independent menuitem refs for nested multi-level dynamic popups across observe and snapshot", async () => {
+    const { withChrome } = await import(
+      new URL(
+        "../../../../../evals/browser/cases/regression/snapshot-coordinates/chrome.mjs",
+        import.meta.url,
+      ).href
+    );
+    const nestedMenuHtml = readFileSync(
+      new URL(
+        "../../../../../evals/browser/skills/browserskill-release-test/assets/fixtures/nested-menu.html",
+        import.meta.url,
+      ),
+      "utf8",
+    );
+    await withChrome(
+      { executable: process.env.BSK_CLICK_CHROME, deviceScale: 1, zoom: 1 },
+      async (send: Send) => {
+        const { targetId } = await send<{ targetId: string }>("Target.createTarget", {
+          url: "about:blank",
+        });
+        const { sessionId } = await send<{ sessionId: string }>("Target.attachToTarget", {
+          targetId,
+          flatten: true,
+        });
+        const local: Send = (method, params) => send(method, params, sessionId);
+        const evaluate = async <T>(expression: string) => {
+          const reply = await local<{ result: { value: T }; exceptionDetails?: unknown }>(
+            "Runtime.evaluate",
+            { expression, returnByValue: true, awaitPromise: true },
+          );
+          expect(reply.exceptionDetails).toBeUndefined();
+          return reply.result.value;
+        };
+        await local("Page.enable");
+        await local("Page.bringToFront");
+        const cdp: CdpRunner = {
+          send: (_tabId, method, params) => local(method, params),
+          sendToTarget: (_target, method, params) => local(method, params),
+          getAttachmentId: () => sessionId,
+          getFrameGraph: async () => {
+            const { frameTree } = await local<{ frameTree: { frame: { id: string } } }>(
+              "Page.getFrameTree",
+            );
+            return {
+              rootFrameId: frameTree.frame.id,
+              frames: [{ frameId: frameTree.frame.id, target: { tabId: 4 } }],
+            };
+          },
+        };
+        const manager = new SessionManager({
+          agentWindow: {
+            create: async () => ({ windowId: 100, initialTabIds: [4] }),
+            remove: async () => {},
+            ensureActiveTab: async () => 4,
+          },
+        });
+        const ctx = await manager.start("nested-menu-observation");
+        const tab = { id: 4, windowId: 100, active: true, url: "about:blank" } as chrome.tabs.Tab;
+        const deps = { cdp, tabsApi: { get: async () => tab, query: async () => [tab] } };
+        const params = { session_id: ctx.sessionId };
+        const menuitemRef = (text: string, exactName: string) =>
+          text
+            .split("\n")
+            .map((line) => line.trim())
+            .find((line) => {
+              const match = line.match(/^(@e\d+)\s+menuitem\s+"([^"]+)"$/);
+              if (!match) return false;
+              const cleaned = match[2].replace(/ \[(?:has-submenu|expanded)\]$/, "");
+              return cleaned === exactName;
+            })
+            ?.match(/^@e\d+/)?.[0];
+
+        await evaluate(
+          `document.open(); document.write(${JSON.stringify(nestedMenuHtml)}); document.close();`,
+        );
+        const initial = await handleObserve(manager, params, deps);
+        if (!("text" in initial)) throw new Error(JSON.stringify(initial));
+        expect(menuitemRef(initial.text, "Audit export")).toBeUndefined();
+        expect(menuitemRef(initial.text, "Report history")).toBeUndefined();
+
+        const workspaceRef = menuitemRef(initial.text, "Workspace");
+        expect(workspaceRef, initial.text).toBeDefined();
+        expect(
+          await handleHover(manager, { ...params, ref: workspaceRef }, deps),
+        ).not.toHaveProperty("code");
+        await expect
+          .poll(() => evaluate("!document.querySelector('#workspace-popper').hidden"))
+          .toBe(true);
+
+        const level1 = await handleObserve(manager, params, deps);
+        if (!("text" in level1)) throw new Error(JSON.stringify(level1));
+        expect(menuitemRef(level1.text, "Audit export")).toBeUndefined();
+        expect(menuitemRef(level1.text, "Report history")).toBeUndefined();
+
+        const advancedRef = menuitemRef(level1.text, "Advanced");
+        expect(advancedRef, level1.text).toBeDefined();
+        expect(
+          await handleHover(manager, { ...params, ref: advancedRef }, deps),
+        ).not.toHaveProperty("code");
+        await expect
+          .poll(() => evaluate("!document.querySelector('#advanced-popper').hidden"))
+          .toBe(true);
+
+        const observed = await handleObserve(manager, params, deps);
+        const snapshotted = await handleSnapshot(manager, params, deps);
+        if (!("text" in observed) || !("text" in snapshotted)) {
+          throw new Error(JSON.stringify({ observed, snapshotted }));
+        }
+        for (const text of [observed.text, snapshotted.text]) {
+          const auditRef = menuitemRef(text, "Audit export");
+          const historyRef = menuitemRef(text, "Report history");
+          expect(auditRef, text).toBeDefined();
+          expect(historyRef, text).toBeDefined();
+          expect(auditRef).not.toBe(historyRef);
+          expect(text, text).not.toMatch(/@e\d+\s+button\b/);
+        }
+
+        const clickTargetRef = menuitemRef(observed.text, "Audit export")!;
+        expect(
+          await handleClick(manager, { ...params, ref: clickTargetRef }, deps),
+        ).not.toHaveProperty("code");
+        expect(
+          await evaluate("document.querySelector('#menu-selection-receipt').textContent"),
+        ).toBe("Selected audit");
       },
     );
   }, 30_000);

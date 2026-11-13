@@ -4,7 +4,7 @@
 
 ## 覆盖定义与 Benchmark 口径
 
-四个维度分别报告：**动态命令清单、固定场景清单（111 项，含 21 项对抗靶场场景 `ARENA-*`）、网页类型清单、Benchmark 效率与耗时指标**。命令至少有一次适用环境的实际成功调用且业务验收通过；场景需完成其全部动作与变体。CLI 退出 0、HTTP 200、截图文件存在、帮助能显示，均不等于业务通过。
+四个维度分别报告：**动态命令清单、固定场景清单（112 项，含 21 项对抗靶场场景 `ARENA-*`）、网页类型清单、Benchmark 效率与耗时指标**。命令至少有一次适用环境的实际成功调用且业务验收通过；场景需完成其全部动作与变体。CLI 退出 0、HTTP 200、截图文件存在、帮助能显示，均不等于业务通过。
 
 网页类型×命令表记录实际用到的命令及证据。无语义组合（如 Canvas 内无 select）写清原因；不能用 N/A 删除必测行。`lifecycle` / `admin` / `mcp` / `batch-plan` / `recipe` 单独列能力域，表中的每一类网页都要有实测场景。
 
@@ -59,6 +59,7 @@ Benchmark 自动采集每次命令的**交互轮次（`interaction_turns`）、�
 | `/video-portal` | 本地确定性视频门户：HTML5 `<video>` 控制栏（倍速/弹幕/章节/简介）、双层叠加弹窗（`modal=1` / `modal=2`）、推荐流与异步评论加载 |
 | `/forum-hub` | 本地确定性开发者论坛：节点 Tab `pushState` 切换、热度/关键词筛选、置顶帖与零回复帖对齐、帖子详情楼层与代码块读取、虚拟列表视口行回收（Rows 20-25） |
 | `/minimal` | 简单静态页面/表单/SPA/表格，用作不受复杂布局干扰的对照 |
+| `/nested-menu` | Element Plus 风格两级动态悬停菜单（`Workspace -> Advanced`）：一级浮层 teleport 到 `body`，二级浮层嵌在父 `menuitem` 内，验证展开前后子项 `@eN` 独立引用与点击回执 `Selected audit` |
 | `/edgecases` | maxlength/readonly/disabled、目标替换、row42→99 复用、重复 CTA、遮挡、closed shadow、500 body |
 | `/extra` | 五种时间、focus/blur、等待节点替换、二维滚动、子 frame 刷新、hidden 文件、260 请求、once 计数 |
 | `/pointer-semantic` | Lit comments/style 污染、固定左右下角 CTA、原生导航 |
