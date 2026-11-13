@@ -723,6 +723,229 @@ def read_record(root, record_id):
     }
 
 
+VOM_DRAG_HINTS = ("[draggable]", "[drop-target]", "[drag-handle]")
+VOM_NAME_STATES = (" [has-submenu]", " [expanded]")
+
+
+def normalize_ws(text):
+    return " ".join(str(text).split())
+
+
+def parse_vom_ref_rows(text):
+    if not isinstance(text, str):
+        return None
+    rows = []
+    has_header = False
+    scope_indent = None
+    decoder = json.JSONDecoder()
+    for raw in text.splitlines():
+        line = raw.lstrip(" ")
+        indent = len(raw) - len(line)
+        if scope_indent is not None:
+            if indent > scope_indent:
+                continue
+            scope_indent = None
+        if line.startswith("[§ active:"):
+            scope_indent = indent
+            continue
+        if line.startswith("@vom "):
+            has_header = True
+            continue
+        m = re.match(r"^@(e[0-9]+)\s+([A-Za-z][A-Za-z0-9]*)(?:\s+(.*))?$", line)
+        if not m:
+            continue
+        ref = "@" + m.group(1)
+        role = m.group(2)
+        rest = (m.group(3) or "").lstrip(" ")
+        for hint in VOM_DRAG_HINTS:
+            if rest.startswith(hint):
+                rest = rest[len(hint) :].lstrip(" ")
+        name = None
+        if rest.startswith('"'):
+            try:
+                parsed_name, _ = decoder.raw_decode(rest)
+                if isinstance(parsed_name, str):
+                    for state in VOM_NAME_STATES:
+                        if parsed_name.endswith(state):
+                            parsed_name = parsed_name[: -len(state)]
+                            break
+                    name = normalize_ws(parsed_name)
+            except ValueError:
+                name = None
+        rows.append({"ref": ref, "role": role, "name": name, "line": raw})
+    return rows if has_header else None
+
+
+def vom_has_no_ref(text, expected):
+    rows = parse_vom_ref_rows(text)
+    if rows is None or not isinstance(expected, list) or not expected:
+        return False
+    forbidden = {
+        normalize_ws(item["name"] if isinstance(item, dict) else item)
+        for item in expected
+    }
+    return all(
+        r["role"].lower() == "canvas" or r["name"] not in forbidden for r in rows
+    )
+
+
+def vom_distinct_item_refs(text, expected):
+    rows = parse_vom_ref_rows(text)
+    if rows is None or not isinstance(expected, list) or not expected:
+        return None
+    refs = []
+    for item in expected:
+        if not isinstance(item, dict) or "role" not in item or "name" not in item:
+            return None
+        role = str(item["role"]).lower()
+        name = normalize_ws(item["name"])
+        matches = [
+            r["ref"]
+            for r in rows
+            if r["role"].lower() == role and r["name"] == name
+        ]
+        if len(matches) != 1:
+            return None
+        refs.append(matches[0])
+    return refs if len(set(refs)) == len(refs) else None
+
+
+def record_vom_text(value):
+    j = value.get("json")
+    if isinstance(j, dict):
+        for ptr in ("/vom", "/observation/text", "/text"):
+            try:
+                cand = pointer(j, ptr)
+            except (KeyError, IndexError, TypeError, ValueError):
+                continue
+            if isinstance(cand, str) and "@vom " in cand:
+                return cand
+    out = value.get("stdout")
+    return out if isinstance(out, str) and "@vom " in out else None
+
+
+def extract_click_ref(argv):
+    tokens = list(argv or [])
+    if tokens and tokens[0] == "click":
+        tokens = tokens[1:]
+    if any(t == "--selector" or t.startswith("--selector=") for t in tokens):
+        return None
+    flags_with_value = {
+        "--session",
+        "--scope",
+        "--tab-id",
+        "--button",
+        "--click-count",
+        "--count",
+        "--context",
+        "--observation",
+        "--depends-on",
+        "--expect",
+        "--modifiers",
+        "--timeout",
+        "--capture",
+        "--image-x",
+        "--image-y",
+    }
+    skip_next = False
+    positional = []
+    for i, tok in enumerate(tokens):
+        if skip_next:
+            skip_next = False
+            continue
+        if tok == "--ref" and i + 1 < len(tokens):
+            cand = tokens[i + 1]
+            return ("@" + cand.lstrip("@")) if re.fullmatch(r"@?e[0-9]+", cand) else None
+        if tok.startswith("--ref="):
+            cand = tok.split("=", 1)[1]
+            return ("@" + cand.lstrip("@")) if re.fullmatch(r"@?e[0-9]+", cand) else None
+        if tok in flags_with_value:
+            skip_next = True
+            continue
+        if tok.startswith("-"):
+            continue
+        positional.append(tok)
+    if len(positional) == 1 and re.fullmatch(r"@?e[0-9]+", positional[0]):
+        return "@" + positional[0].lstrip("@")
+    return None
+
+
+def verify_nested_menu_contract(metas_and_values, contract):
+    items = contract["items"]
+    click_item = contract["click_item"]
+    expected_receipt = normalize_ws(contract["expected_receipt"])
+    obs_cmds = ("sync", "cooperate sync", "observe", "snapshot")
+    hover_indices = [
+        i
+        for i, (m, _) in enumerate(metas_and_values)
+        if m["command"] == "hover" and m["exit_code"] == 0
+    ]
+    if len(hover_indices) < 2:
+        raise ValueError("Nested menu contract requires two-level hover")
+    second_hover_idx = hover_indices[1]
+    pre_obs = [
+        (m, v)
+        for m, v in metas_and_values[:second_hover_idx]
+        if m["command"] in obs_cmds
+    ]
+    if not pre_obs:
+        raise ValueError("Missing pre-expansion VOM observation before secondary hover")
+    for m, v in pre_obs:
+        if not vom_has_no_ref(record_vom_text(v), items):
+            raise ValueError(
+                "Pre-expansion " + m["command"] + " exposed actionable child ref"
+            )
+    click_candidates = [
+        i
+        for i in range(second_hover_idx + 1, len(metas_and_values))
+        if metas_and_values[i][0]["command"] == "click"
+        and metas_and_values[i][0]["exit_code"] == 0
+        and extract_click_ref(metas_and_values[i][0]["argv"])
+    ]
+    if not click_candidates:
+        raise ValueError("Missing ref-based click after secondary hover")
+    click_idx = click_candidates[0]
+    post_slice = metas_and_values[second_hover_idx + 1 : click_idx]
+    sync_records = [
+        (m, v) for m, v in post_slice if m["command"] in ("sync", "cooperate sync")
+    ]
+    observe_records = [(m, v) for m, v in post_slice if m["command"] == "observe"]
+    snapshot_records = [(m, v) for m, v in post_slice if m["command"] == "snapshot"]
+    if not sync_records or not observe_records or not snapshot_records:
+        raise ValueError(
+            "Post-expansion requires sync, observe, and snapshot before click"
+        )
+    for m, v in post_slice:
+        if m["command"] in obs_cmds and not vom_distinct_item_refs(
+            record_vom_text(v), items
+        ):
+            raise ValueError(
+                "Post-expansion "
+                + m["command"]
+                + " lacks independent distinct menuitem lines"
+            )
+    latest_sync_vom = record_vom_text(sync_records[-1][1])
+    target_refs = vom_distinct_item_refs(latest_sync_vom, [click_item])
+    if not target_refs:
+        raise ValueError("Latest sync missing click target menuitem ref")
+    click_ref = extract_click_ref(metas_and_values[click_idx][0]["argv"])
+    if click_ref != target_refs[0]:
+        raise ValueError(
+            f"Click ref {click_ref} does not match latest sync ref {target_refs[0]}"
+        )
+    receipt_ok = False
+    for m, v in metas_and_values[click_idx + 1 :]:
+        if m["command"] == "read" and isinstance(v.get("json"), dict):
+            for it in v["json"].get("items") or []:
+                if isinstance(it, dict):
+                    vals = it.get("values") if isinstance(it.get("values"), dict) else {}
+                    txt = vals.get("text") if "text" in vals else it.get("text", "")
+                    if normalize_ws(txt) == expected_receipt:
+                        receipt_ok = True
+    if not receipt_ok:
+        raise ValueError("Post-click read did not confirm receipt " + expected_receipt)
+
+
 def assertion(root, check):
     if "record" in check:
         _, value = read_record(root, check["record"])
@@ -768,6 +991,10 @@ def assertion(root, check):
         return isinstance(value, str) and bool(value)
     if op == "not_contains":
         return expected not in value
+    if op == "vom_no_ref":
+        return vom_has_no_ref(value, expected)
+    if op == "vom_distinct_refs":
+        return vom_distinct_item_refs(value, expected) is not None
     raise ValueError("Unknown assertion " + op)
 
 
@@ -1469,6 +1696,11 @@ def gate(root):
                         raise ValueError("Missing intermediate assertion")
             if not all(assertion(root, x) for x in r["checks"]):
                 raise ValueError("Oracle assertion failed")
+            if c.get("nested_menu_contract"):
+                verify_nested_menu_contract(
+                    [read_record(root, k) for k in records],
+                    c["nested_menu_contract"],
+                )
             if c.get("negative"):
                 negative_records.update(records)
                 # For commands executed inside a negative case that succeeded as setup

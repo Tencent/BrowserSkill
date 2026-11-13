@@ -838,7 +838,7 @@ else:
 
         real_skill = Path(__file__).resolve().parents[1]
         scenarios = audit.load(real_skill / "references/scenarios.json")
-        self.assertEqual(len(scenarios), 111)
+        self.assertEqual(len(scenarios), 112)
         ids = [s["id"] for s in scenarios]
         self.assertEqual(len(ids), len(set(ids)))
         for required_id in [
@@ -850,6 +850,7 @@ else:
             "READ-DYNAMIC-BOUNDED",
             "EDGE-VIRTUAL-LIST-RECYCLE",
             "EDGE-STACKED-MODALS",
+            "EDGE-NESTED-MENU-REFS",
             "LOCAL-VIDEO-PORTAL",
             "LOCAL-FORUM-HUB",
             "PUBLIC-BILIBILI-FEED",
@@ -938,6 +939,239 @@ else:
             full = real_skill / "assets" / rel
             self.assertTrue(full.is_file(), f"Missing fixture {rel}")
             self.assertEqual(audit.digest(full), expected_sha, f"Hash mismatch for {rel}")
+
+    def test_nested_menu_vom_assertions_and_gate_contract(self):
+        nested_cli = """#!/usr/bin/env python3
+import json, os, sys
+args = sys.argv[1:]
+cmds = ["navigate", "sync", "hover", "wait-for-element", "observe", "snapshot", "click", "read"]
+if "--help" in args:
+    if args == ["--help"]:
+        body = "\\n".join(f"  {c:<18} run {c}" for c in cmds)
+        print(f"Usage: bsk [OPTIONS] <COMMAND>\\n\\nCommands:\\n{body}\\n\\nOptions:\\n  --help  Help")
+    else:
+        print(f"Usage: bsk {args[0]} [OPTIONS]")
+    sys.exit(0)
+mode = os.environ.get("FAKE_MENU_MODE", "fixed")
+cmd = args[0]
+if cmd == "navigate":
+    print(json.dumps({"ok": True, "url": args[1]}))
+elif cmd == "wait-for-element":
+    print(json.dumps({"satisfied": True}))
+elif cmd == "hover":
+    print(json.dumps({"ok": True}))
+elif cmd == "click":
+    print(json.dumps({"ok": True}))
+elif cmd == "read":
+    print(json.dumps({"items": [{"ref": "@e9", "values": {"text": "Selected audit"}, "redacted": []}]}))
+elif cmd in ("sync", "observe", "snapshot"):
+    phase = "post" if "--post" in args else "pre"
+    if phase == "pre":
+        vom = (
+            "@vom 1\\nmenubar \\"Console navigation\\"\\n"
+            "  @e1 menuitem \\"Overview\\"\\n"
+            "  @e2 menuitem \\"Workspace [has-submenu]\\""
+            + ("\\n  @e9 menuitem \\"Audit export\\"" if mode == "leaked_pre" else "")
+        )
+    elif mode == "v050":
+        vom = (
+            "@vom 1\\nmenubar \\"Console navigation\\"\\n"
+            "  @e1 menuitem \\"Overview\\"\\n"
+            "  @e2 menuitem \\"Workspace [expanded]\\"\\n"
+            "menu\\n"
+            "  @e3 menuitem \\"Members\\"\\n"
+            "  @e4 menuitem \\"Advanced Audit export Report history [expanded]\\""
+        )
+    elif mode == "dup_ref":
+        vom = (
+            "@vom 1\\nmenu\\n"
+            "  @e4 menuitem \\"Advanced Audit export Report history [expanded]\\"\\n"
+            "    @e5 menuitem \\"Audit export\\"\\n"
+            "    @e5 menuitem \\"Report history\\""
+        )
+    else:
+        audit_ref = "@e7" if cmd == "sync" else "@e5"
+        vom = (
+            "@vom 1\\nmenubar \\"Console navigation\\"\\n"
+            "  @e1 menuitem \\"Overview\\"\\n"
+            "  @e2 menuitem \\"Workspace [expanded]\\"\\n"
+            "menu\\n"
+            "  @e3 menuitem \\"Members\\"\\n"
+            "  @e4 menuitem \\"Advanced Audit export Report history [expanded]\\"\\n"
+            f"    {audit_ref} menuitem \\"Audit export\\"\\n"
+            "    @e8 menuitem \\"Report history\\""
+        )
+    key = "vom" if cmd == "sync" else "text"
+    print(json.dumps({key: vom}))
+"""
+        self.binary.write_text(nested_cli)
+        self.binary.chmod(0o755)
+        real_skill = Path(__file__).resolve().parents[1]
+        nested_scenario = next(
+            s
+            for s in audit.load(real_skill / "references/scenarios.json")
+            if s["id"] == "EDGE-NESTED-MENU-REFS"
+        )
+        items = nested_scenario["nested_menu_contract"]["items"]
+
+        def run_round(run_name, mode, click_ref="@e7"):
+            out_dir = self.base / run_name
+            audit.write(self.skill / "references/scenarios.json", [nested_scenario])
+            with contextlib.redirect_stdout(io.StringIO()):
+                audit.init(
+                    NS(
+                        out=str(out_dir),
+                        bsk=str(self.binary),
+                        binary=str(self.binary),
+                        browser="chrome",
+                        candidate=run_name,
+                        port=4567,
+                    )
+                )
+
+            def ex(argv, case="EDGE-NESTED-MENU-REFS"):
+                with contextlib.redirect_stdout(io.StringIO()):
+                    audit.execute(
+                        NS(
+                            run=str(out_dir),
+                            case=case,
+                            argv=argv,
+                            timeout=5,
+                            lane="browser",
+                            stdin_file=None,
+                            interactive=False,
+                            env=[f"FAKE_MENU_MODE={mode}"],
+                        )
+                    )
+                return max(
+                    (out_dir / "commands").glob("*/meta.json"),
+                    key=lambda p: p.stat().st_mtime_ns,
+                ).parent.name
+
+            r_nav = ex(["navigate", "http://127.0.0.1:4567/nested-menu"])
+            r_pre = ex(["sync", "--json"])
+            r_h1 = ex(["hover", "--ref", "@e2"])
+            r_w1 = ex(["wait-for-element", "#workspace-popper"])
+            r_h2 = ex(["hover", "--ref", "@e4"])
+            r_w2 = ex(["wait-for-element", "#advanced-popper"])
+            r_obs = ex(["observe", "--post", "--json"])
+            r_snap = ex(["snapshot", "--post", "--json"])
+            r_sync = ex(["sync", "--post", "--json"])
+            r_click = ex(["click", "--ref", click_ref])
+            r_read = ex(["read", "--selector", "#menu-selection-receipt"])
+            records = [r_nav, r_pre, r_h1, r_w1, r_h2, r_w2, r_obs, r_snap, r_sync, r_click, r_read]
+            checks = [
+                {"record": r_pre, "pointer": "/json/vom", "op": "vom_no_ref", "value": items},
+                {"record": r_obs, "pointer": "/json/text", "op": "vom_distinct_refs", "value": items},
+                {"record": r_snap, "pointer": "/json/text", "op": "vom_distinct_refs", "value": items},
+                {"record": r_sync, "pointer": "/json/vom", "op": "vom_distinct_refs", "value": items},
+                {"record": r_read, "pointer": "/json/items/0/values/text", "op": "eq", "value": "Selected audit"},
+            ]
+            return out_dir, records, checks
+
+        # 1) 0.5.0 parent-concatenated menuitem fails vom_distinct_refs and gate()
+        d_050, recs_050, checks_050 = run_round("r050", "v050")
+        self.assertTrue(audit.assertion(d_050, checks_050[0]))
+        for c in checks_050[1:4]:
+            self.assertFalse(audit.assertion(d_050, c))
+        audit.write(
+            d_050 / "results.json",
+            {
+                "cases": [
+                    {
+                        "id": "EDGE-NESTED-MENU-REFS",
+                        "status": "passed",
+                        "records": recs_050,
+                        "oracle_summary": "0.5.0 check",
+                        "checks": [{"record": recs_050[-1], "pointer": "/json/items/0/values/text", "op": "eq", "value": "Selected audit"}],
+                    }
+                ]
+            },
+        )
+        with contextlib.redirect_stdout(io.StringIO()):
+            code_050 = audit.gate(d_050)
+        gate_050 = audit.load(d_050 / "gate.json")
+        self.assertEqual(code_050, 1)
+        self.assertTrue(
+            any("EDGE-NESTED-MENU-REFS" in e and "independent distinct menuitem" in e for e in gate_050["errors"]),
+            gate_050["errors"],
+        )
+
+        # 2) Duplicate @eN fails vom_distinct_refs
+        d_dup, _, checks_dup = run_round("rdup", "dup_ref")
+        self.assertFalse(audit.assertion(d_dup, checks_dup[1]))
+
+        # 3) Pre-expansion leaked ref fails vom_no_ref and gate()
+        d_leak, recs_leak, checks_leak = run_round("rleak", "leaked_pre")
+        self.assertFalse(audit.assertion(d_leak, checks_leak[0]))
+        audit.write(
+            d_leak / "results.json",
+            {
+                "cases": [
+                    {
+                        "id": "EDGE-NESTED-MENU-REFS",
+                        "status": "passed",
+                        "records": recs_leak,
+                        "oracle_summary": "leaked pre check",
+                        "checks": [{"record": recs_leak[-1], "pointer": "/json/items/0/values/text", "op": "eq", "value": "Selected audit"}],
+                    }
+                ]
+            },
+        )
+        with contextlib.redirect_stdout(io.StringIO()):
+            audit.gate(d_leak)
+        gate_leak = audit.load(d_leak / "gate.json")
+        self.assertTrue(
+            any("Pre-expansion sync exposed actionable child ref" in e for e in gate_leak["errors"]),
+            gate_leak["errors"],
+        )
+
+        # 4) Clicking ref NOT taken from latest sync fails gate()
+        d_wrong_ref, recs_wrong, _ = run_round("rwrong", "fixed", click_ref="@e5")
+        audit.write(
+            d_wrong_ref / "results.json",
+            {
+                "cases": [
+                    {
+                        "id": "EDGE-NESTED-MENU-REFS",
+                        "status": "passed",
+                        "records": recs_wrong,
+                        "oracle_summary": "wrong ref check",
+                        "checks": [{"record": recs_wrong[-1], "pointer": "/json/items/0/values/text", "op": "eq", "value": "Selected audit"}],
+                    }
+                ]
+            },
+        )
+        with contextlib.redirect_stdout(io.StringIO()):
+            audit.gate(d_wrong_ref)
+        gate_wrong = audit.load(d_wrong_ref / "gate.json")
+        self.assertTrue(
+            any("Click ref @e5 does not match latest sync ref @e7" in e for e in gate_wrong["errors"]),
+            gate_wrong["errors"],
+        )
+
+        # 5) Fixed candidate passes every assertion and EDGE-NESTED-MENU-REFS in gate()
+        d_ok, recs_ok, checks_ok = run_round("rok", "fixed", click_ref="@e7")
+        for c in checks_ok:
+            self.assertTrue(audit.assertion(d_ok, c), c)
+        audit.write(
+            d_ok / "results.json",
+            {
+                "cases": [
+                    {
+                        "id": "EDGE-NESTED-MENU-REFS",
+                        "status": "passed",
+                        "records": recs_ok,
+                        "oracle_summary": "Verified nested menu refs and receipt",
+                        "checks": checks_ok,
+                    }
+                ]
+            },
+        )
+        with contextlib.redirect_stdout(io.StringIO()):
+            audit.gate(d_ok)
+        gate_ok = audit.load(d_ok / "gate.json")
+        self.assertIn("EDGE-NESTED-MENU-REFS", gate_ok["passed_ids"])
 
 
 if __name__ == "__main__":

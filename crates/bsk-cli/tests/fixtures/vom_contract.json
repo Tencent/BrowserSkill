@@ -385,6 +385,157 @@
           "value": null
         }
       ]
+    },
+    {
+      "name": "nested_menu",
+      "scene": {
+        "viewport": {
+          "width": 1280,
+          "height": 720
+        },
+        "nodes": [
+          {
+            "id": 1,
+            "parentId": null,
+            "tag": "ul",
+            "role": "menubar"
+          },
+          {
+            "id": 2,
+            "parentId": 1,
+            "tag": "li",
+            "role": "menuitem",
+            "name": "Overview"
+          },
+          {
+            "id": 3,
+            "parentId": 1,
+            "tag": "li",
+            "role": "menuitem",
+            "name": "Workspace"
+          },
+          {
+            "id": 4,
+            "parentId": null,
+            "tag": "ul",
+            "role": "menu"
+          },
+          {
+            "id": 5,
+            "parentId": 4,
+            "tag": "li",
+            "role": "menuitem",
+            "name": "Members"
+          },
+          {
+            "id": 6,
+            "parentId": 4,
+            "tag": "li",
+            "role": "menuitem",
+            "name": "Advanced Audit export Report history"
+          },
+          {
+            "id": 7,
+            "parentId": 6,
+            "tag": "span",
+            "role": "StaticText",
+            "name": "Advanced"
+          },
+          {
+            "id": 8,
+            "parentId": 6,
+            "tag": "i",
+            "role": "img",
+            "name": "arrow"
+          },
+          {
+            "id": 9,
+            "parentId": 6,
+            "tag": "div",
+            "role": "generic"
+          },
+          {
+            "id": 10,
+            "parentId": 9,
+            "tag": "ul",
+            "role": "menu",
+            "name": "Advanced submenu"
+          },
+          {
+            "id": 11,
+            "parentId": 10,
+            "tag": "li",
+            "role": "menuitem",
+            "name": "Audit export"
+          },
+          {
+            "id": 12,
+            "parentId": 11,
+            "tag": "span",
+            "role": "StaticText",
+            "name": "Audit export"
+          },
+          {
+            "id": 13,
+            "parentId": 10,
+            "tag": "li",
+            "role": "menuitem",
+            "name": "Report history"
+          },
+          {
+            "id": 14,
+            "parentId": 13,
+            "tag": "span",
+            "role": "StaticText",
+            "name": "Report history"
+          }
+        ]
+      },
+      "text": "@vom 1\n@view 1280x720\n@layers 1 focus=L1\nL1 page\n  @e1 menuitem \"Overview\"\n  @e2 menuitem \"Workspace\"\n  @e3 menuitem \"Members\"\n  @e4 menuitem \"Advanced Audit export Report history\"\n    @e5 menuitem \"Audit export\"\n    @e6 menuitem \"Report history\"",
+      "lines": [
+        {
+          "ref": "e1",
+          "role": "menuitem",
+          "name": "Overview",
+          "ctx": null,
+          "value": null
+        },
+        {
+          "ref": "e2",
+          "role": "menuitem",
+          "name": "Workspace",
+          "ctx": null,
+          "value": null
+        },
+        {
+          "ref": "e3",
+          "role": "menuitem",
+          "name": "Members",
+          "ctx": null,
+          "value": null
+        },
+        {
+          "ref": "e4",
+          "role": "menuitem",
+          "name": "Advanced Audit export Report history",
+          "ctx": null,
+          "value": null
+        },
+        {
+          "ref": "e5",
+          "role": "menuitem",
+          "name": "Audit export",
+          "ctx": null,
+          "value": null
+        },
+        {
+          "ref": "e6",
+          "role": "menuitem",
+          "name": "Report history",
+          "ctx": null,
+          "value": null
+        }
+      ]
     }
   ]
 }
