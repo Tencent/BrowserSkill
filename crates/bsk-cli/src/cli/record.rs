@@ -73,6 +73,13 @@ pub struct RecordStartArgs {
     #[arg(long = "redact-values")]
     pub redact_values: bool,
 
+    /// Include request methods, redacted URLs, and HTTP statuses in the trace.
+    ///
+    /// Captures up to 1,000 HTTP(S) requests. Step association is best-effort,
+    /// and requests without an observed response have a null status.
+    #[arg(long)]
+    pub capture_network: bool,
+
     /// Output directory for the trace bundle (default `./trace`).
     /// Writes `<dir>/trace.json` and `<dir>/states/*.txt`.
     #[arg(long, default_value = "trace")]
@@ -116,6 +123,7 @@ fn dispatch_start(args: RecordStartArgs, format: Format) -> Result<(), CliError>
         redact_values: Some(args.redact_values),
         trace_version: Some(TRACE_VERSION_V3),
         supports_tab_switch_steps: Some(true),
+        capture_network: args.capture_network.then_some(true),
     };
     let start_result = business_rpc::call::<RecordStartParams, RecordStartResult>(
         info.sock_path.clone(),
@@ -501,6 +509,7 @@ mod tests {
             purpose: None,
             max_page_tokens: None,
             redact_values: false,
+            capture_network: false,
             output: PathBuf::from("trace"),
         };
         assert_eq!(args.output, PathBuf::from("trace"));

@@ -12,7 +12,7 @@ pub use super::record_v2::{
 };
 pub use super::record_v3::{
     FillCommit, NavigationCause, RecorderInfo, SelectedOptionV3, StepCommonV3, StepResultV3,
-    StepV3, StopReason, TRACE_VERSION_V3, TargetDescriptorV3, TraceStateV3, TraceV3,
+    StepV3, StopReason, TRACE_VERSION_V3, TargetDescriptorV3, TraceRequest, TraceStateV3, TraceV3,
     VOM_FORMAT_VERSION,
 };
 
@@ -36,6 +36,9 @@ pub struct RecordStartParams {
     pub max_page_tokens: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub redact_values: Option<bool>,
+    /// Include request metadata associated with recorded actions (v3 only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capture_network: Option<bool>,
     /// Desired trace export format. Omitted means v2; `3` requests v3.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trace_version: Option<u32>,
@@ -238,6 +241,7 @@ mod tests {
 
     fn sample_trace() -> TraceV3 {
         TraceV3 {
+            requests: None,
             version: TRACE_VERSION_V3,
             purpose: Some("把草稿商品发布上架".into()),
             started_at: Some("2026-08-10T02:10:41.080Z".into()),
@@ -419,6 +423,7 @@ mod tests {
             redact_values: None,
             trace_version: None,
             supports_tab_switch_steps: None,
+            capture_network: None,
         };
         let legacy_value = serde_json::to_value(legacy).unwrap();
         assert!(legacy_value.get("trace_version").is_none());
@@ -434,6 +439,7 @@ mod tests {
             redact_values: Some(true),
             trace_version: Some(TRACE_VERSION_V3),
             supports_tab_switch_steps: Some(true),
+            capture_network: Some(true),
         };
         let v3_value = serde_json::to_value(v3).unwrap();
         assert_eq!(v3_value["trace_version"], TRACE_VERSION_V3);

@@ -922,6 +922,7 @@ export interface ProtocolTypes {
   TargetDescriptorV2: TargetDescriptorV2;
   TargetDescriptorV3: TargetDescriptorV3;
   TraceEntry: TraceEntry;
+  TraceRequest: TraceRequest;
   TraceStateV3: TraceStateV3;
   TraceV2: TraceV2;
   TraceV3: TraceV3;
@@ -3430,6 +3431,7 @@ export interface TraceV3 {
   purpose?: string;
   recorded_at: string;
   recorder: RecorderInfo;
+  requests?: TraceRequest[];
   started_at?: string;
   states: TraceStateV3[];
   steps: StepV3[];
@@ -3450,6 +3452,22 @@ export interface TraceEntry {
 export interface RecorderInfo {
   bsk: string;
   vom: number;
+}
+/**
+ * This interface was referenced by `ProtocolTypes`'s JSON-Schema
+ * via the `definition` "TraceRequest".
+ */
+export interface TraceRequest {
+  method: string;
+  /**
+   * HTTP status, or null when no response was observed.
+   */
+  status: number | null;
+  /**
+   * Final trace step ID, or null when no step could be associated.
+   */
+  step_id: number | null;
+  url: string;
 }
 /**
  * Page observation dictionary entry — referenced by steps via `state` / `result.state`.
@@ -3561,6 +3579,10 @@ export interface SelectedOptionV2 {
  * via the `definition` "RecordStartParams".
  */
 export interface RecordStartParams {
+  /**
+   * Include request metadata associated with recorded actions (v3 only).
+   */
+  capture_network?: boolean;
   max_page_tokens?: number;
   purpose?: string;
   redact_values?: boolean;

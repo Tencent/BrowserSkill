@@ -2428,8 +2428,8 @@ mod windows {
         first: Option<NamedPipeServer>,
     }
 
-    pub async fn bind(_path: &Path) -> Result<NamedPipeListener> {
-        let pipe_name = crate::daemon::paths::pipe_name();
+    pub async fn bind(path: &Path) -> Result<NamedPipeListener> {
+        let pipe_name = path.to_string_lossy().into_owned();
         let first = ServerOptions::new()
             .first_pipe_instance(true)
             .access_inbound(true)

@@ -1,3 +1,5 @@
+mod support;
+
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -10,7 +12,7 @@ use bsk::ipc_client::IpcClient;
 use bsk_protocol::system::{HandshakeParams, HandshakeResult};
 use bsk_protocol::tools::{
     RecordStopResult, RecordedTrace, RecorderInfo, SessionStartParams, SessionStartResult,
-    StopReason, TraceEntry, TraceStateV3, TraceV3, VOM_FORMAT_VERSION,
+    StopReason, TraceEntry, TraceRequest, TraceStateV3, TraceV3, VOM_FORMAT_VERSION,
 };
 use bsk_protocol::{BrowserPeerInfo, Frame, Method, RequestFrame, ResponseBody, ResponseFrame};
 use futures_util::{SinkExt, StreamExt};
@@ -81,6 +83,12 @@ async fn handshake(ws: &mut Ws) {
 
 fn sample_trace() -> TraceV3 {
     TraceV3 {
+        requests: Some(vec![TraceRequest {
+            step_id: None,
+            method: "GET".into(),
+            url: "https://example.com/api".into(),
+            status: Some(200),
+        }]),
         version: 3,
         purpose: Some("export recovery".into()),
         started_at: Some("2026-08-12T10:00:00Z".into()),
@@ -199,7 +207,7 @@ async fn run_record_stop(home: &Path, output: &Path) -> std::process::Output {
 
 async fn setup_daemon(temp: &Path) -> (bsk::daemon::DaemonHandle, PathBuf, PathBuf) {
     let home = temp.join("bsk-home");
-    let sock = temp.join("daemon.sock");
+    let sock = support::ipc_endpoint(temp);
     let daemon = daemon::run(
         DaemonConfig::new(0).with_local_auth(bsk::daemon::local_auth::LocalAuthMode::TrustLocal),
         Some(sock.clone()),
@@ -320,7 +328,12 @@ async fn failed_bundle_export_can_be_recovered() {
         1,
         "recovery must not call the extension again"
     );
-    assert!(output.join("trace.json").exists());
+    let trace: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(output.join("trace.json")).unwrap()).unwrap();
+    assert_eq!(
+        trace["requests"],
+        serde_json::to_value(sample_trace().requests).unwrap()
+    );
     assert!(output.join("states/s1.txt").exists());
     assert!(
         !home.join("record-recovery.json").exists(),

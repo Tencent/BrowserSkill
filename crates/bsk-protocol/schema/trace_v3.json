@@ -422,6 +422,42 @@
       ],
       "type": "object"
     },
+    "TraceRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "method": {
+          "type": "string"
+        },
+        "status": {
+          "description": "HTTP status, or null when no response was observed.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "step_id": {
+          "description": "Final trace step ID, or null when no step could be associated.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "url": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "step_id",
+        "method",
+        "url",
+        "status"
+      ],
+      "type": "object"
+    },
     "TraceStateV3": {
       "description": "Page observation dictionary entry — referenced by steps via `state` / `result.state`.",
       "properties": {
@@ -469,6 +505,15 @@
     },
     "recorder": {
       "$ref": "#/definitions/RecorderInfo"
+    },
+    "requests": {
+      "items": {
+        "$ref": "#/definitions/TraceRequest"
+      },
+      "type": [
+        "array",
+        "null"
+      ]
     },
     "started_at": {
       "type": [

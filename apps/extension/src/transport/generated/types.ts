@@ -216,6 +216,7 @@ export type { TabSelectResult } from './output';
 export type { TargetDescriptorV2 } from './output';
 export type { TargetDescriptorV3 } from './output';
 export type { TraceEntry } from './output';
+export type { TraceRequest } from './output';
 export type { TraceStateV3 } from './output';
 export type { TraceV2 } from './output';
 export type { TraceV3 } from './output';

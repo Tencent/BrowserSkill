@@ -1,6 +1,6 @@
 {
   "source": "bsk-protocol",
-  "fingerprint": "6c31fbf65825579550c1521951b2b892ab2f8f077fff1453b9b15a30e99aec37",
+  "fingerprint": "c89113a3d18e2aa795c18daaf91ff654ee6aed8d2f2eaf814630f71dc360448a",
   "protocol_version": "1.9",
   "min_compatible_protocol": "1.0",
   "feature_requirements": [
@@ -374,6 +374,7 @@
     "TargetDescriptorV2",
     "TargetDescriptorV3",
     "TraceEntry",
+    "TraceRequest",
     "TraceStateV3",
     "TraceV2",
     "TraceV3",

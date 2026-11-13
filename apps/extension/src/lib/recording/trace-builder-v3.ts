@@ -7,6 +7,7 @@ import {
   VOM_FORMAT_VERSION,
 } from "@/transport/types";
 import { resolveDraftStartUrl } from "./draft-policy";
+import type { DraftRequest } from "./network-capture";
 import type { RecordedStateEntry, RecordingStateRegistry } from "./state-registry";
 import { reduceTraceStepsV3 } from "./trace-reducer-v3";
 import { formatTraceStateBody } from "./trace-state-body";
@@ -41,6 +42,7 @@ export function buildTraceV3(input: {
   bskVersion: string;
   redactValues?: boolean;
   includeTabSwitches?: boolean;
+  requests?: DraftRequest[];
 }): TraceV3 {
   const reduced = reduceTraceStepsV3(input.drafts, {
     includeTabSwitches: input.includeTabSwitches,
@@ -88,5 +90,11 @@ export function buildTraceV3(input: {
     recorder: { bsk: input.bskVersion, vom: VOM_FORMAT_VERSION },
     states,
     steps,
+    ...(input.requests && {
+      requests: input.requests.map(({ draftId, ...request }) => ({
+        ...request,
+        step_id: draftId === null ? null : (reduced.stepIdByDraftId.get(draftId) ?? null),
+      })),
+    }),
   };
 }

@@ -464,6 +464,8 @@ struct BundleTrace<'a> {
     recorder: &'a bsk_protocol::tools::RecorderInfo,
     states: Vec<BundleState<'a>>,
     steps: &'a [bsk_protocol::tools::StepV3],
+    #[serde(skip_serializing_if = "Option::is_none")]
+    requests: Option<&'a [bsk_protocol::tools::TraceRequest]>,
 }
 
 pub(super) fn write_trace_bundle(output_dir: &Path, trace: &TraceV3) -> Result<PathBuf, CliError> {
@@ -528,6 +530,7 @@ pub(super) fn write_trace_bundle(output_dir: &Path, trace: &TraceV3) -> Result<P
         recorder: &trace.recorder,
         states: disk_states,
         steps: &trace.steps,
+        requests: trace.requests.as_deref(),
     };
     let json = serde_json::to_string_pretty(&disk_trace)
         .context("serialize trace JSON")
@@ -617,6 +620,7 @@ mod tests {
 
     fn sample_trace(state_id: &str, body: &str) -> TraceV3 {
         TraceV3 {
+            requests: None,
             version: TRACE_VERSION_V3,
             recorded_at: "2026-08-10T02:12:55.360Z".into(),
             stopped_by: StopReason::UserFinish,
@@ -654,7 +658,13 @@ mod tests {
     fn write_trace_bundle_writes_dir_layout() {
         let dir = tempfile::tempdir().unwrap();
         let output = dir.path().join("flow");
-        let trace = sample_trace("s1", "@vom 1\nL1 page");
+        let mut trace = sample_trace("s1", "@vom 1\nL1 page");
+        trace.requests = Some(vec![bsk_protocol::tools::TraceRequest {
+            step_id: Some(1),
+            method: "GET".into(),
+            url: "https://example.com/api".into(),
+            status: Some(200),
+        }]);
         let states_dir = write_trace_bundle(&output, &trace).unwrap();
         let trace_path = output.join("trace.json");
         assert!(trace_path.exists());
@@ -664,6 +674,10 @@ mod tests {
             serde_json::from_str(&fs::read_to_string(&trace_path).unwrap()).unwrap();
         assert_eq!(disk["states"][0]["page"], "s1.txt");
         assert!(disk["states"][0].get("body").is_none());
+        assert_eq!(
+            disk["requests"],
+            serde_json::to_value(&trace.requests).unwrap()
+        );
         assert_eq!(
             fs::read_to_string(states_dir.join("s1.txt")).unwrap(),
             "@vom 1\nL1 page"
