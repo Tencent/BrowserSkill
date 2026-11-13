@@ -217,6 +217,36 @@ describe("detectBlockingLayer", () => {
     expect(layer).toMatchObject({ rootId: 2, kind: "modal" });
   });
 
+  it.each(["static", "relative"])("limits a %s modal to its subtree", (position) => {
+    const layer = detectBlockingLayer(
+      [
+        node({ id: 1, tag: "body", rect: { x: 0, y: 0, w: 1000, h: 800 } }),
+        node({ id: 3, parentId: 1, tag: "button", paintOrder: 20 }),
+        node({
+          id: 2,
+          parentId: 1,
+          modal: true,
+          position,
+          paintOrder: 10,
+          rect: { x: 400, y: 300, w: 100, h: 60 },
+        }),
+      ],
+      VP,
+    );
+    expect(layer).toMatchObject({ rootId: 2, kind: "modal" });
+    expect([...layer!.members]).toEqual([2]);
+  });
+
+  it("recognizes an explicit modal with a pointer-transparent container", () => {
+    const modal = node({
+      id: 1,
+      modal: true,
+      pointerEvents: "none",
+      rect: { x: 400, y: 300, w: 100, h: 60 },
+    });
+    expect(detectBlockingLayer([modal], VP)).toMatchObject({ rootId: 1, kind: "modal" });
+  });
+
   it("keeps child-frame modality local and ignores offscreen modal nodes", () => {
     const modal = node({
       id: 2,

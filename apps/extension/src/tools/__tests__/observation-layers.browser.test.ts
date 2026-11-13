@@ -24,8 +24,41 @@ const cases = [
   { name: "native showModal", width: 64, native: "showModal", modal: true },
   { name: "ARIA modal", width: 64, role: "dialog", modal: true },
   { name: "small native modal", width: 20, native: "showModal", small: true, modal: true },
+  {
+    name: "static ARIA modal",
+    width: 20,
+    role: "dialog",
+    small: true,
+    modal: true,
+    position: "static",
+  },
+  {
+    name: "relative ARIA modal",
+    width: 20,
+    role: "dialog",
+    small: true,
+    modal: true,
+    position: "relative",
+  },
+  {
+    name: "pointer-transparent ARIA modal",
+    width: 20,
+    role: "dialog",
+    small: true,
+    modal: true,
+    position: "static",
+    transparent: true,
+  },
   { name: "small ARIA modal", width: 20, role: "dialog", small: true, modal: true },
   { name: "ignored ARIA modal", width: 64, role: "dialog", ariaModal: true, ignored: true },
+  {
+    name: "ignored static ARIA modal",
+    width: 64,
+    role: "dialog",
+    ariaModal: true,
+    ignored: true,
+    position: "static",
+  },
   { name: "ARIA modal on a non-dialog", width: 64, ariaModal: true },
   { name: "CSS backdrop", width: 64, backdrop: true },
   { name: "pointer-transparent sidebar", width: 95, transparent: true },
@@ -38,12 +71,13 @@ function fixture(c: (typeof cases)[number]): string {
     * { box-sizing: border-box; } html,body { margin:0; }
     main { width:${100 - c.width}vw; padding:8px; }
     button { display:block; width:100%; height:32px; margin:0 0 8px; padding:0; }
-    #panel { position:fixed; right:0; top:0; left:auto; bottom:auto; margin:0;
+    #panel { position:${c.position ?? "fixed"}; right:0; top:0; left:auto; bottom:auto; margin:0;
       width:${c.width}vw; height:${c.small ? "120px" : "100vh"}; max-width:none; max-height:none;
       background:white; border:0; padding:8px; z-index:10; ${c.transparent ? "pointer-events:none;" : ""} }
     #covered { position:absolute; top:200px; left:60vw; width:80px; }
     #offscreen { position:absolute; top:150vh; left:8px; width:120px; }
     #backdrop { position:fixed; inset:0; z-index:9; background:#0008; }
+    ${c.modal && c.transparent ? "#inside { pointer-events:auto; }" : ""}
     iframe { width:100%; height:120px; border:0; }
   </style><main>
     <button id="main">Main action</button>
@@ -54,6 +88,7 @@ function fixture(c: (typeof cases)[number]): string {
   ${c.backdrop ? '<div id="backdrop"></div>' : ""}
   <${tag} id="panel" ${c.role ? `role="${c.role}"` : ""} ${c.ariaModal || (c.modal && !c.native) ? 'aria-modal="true"' : c.role ? 'aria-modal="false"' : ""} ${c.ignored ? 'aria-hidden="true"' : ""}>
     <button id="inside">Panel action</button>
+    ${c.position && c.modal ? '<canvas aria-label="Panel canvas" width="40" height="30"></canvas>' : ""}
   </${tag}>`;
 }
 
@@ -147,11 +182,30 @@ describe.skipIf(!process.env.BSK_CLICK_CHROME)("real browser observation layers"
           const tabsApi = { get: async () => tab, query: async () => [tab] };
           for (const c of cases) {
             await evaluate(`document.open(); document.write(${JSON.stringify(fixture(c))}); document.close();
-          window.mainClicks=[]; window.frameClicks=0;
+          window.mainClicks=[]; window.panelClicks=[]; window.frameClicks=0;
           document.querySelector('#main').onclick=e=>mainClicks.push(e.isTrusted);
+          document.querySelector('#inside').onclick=e=>panelClicks.push(e.isTrusted);
           document.querySelector('canvas').getContext('2d').fillRect(0,0,40,30);
           scrollTo(0,0);
+          ${
+            c.position && c.modal && c.role
+              ? `document.addEventListener('click', e => {
+            if (!document.querySelector('#panel').contains(e.target)) {
+              e.preventDefault(); e.stopImmediatePropagation();
+            }
+          }, true);`
+              : ""
+          }
           ${c.native ? `document.querySelector('#panel').${c.native}();` : ""}`);
+            if (c.position) {
+              expect(
+                await evaluate("getComputedStyle(document.querySelector('#panel')).position"),
+              ).toBe(c.position);
+            }
+            if (c.position && c.modal && c.role) {
+              await evaluate("document.querySelector('#main').click()");
+              expect(await evaluate("mainClicks")).toEqual([]);
+            }
             if (c.frame)
               await expect
                 .poll(() =>
@@ -172,9 +226,13 @@ describe.skipIf(!process.env.BSK_CLICK_CHROME)("real browser observation layers"
             expect(!!mainRef, c.name + "\n" + result.text).toBe(!blocked);
             expect(result.text.includes("@layers 2"), c.name + "\n" + result.text).toBe(blocked);
             if (blocked) expect(result.text, c.name).not.toContain('button "Offscreen action"');
+            if (c.position && c.modal)
+              expect(result.text, c.name).toContain('button "Panel action"');
+            if (c.position && c.modal)
+              expect(result.text, c.name).toContain('canvas "Panel canvas" [visual:screenshot]');
             if (c.backdrop) expect(result.text, c.name).toContain("L1 mask cover=100%");
             expect(result.text.includes("[visual:screenshot]"), c.name + "\n" + result.text).toBe(
-              !blocked,
+              !blocked || Boolean(c.position && c.modal),
             );
             if (!blocked) {
               const hit = await evaluate<boolean>(
@@ -188,6 +246,17 @@ describe.skipIf(!process.env.BSK_CLICK_CHROME)("real browser observation layers"
               );
               expect(clicked, c.name + ": " + JSON.stringify(clicked)).not.toHaveProperty("code");
               expect(await evaluate("mainClicks"), c.name).toEqual([true]);
+            }
+            if (c.position && c.modal) {
+              const panelRef = result.text.match(/(@e\d+) button "Panel action"/)?.[1];
+              expect(panelRef, result.text).toBeDefined();
+              const clicked = await handleClick(
+                manager,
+                { session_id: ctx.sessionId, ref: panelRef },
+                { cdp, tabsApi },
+              );
+              expect(clicked, c.name + ": " + JSON.stringify(clicked)).not.toHaveProperty("code");
+              expect(await evaluate("panelClicks"), c.name).toEqual([true]);
             }
             if (!c.transparent && !c.small && !c.ignored && !blocked)
               expect(result.text, c.name).not.toContain('button "Covered action"');
