@@ -758,6 +758,34 @@
     "required_commands": ["step", "plan", "navigate back", "read"]
   },
   {
+    "id": "EDGE-NESTED-MENU-REFS",
+    "kind": "workflow",
+    "page_type": "edge-cases",
+    "goal": "/nested-menu 多级动态菜单展开后子项独立引用：复现两级悬停（Workspace -> Advanced）及二级浮层 #advanced-popper 嵌在父 menuitem #menu-advanced 内的 DOM 结构。发版审计核验三项：① 二级菜单展开前，Audit export 与 Report history 都没有可操作引用；② 逐级 hover 并 wait-for-element 等待浮层可见后，按独立行检查 sync、observe 和 snapshot 的输出，Audit export 和 Report history 必须各自有一条完整的 menuitem 行且 @eN 不同（子项文字只出现在父项名称里时判失败）；③ 从最新一次 sync 取出 Audit export 的引用，用 bsk click 点击，通过 read #menu-selection-receipt 核对页面回执为 Selected audit。",
+    "required_commands": [
+      "navigate",
+      "sync",
+      "hover",
+      "wait-for-element",
+      "observe",
+      "snapshot",
+      "click",
+      "read"
+    ],
+    "required_command_counts": {
+      "hover": 2,
+      "sync": 2
+    },
+    "nested_menu_contract": {
+      "items": [
+        { "role": "menuitem", "name": "Audit export" },
+        { "role": "menuitem", "name": "Report history" }
+      ],
+      "click_item": { "role": "menuitem", "name": "Audit export" },
+      "expected_receipt": "Selected audit"
+    }
+  },
+  {
     "id": "LOCAL-VIDEO-PORTAL",
     "kind": "workflow",
     "page_type": "video-site",

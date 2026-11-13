@@ -23,6 +23,14 @@ determines which versions can connect.
   the child `Page` domain and accept intercepted `Page.fileChooserOpened` events (including
   dynamically created detached file inputs); and CLI/DSH tool descriptions now guide callers
   to prefer visible upload trigger `@eN` refs or target `<input type="file">` selectors directly.
+- VOM tree folding (`shouldSkipRedundantRefChildren` and `renderTreeRows`) preserves
+  independent interactive descendants under named interactive controls (such as Vue 3 +
+  Element Plus nested `<el-sub-menu>` popups inside a parent `menuitem` or custom ARIA
+  combobox popups) so each expanded, actionable child item renders on its own row with a
+  distinct `@eN` reference across `bsk sync`, `observe`, and `snapshot`, while keeping
+  passive inner wrappers, inherited `cursor: pointer` / click-skin descendants, and native
+  `<input>` / `<textarea>` / `<select>` controls folded without duplicate refs; added
+  required pre-release audit scenario `EDGE-NESTED-MENU-REFS`.
 
 ## [0.5.0] - 2026-11-12
 

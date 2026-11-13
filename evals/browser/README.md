@@ -63,7 +63,7 @@ Build the CLI and test extension from the same candidate source, record each ope
 and report the tested scope, failures, and blockers without claiming untested cases passed.
 ```
 
-The skill includes 111 workflow/edge/adversarial-arena/regression cases and discovers additional
+The skill includes 112 workflow/edge/adversarial-arena/regression cases and discovers additional
 command coverage cases (including `bsk plan`, `bsk recipe`, and `bsk read`) from the candidate CLI.
 It exercises synthetic HTML — including 21 focused `ARENA-*` cases on high-density fixtures (linked
 3-form joint filing, nested Open/Closed Shadow DOM and same/cross-origin nested iframes, native

@@ -9,6 +9,7 @@ CLI、扩展和 DSH 插件可以分别发布，能否连接由协议兼容性决
 
 - 修复 `iframe` 内隐藏 `<input type="file">` 上传组件（如 Layui 的 `display: none` 文件上传）及
   `--selector` 跨框架匹配问题：交互动作与 `wait-for-element` 的 CSS `--selector` 在主文档未命中或需严格唯一性校验时按框架图顺序穿透同源 `iframe` 与跨源 OOPIF（在 `target` 共驾策略下执行跨框架歧义拦截并接入子框架 `frameEpoch` 变更失效守卫，同时保持 `expect` 前置条件的主文档作用域语义不变）；当 `upload`（默认 `input` 模式）直接解析到 `<input type="file">` 节点时，校验连接态、可用态与 `multiple` 约束后跳过视觉坐标点击与渲染帧等待，直接执行 `DOM.setFileInputFiles`；跨源 OOPIF 与同源跨框按钮触发上传补齐子目标 `Page.enable` 与拦截选择器事件承接（含未挂载 DOM 的动态临时 `input[type=file]`）；并同步澄清 CLI、内置 skill 与 DSH 插件的 `upload` 目标参数说明。
+- VOM 树折叠规则（`shouldSkipRedundantRefChildren` 与 `renderTreeRows`）识别具名交互父节点下独立可交互的后代（如 Vue 3 + Element Plus 将二级浮层嵌在父 `menuitem` 内的多级 `<el-sub-menu>` 或自定义 ARIA `combobox` 弹出项），使每个已展开、可操作的子项在 `bsk sync`、`observe` 和 `snapshot` 中均输出独立行与专属 `@eN` 引用，同时保持被动内部包装节点、继承 `cursor: pointer` / 标题皮肤点击节点及原生 `<input>` / `<textarea>` / `<select>` 的折叠行为不变而不产生重复伪引用，并新增发版前必测用例 `EDGE-NESTED-MENU-REFS`。
 
 ## [0.5.0] - 2026-11-12
 
