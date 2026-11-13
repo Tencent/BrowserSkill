@@ -23,6 +23,7 @@ CLI 和扩展可以分别发布，能否连接由协议兼容性决定。更新�
 ### 修复
 
 - 修复 macOS 与 Linux/X11 Chromium 下后台创建或初始化 Agent 窗口及标签页抢占用户前台窗口焦点的问题（Linux 下 `chromeAgentWindowApi.create` 先创建非激活标签页再通过 `tabId` 建窗以规避 Chromium `Navigate()` `kShowWindow` 抢焦，macOS 下 `tool.tab_create` 与 `ensureActiveTab` 先创建非激活标签页再通过 `chrome.tabs.update` 在目标窗口内选中，且建窗或激活失败时自动关闭新建标签页防泄漏），在 Linux 平台与 Windows 一致为非当前标签页及后台遮挡或最小化 Agent 窗口上的 `screenshot` 与 `screenshot --full-page` 启用 Aura 合成器唤醒租约（及全页截图陈旧帧检测），并消除 `parsePngDimensions` 打包产物对脚本字符集的依赖（#731）。
+- 修复 Linux 后台 Agent 窗口中的原生点击抢占前台焦点的问题。恢复任务弹窗焦点或路由外部链接时，会在 X11 短暂无焦点事件后重新确认实际焦点（#731）。
 - 将 CLI 与 MCP 的共驾证据注入（`context_id`、`depends_on`、`observation_id`、`expect`）严格按协议契约收敛至声明接收该元数据的 RPC 方法（`Method::accepts_action_metadata()` 以及接收 `context_id` 的 `tool.read`），修复 `bsk screenshot --full-page --context`、`bsk download --context`、`bsk upload --context` 与 `bsk step --context` 等多阶段命令将动作证据泄漏至后续分块传输、就绪等待或后置同步请求的问题（#731）。
 - VOM 树折叠规则（`shouldSkipRedundantRefChildren` 与 `renderTreeRows`）识别具名交互父节点下独立可交互的后代（如 Vue 3 + Element Plus 将二级浮层嵌在父 `menuitem` 内的多级 `<el-sub-menu>` 或自定义 ARIA `combobox` 弹出项），使每个已展开、可操作的子项在 `bsk sync`、`observe` 和 `snapshot` 中均输出独立行与专属 `@eN` 引用，同时保持被动内部包装节点、继承 `cursor: pointer` / 标题皮肤点击节点及原生 `<input>` / `<textarea>` / `<select>` 的折叠行为不变而不产生重复伪引用，并新增发版前必测用例 `EDGE-NESTED-MENU-REFS`。
 - 结构化列表提取（`extract list`）支持通过 open Shadow DOM `<slot>` 投影分配的列表项及默认链接（`url`），保留插槽渲染顺序、闭合 `<details>` 隐藏行位置、嵌套子列表项与链接归属、可见性判断及采集限制（[#588](https://github.com/Tencent/BrowserSkill/issues/588)、[#612](https://github.com/Tencent/BrowserSkill/pull/612)），并新增发版前必测用例 `EDGE-SLOTTED-LIST-EXTRACT`。

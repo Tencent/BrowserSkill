@@ -39,6 +39,9 @@ determines which versions can connect.
   `screenshot` and `screenshot --full-page` on unselected tabs and
   unfocused/occluded or minimized Agent Windows, and made `parsePngDimensions`
   charset-independent when bundled (#731).
+- Preserved foreground window focus during native clicks in background Linux
+  Agent Windows and rechecked focus after transient X11 events when restoring
+  task popup focus or routing an external link (#731).
 - Scoped CLI and MCP cooperation metadata attachment (`context_id`, `depends_on`,
   `observation_id`, `expect`) strictly to RPC methods whose wire contracts accept
   them (`Method::accepts_action_metadata()` and `tool.read` for `context_id`), so
