@@ -123,6 +123,7 @@ export interface CdpRunner {
     ) => void,
   ): { dispose(): void };
   ensureConsoleCapture?(tabId: number, signal?: AbortSignal): Promise<void>;
+  ensureNetworkCapture?(tabId: number): Promise<void>;
   consoleEntriesSince?(
     tabId: number,
     since: number | undefined,

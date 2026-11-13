@@ -1,6 +1,13 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "properties": {
+    "capture_network": {
+      "description": "Include request metadata associated with recorded actions (v3 only).",
+      "type": [
+        "boolean",
+        "null"
+      ]
+    },
     "max_page_tokens": {
       "format": "uint32",
       "minimum": 0,

@@ -23,6 +23,7 @@ import {
   type RecordingCaptureScope,
   recordFrameCoordinator,
 } from "@/lib/recording/frame-coordinator";
+import { RecordingNetworkCapture } from "@/lib/recording/network-capture";
 import { RecordingObservationRuntime } from "@/lib/recording/recording-runtime";
 import {
   appendRecordedPayload,
@@ -75,6 +76,7 @@ interface ActiveRecording {
   settled: boolean;
   finishAttempt: Promise<FinishOutcome> | null;
   observation: RecordingObservationRuntime | null;
+  network?: RecordingNetworkCapture;
   stoppedBy: StopReason;
   /** Navigation callbacks tracked from event receipt through action enqueue. */
   navigationCallbacks: Set<Promise<void>>;
@@ -227,6 +229,7 @@ function buildTrace(recording: ActiveRecording): RecordedTrace {
       stoppedBy: recording.stoppedBy,
       bskVersion: BSK_TRACE_VERSION,
       includeTabSwitches: recording.supportsTabSwitchSteps,
+      requests: recording.network?.snapshot(),
     });
   }
   if (recording.traceVersion === 3) {
@@ -420,6 +423,21 @@ export function attachRecordStepListener(deps: RecordDeps = getDefaultDeps()): (
         );
         if (draftIndex !== null) {
           await processRecordedStep(recording, draftIndex, sourceTabId, source?.producerId);
+          const capturedAt = message.step.captured_at_ms;
+          if (recording.network && typeof capturedAt === "number") {
+            const frameId =
+              recording.observation?.frameForAction(sourceTabId, source?.producerId) ??
+              ((source?.browserFrameId ?? sender.frameId) === 0
+                ? recording.observation?.frameForAction(sourceTabId)
+                : undefined);
+            if (frameId) {
+              recording.network.noteAction(sourceTabId, frameId, {
+                draftId: draftIndex + 1,
+                capturedAt,
+                pageUrl: message.step.page_url,
+              });
+            }
+          }
         }
       });
       sendResponse({ ok: true, sequence: message.sequence });
@@ -567,6 +585,7 @@ async function rearmRecording(
       startedAtMs: recording.startedAtMs,
     };
     try {
+      await recording.network?.armTab(targetTabId);
       if (deps.frameCoordinator) {
         const frameStarted = await deps.frameCoordinator.armTab(recording.requestId, targetTabId);
         if (!frameStarted) throw new Error("recording document did not start");
@@ -843,6 +862,7 @@ async function finishRecordingAttempt(
   await recording.observation?.settleTrailing(recording.tabs.currentTabId, recording.steps);
 
   recording.settled = true;
+  recording.network?.dispose();
   recordings.delete(sessionId);
   releaseBrowserObservationListenersIfIdle();
   const trace = buildTrace(recording);
@@ -857,6 +877,15 @@ export async function handleRecordStart(
 ): Promise<RecordStartResult | RpcError> {
   const traceVersionOrErr = negotiatedTraceVersion(params);
   if (typeof traceVersionOrErr !== "number") return traceVersionOrErr;
+  if (params.capture_network && traceVersionOrErr !== 3) {
+    return { code: "invalid_params", message: "capture_network requires trace v3" };
+  }
+  if (params.capture_network && (!deps.cdp?.onEvent || !deps.cdp.ensureNetworkCapture)) {
+    return {
+      code: "protocol_error",
+      message: "recording network capture requires CDP network events",
+    };
+  }
   if (traceVersionOrErr === 3 && !deps.cdp) {
     return {
       code: "protocol_error",
@@ -914,6 +943,10 @@ export async function handleRecordStart(
     rejectFinish,
     settled: false,
     finishAttempt: null,
+    network:
+      params.capture_network && sessionCdp
+        ? new RecordingNetworkCapture(sessionCdp, isTabAllowed)
+        : undefined,
     observation:
       traceVersionOrErr === 3 && sessionCdp
         ? new RecordingObservationRuntime({
@@ -952,6 +985,7 @@ export async function handleRecordStart(
 
   const abortPending = async (notifyContent: boolean) => {
     recordings.get(params.session_id)?.observation?.cancel();
+    recordings.get(params.session_id)?.network?.dispose();
     deps.frameCoordinator?.cancel(requestId);
     recordings.delete(params.session_id);
     releaseBrowserObservationListenersIfIdle();
@@ -992,6 +1026,12 @@ export async function handleRecordStart(
   }
 
   if (sessionCdp) {
+    try {
+      await recordings.get(params.session_id)?.network?.armTab(target.tabId);
+    } catch {
+      await abortPending(false);
+      return { code: "protocol_error", message: "failed to enable network capture for recording" };
+    }
     const nav = await handleNavigate(
       manager,
       {
@@ -1195,6 +1235,7 @@ export function clearRecordingForSession(sessionId: string): void {
   if (!recording.settled) {
     getDefaultDeps().frameCoordinator?.cancel(recording.requestId);
     recording.observation?.cancel();
+    recording.network?.dispose();
     recording.settled = true;
     recording.rejectFinish(new Error("recording cleared"));
   }

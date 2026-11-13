@@ -1,3 +1,5 @@
+mod support;
+
 use std::path::{Path, PathBuf};
 use std::process::{Output, Stdio};
 use std::sync::Arc;
@@ -88,6 +90,7 @@ async fn handshake(ws: &mut Ws) {
 
 fn sample_trace() -> TraceV3 {
     TraceV3 {
+        requests: None,
         version: 3,
         purpose: Some("retry record stop".into()),
         started_at: Some("2026-08-12T10:00:00Z".into()),
@@ -224,7 +227,7 @@ async fn failed_record_stop_keeps_state_and_session_for_retry() {
         .tempdir()
         .unwrap();
     let home = temp.path().join("bsk-home");
-    let sock = temp.path().join("daemon.sock");
+    let sock = support::ipc_endpoint(temp.path());
     let output = temp.path().join("trace");
 
     let daemon = daemon::run(
@@ -318,7 +321,7 @@ async fn exercise_record_cleanup(first: Method, cleanup: Cleanup) {
     tokio::time::timeout(Duration::from_secs(15), async {
         let temp = tempfile::Builder::new().prefix("bsk-record-").tempdir().unwrap();
         let home = temp.path().join("bsk-home");
-        let sock = temp.path().join("daemon.sock");
+        let sock = support::ipc_endpoint(temp.path());
         let start_dir = temp.path().join("start");
         let stop_dir = temp.path().join("stop");
         let daemon = daemon::run(

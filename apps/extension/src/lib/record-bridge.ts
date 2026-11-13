@@ -45,6 +45,8 @@ export interface RecordStartMessage {
 }
 
 export interface RecordStepPayload {
+  /** Time of the captured action in epoch milliseconds. */
+  captured_at_ms?: number;
   op: "click" | "hover" | "fill" | "press" | "select" | "navigate";
   target?: CaptureTargetDescriptor;
   value?: string;

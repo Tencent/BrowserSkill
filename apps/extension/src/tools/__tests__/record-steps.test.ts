@@ -3,6 +3,7 @@ import { RECORD_FINISH, RECORD_START, RECORD_STEP, RECORD_STOP } from "@/lib/rec
 import type { SessionManager } from "@/session-manager/manager";
 import type { CdpRunner } from "@/tools/shared";
 import { EXTENSION_VERSION } from "@/transport/handshake";
+import { validateToolResult } from "@/transport/protocol";
 import type { RecordedTrace, RecordStopResult, TraceV3 } from "@/transport/types";
 import {
   attachRecordFinishListener,
@@ -114,6 +115,7 @@ function axTree(rootName: string, controls: string[] = []): unknown {
 }
 
 type FakeCdp = CdpRunner & {
+  emitEvent(tabId: number, method: string, params: unknown): void;
   /** Simulate captures racing a document swap. */
   setCaptureFailure(failing: boolean): void;
   /** Keep the page reporting DOM churn for this long, as a slow render would. */
@@ -182,6 +184,10 @@ function makeFakeCdp(
       busyUntil = Date.now() + ms;
     },
     trackSessionTab: () => {},
+    ensureNetworkCapture: async () => {},
+    emitEvent: (tabId, method, params) => {
+      for (const listener of [...events]) listener({ tabId }, method, params);
+    },
     onEvent: (handler: EventListener) => {
       events.push(handler);
       return {
@@ -257,7 +263,7 @@ function runtimeOnMessageEmit(
   const sendResponse = vi.fn();
   chromeApi.runtimeOnMessage.emit(
     { type: RECORD_STEP, requestId, producerId, sequence, step },
-    { tab: { id: tabId, active } } as chrome.runtime.MessageSender,
+    { tab: { id: tabId, active }, frameId: 0 } as chrome.runtime.MessageSender,
     sendResponse,
   );
   return sendResponse;
@@ -317,11 +323,81 @@ describe("recorded user steps reach the exported trace", () => {
 
     expect(trace.recorder.bsk).toBe(EXTENSION_VERSION);
     expect(trace.steps).toHaveLength(1);
+    expect(trace).not.toHaveProperty("requests");
     const [step] = trace.steps;
     expect(step?.op).toBe("click");
     expect(step?.state).toBeTruthy();
     expect(step?.result.state).toBeTruthy();
     expect(trace.states.length).toBeGreaterThan(0);
+  });
+
+  it("exports requests by action time even when CDP and content messages arrive out of order", async () => {
+    const chromeApi = installChrome();
+    const manager = fakeManager();
+    const cdp = makeFakeCdp();
+    cdp.getFrameGraph = async (tabId) => ({
+      rootFrameId: "frame-1",
+      frames: [{ frameId: "frame-1", target: { tabId } }],
+    });
+    const tabsApi = makeTabsApi();
+    let requestId = "";
+    const sendToTab = vi.fn(
+      async (_tabId: number, message: { type: string; requestId: string }) => {
+        if (message.type === RECORD_START) requestId = message.requestId;
+        return { ok: true };
+      },
+    );
+    const deps = { tabsApi, sendToTab, cdp };
+    const started = await handleRecordStart(
+      manager,
+      { ...RECORD_START_V3, capture_network: true },
+      deps,
+    );
+    expect(started).toEqual({ tab_id: TAB_ID, recording: true });
+    attachRecordStepListener({ tabsApi, sendToTab });
+
+    const epoch = Date.now();
+    const request = (id: string, offset: number, frameId = "frame-1", tabId = TAB_ID) => {
+      cdp.emitEvent(tabId, "Network.requestWillBeSent", {
+        requestId: id,
+        wallTime: (epoch + offset) / 1_000,
+        type: "Fetch",
+        frameId,
+        documentURL: START_URL,
+        request: { method: "POST", url: new URL(id, START_URL).href },
+      });
+    };
+    const click = (offset: number) =>
+      runtimeOnMessageEmit(chromeApi, requestId, {
+        op: "click",
+        captured_at_ms: epoch + offset,
+        page_url: START_URL,
+        target: { role: "button", name: "Submit", tag: "button" },
+      });
+
+    request("background", 0);
+    request("search", 20);
+    click(10);
+    click(30);
+    request("save", 40);
+    request("other-frame", 50, "frame-2");
+    request("other-tab", 60, "frame-1", TAB_ID + 1);
+    for (const [id, status] of [
+      ["save", 500],
+      ["search", 200],
+    ] as const) {
+      cdp.emitEvent(TAB_ID, "Network.responseReceived", { requestId: id, response: { status } });
+    }
+
+    const stopped = await handleRecordStop(manager, { session_id: "abcd" }, deps);
+    expect(validateToolResult("tool.record_stop", stopped)).toBeUndefined();
+    const trace = asTraceV3((stopped as RecordStopResult).trace);
+    expect(trace.requests).toEqual([
+      { step_id: null, method: "POST", url: `${START_URL}background`, status: null },
+      { step_id: 1, method: "POST", url: `${START_URL}search`, status: 200 },
+      { step_id: 2, method: "POST", url: `${START_URL}save`, status: 500 },
+      { step_id: null, method: "POST", url: `${START_URL}other-frame`, status: null },
+    ]);
   });
 
   it("keeps a fill followed by a click in recorded order", async () => {

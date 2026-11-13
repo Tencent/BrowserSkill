@@ -54,6 +54,7 @@ mod tests {
 
     fn sample_trace() -> RecordedTrace {
         RecordedTrace::V3(TraceV3 {
+            requests: None,
             version: TRACE_VERSION_V3,
             recorded_at: "2026-08-10T02:12:55.360Z".into(),
             stopped_by: StopReason::UserFinish,

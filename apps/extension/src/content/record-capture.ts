@@ -34,6 +34,7 @@ interface FillSession {
   target: CaptureTargetDescriptor;
   baselineValue: string;
   lastValue: string;
+  changedAt?: number;
   pendingCommit?: "enter" | "suggestion" | "blur";
 }
 
@@ -445,6 +446,7 @@ export function startRecordCapture(
       geometry: captureGeometry(session.element),
       value,
       commit: session.pendingCommit ?? "blur",
+      captured_at_ms: session.changedAt,
       ...(isPassword ? { redacted: true } : {}),
     });
   };
@@ -460,7 +462,10 @@ export function startRecordCapture(
 
   const syncFillSessionValue = (el: FillableElement) => {
     if (!fillSession || fillSession.element !== el) return;
-    fillSession.lastValue = fillableValue(el);
+    const value = fillableValue(el);
+    if (fillSession.lastValue !== value)
+      fillSession.changedAt = performance.timeOrigin + performance.now();
+    fillSession.lastValue = value;
   };
 
   const ensureFillSession = (el: FillableElement) => {
@@ -657,6 +662,7 @@ export function startRecordCapture(
     if (emittedHoverElements.has(hover.element)) return;
     emitStep({
       op: "hover",
+      captured_at_ms: hover.recordedAt,
       target: hover.target,
       geometry: captureGeometry(hover.element),
     });
@@ -712,6 +718,7 @@ export function startRecordCapture(
     markNavigationAction();
     emitStep({
       op: "click",
+      captured_at_ms: performance.timeOrigin + event.timeStamp,
       target,
       geometry: geometryForEventTarget(eventTarget(event)),
       expects_navigation: true,
@@ -845,7 +852,7 @@ export function startRecordCapture(
     // A native <select> in a shadow root fires a non-composed `change` that
     // never reaches the document; its composed `input` does.
     if (rawTarget instanceof HTMLSelectElement && rawTarget.getRootNode() instanceof ShadowRoot) {
-      recordSelect(rawTarget);
+      recordSelect(rawTarget, event);
       return;
     }
     const target = fillableFromTarget(rawTarget);
@@ -868,7 +875,7 @@ export function startRecordCapture(
     }
   };
 
-  const recordSelect = (target: HTMLSelectElement) => {
+  const recordSelect = (target: HTMLSelectElement, event: Event) => {
     commitFillSession();
     emitHoverCandidateBeforeAction(target);
     const values = Array.from(target.selectedOptions).map((opt) => opt.value);
@@ -879,6 +886,7 @@ export function startRecordCapture(
     markNavigationAction();
     emitStep({
       op: "select",
+      captured_at_ms: performance.timeOrigin + event.timeStamp,
       target: desc,
       geometry: captureGeometry(target),
       values,
@@ -890,7 +898,7 @@ export function startRecordCapture(
   const onChange = (event: Event) => {
     const target = eventTarget(event);
     if (target instanceof HTMLSelectElement) {
-      recordSelect(target);
+      recordSelect(target, event);
     } else {
       commitFillSession();
     }
@@ -936,6 +944,7 @@ export function startRecordCapture(
     emitHoverCandidateBeforeAction(target);
     emitStep({
       op: "press",
+      captured_at_ms: performance.timeOrigin + event.timeStamp,
       key: event.key,
       ...(desc ? { target: desc, geometry: geometryForEventTarget(target) } : {}),
       ...(modifiers.length ? { modifiers } : {}),

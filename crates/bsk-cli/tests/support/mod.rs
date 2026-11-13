@@ -5,6 +5,7 @@
 
 #![allow(dead_code)]
 
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -14,6 +15,14 @@ use bsk::daemon::state::DaemonState;
 use bsk_protocol::RpcId;
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(2);
+
+pub fn ipc_endpoint(_temp_dir: &Path) -> PathBuf {
+    #[cfg(windows)]
+    return PathBuf::from(format!(r"\\.\pipe\bsk-test-{}", uuid::Uuid::new_v4()));
+
+    #[cfg(unix)]
+    _temp_dir.join("daemon.sock")
+}
 
 /// Poll `condition` until it returns `true` or `timeout` elapses.
 pub async fn wait_until<F>(label: &str, timeout: Duration, mut condition: F)

@@ -28,6 +28,10 @@ fn trace_v3_version_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schem
     schemars::json_schema!({ "type": "integer", "const": TRACE_VERSION_V3 })
 }
 
+fn nullable_request_number_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    schemars::json_schema!({ "type": ["integer", "null"], "format": "uint32", "minimum": 0 })
+}
+
 /// Stable semantic handle for an interacted element within a page observation.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct TargetDescriptorV3 {
@@ -166,6 +170,19 @@ pub enum StepV3 {
     },
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct TraceRequest {
+    /// Final trace step ID, or null when no step could be associated.
+    #[schemars(required, schema_with = "nullable_request_number_schema")]
+    pub step_id: Option<u32>,
+    pub method: String,
+    pub url: String,
+    /// HTTP status, or null when no response was observed.
+    #[schemars(required, schema_with = "nullable_request_number_schema")]
+    pub status: Option<u32>,
+}
+
 /// Wire trace returned by `tool.record_stop` / `await`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -183,6 +200,8 @@ pub struct TraceV3 {
     pub recorder: RecorderInfo,
     pub states: Vec<TraceStateV3>,
     pub steps: Vec<StepV3>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requests: Option<Vec<TraceRequest>>,
 }
 
 #[cfg(test)]
@@ -212,6 +231,7 @@ mod tests {
 
     fn sample_trace() -> TraceV3 {
         TraceV3 {
+            requests: None,
             version: TRACE_VERSION_V3,
             purpose: Some("把草稿商品发布上架".into()),
             started_at: Some("2026-08-10T02:10:41.080Z".into()),

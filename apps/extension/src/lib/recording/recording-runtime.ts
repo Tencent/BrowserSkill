@@ -1,6 +1,7 @@
 import type { CdpRunner, ChromeTabsApi } from "@/tools/shared";
 import type { StopReason, TraceV3 } from "@/transport/types";
 import { type DocumentSettleScope, waitForDocumentSettled } from "./document-settle";
+import type { DraftRequest } from "./network-capture";
 import type { RegisteredObservation } from "./observation-capture";
 import { RecordingObservationSession } from "./observation-session";
 import { inferMissingPostStates, SettleController } from "./settle-controller";
@@ -248,6 +249,13 @@ export class RecordingObservationRuntime {
     context.settle.schedule(drafts, draftIndex, scope);
   }
 
+  frameForAction(tabId: number, producerId?: string): string | undefined {
+    const observation = this.#contexts.get(tabId)?.session.cursor.lastSettled;
+    return producerId
+      ? observation?.index.documentScope(producerId)?.frameId
+      : observation?.rootFrameId;
+  }
+
   scheduleSettle(
     tabId: number,
     drafts: RecordingDraftStep[],
@@ -311,6 +319,7 @@ export class RecordingObservationRuntime {
     stoppedBy: StopReason;
     bskVersion: string;
     includeTabSwitches?: boolean;
+    requests?: DraftRequest[];
   }): TraceV3 {
     return buildTraceV3({
       registry: this.#registry,
@@ -323,6 +332,7 @@ export class RecordingObservationRuntime {
       bskVersion: input.bskVersion,
       redactValues: this.#redactValues,
       includeTabSwitches: input.includeTabSwitches,
+      requests: input.requests,
     });
   }
 }
