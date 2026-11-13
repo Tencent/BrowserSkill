@@ -210,6 +210,27 @@ async function queryChildFrameSelector(
   }
 }
 
+async function listChildFrames(
+  cdp: CdpRunner,
+  tabId: number,
+): Promise<Array<{ frameId: string; target: CdpTarget }>> {
+  if (!cdp.getFrameGraph) return [];
+  try {
+    const graph = await cdp.getFrameGraph(tabId);
+    return graph.frames.filter((frame) => frame.frameId !== graph.rootFrameId);
+  } catch (error) {
+    const name = (error as { name?: string } | null)?.name;
+    if (
+      isAbortError(error) ||
+      name === "CdpAttachmentChangedError" ||
+      name === "CdpReadTimeoutError"
+    ) {
+      throw error;
+    }
+    return [];
+  }
+}
+
 /**
  * Resolve `{ref?, selector?}` into a `backendNodeId`. Returns an
  * `RpcError` if the caller supplied neither (or both), or if neither
@@ -304,9 +325,7 @@ export async function resolveBackendNode(
       let totalMatches = found.nodeIds.length;
       let childMatch: { backendNodeId: number; cdpTarget: CdpTarget; frameId: string } | undefined;
       if (searchChildFrames) {
-        const graph = await cdp.getFrameGraph!(target.tabId);
-        for (const frame of graph.frames) {
-          if (frame.frameId === graph.rootFrameId) continue;
+        for (const frame of await listChildFrames(cdp, target.tabId)) {
           const match = await queryChildFrameSelector(cdp, frame, selector, true);
           totalMatches += match.count;
           if (match.count === 1 && match.backendNodeId !== undefined && !childMatch) {
@@ -338,9 +357,7 @@ export async function resolveBackendNode(
       nodeId = (await cdp.send<{ nodeId?: number }>(target.tabId, "DOM.querySelector", query))
         .nodeId;
       if ((typeof nodeId !== "number" || nodeId === 0) && searchChildFrames) {
-        const graph = await cdp.getFrameGraph!(target.tabId);
-        for (const frame of graph.frames) {
-          if (frame.frameId === graph.rootFrameId) continue;
+        for (const frame of await listChildFrames(cdp, target.tabId)) {
           const match = await queryChildFrameSelector(cdp, frame, selector, false);
           if (match.backendNodeId !== undefined) {
             return {

@@ -40,7 +40,7 @@ On `unsupported_feature`, keep options; use `recovery`. For remote setup/pairing
    After intervention/navigation, sync and replan; wait-user while the person is active.
    Verify success. Stop requested video first, then on success or failure call
    `bsk_session({ action: "stop", session: "<id>" })` unless keeping the session
-   open is requested. Stopping returns borrowed tabs, preserves pages the person touched, and closes untouched task pages.
+   open is requested. Stopping returns borrowed tabs, keeps user-touched pages, and closes untouched task pages.
 
 ## Read and interact
 
@@ -57,8 +57,8 @@ To fill an observed field `@e3`:
 bsk_interact({ action: "fill", session: "<id>", target: "@e3", value: "text", contextId: "<observed-id>" })
 ```
 
-DOM refs survive reads; navigation invalidates them. Prefer observed refs (required for
-shadow roots and `expect` checks; action selectors also search iframes).
+DOM refs survive reads; navigation invalidates them. Prefer observed refs (needed for
+shadow roots and frame `expect`).
 Dynamic pages: [read/extract](references/extraction.md) first. Scripts: target `expect` without `observationId`; strict `dependsOn`; `unverified` last. Select options by value.
 
 Inspect unknown effects before retrying. On an error or two attempts without progress,
