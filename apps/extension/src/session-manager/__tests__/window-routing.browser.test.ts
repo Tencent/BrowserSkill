@@ -1,5 +1,5 @@
 // @vitest-environment node
-// BSK_BACKGROUND_CHROME=/path/to/chrome uses an isolated headed Chrome/profile.
+// BSK_TEST_CHROME=/path/to/chrome uses an isolated headed Chrome/profile.
 // BSK_BACKGROUND_SOAK=1 additionally runs six minutes with Energy Saver enabled.
 import { execFile } from "node:child_process";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
@@ -159,7 +159,8 @@ globalThis.run=async(url,soak)=>{
   const finishCreation=beginTabCreation(task);
   let external;
   try {
-   external=await chrome.tabs.create({windowId:task.agentWindowId,url:url+'/external-background',active:true});
+   external=await chrome.tabs.create({windowId:task.agentWindowId,url:url+'/external-background',active:false});
+   await chrome.tabs.update(external.id,{active:true});
    await wait(async()=>(await chrome.tabs.get(external.id)).status==='complete','external fixture load');
    check(task.pendingRoutingTabs.has(external.id),'external tab is not pending routing');
    const defaults={session_id:task.sessionId};
@@ -258,7 +259,7 @@ globalThis.run=async(url,soak)=>{
  } finally {router.dispose();await cdp.detachAll();cdp.dispose();}
 };`;
 
-describe.skipIf(!process.env.BSK_BACKGROUND_CHROME)("Agent Window browser regression", () => {
+describe.skipIf(!process.env.BSK_TEST_CHROME)("Agent Window browser regression", () => {
   it.each(
     process.env.BSK_BACKGROUND_SOAK === "1" ? [false, true] : [false],
   )("works in the background and routes tabs (six-minute Energy Saver: %s)", async (soak) => {
@@ -328,7 +329,7 @@ describe.skipIf(!process.env.BSK_BACKGROUND_CHROME)("Agent Window browser regres
       );
       await withChrome(
         {
-          executable: process.env.BSK_BACKGROUND_CHROME,
+          executable: process.env.BSK_TEST_CHROME,
           deviceScale: 1,
           zoom: 1,
           extensionPath: directory,
@@ -414,7 +415,7 @@ describe.skipIf(!process.env.BSK_BACKGROUND_CHROME)("Agent Window browser regres
                   !launched.has(phase)
                 ) {
                   launched.add(phase);
-                  await promisify(execFile)(process.env.BSK_BACKGROUND_CHROME!, [
+                  await promisify(execFile)(process.env.BSK_TEST_CHROME!, [
                     `--user-data-dir=${profile}`,
                     `${url}/${phase === "native external link" ? "external-native" : "external-native-fallback"}`,
                   ]);

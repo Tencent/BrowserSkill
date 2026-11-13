@@ -4,13 +4,40 @@ All notable changes to BrowserSkill will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 See the [Chinese changelog](CHANGELOG.zh-CN.md). Update both versions in the same PR.
 
-The CLI, extension, and DSH plugin may release separately. Protocol compatibility
+The CLI and extension may release separately. Protocol compatibility
 determines which versions can connect.
 
 ## [Unreleased]
 
+### Added
+
+- DeepSeek Harness (`dsh`) is now a first-class skill installation target via
+  `bsk install-skill --harness dsh` (honoring `$DSH_HOME`, defaulting to
+  `~/.dsh/skills`), and `DSH_SESSION_ID` is recognized as an automatic host
+  subagent scope in `ImplicitScopeRegistry` (#731).
+
+### Changed
+
+- Unified all real-browser test and regression harnesses onto `BSK_TEST_CHROME`
+  and `BSK_TEST_CLI`, separated `.browser.test.ts` and `.bench.ts` from the unit
+  Vitest configuration into `apps/extension/vitest.browser.config.ts` and
+  `scripts/run-browser-tests.mjs` (enforcing `skipped === 0` and non-empty suite
+  assertions), and wired every extension `.browser.test.ts` suite plus
+  `eval:browser:check` and `eval:browser:dynamic-read` into CI (#731).
+
 ### Fixed
 
+- Preserved user window focus on macOS Chromium when `tool.tab_create` or
+  `ensureActiveTab` creates an active tab inside a background Agent Window by
+  creating the tab inactive and activating it within its window via
+  `chrome.tabs.update` (#731).
+- Scoped CLI and MCP cooperation metadata attachment (`context_id`, `depends_on`,
+  `observation_id`, `expect`) strictly to RPC methods whose wire contracts accept
+  them (`Method::accepts_action_metadata()` and `tool.read` for `context_id`), so
+  multi-RPC commands such as `bsk screenshot --full-page --context`,
+  `bsk download --context`, `bsk upload --context`, and `bsk step --context` no
+  longer leak action metadata onto follow-up chunk-transfer, readiness-wait, or
+  post-sync RPCs (#731).
 - VOM tree folding (`shouldSkipRedundantRefChildren` and `renderTreeRows`) preserves
   independent interactive descendants under named interactive controls (such as Vue 3 +
   Element Plus nested `<el-sub-menu>` popups inside a parent `menuitem` or custom ARIA
@@ -19,6 +46,14 @@ determines which versions can connect.
   passive inner wrappers, inherited `cursor: pointer` / click-skin descendants, and native
   `<input>` / `<textarea>` / `<select>` controls folded without duplicate refs; added
   required pre-release audit scenario `EDGE-NESTED-MENU-REFS`.
+
+### Removed
+
+- Retired and removed `packages/dsh-plugin-browserskill`, its standalone release
+  workflow, and DSH-specific test shims; DeepSeek Harness now uses the standard
+  `bsk` CLI and `bsk mcp` server, with in-flight MCP cancellation, cooperation
+  settlement, video export, and dynamic-reading browser regressions migrated to
+  `bsk` CLI and `bsk mcp` (#731).
 
 ## [0.5.0] - 2026-11-12
 

@@ -1,6 +1,6 @@
 # Reading changing pages
 
-Use `bsk read` (MCP/DSH: `bsk_inspect` action `read`) for current DOM facts.
+Use `bsk read` (MCP: `bsk_inspect` action `read`) for current DOM facts.
 `evaluate` remains arbitrary page execution, including writes and deferred work.
 A script that states nothing keeps its strict observation requirement, so repeated
 sync/evaluate on a carousel is the wrong data path. Read the current facts, decide from those facts,
@@ -104,7 +104,6 @@ rechecked before publishing results/refs; output byte bounds also cover metadata
 | --- | --- |
 | CLI | `bsk read --selector CSS` or `--ref @eN`; `--fields-json` array, `--max-nodes`, `--max-bytes`, `--timeout-ms` |
 | MCP | `bsk_inspect({action:"read", session, selector/ref, read_fields:[...], max_nodes, max_bytes, timeout_ms})` |
-| DSH | `bsk_inspect({action:"read", session, selector/ref, readFields:"[...]", maxNodes, maxBytes, readTimeoutMs})` |
 
 The result has tab/frame identity, page/frame URLs, title, capture time, `scope:
 current_dom`, item refs/values/redactions and `truncated`. Machine errors retain
@@ -124,9 +123,10 @@ For measured results and untested boundaries, see the
 
 ## Reproduction
 
-Build the extension with `BSK_DAEMON_WS_URL=ws://127.0.0.1:52923`, build the CLI and
-DSH plugin, then run `evals/browser/cases/regression/cooperation/dynamic-read.mjs`
-with `BSK_COOP_CHROME` set to a Chromium executable. It owns an isolated profile,
+Build the extension with `BSK_DAEMON_WS_URL=ws://127.0.0.1:52923` and build the CLI,
+then run `evals/browser/cases/regression/cooperation/dynamic-read.mjs`
+with `BSK_TEST_CHROME` set to a Chromium executable (and optional `BSK_TEST_CLI`
+defaulting to `target/debug/bsk`). It owns an isolated profile,
 daemon and sessions. `BSK_DYNAMIC_OCEAN=1` adds real OceanEngine autoplay trials;
 `BSK_DYNAMIC_PLAN_CLI` optionally selects another plan binary; by default the
 runner exercises plan using the same CLI.

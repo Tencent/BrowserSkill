@@ -1,13 +1,33 @@
 # 更新日志
 
 BrowserSkill 的重要变更记录于此，格式参考 [Keep a Changelog](https://keepachangelog.com/)。
-CLI、扩展和 DSH 插件可以分别发布，能否连接由协议兼容性决定。更新日志的中英文版本须在同一 PR 中同步更新。
+CLI 和扩展可以分别发布，能否连接由协议兼容性决定。更新日志的中英文版本须在同一 PR 中同步更新。
 
 ## [Unreleased]
 
+### 新增
+
+- DeepSeek Harness（`dsh`）成为原生 skill 安装目标，支持通过 `bsk install-skill --harness dsh`
+  安装（遵循 `$DSH_HOME`，默认为 `~/.dsh/skills`），同时 `ImplicitScopeRegistry` 自动识别
+  `DSH_SESSION_ID` 作为宿主子代理并发隔离作用域（#731）。
+
+### 变更
+
+- 将所有真浏览器测试与回归套件的环境变量统一收敛至 `BSK_TEST_CHROME` 与 `BSK_TEST_CLI`，将
+  `.browser.test.ts` 与 `.bench.ts` 从单元测试配置剥离至 `apps/extension/vitest.browser.config.ts`
+  与零跳过运行器 `scripts/run-browser-tests.mjs`（强制校验 `skipped === 0` 且每个套件存在有效断言），
+  并在 CI 中接入全部扩展真浏览器测试套件、`eval:browser:check` 与 `eval:browser:dynamic-read`（#731）。
+
 ### 修复
 
+- 修复 macOS Chromium 下 `tool.tab_create` 与 `ensureActiveTab` 在后台 Agent 窗口直接创建激活标签页会抢占用户前台窗口焦点的问题，改为先以非激活态创建再通过 `chrome.tabs.update` 在目标窗口内选中标签页（#731）。
+- 将 CLI 与 MCP 的共驾证据注入（`context_id`、`depends_on`、`observation_id`、`expect`）严格按协议契约收敛至声明接收该元数据的 RPC 方法（`Method::accepts_action_metadata()` 以及接收 `context_id` 的 `tool.read`），修复 `bsk screenshot --full-page --context`、`bsk download --context`、`bsk upload --context` 与 `bsk step --context` 等多阶段命令将动作证据泄漏至后续分块传输、就绪等待或后置同步请求的问题（#731）。
 - VOM 树折叠规则（`shouldSkipRedundantRefChildren` 与 `renderTreeRows`）识别具名交互父节点下独立可交互的后代（如 Vue 3 + Element Plus 将二级浮层嵌在父 `menuitem` 内的多级 `<el-sub-menu>` 或自定义 ARIA `combobox` 弹出项），使每个已展开、可操作的子项在 `bsk sync`、`observe` 和 `snapshot` 中均输出独立行与专属 `@eN` 引用，同时保持被动内部包装节点、继承 `cursor: pointer` / 标题皮肤点击节点及原生 `<input>` / `<textarea>` / `<select>` 的折叠行为不变而不产生重复伪引用，并新增发版前必测用例 `EDGE-NESTED-MENU-REFS`。
+
+### 移除
+
+- 下线并整体移除 `packages/dsh-plugin-browserskill`、独立发版流水线及专属测试桩；DeepSeek Harness
+  与其他 Agent 统一通过标准 `bsk` CLI 与 `bsk mcp` 调用，在途请求取消、协作结算、录屏导出与动态读取等真浏览器回归用例已完整迁移至 `bsk` CLI 与 `bsk mcp`（#731）。
 
 ## [0.5.0] - 2026-11-12
 

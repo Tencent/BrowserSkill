@@ -18,10 +18,10 @@ import { withChrome } from "../snapshot-coordinates/chrome.mjs";
 
 const exec = promisify(execFile);
 const here = dirname(fileURLToPath(import.meta.url));
-const bsk = resolve(process.env.BSK_DIALOG_BSK ?? "target/debug/bsk");
+const bsk = resolve(process.env.BSK_TEST_CLI ?? "target/debug/bsk");
 const extension = resolve(process.env.BSK_DIALOG_EXTENSION ?? "apps/extension/dist/chrome-mv3");
-const chrome = process.env.BSK_DIALOG_CHROME;
-assert(chrome, "Set BSK_DIALOG_CHROME to a local Chrome for Testing executable");
+const chrome = process.env.BSK_TEST_CHROME;
+assert(chrome, "Set BSK_TEST_CHROME to a local Chrome for Testing executable");
 const output = resolve(process.env.BSK_DIALOG_OUTPUT ?? "evals/browser/results/js-dialog-control");
 const port = Number(process.env.BSK_DIALOG_PORT ?? 52837);
 const baseline = process.env.BSK_DIALOG_BASELINE === "1";
@@ -121,7 +121,8 @@ try {
       extensionPath: baseline
         ? extension
         : await copyPairingExtension(extension, join(bskHome, "extension"), port),
-      extensionViaCdp: process.env.BSK_DIALOG_LOAD_CDP === "1",
+      extensionViaCdp:
+        process.env.BSK_TEST_LOAD_CDP === "1" || process.env.BSK_DIALOG_LOAD_CDP === "1",
       headless: false,
     },
     async (send) => {

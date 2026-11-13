@@ -33,24 +33,26 @@ describe("chromeAgentWindowApi.ensureActiveTab", () => {
   it("creates about:blank when the Agent Window has no tabs", async () => {
     query.mockResolvedValue([]);
     create.mockResolvedValue({ id: 8 });
+    update.mockResolvedValue({});
 
     await chromeAgentWindowApi.ensureActiveTab(100, AGENT_WINDOW_HOME, new Set());
 
     expect(create).toHaveBeenCalledWith({
       windowId: 100,
       url: AGENT_WINDOW_HOME,
-      active: true,
+      active: false,
     });
-    expect(update).not.toHaveBeenCalled();
+    expect(update).toHaveBeenCalledWith(8, { active: true });
   });
 
   it("creates its own home tab instead of adopting a tab opened by the user", async () => {
     query.mockResolvedValue([{ id: 99, active: true }]);
     create.mockResolvedValue({ id: 8 });
+    update.mockResolvedValue({});
     const home = await chromeAgentWindowApi.ensureActiveTab(100, AGENT_WINDOW_HOME, new Set([7]));
     expect(home).toBe(8);
-    expect(update).not.toHaveBeenCalled();
-    expect(create).toHaveBeenCalledWith({ windowId: 100, url: AGENT_WINDOW_HOME, active: true });
+    expect(create).toHaveBeenCalledWith({ windowId: 100, url: AGENT_WINDOW_HOME, active: false });
+    expect(update).toHaveBeenCalledWith(8, { active: true });
   });
 });
 

@@ -13,12 +13,10 @@ immediately before each input.
 | --- | --- |
 | CLI | `bsk recipe list`, `show`, `run`, `draft`, `save`, `approve`, `rm` |
 | MCP | `bsk_recipe` |
-| DSH plugin | `bsk_recipe`; `run` and `draft` use an owned session |
 | Wire protocol | None for replay; `session.run_log` is local to the daemon |
 
 `bsk recipe` is always available in the CLI. MCP clients see `bsk_recipe` only when the
-server's environment has `BSK_RECIPES=1`, and DSH hosts only with the plugin's `recipes`
-option or the same variable, so a client that never replays pays nothing for the tool's
+server's environment has `BSK_RECIPES=1`, so a client that never replays pays nothing for the tool's
 schema. This version replays **only read and reversible steps**. It refuses any step that
 submits, pays, sends, deletes or publishes, unless a person approves a lowered risk.
 
@@ -215,7 +213,7 @@ bsk recipe approve sales-report
 ```
 
 `approve` lists each lowered step and asks the person to type the recipe's name. It needs a
-terminal and refuses piped input; MCP and DSH have no such action. Agents must never invoke or
+terminal and refuses piped input; MCP has no such action. Agents must never invoke or
 simulate it. This is a manual review workflow, not proof of human identity: a process with
 terminal and local file access remains trusted. The approval covers the recipe as reviewed:
 rewording the description keeps it,
@@ -274,7 +272,7 @@ CI replays every fixture drift type twice. Before a release that changes replay,
 20 times:
 
 ```sh
-BSK_COOP_CHROME=... BSK_COOP_RECIPES_ONLY=1 BSK_RECIPE_RUNS=20 \
+BSK_TEST_CHROME=... BSK_COOP_RECIPES_ONLY=1 BSK_RECIPE_RUNS=20 \
   node evals/browser/cases/regression/cooperation/run.mjs
 ```
 

@@ -16,7 +16,7 @@ type Send = <T = Record<string, unknown>>(
   sessionId?: string,
 ) => Promise<T>;
 
-describe.skipIf(!process.env.BSK_COOP_CHROME)("frame interaction coverage", () => {
+describe.skipIf(!process.env.BSK_TEST_CHROME)("frame interaction coverage", () => {
   it("collects HTTP frames, skips load failures and repairs old tabs while preserving human control", async () => {
     const directory = await mkdtemp(path.join(tmpdir(), "bsk-http-cooperation-"));
     const brokenFrame = await readFile(
@@ -103,7 +103,7 @@ globalThis.httpCooperationReady = true;`,
       );
       await withChrome(
         {
-          executable: process.env.BSK_COOP_CHROME,
+          executable: process.env.BSK_TEST_CHROME,
           extensionPath: directory,
           extensionViaCdp: true,
           deviceScale: 1,

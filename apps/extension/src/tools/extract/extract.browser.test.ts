@@ -1,5 +1,5 @@
 // @vitest-environment node
-// Opt in with BSK_CLICK_CHROME. Owns its browser, profile and local fixture server.
+// Opt in with BSK_TEST_CHROME. Owns its browser, profile and local fixture server.
 // Runs the collector exactly as handleExtract sends it: its source text, in an
 // isolated world, followed by the same normalizer and byte budget.
 import { createServer } from "node:http";
@@ -165,7 +165,7 @@ const fixtures: Record<string, string> = {
     '<table role="presentation"><tr><td>layout</td></tr></table><table><tr><th>A</th></tr><tr><td>1</td></tr></table>',
 };
 
-describe.skipIf(!process.env.BSK_CLICK_CHROME)("real browser structured extraction", () => {
+describe.skipIf(!process.env.BSK_TEST_CHROME)("real browser structured extraction", () => {
   let extract: (fixture: string, params: Omit<ExtractParams, "session_id">) => Promise<Outcome>;
   let renderedText: (selector: string) => Promise<string>;
   let finish: () => Promise<void>;
@@ -193,7 +193,7 @@ describe.skipIf(!process.env.BSK_CLICK_CHROME)("real browser structured extracti
       ready = resolve;
     });
     const browser = withChrome(
-      { executable: process.env.BSK_CLICK_CHROME, deviceScale: 1, zoom: 1, startupTimeout: 30_000 },
+      { executable: process.env.BSK_TEST_CHROME, deviceScale: 1, zoom: 1, startupTimeout: 30_000 },
       async (send: Send) => {
         const { targetId } = await send<{ targetId: string }>("Target.createTarget", {
           url: "about:blank",

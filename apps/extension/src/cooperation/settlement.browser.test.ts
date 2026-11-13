@@ -1,35 +1,35 @@
-// Real CLI, daemon, extension and plugin; all browser/profile/runtime state is isolated.
+// @vitest-environment node
+// Real CLI, MCP stdio server, daemon, and extension; all browser/profile/runtime state is isolated.
 import { execFile, spawn } from "node:child_process";
 import { once } from "node:events";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
-import type { ToolDefinition, ToolRunContext } from "@deepseek-ai/dsh-tools";
 import { expect, it } from "vitest";
-import {
-  attachVideoBackground,
-  type BrowserSend,
-} from "../../../apps/extension/src/video/browser-fixture";
-import { registerBrowserTools } from "../src/browser-tools";
-import { ObservationService } from "../src/observation";
-import { KeyedExecutor } from "../src/queue";
-import { createBskRunner } from "../src/runner";
-import { SessionRegistry } from "../src/sessions";
+import { attachVideoBackground, type BrowserSend } from "../video/browser-fixture";
+
+const defaultCli = fileURLToPath(
+  new URL(
+    `../../../../target/debug/bsk${process.platform === "win32" ? ".exe" : ""}`,
+    import.meta.url,
+  ),
+);
 
 it
-  .skipIf(!process.env.BSK_COOP_CHROME || !process.env.BSK_COOP_BSK)
+  .skipIf(!process.env.BSK_TEST_CHROME)
   .each(
     (["strict", "target"] as const).flatMap((policy) =>
       (["click", "press", "drag", "fill", "select"] as const).map((action) => ({ policy, action })),
     ),
   )(
-  "$policy policy settles cancelled thumbnails before sync and preserves navigating $action receipts",
+  "$policy policy settles cancelled screenshots before sync and preserves navigating $action receipts",
   async ({ policy, action }) => {
     // Keep the daemon's Unix socket path below macOS's length limit.
     const directory = await mkdtemp(path.join(tmpdir(), "bsk-coop-"));
-    const executable = path.resolve(process.env.BSK_COOP_BSK!);
+    const executable = path.resolve(process.env.BSK_TEST_CLI ?? defaultCli);
     const env = {
       ...process.env,
       BSK_HOME: path.join(directory, "state"),
@@ -74,7 +74,7 @@ it
           async () => {
             try {
               port = JSON.parse(
-                await readFile(path.join(env.BSK_HOME!, "daemon.json"), "utf8"),
+                await readFile(path.join(env.BSK_HOME, "daemon.json"), "utf8"),
               ).ws_port;
               return port;
             } catch {
@@ -85,10 +85,11 @@ it
         )
         .toBeGreaterThan(0);
       const { copyPairingExtension, pairLocalBrowser } = await import(
-        new URL("../../../evals/browser/local-pairing.mjs", import.meta.url).href
+        new URL("../../../../evals/browser/local-pairing.mjs", import.meta.url).href
       );
+      const distPath = fileURLToPath(new URL("../../dist/chrome-mv3", import.meta.url));
       const extension = await copyPairingExtension(
-        path.resolve("../../apps/extension/dist/chrome-mv3"),
+        distPath,
         path.join(directory, "extension"),
         port,
       );
@@ -98,14 +99,21 @@ it
       await writeFile(manifestPath, JSON.stringify(manifest));
       const { withChrome } = await import(
         new URL(
-          "../../../evals/browser/cases/regression/snapshot-coordinates/chrome.mjs",
+          "../../../../evals/browser/cases/regression/snapshot-coordinates/chrome.mjs",
+          import.meta.url,
+        ).href
+      );
+      const { createMcpRegressionClient } = await import(
+        new URL(
+          "../../../../evals/browser/cases/regression/cooperation/mcp-client.mjs",
           import.meta.url,
         ).href
       );
       await withChrome(
         {
-          executable: process.env.BSK_COOP_CHROME,
+          executable: process.env.BSK_TEST_CHROME,
           extensionPath: extension,
+          extensionViaCdp: process.env.BSK_TEST_LOAD_CDP === "1",
           deviceScale: 1,
           zoom: 1,
         },
@@ -124,97 +132,61 @@ it
             expect(reply.exceptionDetails).toBeUndefined();
             return reply.result.value;
           };
-          const tools = new Map<string, ToolDefinition>();
-          const ctx = {
-            tools: {
-              register: (tool: ToolDefinition) => {
-                tools.set(tool.name, tool);
-                return () => tools.delete(tool.name);
-              },
-            },
-            get: () => undefined,
-          };
-          const runner = createBskRunner(executable, (command, args, options) =>
-            spawn(command, args, { ...options, env: { ...options?.env, ...env } }),
-          );
-          const registry = new SessionRegistry(1);
-          const queue = new KeyedExecutor();
-          const config = {
-            bskPath: executable,
-            defaultTimeoutMs: 15000,
-            maxSessions: 1,
-            observationEnabled: true,
-            thumbnailIntervalMs: 1500,
-            idleIntervalMs: 8000,
-            lazyTools: false,
-          };
-          const observation = new ObservationService({
-            ctx: ctx as never,
-            runner,
-            registry,
-            queue,
-            options: { enabled: true, thumbnailIntervalMs: 1500, idleIntervalMs: 8000 },
-          });
-          registerBrowserTools({ ctx: ctx as never, runner, registry, queue, config, observation });
-          const call = (name: string, args: object) =>
-            tools.get(name)!.execute(
-              args as never,
-              {
-                callId: "regression",
-                name,
-                signal: new AbortController().signal,
-              } as ToolRunContext,
-            ) as Promise<Record<string, any>>;
+          const mcp = await createMcpRegressionClient(executable, env);
           let session: string | undefined;
-          let unsubscribe = () => {};
           try {
-            session = (await call("bsk_session", { action: "start", url, noFocus: true }))
-              .sessionId;
+            session = (await mcp.run("bsk_session", { action: "start" })).session_id;
+            await mcp.run("bsk_page", { action: "navigate", session, url });
             // Only this fixture holds one Chrome reply. The installed extension,
-            // dispatcher, daemon cancellation and plugin scheduler remain real.
+            // dispatcher, daemon cancellation, and MCP stdio server remain real.
             await evaluate(`(() => {
-            const original = chrome.debugger.sendCommand.bind(chrome.debugger);
-            const committed = new Promise(resolve => {
-              const onCommitted = details => {
-                if (details.frameId !== 0 || new URL(details.url).pathname !== '/done') return;
-                chrome.webNavigation.onCommitted.removeListener(onCommitted);
-                resolve();
+              const original = chrome.debugger.sendCommand.bind(chrome.debugger);
+              const committed = new Promise(resolve => {
+                const onCommitted = details => {
+                  if (details.frameId !== 0 || new URL(details.url).pathname !== '/done') return;
+                  chrome.webNavigation.onCommitted.removeListener(onCommitted);
+                  resolve();
+                };
+                chrome.webNavigation.onCommitted.addListener(onCommitted);
+              });
+              globalThis.holdNextShot = true;
+              chrome.debugger.sendCommand = async (target, method, params) => {
+                if (method === 'Page.captureScreenshot' && globalThis.holdNextShot) {
+                  globalThis.holdNextShot = false;
+                  return new Promise(resolve => { globalThis.finishHeldShot = () => resolve({data: ''}); });
+                }
+                const result = await original(target, method, params);
+                const value = result?.result?.value;
+                // Hold only a completed input/verification reply until navigation commits.
+                if ((method === 'Input.dispatchKeyEvent' && params.type === 'keyUp' && params.key === 'Enter') ||
+                    (method === 'Input.dispatchMouseEvent' && params.type === 'mouseReleased') ||
+                    (method === 'Runtime.callFunctionOn' && (value?.selected_values || (value?.connected && (value?.matches || typeof value?.valueLength === 'number')))))
+                  await committed;
+                return result;
               };
-              chrome.webNavigation.onCommitted.addListener(onCommitted);
-            });
-            globalThis.holdNextShot = true;
-            chrome.debugger.sendCommand = async (target, method, params) => {
-              if (method === 'Page.captureScreenshot' && globalThis.holdNextShot) {
-                globalThis.holdNextShot = false;
-                return new Promise(resolve => { globalThis.finishHeldShot = () => resolve({data: ''}); });
-              }
-              const result = await original(target, method, params);
-              const value = result?.result?.value;
-              // Hold only a completed input/verification reply until navigation commits.
-              if ((method === 'Input.dispatchKeyEvent' && params.type === 'keyUp' && params.key === 'Enter') ||
-                  (method === 'Input.dispatchMouseEvent' && params.type === 'mouseReleased') ||
-                  (method === 'Runtime.callFunctionOn' && (value?.selected_values || (value?.connected && (value?.matches || typeof value?.valueLength === 'number')))))
-                await committed;
-              return result;
-            };
-          })()`);
-            unsubscribe = observation.subscribe(() => {});
+            })()`);
+            const heldShot = mcp.startCall("bsk_inspect", { action: "screenshot", session });
+            void heldShot.promise.catch(() => {});
             await expect
               .poll(() => evaluate("typeof globalThis.finishHeldShot === 'function'"), {
                 timeout: 10000,
               })
               .toBe(true);
-            const syncing = call("bsk_session", { action: "sync", session, policy });
-            unsubscribe();
+            const syncing = mcp.run("bsk_session", {
+              action: "sync",
+              session,
+              policy,
+              settle: true,
+            });
+            mcp.cancel(heldShot.requestId);
             const synced = await syncing;
             expect(synced.context_id).toEqual(expect.any(String));
             expect(synced.control_policy).toBe(policy);
-            expect(observation.getState()[0].thumbnailAttachmentId).toBeUndefined();
             expect((await cli("debug", "activity", "--session", session!)).activity.state).toBe(
               "idle",
             );
             await evaluate("globalThis.finishHeldShot()");
-            const fresh = await call("bsk_session", { action: "sync", session, policy });
+            const fresh = await mcp.run("bsk_session", { action: "sync", session, policy });
             if (policy === "strict") expect(fresh.context_id).not.toBe(synced.context_id);
             else {
               expect(fresh.context_id).toBe(synced.context_id);
@@ -225,42 +197,42 @@ it
             expect(fresh.kind).toBe("unchanged");
             const ref = synced.observation.text.match(/(@e\d+) link "Continue"/)?.[1];
             expect(ref).toBeDefined();
-            const input = {
-              click: { target: ref },
-              press: { target: "input", key: "Enter" },
+            const interactArgs = {
+              click: { params: { ref } },
+              press: { params: { selector: "input", key: "Enter" } },
               drag: {
-                target: "#drag",
-                deltaX: 80,
-                durationMs: 50,
-                ...(policy === "target" ? { observationId: fresh.observation_id } : {}),
+                params: {
+                  source: { selector: "#drag" },
+                  delta: { x: 80, y: 0 },
+                  duration_ms: 50,
+                },
+                ...(policy === "target" ? { observation: fresh.observation_id } : {}),
               },
-              fill: { target: "input", value: "submitted" },
-              select: { target: "select", values: ["b"] },
+              fill: { params: { selector: "input", value: "submitted" } },
+              select: { params: { selector: "select", values: ["b"] } },
             }[action];
-            const receipt = await call("bsk_interact", {
+            const receipt = await mcp.run("bsk_interact", {
               action,
               session,
-              ...input,
-              contextId: fresh.context_id,
+              context: fresh.context_id,
+              ...interactArgs,
             });
-            expect(action === "drag" ? receipt.tab_id : receipt.tabId).toEqual(expect.any(Number));
-            const destination = await call("bsk_session", { action: "sync", session, policy });
+            expect(receipt.tab_id).toEqual(expect.any(Number));
+            const destination = await mcp.run("bsk_session", { action: "sync", session, policy });
             expect(destination.observation.text).toContain("Navigation completed");
             expect(arrivals).toBe(1);
             await expect(
-              call("bsk_interact", {
+              mcp.run("bsk_interact", {
                 action,
                 session,
-                ...input,
-                contextId: fresh.context_id,
+                context: fresh.context_id,
+                ...interactArgs,
               }),
             ).rejects.toThrow();
             expect(arrivals).toBe(1);
           } finally {
-            unsubscribe();
-            observation.dispose();
-            if (session) await cli("session", "stop", session);
-            runner.killAll();
+            if (session) await cli("session", "stop", session).catch(() => {});
+            await mcp.dispose();
           }
         },
       );

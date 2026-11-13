@@ -14,8 +14,9 @@
     "ext:build:zip": "pnpm --filter @browser-skill/extension zip",
     "ext:dev": "pnpm --filter @browser-skill/extension dev",
     "ext:test": "pnpm --filter @browser-skill/extension test",
+    "ext:test:browser": "node scripts/run-browser-tests.mjs",
     "vom:test": "pnpm --filter @browser-skill/vom test",
-    "lint": "biome check . && stylelint \"**/*.css\" && pnpm --filter @wxg-prc-cpg/browser-skill-dsh-plugin typecheck && pnpm --filter @wxg-prc-cpg/browser-skill-dsh-plugin test",
+    "lint": "biome check . && stylelint \"**/*.css\"",
     "format": "biome format --write .",
     "protocol:generate": "node scripts/protocol.mjs"
   },

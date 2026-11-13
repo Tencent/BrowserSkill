@@ -1,5 +1,5 @@
 // @vitest-environment node
-// BSK_INCOGNITO_CHROME=/path/to/chrome runs against a disposable browser/profile.
+// BSK_TEST_CHROME=/path/to/chrome runs against a disposable browser/profile.
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { createRequire } from "node:module";
@@ -86,7 +86,7 @@ globalThis.run=async(url,allowed)=>{
  } finally {globalThis.phase='detach';await cdp.detachAll();cdp.dispose();await manager.stopAll();events.dispose();}
 };`;
 
-describe.skipIf(!process.env.BSK_INCOGNITO_CHROME)("incognito Agent Windows", () => {
+describe.skipIf(!process.env.BSK_TEST_CHROME)("incognito Agent Windows", () => {
   it.each([
     false,
     true,
@@ -163,7 +163,7 @@ describe.skipIf(!process.env.BSK_INCOGNITO_CHROME)("incognito Agent Windows", ()
       );
       await withChrome(
         {
-          executable: process.env.BSK_INCOGNITO_CHROME,
+          executable: process.env.BSK_TEST_CHROME,
           deviceScale: 1,
           zoom: 1,
           extensionPath: directory,

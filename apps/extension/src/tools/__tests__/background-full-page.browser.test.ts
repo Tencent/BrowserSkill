@@ -1,5 +1,5 @@
 // @vitest-environment node
-// Opt in with BSK_BACKGROUND_CHROME after building the extension. Runs the real
+// Opt in with BSK_TEST_CHROME after building the extension. Runs the real
 // Agent handler, driver, page script, tiler and PNG exporter in an isolated
 // extension; no daemon or user profile. The harness supplies only session setup.
 // BSK_OVERLAY_SCROLLBAR=1 runs headed and requires visible native overlay pixels
@@ -111,193 +111,185 @@ globalThis.run = async (url, overlay, active) => {
   }
 };`;
 
-describe.skipIf(!process.env.BSK_BACKGROUND_CHROME)(
-  "background full-page browser regression",
-  () => {
-    it.each([
-      { scale: 1, zoom: 1, active: false },
-      { scale: 1.5, zoom: 1, active: false },
-      { scale: 2, zoom: 1.25, active: false },
-      { scale: 1.5, zoom: 1, active: true },
-    ])("stitches target pixels and restores the page at $scale/$zoom (active=$active)", async ({
-      scale,
-      zoom,
-      active,
-    }) => {
-      const directory = await mkdtemp(path.join(tmpdir(), "bsk-full-page-extension-"));
-      const server = createServer((req, res) => {
-        res.setHeader("Content-Type", "text/html");
-        const page = fixture();
-        res.end(
-          req.url === "/other" ? page.replace(/rgb\(\d+,\d+,127\)/g, "rgb(20,190,60)") : page,
-        );
+describe.skipIf(!process.env.BSK_TEST_CHROME)("background full-page browser regression", () => {
+  it.each([
+    { scale: 1, zoom: 1, active: false },
+    { scale: 1.5, zoom: 1, active: false },
+    { scale: 2, zoom: 1.25, active: false },
+    { scale: 1.5, zoom: 1, active: true },
+  ])("stitches target pixels and restores the page at $scale/$zoom (active=$active)", async ({
+    scale,
+    zoom,
+    active,
+  }) => {
+    const directory = await mkdtemp(path.join(tmpdir(), "bsk-full-page-extension-"));
+    const server = createServer((req, res) => {
+      res.setHeader("Content-Type", "text/html");
+      const page = fixture();
+      res.end(req.url === "/other" ? page.replace(/rgb\(\d+,\d+,127\)/g, "rgb(20,190,60)") : page);
+    });
+    try {
+      const require = createRequire(import.meta.url);
+      const { build } = await import(
+        require.resolve("vite", { paths: [require.resolve("vitest")] })
+      );
+      await writeFile(path.join(directory, "entry.js"), entry);
+      await build({
+        configFile: false,
+        logLevel: "error",
+        resolve: {
+          alias: {
+            "@": path.resolve("src"),
+            "@browser-skill/i18n": path.resolve("../../packages/i18n/src/index.ts"),
+          },
+        },
+        build: {
+          outDir: directory,
+          emptyOutDir: false,
+          lib: {
+            entry: path.join(directory, "entry.js"),
+            formats: ["iife"],
+            name: "Regression",
+            fileName: () => "regression.js",
+          },
+        },
       });
-      try {
-        const require = createRequire(import.meta.url);
-        const { build } = await import(
-          require.resolve("vite", { paths: [require.resolve("vitest")] })
-        );
-        await writeFile(path.join(directory, "entry.js"), entry);
-        await build({
-          configFile: false,
-          logLevel: "error",
-          resolve: {
-            alias: {
-              "@": path.resolve("src"),
-              "@browser-skill/i18n": path.resolve("../../packages/i18n/src/index.ts"),
+      await cp(
+        path.resolve("dist/chrome-mv3/content-scripts"),
+        path.join(directory, "content-scripts"),
+        { recursive: true },
+      );
+      await writeFile(
+        path.join(directory, "manifest.json"),
+        JSON.stringify({
+          manifest_version: 3,
+          background: { service_worker: "worker.js" },
+          name: "Background full-page regression",
+          version: "1.0",
+          permissions: ["debugger", "tabs", "scripting", "webNavigation", "storage"],
+          host_permissions: ["http://127.0.0.1/*"],
+          content_scripts: [
+            {
+              matches: ["http://127.0.0.1/*"],
+              js: ["content-scripts/long-screenshot-page.js"],
+              run_at: "document_end",
             },
-          },
-          build: {
-            outDir: directory,
-            emptyOutDir: false,
-            lib: {
-              entry: path.join(directory, "entry.js"),
-              formats: ["iife"],
-              name: "Regression",
-              fileName: () => "regression.js",
-            },
-          },
-        });
-        await cp(
-          path.resolve("dist/chrome-mv3/content-scripts"),
-          path.join(directory, "content-scripts"),
-          { recursive: true },
-        );
-        await writeFile(
-          path.join(directory, "manifest.json"),
-          JSON.stringify({
-            manifest_version: 3,
-            background: { service_worker: "worker.js" },
-            name: "Background full-page regression",
-            version: "1.0",
-            permissions: ["debugger", "tabs", "scripting", "webNavigation", "storage"],
-            host_permissions: ["http://127.0.0.1/*"],
-            content_scripts: [
-              {
-                matches: ["http://127.0.0.1/*"],
-                js: ["content-scripts/long-screenshot-page.js"],
-                run_at: "document_end",
+          ],
+        }),
+      );
+      await writeFile(
+        path.join(directory, "worker.js"),
+        "chrome.runtime.onInstalled.addListener(() => {});",
+      );
+      await writeFile(
+        path.join(directory, "regression.html"),
+        '<!doctype html><script src="regression.js"></script>',
+      );
+      await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+      const url = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
+      const { withChrome } = await import(
+        new URL(
+          "../../../../../evals/browser/cases/regression/snapshot-coordinates/chrome.mjs",
+          import.meta.url,
+        ).href
+      );
+      await withChrome(
+        {
+          executable: process.env.BSK_TEST_CHROME,
+          deviceScale: scale,
+          zoom,
+          extensionPath: directory,
+          softwareRendering: !process.env.BSK_SCREENSHOT_HEADED,
+          headless: !process.env.BSK_OVERLAY_SCROLLBAR && !process.env.BSK_SCREENSHOT_HEADED,
+        },
+        async (send: Send) => {
+          let origin = "";
+          await expect
+            .poll(
+              async () => {
+                const { targetInfos } = await send<{
+                  targetInfos: { type: string; url: string }[];
+                }>("Target.getTargets");
+                const worker = targetInfos.find(
+                  (target) => target.type === "service_worker" && target.url.endsWith("/worker.js"),
+                );
+                origin = worker?.url.slice(0, -"/worker.js".length) ?? "";
+                return !!origin;
               },
-            ],
-          }),
-        );
-        await writeFile(
-          path.join(directory, "worker.js"),
-          "chrome.runtime.onInstalled.addListener(() => {});",
-        );
-        await writeFile(
-          path.join(directory, "regression.html"),
-          '<!doctype html><script src="regression.js"></script>',
-        );
-        await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
-        const url = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
-        const { withChrome } = await import(
-          new URL(
-            "../../../../../evals/browser/cases/regression/snapshot-coordinates/chrome.mjs",
-            import.meta.url,
-          ).href
-        );
-        await withChrome(
-          {
-            executable: process.env.BSK_BACKGROUND_CHROME,
-            deviceScale: scale,
-            zoom,
-            extensionPath: directory,
-            softwareRendering: !process.env.BSK_SCREENSHOT_HEADED,
-            headless: !process.env.BSK_OVERLAY_SCROLLBAR && !process.env.BSK_SCREENSHOT_HEADED,
-          },
-          async (send: Send) => {
-            let origin = "";
-            await expect
-              .poll(
-                async () => {
-                  const { targetInfos } = await send<{
-                    targetInfos: { type: string; url: string }[];
-                  }>("Target.getTargets");
-                  const worker = targetInfos.find(
-                    (target) =>
-                      target.type === "service_worker" && target.url.endsWith("/worker.js"),
-                  );
-                  origin = worker?.url.slice(0, -"/worker.js".length) ?? "";
-                  return !!origin;
-                },
-                { timeout: 10_000 },
-              )
-              .toBe(true);
-            const { targetId } = await send<{ targetId: string }>("Target.createTarget", {
-              url: `${origin}/regression.html`,
-              background: true,
-            });
-            const { sessionId } = await send<{ sessionId: string }>("Target.attachToTarget", {
-              targetId,
-              flatten: true,
-            });
-            const evaluate = async <T>(expression: string) => {
-              const reply = await send<{ result: { value: T }; exceptionDetails?: unknown }>(
-                "Runtime.evaluate",
-                { expression, returnByValue: true, awaitPromise: true },
-                sessionId,
-              );
-              if (reply.exceptionDetails) throw new Error(JSON.stringify(reply.exceptionDetails));
-              return reply.result.value;
+              { timeout: 10_000 },
+            )
+            .toBe(true);
+          const { targetId } = await send<{ targetId: string }>("Target.createTarget", {
+            url: `${origin}/regression.html`,
+            background: true,
+          });
+          const { sessionId } = await send<{ sessionId: string }>("Target.attachToTarget", {
+            targetId,
+            flatten: true,
+          });
+          const evaluate = async <T>(expression: string) => {
+            const reply = await send<{ result: { value: T }; exceptionDetails?: unknown }>(
+              "Runtime.evaluate",
+              { expression, returnByValue: true, awaitPromise: true },
+              sessionId,
+            );
+            if (reply.exceptionDetails) throw new Error(JSON.stringify(reply.exceptionDetails));
+            return reply.result.value;
+          };
+          await expect
+            .poll(() => evaluate("typeof run==='function'"), { timeout: 10_000 })
+            .toBe(true);
+          await evaluate(
+            `run(${JSON.stringify(url)},${!!process.env.BSK_OVERLAY_SCROLLBAR},${active}).then(value=>globalThis.done={value},error=>globalThis.done={error:String(error)});true`,
+          );
+          await expect.poll(() => evaluate("!!globalThis.done"), { timeout: 100_000 }).toBe(true);
+          const done = await evaluate<{
+            error?: string;
+            value: {
+              results: {
+                result: { height: number };
+                dpr: number;
+                bad: unknown[];
+                edgeBad: unknown[];
+                overlayPixels: number;
+                footer: number[];
+                original: unknown;
+                restored: unknown;
+                active: boolean;
+              }[];
+              activated: number[];
+              focused: number[];
+              calls: string[];
+              created: number[];
+              control: number;
+              selected: number;
             };
-            await expect
-              .poll(() => evaluate("typeof run==='function'"), { timeout: 10_000 })
-              .toBe(true);
-            await evaluate(
-              `run(${JSON.stringify(url)},${!!process.env.BSK_OVERLAY_SCROLLBAR},${active}).then(value=>globalThis.done={value},error=>globalThis.done={error:String(error)});true`,
+          }>("globalThis.done");
+          expect(done.error).toBeUndefined();
+          for (const item of done.value.results) {
+            expect(item.bad).toEqual([]);
+            expect(item.edgeBad).toEqual([]);
+            [255, 136, 0, 255].forEach((value, index) =>
+              expect(
+                Math.abs(item.footer[index] - value),
+                JSON.stringify(item),
+              ).toBeLessThanOrEqual(3),
             );
-            await expect.poll(() => evaluate("!!globalThis.done"), { timeout: 100_000 }).toBe(true);
-            const done = await evaluate<{
-              error?: string;
-              value: {
-                results: {
-                  result: { height: number };
-                  dpr: number;
-                  bad: unknown[];
-                  edgeBad: unknown[];
-                  overlayPixels: number;
-                  footer: number[];
-                  original: unknown;
-                  restored: unknown;
-                  active: boolean;
-                }[];
-                activated: number[];
-                focused: number[];
-                calls: string[];
-                created: number[];
-                control: number;
-                selected: number;
-              };
-            }>("globalThis.done");
-            expect(done.error).toBeUndefined();
-            for (const item of done.value.results) {
-              expect(item.bad).toEqual([]);
-              expect(item.edgeBad).toEqual([]);
-              [255, 136, 0, 255].forEach((value, index) =>
-                expect(
-                  Math.abs(item.footer[index] - value),
-                  JSON.stringify(item),
-                ).toBeLessThanOrEqual(3),
-              );
-              expect(Math.abs(item.result.height - 2634 * item.dpr)).toBeLessThanOrEqual(1);
-              expect(item.restored).toEqual(item.original);
-              expect(item.active).toBe(active);
-            }
-            if (process.env.BSK_OVERLAY_SCROLLBAR)
-              expect(done.value.results[1].overlayPixels).toBeGreaterThan(0);
-            expect(done.value.selected).toBe(
-              active ? done.value.created.at(-1) : done.value.control,
-            );
-            expect(done.value.activated).toEqual(active ? done.value.created : []);
-            expect(done.value.focused).toEqual([]);
-            expect(done.value.calls).not.toContain("Page.bringToFront");
-          },
-        );
-      } finally {
-        await new Promise<void>((resolve) => server.close(() => resolve()));
-        await rm(directory, { recursive: true, force: true });
-      }
-    }, 120_000);
-  },
-);
+            expect(Math.abs(item.result.height - 2634 * item.dpr)).toBeLessThanOrEqual(1);
+            expect(item.restored).toEqual(item.original);
+            expect(item.active).toBe(active);
+          }
+          if (process.env.BSK_OVERLAY_SCROLLBAR)
+            expect(done.value.results[1].overlayPixels).toBeGreaterThan(0);
+          expect(done.value.selected).toBe(active ? done.value.created.at(-1) : done.value.control);
+          expect(done.value.activated).toEqual(active ? done.value.created : []);
+          expect(done.value.focused).toEqual([]);
+          expect(done.value.calls).not.toContain("Page.bringToFront");
+        },
+      );
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+      await rm(directory, { recursive: true, force: true });
+    }
+  }, 120_000);
+});

@@ -8,20 +8,21 @@ import { join, resolve } from "node:path";
 import { promisify } from "node:util";
 import { withChrome } from "../snapshot-coordinates/chrome.mjs";
 import { attachExtensionWorker, runCompatibilityScenarios } from "./compatibility.mjs";
-import { runLegacyStrictDshScenario } from "./dsh-client.mjs";
 import { runFrameObservabilityScenarios } from "./frame-observability.mjs";
 import { runLifetimeScenario } from "./lifetime.mjs";
+import { runLegacyStrictMcpScenario } from "./mcp-client.mjs";
 import { runPlanScenarios } from "./plan.mjs";
 import { runRecipeScenarios } from "./recipes.mjs";
 import { runGenericScenarios } from "./scenarios.mjs";
 import { runTargetPolicyScenarios } from "./target-policy.mjs";
 
-const executable = process.env.BSK_COOP_CHROME;
-const cli = resolve(process.env.BSK_COOP_CLI ?? "target/debug/bsk");
+const executable = process.env.BSK_TEST_CHROME;
+const cli = resolve(process.env.BSK_TEST_CLI ?? "target/debug/bsk");
 const extensionPath = resolve(process.env.BSK_COOP_EXTENSION ?? "apps/extension/dist/chrome-mv3");
 const port = Number(process.env.BSK_COOP_PORT ?? 52917);
 const artifacts = process.env.BSK_COOP_ARTIFACTS;
-const loadExtensionOverCdp = process.env.BSK_COOP_LOAD_CDP === "1";
+const loadExtensionOverCdp =
+  process.env.BSK_TEST_LOAD_CDP === "1" || process.env.BSK_COOP_LOAD_CDP === "1";
 const compatibilityOnly = process.env.BSK_COOP_COMPAT_ONLY === "1";
 const targetOnly = process.env.BSK_COOP_TARGET_ONLY === "1";
 const framesOnly = process.env.BSK_COOP_FRAMES_ONLY === "1";
@@ -32,7 +33,7 @@ const deviceScale = Number(process.env.BSK_COOP_DPR ?? 1);
 // The full run uses the unmodified five-minute session default and 30-second reaper.
 const idleWaitMs = fullIdle ? 360500 : 12500;
 if (artifacts) await mkdir(artifacts, { recursive: true });
-assert(executable, "Set BSK_COOP_CHROME to an isolated Chromium executable");
+assert(executable, "Set BSK_TEST_CHROME to an isolated Chromium executable");
 assert(
   [compatibilityOnly, targetOnly, framesOnly, recipesOnly].filter(Boolean).length <= 1,
   "Choose one coverage subset",
@@ -828,9 +829,9 @@ try {
             await send("Target.detachFromTarget", { sessionId: userSession }).catch(() => {});
         }
       }
-      for (const interruptStart of compatibilityOnly ? [] : [false, true])
-        evidence.push(await runLegacyStrictDshScenario({ send, base, cli, env, interruptStart }));
-      compatibility = await runCompatibilityScenarios({ send, bsk, cli, env, directory, headful });
+      for (const implicitSession of compatibilityOnly ? [] : [false, true])
+        evidence.push(await runLegacyStrictMcpScenario({ send, base, cli, env, implicitSession }));
+      compatibility = await runCompatibilityScenarios({ send, bsk, directory, headful });
       if (artifacts)
         await writeFile(
           join(artifacts, "compatibility-results.json"),

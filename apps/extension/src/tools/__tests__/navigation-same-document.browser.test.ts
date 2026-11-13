@@ -1,5 +1,5 @@
 // @vitest-environment node
-// Opt in with BSK_NAV_CHROME. The shared harness owns its browser and profile.
+// Opt in with BSK_TEST_CHROME. The shared harness owns its browser and profile.
 import { createServer } from "node:http";
 import { describe, expect, it, vi } from "vitest";
 import { type CdpDebuggerApi, ChromiumCdp } from "@/browser-driver/chromium-cdp";
@@ -23,7 +23,7 @@ interface FrameTree {
   frameTree: { frame: { id: string; loaderId: string } };
 }
 
-describe.skipIf(!process.env.BSK_NAV_CHROME)("real browser same-document navigation", () => {
+describe.skipIf(!process.env.BSK_TEST_CHROME)("real browser same-document navigation", () => {
   it("revokes passive-read refs after loaded-tab SPA routes, including a fresh attachment", async () => {
     const server = createServer((_request, response) => {
       response.setHeader("Content-Type", "text/html");
@@ -47,7 +47,7 @@ describe.skipIf(!process.env.BSK_NAV_CHROME)("real browser same-document navigat
       );
       await withChrome(
         {
-          executable: process.env.BSK_NAV_CHROME,
+          executable: process.env.BSK_TEST_CHROME,
           deviceScale: 1,
           zoom: 1,
           startupTimeout: 30_000,
@@ -207,7 +207,7 @@ describe.skipIf(!process.env.BSK_NAV_CHROME)("real browser same-document navigat
       );
       await withChrome(
         {
-          executable: process.env.BSK_NAV_CHROME,
+          executable: process.env.BSK_TEST_CHROME,
           deviceScale: 1,
           zoom: 1,
           startupTimeout: 30_000,

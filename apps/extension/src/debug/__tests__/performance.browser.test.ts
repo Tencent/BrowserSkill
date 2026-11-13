@@ -10,7 +10,7 @@ type Send = <T = Record<string, unknown>>(
   params?: object,
   session?: string,
 ) => Promise<T>;
-describe.skipIf(!process.env.BSK_CLICK_CHROME)("native performance capture", () => {
+describe.skipIf(!process.env.BSK_TEST_CHROME)("native performance capture", () => {
   it("installs before navigation, captures browser metrics, survives reload and reports hidden/late capture", async () => {
     const server = createServer((_request, response) => {
       response.setHeader("Content-Type", "text/html");
@@ -29,7 +29,7 @@ describe.skipIf(!process.env.BSK_CLICK_CHROME)("native performance capture", () 
       );
       await withChrome(
         {
-          executable: process.env.BSK_CLICK_CHROME,
+          executable: process.env.BSK_TEST_CHROME,
           deviceScale: 1,
           zoom: 1,
           startupTimeout: 30000,

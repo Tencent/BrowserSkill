@@ -70,9 +70,8 @@ Follow `next_offset` while present. Offsets count UTF-16 code units, matching th
 extension. RFC 6901 `--pointer` works only on a complete retained JSON body and is
 applied after redaction. No network request is repeated by these reads.
 
-DSH uses `bsk_inspect` with `action: "debug"`, `debugAction` matching the CLI
-subcommand, and camelCase options (`runId`, `tabId`, `maxChars`). The six public
-tools, existing session ownership, cancellation and queue remain unchanged.
+MCP uses `bsk_inspect` with `action: "debug"` and `debug_action` matching the CLI
+subcommand (`run_id`, `tab_id`, `max_chars`).
 The wire endpoint is `tool.debug`; schemas are in `crates/bsk-protocol/schema`.
 Older extensions reject it without altering the existing `console`/`network` tools.
 
@@ -139,8 +138,8 @@ gaps remain visible. Each group retains up to 50 source request references.
 Performance and analysis lists use `--offset`, `--limit` and top-level `next_offset`.
 Restart pagination if the live recording changes; stop capture for a stable complete
 analysis. These reads use the same output budget and task/history isolation as
-other debug queries. DSH exposes `debugAction: "performance" | "aggregate" |
-"duplicates"` with `slowMs`, `windowMs` and `includeControlled`.
+other debug queries. MCP exposes `debug_action: "performance" | "aggregate" |
+"duplicates"` with `slow_ms`, `window_ms` and `include_controlled`.
 
 ## Reliable agent reads
 
@@ -199,8 +198,8 @@ is required and nothing is sent to the page. Omitting `--command-id` waits for i
 specified command is no longer running, **not** that it succeeded; consult its
 original result and page evidence. Cancelling the waiter does not cancel the
 original command. Waiting never retries, replays or automatically queues a command.
-DSH keeps its existing per-session execution queue; debug activity/wait bypass
-that queue to observe ongoing work, still using the owned session.
+MCP `bsk_inspect(action="debug", debug_action="activity" | "wait")` likewise runs
+against the daemon locally to observe ongoing work.
 
 ## Evidence interpretation
 
@@ -422,9 +421,9 @@ bsk debug replay <request-id> --session <id> --replay-file replay.json
 {"key":"nickname-attempt-1","body":"{\"name\":\"Bob\"}"}
 ```
 
-`--rule` and `--replay` also accept inline JSON. DSH exposes these as JSON-string
-`rule` / `replay` parameters on `bsk_inspect(action: "debug")`, with the same
-`debugAction` values. File input avoids putting large bodies in command arguments.
+`--rule` and `--replay` also accept inline JSON. MCP exposes these as `rule` /
+`replay` parameters on `bsk_inspect(action: "debug")`, with the same
+`debug_action` values. File input avoids putting large bodies in command arguments.
 
 Replay sends a **new** request and may change server data. It uses a dedicated
 isolated page context with the current page's cookies, never an extension-origin

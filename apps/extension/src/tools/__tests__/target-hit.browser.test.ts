@@ -1,5 +1,5 @@
 // @vitest-environment node
-// Opt in with BSK_CLICK_CHROME; the fixture owns its browser, profile and server.
+// Opt in with BSK_TEST_CHROME; the fixture owns its browser, profile and server.
 import { createServer } from "node:http";
 import { expect, it } from "vitest";
 import type { CdpFrameGraph, CdpFrameTreeNode } from "@/browser-driver/frame-graph";
@@ -14,7 +14,7 @@ type Send = <T = Record<string, unknown>>(
   sessionId?: string,
 ) => Promise<T>;
 
-it.skipIf(!process.env.BSK_CLICK_CHROME)(
+it.skipIf(!process.env.BSK_TEST_CHROME)(
   "keeps selector hits inside their document and clicks frame refs through checked ancestors",
   async () => {
     const server = createServer((request, response) => {
@@ -46,7 +46,7 @@ it.skipIf(!process.env.BSK_CLICK_CHROME)(
         ).href
       );
       await withChrome(
-        { executable: process.env.BSK_CLICK_CHROME, deviceScale: 1, zoom: 1 },
+        { executable: process.env.BSK_TEST_CHROME, deviceScale: 1, zoom: 1 },
         async (send: Send) => {
           const { targetId } = await send<{ targetId: string }>("Target.createTarget", {
             url: `http://127.0.0.1:${port}/`,

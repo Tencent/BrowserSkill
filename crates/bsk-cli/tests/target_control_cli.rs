@@ -232,8 +232,10 @@ async fn step_keeps_auto_compatible_and_forwards_target_to_a_current_daemon() {
         assert_eq!(requests.len(), 3);
         assert_eq!(requests[0]["method"], "system.status");
         assert_eq!(requests[1]["method"], "tool.click");
+        assert_eq!(requests[1]["params"]["context_id"], "c");
         assert_eq!(requests[2]["method"], "tool.cooperate");
         assert_eq!(requests[2]["params"]["control_policy"], policy);
+        assert!(requests[2]["params"].get("context_id").is_none());
         let result: Value = serde_json::from_slice(&output.stdout).unwrap();
         assert_eq!(result["action"]["result"]["tab_id"], 7);
         assert_eq!(result["action_replayed"], false);
@@ -291,7 +293,16 @@ async fn dom_read_requires_new_daemon_and_never_falls_back_to_evaluate() {
     for protocol in ["1.8", "1.9"] {
         let (output, calls) = run_cli(
             protocol,
-            &["read", "--session", "s", "--selector", "#data", "--json"],
+            &[
+                "read",
+                "--session",
+                "s",
+                "--context",
+                "c",
+                "--selector",
+                "#data",
+                "--json",
+            ],
             result.clone(),
         )
         .await;
@@ -302,6 +313,10 @@ async fn dom_read_requires_new_daemon_and_never_falls_back_to_evaluate() {
             calls.iter().filter(|c| c["method"] == "tool.read").count(),
             usize::from(protocol == "1.9")
         );
+        if protocol == "1.9" {
+            let read_call = calls.iter().find(|c| c["method"] == "tool.read").unwrap();
+            assert_eq!(read_call["params"]["context_id"], "c");
+        }
         if protocol == "1.8" {
             assert_eq!(data["data"]["reason"], "unsupported_feature");
         }

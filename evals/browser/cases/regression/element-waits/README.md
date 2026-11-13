@@ -13,13 +13,13 @@ extensions. From the repository root, build the CLI and extension from this bran
 cargo build -p bsk --locked
 pnpm install --frozen-lockfile
 BSK_DAEMON_WS_URL=ws://127.0.0.1:52907 pnpm ext:build
-BSK_WAIT_CHROME=/path/to/chromium \
+BSK_TEST_CHROME=/path/to/chromium \
   node evals/browser/cases/regression/element-waits/run.mjs > /tmp/element-waits.json
 ```
 
 Choose an unused port with `BSK_WAIT_PORT` and build the extension with the same
 `BSK_DAEMON_WS_URL`. The script rejects a build using the normal daemon port.
-`BSK_WAIT_CLI` and `BSK_WAIT_EXTENSION` override the built artifact paths;
+`BSK_TEST_CLI` and `BSK_WAIT_EXTENSION` override the built artifact paths;
 `BSK_WAIT_REPEATS` defaults to 10 repetitions per method/state/tab condition.
 The output contains all 80 trial rows plus grouped summaries. Processes, session,
 profile and private daemon files are cleaned up on both success and failure.
@@ -55,8 +55,8 @@ covers masks hidden in place or removed (the two Element UI loading lifecycles),
 initial absence, and scoping a selector when another table's mask is already hidden:
 
 ```bash
-BSK_CLICK_CHROME=/path/to/chromium pnpm --filter @browser-skill/extension \
-  exec vitest run src/tools/__tests__/waits.browser.test.ts
+BSK_TEST_CHROME=/path/to/chromium pnpm --filter @browser-skill/extension \
+  test:browser src/tools/__tests__/waits.browser.test.ts
 ```
 
 The comparison measures deterministic browser orchestration, not Agent end-to-end

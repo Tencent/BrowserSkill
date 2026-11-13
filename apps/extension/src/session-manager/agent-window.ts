@@ -88,10 +88,12 @@ export const chromeAgentWindowApi: AgentWindowApi = {
       }
       return first.id;
     }
-    const created = await chrome.tabs.create({ windowId, url, active: true });
+    // Creating an active tab directly in a background window steals OS window focus on macOS Chromium.
+    const created = await chrome.tabs.create({ windowId, url, active: false });
     if (typeof created?.id !== "number") {
       throw new Error("[bh] chrome.tabs.create returned no tab id");
     }
+    await chrome.tabs.update(created.id, { active: true });
     return created.id;
   },
 };

@@ -1,5 +1,5 @@
 // @vitest-environment node
-// Opt in with built BSK_REMOTE_CLI and BSK_REMOTE_CHROME. Owns every process/profile.
+// Run with BSK_TEST_CHROME and optional BSK_TEST_CLI. Owns every process/profile.
 import { spawn } from "node:child_process";
 import { type EventEmitter, once } from "node:events";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
@@ -17,14 +17,17 @@ type Send = <T = Record<string, unknown>>(
 async function poll<T>(read: () => Promise<T | false | undefined>, timeout = 20_000): Promise<T> {
   const end = Date.now() + timeout;
   while (Date.now() < end) {
-    const value = await read();
-    if (value) return value;
+    try {
+      const value = await read();
+      if (value) return value;
+    } catch (error) {
+      if (!String(error).includes("Cannot find default execution context")) throw error;
+    }
     await new Promise((r) => setTimeout(r, 100));
   }
   throw new Error("Remote browser condition timed out");
 }
-const enabled = !!process.env.BSK_REMOTE_CLI && !!process.env.BSK_REMOTE_CHROME;
-describe.skipIf(!enabled)("standalone remote browser", () => {
+describe.skipIf(!process.env.BSK_TEST_CHROME)("standalone remote browser", () => {
   it("pairs, preserves windows, restricts tabs and cleans up on revocation", async () => {
     const directory = await mkdtemp(path.join(tmpdir(), "bsk-remote-browser-"));
     const page = createServer((_req, res) => {
@@ -41,12 +44,19 @@ describe.skipIf(!enabled)("standalone remote browser", () => {
       ...process.env,
       HOME: directory,
       USERPROFILE: directory,
+      KIMI_CODE_HOME: path.join(directory, ".kimi-code"),
+      HERMES_HOME: path.join(directory, ".hermes"),
+      DSH_HOME: path.join(directory, ".dsh"),
       BSK_HOME: directory,
       BSK_AUTO_START: "0",
       BSK_AUTO_UPDATE: "off",
       BSK_UPDATE_MANIFEST_URL: "http://127.0.0.1:1/disabled",
     };
-    const cli = process.env.BSK_REMOTE_CLI!;
+    const defaultCli = path.resolve(
+      "../../target/debug",
+      process.platform === "win32" ? "bsk.exe" : "bsk",
+    );
+    const cli = path.resolve(process.env.BSK_TEST_CLI ?? defaultCli);
     const command = async (args: string[]) => {
       const child = spawn(cli, args, { env, stdio: ["ignore", "pipe", "pipe"] });
       let stdout = "",
@@ -104,33 +114,38 @@ describe.skipIf(!enabled)("standalone remote browser", () => {
           });
         });
       const pairing = await command(["daemon", "pair"]);
+      const { attachPairingBackground } = await import(
+        new URL("../../../../../evals/browser/local-pairing.mjs", import.meta.url).href
+      );
       const { withChrome } = await import(
         new URL(
           "../../../../../evals/browser/cases/regression/snapshot-coordinates/chrome.mjs",
           import.meta.url,
         ).href
       );
+      const extensionPath = path.resolve("dist/chrome-mv3");
       await withChrome(
         {
-          executable: process.env.BSK_REMOTE_CHROME,
+          executable: process.env.BSK_TEST_CHROME,
           deviceScale: 1,
           zoom: 1,
-          extensionPath: path.resolve("dist/chrome-mv3"),
+          extensionPath,
         },
         async (send: Send) => {
-          const worker = await poll(async () =>
-            (
-              await send<{ targetInfos: { type: string; url: string; targetId: string }[] }>(
-                "Target.getTargets",
-              )
-            ).targetInfos.find(
-              (t) => t.type === "service_worker" && t.url.endsWith("/background.js"),
-            ),
+          const { sessionId: workerSessionId, origin } = await attachPairingBackground(
+            send,
+            extensionPath,
           );
-          const origin = worker.url.split("/").slice(0, 3).join("/");
-          const popup = await send<{ targetId: string }>("Target.createTarget", {
-            url: `${origin}/popup.html`,
-          });
+          await send(
+            "Runtime.evaluate",
+            { expression: "chrome.action.openPopup()", awaitPromise: true, returnByValue: true },
+            workerSessionId,
+          );
+          const popup = await poll(async () =>
+            (
+              await send<{ targetInfos: { url: string; targetId: string }[] }>("Target.getTargets")
+            ).targetInfos.find((t) => t.url === `${origin}/popup.html`),
+          );
           const { sessionId } = await send<{ sessionId: string }>("Target.attachToTarget", {
             targetId: popup.targetId,
             flatten: true,
@@ -157,7 +172,7 @@ describe.skipIf(!enabled)("standalone remote browser", () => {
           expect(preferences.bsk_remote_endpoint).toBeUndefined();
           expect(JSON.stringify(preferences)).not.toContain(pairing.split("#")[1]);
           const readGrant =
-            "new Promise((resolve,reject)=>{const request=indexedDB.open('bsk-remote-authorization',1);request.onsuccess=()=>{const db=request.result;const get=db.transaction('connection').objectStore('connection').get('endpoint');get.onsuccess=()=>{db.close();resolve(get.result)};get.onerror=()=>reject(get.error)};request.onerror=()=>reject(request.error)})";
+            "new Promise((resolve,reject)=>{const request=indexedDB.open('bsk-remote-authorization');request.onsuccess=()=>{const db=request.result;const get=db.transaction('connection').objectStore('connection').get('endpoint');get.onsuccess=()=>{db.close();resolve(get.result)};get.onerror=()=>reject(get.error)};request.onerror=()=>reject(request.error)})";
           const grant = await evaluate<{ deviceId: string; token: string }>(readGrant);
           expect(grant.deviceId).toMatch(/^[a-f0-9]{32}$/);
           expect(JSON.stringify(preferences)).not.toContain(grant.token);

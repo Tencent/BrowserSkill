@@ -16,9 +16,9 @@ import { withChrome } from "../snapshot-coordinates/chrome.mjs";
 import { dragMarkup, dragScript } from "./drag-interactions.fixture.mjs";
 
 const exec = promisify(execFile);
-const chrome = process.env.BSK_DRAG_CHROME;
-assert(chrome, "Set BSK_DRAG_CHROME to a Chrome executable with extension debugging support");
-const bsk = resolve(process.env.BSK_DRAG_BSK ?? "target/debug/bsk");
+const chrome = process.env.BSK_TEST_CHROME;
+assert(chrome, "Set BSK_TEST_CHROME to a Chrome executable with extension debugging support");
+const bsk = resolve(process.env.BSK_TEST_CLI ?? "target/debug/bsk");
 const extension = resolve(process.env.BSK_DRAG_EXTENSION ?? "apps/extension/dist/chrome-mv3");
 const port = Number(process.env.BSK_DRAG_PORT ?? 52839);
 const home = await mkdtemp(join(tmpdir(), "bsk-drag-home-"));

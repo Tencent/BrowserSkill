@@ -10,9 +10,9 @@ import { promisify } from "node:util";
 import { withChrome } from "../snapshot-coordinates/chrome.mjs";
 
 const directory = dirname(fileURLToPath(import.meta.url));
-const cli = resolve(process.env.BSK_COOP_CLI ?? "target/debug/bsk");
-const executable = process.env.BSK_COOP_CHROME;
-assert(executable, "Set BSK_COOP_CHROME to an isolated Chromium executable");
+const cli = resolve(process.env.BSK_TEST_CLI ?? "target/debug/bsk");
+const executable = process.env.BSK_TEST_CHROME;
+assert(executable, "Set BSK_TEST_CHROME to an isolated Chromium executable");
 const port = Number(process.env.BSK_COOP_PORT ?? 52931);
 assert(Number.isInteger(port) && port > 0 && port !== 52800);
 const extensionPath = resolve(process.env.BSK_COOP_EXTENSION ?? "apps/extension/dist/chrome-mv3");

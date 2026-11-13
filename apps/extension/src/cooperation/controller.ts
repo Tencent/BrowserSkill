@@ -263,7 +263,7 @@ const SCRIPT_CHANGE_RECOVERY = {
   target:
     "For data, use read/extract (fixed passive DOM queries) without another sync. For a script, read observed_changes and decide whether it touches what the script relies on. If those facts can be stated, pass them as explicit expect checks and omit observation_id: then only they are checked and the rest of the page may keep changing. Only if they cannot be stated, run evaluate with unverified, which compares nothing about the page; make the script check its own preconditions and throw when they do not hold. Do not resubmit the same script in a sync loop.",
   strict:
-    "Read observed_changes and decide whether it touches what the script relies on. If those regions can be named, synchronize and pass them with --depends-on (plugin: dependsOn): then only they, form values and modal layers are checked, and the rest of the page may keep changing. Only if they cannot be named, synchronize and run evaluate with unverified, which compares nothing about the page; make the script check its own preconditions and throw when they do not hold. Do not resubmit the same script in a sync loop.",
+    "Read observed_changes and decide whether it touches what the script relies on. If those regions can be named, synchronize and pass them with --depends-on (MCP: depends_on): then only they, form values and modal layers are checked, and the rest of the page may keep changing. Only if they cannot be named, synchronize and run evaluate with unverified, which compares nothing about the page; make the script check its own preconditions and throw when they do not hold. Do not resubmit the same script in a sync loop.",
 };
 
 function failure(message: string, effect: "none" | "unknown" = "none"): RpcError {
@@ -2134,8 +2134,8 @@ export class CooperationController implements ControlAuthority {
           "This action requires an unused strict observation from cooperate sync",
           "observation",
           script
-            ? "Synchronize, inspect the result and pass the sync reply's top-level observation_id, not observation.observation_id, explicitly with --observation (plugin: observationId). On a page that keeps changing, state what the script relies on with explicit expect checks and omit observation_id: then only they are checked."
-            : "Synchronize, inspect the result and pass the sync reply's top-level observation_id, not observation.observation_id, explicitly with --observation (plugin: observationId).",
+            ? "Synchronize, inspect the result and pass the sync reply's top-level observation_id, not observation.observation_id, explicitly with --observation (MCP: observation). On a page that keeps changing, state what the script relies on with explicit expect checks and omit observation_id: then only they are checked."
+            : "Synchronize, inspect the result and pass the sync reply's top-level observation_id, not observation.observation_id, explicitly with --observation (MCP: observation).",
         );
       if (!visual && (primaryTarget?.ref || primaryTarget?.selector)) {
         const resolved = await resolveActionTarget(

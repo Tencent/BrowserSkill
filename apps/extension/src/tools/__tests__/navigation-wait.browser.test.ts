@@ -1,5 +1,5 @@
 // @vitest-environment node
-// Opt in with BSK_NAV_CHROME. The shared harness owns its browser and profile.
+// Opt in with BSK_TEST_CHROME. The shared harness owns its browser and profile.
 import { createServer } from "node:http";
 import { describe, expect, it } from "vitest";
 import { SessionManager } from "@/session-manager/manager";
@@ -26,7 +26,7 @@ const START_PAGE = `<!doctype html><title>Start</title>
 <button id="noop">No navigation</button>
 <div id="section">Section</div>`;
 
-describe.skipIf(!process.env.BSK_NAV_CHROME)("real browser wait_for_navigation", () => {
+describe.skipIf(!process.env.BSK_TEST_CHROME)("real browser wait_for_navigation", () => {
   it("waits for scheduled, in-flight, client-redirected and same-document navigations", async () => {
     const server = createServer((request, response) => {
       response.setHeader("Content-Type", "text/html");
@@ -57,7 +57,7 @@ describe.skipIf(!process.env.BSK_NAV_CHROME)("real browser wait_for_navigation",
       );
       await withChrome(
         {
-          executable: process.env.BSK_NAV_CHROME,
+          executable: process.env.BSK_TEST_CHROME,
           deviceScale: 1,
           zoom: 1,
           startupTimeout: 30_000,

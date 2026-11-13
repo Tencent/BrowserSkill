@@ -1,7 +1,7 @@
 //! The BrowserSkill MCP tools and their mapping onto daemon RPCs.
 //!
-//! Six coarse tools mirror the DSH plugin's grouping, each selecting an
-//! operation with `action`, and `bsk_plan` runs several input actions in one call.
+//! Six coarse tools group related operations behind `action`, and `bsk_plan`
+//! runs several input actions in one call.
 //! Arguments use the CLI and protocol field names.
 //! Every call is validated against its action's protocol type before anything
 //! reaches the daemon, and guarded actions reuse the `bsk step` preparation and
@@ -681,8 +681,9 @@ impl Evidence {
         .map_err(CliError::Local)
     }
 
-    fn attach(&self, params: Value) -> Result<Value, CliError> {
-        business_rpc::with_context(
+    fn attach(&self, method: &Method, params: Value) -> Result<Value, CliError> {
+        business_rpc::with_method_context(
+            method,
             Some(params),
             self.context.as_deref(),
             &self.depends_on,
@@ -1103,7 +1104,8 @@ async fn page(
     let link = connect(daemon, control, conn_scope).await?;
     evidence.check(&link.protocol, false)?;
     let timeout = timeout_of(&params, 30_000);
-    let value = link.rpc(method, evidence.attach(params)?, timeout).await?;
+    let params = evidence.attach(&method, params)?;
+    let value = link.rpc(method, params, timeout).await?;
     let is_error = matches!(
         args.action,
         PageAction::Navigate | PageAction::Back | PageAction::Forward | PageAction::Reload
@@ -1482,7 +1484,8 @@ async fn interact(link: &Link, prepared: Prepared) -> Result<Reply, CliError> {
             if is_evaluate && params["unverified"] == true {
                 crate::cli::evaluate::require_unverified_script(&link.protocol)?;
             }
-            let value = link.rpc(method, evidence.attach(params)?, timeout).await?;
+            let params = evidence.attach(&method, params)?;
+            let value = link.rpc(method, params, timeout).await?;
             Ok(Reply {
                 is_error: is_evaluate && value["ok"] == false,
                 ..Reply::json(value)
@@ -1497,11 +1500,12 @@ async fn interact(link: &Link, prepared: Prepared) -> Result<Reply, CliError> {
         } => {
             require_drag_mode(link, &method, &params)?;
             evidence.check(&link.protocol, target_policy)?;
-            // Like the CLI, caller evidence accompanies each request of the step.
+            // Only guarded actions receive caller evidence; readiness waits and post-sync stay clean.
             let (value, exit) = link
                 .blocking(move |rpc| {
                     step::run(&args, method, params, |method, params, timeout| {
-                        rpc(method, evidence.attach(params)?, timeout)
+                        let params = evidence.attach(&method, params)?;
+                        rpc(method, params, timeout)
                     })
                 })
                 .await?;
@@ -1840,7 +1844,8 @@ async fn tabs(
         ));
     }
     evidence.check(&link.protocol, false)?;
-    let value = link.rpc(method, evidence.attach(params)?, timeout).await?;
+    let params = evidence.attach(&method, params)?;
+    let value = link.rpc(method, params, timeout).await?;
     Ok(Reply::json(value))
 }
 
@@ -1927,8 +1932,10 @@ async fn assist(
             let evidence = Evidence::new(args.context, args.observation, None, None)?;
             let link = connect(daemon, control, conn_scope).await?;
             evidence.check(&link.protocol, false)?;
-            let params =
-                evidence.attach(json!({"session_id":session, "width":width, "height":height}))?;
+            let params = evidence.attach(
+                &Method::ToolWindowResize,
+                json!({"session_id":session, "width":width, "height":height}),
+            )?;
             return Ok(Reply::json(
                 link.rpc(Method::ToolWindowResize, params, TOOL_IPC_TIMEOUT)
                     .await?,
@@ -1977,8 +1984,10 @@ async fn assist(
             let evidence = Evidence::new(args.context, args.observation, None, None)?;
             let link = connect(daemon, control, conn_scope).await?;
             evidence.check(&link.protocol, false)?;
-            let params = evidence
-                .attach(serde_json::to_value(params).map_err(|e| invalid(e.to_string()))?)?;
+            let params = evidence.attach(
+                &Method::ToolEmulate,
+                serde_json::to_value(params).map_err(|e| invalid(e.to_string()))?,
+            )?;
             return Ok(Reply::json(
                 link.rpc(Method::ToolEmulate, params, TOOL_IPC_TIMEOUT)
                     .await?,
@@ -2184,7 +2193,7 @@ mod tests {
             panic!("expected a single action");
         };
         assert_eq!(method, Method::ToolClick);
-        let params = evidence.attach(params).unwrap();
+        let params = evidence.attach(&method, params).unwrap();
         assert_eq!(params["session_id"], "s1");
         assert_eq!(params["tab_id"], 7);
         assert_eq!(params["ref"], "@e3");

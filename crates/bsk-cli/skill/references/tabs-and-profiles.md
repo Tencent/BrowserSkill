@@ -96,9 +96,6 @@ are unsupported; screenshots work.
 
 ## Parallel tasks and shared login state
 
-This guidance applies to the `bsk` CLI skill; the DSH plugin is a separate
-skill with plugin-owned session visibility.
-
 Normal sessions started in the same browser profile share one cookie jar and one set
 of site state. Two tasks operating on the same logged-in site - or switching
 accounts/tenants there - can overwrite each other's login state with no error

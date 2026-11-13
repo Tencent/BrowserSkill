@@ -57,7 +57,7 @@ on identical failures, repeat unknown effects or switch backends to bypass limit
 On an unrecoverable failure, report the blocker and stop the owned session.
 
 For observation_changed while gathering data on a changing page, use the fixed
-read/extract path (inspect action=read/extract in MCP/DSH). Do not resubmit
+read/extract path (inspect action=read/extract in MCP). Do not resubmit
 arbitrary evaluate in a sync loop. When a script is still needed, state what it
 relies on (`--expect`, or `--depends-on` under strict policy) so only that is
 checked; `evaluate --unverified` is the last resort when that cannot be stated

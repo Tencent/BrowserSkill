@@ -84,7 +84,7 @@ async function run() {
 run().then(result=>self.postMessage({done:result}), error=>self.postMessage({error:String(error),stack:error.stack}));
 `;
 
-it.skipIf(!process.env.BSK_VIDEO_CHROME || !process.env.BSK_VIDEO_STRESS)(
+it.skipIf(!process.env.BSK_TEST_CHROME || !process.env.BSK_VIDEO_STRESS)(
   "measures clear-quality capture and the maximum MP4 remux workload",
   async () => {
     const directory = await mkdtemp(path.join(tmpdir(), "bsk-video-capacity-"));
@@ -144,7 +144,7 @@ it.skipIf(!process.env.BSK_VIDEO_CHROME || !process.env.BSK_VIDEO_STRESS)(
       );
       await withChrome(
         {
-          executable: process.env.BSK_VIDEO_CHROME,
+          executable: process.env.BSK_TEST_CHROME,
           extensionPath: directory,
           deviceScale: 1,
           zoom: 1,

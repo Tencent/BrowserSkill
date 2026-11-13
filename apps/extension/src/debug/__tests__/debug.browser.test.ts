@@ -1,5 +1,5 @@
 // @vitest-environment node
-// Opt in with BSK_CLICK_CHROME. Owns its browser, profile and local fixture server.
+// Opt in with BSK_TEST_CHROME. Owns its browser, profile and local fixture server.
 
 import { writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
@@ -17,7 +17,7 @@ type Send = <T = Record<string, unknown>>(
 type Event = { sessionId?: string; method: string; params?: Record<string, unknown> };
 type Listener = (source: CdpDebuggee, method: string, params: unknown) => void;
 
-describe.skipIf(!process.env.BSK_CLICK_CHROME)("real browser website debugging", () => {
+describe.skipIf(!process.env.BSK_TEST_CHROME)("real browser website debugging", () => {
   it("captures and verifies an HTTP 200 business failure, redirects, iframe requests and cleanup", async () => {
     let fixed = false;
     const server = createServer((request, response) => {
@@ -91,7 +91,7 @@ describe.skipIf(!process.env.BSK_CLICK_CHROME)("real browser website debugging",
       let onEvent: ((event: Event) => void) | undefined;
       await withChrome(
         {
-          executable: process.env.BSK_CLICK_CHROME,
+          executable: process.env.BSK_TEST_CHROME,
           deviceScale: 1,
           zoom: 1,
           startupTimeout: 30000,

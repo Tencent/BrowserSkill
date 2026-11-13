@@ -168,6 +168,23 @@ pub(crate) fn with_context<P: Serialize>(
         .transpose()
 }
 
+pub(crate) fn with_method_context<P: Serialize>(
+    method: &Method,
+    params: Option<P>,
+    context: Option<&str>,
+    dependencies: &[String],
+    observation: Option<&str>,
+    expect: Option<&serde_json::Value>,
+) -> anyhow::Result<Option<serde_json::Value>> {
+    if method.accepts_action_metadata() {
+        with_context(params, context, dependencies, observation, expect)
+    } else if *method == Method::ToolRead {
+        with_context(params, context, &[], None, None)
+    } else {
+        with_context(params, None, &[], None, None)
+    }
+}
+
 /// Issue a business RPC against the daemon with SIGINT-driven
 /// cancellation.
 pub fn call<P, R>(
@@ -225,7 +242,8 @@ where
         }));
     }
     let rpc_id: RpcId = format!("{}-{}", rpc_id_prefix, random_short_id());
-    let params = with_context(
+    let params = with_method_context(
+        &method,
         params,
         OBSERVATION_CONTEXT.get().and_then(|c| c.as_deref()),
         OBSERVATION_DEPENDENCIES
