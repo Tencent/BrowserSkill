@@ -81,7 +81,11 @@ fn target(value: String, x: f64, y: f64) -> Result<DragTarget, CliError> {
     })
 }
 
-pub fn dispatch(args: DragArgs, format: Format) -> Result<(), CliError> {
+pub fn dispatch(
+    args: DragArgs,
+    ctx: &super::business_rpc::ClientContext,
+    format: Format,
+) -> Result<(), CliError> {
     if args.mode == CliDragMode::ClickMoveClick && (args.to.is_none() || args.hold != 0) {
         return Err(CliError::Local(anyhow::anyhow!(
             "click-move-click requires --to and --hold 0ms"
@@ -119,7 +123,16 @@ pub fn dispatch(args: DragArgs, format: Format) -> Result<(), CliError> {
     }
     let modifiers =
         parse_modifiers(&args.modifiers).map_err(|e| CliError::Local(anyhow::anyhow!(e)))?;
-    super::business_rpc::set_caller_scope(args.scope);
+    if let (Some(global), Some(arg)) = (&ctx.observation_id, &args.observation_id)
+        && global != arg
+    {
+        return Err(CliError::invalid_params(anyhow::anyhow!(
+            "--observation conflicts with the action's observation_id"
+        )));
+    }
+    let op_ctx = ctx
+        .with_scope(args.scope.as_deref())
+        .with_observation_id(args.observation_id.as_deref());
     let params = DragParams {
         session_id: args.session.unwrap_or_default(),
         tab_id: args.tab_id,
@@ -135,10 +148,9 @@ pub fn dispatch(args: DragArgs, format: Format) -> Result<(), CliError> {
         hold_ms: Some(args.hold),
         duration_ms: Some(args.duration),
         timeout_ms: Some(args.timeout),
-        observation_id: args.observation_id,
     };
     let info = ensure_daemon().context("ensure daemon is running")?;
-    let reply: DragResult = super::business_rpc::call(
+    let reply: DragResult = op_ctx.call(
         info.sock_path,
         "drag-1",
         Method::ToolDrag,
@@ -255,7 +267,11 @@ mod tests {
                 panic!("drag")
             };
             assert!(matches!(
-                dispatch(args, Format::Json),
+                dispatch(
+                    args,
+                    &crate::cli::business_rpc::ClientContext::default(),
+                    Format::Json
+                ),
                 Err(CliError::Local(_))
             ));
         }

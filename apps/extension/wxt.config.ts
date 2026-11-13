@@ -70,7 +70,7 @@ export default defineConfig({
       },
     },
   },
-  vite: () => ({
+  vite: (env) => ({
     plugins: [
       tailwindcss(),
       {
@@ -83,6 +83,22 @@ export default defineConfig({
           });
         },
       },
+      ...(env.mode === "production"
+        ? [
+            {
+              name: "browser-skill-strip-output-validators",
+              enforce: "pre" as const,
+              load(id: string) {
+                if (
+                  id.replaceAll("\\", "/").endsWith("/src/transport/generated/output-validators.js")
+                ) {
+                  return "export {};";
+                }
+                return null;
+              },
+            },
+          ]
+        : []),
     ],
     define: {
       __BSK_EXT_BUILD__: JSON.stringify(EXTENSION_BUILD),

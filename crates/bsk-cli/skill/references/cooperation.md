@@ -149,9 +149,9 @@ its own preconditions and `throw` when they do not hold, which is the only check
 together with the effect. A script bypasses hit testing, so a dialog that opened meanwhile does
 not stop it. When that matters, use the declared-facts path with an `exists` check for the dialog.
 
-Requires daemon and extension protocol 1.9 or later compatible 1.x. Peers below 1.9 are rejected
-before dispatch. Earlier 1.9 development builds cannot be distinguished by this version gate;
-update the CLI, restart its daemon and reload the matching extension together.
+Requires CLI, daemon, and extension protocol 2.0; incompatible peers below 2.0 are rejected
+before handshake/dispatch. Update the CLI, restart its daemon and reload the matching
+extension together.
 
 After a refusal, read `observed_changes` and choose from the list above. Do not resubmit the
 same script in a sync loop, and do not reach for `--unverified` when a fact can be stated.

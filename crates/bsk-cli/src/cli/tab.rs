@@ -136,15 +136,19 @@ pub struct TabReturnArgs {
     pub scope: Option<String>,
 }
 
-pub fn dispatch(cmd: TabCmd, format: Format) -> Result<(), CliError> {
+pub fn dispatch(
+    cmd: TabCmd,
+    ctx: &crate::cli::business_rpc::ClientContext,
+    format: Format,
+) -> Result<(), CliError> {
     let info = ensure_daemon().context("ensure daemon is running")?;
     match cmd.sub {
-        TabSub::List(args) => run_list(info.sock_path, args, format),
-        TabSub::Create(args) => run_create(info.sock_path, args, format),
-        TabSub::Close(args) => run_close(info.sock_path, args, format),
-        TabSub::Select(args) => run_select(info.sock_path, args, format),
-        TabSub::Borrow(args) => run_borrow(info.sock_path, args, format),
-        TabSub::Return(args) => run_return(info.sock_path, args, format),
+        TabSub::List(args) => run_list(info.sock_path, ctx, args, format),
+        TabSub::Create(args) => run_create(info.sock_path, ctx, args, format),
+        TabSub::Close(args) => run_close(info.sock_path, ctx, args, format),
+        TabSub::Select(args) => run_select(info.sock_path, ctx, args, format),
+        TabSub::Borrow(args) => run_borrow(info.sock_path, ctx, args, format),
+        TabSub::Return(args) => run_return(info.sock_path, ctx, args, format),
     }
 }
 
@@ -164,15 +168,21 @@ fn print_payload<T: Serialize>(
     Ok(())
 }
 
-fn run_create(sock: PathBuf, args: TabCreateArgs, format: Format) -> Result<(), CliError> {
-    crate::cli::business_rpc::set_caller_scope(args.scope);
+fn run_create(
+    sock: PathBuf,
+    ctx: &crate::cli::business_rpc::ClientContext,
+    args: TabCreateArgs,
+    format: Format,
+) -> Result<(), CliError> {
+    let op_ctx = ctx.with_scope(args.scope.as_deref());
     let params = TabCreateParams {
         session_id: args.session.unwrap_or_default(),
         url: args.url,
         active: if args.no_active { Some(false) } else { None },
         index: args.index,
     };
-    let reply: TabCreateResult = ipc_call("tab-create-1", Method::ToolTabCreate, sock, params)?;
+    let reply: TabCreateResult =
+        ipc_call("tab-create-1", &op_ctx, Method::ToolTabCreate, sock, params)?;
     print_payload(&reply, format, || {
         println!(
             "tab_id={} window_id={} url={}",
@@ -187,25 +197,37 @@ fn run_create(sock: PathBuf, args: TabCreateArgs, format: Format) -> Result<(), 
     })
 }
 
-fn run_close(sock: PathBuf, args: TabCloseArgs, format: Format) -> Result<(), CliError> {
-    crate::cli::business_rpc::set_caller_scope(args.scope);
+fn run_close(
+    sock: PathBuf,
+    ctx: &crate::cli::business_rpc::ClientContext,
+    args: TabCloseArgs,
+    format: Format,
+) -> Result<(), CliError> {
+    let op_ctx = ctx.with_scope(args.scope.as_deref());
     let params = TabCloseParams {
         session_id: args.session.unwrap_or_default(),
         tab_id: args.tab_id,
     };
-    let reply: TabCloseResult = ipc_call("tab-close-1", Method::ToolTabClose, sock, params)?;
+    let reply: TabCloseResult =
+        ipc_call("tab-close-1", &op_ctx, Method::ToolTabClose, sock, params)?;
     print_payload(&reply, format, || {
         println!("closed tab_id={}", reply.tab_id)
     })
 }
 
-fn run_select(sock: PathBuf, args: TabSelectArgs, format: Format) -> Result<(), CliError> {
-    crate::cli::business_rpc::set_caller_scope(args.scope);
+fn run_select(
+    sock: PathBuf,
+    ctx: &crate::cli::business_rpc::ClientContext,
+    args: TabSelectArgs,
+    format: Format,
+) -> Result<(), CliError> {
+    let op_ctx = ctx.with_scope(args.scope.as_deref());
     let params = TabSelectParams {
         session_id: args.session.unwrap_or_default(),
         tab_id: args.tab_id,
     };
-    let reply: TabSelectResult = ipc_call("tab-select-1", Method::ToolTabSelect, sock, params)?;
+    let reply: TabSelectResult =
+        ipc_call("tab-select-1", &op_ctx, Method::ToolTabSelect, sock, params)?;
     print_payload(&reply, format, || {
         println!(
             "selected tab_id={} window_id={}",
@@ -214,18 +236,23 @@ fn run_select(sock: PathBuf, args: TabSelectArgs, format: Format) -> Result<(), 
     })
 }
 
-fn run_borrow(sock: PathBuf, args: TabBorrowArgs, format: Format) -> Result<(), CliError> {
+fn run_borrow(
+    sock: PathBuf,
+    ctx: &crate::cli::business_rpc::ClientContext,
+    args: TabBorrowArgs,
+    format: Format,
+) -> Result<(), CliError> {
     if args.no_confirm {
         crate::cli::interaction_policy::warn_legacy_override("--no-confirm");
     }
-    crate::cli::business_rpc::set_caller_scope(args.scope);
+    let op_ctx = ctx.with_scope(args.scope.as_deref());
     let params = TabBorrowParams {
         session_id: args.session.unwrap_or_default(),
         tab_id: args.tab_id,
         confirmation_timeout_ms: args.timeout,
         confirm: None,
     };
-    let reply: TabBorrowResult = crate::cli::business_rpc::call(
+    let reply: TabBorrowResult = op_ctx.call(
         sock,
         "tab-borrow-1",
         Method::ToolTabBorrow,
@@ -243,13 +270,19 @@ fn run_borrow(sock: PathBuf, args: TabBorrowArgs, format: Format) -> Result<(), 
     })
 }
 
-fn run_return(sock: PathBuf, args: TabReturnArgs, format: Format) -> Result<(), CliError> {
-    crate::cli::business_rpc::set_caller_scope(args.scope);
+fn run_return(
+    sock: PathBuf,
+    ctx: &crate::cli::business_rpc::ClientContext,
+    args: TabReturnArgs,
+    format: Format,
+) -> Result<(), CliError> {
+    let op_ctx = ctx.with_scope(args.scope.as_deref());
     let params = TabReturnParams {
         session_id: args.session.unwrap_or_default(),
         tab_id: args.tab_id,
     };
-    let reply: TabReturnResult = ipc_call("tab-return-1", Method::ToolTabReturn, sock, params)?;
+    let reply: TabReturnResult =
+        ipc_call("tab-return-1", &op_ctx, Method::ToolTabReturn, sock, params)?;
     print_payload(&reply, format, || {
         let suffix = if reply.fallback {
             " (fallback window)"
@@ -265,6 +298,7 @@ fn run_return(sock: PathBuf, args: TabReturnArgs, format: Format) -> Result<(), 
 
 fn ipc_call<P, R>(
     rpc_id_prefix: &'static str,
+    ctx: &crate::cli::business_rpc::ClientContext,
     method: Method,
     sock: PathBuf,
     params: P,
@@ -273,21 +307,20 @@ where
     P: serde::Serialize + Send + 'static,
     R: serde::de::DeserializeOwned + Send + 'static,
 {
-    crate::cli::business_rpc::call::<P, R>(
-        sock,
-        rpc_id_prefix,
-        method,
-        Some(params),
-        TOOL_IPC_TIMEOUT,
-    )
+    ctx.call::<P, R>(sock, rpc_id_prefix, method, Some(params), TOOL_IPC_TIMEOUT)
 }
 
-fn run_list(sock: PathBuf, args: TabListArgs, format: Format) -> Result<(), CliError> {
+fn run_list(
+    sock: PathBuf,
+    ctx: &crate::cli::business_rpc::ClientContext,
+    args: TabListArgs,
+    format: Format,
+) -> Result<(), CliError> {
     let params = TabListParams {
         session_id: args.session.unwrap_or_default(),
         scope: args.scope.into(),
     };
-    let reply: TabListResult = call(sock, params)?;
+    let reply: TabListResult = call(sock, ctx, params)?;
     match format {
         Format::Json => {
             let json = serde_json::to_string_pretty(&reply)
@@ -371,8 +404,12 @@ fn truncate(s: &str, max: usize) -> String {
     out
 }
 
-fn call(sock: PathBuf, params: TabListParams) -> Result<TabListResult, CliError> {
-    crate::cli::business_rpc::call::<TabListParams, TabListResult>(
+fn call(
+    sock: PathBuf,
+    ctx: &crate::cli::business_rpc::ClientContext,
+    params: TabListParams,
+) -> Result<TabListResult, CliError> {
+    ctx.call::<TabListParams, TabListResult>(
         sock,
         "tab-list",
         Method::ToolTabList,

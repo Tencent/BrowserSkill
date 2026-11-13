@@ -91,7 +91,7 @@ async fn handshake_as_ext(
             version: "131.0".into(),
         },
         min_compatible_peer: Some("0.1.0-dev.0".parse().unwrap()),
-        min_compatible_protocol: Some("1.0".into()),
+        min_compatible_protocol: Some(bsk::daemon::state::MIN_COMPATIBLE_PROTOCOL.into()),
         label: "Test".into(),
     };
     let req = RequestFrame {
@@ -557,7 +557,7 @@ async fn concurrent_same_session_dispatch_returns_session_busy_immediately() {
             .as_ref()
             .and_then(|d| d.get("reason"))
             .and_then(|v| v.as_str()),
-        Some(bsk::rpc_reason::SESSION_BUSY)
+        Some(bsk_protocol::RpcErrorReason::SessionBusy.as_str())
     );
 
     reply_tx
@@ -956,7 +956,7 @@ async fn native_input_retains_terminal_reason_after_user_moves_tab() {
                     "cancelled tool did not finish cleanup within 2s"
                 );
             }
-            data["reason"] = json!(bsk::rpc_reason::SESSION_USER_MOVED_TAB);
+            data["reason"] = json!(bsk_protocol::RpcErrorReason::UserMovedTab.as_str());
             data["phase"] = json!(if cleanup_effect.is_some() {
                 "execution"
             } else {
@@ -1075,7 +1075,7 @@ async fn snapshot_outer_timeout_preserves_terminal_reason_without_extending_wait
         if end_session {
             assert_eq!(
                 error.data,
-                Some(json!({"reason": bsk::rpc_reason::SESSION_USER_MOVED_TAB}))
+                Some(json!({"reason": bsk_protocol::RpcErrorReason::UserMovedTab.as_str()}))
             );
             assert!(
                 rendered
@@ -1175,7 +1175,7 @@ async fn evaluate_cleanup_timeout_preserves_session_termination() {
             }
         );
         let mut expected = json!({"reason": if end_session {
-            bsk::rpc_reason::SESSION_USER_MOVED_TAB
+            bsk_protocol::RpcErrorReason::UserMovedTab.as_str()
         } else {
             "cancel_cleanup_timeout"
         }});
@@ -1308,7 +1308,10 @@ async fn session_end_preserves_cleanup_details_and_transfer_results() {
                 assert_eq!(actual.code, expected.code);
                 assert_eq!(actual.message, expected.message);
                 let data = actual.data.as_ref().unwrap();
-                assert_eq!(data["reason"], bsk::rpc_reason::SESSION_USER_MOVED_TAB);
+                assert_eq!(
+                    data["reason"],
+                    bsk_protocol::RpcErrorReason::UserMovedTab.as_str()
+                );
                 match expected.data.unwrap() {
                     serde_json::Value::Object(fields) => {
                         for (key, value) in fields {

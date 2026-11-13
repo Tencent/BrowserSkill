@@ -14,14 +14,14 @@ use tokio::{
 };
 
 #[tokio::test]
-async fn drag_and_step_gate_new_gestures_but_keep_legacy_drags_working() {
-    for protocol in ["1.6", "1.7"] {
+async fn drag_and_step_gate_pre_2_0_daemons_and_forward_drag_modes_under_2_0() {
+    for protocol in ["1.9", "2.0"] {
         for step in [false, true] {
             for click_mode in [false, true] {
                 let home = tempfile::tempdir_in("/tmp").unwrap();
                 let sock = home.path().join("ipc.sock");
                 let listener = UnixListener::bind(&sock).unwrap();
-                let info = DaemonInfo::now(std::process::id(), sock.clone(), 0, "0.3.3");
+                let info = DaemonInfo::now(std::process::id(), sock.clone(), 0, "0.5.0");
                 std::fs::write(
                     home.path().join("daemon.json"),
                     serde_json::to_vec(&info).unwrap(),
@@ -40,14 +40,16 @@ async fn drag_and_step_gate_new_gestures_but_keep_legacy_drags_working() {
                         seen.lock().unwrap().push(method.to_owned());
                         let result = match method {
                             "system.status" => {
-                                json!({"daemon_version":"0.3.3","protocol_version":protocol,
+                                json!({"daemon_version":"0.5.0","protocol_version":protocol,
                                 "pid":std::process::id(),"uptime_secs":0,"ws_port":0,"sock_path":sock,
                                 "browsers":[],"sessions":[]})
                             }
                             "tool.drag" => {
                                 json!({"tab_id":42,"source":{"x":10,"y":10},"target":{"x":30,"y":10}})
                             }
-                            "tool.cooperate" => json!({"tab_id":42,"context_id":"fresh"}),
+                            "tool.cooperate" => {
+                                json!({"tab_id":42,"context_id":"fresh","control_policy":"auto"})
+                            }
                             _ => panic!("unexpected method: {method}"),
                         };
                         let mut bytes =
@@ -94,7 +96,7 @@ async fn drag_and_step_gate_new_gestures_but_keep_legacy_drags_working() {
                 server.abort();
                 let _ = server.await;
                 let reply: Value = serde_json::from_slice(&out.stdout).unwrap();
-                let blocked = protocol == "1.6" && click_mode;
+                let blocked = protocol == "1.9";
                 assert_eq!(
                     out.status.success(),
                     !blocked,
@@ -102,7 +104,11 @@ async fn drag_and_step_gate_new_gestures_but_keep_legacy_drags_working() {
                 );
                 let methods = methods.lock().unwrap();
                 if blocked {
-                    assert!(reply["message"].as_str().unwrap().contains("protocol 1.7"));
+                    let msg = reply["message"].as_str().unwrap();
+                    assert!(
+                        msg.contains("incompatible") && msg.contains("2.0"),
+                        "{reply}"
+                    );
                     assert!(
                         methods.iter().all(|m| m == "system.status"),
                         "input sent: {methods:?}"

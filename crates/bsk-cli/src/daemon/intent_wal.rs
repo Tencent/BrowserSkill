@@ -144,23 +144,15 @@ impl IntentWal {
         Self::new(None)
     }
 
-    /// True for every tool RPC that can mutate page/application state (`RM-03`).
-    pub fn is_mutating_tool(method: &Method) -> bool {
-        matches!(
-            method,
-            Method::ToolClick
-                | Method::ToolFill
-                | Method::ToolPress
-                | Method::ToolSelect
-                | Method::ToolUpload
-                | Method::ToolDrag
-                | Method::ToolEvaluate
-        )
+    /// True for every tool RPC call whose params require Intent WAL protection.
+    pub fn is_wal_tracked(method: &Method, params: &Value) -> bool {
+        method.wal_tracked_with_params(params)
     }
 
     /// Extract a strictly redacted target locator summary from `params`.
     /// Never includes `fill` text values, `press` keys, `select` option values,
-    /// `upload` local paths/filenames, or `evaluate` JS source/arguments.
+    /// `upload` local paths/filenames, `navigate` query strings/fragments/userinfo,
+    /// `dialog.accept` prompt text, `debug` headers/bodies, or `evaluate` JS source.
     pub fn extract_target_summary(method: &Method, params: &Value) -> String {
         match method {
             Method::ToolDrag => {
@@ -187,6 +179,59 @@ impl IntentWal {
                     .and_then(Value::as_array)
                     .map_or(0, Vec::len);
                 format!("{loc} (files={count})")
+            }
+            Method::ToolDownload => {
+                let loc = summarize_locator(params).unwrap_or_else(|| "page".to_string());
+                format!("download:{loc}")
+            }
+            Method::ToolNavigate => {
+                let target = params
+                    .get("url")
+                    .and_then(Value::as_str)
+                    .map(|raw| {
+                        reqwest::Url::parse(raw).map_or_else(
+                            |_| {
+                                let stripped = raw.split(['?', '#']).next().unwrap_or(raw);
+                                sanitize_summary_token(stripped)
+                            },
+                            |parsed| {
+                                let origin = parsed.origin().ascii_serialization();
+                                let path = sanitize_summary_token(parsed.path());
+                                if origin == "null" {
+                                    format!("{}:{path}", parsed.scheme())
+                                } else {
+                                    format!("{origin}{path}")
+                                }
+                            },
+                        )
+                    })
+                    .unwrap_or_else(|| "url:unspecified".to_string());
+                format!("navigate:{target}")
+            }
+            Method::ToolNavigateBack => "navigate:back".to_string(),
+            Method::ToolNavigateForward => "navigate:forward".to_string(),
+            Method::ToolReload => "reload".to_string(),
+            Method::ToolDialogAccept => {
+                let id = params
+                    .get("dialog_id")
+                    .and_then(Value::as_str)
+                    .map(sanitize_summary_token)
+                    .unwrap_or_else(|| "active".to_string());
+                format!("dialog:{id}")
+            }
+            Method::ToolDebug => {
+                let action = params
+                    .get("action")
+                    .and_then(Value::as_str)
+                    .map(sanitize_summary_token)
+                    .unwrap_or_else(|| "unknown".to_string());
+                if action == "replay"
+                    && let Some(req_id) = params.get("request_id").and_then(Value::as_str)
+                {
+                    format!("debug:replay:{}", sanitize_summary_token(req_id))
+                } else {
+                    format!("debug:{action}")
+                }
             }
             Method::ToolEvaluate => {
                 let len = params
@@ -222,7 +267,7 @@ impl IntentWal {
                 RECOVERY_GUIDANCE
             ),
             data: Some(json!({
-                "reason": crate::rpc_reason::UNCERTAIN_PRIOR_EFFECT,
+                "reason": bsk_protocol::RpcErrorReason::UncertainPriorEffect.as_str(),
                 "effect_state": "none",
                 "dispatched": false,
                 "session_id": prior.session_id,
@@ -870,39 +915,48 @@ mod tests {
 
     #[test]
     fn mutating_classification_covers_all_mutators_and_allows_readonly_tools() {
-        for m in [
-            Method::ToolClick,
-            Method::ToolFill,
-            Method::ToolPress,
-            Method::ToolSelect,
-            Method::ToolUpload,
-            Method::ToolDrag,
-            Method::ToolEvaluate,
+        for (m, params) in [
+            (Method::ToolClick, json!({})),
+            (Method::ToolFill, json!({})),
+            (Method::ToolPress, json!({})),
+            (Method::ToolSelect, json!({})),
+            (Method::ToolUpload, json!({})),
+            (Method::ToolDownload, json!({})),
+            (Method::ToolDrag, json!({})),
+            (Method::ToolEvaluate, json!({})),
+            (Method::ToolNavigate, json!({})),
+            (Method::ToolNavigateBack, json!({})),
+            (Method::ToolNavigateForward, json!({})),
+            (Method::ToolReload, json!({})),
+            (Method::ToolDialogAccept, json!({})),
+            (Method::ToolDebug, json!({ "action": "replay" })),
         ] {
             assert!(
-                IntentWal::is_mutating_tool(&m),
+                IntentWal::is_wal_tracked(&m, &params),
                 "{m:?} must be guarded by IntentWal"
             );
         }
 
-        for readonly in [
-            Method::ToolCooperate,
-            Method::ToolObserve,
-            Method::ToolSnapshot,
-            Method::ToolRead,
-            Method::ToolExtract,
-            Method::ToolGetHtml,
-            Method::ToolScreenshot,
-            Method::ToolScreenshotFullPage,
-            Method::ToolConsole,
-            Method::ToolNetwork,
-            Method::ToolTabList,
-            Method::ToolTabCreate,
-            Method::SessionStop,
-            Method::LedgerRequest,
+        for (readonly, params) in [
+            (Method::ToolCooperate, json!({})),
+            (Method::ToolObserve, json!({})),
+            (Method::ToolSnapshot, json!({})),
+            (Method::ToolRead, json!({})),
+            (Method::ToolExtract, json!({})),
+            (Method::ToolGetHtml, json!({})),
+            (Method::ToolScreenshot, json!({})),
+            (Method::ToolScreenshotFullPage, json!({})),
+            (Method::ToolConsole, json!({})),
+            (Method::ToolNetwork, json!({})),
+            (Method::ToolDebug, json!({ "action": "request" })),
+            (Method::ToolDialogDismiss, json!({})),
+            (Method::ToolTabList, json!({})),
+            (Method::ToolTabCreate, json!({})),
+            (Method::SessionStop, json!({})),
+            (Method::LedgerRequest, json!({})),
         ] {
             assert!(
-                !IntentWal::is_mutating_tool(&readonly),
+                !IntentWal::is_wal_tracked(&readonly, &params),
                 "{readonly:?} must NEVER be blocked by IntentWal"
             );
         }

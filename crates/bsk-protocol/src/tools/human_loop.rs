@@ -28,6 +28,7 @@ pub struct HelpTarget {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct RequestHelpParams {
     pub session_id: String,
     /// Target tab. Defaults to the Agent Window's active tab.

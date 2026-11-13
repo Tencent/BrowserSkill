@@ -230,23 +230,18 @@ pub fn full_handler(status: DaemonStatus, state: Arc<DaemonState>) -> RpcHandler
                     }
                 })
                 .flatten();
-            let tab_transition = matches!(
-                method,
-                Method::ToolTabCreate
-                    | Method::ToolTabSelect
-                    | Method::ToolTabBorrow
-                    | Method::ToolTabClose
-                    | Method::ToolTabReturn
-            )
-            .then(|| {
-                let sid = params
-                    .get("session_id")
-                    .and_then(Value::as_str)
-                    .filter(|s| !s.is_empty())
-                    .map(|s| SessionId(s.to_string()))?;
-                Some((sid, method.clone(), params.clone()))
-            })
-            .flatten();
+            let tab_transition = method
+                .spec()
+                .tab_transition
+                .then(|| {
+                    let sid = params
+                        .get("session_id")
+                        .and_then(Value::as_str)
+                        .filter(|s| !s.is_empty())
+                        .map(|s| SessionId(s.to_string()))?;
+                    Some((sid, method.clone(), params.clone()))
+                })
+                .flatten();
             let mut ticket = if method.is_tool() {
                 match state.audit.begin(params.get("session_id").and_then(Value::as_str).unwrap_or(""), &method, &params) {
                     Ok(ticket) => ticket,
@@ -358,7 +353,7 @@ pub fn full_handler(status: DaemonStatus, state: Arc<DaemonState>) -> RpcHandler
                 Method::TransferFinish => handle_transfer_finish(&state, params),
                 Method::TransferRead => handle_transfer_read(&state, params),
                 Method::TransferRelease => handle_transfer_release(&state, params),
-                Method::ToolVideo => handle_video(&state, rpc_id, params).await,
+                Method::ToolVideo => handle_video(&state, rpc_id, params, ticket.take()).await,
                 Method::ToolTabList
                 | Method::ToolTabCreate
                 | Method::ToolTabClose
@@ -509,26 +504,13 @@ fn strip_envelope_scope_meta(params: &mut Value) -> EnvelopeScopeMeta {
     meta
 }
 
-fn method_uses_implicit_session(method: &Method, params: &Value) -> bool {
-    match method {
-        Method::SessionRunLog | Method::TransferBegin => true,
-        Method::ToolVideo => params.get("session_id").is_some(),
-        Method::ToolWaitMs | Method::ToolSessionStart | Method::ToolSessionStop => false,
-        other => other.is_tool(),
+fn strip_daemon_internal_fields(params: &Value) -> Value {
+    let mut cleaned = params.clone();
+    if let Some(object) = cleaned.as_object_mut() {
+        object.remove("_audit_id");
+        object.remove("_operation_id");
     }
-}
-
-fn method_auto_injects_target_context(method: &Method, params: &Value) -> bool {
-    match method {
-        Method::ToolObserve => params.get("probe_hover") == Some(&Value::Bool(true)),
-        Method::ToolDebug => params
-            .get("action")
-            .and_then(|v| {
-                serde_json::from_value::<bsk_protocol::tools::DebugAction>(v.clone()).ok()
-            })
-            .is_some_and(|action| action.cooperation_guarded()),
-        other => other.accepts_action_metadata(),
-    }
+    cleaned
 }
 
 fn prepare_implicit_session_and_evidence(
@@ -537,9 +519,10 @@ fn prepare_implicit_session_and_evidence(
     params: &mut Value,
     scope_meta: &EnvelopeScopeMeta,
 ) -> Result<(), RpcError> {
-    if !method_uses_implicit_session(method, params) {
+    if !method.implicit_session_with_params(params) {
         return Ok(());
     }
+    let auto_inject_context = method.auto_injects_context_with_params(params);
     if params.is_null() {
         *params = serde_json::json!({});
     }
@@ -588,7 +571,7 @@ fn prepare_implicit_session_and_evidence(
         }
         _ => {
             obj.remove("context_id");
-            if method_auto_injects_target_context(method, &Value::Object(obj.clone()))
+            if auto_inject_context
                 && let Some(uuid) = state.scopes.implicit_target_context(&session_id, tab_id)
             {
                 obj.insert("context_id".into(), Value::String(uuid));
@@ -613,16 +596,32 @@ fn prepare_implicit_session_and_evidence(
 }
 
 /// Stored videos remain addressable after session teardown. Only start takes
-/// the session queue; status, stop and artifact transfer cannot wait behind a
-/// long page action. The extension validates connection ownership + capability.
-async fn handle_video(state: &Arc<DaemonState>, rpc_id: RpcId, params: Value) -> ResponseBody {
+/// the session queue (and is dialog-gated); status, stop and artifact transfer
+/// cannot wait behind a long page action. The extension validates connection
+/// ownership + capability.
+async fn handle_video(
+    state: &Arc<DaemonState>,
+    rpc_id: RpcId,
+    params: Value,
+    mut ticket: Option<super::audit::Ticket>,
+) -> ResponseBody {
     use super::browsers::SendError;
-    if let Err(error) = serde_json::from_value::<bsk_protocol::tools::VideoParams>(params.clone()) {
-        return ResponseBody::Err(invalid_params(error.to_string()));
+    if let Err(error) = serde_json::from_value::<bsk_protocol::tools::VideoParams>(
+        strip_daemon_internal_fields(&params),
+    ) {
+        let body = ResponseBody::Err(invalid_params(error.to_string()));
+        if let Some(ticket) = ticket.take() {
+            state.audit.finish(ticket, &body);
+        }
+        return body;
     }
     let browser = if let Some(session_id) = params.get("session_id").and_then(Value::as_str) {
         let Some(session) = state.sessions.get(&SessionId(session_id.into())) else {
-            return ResponseBody::Err(invalid_params("Video task session is no longer active"));
+            let body = ResponseBody::Err(invalid_params("Video task session is no longer active"));
+            if let Some(ticket) = ticket.take() {
+                state.audit.finish(ticket, &body);
+            }
+            return body;
         };
         state.browsers.get(&session.browser_id)
     } else {
@@ -632,19 +631,34 @@ async fn handle_video(state: &Arc<DaemonState>, rpc_id: RpcId, params: Value) ->
         {
             Ok(browser) => Some(browser),
             Err(error) => {
-                return ResponseBody::Err(invalid_params(format!(
+                let body = ResponseBody::Err(invalid_params(format!(
                     "Select a connected browser with --browser: {error:?}"
                 )));
+                if let Some(ticket) = ticket.take() {
+                    state.audit.finish(ticket, &body);
+                }
+                return body;
             }
         }
     };
     let Some(browser) = browser else {
-        return ResponseBody::Err(invalid_params(
+        let body = ResponseBody::Err(invalid_params(
             "Recording browser is disconnected; reconnect it to retrieve the video",
         ));
+        if let Some(ticket) = ticket.take() {
+            state.audit.finish(ticket, &body);
+        }
+        return body;
     };
-    let mut result = if params.get("action").and_then(Value::as_str) == Some("start") {
-        handle_tool_dispatch(state, rpc_id, Method::ToolVideo, params).await
+    let mut result = if Method::ToolVideo.dialog_gated_with_params(&params) {
+        handle_dialog_aware_dispatch(
+            Arc::clone(state),
+            rpc_id,
+            Method::ToolVideo,
+            params,
+            ticket.take(),
+        )
+        .await
     } else {
         let id = format!("video-{}", uuid::Uuid::new_v4().simple());
         let receiver = match browser.dispatch(bsk_protocol::RequestFrame {
@@ -653,11 +667,19 @@ async fn handle_video(state: &Arc<DaemonState>, rpc_id: RpcId, params: Value) ->
             params: Some(params),
         }) {
             Ok(receiver) => receiver,
-            Err(SendError::Terminated(error) | SendError::UnsupportedFeature(error)) => {
-                return ResponseBody::Err(error);
+            Err(SendError::Terminated(error)) => {
+                let body = ResponseBody::Err(error);
+                if let Some(ticket) = ticket.take() {
+                    state.audit.finish(ticket, &body);
+                }
+                return body;
             }
             Err(SendError::SinkClosed) => {
-                return ResponseBody::Err(invalid_params("Recording browser disconnected"));
+                let body = ResponseBody::Err(invalid_params("Recording browser disconnected"));
+                if let Some(ticket) = ticket.take() {
+                    state.audit.finish(ticket, &body);
+                }
+                return body;
             }
         };
         let reply = tokio::time::timeout(Duration::from_secs(32), receiver).await;
@@ -678,6 +700,9 @@ async fn handle_video(state: &Arc<DaemonState>, rpc_id: RpcId, params: Value) ->
     };
     if let ResponseBody::Ok(value) = &mut result {
         value["browser"] = Value::String(browser.id.0.clone());
+    }
+    if let Some(ticket) = ticket.take() {
+        state.audit.finish(ticket, &result);
     }
     result
 }
@@ -702,14 +727,7 @@ async fn handle_dialog_aware_dispatch(
     mut params: Value,
     ticket: Option<super::audit::Ticket>,
 ) -> ResponseBody {
-    if matches!(
-        method,
-        Method::ToolDialogStatus
-            | Method::ToolDialogAccept
-            | Method::ToolDialogDismiss
-            | Method::ToolRecordStop
-            | Method::ToolDebug
-    ) {
+    if !method.dialog_gated_with_params(&params) {
         let body = handle_tool_dispatch(&state, cli_rpc_id, method, params).await;
         if let Some(ticket) = ticket {
             state.audit.finish(ticket, &body);
@@ -725,7 +743,13 @@ async fn handle_dialog_aware_dispatch(
         .register(session, &cli_rpc_id, method.clone())
     {
         Ok(operation) => operation,
-        Err(error) => return ResponseBody::Err(error),
+        Err(error) => {
+            let body = ResponseBody::Err(error);
+            if let Some(ticket) = ticket {
+                state.audit.finish(ticket, &body);
+            }
+            return body;
+        }
     };
     if let Some(params) = params.as_object_mut() {
         params.insert("_operation_id".into(), Value::String(operation.id.clone()));
@@ -767,10 +791,11 @@ async fn handle_operation(
     method: Method,
     params: Value,
 ) -> ResponseBody {
-    let p: bsk_protocol::tools::OperationParams = match serde_json::from_value(params) {
-        Ok(p) => p,
-        Err(error) => return ResponseBody::Err(invalid_params(error.to_string())),
-    };
+    let p: bsk_protocol::tools::OperationParams =
+        match serde_json::from_value(strip_daemon_internal_fields(&params)) {
+            Ok(p) => p,
+            Err(error) => return ResponseBody::Err(invalid_params(error.to_string())),
+        };
     if p.wait_ms.is_some_and(|ms| ms > 60000) {
         return ResponseBody::Err(invalid_params("wait_ms must be 0..60000"));
     }
@@ -828,11 +853,13 @@ async fn handle_tool_dispatch(
     };
     // Reject before allocating local transfer resources. The extension also
     // enforces this for third-party gateways backed by a local-mode daemon.
-    if state.config.server.is_some() && matches!(method, Method::ToolUpload | Method::ToolDownload)
-    {
+    if state.config.server.is_some() && !method.spec().remote_allowed {
         return ResponseBody::Err(RpcError {
             code: ErrorCode::Unsupported,
-            message: "upload and download are not supported for remote browsers".into(),
+            message: format!(
+                "{} is not supported for remote browsers",
+                method.wire_name()
+            ),
             data: None,
         });
     }
@@ -854,7 +881,7 @@ async fn handle_tool_dispatch(
             data: None,
         });
     }
-    let wal_mutating = super::intent_wal::IntentWal::is_mutating_tool(&method);
+    let wal_mutating = super::intent_wal::IntentWal::is_wal_tracked(&method, &params);
     let wal_tab_id = wal_mutating
         .then(|| {
             params
@@ -886,10 +913,11 @@ async fn handle_tool_dispatch(
             Some("activity" | "wait")
         )
     {
-        let p: bsk_protocol::tools::DebugParams = match serde_json::from_value(params) {
-            Ok(value) => value,
-            Err(error) => return ResponseBody::Err(invalid_params(error.to_string())),
-        };
+        let p: bsk_protocol::tools::DebugParams =
+            match serde_json::from_value(strip_daemon_internal_fields(&params)) {
+                Ok(value) => value,
+                Err(error) => return ResponseBody::Err(invalid_params(error.to_string())),
+            };
         if p.wait_ms.is_some_and(|ms| ms > 60000)
             || p.command_id.as_ref().is_some_and(|id| id.len() > 200)
         {
@@ -943,25 +971,13 @@ async fn handle_tool_dispatch(
             object.remove("confirm");
         }
     }
-    // Reject unsupported extension features up front before staging transfers or queueing;
-    // `BrowserClient::dispatch` repeats this check at the WebSocket boundary as a second gate.
-    if let Some(session) = state.sessions.get(&session_id)
-        && let Some(browser) = state.browsers.get(&session.browser_id)
-        && let Err(error) = bsk_protocol::compatibility::check_request(
-            &method,
-            &params,
-            bsk_protocol::compatibility::Peer::Extension,
-            &browser.extension_protocol_version,
-        )
-    {
-        return ResponseBody::Err(error);
-    }
     let mut download_transfer_id: Option<String> = None;
     if method == Method::ToolUpload {
-        let mut upload: UploadParams = match serde_json::from_value(params) {
-            Ok(v) => v,
-            Err(err) => return ResponseBody::Err(invalid_params(err.to_string())),
-        };
+        let mut upload: UploadParams =
+            match serde_json::from_value(strip_daemon_internal_fields(&params)) {
+                Ok(v) => v,
+                Err(err) => return ResponseBody::Err(invalid_params(err.to_string())),
+            };
         if upload.files.is_empty() || upload.files.len() > super::file_transfer::MAX_UPLOAD_FILES {
             return ResponseBody::Err(invalid_params(format!(
                 "upload requires 1..={} files",
@@ -978,10 +994,11 @@ async fn handle_tool_dispatch(
         }
         params = serde_json::to_value(upload).unwrap_or(Value::Null);
     } else if method == Method::ToolDownload {
-        let mut download: DownloadParams = match serde_json::from_value(params) {
-            Ok(v) => v,
-            Err(err) => return ResponseBody::Err(invalid_params(err.to_string())),
-        };
+        let mut download: DownloadParams =
+            match serde_json::from_value(strip_daemon_internal_fields(&params)) {
+                Ok(v) => v,
+                Err(err) => return ResponseBody::Err(invalid_params(err.to_string())),
+            };
         let staging = match state.transfers.begin_download(&session_id.0) {
             Ok(v) => v,
             Err(err) => return ResponseBody::Err(err),
@@ -1002,24 +1019,13 @@ async fn handle_tool_dispatch(
         object.insert("_operation_id".into(), operation_id);
     }
     let entry = inflight_guard.entry();
-    // `record_stop` must reach the extension while `record_await` holds the
-    // serial busy lock — finishing the recording unblocks await.
-    let independent_control = method == Method::ToolCooperate
-        && params.get("action").and_then(Value::as_str) != Some("enable");
     let wal_ticket = wal_mutating.then(|| {
         let op_id = params.get("_operation_id").and_then(Value::as_str);
         state
             .intent_wal
             .begin_dispatch(&session_id, wal_tab_id, op_id, &method, &params)
     });
-    let outcome = if independent_control
-        || matches!(
-            method,
-            Method::ToolRecordStop
-                | Method::ToolDialogStatus
-                | Method::ToolDialogAccept
-                | Method::ToolDialogDismiss
-        ) {
+    let outcome = if method.queue_unlocked_with_params(&params) {
         state
             .tool_queues
             .dispatch_unlocked(&session_id, method.clone(), params, timeout, Some(entry))
@@ -1090,7 +1096,7 @@ async fn handle_tool_dispatch(
             let mut error = err.into_rpc();
             if busy {
                 error.data = Some(serde_json::json!({
-                    "reason": crate::rpc_reason::SESSION_BUSY,
+                    "reason": bsk_protocol::RpcErrorReason::SessionBusy.as_str(),
                     "dispatched": false,
                     "activity": state.tool_queues.activity(&session_id).ok(),
                     "wait": { "action": "wait", "session_id": session_id.0, "wait_ms": 10000 },
@@ -1188,7 +1194,7 @@ async fn handle_wait_ms(
     rpc_id: RpcId,
     params: Value,
 ) -> ResponseBody {
-    let params: WaitMsParams = match serde_json::from_value(params) {
+    let params: WaitMsParams = match serde_json::from_value(strip_daemon_internal_fields(&params)) {
         Ok(p) => p,
         Err(err) => {
             return ResponseBody::Err(RpcError {
@@ -1349,7 +1355,7 @@ fn tool_dispatch_timeout(params: &Value) -> Result<Duration, RpcError> {
 fn tool_dispatch_transport_timeout(method: &Method, params: &Value) -> Result<Duration, RpcError> {
     if *method == Method::ToolCooperate {
         let parsed: bsk_protocol::tools::CooperateParams =
-            serde_json::from_value(params.clone())
+            serde_json::from_value(strip_daemon_internal_fields(params))
                 .map_err(|error| invalid_params(error.to_string()))?;
         if parsed.timeout_ms.is_some_and(|ms| ms > 25_000) {
             return Err(invalid_params("cooperation wait is bounded to 25000ms"));
@@ -1594,7 +1600,7 @@ pub(super) async fn handle_session_start_scoped(
                             binding.session_id, binding.browser_id, selector
                         ),
                         data: Some(serde_json::json!({
-                            "reason": crate::rpc_reason::SCOPE_BROWSER_CONFLICT,
+                            "reason": bsk_protocol::RpcErrorReason::ScopeBrowserConflict.as_str(),
                             "session_id": binding.session_id.0,
                             "bound_browser": binding.browser_id.0,
                             "requested_browser": selected.id.0,
@@ -1624,7 +1630,7 @@ pub(super) async fn handle_session_start_scoped(
                     binding.session_id
                 ),
                 data: Some(serde_json::json!({
-                    "reason": crate::rpc_reason::SCOPE_INCOGNITO_CONFLICT,
+                    "reason": bsk_protocol::RpcErrorReason::ScopeIncognitoConflict.as_str(),
                     "session_id": binding.session_id.0,
                 })),
             });
@@ -1639,9 +1645,10 @@ pub(super) async fn handle_session_start_scoped(
             };
             return Ok(serde_json::to_value(result).unwrap_or(Value::Null));
         }
-        state
-            .scopes
-            .on_session_ended(&binding.session_id, crate::rpc_reason::BROWSER_DISCONNECTED);
+        state.scopes.on_session_ended(
+            &binding.session_id,
+            bsk_protocol::RpcErrorReason::BrowserDisconnected.as_str(),
+        );
         state.intent_wal.on_session_ended(&binding.session_id);
     }
 
@@ -1857,11 +1864,9 @@ async fn stop_record_session(
             pending.result.clone()
         } else {
             let Some(session) = state.sessions.get(session_id) else {
-                if state
-                    .sessions
-                    .end_info(session_id)
-                    .is_some_and(|end| end.reason == crate::rpc_reason::SESSION_STOPPED)
-                {
+                if state.sessions.end_info(session_id).is_some_and(|end| {
+                    end.reason == bsk_protocol::RpcErrorReason::SessionStopped.as_str()
+                }) {
                     return Ok(CliSessionStopResult {
                         stopped: vec![session_id.0.clone()],
                         ..Default::default()
@@ -1954,9 +1959,10 @@ async fn stop_one_session(
         Ok(stop) => {
             state.transfers.release_session(&session_id.0);
             state.dialog_operations.remove_session(&session_id.0);
-            state
-                .scopes
-                .on_session_ended(session_id, crate::rpc_reason::SESSION_STOPPED);
+            state.scopes.on_session_ended(
+                session_id,
+                bsk_protocol::RpcErrorReason::SessionStopped.as_str(),
+            );
             state.intent_wal.on_session_ended(session_id);
             Ok(CliSessionStopResult {
                 stopped: vec![session_id.0.clone()],
@@ -2061,7 +2067,7 @@ async fn handle_session_stop_all(
                 state.dialog_operations.remove_session(&id.0);
                 state
                     .scopes
-                    .on_session_ended(&id, crate::rpc_reason::SESSION_STOPPED);
+                    .on_session_ended(&id, bsk_protocol::RpcErrorReason::SessionStopped.as_str());
                 state.intent_wal.on_session_ended(&id);
                 stopped.push(id.0);
                 returned_tab_ids.extend(stop.returned_tab_ids);
@@ -3134,7 +3140,7 @@ mod selector_miss_payload_tests {
             browser_name: "chrome".into(),
             browser_version: "131".into(),
             extension_version: "0.1.0-dev.0".into(),
-            extension_protocol_version: "1.0".into(),
+            extension_protocol_version: "2.0".into(),
             label: label.into(),
             sink: BrowserSink { tx },
             pending: Mutex::new(Pending::default()),

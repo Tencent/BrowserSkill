@@ -29,9 +29,7 @@ use tracing::{debug, info, warn};
 
 use super::browsers::{BrowserClient, BrowserId, BrowserSink, Pending};
 use super::peer_authorization::PeerAuthorization;
-use super::state::{
-    DaemonState, LEGACY_MIN_COMPATIBLE_PEER, MIN_COMPATIBLE_PROTOCOL, PROTOCOL_VERSION, SERVER_NAME,
-};
+use super::state::{DaemonState, MIN_COMPATIBLE_PROTOCOL, PROTOCOL_VERSION, SERVER_NAME};
 
 /// Origin is a filtering layer; local identity is established by HMAC below.
 pub(super) fn origin_allowed(origin: &str) -> bool {
@@ -291,9 +289,6 @@ pub(super) async fn drive_connection<S: tokio::io::AsyncRead + tokio::io::AsyncW
     let our_app_version: Version = env!("CARGO_PKG_VERSION")
         .parse()
         .expect("CARGO_PKG_VERSION must be a valid semver");
-    let legacy_min_peer: Version = LEGACY_MIN_COMPATIBLE_PEER
-        .parse()
-        .expect("LEGACY_MIN_COMPATIBLE_PEER must be a valid semver");
     let compat = evaluate_handshake_compat(
         &params.protocol_version,
         params.min_compatible_protocol.as_deref(),
@@ -353,7 +348,7 @@ pub(super) async fn drive_connection<S: tokio::io::AsyncRead + tokio::io::AsyncW
     // have an Agent Window on the extension side.
     state.purge_sessions_of_browser(
         &browser_id,
-        crate::rpc_reason::BROWSER_DISCONNECTED,
+        bsk_protocol::RpcErrorReason::BrowserDisconnected.as_str(),
         "purged stale session before browser reconnect",
     );
     let (tx, mut rx) = mpsc::unbounded_channel::<Frame>();
@@ -398,7 +393,7 @@ pub(super) async fn drive_connection<S: tokio::io::AsyncRead + tokio::io::AsyncW
             .parse()
             .expect("CARGO_PKG_VERSION must be a valid semver"),
         protocol_version: PROTOCOL_VERSION.to_string(),
-        min_compatible_peer: Some(legacy_min_peer),
+        min_compatible_peer: None,
         min_compatible_protocol: Some(MIN_COMPATIBLE_PROTOCOL.to_string()),
     };
     let result = serde_json::to_value(bsk_protocol::system::HandshakeResponse {
@@ -494,7 +489,7 @@ pub(super) async fn drive_connection<S: tokio::io::AsyncRead + tokio::io::AsyncW
         info!(id = %browser_id, generation, "browser disconnected");
         state.purge_sessions_of_browser(
             &browser_id,
-            crate::rpc_reason::BROWSER_DISCONNECTED,
+            bsk_protocol::RpcErrorReason::BrowserDisconnected.as_str(),
             "purged session on browser disconnect",
         );
     } else {
@@ -703,7 +698,11 @@ fn handle_session_window_closed(
         );
         return;
     }
-    if forget_browser_session(state, &session_id, crate::rpc_reason::SESSION_WINDOW_CLOSED) {
+    if forget_browser_session(
+        state,
+        &session_id,
+        bsk_protocol::RpcErrorReason::SessionWindowClosed.as_str(),
+    ) {
         info!(session = %session_id, "session removed: user closed Agent Window");
     } else {
         debug!(session = %session_id, "session.window_closed for unknown session id");
@@ -753,7 +752,7 @@ fn handle_session_ended(state: &Arc<DaemonState>, sender: &BrowserId, payload: &
         return;
     };
     if ended.session_id.is_empty()
-        || ended.reason != crate::rpc_reason::SESSION_USER_MOVED_TAB
+        || ended.reason != bsk_protocol::RpcErrorReason::UserMovedTab.as_str()
         || ended.tab_id == 0
     {
         warn!("invalid session.ended reason or resource identity");
@@ -773,7 +772,11 @@ fn handle_session_ended(state: &Arc<DaemonState>, sender: &BrowserId, payload: &
     // Record the terminal cause on queued and forwarded calls before dropping
     // the queue. This is not the resumable, one-shot user-interrupt marker.
     cancel_session_tools(state, &sid, super::inflight::CancelReason::UserMovedTab);
-    if forget_browser_session(state, &sid, crate::rpc_reason::SESSION_USER_MOVED_TAB) {
+    if forget_browser_session(
+        state,
+        &sid,
+        bsk_protocol::RpcErrorReason::UserMovedTab.as_str(),
+    ) {
         info!(session = %sid, tab_id = ended.tab_id, "session ended: user moved a controlled tab");
     }
 }
@@ -1137,7 +1140,10 @@ mod session_user_interrupt_tests {
         assert!(!state.tool_queues.is_accepting(&sid));
         assert!(!state.session_interrupts.try_consume(&sid));
         let ended = state.sessions.end_info(&sid).unwrap();
-        assert_eq!(ended.reason, crate::rpc_reason::SESSION_USER_MOVED_TAB);
+        assert_eq!(
+            ended.reason,
+            bsk_protocol::RpcErrorReason::UserMovedTab.as_str()
+        );
 
         let Frame::Request(cancel) = rx.recv().await.unwrap() else {
             panic!("cancel expected")
@@ -1156,7 +1162,7 @@ mod session_user_interrupt_tests {
         assert_eq!(error.code, ErrorCode::UserAborted);
         assert_eq!(
             error.data.unwrap()["reason"],
-            crate::rpc_reason::SESSION_USER_MOVED_TAB
+            bsk_protocol::RpcErrorReason::UserMovedTab.as_str()
         );
 
         let later = state
@@ -1174,7 +1180,7 @@ mod session_user_interrupt_tests {
         assert_eq!(later.code, ErrorCode::NotFound);
         assert_eq!(
             later.data.unwrap()["reason"],
-            crate::rpc_reason::SESSION_USER_MOVED_TAB
+            bsk_protocol::RpcErrorReason::UserMovedTab.as_str()
         );
         handle_session_ended(&state, &owner, &user_moved_tab_payload(&sid));
         assert_eq!(

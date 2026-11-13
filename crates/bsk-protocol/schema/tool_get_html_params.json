@@ -1,5 +1,6 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
   "description": "Parameters for `tool.get_html`. Either give a tab and (optionally) a\nsnapshot ref to scope the dump to one subtree, or leave both empty\nto fall back to the Agent Window's active tab and the document\nroot.\n\nThe wire field is `\"ref\"` (a Rust keyword); the Rust binding lives\nin [`Self::ref_`] and uses serde rename / alias so JSON stays clean.",
   "properties": {
     "max_bytes": {

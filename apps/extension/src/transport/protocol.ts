@@ -5,6 +5,7 @@ import {
   type ResultOf,
 } from "./generated/methods";
 import { normalizers } from "./generated/normalizers";
+import * as outputValidators from "./generated/output-validators.js";
 import * as validators from "./generated/validators.js";
 import type { CancelParams, HandshakeResult, RequestFrame, RpcError } from "./types";
 
@@ -37,19 +38,14 @@ function describe(validator: validators.Validator): string {
 }
 
 export function validateCancelParams(value: unknown): value is CancelParams {
-  return validators.wire_CancelParams(value);
+  return validators.canonical_CancelParams(normalizers.CancelParams(value));
 }
 
 export function decodeHandshakeResult(value: unknown): HandshakeResult {
-  if (!validators.wire_HandshakeResponse(value)) {
-    throw new Error(
-      `[handshake] invalid daemon response: ${describe(validators.wire_HandshakeResponse)}`,
-    );
-  }
   const result = normalizers.HandshakeResponse(value);
   if (!validators.canonical_HandshakeResponse(result)) {
     throw new Error(
-      `[handshake] invalid normalized response: ${describe(validators.canonical_HandshakeResponse)}`,
+      `[handshake] invalid daemon response: ${describe(validators.canonical_HandshakeResponse)}`,
     );
   }
   return result as HandshakeResult;
@@ -77,13 +73,6 @@ export function decodeToolRequest(
   }
   const definition = extensionMethods.get(frame.method)!;
   const rawParams = stripEnvelopeParams(frame.params);
-  const wire = validators[`wire_${definition.params}`];
-  if (!wire(rawParams)) {
-    return {
-      ok: false,
-      error: { code: "invalid_params", message: `${frame.method}: ${describe(wire)}` },
-    };
-  }
   const params = normalizers[definition.params](rawParams);
   const canonical = validators[`canonical_${definition.params}`];
   if (!canonical(params)) {
@@ -92,8 +81,8 @@ export function decodeToolRequest(
       error: { code: "invalid_params", message: `${frame.method}: ${describe(canonical)}` },
     };
   }
-  // The only raw-JSON assertion in tool dispatch follows both wire validation
-  // and normalization. Method and parameter schemas come from the same catalog.
+  // The only raw-JSON assertion in tool dispatch follows normalization and
+  // canonical schema validation. Method and parameter schemas come from the catalog.
   return { ok: true, request: { id: frame.id, method: frame.method, params } as ToolRequest };
 }
 
@@ -101,9 +90,10 @@ export function validateToolResult(
   method: ExtensionToolMethod,
   result: unknown,
 ): RpcError | undefined {
+  if (!(import.meta.env.DEV || import.meta.env.MODE === "test")) return;
   const definition = extensionMethods.get(method)!;
-  const validator = validators[`canonical_${definition.result}`];
-  if (validator(result)) return;
+  const validator = outputValidators[`canonical_${definition.result}`];
+  if (!validator || validator(result)) return;
   return {
     code: "protocol_error",
     message: `${method} returned an invalid result: ${describe(validator)}`,

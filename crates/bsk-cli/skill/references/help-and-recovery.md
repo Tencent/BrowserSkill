@@ -57,9 +57,11 @@ on identical failures, repeat unknown effects or switch backends to bypass limit
 On an unrecoverable failure, report the blocker and stop the owned session.
 
 For observation_changed while gathering data on a changing page, use the fixed
-read/extract path (inspect action=read/extract in MCP/DSH). Do not resubmit
+read/extract path (`bsk_inspect` action=read/extract in MCP). Do not resubmit
 arbitrary evaluate in a sync loop. When a script is still needed, state what it
 relies on (`--expect`, or `--depends-on` under strict policy) so only that is
 checked; `evaluate --unverified` is the last resort when that cannot be stated
 ([scripts](cooperation.md#scripts)). A refusal is known to have no effect only
 when effect_state=none; unknown results still require application inspection.
+
+In MCP, handle human/dialog/control flows via `bsk_assist` (`request_help`, `dialog_accept`, `dialog_dismiss`, `tab_borrow`, `emulate`, `operation_await`) and resolve uncertain WAL effects via `bsk_ledger` (`status`, `resolve`).

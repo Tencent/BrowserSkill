@@ -247,45 +247,36 @@ impl SessionLog {
     }
 
     fn finished_ok(&mut self, method: &Method, params: &Value, result: &Value) {
-        match method {
-            Method::ToolCooperate => {
+        use bsk_protocol::RecipeStepKind;
+        match method.spec().recipe_step {
+            RecipeStepKind::Ignore => {}
+            RecipeStepKind::Cooperate => {
                 if let Some(text) = result.pointer("/observation/text").and_then(Value::as_str) {
                     self.observe(text, result["context_id"].as_str(), false);
                 }
             }
-            Method::ToolSnapshot | Method::ToolObserve => {
+            RecipeStepKind::Observe => {
                 if let Some(text) = result["text"].as_str() {
                     self.observe(text, None, params.get("cursor").is_some());
                 }
             }
-            Method::ToolClick => self.action(method, "click", params),
-            Method::ToolFill => self.action(method, "fill", params),
-            Method::ToolSelect => self.action(method, "select", params),
-            Method::ToolPress => self.action(method, "press", params),
-            Method::ToolHover => self.action(method, "hover", params),
-            Method::ToolScrollTo => self.action(method, "scroll-to", params),
-            Method::ToolNavigate => self.navigated(params),
-            Method::ToolWaitForElement if result["satisfied"] == true => {
-                self.push(LoggedStep::Wait);
+            RecipeStepKind::Extract { action } => self.action(method, action, params),
+            RecipeStepKind::Navigate => self.navigated(params),
+            RecipeStepKind::WaitElement => {
+                if result["satisfied"] == true {
+                    self.push(LoggedStep::Wait);
+                }
             }
-            Method::ToolTabBorrow => {
+            RecipeStepKind::TabBorrow => {
                 if let Some(tab) = params["tab_id"].as_i64() {
                     self.log.borrowed_tabs.push(tab);
                 }
             }
-            Method::ToolTabReturn => {
+            RecipeStepKind::TabReturn => {
                 let tab = params["tab_id"].as_i64();
                 self.log.borrowed_tabs.retain(|other| Some(*other) != tab);
             }
-            Method::ToolDrag => self.skip(method, "drag"),
-            Method::ToolWheel => self.skip(method, "wheel"),
-            Method::ToolFocus | Method::ToolBlur => self.skip(method, "focus"),
-            Method::ToolEvaluate => self.skip(method, "script"),
-            Method::ToolUpload | Method::ToolDownload => self.skip(method, "file_transfer"),
-            Method::ToolNavigateBack | Method::ToolNavigateForward | Method::ToolReload => {
-                self.skip(method, "history_navigation");
-            }
-            _ => {}
+            RecipeStepKind::Skip { reason } => self.skip(method, reason),
         }
     }
 
@@ -303,9 +294,9 @@ impl SessionLog {
             Some(effect) => effect != "none",
             // Without a stated effect, only a timeout or a suspended action may have run.
             None => {
-                reason == Some("dialog_pending")
+                reason == Some(bsk_protocol::RpcErrorReason::DialogPending.as_str())
                     || (error.code == ErrorCode::Timeout
-                        && reason != Some(crate::rpc_reason::SESSION_BUSY))
+                        && reason != Some(bsk_protocol::RpcErrorReason::SessionBusy.as_str()))
             }
         };
         if possible {
@@ -581,12 +572,15 @@ mod tests {
         let before = logs.read("s").steps.len();
         let busy = failure(
             ErrorCode::Timeout,
-            json!({"reason":crate::rpc_reason::SESSION_BUSY}),
+            json!({"reason": bsk_protocol::RpcErrorReason::SessionBusy.as_str()}),
         );
         logs.record(|_| true, &Method::ToolClick, &params, &busy);
         assert_eq!(logs.read("s").steps.len(), before, "never reached the page");
         for suspended in [
-            failure(ErrorCode::Unsupported, json!({"reason":"dialog_pending"})),
+            failure(
+                ErrorCode::Unsupported,
+                json!({"reason": bsk_protocol::RpcErrorReason::DialogPending.as_str()}),
+            ),
             failure(ErrorCode::Timeout, json!({})),
         ] {
             logs.record(|_| true, &Method::ToolClick, &params, &suspended);

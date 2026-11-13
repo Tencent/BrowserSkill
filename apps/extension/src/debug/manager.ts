@@ -10,6 +10,7 @@ import {
   type SessionManager,
 } from "@/session-manager/manager";
 import type { CdpRunner, ChromeTabsApi } from "@/tools/shared";
+import { methods } from "@/transport/generated/methods";
 import type { RequestFrame } from "@/transport/types";
 import { type DebugArchive, HISTORY_LIMIT } from "./archive";
 import { debugCapabilities } from "./capabilities";
@@ -39,25 +40,11 @@ const MAX_OPERATIONS = 64;
 const MAX_CONSOLE = 100;
 const WINDOW_MS = 1500;
 const OBSERVE_MS = 15000;
-const ACTIONS = new Set([
-  "tool.navigate",
-  "tool.navigate_back",
-  "tool.navigate_forward",
-  "tool.reload",
-  "tool.click",
-  "tool.fill",
-  "tool.upload",
-  "tool.download",
-  "tool.press",
-  "tool.select",
-  "tool.hover",
-  "tool.evaluate",
-  "tool.wheel",
-  "tool.drag",
-  "tool.scroll_to",
-  "tool.focus",
-  "tool.blur",
-]);
+const ACTIONS = new Set<string>(
+  methods
+    .filter((entry) => entry.owner === "extension" && entry.debug_evidence !== "none")
+    .map((entry) => entry.method),
+);
 
 export interface DebugCdp extends CdpRunner {
   ensureNetworkCapture(tabId: number): Promise<void>;

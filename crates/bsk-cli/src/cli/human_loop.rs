@@ -84,7 +84,11 @@ pub fn parse_target(raw: &str) -> HelpTarget {
     }
 }
 
-pub fn dispatch(args: RequestHelpArgs, format: Format) -> Result<(), CliError> {
+pub fn dispatch(
+    args: RequestHelpArgs,
+    ctx: &crate::cli::business_rpc::ClientContext,
+    format: Format,
+) -> Result<(), CliError> {
     if legacy_help_override_requested() {
         crate::cli::interaction_policy::warn_legacy_override("BSK_REQUEST_HELP=off");
     }
@@ -95,7 +99,7 @@ pub fn dispatch(args: RequestHelpArgs, format: Format) -> Result<(), CliError> {
         .map(serde_json::from_str::<HelpCompletionCriteria>)
         .transpose()
         .context("parse --completion-criteria JSON")?;
-    crate::cli::business_rpc::set_caller_scope(args.scope);
+    let op_ctx = ctx.with_scope(args.scope.as_deref());
     let info = ensure_daemon().context("ensure daemon is running")?;
     let params = RequestHelpParams {
         session_id: args.session.unwrap_or_default(),
@@ -110,16 +114,17 @@ pub fn dispatch(args: RequestHelpArgs, format: Format) -> Result<(), CliError> {
         completion_criteria,
         timeout_ms: Some(args.timeout),
     };
-    let reply = call(info.sock_path, params, args.timeout)?;
+    let reply = call(info.sock_path, &op_ctx, params, args.timeout)?;
     render(&reply, format)
 }
 
 fn call(
     sock: PathBuf,
+    ctx: &crate::cli::business_rpc::ClientContext,
     params: RequestHelpParams,
     timeout_ms: u32,
 ) -> Result<RequestHelpResult, CliError> {
-    crate::cli::business_rpc::call::<RequestHelpParams, RequestHelpResult>(
+    ctx.call::<RequestHelpParams, RequestHelpResult>(
         sock,
         "request-help",
         Method::ToolRequestHelp,

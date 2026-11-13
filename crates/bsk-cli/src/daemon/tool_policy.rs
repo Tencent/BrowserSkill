@@ -1,6 +1,6 @@
-//! Daemon scheduling policy. Exhaustive matching makes every new method choose
-//! a timeout and cancellation policy independently of its browser effect class.
-use bsk_protocol::Method;
+//! Daemon scheduling policy derived directly from compile-time `MethodSpec`
+//! metadata in `bsk-protocol` (zero duplicated tables, zero wildcard arms).
+use bsk_protocol::{DeadlineKind, Method, OutcomeKind};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Deadline {
@@ -9,7 +9,7 @@ pub enum Deadline {
     BorrowConfirmation,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Outcome {
     Ordinary,
     EffectAwareAction,
@@ -25,105 +25,39 @@ pub struct ExecutionPolicy {
 }
 
 pub fn execution_policy(method: &Method) -> ExecutionPolicy {
-    use Method::*;
-    const ORDINARY: ExecutionPolicy = ExecutionPolicy {
-        deadline: Deadline::Standard,
-        response_grace: false,
-        cancel_at_deadline: false,
-        outcome: Outcome::Ordinary,
+    let spec = method.spec();
+    let deadline = match spec.deadline {
+        DeadlineKind::Standard => Deadline::Standard,
+        DeadlineKind::FullPage => Deadline::FullPage,
+        DeadlineKind::BorrowConfirmation => Deadline::BorrowConfirmation,
     };
-    match method {
-        ToolTabBorrow => ExecutionPolicy {
-            deadline: Deadline::BorrowConfirmation,
-            cancel_at_deadline: true,
-            ..ORDINARY
-        },
-        ToolNavigate | ToolNavigateBack | ToolNavigateForward | ToolReload => ExecutionPolicy {
-            response_grace: true,
-            cancel_at_deadline: true,
-            outcome: Outcome::EffectAwareAction,
-            ..ORDINARY
-        },
-        ToolWaitForNavigation | ToolWaitForElement => ExecutionPolicy {
-            response_grace: true,
-            ..ORDINARY
-        },
-        ToolClick | ToolPress | ToolWheel | ToolDrag | ToolFill | ToolSelect | ToolFocus
-        | ToolBlur | ToolHover | ToolScrollTo | ToolEvaluate => ExecutionPolicy {
-            cancel_at_deadline: true,
-            outcome: Outcome::EffectAwareAction,
-            ..ORDINARY
-        },
-        ToolUpload | ToolDownload => ExecutionPolicy {
-            response_grace: true,
-            cancel_at_deadline: true,
-            outcome: Outcome::FileTransfer,
-            ..ORDINARY
-        },
-        ToolScreenshotFullPage => ExecutionPolicy {
-            deadline: Deadline::FullPage,
-            cancel_at_deadline: true,
-            ..ORDINARY
-        },
-        ToolRequestHelp => ExecutionPolicy {
-            response_grace: true,
-            cancel_at_deadline: true,
-            ..ORDINARY
-        },
-        ToolCooperate
-        | AuditRequest
-        | LedgerRequest
-        | LocalAuthPair
-        | LocalAuthDevices
-        | LocalAuthRevoke
-        | LocalAuthRotate
-        | LocalAuthSetMode
-        | SystemHandshake
-        | SystemPing
-        | SystemStatus
-        | SessionStart
-        | SessionStartTracked
-        | SessionRequest
-        | SessionRunLog
-        | SessionStop
-        | SessionStopAll
-        | SessionList
-        | BrowserList
-        | ToolSessionStart
-        | ToolSessionStop
-        | ToolWindowResize
-        | ToolEmulate
-        | ToolTabList
-        | ToolTabCreate
-        | ToolTabClose
-        | ToolTabReturn
-        | ToolTabSelect
-        | ToolSnapshot
-        | ToolObserve
-        | ToolGetHtml
-        | ToolRead
-        | ToolExtract
-        | ToolVideo
-        | ToolScreenshot
-        | ToolScreenshotRead
-        | ToolScreenshotRelease
-        | ToolConsole
-        | ToolDebug
-        | ToolNetwork
-        | ToolDialogStatus
-        | ToolDialogAccept
-        | ToolDialogDismiss
-        | ToolOperationAwait
-        | ToolOperationCancel
-        | ToolWaitMs
-        | ToolRecordStart
-        | ToolRecordStop
-        | ToolRecordAwait
-        | TransferBegin
-        | TransferChunk
-        | TransferFinish
-        | TransferRead
-        | TransferRelease
-        | Cancel => ORDINARY,
+    let outcome = match spec.outcome {
+        OutcomeKind::Ordinary => Outcome::Ordinary,
+        OutcomeKind::EffectAwareAction => Outcome::EffectAwareAction,
+        OutcomeKind::FileTransfer => Outcome::FileTransfer,
+    };
+    ExecutionPolicy {
+        deadline,
+        response_grace: spec.response_grace,
+        cancel_at_deadline: spec.cancel_at_deadline,
+        outcome,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mutating_window_emulate_and_tab_close_keep_effect_aware_policy() {
+        for method in [
+            Method::ToolWindowResize,
+            Method::ToolEmulate,
+            Method::ToolTabClose,
+        ] {
+            let policy = execution_policy(&method);
+            assert_eq!(policy.outcome, Outcome::EffectAwareAction);
+            assert!(policy.cancel_at_deadline);
+        }
     }
 }

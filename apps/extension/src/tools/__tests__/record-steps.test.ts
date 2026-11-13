@@ -3,7 +3,7 @@ import { RECORD_FINISH, RECORD_START, RECORD_STEP, RECORD_STOP } from "@/lib/rec
 import type { SessionManager } from "@/session-manager/manager";
 import type { CdpRunner } from "@/tools/shared";
 import { EXTENSION_VERSION } from "@/transport/handshake";
-import type { RecordedTrace, RecordStopResult, TraceV3 } from "@/transport/types";
+import type { RecordStopResult, TraceV3 } from "@/transport/types";
 import {
   attachRecordFinishListener,
   attachRecordStepListener,
@@ -18,12 +18,10 @@ const START_URL = "https://example.com/";
 const RECORD_START_V3 = {
   session_id: "abcd",
   url: START_URL,
-  trace_version: 3 as const,
-  supports_tab_switch_steps: true,
 };
 const stepSequenceByProducer = new Map<string, number>();
 
-function asTraceV3(trace: RecordedTrace): TraceV3 {
+function asTraceV3(trace: TraceV3): TraceV3 {
   if (!("version" in trace)) {
     throw new Error("expected v3 trace");
   }
@@ -1190,7 +1188,7 @@ describe("recorded user steps reach the exported trace", () => {
     expect(result).toMatchObject({ code: "protocol_error" });
   });
 
-  it("defaults to legacy trace v2 without starting observation capture", async () => {
+  it("starts trace v3 observation capture without explicit trace_version fields", async () => {
     const { runtimeOnMessage } = installChrome();
     const manager = fakeManager();
     const tabsApi = makeTabsApi();
@@ -1236,21 +1234,10 @@ describe("recorded user steps reach the exported trace", () => {
     );
 
     const stopped = await handleRecordStop(manager, { session_id: "abcd" }, deps);
-    const trace = (stopped as RecordStopResult).trace;
-    expect("version" in trace).toBe(false);
-    expect("pages" in trace && trace.pages.length).toBeGreaterThan(0);
-    // `hover` has no v2 counterpart on peers that negotiate v2.
-    expect("steps" in trace && trace.steps.map((step) => step.op)).toEqual(["click"]);
-  });
-
-  it("rejects unsupported trace_version values", async () => {
-    const manager = fakeManager();
-    const result = await handleRecordStart(
-      manager,
-      { session_id: "abcd", url: START_URL, trace_version: 99 },
-      { tabsApi: makeTabsApi(), sendToTab: vi.fn(), cdp: makeFakeCdp() },
-    );
-    expect(result).toMatchObject({ code: "invalid_params" });
+    const trace = asTraceV3((stopped as RecordStopResult).trace);
+    expect(trace.version).toBe(3);
+    expect(trace.states.length).toBeGreaterThan(0);
+    expect(trace.steps.map((step) => step.op)).toEqual(["hover", "click"]);
   });
 
   it("does not record an unclaimed user tab inside a remote Agent Window", async () => {
@@ -1394,7 +1381,7 @@ describe("recorded user steps reach the exported trace", () => {
     expect(stateUrl(clicks[1]!.state)).toBe(START_URL);
   });
 
-  it("keeps switch_tab internal when the v3 caller did not advertise support", async () => {
+  it("emits switch_tab steps unconditionally in trace v3", async () => {
     const chromeApi = installChrome();
     const manager = fakeManager();
     const tabsApi = makeMultiTabsApi([
@@ -1415,18 +1402,14 @@ describe("recorded user steps reach the exported trace", () => {
     ]);
     const deps = { tabsApi, sendToTab: vi.fn(async () => ({ ok: true })), cdp: makeFakeCdp() };
 
-    await handleRecordStart(
-      manager,
-      { session_id: "abcd", url: START_URL, trace_version: 3 },
-      deps,
-    );
+    await handleRecordStart(manager, { session_id: "abcd", url: START_URL }, deps);
     tabsApi.activate(5);
     chromeApi.tabsOnActivated.emit({ tabId: 5, windowId: AGENT_WINDOW_ID });
     await settleWait();
 
     const stopped = await handleRecordStop(manager, { session_id: "abcd" }, deps);
     const trace = asTraceV3((stopped as RecordStopResult).trace);
-    expect(trace.steps.some((step) => step.op === "switch_tab")).toBe(false);
+    expect(trace.steps.some((step) => step.op === "switch_tab")).toBe(true);
   });
 
   it("keeps the latest rapid tab activation when an earlier rearm acknowledges late", async () => {

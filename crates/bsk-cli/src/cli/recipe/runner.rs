@@ -49,21 +49,23 @@ const PAGE_MOVED: [&str; 11] = [
 /// The session or its tab is gone: never registered, stopped, or ended with its
 /// window or browser. Nothing about the site follows from that.
 pub(crate) fn session_gone(error: &CliError) -> bool {
-    use crate::rpc_reason::{
-        BROWSER_DISCONNECTED, SESSION_IDLE_TIMEOUT, SESSION_USER_MOVED_TAB, SESSION_WINDOW_CLOSED,
-    };
+    use bsk_protocol::RpcErrorReason;
     error.code() == Some(ErrorCode::NotFound)
         && error
             .data()
             .and_then(|data| data["reason"].as_str())
-            .is_none_or(|reason| {
-                [
-                    SESSION_IDLE_TIMEOUT,
-                    SESSION_WINDOW_CLOSED,
-                    SESSION_USER_MOVED_TAB,
-                    BROWSER_DISCONNECTED,
-                ]
-                .contains(&reason)
+            .is_none_or(|raw| {
+                RpcErrorReason::from_wire(raw).is_some_and(|reason| {
+                    matches!(
+                        reason,
+                        RpcErrorReason::NoActiveSession
+                            | RpcErrorReason::SessionStopped
+                            | RpcErrorReason::SessionIdleTimeout
+                            | RpcErrorReason::SessionWindowClosed
+                            | RpcErrorReason::UserMovedTab
+                            | RpcErrorReason::BrowserDisconnected
+                    )
+                })
             })
 }
 
@@ -350,7 +352,7 @@ where
         let stop = Stop::handoff("step_refused", self.here()).message(error.to_string());
         if matches!(
             reason,
-            "cooperation_sync_required" | "frame_unobservable" | crate::rpc_reason::SESSION_BUSY
+            "cooperation_sync_required" | "frame_unobservable" | "session_busy"
         ) {
             stop.retryable()
         } else {
@@ -838,12 +840,14 @@ where
         }
         // A busy session refused it before it reached the browser. A click reported as
         // unknown only because it scrolled first was never pressed, and says so.
-        let effect = if reason == crate::rpc_reason::SESSION_BUSY || data["press_sent"] == false {
+        let effect = if reason == bsk_protocol::RpcErrorReason::SessionBusy.as_str()
+            || data["press_sent"] == false
+        {
             "none"
         } else {
             stopped["effect_state"].as_str().unwrap_or("unknown")
         };
-        if reason == "dialog_pending" {
+        if reason == bsk_protocol::RpcErrorReason::DialogPending.as_str() {
             self.last_effect = "unknown";
             let mut stop = Stop::uncertain("dialog_pending", at, exit).message(message);
             stop.operation_id = data["operation_id"].as_str().map(str::to_owned);
@@ -860,9 +864,11 @@ where
             | (_, "human_intervention" | "control_authority_required" | "control_held") => {
                 Stop::handoff("human_intervention", at).message(message)
             }
-            (_, crate::rpc_reason::SESSION_BUSY) => Stop::handoff("step_refused", at)
-                .message(message)
-                .retryable(),
+            (_, r) if r == bsk_protocol::RpcErrorReason::SessionBusy.as_str() => {
+                Stop::handoff("step_refused", at)
+                    .message(message)
+                    .retryable()
+            }
             (_, reason) if PAGE_MOVED.contains(&reason) => Stop::handoff("step_refused", at)
                 .message(message)
                 .retryable(),
@@ -1637,7 +1643,9 @@ mod tests {
                     return Err(CliError::from_rpc(RpcError {
                         code: ErrorCode::Timeout,
                         message: "session already has an unfinished command".into(),
-                        data: Some(json!({"reason":crate::rpc_reason::SESSION_BUSY})),
+                        data: Some(
+                            json!({"reason": bsk_protocol::RpcErrorReason::SessionBusy.as_str()}),
+                        ),
                     }));
                 }
             }

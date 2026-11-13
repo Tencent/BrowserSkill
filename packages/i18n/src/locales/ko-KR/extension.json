@@ -389,7 +389,21 @@
       "recordStop": "동작 녹화 종료",
       "recordAwait": "녹화 완료 대기",
       "resize": "창 크기 조절",
-      "emulate": "에뮬레이션 변경"
+      "emulate": "에뮬레이션 변경",
+      "cooperate": "공유 탭 동기화",
+      "sessionStart": "세션 시작",
+      "sessionStop": "세션 중지",
+      "screenshotFullPage": "전체 페이지 스크린샷 캡처",
+      "screenshotRead": "스크린샷 읽기",
+      "screenshotRelease": "스크린샷 해제",
+      "debug": "디버그 작업 실행",
+      "video": "동영상 녹화 관리",
+      "dialogStatus": "대화 상자 상태 확인",
+      "dialogAccept": "대화 상자 수락",
+      "dialogDismiss": "대화 상자 닫기",
+      "waitForElement": "요소 대기",
+      "operationAwait": "작업 대기",
+      "operationCancel": "작업 취소"
     }
   },
   "debug": {

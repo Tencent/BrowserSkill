@@ -116,18 +116,11 @@ async fn handshake_ok_when_protocol_matches() {
         ResponseBody::Err(e) => panic!("expected ok handshake, got {e:?}"),
     };
     assert_eq!(result.protocol_version, PROTOCOL_VERSION);
-    assert_eq!(
-        result
-            .min_compatible_peer
-            .as_ref()
-            .map(ToString::to_string)
-            .as_deref(),
-        Some("0.0.0")
-    );
+    assert!(result.min_compatible_peer.is_none());
     assert_eq!(
         result.min_compatible_protocol.as_deref(),
-        Some("1.0"),
-        "daemon must advertise protocol floor for new extensions"
+        Some("2.0"),
+        "daemon must advertise protocol 2.0 floor for extensions"
     );
     handle.shutdown().await;
 }
@@ -162,7 +155,7 @@ async fn handshake_skew_when_protocol_minor_differs() {
         &newer_protocol,
         env!("CARGO_PKG_VERSION"),
         Some("0.0.0"),
-        Some("1.5"),
+        Some("2.0"),
     )
     .await;
     match resp.body {
@@ -182,7 +175,7 @@ async fn handshake_skew_when_protocol_minor_differs() {
 async fn handshake_rejected_on_protocol_major_mismatch() {
     let (handle, _sock) = spawn_daemon().await;
     let mut ws = open_ws(handle.ws_addr()).await;
-    let resp = send_handshake(&mut ws, "2.0", env!("CARGO_PKG_VERSION")).await;
+    let resp = send_handshake(&mut ws, "3.0", env!("CARGO_PKG_VERSION")).await;
     match resp.body {
         ResponseBody::Err(e) => {
             assert_eq!(e.code, ErrorCode::VersionTooOld);
@@ -196,10 +189,10 @@ async fn handshake_rejected_on_protocol_major_mismatch() {
 
 #[tokio::test]
 async fn handshake_rejected_when_peer_protocol_major_is_below_daemon() {
-    // Protocol "0.9" is below daemon major 1 — rejects before minor/floor checks.
+    // Protocol "1.9" is below daemon major 2 — rejects before minor/floor checks.
     let (handle, _sock) = spawn_daemon().await;
     let mut ws = open_ws(handle.ws_addr()).await;
-    let resp = send_handshake(&mut ws, "0.9", env!("CARGO_PKG_VERSION")).await;
+    let resp = send_handshake(&mut ws, "1.9", env!("CARGO_PKG_VERSION")).await;
     match resp.body {
         ResponseBody::Err(e) => {
             assert_eq!(e.code, ErrorCode::VersionTooOld);
@@ -215,34 +208,12 @@ async fn handshake_rejected_when_peer_protocol_major_is_below_daemon() {
 }
 
 #[tokio::test]
-async fn handshake_keeps_pre_terminal_event_extension_connected() {
-    let (handle, _sock) = spawn_daemon().await;
-    let mut ws = open_ws(handle.ws_addr()).await;
-    let response = send_handshake_with_floors(
-        &mut ws,
-        "1.5",
-        env!("CARGO_PKG_VERSION"),
-        Some("0.0.0"),
-        Some("1.5"),
-    )
-    .await;
-    assert!(matches!(response.body, ResponseBody::Ok(_)));
-    let browser = handle
-        .state()
-        .browsers
-        .get(&bsk::daemon::browsers::BrowserId(TEST_EXT_ID.into()))
-        .expect("older extension stays registered");
-    assert!(browser.version_skew);
-    handle.shutdown().await;
-}
-
-#[tokio::test]
-async fn handshake_legacy_ext_without_protocol_floor_still_ok() {
+async fn handshake_allows_newer_minor_without_protocol_floor() {
     let (handle, _sock) = spawn_daemon().await;
     let mut ws = open_ws(handle.ws_addr()).await;
     let resp = send_handshake_with_floors(
         &mut ws,
-        "1.5",
+        "2.1",
         env!("CARGO_PKG_VERSION"),
         Some("0.1.0"),
         None,
@@ -250,7 +221,9 @@ async fn handshake_legacy_ext_without_protocol_floor_still_ok() {
     .await;
     match resp.body {
         ResponseBody::Ok(_) => {}
-        other => panic!("legacy ext (no min_compatible_protocol) should connect, got {other:?}"),
+        other => panic!(
+            "compatible minor peer (no min_compatible_protocol) should connect, got {other:?}"
+        ),
     }
     handle.shutdown().await;
 }
@@ -267,7 +240,7 @@ async fn status_surfaces_version_skew_for_skewed_browser() {
         browser_name: "chrome".into(),
         browser_version: "131.0".into(),
         extension_version: "9.9.9".into(),
-        extension_protocol_version: "1.5".into(),
+        extension_protocol_version: "2.1".into(),
         label: "Older".into(),
         sink: bsk::daemon::browsers::BrowserSink { tx },
         pending: Mutex::new(bsk::daemon::browsers::Pending::default()),
@@ -294,7 +267,7 @@ async fn status_surfaces_version_skew_for_skewed_browser() {
         .iter()
         .find(|s| s.instance_id == "skew-only-test")
         .expect("status must list our skew client");
-    assert_eq!(skew.client_protocol_version, "1.5");
+    assert_eq!(skew.client_protocol_version, "2.1");
     assert_eq!(skew.server_protocol_version, PROTOCOL_VERSION);
     assert_eq!(skew.client_version, "9.9.9");
     let entry = status
@@ -312,7 +285,7 @@ async fn handshake_rejects_when_local_below_peer_min_compatible_protocol() {
     let mut ws = open_ws(handle.ws_addr()).await;
     let resp = send_handshake_with_floors(
         &mut ws,
-        "1.5",
+        "2.1",
         env!("CARGO_PKG_VERSION"),
         Some("0.0.0"),
         Some("99.0.0"),
@@ -334,22 +307,15 @@ async fn handshake_rejects_when_local_below_peer_min_compatible_protocol() {
 }
 
 #[tokio::test]
-async fn handshake_keeps_legacy_peers_connected_with_version_skew() {
+async fn handshake_rejects_1x_peers_at_protocol_2_0_floor() {
     let (handle, _) = spawn_daemon().await;
-    for protocol in ["1.0", "1.1", "1.2", "1.3"] {
+    for protocol in ["1.0", "1.3", "1.5", "1.8", "1.9"] {
         let mut ws = open_ws(handle.ws_addr()).await;
         let response = send_handshake(&mut ws, protocol, env!("CARGO_PKG_VERSION")).await;
-        let ResponseBody::Ok(result) = response.body else {
-            panic!("rejected compatible legacy protocol {protocol}")
+        let ResponseBody::Err(error) = response.body else {
+            panic!("1.x protocol {protocol} must be rejected under 2.0 floor")
         };
-        assert_eq!(result["min_compatible_protocol"], "1.0");
-        let state = handle.state();
-        let browser = state
-            .browsers
-            .get(&bsk::daemon::browsers::BrowserId(TEST_EXT_ID.into()))
-            .unwrap();
-        assert!(browser.version_skew);
-        assert_eq!(browser.extension_protocol_version, protocol);
+        assert_eq!(error.code, ErrorCode::VersionTooOld);
         assert!(handle.state().sessions.is_empty());
     }
     handle.shutdown().await;

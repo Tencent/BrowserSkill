@@ -43,8 +43,8 @@ async fn connect(addr: std::net::SocketAddr, instance: &str) -> Ws {
     send(
         &mut ws,
         json!({"id":"hs", "method":"system.handshake", "params":{
-            "client":"browser-skill-extension", "version":"0.3.2", "protocol_version":"1.5",
-        "min_compatible_protocol":"1.5", "instance_id":instance, "label":"Dialog test",
+            "client":"browser-skill-extension", "version":"0.5.0", "protocol_version":bsk::daemon::state::PROTOCOL_VERSION,
+        "min_compatible_protocol":bsk::daemon::state::MIN_COMPATIBLE_PROTOCOL, "instance_id":instance, "label":"Dialog test",
             "browser":{"name":"chrome","version":"153"}
         }}),
     )

@@ -58,7 +58,7 @@ async fn sigint_stops_step_even_when_the_current_rpc_returns_success() {
                     }
                     let result = match method {
                         "system.status" => {
-                            json!({"daemon_version":"0.3.3","protocol_version":"1.8",
+                            json!({"daemon_version":"0.5.0","protocol_version":"2.0",
                             "pid":std::process::id(),"uptime_secs":0,"ws_port":0,"sock_path":sock,
                             "browsers":[],"sessions":[]})
                         }

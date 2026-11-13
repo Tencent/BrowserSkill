@@ -15,9 +15,7 @@ use std::path::PathBuf;
 
 use anyhow::Context;
 use bsk_protocol::Method;
-use bsk_protocol::tools::{
-    EvaluateParams, EvaluateResult, UNVERIFIED_SCRIPT_PROTOCOL, supports_unverified_script,
-};
+use bsk_protocol::tools::{EvaluateParams, EvaluateResult};
 use clap::Args;
 
 use crate::cli::business_rpc::{self, ipc_timeout};
@@ -71,20 +69,21 @@ pub struct EvaluateArgs {
     pub unverified: bool,
 }
 
-pub fn dispatch(args: EvaluateArgs, format: Format) -> Result<(), CliError> {
+pub fn dispatch(
+    args: EvaluateArgs,
+    ctx: &business_rpc::ClientContext,
+    format: Format,
+) -> Result<(), CliError> {
+    let op_ctx = ctx.with_scope(args.scope.as_deref());
     // Asking for a page check and for none at once is a contradiction, not a
     // stricter request. Refuse before anything reaches the daemon.
-    if args.unverified && business_rpc::verification_requested() {
+    if args.unverified && op_ctx.verification_requested() {
         return Err(CliError::invalid_params(anyhow::anyhow!(
             "--unverified skips page verification; omit --expect, --observation and --depends-on, or omit --unverified to have them checked"
         )));
     }
-    business_rpc::set_caller_scope(args.scope);
     let (info, protocol) = ensure_daemon_with_protocol().context("ensure daemon is running")?;
     business_rpc::check_daemon_protocol(&protocol)?;
-    if args.unverified {
-        require_unverified_script(&protocol)?;
-    }
     let params = EvaluateParams {
         session_id: args.session.unwrap_or_default(),
         expression: args.expression,
@@ -94,34 +93,17 @@ pub fn dispatch(args: EvaluateArgs, format: Format) -> Result<(), CliError> {
         timeout_ms: Some(args.timeout),
         unverified: args.unverified.then_some(true),
     };
-    let reply = call(info.sock_path, params, args.timeout)?;
+    let reply = call(info.sock_path, &op_ctx, params, args.timeout)?;
     render(&reply, format)
-}
-
-/// An older daemon or extension would ignore the flag and apply its page
-/// checks, so the refusal would look unexplained. Fail before dispatch instead.
-pub(crate) fn require_unverified_script(protocol: &str) -> Result<(), CliError> {
-    if supports_unverified_script(protocol) {
-        return Ok(());
-    }
-    Err(CliError::from_rpc(bsk_protocol::RpcError {
-        code: bsk_protocol::ErrorCode::Unsupported,
-        message: format!(
-            "evaluate --unverified requires daemon protocol {UNVERIFIED_SCRIPT_PROTOCOL} or a later compatible 1.x version; update the CLI and restart its daemon (running protocol {protocol})"
-        ),
-        data: Some(serde_json::json!({
-            "reason": "unsupported_feature", "phase": "negotiate", "effect_state": "none",
-            "required_protocol": UNVERIFIED_SCRIPT_PROTOCOL, "actual_protocol": protocol,
-        })),
-    }))
 }
 
 fn call(
     sock: PathBuf,
+    ctx: &business_rpc::ClientContext,
     params: EvaluateParams,
     timeout_ms: u32,
 ) -> Result<EvaluateResult, CliError> {
-    crate::cli::business_rpc::call::<EvaluateParams, EvaluateResult>(
+    ctx.call::<EvaluateParams, EvaluateResult>(
         sock,
         "evaluate",
         Method::ToolEvaluate,

@@ -5,13 +5,70 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
+pub enum VideoAction {
+    Start,
+    Capabilities,
+    List,
+    Status,
+    Stop,
+    Read,
+    Discard,
+    Exported,
+}
+
+impl VideoAction {
+    pub const ALL: &'static [Self] = &[
+        Self::Start,
+        Self::Capabilities,
+        Self::List,
+        Self::Status,
+        Self::Stop,
+        Self::Read,
+        Self::Discard,
+        Self::Exported,
+    ];
+
+    pub const fn wire_name(self) -> &'static str {
+        match self {
+            Self::Start => "start",
+            Self::Capabilities => "capabilities",
+            Self::List => "list",
+            Self::Status => "status",
+            Self::Stop => "stop",
+            Self::Read => "read",
+            Self::Discard => "discard",
+            Self::Exported => "exported",
+        }
+    }
+
+    /// Starting a recording resumes browser control from a paused/background state
+    /// and respects pending user interrupts, while queries and teardown remain available.
+    pub const fn resumes_control(self) -> bool {
+        matches!(self, Self::Start)
+    }
+
+    pub const fn interrupt_gated(self) -> bool {
+        matches!(self, Self::Start)
+    }
+
+    pub const fn dialog_gated(self) -> bool {
+        matches!(self, Self::Start)
+    }
+
+    pub const fn uses_session_queue(self) -> bool {
+        matches!(self, Self::Start)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
 pub enum VideoQuality {
     Standard,
     Clear,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[serde(tag = "action", rename_all = "snake_case")]
+#[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 pub enum VideoParams {
     Start {
         session_id: String,
@@ -57,6 +114,21 @@ pub enum VideoParams {
         recording_id: String,
         capability: String,
     },
+}
+
+impl VideoParams {
+    pub const fn action(&self) -> VideoAction {
+        match self {
+            Self::Start { .. } => VideoAction::Start,
+            Self::Capabilities { .. } => VideoAction::Capabilities,
+            Self::List { .. } => VideoAction::List,
+            Self::Status { .. } => VideoAction::Status,
+            Self::Stop { .. } => VideoAction::Stop,
+            Self::Read { .. } => VideoAction::Read,
+            Self::Discard { .. } => VideoAction::Discard,
+            Self::Exported { .. } => VideoAction::Exported,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

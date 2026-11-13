@@ -198,7 +198,11 @@ struct ListReply {
     sessions: Vec<SessionStatusEntry>,
 }
 
-pub fn dispatch(cmd: SessionCmd, format: Format) -> Result<(), CliError> {
+pub fn dispatch(
+    cmd: SessionCmd,
+    ctx: &crate::cli::business_rpc::ClientContext,
+    format: Format,
+) -> Result<(), CliError> {
     let info = ensure_daemon().context("ensure daemon is running")?;
     match cmd.sub {
         SessionSub::Start(args) => {
@@ -207,10 +211,10 @@ pub fn dispatch(cmd: SessionCmd, format: Format) -> Result<(), CliError> {
             if args.request_id.is_none() {
                 run_skill_sync_for_session_start(format);
             }
-            run_start(info.sock_path, args, format)
+            run_start(info.sock_path, ctx, args, format)
         }
-        SessionSub::Stop(args) => run_stop(info.sock_path, args, format),
-        SessionSub::List => run_list(info.sock_path, format),
+        SessionSub::Stop(args) => run_stop(info.sock_path, ctx, args, format),
+        SessionSub::List => run_list(info.sock_path, ctx, format),
         SessionSub::Request(args) => {
             let action = if args.prepare {
                 "prepare"
@@ -223,6 +227,7 @@ pub fn dispatch(cmd: SessionCmd, format: Format) -> Result<(), CliError> {
             };
             let reply: serde_json::Value = call(
                 info.sock_path,
+                ctx,
                 Method::SessionRequest,
                 Some(serde_json::json!({"request_id": args.request_id, "action": action})),
                 Duration::from_secs(40),
@@ -236,8 +241,13 @@ pub fn dispatch(cmd: SessionCmd, format: Format) -> Result<(), CliError> {
     }
 }
 
-fn run_start(sock: PathBuf, args: SessionStartArgs, format: Format) -> Result<(), CliError> {
-    crate::cli::business_rpc::set_caller_scope(args.scope.clone());
+fn run_start(
+    sock: PathBuf,
+    ctx: &crate::cli::business_rpc::ClientContext,
+    args: SessionStartArgs,
+    format: Format,
+) -> Result<(), CliError> {
+    let op_ctx = ctx.with_scope(args.scope.as_deref());
     if args.unattended {
         crate::cli::interaction_policy::warn_legacy_override("--unattended");
     }
@@ -262,8 +272,9 @@ fn run_start(sock: PathBuf, args: SessionStartArgs, format: Format) -> Result<()
             }
         });
     }
-    let result = start_session(
+    let result = start_session_with_context(
         sock,
+        &op_ctx,
         SessionStartOptions {
             controller: args
                 .agent_name
@@ -322,6 +333,19 @@ pub struct SessionStartOptions {
 
 /// Start a session and open the Agent Window. Used by `session start` and `record start`.
 pub fn start_session(sock: PathBuf, opts: SessionStartOptions) -> Result<StartReply, CliError> {
+    start_session_with_context(
+        sock,
+        &crate::cli::business_rpc::ClientContext::default(),
+        opts,
+    )
+}
+
+/// Start a session and open the Agent Window under the caller's request context.
+pub fn start_session_with_context(
+    sock: PathBuf,
+    ctx: &crate::cli::business_rpc::ClientContext,
+    opts: SessionStartOptions,
+) -> Result<StartReply, CliError> {
     if let Some(controller) = &opts.controller {
         controller
             .validate()
@@ -343,20 +367,34 @@ pub fn start_session(sock: PathBuf, opts: SessionStartOptions) -> Result<StartRe
         focused: Some(opts.focused.unwrap_or(false)),
     })
     .map_err(|e| CliError::Local(anyhow::anyhow!(e)))?;
-    let caller_scope = crate::cli::business_rpc::current_caller_scope();
+    let caller_scope = ctx.resolved_caller_scope();
     if crate::daemon::scopes::is_isolated_scope(&caller_scope)
         && let Some(obj) = payload.as_object_mut()
     {
         obj.insert("_caller_scope".into(), caller_scope.into());
         obj.insert("_bind_scope".into(), true.into());
     }
-    call(sock, method, Some(payload), SESSION_START_IPC_TIMEOUT)
+    call(sock, ctx, method, Some(payload), SESSION_START_IPC_TIMEOUT)
 }
 
 /// Stop a single session by id.
 pub fn stop_session(sock: PathBuf, session_id: &str) -> Result<StopReply, CliError> {
+    stop_session_with_context(
+        sock,
+        &crate::cli::business_rpc::ClientContext::default(),
+        session_id,
+    )
+}
+
+/// Stop a single session by id under the caller's request context.
+pub fn stop_session_with_context(
+    sock: PathBuf,
+    ctx: &crate::cli::business_rpc::ClientContext,
+    session_id: &str,
+) -> Result<StopReply, CliError> {
     call(
         sock,
+        ctx,
         Method::SessionStop,
         Some(StopParams {
             session_id: Some(session_id.to_string()),
@@ -366,9 +404,14 @@ pub fn stop_session(sock: PathBuf, session_id: &str) -> Result<StopReply, CliErr
     )
 }
 
-pub(super) fn stop_record_session(sock: PathBuf, session_id: &str) -> Result<(), CliError> {
+pub(super) fn stop_record_session_with_context(
+    sock: PathBuf,
+    ctx: &crate::cli::business_rpc::ClientContext,
+    session_id: &str,
+) -> Result<(), CliError> {
     let reply: StopReply = call(
         sock,
+        ctx,
         Method::SessionStop,
         Some(serde_json::json!({ "session_id": session_id, "recording": true })),
         SESSION_STOP_IPC_TIMEOUT,
@@ -557,7 +600,12 @@ fn write_browser_table(
     Ok(())
 }
 
-fn run_stop(sock: PathBuf, args: SessionStopArgs, format: Format) -> Result<(), CliError> {
+fn run_stop(
+    sock: PathBuf,
+    ctx: &crate::cli::business_rpc::ClientContext,
+    args: SessionStopArgs,
+    format: Format,
+) -> Result<(), CliError> {
     if !args.all && args.session_id.is_none() {
         return Err(CliError::Local(anyhow::anyhow!(
             "session stop requires SESSION_ID or --all"
@@ -565,6 +613,7 @@ fn run_stop(sock: PathBuf, args: SessionStopArgs, format: Format) -> Result<(), 
     }
     let reply: StopReply = call(
         sock,
+        ctx,
         Method::SessionStop,
         Some(StopParams {
             session_id: args.session_id,
@@ -620,8 +669,13 @@ fn run_stop(sock: PathBuf, args: SessionStopArgs, format: Format) -> Result<(), 
     Ok(())
 }
 
-fn run_list(sock: PathBuf, format: Format) -> Result<(), CliError> {
-    let reply: ListReply = call::<(), _>(sock, Method::SessionList, None, Duration::from_secs(5))?;
+fn run_list(
+    sock: PathBuf,
+    ctx: &crate::cli::business_rpc::ClientContext,
+    format: Format,
+) -> Result<(), CliError> {
+    let reply: ListReply =
+        call::<(), _>(sock, ctx, Method::SessionList, None, Duration::from_secs(5))?;
     match format {
         Format::Json => {
             println!(
@@ -682,6 +736,7 @@ fn run_list(sock: PathBuf, format: Format) -> Result<(), CliError> {
 
 fn call<P, R>(
     sock: PathBuf,
+    ctx: &crate::cli::business_rpc::ClientContext,
     method: Method,
     params: Option<P>,
     timeout: Duration,
@@ -690,7 +745,7 @@ where
     P: serde::Serialize + Send + 'static,
     R: serde::de::DeserializeOwned + Send + 'static,
 {
-    crate::cli::business_rpc::call::<P, R>(sock, "session", method, params, timeout)
+    ctx.call::<P, R>(sock, "session", method, params, timeout)
 }
 
 /// Best-effort: bring installed agent skills up to date with the

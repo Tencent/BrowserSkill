@@ -84,7 +84,7 @@ async fn handshake_as_ext(
         },
         label: "Test".into(),
         min_compatible_peer: Some("0.1.0-dev.0".parse().unwrap()),
-        min_compatible_protocol: Some("1.0".into()),
+        min_compatible_protocol: Some(bsk::daemon::state::MIN_COMPATIBLE_PROTOCOL.into()),
     };
     let req = RequestFrame {
         id: "hs".into(),
@@ -756,7 +756,7 @@ async fn cancel_keeps_session_busy_until_delayed_extension_cleanup_finishes() {
             .as_ref()
             .and_then(|d| d.get("reason"))
             .and_then(|v| v.as_str()),
-        Some(bsk::rpc_reason::SESSION_BUSY)
+        Some(bsk_protocol::RpcErrorReason::SessionBusy.as_str())
     );
 
     let cancel_slow: CancelResult = cancel_ipc
@@ -795,7 +795,7 @@ async fn cancel_keeps_session_busy_until_delayed_extension_cleanup_finishes() {
             .as_ref()
             .and_then(|d| d.get("reason"))
             .and_then(|v| v.as_str()),
-        Some(bsk::rpc_reason::SESSION_BUSY)
+        Some(bsk_protocol::RpcErrorReason::SessionBusy.as_str())
     );
 
     cleanup_release.notify_one();

@@ -41,13 +41,345 @@ pub(crate) fn ipc_timeout(timeout_ms: u32) -> Duration {
     Duration::from_millis(u64::from(timeout_ms) + 15_000)
 }
 
-static OBSERVATION_DEPENDENCIES: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+fn normalize_non_empty(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_owned())
+}
 
-static OBSERVATION_CONTEXT: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
-static ACTION_EVIDENCE: std::sync::OnceLock<(Option<String>, Option<serde_json::Value>)> =
-    std::sync::OnceLock::new();
-static TARGET_POLICY_REQUESTED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-static EXPLICIT_CALLER_SCOPE: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+/// Request-scoped context replacing process-wide global action metadata and caller scope state.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ClientContext {
+    pub scope: Option<String>,
+    pub mcp_scope: Option<String>,
+    pub context_id: Option<String>,
+    pub depends_on: Vec<String>,
+    pub observation_id: Option<String>,
+    pub expect: Option<serde_json::Value>,
+}
+
+impl ClientContext {
+    /// Build request context from parsed CLI global flags.
+    pub fn from_cli_flags(flags: &crate::cli::GlobalFlags) -> Self {
+        Self {
+            scope: flags.scope.as_deref().and_then(normalize_non_empty),
+            mcp_scope: None,
+            context_id: flags.context.clone(),
+            depends_on: flags.depends_on.clone(),
+            observation_id: flags.observation.clone(),
+            expect: flags.expect.clone(),
+        }
+    }
+
+    /// Build request context for a single MCP tool invocation.
+    pub fn for_mcp(
+        mcp_scope: Option<&str>,
+        scope: Option<&str>,
+        context_id: Option<String>,
+        depends_on: Vec<String>,
+        observation_id: Option<String>,
+        expect: Option<serde_json::Value>,
+    ) -> Self {
+        Self {
+            scope: scope.and_then(normalize_non_empty),
+            mcp_scope: mcp_scope.and_then(normalize_non_empty),
+            context_id,
+            depends_on,
+            observation_id,
+            expect,
+        }
+    }
+
+    /// Override caller scope when an explicit non-empty scope is supplied.
+    pub fn with_scope(&self, scope: Option<&str>) -> Self {
+        let mut next = self.clone();
+        if let Some(scope) = scope.and_then(normalize_non_empty) {
+            next.scope = Some(scope);
+        }
+        next
+    }
+
+    /// Override the explicit observation id when supplied on an action command.
+    pub fn with_observation_id(&self, observation_id: Option<&str>) -> Self {
+        let mut next = self.clone();
+        if let Some(observation_id) = observation_id {
+            next.observation_id = Some(observation_id.to_owned());
+        }
+        next
+    }
+
+    /// Preserve caller scope while stripping action metadata before auxiliary RPCs.
+    pub fn without_action_metadata(&self) -> Self {
+        Self {
+            scope: self.scope.clone(),
+            mcp_scope: self.mcp_scope.clone(),
+            ..Self::default()
+        }
+    }
+
+    /// Whether the caller attached anything asking for the page to be checked.
+    pub fn verification_requested(&self) -> bool {
+        !self.depends_on.is_empty() || self.observation_id.is_some() || self.expect.is_some()
+    }
+
+    /// Resolve the effective caller scope against `BSK_SCOPE`, `BSK_SESSION`, MCP scope and defaults.
+    pub fn resolved_caller_scope(&self) -> String {
+        crate::daemon::scopes::resolve_caller_scope_from_env(
+            self.scope.as_deref(),
+            self.mcp_scope.as_deref(),
+        )
+    }
+
+    /// Validate and frame outgoing RPC parameters using compile-time `MethodSpec` rules.
+    pub fn prepare_params<P: Serialize>(
+        &self,
+        method: &Method,
+        params: Option<P>,
+    ) -> Result<Option<serde_json::Value>, CliError> {
+        if !self.depends_on.is_empty() && self.context_id.is_none() {
+            return Err(CliError::invalid_params(anyhow::anyhow!(
+                "depends_on requires context"
+            )));
+        }
+        if *method == Method::ToolRead {
+            if !self.depends_on.is_empty() || self.observation_id.is_some() || self.expect.is_some()
+            {
+                return Err(CliError::invalid_params(anyhow::anyhow!(
+                    "{} does not accept depends_on, observation_id, or expect",
+                    method.wire_name()
+                )));
+            }
+        } else if !method.accepts_action_metadata()
+            && (self.context_id.is_some()
+                || !self.depends_on.is_empty()
+                || self.observation_id.is_some()
+                || self.expect.is_some())
+        {
+            return Err(CliError::invalid_params(anyhow::anyhow!(
+                "{} does not accept action metadata (context_id, depends_on, observation_id, expect)",
+                method.wire_name()
+            )));
+        }
+
+        let mut value = params
+            .map(|p| serde_json::to_value(p).map_err(|err| CliError::Local(err.into())))
+            .transpose()?;
+        let Some(object) = value.as_mut().and_then(serde_json::Value::as_object_mut) else {
+            return Ok(value);
+        };
+
+        if *method == Method::ToolRead {
+            if ["depends_on", "observation_id", "expect"]
+                .iter()
+                .any(|key| object.get(*key).is_some_and(|v| !v.is_null()))
+            {
+                return Err(CliError::invalid_params(anyhow::anyhow!(
+                    "{} does not accept depends_on, observation_id, or expect",
+                    method.wire_name()
+                )));
+            }
+            if let Some(context) = &self.context_id {
+                if let Some(existing) = object.get("context_id").filter(|v| !v.is_null()) {
+                    if existing.as_str() != Some(context.as_str()) {
+                        return Err(CliError::invalid_params(anyhow::anyhow!(
+                            "--context conflicts with the action's context_id"
+                        )));
+                    }
+                } else {
+                    object.insert("context_id".into(), context.clone().into());
+                }
+            }
+        } else if !method.accepts_action_metadata() {
+            if ["context_id", "depends_on", "observation_id", "expect"]
+                .iter()
+                .any(|key| object.get(*key).is_some_and(|v| !v.is_null()))
+            {
+                return Err(CliError::invalid_params(anyhow::anyhow!(
+                    "{} does not accept action metadata (context_id, depends_on, observation_id, expect)",
+                    method.wire_name()
+                )));
+            }
+        } else {
+            if let Some(context) = &self.context_id {
+                if let Some(existing) = object.get("context_id").filter(|v| !v.is_null()) {
+                    if existing.as_str() != Some(context.as_str()) {
+                        return Err(CliError::invalid_params(anyhow::anyhow!(
+                            "--context conflicts with the action's context_id"
+                        )));
+                    }
+                } else {
+                    object.insert("context_id".into(), context.clone().into());
+                }
+                if !self.depends_on.is_empty() {
+                    object.insert(
+                        "depends_on".into(),
+                        serde_json::to_value(&self.depends_on)
+                            .map_err(|err| CliError::Local(err.into()))?,
+                    );
+                }
+            }
+            if let Some(observation) = &self.observation_id {
+                if let Some(existing) = object.get("observation_id").filter(|v| !v.is_null())
+                    && existing.as_str() != Some(observation.as_str())
+                {
+                    return Err(CliError::invalid_params(anyhow::anyhow!(
+                        "--observation conflicts with the action's observation_id"
+                    )));
+                }
+                object.insert("observation_id".into(), observation.clone().into());
+            }
+            if let Some(expect) = &self.expect {
+                object.insert("expect".into(), expect.clone());
+            }
+        }
+
+        let has_empty_session = object
+            .get("session_id")
+            .is_some_and(|v| v.is_null() || v.as_str().is_some_and(|s| s.trim().is_empty()));
+        if has_empty_session && !object.contains_key("_caller_scope") {
+            object.insert("_caller_scope".into(), self.resolved_caller_scope().into());
+        }
+
+        Ok(value)
+    }
+
+    /// Issue a business RPC against the daemon with SIGINT-driven cancellation.
+    pub fn call<P, R>(
+        &self,
+        sock: PathBuf,
+        rpc_id_prefix: &str,
+        method: Method,
+        params: Option<P>,
+        call_timeout: Duration,
+    ) -> Result<R, CliError>
+    where
+        P: Serialize,
+        R: DeserializeOwned + Send + 'static,
+    {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .context("build tokio runtime for business RPC")
+            .map_err(CliError::Local)?;
+        rt.block_on(self.call_async::<P, R>(sock, rpc_id_prefix, method, params, call_timeout))
+    }
+
+    /// Same as [`ClientContext::call`] but assumes a pre-existing tokio runtime context.
+    pub async fn call_async<P, R>(
+        &self,
+        sock: PathBuf,
+        rpc_id_prefix: &str,
+        method: Method,
+        params: Option<P>,
+        call_timeout: Duration,
+    ) -> Result<R, CliError>
+    where
+        P: Serialize,
+        R: DeserializeOwned + Send + 'static,
+    {
+        let mut sock = super::ensure_daemon::resolve_effective_sock(&sock);
+        let parent_cancel = stdin_cancellation();
+        if cancel_requested() || parent_cancel.as_ref().is_some_and(|rx| *rx.borrow()) {
+            CANCEL_REQUESTED.store(true, Ordering::Relaxed);
+            return Err(CliError::from_rpc(RpcError {
+                code: ErrorCode::Cancelled,
+                message: "command cancelled before dispatch".into(),
+                data: Some(serde_json::json!({
+                    "reason": bsk_protocol::RpcErrorReason::CancelledBeforeDispatch.as_str()
+                })),
+            }));
+        }
+        let rpc_id: RpcId = format!("{}-{}", rpc_id_prefix, random_short_id());
+        let params = self.prepare_params(&method, params)?;
+        // Optimistic single-UDS fast path: connect once and send the target RPC directly.
+        // Fail-safe auto-spawn: ONLY if initial connect() fails before any bytes are written
+        // (NotFound / ConnectionRefused on an unverified optimistic daemon.json candidate),
+        // fall back to ensure_daemon_with_protocol() and connect once to the fresh daemon.
+        let was_optimistic = super::ensure_daemon::take_optimistic_candidate(&sock);
+        let mut client = match IpcClient::connect(sock.clone()).await {
+            Ok(client) => client,
+            Err(connect_err) if was_optimistic && is_daemon_absent_connect_error(&connect_err) => {
+                let stale_sock = sock.clone();
+                let (fresh_info, fresh_protocol) =
+                    tokio::task::spawn_blocking(super::ensure_daemon::ensure_daemon_with_protocol)
+                        .await
+                        .context("join daemon auto-spawn task")
+                        .map_err(CliError::Local)?
+                        .context("ensure daemon is running")
+                        .map_err(CliError::Local)?;
+                check_daemon_protocol(&fresh_protocol).map_err(CliError::Local)?;
+                super::ensure_daemon::record_redirected_sock(&stale_sock, &fresh_info.sock_path);
+                sock = fresh_info.sock_path;
+                IpcClient::connect(sock.clone()).await?
+            }
+            Err(connect_err) => return Err(connect_err.into()),
+        };
+        let rpc_id_for_call = rpc_id.clone();
+        let rpc_id_for_cancel = rpc_id.clone();
+        let action_started = AtomicBool::new(false);
+        let action_started_ref = &action_started;
+
+        let main_fut = async move {
+            action_started_ref.store(true, Ordering::Relaxed);
+            client
+                .call_with_id::<serde_json::Value, R>(rpc_id_for_call, method, params, call_timeout)
+                .await
+        };
+        tokio::pin!(main_fut);
+
+        let outcome = tokio::select! {
+            biased;
+            // Arm cancellation before the RPC can dispatch browser input.
+            sig = wait_for_cancel(parent_cancel) => {
+                sig.context("wait for cancellation").map_err(CliError::Local)?;
+                CANCEL_REQUESTED.store(true, Ordering::Relaxed);
+                if !action_started.load(Ordering::Relaxed) {
+                    return Err(CliError::from_rpc(RpcError {
+                        code: ErrorCode::Cancelled,
+                        message: "request cancelled before dispatch".into(),
+                        data: Some(serde_json::json!({
+                            "reason": bsk_protocol::RpcErrorReason::CancelledBeforeDispatch.as_str(),
+                            "effect_state": "none"
+                        })),
+                    }));
+                }
+                debug!(rpc_id = %rpc_id_for_cancel, "forwarding cancel to daemon");
+                // Separate IPC connections can deliver cancel before the business
+                // request is registered. Keep polling that request while confirming
+                // cancellation, including any write that has not completed yet.
+                let deadline = Instant::now() + CANCEL_RESPONSE_GRACE;
+                let settle = async {
+                    tokio::select! {
+                        biased;
+                        res = &mut main_fut => return res,
+                        result = send_cancel(&sock, &rpc_id_for_cancel, deadline) => {
+                            if let Err(err) = result {
+                                debug!(rpc_id = %rpc_id_for_cancel, %err, "cancel was not confirmed");
+                            }
+                        },
+                    }
+                    main_fut.await
+                };
+                match timeout_at(deadline, settle).await {
+                    Ok(res) => res?,
+                    Err(_) => {
+                        debug!(
+                            rpc_id = %rpc_id_for_cancel,
+                            "cancel grace elapsed; synthesising cancelled error"
+                        );
+                        return Err(CliError::from_rpc(RpcError {
+                            code: ErrorCode::Cancelled,
+                            message: "rpc did not respond within cancel grace window".into(),
+                            data: None,
+                        }));
+                    }
+                }
+            }
+            res = &mut main_fut => res?,
+        };
+
+        outcome.map_err(CliError::from_rpc)
+    }
+}
 
 // Keep the user's stop request even if the in-flight RPC finishes successfully.
 // One CLI process is one command, including its follow-up reads.
@@ -57,138 +389,15 @@ pub(super) fn cancel_requested() -> bool {
     CANCEL_REQUESTED.load(Ordering::Relaxed)
 }
 
-/// A CLI process represents one explicit caller operation. Never fill this from cached state.
-pub fn set_context(context: Option<String>) {
-    let _ = OBSERVATION_CONTEXT.set(context);
-}
-
-pub fn set_dependencies(dependencies: Vec<String>) {
-    let _ = OBSERVATION_DEPENDENCIES.set(dependencies);
-}
-
-pub fn set_action_evidence(observation: Option<String>, expect: Option<serde_json::Value>) {
-    let _ = ACTION_EVIDENCE.set((observation, expect));
-}
-
-pub fn set_target_policy_requested() {
-    let _ = TARGET_POLICY_REQUESTED.set(true);
-}
-
-pub fn set_caller_scope(scope: Option<String>) {
-    if let Some(scope) = scope.filter(|s| !s.trim().is_empty()) {
-        *EXPLICIT_CALLER_SCOPE.lock().unwrap() = Some(scope);
-    }
-}
-
-pub fn current_caller_scope() -> String {
-    let explicit = EXPLICIT_CALLER_SCOPE.lock().unwrap().clone();
-    crate::daemon::scopes::resolve_caller_scope_from_env(explicit.as_deref(), None)
-}
-
-/// Whether the caller attached anything asking for the page to be checked.
-pub(super) fn verification_requested() -> bool {
-    OBSERVATION_DEPENDENCIES
-        .get()
-        .is_some_and(|dependencies| !dependencies.is_empty())
-        || ACTION_EVIDENCE
-            .get()
-            .is_some_and(|(observation, expect)| observation.is_some() || expect.is_some())
-}
-
-/// Use the status already read during discovery, before any guarded action can be forwarded.
-pub(super) fn check_daemon_protocol(protocol: &str) -> anyhow::Result<()> {
-    require_target_control(
-        protocol,
-        TARGET_POLICY_REQUESTED.get().copied().unwrap_or(false),
-        ACTION_EVIDENCE
-            .get()
-            .is_some_and(|(observation, expect)| observation.is_some() || expect.is_some()),
-    )
-}
-
-/// Reject target policy or action evidence when the daemon could silently discard them.
-pub(crate) fn require_target_control(
-    protocol: &str,
-    target_policy: bool,
-    evidence: bool,
-) -> anyhow::Result<()> {
-    if target_policy {
-        anyhow::ensure!(
-            bsk_protocol::tools::supports_target_control(protocol),
-            "--policy target requires daemon protocol 1.8 or a later compatible 1.x version; update the CLI and restart its daemon (running protocol {protocol})"
-        );
-    }
-    if evidence {
-        anyhow::ensure!(
-            bsk_protocol::tools::supports_target_control(protocol),
-            "--expect and --observation require daemon protocol 1.8 or a later compatible 1.x version; update the CLI and restart its daemon (running protocol {protocol}). Conditions are never silently discarded"
-        );
-    }
+/// Verify daemon protocol compatibility against v2.0 baseline.
+pub(crate) fn check_daemon_protocol(protocol: &str) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        bsk_protocol::catalog::is_protocol_compatible(protocol),
+        "daemon protocol {protocol} is incompatible with CLI (requires >= {}, current {}); update the CLI and restart its daemon",
+        bsk_protocol::catalog::MIN_COMPATIBLE_PROTOCOL,
+        bsk_protocol::catalog::PROTOCOL_VERSION,
+    );
     Ok(())
-}
-
-pub(crate) fn with_context<P: Serialize>(
-    params: Option<P>,
-    context: Option<&str>,
-    dependencies: &[String],
-    observation: Option<&str>,
-    expect: Option<&serde_json::Value>,
-) -> anyhow::Result<Option<serde_json::Value>> {
-    params
-        .map(|p| {
-            let mut value = serde_json::to_value(p)?;
-            if let (Some(context), Some(object)) = (context, value.as_object_mut()) {
-                object.insert("context_id".into(), context.into());
-                if !dependencies.is_empty() {
-                    object.insert("depends_on".into(), serde_json::to_value(dependencies)?);
-                }
-            }
-            if let Some(object) = value.as_object_mut() {
-                if let Some(observation) = observation {
-                    anyhow::ensure!(
-                        object
-                            .get("observation_id")
-                            .is_none_or(|existing| existing == observation),
-                        "--observation conflicts with the action's observation_id"
-                    );
-                    object.insert("observation_id".into(), observation.into());
-                }
-                if let Some(expect) = expect {
-                    object.insert("expect".into(), expect.clone());
-                }
-                let has_empty_session = object.get("session_id").is_some_and(|v| {
-                    v.is_null() || v.as_str().is_some_and(|s| s.trim().is_empty())
-                });
-                if has_empty_session && !object.contains_key("_caller_scope") {
-                    object.insert("_caller_scope".into(), current_caller_scope().into());
-                }
-            }
-            Ok(value)
-        })
-        .transpose()
-}
-
-/// Issue a business RPC against the daemon with SIGINT-driven
-/// cancellation.
-pub fn call<P, R>(
-    sock: PathBuf,
-    rpc_id_prefix: &str,
-    method: Method,
-    params: Option<P>,
-    call_timeout: Duration,
-) -> Result<R, CliError>
-where
-    P: Serialize + Send + 'static,
-    R: DeserializeOwned + Send + 'static,
-{
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .context("build tokio runtime for business RPC")
-        .map_err(CliError::Local)?;
-    rt.block_on(async move {
-        call_async::<P, R>(sock, rpc_id_prefix, method, params, call_timeout).await
-    })
 }
 
 fn is_daemon_absent_connect_error(err: &anyhow::Error) -> bool {
@@ -200,154 +409,6 @@ fn is_daemon_absent_connect_error(err: &anyhow::Error) -> bool {
             )
         })
     })
-}
-
-/// Same as [`call`] but assumes a pre-existing tokio runtime context.
-pub async fn call_async<P, R>(
-    sock: PathBuf,
-    rpc_id_prefix: &str,
-    method: Method,
-    params: Option<P>,
-    call_timeout: Duration,
-) -> Result<R, CliError>
-where
-    P: Serialize + Send + 'static,
-    R: DeserializeOwned + Send + 'static,
-{
-    let mut sock = super::ensure_daemon::resolve_effective_sock(&sock);
-    let parent_cancel = stdin_cancellation();
-    if cancel_requested() || parent_cancel.as_ref().is_some_and(|rx| *rx.borrow()) {
-        CANCEL_REQUESTED.store(true, Ordering::Relaxed);
-        return Err(CliError::from_rpc(RpcError {
-            code: ErrorCode::Cancelled,
-            message: "command cancelled before dispatch".into(),
-            data: Some(serde_json::json!({"reason": "cancelled_before_dispatch"})),
-        }));
-    }
-    let rpc_id: RpcId = format!("{}-{}", rpc_id_prefix, random_short_id());
-    let params = with_context(
-        params,
-        OBSERVATION_CONTEXT.get().and_then(|c| c.as_deref()),
-        OBSERVATION_DEPENDENCIES
-            .get()
-            .map(Vec::as_slice)
-            .unwrap_or_default(),
-        ACTION_EVIDENCE
-            .get()
-            .and_then(|(observation, _)| observation.as_deref()),
-        ACTION_EVIDENCE
-            .get()
-            .and_then(|(_, expect)| expect.as_ref()),
-    )?;
-    let mut prechecked = super::protocol::precheck_cached_daemon_support(
-        &sock,
-        &method,
-        params.as_ref().unwrap_or(&serde_json::Value::Null),
-    )?;
-    // Optimistic single-UDS fast path: connect once and send the target RPC directly.
-    // Fail-safe auto-spawn: ONLY if initial connect() fails before any bytes are written
-    // (NotFound / ConnectionRefused on an unverified optimistic daemon.json candidate),
-    // fall back to ensure_daemon_with_protocol() and connect once to the fresh daemon.
-    let was_optimistic = super::ensure_daemon::take_optimistic_candidate(&sock);
-    let mut client = match IpcClient::connect(sock.clone()).await {
-        Ok(client) => client,
-        Err(connect_err) if was_optimistic && is_daemon_absent_connect_error(&connect_err) => {
-            let stale_sock = sock.clone();
-            let (fresh_info, fresh_protocol) =
-                tokio::task::spawn_blocking(super::ensure_daemon::ensure_daemon_with_protocol)
-                    .await
-                    .context("join daemon auto-spawn task")
-                    .map_err(CliError::Local)?
-                    .context("ensure daemon is running")
-                    .map_err(CliError::Local)?;
-            check_daemon_protocol(&fresh_protocol).map_err(CliError::Local)?;
-            super::ensure_daemon::record_redirected_sock(&stale_sock, &fresh_info.sock_path);
-            sock = fresh_info.sock_path;
-            prechecked = super::protocol::precheck_cached_daemon_support(
-                &sock,
-                &method,
-                params.as_ref().unwrap_or(&serde_json::Value::Null),
-            )?;
-            IpcClient::connect(sock.clone()).await?
-        }
-        Err(connect_err) => return Err(connect_err.into()),
-    };
-    let rpc_id_for_call = rpc_id.clone();
-    let rpc_id_for_cancel = rpc_id.clone();
-    let action_started = std::sync::atomic::AtomicBool::new(false);
-    let action_started_ref = &action_started;
-
-    let main_fut = async move {
-        if !prechecked
-            && let Err(error) = super::protocol::check_daemon_support(
-                &mut client,
-                &method,
-                params.as_ref().unwrap_or(&serde_json::Value::Null),
-            )
-            .await?
-        {
-            return Ok(Err(error));
-        }
-        action_started_ref.store(true, std::sync::atomic::Ordering::Relaxed);
-        client
-            .call_with_id::<serde_json::Value, R>(rpc_id_for_call, method, params, call_timeout)
-            .await
-    };
-    tokio::pin!(main_fut);
-
-    let outcome = tokio::select! {
-        biased;
-        // Arm cancellation before the RPC can dispatch browser input.
-        sig = wait_for_cancel(parent_cancel) => {
-            sig.context("wait for cancellation").map_err(CliError::Local)?;
-            CANCEL_REQUESTED.store(true, Ordering::Relaxed);
-            // The feature probe has no browser effects. Dropping it here must
-            // also prevent the action from being sent after cancellation.
-            if !action_started.load(std::sync::atomic::Ordering::Relaxed) {
-                return Err(CliError::from_rpc(RpcError {
-                    code: ErrorCode::Cancelled,
-                    message: "request cancelled before dispatch".into(),
-                    data: Some(serde_json::json!({
-                        "reason": "cancelled_before_dispatch", "effect_state": "none"
-                    })),
-                }));
-            }
-            debug!(rpc_id = %rpc_id_for_cancel, "forwarding cancel to daemon");
-            // Separate IPC connections can deliver cancel before the business
-            // request is registered. Keep polling that request while confirming
-            // cancellation, including any write that has not completed yet.
-            let deadline = Instant::now() + CANCEL_RESPONSE_GRACE;
-            let settle = async {
-                tokio::select! {
-                    biased;
-                    res = &mut main_fut => return res,
-                    result = send_cancel(&sock, &rpc_id_for_cancel, deadline) => {
-                        if let Err(err) = result {
-                            debug!(rpc_id = %rpc_id_for_cancel, %err, "cancel was not confirmed");
-                        }
-                    },
-                }
-                main_fut.await
-            };
-            match timeout_at(deadline, settle).await {
-                Ok(res) => res?,
-                Err(_) => {
-                    debug!(
-                        rpc_id = %rpc_id_for_cancel,
-                        "cancel grace elapsed; synthesising cancelled error"
-                    );
-                    return Err(CliError::from_rpc(RpcError {
-                        code: ErrorCode::Cancelled,
-                        message: "rpc did not respond within cancel grace window".into(),
-                        data: None,
-                    }));
-                }
-            }
-        }
-        res = &mut main_fut => res?,
-    };
-
-    outcome.map_err(CliError::from_rpc)
 }
 
 /// Release caller-owned staging even after cancellation. This deliberately
@@ -533,7 +594,8 @@ mod windows_tests {
 
 #[cfg(test)]
 mod tests {
-    use super::{ipc_timeout, with_context};
+    use super::{ClientContext, ipc_timeout};
+    use bsk_protocol::Method;
     use serde_json::json;
     use std::time::Duration;
 
@@ -547,28 +609,37 @@ mod tests {
     fn context_is_explicit_and_does_not_change_action_parameters() {
         let params = json!({"session_id":"s1", "ref":"e1", "value":"Shanghai"});
         assert_eq!(
-            with_context(Some(&params), None, &[], None, None).unwrap(),
+            ClientContext::default()
+                .prepare_params(&Method::ToolFill, Some(&params))
+                .unwrap(),
             Some(params.clone())
         );
-        let framed = with_context(
-            Some(&params),
-            Some("observed-context"),
-            &["@e2".into()],
-            None,
-            None,
-        )
-        .unwrap()
-        .unwrap();
+        let ctx = ClientContext {
+            context_id: Some("observed-context".into()),
+            depends_on: vec!["@e2".into()],
+            ..ClientContext::default()
+        };
+        let framed = ctx
+            .prepare_params(&Method::ToolFill, Some(&params))
+            .unwrap()
+            .unwrap();
         assert_eq!(framed["context_id"], "observed-context");
         assert_eq!(framed["depends_on"], json!(["@e2"]));
         assert_eq!(framed["value"], "Shanghai");
         assert!(params.get("context_id").is_none());
     }
+
     #[test]
     fn explicit_conditions_survive_without_implicit_context() {
         let params = json!({"session_id":"s1", "ref":"e1"});
         let checks = json!([{ "target":"#price", "field":"text", "equals":"$12" }]);
-        let framed = with_context(Some(&params), None, &[], Some("observed"), Some(&checks))
+        let ctx = ClientContext {
+            observation_id: Some("observed".into()),
+            expect: Some(checks.clone()),
+            ..ClientContext::default()
+        };
+        let framed = ctx
+            .prepare_params(&Method::ToolClick, Some(&params))
             .unwrap()
             .unwrap();
         assert_eq!(framed["observation_id"], "observed");
@@ -580,10 +651,78 @@ mod tests {
     #[test]
     fn conflicting_visual_and_action_observations_are_rejected() {
         let params = json!({"session_id":"s1", "observation_id":"visual"});
-        assert!(with_context(Some(&params), None, &[], Some("other"), None).is_err());
+        assert!(
+            ClientContext {
+                observation_id: Some("other".into()),
+                ..ClientContext::default()
+            }
+            .prepare_params(&Method::ToolClick, Some(&params))
+            .is_err()
+        );
         assert_eq!(
-            with_context(Some(&params), None, &[], Some("visual"), None).unwrap(),
+            ClientContext {
+                observation_id: Some("visual".into()),
+                ..ClientContext::default()
+            }
+            .prepare_params(&Method::ToolClick, Some(&params))
+            .unwrap(),
             Some(params)
+        );
+    }
+
+    #[test]
+    fn accepts_action_metadata_enforced_per_method_and_tool_read_context_only() {
+        let ctx = ClientContext {
+            scope: Some("agent-1".into()),
+            context_id: Some("ctx-1".into()),
+            expect: Some(json!([{"target":"@e1","field":"exists","equals":true}])),
+            ..ClientContext::default()
+        };
+        assert!(
+            ctx.prepare_params(
+                &Method::ToolWaitForElement,
+                Some(json!({"session_id":"s1"}))
+            )
+            .is_err()
+        );
+        assert!(
+            ctx.prepare_params(&Method::TransferBegin, Some(json!({"session_id":"s1"})))
+                .is_err()
+        );
+        let stripped = ctx.without_action_metadata();
+        assert_eq!(stripped.scope.as_deref(), Some("agent-1"));
+        let wait_params = stripped
+            .prepare_params(&Method::ToolWaitForElement, Some(json!({"session_id":""})))
+            .unwrap()
+            .unwrap();
+        assert!(wait_params.get("expect").is_none());
+        assert!(wait_params.get("context_id").is_none());
+        assert_eq!(
+            wait_params["_caller_scope"],
+            crate::daemon::scopes::resolve_caller_scope_from_env(Some("agent-1"), None)
+        );
+
+        let mcp_ctx = ClientContext::for_mcp(Some("mcp:42:nonce"), None, None, vec![], None, None)
+            .without_action_metadata();
+        assert_eq!(mcp_ctx.mcp_scope.as_deref(), Some("mcp:42:nonce"));
+        assert!(mcp_ctx.scope.is_none());
+        assert_eq!(
+            mcp_ctx.resolved_caller_scope(),
+            crate::daemon::scopes::resolve_caller_scope_from_env(None, Some("mcp:42:nonce"))
+        );
+
+        let read_ctx = ClientContext {
+            context_id: Some("ctx-read".into()),
+            ..ClientContext::default()
+        };
+        let read_params = read_ctx
+            .prepare_params(&Method::ToolRead, Some(json!({"session_id":"s1"})))
+            .unwrap()
+            .unwrap();
+        assert_eq!(read_params["context_id"], "ctx-read");
+        assert!(
+            ctx.prepare_params(&Method::ToolRead, Some(json!({"session_id":"s1"})))
+                .is_err()
         );
     }
 }

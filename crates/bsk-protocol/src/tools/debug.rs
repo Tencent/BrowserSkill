@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 macro_rules! debug_actions {
-    ($($action:ident => ($wire:literal, $effect:ident, $owner:ident, $cooperation_guarded:literal)),* $(,)?) => {
+    ($($action:ident => ($wire:literal, $effect:ident, $owner:ident, $cooperation_guarded:literal, $wal_tracked:literal, $dialog_gated:literal)),* $(,)?) => {
         #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
         pub enum DebugAction { $(#[serde(rename = $wire)] $action,)* }
         impl DebugAction {
@@ -24,35 +24,43 @@ macro_rules! debug_actions {
             pub const fn cooperation_guarded(&self) -> bool {
                 match self { $(Self::$action => $cooperation_guarded,)* }
             }
+            /// Whether an uncertain outcome on this sub-action must be recorded in the IntentWal.
+            pub const fn wal_tracked(&self) -> bool {
+                match self { $(Self::$action => $wal_tracked,)* }
+            }
+            /// Whether this sub-action can execute page requests that trigger a native JS dialog.
+            pub const fn dialog_gated(&self) -> bool {
+                match self { $(Self::$action => $dialog_gated,)* }
+            }
         }
     };
 }
 
 debug_actions! {
-    Performance => ("performance", ControlPlane, Extension, false),
-    Aggregate => ("aggregate", ControlPlane, Extension, false),
-    Duplicates => ("duplicates", ControlPlane, Extension, false),
-    Capabilities => ("capabilities", ControlPlane, Extension, false),
-    Activity => ("activity", ControlPlane, Daemon, false),
-    Wait => ("wait", ControlPlane, Daemon, false),
-    Pin => ("pin", ControlPlane, Extension, false),
-    Unpin => ("unpin", ControlPlane, Extension, false),
-    Start => ("start", ControlPlane, Extension, false),
-    Stop => ("stop", ControlPlane, Extension, false),
-    Status => ("status", ControlPlane, Extension, false),
-    Requests => ("requests", ControlPlane, Extension, false),
-    Request => ("request", ControlPlane, Extension, false),
-    Operations => ("operations", ControlPlane, Extension, false),
-    Operation => ("operation", ControlPlane, Extension, false),
-    Console => ("console", ControlPlane, Extension, false),
-    Pages => ("pages", ControlPlane, Extension, false),
-    Export => ("export", ControlPlane, Extension, false),
-    Rules => ("rules", ControlPlane, Extension, false),
-    RuleAdd => ("rule_add", BrowserMutation, Extension, true),
-    RuleEnable => ("rule_enable", BrowserMutation, Extension, true),
-    RuleDisable => ("rule_disable", ControlPlane, Extension, true),
-    RuleRemove => ("rule_remove", ControlPlane, Extension, true),
-    Replay => ("replay", BrowserMutation, Extension, true),
+    Performance => ("performance", ControlPlane, Extension, false, false, false),
+    Aggregate => ("aggregate", ControlPlane, Extension, false, false, false),
+    Duplicates => ("duplicates", ControlPlane, Extension, false, false, false),
+    Capabilities => ("capabilities", ControlPlane, Extension, false, false, false),
+    Activity => ("activity", ControlPlane, Daemon, false, false, false),
+    Wait => ("wait", ControlPlane, Daemon, false, false, false),
+    Pin => ("pin", ControlPlane, Extension, false, false, false),
+    Unpin => ("unpin", ControlPlane, Extension, false, false, false),
+    Start => ("start", ControlPlane, Extension, false, false, false),
+    Stop => ("stop", ControlPlane, Extension, false, false, false),
+    Status => ("status", ControlPlane, Extension, false, false, false),
+    Requests => ("requests", ControlPlane, Extension, false, false, false),
+    Request => ("request", ControlPlane, Extension, false, false, false),
+    Operations => ("operations", ControlPlane, Extension, false, false, false),
+    Operation => ("operation", ControlPlane, Extension, false, false, false),
+    Console => ("console", ControlPlane, Extension, false, false, false),
+    Pages => ("pages", ControlPlane, Extension, false, false, false),
+    Export => ("export", ControlPlane, Extension, false, false, false),
+    Rules => ("rules", ControlPlane, Extension, false, false, false),
+    RuleAdd => ("rule_add", BrowserMutation, Extension, true, true, false),
+    RuleEnable => ("rule_enable", BrowserMutation, Extension, true, true, false),
+    RuleDisable => ("rule_disable", ControlPlane, Extension, true, false, false),
+    RuleRemove => ("rule_remove", ControlPlane, Extension, true, false, false),
+    Replay => ("replay", BrowserMutation, Extension, true, true, true),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]

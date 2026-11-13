@@ -1,5 +1,6 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
   "description": "Parameters for `tool.screenshot`. Omit `ref` to capture the visible\ntab; pass an `@e<N>` ref from the last `tool.snapshot` to crop to\nthat element.",
   "properties": {
     "ref": {

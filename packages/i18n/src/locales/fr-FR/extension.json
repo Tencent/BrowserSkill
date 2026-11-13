@@ -389,7 +389,21 @@
       "recordStop": "Arrêter l'enregistrement des opérations",
       "recordAwait": "Attendre l'enregistrement",
       "resize": "Redimensionner la fenêtre",
-      "emulate": "Modifier les paramètres d'émulation"
+      "emulate": "Modifier les paramètres d'émulation",
+      "cooperate": "Synchroniser l'onglet partagé",
+      "sessionStart": "Démarrer la session",
+      "sessionStop": "Arrêter la session",
+      "screenshotFullPage": "Capturer la page entière",
+      "screenshotRead": "Lire la capture",
+      "screenshotRelease": "Libérer la capture",
+      "debug": "Exécuter une action de débogage",
+      "video": "Gérer l'enregistrement vidéo",
+      "dialogStatus": "Vérifier l'état du dialogue",
+      "dialogAccept": "Accepter le dialogue",
+      "dialogDismiss": "Ignorer le dialogue",
+      "waitForElement": "Attendre l'élément",
+      "operationAwait": "Attendre l'opération",
+      "operationCancel": "Annuler l'opération"
     }
   },
   "debug": {

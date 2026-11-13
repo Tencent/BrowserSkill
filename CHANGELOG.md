@@ -9,7 +9,20 @@ determines which versions can connect.
 
 ## [Unreleased]
 
+### Added
+
+- **MCP 100% parity**: Added `bsk_ledger`, `bsk_debug`, `bsk_video`, and `bsk_record` first-class tools alongside full CLI parity on existing tools (`session open/stop --all`, `sync` waits/filters, `wait_ms`, `view`, full-page `screenshot` / `extract` `--out`/`--overwrite`/`--format`/`--csv-safe`, `read --context`, `upload`/`download`, `tab_borrow`, full `emulate`, and `operation_await --out/--overwrite`), unified behind request-scoped `ClientContext`.
+- **Compile-time `MethodSpec` & `RpcErrorReason` SSOT**: Defined exhaustive `bsk_protocol::method::MethodSpec` metadata across all 77 RPC methods (exported to TypeScript `transport/generated/`) and exhaustive `RpcErrorReason` variants with dual CLI/MCP recovery hints (`cli_hint` / `mcp_hint`).
+
+### Changed
+
+- **Protocol `2.0` baseline**: Raised `PROTOCOL_VERSION` and `MIN_COMPATIBLE_PROTOCOL` to `"2.0"`, eliminated extension/daemon legacy version drift, and slimmed `apps/extension/src/transport/generated/validators.js` by over 60% (`~992 KB` -> `<= 390 KB`).
+- **Daemon & extension routing consolidation**: Replaced 9 independent handwritten method tables and `OnceLock` process globals with generated/exhaustive `MethodSpec` tables and explicit `ClientContext` request state.
+
 ### Fixed
+
+- Fixed native-dialog gate bypass when `tool.debug` (`replay`) triggers browser dialogs, missing `intent_wal` tracking on `download`/`dialog_accept`/`debug(replay)`/`navigate`/`reload`, and missing `EffectAwareAction` policies on `window_resize`/`emulate`/`tab_close`.
+- Fixed MCP error hints emitting CLI-only commands (such as `bsk ledger resolve`), missing `discard`/`exported` video cooperation actions, missing `navigate_back`/`forward`/`dialog_*` debug evidence classification, missing audit labels, and `recipe` `session_gone` detection of `session_stopped`/`no_active_session`.
 
 - VOM tree folding (`shouldSkipRedundantRefChildren` and `renderTreeRows`) preserves
   independent interactive descendants under named interactive controls (such as Vue 3 +
@@ -25,6 +38,10 @@ determines which versions can connect.
   visibility checks, and collection limits ([#588](https://github.com/Tencent/BrowserSkill/issues/588),
   [#612](https://github.com/Tencent/BrowserSkill/pull/612)); added required pre-release
   audit scenario `EDGE-SLOTTED-LIST-EXTRACT`.
+
+### Removed
+
+- Removed deprecated `TraceV2` recording types/converters (retaining `TraceV3` only), all 9 legacy `1.x` `Feature::*` compatibility gates, extension/daemon `"1.6"`/`LEGACY_MIN_COMPATIBLE_PEER` shims, duplicate `DragParams.observation_id` / legacy drag modes, and duplicate `wire_*` runtime validators from generated TypeScript artifacts.
 
 ## [0.5.0] - 2026-11-12
 

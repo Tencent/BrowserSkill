@@ -143,7 +143,11 @@ fn params(args: &ExtractArgs) -> anyhow::Result<ExtractParams> {
         timeout_ms: args.timeout_ms,
     })
 }
-pub fn dispatch(args: ExtractArgs, format: Format) -> Result<(), CliError> {
+pub fn dispatch(
+    args: ExtractArgs,
+    ctx: &business_rpc::ClientContext,
+    format: Format,
+) -> Result<(), CliError> {
     if args.output_format == OutputFormat::Csv
         && args.out.is_none()
         && matches!(format, Format::Json)
@@ -159,9 +163,9 @@ pub fn dispatch(args: ExtractArgs, format: Format) -> Result<(), CliError> {
             preflight(&metadata_path(path), args.overwrite).map_err(CliError::Local)?;
         }
     }
-    business_rpc::set_caller_scope(args.scope.clone());
+    let op_ctx = ctx.with_scope(args.scope.as_deref());
     let daemon = ensure_daemon().context("ensure daemon is running")?;
-    let mut reply: ExtractResult = business_rpc::call(
+    let mut reply: ExtractResult = op_ctx.call(
         daemon.sock_path, "extract", Method::ToolExtract, Some(params), TOOL_IPC_TIMEOUT,
     ).map_err(|error| match error {
         CliError::Rpc { code: ErrorCode::UnknownMethod, .. } => CliError::Rpc {
@@ -173,6 +177,73 @@ pub fn dispatch(args: ExtractArgs, format: Format) -> Result<(), CliError> {
     })?;
     order_rows(&mut reply);
     render(&reply, &args, format).map_err(CliError::Local)
+}
+
+pub(crate) fn render_in_memory(
+    reply: &mut ExtractResult,
+    output_format: OutputFormat,
+    csv_safe: bool,
+) -> anyhow::Result<Value> {
+    order_rows(reply);
+    match output_format {
+        OutputFormat::Json => Ok(serde_json::to_value(&*reply)?),
+        OutputFormat::Csv => {
+            let (bytes, metadata) = csv_export(reply, csv_safe)?;
+            let csv = String::from_utf8(bytes).context("encode CSV output as UTF-8")?;
+            Ok(json!({
+                "format": "csv",
+                "csv": csv,
+                "metadata": metadata,
+            }))
+        }
+    }
+}
+
+pub(crate) fn write_output_artifact(
+    reply: &mut ExtractResult,
+    out: &Path,
+    overwrite: bool,
+    output_format: OutputFormat,
+    csv_safe: bool,
+) -> anyhow::Result<Value> {
+    order_rows(reply);
+    preflight(out, overwrite)?;
+    if output_format == OutputFormat::Csv {
+        preflight(&metadata_path(out), overwrite)?;
+    }
+    let (bytes, metadata) = match output_format {
+        OutputFormat::Json => (serde_json::to_vec_pretty(reply)?, None),
+        OutputFormat::Csv => {
+            let (bytes, meta) = csv_export(reply, csv_safe)?;
+            (bytes, Some(meta))
+        }
+    };
+    let data = stage(out, &bytes)?;
+    let meta_path = metadata.as_ref().map(|_| metadata_path(out));
+    let meta_temp = metadata
+        .as_ref()
+        .zip(meta_path.as_ref())
+        .map(|(meta, path)| stage(path, &serde_json::to_vec_pretty(meta)?))
+        .transpose()?;
+    if let (Some(temp), Some(path)) = (&meta_temp, &meta_path) {
+        atomic_output::commit(temp.path(), path, overwrite)
+            .context("commit extraction metadata")?;
+    }
+    atomic_output::commit(data.path(), out, overwrite).with_context(|| {
+        format!(
+            "commit output {}; metadata may already be present",
+            out.display()
+        )
+    })?;
+    Ok(json!({
+        "path": out,
+        "metadata_path": meta_path,
+        "byte_size": bytes.len(),
+        "columns": reply.columns,
+        "source": reply.source,
+        "coverage": reply.coverage,
+        "warnings": reply.warnings,
+    }))
 }
 /// The daemon relays replies as JSON values, whose object keys come back
 /// sorted (c1, c10, c2, ...). Restore each row to `columns` order.

@@ -300,14 +300,15 @@ fn json_error_string(err: &CliError, exit: u8, hint: Option<&str>) -> String {
         .unwrap_or_else(|_| "{\"message\":\"failed to encode error\"}".into())
 }
 
-/// The same `{ code, message, hint, exit_code, data }` payload `--json`
-/// prints, for callers that return errors as data (the MCP server).
-pub(crate) fn json_error_value(err: &CliError) -> serde_json::Value {
+/// MCP error payload `{ code, message, hint, exit_code, data }` preferring
+/// MCP-native recovery hints (`mcp_hint`) before CLI-only `data.recovery`
+/// or `hint`, so LLM callers never receive CLI subcommands like `bsk ledger resolve`.
+pub(crate) fn mcp_json_error_value(err: &CliError) -> serde_json::Value {
     let render_info = render_info_for(err);
     let body = JsonError {
         code: err.code(),
         message: err.to_string(),
-        hint: hint_for(err, render_info.as_ref()),
+        hint: mcp_hint_for(err, render_info.as_ref()),
         exit_code: err.exit_code(),
         data: err.data().cloned(),
     };
@@ -367,6 +368,29 @@ fn hint_for<'a>(
                         )),
                     _ => None,
                 })
+        })
+}
+
+/// Hint line tailored for MCP responses (`mcp_hint` wins over CLI `data.recovery`).
+fn mcp_hint_for<'a>(
+    err: &'a CliError,
+    render_info: Option<&render_error::RenderInfo>,
+) -> Option<&'a str> {
+    render_info
+        .and_then(|info| info.mcp_hint)
+        .or_else(|| {
+            err.data()
+                .and_then(|data| data.get("recovery"))
+                .and_then(serde_json::Value::as_str)
+        })
+        .or_else(|| render_info.and_then(|info| info.hint))
+        .or_else(|| match err {
+            CliError::Local(error) => recovery_hint(error)
+                .or_else(|| super::update::source_recovery_hint(error))
+                .or(Some(
+                    "is the bsk daemon running? check bsk_session(action='status') or ask the user to start the bsk daemon",
+                )),
+            _ => None,
         })
 }
 
@@ -855,7 +879,7 @@ mod action_timeout_render_tests {
                 message: "tool RPC timed out after 400ms".into(),
                 data: Some(data.clone()),
             });
-            let mcp = json_error_value(&error);
+            let mcp = mcp_json_error_value(&error);
             let render_info = render_info_for(&error);
             let cli: serde_json::Value = serde_json::from_str(&json_error_string(
                 &error,

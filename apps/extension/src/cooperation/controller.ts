@@ -5,7 +5,7 @@ import {
 } from "@/session-manager/manager";
 import { type ResolvedActionTarget, resolveActionTarget } from "@/tools/interaction";
 import { captureVomObservation, handleSnapshot } from "@/tools/observation";
-import { isPassiveDebugAction, toolPolicy } from "@/tools/policy";
+import { isKnownVideoAction, isPassiveDebugAction, toolPolicy } from "@/tools/policy";
 import {
   type CdpRunner,
   cdpBlockedUrlReason,
@@ -1533,8 +1533,7 @@ export class CooperationController implements ControlAuthority {
     const action = (req.params as { action?: string }).action;
     if (
       (policy.cooperation === "debug" && isPassiveDebugAction(action)) ||
-      (policy.cooperation === "video" &&
-        ["start", "stop", "status", "read", "list", "capabilities"].includes(action ?? ""))
+      (policy.cooperation === "video" && isKnownVideoAction(action))
     ) {
       req.params = { ...params, tab_id: params.tab_id ?? this.defaultTabs.get(session.sessionId) };
       return invoke(guardedRunner(cdp));

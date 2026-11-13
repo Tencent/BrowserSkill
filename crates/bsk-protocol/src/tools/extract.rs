@@ -32,6 +32,7 @@ pub enum ExtractRead {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ExtractParams {
     pub session_id: String,
     pub action: ExtractAction,

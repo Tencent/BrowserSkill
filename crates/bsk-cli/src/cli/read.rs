@@ -36,14 +36,18 @@ pub struct ReadArgs {
     #[arg(long, value_parser=clap::value_parser!(u32).range(100..=10000))]
     pub timeout_ms: Option<u32>,
 }
-pub fn dispatch(args: ReadArgs, _format: Format) -> Result<(), CliError> {
+pub fn dispatch(
+    args: ReadArgs,
+    ctx: &business_rpc::ClientContext,
+    _format: Format,
+) -> Result<(), CliError> {
     let fields: Option<Vec<ReadField>> = args
         .fields_json
         .as_deref()
         .map(serde_json::from_str)
         .transpose()
         .context("parse --fields-json as a DOM read field array")?;
-    business_rpc::set_caller_scope(args.scope);
+    let op_ctx = ctx.with_scope(args.scope.as_deref());
     let info = ensure_daemon().context("ensure daemon is running")?;
     let params = ReadParams {
         session_id: args.session.unwrap_or_default(),
@@ -56,7 +60,7 @@ pub fn dispatch(args: ReadArgs, _format: Format) -> Result<(), CliError> {
         max_bytes: args.max_bytes,
         timeout_ms: args.timeout_ms,
     };
-    let reply: ReadResult = business_rpc::call(
+    let reply: ReadResult = op_ctx.call(
         info.sock_path,
         "read",
         Method::ToolRead,

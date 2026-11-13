@@ -31,46 +31,6 @@
       ],
       "type": "string"
     },
-    "PageRefV2": {
-      "description": "Page context dictionary entry — referenced by steps via `page` id.",
-      "properties": {
-        "id": {
-          "type": "string"
-        },
-        "title": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "url": {
-          "type": "string"
-        }
-      },
-      "required": [
-        "id",
-        "url"
-      ],
-      "type": "object"
-    },
-    "RecordedTrace": {
-      "else": {
-        "$ref": "#/definitions/TraceV2"
-      },
-      "if": {
-        "properties": {
-          "version": {
-            "type": "integer"
-          }
-        },
-        "required": [
-          "version"
-        ]
-      },
-      "then": {
-        "$ref": "#/definitions/TraceV3"
-      }
-    },
     "RecorderInfo": {
       "properties": {
         "bsk": {
@@ -85,24 +45,6 @@
       "required": [
         "bsk",
         "vom"
-      ],
-      "type": "object"
-    },
-    "SelectedOptionV2": {
-      "description": "One selected option (`select` op).",
-      "properties": {
-        "label": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "value": {
-          "type": "string"
-        }
-      },
-      "required": [
-        "value"
       ],
       "type": "object"
     },
@@ -124,19 +66,6 @@
       ],
       "type": "object"
     },
-    "StepEffectV2": {
-      "description": "Observed navigation after a step (objective fact only).",
-      "properties": {
-        "navigated_to": {
-          "description": "Reference into `pages[]` for the destination page.",
-          "type": "string"
-        }
-      },
-      "required": [
-        "navigated_to"
-      ],
-      "type": "object"
-    },
     "StepResultV3": {
       "properties": {
         "state": {
@@ -147,275 +76,6 @@
         "state"
       ],
       "type": "object"
-    },
-    "StepV2": {
-      "description": "One recorded user action — discriminated union by `op` (v2).",
-      "oneOf": [
-        {
-          "description": "Fields shared by every v2 step variant (flattened in JSON).",
-          "properties": {
-            "effect": {
-              "anyOf": [
-                {
-                  "$ref": "#/definitions/StepEffectV2"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "id": {
-              "format": "uint32",
-              "minimum": 0,
-              "type": "integer"
-            },
-            "op": {
-              "const": "navigate",
-              "type": "string"
-            },
-            "page": {
-              "description": "Reference into `pages[]`.",
-              "type": "string"
-            },
-            "to": {
-              "type": "string"
-            }
-          },
-          "required": [
-            "op",
-            "id",
-            "page",
-            "to"
-          ],
-          "type": "object"
-        },
-        {
-          "description": "Fields shared by every v2 step variant (flattened in JSON).",
-          "properties": {
-            "effect": {
-              "anyOf": [
-                {
-                  "$ref": "#/definitions/StepEffectV2"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "id": {
-              "format": "uint32",
-              "minimum": 0,
-              "type": "integer"
-            },
-            "op": {
-              "const": "click",
-              "type": "string"
-            },
-            "page": {
-              "description": "Reference into `pages[]`.",
-              "type": "string"
-            },
-            "target": {
-              "$ref": "#/definitions/TargetDescriptorV2"
-            }
-          },
-          "required": [
-            "op",
-            "id",
-            "page",
-            "target"
-          ],
-          "type": "object"
-        },
-        {
-          "description": "Fields shared by every v2 step variant (flattened in JSON).",
-          "properties": {
-            "effect": {
-              "anyOf": [
-                {
-                  "$ref": "#/definitions/StepEffectV2"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "id": {
-              "format": "uint32",
-              "minimum": 0,
-              "type": "integer"
-            },
-            "op": {
-              "const": "hover",
-              "type": "string"
-            },
-            "page": {
-              "description": "Reference into `pages[]`.",
-              "type": "string"
-            },
-            "target": {
-              "$ref": "#/definitions/TargetDescriptorV2"
-            }
-          },
-          "required": [
-            "op",
-            "id",
-            "page",
-            "target"
-          ],
-          "type": "object"
-        },
-        {
-          "description": "Fields shared by every v2 step variant (flattened in JSON).",
-          "properties": {
-            "effect": {
-              "anyOf": [
-                {
-                  "$ref": "#/definitions/StepEffectV2"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "id": {
-              "format": "uint32",
-              "minimum": 0,
-              "type": "integer"
-            },
-            "op": {
-              "const": "fill",
-              "type": "string"
-            },
-            "page": {
-              "description": "Reference into `pages[]`.",
-              "type": "string"
-            },
-            "redacted": {
-              "type": [
-                "boolean",
-                "null"
-              ]
-            },
-            "target": {
-              "$ref": "#/definitions/TargetDescriptorV2"
-            },
-            "value": {
-              "type": "string"
-            }
-          },
-          "required": [
-            "op",
-            "id",
-            "page",
-            "target",
-            "value"
-          ],
-          "type": "object"
-        },
-        {
-          "description": "Fields shared by every v2 step variant (flattened in JSON).",
-          "properties": {
-            "effect": {
-              "anyOf": [
-                {
-                  "$ref": "#/definitions/StepEffectV2"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "id": {
-              "format": "uint32",
-              "minimum": 0,
-              "type": "integer"
-            },
-            "op": {
-              "const": "select",
-              "type": "string"
-            },
-            "page": {
-              "description": "Reference into `pages[]`.",
-              "type": "string"
-            },
-            "selection": {
-              "items": {
-                "$ref": "#/definitions/SelectedOptionV2"
-              },
-              "type": "array"
-            },
-            "target": {
-              "$ref": "#/definitions/TargetDescriptorV2"
-            }
-          },
-          "required": [
-            "op",
-            "id",
-            "page",
-            "target",
-            "selection"
-          ],
-          "type": "object"
-        },
-        {
-          "description": "Fields shared by every v2 step variant (flattened in JSON).",
-          "properties": {
-            "effect": {
-              "anyOf": [
-                {
-                  "$ref": "#/definitions/StepEffectV2"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "id": {
-              "format": "uint32",
-              "minimum": 0,
-              "type": "integer"
-            },
-            "key": {
-              "type": "string"
-            },
-            "modifiers": {
-              "items": {
-                "$ref": "#/definitions/KeyModifier"
-              },
-              "type": [
-                "array",
-                "null"
-              ]
-            },
-            "op": {
-              "const": "press",
-              "type": "string"
-            },
-            "page": {
-              "description": "Reference into `pages[]`.",
-              "type": "string"
-            },
-            "target": {
-              "anyOf": [
-                {
-                  "$ref": "#/definitions/TargetDescriptorV2"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            }
-          },
-          "required": [
-            "op",
-            "id",
-            "page",
-            "key"
-          ],
-          "type": "object"
-        }
-      ]
     },
     "StepV3": {
       "description": "One recorded user action — discriminated union by `op`.",
@@ -717,48 +377,6 @@
       ],
       "type": "string"
     },
-    "TargetDescriptorV2": {
-      "description": "Stable semantic handle for an interacted element (v2).\n\n`name` and `nearby_label` are **untrusted page text**.",
-      "properties": {
-        "name": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "name_attr": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "nearby_label": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "placeholder": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "role": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "tag": {
-          "type": "string"
-        }
-      },
-      "required": [
-        "tag"
-      ],
-      "type": "object"
-    },
     "TargetDescriptorV3": {
       "description": "Stable semantic handle for an interacted element within a page observation.",
       "properties": {
@@ -833,56 +451,6 @@
       ],
       "type": "object"
     },
-    "TraceV2": {
-      "description": "Persisted user-action trace exported by legacy `tool.record_stop` / `await`.\n\nUnknown extension fields are ignored so older traces remain readable.\n`states[]` and a numeric `version` are reserved for Trace v3 / `RecordedTrace`\nclassification — serde still ignores them, but the JSON Schema rejects them.",
-      "properties": {
-        "entry": {
-          "$ref": "#/definitions/TraceEntry"
-        },
-        "pages": {
-          "items": {
-            "$ref": "#/definitions/PageRefV2"
-          },
-          "type": "array"
-        },
-        "purpose": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "recorded_at": {
-          "description": "RFC 3339 timestamp when recording stopped.",
-          "type": "string"
-        },
-        "started_at": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "states": false,
-        "steps": {
-          "items": {
-            "$ref": "#/definitions/StepV2"
-          },
-          "type": "array"
-        },
-        "version": {
-          "description": "Numeric version selects Trace v3. Legacy v2 envelopes omit this field.",
-          "not": {
-            "type": "integer"
-          }
-        }
-      },
-      "required": [
-        "recorded_at",
-        "entry",
-        "pages",
-        "steps"
-      ],
-      "type": "object"
-    },
     "TraceV3": {
       "additionalProperties": false,
       "description": "Wire trace returned by `tool.record_stop` / `await`.",
@@ -942,7 +510,7 @@
   },
   "properties": {
     "trace": {
-      "$ref": "#/definitions/RecordedTrace"
+      "$ref": "#/definitions/TraceV3"
     }
   },
   "required": [

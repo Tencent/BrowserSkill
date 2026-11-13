@@ -389,7 +389,21 @@
       "recordStop": "Detener grabación de operaciones",
       "recordAwait": "Esperar grabación",
       "resize": "Redimensionar ventana",
-      "emulate": "Cambiar ajustes de emulación"
+      "emulate": "Cambiar ajustes de emulación",
+      "cooperate": "Sincronizar pestaña compartida",
+      "sessionStart": "Iniciar sesión",
+      "sessionStop": "Detener sesión",
+      "screenshotFullPage": "Capturar pantalla completa",
+      "screenshotRead": "Leer captura",
+      "screenshotRelease": "Liberar captura",
+      "debug": "Ejecutar acción de depuración",
+      "video": "Gestionar grabación de vídeo",
+      "dialogStatus": "Comprobar estado del diálogo",
+      "dialogAccept": "Aceptar diálogo",
+      "dialogDismiss": "Descartar diálogo",
+      "waitForElement": "Esperar elemento",
+      "operationAwait": "Esperar operación",
+      "operationCancel": "Cancelar operación"
     }
   },
   "debug": {

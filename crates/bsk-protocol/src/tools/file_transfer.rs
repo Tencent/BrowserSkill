@@ -107,6 +107,7 @@ pub struct DownloadResult {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct TransferBeginParams {
     pub session_id: String,
     pub name: String,
@@ -120,6 +121,7 @@ pub struct TransferBeginResult {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct TransferChunkParams {
     pub transfer_id: String,
     pub offset: u64,
@@ -136,6 +138,7 @@ pub struct TransferChunkResult {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct TransferIdParams {
     pub transfer_id: String,
 }

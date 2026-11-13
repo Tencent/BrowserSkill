@@ -507,6 +507,7 @@ mod handshake_payload_tests {
 
 /// `system.ping` request payload. Empty (the response carries `pong`).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct PingParams {}
 
 /// `system.ping` response payload.
@@ -562,6 +563,7 @@ pub struct SessionStatusEntry {
 
 /// `system.status` request payload.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct StatusParams {
     /// When set, the daemon polls the browser registry for up to this many
     /// milliseconds before returning a snapshot. Only applies while zero
@@ -572,6 +574,7 @@ pub struct StatusParams {
 
 /// `browser.list` request payload.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct BrowserListParams {
     /// When set, the daemon polls the browser registry for up to this many
     /// milliseconds before returning a list. Only applies while zero browsers

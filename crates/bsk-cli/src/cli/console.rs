@@ -42,13 +42,22 @@ pub struct ConsoleArgs {
     pub include_stack: bool,
 }
 
-pub fn dispatch(args: ConsoleArgs, format: Format) -> Result<(), CliError> {
-    crate::cli::business_rpc::set_caller_scope(args.scope.clone());
+pub fn dispatch(
+    args: ConsoleArgs,
+    ctx: &crate::cli::business_rpc::ClientContext,
+    format: Format,
+) -> Result<(), CliError> {
+    let op_ctx = ctx.with_scope(args.scope.as_deref());
     let info = ensure_daemon().context("ensure daemon is running")?;
-    run(info.sock_path, args, format)
+    run(info.sock_path, &op_ctx, args, format)
 }
 
-fn run(sock: PathBuf, args: ConsoleArgs, format: Format) -> Result<(), CliError> {
+fn run(
+    sock: PathBuf,
+    ctx: &crate::cli::business_rpc::ClientContext,
+    args: ConsoleArgs,
+    format: Format,
+) -> Result<(), CliError> {
     let params = ConsoleParams {
         session_id: args.session.unwrap_or_default(),
         tab_id: args.tab_id,
@@ -57,12 +66,16 @@ fn run(sock: PathBuf, args: ConsoleArgs, format: Format) -> Result<(), CliError>
         max_text_chars: args.max_text_chars,
         include_stack: args.include_stack.then_some(true),
     };
-    let reply: ConsoleResult = call(sock, params)?;
+    let reply: ConsoleResult = call(sock, ctx, params)?;
     render(&reply, format)
 }
 
-fn call(sock: PathBuf, params: ConsoleParams) -> Result<ConsoleResult, CliError> {
-    crate::cli::business_rpc::call::<ConsoleParams, ConsoleResult>(
+fn call(
+    sock: PathBuf,
+    ctx: &crate::cli::business_rpc::ClientContext,
+    params: ConsoleParams,
+) -> Result<ConsoleResult, CliError> {
+    ctx.call::<ConsoleParams, ConsoleResult>(
         sock,
         "console",
         Method::ToolConsole,

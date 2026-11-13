@@ -163,19 +163,27 @@ pub struct ReloadArgs {
     pub hard: bool,
 }
 
-pub fn dispatch_navigate_command(args: NavigateCommand, format: Format) -> Result<(), CliError> {
+pub fn dispatch_navigate_command(
+    args: NavigateCommand,
+    ctx: &crate::cli::business_rpc::ClientContext,
+    format: Format,
+) -> Result<(), CliError> {
     match args.command {
-        Some(NavigateCmd::Back(args)) => dispatch_navigate_back(args, format),
-        Some(NavigateCmd::Forward(args)) => dispatch_navigate_forward(args, format),
-        None => dispatch_navigate(args.args, format),
+        Some(NavigateCmd::Back(args)) => dispatch_navigate_back(args, ctx, format),
+        Some(NavigateCmd::Forward(args)) => dispatch_navigate_forward(args, ctx, format),
+        None => dispatch_navigate(args.args, ctx, format),
     }
 }
 
-pub fn dispatch_navigate(args: NavigateArgs, format: Format) -> Result<(), CliError> {
+pub fn dispatch_navigate(
+    args: NavigateArgs,
+    ctx: &crate::cli::business_rpc::ClientContext,
+    format: Format,
+) -> Result<(), CliError> {
     let Some(url) = args.url.clone() else {
         return Err(CliError::Local(anyhow::anyhow!("navigate requires a url")));
     };
-    crate::cli::business_rpc::set_caller_scope(args.scope.clone());
+    let op_ctx = ctx.with_scope(args.scope.as_deref());
     let info = ensure_daemon().context("ensure daemon is running")?;
     let params = NavigateParams {
         session_id: args.session.clone().unwrap_or_default(),
@@ -186,6 +194,7 @@ pub fn dispatch_navigate(args: NavigateArgs, format: Format) -> Result<(), CliEr
     };
     let reply: NavigateResult = call(
         info.sock_path,
+        &op_ctx,
         Method::ToolNavigate,
         params,
         "navigate-1",
@@ -194,8 +203,12 @@ pub fn dispatch_navigate(args: NavigateArgs, format: Format) -> Result<(), CliEr
     render_navigate(&reply, format)
 }
 
-pub fn dispatch_navigate_back(args: NavigateHistoryArgs, format: Format) -> Result<(), CliError> {
-    crate::cli::business_rpc::set_caller_scope(args.scope.clone());
+pub fn dispatch_navigate_back(
+    args: NavigateHistoryArgs,
+    ctx: &crate::cli::business_rpc::ClientContext,
+    format: Format,
+) -> Result<(), CliError> {
+    let op_ctx = ctx.with_scope(args.scope.as_deref());
     let info = ensure_daemon().context("ensure daemon is running")?;
     let params = NavigateBackParams {
         session_id: args.session.clone().unwrap_or_default(),
@@ -205,6 +218,7 @@ pub fn dispatch_navigate_back(args: NavigateHistoryArgs, format: Format) -> Resu
     };
     let reply: NavigateBackResult = call(
         info.sock_path,
+        &op_ctx,
         Method::ToolNavigateBack,
         params,
         "navigate-back-1",
@@ -215,9 +229,10 @@ pub fn dispatch_navigate_back(args: NavigateHistoryArgs, format: Format) -> Resu
 
 pub fn dispatch_navigate_forward(
     args: NavigateHistoryArgs,
+    ctx: &crate::cli::business_rpc::ClientContext,
     format: Format,
 ) -> Result<(), CliError> {
-    crate::cli::business_rpc::set_caller_scope(args.scope.clone());
+    let op_ctx = ctx.with_scope(args.scope.as_deref());
     let info = ensure_daemon().context("ensure daemon is running")?;
     let params = NavigateForwardParams {
         session_id: args.session.clone().unwrap_or_default(),
@@ -227,6 +242,7 @@ pub fn dispatch_navigate_forward(
     };
     let reply: NavigateForwardResult = call(
         info.sock_path,
+        &op_ctx,
         Method::ToolNavigateForward,
         params,
         "navigate-forward-1",
@@ -235,8 +251,12 @@ pub fn dispatch_navigate_forward(
     render_history(&OwnedHistoryView::from(reply), "navigate-forward", format)
 }
 
-pub fn dispatch_reload(args: ReloadArgs, format: Format) -> Result<(), CliError> {
-    crate::cli::business_rpc::set_caller_scope(args.scope.clone());
+pub fn dispatch_reload(
+    args: ReloadArgs,
+    ctx: &crate::cli::business_rpc::ClientContext,
+    format: Format,
+) -> Result<(), CliError> {
+    let op_ctx = ctx.with_scope(args.scope.as_deref());
     let info = ensure_daemon().context("ensure daemon is running")?;
     let params = ReloadParams {
         session_id: args.session.clone().unwrap_or_default(),
@@ -247,6 +267,7 @@ pub fn dispatch_reload(args: ReloadArgs, format: Format) -> Result<(), CliError>
     };
     let reply: ReloadResult = call(
         info.sock_path,
+        &op_ctx,
         Method::ToolReload,
         params,
         "reload-1",
@@ -257,6 +278,7 @@ pub fn dispatch_reload(args: ReloadArgs, format: Format) -> Result<(), CliError>
 
 fn call<P, R>(
     sock: PathBuf,
+    ctx: &crate::cli::business_rpc::ClientContext,
     method: Method,
     params: P,
     id: &'static str,
@@ -266,7 +288,7 @@ where
     P: serde::Serialize + Send + 'static,
     R: serde::de::DeserializeOwned + Send + 'static,
 {
-    crate::cli::business_rpc::call::<P, R>(sock, id, method, Some(params), ipc_timeout(timeout_ms))
+    ctx.call::<P, R>(sock, id, method, Some(params), ipc_timeout(timeout_ms))
 }
 
 fn render_navigate(reply: &NavigateResult, format: Format) -> Result<(), CliError> {

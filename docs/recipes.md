@@ -215,7 +215,7 @@ bsk recipe approve sales-report
 ```
 
 `approve` lists each lowered step and asks the person to type the recipe's name. It needs a
-terminal and refuses piped input; MCP and DSH have no such action. Agents must never invoke or
+terminal and refuses piped input; MCP has no such action. Agents must never invoke or
 simulate it. This is a manual review workflow, not proof of human identity: a process with
 terminal and local file access remains trusted. The approval covers the recipe as reviewed:
 rewording the description keeps it,

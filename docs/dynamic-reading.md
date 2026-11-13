@@ -28,10 +28,9 @@ inspect the current page after control changes; subsequent input must synchroniz
 | Visual input, untargeted keys, displacement-only drag | Strict observation and existing geometry/focus guards; a DOM read cannot refresh them. |
 | Strict-policy input | Existing single-use whole-page contract. read/extract do not renew it. |
 
-`evaluate --unverified` requires daemon and extension protocol 1.9 or later compatible 1.x;
-peers below 1.9 are rejected before dispatch. The version gate cannot distinguish earlier
-1.9 development builds, so update the CLI, restart its daemon and reload the matching extension
-together. Strict contexts still authorize only one action, including an unverified script.
+`evaluate --unverified` requires protocol `"2.0"` (both daemon and extension must speak
+`"2.0"`). Update the CLI, restart its daemon, and reload the matching extension together.
+Strict contexts still authorize only one action, including an unverified script.
 
 Unrelated clocks, counts, carousel DOM replacement/reordering, class/style changes,
 video state, Canvas drawing and unrelated child navigations can occur during data
@@ -102,16 +101,14 @@ rechecked before publishing results/refs; output byte bounds also cover metadata
 
 | Client | Fields and limits |
 | --- | --- |
-| CLI | `bsk read --selector CSS` or `--ref @eN`; `--fields-json` array, `--max-nodes`, `--max-bytes`, `--timeout-ms` |
-| MCP | `bsk_inspect({action:"read", session, selector/ref, read_fields:[...], max_nodes, max_bytes, timeout_ms})` |
-| DSH | `bsk_inspect({action:"read", session, selector/ref, readFields:"[...]", maxNodes, maxBytes, readTimeoutMs})` |
+| CLI | `bsk read --selector CSS` or `--ref @eN`; `--fields-json` array, `--max-nodes`, `--max-bytes`, `--timeout-ms`, `--context` |
+| MCP | `bsk_inspect({action:"read", session, selector/ref, read_fields:[...], max_nodes, max_bytes, timeout_ms, context})` |
 
 The result has tab/frame identity, page/frame URLs, title, capture time, `scope:
 current_dom`, item refs/values/redactions and `truncated`. Machine errors retain
 reason/phase/effect_state/recovery; query failures have `phase: read` and no effect.
-New CLI/MCP require daemon protocol 1.9; the daemon checks extension protocol 1.9.
-Unsupported peers fail before forwarding this method. Compatible older 1.x clients
-retain existing action behavior; they cannot request a new method unknowingly.
+CLI and MCP share `ClientContext` and protocol `"2.0"` guarantees; peers below `"2.0"`
+fail handshake/request checks before forwarding this method.
 There is no downgrade to evaluate, no whitelist and no implicit resync/replay.
 
 `bsk plan` is not part of the 0.4.2 release. The plan client on main is

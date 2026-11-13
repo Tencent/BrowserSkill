@@ -45,20 +45,29 @@ pub struct GetHtmlArgs {
     pub out: Option<PathBuf>,
 }
 
-pub fn dispatch(args: GetHtmlArgs, format: Format) -> Result<(), CliError> {
-    crate::cli::business_rpc::set_caller_scope(args.scope.clone());
+pub fn dispatch(
+    args: GetHtmlArgs,
+    ctx: &crate::cli::business_rpc::ClientContext,
+    format: Format,
+) -> Result<(), CliError> {
+    let op_ctx = ctx.with_scope(args.scope.as_deref());
     let info = ensure_daemon().context("ensure daemon is running")?;
-    run(info.sock_path, args, format)
+    run(info.sock_path, &op_ctx, args, format)
 }
 
-fn run(sock: PathBuf, args: GetHtmlArgs, format: Format) -> Result<(), CliError> {
+fn run(
+    sock: PathBuf,
+    ctx: &crate::cli::business_rpc::ClientContext,
+    args: GetHtmlArgs,
+    format: Format,
+) -> Result<(), CliError> {
     let params = GetHtmlParams {
         session_id: args.session.clone().unwrap_or_default(),
         tab_id: args.tab_id,
         ref_: args.ref_.clone(),
         max_bytes: args.max_bytes,
     };
-    let reply: GetHtmlResult = call(sock, params)?;
+    let reply: GetHtmlResult = call(sock, ctx, params)?;
     if let Some(out) = &args.out {
         std::fs::write(out, reply.html.as_bytes())
             .with_context(|| format!("write HTML to {}", out.display()))
@@ -91,8 +100,12 @@ fn run(sock: PathBuf, args: GetHtmlArgs, format: Format) -> Result<(), CliError>
     Ok(())
 }
 
-fn call(sock: PathBuf, params: GetHtmlParams) -> Result<GetHtmlResult, CliError> {
-    crate::cli::business_rpc::call::<GetHtmlParams, GetHtmlResult>(
+fn call(
+    sock: PathBuf,
+    ctx: &crate::cli::business_rpc::ClientContext,
+    params: GetHtmlParams,
+) -> Result<GetHtmlResult, CliError> {
+    ctx.call::<GetHtmlParams, GetHtmlResult>(
         sock,
         "get-html",
         Method::ToolGetHtml,

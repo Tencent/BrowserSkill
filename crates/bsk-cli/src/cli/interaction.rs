@@ -152,7 +152,11 @@ pub struct ClickArgs {
     pub timeout: u32,
 }
 
-pub fn dispatch_click(args: ClickArgs, format: Format) -> Result<(), CliError> {
+pub fn dispatch_click(
+    args: ClickArgs,
+    ctx: &crate::cli::business_rpc::ClientContext,
+    format: Format,
+) -> Result<(), CliError> {
     let (ref_, selector) = split_target(
         args.target.clone(),
         args.ref_.clone(),
@@ -160,7 +164,7 @@ pub fn dispatch_click(args: ClickArgs, format: Format) -> Result<(), CliError> {
     )?;
     let modifiers = parse_modifiers(&args.modifiers)
         .map_err(|e| CliError::Local(anyhow::anyhow!("--modifiers: {e}")))?;
-    crate::cli::business_rpc::set_caller_scope(args.scope.clone());
+    let op_ctx = ctx.with_scope(args.scope.as_deref());
     let info = ensure_daemon().context("ensure daemon is running")?;
     let params = ClickParams {
         capture_id: args.capture_id.clone(),
@@ -181,6 +185,7 @@ pub fn dispatch_click(args: ClickArgs, format: Format) -> Result<(), CliError> {
     };
     let reply: ClickResult = call(
         info.sock_path,
+        &op_ctx,
         Method::ToolClick,
         params,
         "click-1",
@@ -245,7 +250,11 @@ pub struct HoverArgs {
     pub timeout: u32,
 }
 
-pub fn dispatch_hover(args: HoverArgs, format: Format) -> Result<(), CliError> {
+pub fn dispatch_hover(
+    args: HoverArgs,
+    ctx: &crate::cli::business_rpc::ClientContext,
+    format: Format,
+) -> Result<(), CliError> {
     let (ref_, selector) = split_target(
         args.target.clone(),
         args.ref_.clone(),
@@ -253,7 +262,7 @@ pub fn dispatch_hover(args: HoverArgs, format: Format) -> Result<(), CliError> {
     )?;
     let modifiers = parse_modifiers(&args.modifiers)
         .map_err(|e| CliError::Local(anyhow::anyhow!("--modifiers: {e}")))?;
-    crate::cli::business_rpc::set_caller_scope(args.scope.clone());
+    let op_ctx = ctx.with_scope(args.scope.as_deref());
     let info = ensure_daemon().context("ensure daemon is running")?;
     let params = HoverParams {
         session_id: args.session.clone().unwrap_or_default(),
@@ -270,6 +279,7 @@ pub fn dispatch_hover(args: HoverArgs, format: Format) -> Result<(), CliError> {
     };
     let reply: HoverResult = call(
         info.sock_path,
+        &op_ctx,
         Method::ToolHover,
         params,
         "hover-1",
@@ -324,9 +334,13 @@ pub struct FocusArgs {
     pub timeout: u32,
 }
 
-pub fn dispatch_focus(args: FocusArgs, format: Format) -> Result<(), CliError> {
+pub fn dispatch_focus(
+    args: FocusArgs,
+    ctx: &crate::cli::business_rpc::ClientContext,
+    format: Format,
+) -> Result<(), CliError> {
     let (ref_, selector) = split_target(args.target, args.ref_, args.selector)?;
-    crate::cli::business_rpc::set_caller_scope(args.scope);
+    let op_ctx = ctx.with_scope(args.scope.as_deref());
     let info = ensure_daemon().context("ensure daemon is running")?;
     let params = FocusParams {
         session_id: args.session.unwrap_or_default(),
@@ -337,6 +351,7 @@ pub fn dispatch_focus(args: FocusArgs, format: Format) -> Result<(), CliError> {
     };
     let reply: FocusResult = call(
         info.sock_path,
+        &op_ctx,
         Method::ToolFocus,
         params,
         "focus-1",
@@ -385,9 +400,13 @@ pub struct BlurArgs {
     pub timeout: u32,
 }
 
-pub fn dispatch_blur(args: BlurArgs, format: Format) -> Result<(), CliError> {
+pub fn dispatch_blur(
+    args: BlurArgs,
+    ctx: &crate::cli::business_rpc::ClientContext,
+    format: Format,
+) -> Result<(), CliError> {
     let (ref_, selector) = split_target(args.target, args.ref_, args.selector)?;
-    crate::cli::business_rpc::set_caller_scope(args.scope);
+    let op_ctx = ctx.with_scope(args.scope.as_deref());
     let info = ensure_daemon().context("ensure daemon is running")?;
     let params = BlurParams {
         session_id: args.session.unwrap_or_default(),
@@ -398,6 +417,7 @@ pub fn dispatch_blur(args: BlurArgs, format: Format) -> Result<(), CliError> {
     };
     let reply: BlurResult = call(
         info.sock_path,
+        &op_ctx,
         Method::ToolBlur,
         params,
         "blur-1",
@@ -459,13 +479,17 @@ pub struct FillArgs {
     pub timeout: u32,
 }
 
-pub fn dispatch_fill(args: FillArgs, format: Format) -> Result<(), CliError> {
+pub fn dispatch_fill(
+    args: FillArgs,
+    ctx: &crate::cli::business_rpc::ClientContext,
+    format: Format,
+) -> Result<(), CliError> {
     let (ref_, selector) = split_target(
         args.target.clone(),
         args.ref_.clone(),
         args.selector.clone(),
     )?;
-    crate::cli::business_rpc::set_caller_scope(args.scope.clone());
+    let op_ctx = ctx.with_scope(args.scope.as_deref());
     let info = ensure_daemon().context("ensure daemon is running")?;
     let params = FillParams {
         session_id: args.session.clone().unwrap_or_default(),
@@ -478,6 +502,7 @@ pub fn dispatch_fill(args: FillArgs, format: Format) -> Result<(), CliError> {
     };
     let reply: FillResult = call(
         info.sock_path,
+        &op_ctx,
         Method::ToolFill,
         params,
         "fill-1",
@@ -537,10 +562,14 @@ pub struct PressArgs {
     pub timeout: u32,
 }
 
-pub fn dispatch_press(args: PressArgs, format: Format) -> Result<(), CliError> {
+pub fn dispatch_press(
+    args: PressArgs,
+    ctx: &crate::cli::business_rpc::ClientContext,
+    format: Format,
+) -> Result<(), CliError> {
     let modifiers = parse_modifiers(&args.modifiers)
         .map_err(|e| CliError::Local(anyhow::anyhow!("--modifiers: {e}")))?;
-    crate::cli::business_rpc::set_caller_scope(args.scope.clone());
+    let op_ctx = ctx.with_scope(args.scope.as_deref());
     let info = ensure_daemon().context("ensure daemon is running")?;
     let params = PressParams {
         session_id: args.session.clone().unwrap_or_default(),
@@ -558,6 +587,7 @@ pub fn dispatch_press(args: PressArgs, format: Format) -> Result<(), CliError> {
     };
     let reply: PressResult = call(
         info.sock_path,
+        &op_ctx,
         Method::ToolPress,
         params,
         "press-1",
@@ -628,13 +658,17 @@ pub struct SelectArgs {
     pub timeout: u32,
 }
 
-pub fn dispatch_select(args: SelectArgs, format: Format) -> Result<(), CliError> {
+pub fn dispatch_select(
+    args: SelectArgs,
+    ctx: &crate::cli::business_rpc::ClientContext,
+    format: Format,
+) -> Result<(), CliError> {
     let (ref_, selector) = split_target(
         args.target.clone(),
         args.ref_.clone(),
         args.selector.clone(),
     )?;
-    crate::cli::business_rpc::set_caller_scope(args.scope.clone());
+    let op_ctx = ctx.with_scope(args.scope.as_deref());
     let info = ensure_daemon().context("ensure daemon is running")?;
     let params = SelectParams {
         session_id: args.session.clone().unwrap_or_default(),
@@ -646,6 +680,7 @@ pub fn dispatch_select(args: SelectArgs, format: Format) -> Result<(), CliError>
     };
     let reply: SelectResult = call(
         info.sock_path,
+        &op_ctx,
         Method::ToolSelect,
         params,
         "select-1",
@@ -708,6 +743,7 @@ fn modifier_label(m: &KeyModifier) -> &'static str {
 
 fn call<P, R>(
     sock: PathBuf,
+    ctx: &crate::cli::business_rpc::ClientContext,
     method: Method,
     params: P,
     id: &'static str,
@@ -717,7 +753,7 @@ where
     P: serde::Serialize + Send + 'static,
     R: serde::de::DeserializeOwned + Send + 'static,
 {
-    crate::cli::business_rpc::call::<P, R>(sock, id, method, Some(params), ipc_timeout(timeout_ms))
+    ctx.call::<P, R>(sock, id, method, Some(params), ipc_timeout(timeout_ms))
 }
 
 #[cfg(test)]

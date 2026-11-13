@@ -5,24 +5,6 @@ use serde::{Deserialize, Serialize};
 
 use crate::ErrorCode;
 
-/// Protocol 1.3 makes browser Automation settings authoritative.
-pub const INTERACTION_POLICY_PROTOCOL: &str = crate::compatibility::Feature::InteractionPolicy
-    .requirement()
-    .daemon;
-pub const INCOGNITO_SESSION_PROTOCOL: &str = crate::compatibility::Feature::IncognitoSessions
-    .requirement()
-    .daemon;
-
-pub fn supports_incognito_sessions(protocol: &str) -> bool {
-    crate::compatibility::Feature::IncognitoSessions
-        .supports(crate::compatibility::Peer::Daemon, protocol)
-}
-
-pub fn supports_interaction_policy(protocol: &str) -> bool {
-    crate::compatibility::Feature::InteractionPolicy
-        .supports(crate::compatibility::Peer::Daemon, protocol)
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum BorrowConfirmationPolicy {
@@ -44,6 +26,7 @@ pub struct InteractionPolicy {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct SessionStartParams {
     pub session_id: String,
     /// Caller-supplied display labels, not an authenticated identity.
@@ -123,6 +106,7 @@ pub struct SessionStartResult {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct SessionStopParams {
     pub session_id: String,
 }
@@ -225,12 +209,6 @@ mod tests {
             )
             .is_err()
         );
-        for protocol in ["1.0", "1.3", "2.0", "invalid"] {
-            assert!(!supports_incognito_sessions(protocol), "{protocol}");
-        }
-        for protocol in ["1.4", "1.5"] {
-            assert!(supports_incognito_sessions(protocol), "{protocol}");
-        }
     }
 
     #[test]
@@ -258,16 +236,6 @@ mod tests {
                 .unwrap()
                 .contains_key("unattended")
         );
-    }
-
-    #[test]
-    fn interaction_policy_requires_a_compatible_protocol() {
-        for protocol in ["1.0", "1.1", "1.2", "2.0", "invalid"] {
-            assert!(!supports_interaction_policy(protocol), "{protocol}");
-        }
-        for protocol in ["1.3", "1.4"] {
-            assert!(supports_interaction_policy(protocol), "{protocol}");
-        }
         let legacy: SessionStartParams =
             serde_json::from_value(json!({"session_id": "abcd"})).unwrap();
         assert!(!legacy.unattended);

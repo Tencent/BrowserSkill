@@ -230,9 +230,10 @@ impl ImplicitScopeRegistry {
         if let Some(live) = sessions.get(&binding.session_id) {
             return Some((binding, live));
         }
-        let reason = sessions
-            .end_info(&binding.session_id)
-            .map_or(crate::rpc_reason::SESSION_STOPPED, |end| end.reason);
+        let reason = sessions.end_info(&binding.session_id).map_or(
+            bsk_protocol::RpcErrorReason::SessionStopped.as_str(),
+            |end| end.reason,
+        );
         let dead_id = binding.session_id;
         slot.active = None;
         slot.tombstone = Some(ScopeTombstone {
@@ -300,7 +301,7 @@ impl ImplicitScopeRegistry {
                      pass --session <id>, set BSK_SCOPE=<name>, or run 'bsk open --scope <name> <url>' (refusing to hijack an existing session)"
                 ),
                 data: Some(json!({
-                    "reason": crate::rpc_reason::AMBIGUOUS_IMPLICIT_SESSION,
+                    "reason": bsk_protocol::RpcErrorReason::AmbiguousImplicitSession.as_str(),
                     "active_sessions": live_sessions,
                 })),
             });
@@ -333,7 +334,7 @@ impl ImplicitScopeRegistry {
                 display_scope(key)
             ),
             data: Some(json!({
-                "reason": crate::rpc_reason::NO_ACTIVE_SESSION,
+                "reason": bsk_protocol::RpcErrorReason::NoActiveSession.as_str(),
             })),
         })
     }
@@ -475,8 +476,7 @@ impl ImplicitScopeRegistry {
         };
 
         let kind = result.get("kind").and_then(Value::as_str);
-        let is_unchanged_kind = kind == Some("unchanged")
-            || (kind.is_none() && result.get("unchanged").and_then(Value::as_bool) == Some(true));
+        let is_unchanged_kind = kind == Some("unchanged");
         let history_ok = result
             .get("history_complete")
             .and_then(Value::as_bool)
@@ -710,7 +710,7 @@ mod tests {
         assert_eq!(err.code, ErrorCode::InvalidParams);
         assert_eq!(
             err.data.unwrap()["reason"],
-            crate::rpc_reason::AMBIGUOUS_IMPLICIT_SESSION
+            bsk_protocol::RpcErrorReason::AmbiguousImplicitSession.as_str()
         );
     }
 

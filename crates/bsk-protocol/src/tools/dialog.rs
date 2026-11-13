@@ -22,6 +22,7 @@ pub struct PendingJavaScriptDialog {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct DialogStatusParams {
     pub session_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -35,6 +36,7 @@ pub struct DialogStatusResult {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct DialogHandleParams {
     pub session_id: String,
     pub dialog_id: String,
@@ -49,6 +51,7 @@ pub struct DialogHandleResult {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct OperationParams {
     pub session_id: String,
     pub operation_id: String,

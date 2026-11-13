@@ -389,7 +389,21 @@
       "recordStop": "操作の記録を停止",
       "recordAwait": "記録の完了を待機",
       "resize": "ウィンドウサイズを変更",
-      "emulate": "エミュレーション設定を変更"
+      "emulate": "エミュレーション設定を変更",
+      "cooperate": "共有タブを同期",
+      "sessionStart": "セッションを開始",
+      "sessionStop": "セッションを停止",
+      "screenshotFullPage": "ページ全体のスクリーンショットを撮影",
+      "screenshotRead": "スクリーンショットを読み取る",
+      "screenshotRelease": "スクリーンショットを解放",
+      "debug": "デバッグ操作を実行",
+      "video": "画面録画を管理",
+      "dialogStatus": "ダイアログ状態を確認",
+      "dialogAccept": "ダイアログを承認",
+      "dialogDismiss": "ダイアログを閉じる",
+      "waitForElement": "要素を待機",
+      "operationAwait": "操作完了を待機",
+      "operationCancel": "操作をキャンセル"
     }
   },
   "debug": {

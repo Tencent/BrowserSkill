@@ -116,26 +116,31 @@ fn parse_duration(value: &str) -> Result<u32, String> {
     Ok(duration)
 }
 
-fn call<T: serde::de::DeserializeOwned + Send + 'static>(
-    sock: &Path,
+fn call_typed<T: serde::de::DeserializeOwned>(
+    rpc: &mut impl FnMut(VideoParams) -> Result<Value, CliError>,
     params: VideoParams,
 ) -> Result<T, CliError> {
-    business_rpc::call(
-        sock.to_path_buf(),
-        "video",
-        Method::ToolVideo,
-        Some(params),
-        TOOL_IPC_TIMEOUT,
-    )
+    let value = rpc(params)?;
+    serde_json::from_value(value).map_err(|error| CliError::Local(anyhow!(error)))
 }
 
 fn capabilities(
-    sock: &Path,
+    rpc: &mut impl FnMut(VideoParams) -> Result<Value, CliError>,
     browser: Option<String>,
     session: Option<String>,
 ) -> Result<(), CliError> {
-    let reply: Value = call(sock, VideoParams::Capabilities { browser, session_id: session })
-        .map_err(|error| CliError::Local(anyhow!("Video capability check failed: {error}. Update both the CLI daemon and extension if video is unsupported.")))?;
+    let reply: Value = call_typed(
+        rpc,
+        VideoParams::Capabilities {
+            browser,
+            session_id: session,
+        },
+    )
+    .map_err(|error| {
+        CliError::Local(anyhow!(
+            "Video capability check failed: {error}. Update both the CLI daemon and extension if video is unsupported."
+        ))
+    })?;
     if reply.get("version").and_then(Value::as_u64) != Some(1) {
         return Err(anyhow!(
             "Video protocol version 1 is required; update the CLI daemon and extension"
@@ -214,9 +219,12 @@ fn remember(value: &CachedGrant) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn listing(sock: &Path, browser: Option<String>) -> Result<Listing, CliError> {
-    capabilities(sock, browser.clone(), None)?;
-    let list: Listing = call(sock, VideoParams::List { browser })?;
+fn listing(
+    rpc: &mut impl FnMut(VideoParams) -> Result<Value, CliError>,
+    browser: Option<String>,
+) -> Result<Listing, CliError> {
+    capabilities(rpc, browser.clone(), None)?;
+    let list: Listing = call_typed(rpc, VideoParams::List { browser })?;
     for grant in &list.recordings {
         remember(&CachedGrant {
             browser: list.browser.clone(),
@@ -226,7 +234,10 @@ fn listing(sock: &Path, browser: Option<String>) -> Result<Listing, CliError> {
     Ok(list)
 }
 
-fn resolve(sock: &Path, selector: Selector) -> Result<CachedGrant, CliError> {
+fn resolve(
+    rpc: &mut impl FnMut(VideoParams) -> Result<Value, CliError>,
+    selector: Selector,
+) -> Result<CachedGrant, CliError> {
     if let Some(id) = &selector.recording {
         let path = cache_path(id)?;
         if selector.browser.is_none() && path.exists() {
@@ -241,7 +252,7 @@ fn resolve(sock: &Path, selector: Selector) -> Result<CachedGrant, CliError> {
             }
         }
     }
-    let list = listing(sock, selector.browser)?;
+    let list = listing(rpc, selector.browser)?;
     let mut matches: Vec<_> = list
         .recordings
         .into_iter()
@@ -265,16 +276,17 @@ fn resolve(sock: &Path, selector: Selector) -> Result<CachedGrant, CliError> {
     })
 }
 
-pub fn dispatch(cmd: VideoCmd, format: Format) -> Result<(), CliError> {
+pub(crate) fn run_command_with_rpc(
+    command: VideoCommand,
+    mut rpc: impl FnMut(VideoParams) -> Result<Value, CliError>,
+) -> Result<(Value, bool), CliError> {
     prune_cached_grants(&crate::daemon::paths::ensure_bsk_home()?, now_ms())?;
-    let sock = super::ensure_daemon::ensure_daemon()?.sock_path;
-    match cmd.command {
+    match command {
         VideoCommand::Start(args) => {
-            business_rpc::set_caller_scope(args.scope);
             let session = args.session.unwrap_or_default();
-            capabilities(&sock, None, Some(session.clone()))?;
-            let result: CachedGrant = call(
-                &sock,
+            capabilities(&mut rpc, None, Some(session.clone()))?;
+            let result: CachedGrant = call_typed(
+                &mut rpc,
                 VideoParams::Start {
                     session_id: session,
                     tab_id: args.tab_id,
@@ -290,46 +302,42 @@ pub fn dispatch(cmd: VideoCmd, format: Format) -> Result<(), CliError> {
                 },
             )?;
             remember(&result)?;
-            render(&result.grant.recording, None, format)
+            Ok((
+                json!({"recording": result.grant.recording, "path": Option::<&Path>::None}),
+                false,
+            ))
         }
         VideoCommand::List(args) => {
-            let list = listing(&sock, args.browser)?;
+            let list = listing(&mut rpc, args.browser)?;
             let recordings: Vec<_> = list
                 .recordings
                 .into_iter()
                 .map(|grant| grant.recording)
                 .collect();
-            if matches!(format, Format::Json) {
-                println!(
-                    "{}",
-                    serde_json::to_string_pretty(
-                        &json!({"browser": list.browser, "recordings": recordings})
-                    )
-                    .context("serialize video list")?
-                );
-            } else {
-                for value in recordings {
-                    render(&value, None, format)?;
-                }
-            }
-            Ok(())
+            Ok((
+                json!({"browser": list.browser, "recordings": recordings}),
+                false,
+            ))
         }
         VideoCommand::Status(selector) => {
-            let cached = resolve(&sock, selector)?;
-            let result: Status = call(
-                &sock,
+            let cached = resolve(&mut rpc, selector)?;
+            let result: Status = call_typed(
+                &mut rpc,
                 VideoParams::Status {
                     browser: cached.browser,
                     recording_id: cached.grant.recording.recording_id,
                     capability: cached.grant.capability,
                 },
             )?;
-            render(&result.recording, None, format)
+            Ok((
+                json!({"recording": result.recording, "path": Option::<&Path>::None}),
+                false,
+            ))
         }
         VideoCommand::Stop(args) => {
-            let mut cached = resolve(&sock, args.selector)?;
-            let result: Status = call(
-                &sock,
+            let mut cached = resolve(&mut rpc, args.selector)?;
+            let result: Status = call_typed(
+                &mut rpc,
                 VideoParams::Stop {
                     browser: cached.browser.clone(),
                     recording_id: cached.grant.recording.recording_id.clone(),
@@ -338,15 +346,20 @@ pub fn dispatch(cmd: VideoCmd, format: Format) -> Result<(), CliError> {
             )?;
             cached.grant.recording = result.recording;
             if let Some(out) = &args.out {
-                save(&sock, &cached, out, args.overwrite)?;
+                save(&mut rpc, &cached, out, args.overwrite)?;
                 cached.grant.recording.exported = true;
             }
-            render_finished(&cached.grant.recording, args.out.as_deref(), format)
+            let failed = cached.grant.recording.state == VideoState::Failed
+                || cached.grant.recording.completeness == Some(VideoCompleteness::Partial);
+            Ok((
+                json!({"recording": cached.grant.recording, "path": args.out.as_deref()}),
+                failed,
+            ))
         }
         VideoCommand::Save(args) => {
-            let mut cached = resolve(&sock, args.selector)?;
-            let result: Status = call(
-                &sock,
+            let mut cached = resolve(&mut rpc, args.selector)?;
+            let result: Status = call_typed(
+                &mut rpc,
                 VideoParams::Status {
                     browser: cached.browser.clone(),
                     recording_id: cached.grant.recording.recording_id.clone(),
@@ -354,15 +367,20 @@ pub fn dispatch(cmd: VideoCmd, format: Format) -> Result<(), CliError> {
                 },
             )?;
             cached.grant.recording = result.recording;
-            save(&sock, &cached, &args.out, args.overwrite)?;
+            save(&mut rpc, &cached, &args.out, args.overwrite)?;
             cached.grant.recording.exported = true;
-            render_finished(&cached.grant.recording, Some(&args.out), format)
+            let failed = cached.grant.recording.state == VideoState::Failed
+                || cached.grant.recording.completeness == Some(VideoCompleteness::Partial);
+            Ok((
+                json!({"recording": cached.grant.recording, "path": Some(&args.out)}),
+                failed,
+            ))
         }
         VideoCommand::Discard(selector) => {
-            let cached = resolve(&sock, selector)?;
+            let cached = resolve(&mut rpc, selector)?;
             let id = cached.grant.recording.recording_id;
-            let _: Value = call(
-                &sock,
+            let _: Value = call_typed(
+                &mut rpc,
                 VideoParams::Discard {
                     browser: cached.browser,
                     recording_id: id.clone(),
@@ -370,17 +388,63 @@ pub fn dispatch(cmd: VideoCmd, format: Format) -> Result<(), CliError> {
                 },
             )?;
             let _ = std::fs::remove_file(cache_path(&id)?);
-            println!(
-                "{}",
-                if matches!(format, Format::Json) {
-                    json!({"recording_id": id, "discarded": true}).to_string()
-                } else {
-                    format!("Deleted {id}")
-                }
-            );
-            Ok(())
+            Ok((json!({"recording_id": id, "discarded": true}), false))
         }
     }
+}
+
+pub fn dispatch(
+    cmd: VideoCmd,
+    ctx: &business_rpc::ClientContext,
+    format: Format,
+) -> Result<(), CliError> {
+    ctx.prepare_params(&Method::ToolVideo, Some(json!({})))?;
+    let scope_override = match &cmd.command {
+        VideoCommand::Start(args) => args.scope.clone(),
+        _ => None,
+    };
+    let op_ctx = ctx.with_scope(scope_override.as_deref());
+    let sock = super::ensure_daemon::ensure_daemon()?.sock_path;
+    let (value, failed) = run_command_with_rpc(cmd.command, |params| {
+        op_ctx.call(
+            sock.clone(),
+            "video",
+            Method::ToolVideo,
+            Some(params),
+            TOOL_IPC_TIMEOUT,
+        )
+    })?;
+    if matches!(format, Format::Json) {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&value).context("serialize video response")?
+        );
+    } else if let Some(recordings) = value.get("recordings").and_then(Value::as_array) {
+        for entry in recordings {
+            let rec: VideoRecording =
+                serde_json::from_value(entry.clone()).context("decode video entry")?;
+            render(&rec, None, format)?;
+        }
+    } else if value.get("discarded") == Some(&Value::Bool(true)) {
+        let id = value
+            .get("recording_id")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        println!("Deleted {id}");
+    } else if let Some(recording) = value.get("recording") {
+        let rec: VideoRecording =
+            serde_json::from_value(recording.clone()).context("decode video status")?;
+        let out = value.get("path").and_then(Value::as_str).map(PathBuf::from);
+        render(&rec, out.as_deref(), format)?;
+    }
+    if failed {
+        return Err(CliError::RenderedExit { exit_code: 1 });
+    }
+    Ok(())
+}
+
+pub(crate) fn parse_video_duration_ms(value: &str) -> Result<u32, String> {
+    parse_duration(value)
 }
 
 fn render(recording: &VideoRecording, out: Option<&Path>, format: Format) -> Result<(), CliError> {
@@ -419,21 +483,12 @@ fn render(recording: &VideoRecording, out: Option<&Path>, format: Format) -> Res
     Ok(())
 }
 
-fn render_finished(
-    recording: &VideoRecording,
-    out: Option<&Path>,
-    format: Format,
+fn save(
+    rpc: &mut impl FnMut(VideoParams) -> Result<Value, CliError>,
+    cached: &CachedGrant,
+    out: &Path,
+    overwrite: bool,
 ) -> Result<(), CliError> {
-    render(recording, out, format)?;
-    if recording.state == VideoState::Failed
-        || recording.completeness == Some(VideoCompleteness::Partial)
-    {
-        return Err(CliError::RenderedExit { exit_code: 1 });
-    }
-    Ok(())
-}
-
-fn save(sock: &Path, cached: &CachedGrant, out: &Path, overwrite: bool) -> Result<(), CliError> {
     let recording = &cached.grant.recording;
     if recording.state != VideoState::Ready {
         return Err(anyhow!("Recording is not ready; stop it before saving").into());
@@ -455,8 +510,8 @@ fn save(sock: &Path, cached: &CachedGrant, out: &Path, overwrite: bool) -> Resul
         .context("create adjacent video temporary file")?;
     let mut offset = 0;
     while offset < recording.byte_size {
-        let chunk: VideoReadResult = call(
-            sock,
+        let chunk: VideoReadResult = call_typed(
+            rpc,
             VideoParams::Read {
                 browser: cached.browser.clone(),
                 recording_id: recording.recording_id.clone(),
@@ -472,8 +527,8 @@ fn save(sock: &Path, cached: &CachedGrant, out: &Path, overwrite: bool) -> Resul
     atomic_output::commit(temp.path(), out, overwrite).context("commit video output")?;
     // The file is already committed. A lost acknowledgement must not pretend
     // the user's save failed or remove the browser's recoverable copy.
-    let _: Result<Value, _> = call(
-        sock,
+    let _: Result<Value, _> = call_typed(
+        rpc,
         VideoParams::Exported {
             browser: cached.browser.clone(),
             recording_id: recording.recording_id.clone(),

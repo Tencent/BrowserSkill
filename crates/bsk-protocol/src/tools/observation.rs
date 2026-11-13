@@ -13,6 +13,7 @@ use super::JavaScriptDialogInfo;
 /// tree for one tab plus a fresh `@e<N>` ref-store on the extension
 /// side (design §4 / §7).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct SnapshotParams {
     pub session_id: String,
     /// Optional target tab. Defaults to the Agent Window's currently
@@ -171,6 +172,7 @@ pub struct ObserveResult {
 /// The wire field is `"ref"` (a Rust keyword); the Rust binding lives
 /// in [`Self::ref_`] and uses serde rename / alias so JSON stays clean.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct GetHtmlParams {
     pub session_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -215,6 +217,7 @@ pub struct GetHtmlResult {
 /// tab; pass an `@e<N>` ref from the last `tool.snapshot` to crop to
 /// that element.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ScreenshotParams {
     pub session_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -293,6 +296,7 @@ pub struct ScreenshotFullPageResult {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ScreenshotReadParams {
     pub session_id: String,
     pub capture_id: String,
@@ -309,6 +313,7 @@ pub struct ScreenshotReadResult {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ScreenshotReleaseParams {
     pub session_id: String,
     pub capture_id: String,

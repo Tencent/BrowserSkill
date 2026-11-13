@@ -389,7 +389,21 @@
       "recordStop": "结束操作录制",
       "recordAwait": "等待录制完成",
       "resize": "调整窗口",
-      "emulate": "调整浏览器模拟设置"
+      "emulate": "调整浏览器模拟设置",
+      "cooperate": "同步协作状态",
+      "sessionStart": "启动会话",
+      "sessionStop": "停止会话",
+      "screenshotFullPage": "截取整页截图",
+      "screenshotRead": "读取截图",
+      "screenshotRelease": "释放截图",
+      "debug": "执行调试操作",
+      "video": "管理视频录制",
+      "dialogStatus": "检查弹窗状态",
+      "dialogAccept": "确认弹窗",
+      "dialogDismiss": "关闭弹窗",
+      "waitForElement": "等待元素出现",
+      "operationAwait": "等待操作完成",
+      "operationCancel": "取消操作"
     }
   },
   "debug": {
