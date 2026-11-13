@@ -946,6 +946,121 @@ def verify_nested_menu_contract(metas_and_values, contract):
         raise ValueError("Post-click read did not confirm receipt " + expected_receipt)
 
 
+def _argv_flag(argv, flag):
+    tokens = list(argv or [])
+    for i, tok in enumerate(tokens):
+        if tok == flag and i + 1 < len(tokens):
+            return tokens[i + 1]
+        if tok.startswith(flag + "="):
+            return tok.split("=", 1)[1]
+    return None
+
+
+def verify_slotted_list_contract(metas_and_values, contract):
+    target_name = contract["target_name"]
+    discovered_target_id = None
+    discover_idx = None
+    for i, (m, v) in enumerate(metas_and_values):
+        if m["command"] == "extract discover" and m["exit_code"] == 0:
+            targets = (v.get("json") or {}).get("targets") or []
+            for t in targets:
+                if (
+                    isinstance(t, dict)
+                    and t.get("kind") == "list"
+                    and t.get("name") == target_name
+                    and isinstance(t.get("target_id"), str)
+                    and t["target_id"]
+                ):
+                    discovered_target_id = t["target_id"]
+                    discover_idx = i
+                    break
+        if discovered_target_id:
+            break
+    if not discovered_target_id:
+        raise ValueError(f"extract discover did not find list target {target_name!r}")
+
+    outer_json = None
+    for m, v in metas_and_values[discover_idx + 1 :]:
+        if (
+            m["command"] == "extract list"
+            and m["exit_code"] == 0
+            and _argv_flag(m["argv"], "--target-id") == discovered_target_id
+        ):
+            outer_json = v.get("json") if isinstance(v.get("json"), dict) else None
+            break
+    if not outer_json:
+        raise ValueError(
+            f"Missing extract list --target-id {discovered_target_id} after extract discover"
+        )
+
+    outer_rows = outer_json.get("rows") or []
+    expected_outer = contract["outer_items"]
+    if len(outer_rows) != len(expected_outer):
+        raise ValueError(
+            f"Slotted outer list row count {len(outer_rows)} != {len(expected_outer)}"
+        )
+    for row, spec in zip(outer_rows, expected_outer):
+        txt = str((row or {}).get("text") or "")
+        url = str((row or {}).get("url") or "")
+        if spec["text"] not in txt:
+            raise ValueError(f"Slotted list row {txt!r} missing {spec['text']!r}")
+        if not url.endswith(spec["url_suffix"]):
+            raise ValueError(
+                f"Slotted list row {spec['text']!r} url {url!r} does not end with {spec['url_suffix']!r}"
+            )
+        for forbidden in contract.get("forbidden_texts", []):
+            if forbidden in txt:
+                raise ValueError(f"Forbidden text {forbidden!r} leaked into outer row")
+
+    actual_sources = [
+        s.get("source_row")
+        for s in (outer_json.get("row_sources") or [])
+        if isinstance(s, dict)
+    ]
+    expected_sources = [spec["source_row"] for spec in expected_outer]
+    if actual_sources != expected_sources:
+        raise ValueError(
+            f"Slotted outer list source_row {actual_sources} != {expected_sources}"
+        )
+    if (outer_json.get("warnings") or []) != ["hidden_rows_omitted"]:
+        raise ValueError(
+            f"Unexpected slotted outer list warnings: {outer_json.get('warnings')}"
+        )
+    if (outer_json.get("coverage") or {}).get("dataset_complete") != "unknown":
+        raise ValueError("Slotted outer list with hidden rows must report dataset_complete=unknown")
+
+    inner_selector = contract["inner_selector"]
+    inner_json = None
+    for m, v in metas_and_values:
+        if (
+            m["command"] == "extract list"
+            and m["exit_code"] == 0
+            and _argv_flag(m["argv"], "--selector") == inner_selector
+        ):
+            inner_json = v.get("json") if isinstance(v.get("json"), dict) else None
+            break
+    if not inner_json:
+        raise ValueError(f"Missing extract list --selector {inner_selector}")
+    inner_rows = inner_json.get("rows") or []
+    expected_inner = contract["inner_items"]
+    if len(inner_rows) != len(expected_inner):
+        raise ValueError(
+            f"Nested inner list row count {len(inner_rows)} != {len(expected_inner)}"
+        )
+    for row, spec in zip(inner_rows, expected_inner):
+        txt = normalize_ws((row or {}).get("text"))
+        url = str((row or {}).get("url") or "")
+        if txt != normalize_ws(spec["text"]) or not url.endswith(spec["url_suffix"]):
+            raise ValueError(f"Nested inner list row mismatch: {row!r}")
+    inner_sources = [
+        s.get("source_row")
+        for s in (inner_json.get("row_sources") or [])
+        if isinstance(s, dict)
+    ]
+    if inner_sources != [spec["source_row"] for spec in expected_inner]:
+        raise ValueError(f"Nested inner list source_row mismatch: {inner_sources}")
+
+
 def assertion(root, check):
     if "record" in check:
         _, value = read_record(root, check["record"])
@@ -1700,6 +1815,11 @@ def gate(root):
                 verify_nested_menu_contract(
                     [read_record(root, k) for k in records],
                     c["nested_menu_contract"],
+                )
+            if c.get("slotted_list_contract"):
+                verify_slotted_list_contract(
+                    [read_record(root, k) for k in records],
+                    c["slotted_list_contract"],
                 )
             if c.get("negative"):
                 negative_records.update(records)

@@ -116,9 +116,9 @@ export function collectExtractDom(this: Element, options: CollectorOptions): Raw
     for (const item of chain) hiddenSubtrees.set(item, value);
     return value;
   };
-  const childrenOf = (element: Element): ArrayLike<Node> => {
+  const childrenOf = (element: Element, includeClosedDetails = false): ArrayLike<Node> => {
     if (element instanceof HTMLSlotElement) return element.assignedNodes({ flatten: true });
-    if (element instanceof HTMLDetailsElement && !element.open) {
+    if (element instanceof HTMLDetailsElement && !element.open && !includeClosedDetails) {
       const summary = element.querySelector(":scope > summary");
       return summary ? [summary] : [];
     }
@@ -510,14 +510,39 @@ export function collectExtractDom(this: Element, options: CollectorOptions): Raw
         { key: "text", name: "Text", selector: ":scope", read: "text" },
         { key: "url", name: "URL", selector: "a[href]", read: "href" },
       ];
+      // Walk the rendered composition lazily: selectors and closest() cannot
+      // follow assigned slots. Include closed-details content so hidden items
+      // still advance source positions and are handled by isHidden()/omit().
+      // Nested lists own their own items and default links.
+      function* listElements(
+        start: Element,
+        selector: string,
+        includeClosedDetails = false,
+      ): Generator<Element> {
+        const stack = [{ nodes: childrenOf(start, includeClosedDetails), index: 0 }];
+        while (stack.length) {
+          const frame = stack[stack.length - 1];
+          if (frame.index === frame.nodes.length) {
+            stack.pop();
+            continue;
+          }
+          tick();
+          const node = frame.nodes[frame.index++];
+          if (!(node instanceof Element) || node.matches(listSelector)) continue;
+          if (node.matches(selector)) yield node;
+          const nodes = childrenOf(node, includeClosedDetails);
+          if (nodes.length) stack.push({ nodes, index: 0 });
+        }
+      }
       const nodes = options.item_selector
         ? select(root, options.item_selector)
-        : select(root, 'li,[role="listitem"]');
+        : root.matches(listSelector)
+          ? listElements(root, 'li,[role="listitem"]', true)
+          : [];
       let sourceRow = 0;
-      for (const item of nodes) {
-        try {
+      try {
+        for (const item of nodes) {
           tick();
-          if (!options.item_selector && item.closest(listSelector) !== root) continue;
           sourceRow++;
           if (isHidden(item)) {
             omit(item, sourceRow, "aria-posinset");
@@ -539,7 +564,12 @@ export function collectExtractDom(this: Element, options: CollectorOptions): Raw
                   : Math.max(result.declared_rows, count);
           }
           for (const field of fields) {
-            const matches = field.selector === ":scope" ? [item] : select(item, field.selector);
+            const matches =
+              field.selector === ":scope"
+                ? [item]
+                : !options.fields && field.key === "url"
+                  ? listElements(item, field.selector)
+                  : select(item, field.selector);
             const visible: Element[] = [];
             for (const match of matches) {
               tick();
@@ -582,13 +612,10 @@ export function collectExtractDom(this: Element, options: CollectorOptions): Raw
           };
           result.items.push(row);
           result.item_sources.push(source);
-        } catch (error) {
-          if (isLimit(error) && result.items.length) {
-            stop(limitReason(error, "collection_limit"));
-            break;
-          }
-          throw error;
         }
+      } catch (error) {
+        if (!isLimit(error) || !result.items.length) throw error;
+        stop(limitReason(error, "collection_limit"));
       }
       return result;
     }

@@ -786,6 +786,33 @@
     }
   },
   {
+    "id": "EDGE-SLOTTED-LIST-EXTRACT",
+    "kind": "workflow",
+    "page_type": "edge-cases",
+    "goal": "/arena-shadow-iframe Shadow DOM 插槽列表结构化提取：复现 open Shadow Root 内的 <ul id='shadow-slotted-list'> 通过具名插槽 <slot name='priority'>、默认 <slot> 与回退插槽 <slot name='fallback'> 渲染 Light DOM <li> 的真实场景。发版审计核验三项：① 执行 extract discover 发现 Shadow Slotted Runbook List 并取得其 target_id；② 用该 target_id 执行 extract list，按插槽渲染顺序提取 3 条可见项（Preflight quorum check、Canary traffic 10%、Fallback health gate）及其各自的 url（外层项不得因内部嵌套子列表链接误触 ambiguous_default_url 丢弃 url），闭合 <details> 与 display:none 隐藏项被忽略但保留 source_row 位置为 [1, 3, 5] 且返回 warnings:['hidden_rows_omitted']，未分配插槽项 Unassigned orphan item 与嵌套子列表 #shadow-nested-sublist 内的 <li> 不混入外层列表行；③ 对 #shadow-nested-sublist 单独执行 extract list，仅提取子项 Sub-check: mTLS cert pinned 及其 url。",
+    "required_commands": ["navigate", "extract discover", "extract list"],
+    "required_command_counts": {
+      "extract list": 2
+    },
+    "slotted_list_contract": {
+      "target_name": "Shadow Slotted Runbook List",
+      "outer_items": [
+        { "text": "Preflight quorum check", "url_suffix": "/runbook/preflight", "source_row": 1 },
+        { "text": "Canary traffic 10%", "url_suffix": "/runbook/canary", "source_row": 3 },
+        { "text": "Fallback health gate", "url_suffix": "/runbook/fallback", "source_row": 5 }
+      ],
+      "forbidden_texts": [
+        "Unassigned orphan item",
+        "Archived canary rollback",
+        "Hidden staging note"
+      ],
+      "inner_selector": "#shadow-nested-sublist",
+      "inner_items": [
+        { "text": "Sub-check: mTLS cert pinned", "url_suffix": "/runbook/mtls", "source_row": 1 }
+      ]
+    }
+  },
+  {
     "id": "LOCAL-VIDEO-PORTAL",
     "kind": "workflow",
     "page_type": "video-site",
