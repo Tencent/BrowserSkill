@@ -29,6 +29,7 @@ import {
   lookupSession,
   resolveTargetTab,
 } from "./shared";
+import { isHiddenCompositorSurface } from "./viewport-screenshot";
 
 export interface FullPageScreenshotDeps {
   cdp: CdpRunner;
@@ -182,9 +183,14 @@ export async function handleFullPageScreenshot(
     const keepUnselectedAwake = platform.os === "win" || platform.os === "linux";
     await client.prepare();
     const ensureRendering = async (active: boolean) => {
-      if (!keepUnselectedAwake || active || rendering) return;
+      if (
+        !keepUnselectedAwake ||
+        rendering ||
+        !(await waitForReply(isHiddenCompositorSurface(active, target.windowId), controller.signal))
+      )
+        return;
       // Focus emulation keeps script execution alive, but Windows and Linux (Aura)
-      // can stop producing compositor frames on an unselected tab after the first read.
+      // can stop producing compositor frames on an unselected tab or minimized window.
       // A tiny screencast holds the renderer awake without selecting/resizing it.
       // Its pixels are unused; each tile still comes from captureScreenshot.
       checkOwnership();

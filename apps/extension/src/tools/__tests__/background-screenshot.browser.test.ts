@@ -121,7 +121,7 @@ describe.skipIf(!process.env.BSK_TEST_CHROME)("background screenshot browser reg
             );
           const pixels = (png: string) =>
             evaluate<{ width: number; height: number; corner: number[]; center: number[] }>(
-              `(async()=>{const image=await createImageBitmap(await (await fetch('data:image/png;base64,${png}')).blob());const c=new OffscreenCanvas(image.width,image.height),x=c.getContext('2d');x.drawImage(image,0,0);return {width:image.width,height:image.height,corner:Array.from(x.getImageData(image.width-20,image.height-20,1,1).data),center:Array.from(x.getImageData(Math.floor(image.width/2),Math.floor(image.height/2),1,1).data)}})()`,
+              `(async()=>{const image=await createImageBitmap(await (await fetch('data:image/png;base64,${png}')).blob());const c=new OffscreenCanvas(image.width,image.height),x=c.getContext('2d');x.drawImage(image,0,0);return {width:image.width,height:image.height,corner:Array.from(x.getImageData(image.width-80,image.height-80,1,1).data),center:Array.from(x.getImageData(Math.floor(image.width/2),Math.floor(image.height/2),1,1).data)}})()`,
               controlSession,
             );
           const manager = new SessionManager({

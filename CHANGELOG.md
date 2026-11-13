@@ -32,9 +32,11 @@ determines which versions can connect.
 - Preserved user window focus on macOS Chromium when `tool.tab_create` or
   `ensureActiveTab` creates an active tab inside a background Agent Window by
   creating the tab inactive and activating it within its window via
-  `chrome.tabs.update` (closing the created tab if activation fails), and enabled
-  the unselected-tab screencast compositor keepalive and stale-frame guard on Linux
-  as well as Windows for `screenshot --full-page` (#731).
+  `chrome.tabs.update` (closing the created tab if activation fails), enabled the
+  Aura screencast compositor keepalive (and full-page stale-frame guard) on Linux
+  as well as Windows across `screenshot` and `screenshot --full-page` on
+  unselected tabs and minimized Agent Windows, and made `parsePngDimensions`
+  charset-independent when bundled (#731).
 - Scoped CLI and MCP cooperation metadata attachment (`context_id`, `depends_on`,
   `observation_id`, `expect`) strictly to RPC methods whose wire contracts accept
   them (`Method::accepts_action_metadata()` and `tool.read` for `context_id`), so

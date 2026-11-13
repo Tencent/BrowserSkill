@@ -340,11 +340,19 @@ jobs:
           src/session-manager/__tests__/incognito.browser.test.ts
           src/transport/__tests__/remote-connection.browser.test.ts
       - name: Run headed background execution, screenshot and window-routing regressions
-        run: >-
-          xvfb-run -a node scripts/run-browser-tests.mjs
-          src/tools/__tests__/background-execution.browser.test.ts
-          src/tools/__tests__/background-screenshot.browser.test.ts
-          src/session-manager/__tests__/window-routing.browser.test.ts
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends openbox
+          xvfb-run -a -s "-screen 0 1920x1200x24" bash -ec '
+            openbox &
+            wm_pid=$!
+            trap "kill $wm_pid 2>/dev/null || true" EXIT
+            sleep 0.5
+            node scripts/run-browser-tests.mjs \
+              src/tools/__tests__/background-execution.browser.test.ts \
+              src/tools/__tests__/background-screenshot.browser.test.ts \
+              src/session-manager/__tests__/window-routing.browser.test.ts
+          '
       - name: Build extension for the isolated dynamic-reading daemon
         env:
           BSK_DAEMON_WS_URL: ws://127.0.0.1:52923

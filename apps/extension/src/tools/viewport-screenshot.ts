@@ -1,3 +1,4 @@
+import { type ScreencastLease, screencasts } from "@/browser-driver/screencast-coordinator";
 import {
   type CaptureSuppressSendToTab,
   withExtensionOverlayHidden,
@@ -10,6 +11,61 @@ import { BoundedWaitError, waitBounded } from "./transfer-transaction";
 import { isAbortError, throwIfAborted } from "./vom/capture-abort";
 import { verifyDocumentIdentity } from "./vom/document-identity";
 import type { DocumentIdentity } from "./vom/facts";
+
+async function isAuraCompositorPlatform(): Promise<boolean> {
+  if (typeof chrome !== "undefined" && typeof chrome.runtime?.getPlatformInfo === "function") {
+    const info = await chrome.runtime.getPlatformInfo().catch(() => undefined);
+    return info?.os === "win" || info?.os === "linux";
+  }
+  const proc = (
+    globalThis as {
+      process?: { platform?: string; env?: Record<string, string | undefined> };
+    }
+  ).process;
+  return (
+    Boolean(proc?.env?.BSK_TEST_CHROME) &&
+    (proc?.platform === "win32" || proc?.platform === "linux")
+  );
+}
+
+/** True when Aura suspends compositor surface frames (unselected tab or minimized window). */
+export async function isHiddenCompositorSurface(
+  active: boolean,
+  windowId: number,
+): Promise<boolean> {
+  if (!active) return true;
+  if (typeof chrome === "undefined" || typeof chrome.windows?.get !== "function") return false;
+  const win = await chrome.windows.get(windowId).catch(() => undefined);
+  return win?.state === "minimized";
+}
+
+/** Hold a minimal screencast consumer on Windows/Linux Aura while reading a hidden surface. */
+export async function withAuraCompositorKeepalive<T>(
+  cdp: CdpRunner,
+  tabId: number,
+  hiddenSurface: boolean,
+  signal: AbortSignal | undefined,
+  work: () => Promise<T>,
+): Promise<T> {
+  if (
+    !hiddenSurface ||
+    !cdp.onEvent ||
+    !cdp.getAttachmentId?.(tabId) ||
+    !(await isAuraCompositorPlatform())
+  ) {
+    return work();
+  }
+  const lease: ScreencastLease = await screencasts(cdp).acquire(
+    tabId,
+    { format: "png", maxWidth: 32, maxHeight: 32 },
+    signal,
+  );
+  try {
+    return await work();
+  } finally {
+    await lease.release().catch(() => {});
+  }
+}
 
 function changed(): RpcError {
   return rpcError(
@@ -88,6 +144,7 @@ export async function captureControlledViewport(
   stillControlled: () => Promise<boolean>,
   signal?: AbortSignal,
   sendToTab?: CaptureSuppressSendToTab,
+  isHiddenSurface?: () => boolean,
 ): Promise<{ image_base64: string; width: number; height: number } | RpcError> {
   const deadline = Date.now() + 10_000;
   const wait = <T>(work: Promise<T>, cleanup = false) =>
@@ -147,11 +204,13 @@ export async function captureControlledViewport(
       tabId,
       async () => {
         if (!(await current())) return null;
-        return bound.send<{ data?: string }>(tabId, "Page.captureScreenshot", {
-          format: "png",
-          fromSurface: true,
-          captureBeyondViewport: false,
-        });
+        return withAuraCompositorKeepalive(cdp, tabId, isHiddenSurface?.() ?? false, signal, () =>
+          bound.send<{ data?: string }>(tabId, "Page.captureScreenshot", {
+            format: "png",
+            fromSurface: true,
+            captureBeyondViewport: false,
+          }),
+        );
       },
       overlay,
     );
