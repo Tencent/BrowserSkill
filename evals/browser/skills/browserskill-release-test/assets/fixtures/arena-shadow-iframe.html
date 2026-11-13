@@ -141,6 +141,15 @@
         <div style="font-weight:700;margin-bottom:6px">Closed Shadow Root 物理硬件密钥确认区（DOM Ref 隔离边界 + 视觉坐标点击）</div>
         <arena-hardware-key id="closed-key-host"></arena-hardware-key>
       </div>
+      <div style="padding:12px;border:1px solid #cbd5e1;border-radius:8px;background:#f8fafc">
+        <div style="font-weight:700;margin-bottom:6px">Shadow Slotted Runbook 清单（插槽投影顺序 / 闭合 details 隐藏行 / 嵌套子列表隔离）</div>
+        <arena-slotted-runbook id="shadow-slotted-runbook">
+          <li><a href="/runbook/canary">Canary traffic 10%</a><ul id="shadow-nested-sublist" aria-label="Nested mTLS Sub-checks"><li><a href="/runbook/mtls">Sub-check: mTLS cert pinned</a></li></ul></li>
+          <li style="display:none">Hidden staging note</li>
+          <li slot="priority"><a href="/runbook/preflight">Preflight quorum check</a></li>
+          <li slot="unused">Unassigned orphan item</li>
+        </arena-slotted-runbook>
+      </div>
       <div>
         <div style="font-weight:700;margin-bottom:4px">Shadow 组件树与 Closed Root 事件总线回执</div>
         <output id="shadow-bus-output">waiting-shadow-actions</output>
@@ -381,6 +390,26 @@
   }
   customElements.define('arena-hardware-key', ArenaHardwareKey);
 
+  // 4b. Define Open Shadow Slotted List Component: <arena-slotted-runbook>
+  class ArenaSlottedRunbook extends HTMLElement {
+    connectedCallback() {
+      const root = this.attachShadow({ mode: 'open' });
+      root.innerHTML = `
+        <style>
+          ul { margin: 0; padding-left: 18px; }
+          details { margin: 4px 0; color: #64748b; }
+        </style>
+        <ul id="shadow-slotted-list" aria-label="Shadow Slotted Runbook List">
+          <slot name="priority"></slot>
+          <details id="shadow-closed-details"><summary>Archived</summary><li>Archived canary rollback</li></details>
+          <slot></slot>
+          <slot name="fallback"><li><a href="/runbook/fallback">Fallback health gate</a></li></slot>
+        </ul>
+      `;
+    }
+  }
+  customElements.define('arena-slotted-runbook', ArenaSlottedRunbook);
+
   // 5. Populate 55-service topology matrix (>=1,800 total DOM elements in host + shadow roots)
   const planes = ['data-plane-hz', 'control-plane-sz', 'audit-plane-su', 'edge-ingress-gz'];
   const teams = ['Core-Mesh', 'Zero-Trust', 'FinOps-Ledger', 'Observability'];
@@ -434,7 +463,8 @@
   const l1Root = document.getElementById('shadow-l1-host').shadowRoot;
   const l2Root = l1Root?.getElementById('shadow-l2-host')?.shadowRoot;
   const l3Root = l2Root?.getElementById('shadow-l3-host')?.shadowRoot;
-  const shadowCount = [navChipRoot, l1Root, l2Root, l3Root].reduce(
+  const slottedRunbookRoot = document.getElementById('shadow-slotted-runbook')?.shadowRoot;
+  const shadowCount = [navChipRoot, l1Root, l2Root, l3Root, slottedRunbookRoot].reduce(
     (sum, r) => sum + (r ? r.querySelectorAll('*').length : 0),
     0
   );

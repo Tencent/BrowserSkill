@@ -46,6 +46,12 @@ determines which versions can connect.
   passive inner wrappers, inherited `cursor: pointer` / click-skin descendants, and native
   `<input>` / `<textarea>` / `<select>` controls folded without duplicate refs; added
   required pre-release audit scenario `EDGE-NESTED-MENU-REFS`.
+- Structured list extraction (`extract list`) collects slot-assigned items and default
+  item links (`url`) across open Shadow DOM `<slot>` projections while preserving rendered
+  slot order, closed-`<details>` hidden row positions, nested-list item and link ownership,
+  visibility checks, and collection limits ([#588](https://github.com/Tencent/BrowserSkill/issues/588),
+  [#612](https://github.com/Tencent/BrowserSkill/pull/612)); added required pre-release
+  audit scenario `EDGE-SLOTTED-LIST-EXTRACT`.
 
 ### Removed
 
