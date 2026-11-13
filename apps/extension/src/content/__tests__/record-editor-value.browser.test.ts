@@ -196,4 +196,16 @@ describe.skipIf(!process.env.BSK_CLICK_CHROME)("record contenteditable values", 
     expect(result.inner).toBe("One\n\nTwo!");
     expect(finalValue(result.steps)).toBe(result.inner);
   });
+
+  it("keeps a typed edge space as a space instead of the non-breaking space Chrome types", async () => {
+    const result = await recordEditor(editor, async (h) => {
+      await h.click("#editor");
+      await h.insert("  Alpha  ");
+    });
+
+    // Chrome types a space at a line edge as U+00A0; the trace must not carry it.
+    expect(result.html).toContain("&nbsp;");
+    expect(finalValue(result.steps)).toBe("  Alpha  ");
+    expect([...finalValue(result.steps)!].some((char) => char.codePointAt(0) === 0xa0)).toBe(false);
+  });
 });
