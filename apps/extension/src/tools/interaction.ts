@@ -324,7 +324,7 @@ export async function resolveBackendNode(
       );
       let totalMatches = found.nodeIds.length;
       let childMatch: { backendNodeId: number; cdpTarget: CdpTarget; frameId: string } | undefined;
-      if (searchChildFrames) {
+      if (searchChildFrames && totalMatches <= 1) {
         for (const frame of await listChildFrames(cdp, target.tabId)) {
           const match = await queryChildFrameSelector(cdp, frame, selector, true);
           totalMatches += match.count;
@@ -335,6 +335,7 @@ export async function resolveBackendNode(
               frameId: frame.frameId,
             };
           }
+          if (totalMatches > 1) break;
         }
       }
       if (totalMatches > 1)
@@ -391,6 +392,7 @@ export async function resolveBackendNode(
     }
     return { backendNodeId, cdpTarget: { tabId: target.tabId }, usedSelector: selector };
   } catch (err) {
+    if (isAbortError(err)) return { code: "cancelled", message: `${toolName} aborted` };
     return {
       code: "cdp_failed",
       message: err instanceof Error ? err.message : String(err),

@@ -31,7 +31,8 @@ export function registerPhaseOneInteractionTools(
       parameters: {
         target: {
           type: "string",
-          description: "Optional snapshot ref or main-document CSS selector.",
+          description:
+            "Optional snapshot ref or CSS selector (main document and accessible iframes).",
         },
         session: SESSION_PARAM,
         tabId: TAB_ID_PARAM,

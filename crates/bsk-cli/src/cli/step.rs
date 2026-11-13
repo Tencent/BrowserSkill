@@ -47,7 +47,7 @@ pub struct StepArgs {
     /// Session, tab, context and dependencies come from CLI flags, not this object.
     #[arg(long)]
     pub params: String,
-    /// Known main-document CSS selector that should become visible after the action.
+    /// Known CSS selector (main document and accessible iframes) that should become visible after the action.
     /// Use a positive readiness signal; visibility alone does not prove business success.
     #[arg(long)]
     pub until_visible: Option<String>,

@@ -60,7 +60,8 @@ export function registerPlanTool(
         steps: { ...PLAN_PARAMETERS.steps, required: true },
         untilVisible: {
           type: "string",
-          description: "Main-document CSS selector expected to become visible after the last step.",
+          description:
+            "CSS selector (main document and accessible iframes) expected to become visible after the last step.",
         },
         waitTimeoutMs: {
           type: "integer",

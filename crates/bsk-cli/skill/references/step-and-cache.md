@@ -1,7 +1,7 @@
 # One action, several decided actions, and a reusable observation
 
 Use `step` when one action is already decided from current evidence. It invokes
-that action exactly once, optionally waits for a known main-document selector to
+that action exactly once, optionally waits for a known CSS selector to
 be visible, then synchronizes. It uses the session's negotiated guard policy;
 target policy requires compatible protocol 1.x peers at version 1.8 or later. With a current CLI
 and an older extension, pass `--policy strict` on every step for its post-action sync. Choose

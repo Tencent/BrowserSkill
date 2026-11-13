@@ -13,7 +13,7 @@ assert(
 );
 for (const [path, maxEntryBytes, browserTools] of [
   ["crates/bsk-cli/skill", 2_000],
-  ["packages/dsh-plugin-browserskill/skill", 4_500, DSH_BROWSER_TOOLS],
+  ["packages/dsh-plugin-browserskill/skill", 4_600, DSH_BROWSER_TOOLS],
 ]) {
   const { files } = validateSkillDirectory(fileURLToPath(new URL(path, root)), {
     maxEntryBytes,

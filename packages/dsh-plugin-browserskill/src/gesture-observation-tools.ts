@@ -97,7 +97,7 @@ export const STEP_PARAMETERS = {
   untilVisible: {
     type: "string",
     description:
-      "Known main-document CSS selector expected to become visible; visibility alone does not prove business success.",
+      "Known CSS selector (main document and accessible iframes) expected to become visible; visibility alone does not prove business success.",
   },
   waitTimeoutMs: {
     type: "integer",
