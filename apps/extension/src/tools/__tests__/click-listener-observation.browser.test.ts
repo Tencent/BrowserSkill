@@ -312,6 +312,56 @@ describe.skipIf(!process.env.BSK_CLICK_CHROME)("click listener observations", ()
         expect(
           await evaluate("document.querySelector('#menu-selection-receipt').textContent"),
         ).toBe("Selected audit");
+
+        // React 18 root event-delegated dropdown mounted inside a cursor: pointer combobox:
+        // inline trigger skin stays folded while popup pointer-only items get distinct @eN refs.
+        await evaluate(`
+          document.body.innerHTML = \`
+            <div id="root">
+              <div id="combo" role="combobox" aria-label="报表类型" aria-expanded="true" style="position:relative;width:220px;padding:8px;cursor:pointer">
+                <span id="trigger-skin">全部报表</span>
+                <div id="popup" style="position:absolute;top:40px;left:0;width:220px;cursor:default;background:#fff">
+                  <div class="dropdown-item" data-item="export" style="padding:8px;cursor:pointer">导出报表</div>
+                  <div class="dropdown-item" data-item="history" style="padding:8px;cursor:pointer">历史记录</div>
+                </div>
+              </div>
+              <output id="delegated-receipt">None</output>
+            </div>
+          \`;
+          document.getElementById("root").addEventListener("click", (e) => {
+            const item = e.target.closest("[data-item]");
+            if (item) document.getElementById("delegated-receipt").textContent = item.dataset.item;
+          });
+        `);
+        const delegatedObs = await handleObserve(manager, params, deps);
+        const delegatedSnap = await handleSnapshot(manager, params, deps);
+        if (!("text" in delegatedObs) || !("text" in delegatedSnap)) {
+          throw new Error(JSON.stringify({ delegatedObs, delegatedSnap }));
+        }
+        const buttonRef = (text: string, exactName: string) =>
+          text
+            .split("\n")
+            .map((line) => line.trim())
+            .find((line) => line.match(/^@e\d+\s+button\s+"([^"]+)"$/)?.[1] === exactName)
+            ?.match(/^@e\d+/)?.[0];
+        for (const text of [delegatedObs.text, delegatedSnap.text]) {
+          expect(buttonRef(text, "全部报表"), text).toBeUndefined();
+          const exportRef = buttonRef(text, "导出报表");
+          const histRef = buttonRef(text, "历史记录");
+          expect(exportRef, text).toBeDefined();
+          expect(histRef, text).toBeDefined();
+          expect(exportRef).not.toBe(histRef);
+        }
+        expect(
+          await handleClick(
+            manager,
+            { ...params, ref: buttonRef(delegatedObs.text, "导出报表") },
+            deps,
+          ),
+        ).not.toHaveProperty("code");
+        expect(await evaluate("document.querySelector('#delegated-receipt').textContent")).toBe(
+          "export",
+        );
       },
     );
   }, 30_000);

@@ -2364,6 +2364,20 @@ describe("selection evidence", () => {
             name: "Active",
           }),
           node({
+            id: 40,
+            parentId: 4,
+            tag: "i",
+            role: "img",
+            name: "check-badge",
+          }),
+          node({
+            id: 41,
+            parentId: 4,
+            tag: "span",
+            role: "StaticText",
+            name: "Default filter",
+          }),
+          node({
             id: 5,
             parentId: 3,
             backendNodeId: 205,
@@ -2407,6 +2421,51 @@ describe("selection evidence", () => {
             role: "button",
             name: "Remove",
           }),
+          // React 18 root event-delegated custom dropdown: clickable is false on items,
+          // trigger has cursor: pointer + inline skin, popup crosses position: absolute.
+          node({
+            id: 12,
+            backendNodeId: 212,
+            tag: "div",
+            role: "combobox",
+            name: "报表类型",
+            cursor: "pointer",
+            attrs: { "aria-expanded": "true" },
+          }),
+          node({
+            id: 13,
+            parentId: 12,
+            tag: "span",
+            role: "generic",
+            text: "全部报表",
+            cursor: "pointer",
+          }),
+          node({
+            id: 14,
+            parentId: 12,
+            tag: "div",
+            role: "generic",
+            position: "absolute",
+            cursor: "default",
+          }),
+          node({
+            id: 15,
+            parentId: 14,
+            backendNodeId: 215,
+            tag: "div",
+            role: "generic",
+            text: "导出报表",
+            cursor: "pointer",
+          }),
+          node({
+            id: 16,
+            parentId: 14,
+            backendNodeId: 216,
+            tag: "div",
+            role: "generic",
+            text: "历史记录",
+            cursor: "pointer",
+          }),
         ]),
       );
       expect(siblings.text.split("\n")).toEqual([
@@ -2420,6 +2479,53 @@ describe("selection evidence", () => {
         '  @e4 combobox "Region" ="cn" [options: cn="China"* | us="US"]',
         '  @e5 button "Order #88 Remove"',
         '    @e6 button "Remove"',
+        '  @e7 combobox "报表类型" [custom-dropdown: expanded]',
+        '    @e8 button "导出报表"',
+        '    @e9 button "历史记录"',
+      ]);
+
+      // Deeply nested cursor: pointer wrappers under a semantic control stay O(N).
+      const deepCount = 10_000;
+      const deepNodes = [
+        node({
+          id: 1,
+          backendNodeId: 301,
+          tag: "div",
+          role: "combobox",
+          name: "Deep picker",
+          cursor: "pointer",
+          attrs: { "aria-expanded": "true" },
+        }),
+      ];
+      for (let i = 0; i < deepCount; i += 1) {
+        deepNodes.push(
+          node({
+            id: i + 2,
+            parentId: i + 1,
+            tag: "div",
+            role: "generic",
+            cursor: "pointer",
+            ...(i === 0 ? { position: "absolute" } : {}),
+          }),
+        );
+      }
+      deepNodes.push(
+        node({
+          id: deepCount + 2,
+          parentId: deepCount + 1,
+          backendNodeId: 399,
+          tag: "div",
+          role: "generic",
+          text: "Deep delegated option",
+          cursor: "pointer",
+        }),
+      );
+      const t0 = performance.now();
+      const deepOut = renderVom(scene(deepNodes));
+      expect(performance.now() - t0).toBeLessThan(1_000);
+      expect(coreRefs(deepOut.refs)).toEqual([
+        { ref: "e1", backendNodeId: 301 },
+        { ref: "e2", backendNodeId: 399 },
       ]);
     });
   });

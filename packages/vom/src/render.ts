@@ -449,7 +449,7 @@ function isAncestorOf(
   return false;
 }
 
-const PRESENTATIONAL_CHILD_CONTROL_ROLES = new Set([
+const FOLDABLE_NAMED_REF_ROLES = new Set([
   "button",
   "link",
   "menuitem",
@@ -475,42 +475,57 @@ const POPUP_OR_COMPOSITE_BOUNDARY_ROLES = new Set([
   "tree",
 ]);
 
-function isPresentationalDescendantOfControl(
-  node: VomNode,
-  byId: ReadonlyMap<number, VomNode>,
-  parentMap: ReadonlyMap<number, number | null>,
-): boolean {
-  if (isContentEditable(node)) return false;
-  const explicitRole = node.attrs?.role?.toLowerCase() ?? "";
-  if (EXPLICIT_RECOVERY_ROLES.has(explicitRole) || explicitRole === "combobox") return false;
-  const pointerOnly = !hasRecoveryHandler(node) && node.cursor === "pointer";
-  let crossedBoundary = false;
-  let cur = parentMap.get(node.id) ?? null;
-  let guard = 0;
-  while (cur !== null && guard++ <= parentMap.size) {
-    const anc = byId.get(cur);
-    if (!anc || anc.frameId !== node.frameId) return false;
-    if (pointerOnly && anc.cursor === "pointer" && isSemanticReferenceNode(anc)) {
-      return true;
-    }
-    const ancRole = normalizedRole(anc);
-    if (
-      POPUP_OR_COMPOSITE_BOUNDARY_ROLES.has(ancRole) ||
-      anc.position === "absolute" ||
-      anc.position === "fixed"
-    ) {
-      crossedBoundary = true;
-    }
-    if (
-      !crossedBoundary &&
-      isSemanticReferenceNode(anc) &&
-      PRESENTATIONAL_CHILD_CONTROL_ROLES.has(ancRole)
-    ) {
-      return true;
-    }
-    cur = parentMap.get(cur) ?? null;
+function pruneControlSkinRecoveries(
+  children: ReadonlyMap<number | null, VomNode[]>,
+  recoveredIds: Set<number>,
+): void {
+  const stack: Array<{
+    node: VomNode;
+    inControlSkin: boolean;
+    inheritedPointer: boolean;
+  }> = [];
+  for (const root of children.get(null) ?? []) {
+    stack.push({ node: root, inControlSkin: false, inheritedPointer: false });
   }
-  return false;
+  const visited = new Set<number>();
+  while (stack.length > 0) {
+    const { node, inControlSkin, inheritedPointer } = stack.pop()!;
+    if (visited.has(node.id)) continue;
+    visited.add(node.id);
+
+    const role = normalizedRole(node);
+    const crossedBoundary =
+      POPUP_OR_COMPOSITE_BOUNDARY_ROLES.has(role) ||
+      node.position === "absolute" ||
+      node.position === "fixed";
+    const skinHere = !crossedBoundary && inControlSkin;
+    const pointerSkinHere = !crossedBoundary && inheritedPointer && node.cursor === "pointer";
+
+    if (recoveredIds.has(node.id) && (skinHere || (pointerSkinHere && !hasRecoveryHandler(node)))) {
+      const explicitRole = node.attrs?.role?.toLowerCase() ?? "";
+      if (
+        !isContentEditable(node) &&
+        !EXPLICIT_RECOVERY_ROLES.has(explicitRole) &&
+        explicitRole !== "combobox"
+      ) {
+        recoveredIds.delete(node.id);
+      }
+    }
+
+    const isAtomicSemantic =
+      isSemanticReferenceNode(node) && !POPUP_OR_COMPOSITE_BOUNDARY_ROLES.has(role);
+    const nextSkin = skinHere || (isAtomicSemantic && FOLDABLE_NAMED_REF_ROLES.has(role));
+    const nextPointer = pointerSkinHere || (isAtomicSemantic && node.cursor === "pointer");
+
+    for (const child of children.get(node.id) ?? []) {
+      const sameFrame = child.frameId === node.frameId;
+      stack.push({
+        node: child,
+        inControlSkin: sameFrame ? nextSkin : false,
+        inheritedPointer: sameFrame ? nextPointer : false,
+      });
+    }
+  }
 }
 
 export function applyVomInteractionRecovery(nodes: VomNode[]): VomNode[] {
@@ -530,20 +545,23 @@ export function applyVomInteractionRecovery(nodes: VomNode[]): VomNode[] {
     });
   }
 
-  const byId = new Map(nodes.map((node) => [node.id, node]));
-  const parentMap = buildParentMap(nodes);
   const eligible: VomNode[] = [];
   for (const node of nodes) {
     // Drag evidence adds a capability; it must not suppress existing role/name recovery.
-    if (
-      !isSemanticReferenceNode(node) &&
-      passesStaticRecoveryGuards(node) &&
-      !isPresentationalDescendantOfControl(node, byId, parentMap)
-    ) {
+    if (!isSemanticReferenceNode(node) && passesStaticRecoveryGuards(node)) {
       eligible.push(node);
     }
   }
   if (eligible.length === 0) return nodes;
+
+  const hasAnyRecoverySignal = eligible.some(
+    (node) =>
+      node.cursor === "pointer" ||
+      hasRecoveryHandler(node) ||
+      isContentEditable(node) ||
+      isFocusable(node),
+  );
+  if (!hasAnyRecoverySignal) return nodes;
 
   const children = buildChildren(nodes);
   const recoveredIds = new Set<number>();
@@ -571,10 +589,16 @@ export function applyVomInteractionRecovery(nodes: VomNode[]): VomNode[] {
 
   if (recoveredIds.size === 0) return nodes;
 
+  pruneControlSkinRecoveries(children, recoveredIds);
+  if (recoveredIds.size === 0) return nodes;
+
+  const parentMap = buildParentMap(nodes);
+  const prunedAncestors = new Set<number>();
   for (const nodeId of [...recoveredIds]) {
     let current = parentMap.get(nodeId) ?? null;
     let guard = 0;
-    while (current !== null && guard <= parentMap.size) {
+    while (current !== null && !prunedAncestors.has(current) && guard <= parentMap.size) {
+      prunedAncestors.add(current);
       recoveredIds.delete(current);
       current = parentMap.get(current) ?? null;
       guard += 1;
@@ -1023,17 +1047,6 @@ function isEditableCombobox(node: VomNode): boolean {
   return false;
 }
 
-const FOLDABLE_NAMED_REF_ROLES = new Set([
-  "button",
-  "link",
-  "menuitem",
-  "tab",
-  "switch",
-  "checkbox",
-  "radio",
-  "combobox",
-]);
-
 function isAlwaysFoldedRefControl(node: VomNode): boolean {
   const role = normalizedRole(node);
   const tag = normalizedTag(node);
@@ -1283,11 +1296,13 @@ function* renderTreeRows(
     ) {
       continue;
     }
+    const resetsOnlyInteractive = ["dialog", "alertdialog"].includes(normalizedRole(node));
     pushRenderChildren(
       stack,
       children.get(node.id) ?? [],
       depth + 1,
-      Boolean(ref) && isFoldableNamedRefControl(node),
+      (!resetsOnlyInteractive && Boolean(onlyInteractive)) ||
+        Boolean(ref && isFoldableNamedRefControl(node)),
     );
   }
 }
