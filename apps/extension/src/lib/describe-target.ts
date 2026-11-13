@@ -211,13 +211,22 @@ function looksClickable(el: Element): boolean {
   return false;
 }
 
+/** Follow the event ancestry through slots and shadow hosts. */
+function composedParentElement(el: Element): Element | null {
+  const parent = el.assignedSlot ?? el.parentElement;
+  if (parent) return parent;
+  const root = el.getRootNode();
+  return root instanceof ShadowRoot ? root.host : null;
+}
+
 /**
  * Resolve the element a click should describe for the LLM textbook.
  * Never falls back to an anonymous layout `div`.
  */
 export function resolveClickableElement(target: Element): Element | null {
-  const interactive = target.closest(INTERACTIVE_SELECTOR);
-  if (interactive instanceof Element) return interactive;
+  for (let node: Element | null = target; node; node = composedParentElement(node)) {
+    if (node.matches(INTERACTIVE_SELECTOR)) return node;
+  }
 
   let node: Element | null = target;
   let depth = 0;
@@ -226,7 +235,7 @@ export function resolveClickableElement(target: Element): Element | null {
     if (name && isActionableLabel(name) && looksClickable(node)) {
       return node;
     }
-    node = node.parentElement;
+    node = composedParentElement(node);
     depth += 1;
   }
   return null;
@@ -240,7 +249,7 @@ export function resolveHoverElement(target: Element): Element | null {
   let depth = 0;
   while (node && node !== document.body && node !== document.documentElement && depth < 8) {
     if (looksClickable(node)) return node;
-    node = node.parentElement;
+    node = composedParentElement(node);
     depth += 1;
   }
   return null;
