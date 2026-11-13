@@ -635,5 +635,392 @@ describe.skipIf(!process.env.BSK_CLICK_CHROME)(
         rmSync(tempDir, { recursive: true, force: true });
       }
     }, 60_000);
+
+    it("keeps main-doc and healthy-iframe --selector actions fast and non-blocking when another OOPIF renderer is hung", async () => {
+      const tempDir = mkdtempSync(join(tmpdir(), "bsk-upload-hung-oopif-"));
+      const fileA = join(tempDir, "contract.pdf");
+      writeFileSync(fileA, "PDF-HUNG-OOPIF");
+
+      const server = createServer((req, res) => {
+        res.setHeader("Content-Type", "text/html; charset=utf-8");
+        if (req.url === "/same-origin-frame") {
+          res.end(`<!doctype html>
+              <div class="dup-across-frames">Same slot</div>
+              <input class="layui-upload-file" id="same-layui-file" type="file" style="display: none !important">
+              <script>
+                window.sameUploads = [];
+                const inp = document.getElementById('same-layui-file');
+                inp.addEventListener('change', () => {
+                  window.sameUploads.push(Array.from(inp.files, f => f.name + ':' + f.size));
+                });
+              </script>`);
+          return;
+        }
+        if (req.url === "/healthy-oopif") {
+          res.end(`<!doctype html>
+              <button type="button" id="healthy-oopif-btn">Healthy OOPIF</button>
+              <script>
+                window.healthyClicks = 0;
+                document.getElementById('healthy-oopif-btn').addEventListener('click', () => {
+                  window.healthyClicks += 1;
+                });
+              </script>`);
+          return;
+        }
+        if (req.url === "/hung-oopif") {
+          // Isolate hung.localhost into its own dedicated renderer process.
+          res.setHeader("Origin-Agent-Cluster", "?1");
+          res.end(`<!doctype html><div id="hung-marker">Hung OOPIF</div>`);
+          return;
+        }
+        const port = (server.address() as { port: number }).port;
+        res.end(`<!doctype html>
+            <style>body{margin:0;padding:10px}iframe{width:320px;height:100px;display:block}</style>
+            <div class="dup-across-frames">Host slot</div>
+            <button type="button" id="host-action-btn">Host Action</button>
+            <iframe id="same-frame" src="/same-origin-frame"></iframe>
+            <iframe id="healthy-oopif" src="http://localhost:${port}/healthy-oopif"></iframe>
+            <iframe id="hung-oopif" src="http://hung.localhost:${port}/hung-oopif"></iframe>
+            <script>
+              window.hostClicks = 0;
+              document.getElementById('host-action-btn').addEventListener('click', () => {
+                window.hostClicks += 1;
+              });
+            </script>`);
+      });
+      await new Promise<void>((resolve) => server.listen(0, resolve));
+      const port = (server.address() as { port: number }).port;
+      const hostUrl = `http://127.0.0.1:${port}/`;
+
+      try {
+        const { withChrome } = await import(
+          new URL(
+            "../../../../../evals/browser/cases/regression/snapshot-coordinates/chrome.mjs",
+            import.meta.url,
+          ).href
+        );
+        let forwardEvent: ((event: CdpEvent) => void) | undefined;
+        await withChrome(
+          {
+            executable: process.env.BSK_CLICK_CHROME,
+            deviceScale: 1,
+            zoom: 1,
+            startupTimeout: 30_000,
+            onEvent: (event: CdpEvent) => forwardEvent?.(event),
+          },
+          async (send: Send) => {
+            const { targetId } = await send<{ targetId: string }>("Target.createTarget", {
+              url: hostUrl,
+            });
+            const { sessionId: monitorSession } = await send<{ sessionId: string }>(
+              "Target.attachToTarget",
+              { targetId, flatten: true },
+            );
+            const evalHost = async <T>(expression: string): Promise<T> => {
+              const reply = await send<{ result: { value: T } }>(
+                "Runtime.evaluate",
+                { expression, returnByValue: true },
+                monitorSession,
+              );
+              return reply.result.value;
+            };
+            await expect
+              .poll(() =>
+                evalHost<boolean>(
+                  "document.readyState === 'complete' && document.getElementById('same-frame')?.contentDocument?.readyState === 'complete'",
+                ),
+              )
+              .toBe(true);
+
+            const findTarget = async (url: string) => {
+              let target = "";
+              await expect
+                .poll(async () => {
+                  const { targetInfos } = await send<{
+                    targetInfos: { targetId: string; type: string; url: string }[];
+                  }>("Target.getTargets");
+                  const found = targetInfos.find((t) => t.type === "iframe" && t.url === url);
+                  if (found) target = found.targetId;
+                  return Boolean(found);
+                })
+                .toBe(true);
+              return target;
+            };
+            const healthyTargetId = await findTarget(`http://localhost:${port}/healthy-oopif`);
+            const hungTargetId = await findTarget(`http://hung.localhost:${port}/hung-oopif`);
+            const { sessionId: monitorHealthy } = await send<{ sessionId: string }>(
+              "Target.attachToTarget",
+              { targetId: healthyTargetId, flatten: true },
+            );
+            const { sessionId: monitorHung } = await send<{ sessionId: string }>(
+              "Target.attachToTarget",
+              { targetId: hungTargetId, flatten: true },
+            );
+            const evalTarget = async <T>(sessionId: string, expression: string): Promise<T> => {
+              const reply = await send<{ result: { value: T } }>(
+                "Runtime.evaluate",
+                { expression, returnByValue: true },
+                sessionId,
+              );
+              return reply.result.value;
+            };
+            await expect
+              .poll(() => evalTarget<string>(monitorHealthy, "document.readyState"))
+              .toBe("complete");
+            await expect
+              .poll(() => evalTarget<string>(monitorHung, "document.readyState"))
+              .toBe("complete");
+
+            let activeRootSession = "";
+            const childSessions = new Set<string>();
+            const eventListeners = new Set<CdpEventListener>();
+            forwardEvent = (event) => {
+              if (!activeRootSession) return;
+              if (
+                event.method === "Target.attachedToTarget" &&
+                event.sessionId === activeRootSession
+              ) {
+                const sid = (event.params as { sessionId?: string } | undefined)?.sessionId;
+                if (sid) childSessions.add(sid);
+              }
+              if (event.sessionId === activeRootSession) {
+                for (const fn of [...eventListeners]) fn({ tabId: 4 }, event.method, event.params);
+              } else if (event.sessionId && childSessions.has(event.sessionId)) {
+                for (const fn of [...eventListeners])
+                  fn({ tabId: 4, sessionId: event.sessionId }, event.method, event.params);
+              }
+            };
+
+            const api: CdpDebuggerApi = {
+              attach: async () => {
+                childSessions.clear();
+                const reply = await send<{ sessionId: string }>("Target.attachToTarget", {
+                  targetId,
+                  flatten: true,
+                });
+                activeRootSession = reply.sessionId;
+              },
+              detach: async () => {
+                const prev = activeRootSession;
+                activeRootSession = "";
+                childSessions.clear();
+                if (prev) await send("Target.detachFromTarget", { sessionId: prev });
+              },
+              sendCommand: async (target, method, params) => {
+                const sid = target.sessionId ?? activeRootSession;
+                if (!sid) throw new Error("debugger detached");
+                return send(method, params, sid);
+              },
+              onEvent: {
+                addListener: (fn: CdpEventListener) => eventListeners.add(fn),
+                removeListener: (fn: CdpEventListener) => eventListeners.delete(fn),
+              } as unknown as CdpDebuggerApi["onEvent"],
+              onDetach: {
+                addListener() {},
+                removeListener() {},
+              } as unknown as CdpDebuggerApi["onDetach"],
+            };
+
+            const sessions = new SessionManager({
+              agentWindow: {
+                create: async () => ({ windowId: 100, initialTabIds: [4] }),
+                remove: async () => {},
+                ensureActiveTab: async () => 4,
+              },
+            });
+            const ctx = await sessions.start("hung-oopif-e2e");
+            const hostFrame: FrameState = {
+              document: "doc-host",
+              focusIsDocument: true,
+              revision: 1,
+              structure: 1,
+              human: 0,
+              busy: false,
+              editing: false,
+              lastInput: 0,
+              fields: [],
+              events: [],
+            };
+            const controller = new CooperationController({
+              sessions,
+              readFrames: async (): Promise<CooperationFrames> => ({
+                frames: new Map([
+                  [0, structuredClone(hostFrame)],
+                  [2, { ...structuredClone(hostFrame), document: "doc-healthy" }],
+                  [3, { ...structuredClone(hostFrame), document: "doc-hung" }],
+                ]),
+                gaps: [],
+              }),
+              resumeFrames: async () => {},
+              changed: () => {},
+            });
+            const cdp = new ChromiumCdp(api, {
+              canControlDialog: () => true,
+              onDocumentChanged: (tabId) => {
+                sessions.invalidateTabRefs(tabId);
+                controller.invalidate(tabId);
+              },
+              onChildFramesRemapped: (tabId, remapped) =>
+                sessions.remapTabChildFrames(tabId, remapped),
+              onChildFramesInvalidated: (tabId, stale) => {
+                sessions.invalidateTabChildFrames(tabId, stale);
+                controller.invalidateChildFrames(tabId);
+              },
+            });
+            stubInputClock(cdp);
+            const runner = sessionCdpRunner(cdp, ctx.sessionId, () => sessions.has(ctx.sessionId));
+            const tab = async () =>
+              ({
+                id: 4,
+                windowId: 100,
+                active: true,
+                url: hostUrl,
+              }) as chrome.tabs.Tab;
+            const tabsApi = {
+              get: tab,
+              query: async () => [await tab()],
+              sendMessage: async () => ({ ok: true }),
+            };
+
+            const prevChrome = (globalThis as { chrome?: unknown }).chrome;
+            (globalThis as { chrome?: unknown }).chrome = { tabs: tabsApi };
+
+            try {
+              const signal = new AbortController().signal;
+              // Establish target-policy cooperation sync BEFORE freezing the hung OOPIF renderer.
+              const syncReply = (await controller.command(
+                {
+                  session_id: ctx.sessionId,
+                  tab_id: 4,
+                  action: "sync",
+                  control_policy: "target",
+                },
+                runner,
+                signal,
+              )) as { context_id: string };
+              expect(syncReply.context_id).toBeTruthy();
+
+              // Deadlock ONLY the hung.localhost OOPIF renderer thread.
+              void send(
+                "Runtime.evaluate",
+                { expression: "setTimeout(() => { while (true) {} }, 0)" },
+                monitorHung,
+              ).catch(() => {});
+              await new Promise((resolve) => setTimeout(resolve, 50));
+
+              const runCoop = (
+                id: string,
+                method: "tool.click" | "tool.upload",
+                params: Record<string, unknown>,
+              ) => {
+                const req = {
+                  id,
+                  method,
+                  params: {
+                    session_id: ctx.sessionId,
+                    tab_id: 4,
+                    context_id: syncReply.context_id,
+                    ...params,
+                  },
+                };
+                return controller.run(req, runner, signal, (guarded, opSignal) =>
+                  method === "tool.upload"
+                    ? handleUpload(sessions, req.params as never, {
+                        cdp: guarded,
+                        tabsApi,
+                        signal: opSignal,
+                        bypassOverlay: async () => {},
+                        sendToTab: async () => ({ ok: true }),
+                      })
+                    : handleClick(sessions, req.params as never, {
+                        cdp: guarded,
+                        tabsApi,
+                        signal: opSignal,
+                        bypassOverlay: async () => {},
+                      }),
+                );
+              };
+
+              // 1. Main-doc --selector click succeeds despite hung OOPIF (bounded <= ~2s on first call).
+              const t1 = performance.now();
+              const hostClick1 = await runCoop("host-click-1", "tool.click", {
+                selector: "#host-action-btn",
+              });
+              expect(hostClick1).toMatchObject({ tab_id: 4, used_selector: "#host-action-btn" });
+              expect(await evalHost<number>("window.hostClicks")).toBe(1);
+              expect(performance.now() - t1).toBeLessThan(5_000);
+
+              // 2. Subsequent main-doc --selector click skips the gated hung OOPIF immediately!
+              const t2 = performance.now();
+              const hostClick2 = await runCoop("host-click-2", "tool.click", {
+                selector: "#host-action-btn",
+              });
+              expect(hostClick2).toMatchObject({ tab_id: 4, used_selector: "#host-action-btn" });
+              expect(await evalHost<number>("window.hostClicks")).toBe(2);
+              expect(performance.now() - t2).toBeLessThan(1_000);
+
+              // 3. Direct hidden input[type=file] --selector upload in same-origin iframe succeeds.
+              const sameUpload = await runCoop("same-upload", "tool.upload", {
+                selector: "#same-layui-file",
+                files: [{ transfer_id: "tx-hung-1", name: "contract.pdf", staged_path: fileA }],
+              });
+              expect(sameUpload).toMatchObject({
+                tab_id: 4,
+                used_selector: "#same-layui-file",
+                file_names: ["contract.pdf"],
+              });
+              expect(
+                await evalHost<unknown>(
+                  "document.getElementById('same-frame').contentWindow.sameUploads",
+                ),
+              ).toEqual([["contract.pdf:14"]]);
+
+              // 4. Cross-origin healthy OOPIF wait-for-element + click succeed without blocking on hung OOPIF.
+              const waited = await handleWaitForElement(
+                sessions,
+                {
+                  session_id: ctx.sessionId,
+                  tab_id: 4,
+                  selector: "#healthy-oopif-btn",
+                  state: "visible",
+                  timeout_ms: 4_000,
+                },
+                { cdp: runner, tabsApi },
+              );
+              expect(waited).toMatchObject({
+                satisfied: true,
+                attached: true,
+                visible: true,
+                used_selector: "#healthy-oopif-btn",
+              });
+              const healthyClick = await runCoop("healthy-oopif-click", "tool.click", {
+                selector: "#healthy-oopif-btn",
+              });
+              expect(healthyClick).toMatchObject({
+                tab_id: 4,
+                used_selector: "#healthy-oopif-btn",
+              });
+              expect(await evalTarget<number>(monitorHealthy, "window.healthyClicks")).toBe(1);
+
+              // 5. Cross-frame ambiguity check still fails fast under target policy.
+              const dupErr = await runCoop("dup-with-hung", "tool.click", {
+                selector: ".dup-across-frames",
+              });
+              expect(dupErr).toMatchObject({
+                code: "invalid_params",
+                message: expect.stringContaining("selector matched 2 elements"),
+                data: { phase: "target", effect_state: "none" },
+              });
+            } finally {
+              (globalThis as { chrome?: unknown }).chrome = prevChrome;
+              await cdp.detachAll();
+            }
+          },
+        );
+      } finally {
+        await new Promise<void>((resolve) => server.close(() => resolve()));
+        rmSync(tempDir, { recursive: true, force: true });
+      }
+    }, 60_000);
   },
 );

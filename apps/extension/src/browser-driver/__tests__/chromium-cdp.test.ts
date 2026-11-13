@@ -3335,4 +3335,87 @@ describe("idle soft-detach and immediate close/return detach", () => {
       cdp.dispose();
     }
   });
+
+  it("supports fast selector frame graphs: skips owners, skips idle quiet wait, and bounds child OOPIF tree timeouts", async () => {
+    vi.useFakeTimers();
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    vi.spyOn(console, "debug").mockImplementation(() => {});
+    const { api, onEvent } = fakeApi();
+    let ownerCalls = 0;
+    let finishHung!: (value: object) => void;
+    let hungReads = 0;
+    vi.mocked(api.sendCommand).mockImplementation(async (target, method) => {
+      if (method === "DOM.getFrameOwner") {
+        ownerCalls += 1;
+        return { backendNodeId: 100 };
+      }
+      if (method === "Page.getFrameTree") {
+        if (target.sessionId === "hung-session") {
+          hungReads += 1;
+          if (hungReads === 1) {
+            return new Promise((resolve) => {
+              finishHung = resolve;
+            });
+          }
+          return { frameTree: { frame: { id: "hung-frame" } } };
+        }
+        return {
+          frameTree: {
+            frame: { id: "main" },
+            childFrames: [
+              { frame: { id: "same-frame", parentId: "main" } },
+              { frame: { id: "hung-frame", parentId: "main" } },
+            ],
+          },
+        };
+      }
+      return {};
+    });
+
+    const cdp = new ChromiumCdp(api);
+    try {
+      await cdp.ensureAttached(4);
+      onEvent.fire({ tabId: 4 }, "Target.attachedToTarget", {
+        sessionId: "hung-session",
+        targetInfo: { type: "iframe", targetId: "hung-frame" },
+      });
+
+      // 1) First call enables discovery, waits for child OOPIF only up to childReadTimeoutMs (1500ms, not 10s),
+      //    omits hung-frame cleanly, and skips DOM.getFrameOwner when includeOwners is false.
+      const first = cdp.getFrameGraph(4, undefined, {
+        includeOwners: false,
+        childReadTimeoutMs: 1_500,
+        skipQuietWaitWhenIdle: true,
+      });
+      await vi.advanceTimersByTimeAsync(1_600);
+      const g1 = await first;
+      expect(g1.frames.map((f) => f.frameId)).toEqual(["main", "same-frame"]);
+      expect(g1.unavailableFrames?.map((f) => f.frameId)).toEqual(["hung-frame"]);
+      expect(ownerCalls).toBe(0);
+      expect(hungReads).toBe(1);
+
+      // 2) Second idle call skips the 20ms quiet delay and rejects hung-session in 0ms via CdpReadGate.
+      const g2 = await cdp.getFrameGraph(4, undefined, {
+        includeOwners: false,
+        childReadTimeoutMs: 1_500,
+        skipQuietWaitWhenIdle: true,
+      });
+      expect(g2.frames.map((f) => f.frameId)).toEqual(["main", "same-frame"]);
+      expect(ownerCalls).toBe(0);
+      expect(hungReads).toBe(1);
+
+      // 3) Once the late reply settles, the OOPIF recovers automatically.
+      finishHung({ frameTree: { frame: { id: "hung-frame" } } });
+      await vi.advanceTimersByTimeAsync(0);
+      const g3 = await cdp.getFrameGraph(4, undefined, {
+        includeOwners: false,
+        childReadTimeoutMs: 1_500,
+        skipQuietWaitWhenIdle: true,
+      });
+      expect(g3.frames.map((f) => f.frameId)).toEqual(["main", "same-frame", "hung-frame"]);
+      expect(hungReads).toBe(2);
+    } finally {
+      cdp.dispose();
+    }
+  });
 });

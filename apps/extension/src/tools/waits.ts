@@ -26,7 +26,7 @@ import { isMissingNode } from "./errors";
 // `resolveBackendNode` instead of a page-side promise. That keeps ref /
 // selector / frame handling identical to every other tool.
 
-import { ChromiumCdp } from "@/browser-driver/chromium-cdp";
+import { type CdpDispatchGuard, ChromiumCdp } from "@/browser-driver/chromium-cdp";
 import { type CdpTarget, cdpTargetKey } from "@/browser-driver/frame-graph";
 import type { SessionContext, SessionManager } from "@/session-manager/manager";
 import { normaliseRef } from "@/session-manager/ref-store";
@@ -325,13 +325,26 @@ export async function handleWaitForElement(
       objectGroup,
     }).catch(() => {});
   };
-  const send = async <T>(cdpTarget: CdpTarget, method: string, args?: object): Promise<T> => {
+  const send = async <T>(
+    cdpTarget: CdpTarget,
+    method: string,
+    args?: object,
+    guard?: CdpDispatchGuard,
+  ): Promise<T> => {
     checkBudget(deadline, deps.signal);
+    const combinedSignal =
+      guard?.signal && deps.signal
+        ? AbortSignal.any([guard.signal, deps.signal])
+        : (guard?.signal ?? deps.signal);
     try {
       return await (deps.cdp.sendGuarded
         ? deps.cdp.sendGuarded<T>(cdpTarget, method, args, {
-            signal: deps.signal,
-            onDispatch: () => checkBudget(deadline, deps.signal),
+            ...guard,
+            signal: combinedSignal,
+            onDispatch: () => {
+              checkBudget(deadline, deps.signal);
+              guard?.onDispatch?.();
+            },
           })
         : sendToCdpTarget<T>(deps.cdp, cdpTarget, method, args));
     } finally {
@@ -341,7 +354,9 @@ export async function handleWaitForElement(
   };
   const probeCdp: CdpRunner = {
     send: (tabId, method, args) => send({ tabId }, method, args),
-    sendToTarget: send,
+    sendToTarget: (cdpTarget, method, args) => send(cdpTarget, method, args),
+    sendGuarded: deps.cdp.sendGuarded ? send : undefined,
+    getAttachmentId: deps.cdp.getAttachmentId?.bind(deps.cdp),
     trackSessionTab: deps.cdp.trackSessionTab?.bind(deps.cdp),
     resolveTarget: deps.cdp.resolveTarget?.bind(deps.cdp),
     reattachIfSoftDetached: deps.cdp.reattachIfSoftDetached
@@ -359,9 +374,13 @@ export async function handleWaitForElement(
         }
       : undefined,
     getFrameGraph: deps.cdp.getFrameGraph
-      ? async (tabId) => {
+      ? async (tabId, signal, options) => {
           checkBudget(deadline, deps.signal);
-          const graph = await deps.cdp.getFrameGraph!(tabId);
+          const combinedSignal =
+            signal && deps.signal
+              ? AbortSignal.any([signal, deps.signal])
+              : (signal ?? deps.signal);
+          const graph = await deps.cdp.getFrameGraph!(tabId, combinedSignal, options);
           checkBudget(deadline, deps.signal);
           return graph;
         }
@@ -380,11 +399,22 @@ export async function handleWaitForElement(
       elapsed_ms: Math.round(performance.now() - started),
     });
 
+  const waitCleanup = new AbortController();
   try {
     deps.cdp.trackSessionTab?.(ctx.sessionId, target.tabId);
     for (;;) {
       const next = await beforeDeadline(
-        () => probeState(probeCdp, ctx, target, params, objectGroup, objectTargets),
+        () =>
+          probeState(
+            probeCdp,
+            ctx,
+            target,
+            params,
+            objectGroup,
+            objectTargets,
+            deadline,
+            waitCleanup.signal,
+          ),
         deadline,
         deps.signal,
       );
@@ -407,6 +437,7 @@ export async function handleWaitForElement(
     return cdpError(error);
   } finally {
     finished = true;
+    waitCleanup.abort();
     for (const objectTarget of objectTargets.values()) release(objectTarget);
   }
 }
@@ -433,8 +464,13 @@ async function probeState(
   params: WaitForElementParams,
   objectGroup: string,
   objectTargets: Map<string, CdpTarget>,
+  deadline: number,
+  stopSignal: AbortSignal,
 ): Promise<Probe | RpcError | null> {
-  const node = await resolveBackendNode(cdp, ctx, target, params, "wait-for-element");
+  const node = await resolveBackendNode(cdp, ctx, target, params, "wait-for-element", false, {
+    childTimeoutMs: Math.max(1, Math.ceil(deadline - performance.now())),
+    stopSignal,
+  });
   if (isRpcError(node)) {
     if (node.code === "not_found" && node.data?.reason === "selector_not_found") {
       return { attached: false, visible: false };

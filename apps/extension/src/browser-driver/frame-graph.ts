@@ -18,6 +18,15 @@ export interface CdpFrameGraph {
   unavailableFrames?: CdpFrame[];
 }
 
+export interface CdpFrameGraphOptions {
+  /** Skip `DOM.getFrameOwner` lookups when callers only need frame IDs and targets. */
+  includeOwners?: boolean;
+  /** Override timeout (ms) for child OOPIF tree reads instead of `READ_TIMEOUT_MS`. */
+  childReadTimeoutMs?: number;
+  /** Skip the trailing auto-attach quiet delay when discovery is already active and idle. */
+  skipQuietWaitWhenIdle?: boolean;
+}
+
 export function omitFrameSubtrees(
   graph: CdpFrameGraph,
   unavailable: ReadonlyMap<string, CdpTarget>,

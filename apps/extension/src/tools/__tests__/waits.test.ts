@@ -1247,4 +1247,96 @@ describe("wait-for-element regression coverage", () => {
       elapsed_ms: 500,
     });
   });
+
+  it("isolates a hung child OOPIF across polls and leaves zero active timers on wait-for-element completion or timeout", async () => {
+    const manager = await sessionWithRef();
+    let mountedInSameOrigin = false;
+    const fake = makeFakeCdp({
+      handlers: {
+        ...probeHandlers({ attached: true, visible: true }),
+        "DOM.getDocument": () => ({ root: { nodeId: 1 } }),
+        "DOM.querySelector": () => ({ nodeId: 0 }),
+      },
+    });
+    fake.cdp.getFrameGraph = vi.fn(async () => ({
+      rootFrameId: "main",
+      frames: [
+        { frameId: "main", target: { tabId: 4 } },
+        { frameId: "hung", parentFrameId: "main", target: { tabId: 4, sessionId: "hung-oopif" } },
+        { frameId: "same", parentFrameId: "main", target: { tabId: 4 } },
+      ],
+    }));
+    const gatedBlocked = new Set<string>();
+    const originalSend = fake.cdp.send;
+    fake.cdp.sendGuarded = (async (target, method, p, guard) => {
+      if (target.sessionId === "hung-oopif") {
+        if (gatedBlocked.has("hung-oopif")) {
+          const err = new Error("still pending");
+          err.name = "CdpReadTimeoutError";
+          Object.assign(err, { sessionId: "hung-oopif" });
+          throw err;
+        }
+        return await new Promise((_resolve, reject) => {
+          guard.signal?.addEventListener(
+            "abort",
+            () => {
+              gatedBlocked.add("hung-oopif");
+              reject(guard.signal!.reason);
+            },
+            { once: true },
+          );
+        });
+      }
+      if (method === "Page.createIsolatedWorld") return { executionContextId: 2 };
+      if (method === "Runtime.evaluate") {
+        return mountedInSameOrigin
+          ? { result: { deepSerializedValue: { type: "node", value: { backendNodeId: 555 } } } }
+          : { result: { deepSerializedValue: { type: "null" } } };
+      }
+      return originalSend(target.tabId, method, p);
+    }) as CdpRunner["sendGuarded"];
+    fake.cdp.sendToTarget = (async (target, method, p) => {
+      if (target.sessionId) {
+        return fake.cdp.sendGuarded!(target, method, p, {});
+      }
+      return fake.cdp.send(target.tabId, method, p);
+    }) as CdpRunner["sendToTarget"];
+    fake.cdp.send = (async (tabId, method, p) => {
+      if (method === "Page.createIsolatedWorld") return { executionContextId: 2 };
+      if (method === "Runtime.evaluate") {
+        return mountedInSameOrigin
+          ? { result: { deepSerializedValue: { type: "node", value: { backendNodeId: 555 } } } }
+          : { result: { deepSerializedValue: { type: "null" } } };
+      }
+      return originalSend(tabId, method, p);
+    }) as CdpRunner["send"];
+
+    // 1) Short timeout while hung OOPIF is waiting: exits cleanly at 400ms with 0 timers left.
+    const shortPending = handleWaitForElement(
+      manager,
+      { session_id: "aa11", selector: "#child-ready", state: "visible", timeout_ms: 400 },
+      fake,
+    );
+    await vi.advanceTimersByTimeAsync(400);
+    expect(await shortPending).toMatchObject({ satisfied: false, elapsed_ms: 400 });
+    expect(vi.getTimerCount()).toBe(0);
+
+    // 2) Longer wait: hung OOPIF gets isolated after 1500ms, element mounts later, wait succeeds with 0 timers.
+    gatedBlocked.clear();
+    const waitPending = handleWaitForElement(
+      manager,
+      { session_id: "aa11", selector: "#child-ready", state: "visible", timeout_ms: 3_000 },
+      fake,
+    );
+    await vi.advanceTimersByTimeAsync(1_550);
+    mountedInSameOrigin = true;
+    await vi.advanceTimersByTimeAsync(200);
+    expect(await waitPending).toMatchObject({
+      satisfied: true,
+      attached: true,
+      visible: true,
+      used_selector: "#child-ready",
+    });
+    expect(vi.getTimerCount()).toBe(0);
+  });
 });

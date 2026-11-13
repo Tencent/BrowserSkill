@@ -144,9 +144,11 @@ export class CdpReadGate {
       },
     });
     if (!signal) return work;
-    return waitForAbort(work, signal, () =>
-      blockUntilSettled(CdpReadTimeoutError.stillPending(method, target.tabId, target.sessionId)),
-    );
+    return waitForAbort(work, signal, () => {
+      if (GUARDED_READS.has(method)) {
+        blockUntilSettled(CdpReadTimeoutError.stillPending(method, target.tabId, target.sessionId));
+      }
+    });
   }
 
   reset(tabId: number, sessionId?: string): void {

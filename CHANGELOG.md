@@ -13,16 +13,18 @@ determines which versions can connect.
 
 - `upload` and CSS `--selector` targeting across `iframe`s and hidden `<input type="file">`
   widgets (such as Layui's `display: none` file inputs): action and `wait-for-element`
-  selectors now search accessible same-origin `iframe`s and cross-origin OOPIFs in frame-graph
-  order after checking the main document (enforcing cross-frame uniqueness under strict/target
-  policy and tracking child-frame `frameEpoch` invalidation in cooperative control, while
-  keeping `expect` preconditions main-document-scoped); when `upload` (`--mode input`) resolves
-  directly to an `<input type="file">`, it validates connectedness, enabled state, and
-  `multiple` before calling `DOM.setFileInputFiles` without requiring visual geometry or
-  renderer-frame click readiness; OOPIF and same-origin cross-frame chooser triggers enable
-  the child `Page` domain and accept intercepted `Page.fileChooserOpened` events (including
-  dynamically created detached file inputs); and CLI/DSH tool descriptions now guide callers
-  to prefer visible upload trigger `@eN` refs or target `<input type="file">` selectors directly.
+  selectors now search accessible same-origin `iframe`s and cross-origin OOPIFs in parallel
+  (bounded per child frame with unresponsive child-frame isolation in `CdpReadGate`, fast
+  ownerless frame graphs, and deterministic frame-graph order) after checking the main
+  document (enforcing cross-frame uniqueness under strict/target policy and tracking
+  child-frame `frameEpoch` invalidation in cooperative control, while keeping `expect`
+  preconditions main-document-scoped); when `upload` (`--mode input`) resolves directly to
+  an `<input type="file">`, it validates connectedness, enabled state, and `multiple` before
+  calling `DOM.setFileInputFiles` without requiring visual geometry or renderer-frame click
+  readiness; OOPIF and same-origin cross-frame chooser triggers enable the child `Page` domain
+  and accept intercepted `Page.fileChooserOpened` events (including dynamically created
+  detached file inputs); and CLI/DSH tool descriptions now guide callers to prefer visible
+  upload trigger `@eN` refs or target `<input type="file">` selectors directly.
 - VOM tree folding (`shouldSkipRedundantRefChildren` and `renderTreeRows`) preserves
   independent interactive descendants under named interactive controls (such as Vue 3 +
   Element Plus nested `<el-sub-menu>` popups inside a parent `menuitem` or custom ARIA
