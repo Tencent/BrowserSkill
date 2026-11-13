@@ -119,6 +119,7 @@ async function harness(
       `${error}: ${JSON.stringify(await evaluate(popup.sessionId, "({url:location.href,body:document.body?.innerText.slice(0,200)})"))}`,
     );
   });
+  await evaluate(popup.sessionId, "chrome.storage.local.set({i18nextLng:'en-US'})");
   await evaluate(
     popup.sessionId,
     "document.querySelector('[data-slot=popup-connection-toggle][aria-checked=true]')?.click()",
@@ -293,13 +294,20 @@ describe.skipIf(!process.env.BSK_TEST_CHROME)("full-page screenshot in a real ex
         h.evaluate(h.popup.sessionId, "!!document.querySelector('[data-slot=popup-launcher]')"),
       );
       await h.openFromPopup();
+      await expect
+        .poll(() =>
+          h.evaluate<string>(
+            h.popup.sessionId,
+            "document.querySelector('[data-slot=popup-long-screenshot]').innerText",
+          ),
+        )
+        .toContain("Start capture");
       const popupText = await h.evaluate<string>(
         h.popup.sessionId,
         "document.querySelector('[data-slot=popup-long-screenshot]').innerText",
       );
-      expect(popupText).toContain("开始截图");
-      expect(popupText).not.toContain("长截图已完成");
-      expect(popupText).not.toContain("打开预览");
+      expect(popupText).not.toContain("Screenshot ready");
+      expect(popupText).not.toContain("Open preview");
       await h.send("Page.bringToFront", {}, h.page.sessionId);
       expect(await h.request("status")).toMatchObject({ state: null });
 

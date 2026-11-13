@@ -186,20 +186,21 @@ allows a consumer to detect a mismatched pair.
 
 ## MCP
 
-`bsk_inspect` exposes **action: "extract"**:
+`bsk_inspect` exposes **action: "extract"** for inline JSON discovery, table,
+and list extraction:
 
 ~~~text
-bsk_inspect({ action: "extract", session: "<id>", extract_kind: "discover" })
-bsk_inspect({ action: "extract", session: "<id>", extract_kind: "table", extract_target: "<target_id>" })
-bsk_inspect({ action: "extract", session: "<id>", extract_kind: "table", selector: "#orders",
-  extract_format: "csv", output: "/absolute/path/orders.csv", csv_safe: true })
+bsk_inspect({ action: "extract", session: "<id>", extract_action: "discover" })
+bsk_inspect({ action: "extract", session: "<id>", extract_action: "table", target_id: "<target_id>" })
+bsk_inspect({ action: "extract", session: "<id>", extract_action: "list", selector: "#orders",
+  item_selector: "li", fields: [{ key: "title", selector: "h3" }] })
 ~~~
 
-List extraction uses `item_selector` and the fields mapping in
-`extract_fields`. Budgets are `max_rows`, `max_columns`, `max_bytes` and `timeout_ms`.
-Rows returned inline enter the model context, so `max_bytes` defaults to 262144
-there (1048576 when writing `output`). Output paths are on the `bsk mcp` host;
-prefer absolute paths in tool calls.
+Targets accept at most one of `target_id`, `selector`, or `ref`. List extraction
+uses optional `item_selector` and `fields`. Budgets are `max_rows`, `max_columns`,
+`max_bytes`, and `timeout_ms`. Rows returned inline enter the model context, so
+`max_bytes` defaults to 262144; CSV encoding and `--output` / `--csv-safe` file
+exports are provided by the CLI (`bsk extract`).
 
 ## Implementation
 

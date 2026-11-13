@@ -1266,6 +1266,12 @@ describe("ToolDispatcher", () => {
           url: props.url,
           active: props.active,
         })),
+        update: vi.fn(async (id: number, props: chrome.tabs.UpdateProperties) => ({
+          id,
+          windowId: 1,
+          url: "https://example.test/",
+          active: props.active ?? true,
+        })),
       },
     });
     const { transport, sent, deliver } = fakeTransport();

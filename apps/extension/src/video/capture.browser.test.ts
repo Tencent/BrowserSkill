@@ -51,11 +51,20 @@ describe.skipIf(!process.env.BSK_TEST_CHROME)("video CLI browser integration", (
   it("records a fixed tab through navigation, exports after task teardown and previews a seekable MP4", async () => {
     const directory = await mkdtemp(path.join(tmpdir(), "bsk-video-flow-"));
     const executable = path.resolve(process.env.BSK_TEST_CLI ?? defaultCli);
+    const fixtureHome = path.join(directory, "user");
     const env = {
       ...process.env,
+      HOME: fixtureHome,
+      USERPROFILE: fixtureHome,
+      KIMI_CODE_HOME: path.join(fixtureHome, ".kimi-code"),
+      HERMES_HOME: path.join(fixtureHome, ".hermes"),
+      DSH_HOME: path.join(fixtureHome, ".dsh"),
+      CODEX_HOME: path.join(fixtureHome, ".codex"),
       BSK_HOME: path.join(directory, "state"),
       BSK_AUTO_START: "0",
       BSK_AUTO_UPDATE: "off",
+      BSK_SESSION: "",
+      BSK_SCOPE: "",
     };
     const daemon = spawn(executable, ["daemon", "start", "--foreground", "--port", "0"], {
       env,

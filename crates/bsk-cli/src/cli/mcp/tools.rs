@@ -754,6 +754,12 @@ struct SessionArgs {
     browser: Option<String>,
     /// start: task name shown in the Agent Window.
     name: Option<String>,
+    /// start: agent name displayed in the browser control overlay (1..=80 characters).
+    agent_name: Option<String>,
+    /// start: project label displayed alongside agent_name (1..=120 characters); requires agent_name.
+    project: Option<String>,
+    /// start: controller marker color as #RRGGBB; requires agent_name.
+    controller_color: Option<String>,
     /// start: open an incognito Agent Window (requires "Allow in incognito").
     incognito: Option<bool>,
     /// start: Agent Window width in CSS pixels (100-7680); requires height.
@@ -809,6 +815,9 @@ async fn session(
                 &[
                     "browser",
                     "name",
+                    "agent_name",
+                    "project",
+                    "controller_color",
                     "incognito",
                     "width",
                     "height",
@@ -816,6 +825,21 @@ async fn session(
                     "request_id",
                 ],
             )?;
+            if args.agent_name.is_none()
+                && (args.project.is_some() || args.controller_color.is_some())
+            {
+                return Err(invalid("project and controller_color require agent_name"));
+            }
+            let controller = args
+                .agent_name
+                .map(|name| bsk_protocol::tools::ControllerInfo {
+                    name,
+                    project: args.project,
+                    color: args.controller_color,
+                });
+            if let Some(controller) = &controller {
+                controller.validate().map_err(invalid)?;
+            }
             if args.width.is_some() != args.height.is_some() {
                 return Err(invalid("width and height must be given together"));
             }
@@ -840,6 +864,10 @@ async fn session(
                 params["incognito"] = true.into();
             }
             for (key, value) in [
+                (
+                    "controller",
+                    controller.map(|c| serde_json::to_value(c).unwrap()),
+                ),
                 ("browser_instance_id", args.browser.map(Value::from)),
                 ("task_name", args.name.map(Value::from)),
                 ("width", args.width.map(Value::from)),
@@ -2385,6 +2413,20 @@ mod tests {
                 .as_str()
                 .unwrap()
                 .contains("unsupported")
+        );
+        let reply = call(
+            &daemon,
+            &control,
+            None,
+            "bsk_session",
+            json!({"action":"start","project":"BrowserSkill"}),
+        )
+        .await;
+        assert!(
+            reply["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("require agent_name")
         );
     }
 }

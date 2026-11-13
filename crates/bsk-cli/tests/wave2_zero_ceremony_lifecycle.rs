@@ -89,6 +89,7 @@ impl IsolatedEnv {
             .env_remove("CODEX_THREAD_ID")
             .env_remove("ANTIGRAVITY_CONVERSATION_ID")
             .env_remove("CURSOR_TRACE_ID")
+            .env_remove("DSH_SESSION_ID")
             .args(args)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -640,6 +641,7 @@ async fn mcp_stdio_connections_get_isolated_process_scopes() {
             .env_remove("CODEX_THREAD_ID")
             .env_remove("ANTIGRAVITY_CONVERSATION_ID")
             .env_remove("CURSOR_TRACE_ID")
+            .env_remove("DSH_SESSION_ID")
             .arg("mcp")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -699,7 +701,15 @@ async fn mcp_stdio_connections_get_isolated_process_scopes() {
             "jsonrpc": "2.0",
             "id": 2,
             "method": "tools/call",
-            "params": { "name": "bsk_session", "arguments": { "action": "start" } }
+            "params": {
+                "name": "bsk_session",
+                "arguments": {
+                    "action": "start",
+                    "agent_name": "DSH",
+                    "project": "BrowserSkill",
+                    "controller_color": "#2563eb"
+                }
+            }
         }),
     )
     .await;
@@ -736,7 +746,19 @@ async fn mcp_stdio_connections_get_isolated_process_scopes() {
         .await;
         assert_ne!(sync_res["result"]["isError"], json!(true), "{sync_res}");
     }
-    let _ = env.take_requests();
+    let startup_reqs = env.take_requests();
+    assert!(
+        startup_reqs.iter().any(|r| {
+            r.method == bsk_protocol::Method::ToolSessionStart
+                && r.params.as_ref().and_then(|p| p.get("controller"))
+                    == Some(&json!({
+                        "name": "DSH",
+                        "project": "BrowserSkill",
+                        "color": "#2563eb"
+                    }))
+        }),
+        "expected tool.session_start to forward MCP controller identity, got {startup_reqs:?}"
+    );
 
     // Call `bsk_interact` on both MCP connections omitting `session` AND omitting `context`!
     for (stdin, stdout) in [(&mut in1, &mut out1), (&mut in2, &mut out2)] {

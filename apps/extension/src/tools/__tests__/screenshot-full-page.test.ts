@@ -527,7 +527,7 @@ describe("full-page scope and diagnostics", () => {
     expect(vi.mocked(capturePage).mock.calls.at(-1)?.[0]).toMatchObject({
       scope: "current",
       loadingTimeoutMs: 30000,
-      checkFreshness: os === "win",
+      checkFreshness: os === "win" || os === "linux",
     });
     const renderingCalls = deps.cdp.send.mock.calls
       .filter(([, method]) => method.endsWith("Screencast"))

@@ -37,7 +37,8 @@ A plan holds 1 to 20 steps.
 
 Use `context` and, for an untargeted first step, `observation` on the outer `bsk_plan`
 call. Steps use protocol names such as `ref` and `timeout_ms`; put `expect` on the
-step it protects. Saved observation options and `until_visible` work as with `step`.
+step it protects. `until_visible` and `wait_timeout_ms` work on `bsk_plan` as with
+`bsk_interact`; `--save-full` and `--baseline` are CLI options on `bsk plan`.
 
 ## Reply
 

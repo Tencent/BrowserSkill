@@ -16,7 +16,8 @@ produces partial video even when the task action has succeeded. A failed start i
 reported before continuing without video. Recording is opt-in; choosing a save
 location does not block start.
 
-Both CLI and MCP agents can manage this sequence. The extension's Features → Video
+CLI agents manage this sequence with `bsk video` (MCP agents can invoke `bsk video`
+over shell when needed; `bsk mcp` does not expose a video tool). The extension's Features → Video
 recording offers a harness-neutral prompt even with no running task. Its duration
 and quality settings are included in the copied instructions. Manual recording is
 in a secondary section: choose a running task and an authorized tab (a sole choice
@@ -86,7 +87,7 @@ Intentional user/cap stops are complete; interruptions are partial if playable.
 The catalog preserves the reason and any failure, independently of live sessions.
 
 The CDP screencast coordinator owns one stream and ACK per tab/attachment. Video
-and Windows long-screenshot keepalive share leases. Releasing an old lease cannot
+and Windows/Linux long-screenshot keepalive share leases. Releasing an old lease cannot
 stop a replacement attachment or another consumer. Capture retains only an
 in-flight frame and the newest pending frame. Canvas dimensions stay fixed and
 resizes are letterboxed. A monotonic timeline preserves elapsed static time and
@@ -177,18 +178,10 @@ BSK_TEST_CHROME=/path/to/chrome BSK_TEST_CLI="$PWD/target/debug/bsk" \
 ```
 
 The extension's minimum Chrome version remains 125. Codec support is validated at
-runtime. MCP uses `bsk_inspect(action="video")` with `video_action` set to `start`, `status`,
-`stop`, `save`, `list`, or `discard`. Start follows the session queue; artifact operations
-bypass that queue so `status`/`stop` remain available during human help. CLI and MCP partial
-stop/save errors retain their recording metadata and saved path in the error details.
-
-```text
-bsk_inspect({ action: "video", video_action: "start", session: "<task>", duration_ms: 60000 })
-// Execute task operations after state=recording.
-bsk_inspect({ action: "video", video_action: "stop", recording_id: "<recording_id>" })
-// End the task. Preview and Save As remain available in the extension.
-bsk_inspect({ action: "video", video_action: "save", recording_id: "<recording_id>", output: "<explicit-path.mp4>" })
-```
+runtime. `bsk video start` follows the session queue; artifact operations (`status`,
+`stop`, `save`, `list`, `discard`) bypass that queue so `status` and `stop` remain
+available during human help. Partial stop/save errors retain their recording metadata
+and saved path in the error details.
 
 
 ## Capacity benchmark

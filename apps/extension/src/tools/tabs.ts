@@ -101,7 +101,12 @@ export const chromeTabMutationApi: TabMutationApi = {
       // Creating an active tab directly in a background window steals OS window focus on macOS Chromium.
       const tab = await chrome.tabs.create({ ...p, active: false });
       if (typeof tab.id === "number") {
-        return (await chrome.tabs.update(tab.id, { active: true })) ?? tab;
+        try {
+          return (await chrome.tabs.update(tab.id, { active: true })) ?? tab;
+        } catch (err) {
+          await chrome.tabs.remove(tab.id).catch(() => {});
+          throw err;
+        }
       }
       return tab;
     }

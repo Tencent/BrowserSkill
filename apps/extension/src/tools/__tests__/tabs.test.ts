@@ -315,6 +315,45 @@ describe("handleTabCreate", () => {
     expect(ctx.agentCreatedTabs.has(10)).toBe(true);
     expect(ctx.agentCreatedTabs.has(99)).toBe(false);
   });
+
+  it("creates inactive then activates via chrome.tabs.update, removing the tab if activation fails", async () => {
+    const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
+    await sm.start("aa11");
+    const create = vi.fn(async (props: chrome.tabs.CreateProperties) => ({
+      id: 21,
+      windowId: props.windowId ?? 100,
+      url: props.url,
+      active: props.active ?? false,
+    }));
+    const update = vi
+      .fn()
+      .mockRejectedValueOnce(new Error("tab gone"))
+      .mockImplementationOnce(async (id: number, props: chrome.tabs.UpdateProperties) => ({
+        id,
+        windowId: 100,
+        url: NEW_TAB_DEFAULT_URL,
+        active: props.active ?? true,
+      }));
+    const remove = vi.fn(async () => {});
+    vi.stubGlobal("chrome", { tabs: { create, update, remove } });
+    try {
+      const failed = await handleTabCreate(sm, { session_id: "aa11" });
+      expect(failed).toMatchObject({ code: "protocol_error", message: "tab gone" });
+      expect(remove).toHaveBeenCalledWith(21);
+      expect(sm.get("aa11")?.agentCreatedTabs.has(21)).toBe(false);
+
+      const ok = await handleTabCreate(sm, { session_id: "aa11" });
+      expect(ok).toEqual({ tab_id: 21, window_id: 100, url: NEW_TAB_DEFAULT_URL });
+      expect(create).toHaveBeenLastCalledWith({
+        windowId: 100,
+        url: NEW_TAB_DEFAULT_URL,
+        active: false,
+      });
+      expect(update).toHaveBeenLastCalledWith(21, { active: true });
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
 });
 
 describe("handleTabClose", () => {

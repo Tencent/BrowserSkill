@@ -30,11 +30,20 @@ it
     // Keep the daemon's Unix socket path below macOS's length limit.
     const directory = await mkdtemp(path.join(tmpdir(), "bsk-coop-"));
     const executable = path.resolve(process.env.BSK_TEST_CLI ?? defaultCli);
+    const fixtureHome = path.join(directory, "user");
     const env = {
       ...process.env,
+      HOME: fixtureHome,
+      USERPROFILE: fixtureHome,
+      KIMI_CODE_HOME: path.join(fixtureHome, ".kimi-code"),
+      HERMES_HOME: path.join(fixtureHome, ".hermes"),
+      DSH_HOME: path.join(fixtureHome, ".dsh"),
+      CODEX_HOME: path.join(fixtureHome, ".codex"),
       BSK_HOME: path.join(directory, "state"),
       BSK_AUTO_START: "0",
       BSK_AUTO_UPDATE: "off",
+      BSK_SESSION: "",
+      BSK_SCOPE: "",
     };
     const daemon = spawn(executable, ["daemon", "start", "--foreground", "--port", "0"], {
       env,

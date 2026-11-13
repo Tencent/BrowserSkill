@@ -5,14 +5,16 @@ describe("chromeAgentWindowApi.ensureActiveTab", () => {
   const query = vi.fn();
   const update = vi.fn();
   const create = vi.fn();
+  const remove = vi.fn();
 
   beforeEach(() => {
     vi.stubGlobal("chrome", {
-      tabs: { query, update, create },
+      tabs: { query, update, create, remove },
     });
     query.mockReset();
     update.mockReset();
     create.mockReset();
+    remove.mockReset();
   });
 
   afterEach(() => {
@@ -53,6 +55,17 @@ describe("chromeAgentWindowApi.ensureActiveTab", () => {
     expect(home).toBe(8);
     expect(create).toHaveBeenCalledWith({ windowId: 100, url: AGENT_WINDOW_HOME, active: false });
     expect(update).toHaveBeenCalledWith(8, { active: true });
+  });
+
+  it("removes a newly created home tab if activating it fails", async () => {
+    query.mockResolvedValue([]);
+    create.mockResolvedValue({ id: 8 });
+    update.mockRejectedValue(new Error("window closed"));
+    remove.mockResolvedValue(undefined);
+    await expect(
+      chromeAgentWindowApi.ensureActiveTab(100, AGENT_WINDOW_HOME, new Set()),
+    ).rejects.toThrow("window closed");
+    expect(remove).toHaveBeenCalledWith(8);
   });
 });
 

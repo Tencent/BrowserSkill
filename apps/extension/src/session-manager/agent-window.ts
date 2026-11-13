@@ -93,7 +93,12 @@ export const chromeAgentWindowApi: AgentWindowApi = {
     if (typeof created?.id !== "number") {
       throw new Error("[bh] chrome.tabs.create returned no tab id");
     }
-    await chrome.tabs.update(created.id, { active: true });
+    try {
+      await chrome.tabs.update(created.id, { active: true });
+    } catch (err) {
+      await chrome.tabs.remove(created.id).catch(() => {});
+      throw err;
+    }
     return created.id;
   },
 };

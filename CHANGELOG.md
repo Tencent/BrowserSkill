@@ -13,8 +13,10 @@ determines which versions can connect.
 
 - DeepSeek Harness (`dsh`) is now a first-class skill installation target via
   `bsk install-skill --harness dsh` (honoring `$DSH_HOME`, defaulting to
-  `~/.dsh/skills`), and `DSH_SESSION_ID` is recognized as an automatic host
-  subagent scope in `ImplicitScopeRegistry` (#731).
+  `~/.dsh/skills`), `DSH_SESSION_ID` is recognized as an automatic host
+  subagent scope in `ImplicitScopeRegistry`, and MCP `bsk_session(action="start")`
+  now accepts `agent_name`, `project`, and `controller_color` controller identity
+  labels matching `bsk session start` (#731).
 
 ### Changed
 
@@ -30,7 +32,9 @@ determines which versions can connect.
 - Preserved user window focus on macOS Chromium when `tool.tab_create` or
   `ensureActiveTab` creates an active tab inside a background Agent Window by
   creating the tab inactive and activating it within its window via
-  `chrome.tabs.update` (#731).
+  `chrome.tabs.update` (closing the created tab if activation fails), and enabled
+  the unselected-tab screencast compositor keepalive and stale-frame guard on Linux
+  as well as Windows for `screenshot --full-page` (#731).
 - Scoped CLI and MCP cooperation metadata attachment (`context_id`, `depends_on`,
   `observation_id`, `expect`) strictly to RPC methods whose wire contracts accept
   them (`Method::accepts_action_metadata()` and `tool.read` for `context_id`), so
