@@ -36,11 +36,11 @@ use bsk_protocol::{
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use tokio::sync::Notify;
+use tokio::sync::{Notify, watch};
 use tokio::task::JoinHandle;
 use tracing::{debug, warn};
 
-use super::abort::AbortRegistry;
+use super::abort::{AbortRegistry, AbortToken};
 use super::queue::{DEFAULT_TOOL_TIMEOUT, DispatchError};
 use super::sessions::{
     AgentWindowOptions, SessionId, StartSessionError, StopSessionError, snapshot_status_entries,
@@ -1419,23 +1419,25 @@ struct CliSessionStartResult {
     pub agent_window_id: Option<i64>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct CliSessionStopParams {
     #[serde(default)]
     pub session_id: Option<String>,
     #[serde(default)]
     pub all: bool,
+    #[serde(default)]
+    pub recording: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct CliSessionStopResult {
-    pub stopped: Vec<String>,
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub(super) struct CliSessionStopResult {
+    stopped: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub failed: Vec<CliSessionStopFailure>,
+    failed: Vec<CliSessionStopFailure>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub returned_tab_ids: Vec<i64>,
+    returned_tab_ids: Vec<i64>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub return_failures: Vec<ReturnFailure>,
+    return_failures: Vec<ReturnFailure>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1443,6 +1445,14 @@ struct CliSessionStopFailure {
     pub session_id: String,
     pub code: ErrorCode,
     pub message: String,
+}
+
+type SessionStopReply = Result<CliSessionStopResult, RpcError>;
+
+#[derive(Debug)]
+pub(super) struct RecordSessionStop {
+    created_at_ms: i64,
+    result: watch::Receiver<Option<SessionStopReply>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1796,10 +1806,7 @@ async fn handle_session_stop(
         })?;
     let cancel = abort_guard.token().clone();
     let params: CliSessionStopParams = if params.is_null() {
-        CliSessionStopParams {
-            session_id: None,
-            all: false,
-        }
+        CliSessionStopParams::default()
     } else {
         serde_json::from_value(params).map_err(|err| RpcError {
             code: ErrorCode::InvalidParams,
@@ -1826,14 +1833,125 @@ async fn handle_session_stop(
             }
         }
     };
+    let result = if params.recording {
+        stop_record_session(state, &session_id, cancel).await?
+    } else {
+        stop_one_session(state, &session_id, Some(cancel)).await?
+    };
+    Ok(serde_json::to_value(result).unwrap_or(Value::Null))
+}
+
+async fn stop_record_session(
+    state: &Arc<DaemonState>,
+    session_id: &SessionId,
+    cancel: AbortToken,
+) -> SessionStopReply {
+    let mut pending = {
+        let mut stops = state.record_session_stops.lock().unwrap();
+        // Keep failed outcomes while the session is live so the other
+        // recorder observes the same failure. Explicit session.stop can retry.
+        stops.retain(|id, stop| {
+            stop.result.borrow().is_none()
+                || state
+                    .sessions
+                    .get(id)
+                    .is_some_and(|session| session.created_at_ms == stop.created_at_ms)
+        });
+        if let Some(pending) = stops.get(session_id) {
+            pending.result.clone()
+        } else {
+            let Some(session) = state.sessions.get(session_id) else {
+                if state
+                    .sessions
+                    .end_info(session_id)
+                    .is_some_and(|end| end.reason == crate::rpc_reason::SESSION_STOPPED)
+                {
+                    return Ok(CliSessionStopResult {
+                        stopped: vec![session_id.0.clone()],
+                        ..Default::default()
+                    });
+                }
+                return Err(map_stop_error(StopSessionError::NotFound));
+            };
+
+            let (finished, pending) = watch::channel(None);
+            stops.insert(
+                session_id.clone(),
+                RecordSessionStop {
+                    created_at_ms: session.created_at_ms,
+                    result: pending.clone(),
+                },
+            );
+            let state = Arc::clone(state);
+            let session_id = session_id.clone();
+            // The caller owns its wait. The daemon owns teardown, even if
+            // the first CLI cancels or disconnects.
+            tokio::spawn(async move {
+                let result = finish_record_session(&state, &session_id).await;
+                let mut stops = state.record_session_stops.lock().unwrap();
+                if result.as_ref().is_ok_and(|stop| stop.failed.is_empty()) {
+                    stops.remove(&session_id);
+                }
+                finished.send_replace(Some(result));
+            });
+            pending
+        }
+    };
+
+    tokio::select! {
+        biased;
+        result = pending.wait_for(Option::is_some) => match result {
+            Ok(result) => result.as_ref().expect("completed stop result").clone(),
+            Err(_) => Err(RpcError {
+                code: ErrorCode::ProtocolError,
+                message: "recording session cleanup ended without a result".into(),
+                data: None,
+            }),
+        },
+        _ = cancel.cancelled() => Err(RpcError {
+            code: ErrorCode::Cancelled,
+            message: "recording session cleanup wait cancelled; cleanup continues".into(),
+            data: None,
+        }),
+    }
+}
+
+async fn finish_record_session(
+    state: &Arc<DaemonState>,
+    session_id: &SessionId,
+) -> SessionStopReply {
+    // record_stop bypasses the busy gate and can return its trace just
+    // before the queued record_await has delivered the same trace.
+    if let Ok(activity) = state.tool_queues.activity(session_id)
+        && activity.method.as_deref() == Some(Method::ToolRecordAwait.wire_name())
+    {
+        state
+            .tool_queues
+            .wait_idle(
+                session_id,
+                activity.command_id.as_deref(),
+                DEFAULT_SESSION_STOP_TIMEOUT.as_millis() as u32,
+                AbortToken::default(),
+            )
+            .await
+            .map_err(DispatchError::into_rpc)?;
+    }
+    stop_one_session(state, session_id, None).await
+}
+
+async fn stop_one_session(
+    state: &Arc<DaemonState>,
+    session_id: &SessionId,
+    cancel: Option<AbortToken>,
+) -> SessionStopReply {
     match stop_session(
         &state.browsers,
         &state.sessions,
         &state.tool_queues,
         &state.session_interrupts,
-        &session_id,
+        session_id,
         DEFAULT_SESSION_STOP_TIMEOUT,
-        Some(cancel),
+        cancel,
     )
     .await
     {
@@ -1842,32 +1960,30 @@ async fn handle_session_stop(
             state.dialog_operations.remove_session(&session_id.0);
             state
                 .scopes
-                .on_session_ended(&session_id, crate::rpc_reason::SESSION_STOPPED);
-            state.intent_wal.on_session_ended(&session_id);
-            let result = CliSessionStopResult {
-                stopped: vec![session_id.0],
+                .on_session_ended(session_id, crate::rpc_reason::SESSION_STOPPED);
+            state.intent_wal.on_session_ended(session_id);
+            Ok(CliSessionStopResult {
+                stopped: vec![session_id.0.clone()],
                 failed: Vec::new(),
                 returned_tab_ids: stop.returned_tab_ids,
                 return_failures: stop.return_failures,
-            };
-            Ok(serde_json::to_value(result).unwrap_or(Value::Null))
+            })
         }
         Err(StopSessionError::ReturnFailures(stop)) => {
             let message = format!(
                 "failed to return borrowed tabs during session stop ({} failure(s)); session left running",
                 stop.return_failures.len()
             );
-            let result = CliSessionStopResult {
+            Ok(CliSessionStopResult {
                 stopped: Vec::new(),
                 failed: vec![CliSessionStopFailure {
-                    session_id: session_id.0,
+                    session_id: session_id.0.clone(),
                     code: ErrorCode::CdpFailed,
                     message,
                 }],
                 returned_tab_ids: stop.returned_tab_ids,
                 return_failures: stop.return_failures,
-            };
-            Ok(serde_json::to_value(result).unwrap_or(Value::Null))
+            })
         }
         Err(err) => Err(map_stop_error(err)),
     }

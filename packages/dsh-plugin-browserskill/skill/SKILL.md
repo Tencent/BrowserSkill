@@ -5,8 +5,8 @@ description: Use injected bsk_* tools in logged-in Chromium to read pages, fill 
 
 # DeepSeek Harness
 
-All browser work must use the injected tools directly in an Agent Window.
-Never control the browser through another process. Follow the loaded action schemas.
+Use only BrowserSkill tools in an Agent Window. In PTC mode, call them inside
+`run_code` as `await tools.<name>(args)`. Follow the loaded action schemas.
 Never extract credentials, cookies, tokens, or other secrets.
 
 ## Before acting

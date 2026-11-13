@@ -19,7 +19,7 @@ use crate::cli::ensure_daemon::ensure_daemon;
 use crate::cli::error::{CliError, Format};
 use crate::cli::record_recovery;
 use crate::cli::record_state;
-use crate::cli::session::{SessionStartOptions, start_session, stop_session};
+use crate::cli::session::{SessionStartOptions, start_session, stop_record_session, stop_session};
 use export::{
     ExportMeta, export_with_recovery, states_dir_for_output, trace_json_path,
     validate_record_output,
@@ -157,21 +157,13 @@ fn dispatch_start(args: RecordStartArgs, format: Format) -> Result<(), CliError>
         ipc_timeout(RECORD_AWAIT_TIMEOUT_MS),
     );
 
-    // Keep write/render inside a Result so `?` cannot skip session teardown.
-    let run_result: Result<(), CliError> = match await_result {
-        Ok(result) => (|| {
-            let exported = export_with_recovery(&args.output, &result.trace)?;
-            render_finish(&result.trace, &args.output, &exported, format)
-        })(),
-        Err(err) => Err(err),
-    };
-
-    let session_stop_result = stop_session(info.sock_path, &session.session_id);
-    record_state::clear_session(&session.session_id);
-
-    run_result?;
-    session_stop_result?;
-    Ok(())
+    finish_recording(
+        info.sock_path,
+        &session.session_id,
+        await_result.map(|result| result.trace),
+        &args.output,
+        format,
+    )
 }
 
 fn dispatch_stop(args: RecordStopArgs, format: Format) -> Result<(), CliError> {
@@ -193,17 +185,13 @@ fn dispatch_stop(args: RecordStopArgs, format: Format) -> Result<(), CliError> {
         )
         .map_err(|err| forget_stale_recording(err, &session_id))?;
 
-        let run_result: Result<(), CliError> = (|| {
-            let exported = export_with_recovery(&args.output, &result.trace)?;
-            render_stop(&result, &args.output, &exported, format)
-        })();
-
-        let session_stop_result = stop_session(info.sock_path, &session_id);
-        record_state::clear_session(&session_id);
-
-        run_result?;
-        session_stop_result?;
-        return Ok(());
+        return finish_recording(
+            info.sock_path,
+            &session_id,
+            Ok(result.trace),
+            &args.output,
+            format,
+        );
     }
 
     let Some(trace) = record_recovery::load().map_err(CliError::Local)? else {
@@ -214,6 +202,26 @@ fn dispatch_stop(args: RecordStopArgs, format: Format) -> Result<(), CliError> {
 
     let exported = export_with_recovery(&args.output, &trace)?;
     render_finish(&trace, &args.output, &exported, format)
+}
+
+fn finish_recording(
+    sock: PathBuf,
+    session_id: &str,
+    trace: Result<RecordedTrace, CliError>,
+    output: &PathBuf,
+    format: Format,
+) -> Result<(), CliError> {
+    let bundle = trace.and_then(|trace| {
+        let exported = export_with_recovery(output, &trace)?;
+        Ok((trace, exported))
+    });
+    // Preserve the trace before teardown, even if cleanup later fails.
+    let stopped = stop_record_session(sock, session_id);
+    record_state::clear_session(session_id);
+
+    let (trace, exported) = bundle?;
+    stopped?;
+    render_finish(&trace, output, &exported, format)
 }
 
 /// A `not_found` stop means the session or its recording is gone, so the
@@ -358,15 +366,6 @@ fn render_finish(
         },
     }
     Ok(())
-}
-
-fn render_stop(
-    result: &RecordStopResult,
-    output: &PathBuf,
-    exported: &ExportMeta,
-    format: Format,
-) -> Result<(), CliError> {
-    render_finish(&result.trace, output, exported, format)
 }
 
 #[cfg(test)]
