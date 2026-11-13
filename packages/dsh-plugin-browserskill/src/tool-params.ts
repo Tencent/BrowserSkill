@@ -128,7 +128,7 @@ export const ELEMENT_WAIT_PARAMS = {
   target: {
     type: "string",
     description:
-      "wait-for-element: fresh @eN ref or observed main-document CSS selector; no text=, XPath or Playwright locators.",
+      "wait-for-element: fresh @eN ref or CSS selector (searches main document and accessible iframes); no text=, XPath or Playwright locators.",
   },
   state: {
     type: "string",

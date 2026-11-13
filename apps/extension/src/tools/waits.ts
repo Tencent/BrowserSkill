@@ -358,6 +358,14 @@ export async function handleWaitForElement(
           checkBudget(deadline, deps.signal);
         }
       : undefined,
+    getFrameGraph: deps.cdp.getFrameGraph
+      ? async (tabId) => {
+          checkBudget(deadline, deps.signal);
+          const graph = await deps.cdp.getFrameGraph!(tabId);
+          checkBudget(deadline, deps.signal);
+          return graph;
+        }
+      : undefined,
   };
   let probe: Probe | undefined;
 

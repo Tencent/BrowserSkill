@@ -94,7 +94,7 @@ export function registerScriptFileTools(
     defineTool({
       name: "interact.upload",
       description:
-        "Attach local files through an observed file chooser trigger or explicit drop target. Files are staged by the existing CLI transfer service.",
+        "Attach local files via an observed upload button/chooser trigger ref (preferred — clicks the visible trigger and intercepts hidden input[type=file] choosers, including inside iframes), a CSS selector/ref for input[type=file] directly (assigns files without clicking, even when display:none), or an explicit drop target (mode='drop'). Files are staged by the CLI transfer service.",
       parameters: {
         session: SESSION_PARAM,
         tabId: TAB_ID_PARAM,
@@ -102,7 +102,8 @@ export function registerScriptFileTools(
         target: {
           type: "string",
           required: true,
-          description: "Observed ref or selector for the input/chooser trigger or drop target.",
+          description:
+            "Observed @eN ref of the visible upload button/chooser trigger (preferred), CSS selector or ref for an input[type=file] (including hidden iframe inputs), or drop target.",
         },
         files: {
           type: "array",

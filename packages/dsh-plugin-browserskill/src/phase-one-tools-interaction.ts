@@ -206,12 +206,13 @@ export function registerPhaseOneInteractionTools(
       description:
         "Scroll an element and its frame owners into view. Returns the visible portion's " +
         "bounds in top-level viewport CSS pixels; fails if no visible area remains. " +
-        "Use a fresh ref for iframe targets; selectors search the main document.",
+        "Prefer a fresh observed ref; CSS selectors also search accessible iframes.",
       parameters: {
         target: {
           type: "string",
           required: true,
-          description: "Element ref (@e3 / e3) or main-document CSS selector to scroll into view.",
+          description:
+            "Element ref (@e3 / e3; preferred) or CSS selector (main document and accessible iframes) to scroll into view.",
         },
         session: SESSION_PARAM,
         tabId: TAB_ID_PARAM,

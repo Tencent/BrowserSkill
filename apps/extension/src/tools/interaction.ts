@@ -55,6 +55,7 @@ import {
   lookupSession,
   type ResolvedTargetTab,
   resolveTargetTab,
+  sendToCdpTarget,
 } from "./shared";
 import { resolveSnapshotRef } from "./snapshot-ref";
 
@@ -144,6 +145,71 @@ async function wait(ms: number, signal?: AbortSignal): Promise<void> {
   });
 }
 
+const SELECTOR_SERIALIZATION = {
+  serialization: "deep",
+  additionalParameters: { maxNodeDepth: 0, includeShadowTree: "none" },
+} as const;
+
+interface DeepSelectorReply {
+  result?: {
+    value?: unknown;
+    deepSerializedValue?: { type?: string; value?: unknown };
+  };
+  exceptionDetails?: { text?: string; exception?: { description?: string } };
+}
+
+async function queryChildFrameSelector(
+  cdp: CdpRunner,
+  frame: { frameId: string; target: CdpTarget },
+  selector: string,
+  strictSelector: boolean,
+): Promise<{ count: number; backendNodeId?: number }> {
+  const objectGroup = `bsk-selector-${crypto.randomUUID()}`;
+  const target = cdp.resolveTarget ? cdp.resolveTarget(frame.target) : frame.target;
+  const selectorJson = JSON.stringify(selector);
+  const expression = strictSelector
+    ? `(() => { const list = document.querySelectorAll(${selectorJson}); return list.length === 1 ? list[0] : list.length; })()`
+    : `document.querySelector(${selectorJson})`;
+  try {
+    const world = await sendToCdpTarget<{ executionContextId?: number }>(
+      cdp,
+      target,
+      "Page.createIsolatedWorld",
+      { frameId: frame.frameId, worldName: "bsk-selector" },
+    );
+    if (typeof world.executionContextId !== "number") return { count: 0 };
+    const reply = await sendToCdpTarget<DeepSelectorReply>(cdp, target, "Runtime.evaluate", {
+      expression,
+      contextId: world.executionContextId,
+      objectGroup,
+      serializationOptions: SELECTOR_SERIALIZATION,
+    });
+    if (reply.exceptionDetails) return { count: 0 };
+    const dsv = reply.result?.deepSerializedValue;
+    if (dsv?.type === "node") {
+      const backendNodeId = (dsv.value as { backendNodeId?: unknown } | undefined)?.backendNodeId;
+      return typeof backendNodeId === "number" ? { count: 1, backendNodeId } : { count: 0 };
+    }
+    if (strictSelector) {
+      const count =
+        typeof dsv?.value === "number"
+          ? dsv.value
+          : typeof reply.result?.value === "number"
+            ? reply.result.value
+            : 0;
+      return { count };
+    }
+    return { count: 0 };
+  } catch (error) {
+    if (isAbortError(error)) throw error;
+    return { count: 0 };
+  } finally {
+    await sendToCdpTarget(cdp, target, "Runtime.releaseObjectGroup", { objectGroup }).catch(
+      () => {},
+    );
+  }
+}
+
 /**
  * Resolve `{ref?, selector?}` into a `backendNodeId`. Returns an
  * `RpcError` if the caller supplied neither (or both), or if neither
@@ -211,7 +277,8 @@ export async function resolveBackendNode(
       ...(resolved.rowAnchor ? { rowAnchor: resolved.rowAnchor } : {}),
     };
   }
-  // selector path
+  // selector path (precondition checks in `expect` intentionally remain main-document-only)
+  const searchChildFrames = Boolean(cdp.getFrameGraph) && toolName !== "precondition";
   try {
     // Selector lookup itself attaches CDP, even when no element is found.
     cdp.trackSessionTab?.(ctx.sessionId, target.tabId);
@@ -225,7 +292,8 @@ export async function resolveBackendNode(
         message: "DOM.getDocument returned no root nodeId",
       };
     }
-    const query = { nodeId: rootNodeId, selector: params.selector };
+    const selector = params.selector as string;
+    const query = { nodeId: rootNodeId, selector };
     let nodeId: number | undefined;
     if (strictSelector) {
       const found = await cdp.send<{ nodeIds: number[] }>(
@@ -233,21 +301,63 @@ export async function resolveBackendNode(
         "DOM.querySelectorAll",
         query,
       );
-      if (found.nodeIds.length > 1)
+      let totalMatches = found.nodeIds.length;
+      let childMatch: { backendNodeId: number; cdpTarget: CdpTarget; frameId: string } | undefined;
+      if (searchChildFrames) {
+        const graph = await cdp.getFrameGraph!(target.tabId);
+        for (const frame of graph.frames) {
+          if (frame.frameId === graph.rootFrameId) continue;
+          const match = await queryChildFrameSelector(cdp, frame, selector, true);
+          totalMatches += match.count;
+          if (match.count === 1 && match.backendNodeId !== undefined && !childMatch) {
+            childMatch = {
+              backendNodeId: match.backendNodeId,
+              cdpTarget: cdp.resolveTarget ? cdp.resolveTarget(frame.target) : frame.target,
+              frameId: frame.frameId,
+            };
+          }
+        }
+      }
+      if (totalMatches > 1)
         return {
           code: "invalid_params",
-          message: `${toolName}: selector matched ${found.nodeIds.length} elements; use a VOM ref or a narrower selector`,
+          message: `${toolName}: selector matched ${totalMatches} elements; use a VOM ref or a narrower selector`,
         };
+      if (totalMatches === 0) {
+        return rpcError(
+          "not_found",
+          "selector_not_found",
+          `selector ${selector} did not match any element`,
+        );
+      }
+      if (childMatch) {
+        return { ...childMatch, usedSelector: selector };
+      }
       nodeId = found.nodeIds[0];
     } else {
       nodeId = (await cdp.send<{ nodeId?: number }>(target.tabId, "DOM.querySelector", query))
         .nodeId;
+      if ((typeof nodeId !== "number" || nodeId === 0) && searchChildFrames) {
+        const graph = await cdp.getFrameGraph!(target.tabId);
+        for (const frame of graph.frames) {
+          if (frame.frameId === graph.rootFrameId) continue;
+          const match = await queryChildFrameSelector(cdp, frame, selector, false);
+          if (match.backendNodeId !== undefined) {
+            return {
+              backendNodeId: match.backendNodeId,
+              cdpTarget: cdp.resolveTarget ? cdp.resolveTarget(frame.target) : frame.target,
+              frameId: frame.frameId,
+              usedSelector: selector,
+            };
+          }
+        }
+      }
     }
     if (typeof nodeId !== "number" || nodeId === 0) {
       return rpcError(
         "not_found",
         "selector_not_found",
-        `selector ${params.selector} did not match any element`,
+        `selector ${selector} did not match any element`,
       );
     }
     const described = await cdp.send<{ node?: { backendNodeId?: number } }>(
@@ -262,7 +372,7 @@ export async function resolveBackendNode(
         message: "DOM.describeNode returned no backendNodeId",
       };
     }
-    return { backendNodeId, cdpTarget: { tabId: target.tabId }, usedSelector: params.selector };
+    return { backendNodeId, cdpTarget: { tabId: target.tabId }, usedSelector: selector };
   } catch (err) {
     return {
       code: "cdp_failed",

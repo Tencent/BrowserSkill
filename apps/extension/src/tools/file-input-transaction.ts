@@ -43,7 +43,7 @@ export interface FileInputTransactionOptions {
 }
 
 export interface FileInputTransactionResult {
-  click: ClickResult;
+  click?: ClickResult;
   multiple: boolean;
 }
 
@@ -156,6 +156,14 @@ export async function uploadThroughActivatedFileInput(
             ? options
             : { ...options, actionTarget: { ...options.actionTarget, cdpTarget: target } };
       }
+      if (target.sessionId) {
+        await waitBounded(
+          sendToCdpTarget(options.cdp, target, "Page.enable", {}),
+          deadline,
+          options.signal,
+          "enabling frame Page domain timed out",
+        );
+      }
       await waitBounded(
         sendToCdpTarget(options.cdp, target, "Page.setInterceptFileChooserDialog", {
           enabled: true,
@@ -176,6 +184,41 @@ export async function uploadThroughActivatedFileInput(
       return outcome;
     }
 
+    const commitFiles = async (
+      backendNodeId: number,
+      multiple: boolean,
+      click?: ClickResult,
+    ): Promise<FileInputTransactionResult | RpcError> => {
+      if (!multiple && options.files.length !== 1) {
+        return enrichFailure(
+          { code: "invalid_params", message: "file input accepts exactly one file" },
+          "none",
+          "resolve_input",
+        );
+      }
+      try {
+        await waitBounded(
+          sendToCdpTarget(options.cdp, target, "DOM.setFileInputFiles", {
+            files: options.files,
+            backendNodeId,
+          }),
+          deadline,
+          options.signal,
+          "setting file input files timed out",
+        );
+      } catch (err) {
+        return transferFailure(
+          err instanceof BoundedWaitError ? "timeout" : "cdp_failed",
+          "set_file_input_failed",
+          err instanceof Error ? err.message : String(err),
+          "unknown",
+          "set_files",
+        );
+      }
+      return { ...(click ? { click } : {}), multiple };
+    };
+
+    let directInput: { direct?: string; multiple?: boolean } | undefined;
     try {
       const resolved = await waitBounded(
         sendToCdpTarget<{ object?: { objectId?: string } }>(
@@ -199,6 +242,17 @@ export async function uploadThroughActivatedFileInput(
           resolvedOptions,
           triggerObjectId,
           `function(key) {
+            if (this.nodeType === 1 && this.localName === "input" && this.type === "file") {
+              if (!this.isConnected) return { direct: "detached" };
+              if (
+                this.matches(":disabled") ||
+                this.getAttribute("aria-disabled") === "true" ||
+                Boolean(this.closest("[inert]"))
+              ) {
+                return { direct: "disabled" };
+              }
+              return { direct: "ready", multiple: this.multiple === true };
+            }
             const doc = this.ownerDocument;
             const owner = doc.defaultView;
             if (!owner) return false;
@@ -224,10 +278,14 @@ export async function uploadThroughActivatedFileInput(
         "arming frame-scoped file input probe timed out",
       );
       const armError = runtimeError(armed, "failed to arm file input probe");
-      if (armError || armed.result?.value !== true) {
-        throw armError ?? new Error("file input probe did not arm");
+      if (armError) throw armError;
+      if (armed.result?.value && typeof armed.result.value === "object") {
+        directInput = armed.result.value as { direct?: string; multiple?: boolean };
+      } else if (armed.result?.value === true) {
+        probeArmed = true;
+      } else {
+        throw new Error("file input probe did not arm");
       }
-      probeArmed = true;
     } catch (err) {
       outcome = transferFailure(
         err instanceof BoundedWaitError ? "timeout" : "cdp_failed",
@@ -235,6 +293,30 @@ export async function uploadThroughActivatedFileInput(
         err instanceof Error ? err.message : String(err),
         "none",
         "arm_input_probe",
+      );
+      return outcome;
+    }
+
+    if (directInput) {
+      if (directInput.direct === "detached") {
+        outcome = {
+          code: "not_found",
+          message: "The action target was removed from its document",
+          data: { reason: "target_detached", effect_state: "none", phase: "resolve_input" },
+        };
+        return outcome;
+      }
+      if (directInput.direct === "disabled") {
+        outcome = {
+          code: "invalid_params",
+          message: "upload requires an enabled input[type=file]",
+          data: { reason: "target_disabled", effect_state: "none", phase: "resolve_input" },
+        };
+        return outcome;
+      }
+      outcome = await commitFiles(
+        options.actionTarget.backendNodeId,
+        directInput.multiple === true,
       );
       return outcome;
     }
@@ -305,16 +387,6 @@ export async function uploadThroughActivatedFileInput(
       let backendNodeId: number | undefined;
       let multiple = summary.multiple;
       if (chooser) {
-        if (options.actionTarget.frameId && chooser.frameId !== options.actionTarget.frameId) {
-          outcome = transferFailure(
-            "unsupported",
-            "file_input_not_activated",
-            "upload trigger activated a file chooser in a different frame",
-            "none",
-            "resolve_input",
-          );
-          return outcome;
-        }
         if (typeof chooser.backendNodeId !== "number") {
           outcome = transferFailure(
             "unsupported",
@@ -362,36 +434,7 @@ export async function uploadThroughActivatedFileInput(
         }
       }
 
-      if (!multiple && options.files.length !== 1) {
-        outcome = enrichFailure(
-          { code: "invalid_params", message: "file input accepts exactly one file" },
-          "none",
-          "resolve_input",
-        );
-        return outcome;
-      }
-
-      try {
-        await waitBounded(
-          sendToCdpTarget(options.cdp, target, "DOM.setFileInputFiles", {
-            files: options.files,
-            backendNodeId,
-          }),
-          deadline,
-          options.signal,
-          "setting file input files timed out",
-        );
-      } catch (err) {
-        outcome = transferFailure(
-          err instanceof BoundedWaitError ? "timeout" : "cdp_failed",
-          "set_file_input_failed",
-          err instanceof Error ? err.message : String(err),
-          "unknown",
-          "set_files",
-        );
-        return outcome;
-      }
-      outcome = { click, multiple };
+      outcome = await commitFiles(backendNodeId, multiple, click);
       return outcome;
     } catch (err) {
       outcome = transferFailure(

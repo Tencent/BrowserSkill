@@ -37,7 +37,7 @@ impl From<UploadModeArg> for UploadMode {
 
 #[derive(Debug, Clone, Args)]
 pub struct UploadArgs {
-    /// Snapshot ref (`@e3`) or CSS selector for the chooser trigger / drop target.
+    /// Observed ref (`@e3`) of the visible upload button/trigger (preferred), CSS selector/ref for `input[type=file]` (including hidden/iframe inputs), or drop target.
     pub target: Option<String>,
     #[arg(long = "ref")]
     pub ref_: Option<String>,
