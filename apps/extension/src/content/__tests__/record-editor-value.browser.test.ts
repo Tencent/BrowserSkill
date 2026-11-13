@@ -94,7 +94,9 @@ async function recordEditor(
         );
       }
     };
-    const insert = (text: string) => send("Input.insertText", { text }, sessionId);
+    const insert = async (text: string) => {
+      await send("Input.insertText", { text }, sessionId);
+    };
     const enter = async (shift = false) => {
       const key = {
         key: "Enter",
