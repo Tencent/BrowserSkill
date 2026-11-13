@@ -17,6 +17,11 @@ class MemoryStore extends VideoArtifactStore {
   override async put(value: StoredVideo) {
     this.values.set(value.recording_id, structuredClone(value));
   }
+  override async markExported(id: string) {
+    const value = this.values.get(id);
+    if (value?.state === "ready" && value.expires_at > Date.now())
+      this.values.set(id, { ...value, exported: true });
+  }
   override async remove(id: string) {
     this.values.delete(id);
   }
@@ -133,6 +138,51 @@ describe("video lifetime and access", () => {
     const first = await video.stop(grant.recording.recording_id);
     expect(await video.stop(grant.recording.recording_id)).toEqual(first);
     expect(request.mock.calls.filter(([command]) => command.action === "stop")).toHaveLength(1);
+  });
+
+  it.each([
+    "discard",
+    "update",
+  ])("does not overwrite a newer %s when export completion has a stale read", async (action) => {
+    const { video, start, store } = await setup();
+    const grant = await start();
+    const id = grant.recording.recording_id;
+    await video.stop(id);
+    const originalGet = store.get.bind(store);
+    let entered!: () => void;
+    const reading = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    let release!: () => void;
+    const blocked = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    vi.spyOn(store, "get").mockImplementationOnce(async (recordingId) => {
+      const snapshot = await originalGet(recordingId);
+      entered();
+      await blocked;
+      return snapshot;
+    });
+    const completion = video.exported(id);
+    await reading;
+    if (action === "discard") {
+      await video.discard(id);
+      expect(await originalGet(id)).toBeUndefined();
+    } else {
+      await store.put({ ...(await originalGet(id))!, title: "New title", byte_size: 42 });
+    }
+    release();
+    await completion;
+    if (action === "discard") {
+      expect(await originalGet(id)).toBeUndefined();
+      expect(await video.list()).toEqual([]);
+    } else {
+      expect(await originalGet(id)).toMatchObject({
+        title: "New title",
+        byte_size: 42,
+        exported: true,
+      });
+    }
   });
 
   it("retains a partial artifact after task deletion and requires owner plus capability", async () => {
