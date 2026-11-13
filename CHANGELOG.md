@@ -19,6 +19,9 @@ determines which versions can connect.
   passive inner wrappers, inherited `cursor: pointer` / click-skin descendants, and native
   `<input>` / `<textarea>` / `<select>` controls folded without duplicate refs; added
   required pre-release audit scenario `EDGE-NESTED-MENU-REFS`.
+- Recording a contenteditable editor keeps the line breaks the person typed, so a
+  multi-line edit replays with its lines instead of collapsing into one
+  ([#594](https://github.com/Tencent/BrowserSkill/issues/594)).
 
 ## [0.5.0] - 2026-11-12
 

@@ -1687,3 +1687,92 @@ describe("record-capture semantic", () => {
     ]);
   });
 });
+
+describe("record-capture editor values", () => {
+  let steps: RecordStepPayload[];
+
+  // Earlier cases replace window.getComputedStyle to fake hover styles; the
+  // white-space mode these cases depend on must come from the real cascade.
+  beforeEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  /**
+   * Types into an editor that already holds `html`. Chrome stores the lines a
+   * person types as <div> blocks and <br> elements exactly as spelled here; the
+   * browser cases in `record-editor-value.browser.test.ts` confirm it.
+   */
+  function recordEditor(html: string, edited?: string): RecordStepPayload[] {
+    steps = [];
+    document.body.innerHTML = `<div id="editor" contenteditable="true" aria-label="Editor">${html}</div>`;
+    const editor = document.querySelector<HTMLElement>("#editor")!;
+    // happy-dom does not derive editability from the contenteditable attribute.
+    Object.defineProperty(editor, "isContentEditable", { value: true });
+    const capture = startRecordCapture("rec-editor-value", (step) => steps.push(step), {
+      captureNavigation: false,
+    });
+
+    editor.dispatchEvent(new FocusEvent("focusin", { bubbles: true }));
+    if (edited !== undefined) {
+      editor.innerHTML = edited;
+      editor.dispatchEvent(new Event("input", { bubbles: true }));
+    }
+    capture.dispose();
+    return steps;
+  }
+
+  const value = () => steps.find((step) => step.op === "fill")?.value;
+
+  it.each([
+    ["a typed second line", "Alpha<div>Beta</div>", "Alpha\nBeta"],
+    ["a Shift+Enter line", "Alpha<br>Beta", "Alpha\nBeta"],
+    ["an empty line between two lines", "Alpha<div><br></div><div>Beta</div>", "Alpha\n\nBeta"],
+    ["a trailing empty line", "Alpha<div><br></div>", "Alpha\n"],
+    ["a single typed line", "Alpha", "Alpha"],
+    ["rich structure kept as rendered text", "<p>One</p><p>Two</p>", "One\nTwo"],
+  ])("records the value with %s", (_name, html, expected) => {
+    recordEditor("", html);
+
+    expect(value()).toBe(expected);
+  });
+
+  it("keeps whitespace that a pre-wrap editor displays", () => {
+    document.body.innerHTML = `<div id="editor" contenteditable="true" aria-label="Editor" style="white-space: pre-wrap"></div>`;
+    const editor = document.querySelector<HTMLElement>("#editor")!;
+    Object.defineProperty(editor, "isContentEditable", { value: true });
+    steps = [];
+    const capture = startRecordCapture("rec-editor-pre", (step) => steps.push(step), {
+      captureNavigation: false,
+    });
+
+    editor.dispatchEvent(new FocusEvent("focusin", { bubbles: true }));
+    editor.innerHTML = "  Alpha  ";
+    editor.dispatchEvent(new Event("input", { bubbles: true }));
+    capture.dispose();
+
+    expect(value()).toBe("  Alpha  ");
+  });
+
+  it("trims line edges and reads NBSP as a space where white-space collapses", () => {
+    document.body.innerHTML = `<div id="editor" contenteditable="true" aria-label="Editor" style="white-space: normal"></div>`;
+    const editor = document.querySelector<HTMLElement>("#editor")!;
+    Object.defineProperty(editor, "isContentEditable", { value: true });
+    steps = [];
+    const capture = startRecordCapture("rec-editor-collapse", (step) => steps.push(step), {
+      captureNavigation: false,
+    });
+
+    editor.dispatchEvent(new FocusEvent("focusin", { bubbles: true }));
+    editor.innerHTML = "  Alpha\u00a0Beta  ";
+    editor.dispatchEvent(new Event("input", { bubbles: true }));
+    capture.dispose();
+
+    expect(value()).toBe("Alpha Beta");
+  });
+
+  it("records nothing for an editor that only holds an empty line", () => {
+    recordEditor("<p><br></p>", "<p><br></p>");
+
+    expect(steps).toEqual([]);
+  });
+});
