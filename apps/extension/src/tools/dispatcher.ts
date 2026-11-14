@@ -553,17 +553,7 @@ export class ToolDispatcher {
           error: {
             code: "protocol_error",
             message: err instanceof Error ? err.message : String(err),
-            ...(invoked
-              ? typeof resolvedTabId === "number"
-                ? { data: { tab_id: resolvedTabId } }
-                : {}
-              : {
-                  data: {
-                    dispatched: false,
-                    effect_state: "none",
-                    phase: "precondition",
-                  },
-                }),
+            ...(typeof resolvedTabId === "number" ? { data: { tab_id: resolvedTabId } } : {}),
           },
         };
       }
