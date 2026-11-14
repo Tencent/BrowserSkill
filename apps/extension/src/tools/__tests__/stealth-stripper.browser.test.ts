@@ -207,7 +207,7 @@ const VISIBLE_CONTENT = [
   "Frame Checkout",
 ];
 
-describe.skipIf(!process.env.BSK_CLICK_CHROME)(
+describe.skipIf(!process.env.BSK_TEST_CHROME)(
   "real browser stealth prompt-injection stripper",
   () => {
     it("strips transparent/same-color gradients, unscrolled offscreen offsets, CSS Color 4/5 zero-alpha, and 2x HiDPI microboxes while preserving legitimate UI across handleSnapshot and handleObserve", async () => {
@@ -226,7 +226,7 @@ describe.skipIf(!process.env.BSK_CLICK_CHROME)(
       try {
         await withChrome(
           {
-            executable: process.env.BSK_CLICK_CHROME,
+            executable: process.env.BSK_TEST_CHROME,
             deviceScale: 2,
             zoom: 1,
             startupTimeout: 30_000,

@@ -15,14 +15,14 @@ checks that each target reads layout metrics only once. No credentials or person
 Run the geometric assertions with Node 22+ and a local Chrome executable:
 
 ```sh
-BSK_GEOMETRY_CHROME=/path/to/chrome pnpm --filter @browser-skill/extension exec vitest run \
+BSK_TEST_CHROME=/path/to/chrome pnpm --filter @browser-skill/extension test:browser \
   src/tools/__tests__/snapshot-coordinates.browser.test.ts
 ```
 
 The test launches and cleans up its own headless Chrome profiles. It explicitly verifies the
 requested browser zoom and OOPIF topology, so unsupported setups fail rather than silently
-testing a different configuration. It is skipped in ordinary unit runs unless the executable
-is specified. No browser download or new package dependency is required.
+testing a different configuration. Run it via `test:browser` with `BSK_TEST_CHROME` set.
+No browser download or new package dependency is required.
 
 The corpus smoke case checks fixture readiness and observable semantics through the real CLI:
 

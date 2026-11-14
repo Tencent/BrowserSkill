@@ -313,6 +313,88 @@ pub struct LogsCmd {
     pub lines: usize,
 }
 
+impl GlobalFlags {
+    pub fn has_any_evidence(&self) -> bool {
+        self.context.is_some()
+            || !self.depends_on.is_empty()
+            || self.observation.is_some()
+            || self.expect.is_some()
+    }
+}
+
+/// Fail closed when caller action conditions are supplied to commands that never verify them.
+pub fn validate_command_evidence(
+    command: &Command,
+    flags: &GlobalFlags,
+) -> Result<(), error::CliError> {
+    if matches!(command, Command::Plan(_) | Command::Recipe(_)) {
+        return Ok(());
+    }
+    if matches!(command, Command::Evaluate(args) if args.unverified)
+        && (!flags.depends_on.is_empty() || flags.observation.is_some() || flags.expect.is_some())
+    {
+        return Ok(());
+    }
+    let accepts_full_evidence = match command {
+        Command::Open(_) | Command::Step(_) | Command::Upload(_) | Command::Download(_) => true,
+        Command::Screenshot(args) if args.full_page => true,
+        Command::Navigate(_)
+        | Command::NavigateBack(_)
+        | Command::NavigateForward(_)
+        | Command::Reload(_)
+        | Command::Click(_)
+        | Command::Hover(_)
+        | Command::Drag(_)
+        | Command::Wheel(_)
+        | Command::ScrollTo(_)
+        | Command::Focus(_)
+        | Command::Blur(_)
+        | Command::Fill(_)
+        | Command::Press(_)
+        | Command::Select(_)
+        | Command::Evaluate(_)
+        | Command::Emulate(_)
+        | Command::Window(WindowCmd {
+            sub: window::WindowSub::Resize(_),
+        })
+        | Command::Tab(TabCmd {
+            sub: tab::TabSub::Close(_),
+        }) => true,
+        Command::Observe(args) if args.probe_hover => true,
+        Command::Debug(args)
+            if serde_json::from_value::<bsk_protocol::tools::DebugAction>(
+                serde_json::Value::String(args.action.clone()),
+            )
+            .is_ok_and(|a| a.cooperation_guarded()) =>
+        {
+            true
+        }
+        _ => false,
+    };
+    if accepts_full_evidence {
+        if !flags.depends_on.is_empty() && flags.context.is_none() {
+            return Err(error::CliError::invalid_params(anyhow::anyhow!(
+                "--depends-on requires --context"
+            )));
+        }
+        return Ok(());
+    }
+    if matches!(command, Command::Read(_)) {
+        if !flags.depends_on.is_empty() || flags.observation.is_some() || flags.expect.is_some() {
+            return Err(error::CliError::invalid_params(anyhow::anyhow!(
+                "--observation, --expect and --depends-on apply only to guarded browser actions; read accepts --context only"
+            )));
+        }
+        return Ok(());
+    }
+    if flags.has_any_evidence() {
+        return Err(error::CliError::invalid_params(anyhow::anyhow!(
+            "action conditions (--context, --depends-on, --observation, --expect) apply only to guarded browser actions and read (--context)"
+        )));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod action_condition_tests {
     use super::*;

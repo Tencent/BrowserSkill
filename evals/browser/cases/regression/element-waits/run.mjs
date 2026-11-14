@@ -8,12 +8,13 @@ import { join, resolve } from "node:path";
 import { promisify } from "node:util";
 import { withChrome } from "../snapshot-coordinates/chrome.mjs";
 
-const executable = process.env.BSK_WAIT_CHROME;
-const cli = resolve(process.env.BSK_WAIT_CLI ?? "target/debug/bsk");
+const executable = process.env.BSK_TEST_CHROME;
+const defaultCli = process.platform === "win32" ? "target/debug/bsk.exe" : "target/debug/bsk";
+const cli = resolve(process.env.BSK_TEST_CLI ?? defaultCli);
 const extensionPath = resolve(process.env.BSK_WAIT_EXTENSION ?? "apps/extension/dist/chrome-mv3");
 const port = Number(process.env.BSK_WAIT_PORT ?? 52907);
 const repeats = Number(process.env.BSK_WAIT_REPEATS ?? 10);
-assert(executable, "Set BSK_WAIT_CHROME to a Chromium/Chrome for Testing executable");
+assert(executable, "Set BSK_TEST_CHROME to a Chromium/Chrome for Testing executable");
 assert(Number.isInteger(port) && port > 0 && port < 65536 && port !== 52800);
 assert(Number.isInteger(repeats) && repeats > 0 && repeats <= 100);
 assert(
@@ -22,6 +23,17 @@ assert(
 );
 const directory = await mkdtemp(join(tmpdir(), "bsk-element-waits-"));
 const env = { ...process.env, BSK_HOME: directory, BSK_AUTO_START: "0", BSK_AUTO_UPDATE: "off" };
+for (const key of [
+  "BSK_SESSION",
+  "BSK_SCOPE",
+  "CLAUDE_CODE_AGENT_ID",
+  "CODEX_THREAD_ID",
+  "ANTIGRAVITY_CONVERSATION_ID",
+  "CURSOR_TRACE_ID",
+  "DSH_SESSION_ID",
+]) {
+  delete env[key];
+}
 const exec = promisify(execFile);
 const bsk = async (args) => {
   const { stdout } = await exec(cli, [...args, "--json"], {

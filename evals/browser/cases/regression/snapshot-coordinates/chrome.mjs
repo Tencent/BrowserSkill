@@ -11,7 +11,7 @@ export async function withChrome(
     deviceScale,
     zoom,
     extensionPath,
-    extensionViaCdp = false,
+    extensionViaCdp = process.env.BSK_TEST_LOAD_CDP === "1",
     headless = true,
     softwareRendering = false,
     disableGpu = true,
@@ -49,14 +49,19 @@ export async function withChrome(
                   ? ["--disable-gpu"]
                   : []),
               ...(extensionViaCdp
-                ? ["--enable-unsafe-extension-debugging"]
+                ? [
+                    "--enable-unsafe-extension-debugging",
+                    "--disable-component-extensions-with-background-pages",
+                  ]
                 : [
+                    "--enable-unsafe-extension-debugging",
                     `--disable-extensions-except=${extensionPath}`,
                     `--load-extension=${extensionPath}`,
                   ]),
             ]
           : ["--disable-extensions"]),
         "--site-per-process",
+        "--force-color-profile=srgb",
         "--remote-debugging-port=0",
         "--window-size=1600,1200",
         `--force-device-scale-factor=${deviceScale}`,

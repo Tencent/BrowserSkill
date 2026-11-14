@@ -184,29 +184,23 @@ metadata are two separate commits, **not a filesystem transaction**; the sidecar
 is committed first. A failure between commits reports an error, and the SHA-256
 allows a consumer to detect a mismatched pair.
 
-## DSH plugin
+## MCP
 
-The existing **bsk_inspect** tool gains **action: "extract"**:
+`bsk_inspect` exposes **action: "extract"** for inline JSON discovery, table,
+and list extraction:
 
 ~~~text
-bsk_inspect({ action: "extract", session: "<id>", extractKind: "discover" })
-bsk_inspect({ action: "extract", session: "<id>", extractKind: "table", extractTarget: "<target_id>" })
-bsk_inspect({ action: "extract", session: "<id>", extractKind: "table", selector: "#orders",
-  extractFormat: "csv", output: "/absolute/path/orders.csv", csvSafe: true })
+bsk_inspect({ action: "extract", session: "<id>", extract_action: "discover" })
+bsk_inspect({ action: "extract", session: "<id>", extract_action: "table", target_id: "<target_id>" })
+bsk_inspect({ action: "extract", session: "<id>", extract_action: "list", selector: "#orders",
+  item_selector: "li", fields: [{ key: "title", selector: "h3" }] })
 ~~~
 
-List extraction uses itemSelector and the fields-object JSON string in
-extractFields. Budgets are maxRows, maxColumns, maxBytes and extractTimeoutMs.
-Rows returned inline enter the model context, so maxBytes defaults to 262144
-there (1048576 when writing output), and the plugin renders compact JSON. CSV
-requires an output path so the plugin always receives structured JSON. The plugin uses the
-normal session registry, runner and queue; it does not introduce arbitrary
-page-script evaluation. Output paths are on the CLI host; relative paths resolve
-against that process's working directory. Prefer absolute paths in harness calls.
-Extraction shares bsk_inspect's output parameter with debug export and video
-save. Its model guidance lives in the bsk_inspect description and parameter
-schema rather than a separate DSH skill reference, keeping the DSH skill entry
-within its 4,500-byte budget in both LF and CRLF checkouts.
+Targets accept at most one of `target_id`, `selector`, or `ref`. List extraction
+uses optional `item_selector` and `fields`. Budgets are `max_rows`, `max_columns`,
+`max_bytes`, and `timeout_ms`. Rows returned inline enter the model context, so
+`max_bytes` defaults to 262144; CSV encoding and `--output` / `--csv-safe` file
+exports are provided by the CLI (`bsk extract`).
 
 ## Implementation
 

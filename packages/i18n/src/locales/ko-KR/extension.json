@@ -154,7 +154,7 @@
       "unavailableHint": "지침을 복사하려면 이 브라우저 프로필을 bsk에 연결하세요.",
       "copyButton": "지침 복사",
       "copyFailed": "지침을 복사하지 못했습니다. 다시 시도해 주세요.",
-      "promptTemplate": "이 작업에는 브라우저 {{name}}(인스턴스 ID: {{instanceId}})의 BrowserSkill을 사용하세요. 이 작업의 새 세션을 시작할 때마다 해당 인터페이스를 사용하세요:\nCLI: {{command}}\nDeepSeek Harness: {{toolCall}}\nDeepSeek Harness에서는 CLI 명령을 별도로 실행하지 말고 도구 호출을 사용하세요.\n이 인스턴스가 연결되어 있지 않으면 중단하고 이 프로필을 다시 연결해 달라고 요청하세요. --browser / browser를 생략하거나 다른 인스턴스로 전환하지 마세요.",
+      "promptTemplate": "이 작업에는 브라우저 {{name}}(인스턴스 ID: {{instanceId}})의 BrowserSkill을 사용하세요. 이 작업의 새 세션을 시작할 때마다 해당 인터페이스를 사용하세요:\nCLI: {{command}}\nMCP: {{toolCall}}\nMCP 도구를 사용할 때는 CLI 명령을 별도로 실행하지 말고 도구 호출을 사용하세요.\n이 인스턴스가 연결되어 있지 않으면 중단하고 이 프로필을 다시 연결해 달라고 요청하세요. --browser / browser를 생략하거나 다른 인스턴스로 전환하지 마세요.",
       "title": "현재 브라우저",
       "unnamed": "이름 없는 브라우저"
     },

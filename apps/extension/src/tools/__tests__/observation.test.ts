@@ -4607,3 +4607,48 @@ it.each([
   expect(phases).toEqual(["begin", "end"]);
   expect(capture).not.toHaveBeenCalled();
 });
+
+it.each([
+  { os: "linux", active: false, windowState: "normal", expected: 1 },
+  { os: "win", active: true, windowState: "minimized", expected: 1 },
+  { os: "mac", active: false, windowState: "minimized", expected: 0 },
+] as const)("wakes hidden Aura surfaces during controlled handleScreenshot ($os, active=$active, window=$windowState)", async ({
+  os,
+  active,
+  windowState,
+  expected,
+}) => {
+  vi.stubGlobal("chrome", {
+    runtime: { getPlatformInfo: vi.fn(async () => ({ os })) },
+    windows: { get: vi.fn(async () => ({ id: 100, state: windowState })) },
+  });
+  try {
+    const manager = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
+    const ctx = await manager.start("aa11");
+    ctx.agentCreatedTabs.add(7);
+    const { cdp, sent } = makeFakeCdp({
+      "Page.getFrameTree": () => ({ frameTree: { frame: { id: "main" } } }),
+      "Page.createIsolatedWorld": () => ({ executionContextId: 1 }),
+      "Runtime.evaluate": () => ({
+        result: { deepSerializedValue: { type: "node", value: { backendNodeId: 42 } } },
+      }),
+      "Runtime.releaseObjectGroup": () => ({}),
+      "Page.startScreencast": () => ({}),
+      "Page.stopScreencast": () => ({}),
+      "Page.captureScreenshot": () => ({ data: TINY_PNG }),
+    });
+    cdp.getAttachmentId = () => "attachment";
+    cdp.onEvent = () => ({ dispose: () => {} });
+    const deps = makeScreenshotDeps({
+      cdp,
+      get: async () => ({ id: 7, windowId: 100, active }) as chrome.tabs.Tab,
+    });
+    deps.sendToTab = async () => {};
+    const res = await handleScreenshot(manager, { session_id: "aa11", tab_id: 7 }, deps);
+    expect(res).toMatchObject({ tab_id: 7, image_base64: TINY_PNG });
+    expect(sent.filter((call) => call.method === "Page.startScreencast")).toHaveLength(expected);
+    expect(sent.filter((call) => call.method === "Page.stopScreencast")).toHaveLength(expected);
+  } finally {
+    vi.unstubAllGlobals();
+  }
+});

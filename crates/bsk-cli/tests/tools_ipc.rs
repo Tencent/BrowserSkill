@@ -110,6 +110,13 @@ async fn do_handshake_protocol(ws: &mut Ws, protocol: &str) -> HandshakeResult {
     }
 }
 
+fn strip_envelope_params(params: &mut Option<Value>) {
+    if let Some(Value::Object(map)) = params {
+        map.remove("_audit_id");
+        map.remove("_operation_id");
+    }
+}
+
 /// Fake extension that auto-replies to `tool.session_start` /
 /// `tool.session_stop` and routes everything else through a closure
 /// supplied by the test.
@@ -133,7 +140,10 @@ where
                 Ok(f) => f,
                 Err(_) => continue,
             };
-            let Frame::Request(req) = frame else { continue };
+            let Frame::Request(mut req) = frame else {
+                continue;
+            };
+            strip_envelope_params(&mut req.params);
             let body = match req.method {
                 Method::ToolSessionStart => {
                     let _: SessionStartParams =

@@ -1,7 +1,7 @@
 # Browser capability evaluation corpus
 
-This directory is a deterministic, local browser evaluation environment for BrowserSkill, DSH,
-and other command-line agents. Cases, fixture pages, direct `bsk` workflows, and assertions are
+This directory is a deterministic, local browser evaluation environment for BrowserSkill
+and command-line or MCP agents. Cases, fixture pages, direct `bsk` workflows, and assertions are
 data-driven and discovered automatically. Adding a case does not require editing a central switch.
 
 [中文说明](README.zh-CN.md)
@@ -247,7 +247,7 @@ passed directly to the executable without a shell.
 ```sh
 pnpm eval:browser run-agent \
   --config evals/browser/agents.local.json \
-  --agent dsh-local \
+  --agent codex-local \
   --suite core \
   --repeat 3
 ```
@@ -255,13 +255,13 @@ pnpm eval:browser run-agent \
 An adapter may define `command`, `args`, `cwd`, `env`, `timeoutMs`, `variant`, free-form `metadata`,
 and optional `metrics.errorPattern` / `metrics.toolCallPattern` regular expressions.
 
-To compare 28 granular tools with domain tools, create two isolated adapter entries and run both
+To compare CLI and MCP tool configurations, create two isolated adapter entries and run both
 against the same selected cases and seeds:
 
 ```sh
 pnpm eval:browser run-agent \
   --config evals/browser/agents.local.json \
-  --agent dsh-granular,dsh-domain \
+  --agent codex-cli,codex-mcp \
   --suite core \
   --repeat 10
 ```
@@ -295,7 +295,7 @@ Use these lanes as commit and PR gates:
 | Change | Required checks |
 | --- | --- |
 | Any case, fixture, oracle, or harness change | `pnpm eval:browser:check` |
-| CLI, daemon, extension, DSH plugin, or browser-operation change | The check above, `cargo build -p bsk`, then real-browser `smoke --suite core` |
+| CLI, daemon, extension, or browser-operation change | The check above, `cargo build -p bsk`, then real-browser `smoke --suite core` |
 | DOM discovery, form interaction, timing, or waiting change | The checks above, then `smoke --suite matrix --seed 4,7,14` |
 | A bug fix with a known reproduction | Add a `regression` case and run that case on the fixed build |
 

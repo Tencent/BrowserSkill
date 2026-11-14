@@ -173,3 +173,110 @@ fn settings_preserve_unrelated_fields_and_absence_uses_release_default() {
     assert_eq!(settings["custom"]["enabled"], true);
     assert_eq!(read_mode(home.path()).unwrap(), LocalAuthMode::TrustLocal);
 }
+
+#[test]
+fn hyphen_prefixed_device_ids_work_end_to_end_across_pair_replace_rotate_and_revoke() {
+    use bsk_protocol::local_auth::Bytes;
+
+    let home = tempfile::tempdir().unwrap();
+    let ids = [
+        Bytes::<16>::decode("-IAAAAAAAAAAAAAAAAAAAA")
+            .unwrap()
+            .encode(),
+        Bytes::<16>::decode("-vAAAAAAAAAAAAAAAAAAAA")
+            .unwrap()
+            .encode(),
+        Bytes::<16>::decode("-hAAAAAAAAAAAAAAAAAAAA")
+            .unwrap()
+            .encode(),
+        Bytes::<16>::decode("--AAAAAAAAAAAAAAAAAAAA")
+            .unwrap()
+            .encode(),
+    ];
+
+    // Malformed hyphenated flags must fail closed at CLI parse time without touching BSK_HOME.
+    let typo = command(home.path())
+        .args(["--json", "daemon", "revoke", "--al"])
+        .output()
+        .unwrap();
+    assert_eq!(typo.status.code(), Some(1));
+    let err: serde_json::Value = serde_json::from_slice(&typo.stdout).unwrap();
+    assert_eq!(err["code"], "invalid_params");
+    assert_eq!(err["data"]["reason"], "cli_parse_error");
+    assert!(!home.path().join("daemon.lock").exists());
+
+    let mut devices = serde_json::Map::new();
+    for (idx, id) in ids.iter().enumerate() {
+        devices.insert(
+            id.clone(),
+            serde_json::json!({
+                "status": "active",
+                "browser_id": format!("{idx:08x}"),
+                "label": format!("Chrome {idx}"),
+                "key": Bytes([idx as u8 + 1; 32]).encode(),
+                "gen": 1,
+                "pending": null,
+                "replaces": null,
+                "activated_at": "2026-11-14T00:00:00Z",
+                "expires_at": null,
+                "rotate_requested": false,
+            }),
+        );
+    }
+    fs::write(
+        home.path().join("local-pairings.json"),
+        serde_json::to_vec(&serde_json::json!({
+            "version": 1,
+            "daemon_id": Bytes([0x11; 16]).encode(),
+            "devices": devices,
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    // Offline rotate and revoke with `-I...`, `-v...`, `-h...`, `--...` device IDs.
+    output(home.path(), &["daemon", "rotate", &ids[1]]);
+    output(home.path(), &["daemon", "revoke", &ids[0]]);
+    output(home.path(), &["daemon", "revoke", &ids[2]]);
+
+    // Online `pair --replace` and `revoke` against a running foreground daemon (`--port 0`).
+    let log_path = home.path().join("hyphen-daemon.log");
+    let mut daemon = Process(
+        command(home.path())
+            .args(["daemon", "start", "--foreground", "--port", "0"])
+            .stdout(Stdio::null())
+            .stderr(fs::File::create(&log_path).unwrap())
+            .spawn()
+            .unwrap(),
+    );
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !home.path().join("daemon.json").exists() {
+        assert!(
+            daemon.0.try_wait().unwrap().is_none(),
+            "daemon exited during startup: {}",
+            fs::read_to_string(&log_path).unwrap_or_default()
+        );
+        assert!(Instant::now() < deadline, "daemon did not publish metadata");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+
+    let replace_link = output(home.path(), &["daemon", "pair", "--replace", &ids[3]]);
+    assert!(replace_link.contains("#bsk-local.v1."));
+    output(home.path(), &["daemon", "revoke", &ids[3]]);
+
+    let listed: serde_json::Value =
+        serde_json::from_str(&output(home.path(), &["daemon", "devices"])).unwrap();
+    let by_id = |target: &str| {
+        listed
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|d| d["device_id"] == target)
+            .unwrap()
+            .clone()
+    };
+    assert_eq!(by_id(&ids[0])["status"], "revoked");
+    assert_eq!(by_id(&ids[1])["status"], "active");
+    assert_eq!(by_id(&ids[2])["status"], "revoked");
+    assert_eq!(by_id(&ids[3])["status"], "revoked");
+}

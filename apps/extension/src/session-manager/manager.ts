@@ -24,6 +24,8 @@ export interface SessionContext {
   observedTabs?: Set<number>;
   /** Unclassified arrivals and failed external moves must not become implicit tool targets. */
   pendingRoutingTabs?: Set<number>;
+  /** Temporary deselection tabs used to preserve Linux window focus during native pointer input. */
+  temporaryInputTabs?: Set<number>;
   createdAtMs: number;
 }
 
@@ -132,6 +134,7 @@ export class SessionManager {
   private readonly remote: () => boolean;
   private readonly sessions = new Map<string, SessionContext>();
   private readonly windowIndex = new Map<number, string>();
+  private readonly activeAgentWindowIds = new Set<number>();
   private readonly borrowReservations = new Map<number, string>();
   private readonly expectedWindowClosures = new WeakSet<SessionContext>();
   private readonly agentWindow: AgentWindowApi;
@@ -206,6 +209,7 @@ export class SessionManager {
     for (const ctx of this.sessions.values()) {
       ctx.agentCreatedTabs.delete(tabId);
       ctx.observedTabs?.delete(tabId);
+      ctx.temporaryInputTabs?.delete(tabId);
       if (!isWindowClosing) ctx.borrowedTabs.delete(tabId);
     }
   }
@@ -302,8 +306,12 @@ export class SessionManager {
     const agentCreatedTabs = new Set<number>();
     try {
       const { signal: _signal, controller: _controller, ...createOptions } = opts;
-      const created = await this.agentWindow.create(AGENT_WINDOW_HOME, createOptions);
+      const created = await this.agentWindow.create(AGENT_WINDOW_HOME, {
+        ...createOptions,
+        excludeWindowIds: this.activeAgentWindowIds,
+      });
       windowId = created.windowId;
+      this.activeAgentWindowIds.add(windowId);
       for (const tabId of created.initialTabIds) agentCreatedTabs.add(tabId);
       if (opts.incognito && !created.incognito) {
         throw new Error(
@@ -340,6 +348,7 @@ export class SessionManager {
       if (windowId !== null) {
         try {
           await this.agentWindow.remove(windowId);
+          this.activeAgentWindowIds.delete(windowId);
         } catch (cleanupError) {
           // The daemon may retry stop after a failed startup rollback. Retain
           // the exact window handle until closure is confirmed.
@@ -404,6 +413,7 @@ export class SessionManager {
     if (!ctx) return null;
     this.sessions.delete(sessionId);
     this.windowIndex.delete(ctx.agentWindowId);
+    this.activeAgentWindowIds.delete(ctx.agentWindowId);
     for (const [tabId, owner] of this.borrowReservations) {
       if (owner === sessionId) this.borrowReservations.delete(tabId);
     }

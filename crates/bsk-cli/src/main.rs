@@ -39,6 +39,7 @@ fn main() -> ExitCode {
 }
 
 fn dispatch(cli: Cli, format: Format) -> Result<(), CliError> {
+    cli::validate_command_evidence(&cli.command, &cli.flags)?;
     let base_ctx = cli::business_rpc::ClientContext::from_cli_flags(&cli.flags);
     // Plans and recipes attach evidence step by step, so it never goes on every request.
     let step_ctx = base_ctx.without_action_metadata();

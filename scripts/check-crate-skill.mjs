@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { validateSkillDirectory } from "../packages/dsh-plugin-browserskill/scripts/validate-skill.mjs";
+import { validateSkillDirectory } from "./lib/validate-skill.mjs";
 
 const root = fileURLToPath(new URL("../", import.meta.url));
 const { files } = validateSkillDirectory(`${root}crates/bsk-cli/skill`, { maxEntryBytes: 8_000 });

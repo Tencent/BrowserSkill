@@ -48,6 +48,46 @@ fn normalize_non_empty(value: &str) -> Option<String> {
     (!trimmed.is_empty()).then(|| trimmed.to_owned())
 }
 
+/// Param-sensitive caller action-metadata policy:
+/// - `Full` for guarded browser actions (including `observe` only when `probe_hover == true`
+///   and `debug` only when `action.cooperation_guarded()`).
+/// - `ContextOnly` for `tool.read` (`--context` / `context` only).
+/// - `None` for all other methods, so caller-supplied conditions fail closed with `invalid_params`
+///   before contacting the daemon.
+pub(crate) fn caller_action_metadata_policy(
+    method: &Method,
+    params: Option<&serde_json::Value>,
+) -> ActionMetadataPolicy {
+    if method_accepts_action_metadata_with_params(method, params) {
+        ActionMetadataPolicy::Full
+    } else if *method == Method::ToolRead {
+        ActionMetadataPolicy::ContextOnly
+    } else {
+        ActionMetadataPolicy::None
+    }
+}
+
+pub(crate) fn method_accepts_action_metadata_with_params(
+    method: &Method,
+    params: Option<&serde_json::Value>,
+) -> bool {
+    match method {
+        Method::ToolObserve => {
+            params
+                .and_then(|v| v.get("probe_hover"))
+                .and_then(serde_json::Value::as_bool)
+                == Some(true)
+        }
+        Method::ToolDebug => params
+            .and_then(|v| v.get("action"))
+            .and_then(|a| {
+                serde_json::from_value::<bsk_protocol::tools::DebugAction>(a.clone()).ok()
+            })
+            .is_some_and(|a| a.cooperation_guarded()),
+        other => other.accepts_action_metadata(),
+    }
+}
+
 /// Request-scoped context replacing process-wide global action metadata and caller scope state.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ClientContext {
@@ -118,6 +158,11 @@ impl ClientContext {
         }
     }
 
+    /// Whether the caller attached any action condition (`context`, `depends_on`, `observation`, `expect`).
+    pub fn has_any_action_metadata(&self) -> bool {
+        self.context_id.is_some() || self.verification_requested()
+    }
+
     /// Whether the caller attached anything asking for the page to be checked.
     pub fn verification_requested(&self) -> bool {
         !self.depends_on.is_empty() || self.observation_id.is_some() || self.expect.is_some()
@@ -131,53 +176,61 @@ impl ClientContext {
         )
     }
 
-    /// Validate and frame outgoing RPC parameters using compile-time `MethodSpec` rules.
-    pub fn prepare_params<P: Serialize>(
+    /// Reject caller action conditions before daemon discovery when `method` + `params` do not verify them.
+    pub fn validate_action_metadata(
         &self,
         method: &Method,
-        params: Option<P>,
-    ) -> Result<Option<serde_json::Value>, CliError> {
-        if !self.depends_on.is_empty() && self.context_id.is_none() {
-            return Err(CliError::invalid_params(anyhow::anyhow!(
-                "depends_on requires context"
-            )));
-        }
-        let policy = method.action_metadata_policy();
-        match policy {
+        params: Option<&serde_json::Value>,
+    ) -> Result<ActionMetadataPolicy, CliError> {
+        let caller_policy = caller_action_metadata_policy(method, params);
+        match caller_policy {
             ActionMetadataPolicy::None => {
-                if self.context_id.is_some()
-                    || !self.depends_on.is_empty()
-                    || self.observation_id.is_some()
-                    || self.expect.is_some()
-                {
+                if self.has_any_action_metadata() {
                     return Err(CliError::invalid_params(anyhow::anyhow!(
-                        "{} does not accept action metadata (context_id, depends_on, observation_id, expect)",
+                        "action conditions (--context, --depends-on, --observation, --expect) do not apply to {}",
                         method.wire_name()
                     )));
                 }
             }
             ActionMetadataPolicy::ContextOnly => {
-                if !self.depends_on.is_empty()
-                    || self.observation_id.is_some()
-                    || self.expect.is_some()
-                {
+                if self.verification_requested() {
                     return Err(CliError::invalid_params(anyhow::anyhow!(
-                        "{} does not accept depends_on, observation_id, or expect",
-                        method.wire_name()
+                        "--observation, --expect and --depends-on apply only to guarded browser actions; read accepts --context only"
                     )));
                 }
             }
-            ActionMetadataPolicy::Full => {}
+            ActionMetadataPolicy::Full => {
+                if !self.depends_on.is_empty() && self.context_id.is_none() {
+                    return Err(CliError::invalid_params(anyhow::anyhow!(
+                        "depends_on requires context"
+                    )));
+                }
+            }
         }
+        Ok(caller_policy)
+    }
 
+    /// Validate and frame outgoing RPC parameters using compile-time `MethodSpec` and param-sensitive rules.
+    pub fn prepare_params<P: Serialize>(
+        &self,
+        method: &Method,
+        params: Option<P>,
+    ) -> Result<Option<serde_json::Value>, CliError> {
         let mut value = params
-            .map(|p| serde_json::to_value(p).map_err(|err| CliError::Local(err.into())))
+            .map(|p| serde_json::to_value(p).map_err(|err| CliError::invalid_params(err.into())))
             .transpose()?;
+        let caller_policy = self.validate_action_metadata(method, value.as_ref())?;
+        let wire_policy = if matches!(method, Method::ToolObserve | Method::ToolDebug) {
+            caller_policy
+        } else {
+            method.action_metadata_policy()
+        };
+
         let Some(object) = value.as_mut().and_then(serde_json::Value::as_object_mut) else {
             return Ok(value);
         };
 
-        match policy {
+        match wire_policy {
             ActionMetadataPolicy::None => {
                 if ["context_id", "depends_on", "observation_id", "expect"]
                     .iter()
@@ -199,7 +252,9 @@ impl ClientContext {
                         method.wire_name()
                     )));
                 }
-                if let Some(context) = &self.context_id {
+                if caller_policy == ActionMetadataPolicy::ContextOnly
+                    && let Some(context) = &self.context_id
+                {
                     if let Some(existing) = object.get("context_id").filter(|v| !v.is_null()) {
                         if existing.as_str() != Some(context.as_str()) {
                             return Err(CliError::invalid_params(anyhow::anyhow!(
@@ -424,7 +479,6 @@ fn is_daemon_absent_connect_error(err: &anyhow::Error) -> bool {
         })
     })
 }
-
 /// Release caller-owned staging even after cancellation. This deliberately
 /// exposes only transfer.release, not a general bypass for business RPCs.
 /// The entire batch, including connection setup, shares one bounded budget.
@@ -729,10 +783,20 @@ mod tests {
             context_id: Some("ctx-read".into()),
             ..ClientContext::default()
         };
+        let read_params = read_ctx
+            .prepare_params(&Method::ToolRead, Some(json!({"session_id":"s1"})))
+            .unwrap()
+            .unwrap();
+        assert_eq!(read_params["context_id"], "ctx-read");
+        assert!(
+            ctx.prepare_params(&Method::ToolRead, Some(json!({"session_id":"s1"})))
+                .is_err(),
+            "tool.read must reject expect/observation/depends_on"
+        );
+
         for passive_method in [
             Method::ToolSnapshot,
             Method::ToolGetHtml,
-            Method::ToolRead,
             Method::ToolExtract,
             Method::ToolScreenshot,
             Method::ToolConsole,
@@ -740,11 +804,13 @@ mod tests {
             Method::ToolWaitForNavigation,
             Method::ToolWaitForElement,
         ] {
-            let passive_params = read_ctx
-                .prepare_params(&passive_method, Some(json!({"session_id":"s1"})))
-                .unwrap()
-                .unwrap();
-            assert_eq!(passive_params["context_id"], "ctx-read");
+            assert!(
+                read_ctx
+                    .prepare_params(&passive_method, Some(json!({"session_id":"s1"})))
+                    .is_err(),
+                "{} must reject caller-supplied context_id",
+                passive_method.wire_name()
+            );
             let inline_params = ClientContext::default()
                 .prepare_params(
                     &passive_method,
@@ -760,6 +826,38 @@ mod tests {
                 passive_method.wire_name()
             );
         }
+
+        // Param-sensitive guarded sub-modes (`observe --probe-hover` and `debug` guarded actions).
+        assert!(
+            read_ctx
+                .prepare_params(&Method::ToolObserve, Some(json!({"session_id":"s1"})))
+                .is_err()
+        );
+        let probe_params = ctx
+            .prepare_params(
+                &Method::ToolObserve,
+                Some(json!({"session_id":"s1","probe_hover":true})),
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(probe_params["context_id"], "ctx-1");
+        assert!(
+            read_ctx
+                .prepare_params(
+                    &Method::ToolDebug,
+                    Some(json!({"session_id":"s1","action":"requests"})),
+                )
+                .is_err()
+        );
+        let replay_params = ctx
+            .prepare_params(
+                &Method::ToolDebug,
+                Some(json!({"session_id":"s1","action":"replay"})),
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(replay_params["context_id"], "ctx-1");
+
         assert!(
             read_ctx
                 .prepare_params(&Method::TransferBegin, Some(json!({"session_id":"s1"})))

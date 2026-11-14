@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 import { buildSync } from "esbuild";
 import { describe, expect, it } from "vitest";
 
-describe.skipIf(!process.env.BSK_CLICK_CHROME)("browser-local debug history", () => {
+describe.skipIf(!process.env.BSK_TEST_CHROME)("browser-local debug history", () => {
   it("survives reload, recovers interrupted checkpoints, expires and bounds records, and deletes atomically", async () => {
     const scripts = new Map(
       [
@@ -47,7 +47,7 @@ describe.skipIf(!process.env.BSK_CLICK_CHROME)("browser-local debug history", ()
       );
       await withChrome(
         {
-          executable: process.env.BSK_CLICK_CHROME,
+          executable: process.env.BSK_TEST_CHROME,
           deviceScale: 1,
           zoom: 1,
           startupTimeout: 30000,

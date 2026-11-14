@@ -12,7 +12,7 @@ type Send = <T = Record<string, unknown>>(
   sessionId?: string,
 ) => Promise<T>;
 
-describe.skipIf(!process.env.BSK_CLICK_CHROME)("real browser element waits", () => {
+describe.skipIf(!process.env.BSK_TEST_CHROME)("real browser element waits", () => {
   it("observes delayed results, masks and node removal in foreground and background tabs", async () => {
     const { withChrome } = await import(
       new URL(
@@ -21,7 +21,7 @@ describe.skipIf(!process.env.BSK_CLICK_CHROME)("real browser element waits", () 
       ).href
     );
     await withChrome(
-      { executable: process.env.BSK_CLICK_CHROME, deviceScale: 1, zoom: 1 },
+      { executable: process.env.BSK_TEST_CHROME, deviceScale: 1, zoom: 1 },
       async (send: Send) => {
         const manager = new SessionManager({
           agentWindow: {

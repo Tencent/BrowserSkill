@@ -443,7 +443,10 @@ describe("ToolDispatcher", () => {
     deliver(makeRequest("tool.session_start", { session_id: "aa11", focused: false }));
     await flushMicrotasks();
 
-    expect(create).toHaveBeenCalledWith("about:blank", { focused: false });
+    expect(create).toHaveBeenCalledWith("about:blank", {
+      focused: false,
+      excludeWindowIds: expect.any(Set),
+    });
   });
 
   it("starts an incognito session through the normal dispatcher", async () => {
@@ -456,7 +459,10 @@ describe("ToolDispatcher", () => {
     dispatcher.start();
     deliver(makeRequest("tool.session_start", { session_id: "private", incognito: true }));
     await flushMicrotasks();
-    expect(create).toHaveBeenCalledWith("about:blank", { incognito: true });
+    expect(create).toHaveBeenCalledWith("about:blank", {
+      incognito: true,
+      excludeWindowIds: expect.any(Set),
+    });
     expect(sessions.get("private")?.incognito).toBe(true);
     expect(sent[0]).toMatchObject({ result: { agent_window_id: 4242 } });
     dispatcher.stop();
@@ -1318,6 +1324,12 @@ describe("ToolDispatcher", () => {
           windowId: props.windowId,
           url: props.url,
           active: props.active,
+        })),
+        update: vi.fn(async (id: number, props: chrome.tabs.UpdateProperties) => ({
+          id,
+          windowId: 1,
+          url: "https://example.test/",
+          active: props.active ?? true,
         })),
       },
     });

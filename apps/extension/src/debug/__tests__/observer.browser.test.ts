@@ -5,7 +5,7 @@ import { expect, it } from "vitest";
 import { SessionManager } from "@/session-manager/manager";
 import { type DebugCdp, DebugManager } from "../manager";
 
-it.skipIf(!process.env.BSK_CLICK_CHROME)(
+it.skipIf(!process.env.BSK_TEST_CHROME)(
   "bounds pre-reads on a frozen renderer and restores manual capture after late hooks",
   async () => {
     const server = createServer((_request, response) => {
@@ -25,7 +25,7 @@ it.skipIf(!process.env.BSK_CLICK_CHROME)(
       let listener: Parameters<NonNullable<DebugCdp["onEvent"]>>[0] | undefined;
       await withChrome(
         {
-          executable: process.env.BSK_CLICK_CHROME,
+          executable: process.env.BSK_TEST_CHROME,
           deviceScale: 1,
           zoom: 1,
           startupTimeout: 30000,

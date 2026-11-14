@@ -493,14 +493,17 @@ async fn cli_incognito_start_checks_extension_support_and_preserves_normal_start
     handle.shutdown().await;
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn cli_incognito_start_refuses_an_old_daemon_before_dispatching_a_start() {
-    use bsk::cli::error::CliError;
-    use bsk::cli::session::{SessionStartOptions, start_session};
+    use bsk::daemon::info::DaemonInfo;
     use bsk::daemon::ipc::{self, DaemonStatus};
+    use std::process::Stdio;
     use std::sync::Mutex;
+    use tokio::process::Command;
 
-    let sock = tempfile_path("bsk-incognito-old-daemon");
+    let home = tempfile::tempdir_in("/tmp").unwrap();
+    let sock = home.path().join("ipc.sock");
     let listener = ipc::bind(&sock).await.unwrap();
     let system = ipc::system_handler(DaemonStatus {
         started_at: std::time::Instant::now(),
@@ -523,26 +526,66 @@ async fn cli_incognito_start_refuses_an_old_daemon_before_dispatching_a_start() 
         || {},
         std::future::pending::<()>(),
     ));
-    let path = sock.clone();
-    let error = tokio::task::spawn_blocking(move || {
-        start_session(
-            path,
-            SessionStartOptions {
-                incognito: true,
-                ..Default::default()
-            },
-        )
-    })
-    .await
-    .unwrap()
-    .unwrap_err();
-    assert!(matches!(error, CliError::Local(_)));
-    let msg = error.to_string();
+
+    let run_incognito_start = |info: DaemonInfo| {
+        let home_path = home.path().to_path_buf();
+        async move {
+            std::fs::write(
+                home_path.join("daemon.json"),
+                serde_json::to_vec(&info).unwrap(),
+            )
+            .unwrap();
+            let child = Command::new(env!("CARGO_BIN_EXE_bsk"))
+                .env("BSK_HOME", &home_path)
+                .env("HOME", &home_path)
+                .env("BSK_AUTO_START", "0")
+                .env("BSK_AUTO_UPDATE", "off")
+                .env_remove("BSK_CANCEL_ON_STDIN_CLOSE")
+                .env_remove("BSK_SESSION")
+                .env_remove("BSK_SCOPE")
+                .args(["session", "start", "--incognito", "--json"])
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .kill_on_drop(true)
+                .spawn()
+                .unwrap();
+            tokio::time::timeout(Duration::from_secs(5), child.wait_with_output())
+                .await
+                .unwrap()
+                .unwrap()
+        }
+    };
+
+    // Legacy 0.4.0 daemon.json without `protocol_version`: CLI probes `system.status`
+    // and fails closed before dispatching `session.start`.
+    let output = run_incognito_start(DaemonInfo::now(
+        std::process::id(),
+        sock.clone(),
+        0,
+        "0.4.0",
+    ))
+    .await;
+    assert!(!output.status.success());
+    let error: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let msg = error["message"].as_str().unwrap();
     assert!(msg.contains("incompatible") && msg.contains("2.0"), "{msg}");
     assert_eq!(*calls.lock().unwrap(), vec![Method::SystemStatus]);
+
+    // Optimistic `daemon.json` carrying `protocol_version: "1.9"`: CLI fails closed
+    // immediately from discovery metadata with zero IPC round-trips.
+    calls.lock().unwrap().clear();
+    let output = run_incognito_start(
+        DaemonInfo::now(std::process::id(), sock.clone(), 0, "0.4.0").with_protocol_version("1.9"),
+    )
+    .await;
+    assert!(!output.status.success());
+    let error: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let msg = error["message"].as_str().unwrap();
+    assert!(msg.contains("incompatible") && msg.contains("2.0"), "{msg}");
+    assert!(calls.lock().unwrap().is_empty());
+
     server.abort();
     let _ = server.await;
-    let _ = std::fs::remove_file(sock);
 }
 
 #[tokio::test]

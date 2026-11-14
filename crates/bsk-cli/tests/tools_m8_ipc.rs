@@ -108,6 +108,13 @@ async fn do_handshake(ws: &mut Ws) -> HandshakeResult {
     }
 }
 
+fn strip_envelope_params(params: &mut Option<Value>) {
+    if let Some(Value::Object(map)) = params {
+        map.remove("_audit_id");
+        map.remove("_operation_id");
+    }
+}
+
 fn run_extension<F>(ws: Ws, reply: F)
 where
     F: Fn(&RequestFrame) -> ResponseBody + Send + Sync + 'static,
@@ -128,7 +135,10 @@ where
                 Ok(f) => f,
                 Err(_) => continue,
             };
-            let Frame::Request(req) = frame else { continue };
+            let Frame::Request(mut req) = frame else {
+                continue;
+            };
+            strip_envelope_params(&mut req.params);
             let body = match req.method {
                 Method::ToolSessionStart => {
                     let _: SessionStartParams =

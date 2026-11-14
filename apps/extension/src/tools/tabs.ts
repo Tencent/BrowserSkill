@@ -95,8 +95,44 @@ export interface TabMutationApi {
   group?(options: chrome.tabs.GroupOptions): Promise<number>;
 }
 
+class TabCreateActivationCleanupError extends Error {
+  readonly tabId: number;
+  readonly activationError: unknown;
+  readonly cleanupError: unknown;
+
+  constructor(tabId: number, activationError: unknown, cleanupError: unknown) {
+    const primary =
+      activationError instanceof Error ? activationError.message : String(activationError);
+    const cleanup = cleanupError instanceof Error ? cleanupError.message : String(cleanupError);
+    super(`tab_create failed to activate tab ${tabId} (${primary}) and cleanup failed: ${cleanup}`);
+    this.name = "TabCreateActivationCleanupError";
+    this.tabId = tabId;
+    this.activationError = activationError;
+    this.cleanupError = cleanupError;
+  }
+}
+
 export const chromeTabMutationApi: TabMutationApi = {
-  create: (p) => chrome.tabs.create(p),
+  create: async (p) => {
+    if (p.active ?? true) {
+      // Creating an active tab directly in a background window steals OS window focus on macOS Chromium.
+      const tab = await chrome.tabs.create({ ...p, active: false });
+      if (typeof tab.id === "number") {
+        try {
+          return (await chrome.tabs.update(tab.id, { active: true })) ?? tab;
+        } catch (err) {
+          try {
+            await chrome.tabs.remove(tab.id);
+          } catch (cleanupErr) {
+            throw new TabCreateActivationCleanupError(tab.id, err, cleanupErr);
+          }
+          throw err;
+        }
+      }
+      return tab;
+    }
+    return chrome.tabs.create(p);
+  },
   remove: (id) => chrome.tabs.remove(id),
   update: (id, p) => chrome.tabs.update(id, p),
   get: (id) => chrome.tabs.get(id),
@@ -426,6 +462,19 @@ async function createAndClaimTab(
       return getTabsApi(deps).create(createProps);
     });
   } catch (err) {
+    if (err instanceof TabCreateActivationCleanupError) {
+      if (deps.isSessionLive?.() !== false) {
+        // Retain ownership when compensating removal failed so AgentWindowRouting
+        // never routes the orphan tab to user windows and session_stop can retry closing it.
+        ctx.agentCreatedTabs.add(err.tabId);
+      }
+      const cancelled = aborted(deps.signal, "tab_create", deps.isSessionLive);
+      if (cancelled && deps.isSessionLive?.() === false) return cancelled;
+      return rpcError("protocol_error", "cleanup_failed", err.message, {
+        resource_type: "tab",
+        resource_id: err.tabId,
+      });
+    }
     const cancelled = aborted(deps.signal, "tab_create", deps.isSessionLive);
     if (cancelled) return cancelled;
     return {
@@ -658,6 +707,7 @@ export async function handleTabClose(
     // tab that's already gone (design §3.1).
     ctx.agentCreatedTabs.delete(params.tab_id);
     ctx.observedTabs?.delete(params.tab_id);
+    ctx.temporaryInputTabs?.delete(params.tab_id);
   } catch (err) {
     return {
       code: "protocol_error",
@@ -697,6 +747,7 @@ export async function handleTabSelect(
   }
   try {
     await mutateBrowser(deps, () => getTabsApi(deps).update(params.tab_id, { active: true }));
+    ctx.temporaryInputTabs?.delete(params.tab_id);
   } catch (err) {
     return {
       code: "protocol_error",

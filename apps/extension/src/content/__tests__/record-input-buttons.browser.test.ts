@@ -1,5 +1,5 @@
 // @vitest-environment node
-// Opt in with BSK_CLICK_CHROME. Uses real input in its own browser/profile.
+// Opt in with BSK_TEST_CHROME. Uses real input in its own browser/profile.
 
 import { fileURLToPath } from "node:url";
 import { build } from "esbuild";
@@ -17,7 +17,7 @@ let bundle: string;
 let close: (() => void) | undefined;
 let browserRun: Promise<void> | undefined;
 
-if (process.env.BSK_CLICK_CHROME) {
+if (process.env.BSK_TEST_CHROME) {
   beforeAll(async () => {
     const built = await build({
       entryPoints: [fileURLToPath(new URL("../record-capture.ts", import.meta.url))],
@@ -38,7 +38,7 @@ if (process.env.BSK_CLICK_CHROME) {
     const closed = Promise.withResolvers<void>();
     close = () => closed.resolve();
     browserRun = withChrome(
-      { executable: process.env.BSK_CLICK_CHROME, deviceScale: 1, zoom: 1 },
+      { executable: process.env.BSK_TEST_CHROME, deviceScale: 1, zoom: 1 },
       async (command: Send) => {
         ready.resolve(command);
         await closed.promise;
@@ -69,7 +69,7 @@ const buttons = [
   },
 ];
 
-describe.skipIf(!process.env.BSK_CLICK_CHROME)("record native form buttons", () => {
+describe.skipIf(!process.env.BSK_TEST_CHROME)("record native form buttons", () => {
   for (const search of [false, true]) {
     it.each(buttons)(`records $name with search field=${search}`, async ({
       markup,

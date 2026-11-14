@@ -20,7 +20,6 @@ const run = (command, args, options = {}) =>
   execFileSync(command, args, { cwd: root, stdio: "inherit", ...options });
 run("cargo", ["build", "--release", "--locked"]);
 run("pnpm", ["ext:build"], { env: { ...process.env, BSK_DAEMON_WS_URL: "ws://127.0.0.1:52917" } });
-run("pnpm", ["--filter", "@wxg-prc-cpg/browser-skill-dsh-plugin", "build"]);
 
 mkdirSync(join(output, "bin"), { recursive: true });
 mkdirSync(join(output, "libexec"));
@@ -30,11 +29,7 @@ cpSync(join(root, "apps/extension/dist/chrome-mv3"), join(output, "extension"), 
 });
 cpSync(join(root, "crates/bsk-cli/skill"), join(output, "skill"), { recursive: true });
 copyFileSync(join(root, "docs/shared-browser-control.zh-CN.md"), join(output, "设计与验证.md"));
-const plugin = join(root, "packages/dsh-plugin-browserskill");
-run("npm", ["pack", "--ignore-scripts", "--pack-destination", output], { cwd: plugin });
-const version = JSON.parse(readFileSync(join(plugin, "package.json"), "utf8")).version;
-const archive = `wxg-prc-cpg-browser-skill-dsh-plugin-${version}.tgz`;
-if (!existsSync(join(output, archive))) throw new Error("Plugin archive was not created");
+const version = JSON.parse(readFileSync(join(root, "apps/extension/package.json"), "utf8")).version;
 
 writeFileSync(
   join(output, "bin/bsk"),
@@ -89,13 +84,7 @@ writeFileSync(
 
 打开任务页后，页面会出现协作控件，提供暂停与交回操作。你可以直接点页面，不必先暂停；编辑输入框时 Agent 会等待，点离输入框或点“交给 Agent”后继续。
 
-## DSH 插件
-
-本目录包含 ${archive}。在你要体验的 profile 中安装此本地包：
-
-    dsh plugin --profile web add '${join(output, archive)}'
-
-将该 profile 的 BrowserSkill 插件配置 bskPath 指向 '${join(output, "bin/bsk")}'，保留其余已有配置。重新启动该 profile，加载 /browser-skill，直接给出任务即可；新会话默认协作，无需要求 Agent 开启。对应工具是 bsk_session 的 share、sync、wait-user、cooperation-status；操作时传 contextId。
+MCP Agent（含 DeepSeek Harness / Claude / Cursor 等）：将 MCP server 命令指向 '${join(output, "bin/bsk")}'（参数：mcp），加载本目录 skill/SKILL.md 后直接给出业务任务即可；对应协作工具为 bsk_session 的 start、sync、wait、status。
 
 ## 验证范围
 

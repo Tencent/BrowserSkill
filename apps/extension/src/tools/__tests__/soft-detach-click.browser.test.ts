@@ -1,5 +1,5 @@
 // @vitest-environment node
-// Opt in with BSK_CLICK_CHROME; exercises full end-to-end idle CDP soft-detach
+// Opt in with BSK_TEST_CHROME; exercises full end-to-end idle CDP soft-detach
 // and transparent reattach against real Chrome (cross-origin OOPIFs, CooperationController, dialogs, waits).
 
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -41,7 +41,7 @@ const stubInputClock = (cdp: ChromiumCdp) => {
   }));
 };
 
-describe.skipIf(!process.env.BSK_CLICK_CHROME)(
+describe.skipIf(!process.env.BSK_TEST_CHROME)(
   "real browser idle CDP soft-detach end-to-end lifecycle",
   () => {
     it("preserves cross-origin OOPIF @eN actions across chained soft-detaches (direct & CooperationController) and invalidates navigated OOPIFs", async () => {
@@ -104,7 +104,7 @@ describe.skipIf(!process.env.BSK_CLICK_CHROME)(
         let forwardEvent: ((event: CdpEvent) => void) | undefined;
         await withChrome(
           {
-            executable: process.env.BSK_CLICK_CHROME,
+            executable: process.env.BSK_TEST_CHROME,
             deviceScale: 1,
             zoom: 1,
             startupTimeout: 30_000,
@@ -538,7 +538,7 @@ describe.skipIf(!process.env.BSK_CLICK_CHROME)(
         let forwardEvent: ((event: CdpEvent) => void) | undefined;
         await withChrome(
           {
-            executable: process.env.BSK_CLICK_CHROME,
+            executable: process.env.BSK_TEST_CHROME,
             deviceScale: 1,
             zoom: 1,
             startupTimeout: 30_000,

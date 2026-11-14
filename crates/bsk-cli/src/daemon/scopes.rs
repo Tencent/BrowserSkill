@@ -23,11 +23,12 @@ pub const SHORT_ALIAS_CAP: usize = 32;
 /// Host subagent environment variables probed in deterministic priority order
 /// when neither `--scope`, `BSK_SESSION`/`BSK_SCOPE`, nor an MCP stdio scope
 /// is active.
-pub const HOST_AGENT_ENV_KEYS: [(&str, &str); 4] = [
+pub const HOST_AGENT_ENV_KEYS: [(&str, &str); 5] = [
     ("CLAUDE_CODE_AGENT_ID", "claude"),
     ("CODEX_THREAD_ID", "codex"),
     ("ANTIGRAVITY_CONVERSATION_ID", "antigravity"),
     ("CURSOR_TRACE_ID", "cursor"),
+    ("DSH_SESSION_ID", "dsh"),
 ];
 
 /// Resolve the caller's implicit scope identifier from explicit CLI `--scope`,
@@ -694,6 +695,11 @@ mod tests {
                 env_agents.get(k).map(|v| (*v).to_string())
             }),
             "agent:codex:codex-9"
+        );
+        let env_dsh = HashMap::from([("DSH_SESSION_ID", "dsh-42")]);
+        assert_eq!(
+            resolve_caller_scope_with(None, None, |k| { env_dsh.get(k).map(|v| (*v).to_string()) }),
+            "agent:dsh:dsh-42"
         );
         assert_eq!(resolve_caller_scope_with(None, None, |_| None), "default");
     }

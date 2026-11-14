@@ -787,6 +787,12 @@ struct SessionArgs {
     browser: Option<String>,
     /// start: task name shown in the Agent Window.
     name: Option<String>,
+    /// start: agent name displayed in the browser control overlay (1..=80 characters).
+    agent_name: Option<String>,
+    /// start: project label displayed alongside agent_name (1..=120 characters); requires agent_name.
+    project: Option<String>,
+    /// start: controller marker color as #RRGGBB; requires agent_name.
+    controller_color: Option<String>,
     /// start, open: open an incognito Agent Window (requires "Allow in incognito").
     incognito: Option<bool>,
     /// start, open: Agent Window width in CSS pixels (100-7680); requires height.
@@ -855,6 +861,9 @@ async fn session(
                 &[
                     "browser",
                     "name",
+                    "agent_name",
+                    "project",
+                    "controller_color",
                     "incognito",
                     "width",
                     "height",
@@ -863,6 +872,21 @@ async fn session(
                     "scope",
                 ],
             )?;
+            if args.agent_name.is_none()
+                && (args.project.is_some() || args.controller_color.is_some())
+            {
+                return Err(invalid("project and controller_color require agent_name"));
+            }
+            let controller = args
+                .agent_name
+                .map(|name| bsk_protocol::tools::ControllerInfo {
+                    name,
+                    project: args.project,
+                    color: args.controller_color,
+                });
+            if let Some(controller) = &controller {
+                controller.validate().map_err(invalid)?;
+            }
             if args.width.is_some() != args.height.is_some() {
                 return Err(invalid("width and height must be given together"));
             }
@@ -880,6 +904,10 @@ async fn session(
                 params["incognito"] = true.into();
             }
             for (key, value) in [
+                (
+                    "controller",
+                    controller.map(|c| serde_json::to_value(c).unwrap()),
+                ),
                 ("browser_instance_id", args.browser.map(Value::from)),
                 ("task_name", args.name.map(Value::from)),
                 ("width", args.width.map(Value::from)),
@@ -1407,6 +1435,7 @@ async fn page(
         None,
         None,
     )?;
+    ctx.validate_action_metadata(&method, Some(&params))?;
     let link = connect(daemon, control).await?;
     let timeout = timeout_of(&params, 30_000);
     let value = link.rpc(&ctx, method, params, timeout).await?;
@@ -1452,7 +1481,7 @@ struct InspectArgs {
     scope: Option<String>,
     /// Tab to read; defaults to the session's current task tab.
     tab_id: Option<i64>,
-    /// Optional context_id from the latest sync (validates context and binds tab without renewing control; ignored by view).
+    /// read, screenshot (full_page=true), observe (probe_hover=true): optional context_id from the latest sync.
     context: Option<String>,
     /// observe, snapshot: approximate token cap for the rendered tree.
     max_tokens: Option<u32>,
@@ -1605,6 +1634,7 @@ async fn inspect(
                 timeout_ms: Some(timeout_ms),
             })
             .map_err(|e| invalid(e.to_string()))?;
+            ctx.validate_action_metadata(&Method::ToolScreenshotFullPage, Some(&params))?;
             let link = connect(daemon, control).await?;
             let reply_val = link
                 .rpc(
@@ -1700,6 +1730,7 @@ async fn inspect(
             &["scope", "out", "overwrite", "full_page", "context"],
             &[],
         )?;
+        ctx.validate_action_metadata(&Method::ToolScreenshot, Some(&params))?;
         let link = connect(daemon, control).await?;
         let mut value = link
             .rpc(&ctx, Method::ToolScreenshot, params, TOOL_IPC_TIMEOUT)
@@ -1794,6 +1825,7 @@ async fn inspect(
                 "discover accepts a selector scope, not ref or target_id",
             ));
         }
+        ctx.validate_action_metadata(&Method::ToolExtract, Some(&params))?;
         let link = connect(daemon, control).await?;
         let value = link
             .rpc(&ctx, Method::ToolExtract, params, TOOL_IPC_TIMEOUT)
@@ -1885,6 +1917,7 @@ async fn inspect(
         ),
         InspectAction::Screenshot | InspectAction::Extract | InspectAction::View => unreachable!(),
     };
+    ctx.validate_action_metadata(&method, Some(&params))?;
     let link = connect(daemon, control).await?;
     let value = link.rpc(&ctx, method, params, TOOL_IPC_TIMEOUT).await?;
     Ok(Reply {
@@ -2217,14 +2250,15 @@ async fn interact(link: &Link, prepared: Prepared) -> Result<Reply, CliError> {
             method,
             params,
         } => {
-            // Only the action RPC itself carries caller evidence (context/expect/observation/depends_on);
-            // follow-up readiness and cooperation RPCs use aux_ctx so action metadata never leaks.
+            // Only guarded actions receive caller evidence; readiness waits and post-sync stay clean.
             let aux_ctx = ctx.without_action_metadata();
-            let mut first_rpc = true;
             let (value, exit) = link
                 .blocking(move |rpc| {
                     step::run(&args, method, params, |method, params, timeout| {
-                        let rpc_ctx = if std::mem::take(&mut first_rpc) {
+                        let rpc_ctx = if business_rpc::method_accepts_action_metadata_with_params(
+                            &method,
+                            Some(&params),
+                        ) {
                             &ctx
                         } else {
                             &aux_ctx
@@ -2710,6 +2744,7 @@ async fn tabs(
         None,
         None,
     )?;
+    ctx.validate_action_metadata(&method, Some(&params))?;
     let link = connect(daemon, control).await?;
     let value = link.rpc(&ctx, method, params, timeout).await?;
     Ok(Reply::json(value))
@@ -2826,8 +2861,9 @@ async fn assist(
             if !(100..=7680).contains(&width) || !(100..=7680).contains(&height) {
                 return Err(invalid("window dimensions must be 100..=7680"));
             }
-            let link = connect(daemon, control).await?;
             let params = json!({"session_id": session, "width": width, "height": height});
+            ctx.validate_action_metadata(&Method::ToolWindowResize, Some(&params))?;
+            let link = connect(daemon, control).await?;
             return Ok(Reply::json(
                 link.rpc(&ctx, Method::ToolWindowResize, params, TOOL_IPC_TIMEOUT)
                     .await?,
@@ -2882,6 +2918,7 @@ async fn assist(
                 off: args.off.unwrap_or(false),
             })?;
             let params_val = serde_json::to_value(params).map_err(|e| invalid(e.to_string()))?;
+            ctx.validate_action_metadata(&Method::ToolEmulate, Some(&params_val))?;
             let link = connect(daemon, control).await?;
             return Ok(Reply::json(
                 link.rpc(&ctx, Method::ToolEmulate, params_val, TOOL_IPC_TIMEOUT)
@@ -2939,6 +2976,7 @@ async fn assist(
                 &["scope", "out", "overwrite"],
                 &[("wait_ms", json!(wait_ms))],
             )?;
+            ctx.validate_action_metadata(&Method::ToolOperationAwait, Some(&params))?;
             let link = connect(daemon, control).await?;
             let mut value = link
                 .rpc(
@@ -3002,6 +3040,7 @@ async fn assist(
             )
         }
     };
+    ctx.validate_action_metadata(&method, Some(&params))?;
     let link = connect(daemon, control).await?;
     let value = link.rpc(&ctx, method, params, timeout).await?;
     Ok(Reply::json(value))
@@ -3153,11 +3192,9 @@ fn validate_debug_args(
         args.expect,
         args.depends_on,
     )?;
-    if args.action != DebugAction::Replay
-        && (ctx.verification_requested() || ctx.context_id.is_some())
-    {
+    if !args.action.cooperation_guarded() && ctx.has_any_action_metadata() {
         return Err(invalid(
-            "context, depends_on, observation, and expect on bsk_debug apply only to replay",
+            "context, depends_on, observation, and expect on bsk_debug apply only to guarded debug actions",
         ));
     }
     if args.action != DebugAction::Capabilities && args.session.as_deref().is_none_or(str::is_empty)
@@ -4110,8 +4147,18 @@ mod tests {
             None,
         )
         .unwrap();
+        assert!(
+            ctx.prepare_params(&Method::ToolRead, Some(json!({"session_id": "s1"})))
+                .is_err()
+        );
+        let read_params = read_ctx
+            .prepare_params(&Method::ToolRead, Some(json!({"session_id": ""})))
+            .unwrap()
+            .unwrap();
+        assert_eq!(read_params["context_id"], "ctx-1");
+        assert_eq!(read_params["_caller_scope"], "scope:scope-1");
+
         for passive_method in [
-            Method::ToolRead,
             Method::ToolSnapshot,
             Method::ToolGetHtml,
             Method::ToolExtract,
@@ -4125,12 +4172,13 @@ mod tests {
                 ctx.prepare_params(&passive_method, Some(json!({"session_id": "s1"})))
                     .is_err()
             );
-            let read_params = read_ctx
-                .prepare_params(&passive_method, Some(json!({"session_id": ""})))
-                .unwrap()
-                .unwrap();
-            assert_eq!(read_params["context_id"], "ctx-1");
-            assert_eq!(read_params["_caller_scope"], "scope:scope-1");
+            assert!(
+                read_ctx
+                    .prepare_params(&passive_method, Some(json!({"session_id": ""})))
+                    .is_err(),
+                "{} must reject caller-supplied context_id",
+                passive_method.wire_name()
+            );
         }
 
         // Wait tool never receives leaked expect/observation/context metadata via without_action_metadata().
@@ -4254,7 +4302,6 @@ mod tests {
                 .unwrap()
                 .contains("unsupported")
         );
-
         let wait_err = call(
             &valid_daemon,
             &control,
@@ -4308,5 +4355,88 @@ mod tests {
         )
         .await;
         assert_eq!(ledger_bad["isError"], true);
+
+        let reply = call(
+            &valid_daemon,
+            &control,
+            None,
+            "bsk_session",
+            json!({"action":"start","project":"BrowserSkill"}),
+        )
+        .await;
+        assert!(
+            reply["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("require agent_name")
+        );
+
+        // Unguarded `bsk_page`, `bsk_tabs`, `bsk_assist`, `bsk_inspect`, and `bsk_debug` actions
+        // fail closed on context/observation before connecting.
+        for (tool, bad_args) in [
+            (
+                "bsk_page",
+                json!({"action":"wait_for_navigation","session":"s","context":"ctx-1"}),
+            ),
+            (
+                "bsk_page",
+                json!({"action":"wait_for_element","session":"s","selector":"#ready","observation":"obs-1"}),
+            ),
+            (
+                "bsk_tabs",
+                json!({"action":"list","session":"s","context":"ctx-1"}),
+            ),
+            (
+                "bsk_tabs",
+                json!({"action":"create","session":"s","observation":"obs-1"}),
+            ),
+            (
+                "bsk_tabs",
+                json!({"action":"select","session":"s","tab_id":7,"context":"ctx-1"}),
+            ),
+            (
+                "bsk_tabs",
+                json!({"action":"borrow","session":"s","tab_id":7,"context":"ctx-1"}),
+            ),
+            (
+                "bsk_tabs",
+                json!({"action":"return","session":"s","tab_id":7,"observation":"obs-1"}),
+            ),
+            (
+                "bsk_assist",
+                json!({"action":"dialog_status","session":"s","context":"ctx-1"}),
+            ),
+            (
+                "bsk_inspect",
+                json!({"action":"snapshot","session":"s","context":"ctx-1"}),
+            ),
+            (
+                "bsk_inspect",
+                json!({"action":"screenshot","session":"s","context":"ctx-1"}),
+            ),
+            (
+                "bsk_inspect",
+                json!({"action":"observe","session":"s","context":"ctx-1"}),
+            ),
+            (
+                "bsk_debug",
+                json!({"action":"requests","session":"s","context":"ctx-1"}),
+            ),
+        ] {
+            let reply = call(&valid_daemon, &control, None, tool, bad_args.clone()).await;
+            assert_eq!(reply["isError"], true, "{tool} {bad_args}");
+            let body: Value =
+                serde_json::from_str(reply["content"][0]["text"].as_str().unwrap()).unwrap();
+            assert_eq!(body["code"], "invalid_params", "{tool} {bad_args}: {body}");
+        }
+
+        assert!(!business_rpc::method_accepts_action_metadata_with_params(
+            &Method::ToolObserve,
+            Some(&json!({"session_id":"s","probe_hover":false})),
+        ));
+        assert!(business_rpc::method_accepts_action_metadata_with_params(
+            &Method::ToolObserve,
+            Some(&json!({"session_id":"s","probe_hover":true})),
+        ));
     }
 }

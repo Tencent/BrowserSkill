@@ -862,3 +862,72 @@ fn canvas_click_requires_complete_capture_coordinates() {
         assert!(Cli::try_parse_from(argv).is_err());
     }
 }
+
+#[test]
+fn parses_hyphen_prefixed_local_device_ids_and_rejects_malformed_flags() {
+    use bsk_protocol::local_auth::Bytes;
+
+    let ids = [
+        Bytes::<16>::decode("-IAAAAAAAAAAAAAAAAAAAA")
+            .unwrap()
+            .encode(),
+        Bytes::<16>::decode("-vAAAAAAAAAAAAAAAAAAAA")
+            .unwrap()
+            .encode(),
+        Bytes::<16>::decode("-hAAAAAAAAAAAAAAAAAAAA")
+            .unwrap()
+            .encode(),
+        Bytes::<16>::decode("--AAAAAAAAAAAAAAAAAAAA")
+            .unwrap()
+            .encode(),
+    ];
+    assert!(ids[0].starts_with("-I"));
+    assert!(ids[1].starts_with("-v"));
+    assert!(ids[2].starts_with("-h"));
+    assert!(ids[3].starts_with("--"));
+
+    for id in &ids {
+        let cli = parse(&["bsk", "daemon", "revoke", id, "--json"]);
+        assert!(cli.flags.json);
+        assert_eq!(cli.flags.verbose, 0);
+        let Command::Daemon(DaemonCmd::Revoke { device_id, all }) = cli.command else {
+            panic!("expected daemon revoke");
+        };
+        assert!(!all);
+        assert_eq!(device_id.as_deref(), Some(id.as_str()));
+
+        let Command::Daemon(DaemonCmd::Rotate { device_id }) =
+            parse(&["bsk", "daemon", "rotate", id]).command
+        else {
+            panic!("expected daemon rotate");
+        };
+        assert_eq!(device_id, *id);
+
+        let Command::Daemon(DaemonCmd::Pair { replace }) =
+            parse(&["bsk", "daemon", "pair", "--replace", id]).command
+        else {
+            panic!("expected daemon pair");
+        };
+        assert_eq!(replace.as_deref(), Some(id.as_str()));
+    }
+
+    let Command::Daemon(DaemonCmd::Revoke { device_id, all }) =
+        parse(&["bsk", "daemon", "revoke", "--all"]).command
+    else {
+        panic!("expected daemon revoke --all");
+    };
+    assert!(all);
+    assert!(device_id.is_none());
+
+    for bad in [
+        vec!["bsk", "daemon", "revoke", "--al"],
+        vec!["bsk", "daemon", "revoke", "-I"],
+        vec!["bsk", "daemon", "revoke", ""],
+        vec!["bsk", "daemon", "rotate", "--unknown"],
+        vec!["bsk", "daemon", "rotate", "-I"],
+        vec!["bsk", "daemon", "pair", "--replace", "--json"],
+        vec!["bsk", "daemon", "pair", "--replace", "-I"],
+    ] {
+        assert!(Cli::try_parse_from(&bad).is_err(), "{bad:?}");
+    }
+}

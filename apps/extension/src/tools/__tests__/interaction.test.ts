@@ -1231,6 +1231,389 @@ describe("click input readiness", () => {
     });
     expect(f.mouseCommands()).toHaveLength(0);
   });
+
+  it("enables focus emulation before unselecting a shared Linux tab, releases tab-creation barrier before clicking, and keeps failed temporary tabs off default routing", async () => {
+    const { waitForTabCreation } = await import("@/session-manager/tab-creation");
+    const { resolveTargetTab } = await import("../shared");
+    const events: string[] = [];
+    let activeTabId = 4;
+    let tempAlive = false;
+    let failCleanup = false;
+    const tabsState = () => [
+      {
+        id: 4,
+        windowId: 100,
+        active: activeTabId === 4,
+        url: "https://app.test/",
+        lastAccessed: 10,
+      },
+      ...(tempAlive
+        ? [
+            {
+              id: 99,
+              windowId: 100,
+              active: activeTabId === 99,
+              url: "about:blank",
+              lastAccessed: 20,
+            },
+          ]
+        : []),
+    ];
+    const prevChrome = globalThis.chrome;
+    vi.stubGlobal("chrome", {
+      runtime: { getPlatformInfo: vi.fn(async () => ({ os: "linux" })) },
+      windows: { get: vi.fn(async () => ({ id: 100, focused: false })) },
+      tabs: {
+        get: vi.fn(async (id: number) => {
+          const found = tabsState().find((t) => t.id === id);
+          if (!found) throw new Error("no tab");
+          return found;
+        }),
+        query: vi.fn(async (q: chrome.tabs.QueryInfo) =>
+          tabsState().filter((t) => (q.active === undefined ? true : t.active === q.active)),
+        ),
+        create: vi.fn(async () => {
+          events.push("tabs.create:99");
+          tempAlive = true;
+          return { id: 99, windowId: 100, active: false, url: "about:blank" };
+        }),
+        update: vi.fn(async (id: number, props: chrome.tabs.UpdateProperties) => {
+          if (failCleanup && id === 4) throw new Error("restore active failed");
+          events.push(`tabs.update:${id}:${props.active}`);
+          if (props.active) activeTabId = id;
+          return { id, windowId: 100, active: Boolean(props.active) };
+        }),
+        remove: vi.fn(async (id: number) => {
+          if (failCleanup) throw new Error("remove temp failed");
+          events.push(`tabs.remove:${id}`);
+          if (id === 99) tempAlive = false;
+        }),
+      },
+    });
+    try {
+      let focusEmulated = false;
+      const manager = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
+      const ctx = await manager.start("linux-shared");
+      // Make tab 4 the sole controlled tab so a temporary blank tab must be created.
+      ctx.agentCreatedTabs.clear();
+      ctx.agentCreatedTabs.add(4);
+      ctx.refStore.set("e1", 1234, { tabId: 4 });
+      let barrierResolvedDuringClick = false;
+      const fake = makeFakeCdp(
+        {
+          "DOM.scrollIntoViewIfNeeded": () => ({}),
+          "DOM.getContentQuads": () => ({ quads: [[0, 0, 40, 0, 40, 20, 0, 20]] }),
+          "Emulation.setFocusEmulationEnabled": (params: unknown) => {
+            const enabled = Boolean((params as { enabled?: boolean }).enabled);
+            focusEmulated = enabled;
+            events.push(`focus:${enabled}`);
+            return {};
+          },
+          "Input.dispatchMouseEvent": (params: unknown) => {
+            const type = String((params as { type?: string }).type);
+            if (type === "mousePressed") {
+              events.push(
+                `mousePressed:active=${activeTabId}:claimed=${ctx.agentCreatedTabs.has(99)}`,
+              );
+              void waitForTabCreation(ctx).then(() => {
+                barrierResolvedDuringClick = true;
+              });
+            }
+            return {};
+          },
+        },
+        () => (activeTabId === 4 || focusEmulated ? "visible" : "hidden"),
+      );
+
+      expect(
+        await handleClick(
+          manager,
+          { session_id: "linux-shared", ref: "e1" },
+          { cdp: fake.cdp, tabsApi: globalThis.chrome.tabs },
+        ),
+      ).not.toHaveProperty("code");
+      await Promise.resolve();
+      expect(barrierResolvedDuringClick).toBe(true);
+      // Focus emulation enabled BEFORE unselecting tab 4 (no premature blur on shared tab),
+      // mousePressed ran while tab 99 was active and claimed, then tab 4 restored & tab 99 removed.
+      expect(events).toEqual([
+        "focus:true",
+        "tabs.create:99",
+        "tabs.update:99:true",
+        "mousePressed:active=99:claimed=true",
+        "tabs.update:4:true",
+        "tabs.remove:99",
+        "focus:false",
+      ]);
+      expect(ctx.agentCreatedTabs.has(99)).toBe(false);
+
+      // Now simulate cleanup failure on both update(4) and remove(99):
+      // temporary tab 99 stays claimed (never leaked to user windows) and never becomes default target.
+      events.length = 0;
+      failCleanup = true;
+      const cleanupFailed = await handleClick(
+        manager,
+        { session_id: "linux-shared", ref: "e1" },
+        { cdp: fake.cdp, tabsApi: globalThis.chrome.tabs },
+      );
+      expect(cleanupFailed).toMatchObject({
+        code: "cdp_failed",
+        data: { reason: "input_cleanup_failed", effect_state: "unknown" },
+      });
+      expect(ctx.agentCreatedTabs.has(99)).toBe(true);
+      const resolvedDefault = await resolveTargetTab(
+        manager,
+        ctx,
+        undefined,
+        globalThis.chrome.tabs,
+      );
+      expect(resolvedDefault).toMatchObject({ tabId: 4 });
+    } finally {
+      vi.stubGlobal("chrome", prevChrome);
+    }
+  });
+
+  it("unselects a leased Linux tab before sampling visibility so a lost focus override triggers restoreLeasedInput, and covers drag/upload/download", async () => {
+    const { handleDrag } = await import("../drag");
+    const { handleUpload } = await import("../upload");
+    const { handleDownload } = await import("../download");
+    let activeTabId = 4;
+    let leaseOverrideIntact = false;
+    const unselectedDuringPress: string[] = [];
+    const tabsState = () => [
+      { id: 1, windowId: 100, active: activeTabId === 1, url: "about:blank" },
+      { id: 4, windowId: 100, active: activeTabId === 4, url: "https://app.test/" },
+    ];
+    const prevChrome = globalThis.chrome;
+    vi.stubGlobal("chrome", {
+      runtime: { getPlatformInfo: vi.fn(async () => ({ os: "linux" })) },
+      windows: { get: vi.fn(async () => ({ id: 100, focused: false })) },
+      tabs: {
+        get: vi.fn(async (id: number) => tabsState().find((t) => t.id === id)!),
+        query: vi.fn(async (q: chrome.tabs.QueryInfo) =>
+          tabsState().filter((t) => (q.active === undefined ? true : t.active === q.active)),
+        ),
+        update: vi.fn(async (id: number, props: chrome.tabs.UpdateProperties) => {
+          if (props.active) activeTabId = id;
+          return { id, windowId: 100, active: Boolean(props.active) };
+        }),
+        create: vi.fn(),
+        remove: vi.fn(),
+      },
+    });
+    try {
+      const manager = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
+      const ctx = await manager.start("linux-leased");
+      ctx.agentCreatedTabs.add(1);
+      ctx.agentCreatedTabs.add(4);
+      ctx.refStore.set("e1", 1234, { tabId: 4 });
+      ctx.refStore.set("e2", 5678, { tabId: 4 });
+
+      let currentTool = "click";
+      const fake = makeFakeCdp(
+        {
+          "Page.enable": () => ({}),
+          "Page.getFrameTree": () => ({ frameTree: { frame: { id: "main" } } }),
+          "DOM.enable": () => ({}),
+          "Page.setInterceptFileChooserDialog": () => ({}),
+          "DOM.scrollIntoViewIfNeeded": () => ({}),
+          "DOM.describeNode": () => ({
+            node: {
+              nodeId: 10,
+              backendNodeId: 1234,
+              nodeName: "INPUT",
+              attributes: ["type", "file"],
+            },
+          }),
+          "DOM.resolveNode": () => ({ object: { objectId: "obj-1" } }),
+          "DOM.getNodeForLocation": () => ({ backendNodeId: 1234, frameId: "main" }),
+          "Runtime.callFunctionOn": () => ({ result: { value: true } }),
+          "Runtime.releaseObjectGroup": () => ({}),
+          "DOM.setFileInputFiles": () => ({}),
+          "DOM.getContentQuads": () => ({ quads: [[0, 0, 40, 0, 40, 20, 0, 20]] }),
+          "DOM.getBoxModel": () => ({ model: { content: [0, 0, 40, 0, 40, 20, 0, 20] } }),
+          "Input.dispatchMouseEvent": (params: unknown) => {
+            if ((params as { type?: string }).type === "mousePressed") {
+              unselectedDuringPress.push(`${currentTool}:${activeTabId}`);
+              if (currentTool === "upload") {
+                cdpListener?.({ tabId: 4 }, "Page.fileChooserOpened", {
+                  mode: "selectSingle",
+                  backendNodeId: 1234,
+                });
+              }
+              if (currentTool === "download") {
+                queueMicrotask(() => {
+                  const completedItem = {
+                    id: 77,
+                    state: "complete",
+                    filename: "/tmp/bsk-dl/report.csv",
+                    url: "https://app.test/report.csv",
+                    finalUrl: "https://app.test/report.csv",
+                    mime: "text/csv",
+                    danger: "safe",
+                    bytesReceived: 4,
+                    totalBytes: 4,
+                    fileSize: 4,
+                    exists: true,
+                    incognito: false,
+                    paused: false,
+                    canResume: false,
+                    startTime: new Date().toISOString(),
+                  } as chrome.downloads.DownloadItem;
+                  cdpListener?.({ tabId: 4 }, "Page.downloadWillBegin", {
+                    url: "https://app.test/report.csv",
+                    suggestedFilename: "report.csv",
+                  });
+                  determiningFilename?.(completedItem, () => {});
+                  downloadCreated?.(completedItem);
+                });
+              }
+            }
+            return {};
+          },
+        },
+        // Active tab in unfocused X11 window reports "visible" even when override was lost,
+        // and only turns "hidden" once unselected to tab 1!
+        () => (activeTabId === 4 || leaseOverrideIntact ? "visible" : "hidden"),
+      );
+      let cdpListener:
+        | ((source: { tabId?: number }, method: string, params: unknown) => void)
+        | undefined;
+      fake.cdp.onEvent = (fn) => {
+        cdpListener = fn;
+        return { dispose: () => {} };
+      };
+      fake.cdp.ownsBackgroundExecution = vi.fn(() => true);
+      fake.cdp.restoreBackgroundExecution = vi.fn(async () => {
+        leaseOverrideIntact = true;
+      });
+
+      // 1. Click: unselects tab 4 -> sees "hidden" -> calls restoreBackgroundExecution -> clicks -> restores tab 4.
+      expect(
+        await handleClick(
+          manager,
+          { session_id: "linux-leased", ref: "e1" },
+          { cdp: fake.cdp, tabsApi: globalThis.chrome.tabs },
+        ),
+      ).not.toHaveProperty("code");
+      expect(fake.cdp.restoreBackgroundExecution).toHaveBeenCalledOnce();
+      expect(activeTabId).toBe(4);
+
+      // 2. Drag: also passes preserveWindowFocus: true -> unselects tab 4 before mousePressed.
+      currentTool = "drag";
+      expect(
+        await handleDrag(
+          manager,
+          {
+            session_id: "linux-leased",
+            source: { ref: "e1" },
+            delta: { x: 20, y: 0 },
+            duration_ms: 16,
+          },
+          { cdp: fake.cdp, tabsApi: globalThis.chrome.tabs },
+        ),
+      ).not.toHaveProperty("code");
+      expect(activeTabId).toBe(4);
+
+      // 3. Upload (input mode): passes preserveWindowFocus: true -> unselects tab 4 before mousePressed.
+      currentTool = "upload";
+      expect(
+        await handleUpload(
+          manager,
+          {
+            session_id: "linux-leased",
+            ref: "e1",
+            mode: "input",
+            files: [{ transfer_id: "tx-1", staged_path: "/tmp/a.txt", name: "a.txt" }],
+          },
+          { cdp: fake.cdp, tabsApi: globalThis.chrome.tabs },
+        ),
+      ).not.toHaveProperty("code");
+      expect(activeTabId).toBe(4);
+
+      // 4. Download: passes preserveWindowFocus: true -> unselects tab 4 before mousePressed.
+      currentTool = "download";
+      let downloadCreated: ((item: chrome.downloads.DownloadItem) => void) | undefined;
+      let determiningFilename:
+        | ((
+            item: chrome.downloads.DownloadItem,
+            suggest: (suggestion?: chrome.downloads.DownloadFilenameSuggestion) => void,
+          ) => void | true)
+        | undefined;
+      const noop = { addListener: () => {}, removeListener: () => {} };
+      expect(
+        await handleDownload(
+          manager,
+          { session_id: "linux-leased", ref: "e1", browser_relative_dir: "bsk-dl" },
+          {
+            cdp: fake.cdp,
+            tabsApi: globalThis.chrome.tabs,
+            navigationTargets: {
+              onCreatedNavigationTarget: noop,
+            },
+            downloads: {
+              onCreated: {
+                addListener: (fn) => {
+                  downloadCreated = fn;
+                },
+                removeListener: () => {},
+              },
+              onChanged: noop,
+              onDeterminingFilename: {
+                addListener: (fn) => {
+                  determiningFilename = fn;
+                },
+                removeListener: () => {},
+              },
+              search: async () => [
+                {
+                  id: 77,
+                  state: "complete",
+                  filename: "/tmp/bsk-dl/report.csv",
+                  url: "https://app.test/report.csv",
+                  finalUrl: "https://app.test/report.csv",
+                  mime: "text/csv",
+                  danger: "safe",
+                  bytesReceived: 4,
+                  totalBytes: 4,
+                  fileSize: 4,
+                  exists: true,
+                } as chrome.downloads.DownloadItem,
+              ],
+              cancel: async () => {},
+              removeFile: async () => {},
+            },
+          },
+        ),
+      ).not.toHaveProperty("code");
+      expect(activeTabId).toBe(4);
+
+      expect(unselectedDuringPress).toEqual(["click:1", "drag:1", "upload:1", "download:1"]);
+
+      // 5. If selecting the reused home tab (1) fails transiently, home is not left poisoned in temporaryInputTabs.
+      vi.mocked(globalThis.chrome.tabs.update).mockRejectedValueOnce(
+        new Error("select home failed"),
+      );
+      expect(
+        await handleClick(
+          manager,
+          { session_id: "linux-leased", ref: "e1" },
+          { cdp: fake.cdp, tabsApi: globalThis.chrome.tabs },
+        ),
+      ).toMatchObject({ code: "cdp_failed", data: { effect_state: "none" } });
+      expect(ctx.temporaryInputTabs?.has(1) ?? false).toBe(false);
+      expect(
+        await handleClick(
+          manager,
+          { session_id: "linux-leased", ref: "e1" },
+          { cdp: fake.cdp, tabsApi: globalThis.chrome.tabs },
+        ),
+      ).not.toHaveProperty("code");
+      expect(globalThis.chrome.tabs.create).not.toHaveBeenCalled();
+    } finally {
+      vi.stubGlobal("chrome", prevChrome);
+    }
+  });
 });
 
 describe("handleHover", () => {

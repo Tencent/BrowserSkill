@@ -190,9 +190,6 @@ jobs:
       - name: Run lint checks
         run: pnpm lint
 
-      - name: Build and verify the DSH npm skill package
-        run: pnpm --filter @wxg-prc-cpg/browser-skill-dsh-plugin build && node scripts/check-dsh-package.mjs
-
       - name: Compile extension TypeScript
         run: pnpm --filter @browser-skill/extension compile
 
@@ -202,46 +199,20 @@ jobs:
       - name: Run VOM tests
         run: pnpm --filter @browser-skill/vom test
 
-      - name: Run extension tests
+      - name: Run extension unit tests
         run: pnpm ext:test
+
+      - name: Validate browser evaluation corpus and harness tests
+        run: pnpm eval:browser:check
 
       - name: Build extension
         run: pnpm ext:build
 
-  windows-dsh-package:
-    name: Windows DSH npm package
-    runs-on: windows-latest
-
-    steps:
-      - uses: actions/checkout@v6
-
-      - uses: pnpm/action-setup@v6
-
-      - uses: actions/setup-node@v6
-        with:
-          node-version: 22
-          cache: pnpm
-
-      - name: Install dependencies
-        run: pnpm install --frozen-lockfile
-
-      - name: Run DSH runner tests on Windows
-        run: pnpm --filter @wxg-prc-cpg/browser-skill-dsh-plugin exec vitest run tests/runner.test.ts
-
-      - name: Build the DSH plugin
-        run: pnpm --filter @wxg-prc-cpg/browser-skill-dsh-plugin build
-
-      - name: Verify the npm archive and runtime resource paths
-        env:
-          TEMP: ${{ runner.temp }}/bsk package & cache
-          TMP: ${{ runner.temp }}/bsk package & cache
-        run: |
-          New-Item -ItemType Directory -Force -Path $env:TEMP | Out-Null
-          node scripts/check-dsh-package.mjs
-
   browser-download:
     name: Browser download cancellation regression
     runs-on: ubuntu-latest
+    env:
+      BSK_TEST_CHROME: google-chrome
 
     steps:
       - uses: actions/checkout@v6
@@ -255,14 +226,13 @@ jobs:
       - name: Prepare extension types
         run: pnpm --filter @browser-skill/extension exec wxt prepare
       - name: Run download cancellation browser regression
-        working-directory: apps/extension
-        env:
-          BSK_CLICK_CHROME: google-chrome
-        run: pnpm exec vitest run src/tools/__tests__/download-deadline.browser.test.ts
+        run: node scripts/run-browser-tests.mjs src/tools/__tests__/download-deadline.browser.test.ts
 
   browser-input:
     name: Browser input readiness regression
     runs-on: ubuntu-latest
+    env:
+      BSK_TEST_CHROME: google-chrome
 
     steps:
       - uses: actions/checkout@v6
@@ -281,61 +251,117 @@ jobs:
         run: pnpm --filter @browser-skill/extension exec wxt prepare
 
       - name: Run download-effect-state browser regression
-        working-directory: apps/extension
-        env:
-          BSK_CLICK_CHROME: google-chrome
-        run: pnpm exec vitest run src/tools/__tests__/download-effect-state.browser.test.ts
+        run: node scripts/run-browser-tests.mjs src/tools/__tests__/download-effect-state.browser.test.ts
 
       - name: Run browser input and debugging regressions
-        working-directory: apps/extension
-        env:
-          BSK_CLICK_CHROME: google-chrome
-        run: pnpm exec vitest run src/tools/__tests__/*click*.browser.test.ts src/tools/__tests__/observation-layers.browser.test.ts src/tools/__tests__/stealth-stripper.browser.test.ts src/debug/__tests__/*.browser.test.ts
+        run: >-
+          node scripts/run-browser-tests.mjs
+          src/tools/__tests__/click.browser.test.ts
+          src/tools/__tests__/click-listener-observation.browser.test.ts
+          src/tools/__tests__/dom-multiclick.browser.test.ts
+          src/tools/__tests__/soft-detach-click.browser.test.ts
+          src/tools/__tests__/target-hit.browser.test.ts
+          src/tools/__tests__/observation-layers.browser.test.ts
+          src/tools/__tests__/stealth-stripper.browser.test.ts
+          src/debug/__tests__/archive.browser.test.ts
+          src/debug/__tests__/debug.browser.test.ts
+          src/debug/__tests__/network-control.browser.test.ts
+          src/debug/__tests__/observer.browser.test.ts
+          src/debug/__tests__/performance.browser.test.ts
 
       - name: Run element wait browser regression
-        working-directory: apps/extension
-        env:
-          BSK_CLICK_CHROME: google-chrome
-        run: pnpm exec vitest run src/tools/__tests__/waits.browser.test.ts
+        run: node scripts/run-browser-tests.mjs src/tools/__tests__/waits.browser.test.ts
 
       - name: Run shared-control live text browser regression
-        working-directory: apps/extension
-        env:
-          BSK_CLICK_CHROME: google-chrome
-        run: pnpm exec vitest run src/cooperation/live-text.browser.test.ts
+        run: node scripts/run-browser-tests.mjs src/cooperation/live-text.browser.test.ts
 
       - name: Run navigation lifecycle and passive-read ref browser regressions
-        working-directory: apps/extension
-        env:
-          BSK_NAV_CHROME: google-chrome
-        run: pnpm exec vitest run src/tools/__tests__/navigation*.browser.test.ts
+        run: >-
+          node scripts/run-browser-tests.mjs
+          src/tools/__tests__/navigation-history.browser.test.ts
+          src/tools/__tests__/navigation-same-document.browser.test.ts
+          src/tools/__tests__/navigation-wait.browser.test.ts
 
       - name: Run emulation-lifecycle browser regression
-        working-directory: apps/extension
-        env:
-          BSK_CLICK_CHROME: google-chrome
-        run: pnpm exec vitest run src/tools/__tests__/emulation-lifecycle.browser.test.ts
+        run: node scripts/run-browser-tests.mjs src/tools/__tests__/emulation-lifecycle.browser.test.ts
 
       - name: Run structured extraction browser regression
-        working-directory: apps/extension
-        env:
-          BSK_CLICK_CHROME: google-chrome
-        run: pnpm exec vitest run src/tools/extract/extract.browser.test.ts
+        run: node scripts/run-browser-tests.mjs src/tools/extract/extract.browser.test.ts
 
       - name: Run drag browser regression
-        working-directory: apps/extension
-        env:
-          BSK_DRAG_CHROME: google-chrome
-        run: pnpm exec vitest run src/tools/__tests__/drag.browser.test.ts
+        run: node scripts/run-browser-tests.mjs src/tools/__tests__/drag.browser.test.ts
 
       - name: Run fill browser regression
-        working-directory: apps/extension
+        run: node scripts/run-browser-tests.mjs src/tools/__tests__/fill.browser.test.ts
+
+  browser-extension-and-geometry:
+    name: Browser geometry, screenshots, session routing and dynamic reading
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: pnpm
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Install Chrome for Testing
+        run: |
+          chrome_download=$(curl --fail --silent --show-error --location https://googlechromelabs.github.io/chrome-for-testing/last-known-good-versions-with-downloads.json | jq -er '.channels.Stable.downloads.chrome[] | select(.platform == "linux64") | .url')
+          curl --fail --silent --show-error --location --retry 3 "$chrome_download" --output "$RUNNER_TEMP/cft-chrome.zip"
+          unzip -q "$RUNNER_TEMP/cft-chrome.zip" -d "$RUNNER_TEMP/cft-chrome"
+          echo "BSK_TEST_CHROME=$RUNNER_TEMP/cft-chrome/chrome-linux64/chrome" >> "$GITHUB_ENV"
+          "$RUNNER_TEMP/cft-chrome/chrome-linux64/chrome" --version
+      - name: Build CLI and extension
+        run: |
+          cargo build -p bsk --locked
+          pnpm --filter @browser-skill/extension build
+      - name: Run geometry, scroll, wheel, focus, select and button-recording regressions
+        run: >-
+          node scripts/run-browser-tests.mjs
+          src/content/__tests__/record-input-buttons.browser.test.ts
+          src/tools/__tests__/focus.browser.test.ts
+          src/tools/__tests__/scroll.browser.test.ts
+          src/tools/__tests__/select.browser.test.ts
+          src/tools/__tests__/snapshot-coordinates.browser.test.ts
+          src/tools/__tests__/visual-geometry.browser.test.ts
+          src/tools/__tests__/wheel.browser.test.ts
+      - name: Run full-page screenshot, incognito and remote-connection regressions
+        run: >-
+          node scripts/run-browser-tests.mjs
+          src/long-screenshot/renderer.browser.test.ts
+          src/long-screenshot/long-screenshot.browser.test.ts
+          src/long-screenshot/agent.browser.test.ts
+          src/tools/__tests__/background-full-page.browser.test.ts
+          src/session-manager/__tests__/incognito.browser.test.ts
+          src/transport/__tests__/remote-connection.browser.test.ts
+      - name: Run headed background execution, screenshot and window-routing regressions
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends openbox
+          xvfb-run -a -s "-screen 0 1920x1200x24" bash -ec '
+            openbox &
+            wm_pid=$!
+            trap "kill $wm_pid 2>/dev/null || true" EXIT
+            sleep 0.5
+            node scripts/run-browser-tests.mjs \
+              src/tools/__tests__/background-execution.browser.test.ts \
+              src/tools/__tests__/background-screenshot.browser.test.ts \
+              src/session-manager/__tests__/window-routing.browser.test.ts
+          '
+      - name: Build extension for the isolated dynamic-reading daemon
         env:
-          BSK_FILL_CHROME: google-chrome
-        run: pnpm exec vitest run src/tools/__tests__/fill.browser.test.ts
+          BSK_DAEMON_WS_URL: ws://127.0.0.1:52923
+        run: pnpm --filter @browser-skill/extension build
+      - name: Validate dynamic reading across CLI, MCP and plan
+        run: pnpm eval:browser:dynamic-read
 
   browser-video:
-    name: Browser video recording regression
+    name: Browser video recording and shared-control regression
     # Allows Chrome for Testing's user-namespace sandbox without a custom
     # AppArmor profile for its temporary installation path.
     runs-on: ubuntu-22.04
@@ -358,41 +384,32 @@ jobs:
           video_chrome_download=$(curl --fail --silent --show-error --location https://googlechromelabs.github.io/chrome-for-testing/last-known-good-versions-with-downloads.json | jq -er '.channels.Stable.downloads.chrome[] | select(.platform == "linux64") | .url')
           curl --fail --silent --show-error --location --retry 3 "$video_chrome_download" --output "$RUNNER_TEMP/video-chrome.zip"
           unzip -q "$RUNNER_TEMP/video-chrome.zip" -d "$RUNNER_TEMP/video-chrome"
-          echo "BSK_VIDEO_CHROME=$RUNNER_TEMP/video-chrome/chrome-linux64/chrome" >> "$GITHUB_ENV"
+          echo "BSK_TEST_CHROME=$RUNNER_TEMP/video-chrome/chrome-linux64/chrome" >> "$GITHUB_ENV"
           mkdir -p "$BSK_VIDEO_ARTIFACTS"
           "$RUNNER_TEMP/video-chrome/chrome-linux64/chrome" --version | tee "$BSK_VIDEO_ARTIFACTS/chrome-version.txt"
-      - name: Build CLI, extension and DSH plugin
+      - name: Build CLI and extension
         run: |
           cargo build -p bsk --locked
           pnpm --filter @browser-skill/extension build
-          pnpm --filter @wxg-prc-cpg/browser-skill-dsh-plugin build
       - name: Validate interaction capture on HTTP intranet pages and hidden silent frames
-        working-directory: apps/extension
-        env:
-          BSK_COOP_CHROME: ${{ env.BSK_VIDEO_CHROME }}
-        run: pnpm exec vitest run src/content/__tests__/cooperation-capture.browser.test.ts src/cooperation/hidden-frames.browser.test.ts
+        run: >-
+          node scripts/run-browser-tests.mjs
+          src/content/__tests__/cooperation-capture.browser.test.ts
+          src/cooperation/hidden-frames.browser.test.ts
       - name: Validate window resize and viewport reporting
-        working-directory: apps/extension
-        env:
-          BSK_WINDOW_CHROME: ${{ env.BSK_VIDEO_CHROME }}
-        run: pnpm exec vitest run src/tools/__tests__/window.browser.test.ts
-      - name: Validate thumbnail cancellation, synchronization and navigating clicks
-        working-directory: packages/dsh-plugin-browserskill
-        env:
-          BSK_COOP_CHROME: ${{ env.BSK_VIDEO_CHROME }}
-          BSK_COOP_BSK: ../../target/debug/bsk
-        run: pnpm exec vitest run tests/cooperation.browser.test.ts
+        run: node scripts/run-browser-tests.mjs src/tools/__tests__/window.browser.test.ts
+      - name: Validate MCP cancellation, synchronization and navigating inputs
+        run: node scripts/run-browser-tests.mjs src/cooperation/settlement.browser.test.ts
       - name: Validate task termination on tab detachment
-        working-directory: apps/extension
         env:
-          BSK_TAB_DETACH_CHROME: ${{ env.BSK_VIDEO_CHROME }}
           BSK_TAB_DETACH_REPORT: ${{ env.BSK_VIDEO_ARTIFACTS }}/tab-detachment.json
-        run: pnpm exec vitest run src/session-manager/__tests__/tab-detachment.browser.test.ts
-      - name: Validate capture, playback, recovery and CLI/DSH export
-        working-directory: apps/extension
-        env:
-          BSK_VIDEO_BSK: ../../target/debug/bsk
-        run: pnpm exec vitest run src/video/*.browser.test.ts --reporter=default --reporter=json --outputFile.json="$BSK_VIDEO_ARTIFACTS/results.json"
+        run: node scripts/run-browser-tests.mjs src/session-manager/__tests__/tab-detachment.browser.test.ts
+      - name: Validate capture, playback, recovery and CLI export
+        run: >-
+          node scripts/run-browser-tests.mjs
+          --output-json "${BSK_VIDEO_ARTIFACTS}/results.json"
+          src/video/capture.browser.test.ts
+          src/video/encoder.browser.test.ts
 
       - name: Build extension for the isolated cooperation daemon
         env:
@@ -401,14 +418,12 @@ jobs:
 
       - name: Validate failed-frame synchronization and CLI recovery
         env:
-          BSK_COOP_CHROME: ${{ env.BSK_VIDEO_CHROME }}
           BSK_COOP_FRAMES_ONLY: "1"
           BSK_COOP_ARTIFACTS: ${{ env.BSK_VIDEO_ARTIFACTS }}/cooperation
         run: node evals/browser/cases/regression/cooperation/run.mjs
 
-      - name: Validate target control, plans and recipe drift through CLI and DSH
+      - name: Validate target control, plans and recipe drift through CLI and MCP
         env:
-          BSK_COOP_CHROME: ${{ env.BSK_VIDEO_CHROME }}
           BSK_COOP_TARGET_ONLY: "1"
           BSK_RECIPE_RUNS: "2"
           BSK_COOP_ARTIFACTS: ${{ env.BSK_VIDEO_ARTIFACTS }}/cooperation-intent
@@ -430,7 +445,6 @@ jobs:
 
       - name: Validate native dialogs, held control, download recovery and teardown
         env:
-          BSK_DIALOG_CHROME: ${{ env.BSK_VIDEO_CHROME }}
           BSK_DIALOG_TEST_TIMEOUT: "1"
           BSK_DIALOG_REVISION: ${{ github.event.pull_request.head.sha || github.sha }}
         run: xvfb-run -a node evals/browser/cases/regression/js-dialog-control/run.mjs
@@ -449,8 +463,6 @@ jobs:
         run: pnpm --filter @browser-skill/extension build
 
       - name: Validate drag CLI, native drops, recovery and cross-origin frame refs
-        env:
-          BSK_DRAG_CHROME: ${{ env.BSK_VIDEO_CHROME }}
         run: node evals/browser/cases/regression/drag-interactions/run.mjs
 
       - name: Upload drag regression evidence

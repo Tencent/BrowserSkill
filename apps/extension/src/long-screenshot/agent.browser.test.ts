@@ -22,8 +22,12 @@ type Send = <T = Record<string, unknown>>(
 async function poll<T>(read: () => Promise<T | false | undefined>, timeout = 20_000): Promise<T> {
   const end = Date.now() + timeout;
   while (Date.now() < end) {
-    const value = await read();
-    if (value) return value;
+    try {
+      const value = await read();
+      if (value) return value;
+    } catch (error) {
+      if (!String(error).includes("Cannot find default execution context")) throw error;
+    }
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
   throw new Error("Agent screenshot condition timed out");
@@ -85,12 +89,28 @@ async function withAgent(
     USERPROFILE: fixtureHome,
     KIMI_CODE_HOME: path.join(fixtureHome, ".kimi-code"),
     HERMES_HOME: path.join(fixtureHome, ".hermes"),
+    DSH_HOME: path.join(fixtureHome, ".dsh"),
     BSK_HOME: directory,
     BSK_AUTO_START: "0",
     BSK_AUTO_UPDATE: "off",
     BSK_UPDATE_MANIFEST_URL: `${baseUrl}/update.json`,
   };
-  const cli = process.env.BSK_LONG_SCREENSHOT_CLI!;
+  for (const key of [
+    "BSK_SESSION",
+    "BSK_SCOPE",
+    "CLAUDE_CODE_AGENT_ID",
+    "CODEX_THREAD_ID",
+    "ANTIGRAVITY_CONVERSATION_ID",
+    "CURSOR_TRACE_ID",
+    "DSH_SESSION_ID",
+  ]) {
+    delete (env as NodeJS.ProcessEnv)[key];
+  }
+  const defaultCli = path.resolve(
+    "../../target/debug",
+    process.platform === "win32" ? "bsk.exe" : "bsk",
+  );
+  const cli = path.resolve(process.env.BSK_TEST_CLI ?? defaultCli);
   const daemon = spawn(cli, ["daemon", "start", "--foreground", "--port", String(port)], {
     env,
     stdio: "ignore",
@@ -115,7 +135,7 @@ async function withAgent(
     );
     await withChrome(
       {
-        executable: process.env.BSK_LONG_SCREENSHOT_CHROME,
+        executable: process.env.BSK_TEST_CHROME,
         deviceScale: scale,
         zoom: 1,
         extensionPath: path.resolve("dist/chrome-mv3"),
@@ -149,14 +169,10 @@ async function harness(
   cli: string,
   env: NodeJS.ProcessEnv,
 ) {
-  const targets = () =>
-    send<{ targetInfos: { type: string; url: string; targetId: string }[] }>("Target.getTargets");
-  const worker = await poll(async () =>
-    (await targets()).targetInfos.find(
-      (t) => t.type === "service_worker" && t.url.endsWith("/background.js"),
-    ),
+  const { attachPairingBackground } = await import(
+    new URL("../../../../evals/browser/local-pairing.mjs", import.meta.url).href
   );
-  const origin = worker.url.split("/").slice(0, 3).join("/");
+  const { origin } = await attachPairingBackground(send, path.resolve("dist/chrome-mv3"));
   const extensionTarget = await send<{ targetId: string }>("Target.createTarget", {
     url: `${origin}/popup.html`,
     background: true,
@@ -248,12 +264,18 @@ async function harness(
     );
   const setWindowState = (state: "minimized" | "normal") =>
     evaluate(`chrome.windows.update(${started.agent_window_id},${JSON.stringify({ state })})`);
+  const syncCtx = async () => [
+    "--context",
+    (await ok(["cooperate", "sync", "--session", session, "--policy", "strict", "--settle"]))
+      .context_id as string,
+  ];
   return {
     directory,
     baseUrl,
     session,
     tabId,
     setWindowState,
+    syncCtx,
     command,
     ok,
     onPage,
@@ -301,231 +323,275 @@ function verifyPng(png: Buffer, expectedHeight: number, scale = 1) {
   }
 }
 
-describe.skipIf(!process.env.BSK_LONG_SCREENSHOT_CHROME || !process.env.BSK_LONG_SCREENSHOT_CLI)(
-  "Agent full-page screenshots",
-  () => {
-    it(
-      "rejects old refs after document navigation and accepts a fresh observation",
-      () =>
-        withAgent(async (h) => {
-          const session = ["--session", h.session];
-          for (let i = 0; i < 3; i++) {
-            await h.ok(["navigate", h.baseUrl + "/ref-before", ...session]);
-            const observation = await h.ok(["observe", ...session]);
-            const ref = observation.text.match(/@e\d+/)[0];
-            await h.ok(["navigate", h.baseUrl + "/ref-after", ...session]);
-            const stale = await h.command(["click", ref, ...session]).done;
-            expect(stale.code).not.toBe(0);
-            expect(stale.stdout + stale.stderr).toContain("ref_not_found");
-            expect(await h.onPage("window.clicks")).toEqual([]);
-            const fresh = (await h.ok(["observe", ...session])).text.match(/@e\d+/)[0];
-            await h.ok(["click", fresh, ...session]);
-            expect(await h.onPage("window.clicks")).toEqual([true]);
-          }
-        }),
-      90_000,
-    );
+describe.skipIf(!process.env.BSK_TEST_CHROME)("Agent full-page screenshots", () => {
+  it(
+    "rejects old refs after document navigation and accepts a fresh observation",
+    () =>
+      withAgent(async (h) => {
+        const session = ["--session", h.session];
+        const syncTarget = async () => {
+          const synced = await h.ok([
+            "cooperate",
+            "sync",
+            "--session",
+            h.session,
+            "--policy",
+            "target",
+            "--settle",
+          ]);
+          return {
+            ctx: ["--context", synced.context_id as string] as const,
+            untargeted: [
+              "--context",
+              synced.context_id as string,
+              "--observation",
+              synced.observation_id as string,
+            ] as const,
+          };
+        };
+        for (let i = 0; i < 3; i++) {
+          await h.ok([
+            "navigate",
+            h.baseUrl + "/ref-before",
+            ...session,
+            ...(await syncTarget()).untargeted,
+          ]);
+          const observation = await h.ok(["observe", ...session]);
+          const ref = observation.text.match(/@e\d+/)[0];
+          await h.ok([
+            "navigate",
+            h.baseUrl + "/ref-after",
+            ...session,
+            ...(await syncTarget()).untargeted,
+          ]);
+          const ctxAfter = (await syncTarget()).ctx;
+          const stale = await h.command(["click", ref, ...session, ...ctxAfter]).done;
+          expect(stale.code).not.toBe(0);
+          expect(stale.stdout + stale.stderr).toContain("ref_not_found");
+          expect(await h.onPage("window.clicks")).toEqual([]);
+          const fresh = (await h.ok(["observe", ...session])).text.match(/@e\d+/)[0];
+          await h.ok(["click", fresh, ...session, ...ctxAfter]);
+          expect(await h.onPage("window.clicks")).toEqual([true]);
+        }
+      }),
+    90_000,
+  );
 
-    it(
-      "rejects hidden full-page capture without changing the page and recovers in the same session",
-      () =>
-        withAgent(async (h) => {
-          const session = ["--session", h.session];
-          const target = [...session, "--tab-id", String(h.tabId)];
-          const original = await h.restored();
-          await h.setWindowState("minimized");
-          await poll(async () => (await h.onPage("document.visibilityState")) === "hidden");
-          expect(await h.onPage("document.visibilityState")).toBe("hidden");
-          const rejected = await h.command([
-            "screenshot",
-            "--full-page",
-            ...target,
-            "--out",
-            path.join(h.directory, "hidden.png"),
-          ]).done;
-          expect(rejected.code).not.toBe(0);
-          expect(rejected.stdout + rejected.stderr).toContain("page_hidden");
-          expect(await h.restored()).toEqual(original);
-          expect(await h.scratch()).toEqual([]);
-          await h.setWindowState("normal");
-          await poll(async () => (await h.onPage("document.visibilityState")) === "visible");
-          const viewport = await h.ok([
-            "screenshot",
-            ...target,
-            "--out",
-            path.join(h.directory, "recovered-viewport.png"),
-          ]);
-          expect(viewport.height).toBeGreaterThan(0);
-          const out = path.join(h.directory, "recovered-full.png");
-          await h.ok(["screenshot", "--full-page", ...target, "--out", out]);
-          verifyPng(await readFile(out), 2634);
-          expect(await h.restored()).toEqual(original);
-        }),
-      120_000,
-    );
+  it(
+    "rejects hidden full-page capture without changing the page and recovers in the same session",
+    () =>
+      withAgent(async (h) => {
+        const session = ["--session", h.session];
+        const target = [...session, "--tab-id", String(h.tabId)];
+        const original = await h.restored();
+        await h.setWindowState("minimized");
+        await poll(async () => (await h.onPage("document.visibilityState")) === "hidden");
+        expect(await h.onPage("document.visibilityState")).toBe("hidden");
+        const rejected = await h.command([
+          "screenshot",
+          "--full-page",
+          ...target,
+          ...(await h.syncCtx()),
+          "--out",
+          path.join(h.directory, "hidden.png"),
+        ]).done;
+        expect(rejected.code).not.toBe(0);
+        expect(rejected.stdout + rejected.stderr).toContain("page_hidden");
+        expect(await h.restored()).toEqual(original);
+        expect(await h.scratch()).toEqual([]);
+        await h.setWindowState("normal");
+        await poll(async () => (await h.onPage("document.visibilityState")) === "visible");
+        const viewport = await h.ok([
+          "screenshot",
+          ...target,
+          "--out",
+          path.join(h.directory, "recovered-viewport.png"),
+        ]);
+        expect(viewport.height).toBeGreaterThan(0);
+        const out = path.join(h.directory, "recovered-full.png");
+        await h.ok(["screenshot", "--full-page", ...target, ...(await h.syncCtx()), "--out", out]);
+        verifyPng(await readFile(out), 2634);
+        expect(await h.restored()).toEqual(original);
+      }),
+    120_000,
+  );
 
-    it.each([1, 2])(
-      "captures exact full-page pixels at scale %i through the CLI and releases all export files",
-      (scale) =>
-        withAgent(async (h) => {
-          const original = await h.restored();
-          const out = path.join(h.directory, "full.png");
-          const reply = await h.ok([
-            "screenshot",
-            "--session",
-            h.session,
-            "--full-page",
-            "--out",
-            out,
-          ]);
-          const png = await readFile(out);
-          expect(reply.byte_size).toBe(png.length);
-          expect(png.length).toBeGreaterThan(256 * 1024);
-          verifyPng(png, 2634 * scale, scale);
-          expect(await h.restored()).toEqual(original);
-          expect(await h.scratch()).toEqual([]);
-          const viewport = await h.ok([
-            "screenshot",
-            "--session",
-            h.session,
-            "--out",
-            path.join(h.directory, "viewport.png"),
-          ]);
-          expect(viewport.height).toBeLessThan(reply.height);
-          expect(viewport.width).toBeGreaterThan(0);
-        }, scale),
-      120_000,
-    );
+  it.each([1, 2])(
+    "captures exact full-page pixels at scale %i through the CLI and releases all export files",
+    (scale) =>
+      withAgent(async (h) => {
+        const original = await h.restored();
+        const out = path.join(h.directory, "full.png");
+        const reply = await h.ok([
+          "screenshot",
+          "--session",
+          h.session,
+          ...(await h.syncCtx()),
+          "--full-page",
+          "--out",
+          out,
+        ]);
+        const png = await readFile(out);
+        expect(reply.byte_size).toBe(png.length);
+        expect(png.length).toBeGreaterThan(256 * 1024);
+        verifyPng(png, 2634 * scale, scale);
+        expect(await h.restored()).toEqual(original);
+        expect(await h.scratch()).toEqual([]);
+        const viewport = await h.ok([
+          "screenshot",
+          "--session",
+          h.session,
+          "--out",
+          path.join(h.directory, "viewport.png"),
+        ]);
+        expect(viewport.height).toBeLessThan(reply.height);
+        expect(viewport.width).toBeGreaterThan(0);
+      }, scale),
+    120_000,
+  );
 
-    it(
-      "captures the current range when the loading indicator never clears",
-      () =>
-        withAgent(async (h) => {
-          const original = await h.restored();
-          await h.onPage(
-            `document.body.insertAdjacentHTML('beforeend', '<span style="position:absolute;top:2500px;left:500px">加载中...</span>')`,
-          );
-          const out = path.join(h.directory, "current.png");
-          const reply = await h.ok([
-            "screenshot",
-            "--session",
-            h.session,
-            "--full-page",
-            "--scope",
-            "current",
-            "--out",
-            out,
-          ]);
-          expect(reply.scope).toBe("current");
-          verifyPng(await readFile(out), 2634, 1);
-          expect(await h.restored()).toEqual(original);
-          expect(await h.scratch()).toEqual([]);
-        }),
-      120_000,
-    );
+  it(
+    "captures the current range when the loading indicator never clears",
+    () =>
+      withAgent(async (h) => {
+        const original = await h.restored();
+        await h.onPage(
+          `document.body.insertAdjacentHTML('beforeend', '<span style="position:absolute;top:2500px;left:500px">加载中...</span>')`,
+        );
+        const out = path.join(h.directory, "current.png");
+        const reply = await h.ok([
+          "screenshot",
+          "--session",
+          h.session,
+          ...(await h.syncCtx()),
+          "--full-page",
+          "--scope",
+          "current",
+          "--out",
+          out,
+        ]);
+        expect(reply.scope).toBe("current");
+        verifyPng(await readFile(out), 2634, 1);
+        expect(await h.restored()).toEqual(original);
+        expect(await h.scratch()).toEqual([]);
+      }),
+    120_000,
+  );
 
-    it(
-      "restores the page on timeout and Ctrl-C without replacing an existing output",
-      () =>
-        withAgent(async (h) => {
-          const original = await h.restored();
-          const out = path.join(h.directory, "previous.png");
-          await writeFile(out, "previous image");
-          const timed = await h.command([
-            "screenshot",
-            "--session",
-            h.session,
-            "--full-page",
-            "--timeout",
-            "600ms",
-            "--out",
-            out,
-          ]).done;
-          expect(timed.code).not.toBe(0);
-          expect(timed.stderr + timed.stdout).toContain("timeout");
-          await poll(async () => (await h.restored()).y === original.y);
-          expect(await h.scratch()).toEqual([]);
-          const pending = h.command([
-            "screenshot",
-            "--session",
-            h.session,
-            "--full-page",
-            "--out",
-            out,
-          ]);
-          await poll(async () => (await h.onPage<number>("scrollY")) !== original.y);
-          pending.child.kill("SIGINT");
-          const stopped = await pending.done;
-          expect(stopped.code).not.toBe(0);
-          expect(stopped.stderr + stopped.stdout).toContain("cancelled");
-          await poll(async () => (await h.restored()).y === original.y);
-          await poll(async () => (await h.scratch()).length === 0);
-          expect(await readFile(out, "utf8")).toBe("previous image");
-          expect((await readdir(h.directory)).filter((n) => n.endsWith(".part"))).toEqual([]);
-        }),
-      120_000,
-    );
+  it(
+    "restores the page on timeout and Ctrl-C without replacing an existing output",
+    () =>
+      withAgent(async (h) => {
+        const original = await h.restored();
+        const out = path.join(h.directory, "previous.png");
+        await writeFile(out, "previous image");
+        const timed = await h.command([
+          "screenshot",
+          "--session",
+          h.session,
+          ...(await h.syncCtx()),
+          "--full-page",
+          "--timeout",
+          "600ms",
+          "--out",
+          out,
+        ]).done;
+        expect(timed.code).not.toBe(0);
+        expect(timed.stderr + timed.stdout).toContain("timeout");
+        await poll(async () => (await h.restored()).y === original.y);
+        expect(await h.scratch()).toEqual([]);
+        const nextCtx = await h.syncCtx();
+        const pending = h.command([
+          "screenshot",
+          "--session",
+          h.session,
+          ...nextCtx,
+          "--full-page",
+          "--out",
+          out,
+        ]);
+        await poll(async () => (await h.onPage<number>("scrollY")) !== original.y);
+        pending.child.kill("SIGINT");
+        const stopped = await pending.done;
+        expect(stopped.code).not.toBe(0);
+        expect(stopped.stderr + stopped.stdout).toContain("cancelled");
+        await poll(async () => (await h.restored()).y === original.y);
+        await poll(async () => (await h.scratch()).length === 0);
+        expect(await readFile(out, "utf8")).toBe("previous image");
+        expect((await readdir(h.directory)).filter((n) => n.endsWith(".part"))).toEqual([]);
+      }),
+    120_000,
+  );
 
-    it(
-      "honors the page's Escape cancel button without opening a popup result",
-      () =>
-        withAgent(async (h) => {
-          const original = await h.restored();
-          const out = path.join(h.directory, "cancelled.png");
-          const pending = h.command([
-            "screenshot",
-            "--session",
-            h.session,
-            "--full-page",
-            "--out",
-            out,
-          ]);
-          await poll(async () => (await h.onPage<number>("scrollY")) !== original.y);
-          await h.onPage("window.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape'}))");
-          const stopped = await pending.done;
-          expect(stopped.code).not.toBe(0);
-          expect(stopped.stderr + stopped.stdout).toContain("cancelled");
-          expect(await h.restored()).toEqual(original);
-          expect(await h.scratch()).toEqual([]);
-          expect((await readdir(h.directory)).includes("cancelled.png")).toBe(false);
-        }),
-      120_000,
-    );
+  it(
+    "honors the page's Escape cancel button without opening a popup result",
+    () =>
+      withAgent(async (h) => {
+        const original = await h.restored();
+        const out = path.join(h.directory, "cancelled.png");
+        const ctx = await h.syncCtx();
+        const pending = h.command([
+          "screenshot",
+          "--session",
+          h.session,
+          ...ctx,
+          "--full-page",
+          "--out",
+          out,
+        ]);
+        await poll(async () => (await h.onPage<number>("scrollY")) !== original.y);
+        await h.onPage("window.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape'}))");
+        const stopped = await pending.done;
+        expect(stopped.code).not.toBe(0);
+        expect(stopped.stderr + stopped.stdout).toContain("cancelled");
+        expect(await h.restored()).toEqual(original);
+        expect(await h.scratch()).toEqual([]);
+        expect((await readdir(h.directory)).includes("cancelled.png")).toBe(false);
+      }),
+    120_000,
+  );
 
-    it(
-      "captures pages beyond 32K pixels and cleans up after a local output error",
-      () =>
-        withAgent(async (h) => {
-          await h.ok(["navigate", `${h.baseUrl}/large`, "--session", h.session]);
-          const original = await h.restored();
-          const out = path.join(h.directory, "large.png");
-          const result = await h.ok([
-            "screenshot",
-            "--session",
-            h.session,
-            "--full-page",
-            "--timeout",
-            "3m",
-            "--out",
-            out,
-          ]);
-          expect(result.height).toBe(34_034);
-          verifyPng(await readFile(out), 34_034);
-          expect(await h.restored()).toEqual(original);
-          expect(await h.scratch()).toEqual([]);
-          await h.ok(["navigate", h.baseUrl, "--session", h.session]);
-          const failed = await h.command([
-            "screenshot",
-            "--session",
-            h.session,
-            "--full-page",
-            "--out",
-            path.join(h.directory, "missing", "out.png"),
-          ]).done;
-          expect(failed.code).not.toBe(0);
-          expect(await h.scratch()).toEqual([]);
-        }),
-      240_000,
-    );
-  },
-);
+  it(
+    "captures pages beyond 32K pixels and cleans up after a local output error",
+    () =>
+      withAgent(async (h) => {
+        await h.ok([
+          "navigate",
+          `${h.baseUrl}/large`,
+          "--session",
+          h.session,
+          ...(await h.syncCtx()),
+        ]);
+        const original = await h.restored();
+        const out = path.join(h.directory, "large.png");
+        const result = await h.ok([
+          "screenshot",
+          "--session",
+          h.session,
+          ...(await h.syncCtx()),
+          "--full-page",
+          "--timeout",
+          "3m",
+          "--out",
+          out,
+        ]);
+        expect(result.height).toBe(34_034);
+        verifyPng(await readFile(out), 34_034);
+        expect(await h.restored()).toEqual(original);
+        expect(await h.scratch()).toEqual([]);
+        await h.ok(["navigate", h.baseUrl, "--session", h.session, ...(await h.syncCtx())]);
+        const failed = await h.command([
+          "screenshot",
+          "--session",
+          h.session,
+          ...(await h.syncCtx()),
+          "--full-page",
+          "--out",
+          path.join(h.directory, "missing", "out.png"),
+        ]).done;
+        expect(failed.code).not.toBe(0);
+        expect(await h.scratch()).toEqual([]);
+      }),
+    240_000,
+  );
+});

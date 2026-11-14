@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { lstatSync, readdirSync, readFileSync } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 
-export function validateSkillDirectory(directory, { maxEntryBytes, browserTools } = {}) {
+export function validateSkillDirectory(directory, { maxEntryBytes } = {}) {
   const root = resolve(directory);
   const files = new Map();
   function walk(dir) {
@@ -38,7 +38,6 @@ export function validateSkillDirectory(directory, { maxEntryBytes, browserTools 
     );
   }
   const linked = new Set();
-  const mentionedTools = new Set();
   for (const [file, content] of files) {
     if (!file.endsWith(".md")) continue;
     for (const [, href] of content.matchAll(/\[[^\]]*\]\(([^\s)]+)\)/g)) {
@@ -52,29 +51,10 @@ export function validateSkillDirectory(directory, { maxEntryBytes, browserTools 
       assert(lstatSync(path).isFile(), `Broken skill link: ${file}: ${href}`);
       if (file === "SKILL.md") linked.add(local.split(sep).join("/"));
     }
-    if (browserTools) {
-      assert(!/\bbsk\b/i.test(content), `DSH skill exposes internal CLI: ${file}`);
-      assert(
-        !/```(?:bash|sh|shell)\b/i.test(content),
-        `DSH skill contains shell commands: ${file}`,
-      );
-      for (const tool of content.match(/\b(?:bsk|browser)_[a-z][a-z_]*\b/g) ?? []) {
-        assert(browserTools.includes(tool), `Unsupported DSH tool ${tool} in ${file}`);
-        mentionedTools.add(tool);
-      }
-    }
   }
   for (const file of files.keys()) {
     if (file.startsWith("references/"))
       assert(linked.has(file), `Reference not routed from SKILL.md: ${file}`);
   }
-  for (const tool of browserTools ?? [])
-    assert(mentionedTools.has(tool), `DSH skill omits ${tool}`);
   return { name, description, content: `${source.slice(frontmatter[0].length).trim()}\n`, files };
 }
-
-// Host schemas, client toolviews, and packaged instructions share one contract.
-// Opt-in tools are taught too, so a host that enables one finds its instructions.
-export const DSH_BROWSER_TOOLS = ["tool-names.json", "optional-tool-names.json"].flatMap((file) =>
-  Object.values(JSON.parse(readFileSync(new URL(`../src/${file}`, import.meta.url), "utf8"))),
-);

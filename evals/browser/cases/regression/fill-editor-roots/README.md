@@ -20,13 +20,13 @@ text reader to calculate expected results.
 Run the regression with Node 22+ and a local Chrome executable:
 
 ```sh
-BSK_FILL_CHROME=/path/to/chrome pnpm --filter @browser-skill/extension exec vitest run \
+BSK_TEST_CHROME=/path/to/chrome pnpm --filter @browser-skill/extension test:browser \
   src/tools/__tests__/fill.browser.test.ts
 ```
 
 The suite owns an isolated headless browser and profile, gives each case a fresh
-tab, and closes all targets and the browser on completion. It is skipped unless
-BSK_FILL_CHROME is set; CI runs it explicitly. No browser download is required.
+tab, and closes all targets and the browser on completion. It runs under
+`test:browser` with `BSK_TEST_CHROME` set; CI runs it explicitly. No browser download is required.
 
 Validate the corpus and run the CLI smoke against a connected test extension:
 

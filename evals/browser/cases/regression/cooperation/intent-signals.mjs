@@ -1,10 +1,12 @@
 import assert from "node:assert/strict";
 import { join } from "node:path";
 
+const targetParam = (target) => (target.startsWith("@e") ? { ref: target } : { selector: target });
+
 /** Real native input from the second CDP connection represents the person. */
 export async function runIntentScenarios({
   client,
-  dsh,
+  mcp,
   bsk,
   send,
   scope,
@@ -15,23 +17,33 @@ export async function runIntentScenarios({
   click,
 }) {
   const status = () =>
-    dsh
-      ? dsh.run("bsk_session", { action: "cooperation-status", session })
+    mcp
+      ? mcp.run("bsk_session", { action: "status", session })
       : bsk(["cooperate", "status", ...scope]);
   const wait = () =>
-    dsh
-      ? dsh.run("bsk_session", { action: "wait-user", session, timeoutMs: 3000 })
+    mcp
+      ? mcp.run("bsk_session", { action: "wait", session, timeout_ms: 3000 })
       : bsk(["cooperate", "wait", ...scope, "--timeout-ms", "3000"]);
   const fill = (target, value, context) =>
-    dsh
-      ? dsh.run("bsk_interact", { action: "fill", session, target, value, contextId: context })
+    mcp
+      ? mcp.run("bsk_interact", {
+          action: "fill",
+          session,
+          context,
+          params: { ...targetParam(target), value },
+        })
       : bsk(["fill", target, "--value", value, ...scope, "--context", context]);
   const press = (target, key, context) =>
-    dsh
-      ? dsh.run("bsk_interact", { action: "press", session, target, key, contextId: context })
+    mcp
+      ? mcp.run("bsk_interact", {
+          action: "press",
+          session,
+          context,
+          params: { ...targetParam(target), key },
+        })
       : bsk(["press", key, "--ref", target, ...scope, "--context", context]);
   const refuse = async (context) => {
-    if (dsh)
+    if (mcp)
       await assert.rejects(
         click(context),
         (error) =>
@@ -153,8 +165,8 @@ export async function runIntentScenarios({
     assert.equal((await wait()).ready, true);
     const frameSync = await sync();
     context = frameSync.context_id;
-    const frameSnapshot = dsh
-      ? await dsh.run("bsk_inspect", { action: "snapshot", session })
+    const frameSnapshot = mcp
+      ? await mcp.run("bsk_inspect", { action: "snapshot", session })
       : await bsk(["snapshot", ...scope]);
     const frameRef = frameSnapshot.text
       .split("\n")

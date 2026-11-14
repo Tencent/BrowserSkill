@@ -11,13 +11,11 @@ const scriptPath = fileURLToPath(new URL("./release.mjs", import.meta.url));
 function prepareRelease(t, changelog, extraArgs = []) {
   const cwd = mkdtempSync(join(tmpdir(), "bsk-release-test-"));
   t.after(() => rmSync(cwd, { recursive: true, force: true }));
-  for (const dir of ["apps/extension", "packages/dsh-plugin-browserskill", "bin"]) {
+  for (const dir of ["apps/extension", "bin"]) {
     mkdirSync(join(cwd, dir), { recursive: true });
   }
   writeFileSync(join(cwd, "Cargo.toml"), '[workspace.package]\nversion = "0.2.1"\n');
-  for (const dir of ["apps/extension", "packages/dsh-plugin-browserskill"]) {
-    writeFileSync(join(cwd, dir, "package.json"), '{"version":"0.2.1"}\n');
-  }
+  writeFileSync(join(cwd, "apps/extension", "package.json"), '{"version":"0.2.1"}\n');
   writeFileSync(join(cwd, "CHANGELOG.md"), changelog);
   // Exercise the real file-writing path without compiling Rust or creating Git tags.
   const windows = process.platform === "win32";

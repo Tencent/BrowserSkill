@@ -337,8 +337,11 @@ export async function resolveTargetTab(
   return target;
 }
 
-function isPendingTabRouting(ctx: SessionContext, tabId: number): boolean {
-  return (ctx.pendingRoutingTabs?.has(tabId) ?? false) && !isAgentControlledTab(ctx, tabId);
+function isExcludedImplicitTarget(ctx: SessionContext, tabId: number): boolean {
+  return (
+    ((ctx.pendingRoutingTabs?.has(tabId) ?? false) && !isAgentControlledTab(ctx, tabId)) ||
+    (ctx.temporaryInputTabs?.has(tabId) ?? false)
+  );
 }
 
 async function resolveVisibleTargetTab(
@@ -386,8 +389,8 @@ async function resolveVisibleTargetTab(
   }
   const tabs = await api.query({ active: true, windowId: ctx.agentWindowId });
   let first = tabs.find((t) => typeof t.id === "number");
-  if (first?.id !== undefined && isPendingTabRouting(ctx, first.id)) {
-    // External arrivals can become active before Chrome lets us move them.
+  if (first?.id !== undefined && isExcludedImplicitTarget(ctx, first.id)) {
+    // External arrivals and temporary input-deselection tabs must not become default targets.
     // Prefer the most recently accessed controlled page without activating tabs.
     const available = await api.query({ windowId: ctx.agentWindowId });
     first = available
@@ -395,7 +398,8 @@ async function resolveVisibleTargetTab(
         (tab) =>
           tab.id !== undefined &&
           tab.windowId === ctx.agentWindowId &&
-          isAgentControlledTab(ctx, tab.id),
+          isAgentControlledTab(ctx, tab.id) &&
+          !(ctx.temporaryInputTabs?.has(tab.id) ?? false),
       )
       .sort((a, b) => (b.lastAccessed ?? 0) - (a.lastAccessed ?? 0))[0];
     if (!first) {
@@ -512,7 +516,7 @@ export async function resolveCdpAccessibleTargetTab(
   const tabs = await api.query({ windowId: ctx.agentWindowId });
   for (const tab of tabs) {
     if (ctx.remote && (tab.id === undefined || !isAgentControlledTab(ctx, tab.id))) continue;
-    if (tab.id !== undefined && isPendingTabRouting(ctx, tab.id)) continue;
+    if (tab.id !== undefined && isExcludedImplicitTarget(ctx, tab.id)) continue;
     const candidate = resolvedTargetFromChromeTab(tab, ctx.agentWindowId);
     if (!candidate) continue;
     if (!enforceCdpAccessibleTarget(candidate, toolName)) return candidate;
