@@ -29,7 +29,7 @@ use tokio::time::{Instant, timeout_at};
 use tracing::debug;
 
 use crate::cli::error::CliError;
-use crate::ipc_client::IpcClient;
+use crate::ipc_client::{IpcClient, IpcRequestMeta, IpcResponseMeta};
 
 /// Total budget after cancellation is observed: connecting, sending cancel,
 /// retrying before registration, and waiting for the original RPC to settle.
@@ -301,14 +301,29 @@ impl ClientContext {
             }
         }
 
-        let has_empty_session = object
-            .get("session_id")
-            .is_some_and(|v| v.is_null() || v.as_str().is_some_and(|s| s.trim().is_empty()));
-        if has_empty_session && !object.contains_key("_caller_scope") {
-            object.insert("_caller_scope".into(), self.resolved_caller_scope().into());
-        }
-
         Ok(value)
+    }
+
+    /// Prepare both the clean business JSON `params` and the out-of-band
+    /// [`IpcRequestMeta`] envelope header for `method`.
+    pub fn prepare_envelope<P: Serialize>(
+        &self,
+        method: &Method,
+        params: Option<P>,
+        mut meta: IpcRequestMeta,
+    ) -> Result<(Option<serde_json::Value>, IpcRequestMeta), CliError> {
+        let value = self.prepare_params(method, params)?;
+        let has_empty_session = value
+            .as_ref()
+            .and_then(|v| v.as_object())
+            .and_then(|obj| obj.get("session_id"))
+            .is_some_and(|v| v.is_null() || v.as_str().is_some_and(|s| s.trim().is_empty()));
+        if meta.caller_scope.is_none()
+            && (has_empty_session || meta.bind_scope || meta.reuse_or_start_scope)
+        {
+            meta.caller_scope = Some(self.resolved_caller_scope());
+        }
+        Ok((value, meta))
     }
 
     /// Issue a business RPC against the daemon with SIGINT-driven cancellation.
@@ -324,12 +339,45 @@ impl ClientContext {
         P: Serialize,
         R: DeserializeOwned + Send + 'static,
     {
+        self.call_envelope::<P, R>(
+            sock,
+            rpc_id_prefix,
+            method,
+            params,
+            IpcRequestMeta::default(),
+            call_timeout,
+        )
+        .map(|(reply, _)| reply)
+    }
+
+    /// Issue a business RPC with an explicit [`IpcRequestMeta`] envelope and
+    /// return both the decoded reply and [`IpcResponseMeta`].
+    pub fn call_envelope<P, R>(
+        &self,
+        sock: PathBuf,
+        rpc_id_prefix: &str,
+        method: Method,
+        params: Option<P>,
+        meta: IpcRequestMeta,
+        call_timeout: Duration,
+    ) -> Result<(R, IpcResponseMeta), CliError>
+    where
+        P: Serialize,
+        R: DeserializeOwned + Send + 'static,
+    {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .context("build tokio runtime for business RPC")
             .map_err(CliError::Local)?;
-        rt.block_on(self.call_async::<P, R>(sock, rpc_id_prefix, method, params, call_timeout))
+        rt.block_on(self.call_envelope_async::<P, R>(
+            sock,
+            rpc_id_prefix,
+            method,
+            params,
+            meta,
+            call_timeout,
+        ))
     }
 
     /// Same as [`ClientContext::call`] but assumes a pre-existing tokio runtime context.
@@ -341,6 +389,32 @@ impl ClientContext {
         params: Option<P>,
         call_timeout: Duration,
     ) -> Result<R, CliError>
+    where
+        P: Serialize,
+        R: DeserializeOwned + Send + 'static,
+    {
+        self.call_envelope_async::<P, R>(
+            sock,
+            rpc_id_prefix,
+            method,
+            params,
+            IpcRequestMeta::default(),
+            call_timeout,
+        )
+        .await
+        .map(|(reply, _)| reply)
+    }
+
+    /// Same as [`ClientContext::call_envelope`] inside an existing tokio runtime.
+    pub async fn call_envelope_async<P, R>(
+        &self,
+        sock: PathBuf,
+        rpc_id_prefix: &str,
+        method: Method,
+        params: Option<P>,
+        meta: IpcRequestMeta,
+        call_timeout: Duration,
+    ) -> Result<(R, IpcResponseMeta), CliError>
     where
         P: Serialize,
         R: DeserializeOwned + Send + 'static,
@@ -358,7 +432,7 @@ impl ClientContext {
             }));
         }
         let rpc_id: RpcId = format!("{}-{}", rpc_id_prefix, random_short_id());
-        let params = self.prepare_params(&method, params)?;
+        let (params, meta) = self.prepare_envelope(&method, params, meta)?;
         // Optimistic single-UDS fast path: connect once and send the target RPC directly.
         // Fail-safe auto-spawn: ONLY if initial connect() fails before any bytes are written
         // (NotFound / ConnectionRefused on an unverified optimistic daemon.json candidate),
@@ -390,12 +464,18 @@ impl ClientContext {
         let main_fut = async move {
             action_started_ref.store(true, Ordering::Relaxed);
             client
-                .call_with_id::<serde_json::Value, R>(rpc_id_for_call, method, params, call_timeout)
+                .call_envelope_with_id::<serde_json::Value, R>(
+                    rpc_id_for_call,
+                    method,
+                    params,
+                    meta,
+                    call_timeout,
+                )
                 .await
         };
         tokio::pin!(main_fut);
 
-        let outcome = tokio::select! {
+        let (outcome, resp_meta) = tokio::select! {
             biased;
             // Arm cancellation before the RPC can dispatch browser input.
             sig = wait_for_cancel(parent_cancel) => {
@@ -446,7 +526,9 @@ impl ClientContext {
             res = &mut main_fut => res?,
         };
 
-        outcome.map_err(CliError::from_rpc)
+        outcome
+            .map(|reply| (reply, resp_meta))
+            .map_err(CliError::from_rpc)
     }
 }
 
@@ -759,15 +841,23 @@ mod tests {
         );
         let stripped = ctx.without_action_metadata();
         assert_eq!(stripped.scope.as_deref(), Some("agent-1"));
-        let wait_params = stripped
-            .prepare_params(&Method::ToolWaitForElement, Some(json!({"session_id":""})))
-            .unwrap()
+        let (wait_params, wait_meta) = stripped
+            .prepare_envelope(
+                &Method::ToolWaitForElement,
+                Some(json!({"session_id":""})),
+                crate::ipc_client::IpcRequestMeta::default(),
+            )
             .unwrap();
+        let wait_params = wait_params.unwrap();
         assert!(wait_params.get("expect").is_none());
         assert!(wait_params.get("context_id").is_none());
+        assert_eq!(wait_params, json!({"session_id": ""}));
         assert_eq!(
-            wait_params["_caller_scope"],
-            crate::daemon::scopes::resolve_caller_scope_from_env(Some("agent-1"), None)
+            wait_meta.caller_scope.as_deref(),
+            Some(
+                crate::daemon::scopes::resolve_caller_scope_from_env(Some("agent-1"), None)
+                    .as_str()
+            )
         );
 
         let mcp_ctx = ClientContext::for_mcp(Some("mcp:42:nonce"), None, None, vec![], None, None)

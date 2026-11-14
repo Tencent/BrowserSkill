@@ -7,14 +7,309 @@
 //!
 //! On Windows the same line protocol runs over a per-user named pipe.
 
-use anyhow::{Context, Result};
-use bsk_protocol::{Frame, ResponseBody, RpcError};
-use serde::de::DeserializeOwned;
+use std::fmt;
 
-fn decode_response<R: DeserializeOwned>(line: &str, id: &str) -> Result<RpcOutcome<R>> {
-    let frame: Frame = serde_json::from_str(line).context("decode IPC response")?;
+use anyhow::{Context, Result};
+use bsk_protocol::{
+    DecodeError, EventFrame, EventKind, Method, ResponseBody, ResponseFrame, RpcError, RpcId,
+};
+use serde::de::{self, DeserializeOwned, MapAccess, Visitor};
+use serde::ser::SerializeStruct;
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+fn is_false(v: &bool) -> bool {
+    !*v
+}
+
+/// Request-side transport metadata on the local CLI/MCP ↔ daemon IPC link.
+/// Keeps caller scope and implicit session binding directives out of business
+/// `params: Value` payloads.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct IpcRequestMeta {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub caller_scope: Option<String>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub bind_scope: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub reuse_or_start_scope: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub explicit_incognito: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub return_scope_meta: bool,
+}
+
+impl IpcRequestMeta {
+    pub fn is_empty(&self) -> bool {
+        self.caller_scope.is_none()
+            && !self.bind_scope
+            && !self.reuse_or_start_scope
+            && !self.explicit_incognito
+            && !self.return_scope_meta
+    }
+}
+
+/// Daemon-cached observation metadata returned out-of-band alongside a
+/// `tool.cooperate` (or `operation_await`) reply when `return_scope_meta` is requested.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ScopeResultMeta {
+    pub session_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tab_id: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub short_ctx: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub short_obs: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cached_vom: Option<String>,
+    #[serde(default)]
+    pub cached_vom_truncated: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cached_vom_next_cursor: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cached_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cached_title: Option<String>,
+    #[serde(default)]
+    pub cache_reusable: bool,
+}
+
+/// Response-side transport metadata on the local CLI/MCP ↔ daemon IPC link.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct IpcResponseMeta {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope_meta: Option<ScopeResultMeta>,
+}
+
+impl IpcResponseMeta {
+    pub fn is_empty(&self) -> bool {
+        self.scope_meta.is_none()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct IpcRequestEnvelope {
+    pub id: RpcId,
+    pub method: Method,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub params: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "IpcRequestMeta::is_empty")]
+    pub meta: IpcRequestMeta,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct IpcResponseEnvelope {
+    pub id: RpcId,
+    pub body: ResponseBody,
+    pub meta: IpcResponseMeta,
+}
+
+impl Serialize for IpcResponseEnvelope {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let fields = if self.meta.is_empty() { 2 } else { 3 };
+        let mut s = serializer.serialize_struct("IpcResponseEnvelope", fields)?;
+        s.serialize_field("id", &self.id)?;
+        match &self.body {
+            ResponseBody::Ok(v) => s.serialize_field("result", v)?,
+            ResponseBody::Err(e) => s.serialize_field("error", e)?,
+        }
+        if !self.meta.is_empty() {
+            s.serialize_field("meta", &self.meta)?;
+        }
+        s.end()
+    }
+}
+
+/// Strongly typed local IPC wire envelope shared by CLI/MCP and the daemon.
+/// Wire-compatible with [`bsk_protocol::Frame`] whenever `meta` is empty.
+#[derive(Debug, Clone, PartialEq)]
+pub enum IpcEnvelope {
+    Request(IpcRequestEnvelope),
+    Response(IpcResponseEnvelope),
+    Event(EventFrame),
+}
+
+impl Serialize for IpcEnvelope {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        match self {
+            Self::Request(v) => v.serialize(serializer),
+            Self::Response(v) => v.serialize(serializer),
+            Self::Event(v) => v.serialize(serializer),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for IpcEnvelope {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        deserializer.deserialize_any(IpcEnvelopeVisitor)
+    }
+}
+
+struct IpcEnvelopeVisitor;
+
+impl<'de> Visitor<'de> for IpcEnvelopeVisitor {
+    type Value = IpcEnvelope;
+
+    fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "an IPC envelope object")
+    }
+
+    fn visit_map<A>(self, mut map: A) -> std::result::Result<Self::Value, A::Error>
+    where
+        A: MapAccess<'de>,
+    {
+        let mut id = None::<RpcId>;
+        let mut method = None::<Method>;
+        let mut params = None::<serde_json::Value>;
+        let mut result = None::<serde_json::Value>;
+        let mut error = None::<RpcError>;
+        let mut event = None::<EventKind>;
+        let mut payload = None::<serde_json::Value>;
+        let mut meta = None::<serde_json::Value>;
+
+        while let Some(key) = map.next_key::<String>()? {
+            match key.as_str() {
+                "id" => {
+                    if id.is_some() {
+                        return Err(de::Error::duplicate_field("id"));
+                    }
+                    id = Some(map.next_value()?);
+                }
+                "method" => {
+                    if method.is_some() {
+                        return Err(de::Error::duplicate_field("method"));
+                    }
+                    method = Some(map.next_value()?);
+                }
+                "params" => {
+                    if params.is_some() {
+                        return Err(de::Error::duplicate_field("params"));
+                    }
+                    params = Some(map.next_value()?);
+                }
+                "result" => {
+                    if result.is_some() {
+                        return Err(de::Error::duplicate_field("result"));
+                    }
+                    result = Some(map.next_value()?);
+                }
+                "error" => {
+                    if error.is_some() {
+                        return Err(de::Error::duplicate_field("error"));
+                    }
+                    error = Some(map.next_value()?);
+                }
+                "event" => {
+                    if event.is_some() {
+                        return Err(de::Error::duplicate_field("event"));
+                    }
+                    event = Some(map.next_value()?);
+                }
+                "payload" => {
+                    if payload.is_some() {
+                        return Err(de::Error::duplicate_field("payload"));
+                    }
+                    payload = Some(map.next_value()?);
+                }
+                "meta" => {
+                    if meta.is_some() {
+                        return Err(de::Error::duplicate_field("meta"));
+                    }
+                    meta = Some(map.next_value()?);
+                }
+                other => {
+                    return Err(de::Error::unknown_field(
+                        other,
+                        &[
+                            "id", "method", "params", "result", "error", "event", "payload", "meta",
+                        ],
+                    ));
+                }
+            }
+        }
+
+        if let Some(event) = event {
+            if id.is_some()
+                || method.is_some()
+                || params.is_some()
+                || result.is_some()
+                || error.is_some()
+                || meta.is_some()
+            {
+                return Err(de::Error::custom(DecodeError::InvalidFrame(
+                    "mixed event and rpc frame fields".into(),
+                )));
+            }
+            return Ok(IpcEnvelope::Event(EventFrame {
+                event,
+                payload: payload.unwrap_or(serde_json::Value::Null),
+            }));
+        }
+
+        if payload.is_some() {
+            return Err(de::Error::custom(DecodeError::InvalidFrame(
+                "unexpected event payload on rpc frame".into(),
+            )));
+        }
+
+        match (id, method, result, error) {
+            (Some(id), Some(method), None, None) => {
+                let meta: IpcRequestMeta = match meta {
+                    Some(raw) => serde_json::from_value(raw).map_err(de::Error::custom)?,
+                    None => IpcRequestMeta::default(),
+                };
+                Ok(IpcEnvelope::Request(IpcRequestEnvelope {
+                    id,
+                    method,
+                    params,
+                    meta,
+                }))
+            }
+            (Some(id), None, result, error) if params.is_none() => {
+                let meta: IpcResponseMeta = match meta {
+                    Some(raw) => serde_json::from_value(raw).map_err(de::Error::custom)?,
+                    None => IpcResponseMeta::default(),
+                };
+                let body = match (result, error) {
+                    (Some(v), None) => ResponseBody::Ok(v),
+                    (None, Some(e)) => ResponseBody::Err(e),
+                    _ => return Err(de::Error::custom(DecodeError::AmbiguousResponse)),
+                };
+                let _ = ResponseFrame {
+                    id: id.clone(),
+                    body: body.clone(),
+                };
+                Ok(IpcEnvelope::Response(IpcResponseEnvelope {
+                    id,
+                    body,
+                    meta,
+                }))
+            }
+            _ => Err(de::Error::custom(DecodeError::InvalidFrame(
+                "invalid IPC envelope fields".into(),
+            ))),
+        }
+    }
+}
+
+fn decode_response_envelope<R: DeserializeOwned>(
+    line: &str,
+    id: &str,
+) -> Result<(RpcOutcome<R>, IpcResponseMeta)> {
+    let frame: IpcEnvelope = serde_json::from_str(line).context("decode IPC response")?;
     match frame {
-        Frame::Response(resp) => {
+        IpcEnvelope::Response(resp) => {
             if resp.id != id {
                 return Err(anyhow::anyhow!(
                     "IPC response id mismatch: expected {id}, got {}",
@@ -24,13 +319,18 @@ fn decode_response<R: DeserializeOwned>(line: &str, id: &str) -> Result<RpcOutco
             match resp.body {
                 ResponseBody::Ok(v) => {
                     let value: R = serde_json::from_value(v).context("decode result")?;
-                    Ok(Ok(value))
+                    Ok((Ok(value), resp.meta))
                 }
-                ResponseBody::Err(e) => Ok(Err(e)),
+                ResponseBody::Err(e) => Ok((Err(e), resp.meta)),
             }
         }
         other => Err(anyhow::anyhow!("unexpected frame from daemon: {other:?}")),
     }
+}
+
+#[cfg(test)]
+fn decode_response<R: DeserializeOwned>(line: &str, id: &str) -> Result<RpcOutcome<R>> {
+    decode_response_envelope(line, id).map(|(outcome, _)| outcome)
 }
 
 #[cfg(test)]
@@ -78,13 +378,16 @@ mod platform {
     use std::time::Duration;
 
     use anyhow::{Context, Result};
-    use bsk_protocol::{Frame, Method, RequestFrame};
+    use bsk_protocol::Method;
     use serde::{Serialize, de::DeserializeOwned};
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     use tokio::net::UnixStream;
     use tokio::time::timeout;
 
-    use crate::ipc_client::{RpcOutcome, decode_response, random_id};
+    use crate::ipc_client::{
+        IpcEnvelope, IpcRequestEnvelope, IpcRequestMeta, IpcResponseMeta, RpcOutcome,
+        decode_response_envelope, random_id,
+    };
 
     /// Connected IPC client. Holds an open UDS connection plus a buffered
     /// reader/writer pair.
@@ -142,10 +445,35 @@ mod platform {
             params: &P,
             call_timeout: Duration,
         ) -> Result<RpcOutcome<R>> {
-            let frame = Frame::Request(RequestFrame {
+            self.call_envelope_with_id(id, method, params, IpcRequestMeta::default(), call_timeout)
+                .await
+                .map(|(outcome, _)| outcome)
+        }
+
+        pub async fn call_envelope<P: Serialize, R: DeserializeOwned>(
+            &mut self,
+            method: Method,
+            params: &P,
+            meta: IpcRequestMeta,
+            call_timeout: Duration,
+        ) -> Result<(RpcOutcome<R>, IpcResponseMeta)> {
+            self.call_envelope_with_id(random_id(), method, params, meta, call_timeout)
+                .await
+        }
+
+        pub async fn call_envelope_with_id<P: Serialize, R: DeserializeOwned>(
+            &mut self,
+            id: String,
+            method: Method,
+            params: &P,
+            meta: IpcRequestMeta,
+            call_timeout: Duration,
+        ) -> Result<(RpcOutcome<R>, IpcResponseMeta)> {
+            let frame = IpcEnvelope::Request(IpcRequestEnvelope {
                 id: id.clone(),
                 method,
                 params: Some(serde_json::to_value(params).context("serialise params")?),
+                meta,
             });
             let mut payload = serde_json::to_string(&frame).context("encode request")?;
             payload.push('\n');
@@ -163,7 +491,7 @@ mod platform {
                 .await
                 .context("IPC read timed out")??;
 
-            decode_response(line.trim_end(), &id)
+            decode_response_envelope(line.trim_end(), &id)
         }
 
         /// Path of the socket this client connected through (debug helper).
@@ -179,14 +507,17 @@ mod platform {
     use std::time::Duration;
 
     use anyhow::{Context, Result};
-    use bsk_protocol::{Frame, Method, RequestFrame};
+    use bsk_protocol::Method;
     use serde::{Serialize, de::DeserializeOwned};
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     use tokio::net::windows::named_pipe::{ClientOptions, NamedPipeClient};
     use tokio::time::{sleep, timeout};
     use windows_sys::Win32::Foundation::{ERROR_ACCESS_DENIED, ERROR_PIPE_BUSY};
 
-    use crate::ipc_client::{RpcOutcome, decode_response, random_id};
+    use crate::ipc_client::{
+        IpcEnvelope, IpcRequestEnvelope, IpcRequestMeta, IpcResponseMeta, RpcOutcome,
+        decode_response_envelope, random_id,
+    };
 
     pub struct Client {
         stream: BufReader<tokio::io::ReadHalf<NamedPipeClient>>,
@@ -280,10 +611,35 @@ mod platform {
             params: &P,
             call_timeout: Duration,
         ) -> Result<RpcOutcome<R>> {
-            let frame = Frame::Request(RequestFrame {
+            self.call_envelope_with_id(id, method, params, IpcRequestMeta::default(), call_timeout)
+                .await
+                .map(|(outcome, _)| outcome)
+        }
+
+        pub async fn call_envelope<P: Serialize, R: DeserializeOwned>(
+            &mut self,
+            method: Method,
+            params: &P,
+            meta: IpcRequestMeta,
+            call_timeout: Duration,
+        ) -> Result<(RpcOutcome<R>, IpcResponseMeta)> {
+            self.call_envelope_with_id(random_id(), method, params, meta, call_timeout)
+                .await
+        }
+
+        pub async fn call_envelope_with_id<P: Serialize, R: DeserializeOwned>(
+            &mut self,
+            id: String,
+            method: Method,
+            params: &P,
+            meta: IpcRequestMeta,
+            call_timeout: Duration,
+        ) -> Result<(RpcOutcome<R>, IpcResponseMeta)> {
+            let frame = IpcEnvelope::Request(IpcRequestEnvelope {
                 id: id.clone(),
                 method,
                 params: Some(serde_json::to_value(params).context("serialise params")?),
+                meta,
             });
             let mut payload = serde_json::to_string(&frame).context("encode request")?;
             payload.push('\n');
@@ -301,7 +657,7 @@ mod platform {
                 .await
                 .context("IPC read timed out")??;
 
-            decode_response(line.trim_end(), &id)
+            decode_response_envelope(line.trim_end(), &id)
         }
 
         pub fn sock_path(&self) -> &Path {
@@ -391,6 +747,48 @@ impl IpcClient {
             None => {
                 self.inner
                     .call_with_id::<(), R>(id, method, &(), call_timeout)
+                    .await
+            }
+        }
+    }
+
+    pub async fn call_envelope<P, R>(
+        &mut self,
+        id: impl Into<bsk_protocol::RpcId>,
+        method: bsk_protocol::Method,
+        params: Option<P>,
+        meta: IpcRequestMeta,
+        call_timeout: std::time::Duration,
+    ) -> anyhow::Result<(std::result::Result<R, RpcError>, IpcResponseMeta)>
+    where
+        P: serde::Serialize,
+        R: serde::de::DeserializeOwned,
+    {
+        self.call_envelope_with_id(id.into(), method, params, meta, call_timeout)
+            .await
+    }
+
+    pub async fn call_envelope_with_id<P, R>(
+        &mut self,
+        id: bsk_protocol::RpcId,
+        method: bsk_protocol::Method,
+        params: Option<P>,
+        meta: IpcRequestMeta,
+        call_timeout: std::time::Duration,
+    ) -> anyhow::Result<(std::result::Result<R, RpcError>, IpcResponseMeta)>
+    where
+        P: serde::Serialize,
+        R: serde::de::DeserializeOwned,
+    {
+        match params {
+            Some(p) => {
+                self.inner
+                    .call_envelope_with_id::<P, R>(id, method, &p, meta, call_timeout)
+                    .await
+            }
+            None => {
+                self.inner
+                    .call_envelope_with_id::<(), R>(id, method, &(), meta, call_timeout)
                     .await
             }
         }

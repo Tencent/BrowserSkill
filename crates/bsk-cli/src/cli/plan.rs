@@ -413,16 +413,29 @@ pub fn dispatch(
     let (daemon, protocol) = ensure_daemon::ensure_daemon_optimistic_with_protocol()
         .context("ensure daemon is running")?;
     check_protocol(&protocol)?;
+    let need_scope_meta = session.trim().is_empty();
+    let mut resolved_session: Option<String> = None;
     let (reply, exit) = run(&plan, |method, params, timeout| {
-        op_ctx.call(
+        let meta = crate::ipc_client::IpcRequestMeta {
+            return_scope_meta: need_scope_meta && method == Method::ToolCooperate,
+            ..Default::default()
+        };
+        let (val, resp_meta) = op_ctx.call_envelope(
             daemon.sock_path.clone(),
             "plan",
             method,
             Some(params),
+            meta,
             timeout,
-        )
+        )?;
+        if let Some(sm) = resp_meta.scope_meta {
+            resolved_session = Some(sm.session_id);
+        }
+        Ok(val)
     });
-    output.finish(reply, exit)
+    output
+        .with_resolved_session(resolved_session.as_deref())
+        .finish(reply, exit)
 }
 
 #[cfg(test)]

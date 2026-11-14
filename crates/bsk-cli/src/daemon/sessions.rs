@@ -343,6 +343,29 @@ impl SessionRegistry {
         self.remove(id)
     }
 
+    /// Close an active audit run gracefully (`"ended"`) before teardown removes
+    /// the session row. Subsequent abnormal audit closure becomes a no-op.
+    pub(super) fn mark_graceful_audit_end(&self, id: &SessionId) {
+        if let Some(audit) = &self.audit {
+            audit.session_ended(&id.0, "ended");
+        }
+    }
+
+    /// Tear down `id` from `SessionRegistry` as part of [`DaemonState::teardown_session`].
+    /// Records `reason` only when `id` was live (never overwriting an earlier
+    /// terminal reason or polluting tombstones with unknown IDs).
+    pub(super) fn teardown(&self, id: &SessionId, reason: &'static str) -> bool {
+        if let Some(audit) = &self.audit {
+            audit.session_ended(&id.0, "interrupted");
+        }
+        if self.remove(id).is_some() {
+            self.remember_end(id, reason);
+            true
+        } else {
+            false
+        }
+    }
+
     /// The recorded end for `id`, when one still exists.
     pub fn end_info(&self, id: &SessionId) -> Option<SessionEnd> {
         self.ended
@@ -424,35 +447,6 @@ impl SessionRegistry {
             })
             .map(|session| session.id.clone())
             .collect()
-    }
-
-    /// Drop all sessions owned by `browser_id` (e.g. on disconnect).
-    pub fn purge_browser(&self, browser_id: &BrowserId) -> Vec<Session> {
-        let mut guard = self.inner.lock().expect("session registry poisoned");
-        let drained: Vec<Session> = guard
-            .values()
-            .filter(|s| &s.browser_id == browser_id)
-            .cloned()
-            .collect();
-        for s in &drained {
-            self.starting.lock().unwrap().remove(&s.id);
-            guard.remove(&s.id);
-        }
-        let mut activity = self
-            .last_activity
-            .lock()
-            .expect("session activity registry poisoned");
-        for session in &drained {
-            activity.remove(&session.id);
-        }
-        drop(activity);
-        drop(guard);
-        if let Some(audit) = &self.audit {
-            for session in &drained {
-                audit.session_ended(&session.id.0, "interrupted");
-            }
-        }
-        drained
     }
 
     pub fn ids_for_browser(&self, browser_id: &BrowserId) -> Vec<SessionId> {
@@ -1046,18 +1040,17 @@ async fn rollback_extension_session(
     }
 }
 
-/// Tear down a single session id (round-trips `tool.session_stop` to the
-/// owning extension and unregisters on success). Also tears down the
-/// per-session dispatch queue so the worker task exits.
-pub async fn stop_session(
+/// Round-trip `tool.session_stop` to the owning extension without performing
+/// local registry teardown. Returns `(result, graceful_audit)` so callers can
+/// route all local state cleanup through [`DaemonState::teardown_session`].
+pub(super) async fn send_session_stop(
     registry: &Arc<BrowserRegistry>,
     sessions: &Arc<SessionRegistry>,
     queues: &Arc<ToolQueueRegistry>,
-    interrupts: &Arc<SessionInterruptRegistry>,
     session_id: &SessionId,
     timeout_dur: Duration,
     cancel: Option<AbortToken>,
-) -> Result<SessionStopResult, StopSessionError> {
+) -> Result<(SessionStopResult, bool), StopSessionError> {
     if sessions.starting.lock().unwrap().contains(session_id) {
         return Err(StopSessionError::SessionBusy);
     }
@@ -1096,12 +1089,7 @@ pub async fn stop_session(
                 queues.reopen(session_id);
                 return Err(StopSessionError::ReturnFailures(result));
             }
-            sessions.remove_with_end_reason(
-                session_id,
-                bsk_protocol::RpcErrorReason::SessionStopped.as_str(),
-            );
-            drop_session_local(queues, interrupts, session_id);
-            Ok(result)
+            Ok((result, true))
         }
         Err(DispatchError::Rpc(err)) => {
             // A legacy extension or an unusual reconnect race may still
@@ -1120,23 +1108,11 @@ pub async fn stop_session(
                 if sessions.get(session_id).is_none() {
                     return Err(StopSessionError::NotFound);
                 }
-                if let Some(audit) = &sessions.audit {
-                    audit.session_ended(&session_id.0, "interrupted");
-                }
-                if sessions
-                    .remove_with_end_reason(
-                        session_id,
-                        bsk_protocol::RpcErrorReason::SessionStopped.as_str(),
-                    )
-                    .is_some()
-                {
-                    tracing::info!(
-                        session = %session_id,
-                        "session forgotten locally; extension reported not_found (likely SW restart)"
-                    );
-                }
-                drop_session_local(queues, interrupts, session_id);
-                return Ok(SessionStopResult::default());
+                tracing::info!(
+                    session = %session_id,
+                    "session forgotten locally; extension reported not_found (likely SW restart)"
+                );
+                return Ok((SessionStopResult::default(), false));
             }
             if err.code == bsk_protocol::ErrorCode::Timeout {
                 queues.reopen(session_id);
@@ -1159,44 +1135,30 @@ pub async fn stop_session(
     }
 }
 
-/// Drop a session locally (no round-trip) — used when the extension has
-/// already torn down its side (e.g. window closed by user). Also drops
-/// the queue so the worker exits. `end_reason` tombstones why the id is
-/// gone so later dispatches say so (issue #465 §7).
-pub fn forget_session(
+/// Tear down a single session id against standalone component registries
+/// (retained for isolated queue/session integration tests; production daemon
+/// paths call [`DaemonState::stop_session_with_reason`]).
+pub async fn stop_session(
+    registry: &Arc<BrowserRegistry>,
     sessions: &Arc<SessionRegistry>,
     queues: &Arc<ToolQueueRegistry>,
     interrupts: &Arc<SessionInterruptRegistry>,
     session_id: &SessionId,
-    end_reason: Option<&'static str>,
-) -> bool {
-    if let Some(audit) = &sessions.audit {
-        audit.session_ended(&session_id.0, "interrupted");
+    timeout_dur: Duration,
+    cancel: Option<AbortToken>,
+) -> Result<SessionStopResult, StopSessionError> {
+    let (result, graceful_audit) =
+        send_session_stop(registry, sessions, queues, session_id, timeout_dur, cancel).await?;
+    if graceful_audit {
+        sessions.mark_graceful_audit_end(session_id);
     }
-    let removed = match end_reason {
-        Some(reason) => sessions
-            .remove_with_end_reason(session_id, reason)
-            .is_some(),
-        None => sessions.remove(session_id).is_some(),
-    };
-    if removed {
-        drop_session_local(queues, interrupts, session_id);
-    }
-    removed
-}
-
-/// Tear down the per-session dispatch queue and any pending
-/// user-interrupt marker. Always called immediately after
-/// `sessions.remove` (or after the extension confirmed the session
-/// is gone), so the queue worker exits and a stale interrupt does
-/// not leak across a session id reuse.
-fn drop_session_local(
-    queues: &Arc<ToolQueueRegistry>,
-    interrupts: &Arc<SessionInterruptRegistry>,
-    session_id: &SessionId,
-) {
+    sessions.teardown(
+        session_id,
+        bsk_protocol::RpcErrorReason::SessionStopped.as_str(),
+    );
     queues.remove(session_id);
     interrupts.drop_session(session_id);
+    Ok(result)
 }
 
 #[cfg(test)]

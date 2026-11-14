@@ -12,12 +12,67 @@ use crate::method::Method;
 
 pub type RpcId = String;
 
+/// Daemon-to-extension WS correlation identifiers carried alongside an
+/// outbound [`RequestFrame`] and stripped by the extension's transport codec
+/// (`apps/extension/src/transport/protocol.ts`) before schema validation.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WsCorrelation {
+    pub audit_id: Option<String>,
+    pub operation_id: Option<String>,
+}
+
+const WS_AUDIT_ID_FIELD: &str = concat!("_", "audit_id");
+const WS_OPERATION_ID_FIELD: &str = concat!("_", "operation_id");
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RequestFrame {
     pub id: RpcId,
     pub method: Method,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub params: Option<serde_json::Value>,
+}
+
+impl RequestFrame {
+    /// Build an outbound daemon→extension WS request frame, stripping any
+    /// caller-forged correlation keys from `params` before attaching
+    /// daemon-issued [`WsCorrelation`] identifiers.
+    pub fn for_extension_ws(
+        id: RpcId,
+        method: Method,
+        mut params: serde_json::Value,
+        correlation: &WsCorrelation,
+    ) -> Self {
+        if let Some(obj) = params.as_object_mut() {
+            obj.remove(WS_AUDIT_ID_FIELD);
+            obj.remove(WS_OPERATION_ID_FIELD);
+            if let Some(audit_id) = &correlation.audit_id {
+                obj.insert(
+                    WS_AUDIT_ID_FIELD.to_owned(),
+                    serde_json::Value::String(audit_id.clone()),
+                );
+            }
+            if let Some(operation_id) = &correlation.operation_id {
+                obj.insert(
+                    WS_OPERATION_ID_FIELD.to_owned(),
+                    serde_json::Value::String(operation_id.clone()),
+                );
+            }
+        }
+        Self {
+            id,
+            method,
+            params: Some(params),
+        }
+    }
+
+    /// Strip WS transport correlation keys from `params` (mirrors
+    /// `stripEnvelopeParams` in `apps/extension/src/transport/protocol.ts`).
+    pub fn strip_ws_correlation(params: &mut Option<serde_json::Value>) {
+        if let Some(serde_json::Value::Object(map)) = params {
+            map.remove(WS_AUDIT_ID_FIELD);
+            map.remove(WS_OPERATION_ID_FIELD);
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]

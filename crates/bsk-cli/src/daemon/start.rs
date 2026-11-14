@@ -28,7 +28,7 @@ use crate::daemon::{
     browsers::{BROWSER_LIVENESS_TICK, BROWSER_LIVENESS_TIMEOUT, EXTENSION_CONNECT_WAIT},
     info as daemon_info, ipc, lockfile, paths,
     probe::{self, PROBE_TIMEOUT, Probe},
-    sessions::{StopSessionError, forget_session, stop_session},
+    sessions::StopSessionError,
     state::{DaemonState, PROTOCOL_VERSION},
     ws,
 };
@@ -674,7 +674,7 @@ fn serve(
             daemon_version: env!("CARGO_PKG_VERSION"),
             protocol_version: PROTOCOL_VERSION,
         };
-        let handler = ipc::full_handler(status, Arc::clone(&state));
+        let handler = ipc::full_envelope_handler(status, Arc::clone(&state));
 
         let ipc_activity = {
             let activity = activity.clone();
@@ -898,47 +898,24 @@ pub(crate) fn spawn_session_idle_reaper(state: Arc<DaemonState>) -> tokio::task:
                 {
                     continue;
                 }
-                match stop_session(
-                    &state.browsers,
-                    &state.sessions,
-                    &state.tool_queues,
-                    &state.session_interrupts,
-                    &session_id,
-                    Duration::from_secs(10),
-                    None,
-                )
-                .await
+                let idle_reason = bsk_protocol::RpcErrorReason::SessionIdleTimeout.as_str();
+                match state
+                    .stop_session_with_reason(
+                        &session_id,
+                        idle_reason,
+                        Duration::from_secs(10),
+                        None,
+                    )
+                    .await
                 {
                     Ok(_) => {
-                        state.transfers.release_session(&session_id.0);
-                        state.sessions.remember_end(
-                            &session_id,
-                            bsk_protocol::RpcErrorReason::SessionIdleTimeout.as_str(),
-                        );
-                        state.scopes.on_session_ended(
-                            &session_id,
-                            bsk_protocol::RpcErrorReason::SessionIdleTimeout.as_str(),
-                        );
-                        state.intent_wal.on_session_ended(&session_id);
                         info!(session = %session_id, "idle session stopped");
                     }
                     Err(StopSessionError::SessionBusy | StopSessionError::Stopping) => {
                         debug!(session = %session_id, "idle session still active; retrying later");
                     }
                     Err(StopSessionError::NotFound | StopSessionError::BrowserGone) => {
-                        forget_session(
-                            &state.sessions,
-                            &state.tool_queues,
-                            &state.session_interrupts,
-                            &session_id,
-                            None,
-                        );
-                        state.transfers.release_session(&session_id.0);
-                        state.scopes.on_session_ended(
-                            &session_id,
-                            bsk_protocol::RpcErrorReason::SessionIdleTimeout.as_str(),
-                        );
-                        state.intent_wal.on_session_ended(&session_id);
+                        state.teardown_session(&session_id, idle_reason);
                     }
                     Err(err) => {
                         warn!(session = %session_id, error = %err, "failed to stop idle session");

@@ -327,23 +327,28 @@ pub(crate) async fn release_full_page_async(
 ) -> anyhow::Result<()> {
     tokio::time::timeout(Duration::from_secs(5), async {
         let mut client = crate::ipc_client::IpcClient::connect(sock).await?;
-        let mut params = serde_json::to_value(ScreenshotReleaseParams {
+        let params = ScreenshotReleaseParams {
             session_id: session.into(),
             capture_id: capture_id.into(),
-        })?;
-        if session.trim().is_empty()
-            && let Some(obj) = params.as_object_mut()
-        {
-            obj.insert("_caller_scope".into(), caller_scope.into());
-        }
-        let _: Result<ScreenshotReleaseResult, _> = client
-            .call(
+        };
+        let meta = if session.trim().is_empty() {
+            crate::ipc_client::IpcRequestMeta {
+                caller_scope: Some(caller_scope.into()),
+                ..Default::default()
+            }
+        } else {
+            crate::ipc_client::IpcRequestMeta::default()
+        };
+        let (res, _): (Result<ScreenshotReleaseResult, _>, _) = client
+            .call_envelope(
                 "screenshot-release",
                 Method::ToolScreenshotRelease,
                 Some(params),
+                meta,
                 Duration::from_secs(5),
             )
             .await?;
+        let _ = res;
         Ok::<_, anyhow::Error>(())
     })
     .await?

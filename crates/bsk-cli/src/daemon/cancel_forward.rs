@@ -4,8 +4,6 @@
 //! which both need to translate a daemon-side cancel decision into
 //! the line-protocol frame the extension's dispatcher listens for.
 
-use std::sync::Arc;
-
 use bsk_protocol::{Frame, Method, RequestFrame, RpcId};
 
 use super::browsers::BrowserId;
@@ -17,7 +15,7 @@ use super::state::DaemonState;
 /// its own peer (IPC side maps to a warning + `Ok(false)` for the
 /// outer `cancel` RPC; WS side just logs).
 pub(super) fn forward_cancel_to_browser(
-    state: &Arc<DaemonState>,
+    state: &DaemonState,
     browser_id: &BrowserId,
     ws_rpc_id: &RpcId,
 ) -> anyhow::Result<()> {

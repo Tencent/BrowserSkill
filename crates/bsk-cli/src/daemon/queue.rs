@@ -40,6 +40,7 @@ use std::time::Duration;
 use bsk_protocol::tools::DebugActivity;
 use bsk_protocol::{
     ErrorCode, Frame, Method, RequestFrame, ResponseBody, ResponseFrame, RpcError, RpcId,
+    WsCorrelation,
 };
 use rand::Rng;
 use serde_json::Value;
@@ -73,6 +74,7 @@ pub const CANCEL_CLEANUP_TIMEOUT: Duration = Duration::from_secs(2);
 pub struct ToolJob {
     pub method: Method,
     pub params: Value,
+    pub correlation: WsCorrelation,
     pub timeout: Duration,
     pub respond: oneshot::Sender<Result<Value, RpcError>>,
     /// Inflight handle pre-registered by the IPC handler before the
@@ -357,6 +359,26 @@ impl ToolQueueRegistry {
         timeout: Duration,
         inflight: Option<Arc<ToolInflightEntry>>,
     ) -> Result<Value, DispatchError> {
+        self.dispatch_with_context(
+            sid,
+            method,
+            params,
+            WsCorrelation::default(),
+            timeout,
+            inflight,
+        )
+        .await
+    }
+
+    pub async fn dispatch_with_context(
+        &self,
+        sid: &SessionId,
+        method: Method,
+        params: Value,
+        correlation: WsCorrelation,
+        timeout: Duration,
+        inflight: Option<Arc<ToolInflightEntry>>,
+    ) -> Result<Value, DispatchError> {
         let (sender, state) = {
             let guard = self.queues.lock().expect("tool queue registry poisoned");
             let Some(entry) = guard.get(sid) else {
@@ -388,6 +410,7 @@ impl ToolQueueRegistry {
             sid.clone(),
             method,
             params,
+            correlation,
             timeout,
             false,
             inflight.clone(),
@@ -462,6 +485,26 @@ impl ToolQueueRegistry {
         timeout: Duration,
         inflight: Option<Arc<ToolInflightEntry>>,
     ) -> Result<Value, DispatchError> {
+        self.dispatch_unlocked_with_context(
+            sid,
+            method,
+            params,
+            WsCorrelation::default(),
+            timeout,
+            inflight,
+        )
+        .await
+    }
+
+    pub async fn dispatch_unlocked_with_context(
+        &self,
+        sid: &SessionId,
+        method: Method,
+        params: Value,
+        correlation: WsCorrelation,
+        timeout: Duration,
+        inflight: Option<Arc<ToolInflightEntry>>,
+    ) -> Result<Value, DispatchError> {
         {
             let guard = self.queues.lock().expect("tool queue registry poisoned");
             let Some(entry) = guard.get(sid) else {
@@ -475,6 +518,7 @@ impl ToolQueueRegistry {
         let job = ToolJob {
             method,
             params,
+            correlation,
             timeout,
             respond: respond_tx,
             inflight,
@@ -523,6 +567,7 @@ impl ToolQueueRegistry {
             sid.clone(),
             method,
             params,
+            WsCorrelation::default(),
             timeout,
             true,
             None,
@@ -540,6 +585,7 @@ async fn dispatch_with_sender(
     session_id: SessionId,
     method: Method,
     params: Value,
+    correlation: WsCorrelation,
     timeout: Duration,
     wait_for_capacity: bool,
     inflight: Option<Arc<ToolInflightEntry>>,
@@ -551,6 +597,7 @@ async fn dispatch_with_sender(
     let job = ToolJob {
         method,
         params,
+        correlation,
         timeout,
         respond: respond_tx,
         inflight,
@@ -678,11 +725,12 @@ async fn forward_one(
         return Err(super::browsers::extension_unresponsive_error());
     }
     let rpc_id = next_rpc_id("tool");
-    let request = RequestFrame {
-        id: rpc_id.clone(),
-        method: job.method.clone(),
-        params: Some(job.params.clone()),
-    };
+    let request = RequestFrame::for_extension_ws(
+        rpc_id.clone(),
+        job.method.clone(),
+        job.params.clone(),
+        &job.correlation,
+    );
     // Promote the inflight entry to "forwarded" AND hand the WS request
     // frame to the socket inside the same critical section (review round 2
     // C1). The closure runs while the entry's inner lock is held, so a
@@ -1674,6 +1722,7 @@ mod tool_job_session_id_tests {
         let job = ToolJob {
             method: Method::ToolTabList,
             params: serde_json::json!({}),
+            correlation: WsCorrelation::default(),
             timeout: Duration::from_secs(1),
             respond: tx,
             inflight: None,
@@ -1883,6 +1932,7 @@ mod action_timeout_tests {
                 &ToolJob {
                     method,
                     params: json!({"session_id": sid.0}),
+                    correlation: WsCorrelation::default(),
                     timeout: Duration::from_millis(20),
                     respond,
                     inflight: None,
