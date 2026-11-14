@@ -2,6 +2,7 @@ import { IDBDatabase, IDBFactory } from "fake-indexeddb";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import v from "../../../../crates/bsk-protocol/tests/fixtures/local-auth-v1.json";
 import { openCredentialDatabase } from "./credential-db";
+import { DEFAULT_DAEMON_WS_URL, LOCAL_PAIRING_FRAGMENT_PREFIX } from "./generated/methods";
 import {
   discardStaged,
   parseLocalPairing,
@@ -12,7 +13,7 @@ import {
   stageCredential,
 } from "./local-credentials";
 
-export const link = `ws://127.0.0.1:52800/#bsk-local.v1.${v.daemon_id}.${v.device_id}.${v.key}`;
+export const link = `${DEFAULT_DAEMON_WS_URL}/#${LOCAL_PAIRING_FRAGMENT_PREFIX}${v.daemon_id}.${v.device_id}.${v.key}`;
 beforeEach(() => vi.stubGlobal("indexedDB", new IDBFactory()));
 afterEach(() => {
   vi.restoreAllMocks();
@@ -20,14 +21,14 @@ afterEach(() => {
 });
 
 it("L16: rejects remote credentials and non-loopback local endpoints without exposing secrets", () => {
-  expect(parseLocalPairing(link).endpoint).toBe("ws://127.0.0.1:52800/");
+  expect(parseLocalPairing(link).endpoint).toBe(`${DEFAULT_DAEMON_WS_URL}/`);
   for (const bad of [
     link.replace("127.0.0.1", "example.com"),
     link.replace("ws:", "wss:"),
     link.replace("/#", "/extension#"),
     link.replace("/#", "/?key=1#"),
     link.replace("127.0.0.1", "user@127.0.0.1"),
-    link.replace("#bsk-local.v1.", "#"),
+    link.replace(`#${LOCAL_PAIRING_FRAGMENT_PREFIX}`, "#"),
     `${link}=`,
     link.replace(".v1.", ".v2."),
   ])

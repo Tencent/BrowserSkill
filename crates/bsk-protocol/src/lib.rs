@@ -10,9 +10,18 @@ pub mod system;
 pub mod tools;
 
 pub use cancel::{CancelParams, CancelResult};
-pub use catalog::{MIN_COMPATIBLE_PROTOCOL, PROTOCOL_VERSION, is_protocol_compatible};
-pub use error::{DecodeError, ErrorCode, RpcError, RpcErrorReason};
+pub use catalog::{
+    DEFAULT_DAEMON_PORT, DEFAULT_DAEMON_WS_URL, EXTENSION_CLIENT_ID, INSTANCE_ID_HEX_LENGTH,
+    LOCAL_PAIRING_FRAGMENT_PREFIX, MIN_COMPATIBLE_PROTOCOL, PROTOCOL_VERSION,
+    REMOTE_AUTH_SUBPROTOCOL_PREFIX, is_protocol_compatible,
+};
+pub use error::{
+    DecodeError, ErrorCode, JSONRPC_INTERNAL_ERROR, JSONRPC_INVALID_PARAMS,
+    JSONRPC_INVALID_REQUEST, JSONRPC_METHOD_NOT_FOUND, JSONRPC_PARSE_ERROR, RpcError,
+    RpcErrorReason,
+};
 pub use frame::{EventFrame, EventKind, Frame, RequestFrame, ResponseBody, ResponseFrame, RpcId};
+pub use local_auth::LOCAL_AUTH_KDF_DOMAIN;
 pub use method::{ActionMetadataPolicy, DeadlineKind, Method, OutcomeKind, RecipeStepKind};
 pub use system::{
     BrowserListParams, BrowserPeerInfo, BrowserStatusEntry, HandshakeCompat, HandshakeParams,

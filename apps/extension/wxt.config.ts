@@ -4,6 +4,7 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import tailwindcss from "@tailwindcss/vite";
 import { defineConfig } from "wxt";
+import { DEFAULT_DAEMON_WS_URL } from "./src/transport/generated/methods";
 
 // Resolve the extension's own version once at config-evaluation time
 // so every entrypoint sees the same string. Reading package.json this
@@ -103,9 +104,7 @@ export default defineConfig({
     define: {
       __BSK_EXT_BUILD__: JSON.stringify(EXTENSION_BUILD),
       __BSK_EXT_VERSION__: JSON.stringify(EXTENSION_VERSION),
-      __BSK_DAEMON_WS_URL__: JSON.stringify(
-        process.env.BSK_DAEMON_WS_URL ?? "ws://127.0.0.1:52800",
-      ),
+      __BSK_DAEMON_WS_URL__: JSON.stringify(process.env.BSK_DAEMON_WS_URL ?? DEFAULT_DAEMON_WS_URL),
     },
     resolve: {
       alias: {

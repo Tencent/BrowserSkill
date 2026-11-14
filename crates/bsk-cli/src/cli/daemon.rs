@@ -7,7 +7,7 @@ use clap::Subcommand;
 use crate::daemon;
 
 /// Default WebSocket port the daemon listens on.
-pub const DEFAULT_WS_PORT: u16 = 52800;
+pub const DEFAULT_WS_PORT: u16 = bsk_protocol::DEFAULT_DAEMON_PORT;
 /// Default daemon idle timeout (10 minutes per design §3.2).
 pub const DEFAULT_DAEMON_IDLE: Duration = Duration::from_secs(10 * 60);
 /// Default session idle timeout (5 minutes per design §5).
@@ -383,7 +383,7 @@ mod tests {
         }
         args = StartArgs {
             mode: DaemonMode::Server,
-            public_url: Some("ws://127.0.0.1:52800/extension".into()),
+            public_url: Some(format!("{}/extension", bsk_protocol::DEFAULT_DAEMON_WS_URL)),
             ..Default::default()
         };
         args.renew_after = Some(Duration::from_secs(90 * 86400));

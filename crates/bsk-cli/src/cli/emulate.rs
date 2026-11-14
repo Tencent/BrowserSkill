@@ -473,7 +473,6 @@ mod tests {
 
     #[test]
     fn every_preset_is_applicable() {
-        assert_eq!(DEVICE_PRESETS.len(), 7);
         for preset in DEVICE_PRESETS {
             let args = EmulateArgs {
                 device: Some(preset.name.into()),

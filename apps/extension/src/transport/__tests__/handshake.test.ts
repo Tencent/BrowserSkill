@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  CLIENT_ID,
   detectBrowserMeta,
   EXTENSION_VERSION,
   HandshakeRejectedError,
@@ -97,7 +98,7 @@ describe("performHandshake", () => {
       id: "hs-test",
       method: "system.handshake",
       params: {
-        client: "browser-skill-extension",
+        client: CLIENT_ID,
         version: EXTENSION_VERSION,
         protocol_version: PROTOCOL_VERSION,
         instance_id: "abcdef01-2345-4678-89ab-cdef01234567",

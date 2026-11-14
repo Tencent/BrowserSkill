@@ -40,7 +40,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 /// Default WebSocket port (design §3.2). Override via `--port`.
-pub const DEFAULT_WS_PORT: u16 = 52800;
+pub const DEFAULT_WS_PORT: u16 = bsk_protocol::DEFAULT_DAEMON_PORT;
 
 /// Test/embed entry point used by M4/M5 integration tests and the
 /// experimental `bsk daemon start --foreground` flag. Spins up the WS

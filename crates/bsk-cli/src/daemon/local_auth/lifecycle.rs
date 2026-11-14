@@ -206,7 +206,10 @@ mod tests {
     };
 
     fn activate(local: &LocalAuth) -> String {
-        local.store.pair(52800, None).unwrap();
+        local
+            .store
+            .pair(crate::daemon::DEFAULT_WS_PORT, None)
+            .unwrap();
         let id = local.store.devices()[0].device_id.clone();
         let txn = store::random();
         local

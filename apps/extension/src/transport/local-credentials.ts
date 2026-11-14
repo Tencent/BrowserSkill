@@ -1,4 +1,5 @@
 import { openCredentialDatabase } from "./credential-db";
+import { LOCAL_PAIRING_FRAGMENT_PREFIX } from "./generated/methods";
 import { decodeBytes } from "./local-auth-crypto";
 import type { Rotation } from "./local-auth-protocol";
 
@@ -90,9 +91,11 @@ export function parseLocalPairing(input: string): LocalCredential {
       url.pathname !== "/"
     )
       throw new Error();
-    const parts = url.hash.slice(1).split(".");
-    if (parts.length !== 5 || parts[0] !== "bsk-local" || parts[1] !== "v1") throw new Error();
-    const [, , daemonId, deviceId, key] = parts;
+    const fragment = url.hash.slice(1);
+    if (!fragment.startsWith(LOCAL_PAIRING_FRAGMENT_PREFIX)) throw new Error();
+    const parts = fragment.slice(LOCAL_PAIRING_FRAGMENT_PREFIX.length).split(".");
+    if (parts.length !== 3) throw new Error();
+    const [daemonId, deviceId, key] = parts;
     decodeBytes(daemonId, 16);
     decodeBytes(deviceId, 16);
     decodeBytes(key, 32);

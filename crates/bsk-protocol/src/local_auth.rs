@@ -9,6 +9,7 @@ use crate::RpcId;
 
 pub const MAX_MESSAGE_BYTES: usize = 4096;
 pub const MAX_CREDENTIALS: usize = 16;
+pub const LOCAL_AUTH_KDF_DOMAIN: &str = "bsk-local-auth-v1";
 
 /// Canonical, unpadded base64url with a fixed decoded length. Debug output is
 /// deliberately redacted: the same representation is used for stored keys.
@@ -259,7 +260,7 @@ pub struct Transcript<'a> {
 impl Transcript<'_> {
     pub fn encode(&self) -> Vec<u8> {
         fields(&[
-            b"bsk-local-auth-v1",
+            LOCAL_AUTH_KDF_DOMAIN.as_bytes(),
             &self.daemon_id.0,
             &self.device_id.0,
             &self.r#gen.to_be_bytes(),

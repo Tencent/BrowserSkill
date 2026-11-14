@@ -18,6 +18,10 @@ concurrency:
   group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
+env:
+  CARGO_INCREMENTAL: "0"
+  CARGO_TERM_COLOR: always
+
 jobs:
   changelog:
     name: Bilingual changelog synchronization
@@ -55,6 +59,17 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
+      - uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+            !target/windows-daemon-validation
+          key: ${{ runner.os }}-cargo-rust-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: ${{ runner.os }}-cargo-rust-
+
       - name: Check Rust formatting
         run: cargo fmt --all -- --check
 
@@ -76,41 +91,46 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
-      - name: Run Windows CLI argument error tests
-        run: cargo test -p bsk --test cli_usage_errors --test cli_parse --locked
+      - uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+            !target/windows-daemon-validation
+          key: ${{ runner.os }}-cargo-windows-daemon-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: ${{ runner.os }}-cargo-windows-daemon-
 
-      - name: Run Windows named-pipe tests
-        run: cargo test -p bsk --lib --locked daemon::ipc::windows::tests
+      - name: Run Windows unit tests
+        run: >-
+          cargo test -p bsk --lib --locked --
+          daemon::ipc::windows::tests
+          daemon::start::windows::tests
+          daemon::audit::tests
+          cli::plan::
+          cli::recipe::
+          daemon::remote::authorization::tests
+          daemon::lockfile::tests
+          skill_install
+          cli::update::
 
-      - name: Run Windows daemon startup diagnostics tests
-        run: cargo test -p bsk --lib --locked daemon::start::windows::tests
-
-      - name: Run Windows audit storage tests
-        run: cargo test -p bsk --lib --locked daemon::audit::tests
-
-      - name: Run Windows plan and recipe unit tests
-        run: |
-          cargo test -p bsk --lib --locked cli::plan::
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          cargo test -p bsk --lib --locked cli::recipe::
-
-      - name: Run Windows audit and browser interaction policy tests
-        run: cargo test -p bsk --test audit_ws --test interaction_preferences --locked
-
-      - name: Run Windows remote authorization storage tests
-        run: cargo test -p bsk --lib --locked daemon::remote::authorization::tests
-
-      - name: Run Windows remote server integration tests
-        run: cargo test -p bsk --test remote_server --locked
+      - name: Run Windows integration tests
+        run: >-
+          cargo test -p bsk --test integration --locked --
+          cli_usage_errors::
+          cli_parse::
+          audit_ws::
+          interaction_preferences::
+          remote_server::
+          skill_install_legacy::
+          auto_update_policy::
 
       - name: Verify background startup refusal inside the runner Job
         run: cargo test -p bsk --test windows_daemon_start --locked restrictive_job_refuses_explicit_and_automatic_start_without_a_daemon -- --exact
 
-      - name: Run Windows process liveness tests
-        run: cargo test -p bsk --lib --locked daemon::lockfile::tests
-
-      - name: Run Windows skill bundle installation and migration tests
-        run: cargo test -p bsk --lib --test skill_install_legacy --locked skill_install
+      - name: Run Windows cancellation process tests
+        run: cargo test -p bsk --test parent_cancel --locked
 
       - uses: actions/setup-node@v6
         with:
@@ -123,15 +143,6 @@ jobs:
           node scripts/check-skill-bundles.mjs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node scripts/check-crate-skill.mjs
-
-      - name: Run Windows update tests
-        run: |
-          cargo test -p bsk --lib --locked cli::update::
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          cargo test -p bsk --test auto_update_policy --locked
-
-      - name: Run Windows cancellation process tests
-        run: cargo test -p bsk --test parent_cancel --locked
 
       - name: Run installer tests (Windows PowerShell 5.1)
         shell: powershell
@@ -149,10 +160,24 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+            !target/windows-daemon-validation
+          key: ${{ runner.os }}-cargo-windows-daemon-lifecycle-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: ${{ runner.os }}-cargo-windows-daemon-lifecycle-
 
       - name: Run lifecycle regressions in a verified independent host
         shell: powershell
-        run: ./scripts/test-windows-daemon.ps1
+        run: |
+          if (Test-Path target/windows-daemon-validation) {
+            Remove-Item -Recurse -Force target/windows-daemon-validation
+          }
+          ./scripts/test-windows-daemon.ps1
 
       - name: Upload lifecycle test logs
         if: always()
@@ -223,10 +248,13 @@ jobs:
           cache: pnpm
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
-      - name: Prepare extension types
-        run: pnpm --filter @browser-skill/extension exec wxt prepare
-      - name: Run download cancellation browser regression
-        run: node scripts/run-browser-tests.mjs src/tools/__tests__/download-deadline.browser.test.ts
+      - name: Build extension
+        run: pnpm --filter @browser-skill/extension build
+      - name: Run download cancellation and long-screenshot renderer regressions
+        run: >-
+          node scripts/run-browser-tests.mjs
+          src/tools/__tests__/download-deadline.browser.test.ts
+          src/long-screenshot/renderer.browser.test.ts
 
   browser-input:
     name: Browser input readiness regression
@@ -250,12 +278,10 @@ jobs:
       - name: Prepare extension types
         run: pnpm --filter @browser-skill/extension exec wxt prepare
 
-      - name: Run download-effect-state browser regression
-        run: node scripts/run-browser-tests.mjs src/tools/__tests__/download-effect-state.browser.test.ts
-
-      - name: Run browser input and debugging regressions
+      - name: Run DOM interaction and debugging browser regressions
         run: >-
           node scripts/run-browser-tests.mjs
+          src/tools/__tests__/download-effect-state.browser.test.ts
           src/tools/__tests__/click.browser.test.ts
           src/tools/__tests__/click-listener-observation.browser.test.ts
           src/tools/__tests__/dom-multiclick.browser.test.ts
@@ -269,30 +295,18 @@ jobs:
           src/debug/__tests__/observer.browser.test.ts
           src/debug/__tests__/performance.browser.test.ts
 
-      - name: Run element wait browser regression
-        run: node scripts/run-browser-tests.mjs src/tools/__tests__/waits.browser.test.ts
-
-      - name: Run shared-control live text browser regression
-        run: node scripts/run-browser-tests.mjs src/cooperation/live-text.browser.test.ts
-
-      - name: Run navigation lifecycle and passive-read ref browser regressions
+      - name: Run wait, navigation, extraction, drag and fill browser regressions
         run: >-
           node scripts/run-browser-tests.mjs
+          src/tools/__tests__/waits.browser.test.ts
+          src/cooperation/live-text.browser.test.ts
           src/tools/__tests__/navigation-history.browser.test.ts
           src/tools/__tests__/navigation-same-document.browser.test.ts
           src/tools/__tests__/navigation-wait.browser.test.ts
-
-      - name: Run emulation-lifecycle browser regression
-        run: node scripts/run-browser-tests.mjs src/tools/__tests__/emulation-lifecycle.browser.test.ts
-
-      - name: Run structured extraction browser regression
-        run: node scripts/run-browser-tests.mjs src/tools/extract/extract.browser.test.ts
-
-      - name: Run drag browser regression
-        run: node scripts/run-browser-tests.mjs src/tools/__tests__/drag.browser.test.ts
-
-      - name: Run fill browser regression
-        run: node scripts/run-browser-tests.mjs src/tools/__tests__/fill.browser.test.ts
+          src/tools/__tests__/emulation-lifecycle.browser.test.ts
+          src/tools/extract/extract.browser.test.ts
+          src/tools/__tests__/drag.browser.test.ts
+          src/tools/__tests__/fill.browser.test.ts
 
   browser-extension-and-geometry:
     name: Browser geometry, screenshots, session routing and dynamic reading
@@ -302,6 +316,16 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+            !target/windows-daemon-validation
+          key: ${{ runner.os }}-cargo-browser-extension-and-geometry-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: ${{ runner.os }}-cargo-browser-extension-and-geometry-
       - uses: pnpm/action-setup@v6
       - uses: actions/setup-node@v6
         with:
@@ -333,7 +357,6 @@ jobs:
       - name: Run full-page screenshot, incognito and remote-connection regressions
         run: >-
           node scripts/run-browser-tests.mjs
-          src/long-screenshot/renderer.browser.test.ts
           src/long-screenshot/long-screenshot.browser.test.ts
           src/long-screenshot/agent.browser.test.ts
           src/tools/__tests__/background-full-page.browser.test.ts
@@ -353,10 +376,6 @@ jobs:
               src/tools/__tests__/background-screenshot.browser.test.ts \
               src/session-manager/__tests__/window-routing.browser.test.ts
           '
-      - name: Build extension for the isolated dynamic-reading daemon
-        env:
-          BSK_DAEMON_WS_URL: ws://127.0.0.1:52923
-        run: pnpm --filter @browser-skill/extension build
       - name: Validate dynamic reading across CLI, MCP and plan
         run: pnpm eval:browser:dynamic-read
 
@@ -372,6 +391,16 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+            !target/windows-daemon-validation
+          key: ${{ runner.os }}-cargo-browser-video-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: ${{ runner.os }}-cargo-browser-video-
       - uses: pnpm/action-setup@v6
       - uses: actions/setup-node@v6
         with:
@@ -411,11 +440,6 @@ jobs:
           src/video/capture.browser.test.ts
           src/video/encoder.browser.test.ts
 
-      - name: Build extension for the isolated cooperation daemon
-        env:
-          BSK_DAEMON_WS_URL: ws://127.0.0.1:52917
-        run: pnpm --filter @browser-skill/extension build
-
       - name: Validate failed-frame synchronization and CLI recovery
         env:
           BSK_COOP_FRAMES_ONLY: "1"
@@ -438,11 +462,6 @@ jobs:
           if-no-files-found: warn
           retention-days: 7
 
-      - name: Build extension for the isolated native-dialog daemon
-        env:
-          BSK_DAEMON_WS_URL: ws://127.0.0.1:52837
-        run: pnpm --filter @browser-skill/extension build
-
       - name: Validate native dialogs, held control, download recovery and teardown
         env:
           BSK_DIALOG_TEST_TIMEOUT: "1"
@@ -456,11 +475,6 @@ jobs:
           name: native-dialog-regression
           path: evals/browser/results/js-dialog-control/
           if-no-files-found: ignore
-
-      - name: Build extension for the isolated drag daemon
-        env:
-          BSK_DAEMON_WS_URL: ws://127.0.0.1:52839
-        run: pnpm --filter @browser-skill/extension build
 
       - name: Validate drag CLI, native drops, recovery and cross-origin frame refs
         run: node evals/browser/cases/regression/drag-interactions/run.mjs

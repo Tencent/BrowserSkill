@@ -755,7 +755,7 @@ export default defineBackground(() => {
  * — a failure here just means the user will need to retry the
  * interrupt; no daemon state is left half-updated.
  */
-export async function handleOverlayInterrupt(
+async function handleOverlayInterrupt(
   transport: Pick<Transport, "send">,
   sessionId: string,
 ): Promise<OverlayInterruptResponse> {

@@ -264,11 +264,14 @@ mod tests {
         let dest = dest_dir.join("SKILL.md");
         std::fs::write(&dest, "frozen content").unwrap();
         mark_bundled(&dest);
+        // Backdate mtime past coarse fs granularity (HFS+ 1s) so any rewrite visibly bumps it.
+        std::fs::File::options()
+            .write(true)
+            .open(&dest)
+            .unwrap()
+            .set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(10))
+            .unwrap();
         let mtime_before = std::fs::metadata(&dest).unwrap().modified().unwrap();
-
-        // Sleep enough that any rewrite would visibly change mtime on
-        // platforms with coarse fs timestamps (HFS+ has 1 s granularity).
-        std::thread::sleep(std::time::Duration::from_millis(1100));
 
         let report = sync_with_source(home, "frozen content");
 

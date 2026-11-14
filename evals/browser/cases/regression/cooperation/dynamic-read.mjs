@@ -6,13 +6,14 @@ import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { promisify } from "node:util";
+import { copyIsolatedExtension } from "../../../local-pairing.mjs";
 import { withChrome } from "../snapshot-coordinates/chrome.mjs";
 import { createMcpRegressionClient } from "./mcp-client.mjs";
 
 // Own every process/profile/session. Never reload the user's extension or daemon.
 const defaultCli = process.platform === "win32" ? "target/debug/bsk.exe" : "target/debug/bsk";
 const cli = resolve(process.env.BSK_TEST_CLI ?? defaultCli);
-const extensionPath = resolve(
+const extensionSource = resolve(
   process.env.BSK_DYNAMIC_EXTENSION ?? "apps/extension/dist/chrome-mv3",
 );
 const executable = process.env.BSK_TEST_CHROME;
@@ -20,11 +21,9 @@ const port = Number(process.env.BSK_DYNAMIC_PORT ?? 52923);
 const artifacts = resolve(process.env.BSK_DYNAMIC_ARTIFACTS ?? "reports/dynamic-read");
 assert(executable, "BSK_TEST_CHROME must name an isolated-test browser executable");
 assert(port !== 52800);
-assert(
-  (await readFile(join(extensionPath, "background.js"), "utf8")).includes(`ws://127.0.0.1:${port}`),
-);
 await mkdir(artifacts, { recursive: true });
 const home = await mkdtemp(join(tmpdir(), "bsk-dynamic-read-"));
+const extensionPath = await copyIsolatedExtension(extensionSource, join(home, "extension"), port);
 const env = {
   ...process.env,
   HOME: home,
