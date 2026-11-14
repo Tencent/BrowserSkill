@@ -1040,14 +1040,17 @@ fn format_state_receipt(
 
     // Hydrate `observation.text` (along with `cached_vom_truncated` and
     // `cached_vom_next_cursor`) from `ScopeResultMeta` when `cache_reusable`
-    // confirms an exact unchanged predecessor, or when `--match` requests a
-    // filtered view over a text-delta-patched `last_vom`. Plain `bsk sync` on
-    // `delta` (without `--match`) stays slim; unpatched field deltas set
-    // `cache_reusable = false` and `cached_vom = None`, so stale VOM is never
-    // resurrected.
+    // confirms an exact unchanged or text-delta-patched predecessor (`bsk open`,
+    // `bsk sync --json`, or `bsk sync --match-text`). Plain human `bsk sync` on
+    // `delta` (without `--match-text` or `--json`) stays slim; unpatched field
+    // deltas set `cache_reusable = false` and `cached_vom = None`, so stale VOM
+    // is never resurrected.
     let mut hydrated_from_cache = false;
     if reply.pointer("/observation/text").is_none()
-        && (!emit_unchanged_flag || unchanged || !match_text.is_empty())
+        && (!emit_unchanged_flag
+            || unchanged
+            || !match_text.is_empty()
+            || matches!(format, Format::Json))
         && cache_reusable
         && let Some(cached_vom) = meta.and_then(|m| m.cached_vom.as_deref())
     {

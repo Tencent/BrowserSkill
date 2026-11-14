@@ -353,6 +353,8 @@ async fn wave3c_unlocked_liveness_lease_and_dialog_accept_serialization() {
     let dialog_accept_count_ext = Arc::clone(&dialog_accept_count);
     let cancel_count = Arc::new(AtomicUsize::new(0));
     let cancel_count_ext = Arc::clone(&cancel_count);
+    let session_start_count = Arc::new(AtomicUsize::new(0));
+    let session_start_count_ext = Arc::clone(&session_start_count);
 
     let (writer, mut reader): (SplitSink<Ws, Message>, SplitStream<Ws>) = ws.split();
     let writer = Arc::new(tokio::sync::Mutex::new(writer));
@@ -372,12 +374,17 @@ async fn wave3c_unlocked_liveness_lease_and_dialog_accept_serialization() {
             let writer = Arc::clone(&writer_ext);
             let dialog_accept_count = Arc::clone(&dialog_accept_count_ext);
             let cancel_count = Arc::clone(&cancel_count_ext);
+            let session_start_count = Arc::clone(&session_start_count_ext);
             tokio::spawn(async move {
                 match req.method {
                     Method::ToolSessionStart => {
+                        let start_idx = session_start_count.fetch_add(1, Ordering::SeqCst);
+                        if start_idx > 0 {
+                            tokio::time::sleep(Duration::from_millis(60)).await;
+                        }
                         let resp = ResponseFrame {
                             id: req.id,
-                            body: ResponseBody::Ok(json!({ "agent_window_id": 401 })),
+                            body: ResponseBody::Ok(json!({ "agent_window_id": 401 + start_idx })),
                         };
                         let _ = writer
                             .lock()
@@ -527,8 +534,14 @@ async fn wave3c_unlocked_liveness_lease_and_dialog_accept_serialization() {
         }
     });
 
-    // 1. Open session `S1` via real `bsk open`.
-    let open_out = run_bsk_at(home.path(), &["open", "https://dlg.test/", "--json"], &[]).await;
+    // 1. Open session `S1` via real `bsk open` in isolated scope `tracked-victim`.
+    let scope_env = [("BSK_SCOPE", "tracked-victim")];
+    let open_out = run_bsk_at(
+        home.path(),
+        &["open", "https://dlg.test/", "--json"],
+        &scope_env,
+    )
+    .await;
     assert!(
         open_out.status.success(),
         "open failed: {}",
@@ -536,6 +549,79 @@ async fn wave3c_unlocked_liveness_lease_and_dialog_accept_serialization() {
     );
     let open_json: Value = serde_json::from_slice(&open_out.stdout).unwrap();
     let sid = open_json["session_id"].as_str().unwrap().to_owned();
+
+    // 1b. Cancelled in-flight `SessionStartTracked` (`bind_scope: true`) in `tracked-victim`
+    //     that races to `Ok(S2)` before `session_requests::cleanup` MUST NOT clobber or
+    //     tombstone `tracked-victim`'s existing binding to `sid`!
+    let expiry_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64
+        + 60_000;
+    let tracked_req_id = format!("{expiry_ms}:{}", uuid::Uuid::new_v4());
+    IpcClient::connect(&sock)
+        .await
+        .unwrap()
+        .call::<_, Value>(
+            "prep-tracked-race",
+            Method::SessionRequest,
+            Some(json!({
+                "request_id": tracked_req_id,
+                "action": "prepare"
+            })),
+            Duration::from_secs(5),
+        )
+        .await
+        .unwrap()
+        .expect("prepare tracked request");
+    let sock_tracked = sock.clone();
+    let tracked_req_id_start = tracked_req_id.clone();
+    let tracked_task = tokio::spawn(async move {
+        let mut c = IpcClient::connect(&sock_tracked).await.unwrap();
+        c.call_envelope::<_, Value>(
+            "start-tracked-race",
+            Method::SessionStartTracked,
+            Some(json!({ "request_id": tracked_req_id_start })),
+            IpcRequestMeta {
+                caller_scope: Some("scope:tracked-victim".into()),
+                bind_scope: true,
+                ..Default::default()
+            },
+            Duration::from_secs(5),
+        )
+        .await
+        .unwrap()
+        .0
+    });
+    tokio::time::sleep(Duration::from_millis(15)).await;
+    IpcClient::connect(&sock)
+        .await
+        .unwrap()
+        .call::<_, Value>(
+            "cancel-tracked-race",
+            Method::SessionRequest,
+            Some(json!({
+                "request_id": tracked_req_id,
+                "action": "cancel"
+            })),
+            Duration::from_secs(5),
+        )
+        .await
+        .unwrap()
+        .expect("cancel tracked request");
+    let tracked_err = tracked_task
+        .await
+        .unwrap()
+        .expect_err("cancelled SessionStartTracked must return Cancelled");
+    assert_eq!(tracked_err.code, ErrorCode::Cancelled);
+    assert_eq!(
+        state
+            .scopes
+            .active_binding("scope:tracked-victim", &state.sessions)
+            .map(|(b, _)| b.session_id.0),
+        Some(sid.clone()),
+        "cancelled in-flight SessionStartTracked must preserve existing bound session"
+    );
 
     // 2. Run `Unlocked` `cooperate wait` lasting 420ms (> 240ms `session_idle`):
     //    `SessionActivityGuard` must keep `sid` alive!
@@ -581,7 +667,7 @@ async fn wave3c_unlocked_liveness_lease_and_dialog_accept_serialization() {
     );
 
     // 4. Trigger `DialogPending` via `bsk click @e1`.
-    let click_out = run_bsk_at(home.path(), &["click", "@e1", "--json"], &[]).await;
+    let click_out = run_bsk_at(home.path(), &["click", "@e1", "--json"], &scope_env).await;
     assert!(!click_out.status.success());
     let click_err: Value = serde_json::from_slice(&click_out.stdout).unwrap();
     assert_eq!(click_err["code"], "dialog_pending");
@@ -1256,6 +1342,8 @@ async fn wave3c_vom_cache_last_mile_run_log_and_plan_context_pinning() {
     let obs_base = "bbbbbbbb-0000-4000-8000-000000000001";
     let ctx_delta = "aaaaaaaa-0000-4000-8000-000000000002";
     let obs_delta = "bbbbbbbb-0000-4000-8000-000000000002";
+    let ctx_delta_2 = "aaaaaaaa-0000-4000-8000-000000000005";
+    let obs_delta_2 = "bbbbbbbb-0000-4000-8000-000000000005";
     let ctx_tab2 = "aaaaaaaa-0000-4000-8000-000000000003";
     let obs_tab2 = "bbbbbbbb-0000-4000-8000-000000000003";
     let ctx_plan = "aaaaaaaa-0000-4000-8000-000000000004";
@@ -1410,8 +1498,8 @@ async fn wave3c_vom_cache_last_mile_run_log_and_plan_context_pinning() {
                         "title": "Checkout"
                     }
                 })),
-                // Stage 4 & 5: slim `unchanged` after `ctx_delta` (for MCP `bsk_session(open)` & `bsk_session(sync)`)
-                4 | 5 => ResponseBody::Ok(json!({
+                // Stage 4: slim `unchanged` after `ctx_delta` (post-step sync for `--baseline saved-delta-sync.json`)
+                4 => ResponseBody::Ok(json!({
                     "tab_id": 11,
                     "control_policy": "target",
                     "kind": "unchanged",
@@ -1427,7 +1515,54 @@ async fn wave3c_vom_cache_last_mile_run_log_and_plan_context_pinning() {
                         "title": "Checkout"
                     }
                 })),
-                // Stage 6+: baseline for `plan` / `bsk_plan` (`ctx_plan`)
+                // Stage 5: slim text-patched `delta` updating line 3 `"Pay $25"` -> `"Pay $30"` (for `--wait-for`)
+                5 => ResponseBody::Ok(json!({
+                    "tab_id": 11,
+                    "control_policy": "target",
+                    "kind": "delta",
+                    "history_complete": true,
+                    "previous_context_id": ctx_delta,
+                    "previous_observation_id": obs_delta,
+                    "context_id": ctx_delta_2,
+                    "observation_id": obs_delta_2,
+                    "changes": [{
+                        "kind": "text",
+                        "previous_value": "Pay $25",
+                        "value": "Pay $30",
+                        "lines": [3]
+                    }],
+                    "observation_patch": {
+                        "lines": [{
+                            "line": 3,
+                            "previous": "@e2 button \"Pay $25\"",
+                            "text": "@e2 button \"Pay $30\""
+                        }]
+                    },
+                    "state": {
+                        "mode": "ready",
+                        "revision": 3,
+                        "url": "https://shop.test/checkout",
+                        "title": "Checkout"
+                    }
+                })),
+                // Stage 6 & 7: slim `unchanged` after `ctx_delta_2` (for MCP `bsk_session(open)` & `bsk_session(sync)`)
+                6 | 7 => ResponseBody::Ok(json!({
+                    "tab_id": 11,
+                    "control_policy": "target",
+                    "kind": "unchanged",
+                    "history_complete": true,
+                    "previous_context_id": ctx_delta_2,
+                    "context_id": ctx_delta_2,
+                    "observation_id": obs_delta_2,
+                    "changes": [],
+                    "state": {
+                        "mode": "ready",
+                        "revision": 3,
+                        "url": "https://shop.test/checkout",
+                        "title": "Checkout"
+                    }
+                })),
+                // Stage 8+: baseline for `plan` / `bsk_plan` (`ctx_plan`)
                 _ => ResponseBody::Ok(json!({
                     "tab_id": 11,
                     "control_policy": "target",
@@ -1441,11 +1576,11 @@ async fn wave3c_vom_cache_last_mile_run_log_and_plan_context_pinning() {
                         "tab_id": 11,
                         "url": "https://shop.test/checkout",
                         "title": "Checkout",
-                        "text": "heading \"Checkout\"\n@e1 textbox \"Password\" [filled] =\"•••\"\n@e2 button \"Pay $25\"",
+                        "text": "heading \"Checkout\"\n@e1 textbox \"Password\" [filled] =\"•••\"\n@e2 button \"Pay $30\"",
                         "ref_count": 2,
                         "truncated": false
                     },
-                    "state": { "mode": "ready", "revision": 3 }
+                    "state": { "mode": "ready", "revision": 4 }
                 })),
             }
         }
@@ -1553,16 +1688,86 @@ async fn wave3c_vom_cache_last_mile_run_log_and_plan_context_pinning() {
     let step_json: Value = serde_json::from_slice(&step_out.stdout).unwrap();
     assert_eq!(step_json["post"]["observation_origin"]["kind"], "reused");
 
-    // 2. Stage 3: `bsk sync --wait-for "Pay $25" --match-text "Pay $25" --json` on slim text-patched `delta`!
-    //    Must hydrate from `scope_meta.cached_vom` with ZERO `tool.snapshot` fallback calls!
+    // 2a. Stage 3: plain `bsk sync --json` (WITHOUT `--match-text` or `--wait-for`) on slim text-patched `delta`!
+    //     Must hydrate `vom`, `observation`, and `observation_origin.kind == "merged"` so `bsk view` and
+    //     `bsk step --baseline` work directly on saved text-delta `bsk sync --json` files!
+    let delta_sync_out = env.run_bsk(&["sync", "--json"], &scope).await;
+    assert!(delta_sync_out.status.success());
+    let delta_sync_json: Value = serde_json::from_slice(&delta_sync_out.stdout).unwrap();
+    assert!(
+        delta_sync_json["vom"]
+            .as_str()
+            .unwrap_or("")
+            .contains("Pay $25"),
+        "bsk sync --json must hydrate vom on reusable text delta: {delta_sync_json}"
+    );
+    assert_eq!(delta_sync_json["observation_origin"]["kind"], "merged");
+    let saved_delta_path = env.home.path().join("saved-delta-sync.json");
+    std::fs::write(&saved_delta_path, &delta_sync_out.stdout).unwrap();
+
+    env.take_requests();
+    let view_delta_out = env
+        .run_bsk(
+            &[
+                "view",
+                saved_delta_path.to_str().unwrap(),
+                "--find",
+                "Pay $25",
+                "--json",
+            ],
+            &scope,
+        )
+        .await;
+    assert!(
+        view_delta_out.status.success(),
+        "bsk view failed on text-delta bsk sync --json output: {}",
+        String::from_utf8_lossy(&view_delta_out.stderr)
+    );
+    let view_delta_json: Value = serde_json::from_slice(&view_delta_out.stdout).unwrap();
+    assert_eq!(view_delta_json["observation_id"], obs_delta);
+    assert_eq!(view_delta_json["matching_lines"], json!([3]));
+    assert!(env.take_requests().is_empty());
+
+    let step_delta_out = env
+        .run_bsk(
+            &[
+                "step",
+                "--session",
+                &sid,
+                "--context",
+                ctx_delta,
+                "--action",
+                "hover",
+                "--params",
+                r#"{"ref":"@e2"}"#,
+                "--baseline",
+                saved_delta_path.to_str().unwrap(),
+                "--json",
+            ],
+            &scope,
+        )
+        .await;
+    assert!(
+        step_delta_out.status.success(),
+        "step with text-delta sync --json baseline failed: {}",
+        String::from_utf8_lossy(&step_delta_out.stderr)
+    );
+    let step_delta_json: Value = serde_json::from_slice(&step_delta_out.stdout).unwrap();
+    assert_eq!(
+        step_delta_json["post"]["observation_origin"]["kind"],
+        "reused"
+    );
+
+    // 2b. Stage 5: `bsk sync --wait-for "Pay $30" --match-text "Pay $30" --json` on slim text-patched `delta`!
+    //     Must hydrate from `scope_meta.cached_vom` with ZERO `tool.snapshot` fallback calls!
     let wait_delta_out = env
         .run_bsk(
             &[
                 "sync",
                 "--wait-for",
-                "Pay $25",
+                "Pay $30",
                 "--match-text",
-                "Pay $25",
+                "Pay $30",
                 "--json",
             ],
             &scope,
@@ -1579,13 +1784,13 @@ async fn wave3c_vom_cache_last_mile_run_log_and_plan_context_pinning() {
         "authoritative_full_vom must reuse patched delta without ToolSnapshot fallback!"
     );
     let wait_delta_json: Value = serde_json::from_slice(&wait_delta_out.stdout).unwrap();
-    assert!(wait_delta_json["vom"].as_str().unwrap().contains("Pay $25"));
+    assert!(wait_delta_json["vom"].as_str().unwrap().contains("Pay $30"));
 
     // Verify `RunLogs` hydrated the slim `delta` AND keeps multi-tab `sensitive` masking isolated:
     // - Sync Tab 22 (`@e1 textbox "Public Note"`, NOT sensitive),
     // - Fill `@e1` on Tab 11 (`"top-secret-pw"`, MUST be redacted `[REDACTED]`),
     // - Fill `@e1` on Tab 22 (`"hello-public"`, MUST NOT be redacted),
-    // - Click `@e2` on Tab 11 (MUST log target name `"Pay $25"` from the hydrated delta, NOT `"Pay $10"`!).
+    // - Click `@e2` on Tab 11 (MUST log target name `"Pay $30"` from the hydrated delta, NOT `"Pay $10"`!).
     let mut ipc = IpcClient::connect(&env.sock).await.unwrap();
     ipc.call_envelope::<_, Value>(
         "tab22-sync",
@@ -1613,7 +1818,7 @@ async fn wave3c_vom_cache_last_mile_run_log_and_plan_context_pinning() {
                 "--tab-id",
                 "11",
                 "--context",
-                ctx_delta,
+                ctx_delta_2,
                 "--json"
             ],
             &scope
@@ -1649,7 +1854,7 @@ async fn wave3c_vom_cache_last_mile_run_log_and_plan_context_pinning() {
                 "--tab-id",
                 "11",
                 "--context",
-                ctx_delta,
+                ctx_delta_2,
                 "--json"
             ],
             &scope
@@ -1689,12 +1894,12 @@ async fn wave3c_vom_cache_last_mile_run_log_and_plan_context_pinning() {
     assert!(
         steps
             .iter()
-            .any(|s| s["action"] == "click" && s["target"]["name"] == "Pay $25"),
+            .any(|s| s["action"] == "click" && s["target"]["name"] == "Pay $30"),
         "RunLogs missed slim delta hydration for @e2: {logs_val}"
     );
 
-    // 3. MCP `bsk_session(open)` (reusing `sid` via `BSK_SCOPE=cache-agent`, Stage 4 slim `unchanged`)
-    //    and `bsk_session(sync, wait_for="Pay $25")` (Stage 5 slim `unchanged`) both emit full VOM!
+    // 3. MCP `bsk_session(open)` (reusing `sid` via `BSK_SCOPE=cache-agent`, Stage 6 slim `unchanged`)
+    //    and `bsk_session(sync, wait_for="Pay $30")` (Stage 7 slim `unchanged`) both emit full VOM!
     let mut mcp = McpProcess::spawn(env.home.path(), &scope).await;
     let m_open = mcp
         .call_tool(
@@ -1707,14 +1912,14 @@ async fn wave3c_vom_cache_last_mile_run_log_and_plan_context_pinning() {
         m_open["content"][1]["text"]
             .as_str()
             .unwrap_or("")
-            .contains("Pay $25"),
+            .contains("Pay $30"),
         "MCP bsk_session(open) dropped cached_vom on unchanged sync: {m_open}"
     );
 
     let m_sync = mcp
         .call_tool(
             "bsk_session",
-            json!({ "action": "sync", "tab_id": 11, "wait_for": "Pay $25" }),
+            json!({ "action": "sync", "tab_id": 11, "wait_for": "Pay $30" }),
         )
         .await;
     assert_ne!(
@@ -1725,7 +1930,7 @@ async fn wave3c_vom_cache_last_mile_run_log_and_plan_context_pinning() {
         m_sync["content"][1]["text"]
             .as_str()
             .unwrap_or("")
-            .contains("Pay $25"),
+            .contains("Pay $30"),
         "MCP bsk_session(sync) dropped cached_vom: {m_sync}"
     );
     assert_eq!(snapshot_calls.load(Ordering::SeqCst), 0);

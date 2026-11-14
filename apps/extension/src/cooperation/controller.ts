@@ -1398,6 +1398,16 @@ export class CooperationController implements ControlAuthority {
       if (states.some((state) => state.stopped)) return stopped(sent ? "unknown" : "none");
       if (signal.aborted) signal.throwIfAborted();
       if (revoked) return refusal(revoked);
+      if (isRpcError(result) && result.data?.effect_state === undefined) {
+        return {
+          ...result,
+          data: {
+            ...result.data,
+            effect_state: sent ? "unknown" : "none",
+            phase: result.data?.phase ?? (sent ? "execution" : "precondition"),
+          },
+        };
+      }
       return result;
     } catch (error) {
       if (states.some((state) => state.stopped)) return stopped(sent ? "unknown" : "none");
@@ -2262,6 +2272,7 @@ export class CooperationController implements ControlAuthority {
           return {
             code: "invalid_params",
             message: "depends_on requires at most 16 observed refs/selectors",
+            data: { phase: "precondition", effect_state: "none" },
           };
         if (params.depends_on.length) {
           // Dependencies constrain the decision even when a key has no target.
@@ -2275,7 +2286,7 @@ export class CooperationController implements ControlAuthority {
               /^@?e\d+$/.test(dependency) ? { ref: dependency } : { selector: dependency },
               "action dependency",
             );
-            if (isRpcError(resolved)) return resolved;
+            if (isRpcError(resolved)) return targetError(resolved);
             evidenceTargets.push(resolved);
           }
         }

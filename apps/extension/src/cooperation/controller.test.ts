@@ -4012,5 +4012,78 @@ describe("tool.record_start cooperation guard", () => {
         phase: "precondition",
       },
     });
+
+    // 3. Strict-policy `depends_on` validation and pre-dispatch resolution failures carry `effect_state: "none"`.
+    const strictDep = await fixture();
+    expect(
+      await strictDep.controller.run(
+        {
+          id: "strict-bad-dep",
+          method: "tool.evaluate",
+          params: {
+            session_id: "shared",
+            tab_id: 7,
+            expression: "1",
+            context_id: strictDep.first.context_id,
+            depends_on: [""],
+          },
+        },
+        strictDep.cdp,
+        strictDep.abort.signal,
+        async () => ({ ok: true }),
+      ),
+    ).toMatchObject({
+      code: "invalid_params",
+      data: {
+        effect_state: "none",
+        phase: "precondition",
+      },
+    });
+    vi.mocked(resolveActionTarget).mockResolvedValueOnce({
+      code: "cdp_failed",
+      message: "DOM.querySelector failed",
+    });
+    expect(
+      await strictDep.controller.run(
+        {
+          id: "strict-missing-dep",
+          method: "tool.evaluate",
+          params: {
+            session_id: "shared",
+            tab_id: 7,
+            expression: "1",
+            context_id: strictDep.first.context_id,
+            depends_on: ["@e999"],
+          },
+        },
+        strictDep.cdp,
+        strictDep.abort.signal,
+        async () => ({ ok: true }),
+      ),
+    ).toMatchObject({
+      data: {
+        effect_state: "none",
+      },
+    });
+
+    // 4. `manageTabs` (`tool.tab_select`) stamps `effect_state` onto untagged RpcErrors.
+    expect(
+      await strictDep.controller.run(
+        {
+          id: "tab-select-err",
+          method: "tool.tab_select",
+          params: { session_id: "shared", tab_id: 7 },
+        },
+        strictDep.cdp,
+        strictDep.abort.signal,
+        async () => ({ code: "cdp_failed", message: "tab activation failed before mutation" }),
+      ),
+    ).toMatchObject({
+      code: "cdp_failed",
+      data: {
+        effect_state: "none",
+        phase: "precondition",
+      },
+    });
   });
 });

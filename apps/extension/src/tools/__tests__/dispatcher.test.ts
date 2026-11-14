@@ -2853,9 +2853,16 @@ describe("implicit auto-borrow when confirmTabBorrow is false", () => {
       changed: vi.fn(),
     });
     cooperation.startSession("aa99");
+    let abortInFlightEvaluate = false;
     const cdp = {
       send: vi.fn(async <T>(_target: unknown, method: string) => {
         if (method === "Runtime.evaluate") {
+          if (abortInFlightEvaluate) {
+            dispatcher.inflightAbortControllers.get("post-invoke-cancel")?.abort();
+            const abortErr = new Error("Aborted");
+            abortErr.name = "AbortError";
+            throw abortErr;
+          }
           throw new Error("WebSocket closed mid-evaluate");
         }
         return {} as T;
@@ -2937,6 +2944,39 @@ describe("implicit auto-borrow when confirmTabBorrow is false", () => {
             dispatched: false,
             effect_state: "none",
             phase: "precondition",
+          },
+        },
+      });
+
+      // Re-sync and prove an in-flight `AbortError` thrown after `invoked = true`
+      // (with omitted `tab_id`) still carries `tab_id: 42` resolved from `context_id`.
+      abortDuringDebugBefore = false;
+      deliver({
+        id: "resync-42",
+        method: "tool.cooperate",
+        params: { session_id: "aa99", tab_id: 42, action: "sync" },
+      });
+      await vi.waitFor(() => expect(sent).toHaveLength(4));
+      const nextCtxId = (sent[3] as { result: { context_id: string } }).result.context_id;
+
+      abortInFlightEvaluate = true;
+      deliver({
+        id: "post-invoke-cancel",
+        method: "tool.evaluate",
+        params: {
+          session_id: "aa99",
+          expression: "inFlight()",
+          unverified: true,
+          context_id: nextCtxId,
+        },
+      });
+      await vi.waitFor(() => expect(sent).toHaveLength(5));
+      expect(sent[4]).toMatchObject({
+        id: "post-invoke-cancel",
+        error: {
+          code: "cancelled",
+          data: {
+            tab_id: 42,
           },
         },
       });

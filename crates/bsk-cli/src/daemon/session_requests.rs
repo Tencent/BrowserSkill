@@ -206,8 +206,13 @@ pub(super) async fn start(
     if fresh {
         let state = state.clone();
         let entry = entry.clone();
-        let req_meta = req_meta.clone();
-        // Owned by the daemon, not the IPC reader or a plugin process.
+        // Defer `bind_scope` until `Method::SessionStartTracked` returns uncancelled
+        // in `ipc.rs` so a cancelled in-flight tracked start never overwrites and
+        // tombstones an active bound session during `cleanup`.
+        let mut inner_meta = req_meta.clone();
+        inner_meta.bind_scope = false;
+        inner_meta.reuse_or_start_scope = false;
+        // Owned by the daemon, not the IPC reader.
         tokio::spawn(async move {
             let cancelled = entry.data.lock().unwrap().cancelled;
             let result = if cancelled {
@@ -218,7 +223,7 @@ pub(super) async fn start(
                     entry.rpc_id(),
                     params,
                     true,
-                    &req_meta,
+                    &inner_meta,
                 )
                 .await
                 {

@@ -398,6 +398,16 @@ export class ToolDispatcher {
         ? req.params.session_id
         : undefined;
     if (requestSessionId) this.requestSessions.set(req.id, requestSessionId);
+    const resolveErrorTabId = (): number | undefined => {
+      const rawParams = req.params as { tab_id?: unknown; context_id?: unknown } | undefined;
+      const explicitTabId = rawParams?.tab_id;
+      if (typeof explicitTabId === "number") return explicitTabId;
+      const contextId =
+        typeof rawParams?.context_id === "string" ? rawParams.context_id : undefined;
+      return requestSessionId && contextId
+        ? this.cooperation?.contextTabId(requestSessionId, contextId)
+        : undefined;
+    };
     let body: ResponseFrame;
     let startedSession: string | null = null;
     let debugTicket: DebugTicket | undefined;
@@ -498,16 +508,7 @@ export class ToolDispatcher {
         debugTicket = undefined;
         if (isRpcError(result)) {
           const classified = classifyCdpError(result);
-          const rawParams = req.params as { tab_id?: unknown; context_id?: unknown } | undefined;
-          const explicitTabId = rawParams?.tab_id;
-          const contextId =
-            typeof rawParams?.context_id === "string" ? rawParams.context_id : undefined;
-          const resolvedTabId =
-            typeof explicitTabId === "number"
-              ? explicitTabId
-              : requestSessionId && contextId
-                ? this.cooperation?.contextTabId(requestSessionId, contextId)
-                : undefined;
+          const resolvedTabId = resolveErrorTabId();
           body = {
             id: req.id,
             error:
@@ -525,11 +526,16 @@ export class ToolDispatcher {
         }
       }
     } catch (err) {
+      const resolvedTabId = invoked ? resolveErrorTabId() : undefined;
       if (isAbortLikeError(err)) {
         body = {
           id: req.id,
           error: invoked
-            ? { code: "cancelled", message: "rpc aborted by daemon cancel" }
+            ? {
+                code: "cancelled",
+                message: "rpc aborted by daemon cancel",
+                ...(typeof resolvedTabId === "number" ? { data: { tab_id: resolvedTabId } } : {}),
+              }
             : {
                 code: "cancelled",
                 message: "rpc aborted before dispatch",
@@ -547,6 +553,17 @@ export class ToolDispatcher {
           error: {
             code: "protocol_error",
             message: err instanceof Error ? err.message : String(err),
+            ...(invoked
+              ? typeof resolvedTabId === "number"
+                ? { data: { tab_id: resolvedTabId } }
+                : {}
+              : {
+                  data: {
+                    dispatched: false,
+                    effect_state: "none",
+                    phase: "precondition",
+                  },
+                }),
           },
         };
       }

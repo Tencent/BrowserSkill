@@ -34,11 +34,11 @@ flowchart TB
 
 ### bsk CLI & MCP server (`crates/bsk-cli`)
 
-- Parses verb-noun subcommands (`bsk open`, `bsk sync`, `bsk click`, `bsk step`, `bsk plan`, …) and hosts the stdio MCP server (`bsk mcp`) exposing 11 domain tools (`bsk_session`, `bsk_act`, `bsk_plan`, `bsk_inspect`, `bsk_tabs`, `bsk_assist`, `bsk_ledger`, `bsk_recipe`, `bsk_record`, `bsk_video`, `bsk_browser`).
+- Parses verb-noun subcommands (`bsk open`, `bsk sync`, `bsk click`, `bsk step`, `bsk plan`, …) and hosts the stdio MCP server (`bsk mcp`) exposing 11 default domain tools (`bsk_session`, `bsk_page`, `bsk_inspect`, `bsk_interact`, `bsk_plan`, `bsk_tabs`, `bsk_assist`, `bsk_ledger`, `bsk_debug`, `bsk_video`, `bsk_record`, plus opt-in `bsk_recipe` when `BSK_RECIPES=1`).
 - Uses IPC to discover a running daemon. Automatically starts one only when
   discovery or its listener is absent, unless `BSK_AUTO_START=0` disables implicit
   startup. See [sandboxed agent setup](sandboxed-agents.md) for host-managed daemons.
-- Speaks `IpcEnvelope` JSON Lines over `$BSK_HOME/run/daemon.sock` (Unix domain socket) or a deterministic Named Pipe `\\.\pipe\bsk-ipc-*` derived from `daemon.sock` (Windows); the default home is `~/.bsk`.
+- Speaks `IpcEnvelope` JSON Lines over `$BSK_HOME/run/daemon.sock` (Unix domain socket) or a deterministic Named Pipe `\\.\pipe\bsk-daemon-<hash>` derived from the user and endpoint/`BSK_HOME` (Windows); the default home is `~/.bsk`.
 - Renders human-readable output by default; `--json` emits structured responses.
 
 Key modules:
@@ -132,7 +132,7 @@ Conditions are browser-side preconditions, not an atomic transaction with the ap
 
 Action failures preserve `reason`, `phase`, `effect_state` and recovery guidance; failed conditions
 include target, field, expected and actual values. Unknown outcomes require application reconciliation.
-The daemon and plugin never replace caller receipts or automatically replay a business action.
+The daemon and `bsk mcp` never replace explicit caller receipts or automatically replay a business action.
 Completed tool results survive ordinary page/frame changes and unavailable post-action collection.
 Document or coverage changes still revoke the old context; subsequent actions require a fresh sync.
 In-flight input guards, human intervention, stop and cancellation remain enforced. A completed
@@ -148,7 +148,7 @@ See [shared browser control](shared-browser-control.zh-CN.md) for lifecycle deta
 5. Response travels CLI ← daemon ← extension; CLI prints result and exits.
 
 The [scroll-to primitive reference](scroll-to.md) documents `tool.scroll_to`,
-including its CLI/plugin mappings, visible-bounds contract and cancellation
+including its CLI/MCP mappings, visible-bounds contract and cancellation
 behavior. It follows the same routing path and is classified as a browser
 mutation for session queueing and user-interruption gating.
 

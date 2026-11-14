@@ -46,9 +46,10 @@ policies, and schemas:
 
 1. **Declare method metadata in `crates/bsk-protocol/src/method.rs`**: Every `Method` variant
    defines a single `MethodSpec` entry specifying `owner` (`Daemon`, `Extension`, or `Shared`),
-   `queue` (`Session` or `Unlocked`), `deadline`, `cancel_at_deadline`, `outcome`
-   (`Standard` or `EffectAwareAction`), `action_metadata` (`None`, `ContextOnly`, or `Full`),
-   and `recipe_step`.
+   `queue_mode` (`Serial`, `Unlocked`, `CooperateDynamic`, or `VideoDynamic`), `deadline`
+   (`Standard`, `FullPage`, or `BorrowConfirmation`), `cancel_at_deadline`, `outcome`
+   (`Ordinary`, `EffectAwareAction`, or `FileTransfer`), `wal_tracking`, `action_metadata`
+   (`None`, `ContextOnly`, or `Full`), and `recipe_step`.
 2. **Keep additive changes backward-compatible within a major**: Add optional fields with
    `#[serde(default, skip_serializing_if = ...)]` when preserving compatibility within `2.x`.
    Bump `PROTOCOL_VERSION` (and `MIN_COMPATIBLE_PROTOCOL` when breaking wire invariants) in
