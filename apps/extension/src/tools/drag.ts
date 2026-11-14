@@ -143,7 +143,12 @@ export async function handleDrag(
         return withInputReady(
           ctx,
           tab.tabId,
-          { ...deps, deadline, registerCleanup: inputDeps.registerClickCleanup },
+          {
+            ...deps,
+            deadline,
+            preserveWindowFocus: true,
+            registerCleanup: inputDeps.registerClickCleanup,
+          },
           async (input): Promise<DragResult | RpcError> => {
             const address = (r: typeof source) => ({
               target: r.cdpTarget,

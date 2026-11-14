@@ -32,13 +32,15 @@ async function isAuraCompositorPlatform(): Promise<boolean> {
 export async function isHiddenCompositorSurface(
   active: boolean,
   windowId: number,
-  { includeUnfocusedWindow = true }: { includeUnfocusedWindow?: boolean } = {},
 ): Promise<boolean> {
   if (!active) return true;
   if (typeof chrome === "undefined" || typeof chrome.windows?.get !== "function") return false;
   const win = await chrome.windows.get(windowId).catch(() => undefined);
   if (!win) return false;
-  return win.state === "minimized" || (includeUnfocusedWindow && !win.focused);
+  if (win.state === "minimized") return true;
+  if (win.focused !== false) return false;
+  // Headless Chrome reports windows as unfocused without an Aura desktop occlusion path.
+  return !globalThis.navigator?.userAgent.includes("HeadlessChrome/");
 }
 
 /** Hold a minimal screencast consumer on Windows/Linux Aura while reading a hidden surface. */

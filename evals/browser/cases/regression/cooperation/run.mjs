@@ -17,7 +17,8 @@ import { runGenericScenarios } from "./scenarios.mjs";
 import { runTargetPolicyScenarios } from "./target-policy.mjs";
 
 const executable = process.env.BSK_TEST_CHROME;
-const cli = resolve(process.env.BSK_TEST_CLI ?? "target/debug/bsk");
+const defaultCli = process.platform === "win32" ? "target/debug/bsk.exe" : "target/debug/bsk";
+const cli = resolve(process.env.BSK_TEST_CLI ?? defaultCli);
 const extensionPath = resolve(process.env.BSK_COOP_EXTENSION ?? "apps/extension/dist/chrome-mv3");
 const port = Number(process.env.BSK_COOP_PORT ?? 52917);
 const artifacts = process.env.BSK_COOP_ARTIFACTS;
@@ -51,6 +52,17 @@ const env = {
   BSK_AUTO_UPDATE: "off",
   RUST_LOG: "info",
 };
+for (const key of [
+  "BSK_SESSION",
+  "BSK_SCOPE",
+  "CLAUDE_CODE_AGENT_ID",
+  "CODEX_THREAD_ID",
+  "ANTIGRAVITY_CONVERSATION_ID",
+  "CURSOR_TRACE_ID",
+  "DSH_SESSION_ID",
+]) {
+  delete env[key];
+}
 const exec = promisify(execFile);
 const runBsk = async (args, failure = false) => {
   if (process.env.BSK_COOP_DEBUG) console.error("step", args.slice(0, 3).join(" "));

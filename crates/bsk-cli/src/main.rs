@@ -39,9 +39,13 @@ fn main() -> ExitCode {
 }
 
 fn dispatch(cli: Cli, format: Format) -> Result<(), CliError> {
+    let is_multi_phase = cli::validate_command_evidence(&cli.command, &cli.flags)?;
     cli::business_rpc::set_caller_scope(cli.flags.scope.clone());
     // Plans and recipes attach evidence step by step, so it never goes on every request.
     if !matches!(cli.command, Command::Plan(_) | Command::Recipe(_)) {
+        if is_multi_phase {
+            cli::business_rpc::set_multi_phase_command();
+        }
         cli::business_rpc::set_context(cli.flags.context.clone());
         cli::business_rpc::set_dependencies(cli.flags.depends_on.clone());
         cli::business_rpc::set_action_evidence(

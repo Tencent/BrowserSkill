@@ -95,6 +95,17 @@ async function withAgent(
     BSK_AUTO_UPDATE: "off",
     BSK_UPDATE_MANIFEST_URL: `${baseUrl}/update.json`,
   };
+  for (const key of [
+    "BSK_SESSION",
+    "BSK_SCOPE",
+    "CLAUDE_CODE_AGENT_ID",
+    "CODEX_THREAD_ID",
+    "ANTIGRAVITY_CONVERSATION_ID",
+    "CURSOR_TRACE_ID",
+    "DSH_SESSION_ID",
+  ]) {
+    delete (env as NodeJS.ProcessEnv)[key];
+  }
   const defaultCli = path.resolve(
     "../../target/debug",
     process.platform === "win32" ? "bsk.exe" : "bsk",

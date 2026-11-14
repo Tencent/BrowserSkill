@@ -21,34 +21,44 @@ determines which versions can connect.
 ### Changed
 
 - Unified all real-browser test and regression harnesses onto `BSK_TEST_CHROME`
-  and `BSK_TEST_CLI`, separated `.browser.test.ts` and `.bench.ts` from the unit
-  Vitest configuration into `apps/extension/vitest.browser.config.ts` and
-  `scripts/run-browser-tests.mjs` (enforcing `skipped === 0` and non-empty suite
-  assertions), and wired every extension `.browser.test.ts` suite plus
-  `eval:browser:check` and `eval:browser:dynamic-read` into CI (#731).
+  and `BSK_TEST_CLI` (resolving Windows `.exe` binaries and stripping host agent
+  scope env vars in isolated daemon fixtures), separated `.browser.test.ts` and
+  `.bench.ts` from the unit Vitest configuration into
+  `apps/extension/vitest.browser.config.ts` and `scripts/run-browser-tests.mjs`
+  (routing `pnpm --filter @browser-skill/extension test:browser` through the
+  runner and enforcing `skipped === 0`, non-empty suite assertions, and
+  per-target suite coverage), and wired every extension `.browser.test.ts` suite
+  plus `eval:browser:check` and `eval:browser:dynamic-read` into CI (#731, #732).
 
 ### Fixed
 
 - Preserved user window focus on macOS and Linux/X11 Chromium when creating or
   initializing background Agent Windows and tabs (`chromeAgentWindowApi.create`
-  seeding an inactive tab via `tabId` on Linux to avoid Chromium `Navigate()`
-  `kShowWindow` focus theft, and `tool.tab_create` / `ensureActiveTab` creating
-  inactive tabs before activating via `chrome.tabs.update`, closing orphan tabs if
-  window/tab activation fails), enabled the Aura screencast compositor keepalive
-  (and full-page stale-frame guard) on Linux as well as Windows across
-  `screenshot` and `screenshot --full-page` on unselected tabs and
-  unfocused/occluded or minimized Agent Windows, and made `parsePngDimensions`
-  charset-independent when bundled (#731).
-- Preserved foreground window focus during native clicks in background Linux
-  Agent Windows and rechecked focus after transient X11 events when restoring
-  task popup focus or routing an external link (#731).
-- Scoped CLI and MCP cooperation metadata attachment (`context_id`, `depends_on`,
-  `observation_id`, `expect`) strictly to RPC methods whose wire contracts accept
-  them (`Method::accepts_action_metadata()` and `tool.read` for `context_id`), so
-  multi-RPC commands such as `bsk screenshot --full-page --context`,
-  `bsk download --context`, `bsk upload --context`, and `bsk step --context` no
-  longer leak action metadata onto follow-up chunk-transfer, readiness-wait, or
-  post-sync RPCs (#731).
+  seeding an inactive tab via `tabId` on Linux while excluding active or
+  starting Agent Windows from donor selection, and `tool.tab_create` /
+  `ensureActiveTab` creating inactive tabs before activating via
+  `chrome.tabs.update`, closing orphan tabs or claiming cleanup failures into
+  `agentCreatedTabs`), enabled the Aura screencast compositor keepalive (and
+  full-page stale-frame guard) on headed Linux and Windows across `screenshot`
+  and `screenshot --full-page` on unselected tabs and unfocused/occluded or
+  minimized Agent Windows (skipping `HeadlessChrome/`), and made
+  `parsePngDimensions` charset-independent when bundled (#731, #732).
+- Preserved foreground window focus during native pointer interactions (`click`,
+  `drag`, `download`, and `upload`) in background Linux Agent Windows, ordered
+  CDP focus emulation, temporary `about:blank` tab unselection, and background
+  lease visibility checks so shared tabs do not emit spurious `blur` events,
+  claimed temporary tabs to prevent leaked `about:blank` fallback routing, and
+  rechecked focus after transient X11 events when restoring task popup focus or
+  routing an external link (#731, #732).
+- Failed closed with `invalid_params` when cooperation action metadata
+  (`context_id`, `depends_on`, `observation_id`, `expect`) is supplied to
+  unguarded CLI or MCP commands while stripping auxiliary follow-up RPCs inside
+  multi-phase commands (`open`, `step`, `upload`, `download`, and
+  `screenshot --full-page`), and re-verified `--expect` business conditions in
+  `CooperationController` (`prepare` — including `primaryEffect` hover/focus
+  steps — and `beginDomMutation` before marking `nativeInputStarted`) under
+  `target` policy so last-moment DOM mutations fail closed before the committing
+  press or scripted mutation (#731, #732).
 - VOM tree folding (`shouldSkipRedundantRefChildren` and `renderTreeRows`) preserves
   independent interactive descendants under named interactive controls (such as Vue 3 +
   Element Plus nested `<el-sub-menu>` popups inside a parent `menuitem` or custom ARIA
@@ -68,9 +78,10 @@ determines which versions can connect.
 
 - Retired and removed `packages/dsh-plugin-browserskill`, its standalone release
   workflow, and DSH-specific test shims; DeepSeek Harness now uses the standard
-  `bsk` CLI and `bsk mcp` server, with in-flight MCP cancellation, cooperation
-  settlement, video export, and dynamic-reading browser regressions migrated to
-  `bsk` CLI and `bsk mcp` (#731).
+  `bsk` CLI and `bsk mcp` server (keeping video recording and host-filesystem
+  MP4 export intentionally CLI-only via `bsk video`), with in-flight MCP
+  cancellation, cooperation settlement, CLI video export, and dynamic-reading
+  browser regressions migrated to `bsk` CLI and `bsk mcp` (#731, #732).
 
 ## [0.5.0] - 2026-11-12
 

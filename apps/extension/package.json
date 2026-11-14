@@ -9,7 +9,7 @@
     "zip": "wxt zip",
     "compile": "tsc --noEmit",
     "test": "vitest run",
-    "test:browser": "vitest run --config vitest.browser.config.ts",
+    "test:browser": "node ../../scripts/run-browser-tests.mjs",
     "test:watch": "vitest",
     "postinstall": "wxt prepare"
   },

@@ -404,7 +404,7 @@ jobs:
         env:
           BSK_TAB_DETACH_REPORT: ${{ env.BSK_VIDEO_ARTIFACTS }}/tab-detachment.json
         run: node scripts/run-browser-tests.mjs src/session-manager/__tests__/tab-detachment.browser.test.ts
-      - name: Validate capture, playback, recovery and CLI/MCP export
+      - name: Validate capture, playback, recovery and CLI export
         run: >-
           node scripts/run-browser-tests.mjs
           --output-json "${BSK_VIDEO_ARTIFACTS}/results.json"

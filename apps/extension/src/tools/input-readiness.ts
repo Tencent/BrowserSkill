@@ -203,18 +203,19 @@ async function temporarilyUnselectInputTab(
       tab.id !== undefined &&
       tab.id !== tabId &&
       ctx.agentCreatedTabs.has(tab.id) &&
+      !(ctx.temporaryInputTabs?.has(tab.id) ?? false) &&
       tab.url === AGENT_WINDOW_HOME &&
       !tab.pendingUrl,
   );
-  const finishCreation = beginTabCreation(ctx);
   let alternateId = home?.id;
   let temporaryId: number | undefined;
-  let selectionAttempted = false;
+  let alternateSelected = false;
   let cleanup: Promise<void> | undefined;
   const release = () => {
     cleanup ??= (async () => {
+      let restoreError: unknown;
       try {
-        if (selectionAttempted) {
+        if (alternateSelected && alternateId !== undefined) {
           const [current, selected] = await Promise.all([
             chrome.tabs.get(tabId).catch(() => undefined),
             chrome.tabs.query({ windowId, active: true }),
@@ -223,26 +224,43 @@ async function temporarilyUnselectInputTab(
           if (current?.windowId === windowId && selected[0]?.id === alternateId) {
             await chrome.tabs.update(tabId, { active: true });
           }
-        }
-      } finally {
-        try {
-          if (temporaryId !== undefined) {
-            const tab = await chrome.tabs.get(temporaryId).catch(() => undefined);
-            if (tab?.windowId === windowId) await chrome.tabs.remove(temporaryId);
+          if (alternateId !== temporaryId) {
+            ctx.temporaryInputTabs?.delete(alternateId);
           }
-        } finally {
-          finishCreation();
+        }
+      } catch (err) {
+        restoreError = err;
+      } finally {
+        if (temporaryId !== undefined) {
+          const tab = await chrome.tabs.get(temporaryId).catch(() => undefined);
+          if (!tab) {
+            ctx.agentCreatedTabs.delete(temporaryId);
+            ctx.temporaryInputTabs?.delete(temporaryId);
+          } else if (tab.windowId === windowId) {
+            await chrome.tabs.remove(temporaryId);
+            ctx.agentCreatedTabs.delete(temporaryId);
+            ctx.temporaryInputTabs?.delete(temporaryId);
+          }
         }
       }
+      if (restoreError) throw restoreError;
     })();
     return cleanup;
   };
   try {
     checkActive();
     if (alternateId === undefined) {
-      const tab = await chrome.tabs.create({ windowId, url: AGENT_WINDOW_HOME, active: false });
-      alternateId = temporaryId = tab.id;
-      if (alternateId === undefined) throw new Error("Could not create a temporary input tab");
+      const finishCreation = beginTabCreation(ctx);
+      try {
+        const tab = await chrome.tabs.create({ windowId, url: AGENT_WINDOW_HOME, active: false });
+        const createdId = tab.id;
+        if (createdId === undefined) throw new Error("Could not create a temporary input tab");
+        alternateId = temporaryId = createdId;
+        ctx.agentCreatedTabs.add(createdId);
+        (ctx.temporaryInputTabs ??= new Set()).add(createdId);
+      } finally {
+        finishCreation();
+      }
     }
     const [current, window] = await Promise.all([
       chrome.tabs.get(tabId),
@@ -251,13 +269,29 @@ async function temporarilyUnselectInputTab(
     if (current.windowId !== windowId) throw new Error("Input tab left the Agent Window");
     checkActive();
     if (current.active && !window.focused) {
-      selectionAttempted = true;
-      const selected = await chrome.tabs.update(alternateId, { active: true });
+      (ctx.temporaryInputTabs ??= new Set()).add(alternateId);
+      let selected: chrome.tabs.Tab | undefined;
+      try {
+        selected = await chrome.tabs.update(alternateId, { active: true });
+      } catch (err) {
+        if (alternateId !== temporaryId) {
+          ctx.temporaryInputTabs?.delete(alternateId);
+        }
+        throw err;
+      }
       if (!selected?.active || selected.windowId !== windowId) {
+        if (alternateId !== temporaryId) {
+          ctx.temporaryInputTabs?.delete(alternateId);
+        }
         throw new Error("Could not unselect the input tab in the Agent Window");
       }
+      alternateSelected = true;
+      return release;
     }
-    return release;
+    if (temporaryId !== undefined) {
+      await release();
+    }
+    return;
   } catch (error) {
     await release().catch(() => {});
     throw error;
@@ -315,48 +349,78 @@ export async function withInputReady<T extends object>(
     // A persistent lease owns focus emulation for dispatcher-controlled tools;
     // unowned direct-handler paths retain the bounded 0.3.0 fallback below.
     const persistentLease = deps.cdp.ownsBackgroundExecution?.(ctx.sessionId, tabId) === true;
-    const visibility = await sampleVisibility(tabId, deps);
-    checkActive();
-    const unselect = deps.preserveWindowFocus && (await needsInactiveInputTab(ctx, tabId));
+    const unselect = Boolean(deps.preserveWindowFocus && (await needsInactiveInputTab(ctx, tabId)));
     const cancelled = abortError(deps.signal);
     if (cancelled) return cancelled;
     checkActive();
-    if (visibility === "hidden" && persistentLease) {
-      const notReady = await restoreLeasedInput(ctx, tabId, deps);
-      if (notReady) return notReady;
+    if (persistentLease) {
+      if (unselect) {
+        releaseTab = await temporarilyUnselectInputTab(ctx, tabId, checkActive);
+        const cancelledAfterUnselect = abortError(deps.signal);
+        if (cancelledAfterUnselect) return cancelledAfterUnselect;
+        checkActive();
+      }
+      const visibility = await sampleVisibility(tabId, deps);
+      const cancelledAfterSample = abortError(deps.signal);
+      if (cancelledAfterSample) return cancelledAfterSample;
       checkActive();
-    } else if (visibility === "hidden" || (unselect && !persistentLease)) {
-      attachmentId = deps.cdp.getAttachmentId?.(tabId);
-      // Mark ownership before awaiting: a failed reply may still have enabled it.
-      restoreFocus = true;
-      deps.registerCleanup?.(cleanupFocus);
-      await waitForInputReply(
-        deps.cdp.sendGuarded
-          ? deps.cdp.sendGuarded(
-              { tabId },
-              "Emulation.setFocusEmulationEnabled",
-              { enabled: true },
-              { signal: deps.signal, onDispatch: checkActive },
-            )
-          : deps.cdp.send(tabId, "Emulation.setFocusEmulationEnabled", { enabled: true }),
-        deps.signal,
-        5000,
-        deps.deadline,
-      );
+      if (visibility === "hidden") {
+        const notReady = await restoreLeasedInput(ctx, tabId, deps);
+        if (notReady) return notReady;
+        checkActive();
+      } else if (visibility !== "visible") {
+        throw new Error("Could not determine input target visibility");
+      }
+    } else {
+      const visibility = await sampleVisibility(tabId, deps);
+      const cancelledAfterSample = abortError(deps.signal);
+      if (cancelledAfterSample) return cancelledAfterSample;
       checkActive();
-      // Focus emulation resumes renderer frames even in a minimized window,
-      // where a compositor screenshot may never complete.
-      await waitForRendererFrames(
-        deps.cdp,
-        tabId,
-        "Renderer did not produce a frame after preparing hidden input",
-        deps.signal,
-        deps.deadline,
-      );
-    } else if (visibility !== "visible") {
-      throw new Error("Could not determine input target visibility");
+      if (visibility === "hidden" || unselect) {
+        if (visibility !== "hidden" && visibility !== "visible") {
+          throw new Error("Could not determine input target visibility");
+        }
+        attachmentId = deps.cdp.getAttachmentId?.(tabId);
+        // Mark ownership before awaiting: a failed reply may still have enabled it.
+        restoreFocus = true;
+        deps.registerCleanup?.(cleanupFocus);
+        await waitForInputReply(
+          deps.cdp.sendGuarded
+            ? deps.cdp.sendGuarded(
+                { tabId },
+                "Emulation.setFocusEmulationEnabled",
+                { enabled: true },
+                { signal: deps.signal, onDispatch: checkActive },
+              )
+            : deps.cdp.send(tabId, "Emulation.setFocusEmulationEnabled", { enabled: true }),
+          deps.signal,
+          5000,
+          deps.deadline,
+        );
+        checkActive();
+        if (unselect) {
+          releaseTab = await temporarilyUnselectInputTab(ctx, tabId, checkActive);
+          const cancelledAfterUnselect = abortError(deps.signal);
+          if (cancelledAfterUnselect) return cancelledAfterUnselect;
+          checkActive();
+          if ((await sampleVisibility(tabId, deps)) !== "visible") {
+            throw new Error("Input target did not remain visible after unselecting tab");
+          }
+          checkActive();
+        }
+        // Focus emulation resumes renderer frames even in a minimized window,
+        // where a compositor screenshot may never complete.
+        await waitForRendererFrames(
+          deps.cdp,
+          tabId,
+          "Renderer did not produce a frame after preparing hidden input",
+          deps.signal,
+          deps.deadline,
+        );
+      } else if (visibility !== "visible") {
+        throw new Error("Could not determine input target visibility");
+      }
     }
-    if (unselect) releaseTab = await temporarilyUnselectInputTab(ctx, tabId, checkActive);
     const cancelledAfterEnable = abortError(deps.signal);
     if (cancelledAfterEnable) result = cancelledAfterEnable;
     else {

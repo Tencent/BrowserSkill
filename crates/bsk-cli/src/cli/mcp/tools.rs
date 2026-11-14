@@ -1129,10 +1129,10 @@ async fn page(
         }
     };
     let evidence = Evidence::new(args.context, args.observation, None, None)?;
-    let link = connect(daemon, control, conn_scope).await?;
-    evidence.check(&link.protocol, false)?;
     let timeout = timeout_of(&params, 30_000);
     let params = evidence.attach(&method, params)?;
+    let link = connect(daemon, control, conn_scope).await?;
+    evidence.check(&link.protocol, false)?;
     let value = link.rpc(method, params, timeout).await?;
     let is_error = matches!(
         args.action,
@@ -1532,7 +1532,14 @@ async fn interact(link: &Link, prepared: Prepared) -> Result<Reply, CliError> {
             let (value, exit) = link
                 .blocking(move |rpc| {
                     step::run(&args, method, params, |method, params, timeout| {
-                        let params = evidence.attach(&method, params)?;
+                        let params = if business_rpc::method_accepts_action_metadata_with_params(
+                            &method,
+                            Some(&params),
+                        ) {
+                            evidence.attach(&method, params)?
+                        } else {
+                            params
+                        };
                         rpc(method, params, timeout)
                     })
                 })
@@ -1861,6 +1868,7 @@ async fn tabs(
         }
     };
     let evidence = Evidence::new(args.context, args.observation, None, None)?;
+    let params = evidence.attach(&method, params)?;
     let link = connect(daemon, control, conn_scope).await?;
     if args.confirmation_timeout_ms.is_some()
         && !bsk_protocol::tools::supports_borrow_confirmation_timeout(&link.protocol)
@@ -1872,7 +1880,6 @@ async fn tabs(
         ));
     }
     evidence.check(&link.protocol, false)?;
-    let params = evidence.attach(&method, params)?;
     let value = link.rpc(method, params, timeout).await?;
     Ok(Reply::json(value))
 }
@@ -1958,12 +1965,12 @@ async fn assist(
                 return Err(invalid("window dimensions must be 100..=7680"));
             }
             let evidence = Evidence::new(args.context, args.observation, None, None)?;
-            let link = connect(daemon, control, conn_scope).await?;
-            evidence.check(&link.protocol, false)?;
             let params = evidence.attach(
                 &Method::ToolWindowResize,
                 json!({"session_id":session, "width":width, "height":height}),
             )?;
+            let link = connect(daemon, control, conn_scope).await?;
+            evidence.check(&link.protocol, false)?;
             return Ok(Reply::json(
                 link.rpc(Method::ToolWindowResize, params, TOOL_IPC_TIMEOUT)
                     .await?,
@@ -2010,12 +2017,12 @@ async fn assist(
                 off: args.off.unwrap_or(false),
             })?;
             let evidence = Evidence::new(args.context, args.observation, None, None)?;
-            let link = connect(daemon, control, conn_scope).await?;
-            evidence.check(&link.protocol, false)?;
             let params = evidence.attach(
                 &Method::ToolEmulate,
                 serde_json::to_value(params).map_err(|e| invalid(e.to_string()))?,
             )?;
+            let link = connect(daemon, control, conn_scope).await?;
+            evidence.check(&link.protocol, false)?;
             return Ok(Reply::json(
                 link.rpc(Method::ToolEmulate, params, TOOL_IPC_TIMEOUT)
                     .await?,
@@ -2428,5 +2435,56 @@ mod tests {
                 .unwrap()
                 .contains("require agent_name")
         );
+
+        // Unguarded `bsk_page` and `bsk_tabs` actions fail closed on context/observation before connecting.
+        for (tool, bad_args) in [
+            (
+                "bsk_page",
+                json!({"action":"wait_for_navigation","session":"s","context":"ctx-1"}),
+            ),
+            (
+                "bsk_page",
+                json!({"action":"wait_for_element","session":"s","selector":"#ready","observation":"obs-1"}),
+            ),
+            (
+                "bsk_tabs",
+                json!({"action":"list","session":"s","context":"ctx-1"}),
+            ),
+            (
+                "bsk_tabs",
+                json!({"action":"create","session":"s","observation":"obs-1"}),
+            ),
+            (
+                "bsk_tabs",
+                json!({"action":"select","session":"s","tab_id":7,"context":"ctx-1"}),
+            ),
+            (
+                "bsk_tabs",
+                json!({"action":"borrow","session":"s","tab_id":7,"context":"ctx-1"}),
+            ),
+            (
+                "bsk_tabs",
+                json!({"action":"return","session":"s","tab_id":7,"observation":"obs-1"}),
+            ),
+            (
+                "bsk_assist",
+                json!({"action":"dialog_status","session":"s","context":"ctx-1"}),
+            ),
+        ] {
+            let reply = call(&daemon, &control, None, tool, bad_args.clone()).await;
+            assert_eq!(reply["isError"], true, "{tool} {bad_args}");
+            let body: Value =
+                serde_json::from_str(reply["content"][0]["text"].as_str().unwrap()).unwrap();
+            assert_eq!(body["code"], "invalid_params", "{tool} {bad_args}: {body}");
+        }
+
+        assert!(!business_rpc::method_accepts_action_metadata_with_params(
+            &Method::ToolObserve,
+            Some(&json!({"session_id":"s","probe_hover":false})),
+        ));
+        assert!(business_rpc::method_accepts_action_metadata_with_params(
+            &Method::ToolObserve,
+            Some(&json!({"session_id":"s","probe_hover":true})),
+        ));
     }
 }

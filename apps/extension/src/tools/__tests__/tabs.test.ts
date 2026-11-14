@@ -2066,3 +2066,44 @@ it("keeps borrowed tabs as the default target and preserves explicit targeting",
   expect(ctx.borrowedTabs.has(7)).toBe(false);
   expect(cdp.releaseSessionTab).toHaveBeenCalledWith("aa11", 7);
 });
+
+it("claims an unremovable tab into agentCreatedTabs when chromeTabMutationApi.create fails activation and cleanup", async () => {
+  const { chromeTabMutationApi } = await import("../tabs");
+  const prevChrome = globalThis.chrome;
+  vi.stubGlobal("chrome", {
+    tabs: {
+      create: vi.fn(async () => ({
+        id: 88,
+        windowId: 100,
+        active: false,
+        url: "https://leak.test/",
+      })),
+      update: vi.fn(async () => {
+        throw new Error("activation rejected");
+      }),
+      remove: vi.fn(async () => {
+        throw new Error("tab locked by dialog");
+      }),
+    },
+  });
+  try {
+    const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
+    const ctx = await sm.start("aa11");
+    const result = await handleTabCreate(
+      sm,
+      { session_id: "aa11", url: "https://leak.test/" },
+      { tabs: chromeTabMutationApi },
+    );
+    expect(result).toMatchObject({
+      code: "protocol_error",
+      data: {
+        reason: "cleanup_failed",
+        resource_type: "tab",
+        resource_id: 88,
+      },
+    });
+    expect(ctx.agentCreatedTabs.has(88)).toBe(true);
+  } finally {
+    vi.stubGlobal("chrome", prevChrome);
+  }
+});

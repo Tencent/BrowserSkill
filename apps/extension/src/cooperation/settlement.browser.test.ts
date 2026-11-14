@@ -42,9 +42,18 @@ it
       BSK_HOME: path.join(directory, "state"),
       BSK_AUTO_START: "0",
       BSK_AUTO_UPDATE: "off",
-      BSK_SESSION: "",
-      BSK_SCOPE: "",
     };
+    for (const key of [
+      "BSK_SESSION",
+      "BSK_SCOPE",
+      "CLAUDE_CODE_AGENT_ID",
+      "CODEX_THREAD_ID",
+      "ANTIGRAVITY_CONVERSATION_ID",
+      "CURSOR_TRACE_ID",
+      "DSH_SESSION_ID",
+    ]) {
+      delete (env as NodeJS.ProcessEnv)[key];
+    }
     const daemon = spawn(executable, ["daemon", "start", "--foreground", "--port", "0"], {
       env,
       stdio: "ignore",

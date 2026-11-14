@@ -36,6 +36,8 @@ export interface AgentWindowCreateOptions {
   focused?: boolean;
   /** Use Chrome's shared incognito browsing session. */
   incognito?: boolean;
+  /** Live or initializing Agent Windows that must never donate a seed tab. */
+  excludeWindowIds?: ReadonlySet<number>;
 }
 
 /** Initial tab URL for every new session's Agent Window. */
@@ -72,7 +74,10 @@ export const chromeAgentWindowApi: AgentWindowApi = {
     ) {
       const windows = await chrome.windows.getAll({ windowTypes: ["normal"] }).catch(() => []);
       const candidates = windows.filter(
-        (w) => typeof w.id === "number" && Boolean(w.incognito) === incognito,
+        (w) =>
+          typeof w.id === "number" &&
+          Boolean(w.incognito) === incognito &&
+          !opts.excludeWindowIds?.has(w.id),
       );
       const donor = candidates.find((w) => w.focused) ?? candidates[0];
       if (typeof donor?.id === "number") {

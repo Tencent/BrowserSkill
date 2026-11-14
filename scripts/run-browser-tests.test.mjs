@@ -40,39 +40,86 @@ test("fails fast when BSK_TEST_CHROME is unset or missing", () => {
   assert.match(missingResult.stderr, /BSK_TEST_CHROME does not exist/);
 });
 
-test("normalizes apps/extension prefixes and --output-json flag", () => {
+test("normalizes apps/extension prefixes, -- separator, and --output-json flag", () => {
   const parsed = normalizeTargetArgs([
+    "--",
     "--output-json",
     "artifacts/report.json",
     "apps/extension/src/video/capture.browser.test.ts",
-    "src/tools/__tests__/wheel.browser.test.ts",
+    path.join(REPO_ROOT, "apps", "extension", "src/tools/__tests__/wheel.browser.test.ts"),
   ]);
   assert.equal(parsed.outputJson, "artifacts/report.json");
   assert.deepEqual(parsed.targets, [
     "src/video/capture.browser.test.ts",
     "src/tools/__tests__/wheel.browser.test.ts",
   ]);
+  assert.deepEqual(
+    normalizeTargetArgs([
+      ".",
+      "./",
+      "apps/extension",
+      "./apps/extension/",
+      path.join(REPO_ROOT, "apps", "extension"),
+    ]).targets,
+    [".", ".", ".", ".", "."],
+  );
 });
 
-test("enforces zero-skip and non-empty suite assertions on Vitest JSON output", () => {
-  validateVitestReport({
-    success: true,
-    numTotalTests: 2,
-    numPassedTests: 2,
-    numFailedTests: 0,
-    numFailedTestSuites: 0,
-    numPendingTests: 0,
-    numTodoTests: 0,
-    testResults: [
-      {
-        name: "src/tools/__tests__/wheel.browser.test.ts",
-        assertionResults: [
-          { fullName: "wheel > scrolls element", status: "passed" },
-          { fullName: "wheel > respects zoom", status: "passed" },
-        ],
-      },
-    ],
-  });
+test("enforces zero-skip, non-empty suite assertions, and per-target coverage on Vitest JSON output", () => {
+  validateVitestReport(
+    {
+      success: true,
+      numTotalTests: 2,
+      numPassedTests: 2,
+      numFailedTests: 0,
+      numFailedTestSuites: 0,
+      numPendingTests: 0,
+      numTodoTests: 0,
+      testResults: [
+        {
+          name: path.join(
+            REPO_ROOT,
+            "apps",
+            "extension",
+            "src/tools/__tests__/wheel.browser.test.ts",
+          ),
+          assertionResults: [
+            { fullName: "wheel > scrolls element", status: "passed" },
+            { fullName: "wheel > respects zoom", status: "passed" },
+          ],
+        },
+      ],
+    },
+    [".", "src/tools/__tests__/wheel.browser.test.ts"],
+  );
+
+  assert.throws(
+    () =>
+      validateVitestReport(
+        {
+          success: true,
+          numTotalTests: 1,
+          numPassedTests: 1,
+          numFailedTests: 0,
+          numFailedTestSuites: 0,
+          numPendingTests: 0,
+          numTodoTests: 0,
+          testResults: [
+            {
+              name: path.join(
+                REPO_ROOT,
+                "apps",
+                "extension",
+                "src/tools/__tests__/not-wheel.browser.test.ts",
+              ),
+              assertionResults: [{ fullName: "other > runs", status: "passed" }],
+            },
+          ],
+        },
+        ["src/tools/__tests__/not-wheel.browser.test.ts", "wheel.browser.test.ts"],
+      ),
+    /Target\(s\) matched zero executed browser test suites: wheel\.browser\.test\.ts/,
+  );
 
   assert.throws(
     () =>
@@ -156,5 +203,14 @@ test("CI workflow executes every .browser.test.ts suite through run-browser-test
     ciWorkflow,
     /\bvitest\s+run\b[^\n]*\.browser\.test\.ts/,
     "CI workflow must invoke scripts/run-browser-tests.mjs instead of raw vitest run for browser tests",
+  );
+
+  const extPkg = JSON.parse(
+    fs.readFileSync(path.join(REPO_ROOT, "apps", "extension", "package.json"), "utf8"),
+  );
+  assert.match(
+    extPkg.scripts?.["test:browser"] ?? "",
+    /run-browser-tests\.mjs/,
+    "apps/extension test:browser script must route through scripts/run-browser-tests.mjs",
   );
 });

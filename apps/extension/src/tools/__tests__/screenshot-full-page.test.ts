@@ -509,6 +509,30 @@ describe("Windows full-page rendering lifetime", () => {
     expect(deps.exports.discard).toHaveBeenCalledOnce();
     expect(vi.getTimerCount()).toBe(0);
   });
+
+  it("wakes an unfocused headed Linux/Windows Agent Window while skipping HeadlessChrome", async () => {
+    for (const [ua, expectedScreencasts] of [
+      ["Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/136.0.0.0", 1],
+      ["Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 HeadlessChrome/136.0.0.0", 0],
+    ] as const) {
+      const { manager, tab, deps } = await setupWindowsCapture();
+      tab.active = true;
+      vi.mocked(chrome.runtime.getPlatformInfo).mockResolvedValue({
+        os: "linux",
+      } as chrome.runtime.PlatformInfo);
+      (chrome as unknown as { windows: unknown }).windows = {
+        get: vi.fn(async () => ({ id: 100, focused: false, state: "normal" })),
+      };
+      vi.stubGlobal("navigator", { userAgent: ua });
+      expect(await handleFullPageScreenshot(manager, { session_id: "one" }, deps)).toMatchObject({
+        format: "png",
+      });
+      expect(
+        deps.cdp.send.mock.calls.filter(([, method]) => method === "Page.startScreencast"),
+      ).toHaveLength(expectedScreencasts);
+      await deps.exports.dispose();
+    }
+  });
 });
 
 describe("full-page scope and diagnostics", () => {

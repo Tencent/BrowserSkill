@@ -22,6 +22,17 @@ const output = resolve(
 assert(executable, "Set BSK_TEST_CHROME to a browser executable");
 const home = await mkdtemp(join(tmpdir(), "bsk-controller-identity-"));
 const env = { ...process.env, BSK_HOME: home, BSK_AUTO_START: "0", BSK_BROWSER_WAIT_MS: "0" };
+for (const key of [
+  "BSK_SESSION",
+  "BSK_SCOPE",
+  "CLAUDE_CODE_AGENT_ID",
+  "CODEX_THREAD_ID",
+  "ANTIGRAVITY_CONVERSATION_ID",
+  "CURSOR_TRACE_ID",
+  "DSH_SESSION_ID",
+]) {
+  delete env[key];
+}
 const execute = promisify(execFile);
 const bsk = async (...args) => {
   const { stdout } = await execute(cli, [...args, "--json"], {

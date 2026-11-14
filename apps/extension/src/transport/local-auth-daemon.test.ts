@@ -49,6 +49,17 @@ function environment() {
   };
   delete env.BSK_DAEMONIZED;
   delete env.BSK_DAEMON_REPLACES_PID;
+  for (const key of [
+    "BSK_SESSION",
+    "BSK_SCOPE",
+    "CLAUDE_CODE_AGENT_ID",
+    "CODEX_THREAD_ID",
+    "ANTIGRAVITY_CONVERSATION_ID",
+    "CURSOR_TRACE_ID",
+    "DSH_SESSION_ID",
+  ]) {
+    delete env[key];
+  }
   return env;
 }
 async function cli(binary: string, ...args: string[]) {

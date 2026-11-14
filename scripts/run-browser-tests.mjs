@@ -39,6 +39,9 @@ export function normalizeTargetArgs(rawArgs) {
   const targets = [];
   for (let i = 0; i < rawArgs.length; i += 1) {
     const arg = rawArgs[i];
+    if (arg === "--") {
+      continue;
+    }
     if (arg === "--output-json") {
       outputJson = rawArgs[i + 1];
       if (!outputJson) throw new Error("--output-json requires a file path");
@@ -50,7 +53,23 @@ export function normalizeTargetArgs(rawArgs) {
       if (!outputJson) throw new Error("--output-json requires a file path");
       continue;
     }
-    const normalized = arg.replaceAll("\\", "/").replace(/^\.\//, "");
+    if (path.isAbsolute(arg)) {
+      if (path.resolve(arg) === REPO_ROOT) {
+        targets.push(".");
+        continue;
+      }
+      const rel = path.relative(EXT_DIR, arg).replaceAll("\\", "/");
+      if (!rel.startsWith("../") && rel !== "..") {
+        const cleaned = rel.replace(/^\.\//, "").replace(/\/+$/, "");
+        targets.push(cleaned || ".");
+        continue;
+      }
+    }
+    const normalized = arg.replaceAll("\\", "/").replace(/^\.\//, "").replace(/\/+$/, "");
+    if (!normalized || normalized === "." || normalized === "apps/extension") {
+      targets.push(".");
+      continue;
+    }
     targets.push(
       normalized.startsWith("apps/extension/")
         ? normalized.slice("apps/extension/".length)
@@ -60,7 +79,32 @@ export function normalizeTargetArgs(rawArgs) {
   return { outputJson, targets };
 }
 
-export function validateVitestReport(report) {
+function toSuiteRelativePath(rawName) {
+  if (typeof rawName !== "string" || !rawName) return "";
+  if (path.isAbsolute(rawName)) {
+    const rel = path.relative(EXT_DIR, rawName).replaceAll("\\", "/");
+    if (!rel.startsWith("../") && rel !== "..") {
+      return rel;
+    }
+  }
+  const stripped = rawName.replaceAll("\\", "/").replace(/^\.\//, "");
+  return stripped.startsWith("apps/extension/")
+    ? stripped.slice("apps/extension/".length)
+    : stripped;
+}
+
+function targetMatchesSuite(target, suitePath) {
+  if (target === ".") return Boolean(suitePath);
+  const cleanTarget = target.replaceAll("\\", "/").replace(/^\.\//, "").replace(/\/+$/, "");
+  if (!cleanTarget || !suitePath) return false;
+  return (
+    suitePath === cleanTarget ||
+    suitePath.endsWith(`/${cleanTarget}`) ||
+    suitePath.startsWith(`${cleanTarget}/`)
+  );
+}
+
+export function validateVitestReport(report, targets = []) {
   if (!report || typeof report !== "object") {
     throw new Error("Vitest did not produce a valid JSON report.");
   }
@@ -82,6 +126,7 @@ export function validateVitestReport(report) {
   if (!(report.numPassedTests > 0)) {
     throw new Error("Zero browser tests passed; check target paths and test discovery.");
   }
+  const suitePaths = [];
   for (const suite of suites) {
     const assertions = Array.isArray(suite.assertionResults) ? suite.assertionResults : [];
     if (assertions.length === 0) {
@@ -91,6 +136,17 @@ export function validateVitestReport(report) {
     if (nonPassing.length > 0) {
       const summary = nonPassing.map((item) => `${item.fullName} [${item.status}]`).join(", ");
       throw new Error(`Zero-skip browser gate violated in ${suite.name}: ${summary}`);
+    }
+    suitePaths.push(toSuiteRelativePath(suite.name));
+  }
+  if (targets.length > 0) {
+    const unmatched = targets.filter(
+      (target) => !suitePaths.some((suitePath) => targetMatchesSuite(target, suitePath)),
+    );
+    if (unmatched.length > 0) {
+      throw new Error(
+        `Target(s) matched zero executed browser test suites: ${unmatched.join(", ")}`,
+      );
     }
   }
 }
@@ -121,7 +177,7 @@ function main() {
         "--reporter=default",
         "--reporter=json",
         `--outputFile.json=${reportPath}`,
-        ...targets,
+        ...targets.filter((target) => target !== "."),
       ],
       {
         cwd: EXT_DIR,
@@ -133,7 +189,7 @@ function main() {
       process.exit(result.status || 1);
     }
     const report = JSON.parse(readFileSync(reportPath, "utf8"));
-    validateVitestReport(report);
+    validateVitestReport(report, targets);
     if (result.status !== 0) {
       process.exit(result.status ?? 1);
     }

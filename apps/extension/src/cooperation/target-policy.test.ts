@@ -1254,6 +1254,10 @@ describe("pre-write validation failures", () => {
 });
 
 describe("targeted optimistic fast-path", () => {
+  afterEach(() => {
+    vi.mocked(checkExpectations).mockImplementation(async () => undefined);
+  });
+
   it("skips cross-frame readFrames broadcasts and target resampling on internal CDP steps", async () => {
     const f = await fixture("target");
     f.readFrames.mockClear();
@@ -1312,6 +1316,171 @@ describe("targeted optimistic fast-path", () => {
     expect(f.send).toHaveBeenCalledExactlyOnceWith(7, "DOM.focus", { backendNodeId: 4 });
     f.advance();
     expect(await f.run()).toMatchObject({ data: { reason: "control_context_invalid" } });
+  });
+
+  it("re-verifies --expect before mousePressed when preparation hover mutates a fact", async () => {
+    const f = await fixture("target");
+    const expectCheck = [{ target: "#price", field: "text" as const, equals: "100" }];
+    let price = "100";
+    vi.mocked(checkExpectations).mockImplementation(async () =>
+      price === "100"
+        ? undefined
+        : {
+            code: "permission_denied",
+            message: "Action condition 0 failed: #price text changed",
+            data: { reason: "precondition_failed", phase: "precondition" },
+          },
+    );
+
+    const result = await f.run({ ref: "e1", expect: expectCheck }, "tool.click", async (runner) => {
+      await runner.send(7, "DOM.scrollIntoViewIfNeeded", { backendNodeId: 4 });
+      await runner.send(7, "Input.dispatchMouseEvent", { type: "mouseMoved", x: 10, y: 20 });
+      // Hovering over the button mutates #price in mouseover before mousePressed.
+      price = "120";
+      await runner.send(7, "Input.dispatchMouseEvent", {
+        type: "mousePressed",
+        button: "left",
+        x: 10,
+        y: 20,
+      });
+      return { tab_id: 7 };
+    });
+
+    expect(result).toMatchObject({
+      code: "permission_denied",
+      data: {
+        reason: "precondition_failed",
+        effect_state: "unknown",
+        press_sent: false,
+      },
+    });
+    expect(checkExpectations).toHaveBeenCalledTimes(2);
+    expect(
+      f.send.mock.calls.some(
+        (call: unknown[]) =>
+          call[1] === "Input.dispatchMouseEvent" &&
+          (call[2] as { type?: string } | undefined)?.type === "mousePressed",
+      ),
+    ).toBe(false);
+  });
+
+  it("re-verifies --expect in beginDomMutation before marking nativeInputStarted", async () => {
+    const f = await fixture("target");
+    const expectCheck = [{ target: "#price", field: "text" as const, equals: "100" }];
+    let price = "100";
+    vi.mocked(checkExpectations).mockImplementation(async () =>
+      price === "100"
+        ? undefined
+        : {
+            code: "permission_denied",
+            message: "Action condition 0 failed: #price text changed",
+            data: { reason: "precondition_failed", phase: "precondition" },
+          },
+    );
+
+    const result = await f.run(
+      { ref: "e1", expect: expectCheck },
+      "tool.select",
+      async (runner) => {
+        await runner.send(7, "DOM.scrollIntoViewIfNeeded", { backendNodeId: 4 });
+        await runner.send(7, "DOM.focus", { backendNodeId: 4 });
+        price = "200";
+        await runner.beginDomMutation?.();
+        await runner.send(7, "Runtime.callFunctionOn", {
+          objectId: "obj-1",
+          functionDeclaration: "function() { this.value = 'mutated'; }",
+        });
+        return { tab_id: 7 };
+      },
+    );
+
+    expect(result).toMatchObject({
+      code: "permission_denied",
+      data: {
+        reason: "precondition_failed",
+        effect_state: "unknown",
+      },
+    });
+    expect((result as { data: Record<string, unknown> }).data).not.toHaveProperty("press_sent");
+    expect(checkExpectations).toHaveBeenCalledTimes(2);
+    expect(f.send.mock.calls.some((call: unknown[]) => call[1] === "Runtime.callFunctionOn")).toBe(
+      false,
+    );
+  });
+
+  it("re-verifies --expect with effect_state none in pre-effect beginDomMutation and before primaryEffect internal steps", async () => {
+    const f = await fixture("target");
+    const expectCheck = [{ target: "#price", field: "text" as const, equals: "100" }];
+    let price = "100";
+    let advanceAfterInitialCheck = false;
+    vi.mocked(checkExpectations).mockImplementation(async () => {
+      const current = price;
+      if (advanceAfterInitialCheck) {
+        price = "200";
+        advanceAfterInitialCheck = false;
+      }
+      return current === "100"
+        ? undefined
+        : {
+            code: "permission_denied",
+            message: "Action condition 0 failed: #price text changed",
+            data: { reason: "precondition_failed", phase: "precondition" },
+          };
+    });
+
+    // 1. Main-frame fill / evaluate calls beginDomMutation before any CDP effect (`sent === false`),
+    // so failing --expect reports `effect_state: "none"` (never freezing Intent WAL) and keeps context reusable.
+    advanceAfterInitialCheck = true;
+    const preEffectFill = await f.run(
+      { ref: "e1", expect: expectCheck },
+      "tool.fill",
+      async (runner) => {
+        await runner.beginDomMutation?.();
+        await runner.send(7, "Runtime.callFunctionOn", {
+          objectId: "obj-1",
+          functionDeclaration: "function() { this.value = 'mutated'; }",
+        });
+        return { tab_id: 7 };
+      },
+    );
+    expect(preEffectFill).toMatchObject({
+      code: "permission_denied",
+      data: {
+        reason: "precondition_failed",
+        effect_state: "none",
+      },
+    });
+    expect(f.send).not.toHaveBeenCalled();
+
+    // 2. `tool.hover` / `tool.focus` primaryEffect internal steps must not bypass --expect after scroll preparation.
+    price = "100";
+    vi.mocked(checkExpectations).mockClear();
+    const hoverResult = await f.run(
+      { ref: "e1", expect: expectCheck },
+      "tool.hover",
+      async (runner) => {
+        await runner.send(7, "DOM.scrollIntoViewIfNeeded", { backendNodeId: 4 });
+        // IntersectionObserver / scroll handler mutates #price before hover mouseMoved.
+        price = "300";
+        await runner.send(7, "Input.dispatchMouseEvent", { type: "mouseMoved", x: 10, y: 20 });
+        return { tab_id: 7 };
+      },
+    );
+    expect(hoverResult).toMatchObject({
+      code: "permission_denied",
+      data: {
+        reason: "precondition_failed",
+        effect_state: "unknown",
+      },
+    });
+    expect(checkExpectations).toHaveBeenCalledTimes(2);
+    expect(
+      f.send.mock.calls.some(
+        (call: unknown[]) =>
+          call[1] === "Input.dispatchMouseEvent" &&
+          (call[2] as { type?: string } | undefined)?.type === "mouseMoved",
+      ),
+    ).toBe(false);
   });
 });
 

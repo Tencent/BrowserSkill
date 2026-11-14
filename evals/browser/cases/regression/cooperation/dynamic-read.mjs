@@ -10,7 +10,8 @@ import { withChrome } from "../snapshot-coordinates/chrome.mjs";
 import { createMcpRegressionClient } from "./mcp-client.mjs";
 
 // Own every process/profile/session. Never reload the user's extension or daemon.
-const cli = resolve(process.env.BSK_TEST_CLI ?? "target/debug/bsk");
+const defaultCli = process.platform === "win32" ? "target/debug/bsk.exe" : "target/debug/bsk";
+const cli = resolve(process.env.BSK_TEST_CLI ?? defaultCli);
 const extensionPath = resolve(
   process.env.BSK_DYNAMIC_EXTENSION ?? "apps/extension/dist/chrome-mv3",
 );
@@ -34,6 +35,15 @@ const env = {
 };
 delete env.BSK_SESSION;
 delete env.BSK_SCOPE;
+for (const key of [
+  "CLAUDE_CODE_AGENT_ID",
+  "CODEX_THREAD_ID",
+  "ANTIGRAVITY_CONVERSATION_ID",
+  "CURSOR_TRACE_ID",
+  "DSH_SESSION_ID",
+]) {
+  delete env[key];
+}
 const exec = promisify(execFile);
 const evidence = [];
 const delay = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -282,12 +292,11 @@ try {
           }
           observed = await sync();
           context = observed.context_id;
-          // Hovering #race mutates #price in mouseover after the read; entry preflight
-          // checks expect before dispatching the click, so no click may follow.
+          // Clicking #race hovers it first, mutating #price in mouseover after the read;
+          // pre-dispatch expect re-verification before mousePressed refuses without clicking.
           await bsk("race-move-away", ["hover", "#apply", ...scope, "--context", context]);
           await page("document.querySelector('#price').textContent='100';window.armRace=true");
           await read("race-before", "#price");
-          await bsk("race-hover-mutates", ["hover", "#race", ...scope, "--context", context]);
           await click(
             "last-moment-fact-rejected",
             "#race",
