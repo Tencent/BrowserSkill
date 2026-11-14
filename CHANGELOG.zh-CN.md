@@ -7,6 +7,8 @@ CLI 和扩展可以分别发布，能否连接由协议兼容性决定。更新�
 
 ### 新增
 
+- **MCP 100% 能力对齐**：新增 `bsk_ledger`、`bsk_debug`、`bsk_video` 与 `bsk_record` 一等工具，补齐现有工具全量 CLI 参数与动作（`session open/stop --all`、`sync` 等待/过滤、`wait_ms`、`view`、`screenshot`/`extract` 输出导出、`read` `context` 透传、`upload`/`download`、`tab_borrow`、完整 `emulate` 与 `operation_await` 文件保存），并通过请求级 `ClientContext` 统一 CLI 与 MCP 传输上下文。
+- **编译期 `MethodSpec` 与 `RpcErrorReason` 全栈单一事实源**：为全部 77 个 RPC 方法建立无通配兜底的 `MethodSpec` 元数据并生成 TS 消费端，同时补齐并全栈枚举化 `RpcErrorReason` 及 CLI/MCP 双通道恢复提示（`cli_hint` / `mcp_hint`）。
 - DeepSeek Harness（`dsh`）成为原生 skill 安装目标，支持通过 `bsk install-skill --harness dsh`
   安装（遵循 `$DSH_HOME`，默认为 `~/.dsh/skills`），`ImplicitScopeRegistry` 自动识别
   `DSH_SESSION_ID` 作为宿主子代理并发隔离作用域，且 MCP `bsk_session(action="start")`
@@ -15,10 +17,14 @@ CLI 和扩展可以分别发布，能否连接由协议兼容性决定。更新�
 
 ### 变更
 
+- **协议基线直升 `2.0`**：将 `PROTOCOL_VERSION` 与 `MIN_COMPATIBLE_PROTOCOL` 同步升至 `"2.0"`，清除扩展与守护进程间的握手版本漂移，并将 `apps/extension/src/transport/generated/validators.js` 体积削减 60% 以上（`~992 KB` -> `<= 390 KB`）。
+- **收口守护进程/扩展分发与上下文全局状态**：以生成/穷尽的 `MethodSpec` 映射替代全栈 9 张手写方法表，并移除 `business_rpc.rs` 中的全局 `OnceLock` 上下文。
 - 将所有真浏览器测试与回归套件的环境变量统一收敛至 `BSK_TEST_CHROME` 与 `BSK_TEST_CLI`（补齐 Windows `.exe` 后缀并在隔离 daemon 用例中清理宿主子代理作用域环境变量），将 `.browser.test.ts` 与 `.bench.ts` 从单元测试配置剥离至 `apps/extension/vitest.browser.config.ts` 与零跳过运行器 `scripts/run-browser-tests.mjs`（将 `pnpm --filter @browser-skill/extension test:browser` 统一路由至该运行器，强制校验 `skipped === 0`、每个套件存在有效断言以及多目标参数逐项命中），并在 CI 中接入全部扩展真浏览器测试套件、`eval:browser:check` 与 `eval:browser:dynamic-read`（#731、#732）。
 
 ### 修复
 
+- 修复 `tool.debug`（`replay`）绕过原生弹窗挂起门禁、`intent_wal` 漏掉 `download`/`dialog_accept`/`debug(replay)`/`navigate`/`reload` 以及 `window_resize`/`emulate`/`tab_close` 丢失 `EffectAwareAction` 超时策略的缺陷。
+- 修复 MCP 错误恢复提示直接回显 CLI 专属命令（如 `bsk ledger resolve`）、`tool.video` 漏掉 `discard`/`exported` 协作动作、调试证据分类遗漏 `navigate_back`/`forward`/`dialog_*`、审计 UI 标签缺失以及 `recipe` `session_gone` 漏判 `session_stopped`/`no_active_session` 的问题。
 - 修复 macOS 与 Linux/X11 Chromium 下后台创建或初始化 Agent 窗口及标签页抢占用户前台窗口焦点的问题（Linux 下 `chromeAgentWindowApi.create` 先创建非激活标签页再通过 `tabId` 建窗以规避 Chromium `Navigate()` `kShowWindow` 抢焦，且排除其他活跃或创建中的 Agent 窗口防跨会话串窗；macOS 下 `tool.tab_create` 与 `ensureActiveTab` 先创建非激活标签页再通过 `chrome.tabs.update` 在目标窗口内选中，建窗或激活失败时自动关闭新建标签页并在清理亦失败时认领至 `agentCreatedTabs` 防孤儿泄漏），在有头 Linux 与 Windows 平台（排除 `HeadlessChrome/`）为非当前标签页及后台遮挡或最小化 Agent 窗口上的 `screenshot` 与 `screenshot --full-page` 启用 Aura 合成器唤醒租约（及全页截图陈旧帧检测），并消除 `parsePngDimensions` 打包产物对脚本字符集的依赖（#731、#732）。
 - 修复 Linux 后台 Agent 窗口中原生指针交互（`click`、`drag`、`download`、`upload`）抢占前台焦点的问题，理顺 CDP 焦点模拟、临时 `about:blank` 取消选中与后台租约可见性采样的时序以避免共享标签页误派发 `blur` 或漏检失焦租约，收敛临时标签页创建门控与归属以防清理失败时污染默认标签页路由，并在恢复任务弹窗焦点或路由外部链接时于 X11 短暂无焦点事件后重新确认实际焦点（#731、#732）。
 - 修复 `bsk daemon revoke`、`bsk daemon rotate` 与 `bsk daemon pair --replace` 在遇到以连字符 `-` 开头的 base64url 本机 `device_id`（`Bytes<16>`）时被当作未知参数拒绝的问题，同时保留对非法连字符选项的解析期失败关闭校验（#732）。
@@ -28,8 +34,9 @@ CLI 和扩展可以分别发布，能否连接由协议兼容性决定。更新�
 
 ### 移除
 
+- 移除已废弃的 `TraceV2` 录制协议类型与转换器（仅保留 `TraceV3`）、全部 9 套 `1.x` `Feature::*` 历史版本协商门禁、扩展/守护进程 `"1.6"`/`LEGACY_MIN_COMPATIBLE_PEER` 兼容兜底、重复字段 `DragParams.observation_id` / 旧拖拽模式以及生成 TS 产物中重复导出的 `wire_*` 运行时校验器。
 - 下线并整体移除 `packages/dsh-plugin-browserskill`、独立发版流水线及专属测试桩；DeepSeek Harness
-  与其他 Agent 统一通过标准 `bsk` CLI 与 `bsk mcp` 调用（录屏与宿主机文件系统 MP4 导出保持 CLI 专属命令 `bsk video`），在途请求取消、协作结算、CLI 录屏导出与动态读取等真浏览器回归用例已完整迁移至 `bsk` CLI 与 `bsk mcp`（#731、#732）。
+  与其他 Agent 统一通过标准 `bsk` CLI 与 `bsk mcp` 调用，在途请求取消、协作结算、CLI 录屏导出与动态读取等真浏览器回归用例已完整迁移至 `bsk` CLI 与 `bsk mcp`（#731、#732）。
 
 ## [0.5.0] - 2026-11-12
 

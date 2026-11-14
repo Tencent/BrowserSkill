@@ -20,13 +20,6 @@ pub struct DragTarget {
     pub offset: Option<DragPoint>,
 }
 
-pub const CLICK_MOVE_CLICK_PROTOCOL: &str = "1.7";
-
-pub fn supports_click_move_click(protocol: &str) -> bool {
-    crate::compatibility::Feature::ClickMoveClick
-        .supports(crate::compatibility::Peer::Extension, protocol)
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "kebab-case")]
 pub enum DragMode {
@@ -60,8 +53,6 @@ pub struct DragParams {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(range(min = 1, max = 5000))]
     pub duration_ms: Option<u32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub observation_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(range(min = 1))]
     pub timeout_ms: Option<u32>,
@@ -97,14 +88,5 @@ mod tests {
         assert_eq!(serde_json::to_value(params).unwrap(), new);
         new["mode"] = "auto".into();
         assert!(serde_json::from_value::<DragParams>(new).is_err());
-    }
-    #[test]
-    fn click_mode_requires_the_new_wire_semantics() {
-        for old in ["", "garbage", "1.0", "1.6", "2.0"] {
-            assert!(!supports_click_move_click(old));
-        }
-        for new in ["1.7", "1.8"] {
-            assert!(supports_click_move_click(new));
-        }
     }
 }

@@ -64,12 +64,11 @@ if (
 ) {
   throw new Error("Empty or duplicate method catalog");
 }
-const featureNames = new Set(catalog.feature_requirements.map((entry) => entry.feature));
-if (featureNames.size !== catalog.feature_requirements.length)
-  throw new Error("Duplicate feature requirement");
+const featureError = catalog.feature_requirements;
+if (featureError !== undefined) {
+  throw new Error("Unexpected legacy feature_requirements in v2 protocol catalog");
+}
 for (const method of catalog.methods) {
-  if (!Array.isArray(method.features) || method.features.some((name) => !featureNames.has(name)))
-    throw new Error(`Missing or unknown feature requirements for ${method.method}`);
   for (const name of [method.params, method.result]) {
     if (!(name in definitions)) throw new Error(`Missing contract ${method.method}: ${name}`);
   }
@@ -189,18 +188,25 @@ const ajv = new Ajv({
 });
 ajv.addSchema({ ...catalog.schema, $id: wireId });
 ajv.addSchema({ ...normalized, $id: canonicalId });
-const outputId = "urn:bsk:output";
-ajv.addSchema({ ...outputSchema, $id: outputId });
 const validators = {};
 const inputRoots = [
   ...new Set([...methods.map((method) => method.params), "CancelParams", "HandshakeResponse"]),
 ].sort();
 for (const name of inputRoots) {
-  validators[`wire_${name}`] = `${wireId}#/definitions/${name}`;
   validators[`canonical_${name}`] = `${canonicalId}#/definitions/${name}`;
 }
+
+const outputId = "urn:bsk:output";
+const outputAjv = new Ajv({
+  strict: false,
+  validateFormats: false,
+  inlineRefs: false,
+  code: { source: true, esm: true, lines: true },
+});
+outputAjv.addSchema({ ...outputSchema, $id: outputId });
+const outputValidatorMap = {};
 for (const name of [...new Set([...methods.map((method) => method.result), "RpcError"])].sort()) {
-  validators[`canonical_${name}`] = `${outputId}#/definitions/${name}`;
+  outputValidatorMap[`canonical_${name}`] = `${outputId}#/definitions/${name}`;
 }
 
 // Emit ordinary functions, including branch selection against the wire schema.
@@ -291,11 +297,33 @@ const bundled = await build({
   write: false,
   legalComments: "none",
 });
+const outputValidatorSource = standalone(outputAjv, outputValidatorMap);
+const outputBundled = await build({
+  stdin: {
+    contents: outputValidatorSource,
+    resolveDir: root,
+    sourcefile: "protocol-output-validators.js",
+  },
+  bundle: true,
+  format: "esm",
+  platform: "browser",
+  target: "es2022",
+  minify: true,
+  write: false,
+  legalComments: "none",
+});
 const validationTypes =
   banner +
   "export interface ValidationIssue { instancePath: string; message?: string; keyword: string; }\n" +
   "export interface Validator { (value: unknown): boolean; errors?: ValidationIssue[] | null; }\n" +
   Object.keys(validators)
+    .map((name) => `export const ${name}: Validator;`)
+    .join("\n") +
+  "\n";
+const outputValidationTypes =
+  banner +
+  'import type { Validator } from "./validators";\n' +
+  Object.keys(outputValidatorMap)
     .map((name) => `export const ${name}: Validator;`)
     .join("\n") +
   "\n";
@@ -312,11 +340,13 @@ const methodSource =
   Object.entries(catalog.constants)
     .map(([name, value]) => `export const ${name} = ${JSON.stringify(value)};\n`)
     .join("") +
-  `export const featureRequirements = ${JSON.stringify(catalog.feature_requirements, null, 2)} as const;\n` +
-  `export type FeatureName = typeof featureRequirements[number]["feature"];\n` +
   `export const eventNames = ${JSON.stringify(catalog.events, null, 2)} as const;\n` +
   `export type EventName = typeof eventNames[number];\n` +
+  `export const rpcErrorReasons = ${JSON.stringify(catalog.rpc_error_reasons, null, 2)} as const;\n` +
+  `export type RpcErrorReasonName = typeof rpcErrorReasons[number];\n` +
   `export const debugActions = ${JSON.stringify(catalog.debug_actions, null, 2)} as const;\n` +
+  `export const videoActions = ${JSON.stringify(catalog.video_actions, null, 2)} as const;\n` +
+  `export type VideoActionName = typeof videoActions[number]["action"];\n` +
   `export const methods = ${JSON.stringify(catalog.methods, null, 2)} as const;\n` +
   `export interface ToolMap {\n${methods.map((method) => `  ${JSON.stringify(method.method)}: { params: Types.${method.params}; result: Types.${method.result} };`).join("\n")}\n}\n` +
   "export type ExtensionToolMethod = keyof ToolMap;\n" +
@@ -330,6 +360,8 @@ const outputs = new Map([
   ["methods.ts", methodSource],
   ["validators.js", banner + bundled.outputFiles[0].text],
   ["validators.d.ts", validationTypes],
+  ["output-validators.js", banner + outputBundled.outputFiles[0].text],
+  ["output-validators.d.ts", outputValidationTypes],
   ["normalizers.ts", normalizationSource],
   [
     "manifest.json",
@@ -339,7 +371,6 @@ const outputs = new Map([
         fingerprint,
         protocol_version: catalog.protocol_version,
         min_compatible_protocol: catalog.min_compatible_protocol,
-        feature_requirements: catalog.feature_requirements,
         events: catalog.events,
         methods: methods.map((m) => m.method),
         contracts: names,

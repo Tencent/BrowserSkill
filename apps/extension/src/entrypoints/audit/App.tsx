@@ -11,48 +11,13 @@ import {
   auditRequest,
 } from "@/lib/audit";
 import { type AuditStep, auditStepStatus, auditTimeline } from "@/lib/audit-timeline";
+import { methods } from "@/transport/generated/methods";
 
-const methodKeys = {
-  "tool.tab_list": "tabList",
-  "tool.tab_create": "tabCreate",
-  "tool.tab_close": "tabClose",
-  "tool.tab_select": "tabSelect",
-  "tool.tab_borrow": "tabBorrow",
-  "tool.tab_return": "tabReturn",
-  "tool.navigate": "navigate",
-  "tool.navigate_back": "navigateBack",
-  "tool.navigate_forward": "navigateForward",
-  "tool.reload": "reload",
-  "tool.click": "click",
-  "tool.fill": "fill",
-  "tool.press": "press",
-  "tool.select": "select",
-  "tool.hover": "hover",
-  "tool.focus": "focus",
-  "tool.blur": "blur",
-  "tool.wheel": "scroll",
-  "tool.drag": "drag",
-  "tool.scroll_to": "scroll",
-  "tool.upload": "upload",
-  "tool.download": "download",
-  "tool.snapshot": "read",
-  "tool.observe": "read",
-  "tool.get_html": "read",
-  "tool.read": "read",
-  "tool.extract": "read",
-  "tool.screenshot": "screenshot",
-  "tool.console": "console",
-  "tool.network": "network",
-  "tool.evaluate": "evaluate",
-  "tool.wait_ms": "wait",
-  "tool.wait_for_navigation": "wait",
-  "tool.request_help": "help",
-  "tool.record_start": "recordStart",
-  "tool.record_stop": "recordStop",
-  "tool.record_await": "recordAwait",
-  "tool.window_resize": "resize",
-  "tool.emulate": "emulate",
-} as const;
+const methodKeys: Record<string, string | undefined> = Object.fromEntries(
+  methods
+    .filter((entry): entry is typeof entry & { audit_key: string } => entry.audit_key !== null)
+    .map((entry) => [entry.method, entry.audit_key]),
+);
 
 function TimelineStep({
   step,
@@ -92,7 +57,7 @@ function TimelineStep({
         </time>
         <div className="min-w-0 flex-1 basis-48">
           <p className="break-words text-sm font-medium">
-            {key ? t(`audit.methods.${key}`) : method}
+            {key ? t(`audit.methods.${key as "click"}`) : method}
             {target && <span className="ml-2 font-normal text-muted-foreground">「{target}」</span>}
           </p>
           {typeof url === "string" && (

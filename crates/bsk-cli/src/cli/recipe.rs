@@ -608,7 +608,12 @@ fn write_new_file(path: &std::path::Path, value: &Value) -> anyhow::Result<()> {
     Ok(())
 }
 
-pub fn dispatch(cmd: RecipeCmd, flags: &GlobalFlags, _format: Format) -> Result<(), CliError> {
+pub fn dispatch(
+    cmd: RecipeCmd,
+    flags: &GlobalFlags,
+    ctx: &business_rpc::ClientContext,
+    _format: Format,
+) -> Result<(), CliError> {
     {
         let rejected = || -> anyhow::Result<()> {
             ensure!(
@@ -628,6 +633,7 @@ pub fn dispatch(cmd: RecipeCmd, flags: &GlobalFlags, _format: Format) -> Result<
             })
         })?;
     }
+    let op_ctx = ctx.without_action_metadata();
     match cmd.command {
         RecipeCommand::List { site } => {
             let (reply, exit) = list(site.as_deref());
@@ -657,7 +663,7 @@ pub fn dispatch(cmd: RecipeCmd, flags: &GlobalFlags, _format: Format) -> Result<
                 &args.name,
                 &args.description,
                 |method, params, timeout| {
-                    business_rpc::call(
+                    op_ctx.call(
                         daemon.sock_path.clone(),
                         "recipe",
                         method,
@@ -709,7 +715,7 @@ pub fn dispatch(cmd: RecipeCmd, flags: &GlobalFlags, _format: Format) -> Result<
                 .context("ensure daemon is running")?;
             plan::check_protocol(&protocol).map_err(CliError::Local)?;
             let (mut reply, mut exit) = run(&request, |method, params, timeout| {
-                business_rpc::call(
+                op_ctx.call(
                     daemon.sock_path.clone(),
                     "recipe",
                     method,

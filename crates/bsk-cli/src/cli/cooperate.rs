@@ -23,7 +23,7 @@ pub enum Action {
     Wait,
 }
 
-#[derive(Debug, Clone, Copy, ValueEnum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum Policy {
     Auto,
     Strict,
@@ -82,7 +82,11 @@ pub struct CooperateArgs {
     pub settle: bool,
 }
 
-pub fn dispatch(args: CooperateArgs, _format: Format) -> Result<(), CliError> {
+pub fn dispatch(
+    args: CooperateArgs,
+    ctx: &business_rpc::ClientContext,
+    _format: Format,
+) -> Result<(), CliError> {
     if args.policy.is_some() && !matches!(args.action, Action::Sync | Action::Enable) {
         return Err(CliError::Local(anyhow::anyhow!(
             "--policy requires cooperate sync or enable"
@@ -111,10 +115,7 @@ pub fn dispatch(args: CooperateArgs, _format: Format) -> Result<(), CliError> {
         .as_ref()
         .map(|path| saved_reply::SavedReply::prepare(path))
         .transpose()?;
-    if matches!(control_policy, Some(ControlPolicy::Target)) {
-        business_rpc::set_target_policy_requested();
-    }
-    business_rpc::set_caller_scope(args.scope.clone());
+    let op_ctx = ctx.with_scope(args.scope.as_deref());
     let daemon = ensure_daemon().context("ensure daemon is running")?;
     let params = CooperateParams {
         control_policy,
@@ -137,7 +138,7 @@ pub fn dispatch(args: CooperateArgs, _format: Format) -> Result<(), CliError> {
                 current.timeout_ms = Some(args.timeout_ms.unwrap_or(1000));
             }
             current.action = action;
-            business_rpc::call(
+            op_ctx.call(
                 daemon.sock_path.clone(),
                 "cooperate",
                 Method::ToolCooperate,
@@ -146,7 +147,7 @@ pub fn dispatch(args: CooperateArgs, _format: Format) -> Result<(), CliError> {
             )
         })?
     } else {
-        business_rpc::call(
+        op_ctx.call(
             daemon.sock_path,
             "cooperate",
             Method::ToolCooperate,
@@ -193,8 +194,8 @@ pub(crate) fn verify_policy(
     if reply.get("context_id").is_some() && !acknowledged {
         return Err(CliError::from_rpc(bsk_protocol::RpcError {
             code: bsk_protocol::ErrorCode::Unsupported,
-            message: "Control policy was not acknowledged; update the CLI, restart its daemon and update the extension. With a current CLI and an older extension, pass --policy strict on every sync/enable and step to retain legacy behavior; expect conditions still require protocol 1.8".into(),
-            data: Some(serde_json::json!({"reason":"unsupported_feature", "phase":"negotiate", "effect_state":"none", "required_protocol":"1.8", "requested_policy":policy})),
+            message: "Control policy was not acknowledged; update the CLI, restart its daemon, and update the extension. Control policy and expect conditions require protocol 2.0+".into(),
+            data: Some(serde_json::json!({"reason":"unsupported_feature", "phase":"negotiate", "effect_state":"none", "required_protocol": bsk_protocol::catalog::MIN_COMPATIBLE_PROTOCOL, "requested_policy":policy})),
         }));
     }
     Ok(())
@@ -254,7 +255,7 @@ mod tests {
                 .unwrap()
                 .cooperate;
         assert!(
-            dispatch(args, Format::Json)
+            dispatch(args, &business_rpc::ClientContext::default(), Format::Json)
                 .unwrap_err()
                 .to_string()
                 .contains("require cooperate sync")
@@ -276,7 +277,7 @@ mod tests {
         ])
         .unwrap()
         .cooperate;
-        assert!(dispatch(args, Format::Json).is_err());
+        assert!(dispatch(args, &business_rpc::ClientContext::default(), Format::Json).is_err());
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "previous evidence");
     }
     #[test]
@@ -319,7 +320,7 @@ mod tests {
                 .unwrap()
                 .cooperate;
         assert!(
-            dispatch(args, Format::Json)
+            dispatch(args, &business_rpc::ClientContext::default(), Format::Json)
                 .unwrap_err()
                 .to_string()
                 .contains("--policy requires")

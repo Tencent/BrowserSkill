@@ -1,5 +1,6 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
   "definitions": {
     "ExtractAction": {
       "enum": [
@@ -53,6 +54,13 @@
   "properties": {
     "action": {
       "$ref": "#/definitions/ExtractAction"
+    },
+    "context_id": {
+      "description": "Optional cooperation context validated by the extension without renewing control.",
+      "type": [
+        "string",
+        "null"
+      ]
     },
     "fields": {
       "items": {

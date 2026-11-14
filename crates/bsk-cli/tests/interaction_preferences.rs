@@ -245,8 +245,8 @@ async fn legacy_flags_and_both_process_environments_cannot_override_the_browser(
 }
 
 #[tokio::test]
-async fn mixed_extension_versions_keep_sessions_usable_and_cannot_receive_legacy_overrides() {
-    for protocol in ["1.0", "1.1", "1.2", "1.3"] {
+async fn compatible_extension_versions_keep_sessions_usable_and_cannot_receive_legacy_overrides() {
+    for protocol in ["2.0", "2.1"] {
         let (temp, mut daemon, mut ws) = start_with_protocol(protocol).await;
         let info = read_from_path(&temp.path().join("daemon.json"))
             .unwrap()
@@ -264,7 +264,6 @@ async fn mixed_extension_versions_keep_sessions_usable_and_cannot_receive_legacy
         let respond = async {
             let request = next_request(&mut ws, Method::ToolSessionStart).await;
             assert!(request.params.as_ref().unwrap().get("unattended").is_none());
-            // Legacy extensions can omit interaction policy entirely.
             reply(
                 &mut ws,
                 request,
@@ -282,24 +281,18 @@ async fn mixed_extension_versions_keep_sessions_usable_and_cannot_receive_legacy
             Some(json!({"session_id": session, "tab_id": 7, "confirmation_timeout_ms": 120_000})),
             WAIT,
         );
-        if protocol == "1.0" || protocol == "1.1" {
-            let error = custom.await.unwrap().unwrap_err();
-            assert_eq!(error.code, ErrorCode::Unsupported);
-            assert_eq!(error.data.unwrap()["component"], "extension");
-        } else {
-            let respond = async {
-                let request = next_request(&mut ws, Method::ToolTabBorrow).await;
-                assert_eq!(
-                    request.params.as_ref().unwrap()["confirmation_timeout_ms"],
-                    120_000
-                );
-                reply(&mut ws, request, ResponseBody::Ok(json!({"tab_id": 7}))).await;
-            };
-            let (result, ()) = tokio::join!(custom, respond);
-            result.unwrap().unwrap();
-        }
+        let respond = async {
+            let request = next_request(&mut ws, Method::ToolTabBorrow).await;
+            assert_eq!(
+                request.params.as_ref().unwrap()["confirmation_timeout_ms"],
+                120_000
+            );
+            reply(&mut ws, request, ResponseBody::Ok(json!({"tab_id": 7}))).await;
+        };
+        let (result, ()) = tokio::join!(custom, respond);
+        result.unwrap().unwrap();
 
-        // This reaches the same connection even after an unsupported custom wait.
+        // User-denial from the browser is forwarded intact without override flags.
         let borrow = ipc.call::<Value, Value>(
             "borrow",
             Method::ToolTabBorrow,

@@ -56,23 +56,37 @@ fn window_size(s: &str) -> Result<u32, String> {
     }
 }
 
-pub fn dispatch(cmd: WindowCmd, format: Format) -> Result<(), CliError> {
+pub fn dispatch(
+    cmd: WindowCmd,
+    ctx: &crate::cli::business_rpc::ClientContext,
+    format: Format,
+) -> Result<(), CliError> {
     let info = ensure_daemon().context("ensure daemon is running")?;
     match cmd.sub {
-        WindowSub::Resize(args) => run_resize(info.sock_path, args, format),
+        WindowSub::Resize(args) => run_resize(info.sock_path, ctx, args, format),
     }
 }
 
-fn run_resize(sock: PathBuf, args: WindowResizeArgs, format: Format) -> Result<(), CliError> {
-    crate::cli::business_rpc::set_caller_scope(args.scope);
+fn run_resize(
+    sock: PathBuf,
+    ctx: &crate::cli::business_rpc::ClientContext,
+    args: WindowResizeArgs,
+    format: Format,
+) -> Result<(), CliError> {
+    let op_ctx = ctx.with_scope(args.scope.as_deref());
     let params = WindowResizeParams {
         session_id: args.session.unwrap_or_default(),
         tab_id: None,
         width: args.width,
         height: args.height,
     };
-    let reply: WindowResizeResult =
-        ipc_call("window-resize-1", Method::ToolWindowResize, sock, params)?;
+    let reply: WindowResizeResult = ipc_call(
+        "window-resize-1",
+        &op_ctx,
+        Method::ToolWindowResize,
+        sock,
+        params,
+    )?;
     match format {
         Format::Json => {
             let json = serde_json::to_string_pretty(&reply)
@@ -91,6 +105,7 @@ fn run_resize(sock: PathBuf, args: WindowResizeArgs, format: Format) -> Result<(
 
 fn ipc_call<P, R>(
     rpc_id_prefix: &'static str,
+    ctx: &crate::cli::business_rpc::ClientContext,
     method: Method,
     sock: PathBuf,
     params: P,
@@ -99,11 +114,5 @@ where
     P: serde::Serialize + Send + 'static,
     R: serde::de::DeserializeOwned + Send + 'static,
 {
-    crate::cli::business_rpc::call::<P, R>(
-        sock,
-        rpc_id_prefix,
-        method,
-        Some(params),
-        TOOL_IPC_TIMEOUT,
-    )
+    ctx.call::<P, R>(sock, rpc_id_prefix, method, Some(params), TOOL_IPC_TIMEOUT)
 }

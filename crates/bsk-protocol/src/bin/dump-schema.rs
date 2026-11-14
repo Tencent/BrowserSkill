@@ -119,12 +119,10 @@ fn main() {
         ("ConsoleStackFrame", "tool_console_stack_frame"),
         ("NetworkEntry", "tool_network_entry"),
         ("EvaluateError", "tool_evaluate_error"),
-        ("TraceV2", "trace_v2"),
         ("TraceV3", "trace_v3"),
-        ("RecordedTrace", "trace"),
-        ("StepV2", "trace_step_v2"),
+        ("TraceV3", "trace"),
         ("StepV3", "trace_step_v3"),
-        ("RecordedStep", "trace_step"),
+        ("StepV3", "trace_step"),
     ] {
         write_schema(&dir, file, standalone(&catalog, name));
     }
@@ -142,13 +140,11 @@ mod tests {
         let value = standalone(&catalog::export(), "DragParams");
         assert_eq!(value["required"], original["required"]);
         for (name, property) in original["properties"].as_object().unwrap() {
-            if name != "observation_id" {
-                assert_eq!(&value["properties"][name], property, "{name}");
-            }
+            assert_eq!(&value["properties"][name], property, "{name}");
         }
         assert_eq!(value["title"], "DragParams");
+        assert_eq!(value["additionalProperties"], false);
         assert_eq!(value["properties"]["expect"]["type"], "array");
-        // Drag already exposed this optional field; retain its accepted wire shape.
         assert_eq!(
             value["properties"]["observation_id"]["type"],
             json!(["string", "null"])
@@ -161,12 +157,6 @@ mod tests {
         assert_eq!(
             value["definitions"]["ActionExpectation"]["properties"]["attribute"]["maxLength"],
             256
-        );
-        assert!(
-            value["properties"]["observation_id"]["description"]
-                .as_str()
-                .unwrap()
-                .contains("Strict-policy drag")
         );
     }
 
@@ -220,6 +210,44 @@ mod tests {
                 schema["definitions"]["ActionExpectation"]["additionalProperties"],
                 false
             );
+        }
+
+        for passive_read in [
+            "snapshot",
+            "get_html",
+            "read",
+            "extract",
+            "screenshot",
+            "console",
+            "network",
+            "wait_for_navigation",
+            "wait_for_element",
+        ] {
+            let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join(format!("schema/tool_{passive_read}_params.json"));
+            let schema: Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+            assert_eq!(
+                schema["additionalProperties"], false,
+                "{passive_read}.additionalProperties"
+            );
+            assert_eq!(
+                schema["properties"]["context_id"]["type"],
+                json!(["string", "null"]),
+                "{passive_read}.context_id"
+            );
+            assert!(
+                !schema["required"]
+                    .as_array()
+                    .unwrap()
+                    .contains(&json!("context_id")),
+                "{passive_read}.required"
+            );
+            for forbidden in ["observation_id", "depends_on", "expect"] {
+                assert!(
+                    schema["properties"].get(forbidden).is_none(),
+                    "{passive_read} must not accept {forbidden}"
+                );
+            }
         }
     }
 }

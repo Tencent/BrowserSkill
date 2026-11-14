@@ -389,7 +389,21 @@
       "recordStop": "Vorgangsaufzeichnung stoppen",
       "recordAwait": "Auf Aufzeichnung warten",
       "resize": "Fenstergröße ändern",
-      "emulate": "Emulationseinstellungen ändern"
+      "emulate": "Emulationseinstellungen ändern",
+      "cooperate": "Geteilten Tab synchronisieren",
+      "sessionStart": "Sitzung starten",
+      "sessionStop": "Sitzung beenden",
+      "screenshotFullPage": "Vollseiten-Screenshot aufnehmen",
+      "screenshotRead": "Screenshot lesen",
+      "screenshotRelease": "Screenshot freigeben",
+      "debug": "Debug-Aktion ausführen",
+      "video": "Videoaufnahme verwalten",
+      "dialogStatus": "Dialogstatus prüfen",
+      "dialogAccept": "Dialog bestätigen",
+      "dialogDismiss": "Dialog schließen",
+      "waitForElement": "Auf Element warten",
+      "operationAwait": "Auf Vorgang warten",
+      "operationCancel": "Vorgang abbrechen"
     }
   },
   "debug": {

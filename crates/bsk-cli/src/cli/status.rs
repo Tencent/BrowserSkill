@@ -65,7 +65,7 @@ fn render_human(s: &StatusResult) {
         let bold = "\x1b[1m";
         let reset = "\x1b[0m";
         eprintln!(
-            "{bold}{yellow}note:{reset} {} browser(s) report a different protocol version; base communication is compatible. See feature availability below or run `bsk doctor`{reset}",
+            "{bold}{yellow}note:{reset} {} browser(s) report a different protocol version; run `bsk doctor` for upgrade guidance{reset}",
             s.version_skew_browsers.len()
         );
         for skew in &s.version_skew_browsers {
@@ -99,24 +99,10 @@ fn render_human(s: &StatusResult) {
     for (key, value) in &rows {
         println!("{key:<label_width$}  {value}");
     }
-    let report = super::compatibility::report(s);
-    let limitations = super::compatibility::limitations(&report);
-    if !limitations.is_empty() {
-        println!("unavailable features (other supported operations remain usable):");
-        for limitation in limitations {
-            println!("  {limitation}");
-        }
-        println!(
-            "Run `bsk status --json` for the required versions and component-specific update instructions."
-        );
-    }
 }
 
 fn render_json(s: &StatusResult) -> anyhow::Result<()> {
-    // Preserve every existing top-level field for older agents and plugins.
-    let mut value = serde_json::to_value(s).context("encode status as JSON")?;
-    value["compatibility"] = serde_json::to_value(super::compatibility::report(s))?;
-    let json = serde_json::to_string_pretty(&value).context("encode compatibility as JSON")?;
+    let json = serde_json::to_string_pretty(s).context("encode status as JSON")?;
     println!("{json}");
     Ok(())
 }
@@ -162,6 +148,6 @@ mod tests {
     #[test]
     fn display_protocol_uses_unknown_for_legacy_empty_values() {
         assert_eq!(display_protocol(""), "unknown");
-        assert_eq!(display_protocol("1.0"), "1.0");
+        assert_eq!(display_protocol("2.0"), "2.0");
     }
 }

@@ -300,14 +300,14 @@ fn json_error_string(err: &CliError, exit: u8, hint: Option<&str>) -> String {
         .unwrap_or_else(|_| "{\"message\":\"failed to encode error\"}".into())
 }
 
-/// The same `{ code, message, hint, exit_code, data }` payload `--json`
-/// prints, for callers that return errors as data (the MCP server).
-pub(crate) fn json_error_value(err: &CliError) -> serde_json::Value {
-    let render_info = render_info_for(err);
+/// MCP error payload `{ code, message, hint, exit_code, data }` preferring
+/// MCP-native recovery hints (`mcp_hint`) before CLI-only `data.recovery`
+/// or `hint`, so LLM callers never receive CLI subcommands like `bsk ledger resolve`.
+pub(crate) fn mcp_json_error_value(err: &CliError) -> serde_json::Value {
     let body = JsonError {
         code: err.code(),
         message: err.to_string(),
-        hint: hint_for(err, render_info.as_ref()),
+        hint: mcp_hint_for(err),
         exit_code: err.exit_code(),
         data: err.data().cloned(),
     };
@@ -367,6 +367,38 @@ fn hint_for<'a>(
                         )),
                     _ => None,
                 })
+        })
+}
+
+/// Hint line tailored for MCP responses:
+///   1. Reason-specific `mcp_hint` overrides CLI-only `data.recovery` (such as
+///      `uncertain_prior_effect` or `local_file_error`).
+///   2. Tool-neutral `data.recovery` from the extension/daemon wins before
+///      generic [`ErrorCode`]-level fallbacks.
+///   3. Reason-specific `hint`, then base `ErrorCode` `mcp_hint` / `hint`,
+///      then the local daemon reachability hint.
+fn mcp_hint_for(err: &CliError) -> Option<&str> {
+    let reason_info = err
+        .code()
+        .and_then(|code| render_error::reason_info_for_error(code, err.data()));
+    let base_info = err.code().map(render_error::info_for);
+    reason_info
+        .and_then(|info| info.mcp_hint)
+        .or_else(|| {
+            err.data()
+                .and_then(|data| data.get("recovery"))
+                .and_then(serde_json::Value::as_str)
+        })
+        .or_else(|| reason_info.and_then(|info| info.hint))
+        .or_else(|| base_info.and_then(|info| info.mcp_hint))
+        .or_else(|| base_info.and_then(|info| info.hint))
+        .or_else(|| match err {
+            CliError::Local(error) => recovery_hint(error)
+                .or_else(|| super::update::source_recovery_hint(error))
+                .or(Some(
+                    "is the bsk daemon running? check bsk_session(action='status') or ask the user to start the bsk daemon",
+                )),
+            _ => None,
         })
 }
 
@@ -839,6 +871,8 @@ mod tests {
 
 #[cfg(test)]
 mod action_timeout_render_tests {
+    use std::path::Path;
+
     use super::*;
 
     #[test]
@@ -855,7 +889,7 @@ mod action_timeout_render_tests {
                 message: "tool RPC timed out after 400ms".into(),
                 data: Some(data.clone()),
             });
-            let mcp = json_error_value(&error);
+            let mcp = mcp_json_error_value(&error);
             let render_info = render_info_for(&error);
             let cli: serde_json::Value = serde_json::from_str(&json_error_string(
                 &error,
@@ -863,13 +897,46 @@ mod action_timeout_render_tests {
                 hint_for(&error, render_info.as_ref()),
             ))
             .unwrap();
-            assert_eq!(cli, mcp);
+            assert_eq!(cli["code"], mcp["code"]);
+            assert_eq!(cli["message"], mcp["message"]);
+            assert_eq!(cli["exit_code"], mcp["exit_code"]);
+            assert_eq!(cli["data"], mcp["data"]);
             assert_eq!(cli["data"], data);
             assert_eq!(cli["exit_code"], 4);
-            let hint = cli["hint"].as_str().unwrap();
-            assert!(hint.contains("inspect the application result"));
-            assert!(hint.contains("do not replay"));
-            assert!(!hint.contains("retry the command"));
+            let cli_hint = cli["hint"].as_str().unwrap();
+            assert!(cli_hint.contains("inspect the application result"));
+            assert!(cli_hint.contains("synchronize"));
+            assert!(cli_hint.contains("do not replay"));
+            assert!(!cli_hint.contains("retry the command"));
+            let mcp_hint = mcp["hint"].as_str().unwrap();
+            assert!(mcp_hint.contains("inspect the application result"));
+            assert!(mcp_hint.contains("bsk_session(action='sync')"));
+            assert!(mcp_hint.contains("do not replay"));
+            assert!(!mcp_hint.contains("retry the command"));
         }
+    }
+
+    #[test]
+    fn mcp_error_preserves_tool_neutral_recovery_while_sanitizing_local_file_flags() {
+        let read_recovery = "Inspect the current document and target. Use read/extract for data and explicit expect conditions before input.";
+        let read_err = CliError::from_rpc(RpcError {
+            code: ErrorCode::InvalidParams,
+            message: "read requires selector or ref".into(),
+            data: Some(serde_json::json!({
+                "reason": "read_params_invalid",
+                "phase": "read",
+                "effect_state": "none",
+                "recovery": read_recovery,
+            })),
+        });
+        let read_mcp = mcp_json_error_value(&read_err);
+        assert_eq!(read_mcp["hint"].as_str(), Some(read_recovery));
+
+        let file_err = crate::cli::download::output_exists(Path::new("/tmp/already-there.png"));
+        let file_mcp = mcp_json_error_value(&file_err);
+        let file_hint = file_mcp["hint"].as_str().unwrap();
+        assert!(file_hint.contains("overwrite=true"));
+        assert!(!file_hint.contains("--out"));
+        assert!(!file_hint.contains("--overwrite"));
     }
 }

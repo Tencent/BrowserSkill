@@ -42,7 +42,11 @@ pub struct DownloadArgs {
     pub overwrite: bool,
 }
 
-pub fn dispatch(args: DownloadArgs, format: Format) -> Result<(), CliError> {
+pub fn dispatch(
+    args: DownloadArgs,
+    ctx: &crate::cli::business_rpc::ClientContext,
+    format: Format,
+) -> Result<(), CliError> {
     if args.out.exists() && !args.overwrite {
         return Err(output_exists(&args.out));
     }
@@ -51,7 +55,8 @@ pub fn dispatch(args: DownloadArgs, format: Format) -> Result<(), CliError> {
             CliError::Local(error) => CliError::invalid_params(error),
             error => error,
         })?;
-    crate::cli::business_rpc::set_caller_scope(args.scope.clone());
+    let op_ctx = ctx.with_scope(args.scope.as_deref());
+    let aux_ctx = op_ctx.without_action_metadata();
     let info = ensure_daemon().context("ensure daemon is running")?;
     let params = DownloadParams {
         session_id: args.session.clone().unwrap_or_default(),
@@ -62,7 +67,7 @@ pub fn dispatch(args: DownloadArgs, format: Format) -> Result<(), CliError> {
         browser_relative_dir: None,
         max_byte_size: None,
     };
-    let reply: DownloadResult = crate::cli::business_rpc::call(
+    let reply: DownloadResult = op_ctx.call(
         info.sock_path.clone(),
         "download",
         Method::ToolDownload,
@@ -107,7 +112,13 @@ pub fn dispatch(args: DownloadArgs, format: Format) -> Result<(), CliError> {
     let transfer_id = reply.transfer_id.clone().ok_or_else(|| {
         CliError::Local(anyhow::anyhow!("daemon returned no download transfer id"))
     })?;
-    let write_result = write_transfer(&info.sock_path, &transfer_id, &args.out, args.overwrite);
+    let write_result = write_transfer(
+        &info.sock_path,
+        &aux_ctx,
+        &transfer_id,
+        &args.out,
+        args.overwrite,
+    );
     let _ = crate::cli::business_rpc::release_transfers(&info.sock_path, [transfer_id.as_str()]);
     write_result?;
     match format {
@@ -125,7 +136,7 @@ pub fn dispatch(args: DownloadArgs, format: Format) -> Result<(), CliError> {
     Ok(())
 }
 
-fn output_exists(out: &Path) -> CliError {
+pub(crate) fn output_exists(out: &Path) -> CliError {
     CliError::file_validation(
         anyhow::anyhow!(
             "output already exists (pass --overwrite to replace it): {}",
@@ -135,8 +146,9 @@ fn output_exists(out: &Path) -> CliError {
     )
 }
 
-pub(super) fn write_transfer(
+pub(crate) fn write_transfer(
     sock: &Path,
+    ctx: &crate::cli::business_rpc::ClientContext,
     id: &str,
     out: &Path,
     overwrite: bool,
@@ -144,6 +156,7 @@ pub(super) fn write_transfer(
     if out.exists() && !overwrite {
         return Err(output_exists(out));
     }
+    let aux_ctx = ctx.without_action_metadata();
     let parent = out
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
@@ -158,7 +171,7 @@ pub(super) fn write_transfer(
             .map_err(CliError::Local)?;
         let mut offset = 0u64;
         loop {
-            let chunk: TransferChunkResult = crate::cli::business_rpc::call(
+            let chunk: TransferChunkResult = aux_ctx.call(
                 sock.to_path_buf(),
                 "transfer-read",
                 Method::TransferRead,

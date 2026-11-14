@@ -18,15 +18,6 @@ use serde::{Deserialize, Serialize};
 
 use super::JavaScriptDialogInfo;
 
-/// First protocol whose extension honours `unverified`. An older extension
-/// would ignore the field and apply its page checks, which looks like a
-/// refusal the caller cannot explain, so peers below this are rejected.
-pub const UNVERIFIED_SCRIPT_PROTOCOL: &str = "1.9";
-pub fn supports_unverified_script(protocol: &str) -> bool {
-    crate::compatibility::Feature::UnverifiedScript
-        .supports(crate::compatibility::Peer::Extension, protocol)
-}
-
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct EvaluateParams {
     pub session_id: String,

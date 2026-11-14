@@ -699,14 +699,6 @@ pub(crate) async fn start_session_recoverable(
     if client.is_unresponsive() {
         return Err(StartSessionError::ExtensionUnresponsive);
     }
-    if window.incognito {
-        bsk_protocol::compatibility::Feature::IncognitoSessions
-            .require(
-                bsk_protocol::compatibility::Peer::Extension,
-                &client.extension_protocol_version,
-            )
-            .map_err(StartSessionError::ExtensionError)?;
-    }
     let session_id = sessions
         .reserve_id(client.id.clone(), SESSION_ID_MAX_RESERVE_ATTEMPTS, now_ms)
         .ok_or(StartSessionError::IdExhausted)?;
@@ -742,8 +734,7 @@ pub(crate) async fn start_session_recoverable(
         Err(err) => {
             sessions.cancel_reservation(&session_id);
             return Err(match err {
-                super::browsers::SendError::Terminated(cause)
-                | super::browsers::SendError::UnsupportedFeature(cause) => {
+                super::browsers::SendError::Terminated(cause) => {
                     StartSessionError::ExtensionError(cause)
                 }
                 super::browsers::SendError::SinkClosed => StartSessionError::TransportClosed,
@@ -1023,10 +1014,7 @@ async fn rollback_extension_session(
     };
     let waiter = match client.dispatch(request) {
         Ok(waiter) => waiter,
-        Err(
-            super::browsers::SendError::Terminated(cause)
-            | super::browsers::SendError::UnsupportedFeature(cause),
-        ) => {
+        Err(super::browsers::SendError::Terminated(cause)) => {
             return Err(format!("rollback was not queued: {}", cause.message));
         }
         Err(super::browsers::SendError::SinkClosed) => {
@@ -1108,7 +1096,10 @@ pub async fn stop_session(
                 queues.reopen(session_id);
                 return Err(StopSessionError::ReturnFailures(result));
             }
-            sessions.remove_with_end_reason(session_id, crate::rpc_reason::SESSION_STOPPED);
+            sessions.remove_with_end_reason(
+                session_id,
+                bsk_protocol::RpcErrorReason::SessionStopped.as_str(),
+            );
             drop_session_local(queues, interrupts, session_id);
             Ok(result)
         }
@@ -1133,7 +1124,10 @@ pub async fn stop_session(
                     audit.session_ended(&session_id.0, "interrupted");
                 }
                 if sessions
-                    .remove_with_end_reason(session_id, crate::rpc_reason::SESSION_STOPPED)
+                    .remove_with_end_reason(
+                        session_id,
+                        bsk_protocol::RpcErrorReason::SessionStopped.as_str(),
+                    )
                     .is_some()
                 {
                     tracing::info!(
@@ -1255,7 +1249,7 @@ mod link_tests {
                 browser_name: "chrome".into(),
                 browser_version: "1".into(),
                 extension_version: "0.1.0".into(),
-                extension_protocol_version: "1.3".into(),
+                extension_protocol_version: "2.0".into(),
                 label: String::new(),
                 sink: BrowserSink { tx },
                 pending: std::sync::Mutex::new(Pending::default()),
@@ -1545,7 +1539,7 @@ mod controller_color_tests {
 #[cfg(test)]
 mod ended_tombstone_tests {
     use super::{super::browsers::BrowserId, Session, SessionId, SessionRegistry};
-    use crate::rpc_reason;
+    use bsk_protocol::RpcErrorReason;
 
     fn live_session(id: &str) -> Session {
         Session {
@@ -1563,13 +1557,15 @@ mod ended_tombstone_tests {
         let registry = SessionRegistry::new();
         registry.insert(live_session("abcd"));
 
-        let removed = registry
-            .remove_with_end_reason(&SessionId("abcd".into()), rpc_reason::SESSION_IDLE_TIMEOUT);
+        let removed = registry.remove_with_end_reason(
+            &SessionId("abcd".into()),
+            RpcErrorReason::SessionIdleTimeout.as_str(),
+        );
         assert!(removed.is_some());
         let end = registry
             .end_info(&SessionId("abcd".into()))
             .expect("ended session must keep a tombstone");
-        assert_eq!(end.reason, rpc_reason::SESSION_IDLE_TIMEOUT);
+        assert_eq!(end.reason, RpcErrorReason::SessionIdleTimeout.as_str());
         assert!(end.ended_unix_ms > 0);
 
         // A new session reusing the id clears the tombstone: later
@@ -1589,13 +1585,16 @@ mod ended_tombstone_tests {
     fn remember_end_only_tombstones_stop_paths_that_opt_in() {
         let registry = SessionRegistry::new();
         registry.insert(live_session("woff"));
-        registry.remember_end(&SessionId("woff".into()), rpc_reason::SESSION_WINDOW_CLOSED);
+        registry.remember_end(
+            &SessionId("woff".into()),
+            RpcErrorReason::SessionWindowClosed.as_str(),
+        );
         assert_eq!(
             registry
                 .end_info(&SessionId("woff".into()))
                 .expect("tombstone recorded")
                 .reason,
-            rpc_reason::SESSION_WINDOW_CLOSED
+            RpcErrorReason::SessionWindowClosed.as_str()
         );
         registry.remove(&SessionId("woff".into()));
     }
@@ -1605,7 +1604,7 @@ mod ended_tombstone_tests {
         let registry = SessionRegistry::new();
         for i in 0..(256 + 32) {
             let id = SessionId(format!("a{i:0>3}"));
-            registry.remember_end(&id, rpc_reason::BROWSER_DISCONNECTED);
+            registry.remember_end(&id, RpcErrorReason::BrowserDisconnected.as_str());
         }
         let guarded = registry
             .ended

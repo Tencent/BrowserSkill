@@ -1,5 +1,6 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
   "description": "Params for `tool.tab_create`. The new tab is always created inside\nthe requesting session's Agent Window (design §6 sandbox rule —\nagents never spawn tabs in user windows).",
   "properties": {
     "active": {

@@ -4,47 +4,32 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use anyhow::Context;
-use bsk_protocol::tools::{RecordedTrace, TRACE_VERSION_V2, TRACE_VERSION_V3, TraceV2, TraceV3};
+use bsk_protocol::tools::{RecordedTrace, TRACE_VERSION_V3, TraceV3};
 use serde::Serialize;
 
 use crate::cli::error::CliError;
 
 #[derive(Debug)]
-pub(super) struct ExportMeta {
-    pub(super) states_dir: Option<PathBuf>,
-    pub(super) trace_version: u32,
-    /// True when the CLI requested v3 but the extension returned legacy v2.
-    pub(super) v2_fallback: bool,
+pub(crate) struct ExportMeta {
+    pub(crate) states_dir: PathBuf,
+    pub(crate) trace_version: u32,
 }
 
 pub(super) fn export_recorded_trace(
     output_dir: &Path,
     trace: &RecordedTrace,
 ) -> Result<ExportMeta, CliError> {
-    match trace {
-        RecordedTrace::V3(trace) => {
-            let states_dir = write_trace_bundle(output_dir, trace)?;
-            Ok(ExportMeta {
-                states_dir: Some(states_dir),
-                trace_version: TRACE_VERSION_V3,
-                v2_fallback: false,
-            })
-        }
-        RecordedTrace::V2(trace) => {
-            write_trace_v2(output_dir, trace)?;
-            Ok(ExportMeta {
-                states_dir: None,
-                trace_version: TRACE_VERSION_V2,
-                v2_fallback: true,
-            })
-        }
-    }
+    let states_dir = write_trace_bundle(output_dir, trace)?;
+    Ok(ExportMeta {
+        states_dir,
+        trace_version: TRACE_VERSION_V3,
+    })
 }
 
 /// Save the completed Trace first, then write the bundle. Recovery is
 /// removed only after the export commits so a bad `--output` cannot drop
 /// a recording the extension already returned.
-pub(super) fn export_with_recovery(
+pub(crate) fn export_with_recovery(
     output_dir: &Path,
     trace: &RecordedTrace,
 ) -> Result<ExportMeta, CliError> {
@@ -98,7 +83,7 @@ fn legacy_json_output_error(path: &Path) -> CliError {
 
 /// Reject legacy `--output trace.json` (and any existing non-directory)
 /// before a recording starts, so the user is not blocked only after Finish.
-pub(super) fn validate_record_output(path: &Path) -> Result<(), CliError> {
+pub(crate) fn validate_record_output(path: &Path) -> Result<(), CliError> {
     match fs::symlink_metadata(path) {
         Ok(metadata) if metadata.file_type().is_symlink() => Err(CliError::Local(anyhow::anyhow!(
             "--output {} must not be a symlink",
@@ -144,54 +129,11 @@ fn acquire_export_lock(output_dir: &Path) -> Result<std::fs::File, CliError> {
     Ok(lock_file)
 }
 
-pub(super) fn write_trace_v2(output_dir: &Path, trace: &TraceV2) -> Result<(), CliError> {
-    let trace_path = trace_json_path(output_dir);
-    let states_dir = states_dir_for_output(output_dir);
-    let json = serde_json::to_string_pretty(trace)
-        .context("serialize trace JSON")
-        .map_err(CliError::Local)?;
-
-    let _lock = acquire_export_lock(output_dir)?;
-    validate_replaceable_file(&trace_path, "trace JSON")?;
-
-    let transaction_id = uuid::Uuid::new_v4();
-    let staging_dir = output_dir.join(format!(".bsk-record-stage-{transaction_id}"));
-    fs::create_dir_all(&staging_dir)
-        .with_context(|| format!("create staging dir {}", staging_dir.display()))
-        .map_err(CliError::Local)?;
-
-    let staged_trace = staging_dir.join("trace.json");
-    let stage_result: Result<(), CliError> = (|| {
-        fs::write(&staged_trace, format!("{json}\n"))
-            .with_context(|| format!("write staged trace to {}", staged_trace.display()))
-            .map_err(CliError::Local)?;
-        Ok(())
-    })();
-    if let Err(err) = stage_result {
-        let _ = fs::remove_dir_all(&staging_dir);
-        return Err(err);
-    }
-
-    commit_export_transaction(
-        &staging_dir,
-        &states_dir,
-        &HashSet::new(),
-        transaction_id,
-        vec![(
-            staged_trace,
-            trace_path,
-            output_dir.join(format!(".trace.json.{transaction_id}.bak")),
-        )],
-    )?;
-
-    Ok(())
-}
-
 pub(super) fn states_dir_for_output(output_dir: &Path) -> PathBuf {
     output_dir.join("states")
 }
 
-pub(super) fn trace_json_path(output_dir: &Path) -> PathBuf {
+pub(crate) fn trace_json_path(output_dir: &Path) -> PathBuf {
     output_dir.join("trace.json")
 }
 
@@ -610,9 +552,9 @@ mod tests {
 
     use super::*;
     use bsk_protocol::tools::{
-        NavigationCause, PageRefV2 as PageRef, RecorderInfo, StepCommonV3 as StepCommon,
-        StepResultV3 as StepResult, StepV3 as Step, StopReason, TRACE_VERSION_V2, TRACE_VERSION_V3,
-        TraceEntry, TraceStateV3, TraceV2, TraceV3, VOM_FORMAT_VERSION,
+        NavigationCause, RecorderInfo, StepCommonV3 as StepCommon, StepResultV3 as StepResult,
+        StepV3 as Step, StopReason, TRACE_VERSION_V3, TraceEntry, TraceStateV3, TraceV3,
+        VOM_FORMAT_VERSION,
     };
 
     fn sample_trace(state_id: &str, body: &str) -> TraceV3 {
@@ -824,81 +766,6 @@ mod tests {
     }
 
     #[test]
-    fn write_trace_v2_writes_single_json_and_prunes_stale_states() {
-        let dir = tempfile::tempdir().unwrap();
-        let output = dir.path().join("flow");
-        fs::create_dir_all(output.join("states")).unwrap();
-        fs::write(output.join("states/s1.txt"), "stale").unwrap();
-
-        let trace = TraceV2 {
-            recorded_at: "2026-08-10T02:12:55.360Z".into(),
-            started_at: None,
-            purpose: None,
-            entry: bsk_protocol::tools::TraceEntry {
-                start_url: "https://example.com/".into(),
-            },
-            pages: vec![PageRef {
-                id: "p1".into(),
-                url: "https://example.com/".into(),
-                title: None,
-            }],
-            steps: vec![],
-        };
-        write_trace_v2(&output, &trace).unwrap();
-        assert!(output.join("trace.json").exists());
-        assert!(!output.join("states/s1.txt").exists());
-    }
-
-    #[test]
-    fn write_trace_v2_stale_cleanup_failure_rolls_back_trace() {
-        let dir = tempfile::tempdir().unwrap();
-        let output = dir.path().join("flow");
-        write_trace_bundle(&output, &sample_trace("s1", "original")).unwrap();
-        let original_json = fs::read(output.join("trace.json")).unwrap();
-        fs::create_dir(output.join("states/s9.txt")).unwrap();
-        let trace = TraceV2 {
-            recorded_at: "2026-08-10T02:12:55.360Z".into(),
-            started_at: None,
-            purpose: None,
-            entry: bsk_protocol::tools::TraceEntry {
-                start_url: "https://example.com/".into(),
-            },
-            pages: vec![],
-            steps: vec![],
-        };
-
-        let err = write_trace_v2(&output, &trace).unwrap_err();
-
-        assert!(err.to_string().contains("stale state"));
-        assert_eq!(fs::read(output.join("trace.json")).unwrap(), original_json);
-        assert_eq!(
-            fs::read_to_string(output.join("states/s1.txt")).unwrap(),
-            "original"
-        );
-        assert!(output.join("states/s9.txt").is_dir());
-    }
-
-    #[test]
-    fn export_recorded_trace_accepts_v2() {
-        let dir = tempfile::tempdir().unwrap();
-        let output = dir.path().join("flow");
-        let trace = RecordedTrace::V2(TraceV2 {
-            recorded_at: "2026-08-10T02:12:55.360Z".into(),
-            started_at: None,
-            purpose: None,
-            entry: bsk_protocol::tools::TraceEntry {
-                start_url: "https://example.com/".into(),
-            },
-            pages: vec![],
-            steps: vec![],
-        });
-        let exported = export_recorded_trace(&output, &trace).unwrap();
-        assert_eq!(exported.trace_version, TRACE_VERSION_V2);
-        assert!(exported.states_dir.is_none());
-        assert!(output.join("trace.json").exists());
-    }
-
-    #[test]
     fn existing_trace_json_file_is_rejected_with_bundle_usage() {
         let dir = tempfile::tempdir().unwrap();
         let output = dir.path().join("trace.json");
@@ -942,7 +809,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let bad_output = dir.path().join("trace.json");
         fs::write(&bad_output, "{}\n").unwrap();
-        let trace = RecordedTrace::V3(sample_trace("s1", "@vom 1\nL1 page"));
+        let trace: RecordedTrace = sample_trace("s1", "@vom 1\nL1 page");
 
         let err = export_with_recovery(&bad_output, &trace).unwrap_err();
         let msg = err.to_string();

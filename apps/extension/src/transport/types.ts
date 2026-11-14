@@ -10,7 +10,7 @@ import type {
 } from "./generated/types";
 
 export type { EventName } from "./generated/methods";
-export { TRACE_VERSION_V2, TRACE_VERSION_V3, VOM_FORMAT_VERSION } from "./generated/methods";
+export { TRACE_VERSION_V3, VOM_FORMAT_VERSION } from "./generated/methods";
 export type * from "./generated/types";
 export type HandshakeParams = HandshakeRequest;
 export type HandshakeResult = import("./generated/input").HandshakeResponse;

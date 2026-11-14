@@ -54,30 +54,37 @@ pub struct ScreenshotArgs {
     pub out: Option<PathBuf>,
 }
 
-pub fn dispatch(args: ScreenshotArgs, format: Format) -> Result<(), CliError> {
+pub fn dispatch(
+    args: ScreenshotArgs,
+    ctx: &crate::cli::business_rpc::ClientContext,
+    format: Format,
+) -> Result<(), CliError> {
     let info = ensure_daemon().context("ensure daemon is running")?;
-    run(info.sock_path, args, format)
+    run(info.sock_path, args, ctx, format)
 }
 
-fn run(sock: PathBuf, args: ScreenshotArgs, format: Format) -> Result<(), CliError> {
+fn run(
+    sock: PathBuf,
+    args: ScreenshotArgs,
+    ctx: &crate::cli::business_rpc::ClientContext,
+    format: Format,
+) -> Result<(), CliError> {
     if args.full_page {
-        return run_full_page(sock, args, format);
+        return run_full_page(sock, args, ctx, format);
     }
     let params = ScreenshotParams {
         session_id: args.session.clone().unwrap_or_default(),
         tab_id: args.tab_id,
         ref_: args.ref_.clone(),
     };
-    let reply: ScreenshotResult = call(sock, params)?;
+    let reply: ScreenshotResult = call(sock, ctx, params)?;
     let out_path = match &args.out {
         Some(p) => p.clone(),
         None => default_out_path(),
     };
     let bytes = decode_base64(&reply.image_base64)
         .map_err(|e| CliError::Local(anyhow!("decode screenshot base64: {e}")))?;
-    std::fs::write(&out_path, &bytes)
-        .with_context(|| format!("write screenshot to {}", out_path.display()))
-        .map_err(CliError::Local)?;
+    write_screenshot_bytes(&out_path, &bytes, true)?;
     match format {
         Format::Json => {
             let mut json = serde_json::json!({
@@ -117,10 +124,17 @@ fn run(sock: PathBuf, args: ScreenshotArgs, format: Format) -> Result<(), CliErr
     Ok(())
 }
 
-fn run_full_page(sock: PathBuf, args: ScreenshotArgs, format: Format) -> Result<(), CliError> {
+fn run_full_page(
+    sock: PathBuf,
+    args: ScreenshotArgs,
+    ctx: &crate::cli::business_rpc::ClientContext,
+    format: Format,
+) -> Result<(), CliError> {
     let timeout = args.timeout.unwrap_or(120_000);
     let session = args.session.clone().unwrap_or_default();
-    let reply: ScreenshotFullPageResult = crate::cli::business_rpc::call(
+    let aux_ctx = ctx.without_action_metadata();
+    let caller_scope = ctx.resolved_caller_scope();
+    let reply: ScreenshotFullPageResult = ctx.call(
         sock.clone(),
         "screenshot-full-page",
         Method::ToolScreenshotFullPage,
@@ -141,16 +155,16 @@ fn run_full_page(sock: PathBuf, args: ScreenshotArgs, format: Format) -> Result<
     // An older extension may ignore new optional params. Never save a capture
     // that did not explicitly acknowledge the requested range.
     if args.scope.as_deref() == Some("current") && reply.scope != Some(ScreenshotScope::Current) {
-        let _ = release_full_page(&sock, &session, &reply.capture_id);
+        let _ = release_full_page(&sock, &session, &caller_scope, &reply.capture_id);
         return Err(CliError::Local(anyhow!(
             "extension did not acknowledge --scope current; update the extension"
         )));
     }
     let out = args.out.unwrap_or_else(default_out_path);
-    let result = write_full_page(&sock, &session, &reply, &out);
+    let result = write_full_page(&sock, &aux_ctx, &session, &reply, &out, true);
     // Cleanup must run even after Ctrl-C or a local write failure. Unlike the
     // business call, this small release RPC is not itself cancelled by stdin.
-    let _ = release_full_page(&sock, &session, &reply.capture_id);
+    let _ = release_full_page(&sock, &session, &caller_scope, &reply.capture_id);
     result?;
     match format {
         Format::Json => {
@@ -176,12 +190,57 @@ fn run_full_page(sock: PathBuf, args: ScreenshotArgs, format: Format) -> Result<
     Ok(())
 }
 
-fn write_full_page(
+pub(crate) fn write_screenshot_bytes(
+    out: &Path,
+    bytes: &[u8],
+    overwrite: bool,
+) -> Result<(), CliError> {
+    if !overwrite && out.exists() {
+        return Err(crate::cli::download::output_exists(out));
+    }
+    let parent = out
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    let temp = parent.join(format!(
+        ".bsk-screenshot-{}.part",
+        uuid::Uuid::new_v4().simple()
+    ));
+    let result = (|| {
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp)
+            .with_context(|| format!("create screenshot temporary file {}", temp.display()))
+            .map_err(CliError::Local)?;
+        file.write_all(bytes)
+            .context("write screenshot bytes")
+            .map_err(CliError::Local)?;
+        file.sync_all()
+            .context("flush screenshot")
+            .map_err(CliError::Local)?;
+        drop(file);
+        crate::cli::atomic_output::commit(&temp, out, overwrite)
+            .with_context(|| format!("save screenshot to {}", out.display()))
+            .map_err(CliError::Local)
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temp);
+    }
+    result
+}
+
+pub(crate) fn write_full_page(
     sock: &Path,
+    ctx: &crate::cli::business_rpc::ClientContext,
     session: &str,
     reply: &ScreenshotFullPageResult,
     out: &Path,
+    overwrite: bool,
 ) -> Result<(), CliError> {
+    if !overwrite && out.exists() {
+        return Err(crate::cli::download::output_exists(out));
+    }
     let parent = out
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
@@ -199,7 +258,7 @@ fn write_full_page(
             .map_err(CliError::Local)?;
         let mut offset = 0;
         loop {
-            let chunk: ScreenshotReadResult = crate::cli::business_rpc::call(
+            let chunk: ScreenshotReadResult = ctx.call(
                 sock.to_path_buf(),
                 "screenshot-read",
                 Method::ToolScreenshotRead,
@@ -223,9 +282,8 @@ fn write_full_page(
             .context("flush screenshot")
             .map_err(CliError::Local)?;
         drop(file);
-        // Keep screenshot's existing overwrite semantics, but never replace a
-        // previous image with an interrupted or partially transferred PNG.
-        crate::cli::atomic_output::commit(&temp, out, true)
+        // Never replace a previous image with an interrupted or partially transferred PNG.
+        crate::cli::atomic_output::commit(&temp, out, overwrite)
             .with_context(|| format!("save screenshot to {}", out.display()))
             .map_err(CliError::Local)
     })();
@@ -261,40 +319,54 @@ fn validate_chunk(
     Ok(bytes)
 }
 
-fn release_full_page(sock: &Path, session: &str, capture_id: &str) -> anyhow::Result<()> {
+pub(crate) async fn release_full_page_async(
+    sock: &Path,
+    session: &str,
+    caller_scope: &str,
+    capture_id: &str,
+) -> anyhow::Result<()> {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        let mut client = crate::ipc_client::IpcClient::connect(sock).await?;
+        let mut params = serde_json::to_value(ScreenshotReleaseParams {
+            session_id: session.into(),
+            capture_id: capture_id.into(),
+        })?;
+        if session.trim().is_empty()
+            && let Some(obj) = params.as_object_mut()
+        {
+            obj.insert("_caller_scope".into(), caller_scope.into());
+        }
+        let _: Result<ScreenshotReleaseResult, _> = client
+            .call(
+                "screenshot-release",
+                Method::ToolScreenshotRelease,
+                Some(params),
+                Duration::from_secs(5),
+            )
+            .await?;
+        Ok::<_, anyhow::Error>(())
+    })
+    .await?
+}
+
+fn release_full_page(
+    sock: &Path,
+    session: &str,
+    caller_scope: &str,
+    capture_id: &str,
+) -> anyhow::Result<()> {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?;
-    runtime.block_on(async {
-        tokio::time::timeout(Duration::from_secs(5), async {
-            let mut client = crate::ipc_client::IpcClient::connect(sock).await?;
-            let mut params = serde_json::to_value(ScreenshotReleaseParams {
-                session_id: session.into(),
-                capture_id: capture_id.into(),
-            })?;
-            if session.trim().is_empty()
-                && let Some(obj) = params.as_object_mut()
-            {
-                obj.insert(
-                    "_caller_scope".into(),
-                    crate::cli::business_rpc::current_caller_scope().into(),
-                );
-            }
-            let _: Result<ScreenshotReleaseResult, _> = client
-                .call(
-                    "screenshot-release",
-                    Method::ToolScreenshotRelease,
-                    Some(params),
-                    Duration::from_secs(5),
-                )
-                .await?;
-            Ok::<_, anyhow::Error>(())
-        })
-        .await?
-    })
+    runtime.block_on(release_full_page_async(
+        sock,
+        session,
+        caller_scope,
+        capture_id,
+    ))
 }
 
-fn default_out_path() -> PathBuf {
+pub(crate) fn default_out_path() -> PathBuf {
     let mut dir = std::env::temp_dir();
     let ts = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -304,8 +376,12 @@ fn default_out_path() -> PathBuf {
     dir
 }
 
-fn call(sock: PathBuf, params: ScreenshotParams) -> Result<ScreenshotResult, CliError> {
-    crate::cli::business_rpc::call::<ScreenshotParams, ScreenshotResult>(
+fn call(
+    sock: PathBuf,
+    ctx: &crate::cli::business_rpc::ClientContext,
+    params: ScreenshotParams,
+) -> Result<ScreenshotResult, CliError> {
+    ctx.call::<ScreenshotParams, ScreenshotResult>(
         sock,
         "screenshot",
         Method::ToolScreenshot,

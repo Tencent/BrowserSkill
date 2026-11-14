@@ -43,6 +43,7 @@ pub struct TabInfo {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct TabListParams {
     #[serde(default)]
     pub scope: TabScope,
@@ -62,6 +63,7 @@ pub struct TabListResult {
 /// the requesting session's Agent Window (design §6 sandbox rule —
 /// agents never spawn tabs in user windows).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct TabCreateParams {
     pub session_id: String,
     /// Destination URL. Defaults to `chrome://newtab` when omitted.
@@ -106,6 +108,7 @@ pub struct TabCloseResult {
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct TabSelectParams {
     pub tab_id: i64,
     pub session_id: String,
@@ -121,21 +124,11 @@ pub struct TabSelectResult {
 // tab_borrow (M8.2)
 // ---------------------------------------------------------------------------
 
-pub const BORROW_CONFIRMATION_TIMEOUT_PROTOCOL: &str =
-    crate::compatibility::Feature::BorrowConfirmationTimeout
-        .requirement()
-        .daemon;
-
-/// Earlier peers may silently ignore a custom confirmation wait.
-pub fn supports_borrow_confirmation_timeout(protocol: &str) -> bool {
-    crate::compatibility::Feature::BorrowConfirmationTimeout
-        .supports(crate::compatibility::Peer::Daemon, protocol)
-}
-
 /// Params for `tool.tab_borrow`. Moves a *user* tab into the
 /// requesting session's Agent Window, recording its original window /
 /// index so `tab_return` (or session_stop) can put it back.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct TabBorrowParams {
     /// Maximum time to wait for user confirmation (default 60 seconds).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -160,6 +153,7 @@ pub struct TabBorrowResult {
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct TabReturnParams {
     pub tab_id: i64,
     pub session_id: String,

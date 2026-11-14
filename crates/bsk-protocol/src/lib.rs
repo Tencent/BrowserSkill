@@ -2,7 +2,6 @@
 
 pub mod cancel;
 pub mod catalog;
-pub mod compatibility;
 pub mod error;
 pub mod frame;
 pub mod local_auth;
@@ -11,9 +10,10 @@ pub mod system;
 pub mod tools;
 
 pub use cancel::{CancelParams, CancelResult};
+pub use catalog::{MIN_COMPATIBLE_PROTOCOL, PROTOCOL_VERSION, is_protocol_compatible};
 pub use error::{DecodeError, ErrorCode, RpcError, RpcErrorReason};
 pub use frame::{EventFrame, EventKind, Frame, RequestFrame, ResponseBody, ResponseFrame, RpcId};
-pub use method::Method;
+pub use method::{ActionMetadataPolicy, DeadlineKind, Method, OutcomeKind, RecipeStepKind};
 pub use system::{
     BrowserListParams, BrowserPeerInfo, BrowserStatusEntry, HandshakeCompat, HandshakeParams,
     HandshakeResult, PingParams, PingResult, SessionStatusEntry, StatusParams, StatusResult,

@@ -440,7 +440,11 @@ impl<'a> Output<'a> {
     }
 }
 
-pub fn dispatch(args: StepArgs, _format: Format) -> Result<(), CliError> {
+pub fn dispatch(
+    args: StepArgs,
+    ctx: &business_rpc::ClientContext,
+    _format: Format,
+) -> Result<(), CliError> {
     let (method, params) = prepare(&args).map_err(CliError::invalid_params)?;
     let session = args.session.as_deref().unwrap_or_default();
     let output = Output::prepare(
@@ -450,19 +454,17 @@ pub fn dispatch(args: StepArgs, _format: Format) -> Result<(), CliError> {
         &args.match_text,
         args.context_lines,
     )?;
-    if matches!(args.policy, cooperate::Policy::Target) {
-        business_rpc::set_target_policy_requested();
-    }
-    business_rpc::set_caller_scope(args.scope.clone());
+    let op_ctx = ctx.with_scope(args.scope.as_deref());
+    let aux_ctx = op_ctx.without_action_metadata();
+    let mut first_rpc = true;
     let daemon = ensure_daemon().context("ensure daemon is running")?;
-    if matches!(args.action, Action::Drag) && params["mode"] == "click-move-click" {
-        super::protocol::require_feature_on_daemon(
-            &daemon.sock_path,
-            bsk_protocol::compatibility::Feature::ClickMoveClick,
-        )?;
-    }
     let (reply, exit) = run(&args, method, params, |method, params, timeout| {
-        business_rpc::call(
+        let rpc_ctx = if std::mem::take(&mut first_rpc) {
+            &op_ctx
+        } else {
+            &aux_ctx
+        };
+        rpc_ctx.call(
             daemon.sock_path.clone(),
             "step",
             method,
@@ -709,7 +711,7 @@ mod tests {
         std::fs::write(&p, "keep").unwrap();
         let mut a = args();
         a.save_full = Some(p.clone());
-        assert!(dispatch(a, Format::Json).is_err());
+        assert!(dispatch(a, &business_rpc::ClientContext::default(), Format::Json).is_err());
         assert_eq!(std::fs::read_to_string(p).unwrap(), "keep");
     }
     #[test]

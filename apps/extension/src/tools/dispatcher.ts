@@ -1060,7 +1060,7 @@ export class ToolDispatcher {
         signal,
       });
     },
-    "tool.record_start": async (params, { signal }) => {
+    "tool.record_start": async (params, { signal, cdp }) => {
       const release = this.video?.reserveActionRecording(params.session_id);
       if (this.video && !release)
         return {
@@ -1069,23 +1069,26 @@ export class ToolDispatcher {
         };
       const started = this.recording
         ? handleRecordStart(this.sessions, params, {
+            ...(cdp ? { cdp } : {}),
             ...this.recording,
             signal,
           })
         : Promise.resolve(recordingRuntimeUnavailable());
       return release ? started.finally(release) : started;
     },
-    "tool.record_stop": async (params, { signal }) => {
+    "tool.record_stop": async (params, { signal, cdp }) => {
       return this.recording
         ? handleRecordStop(this.sessions, params, {
+            ...(cdp ? { cdp } : {}),
             ...this.recording,
             signal,
           })
         : recordingRuntimeUnavailable();
     },
-    "tool.record_await": async (params, { signal }) => {
+    "tool.record_await": async (params, { signal, cdp }) => {
       return this.recording
         ? handleRecordAwait(this.sessions, params, {
+            ...(cdp ? { cdp } : {}),
             ...this.recording,
             signal,
           })

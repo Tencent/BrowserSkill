@@ -863,7 +863,7 @@ pub(crate) fn spawn_browser_liveness_reaper(
                     );
                     state.purge_sessions_of_browser(
                         &client.id,
-                        crate::rpc_reason::BROWSER_DISCONNECTED,
+                        bsk_protocol::RpcErrorReason::BrowserDisconnected.as_str(),
                         "purged session on browser liveness timeout",
                     );
                 }
@@ -911,12 +911,14 @@ pub(crate) fn spawn_session_idle_reaper(state: Arc<DaemonState>) -> tokio::task:
                 {
                     Ok(_) => {
                         state.transfers.release_session(&session_id.0);
-                        state
-                            .sessions
-                            .remember_end(&session_id, crate::rpc_reason::SESSION_IDLE_TIMEOUT);
-                        state
-                            .scopes
-                            .on_session_ended(&session_id, crate::rpc_reason::SESSION_IDLE_TIMEOUT);
+                        state.sessions.remember_end(
+                            &session_id,
+                            bsk_protocol::RpcErrorReason::SessionIdleTimeout.as_str(),
+                        );
+                        state.scopes.on_session_ended(
+                            &session_id,
+                            bsk_protocol::RpcErrorReason::SessionIdleTimeout.as_str(),
+                        );
                         state.intent_wal.on_session_ended(&session_id);
                         info!(session = %session_id, "idle session stopped");
                     }
@@ -932,9 +934,10 @@ pub(crate) fn spawn_session_idle_reaper(state: Arc<DaemonState>) -> tokio::task:
                             None,
                         );
                         state.transfers.release_session(&session_id.0);
-                        state
-                            .scopes
-                            .on_session_ended(&session_id, crate::rpc_reason::SESSION_IDLE_TIMEOUT);
+                        state.scopes.on_session_ended(
+                            &session_id,
+                            bsk_protocol::RpcErrorReason::SessionIdleTimeout.as_str(),
+                        );
                         state.intent_wal.on_session_ended(&session_id);
                     }
                     Err(err) => {

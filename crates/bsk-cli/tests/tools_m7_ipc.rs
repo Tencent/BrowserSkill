@@ -91,7 +91,7 @@ async fn do_handshake_protocol(ws: &mut Ws, protocol: &str) -> HandshakeResult {
             version: "131.0".into(),
         },
         min_compatible_peer: Some("0.1.0-dev.0".parse().unwrap()),
-        min_compatible_protocol: Some("1.0".into()),
+        min_compatible_protocol: Some(bsk::daemon::state::MIN_COMPATIBLE_PROTOCOL.into()),
         label: "Test".into(),
     };
     let req = RequestFrame {
@@ -871,126 +871,121 @@ async fn wheel_round_trips_native_deltas_and_point() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn click_move_click_is_never_forwarded_as_a_legacy_held_drag() {
+async fn click_move_click_rejects_pre_2_0_peer_and_forwards_both_drag_modes_under_2_0() {
     use std::sync::atomic::{AtomicUsize, Ordering};
-    for protocol in ["1.6", "1.7"] {
-        let (handle, sock) = spawn_daemon().await;
-        let mut ws = connect_ext(handle.ws_addr()).await;
-        do_handshake_protocol(&mut ws, protocol).await;
-        let forwarded = Arc::new(AtomicUsize::new(0));
-        let count = forwarded.clone();
-        run_extension(ws, move |req| {
-            assert_eq!(req.method, Method::ToolDrag);
-            let p: bsk_protocol::tools::DragParams =
-                serde_json::from_value(req.params.clone().unwrap()).unwrap();
-            if protocol == "1.6" {
-                assert_eq!(p.mode, None);
-            }
-            count.fetch_add(1, Ordering::SeqCst);
-            ResponseBody::Ok(
-                json!({"tab_id":17,"source":{"x":10,"y":10},"target":{"x":100,"y":10}}),
-            )
-        });
-        let session = ipc_session_start(&sock).await;
-        let mut params = json!({"session_id":session,"source":{"selector":"#start"},"target":{"selector":"#end"},"mode":"click-move-click"});
-        let result: Result<Value, RpcError> =
-            ipc_tool_call(&sock, Method::ToolDrag, params.clone()).await;
-        if protocol == "1.6" {
-            let error = result.unwrap_err();
-            assert_eq!(error.code, ErrorCode::Unsupported);
-            assert_eq!(error.data.unwrap()["effect_state"], "none");
-            assert_eq!(forwarded.load(Ordering::SeqCst), 0);
-        } else {
-            assert_eq!(result.unwrap()["tab_id"], 17);
-        }
-        params.as_object_mut().unwrap().remove("mode");
-        let legacy: Value = ipc_tool_call(&sock, Method::ToolDrag, params)
-            .await
-            .unwrap();
-        assert_eq!(legacy["tab_id"], 17);
-        assert_eq!(
-            forwarded.load(Ordering::SeqCst),
-            if protocol == "1.6" { 1 } else { 2 }
-        );
-        handle.shutdown().await;
-    }
+    let (handle, sock) = spawn_daemon().await;
+
+    // 1.x extensions must fail at WS handshake before any tool dispatch.
+    let mut old_ws = connect_ext(handle.ws_addr()).await;
+    let params = HandshakeParams {
+        client: "browser-skill-extension".into(),
+        version: "0.4.0".parse().unwrap(),
+        protocol_version: "1.9".into(),
+        instance_id: TEST_EXT_ID.into(),
+        browser: BrowserPeerInfo {
+            name: "chrome".into(),
+            version: "131.0".into(),
+        },
+        min_compatible_peer: None,
+        min_compatible_protocol: None,
+        label: "Legacy".into(),
+    };
+    let hs = RequestFrame {
+        id: "hs-old".into(),
+        method: Method::SystemHandshake,
+        params: Some(serde_json::to_value(params).unwrap()),
+    };
+    old_ws
+        .send(Message::Text(serde_json::to_string(&hs).unwrap()))
+        .await
+        .unwrap();
+    let Message::Text(raw) = old_ws.next().await.unwrap().unwrap() else {
+        panic!("expected text handshake response");
+    };
+    let resp: ResponseFrame = serde_json::from_str(&raw).unwrap();
+    let ResponseBody::Err(err) = resp.body else {
+        panic!("expected handshake rejection for 1.9 peer");
+    };
+    assert_eq!(err.code, ErrorCode::VersionTooOld);
+    drop(old_ws);
+
+    let mut ws = connect_ext(handle.ws_addr()).await;
+    do_handshake_protocol(&mut ws, bsk::daemon::state::PROTOCOL_VERSION).await;
+    let forwarded = Arc::new(AtomicUsize::new(0));
+    let count = forwarded.clone();
+    run_extension(ws, move |req| {
+        assert_eq!(req.method, Method::ToolDrag);
+        let _: bsk_protocol::tools::DragParams =
+            serde_json::from_value(req.params.clone().unwrap()).unwrap();
+        count.fetch_add(1, Ordering::SeqCst);
+        ResponseBody::Ok(json!({"tab_id":17,"source":{"x":10,"y":10},"target":{"x":100,"y":10}}))
+    });
+    let session = ipc_session_start(&sock).await;
+    let mut params = json!({"session_id":session,"source":{"selector":"#start"},"target":{"selector":"#end"},"mode":"click-move-click"});
+    let click_move: Value = ipc_tool_call(&sock, Method::ToolDrag, params.clone())
+        .await
+        .unwrap();
+    assert_eq!(click_move["tab_id"], 17);
+
+    params.as_object_mut().unwrap().remove("mode");
+    let held: Value = ipc_tool_call(&sock, Method::ToolDrag, params)
+        .await
+        .unwrap();
+    assert_eq!(held["tab_id"], 17);
+    assert_eq!(forwarded.load(Ordering::SeqCst), 2);
+    handle.shutdown().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn target_control_and_conditions_negotiate_before_browser_dispatch() {
+async fn target_control_and_conditions_forward_intact_under_protocol_2_0() {
     use std::sync::atomic::{AtomicUsize, Ordering};
-    for protocol in ["1.7", "1.8"] {
-        let (handle, sock) = spawn_daemon().await;
-        let mut ws = connect_ext(handle.ws_addr()).await;
-        do_handshake_protocol(&mut ws, protocol).await;
-        let forwarded = Arc::new(AtomicUsize::new(0));
-        let count = forwarded.clone();
-        run_extension(ws, move |req| {
-            count.fetch_add(1, Ordering::SeqCst);
-            ResponseBody::Ok(req.params.clone().unwrap())
-        });
-        let session = ipc_session_start(&sock).await;
-        for (method, params) in [
-            (
-                Method::ToolCooperate,
-                json!({"session_id":session,"action":"sync","control_policy":"target"}),
-            ),
-            (
-                Method::ToolCooperate,
-                json!({"session_id":session,"action":"sync","control_policy":"auto"}),
-            ),
-            (
-                Method::ToolClick,
-                json!({"session_id":session,"ref":"e1","context_id":"c","observation_id":"o", "expect":[{"target":"#price","field":"text","equals":"$12"}]}),
-            ),
-        ] {
-            let result: Result<Value, RpcError> =
-                ipc_tool_call(&sock, method, params.clone()).await;
-            if protocol == "1.7" {
-                let error = result.unwrap_err();
-                assert_eq!(error.code, ErrorCode::Unsupported);
-                let data = error.data.unwrap();
-                assert_eq!(data["effect_state"], "none");
-                assert_eq!(data["required_protocol"], "1.8");
-                assert!(
-                    data["recovery"]
-                        .as_str()
-                        .unwrap()
-                        .contains("every sync/enable and step")
-                );
-                assert_eq!(forwarded.load(Ordering::SeqCst), 0);
-            } else {
-                // The daemon preserves exact conditions and explicit evidence.
-                let result = result.unwrap();
-                for (key, value) in params.as_object().unwrap() {
-                    assert_eq!(&result[key], value);
-                }
-            }
-        }
-        // Explicit strict remains available on every sync with an older extension.
-        for _ in 0..2 {
-            let strict: Value = ipc_tool_call(
-                &sock,
-                Method::ToolCooperate,
-                json!({"session_id":session,"action":"sync","control_policy":"strict"}),
-            )
-            .await
-            .unwrap();
-            assert_eq!(strict["control_policy"], "strict");
-        }
-        // Legacy visual observation IDs remain usable on older extensions.
-        let legacy: Value = ipc_tool_call(
-            &sock,
+    let (handle, sock) = spawn_daemon().await;
+    let mut ws = connect_ext(handle.ws_addr()).await;
+    do_handshake_protocol(&mut ws, bsk::daemon::state::PROTOCOL_VERSION).await;
+    let forwarded = Arc::new(AtomicUsize::new(0));
+    let count = forwarded.clone();
+    run_extension(ws, move |req| {
+        count.fetch_add(1, Ordering::SeqCst);
+        ResponseBody::Ok(req.params.clone().unwrap())
+    });
+    let session = ipc_session_start(&sock).await;
+    for (method, params) in [
+        (
+            Method::ToolCooperate,
+            json!({"session_id":session,"action":"sync","control_policy":"target"}),
+        ),
+        (
+            Method::ToolCooperate,
+            json!({"session_id":session,"action":"sync","control_policy":"auto"}),
+        ),
+        (
             Method::ToolClick,
-            json!({"session_id":session,"ref":"e1","context_id":"old","observation_id":"visual"}),
+            json!({"session_id":session,"ref":"e1","context_id":"c","observation_id":"o", "expect":[{"target":"#price","field":"text","equals":"$12"}]}),
+        ),
+    ] {
+        let result: Value = ipc_tool_call(&sock, method, params.clone()).await.unwrap();
+        for (key, value) in params.as_object().unwrap() {
+            assert_eq!(&result[key], value);
+        }
+    }
+    for _ in 0..2 {
+        let strict: Value = ipc_tool_call(
+            &sock,
+            Method::ToolCooperate,
+            json!({"session_id":session,"action":"sync","control_policy":"strict"}),
         )
         .await
         .unwrap();
-        assert_eq!(legacy["observation_id"], "visual");
-        assert_eq!(
-            forwarded.load(Ordering::SeqCst),
-            if protocol == "1.7" { 3 } else { 6 }
-        );
-        handle.shutdown().await;
+        assert_eq!(strict["control_policy"], "strict");
     }
+    let observed: Value = ipc_tool_call(
+        &sock,
+        Method::ToolClick,
+        json!({"session_id":session,"ref":"e1","context_id":"c","observation_id":"obs-1"}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(observed["observation_id"], "obs-1");
+    assert_eq!(forwarded.load(Ordering::SeqCst), 6);
+    handle.shutdown().await;
 }

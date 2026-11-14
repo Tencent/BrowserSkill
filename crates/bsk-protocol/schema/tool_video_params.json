@@ -11,6 +11,7 @@
   },
   "oneOf": [
     {
+      "additionalProperties": false,
       "properties": {
         "action": {
           "const": "start",
@@ -48,6 +49,7 @@
       "type": "object"
     },
     {
+      "additionalProperties": false,
       "properties": {
         "action": {
           "const": "capabilities",
@@ -72,6 +74,7 @@
       "type": "object"
     },
     {
+      "additionalProperties": false,
       "properties": {
         "action": {
           "const": "list",
@@ -90,6 +93,7 @@
       "type": "object"
     },
     {
+      "additionalProperties": false,
       "properties": {
         "action": {
           "const": "status",
@@ -114,6 +118,7 @@
       "type": "object"
     },
     {
+      "additionalProperties": false,
       "properties": {
         "action": {
           "const": "stop",
@@ -138,6 +143,7 @@
       "type": "object"
     },
     {
+      "additionalProperties": false,
       "properties": {
         "action": {
           "const": "read",
@@ -168,6 +174,7 @@
       "type": "object"
     },
     {
+      "additionalProperties": false,
       "properties": {
         "action": {
           "const": "discard",
@@ -192,6 +199,7 @@
       "type": "object"
     },
     {
+      "additionalProperties": false,
       "properties": {
         "action": {
           "const": "exported",

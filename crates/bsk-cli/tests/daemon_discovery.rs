@@ -164,41 +164,41 @@ impl Drop for MockDaemon {
 
 fn status(info: &DaemonInfo) -> ResponseBody {
     ResponseBody::Ok(serde_json::json!({
-        "pid": info.pid, "daemon_version": info.version, "protocol_version": "1.1",
+        "pid": info.pid, "daemon_version": info.version, "protocol_version": "2.0",
         "uptime_secs": 1, "ws_port": info.ws_port, "sock_path": info.sock_path,
         "browsers": [], "sessions": []
     }))
 }
 
 #[test]
-fn only_unsupported_operations_reject_a_legacy_daemon() {
-    let daemon = MockDaemon::new(FOREIGN_PID, |_, info| Some(status(info)));
+fn incompatible_operations_reject_a_legacy_daemon_without_restarting_it() {
+    let daemon = MockDaemon::new(FOREIGN_PID, |_, info| {
+        let ResponseBody::Ok(mut value) = status(info) else {
+            unreachable!()
+        };
+        value["protocol_version"] = "1.9".into();
+        Some(ResponseBody::Ok(value))
+    });
     let original = daemon.metadata();
-    for (args, required_protocol) in [
-        (
-            vec![
-                "tab",
-                "borrow",
-                "7",
-                "--session",
-                "abcd",
-                "--timeout",
-                "120s",
-                "--json",
-            ],
-            "1.2",
-        ),
-        (
-            vec![
-                "request-help",
-                "--session",
-                "abcd",
-                "--prompt",
-                "Continue",
-                "--json",
-            ],
-            "1.3",
-        ),
+    for args in [
+        vec![
+            "tab",
+            "borrow",
+            "7",
+            "--session",
+            "abcd",
+            "--timeout",
+            "120s",
+            "--json",
+        ],
+        vec![
+            "request-help",
+            "--session",
+            "abcd",
+            "--prompt",
+            "Continue",
+            "--json",
+        ],
     ] {
         let result = command(daemon.home(), &args)
             .env("BSK_REQUEST_HELP", "off")
@@ -207,22 +207,19 @@ fn only_unsupported_operations_reject_a_legacy_daemon() {
             .unwrap();
         assert!(!result.status.success());
         let error: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
-        assert_eq!(error["code"], "unsupported", "{error}");
+        let message = error["message"].as_str().unwrap();
         assert!(
-            error["message"]
-                .as_str()
-                .unwrap()
-                .contains(&format!("protocol {required_protocol}"))
+            message.contains("incompatible") && message.contains("2.0"),
+            "{error}"
         );
-        assert_eq!(error["data"]["component"], "daemon");
         assert!(error.get("outcome").is_none());
         assert_eq!(daemon.metadata(), original);
     }
 }
 
 #[test]
-fn sessions_and_default_borrowing_work_with_legacy_daemons_without_forwarding_overrides() {
-    for protocol in ["1.0", "1.1", "1.2"] {
+fn sessions_and_default_borrowing_work_with_compatible_daemons_without_forwarding_overrides() {
+    for protocol in ["2.0", "2.1"] {
         let daemon = MockDaemon::with_requests(FOREIGN_PID, move |_, info, request| {
             Some(match request.method {
                 Method::SystemStatus => {
@@ -235,20 +232,24 @@ fn sessions_and_default_borrowing_work_with_legacy_daemons_without_forwarding_ov
                 Method::SessionStart => {
                     assert!(request.params.as_ref().unwrap().get("unattended").is_none());
                     ResponseBody::Ok(serde_json::json!({
-                        "session_id": "abcd", "browser_instance_id": "legacy", "agent_window_id": 1
+                        "session_id": "abcd", "browser_instance_id": "mock", "agent_window_id": 1
                     }))
                 }
                 Method::ToolTabBorrow => {
                     let params = request.params.as_ref().unwrap();
                     assert!(params.get("confirm").is_none());
                     if params.get("confirmation_timeout_ms").is_some() {
-                        assert_eq!(protocol, "1.2");
                         assert_eq!(params["confirmation_timeout_ms"], 120_000);
                     }
                     ResponseBody::Ok(serde_json::json!({
                         "tab_id": 7, "original_window_id": 2, "original_index": 0, "agent_window_id": 1
                     }))
                 }
+                Method::ToolRequestHelp => ResponseBody::Err(bsk_protocol::RpcError {
+                    code: bsk_protocol::ErrorCode::Unsupported,
+                    message: "not enabled".into(),
+                    data: None,
+                }),
                 Method::SessionStop => ResponseBody::Ok(serde_json::json!({"stopped": ["abcd"]})),
                 _ => panic!("unexpected request: {:?}", request.method),
             })
@@ -283,7 +284,7 @@ fn sessions_and_default_borrowing_work_with_legacy_daemons_without_forwarding_ov
                 "--json",
             ],
         );
-        assert_eq!(custom.status.success(), protocol == "1.2");
+        assert!(custom.status.success());
         let help = command(
             daemon.home(),
             &[

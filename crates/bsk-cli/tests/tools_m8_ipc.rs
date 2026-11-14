@@ -85,7 +85,7 @@ async fn do_handshake(ws: &mut Ws) -> HandshakeResult {
             version: "131.0".into(),
         },
         min_compatible_peer: Some("0.1.0-dev.0".parse().unwrap()),
-        min_compatible_protocol: Some("1.0".into()),
+        min_compatible_protocol: Some(bsk::daemon::state::MIN_COMPATIBLE_PROTOCOL.into()),
         label: "Test".into(),
     };
     let req = RequestFrame {
@@ -105,6 +105,13 @@ async fn do_handshake(ws: &mut Ws) -> HandshakeResult {
     match frame.body {
         ResponseBody::Ok(v) => serde_json::from_value(v).unwrap(),
         ResponseBody::Err(e) => panic!("handshake rejected: {e:?}"),
+    }
+}
+
+fn strip_envelope_params(params: &mut Option<Value>) {
+    if let Some(Value::Object(map)) = params {
+        map.remove("_audit_id");
+        map.remove("_operation_id");
     }
 }
 
@@ -128,7 +135,10 @@ where
                 Ok(f) => f,
                 Err(_) => continue,
             };
-            let Frame::Request(req) = frame else { continue };
+            let Frame::Request(mut req) = frame else {
+                continue;
+            };
+            strip_envelope_params(&mut req.params);
             let body = match req.method {
                 Method::ToolSessionStart => {
                     let _: SessionStartParams =

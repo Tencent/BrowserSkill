@@ -20,7 +20,7 @@ fn fixture_info() -> DaemonInfo {
 
 fn status(info: &DaemonInfo) -> ResponseBody {
     ResponseBody::Ok(serde_json::json!({
-        "pid": info.pid, "daemon_version": info.version, "protocol_version": "1.1",
+        "pid": info.pid, "daemon_version": info.version, "protocol_version": "2.0",
         "uptime_secs": 1, "ws_port": info.ws_port, "sock_path": info.sock_path,
         "browsers": [], "sessions": []
     }))

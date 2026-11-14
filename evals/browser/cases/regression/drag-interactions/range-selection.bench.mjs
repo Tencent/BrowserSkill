@@ -101,8 +101,8 @@ try {
           return b.length ? b : false;
         });
         const status = await bsk(["status"]);
-        assert.equal(status.protocol_version, "1.8");
-        assert.equal(status.browsers[0].extension_protocol_version, "1.8");
+        assert.equal(status.protocol_version, "2.0");
+        assert.equal(status.browsers[0].extension_protocol_version, "2.0");
         const start = await bsk(["session", "start", "--browser", browsers[0].instance_id]);
         session = start.session_id;
         const scope = ["--session", session];

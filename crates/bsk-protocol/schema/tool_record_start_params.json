@@ -1,5 +1,6 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
   "properties": {
     "max_page_tokens": {
       "format": "uint32",
@@ -24,24 +25,8 @@
     "session_id": {
       "type": "string"
     },
-    "supports_tab_switch_steps": {
-      "description": "Client can decode the v3 `switch_tab` step variant.",
-      "type": [
-        "boolean",
-        "null"
-      ]
-    },
     "tab_id": {
       "format": "int64",
-      "type": [
-        "integer",
-        "null"
-      ]
-    },
-    "trace_version": {
-      "description": "Desired trace export format. Omitted means v2; `3` requests v3.",
-      "format": "uint32",
-      "minimum": 0,
       "type": [
         "integer",
         "null"

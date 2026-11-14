@@ -12,7 +12,7 @@ use super::{
 use anyhow::{Context, ensure};
 use bsk_protocol::{
     ErrorCode, Method,
-    tools::{TARGET_CONTROL_PROTOCOL, WaitForElementParams, parse_expectations},
+    tools::{WaitForElementParams, parse_expectations},
 };
 use clap::{Args, ValueEnum};
 use serde_json::{Map, Value, json};
@@ -368,13 +368,9 @@ pub(crate) fn run(
     (reply, exit)
 }
 
-/// A plan reuses one context across actions, which only target control allows.
+/// Validate daemon protocol compatibility before running a plan.
 pub(crate) fn check_protocol(protocol: &str) -> anyhow::Result<()> {
-    ensure!(
-        bsk_protocol::tools::supports_target_control(protocol),
-        "plan requires daemon protocol {TARGET_CONTROL_PROTOCOL} or a later compatible 1.x version; update the CLI and restart its daemon"
-    );
-    Ok(())
+    business_rpc::check_daemon_protocol(protocol)
 }
 
 fn prepare(args: &PlanArgs, flags: &GlobalFlags) -> anyhow::Result<Plan> {
@@ -396,7 +392,12 @@ fn prepare(args: &PlanArgs, flags: &GlobalFlags) -> anyhow::Result<Plan> {
     Ok(plan)
 }
 
-pub fn dispatch(args: PlanArgs, flags: &GlobalFlags, _format: Format) -> Result<(), CliError> {
+pub fn dispatch(
+    args: PlanArgs,
+    flags: &GlobalFlags,
+    ctx: &business_rpc::ClientContext,
+    _format: Format,
+) -> Result<(), CliError> {
     let plan = prepare(&args, flags).map_err(CliError::invalid_params)?;
     let session = args.session.as_deref().unwrap_or_default();
     let output = step::Output::prepare(
@@ -406,12 +407,14 @@ pub fn dispatch(args: PlanArgs, flags: &GlobalFlags, _format: Format) -> Result<
         &args.match_text,
         args.context_lines,
     )?;
-    business_rpc::set_caller_scope(args.scope.clone());
+    let op_ctx = ctx
+        .with_scope(args.scope.as_deref())
+        .without_action_metadata();
     let (daemon, protocol) = ensure_daemon::ensure_daemon_optimistic_with_protocol()
         .context("ensure daemon is running")?;
     check_protocol(&protocol)?;
     let (reply, exit) = run(&plan, |method, params, timeout| {
-        business_rpc::call(
+        op_ctx.call(
             daemon.sock_path.clone(),
             "plan",
             method,

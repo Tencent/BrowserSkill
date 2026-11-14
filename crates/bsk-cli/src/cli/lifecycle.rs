@@ -153,7 +153,11 @@ fn nonempty_single_line(value: &str) -> Result<String, String> {
     Ok(value.to_owned())
 }
 
-pub fn dispatch_open(args: OpenArgs, format: Format) -> Result<(), CliError> {
+pub fn dispatch_open(
+    args: OpenArgs,
+    ctx: &business_rpc::ClientContext,
+    format: Format,
+) -> Result<(), CliError> {
     if args.url.trim().is_empty() {
         return Err(CliError::invalid_params(anyhow::anyhow!(
             "open requires a non-empty URL"
@@ -164,15 +168,16 @@ pub fn dispatch_open(args: OpenArgs, format: Format) -> Result<(), CliError> {
             "--width and --height must be given together"
         )));
     }
-    business_rpc::set_caller_scope(args.scope.clone());
+    let op_ctx = ctx.with_scope(args.scope.as_deref());
+    let aux_ctx = op_ctx.without_action_metadata();
 
     let info = ensure_daemon().context("ensure daemon is running")?;
-    let session_id = resolve_or_start_open_session(&info.sock_path, &args, format)?;
+    let session_id = resolve_or_start_open_session(&info.sock_path, &aux_ctx, &args, format)?;
 
     let nav_timeout_ms = args
         .timeout_ms
         .map_or(DEFAULT_NAV_TIMEOUT_MS, |ms| ms.max(DEFAULT_NAV_TIMEOUT_MS));
-    let nav_reply: NavigateResult = business_rpc::call(
+    let nav_reply: NavigateResult = op_ctx.call(
         info.sock_path.clone(),
         "open-nav",
         Method::ToolNavigate,
@@ -189,6 +194,7 @@ pub fn dispatch_open(args: OpenArgs, format: Format) -> Result<(), CliError> {
     let wait_budget = args.timeout_ms.unwrap_or(DEFAULT_WAIT_BUDGET_MS);
     let reply = settled_sync_with_conditions(
         &info.sock_path,
+        &aux_ctx,
         Some(session_id.as_str()),
         Some(nav_reply.tab_id),
         ControlPolicy::Auto,
@@ -215,17 +221,21 @@ pub fn dispatch_open(args: OpenArgs, format: Format) -> Result<(), CliError> {
     )
 }
 
-pub fn dispatch_sync(args: SyncArgs, format: Format) -> Result<(), CliError> {
-    business_rpc::set_caller_scope(args.scope.clone());
+pub fn dispatch_sync(
+    args: SyncArgs,
+    ctx: &business_rpc::ClientContext,
+    format: Format,
+) -> Result<(), CliError> {
+    let op_ctx = ctx.with_scope(args.scope.as_deref());
+    op_ctx.prepare_params(&Method::ToolCooperate, Some(json!({})))?;
+    let aux_ctx = op_ctx.without_action_metadata();
     let control_policy = ControlPolicy::from(args.policy);
-    if matches!(control_policy, ControlPolicy::Target) {
-        business_rpc::set_target_policy_requested();
-    }
 
     let info = ensure_daemon().context("ensure daemon is running")?;
     let wait_budget = args.timeout_ms.unwrap_or(DEFAULT_WAIT_BUDGET_MS);
     let reply = settled_sync_with_conditions(
         &info.sock_path,
+        &aux_ctx,
         args.session.as_deref(),
         args.tab_id,
         control_policy,
@@ -249,8 +259,12 @@ pub fn dispatch_sync(args: SyncArgs, format: Format) -> Result<(), CliError> {
     )
 }
 
-pub fn dispatch_close(args: CloseArgs, format: Format) -> Result<(), CliError> {
-    business_rpc::set_caller_scope(args.scope.clone());
+pub fn dispatch_close(
+    args: CloseArgs,
+    ctx: &business_rpc::ClientContext,
+    format: Format,
+) -> Result<(), CliError> {
+    let op_ctx = ctx.with_scope(args.scope.as_deref());
     let info = ensure_daemon().context("ensure daemon is running")?;
 
     let explicit_sid = args
@@ -264,10 +278,10 @@ pub fn dispatch_close(args: CloseArgs, format: Format) -> Result<(), CliError> {
     if let Some(ref sid) = explicit_sid {
         payload["session_id"] = Value::String(sid.clone());
     } else if !args.all {
-        payload["_caller_scope"] = Value::String(business_rpc::current_caller_scope());
+        payload["_caller_scope"] = Value::String(op_ctx.resolved_caller_scope());
     }
 
-    let reply: StopReply = business_rpc::call(
+    let reply: StopReply = op_ctx.call(
         info.sock_path,
         "close",
         Method::SessionStop,
@@ -339,17 +353,23 @@ pub fn dispatch_close(args: CloseArgs, format: Format) -> Result<(), CliError> {
 
 fn resolve_or_start_open_session(
     sock: &Path,
+    ctx: &business_rpc::ClientContext,
     args: &OpenArgs,
     format: Format,
 ) -> Result<String, CliError> {
     if let Some(ref explicit_sid) = args.session {
         if args.browser.is_some() {
-            verify_explicit_session_browser(sock, explicit_sid, args.browser.as_deref().unwrap())?;
+            verify_explicit_session_browser(
+                sock,
+                ctx,
+                explicit_sid,
+                args.browser.as_deref().unwrap(),
+            )?;
         }
         return Ok(explicit_sid.clone());
     }
 
-    let scope = business_rpc::current_caller_scope();
+    let scope = ctx.resolved_caller_scope();
     let mut start_payload = json!({
         "incognito": args.incognito,
         "focused": args.focus,
@@ -366,7 +386,7 @@ fn resolve_or_start_open_session(
         start_payload["height"] = h.into();
     }
 
-    match business_rpc::call::<Value, StartReply>(
+    match ctx.call::<Value, StartReply>(
         sock.to_path_buf(),
         "open-start",
         Method::SessionStart,
@@ -380,6 +400,7 @@ fn resolve_or_start_open_session(
 
 fn verify_explicit_session_browser(
     sock: &Path,
+    ctx: &business_rpc::ClientContext,
     session_id: &str,
     requested_browser: &str,
 ) -> Result<(), CliError> {
@@ -391,7 +412,7 @@ fn verify_explicit_session_browser(
     struct BrowsersResp {
         browsers: Vec<BrowserStatusEntry>,
     }
-    let list: SessionsResp = business_rpc::call(
+    let list: SessionsResp = ctx.call(
         sock.to_path_buf(),
         "open-sessions",
         Method::SessionList,
@@ -408,7 +429,7 @@ fn verify_explicit_session_browser(
     if entry.browser_instance_id == requested_browser {
         return Ok(());
     }
-    let browsers: BrowsersResp = business_rpc::call(
+    let browsers: BrowsersResp = ctx.call(
         sock.to_path_buf(),
         "open-browsers",
         Method::BrowserList,
@@ -427,7 +448,7 @@ fn verify_explicit_session_browser(
                 entry.browser_instance_id
             ),
             data: Some(json!({
-                "reason": crate::rpc_reason::SCOPE_BROWSER_CONFLICT,
+                "reason": bsk_protocol::RpcErrorReason::ScopeBrowserConflict.as_str(),
                 "session_id": session_id,
                 "bound_browser": entry.browser_instance_id,
                 "requested_browser": requested_browser,
@@ -440,6 +461,7 @@ fn verify_explicit_session_browser(
 #[allow(clippy::too_many_arguments)]
 fn settled_sync_with_conditions(
     sock: &Path,
+    ctx: &business_rpc::ClientContext,
     explicit_session: Option<&str>,
     tab_id: Option<i64>,
     control_policy: ControlPolicy,
@@ -460,7 +482,7 @@ fn settled_sync_with_conditions(
         wait_budget_ms,
         prior_effect_state,
         |prefix, method, req_val| {
-            business_rpc::call(
+            ctx.call(
                 sock_buf.clone(),
                 prefix,
                 method,
@@ -473,7 +495,7 @@ fn settled_sync_with_conditions(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn settled_sync_with_conditions_using(
+pub(crate) fn settled_sync_with_conditions_using(
     explicit_session: Option<&str>,
     tab_id: Option<i64>,
     control_policy: ControlPolicy,
@@ -822,9 +844,7 @@ fn authoritative_full_vom(reply: &Value) -> Option<(&str, bool)> {
             == Some(true);
         return Some((text, truncated));
     }
-    let kind = reply.get("kind").and_then(Value::as_str);
-    let is_unchanged = kind == Some("unchanged")
-        || (kind != Some("delta") && reply.get("unchanged").and_then(Value::as_bool) == Some(true));
+    let is_unchanged = reply.get("kind").and_then(Value::as_str) == Some("unchanged");
     if is_unchanged
         && reply
             .pointer("/_scope_meta/cache_reusable")
@@ -938,8 +958,7 @@ fn format_state_receipt(
 
     let kind = reply.get("kind").and_then(Value::as_str).map(str::to_owned);
     let is_delta = kind.as_deref() == Some("delta");
-    let unchanged = kind.as_deref() == Some("unchanged")
-        || reply.get("unchanged").and_then(Value::as_bool) == Some(true);
+    let unchanged = kind.as_deref() == Some("unchanged");
     let cache_reusable = meta
         .get("cache_reusable")
         .and_then(Value::as_bool)
@@ -1131,8 +1150,7 @@ mod tests {
                 "cached_vom": "@e1 button \"Ready\""
             }
         })));
-        assert!(authoritative_full_vom_is_some(&json!({
-            "unchanged": true,
+        assert!(!authoritative_full_vom_is_some(&json!({
             "_scope_meta": {
                 "cache_reusable": true,
                 "cached_vom": "@e1 button \"Ready\""

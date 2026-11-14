@@ -9,8 +9,8 @@ use bsk::daemon::{self, DaemonConfig};
 use bsk::ipc_client::IpcClient;
 use bsk_protocol::system::{HandshakeParams, HandshakeResult};
 use bsk_protocol::tools::{
-    RecordStopResult, RecordedTrace, RecorderInfo, SessionStartParams, SessionStartResult,
-    StopReason, TraceEntry, TraceStateV3, TraceV3, VOM_FORMAT_VERSION,
+    RecordStopResult, RecorderInfo, SessionStartParams, SessionStartResult, StopReason, TraceEntry,
+    TraceStateV3, TraceV3, VOM_FORMAT_VERSION,
 };
 use bsk_protocol::{BrowserPeerInfo, Frame, Method, RequestFrame, ResponseBody, ResponseFrame};
 use futures_util::{SinkExt, StreamExt};
@@ -60,7 +60,7 @@ async fn handshake(ws: &mut Ws) {
                     version: "131.0".into(),
                 },
                 min_compatible_peer: Some("0.1.10".parse().unwrap()),
-                min_compatible_protocol: Some("1.1".into()),
+                min_compatible_protocol: Some(bsk::daemon::state::MIN_COMPATIBLE_PROTOCOL.into()),
                 label: "Record export recovery test".into(),
             })
             .unwrap(),
@@ -130,7 +130,7 @@ fn run_extension(
                     record_stop_calls.fetch_add(1, Ordering::SeqCst);
                     ResponseBody::Ok(
                         serde_json::to_value(RecordStopResult {
-                            trace: RecordedTrace::V3(sample_trace()),
+                            trace: sample_trace(),
                         })
                         .unwrap(),
                     )

@@ -151,12 +151,16 @@ pub(crate) fn omit_saved_merge(reply: &mut Value) {
 }
 
 pub fn dispatch(args: ViewArgs, _format: Format) -> Result<(), CliError> {
-    let value = read(&args.file)?;
     println!(
         "{}",
-        serde_json::to_string_pretty(&project(&value, &args)?).context("render local view")?
+        serde_json::to_string_pretty(&view_value(&args)?).context("render local view")?
     );
     Ok(())
+}
+
+pub(crate) fn view_value(args: &ViewArgs) -> anyhow::Result<Value> {
+    let value = read(&args.file)?;
+    project(&value, args)
 }
 
 fn project(value: &Value, args: &ViewArgs) -> anyhow::Result<Value> {

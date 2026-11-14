@@ -293,6 +293,7 @@ pub struct ScreenshotFullPageResult {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ScreenshotReadParams {
     pub session_id: String,
     pub capture_id: String,
@@ -309,6 +310,7 @@ pub struct ScreenshotReadResult {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ScreenshotReleaseParams {
     pub session_id: String,
     pub capture_id: String,

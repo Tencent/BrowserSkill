@@ -59,7 +59,11 @@ pub struct UploadArgs {
     pub timeout: u32,
 }
 
-pub fn dispatch(args: UploadArgs, format: Format) -> Result<(), CliError> {
+pub fn dispatch(
+    args: UploadArgs,
+    ctx: &crate::cli::business_rpc::ClientContext,
+    format: Format,
+) -> Result<(), CliError> {
     if args.files.len() > crate::daemon::file_transfer::MAX_UPLOAD_FILES {
         return Err(CliError::invalid_params(anyhow::anyhow!(
             "upload accepts at most {} files",
@@ -76,12 +80,13 @@ pub fn dispatch(args: UploadArgs, format: Format) -> Result<(), CliError> {
         .iter()
         .map(|path| UploadSource::open(path))
         .collect::<Result<Vec<_>, _>>()?;
-    crate::cli::business_rpc::set_caller_scope(args.scope);
+    let op_ctx = ctx.with_scope(args.scope.as_deref());
+    let aux_ctx = op_ctx.without_action_metadata();
     let session = args.session.unwrap_or_default();
     let info = ensure_daemon().context("ensure daemon is running")?;
     let mut staged = Vec::new();
     for source in sources {
-        if let Err(err) = stage_file(&info.sock_path, &session, source, &mut staged) {
+        if let Err(err) = stage_file(&info.sock_path, &aux_ctx, &session, source, &mut staged) {
             let _ = crate::cli::business_rpc::release_transfers(
                 &info.sock_path,
                 staged.iter().map(|(id, _)| id.as_str()),
@@ -105,7 +110,7 @@ pub fn dispatch(args: UploadArgs, format: Format) -> Result<(), CliError> {
         mode: args.mode.into(),
         timeout_ms: Some(args.timeout),
     };
-    let result = crate::cli::business_rpc::call::<_, UploadResult>(
+    let result = op_ctx.call::<_, UploadResult>(
         info.sock_path.clone(),
         "upload",
         Method::ToolUpload,
@@ -139,7 +144,7 @@ pub fn dispatch(args: UploadArgs, format: Format) -> Result<(), CliError> {
     Ok(())
 }
 
-struct UploadSource {
+pub(crate) struct UploadSource {
     file: File,
     name: String,
     byte_size: u64,
@@ -147,7 +152,7 @@ struct UploadSource {
 
 impl UploadSource {
     /// Open every source before starting the daemon or staging any transfer.
-    fn open(path: &Path) -> Result<Self, CliError> {
+    pub(crate) fn open(path: &Path) -> Result<Self, CliError> {
         let file_error = |error| {
             CliError::file_validation(
                 error,
@@ -181,8 +186,9 @@ impl UploadSource {
     }
 }
 
-fn stage_file(
+pub(crate) fn stage_file(
     sock: &Path,
+    ctx: &crate::cli::business_rpc::ClientContext,
     session: &str,
     source: UploadSource,
     staged: &mut Vec<(String, String)>,
@@ -192,7 +198,7 @@ fn stage_file(
         name,
         byte_size,
     } = source;
-    let begin: TransferBeginResult = crate::cli::business_rpc::call(
+    let begin: TransferBeginResult = ctx.call(
         sock.to_path_buf(),
         "transfer-begin",
         Method::TransferBegin,
@@ -213,7 +219,7 @@ fn stage_file(
         if n == 0 {
             break;
         }
-        let reply: TransferChunkResult = crate::cli::business_rpc::call(
+        let reply: TransferChunkResult = ctx.call(
             sock.to_path_buf(),
             "transfer-chunk",
             Method::TransferChunk,
@@ -226,7 +232,7 @@ fn stage_file(
         )?;
         offset = reply.next_offset;
     }
-    let _: TransferReadyResult = crate::cli::business_rpc::call(
+    let _: TransferReadyResult = ctx.call(
         sock.to_path_buf(),
         "transfer-finish",
         Method::TransferFinish,

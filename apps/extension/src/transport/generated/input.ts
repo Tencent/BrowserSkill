@@ -289,11 +289,6 @@ export type NavigationCause =
  */
 export type NetworkEntryKind = "response" | "failure";
 /**
- * This interface was referenced by `ProtocolTypes`'s JSON-Schema
- * via the `definition` "RecordedTrace".
- */
-export type RecordedTrace = TraceV3 | TraceV2;
-/**
  * One recorded user action — discriminated union by `op`.
  *
  * This interface was referenced by `ProtocolTypes`'s JSON-Schema
@@ -390,83 +385,6 @@ export type StepV3 =
  * via the `definition` "StopReason".
  */
 export type StopReason = "user_finish" | "cli_stop";
-/**
- * One recorded user action — discriminated union by `op` (v2).
- *
- * This interface was referenced by `ProtocolTypes`'s JSON-Schema
- * via the `definition` "StepV2".
- */
-export type StepV2 =
-  | {
-      effect?: StepEffectV2;
-      id: number;
-      op: "navigate";
-      /**
-       * Reference into `pages[]`.
-       */
-      page: string;
-      to: string;
-    }
-  | {
-      effect?: StepEffectV2;
-      id: number;
-      op: "click";
-      /**
-       * Reference into `pages[]`.
-       */
-      page: string;
-      target: TargetDescriptorV2;
-    }
-  | {
-      effect?: StepEffectV2;
-      id: number;
-      op: "hover";
-      /**
-       * Reference into `pages[]`.
-       */
-      page: string;
-      target: TargetDescriptorV2;
-    }
-  | {
-      effect?: StepEffectV2;
-      id: number;
-      op: "fill";
-      /**
-       * Reference into `pages[]`.
-       */
-      page: string;
-      redacted?: boolean;
-      target: TargetDescriptorV2;
-      value: string;
-    }
-  | {
-      effect?: StepEffectV2;
-      id: number;
-      op: "select";
-      /**
-       * Reference into `pages[]`.
-       */
-      page: string;
-      selection: SelectedOptionV2[];
-      target: TargetDescriptorV2;
-    }
-  | {
-      effect?: StepEffectV2;
-      id: number;
-      key: string;
-      modifiers?: KeyModifier[];
-      op: "press";
-      /**
-       * Reference into `pages[]`.
-       */
-      page: string;
-      target?: TargetDescriptorV2;
-    };
-/**
- * This interface was referenced by `ProtocolTypes`'s JSON-Schema
- * via the `definition` "RecordedStep".
- */
-export type RecordedStep = StepV3 | StepV2;
 /**
  * Stable `RpcError.data.reason` values shared across extension emitters and CLI renderers.
  *
@@ -579,7 +497,28 @@ export type RpcErrorReason =
   | "download_path_mismatch"
   | "transfer_outcome_unknown"
   | "transfer_timeout"
-  | "cleanup_failed";
+  | "cleanup_failed"
+  | "session_busy"
+  | "session_idle_timeout"
+  | "session_window_closed"
+  | "browser_disconnected"
+  | "no_active_session"
+  | "ambiguous_implicit_session"
+  | "session_stopped"
+  | "scope_browser_conflict"
+  | "scope_incognito_conflict"
+  | "record_start_page_unreachable"
+  | "unsupported_feature"
+  | "local_pairing_required"
+  | "local_file_error"
+  | "extension_unresponsive"
+  | "extension_disconnected"
+  | "extension_reconnected"
+  | "cancel_cleanup_timeout"
+  | "cancelled_before_dispatch"
+  | "cancelled"
+  | "cli_parse_error"
+  | "dialog_pending";
 /**
  * This interface was referenced by `ProtocolTypes`'s JSON-Schema
  * via the `definition` "ScreenshotScope".
@@ -602,6 +541,12 @@ export type TabScope = "user" | "agent" | "all";
  * via the `definition` "UploadMode".
  */
 export type UploadMode = "input" | "drop";
+/**
+ * This interface was referenced by `ProtocolTypes`'s JSON-Schema
+ * via the `definition` "VideoAction".
+ */
+export type VideoAction =
+  "start" | "capabilities" | "list" | "status" | "stop" | "read" | "discard" | "exported";
 /**
  * This interface was referenced by `ProtocolTypes`'s JSON-Schema
  * via the `definition` "VideoCompleteness".
@@ -846,7 +791,6 @@ export interface ProtocolTypes {
   ObserveParams: ObserveParams;
   ObserveResult: ObserveResult;
   OperationParams: OperationParams;
-  PageRefV2: PageRefV2;
   PendingJavaScriptDialog: PendingJavaScriptDialog;
   PingParams: PingParams;
   PingResult: PingResult;
@@ -862,8 +806,6 @@ export interface ProtocolTypes {
   RecordStartResult: RecordStartResult;
   RecordStopParams: RecordStopParams;
   RecordStopResult: RecordStopResult;
-  RecordedStep: RecordedStep;
-  RecordedTrace: RecordedTrace;
   RecorderInfo: RecorderInfo;
   ReloadParams: ReloadParams;
   ReloadResult: ReloadResult;
@@ -887,7 +829,6 @@ export interface ProtocolTypes {
   ScrollToResult: ScrollToResult;
   SelectParams: SelectParams;
   SelectResult: SelectResult;
-  SelectedOptionV2: SelectedOptionV2;
   SelectedOptionV3: SelectedOptionV3;
   SessionStartParams: SessionStartParams;
   SessionStartResult: SessionStartResult;
@@ -898,9 +839,7 @@ export interface ProtocolTypes {
   SnapshotResult: SnapshotResult;
   StatusParams: StatusParams;
   StatusResult: StatusResult;
-  StepEffectV2: StepEffectV2;
   StepResultV3: StepResultV3;
-  StepV2: StepV2;
   StepV3: StepV3;
   StopReason: StopReason;
   SurfaceProbeDebug: SurfaceProbeDebug;
@@ -919,11 +858,9 @@ export interface ProtocolTypes {
   TabScope: TabScope;
   TabSelectParams: TabSelectParams;
   TabSelectResult: TabSelectResult;
-  TargetDescriptorV2: TargetDescriptorV2;
   TargetDescriptorV3: TargetDescriptorV3;
   TraceEntry: TraceEntry;
   TraceStateV3: TraceStateV3;
-  TraceV2: TraceV2;
   TraceV3: TraceV3;
   UnpairedAttempt: UnpairedAttempt;
   UploadFile: UploadFile;
@@ -933,6 +870,7 @@ export interface ProtocolTypes {
   UserAgentBrandVersion: UserAgentBrandVersion;
   UserAgentMetadata: UserAgentMetadata;
   VersionSkewEntry: VersionSkewEntry;
+  VideoAction: VideoAction;
   VideoCompleteness: VideoCompleteness;
   VideoGrant: VideoGrant;
   VideoParams: VideoParams;
@@ -1278,6 +1216,10 @@ export interface ConsoleStackFrame {
  */
 export interface ConsoleParams {
   /**
+   * Optional cooperation context validated by the extension without renewing control.
+   */
+  context_id?: string;
+  /**
    * Include structured stack frames. Defaults to false.
    */
   include_stack?: boolean;
@@ -1330,7 +1272,7 @@ export interface ControllerInfo {
 export interface CooperateParams {
   action: CooperateAction;
   /**
-   * Omitted by legacy callers. A negotiated policy remains fixed for the session.
+   * A negotiated policy remains fixed for the session.
    */
   control_policy?: ControlPolicy;
   max_tokens?: number;
@@ -2411,6 +2353,10 @@ export interface ExtractField {
  */
 export interface ExtractParams {
   action: ExtractAction;
+  /**
+   * Optional cooperation context validated by the extension without renewing control.
+   */
+  context_id?: string;
   fields?: ExtractField[];
   item_selector?: string;
   max_bytes?: number;
@@ -2632,6 +2578,10 @@ export interface FocusResult {
  * via the `definition` "GetHtmlParams".
  */
 export interface GetHtmlParams {
+  /**
+   * Optional cooperation context validated by the extension without renewing control.
+   */
+  context_id?: string;
   /**
    * Truncate the HTML to at most this many bytes. Optional;
    * extension applies a sensible default (`524288` = 512 KiB) when
@@ -3064,6 +3014,10 @@ export interface NetworkEntry {
  */
 export interface NetworkParams {
   /**
+   * Optional cooperation context validated by the extension without renewing control.
+   */
+  context_id?: string;
+  /**
    * Maximum number of entries to return. Extension applies safe defaults and caps.
    */
   limit?: number;
@@ -3241,17 +3195,6 @@ export interface OperationParams {
   wait_ms?: number;
 }
 /**
- * Page context dictionary entry — referenced by steps via `page` id.
- *
- * This interface was referenced by `ProtocolTypes`'s JSON-Schema
- * via the `definition` "PageRefV2".
- */
-export interface PageRefV2 {
-  id: string;
-  title?: string;
-  url: string;
-}
-/**
  * `system.ping` request payload. Empty (the response carries `pong`).
  *
  * This interface was referenced by `ProtocolTypes`'s JSON-Schema
@@ -3417,7 +3360,7 @@ export interface RecordAwaitParams {
  * via the `definition` "RecordAwaitResult".
  */
 export interface RecordAwaitResult {
-  trace: RecordedTrace;
+  trace: TraceV3;
 }
 /**
  * Wire trace returned by `tool.record_stop` / `await`.
@@ -3498,65 +3441,6 @@ export interface SelectedOptionV3 {
   value: string;
 }
 /**
- * Persisted user-action trace exported by legacy `tool.record_stop` / `await`.
- *
- * Unknown extension fields are ignored so older traces remain readable.
- * `states[]` and a numeric `version` are reserved for Trace v3 / `RecordedTrace`
- * classification — serde still ignores them, but the JSON Schema rejects them.
- *
- * This interface was referenced by `ProtocolTypes`'s JSON-Schema
- * via the `definition` "TraceV2".
- */
-export interface TraceV2 {
-  entry: TraceEntry;
-  pages: PageRefV2[];
-  purpose?: string;
-  /**
-   * RFC 3339 timestamp when recording stopped.
-   */
-  recorded_at: string;
-  started_at?: string;
-  steps: StepV2[];
-}
-/**
- * Observed navigation after a step (objective fact only).
- *
- * This interface was referenced by `ProtocolTypes`'s JSON-Schema
- * via the `definition` "StepEffectV2".
- */
-export interface StepEffectV2 {
-  /**
-   * Reference into `pages[]` for the destination page.
-   */
-  navigated_to: string;
-}
-/**
- * Stable semantic handle for an interacted element (v2).
- *
- * `name` and `nearby_label` are **untrusted page text**.
- *
- * This interface was referenced by `ProtocolTypes`'s JSON-Schema
- * via the `definition` "TargetDescriptorV2".
- */
-export interface TargetDescriptorV2 {
-  name?: string;
-  name_attr?: string;
-  nearby_label?: string;
-  placeholder?: string;
-  role?: string;
-  tag: string;
-}
-/**
- * One selected option (`select` op).
- *
- * This interface was referenced by `ProtocolTypes`'s JSON-Schema
- * via the `definition` "SelectedOptionV2".
- */
-export interface SelectedOptionV2 {
-  label?: string;
-  value: string;
-}
-/**
  * This interface was referenced by `ProtocolTypes`'s JSON-Schema
  * via the `definition` "RecordStartParams".
  */
@@ -3565,15 +3449,7 @@ export interface RecordStartParams {
   purpose?: string;
   redact_values?: boolean;
   session_id: string;
-  /**
-   * Client can decode the v3 `switch_tab` step variant.
-   */
-  supports_tab_switch_steps?: boolean;
   tab_id?: number;
-  /**
-   * Desired trace export format. Omitted means v2; `3` requests v3.
-   */
-  trace_version?: number;
   url?: string;
 }
 /**
@@ -3596,7 +3472,7 @@ export interface RecordStopParams {
  * via the `definition` "RecordStopResult".
  */
 export interface RecordStopResult {
-  trace: RecordedTrace;
+  trace: TraceV3;
 }
 /**
  * This interface was referenced by `ProtocolTypes`'s JSON-Schema
@@ -3801,6 +3677,10 @@ export interface ScreenshotFullPageResult {
  * via the `definition` "ScreenshotParams".
  */
 export interface ScreenshotParams {
+  /**
+   * Optional cooperation context validated by the extension without renewing control.
+   */
+  context_id?: string;
   /**
    * Optional `@e<N>` ref allocated by the last `tool.snapshot`.
    * Accepts both `"e3"` and `"@e3"`.
@@ -4110,6 +3990,10 @@ export interface SessionStopParams {
  * via the `definition` "SnapshotParams".
  */
 export interface SnapshotParams {
+  /**
+   * Optional cooperation context validated by the extension without renewing control.
+   */
+  context_id?: string;
   /**
    * Cap the depth of the rendered tree (defense against very deep
    * pages). Implementation-defined default; agents typically use
@@ -4556,6 +4440,10 @@ export interface VideoReadResult {
  */
 export interface WaitForElementParams {
   /**
+   * Optional cooperation context validated by the extension without renewing control.
+   */
+  context_id?: string;
+  /**
    * Polling interval, shortened near the deadline to allow a final probe.
    * Defaults to 100ms; values outside 16..=2000ms are rejected.
    */
@@ -4616,6 +4504,10 @@ export interface WaitForElementResult {
  * via the `definition` "WaitForNavigationParams".
  */
 export interface WaitForNavigationParams {
+  /**
+   * Optional cooperation context validated by the extension without renewing control.
+   */
+  context_id?: string;
   session_id: string;
   /**
    * Target tab. Defaults to the Agent Window's currently active tab.

@@ -55,7 +55,7 @@ struct Script {
 impl Default for Script {
     fn default() -> Self {
         Self {
-            protocol: "1.9",
+            protocol: "2.0",
             pages: vec![FORM, DONE],
             die_on: None,
             rejects: None,
@@ -681,14 +681,17 @@ async fn an_old_daemon_is_rejected_before_any_step() {
     let home = Home::new();
     home.save();
     let script = Script {
-        protocol: "1.7",
+        protocol: "1.9",
         ..Script::default()
     };
     let args = ["recipe", "run", "sales", "--param", "region=East"];
     let (output, _, requests) = home.with_daemon(script, &args).await;
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("daemon protocol 1.8"), "{stderr}");
+    assert!(
+        stderr.contains("incompatible") && stderr.contains("2.0"),
+        "{stderr}"
+    );
     assert!(methods(&requests).is_empty());
 }
 
@@ -925,7 +928,14 @@ async fn mcp_clients_do_not_see_the_tool_without_the_switch() {
         serde_json::from_str::<Value>(&reply).unwrap()
     };
     let listed = send(json!({"jsonrpc":"2.0","id":1,"method":"tools/list"})).await;
-    assert_eq!(listed["result"]["tools"].as_array().unwrap().len(), 7);
+    let tools: Vec<&str> = listed["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|tool| tool["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(tools.len(), 11, "{tools:?}");
+    assert!(!tools.contains(&"bsk_recipe"), "{tools:?}");
     let called = send(tool_call(2, json!({"action":"list"}))).await;
     assert!(called.get("error").is_some(), "{called}");
 }

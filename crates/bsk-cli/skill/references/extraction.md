@@ -29,7 +29,7 @@ input. Comparisons concern values at input time, not an uninterrupted history;
 changed-then-restored facts may match. Cross-frame reads are separate samples,
 not one atomic business transaction.
 
-Requires CLI/daemon/extension protocol 1.9; unsupported peers fail explicitly,
+Requires CLI/daemon/extension protocol 2.0; incompatible peers fail explicitly,
 with no JavaScript fallback. Arbitrary evaluate that declares nothing still needs
 a fresh strict observation. After observation_changed during data gathering,
 switch to read/extract; do not keep syncing and retrying the script. For data

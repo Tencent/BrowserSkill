@@ -186,7 +186,7 @@ pub struct EmulateArgs {
 }
 
 /// Parse a `--width` / `--height` viewport dimension (CSS pixels).
-fn viewport_dimension(s: &str) -> Result<u32, String> {
+pub(crate) fn viewport_dimension(s: &str) -> Result<u32, String> {
     let value: u32 = s
         .parse()
         .map_err(|_| format!("invalid viewport dimension {s:?}: expected a positive integer"))?;
@@ -200,7 +200,7 @@ fn viewport_dimension(s: &str) -> Result<u32, String> {
 }
 
 /// Parse a `--dpr` device pixel ratio.
-fn device_pixel_ratio(s: &str) -> Result<f64, String> {
+pub(crate) fn device_pixel_ratio(s: &str) -> Result<f64, String> {
     let value: f64 = s
         .parse()
         .map_err(|_| format!("invalid device pixel ratio {s:?}: expected a number"))?;
@@ -214,7 +214,7 @@ fn device_pixel_ratio(s: &str) -> Result<f64, String> {
 }
 
 /// Parse a `--max-touch-points` value.
-fn touch_points(s: &str) -> Result<u32, String> {
+pub(crate) fn touch_points(s: &str) -> Result<u32, String> {
     let value: u32 = s
         .parse()
         .map_err(|_| format!("invalid max touch points {s:?}: expected a positive integer"))?;
@@ -356,17 +356,25 @@ pub fn build_params(args: &EmulateArgs) -> Result<EmulateParams, CliError> {
     })
 }
 
-pub fn dispatch(args: EmulateArgs, format: Format) -> Result<(), CliError> {
+pub fn dispatch(
+    args: EmulateArgs,
+    ctx: &crate::cli::business_rpc::ClientContext,
+    format: Format,
+) -> Result<(), CliError> {
     let device = args.device.clone();
     let params = build_params(&args)?;
-    crate::cli::business_rpc::set_caller_scope(args.scope);
+    let op_ctx = ctx.with_scope(args.scope.as_deref());
     let info = ensure_daemon().context("ensure daemon is running")?;
-    let reply = call(info.sock_path, params)?;
+    let reply = call(info.sock_path, &op_ctx, params)?;
     render(&reply, device.as_deref(), format)
 }
 
-fn call(sock: PathBuf, params: EmulateParams) -> Result<EmulateResult, CliError> {
-    crate::cli::business_rpc::call::<EmulateParams, EmulateResult>(
+fn call(
+    sock: PathBuf,
+    ctx: &crate::cli::business_rpc::ClientContext,
+    params: EmulateParams,
+) -> Result<EmulateResult, CliError> {
+    ctx.call::<EmulateParams, EmulateResult>(
         sock,
         "emulate",
         Method::ToolEmulate,

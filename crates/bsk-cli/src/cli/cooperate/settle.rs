@@ -1,7 +1,6 @@
 //! Retry only read-only synchronization, never the action that preceded it.
 use crate::cli::error::CliError;
-use crate::rpc_reason::OPERATION_SETTLING;
-use bsk_protocol::{ErrorCode, tools::CooperateAction};
+use bsk_protocol::{ErrorCode, RpcErrorReason, tools::CooperateAction};
 use serde_json::{Value, json};
 use std::time::Duration;
 
@@ -36,7 +35,8 @@ fn settling(error: &CliError) -> bool {
         return false;
     };
     data["dispatched"] == false
-        && (data["reason"] == OPERATION_SETTLING || message.starts_with(LEGACY_SETTLING))
+        && (data["reason"] == RpcErrorReason::OperationSettling.as_str()
+            || message.starts_with(LEGACY_SETTLING))
 }
 
 pub(crate) fn run(
@@ -251,7 +251,12 @@ mod tests {
     #[test]
     fn settling_refusals_pause_and_sync_again_without_waiting_for_control() {
         for error in [
-            || settling_error(Some(OPERATION_SETTLING), "busy"),
+            || {
+                settling_error(
+                    Some(bsk_protocol::RpcErrorReason::OperationSettling.as_str()),
+                    "busy",
+                )
+            },
             || {
                 settling_error(
                     None,
@@ -288,14 +293,20 @@ mod tests {
             |action| {
                 assert!(matches!(action, CooperateAction::Sync));
                 syncs += 1;
-                Err(settling_error(Some(OPERATION_SETTLING), "busy"))
+                Err(settling_error(
+                    Some(bsk_protocol::RpcErrorReason::OperationSettling.as_str()),
+                    "busy",
+                ))
             },
             |pause| paused += pause,
         )
         .unwrap_err();
         assert_eq!(syncs, 4);
         assert_eq!(paused, Duration::from_millis(5000));
-        assert_eq!(error.data().unwrap()["reason"], OPERATION_SETTLING);
+        assert_eq!(
+            error.data().unwrap()["reason"],
+            bsk_protocol::RpcErrorReason::OperationSettling.as_str()
+        );
     }
 
     #[test]
@@ -314,7 +325,10 @@ mod tests {
             CliError::from_rpc(RpcError {
                 code: ErrorCode::Timeout,
                 message: "busy".into(),
-                data: Some(json!({"reason": OPERATION_SETTLING, "dispatched": false})),
+                data: Some(json!({
+                    "reason": bsk_protocol::RpcErrorReason::OperationSettling.as_str(),
+                    "dispatched": false
+                })),
             }),
         ] {
             assert!(!settling(&error));

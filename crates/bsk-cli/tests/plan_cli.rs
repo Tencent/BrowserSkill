@@ -110,7 +110,7 @@ async fn context_reaches_only_the_actions_and_expect_only_its_own_step() {
         "--steps",
         FORM,
     ];
-    let (output, requests) = run_cli("1.9", &args, None).await;
+    let (output, requests) = run_cli("2.0", &args, None).await;
     assert!(output.status.success(), "{output:?}");
     let reply: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(reply["ok"], true);
@@ -136,7 +136,7 @@ async fn context_reaches_only_the_actions_and_expect_only_its_own_step() {
 #[tokio::test]
 async fn a_refused_step_stops_the_plan_with_a_nonzero_exit_and_fresh_state() {
     let args = ["plan", "--session", "s", "--context", "c", "--steps", FORM];
-    let (output, requests) = run_cli("1.9", &args, Some("tool.fill")).await;
+    let (output, requests) = run_cli("2.0", &args, Some("tool.fill")).await;
     assert!(!output.status.success());
     let reply: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(reply["ok"], false);
@@ -150,12 +150,15 @@ async fn a_refused_step_stops_the_plan_with_a_nonzero_exit_and_fresh_state() {
 
 #[tokio::test]
 async fn an_old_daemon_is_rejected_before_any_step() {
-    for protocol in ["1.7", "2.0"] {
+    for protocol in ["1.9", "3.0"] {
         let args = ["plan", "--session", "s", "--context", "c", "--steps", FORM];
         let (output, requests) = run_cli(protocol, &args, None).await;
         assert!(!output.status.success());
         let stderr = String::from_utf8_lossy(&output.stderr);
-        assert!(stderr.contains("daemon protocol 1.8"), "{stderr}");
+        assert!(
+            stderr.contains("incompatible") && stderr.contains("2.0"),
+            "{stderr}"
+        );
         assert!(tools(&requests).is_empty());
     }
 }
@@ -192,7 +195,7 @@ async fn an_invalid_plan_or_global_expect_never_reaches_the_daemon() {
             FORM,
         ],
     ] {
-        let (output, requests) = run_cli("1.9", &args, None).await;
+        let (output, requests) = run_cli("2.0", &args, None).await;
         assert!(!output.status.success(), "{args:?}");
         assert!(requests.is_empty(), "{args:?}");
     }

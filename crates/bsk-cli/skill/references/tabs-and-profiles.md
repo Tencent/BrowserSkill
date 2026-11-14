@@ -25,7 +25,7 @@ extension reinstall or storage reset, obtain the instance mapping again.
 
 When temporary login isolation from ordinary browsing is required, use
 `bsk session start --incognito --browser <instance-id> --json`. The extension must
-have **Allow in incognito** enabled; daemon and extension protocol 1.4+ are required.
+have **Allow in incognito** enabled; daemon and extension must both speak protocol 2.0.
 Report a permission or compatibility error instead of retrying in normal mode.
 
 Incognito sessions cannot borrow tabs, and normal sessions cannot borrow incognito
@@ -78,7 +78,7 @@ non-Agent window of the same browser profile, then retry once. Task tabs in the
 Agent Window cannot host the prompt. If it still fails, stop and report the error.
 
 `tab borrow --timeout 120s` changes only the confirmation wait (default 60s);
-custom waits require daemon and extension protocol 1.2+.
+all session and tab-borrow flows require matching protocol 2.0 peers.
 
 The extension's saved Automation settings control borrow confirmation and human
 help independently; both default on and apply to existing sessions too. Read
@@ -86,8 +86,7 @@ help independently; both default on and apply to existing sessions too. Read
 Deprecated `--unattended`, `--no-confirm`, and `BSK_REQUEST_HELP=off` cannot override
 these settings. Never change browser storage/settings to bypass them. Human-help
 availability does not require permission for every action or grant extra authority.
-`request-help` requires daemon protocol 1.3; update CLI, daemon and extension for
-full settings support. A feature's version error does not disable other operations.
+Update CLI, daemon and extension together so all components speak protocol 2.0.
 
 Remote content reads/actions require task-created or borrowed tabs. Page-opened
 popups gain no control automatically; an unowned tab inside the Agent Window
@@ -95,6 +94,10 @@ needs the user to move it to a user window before borrowing. Remote upload/downl
 are unsupported; screenshots work.
 
 ## Parallel tasks and shared login state
+
+This guidance applies to the `bsk` CLI and `bsk mcp` server; each caller
+scope owns isolated session visibility.
+
 
 Normal sessions started in the same browser profile share one cookie jar and one set
 of site state. Two tasks operating on the same logged-in site - or switching

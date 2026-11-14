@@ -389,7 +389,21 @@
       "recordStop": "結束操作錄製",
       "recordAwait": "等待錄製完成",
       "resize": "調整視窗大小",
-      "emulate": "調整瀏覽器模擬設定"
+      "emulate": "調整瀏覽器模擬設定",
+      "cooperate": "同步協作狀態",
+      "sessionStart": "啟動工作階段",
+      "sessionStop": "停止工作階段",
+      "screenshotFullPage": "擷取完整頁面截圖",
+      "screenshotRead": "讀取截圖",
+      "screenshotRelease": "釋放截圖",
+      "debug": "執行偵錯操作",
+      "video": "管理影片錄製",
+      "dialogStatus": "檢查對話框狀態",
+      "dialogAccept": "確認對話框",
+      "dialogDismiss": "關閉對話框",
+      "waitForElement": "等待元素出現",
+      "operationAwait": "等待操作完成",
+      "operationCancel": "取消操作"
     }
   },
   "debug": {

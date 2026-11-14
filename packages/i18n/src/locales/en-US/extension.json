@@ -389,7 +389,21 @@
       "recordStop": "Stop operation recording",
       "recordAwait": "Wait for recording",
       "resize": "Resize window",
-      "emulate": "Change emulation settings"
+      "emulate": "Change emulation settings",
+      "cooperate": "Sync shared tab",
+      "sessionStart": "Start session",
+      "sessionStop": "Stop session",
+      "screenshotFullPage": "Capture full-page screenshot",
+      "screenshotRead": "Read screenshot",
+      "screenshotRelease": "Release screenshot",
+      "debug": "Run debugging action",
+      "video": "Manage video recording",
+      "dialogStatus": "Check dialog status",
+      "dialogAccept": "Accept dialog",
+      "dialogDismiss": "Dismiss dialog",
+      "waitForElement": "Wait for element",
+      "operationAwait": "Wait for operation",
+      "operationCancel": "Cancel operation"
     }
   },
   "debug": {

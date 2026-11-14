@@ -210,7 +210,6 @@ fn collect_checks(state: DaemonState) -> Vec<CheckResult> {
         check_extension_connected(state.status()),
         check_local_auth(state.status()),
         check_browsers_protocol_compatible(state.status()),
-        check_feature_availability(state.status()),
     ]
 }
 
@@ -590,10 +589,10 @@ fn check_version_compatible(status: Option<&StatusResult>) -> CheckResult {
         bsk_protocol::HandshakeCompat::Skew => CheckResult::warn(
             name,
             format!(
-                "daemon protocol {} and CLI protocol {} are base-compatible; individual features are checked before use",
+                "daemon protocol {} and CLI protocol {} differ within compatible minor range",
                 status.protocol_version, PROTOCOL_VERSION
             ),
-            "see feature availability below; a different version alone does not require stopping ordinary browsing",
+            "upgrade and restart the older component if any newer option is unavailable",
         ),
         bsk_protocol::HandshakeCompat::Reject { reason } => CheckResult::fail(
             name,
@@ -601,55 +600,9 @@ fn check_version_compatible(status: Option<&StatusResult>) -> CheckResult {
                 "daemon protocol {} (expected {}), app {}",
                 status.protocol_version, PROTOCOL_VERSION, status.daemon_version
             ),
-            format!(
-                "{reason}; {}",
-                bsk_protocol::compatibility::Peer::Daemon.upgrade_hint()
-            ),
+            format!("{reason}; update bsk and restart its daemon (`bsk daemon stop`)"),
         ),
     }
-}
-
-fn check_feature_availability(status: Option<&StatusResult>) -> CheckResult {
-    let name = "feature availability";
-    let Some(status) = status else {
-        return CheckResult::na(name, "daemon status unavailable");
-    };
-    let report = super::compatibility::report(status);
-    let limitations = super::compatibility::limitations(&report);
-    if limitations.is_empty() {
-        return if status.browsers.is_empty() {
-            CheckResult::na(
-                name,
-                "daemon supports the catalogued features; no connected browser to check",
-            )
-        } else {
-            CheckResult::ok(
-                name,
-                "daemon and connected browsers support the catalogued features",
-            )
-        };
-    }
-    let mut hints = Vec::new();
-    if report.daemon.iter().any(|feature| !feature.available) {
-        hints.push(bsk_protocol::compatibility::Peer::Daemon.upgrade_hint());
-    }
-    if report
-        .browsers
-        .iter()
-        .flat_map(|browser| &browser.features)
-        .flat_map(|feature| &feature.blocked_by)
-        .any(|blocker| blocker.component == bsk_protocol::compatibility::Peer::Extension)
-    {
-        hints.push(bsk_protocol::compatibility::Peer::Extension.upgrade_hint());
-    }
-    CheckResult::warn(
-        name,
-        format!(
-            "unavailable: {}; other supported operations remain usable",
-            limitations.join("; ")
-        ),
-        hints.join(" "),
-    )
 }
 
 /// `bsk doctor` check: connected browsers should speak a protocol the
@@ -885,7 +838,7 @@ mod m2_tests {
         StatusResult {
             local_auth: None,
             daemon_version: env!("CARGO_PKG_VERSION").into(),
-            protocol_version: "1.0".into(),
+            protocol_version: "2.0".into(),
             pid: 1,
             uptime_secs: 0,
             ws_port: 0,
@@ -1312,7 +1265,7 @@ mod m2_tests {
             session_count: 1,
             connected_at_ms: 1,
             version_skew: false,
-            extension_protocol_version: "1.0".into(),
+            extension_protocol_version: "2.0".into(),
             unresponsive: true,
         };
         let status = fake_status(vec![entry.clone()], Vec::new());
@@ -1350,7 +1303,7 @@ mod m2_tests {
                 session_count: 0,
                 connected_at_ms: 1,
                 version_skew: false,
-                extension_protocol_version: "1.0".into(),
+                extension_protocol_version: "2.0".into(),
                 unresponsive: false,
             }],
             Vec::new(),
@@ -1372,7 +1325,7 @@ mod m2_tests {
                 session_count: 0,
                 connected_at_ms: 1,
                 version_skew: true,
-                extension_protocol_version: "1.1".into(),
+                extension_protocol_version: "2.1".into(),
                 unresponsive: false,
             }],
             vec![VersionSkewEntry {
@@ -1381,8 +1334,8 @@ mod m2_tests {
                 label: "Personal".into(),
                 server_version: env!("CARGO_PKG_VERSION").into(),
                 client_version: "0.0.9".into(),
-                server_protocol_version: "1.0".into(),
-                client_protocol_version: "1.1".into(),
+                server_protocol_version: "2.0".into(),
+                client_protocol_version: "2.1".into(),
             }],
         );
         let check = check_browsers_protocol_compatible(Some(&status));

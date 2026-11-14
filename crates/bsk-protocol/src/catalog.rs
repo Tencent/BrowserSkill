@@ -7,10 +7,26 @@ use schemars::{JsonSchema, Schema, SchemaGenerator, generate::SchemaSettings};
 use serde::Serialize;
 use serde_json::{Value, json};
 
-use crate::{ErrorCode, EventKind, Method, RpcError, RpcErrorReason, method::MethodEffect};
+use crate::{
+    ActionMetadataPolicy, ErrorCode, EventKind, Method, RpcError, RpcErrorReason,
+    method::MethodSpec,
+};
 
-pub const PROTOCOL_VERSION: &str = "1.9";
-pub const MIN_COMPATIBLE_PROTOCOL: &str = "1.0";
+pub const PROTOCOL_VERSION: &str = "2.0";
+pub const MIN_COMPATIBLE_PROTOCOL: &str = "2.0";
+
+/// Returns whether `peer_protocol` satisfies the local protocol compatibility gate.
+pub fn is_protocol_compatible(peer_protocol: &str) -> bool {
+    !matches!(
+        crate::evaluate_handshake_compat(
+            peer_protocol,
+            None,
+            PROTOCOL_VERSION,
+            MIN_COMPATIBLE_PROTOCOL,
+        ),
+        crate::HandshakeCompat::Reject { .. }
+    )
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -23,31 +39,23 @@ pub enum MethodOwner {
 #[derive(Debug, Serialize)]
 pub struct MethodDescriptor {
     pub method: &'static str,
-    pub owner: MethodOwner,
-    pub effect: MethodEffect,
-    pub action_metadata: bool,
-    pub features: &'static [crate::compatibility::Feature],
     pub params: String,
     pub result: String,
+    #[serde(flatten)]
+    pub spec: &'static MethodSpec,
 }
 
 impl MethodDescriptor {
     pub fn new<P: JsonSchema, R: JsonSchema>(
         method: &'static str,
-        owner: MethodOwner,
-        effect: MethodEffect,
-        action_metadata: bool,
-        features: &'static [crate::compatibility::Feature],
+        spec: &'static MethodSpec,
         generator: &mut SchemaGenerator,
     ) -> Self {
         Self {
             method,
-            owner,
-            effect,
-            action_metadata,
-            features,
             params: register::<P>(generator),
             result: register::<R>(generator),
+            spec,
         }
     }
 }
@@ -92,11 +100,9 @@ fn describe(settings: SchemaSettings) -> (Vec<MethodDescriptor>, Value) {
     register::<crate::tools::PendingJavaScriptDialog>(&mut generator);
     register::<crate::tools::DialogHandleParams>(&mut generator);
     register::<crate::tools::OperationParams>(&mut generator);
-    register::<crate::tools::TraceV2>(&mut generator);
     register::<crate::tools::TraceV3>(&mut generator);
-    register::<crate::tools::StepV2>(&mut generator);
     register::<crate::tools::StepV3>(&mut generator);
-    register::<crate::tools::RecordedStep>(&mut generator);
+    register::<crate::tools::VideoAction>(&mut generator);
     let mut definitions = generator.take_definitions(false);
     let metadata_properties = definitions
         .get("ActionMetadata")
@@ -104,17 +110,44 @@ fn describe(settings: SchemaSettings) -> (Vec<MethodDescriptor>, Value) {
         .and_then(Value::as_object)
         .expect("ActionMetadata properties")
         .clone();
+    let context_only_property = json!({
+        "description": "Optional cooperation context validated by the extension without renewing control.",
+        "type": ["string", "null"],
+    });
     for descriptor in &methods {
-        if !descriptor.action_metadata {
-            continue;
+        match descriptor.spec.action_metadata {
+            ActionMetadataPolicy::None => continue,
+            ActionMetadataPolicy::ContextOnly => {
+                let schema_obj = definitions
+                    .get_mut(&descriptor.params)
+                    .and_then(Value::as_object_mut)
+                    .unwrap_or_else(|| panic!("{} schema must be an object", descriptor.params));
+                let properties = schema_obj
+                    .get_mut("properties")
+                    .and_then(Value::as_object_mut)
+                    .unwrap_or_else(|| {
+                        panic!("{} properties must be an object", descriptor.params)
+                    });
+                properties
+                    .entry("context_id")
+                    .or_insert_with(|| context_only_property.clone());
+                schema_obj.insert("additionalProperties".into(), json!(false));
+            }
+            ActionMetadataPolicy::Full => {
+                let schema_obj = definitions
+                    .get_mut(&descriptor.params)
+                    .and_then(Value::as_object_mut)
+                    .unwrap_or_else(|| panic!("{} schema must be an object", descriptor.params));
+                let properties = schema_obj
+                    .get_mut("properties")
+                    .and_then(Value::as_object_mut)
+                    .unwrap_or_else(|| {
+                        panic!("{} properties must be an object", descriptor.params)
+                    });
+                properties.extend(metadata_properties.clone());
+                schema_obj.insert("additionalProperties".into(), json!(false));
+            }
         }
-        let properties = definitions
-            .get_mut(&descriptor.params)
-            .and_then(Value::as_object_mut)
-            .and_then(|schema| schema.get_mut("properties"))
-            .and_then(Value::as_object_mut)
-            .unwrap_or_else(|| panic!("{} properties must be an object", descriptor.params));
-        properties.extend(metadata_properties.clone());
     }
     (
         methods,
@@ -136,9 +169,7 @@ pub fn export() -> Value {
         "min_compatible_protocol": MIN_COMPATIBLE_PROTOCOL,
         "methods": methods,
         "events": EventKind::ALL,
-        "feature_requirements": crate::compatibility::Feature::ALL.iter().map(|f| f.requirement()).collect::<Vec<_>>(),
         "constants": {
-            "TRACE_VERSION_V2": crate::tools::TRACE_VERSION_V2,
             "TRACE_VERSION_V3": crate::tools::TRACE_VERSION_V3,
             "VOM_FORMAT_VERSION": crate::tools::VOM_FORMAT_VERSION,
         },
@@ -147,7 +178,17 @@ pub fn export() -> Value {
             "effect": action.effect(),
             "owner": action.owner(),
             "cooperation_guarded": action.cooperation_guarded(),
+            "wal_tracked": action.wal_tracked(),
+            "dialog_gated": action.dialog_gated(),
         })).collect::<Vec<_>>(),
+        "video_actions": crate::tools::VideoAction::ALL.iter().map(|action| json!({
+            "action": action,
+            "resumes_control": action.resumes_control(),
+            "interrupt_gated": action.interrupt_gated(),
+            "dialog_gated": action.dialog_gated(),
+            "uses_session_queue": action.uses_session_queue(),
+        })).collect::<Vec<_>>(),
+        "rpc_error_reasons": RpcErrorReason::ALL,
         "schema": input,
         "output_schema": output,
     })

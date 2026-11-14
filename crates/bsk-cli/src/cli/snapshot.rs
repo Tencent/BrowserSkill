@@ -37,20 +37,29 @@ pub struct SnapshotArgs {
     pub max_tokens: Option<u32>,
 }
 
-pub fn dispatch(args: SnapshotArgs, format: Format) -> Result<(), CliError> {
-    crate::cli::business_rpc::set_caller_scope(args.scope.clone());
+pub fn dispatch(
+    args: SnapshotArgs,
+    ctx: &crate::cli::business_rpc::ClientContext,
+    format: Format,
+) -> Result<(), CliError> {
+    let op_ctx = ctx.with_scope(args.scope.as_deref());
     let info = ensure_daemon().context("ensure daemon is running")?;
-    run(info.sock_path, args, format)
+    run(info.sock_path, &op_ctx, args, format)
 }
 
-fn run(sock: PathBuf, args: SnapshotArgs, format: Format) -> Result<(), CliError> {
+fn run(
+    sock: PathBuf,
+    ctx: &crate::cli::business_rpc::ClientContext,
+    args: SnapshotArgs,
+    format: Format,
+) -> Result<(), CliError> {
     let params = SnapshotParams {
         session_id: args.session.unwrap_or_default(),
         tab_id: args.tab_id,
         max_depth: args.max_depth,
         max_tokens: args.max_tokens,
     };
-    let reply: SnapshotResult = call(sock, params)?;
+    let reply: SnapshotResult = call(sock, ctx, params)?;
     match format {
         Format::Json => {
             let json = serde_json::to_string_pretty(&reply)
@@ -75,8 +84,12 @@ fn run(sock: PathBuf, args: SnapshotArgs, format: Format) -> Result<(), CliError
     Ok(())
 }
 
-fn call(sock: PathBuf, params: SnapshotParams) -> Result<SnapshotResult, CliError> {
-    crate::cli::business_rpc::call::<SnapshotParams, SnapshotResult>(
+fn call(
+    sock: PathBuf,
+    ctx: &crate::cli::business_rpc::ClientContext,
+    params: SnapshotParams,
+) -> Result<SnapshotResult, CliError> {
+    ctx.call::<SnapshotParams, SnapshotResult>(
         sock,
         "snapshot",
         Method::ToolSnapshot,

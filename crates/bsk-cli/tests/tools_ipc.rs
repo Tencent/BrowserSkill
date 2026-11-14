@@ -87,7 +87,7 @@ async fn do_handshake_protocol(ws: &mut Ws, protocol: &str) -> HandshakeResult {
             version: "131.0".into(),
         },
         min_compatible_peer: Some("0.1.0-dev.0".parse().unwrap()),
-        min_compatible_protocol: Some("1.0".into()),
+        min_compatible_protocol: Some(bsk::daemon::state::MIN_COMPATIBLE_PROTOCOL.into()),
         label: "Test".into(),
     };
     let req = RequestFrame {
@@ -107,6 +107,13 @@ async fn do_handshake_protocol(ws: &mut Ws, protocol: &str) -> HandshakeResult {
     match frame.body {
         ResponseBody::Ok(v) => serde_json::from_value(v).unwrap(),
         ResponseBody::Err(e) => panic!("handshake rejected: {e:?}"),
+    }
+}
+
+fn strip_envelope_params(params: &mut Option<Value>) {
+    if let Some(Value::Object(map)) = params {
+        map.remove("_audit_id");
+        map.remove("_operation_id");
     }
 }
 
@@ -133,7 +140,10 @@ where
                 Ok(f) => f,
                 Err(_) => continue,
             };
-            let Frame::Request(req) = frame else { continue };
+            let Frame::Request(mut req) = frame else {
+                continue;
+            };
+            strip_envelope_params(&mut req.params);
             let body = match req.method {
                 Method::ToolSessionStart => {
                     let _: SessionStartParams =
@@ -727,36 +737,69 @@ async fn tool_dispatch_rejects_unknown_session() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn dom_read_is_never_forwarded_or_downgraded_on_an_old_extension() {
+async fn dom_read_forwards_directly_and_rejects_pre_2_0_extensions_at_handshake() {
     let (handle, sock) = spawn_daemon().await;
+    let mut old_ws = connect_ext(handle.ws_addr()).await;
+    let params = HandshakeParams {
+        client: "browser-skill-extension".into(),
+        version: "0.4.0".parse().unwrap(),
+        protocol_version: "1.9".into(),
+        instance_id: TEST_EXT_ID.into(),
+        browser: BrowserPeerInfo {
+            name: "chrome".into(),
+            version: "131.0".into(),
+        },
+        min_compatible_peer: None,
+        min_compatible_protocol: None,
+        label: "Legacy".into(),
+    };
+    let req = RequestFrame {
+        id: "hs-old".into(),
+        method: Method::SystemHandshake,
+        params: Some(serde_json::to_value(params).unwrap()),
+    };
+    old_ws
+        .send(Message::Text(serde_json::to_string(&req).unwrap()))
+        .await
+        .unwrap();
+    let Message::Text(raw) = old_ws.next().await.unwrap().unwrap() else {
+        panic!("expected handshake rejection frame");
+    };
+    let resp: ResponseFrame = serde_json::from_str(&raw).unwrap();
+    let ResponseBody::Err(err) = resp.body else {
+        panic!("expected handshake error for 1.9 peer");
+    };
+    assert_eq!(err.code, bsk_protocol::ErrorCode::VersionTooOld);
+    drop(old_ws);
+
     let mut ws = connect_ext(handle.ws_addr()).await;
-    do_handshake_protocol(&mut ws, "1.8").await;
+    do_handshake_protocol(&mut ws, bsk::daemon::state::PROTOCOL_VERSION).await;
     let count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let seen = count.clone();
     run_extension(ws, move |req| {
         seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        assert_eq!(req.method, Method::ToolSnapshot);
-        ResponseBody::Ok(json!({"text":"legacy read still works","tab_id":9,"truncated":false}))
+        assert_eq!(req.method, Method::ToolRead);
+        ResponseBody::Ok(json!({
+            "tab_id": 9,
+            "page_url": "https://example.test/",
+            "frame_url": "https://example.test/",
+            "frame_id": "root",
+            "title": "Test",
+            "captured_at": "2026-11-13T00:00:00Z",
+            "scope": "current_dom",
+            "items": [],
+            "truncated": false
+        }))
     });
     let session_id = ipc_session_start(&sock).await;
-    let error = ipc_tool_call::<_, Value>(
+    let result = ipc_tool_call::<_, Value>(
         &sock,
         Method::ToolRead,
         json!({"session_id":session_id,"selector":"#data"}),
     )
     .await
-    .unwrap_err();
-    assert_eq!(error.code, ErrorCode::Unsupported);
-    assert_eq!(error.data.as_ref().unwrap()["required_protocol"], "1.9");
-    assert_eq!(error.data.as_ref().unwrap()["effect_state"], "none");
-    assert_eq!(count.load(std::sync::atomic::Ordering::SeqCst), 0);
-    let result = ipc_tool_call::<_, Value>(
-        &sock,
-        Method::ToolSnapshot,
-        json!({"session_id":session_id}),
-    )
-    .await
     .unwrap();
-    assert_eq!(result["text"], "legacy read still works");
+    assert_eq!(result["scope"], "current_dom");
+    assert_eq!(count.load(std::sync::atomic::Ordering::SeqCst), 1);
     handle.shutdown().await;
 }

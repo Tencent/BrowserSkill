@@ -69,3 +69,5 @@ just to make a new capture start. A crash may lose the last unfinished fragment.
 The extension offers preview, download and deletion under Features → Video
 recording. Its own control overlay is omitted. During extension confirmation or
 human-help UI, recording shows a neutral waiting screen until the overlay closes.
+
+In MCP, use `bsk_video` (`start`, `status`, `stop`, `save`, `list`, `discard`). For Trace v3 action recording in MCP, use `bsk_record` (`start`, `stop`, `export`, `inspect`, `status`).

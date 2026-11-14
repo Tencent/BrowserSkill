@@ -157,7 +157,7 @@ impl DispatchError {
         } else if !data.is_object() {
             *data = serde_json::json!({ "details": data.take() });
         }
-        data["reason"] = serde_json::json!(crate::rpc_reason::SESSION_USER_MOVED_TAB);
+        data["reason"] = serde_json::json!(bsk_protocol::RpcErrorReason::UserMovedTab.as_str());
         Self::Rpc(error)
     }
 
@@ -215,7 +215,9 @@ fn session_busy_rpc() -> RpcError {
     RpcError {
         code: ErrorCode::Timeout,
         message: "session already has an unfinished command".into(),
-        data: Some(serde_json::json!({ "reason": crate::rpc_reason::SESSION_BUSY })),
+        data: Some(
+            serde_json::json!({ "reason": bsk_protocol::RpcErrorReason::SessionBusy.as_str() }),
+        ),
     }
 }
 
@@ -1095,10 +1097,7 @@ fn not_dispatched_error(
     dispatched: Option<Result<oneshot::Receiver<ResponseFrame>, super::browsers::SendError>>,
 ) -> RpcError {
     match dispatched {
-        Some(Err(
-            super::browsers::SendError::Terminated(cause)
-            | super::browsers::SendError::UnsupportedFeature(cause),
-        )) => cause,
+        Some(Err(super::browsers::SendError::Terminated(cause))) => cause,
         _ => RpcError {
             code: ErrorCode::ProtocolError,
             message: "browser sink closed before request was queued".into(),
@@ -1381,7 +1380,7 @@ fn cancelled_error(entry: Option<&ToolInflightEntry>, default_msg: &str) -> RpcE
                     "session ended because the user moved a controlled tab out of its Agent Window"
                         .into(),
                 data: Some(
-                    serde_json::json!({ "reason": crate::rpc_reason::SESSION_USER_MOVED_TAB }),
+                    serde_json::json!({ "reason": bsk_protocol::RpcErrorReason::UserMovedTab.as_str() }),
                 ),
             };
         }
@@ -1645,7 +1644,7 @@ mod forward_one_cancel_reason_tests {
         assert_eq!(error.code, ErrorCode::UserAborted);
         assert_eq!(
             error.data.unwrap()["reason"],
-            crate::rpc_reason::SESSION_USER_MOVED_TAB
+            bsk_protocol::RpcErrorReason::UserMovedTab.as_str()
         );
         assert!(error.message.contains("session ended"));
     }
@@ -1808,21 +1807,20 @@ mod link_error_tests {
 #[cfg(test)]
 mod ended_session_dispatch_tests {
     use super::{super::sessions::SessionEnd, DispatchError};
-    use crate::rpc_reason;
-    use bsk_protocol::ErrorCode;
+    use bsk_protocol::{ErrorCode, RpcErrorReason};
 
     #[test]
     fn ended_session_surfaces_reason_and_timestamp() {
         let rpc = DispatchError::SessionNotFound {
             ended: Some(SessionEnd {
-                reason: rpc_reason::SESSION_IDLE_TIMEOUT,
+                reason: RpcErrorReason::SessionIdleTimeout.as_str(),
                 ended_unix_ms: 1_760_000_000_000,
             }),
         }
         .into_rpc();
         assert_eq!(rpc.code, ErrorCode::NotFound);
         let data = rpc.data.expect("ended session must carry data");
-        assert_eq!(data["reason"], rpc_reason::SESSION_IDLE_TIMEOUT);
+        assert_eq!(data["reason"], RpcErrorReason::SessionIdleTimeout.as_str());
         assert_eq!(data["ended_unix_ms"], 1_760_000_000_000i64);
     }
 
@@ -1857,7 +1855,7 @@ mod action_timeout_tests {
             browser_name: "chrome".into(),
             browser_version: "1".into(),
             extension_version: "0.4.1".into(),
-            extension_protocol_version: "1.8".into(),
+            extension_protocol_version: "2.0".into(),
             label: String::new(),
             sink: BrowserSink { tx },
             pending: Mutex::new(Pending::default()),

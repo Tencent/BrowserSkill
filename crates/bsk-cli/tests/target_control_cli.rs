@@ -87,7 +87,7 @@ async fn run_cli(
 
 #[tokio::test]
 async fn incompatible_daemon_cannot_silently_drop_new_action_evidence() {
-    for protocol in ["1.7", "2.0"] {
+    for protocol in ["1.9", "3.0"] {
         for extra in [
             vec![
                 "--expect",
@@ -101,27 +101,20 @@ async fn incompatible_daemon_cannot_silently_drop_new_action_evidence() {
                 run_cli(protocol, &args, json!({"tab_id":7,"x":1,"y":2})).await;
             assert!(!output.status.success());
             let error: Value = serde_json::from_slice(&output.stdout).unwrap();
+            let message = error["message"].as_str().unwrap();
             assert!(
-                error["message"]
-                    .as_str()
-                    .unwrap()
-                    .contains("daemon protocol 1.8")
+                message.contains("incompatible") && message.contains("2.0"),
+                "{error}"
             );
             assert_eq!(requests.len(), 1);
             assert_eq!(requests[0]["method"], "system.status");
-            assert!(
-                error["message"]
-                    .as_str()
-                    .unwrap()
-                    .contains("compatible 1.x")
-            );
         }
     }
 }
 
 #[tokio::test]
 async fn explicit_target_policy_is_rejected_before_legacy_daemon_can_lock_the_session() {
-    for protocol in ["1.7", "2.0"] {
+    for protocol in ["1.9", "3.0"] {
         for mut args in [
             vec!["cooperate", "sync", "--session", "s"],
             vec!["cooperate", "enable", "--session", "s"],
@@ -142,11 +135,10 @@ async fn explicit_target_policy_is_rejected_before_legacy_daemon_can_lock_the_se
                 run_cli(protocol, &args, json!({"tab_id":7,"context_id":"legacy"})).await;
             assert!(!output.status.success());
             let error: Value = serde_json::from_slice(&output.stdout).unwrap();
+            let message = error["message"].as_str().unwrap();
             assert!(
-                error["message"]
-                    .as_str()
-                    .unwrap()
-                    .contains("--policy target requires daemon protocol 1.8")
+                message.contains("incompatible") && message.contains("2.0"),
+                "{error}"
             );
             assert_eq!(requests.len(), 1, "no action or negotiation may be sent");
             assert_eq!(requests[0]["method"], "system.status");
@@ -162,7 +154,7 @@ async fn target_sync_requires_acknowledgement_but_strict_remains_compatible() {
             args.extend(["--policy", policy]);
         }
         let (output, requests) =
-            run_cli("1.7", &args, json!({"tab_id":7,"context_id":"legacy"})).await;
+            run_cli("2.0", &args, json!({"tab_id":7,"context_id":"legacy"})).await;
         assert_eq!(
             requests[1]["params"]["control_policy"],
             policy.unwrap_or("auto")
@@ -173,12 +165,13 @@ async fn target_sync_requires_acknowledgement_but_strict_remains_compatible() {
         if policy != Some("strict") {
             assert_eq!(reply["code"], "unsupported");
             assert_eq!(reply["data"]["effect_state"], "none");
+            assert_eq!(reply["data"]["required_protocol"], "2.0");
             assert!(reply.get("context_id").is_none());
             assert!(
                 reply["message"]
                     .as_str()
                     .unwrap()
-                    .contains("every sync/enable and step")
+                    .contains("require protocol 2.0+")
             );
         }
     }
@@ -186,7 +179,7 @@ async fn target_sync_requires_acknowledgement_but_strict_remains_compatible() {
 
 #[tokio::test]
 async fn compatible_daemon_receives_target_policy_without_extra_status_calls() {
-    for protocol in ["1.8", "1.9"] {
+    for protocol in ["2.0", "2.1"] {
         for action in ["sync", "enable"] {
             let (output, requests) = run_cli(
                 protocol,
@@ -217,13 +210,13 @@ async fn compatible_daemon_receives_target_policy_without_extra_status_calls() {
 
 #[tokio::test]
 async fn step_keeps_auto_compatible_and_forwards_target_to_a_current_daemon() {
-    for (protocol, policy, acknowledged) in [("1.7", "auto", false), ("1.8", "target", true)] {
+    for (policy, acknowledged) in [("auto", false), ("target", true)] {
         let mut reply = json!({"tab_id":7,"context_id":"c"});
         if acknowledged {
             reply["control_policy"] = "target".into();
         }
         let (output, requests) = run_cli(
-            protocol,
+            "2.0",
             &[
                 "step",
                 "--session",
@@ -266,7 +259,7 @@ async fn current_daemon_receives_exact_conditions_without_extra_status_calls() {
     ])
     .to_string();
     let (output, requests) = run_cli(
-        "1.8",
+        "2.0",
         &[
             "click",
             "@e1",
@@ -303,7 +296,7 @@ async fn current_daemon_receives_exact_conditions_without_extra_status_calls() {
 async fn dom_read_requires_new_daemon_and_never_falls_back_to_evaluate() {
     let result = json!({"tab_id":7,"page_url":"https://example.test/","frame_url":"https://example.test/",
         "frame_id":"root","title":"Test","captured_at":"now","scope":"current_dom","items":[],"truncated":false});
-    for protocol in ["1.8", "1.9"] {
+    for protocol in ["1.9", "2.0"] {
         let (output, calls) = run_cli(
             protocol,
             &[
@@ -320,22 +313,25 @@ async fn dom_read_requires_new_daemon_and_never_falls_back_to_evaluate() {
         )
         .await;
         let data: Value = serde_json::from_slice(&output.stdout).unwrap();
-        assert_eq!(output.status.success(), protocol == "1.9", "{data}");
+        assert_eq!(output.status.success(), protocol == "2.0", "{data}");
         assert!(!calls.iter().any(|c| c["method"] == "tool.evaluate"));
         assert_eq!(
             calls.iter().filter(|c| c["method"] == "tool.read").count(),
-            usize::from(protocol == "1.9")
+            usize::from(protocol == "2.0")
         );
         if protocol == "1.9" {
+            let msg = data["message"].as_str().unwrap();
+            assert!(
+                msg.contains("incompatible") && msg.contains("2.0"),
+                "{data}"
+            );
+        } else {
             let read_call = calls.iter().find(|c| c["method"] == "tool.read").unwrap();
             assert_eq!(read_call["params"]["context_id"], "c");
         }
-        if protocol == "1.8" {
-            assert_eq!(data["data"]["reason"], "unsupported_feature");
-        }
     }
     let (output, calls) = run_cli(
-        "1.9",
+        "2.0",
         &[
             "read",
             "--session",
@@ -381,7 +377,7 @@ async fn unguarded_commands_fail_closed_when_given_action_conditions_while_multi
             let mut args = base.clone();
             args.extend(condition);
             args.push("--json");
-            let (output, calls) = run_cli("1.9", &args, json!({})).await;
+            let (output, calls) = run_cli("2.0", &args, json!({})).await;
             assert_eq!(output.status.code(), Some(1), "args: {args:?}");
             let err: Value = serde_json::from_slice(&output.stdout).unwrap();
             assert_eq!(err["code"], "invalid_params", "args: {args:?}");
@@ -400,7 +396,7 @@ async fn unguarded_commands_fail_closed_when_given_action_conditions_while_multi
     ] {
         let mut args = vec!["read", "--session", "s", "--selector", "#x", "--json"];
         args.extend(rejected);
-        let (output, calls) = run_cli("1.9", &args, json!({})).await;
+        let (output, calls) = run_cli("2.0", &args, json!({})).await;
         assert_eq!(output.status.code(), Some(1), "args: {args:?}");
         let err: Value = serde_json::from_slice(&output.stdout).unwrap();
         assert_eq!(err["code"], "invalid_params", "args: {args:?}");
@@ -412,7 +408,7 @@ async fn unguarded_commands_fail_closed_when_given_action_conditions_while_multi
 
     // `observe --probe-hover` IS guarded and forwards action conditions.
     let (output, calls) = run_cli(
-        "1.9",
+        "2.0",
         &[
             "observe",
             "--probe-hover",
@@ -445,7 +441,7 @@ async fn unguarded_commands_fail_closed_when_given_action_conditions_while_multi
     let out_path = dir.path().join("full.png");
     let png_b64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
     let (output, calls) = run_cli(
-        "1.9",
+        "2.0",
         &[
             "screenshot",
             "--full-page",

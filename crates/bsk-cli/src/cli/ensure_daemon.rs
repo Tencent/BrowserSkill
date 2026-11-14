@@ -102,7 +102,6 @@ pub(crate) fn ensure_daemon_optimistic_with_protocol() -> Result<(DaemonInfo, St
         && let Some(protocol) = info.protocol_version.clone()
         && optimistic_endpoint_present(&info.sock_path)
     {
-        super::protocol::record_daemon_protocol(&info.sock_path, &protocol);
         mark_optimistic_candidate(&info.sock_path);
         return Ok((info, protocol));
     }
@@ -120,14 +119,10 @@ pub fn ensure_daemon() -> Result<DaemonInfo> {
 }
 
 /// Same discovery and startup as [`ensure_daemon`], also returning the
-/// daemon's protocol version so long-lived callers can check features per call.
+/// daemon's protocol version so long-lived callers can verify compatibility.
 pub(crate) fn ensure_daemon_with_protocol() -> Result<(DaemonInfo, String)> {
     let deadline = Instant::now() + SPAWN_DEADLINE;
     if let Probe::Ready(daemon) = probe::probe(PROBE_TIMEOUT)? {
-        super::protocol::record_daemon_protocol(
-            &daemon.info.sock_path,
-            &daemon.status.protocol_version,
-        );
         return Ok((daemon.info, daemon.status.protocol_version));
     }
     ensure!(auto_start_enabled(), DaemonStartFailure::AutoStartDisabled);
@@ -135,7 +130,6 @@ pub(crate) fn ensure_daemon_with_protocol() -> Result<(DaemonInfo, String)> {
         .context("automatic daemon startup failed")?;
     // A daemon this process just started runs this binary's protocol.
     let protocol = crate::daemon::state::PROTOCOL_VERSION.to_string();
-    super::protocol::record_daemon_protocol(&info.sock_path, &protocol);
     Ok((info, protocol))
 }
 

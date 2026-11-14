@@ -19,9 +19,6 @@ use super::ws::WsHandle;
 
 pub const DAEMON_VERSION: &str = env!("CARGO_PKG_VERSION");
 pub use bsk_protocol::catalog::{MIN_COMPATIBLE_PROTOCOL, PROTOCOL_VERSION};
-/// Legacy app-semver floor used only when `HandshakeResult.min_compatible_peer`
-/// is emitted for old extensions. New code ignores this on read.
-pub const LEGACY_MIN_COMPATIBLE_PEER: &str = "0.0.0";
 pub const SERVER_NAME: &str = "browser-skill-daemon";
 
 #[derive(Debug)]

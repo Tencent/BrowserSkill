@@ -38,13 +38,22 @@ pub struct NetworkArgs {
     pub max_text_chars: Option<u32>,
 }
 
-pub fn dispatch(args: NetworkArgs, format: Format) -> Result<(), CliError> {
-    crate::cli::business_rpc::set_caller_scope(args.scope.clone());
+pub fn dispatch(
+    args: NetworkArgs,
+    ctx: &crate::cli::business_rpc::ClientContext,
+    format: Format,
+) -> Result<(), CliError> {
+    let op_ctx = ctx.with_scope(args.scope.as_deref());
     let info = ensure_daemon().context("ensure daemon is running")?;
-    run(info.sock_path, args, format)
+    run(info.sock_path, &op_ctx, args, format)
 }
 
-fn run(sock: PathBuf, args: NetworkArgs, format: Format) -> Result<(), CliError> {
+fn run(
+    sock: PathBuf,
+    ctx: &crate::cli::business_rpc::ClientContext,
+    args: NetworkArgs,
+    format: Format,
+) -> Result<(), CliError> {
     let params = NetworkParams {
         session_id: args.session.unwrap_or_default(),
         tab_id: args.tab_id,
@@ -52,12 +61,16 @@ fn run(sock: PathBuf, args: NetworkArgs, format: Format) -> Result<(), CliError>
         limit: args.limit,
         max_text_chars: args.max_text_chars,
     };
-    let reply: NetworkResult = call(sock, params)?;
+    let reply: NetworkResult = call(sock, ctx, params)?;
     render(&reply, format)
 }
 
-fn call(sock: PathBuf, params: NetworkParams) -> Result<NetworkResult, CliError> {
-    crate::cli::business_rpc::call::<NetworkParams, NetworkResult>(
+fn call(
+    sock: PathBuf,
+    ctx: &crate::cli::business_rpc::ClientContext,
+    params: NetworkParams,
+) -> Result<NetworkResult, CliError> {
+    ctx.call::<NetworkParams, NetworkResult>(
         sock,
         "network",
         Method::ToolNetwork,

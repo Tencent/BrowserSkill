@@ -6,7 +6,6 @@ mod atomic_output;
 pub mod browser_wait;
 pub mod browsers;
 pub mod business_rpc;
-pub(crate) mod compatibility;
 pub mod console;
 pub mod cooperate;
 pub mod daemon;
@@ -35,7 +34,6 @@ pub mod network;
 pub mod observation_view;
 pub mod observe;
 pub mod plan;
-pub(crate) mod protocol;
 pub mod read;
 pub mod recipe;
 pub mod record;
@@ -325,24 +323,21 @@ impl GlobalFlags {
 }
 
 /// Fail closed when caller action conditions are supplied to commands that never verify them.
-/// Returns `Ok(true)` for multi-phase guarded commands whose auxiliary RPCs must stay clean.
 pub fn validate_command_evidence(
     command: &Command,
     flags: &GlobalFlags,
-) -> Result<bool, error::CliError> {
+) -> Result<(), error::CliError> {
     if matches!(command, Command::Plan(_) | Command::Recipe(_)) {
-        return Ok(false);
+        return Ok(());
     }
     if matches!(command, Command::Evaluate(args) if args.unverified)
         && (!flags.depends_on.is_empty() || flags.observation.is_some() || flags.expect.is_some())
     {
-        return Ok(false);
+        return Ok(());
     }
-    let multi_phase_guarded = match command {
-        Command::Open(_) | Command::Step(_) | Command::Upload(_) | Command::Download(_) => {
-            Some(true)
-        }
-        Command::Screenshot(args) if args.full_page => Some(true),
+    let accepts_full_evidence = match command {
+        Command::Open(_) | Command::Step(_) | Command::Upload(_) | Command::Download(_) => true,
+        Command::Screenshot(args) if args.full_page => true,
         Command::Navigate(_)
         | Command::NavigateBack(_)
         | Command::NavigateForward(_)
@@ -364,25 +359,25 @@ pub fn validate_command_evidence(
         })
         | Command::Tab(TabCmd {
             sub: tab::TabSub::Close(_),
-        }) => Some(false),
-        Command::Observe(args) if args.probe_hover => Some(false),
+        }) => true,
+        Command::Observe(args) if args.probe_hover => true,
         Command::Debug(args)
             if serde_json::from_value::<bsk_protocol::tools::DebugAction>(
                 serde_json::Value::String(args.action.clone()),
             )
             .is_ok_and(|a| a.cooperation_guarded()) =>
         {
-            Some(false)
+            true
         }
-        _ => None,
+        _ => false,
     };
-    if let Some(is_multi_phase) = multi_phase_guarded {
+    if accepts_full_evidence {
         if !flags.depends_on.is_empty() && flags.context.is_none() {
             return Err(error::CliError::invalid_params(anyhow::anyhow!(
                 "--depends-on requires --context"
             )));
         }
-        return Ok(is_multi_phase);
+        return Ok(());
     }
     if matches!(command, Command::Read(_)) {
         if !flags.depends_on.is_empty() || flags.observation.is_some() || flags.expect.is_some() {
@@ -390,14 +385,14 @@ pub fn validate_command_evidence(
                 "--observation, --expect and --depends-on apply only to guarded browser actions; read accepts --context only"
             )));
         }
-        return Ok(false);
+        return Ok(());
     }
     if flags.has_any_evidence() {
         return Err(error::CliError::invalid_params(anyhow::anyhow!(
             "action conditions (--context, --depends-on, --observation, --expect) apply only to guarded browser actions and read (--context)"
         )));
     }
-    Ok(false)
+    Ok(())
 }
 
 #[cfg(test)]

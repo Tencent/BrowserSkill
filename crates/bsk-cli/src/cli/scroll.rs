@@ -36,9 +36,13 @@ pub struct ScrollToArgs {
     pub timeout: u32,
 }
 
-pub fn dispatch(args: ScrollToArgs, format: Format) -> Result<(), CliError> {
+pub fn dispatch(
+    args: ScrollToArgs,
+    ctx: &crate::cli::business_rpc::ClientContext,
+    format: Format,
+) -> Result<(), CliError> {
     let (ref_, selector) = split_target(args.target, args.ref_, args.selector)?;
-    crate::cli::business_rpc::set_caller_scope(args.scope);
+    let op_ctx = ctx.with_scope(args.scope.as_deref());
     let info = ensure_daemon().context("ensure daemon is running")?;
     let params = ScrollToParams {
         session_id: args.session.unwrap_or_default(),
@@ -47,7 +51,7 @@ pub fn dispatch(args: ScrollToArgs, format: Format) -> Result<(), CliError> {
         tab_id: args.tab_id,
         timeout_ms: Some(args.timeout),
     };
-    let reply: ScrollToResult = crate::cli::business_rpc::call(
+    let reply: ScrollToResult = op_ctx.call(
         info.sock_path,
         "scroll-to-1",
         Method::ToolScrollTo,

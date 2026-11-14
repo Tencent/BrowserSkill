@@ -2,7 +2,7 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum CooperateAction {
     Enable,
@@ -12,8 +12,9 @@ pub enum CooperateAction {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct CooperateParams {
-    /// Omitted by legacy callers. A negotiated policy remains fixed for the session.
+    /// A negotiated policy remains fixed for the session.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub control_policy: Option<ControlPolicy>,
     pub session_id: String,
@@ -24,13 +25,6 @@ pub struct CooperateParams {
     pub timeout_ms: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_tokens: Option<u32>,
-}
-
-pub const TARGET_CONTROL_PROTOCOL: &str = "1.8";
-
-pub fn supports_target_control(protocol: &str) -> bool {
-    crate::compatibility::Feature::TargetControl
-        .supports(crate::compatibility::Peer::Extension, protocol)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -158,16 +152,6 @@ mod tests {
         let new: CooperateParams = serde_json::from_value(value.clone()).unwrap();
         assert_eq!(new.control_policy, Some(ControlPolicy::Target));
         assert_eq!(serde_json::to_value(new).unwrap(), value);
-    }
-
-    #[test]
-    fn target_control_has_an_explicit_protocol_boundary() {
-        for old in ["", "invalid", "1.0", "1.7", "2.0"] {
-            assert!(!supports_target_control(old));
-        }
-        for new in ["1.8", "1.8.0", "1.9"] {
-            assert!(supports_target_control(new));
-        }
     }
 
     #[test]
