@@ -133,4 +133,47 @@ describe("LLM textbook click targets", () => {
       expect.objectContaining({ tag: "div", name: "发布" }),
     );
   });
+
+  it("names a plain button from a child image alt", () => {
+    document.body.innerHTML = `
+      <button id="text" type="button">Save</button>
+      <button id="image" type="button">
+        <img alt="Save" width="40" height="20" src="icon.svg">
+      </button>
+      <button id="labeled" type="button" aria-label="Publish">
+        <img alt="Save" src="icon.svg">
+      </button>
+      <button id="text-and-icon" type="button">Save <img alt="icon" src="icon.svg"></button>
+      <button id="decorative" type="button"><img alt="" src="icon.svg"></button>
+      <button id="blank" type="button"><img alt="   " src="icon.svg"></button>
+      <button id="later" type="button"><img alt=""><img alt="Save" src="icon.svg"></button>
+    `;
+    expect(describeEventTarget(document.querySelector("#text"))).toEqual({
+      tag: "button",
+      role: "button",
+      name: "Save",
+    });
+    expect(describeEventTarget(document.querySelector("#image img"))).toEqual({
+      tag: "button",
+      role: "button",
+      name: "Save",
+    });
+    expect(describeEventTarget(document.querySelector("#labeled img"))).toEqual({
+      tag: "button",
+      role: "button",
+      name: "Publish",
+    });
+    expect(describeEventTarget(document.querySelector("#text-and-icon img"))).toEqual({
+      tag: "button",
+      role: "button",
+      name: "Save",
+    });
+    expect(describeEventTarget(document.querySelector("#decorative img"))).toBeNull();
+    expect(describeEventTarget(document.querySelector("#blank img"))).toBeNull();
+    expect(describeEventTarget(document.querySelector("#later img"))).toEqual({
+      tag: "button",
+      role: "button",
+      name: "Save",
+    });
+  });
 });
