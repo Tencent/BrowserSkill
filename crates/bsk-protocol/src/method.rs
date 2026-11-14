@@ -806,7 +806,7 @@ impl Method {
             ),
             Self::ToolDialogAccept => method_spec!(
                 owner: Extension, effect: BrowserMutation, action_metadata: None, remote_allowed: true,
-                deadline: Standard, response_grace: false, cancel_at_deadline: false, outcome: Ordinary,
+                deadline: Standard, response_grace: false, cancel_at_deadline: true, outcome: EffectAwareAction,
                 wal: Always, dialog: Bypass, queue: Unlocked, implicit_session: Always, auto_inject: Never, tab_transition: false,
                 background: None, resume: Never, opens_tabs: false, auto_borrow_write: false, cooperation: Dialog, dom_targeted: false, bootstrap: false,
                 debug_evidence: Dialog, audit_key: Some("dialogAccept"), recipe: Ignore
@@ -1081,7 +1081,10 @@ mod tests {
             );
             if matches!(
                 method,
-                Method::ToolWindowResize | Method::ToolEmulate | Method::ToolTabClose
+                Method::ToolWindowResize
+                    | Method::ToolEmulate
+                    | Method::ToolTabClose
+                    | Method::ToolDialogAccept
             ) {
                 assert_eq!(spec.outcome, OutcomeKind::EffectAwareAction);
                 assert!(spec.cancel_at_deadline);

@@ -147,15 +147,24 @@ impl Plan {
         })
     }
 
-    fn request(&self, step: &Step, tab: Option<i64>) -> Value {
+    fn request_pinned(
+        &self,
+        step: &Step,
+        session: Option<&str>,
+        tab: Option<i64>,
+        context: Option<&str>,
+    ) -> Value {
         let mut params = step.params.clone();
+        if let Some(sid) = session.filter(|s| !s.trim().is_empty()) {
+            params["session_id"] = sid.into();
+        }
         if let Some(tab) = tab {
             params["tab_id"] = tab.into();
         }
         if !step.wait
-            && let Some(context) = &self.context
+            && let Some(context) = context
         {
-            params["context_id"] = context.as_str().into();
+            params["context_id"] = context.into();
         }
         if step.strict
             && let Some(observation) = &self.observation
@@ -284,8 +293,25 @@ pub(crate) fn run(
     plan: &Plan,
     mut call: impl FnMut(Method, Value, Duration) -> Result<Value, CliError>,
 ) -> (Value, u8) {
+    run_with_meta(plan, |method, params, timeout, _| {
+        call(method, params, timeout).map(|val| (val, None))
+    })
+}
+
+pub(crate) fn run_with_meta(
+    plan: &Plan,
+    mut call: impl FnMut(
+        Method,
+        Value,
+        Duration,
+        bool,
+    ) -> Result<(Value, Option<crate::ipc_client::ScopeResultMeta>), CliError>,
+) -> (Value, u8) {
     let start = Instant::now();
-    // Pin every request to the plan's tab; never follow a human's active tab.
+    // Pin every request to the plan's resolved session, tab, and context; never follow
+    // a human's active tab or re-resolve an implicit context mid-batch.
+    let mut pinned_session = (!plan.session.trim().is_empty()).then(|| plan.session.clone());
+    let mut pinned_context = plan.context.clone();
     let mut tab = plan.tab_id;
     let mut completed = 0;
     let mut notes = Vec::new();
@@ -302,8 +328,31 @@ pub(crate) fn run(
             ));
             break;
         }
-        match call(step.method.clone(), plan.request(step, tab), step.timeout) {
-            Ok(receipt) => {
+        let want_meta = pinned_session.is_none()
+            || (!step.wait
+                && (pinned_context.is_none()
+                    || pinned_context
+                        .as_deref()
+                        .is_some_and(|c| crate::daemon::scopes::is_short_alias(c, 'c'))));
+        let req = plan.request_pinned(
+            step,
+            pinned_session.as_deref(),
+            tab,
+            pinned_context.as_deref(),
+        );
+        match call(step.method.clone(), req, step.timeout, want_meta) {
+            Ok((receipt, scope_meta)) => {
+                if let Some(sm) = scope_meta {
+                    if !sm.session_id.is_empty() {
+                        pinned_session = Some(sm.session_id);
+                    }
+                    tab = tab.or(sm.tab_id);
+                    if !step.wait
+                        && let Some(ctx) = sm.short_ctx.filter(|s| !s.is_empty())
+                    {
+                        pinned_context = Some(ctx);
+                    }
+                }
                 tab = tab.or(receipt["tab_id"].as_i64());
                 if step.wait && receipt["satisfied"] != true {
                     exit = 1;
@@ -339,28 +388,34 @@ pub(crate) fn run(
         reply["stopped"] = stop;
         reply["not_run"] = (index + 1..not_run).collect::<Vec<_>>().into();
     }
+    let final_session = pinned_session.as_deref().unwrap_or(&plan.session);
+    let need_post_meta = pinned_session.is_none();
+    let mut plain_call = |method: Method, params: Value, timeout: Duration| {
+        let want_meta = need_post_meta && method == Method::ToolCooperate;
+        call(method, params, timeout, want_meta).map(|(val, _)| val)
+    };
     if finished
         && let Some(selector) = &plan.until_visible
         && step::await_ready(
-            &plan.session,
+            final_session,
             tab,
             selector,
             plan.wait_timeout_ms,
             &mut reply,
             &mut exit,
-            &mut call,
+            &mut plain_call,
         )
     {
         read_after = false;
     }
     if read_after {
         step::post_sync(
-            &plan.session,
+            final_session,
             cooperate::Policy::Auto,
             tab,
             &mut reply,
             &mut exit,
-            &mut call,
+            &mut plain_call,
         );
     }
     reply["ok"] = (exit == 0).into();
@@ -413,11 +468,10 @@ pub fn dispatch(
     let (daemon, protocol) = ensure_daemon::ensure_daemon_optimistic_with_protocol()
         .context("ensure daemon is running")?;
     check_protocol(&protocol)?;
-    let need_scope_meta = session.trim().is_empty();
     let mut resolved_session: Option<String> = None;
-    let (reply, exit) = run(&plan, |method, params, timeout| {
+    let (reply, exit) = run_with_meta(&plan, |method, params, timeout, want_meta| {
         let meta = crate::ipc_client::IpcRequestMeta {
-            return_scope_meta: need_scope_meta && method == Method::ToolCooperate,
+            return_scope_meta: want_meta,
             ..Default::default()
         };
         let (val, resp_meta) = op_ctx.call_envelope(
@@ -428,10 +482,12 @@ pub fn dispatch(
             meta,
             timeout,
         )?;
-        if let Some(sm) = resp_meta.scope_meta {
-            resolved_session = Some(sm.session_id);
+        if let Some(ref sm) = resp_meta.scope_meta
+            && !sm.session_id.is_empty()
+        {
+            resolved_session = Some(sm.session_id.clone());
         }
-        Ok(val)
+        Ok((val, resp_meta.scope_meta))
     });
     output
         .with_resolved_session(resolved_session.as_deref())

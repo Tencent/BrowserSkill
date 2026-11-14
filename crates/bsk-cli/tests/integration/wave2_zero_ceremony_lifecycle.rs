@@ -40,7 +40,7 @@ impl IsolatedEnv {
     where
         F: Fn(&RequestFrame) -> ResponseBody + Send + Sync + 'static,
     {
-        let home = tempfile::tempdir_in("/tmp").unwrap();
+        let home = crate::support::short_tempdir();
         let sock = home.path().join("ipc.sock");
         let handle = daemon::run(
             DaemonConfig::new(0)

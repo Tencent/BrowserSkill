@@ -909,8 +909,23 @@ fn authoritative_full_vom(state: &SyncedState) -> Option<(&str, bool)> {
             == Some(true);
         return Some((text, truncated));
     }
-    let is_unchanged = state.reply.get("kind").and_then(Value::as_str) == Some("unchanged");
-    if is_unchanged
+    let kind = state.reply.get("kind").and_then(Value::as_str);
+    let is_patchable_text_delta = kind == Some("delta")
+        && state
+            .reply
+            .pointer("/observation_patch/lines")
+            .and_then(Value::as_array)
+            .is_some()
+        && state
+            .reply
+            .get("changes")
+            .and_then(Value::as_array)
+            .is_some_and(|changes| {
+                changes
+                    .iter()
+                    .all(|c| c.get("kind").and_then(Value::as_str) == Some("text"))
+            });
+    if (kind == Some("unchanged") || is_patchable_text_delta)
         && let Some(meta) = state.scope_meta.as_ref()
         && meta.cache_reusable
     {
@@ -1030,8 +1045,9 @@ fn format_state_receipt(
     // `delta` (without `--match`) stays slim; unpatched field deltas set
     // `cache_reusable = false` and `cached_vom = None`, so stale VOM is never
     // resurrected.
+    let mut hydrated_from_cache = false;
     if reply.pointer("/observation/text").is_none()
-        && (unchanged || !match_text.is_empty())
+        && (!emit_unchanged_flag || unchanged || !match_text.is_empty())
         && cache_reusable
         && let Some(cached_vom) = meta.and_then(|m| m.cached_vom.as_deref())
     {
@@ -1044,6 +1060,38 @@ fn format_state_receipt(
         if let Some(cursor) = meta.and_then(|m| m.cached_vom_next_cursor.as_deref()) {
             reply["observation"]["next_cursor"] = Value::String(cursor.to_string());
         }
+        if reply.pointer("/observation/observation_id").is_none()
+            && let Some(obs_id) = reply.get("observation_id").and_then(Value::as_str)
+        {
+            reply["observation"]["observation_id"] = Value::String(obs_id.to_string());
+        }
+        if reply.pointer("/observation/tab_id").is_none()
+            && let Some(tid) = reply
+                .get("tab_id")
+                .and_then(Value::as_i64)
+                .or_else(|| meta.and_then(|m| m.tab_id))
+        {
+            reply["observation"]["tab_id"] = Value::from(tid);
+        }
+        if reply.pointer("/observation/url").is_none()
+            && let Some(u) = reply
+                .pointer("/state/url")
+                .and_then(Value::as_str)
+                .or_else(|| meta.and_then(|m| m.cached_url.as_deref()))
+                .filter(|s| !s.is_empty())
+        {
+            reply["observation"]["url"] = Value::String(u.to_string());
+        }
+        if reply.pointer("/observation/title").is_none()
+            && let Some(t) = reply
+                .pointer("/state/title")
+                .and_then(Value::as_str)
+                .or_else(|| meta.and_then(|m| m.cached_title.as_deref()))
+                .filter(|s| !s.is_empty())
+        {
+            reply["observation"]["title"] = Value::String(t.to_string());
+        }
+        hydrated_from_cache = true;
     }
 
     if !match_text.is_empty() {
@@ -1135,6 +1183,14 @@ fn format_state_receipt(
             }
             if let Some(presentation) = reply.get("presentation") {
                 out["presentation"] = presentation.clone();
+            }
+            if reply.pointer("/observation/text").is_some() {
+                out["observation"] = reply["observation"].clone();
+                crate::cli::observation_view::attach(&mut out, session_id, None);
+                if hydrated_from_cache {
+                    out["observation_origin"]["kind"] =
+                        Value::String(if is_delta { "merged" } else { "reused" }.into());
+                }
             }
             if emit_unchanged_flag || unchanged {
                 out["unchanged"] = Value::Bool(unchanged);

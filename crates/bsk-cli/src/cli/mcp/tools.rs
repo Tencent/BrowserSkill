@@ -410,18 +410,15 @@ impl Link {
         params: Value,
         timeout: Duration,
     ) -> Result<Value, CliError> {
-        let initial_meta = if matches!(method, Method::SessionStart | Method::SessionStartTracked) {
-            crate::ipc_client::IpcRequestMeta {
-                caller_scope: Some(ctx.resolved_caller_scope()),
-                bind_scope: true,
-                ..Default::default()
-            }
-        } else {
-            crate::ipc_client::IpcRequestMeta::default()
-        };
-        self.rpc_envelope(ctx, method, params, initial_meta, timeout)
-            .await
-            .map(|(value, _)| value)
+        self.rpc_envelope(
+            ctx,
+            method,
+            params,
+            crate::ipc_client::IpcRequestMeta::default(),
+            timeout,
+        )
+        .await
+        .map(|(value, _)| value)
     }
 
     async fn rpc_envelope(
@@ -965,8 +962,13 @@ async fn session(
                     params[key] = value;
                 }
             }
-            let value = link
-                .rpc(
+            let start_meta = crate::ipc_client::IpcRequestMeta {
+                caller_scope: Some(ctx.resolved_caller_scope()),
+                bind_scope: true,
+                ..Default::default()
+            };
+            let (value, _) = link
+                .rpc_envelope(
                     &ctx,
                     if args.request_id.is_some() {
                         Method::SessionStartTracked
@@ -974,6 +976,7 @@ async fn session(
                         Method::SessionStart
                     },
                     params,
+                    start_meta,
                     SESSION_START_TIMEOUT,
                 )
                 .await?;
@@ -1141,6 +1144,7 @@ async fn session(
                 })
                 .await??;
             let mut reply = synced.reply;
+            hydrate_mcp_cached_observation(&mut reply, synced.scope_meta.as_ref());
             if let Some(obj) = reply.as_object_mut() {
                 obj.entry("session_id")
                     .or_insert_with(|| Value::String(session_id));
@@ -1317,7 +1321,7 @@ async fn session(
                             let is_sync = matches!(mode, CooperateAction::Sync);
                             current.action = mode;
                             let meta = crate::ipc_client::IpcRequestMeta {
-                                return_scope_meta: has_match_text && is_sync,
+                                return_scope_meta: is_sync,
                                 ..Default::default()
                             };
                             let (val, resp_meta) = rpc(
@@ -1337,7 +1341,7 @@ async fn session(
                     .await??
                 } else {
                     let meta = crate::ipc_client::IpcRequestMeta {
-                        return_scope_meta: syncing && has_match_text,
+                        return_scope_meta: syncing,
                         ..Default::default()
                     };
                     let (val, resp_meta) = link
@@ -1354,21 +1358,21 @@ async fn session(
             };
             if syncing {
                 cooperate::verify_policy(&reply, policy)?;
+                if reply.get("session_id").is_none()
+                    && let Some(sid) = sync_scope_meta
+                        .as_ref()
+                        .map(|m| m.session_id.as_str())
+                        .filter(|s| !s.is_empty())
+                {
+                    reply["session_id"] = Value::String(sid.to_owned());
+                }
+                let should_hydrate = reply.get("kind").and_then(Value::as_str) == Some("unchanged")
+                    || has_wait_conditions
+                    || has_match_text;
+                if should_hydrate {
+                    hydrate_mcp_cached_observation(&mut reply, sync_scope_meta.as_ref());
+                }
                 if let Some(needles) = args.match_text.filter(|v| !v.is_empty()) {
-                    if reply.pointer("/observation/text").is_none()
-                        && let Some(meta) = sync_scope_meta.as_ref()
-                        && meta.cache_reusable
-                        && let Some(cached_vom) = meta.cached_vom.as_deref()
-                    {
-                        if !reply.get("observation").is_some_and(Value::is_object) {
-                            reply["observation"] = json!({});
-                        }
-                        reply["observation"]["text"] = Value::String(cached_vom.to_string());
-                        reply["observation"]["truncated"] = Value::Bool(meta.cached_vom_truncated);
-                        if let Some(cursor) = meta.cached_vom_next_cursor.as_deref() {
-                            reply["observation"]["next_cursor"] = Value::String(cursor.to_string());
-                        }
-                    }
                     cooperate::presentation::filter(
                         &mut reply,
                         &needles,
@@ -2725,13 +2729,52 @@ fn plan_prepare(
     Ok((prepared, ctx))
 }
 
+fn hydrate_mcp_cached_observation(
+    reply: &mut Value,
+    scope_meta: Option<&crate::ipc_client::ScopeResultMeta>,
+) {
+    if reply.pointer("/observation/text").is_none()
+        && let Some(meta) = scope_meta
+        && meta.cache_reusable
+        && let Some(cached_vom) = meta.cached_vom.as_deref()
+    {
+        if !reply.get("observation").is_some_and(Value::is_object) {
+            reply["observation"] = json!({});
+        }
+        reply["observation"]["text"] = Value::String(cached_vom.to_string());
+        reply["observation"]["truncated"] = Value::Bool(meta.cached_vom_truncated);
+        if let Some(cursor) = meta.cached_vom_next_cursor.as_deref() {
+            reply["observation"]["next_cursor"] = Value::String(cursor.to_string());
+        }
+        if reply.pointer("/observation/url").is_none()
+            && let Some(url) = meta.cached_url.as_deref().filter(|s| !s.is_empty())
+        {
+            reply["observation"]["url"] = Value::String(url.to_string());
+        }
+        if reply.pointer("/observation/title").is_none()
+            && let Some(title) = meta.cached_title.as_deref().filter(|s| !s.is_empty())
+        {
+            reply["observation"]["title"] = Value::String(title.to_string());
+        }
+    }
+}
+
 async fn run_plan(
     link: &Link,
     prepared: plan::Plan,
     ctx: ClientContext,
 ) -> Result<Reply, CliError> {
     let (value, exit) = link
-        .blocking(move |rpc| plan::run(&prepared, |m, p, t| rpc(&ctx, m, p, t)))
+        .blocking_envelope(move |rpc| {
+            plan::run_with_meta(&prepared, |m, p, t, want_meta| {
+                let meta = crate::ipc_client::IpcRequestMeta {
+                    return_scope_meta: want_meta,
+                    ..Default::default()
+                };
+                let (val, resp_meta) = rpc(&ctx, m, p, meta, t)?;
+                Ok((val, resp_meta.scope_meta))
+            })
+        })
         .await?;
     Ok(Reply {
         is_error: exit != 0,

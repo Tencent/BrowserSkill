@@ -105,11 +105,22 @@ jobs:
       - name: Run Windows unit tests
         run: >-
           cargo test -p bsk --lib --locked --
-          daemon::ipc::windows::tests
+          daemon::ipc::
+          daemon::paths::tests
           daemon::start::windows::tests
           daemon::audit::tests
+          daemon::scopes::tests
+          daemon::intent_wal::tests
+          daemon::dialog_operations::tests
+          daemon::run_log::tests
+          daemon::sessions::
+          daemon::queue::
+          ipc_client::tests
+          cli::lifecycle::tests
+          cli::observation_view::tests
           cli::plan::
           cli::recipe::
+          cli::mcp::tools::tests
           daemon::remote::authorization::tests
           daemon::lockfile::tests
           skill_install
@@ -125,6 +136,15 @@ jobs:
           remote_server::
           skill_install_legacy::
           auto_update_policy::
+          ipc_client::
+          dialog_control::
+          per_session_queue::
+          plan_cli::
+          target_control_cli::
+          wave2_ssot_mcp_e2e::
+          wave2_zero_ceremony_lifecycle::
+          wave3a_lifecycle_envelope_and_cache::
+          wave3c_liveness_wal_and_cache::
 
       - name: Verify background startup refusal inside the runner Job
         run: cargo test -p bsk --test windows_daemon_start --locked restrictive_job_refuses_explicit_and_automatic_start_without_a_daemon -- --exact

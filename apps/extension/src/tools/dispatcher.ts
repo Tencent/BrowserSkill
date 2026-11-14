@@ -401,6 +401,7 @@ export class ToolDispatcher {
     let body: ResponseFrame;
     let startedSession: string | null = null;
     let debugTicket: DebugTicket | undefined;
+    let invoked = false;
     try {
       if (startsSession && this.idleOperationInProgress) {
         throw new Error("Browser settings are updating; retry session start.");
@@ -475,6 +476,7 @@ export class ToolDispatcher {
           /* Evidence must not block the operation. */
         }
         throwIfDispatchAborted(ac.signal);
+        invoked = true;
         let result = policy.opensTabs
           ? await withTaskPopups(
               this.sessions,
@@ -495,7 +497,26 @@ export class ToolDispatcher {
         this.debug?.after(debugTicket, isRpcError(result) ? result.message : undefined);
         debugTicket = undefined;
         if (isRpcError(result)) {
-          body = { id: req.id, error: classifyCdpError(result) };
+          const classified = classifyCdpError(result);
+          const rawParams = req.params as { tab_id?: unknown; context_id?: unknown } | undefined;
+          const explicitTabId = rawParams?.tab_id;
+          const contextId =
+            typeof rawParams?.context_id === "string" ? rawParams.context_id : undefined;
+          const resolvedTabId =
+            typeof explicitTabId === "number"
+              ? explicitTabId
+              : requestSessionId && contextId
+                ? this.cooperation?.contextTabId(requestSessionId, contextId)
+                : undefined;
+          body = {
+            id: req.id,
+            error:
+              typeof resolvedTabId === "number" &&
+              classified.data?.tab_id === undefined &&
+              classified.data?.effect_state !== "none"
+                ? { ...classified, data: { ...classified.data, tab_id: resolvedTabId } }
+                : classified,
+          };
         } else {
           body = { id: req.id, result };
           if (startsSession) {
@@ -507,7 +528,18 @@ export class ToolDispatcher {
       if (isAbortLikeError(err)) {
         body = {
           id: req.id,
-          error: { code: "cancelled", message: "rpc aborted by daemon cancel" },
+          error: invoked
+            ? { code: "cancelled", message: "rpc aborted by daemon cancel" }
+            : {
+                code: "cancelled",
+                message: "rpc aborted before dispatch",
+                data: {
+                  reason: "cancelled_before_dispatch",
+                  dispatched: false,
+                  effect_state: "none",
+                  phase: "precondition",
+                },
+              },
         };
       } else {
         body = {

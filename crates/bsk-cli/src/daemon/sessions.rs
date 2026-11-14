@@ -102,12 +102,46 @@ pub struct SessionEnd {
 struct SessionActivity {
     last_seen: Instant,
     idle_protected: bool,
+    active_leases: usize,
 }
 impl Default for SessionActivity {
     fn default() -> Self {
         Self {
             last_seen: Instant::now(),
             idle_protected: false,
+            active_leases: 0,
+        }
+    }
+}
+
+/// RAII lease keeping a session marked active across in-flight unlocked/await
+/// RPCs so the idle reaper never tears down a session mid-call, while refreshing
+/// `last_seen` on both start and completion without holding the serial tool queue.
+pub struct SessionActivityGuard {
+    sessions: Arc<SessionRegistry>,
+    id: SessionId,
+}
+
+impl Drop for SessionActivityGuard {
+    fn drop(&mut self) {
+        let live = self
+            .sessions
+            .inner
+            .lock()
+            .expect("session registry poisoned")
+            .contains_key(&self.id);
+        if !live {
+            return;
+        }
+        if let Some(entry) = self
+            .sessions
+            .last_activity
+            .lock()
+            .expect("session activity registry poisoned")
+            .get_mut(&self.id)
+        {
+            entry.active_leases = entry.active_leases.saturating_sub(1);
+            entry.last_seen = Instant::now();
         }
     }
 }
@@ -411,6 +445,29 @@ impl SessionRegistry {
         true
     }
 
+    /// Hold an in-flight activity lease for `id` across unlocked tool calls,
+    /// `operation await`, or `debug wait`, refreshing `last_seen` at both
+    /// entry and exit while preventing idle reaping mid-call.
+    pub fn begin_activity(self: &Arc<Self>, id: &SessionId) -> Option<SessionActivityGuard> {
+        {
+            let sessions = self.inner.lock().expect("session registry poisoned");
+            if !sessions.contains_key(id) {
+                return None;
+            }
+            let mut activity = self
+                .last_activity
+                .lock()
+                .expect("session activity registry poisoned");
+            let entry = activity.entry(id.clone()).or_default();
+            entry.active_leases = entry.active_leases.saturating_add(1);
+            entry.last_seen = Instant::now();
+        }
+        Some(SessionActivityGuard {
+            sessions: Arc::clone(self),
+            id: id.clone(),
+        })
+    }
+
     /// Only the owning browser can retain a session while a shared page is live.
     /// Ending collaboration starts a fresh idle interval; normal teardown still applies.
     pub fn update_activity(&self, id: &SessionId, browser: &BrowserId, idle_protected: bool) {
@@ -442,6 +499,7 @@ impl SessionRegistry {
                 !starting.contains(&session.id)
                     && activity.get(&session.id).is_some_and(|last| {
                         !last.idle_protected
+                            && last.active_leases == 0
                             && now.saturating_duration_since(last.last_seen) >= idle_for
                     })
             })

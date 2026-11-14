@@ -71,13 +71,20 @@ struct KnownRef {
 }
 
 #[derive(Debug, Default)]
-struct SessionLog {
-    log: RunLog,
+struct TabLogState {
     known: HashMap<String, KnownRef>,
     current: HashSet<String>,
     masked: HashSet<String>,
     heading: Option<String>,
     context: Option<String>,
+}
+
+#[derive(Debug, Default)]
+struct SessionLog {
+    log: RunLog,
+    active_tab: Option<i64>,
+    tabs: HashMap<Option<i64>, TabLogState>,
+    step_tabs: Vec<Option<i64>>,
     pending_ops: HashMap<String, usize>,
     resolved_ops: VecDeque<String>,
 }
@@ -97,21 +104,65 @@ fn method_name(method: &Method) -> String {
 }
 
 impl SessionLog {
-    fn observe(&mut self, text: &str, context: Option<&str>, partial: bool) {
-        // A new context means a new document: same-numbered refs are new elements.
-        if context.is_some() && context != self.context.as_deref() {
-            if self.context.is_some() {
-                self.known.clear();
-                self.current.clear();
-            }
-            self.context = context.map(str::to_owned);
+    fn resolve_observe_tab(&mut self, params: &Value, result: &Value) -> Option<i64> {
+        let tid = result["tab_id"]
+            .as_i64()
+            .or_else(|| params["tab_id"].as_i64())
+            .or(self.active_tab);
+        if tid.is_some() {
+            self.active_tab = tid;
         }
+        tid
+    }
+
+    fn resolve_action_tab(&self, params: &Value, result: &Value) -> Option<i64> {
+        if let Some(tid) = params["tab_id"].as_i64() {
+            if self.tabs.contains_key(&Some(tid)) || !self.tabs.contains_key(&None) {
+                return Some(tid);
+            }
+            return None;
+        }
+        if let Some(ctx) = params["context_id"].as_str().filter(|s| !s.is_empty())
+            && let Some((&tid, _)) = self
+                .tabs
+                .iter()
+                .find(|(_, state)| state.context.as_deref() == Some(ctx))
+        {
+            return tid;
+        }
+        if let Some(tid) = result["tab_id"].as_i64()
+            && self.tabs.contains_key(&Some(tid))
+        {
+            return Some(tid);
+        }
+        self.active_tab
+    }
+
+    fn observe(
+        &mut self,
+        tab_key: Option<i64>,
+        text: &str,
+        context: Option<&str>,
+        partial: bool,
+        incremental: bool,
+    ) {
         let page = vom::parse(text);
         self.log.observations += 1;
         let seen = self.log.observations;
+        let tab = self.tabs.entry(tab_key).or_default();
+        // A new context on a full capture means a new document: same-numbered refs
+        // are new elements. Incremental text deltas on the same document keep
+        // prior `first_seen` stamps even when strict policy rotates `context_id`.
+        if context.is_some() && context != tab.context.as_deref() {
+            if tab.context.is_some() && !incremental {
+                tab.known.clear();
+                tab.current.clear();
+            }
+            tab.context = context.map(str::to_owned);
+        }
         if !partial {
-            self.current.clear();
-            self.heading = page
+            tab.current.clear();
+            tab.heading = page
                 .lines
                 .iter()
                 .find(|line| line.role.eq_ignore_ascii_case("heading"))
@@ -122,16 +173,16 @@ impl SessionLog {
                 continue;
             };
             if line.value.as_deref() == Some(vom::SENSITIVE_MASK) {
-                self.masked.insert(element.clone());
+                tab.masked.insert(element.clone());
             }
             let name = bounded(line.name);
             let ctx = bounded(line.ctx);
-            let first_seen = match self.known.get(&element) {
+            let first_seen = match tab.known.get(&element) {
                 Some(known) if known.role == line.role && known.name == name => known.first_seen,
                 _ => seen,
             };
-            self.current.insert(element.clone());
-            self.known.insert(
+            tab.current.insert(element.clone());
+            tab.known.insert(
                 element,
                 KnownRef {
                     role: line.role,
@@ -141,34 +192,47 @@ impl SessionLog {
                 },
             );
         }
-        if self.known.len() > MAX_REFS {
-            let current = &self.current;
-            self.known.retain(|element, _| current.contains(element));
+        if tab.known.len() > MAX_REFS {
+            let current = &tab.current;
+            tab.known.retain(|element, _| current.contains(element));
+        }
+        let total_known: usize = self.tabs.values().map(|t| t.known.len()).sum();
+        if total_known > MAX_REFS {
+            for (&k, other) in &mut self.tabs {
+                if k != tab_key {
+                    other.known.clear();
+                    other.current.clear();
+                }
+            }
         }
     }
 
-    fn push(&mut self, step: LoggedStep) {
+    fn push(&mut self, step: LoggedStep, tab_key: Option<i64>) {
         if self.log.steps.len() >= MAX_STEPS {
             self.log.truncated = true;
         } else {
             self.log.steps.push(step);
+            self.step_tabs.push(tab_key);
         }
     }
 
     fn skip(&mut self, method: &Method, reason: &str) {
-        self.push(LoggedStep::Skipped {
-            method: method_name(method),
-            reason: reason.to_owned(),
-        });
+        self.push(
+            LoggedStep::Skipped {
+                method: method_name(method),
+                reason: reason.to_owned(),
+            },
+            None,
+        );
     }
 
     /// The fewest fields that identify the element in the page it was used on.
-    fn minimal_target(&self, known: &KnownRef) -> Option<Target> {
+    fn minimal_target(tab: &TabLogState, known: &KnownRef) -> Option<Target> {
         let name = known.name.clone()?;
-        let matching: Vec<&KnownRef> = self
+        let matching: Vec<&KnownRef> = tab
             .current
             .iter()
-            .filter_map(|element| self.known.get(element))
+            .filter_map(|element| tab.known.get(element))
             .filter(|other| other.role == known.role && other.name.as_ref() == Some(&name))
             .collect();
         if matching.len() <= 1 {
@@ -190,7 +254,7 @@ impl SessionLog {
         })
     }
 
-    fn action(&mut self, method: &Method, action: &str, params: &Value) {
+    fn action(&mut self, method: &Method, action: &str, params: &Value, result: &Value) {
         let Some(element) = params["ref"].as_str() else {
             let reason = if params.get("selector").is_some() {
                 "css_selector"
@@ -200,14 +264,21 @@ impl SessionLog {
             return self.skip(method, reason);
         };
         let element = element.trim_start_matches('@').to_owned();
-        let Some(known) = self.known.get(&element).cloned() else {
-            return self.skip(method, "unknown_ref");
-        };
-        if known.name.is_none() {
-            return self.skip(method, "unnamed");
-        }
-        let Some(target) = self.minimal_target(&known) else {
-            return self.skip(method, "ambiguous");
+        let tab_key = self.resolve_action_tab(params, result);
+        let (known, target, heading) = {
+            let Some(tab) = self.tabs.get(&tab_key) else {
+                return self.skip(method, "unknown_ref");
+            };
+            let Some(known) = tab.known.get(&element).cloned() else {
+                return self.skip(method, "unknown_ref");
+            };
+            if known.name.is_none() {
+                return self.skip(method, "unnamed");
+            };
+            let Some(target) = Self::minimal_target(tab, &known) else {
+                return self.skip(method, "ambiguous");
+            };
+            (known, target, tab.heading.clone())
         };
         let key = params["key"].as_str().map(str::to_owned);
         let modifiers = params.get("modifiers").cloned();
@@ -226,57 +297,124 @@ impl SessionLog {
             values: params["values"].as_array().map(Vec::len),
             key,
             modifiers,
-            heading: self.heading.clone(),
+            heading,
             sensitive: false,
         };
-        self.push(step);
+        self.push(step, tab_key);
     }
 
-    fn navigated(&mut self, params: &Value) {
+    fn navigated(&mut self, params: &Value, result: &Value) {
         let url = params["url"]
             .as_str()
             .and_then(|url| reqwest::Url::parse(url).ok());
-        self.push(LoggedStep::Navigate {
-            origin: url
-                .as_ref()
-                .map(|url| url.origin().ascii_serialization())
-                .filter(|origin| origin.starts_with("http")),
-            path: url.as_ref().map(|url| url.path().to_owned()),
-            dropped_query: url.as_ref().is_some_and(|url| url.query().is_some()),
-        });
-        self.current.clear();
-        self.known.clear();
+        let tab_key = self.resolve_observe_tab(params, result);
+        self.push(
+            LoggedStep::Navigate {
+                origin: url
+                    .as_ref()
+                    .map(|url| url.origin().ascii_serialization())
+                    .filter(|origin| origin.starts_with("http")),
+                path: url.as_ref().map(|url| url.path().to_owned()),
+                dropped_query: url.as_ref().is_some_and(|url| url.query().is_some()),
+            },
+            tab_key,
+        );
+        if let Some(tab) = self.tabs.get_mut(&tab_key) {
+            tab.current.clear();
+            tab.known.clear();
+        }
     }
 
     fn finished_ok(&mut self, method: &Method, params: &Value, result: &Value) {
         use bsk_protocol::RecipeStepKind;
+        match method {
+            Method::ToolTabCreate => {
+                if let Some(tid) = result["tab_id"].as_i64()
+                    && (params["active"].as_bool().unwrap_or(true) || self.active_tab.is_none())
+                {
+                    self.active_tab = Some(tid);
+                }
+            }
+            Method::ToolTabSelect => {
+                if let Some(tid) = result["tab_id"]
+                    .as_i64()
+                    .or_else(|| params["tab_id"].as_i64())
+                {
+                    self.active_tab = Some(tid);
+                }
+            }
+            Method::ToolTabClose => {
+                if let Some(tid) = result["tab_id"]
+                    .as_i64()
+                    .or_else(|| params["tab_id"].as_i64())
+                {
+                    if let Some(tab) = self.tabs.get_mut(&Some(tid)) {
+                        tab.known.clear();
+                        tab.current.clear();
+                    }
+                    if self.active_tab == Some(tid) {
+                        self.active_tab = None;
+                    }
+                }
+            }
+            _ => {}
+        }
         match method.spec().recipe_step {
             RecipeStepKind::Ignore => {}
             RecipeStepKind::Cooperate => {
+                let tab_key = self.resolve_observe_tab(params, result);
                 if let Some(text) = result.pointer("/observation/text").and_then(Value::as_str) {
-                    self.observe(text, result["context_id"].as_str(), false);
+                    let incremental =
+                        matches!(result["kind"].as_str(), Some("delta" | "unchanged"));
+                    self.observe(
+                        tab_key,
+                        text,
+                        result["context_id"].as_str(),
+                        false,
+                        incremental,
+                    );
+                } else if result["kind"].as_str() == Some("unchanged")
+                    && let Some(ctx) = result["context_id"].as_str()
+                {
+                    self.tabs.entry(tab_key).or_default().context = Some(ctx.to_owned());
                 }
             }
             RecipeStepKind::Observe => {
                 if let Some(text) = result["text"].as_str() {
-                    self.observe(text, None, params.get("cursor").is_some());
+                    let tab_key = self.resolve_observe_tab(params, result);
+                    self.observe(tab_key, text, None, params.get("cursor").is_some(), false);
                 }
             }
-            RecipeStepKind::Extract { action } => self.action(method, action, params),
-            RecipeStepKind::Navigate => self.navigated(params),
+            RecipeStepKind::Extract { action } => self.action(method, action, params, result),
+            RecipeStepKind::Navigate => self.navigated(params, result),
             RecipeStepKind::WaitElement => {
                 if result["satisfied"] == true {
-                    self.push(LoggedStep::Wait);
+                    self.push(LoggedStep::Wait, None);
                 }
             }
             RecipeStepKind::TabBorrow => {
-                if let Some(tab) = params["tab_id"].as_i64() {
+                if let Some(tab) = result["tab_id"]
+                    .as_i64()
+                    .or_else(|| params["tab_id"].as_i64())
+                {
+                    self.active_tab = Some(tab);
                     self.log.borrowed_tabs.push(tab);
                 }
             }
             RecipeStepKind::TabReturn => {
-                let tab = params["tab_id"].as_i64();
+                let tab = result["tab_id"]
+                    .as_i64()
+                    .or_else(|| params["tab_id"].as_i64());
                 self.log.borrowed_tabs.retain(|other| Some(*other) != tab);
+                if let Some(tid) = tab {
+                    if let Some(state) = self.tabs.get_mut(&Some(tid)) {
+                        state.known.clear();
+                        state.current.clear();
+                    }
+                    if self.active_tab == Some(tid) {
+                        self.active_tab = None;
+                    }
+                }
             }
             RecipeStepKind::Skip { reason } => self.skip(method, reason),
         }
@@ -287,6 +425,14 @@ impl SessionLog {
         if !method.is_mutating() && !matches!(method, Method::ToolHover) {
             return;
         }
+        if error
+            .data
+            .as_ref()
+            .and_then(|data| data["dispatched"].as_bool())
+            == Some(false)
+        {
+            return;
+        }
         let reason = error.data.as_ref().and_then(|data| data["reason"].as_str());
         let effect = error
             .data
@@ -294,17 +440,40 @@ impl SessionLog {
             .and_then(|data| data["effect_state"].as_str());
         let possible = match effect {
             Some(effect) => effect != "none",
-            // Without a stated effect, only a timeout or a suspended action may have run.
             None => {
                 reason == Some(bsk_protocol::RpcErrorReason::DialogPending.as_str())
-                    || (error.code == ErrorCode::Timeout
-                        && reason != Some(bsk_protocol::RpcErrorReason::SessionBusy.as_str()))
+                    || matches!(
+                        reason,
+                        Some(
+                            "input_outcome_unknown"
+                                | "transfer_outcome_unknown"
+                                | "transfer_timeout"
+                                | "cancel_cleanup_timeout"
+                                | "borrow_outcome_unknown"
+                        )
+                    )
+                    || (matches!(
+                        error.code,
+                        ErrorCode::Timeout
+                            | ErrorCode::Cancelled
+                            | ErrorCode::UserAborted
+                            | ErrorCode::NoBrowserConnected
+                            | ErrorCode::ProtocolError
+                    ) && !matches!(
+                        reason,
+                        Some(r)
+                            if r == bsk_protocol::RpcErrorReason::SessionBusy.as_str()
+                                || r == bsk_protocol::RpcErrorReason::CancelledBeforeDispatch.as_str()
+                    ))
             }
         };
         if possible {
-            self.push(LoggedStep::Uncertain {
-                method: method_name(method),
-            });
+            self.push(
+                LoggedStep::Uncertain {
+                    method: method_name(method),
+                },
+                None,
+            );
         }
     }
 
@@ -325,6 +494,7 @@ impl SessionLog {
         self.log.steps.push(LoggedStep::Uncertain {
             method: method_name(method),
         });
+        self.step_tabs.push(None);
         self.pending_ops.insert(operation_id.to_owned(), idx);
     }
 
@@ -352,24 +522,28 @@ impl SessionLog {
         };
 
         let saved_steps = std::mem::take(&mut self.log.steps);
+        let saved_tabs = std::mem::take(&mut self.step_tabs);
         let saved_truncated = self.log.truncated;
         self.log.truncated = false;
         match body {
             ResponseBody::Ok(result) => self.finished_ok(method, params, result),
             ResponseBody::Err(error) => self.finished_err(method, error),
         }
-        let produced = std::mem::replace(&mut self.log.steps, saved_steps);
+        let produced_steps = std::mem::replace(&mut self.log.steps, saved_steps);
+        let produced_tabs = std::mem::replace(&mut self.step_tabs, saved_tabs);
         self.log.truncated = saved_truncated;
 
         if pending_idx < self.log.steps.len() {
-            let mut iter = produced.into_iter();
-            if let Some(first) = iter.next() {
-                self.log.steps[pending_idx] = first;
-                for extra in iter {
-                    self.push(extra);
+            let mut iter = produced_steps.into_iter().zip(produced_tabs);
+            if let Some((first_step, first_tab)) = iter.next() {
+                self.log.steps[pending_idx] = first_step;
+                self.step_tabs[pending_idx] = first_tab;
+                for (extra_step, extra_tab) in iter {
+                    self.push(extra_step, extra_tab);
                 }
             } else {
                 self.log.steps.remove(pending_idx);
+                self.step_tabs.remove(pending_idx);
                 for idx in self.pending_ops.values_mut() {
                     if *idx > pending_idx {
                         *idx -= 1;
@@ -377,8 +551,8 @@ impl SessionLog {
                 }
             }
         } else {
-            for step in produced {
-                self.push(step);
+            for (step, tab_key) in produced_steps.into_iter().zip(produced_tabs) {
+                self.push(step, tab_key);
             }
         }
     }
@@ -463,12 +637,16 @@ impl RunLogs {
             return RunLog::default();
         };
         let mut log = entry.log.clone();
-        for step in &mut log.steps {
+        for (idx, step) in log.steps.iter_mut().enumerate() {
             if let LoggedStep::Action {
                 element, sensitive, ..
             } = step
             {
-                *sensitive = entry.masked.contains(element);
+                let tab_key = entry.step_tabs.get(idx).copied().unwrap_or(None);
+                *sensitive = entry
+                    .tabs
+                    .get(&tab_key)
+                    .is_some_and(|tab| tab.masked.contains(element));
             }
         }
         log

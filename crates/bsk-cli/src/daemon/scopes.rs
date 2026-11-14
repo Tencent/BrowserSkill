@@ -158,8 +158,8 @@ struct SessionContextSlot {
     has_tab_history: bool,
     ctx_seq: u64,
     obs_seq: u64,
-    short_ctx_ring: VecDeque<(String, String)>,
-    short_obs_ring: VecDeque<(String, String)>,
+    short_ctx_ring: VecDeque<(String, String, Option<i64>)>,
+    short_obs_ring: VecDeque<(String, String, Option<i64>)>,
     latest_ctx_id: Option<String>,
     latest_short_ctx: Option<String>,
     latest_obs_id: Option<String>,
@@ -513,8 +513,14 @@ impl ImplicitScopeRegistry {
         slot.short_ctx_ring
             .iter()
             .rev()
-            .find(|(alias, _)| alias == token)
-            .map(|(_, uuid)| uuid.clone())
+            .find(|(alias, _, _)| alias == token)
+            .map(|(_, uuid, _)| uuid.clone())
+            .or_else(|| {
+                slot.tabs
+                    .values()
+                    .find(|t| t.latest_short_ctx.as_deref() == Some(token))
+                    .and_then(|t| t.latest_ctx_id.clone())
+            })
     }
 
     /// Expand a short observation alias (`o1..oN`) to its 36-char UUID if registered.
@@ -527,8 +533,42 @@ impl ImplicitScopeRegistry {
         slot.short_obs_ring
             .iter()
             .rev()
-            .find(|(alias, _)| alias == token)
-            .map(|(_, uuid)| uuid.clone())
+            .find(|(alias, _, _)| alias == token)
+            .map(|(_, uuid, _)| uuid.clone())
+            .or_else(|| {
+                slot.tabs
+                    .values()
+                    .find(|t| t.latest_short_obs.as_deref() == Some(token))
+                    .and_then(|t| t.latest_obs_id.clone())
+            })
+    }
+
+    /// Resolve the owning `tab_id` for a `context_id` UUID or `cN` short alias when known.
+    pub fn tab_id_for_context(&self, session_id: &SessionId, ctx_or_alias: &str) -> Option<i64> {
+        let token = ctx_or_alias.trim();
+        if token.is_empty() {
+            return None;
+        }
+        let guard = self.inner.lock().expect("implicit scope registry poisoned");
+        let slot = guard.sessions.get(session_id)?;
+        if let Some(active_tid) = slot.active_tab_id
+            && let Some(active_tab) = slot.tabs.get(&active_tid)
+            && (active_tab.latest_ctx_id.as_deref() == Some(token)
+                || active_tab.latest_short_ctx.as_deref() == Some(token))
+        {
+            return Some(active_tid);
+        }
+        if let Some((&tid, _)) = slot.tabs.iter().find(|(_, tab)| {
+            tab.latest_ctx_id.as_deref() == Some(token)
+                || tab.latest_short_ctx.as_deref() == Some(token)
+        }) {
+            return Some(tid);
+        }
+        slot.short_ctx_ring
+            .iter()
+            .rev()
+            .find(|(alias, uuid, _)| alias == token || uuid == token)
+            .and_then(|(_, _, tid)| *tid)
     }
 
     /// Return the session's currently tracked active `tab_id` when known.
@@ -706,12 +746,24 @@ impl ImplicitScopeRegistry {
         let patchable_delta =
             is_delta_kind && history_ok && has_explicit_predecessor && predecessor_ok && budget_ok;
 
+        let pinned_ctx: Vec<(String, String)> = slot
+            .tabs
+            .values()
+            .filter_map(|t| Some((t.latest_short_ctx.clone()?, t.latest_ctx_id.clone()?)))
+            .collect();
         let minted_ctx = if let Some(ctx_id) = result
             .get("context_id")
             .and_then(Value::as_str)
             .filter(|s| !s.is_empty())
         {
-            let short = intern_alias(&mut slot.short_ctx_ring, &mut slot.ctx_seq, 'c', ctx_id);
+            let short = intern_alias(
+                &mut slot.short_ctx_ring,
+                &mut slot.ctx_seq,
+                'c',
+                ctx_id,
+                effective_tab_id,
+                &pinned_ctx,
+            );
             slot.latest_ctx_id = Some(ctx_id.to_string());
             slot.latest_short_ctx = Some(short.clone());
             Some((short, ctx_id.to_string()))
@@ -719,12 +771,24 @@ impl ImplicitScopeRegistry {
             None
         };
 
+        let pinned_obs: Vec<(String, String)> = slot
+            .tabs
+            .values()
+            .filter_map(|t| Some((t.latest_short_obs.clone()?, t.latest_obs_id.clone()?)))
+            .collect();
         let minted_obs = if let Some(obs_id) = result
             .get("observation_id")
             .and_then(Value::as_str)
             .filter(|s| !s.is_empty())
         {
-            let short = intern_alias(&mut slot.short_obs_ring, &mut slot.obs_seq, 'o', obs_id);
+            let short = intern_alias(
+                &mut slot.short_obs_ring,
+                &mut slot.obs_seq,
+                'o',
+                obs_id,
+                effective_tab_id,
+                &pinned_obs,
+            );
             slot.latest_obs_id = Some(obs_id.to_string());
             slot.latest_short_obs = Some(short.clone());
             Some((short, obs_id.to_string()))
@@ -863,25 +927,40 @@ impl ImplicitScopeRegistry {
 }
 
 fn intern_alias(
-    ring: &mut VecDeque<(String, String)>,
+    ring: &mut VecDeque<(String, String, Option<i64>)>,
     seq: &mut u64,
     prefix: char,
     uuid: &str,
+    tab_id: Option<i64>,
+    pinned: &[(String, String)],
 ) -> String {
-    if let Some(pos) = ring.iter().position(|(_, existing)| existing == uuid) {
-        let (alias, owned_uuid) = ring.remove(pos).expect("ring position verified");
-        ring.push_back((alias.clone(), owned_uuid));
+    if let Some(pos) = ring.iter().position(|(_, existing, _)| existing == uuid) {
+        let (alias, owned_uuid, prev_tid) = ring.remove(pos).expect("ring position verified");
+        ring.push_back((alias.clone(), owned_uuid, tab_id.or(prev_tid)));
+        return alias;
+    }
+    if let Some((pinned_alias, _)) = pinned.iter().find(|(_, existing)| existing == uuid) {
+        let alias = pinned_alias.clone();
+        push_ring(ring, (alias.clone(), uuid.to_string(), tab_id), pinned);
         return alias;
     }
     *seq += 1;
     let alias = format!("{prefix}{}", *seq);
-    push_ring(ring, (alias.clone(), uuid.to_string()));
+    push_ring(ring, (alias.clone(), uuid.to_string(), tab_id), pinned);
     alias
 }
 
-fn push_ring(ring: &mut VecDeque<(String, String)>, entry: (String, String)) {
+fn push_ring(
+    ring: &mut VecDeque<(String, String, Option<i64>)>,
+    entry: (String, String, Option<i64>),
+    pinned: &[(String, String)],
+) {
     if ring.len() >= SHORT_ALIAS_CAP {
-        ring.pop_front();
+        let evict_idx = ring
+            .iter()
+            .position(|(alias, _, _)| !pinned.iter().any(|(pa, _)| pa == alias))
+            .unwrap_or(0);
+        ring.remove(evict_idx);
     }
     ring.push_back(entry);
 }
