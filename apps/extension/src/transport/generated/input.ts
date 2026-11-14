@@ -4073,6 +4073,13 @@ export interface StatusResult {
    * Semver of the daemon binary (`env!("CARGO_PKG_VERSION")`).
    */
   daemon_version: string;
+  /**
+   * True when the daemon's local IPC listener supports the out-of-band
+   * `IpcEnvelope` (`meta` header) in addition to legacy `"2.0"` `_`-prefixed
+   * scope fields. Omitted when false so pre-envelope `"2.0"` daemons
+   * deserialize as `false` without bumping `PROTOCOL_VERSION`.
+   */
+  ipc_envelope?: boolean;
   local_auth?: LocalAuthStatus;
   /**
    * Daemon process id.

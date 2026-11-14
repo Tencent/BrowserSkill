@@ -15,7 +15,9 @@ use bsk_protocol::{ErrorCode, ResponseBody, RpcError};
 use serde_json::{Value, json};
 use tokio::sync::{Mutex as AsyncMutex, watch};
 
-use super::sessions::{Session, SessionId, stop_session};
+use crate::ipc_client::IpcRequestMeta;
+
+use super::sessions::{Session, SessionId};
 use super::state::DaemonState;
 
 const MAX_ADMISSION_MS: u64 = 10 * 60 * 1000;
@@ -133,10 +135,31 @@ fn same_session(state: &DaemonState, session: &Session) -> bool {
     })
 }
 
+impl SessionRequests {
+    /// Reconcile any tracked start request whose session was torn down.
+    /// Returns the synthetic RPC IDs of matching entries so `abort_registry`
+    /// can drop/cancel any stale registration.
+    pub(super) fn on_session_ended(&self, session_id: &SessionId) -> Vec<String> {
+        let mut rpc_ids = Vec::new();
+        let requests = self.0.lock().unwrap();
+        for entry in requests.values() {
+            let mut data = entry.data.lock().unwrap();
+            if data.result.is_some() && data.session.as_ref().is_some_and(|s| &s.id == session_id) {
+                data.session = None;
+                data.closed = true;
+                data.cleanup_error = None;
+                rpc_ids.push(entry.rpc_id());
+            }
+        }
+        rpc_ids
+    }
+}
+
 pub(super) async fn start(
     state: &Arc<DaemonState>,
     rpc_id: String,
     mut params: Value,
+    req_meta: &IpcRequestMeta,
 ) -> ResponseBody {
     let Some(id) = params
         .get("request_id")
@@ -183,13 +206,22 @@ pub(super) async fn start(
     if fresh {
         let state = state.clone();
         let entry = entry.clone();
+        let req_meta = req_meta.clone();
         // Owned by the daemon, not the IPC reader or a plugin process.
         tokio::spawn(async move {
             let cancelled = entry.data.lock().unwrap().cancelled;
             let result = if cancelled {
                 error(ErrorCode::Cancelled, "start request cancelled")
             } else {
-                match super::ipc::handle_session_start(&state, entry.rpc_id(), params, true).await {
+                match super::ipc::handle_session_start_scoped(
+                    &state,
+                    entry.rpc_id(),
+                    params,
+                    true,
+                    &req_meta,
+                )
+                .await
+                {
                     Ok(value) => ResponseBody::Ok(value),
                     Err(err) => ResponseBody::Err(err),
                 }
@@ -338,18 +370,16 @@ async fn cleanup(state: &Arc<DaemonState>, entry: &StartRequest) {
     let _serial = entry.cleanup.lock().await;
     let session = entry.data.lock().unwrap().session.clone();
     let result = match session {
-        Some(session) if same_session(state, &session) => stop_session(
-            &state.browsers,
-            &state.sessions,
-            &state.tool_queues,
-            &state.session_interrupts,
-            &session.id,
-            Duration::from_secs(10),
-            None,
-        )
-        .await
-        .map(|_| state.transfers.release_session(&session.id.0))
-        .map_err(|err| err.to_string()),
+        Some(session) if same_session(state, &session) => state
+            .stop_session_with_reason(
+                &session.id,
+                bsk_protocol::RpcErrorReason::SessionStopped.as_str(),
+                Duration::from_secs(10),
+                None,
+            )
+            .await
+            .map(|_| ())
+            .map_err(|err| err.to_string()),
         _ => Ok(()),
     };
     let mut data = entry.data.lock().unwrap();
@@ -429,7 +459,13 @@ mod tests {
             "closed"
         );
         assert!(matches!(
-            start(&state, "late".into(), json!({"request_id":id})).await,
+            start(
+                &state,
+                "late".into(),
+                json!({"request_id":id}),
+                &IpcRequestMeta::default(),
+            )
+            .await,
             ResponseBody::Err(RpcError {
                 code: ErrorCode::Cancelled,
                 ..
@@ -447,7 +483,13 @@ mod tests {
         );
         let new = state();
         assert!(matches!(
-            start(&new, "late".into(), json!({"request_id":id})).await,
+            start(
+                &new,
+                "late".into(),
+                json!({"request_id":id}),
+                &IpcRequestMeta::default(),
+            )
+            .await,
             ResponseBody::Err(RpcError {
                 code: ErrorCode::InvalidParams,
                 ..
@@ -474,7 +516,13 @@ mod tests {
         reap(&state);
         assert!(!state.session_requests.0.lock().unwrap().contains_key(&id));
         assert!(matches!(
-            start(&state, "late".into(), json!({"request_id":id})).await,
+            start(
+                &state,
+                "late".into(),
+                json!({"request_id":id}),
+                &IpcRequestMeta::default(),
+            )
+            .await,
             ResponseBody::Err(_)
         ));
     }
@@ -491,7 +539,13 @@ mod tests {
                 ResponseBody::Err(_)
             ));
             assert!(matches!(
-                start(&state, "bad".into(), json!({"request_id":id})).await,
+                start(
+                    &state,
+                    "bad".into(),
+                    json!({"request_id":id}),
+                    &IpcRequestMeta::default(),
+                )
+                .await,
                 ResponseBody::Err(_)
             ));
         }

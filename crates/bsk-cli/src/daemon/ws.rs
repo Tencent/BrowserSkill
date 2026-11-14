@@ -684,9 +684,8 @@ fn handle_session_window_closed(
     // Without this, any connected extension (or any same-machine process
     // that completed the WS handshake) could tear down another browser's
     // session by emitting window_closed with its session_id. A session
-    // that is already gone cannot be verified but is harmless to "forget"
-    // (forget_session is a no-op), so we only reject when a live owner
-    // disagrees.
+    // that is already gone cannot be verified and `teardown_session` is
+    // a safe no-op, so we only reject when a live owner disagrees.
     if let Some(session) = state.sessions.get(&session_id)
         && session.browser_id != *sender
     {
@@ -698,8 +697,7 @@ fn handle_session_window_closed(
         );
         return;
     }
-    if forget_browser_session(
-        state,
+    if state.teardown_session(
         &session_id,
         bsk_protocol::RpcErrorReason::SessionWindowClosed.as_str(),
     ) {
@@ -716,28 +714,6 @@ fn handle_session_window_closed(
             "borrowed tab could not be returned before Agent Window closed"
         );
     }
-}
-
-/// Logical termination is independent of whether the browser window stays open.
-fn forget_browser_session(
-    state: &Arc<DaemonState>,
-    session_id: &super::sessions::SessionId,
-    reason: &'static str,
-) -> bool {
-    let removed = super::sessions::forget_session(
-        &state.sessions,
-        &state.tool_queues,
-        &state.session_interrupts,
-        session_id,
-        Some(reason),
-    );
-    if removed {
-        state.transfers.release_session(&session_id.0);
-        state.dialog_operations.remove_session(&session_id.0);
-        state.scopes.on_session_ended(session_id, reason);
-        state.intent_wal.on_session_ended(session_id);
-    }
-    removed
 }
 
 fn handle_session_ended(state: &Arc<DaemonState>, sender: &BrowserId, payload: &serde_json::Value) {
@@ -769,31 +745,8 @@ fn handle_session_ended(state: &Arc<DaemonState>, sender: &BrowserId, payload: &
         return;
     }
 
-    // Record the terminal cause on queued and forwarded calls before dropping
-    // the queue. This is not the resumable, one-shot user-interrupt marker.
-    cancel_session_tools(state, &sid, super::inflight::CancelReason::UserMovedTab);
-    if forget_browser_session(
-        state,
-        &sid,
-        bsk_protocol::RpcErrorReason::UserMovedTab.as_str(),
-    ) {
+    if state.teardown_session(&sid, bsk_protocol::RpcErrorReason::UserMovedTab.as_str()) {
         info!(session = %sid, tab_id = ended.tab_id, "session ended: user moved a controlled tab");
-    }
-}
-
-fn cancel_session_tools(
-    state: &Arc<DaemonState>,
-    sid: &super::sessions::SessionId,
-    reason: super::inflight::CancelReason,
-) {
-    let snapshots = state.tool_inflight.cancel_session_with_reason(sid, reason);
-    for snap in snapshots {
-        if let (Some(browser_id), Some(ws_rpc_id)) = (snap.browser_id, snap.ws_rpc_id)
-            && let Err(err) =
-                super::cancel_forward::forward_cancel_to_browser(state, &browser_id, &ws_rpc_id)
-        {
-            warn!(%browser_id, %ws_rpc_id, %err, "failed to forward session cancellation to extension");
-        }
     }
 }
 

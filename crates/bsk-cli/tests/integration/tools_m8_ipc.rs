@@ -109,10 +109,7 @@ async fn do_handshake(ws: &mut Ws) -> HandshakeResult {
 }
 
 fn strip_envelope_params(params: &mut Option<Value>) {
-    if let Some(Value::Object(map)) = params {
-        map.remove("_audit_id");
-        map.remove("_operation_id");
-    }
+    bsk_protocol::RequestFrame::strip_ws_correlation(params);
 }
 
 fn run_extension<F>(ws: Ws, reply: F)

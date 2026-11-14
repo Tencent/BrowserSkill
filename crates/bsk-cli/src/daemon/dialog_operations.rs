@@ -10,6 +10,8 @@ use bsk_protocol::{ErrorCode, Method, ResponseBody, RpcError};
 use serde_json::{Value, json};
 use tokio::sync::watch;
 
+use crate::ipc_client::ScopeResultMeta;
+
 const MAX_OPERATIONS: usize = 64;
 const RESULT_TTL: Duration = Duration::from_secs(300);
 const MAX_RESULT_BYTES: usize = 4 * 1024 * 1024;
@@ -28,10 +30,25 @@ pub struct DialogOperation {
     pub cli_rpc_id: String,
     method: Method,
     retained: AtomicBool,
+    scope_meta: Mutex<Option<ScopeResultMeta>>,
     progress: watch::Sender<Progress>,
 }
 
 impl DialogOperation {
+    pub fn set_scope_meta(&self, meta: Option<ScopeResultMeta>) {
+        *self
+            .scope_meta
+            .lock()
+            .expect("dialog operation scope_meta poisoned") = meta;
+    }
+
+    pub fn scope_meta(&self) -> Option<ScopeResultMeta> {
+        self.scope_meta
+            .lock()
+            .expect("dialog operation scope_meta poisoned")
+            .clone()
+    }
+
     pub fn finish(&self, body: ResponseBody) {
         let body = if self.retained.load(Ordering::Acquire) {
             bound_result(body)
@@ -165,6 +182,7 @@ impl DialogOperations {
             cli_rpc_id: cli_rpc_id.into(),
             method,
             retained: AtomicBool::new(false),
+            scope_meta: Mutex::new(None),
             progress,
         });
         entries.insert(entry.id.clone(), Arc::clone(&entry));

@@ -17,6 +17,7 @@ CLI 和扩展可以分别发布，能否连接由协议兼容性决定。更新�
 
 ### 变更
 
+- **统一守护进程会话销毁入口、强类型 `IpcEnvelope` 与 MCP 宿主作用域生命周期**：将 `state.rs`、`ws.rs`、`ipc.rs`、`start.rs`、`session_requests.rs` 与 `sessions.rs` 中分散的 6 处会话清理路径统一收口至覆盖全部 12 张会话状态表的 `DaemonState::teardown_session(session_id, reason)`；在 `ImplicitScopeRegistry` 中将宿主子代理环境变量（`HOST_AGENT_ENV_KEYS`）优先级提升至瞬态 `mcp:<pid>:<nonce>` 之前，使同一宿主线程内的 `bsk mcp` 与 `bsk` CLI 自动共享隐式会话，同时仅对无宿主环境变量兜底的独占瞬态 `mcp:` 连接在 `stdio` EOF 或读取异常断开时立即停止并回收孤儿会话；为非活跃作用域墓碑与空闲 `start_locks` 增加 256 容量上限的 LRU 淘汰；并以通过 `StatusResult.ipc_envelope` 与 `DaemonInfo.ipc_envelope` 协商的强类型 `IpcEnvelope`（`IpcRequestMeta` / `IpcResponseMeta`，保留与升级期间未重启的 `"2.0"` 旧版 `bsk mcp`、CLI 及守护进程间的双向滚动升级兼容）及显式扩展 WS `WsCorrelation` 替代本地 IPC 载荷混装的私有 `_` 字段。
 - **`ChromiumCdp` 单状态机与 `FrameNodeHandle` 寻址收口**：将 `ChromiumCdp` 原先散落的 33 张单标签页平行 `Map`/`Set` 收敛为唯一主表 `Map<TabId, TabAttachment>` 判别联合状态机（`detached | attaching | attached | soft_detached`），将 `onEvent(tabId, handler)` 改造为自动持有空闲租约的标签页级 `Disposable` 订阅，并通过 `FrameNodeHandle` 与 `FrameDocumentHandle` 将瞬态 `cdpSessionId` 彻底封入 `browser-driver/` 内部（全量覆盖 `RefStore`、VOM 视觉观测与截图坐标映射、`read`、`extract`、`observation`、`interaction`、`waits`、`human-loop`、`recording` 与 `CooperationController`）。
 - **协议基线直升 `2.0`**：将 `PROTOCOL_VERSION` 与 `MIN_COMPATIBLE_PROTOCOL` 同步升至 `"2.0"`，清除扩展与守护进程间的握手版本漂移，并将 `apps/extension/src/transport/generated/validators.js` 体积削减 60% 以上（`~992 KB` -> `<= 390 KB`）。
 - **收口守护进程/扩展分发与上下文全局状态**：以生成/穷尽的 `MethodSpec` 映射替代全栈 9 张手写方法表，并移除 `business_rpc.rs` 中的全局 `OnceLock` 上下文。
@@ -25,6 +26,8 @@ CLI 和扩展可以分别发布，能否连接由协议兼容性决定。更新�
 
 ### 修复
 
+- 修复会话空闲超时回收遗漏 `dialog_operations.remove_session` 且在后续浏览器断连时被覆盖丢失 `session_idle_timeout` 结束原因的缺陷，修复未认领 `session_requests` 清理遗漏 `dialog_operations`、`scopes` 与 `intent_wal` 的问题，并打通 `DialogOperation` 异步结算后的统一对账闭环（`scopes`、`intent_wal` 与 `run_logs`），使因 `DialogPending` 挂起并通过 `dialog accept/dismiss` + `operation await` 完成的操作在 `run_logs` 中原位更新为真实完成态而非滞留 `Uncertain`。
+- 修复 `--max-tokens` 截断基线误短路后续无预算或不同预算 `bsk sync` 的问题（在 `strict` 与 `target` 策略下同步记录 `maxTokens`/`truncated` 并在预算变化时发出 `baseline_reason: "token_budget_changed"`，同时在守护进程侧校验前置观测与预算兼容性）；支持在 `target` 策略纯文本 `delta`（含相同 `--max-tokens` 预算下的截断观测与空白折叠空补丁）携带行补丁时原位更新缓存 `last_vom`，并在遇到不含行补丁的表单 `field` 变更时主动清空 `last_vom` 以防 `bsk sync --match-text` 误匹配旧输入值；在 `bsk sync` 缓存补齐与回执渲染中完整保留 `truncated`、`capture_truncated`、`next_cursor` 与 `presentation` 元数据；并为 `--wait-for` 补齐与 `--wait-not` 对称的 `--max-tokens` 截断全页 `tool.snapshot` 回退检查与引用重同步。
 - 修复跨源 OOPIF 内 `visual-region` `@eN` 视觉引用与 `--capture-id` 坐标点击在 75 秒空闲 Soft-Detach 重连分配新内部子会话 `sessionId`（`frameId + loaderId` 未变）后误报 `visual_target_changed` 断裂的缺陷，在子帧导航切换 `loaderId` 或同一 `loaderId` 下调用 `document.open()` 替换文档时确定性拒绝过期 `FrameNodeHandle` / `FrameDocumentHandle` 目标，并修复单次 `console` / `network` 读取及 `debug start -> stop` 释放租约后永久阻塞 75 秒空闲 Soft-Detach 的粘滞问题。
 - 修复 `tool.debug`（`replay`）绕过原生弹窗挂起门禁、`intent_wal` 漏掉 `download`/`dialog_accept`/`debug(replay)`/`navigate`/`reload` 以及 `window_resize`/`emulate`/`tab_close` 丢失 `EffectAwareAction` 超时策略的缺陷。
 - 修复 MCP 错误恢复提示直接回显 CLI 专属命令（如 `bsk ledger resolve`）、`tool.video` 漏掉 `discard`/`exported` 协作动作、调试证据分类遗漏 `navigate_back`/`forward`/`dialog_*`、审计 UI 标签缺失以及 `recipe` `session_gone` 漏判 `session_stopped`/`no_active_session` 的问题。

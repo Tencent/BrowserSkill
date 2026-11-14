@@ -66,6 +66,8 @@ interface Context {
   activityCursor: number;
   observationId?: string;
   consumed?: boolean;
+  maxTokens?: number;
+  truncated?: boolean;
   /** Target control: the page text the agent holds, kept current by text deltas. */
   held?: HeldText;
 }
@@ -925,8 +927,10 @@ export class CooperationController implements ControlAuthority {
         const fieldsComplete = [...before.values()].every(
           (frame) => frame.fieldsComplete !== false,
         );
+        const sameBudget = baseline !== undefined && baseline.maxTokens === params.max_tokens;
         const comparable =
           baseline &&
+          sameBudget &&
           baseline.frameEpoch === frameEpoch &&
           fieldsComplete &&
           baseline.refs === session.refStore.revision &&
@@ -956,10 +960,12 @@ export class CooperationController implements ControlAuthority {
                   ? "refs_replaced"
                   : !sameMedia(baseline.frames, before)
                     ? "media_changed"
-                    : (patched ??
-                      (!sameFrames(baseline.frames, before, "structure")
-                        ? "structure_changed"
-                        : "focus_changed"));
+                    : !sameBudget
+                      ? "token_budget_changed"
+                      : (patched ??
+                        (!sameFrames(baseline.frames, before, "structure")
+                          ? "structure_changed"
+                          : "focus_changed"));
         // The private evidence describes the text and focus as they were captured.
         if (text && (text.lines.length || text.focusMoved)) evidence = undefined;
         // A delta updates the model's field values. Refresh private semantic
@@ -1030,6 +1036,8 @@ export class CooperationController implements ControlAuthority {
           evidence,
           activityCursor: state.activitySequence,
           observationId: crypto.randomUUID(),
+          maxTokens: observation ? params.max_tokens : baseline?.maxTokens,
+          truncated: observation ? Boolean(observation.truncated) : baseline?.truncated,
           ...(targetPolicy
             ? {
                 held: observation

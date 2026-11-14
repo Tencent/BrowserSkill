@@ -1719,4 +1719,81 @@ describe("text deltas under target control", () => {
     });
     expect(await f.sync()).toMatchObject({ kind: "baseline", baseline_reason: "no_held_text" });
   });
+
+  it.each([
+    "strict",
+    "target",
+  ] as const)("never short-circuits an unchanged page across max_tokens budgets (%s)", async (policy) => {
+    const f = await fixture(policy);
+    snapshots.mockImplementation(async (_sessions, params) =>
+      params.max_tokens === 150
+        ? {
+            text: '[page "Board"]\n  banner "Board Version: rev-0"\n[truncated: 4 more lines]',
+            ref_count: 1,
+            tab_id: 7,
+            truncated: true,
+            next_cursor: "line:3",
+          }
+        : {
+            text: VOM,
+            ref_count: 1,
+            tab_id: 7,
+            truncated: false,
+          },
+    );
+
+    const cut = (await f.controller.command(
+      { session_id: "s", tab_id: 7, action: "sync", control_policy: policy, max_tokens: 150 },
+      f.cdp,
+      f.signal,
+    )) as Record<string, unknown>;
+    expect(cut).toMatchObject({
+      kind: "baseline",
+      baseline_reason: "token_budget_changed",
+      observation: { truncated: true, next_cursor: "line:3" },
+    });
+
+    // Repeating the exact same 150-token budget on an unchanged page stays unchanged
+    // and preserves the 150-token baseline metadata for subsequent sync calls.
+    const sameCut = (await f.controller.command(
+      { session_id: "s", tab_id: 7, action: "sync", control_policy: policy, max_tokens: 150 },
+      f.cdp,
+      f.signal,
+    )) as Record<string, unknown>;
+    expect(sameCut).toMatchObject({
+      kind: "unchanged",
+      previous_context_id: cut.context_id,
+      ...(policy === "target" ? { previous_observation_id: cut.observation_id } : {}),
+    });
+
+    // Unbounded sync (max_tokens: undefined) on the exact same unchanged page MUST NOT
+    // return kind: "unchanged"; it must re-capture the full untruncated observation.
+    const unbounded = (await f.controller.command(
+      { session_id: "s", tab_id: 7, action: "sync", control_policy: policy },
+      f.cdp,
+      f.signal,
+    )) as Record<string, unknown>;
+    expect(unbounded).toMatchObject({
+      kind: "baseline",
+      baseline_reason: "token_budget_changed",
+      observation: { text: VOM, truncated: false },
+    });
+
+    // Likewise, switching from a 150-token budget to a larger 500-token budget re-captures.
+    await f.controller.command(
+      { session_id: "s", tab_id: 7, action: "sync", control_policy: policy, max_tokens: 150 },
+      f.cdp,
+      f.signal,
+    );
+    const larger = (await f.controller.command(
+      { session_id: "s", tab_id: 7, action: "sync", control_policy: policy, max_tokens: 500 },
+      f.cdp,
+      f.signal,
+    )) as Record<string, unknown>;
+    expect(larger).toMatchObject({
+      kind: "baseline",
+      baseline_reason: "token_budget_changed",
+      observation: { text: VOM, truncated: false },
+    });
+  });
 });

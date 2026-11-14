@@ -130,6 +130,8 @@ pub fn dispatch(
         timeout_ms: args.timeout_ms,
         max_tokens: args.max_tokens,
     };
+    let need_scope_meta = session.trim().is_empty();
+    let mut resolved_session: Option<String> = None;
     let mut reply: serde_json::Value = if args.settle {
         settle::run(|action| {
             let mut current = params.clone();
@@ -138,25 +140,52 @@ pub fn dispatch(
                 current.timeout_ms = Some(args.timeout_ms.unwrap_or(1000));
             }
             current.action = action;
-            op_ctx.call(
+            let meta = crate::ipc_client::IpcRequestMeta {
+                return_scope_meta: need_scope_meta
+                    && matches!(
+                        current.action,
+                        CooperateAction::Sync | CooperateAction::Enable
+                    ),
+                ..Default::default()
+            };
+            let (val, resp_meta) = op_ctx.call_envelope(
                 daemon.sock_path.clone(),
                 "cooperate",
                 Method::ToolCooperate,
                 Some(current),
+                meta,
                 TOOL_IPC_TIMEOUT,
-            )
+            )?;
+            if let Some(sm) = resp_meta.scope_meta {
+                resolved_session = Some(sm.session_id);
+            }
+            Ok(val)
         })?
     } else {
-        op_ctx.call(
+        let meta = crate::ipc_client::IpcRequestMeta {
+            return_scope_meta: need_scope_meta
+                && matches!(
+                    params.action,
+                    CooperateAction::Sync | CooperateAction::Enable
+                ),
+            ..Default::default()
+        };
+        let (val, resp_meta) = op_ctx.call_envelope(
             daemon.sock_path,
             "cooperate",
             Method::ToolCooperate,
             Some(params),
+            meta,
             TOOL_IPC_TIMEOUT,
-        )?
+        )?;
+        if let Some(sm) = resp_meta.scope_meta {
+            resolved_session = Some(sm.session_id);
+        }
+        val
     };
     verify_policy(&reply, control_policy)?;
-    super::observation_view::attach(&mut reply, &session, baseline.as_ref());
+    let effective_session = resolved_session.as_deref().unwrap_or(&session);
+    super::observation_view::attach(&mut reply, effective_session, baseline.as_ref());
     if let Some(saved) = saved {
         saved.finish(&reply)?;
         super::observation_view::omit_saved_merge(&mut reply);

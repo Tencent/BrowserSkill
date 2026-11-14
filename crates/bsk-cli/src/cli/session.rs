@@ -356,7 +356,7 @@ pub fn start_session_with_context(
     } else {
         Method::SessionStart
     };
-    let mut payload = serde_json::to_value(StartParams {
+    let payload = StartParams {
         controller: opts.controller,
         incognito: opts.incognito,
         request_id: opts.request_id,
@@ -365,16 +365,26 @@ pub fn start_session_with_context(
         width: opts.width,
         height: opts.height,
         focused: Some(opts.focused.unwrap_or(false)),
-    })
-    .map_err(|e| CliError::Local(anyhow::anyhow!(e)))?;
+    };
     let caller_scope = ctx.resolved_caller_scope();
-    if crate::daemon::scopes::is_isolated_scope(&caller_scope)
-        && let Some(obj) = payload.as_object_mut()
-    {
-        obj.insert("_caller_scope".into(), caller_scope.into());
-        obj.insert("_bind_scope".into(), true.into());
-    }
-    call(sock, ctx, method, Some(payload), SESSION_START_IPC_TIMEOUT)
+    let meta = if crate::daemon::scopes::is_isolated_scope(&caller_scope) {
+        crate::ipc_client::IpcRequestMeta {
+            caller_scope: Some(caller_scope),
+            bind_scope: true,
+            ..Default::default()
+        }
+    } else {
+        crate::ipc_client::IpcRequestMeta::default()
+    };
+    ctx.call_envelope::<StartParams, StartReply>(
+        sock,
+        "session",
+        method,
+        Some(payload),
+        meta,
+        SESSION_START_IPC_TIMEOUT,
+    )
+    .map(|(reply, _)| reply)
 }
 
 /// Stop a single session by id.

@@ -1,17 +1,19 @@
 //! Daemon-memory caller scope isolation registry (`RM-02`).
 //!
 //! Maps each isolated `caller_scope` (`--scope`, `BSK_SESSION`, `BSK_SCOPE`,
-//! per-process MCP stdio `conn_scope_id`, host subagent IDs, or guarded
+//! host subagent IDs, per-process MCP stdio `conn_scope_id`, or guarded
 //! `"default"`) to its active [`SessionId`] and maintains per-session
 //! short evidence aliases (`c1..cN`, `o1..oN`, capped at 32 entries) plus
-//! cached VOM snapshots so `bsk sync` can hydrate `unchanged` replies
-//! without an extra round-trip.
+//! cached VOM snapshots so `bsk sync` can hydrate `unchanged` and text-`delta`
+//! replies without an extra round-trip.
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 
 use bsk_protocol::{ErrorCode, Method, RpcError};
 use serde_json::{Value, json};
+
+use crate::ipc_client::ScopeResultMeta;
 
 use super::browsers::BrowserId;
 use super::queue::DispatchError;
@@ -20,9 +22,14 @@ use super::sessions::{Session, SessionId, SessionRegistry};
 /// Maximum number of `cN` / `oN` short aliases retained per session.
 pub const SHORT_ALIAS_CAP: usize = 32;
 
+/// Maximum number of inactive scope tombstones and idle per-scope start locks
+/// retained in memory (active bindings and held locks are never evicted).
+pub const INACTIVE_SCOPE_LRU_CAP: usize = 256;
+
 /// Host subagent environment variables probed in deterministic priority order
-/// when neither `--scope`, `BSK_SESSION`/`BSK_SCOPE`, nor an MCP stdio scope
-/// is active.
+/// when neither `--scope` nor `BSK_SESSION`/`BSK_SCOPE` is active. Takes
+/// priority over transient `mcp:<pid>:<nonce>` connection scopes so `bsk mcp`
+/// and `bsk` CLI invocations inside the same host agent thread share one session.
 pub const HOST_AGENT_ENV_KEYS: [(&str, &str); 5] = [
     ("CLAUDE_CODE_AGENT_ID", "claude"),
     ("CODEX_THREAD_ID", "codex"),
@@ -32,7 +39,7 @@ pub const HOST_AGENT_ENV_KEYS: [(&str, &str); 5] = [
 ];
 
 /// Resolve the caller's implicit scope identifier from explicit CLI `--scope`,
-/// optional MCP connection scope, and process environment variables.
+/// process environment variables, and optional MCP connection scope.
 pub fn resolve_caller_scope_from_env(
     explicit_scope: Option<&str>,
     mcp_scope: Option<&str>,
@@ -58,13 +65,13 @@ where
     if let Some(scope_env) = get_env("BSK_SCOPE").and_then(|v| non_empty_owned(&v)) {
         return format!("scope:{scope_env}");
     }
-    if let Some(mcp) = non_empty(mcp_scope) {
-        return mcp.to_string();
-    }
     for (env_key, tag) in HOST_AGENT_ENV_KEYS {
         if let Some(val) = get_env(env_key).and_then(|v| non_empty_owned(&v)) {
             return format!("agent:{tag}:{val}");
         }
+    }
+    if let Some(mcp) = non_empty(mcp_scope) {
+        return mcp.to_string();
     }
     "default".to_string()
 }
@@ -138,6 +145,8 @@ struct TabContextCache {
     last_vom: Option<String>,
     /// The cached VOM was cut to a `max_tokens` budget.
     last_vom_truncated: bool,
+    last_vom_next_cursor: Option<String>,
+    last_vom_max_tokens: Option<u32>,
     last_url: Option<String>,
     last_title: Option<String>,
 }
@@ -157,6 +166,8 @@ struct SessionContextSlot {
     latest_short_obs: Option<String>,
     last_vom: Option<String>,
     last_vom_truncated: bool,
+    last_vom_next_cursor: Option<String>,
+    last_vom_max_tokens: Option<u32>,
     last_url: Option<String>,
     last_title: Option<String>,
     tabs: HashMap<i64, TabContextCache>,
@@ -165,18 +176,142 @@ struct SessionContextSlot {
 #[derive(Debug, Default)]
 struct RegistryInner {
     scopes: HashMap<String, ScopeSlot>,
+    /// LRU order of keys in `scopes` whose `active` binding is `None` (oldest at front).
+    inactive_lru: VecDeque<String>,
     sessions: HashMap<SessionId, SessionContextSlot>,
+}
+
+#[derive(Debug, Default)]
+struct StartLocksInner {
+    locks: HashMap<String, Arc<tokio::sync::Mutex<()>>>,
+    /// LRU order of keys in `locks` (oldest at front).
+    lru: VecDeque<String>,
+}
+
+fn remove_lru_key(lru: &mut VecDeque<String>, key: &str) {
+    if let Some(pos) = lru.iter().position(|existing| existing == key) {
+        lru.remove(pos);
+    }
+}
+
+fn touch_inactive_scope(inner: &mut RegistryInner, key: &str) {
+    remove_lru_key(&mut inner.inactive_lru, key);
+    inner.inactive_lru.push_back(key.to_string());
+    while inner.inactive_lru.len() > INACTIVE_SCOPE_LRU_CAP {
+        let Some(oldest) = inner.inactive_lru.pop_front() else {
+            break;
+        };
+        if inner
+            .scopes
+            .get(&oldest)
+            .is_some_and(|slot| slot.active.is_none())
+        {
+            inner.scopes.remove(&oldest);
+        }
+    }
+}
+
+fn evict_idle_start_locks(inner: &mut StartLocksInner) {
+    while inner.locks.len() > INACTIVE_SCOPE_LRU_CAP {
+        let Some(pos) = inner.lru.iter().position(|key| {
+            inner
+                .locks
+                .get(key)
+                .is_some_and(|arc| Arc::strong_count(arc) == 1)
+        }) else {
+            break;
+        };
+        let oldest = inner.lru.remove(pos).expect("lru position verified");
+        inner.locks.remove(&oldest);
+    }
+}
+
+/// Apply a verified text `delta` line patch onto `text`, returning `None` when the
+/// reply is not a pure text delta or any 1-based line replacement fails validation.
+pub(crate) fn apply_text_delta_patch(reply: &Value, text: &str) -> Option<String> {
+    if reply.get("kind").and_then(Value::as_str) != Some("delta") {
+        return None;
+    }
+    let patch = reply.pointer("/observation_patch/lines")?.as_array()?;
+    let changes = reply.get("changes")?.as_array()?;
+    // Form field values (`value="..."`) are not covered by line patches; any non-text
+    // change invalidates the cached VOM text. Empty `patch`/`changes` arrays remain
+    // valid for whitespace-collapsed or neutral-focus text deltas.
+    if !changes
+        .iter()
+        .all(|c| c.get("kind").and_then(Value::as_str) == Some("text"))
+    {
+        return None;
+    }
+    let mut lines: Vec<&str> = text.split('\n').collect();
+    let mut prev_line = 0u64;
+    for entry in patch {
+        let line_no = entry.get("line")?.as_u64()?;
+        if line_no <= prev_line {
+            return None;
+        }
+        prev_line = line_no;
+        let index = usize::try_from(line_no.checked_sub(1)?).ok()?;
+        let replacement = entry.get("text")?.as_str()?;
+        let previous = entry.get("previous")?.as_str()?;
+        if *lines.get(index)? != previous || replacement.contains('\n') {
+            return None;
+        }
+        lines[index] = replacement;
+    }
+    Some(lines.join("\n"))
+}
+
+fn budget_compatible(
+    cached_max_tokens: Option<u32>,
+    cached_truncated: bool,
+    requested_max_tokens: Option<u32>,
+) -> bool {
+    if cached_truncated {
+        match (cached_max_tokens, requested_max_tokens) {
+            (Some(cached), Some(req)) => cached == req,
+            (None, None) => true,
+            _ => false,
+        }
+    } else {
+        cached_max_tokens == requested_max_tokens
+    }
 }
 
 #[derive(Debug, Default)]
 pub struct ImplicitScopeRegistry {
     inner: Mutex<RegistryInner>,
-    start_locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    start_locks: Mutex<StartLocksInner>,
 }
 
 impl ImplicitScopeRegistry {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Number of inactive scope tombstones currently retained (for diagnostics and tests).
+    pub fn inactive_scope_count(&self) -> usize {
+        let guard = self.inner.lock().expect("implicit scope registry poisoned");
+        guard
+            .scopes
+            .values()
+            .filter(|slot| slot.active.is_none())
+            .count()
+    }
+
+    /// Number of per-scope start locks currently retained (for diagnostics and tests).
+    pub fn start_lock_count(&self) -> usize {
+        let guard = self
+            .start_locks
+            .lock()
+            .expect("implicit scope start_locks poisoned");
+        guard.locks.len()
+    }
+
+    /// Number of active per-session observation/alias slots currently retained.
+    pub fn tracked_session_count(&self) -> usize {
+        let guard = self.inner.lock().expect("implicit scope registry poisoned");
+        guard.sessions.len()
     }
 
     /// Return a per-scope async mutex used to serialize `bsk open` reuse-or-start
@@ -187,11 +322,16 @@ impl ImplicitScopeRegistry {
             .start_locks
             .lock()
             .expect("implicit scope start_locks poisoned");
-        Arc::clone(
+        remove_lru_key(&mut guard.lru, key);
+        guard.lru.push_back(key.to_string());
+        let lock = Arc::clone(
             guard
+                .locks
                 .entry(key.to_string())
                 .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(()))),
-        )
+        );
+        evict_idle_start_locks(&mut guard);
+        lock
     }
 
     /// Bind `scope` to a newly started live session and clear any prior tombstone.
@@ -204,6 +344,7 @@ impl ImplicitScopeRegistry {
     ) {
         let key = normalize_scope_key(scope);
         let mut guard = self.inner.lock().expect("implicit scope registry poisoned");
+        remove_lru_key(&mut guard.inactive_lru, key);
         guard.scopes.insert(
             key.to_string(),
             ScopeSlot {
@@ -242,27 +383,41 @@ impl ImplicitScopeRegistry {
             reason,
         });
         guard.sessions.remove(&dead_id);
+        touch_inactive_scope(&mut guard, key);
         None
     }
 
     /// Atomically unbind every scope pointing to `session_id`, leave a tombstone
-    /// recording `reason`, and drop cached short tokens / VOM for `session_id`.
+    /// recording `reason` (bounded by [`INACTIVE_SCOPE_LRU_CAP`]), and drop cached
+    /// short tokens / VOM for `session_id`.
     pub fn on_session_ended(&self, session_id: &SessionId, reason: &'static str) {
-        let mut guard = self.inner.lock().expect("implicit scope registry poisoned");
-        guard.sessions.remove(session_id);
-        for slot in guard.scopes.values_mut() {
-            if slot
-                .active
-                .as_ref()
-                .is_some_and(|binding| &binding.session_id == session_id)
-            {
-                slot.active = None;
-                slot.tombstone = Some(ScopeTombstone {
-                    session_id: session_id.clone(),
-                    reason,
-                });
+        {
+            let mut guard = self.inner.lock().expect("implicit scope registry poisoned");
+            guard.sessions.remove(session_id);
+            let mut deactivated = Vec::new();
+            for (scope_key, slot) in &mut guard.scopes {
+                if slot
+                    .active
+                    .as_ref()
+                    .is_some_and(|binding| &binding.session_id == session_id)
+                {
+                    slot.active = None;
+                    slot.tombstone = Some(ScopeTombstone {
+                        session_id: session_id.clone(),
+                        reason,
+                    });
+                    deactivated.push(scope_key.clone());
+                }
+            }
+            for scope_key in deactivated {
+                touch_inactive_scope(&mut guard, &scope_key);
             }
         }
+        let mut locks = self
+            .start_locks
+            .lock()
+            .expect("implicit scope start_locks poisoned");
+        evict_idle_start_locks(&mut locks);
     }
 
     /// Resolve a missing/empty `session_id` using `scope` and enforce the
@@ -309,8 +464,16 @@ impl ImplicitScopeRegistry {
         }
 
         let tombstone = {
-            let guard = self.inner.lock().expect("implicit scope registry poisoned");
-            guard.scopes.get(key).and_then(|s| s.tombstone.clone())
+            let mut guard = self.inner.lock().expect("implicit scope registry poisoned");
+            let found = guard
+                .scopes
+                .get(key)
+                .filter(|s| s.active.is_none())
+                .and_then(|s| s.tombstone.clone());
+            if found.is_some() {
+                touch_inactive_scope(&mut guard, key);
+            }
+            found
         };
         if let Some(ended) = tombstone {
             return Err(RpcError {
@@ -451,10 +614,26 @@ impl ImplicitScopeRegistry {
         }
     }
 
-    /// Record a successful `tool.cooperate` (`sync` / `enable`) reply, interning
-    /// `c<N>` / `o<N>` aliases (reusing existing alias on identical UUID; capped
-    /// at 32) and updating per-tab VOM / URL / title metadata. Returns `_scope_meta`.
-    pub fn record_cooperate_result(&self, session_id: &SessionId, result: &Value) -> Value {
+    /// Record a successful `tool.cooperate` (`sync` / `enable`) reply without an
+    /// explicit `max_tokens` budget.
+    pub fn record_cooperate_result(
+        &self,
+        session_id: &SessionId,
+        result: &Value,
+    ) -> ScopeResultMeta {
+        self.record_cooperate_result_with_budget(session_id, None, result)
+    }
+
+    /// Record a successful `tool.cooperate` (`sync` / `enable`) reply under
+    /// `requested_max_tokens`, interning `c<N>` / `o<N>` aliases (reusing existing
+    /// alias on identical UUID; capped at 32), validating predecessor & token-budget
+    /// compatibility, and updating or patching per-tab VOM / URL / title metadata.
+    pub fn record_cooperate_result_with_budget(
+        &self,
+        session_id: &SessionId,
+        requested_max_tokens: Option<u32>,
+        result: &Value,
+    ) -> ScopeResultMeta {
         let mut guard = self.inner.lock().expect("implicit scope registry poisoned");
         let slot = guard.sessions.entry(session_id.clone()).or_default();
 
@@ -471,13 +650,27 @@ impl ImplicitScopeRegistry {
         }
         let effective_tab_id = tab_id.or(slot.active_tab_id);
 
-        let prior_ctx_id = match effective_tab_id {
-            Some(tid) => slot.tabs.get(&tid).and_then(|t| t.latest_ctx_id.clone()),
-            None => slot.latest_ctx_id.clone(),
+        let (prior_ctx_id, prior_obs_id, prior_max_tokens, prior_truncated) = match effective_tab_id
+        {
+            Some(tid) => slot.tabs.get(&tid).map_or((None, None, None, false), |t| {
+                (
+                    t.latest_ctx_id.clone(),
+                    t.latest_obs_id.clone(),
+                    t.last_vom_max_tokens,
+                    t.last_vom_truncated,
+                )
+            }),
+            None => (
+                slot.latest_ctx_id.clone(),
+                slot.latest_obs_id.clone(),
+                slot.last_vom_max_tokens,
+                slot.last_vom_truncated,
+            ),
         };
 
         let kind = result.get("kind").and_then(Value::as_str);
         let is_unchanged_kind = kind == Some("unchanged");
+        let is_delta_kind = kind == Some("delta");
         let history_ok = result
             .get("history_complete")
             .and_then(Value::as_bool)
@@ -486,7 +679,7 @@ impl ImplicitScopeRegistry {
             .get("changes")
             .and_then(Value::as_array)
             .is_none_or(Vec::is_empty);
-        let predecessor_ok = match (
+        let ctx_predecessor_ok = match (
             result.get("previous_context_id").and_then(Value::as_str),
             prior_ctx_id.as_deref(),
         ) {
@@ -494,7 +687,24 @@ impl ImplicitScopeRegistry {
             (Some(_), None) => false,
             (None, _) => true,
         };
-        let exact_unchanged = is_unchanged_kind && history_ok && changes_empty && predecessor_ok;
+        let obs_predecessor_ok = match (
+            result
+                .get("previous_observation_id")
+                .and_then(Value::as_str),
+            prior_obs_id.as_deref(),
+        ) {
+            (Some(prev), Some(prior)) => prev == prior,
+            (Some(_), None) => false,
+            (None, _) => true,
+        };
+        let predecessor_ok = ctx_predecessor_ok && obs_predecessor_ok;
+        let has_explicit_predecessor = result.get("previous_context_id").is_some()
+            || result.get("previous_observation_id").is_some();
+        let budget_ok = budget_compatible(prior_max_tokens, prior_truncated, requested_max_tokens);
+        let exact_unchanged =
+            is_unchanged_kind && history_ok && changes_empty && predecessor_ok && budget_ok;
+        let patchable_delta =
+            is_delta_kind && history_ok && has_explicit_predecessor && predecessor_ok && budget_ok;
 
         let minted_ctx = if let Some(ctx_id) = result
             .get("context_id")
@@ -527,6 +737,9 @@ impl ImplicitScopeRegistry {
             .pointer("/observation/truncated")
             .and_then(Value::as_bool)
             == Some(true);
+        let obs_next_cursor = result
+            .pointer("/observation/next_cursor")
+            .and_then(Value::as_str);
         let obs_url = result
             .pointer("/observation/url")
             .and_then(Value::as_str)
@@ -536,79 +749,116 @@ impl ImplicitScopeRegistry {
             .and_then(Value::as_str)
             .or_else(|| result.pointer("/state/title").and_then(Value::as_str));
 
-        let (cached_vom, cached_truncated, cached_url, cached_title, cache_reusable) =
-            if let Some(tid) = effective_tab_id {
-                let tab_cache = slot.tabs.entry(tid).or_default();
-                if let Some((ref short, ref uuid)) = minted_ctx {
-                    tab_cache.latest_short_ctx = Some(short.clone());
-                    tab_cache.latest_ctx_id = Some(uuid.clone());
-                }
-                if let Some((ref short, ref uuid)) = minted_obs {
-                    tab_cache.latest_short_obs = Some(short.clone());
-                    tab_cache.latest_obs_id = Some(uuid.clone());
-                }
-                let reusable = if let Some(text) = obs_text {
-                    tab_cache.last_vom = Some(text.to_string());
-                    tab_cache.last_vom_truncated = obs_truncated;
-                    true
-                } else if exact_unchanged {
-                    tab_cache.last_vom.is_some()
-                } else {
-                    tab_cache.last_vom = None;
-                    tab_cache.last_vom_truncated = false;
-                    false
-                };
-                if let Some(url) = obs_url {
-                    tab_cache.last_url = Some(url.to_string());
-                }
-                if let Some(title) = obs_title {
-                    tab_cache.last_title = Some(title.to_string());
-                }
-                (
-                    tab_cache.last_vom.clone(),
-                    tab_cache.last_vom_truncated,
-                    tab_cache.last_url.clone(),
-                    tab_cache.last_title.clone(),
-                    reusable,
-                )
+        let (
+            cached_vom,
+            cached_truncated,
+            cached_next_cursor,
+            cached_url,
+            cached_title,
+            cache_reusable,
+        ) = if let Some(tid) = effective_tab_id {
+            let tab_cache = slot.tabs.entry(tid).or_default();
+            if let Some((ref short, ref uuid)) = minted_ctx {
+                tab_cache.latest_short_ctx = Some(short.clone());
+                tab_cache.latest_ctx_id = Some(uuid.clone());
+            }
+            if let Some((ref short, ref uuid)) = minted_obs {
+                tab_cache.latest_short_obs = Some(short.clone());
+                tab_cache.latest_obs_id = Some(uuid.clone());
+            }
+            let reusable = if let Some(text) = obs_text {
+                tab_cache.last_vom = Some(text.to_string());
+                tab_cache.last_vom_truncated = obs_truncated;
+                tab_cache.last_vom_next_cursor = obs_next_cursor.map(str::to_string);
+                tab_cache.last_vom_max_tokens = requested_max_tokens;
+                true
+            } else if exact_unchanged {
+                tab_cache.last_vom.is_some()
+            } else if patchable_delta
+                && let Some(patched) = tab_cache
+                    .last_vom
+                    .as_deref()
+                    .and_then(|prev| apply_text_delta_patch(result, prev))
+            {
+                tab_cache.last_vom = Some(patched);
+                true
             } else {
-                let reusable = if let Some(text) = obs_text {
-                    slot.last_vom = Some(text.to_string());
-                    slot.last_vom_truncated = obs_truncated;
-                    true
-                } else if exact_unchanged {
-                    slot.last_vom.is_some()
-                } else {
-                    slot.last_vom = None;
-                    slot.last_vom_truncated = false;
-                    false
-                };
-                if let Some(url) = obs_url {
-                    slot.last_url = Some(url.to_string());
-                }
-                if let Some(title) = obs_title {
-                    slot.last_title = Some(title.to_string());
-                }
-                (
-                    slot.last_vom.clone(),
-                    slot.last_vom_truncated,
-                    slot.last_url.clone(),
-                    slot.last_title.clone(),
-                    reusable,
-                )
+                tab_cache.last_vom = None;
+                tab_cache.last_vom_truncated = false;
+                tab_cache.last_vom_next_cursor = None;
+                tab_cache.last_vom_max_tokens = None;
+                false
             };
+            if let Some(url) = obs_url {
+                tab_cache.last_url = Some(url.to_string());
+            }
+            if let Some(title) = obs_title {
+                tab_cache.last_title = Some(title.to_string());
+            }
+            (
+                tab_cache.last_vom.clone(),
+                tab_cache.last_vom_truncated,
+                tab_cache.last_vom_next_cursor.clone(),
+                tab_cache.last_url.clone(),
+                tab_cache.last_title.clone(),
+                reusable,
+            )
+        } else {
+            let reusable = if let Some(text) = obs_text {
+                slot.last_vom = Some(text.to_string());
+                slot.last_vom_truncated = obs_truncated;
+                slot.last_vom_next_cursor = obs_next_cursor.map(str::to_string);
+                slot.last_vom_max_tokens = requested_max_tokens;
+                true
+            } else if exact_unchanged {
+                slot.last_vom.is_some()
+            } else if patchable_delta
+                && let Some(patched) = slot
+                    .last_vom
+                    .as_deref()
+                    .and_then(|prev| apply_text_delta_patch(result, prev))
+            {
+                slot.last_vom = Some(patched);
+                true
+            } else {
+                slot.last_vom = None;
+                slot.last_vom_truncated = false;
+                slot.last_vom_next_cursor = None;
+                slot.last_vom_max_tokens = None;
+                false
+            };
+            if let Some(url) = obs_url {
+                slot.last_url = Some(url.to_string());
+            }
+            if let Some(title) = obs_title {
+                slot.last_title = Some(title.to_string());
+            }
+            (
+                slot.last_vom.clone(),
+                slot.last_vom_truncated,
+                slot.last_vom_next_cursor.clone(),
+                slot.last_url.clone(),
+                slot.last_title.clone(),
+                reusable,
+            )
+        };
 
-        json!({
-            "session_id": session_id.0,
-            "tab_id": effective_tab_id,
-            "short_ctx": minted_ctx.map(|(s, _)| s).or_else(|| slot.latest_short_ctx.clone()),
-            "short_obs": minted_obs.map(|(s, _)| s).or_else(|| slot.latest_short_obs.clone()),
-            "cached_vom": cached_vom,
-            "cached_vom_truncated": cached_truncated,
-            "cached_url": cached_url,
-            "cached_title": cached_title,
-            "cache_reusable": cache_reusable,
-        })
+        ScopeResultMeta {
+            session_id: session_id.0.clone(),
+            tab_id: effective_tab_id,
+            short_ctx: minted_ctx
+                .map(|(s, _)| s)
+                .or_else(|| slot.latest_short_ctx.clone()),
+            short_obs: minted_obs
+                .map(|(s, _)| s)
+                .or_else(|| slot.latest_short_obs.clone()),
+            cached_vom,
+            cached_vom_truncated: cached_truncated,
+            cached_vom_next_cursor: cached_next_cursor,
+            cached_url,
+            cached_title,
+            cache_reusable,
+        }
     }
 }
 
@@ -682,26 +932,113 @@ mod tests {
             }),
             "scope:env-scope"
         );
-        assert_eq!(
-            resolve_caller_scope_with(None, Some("mcp:1:abc"), |_| None),
-            "mcp:1:abc"
-        );
-        let env_agents = HashMap::from([
+        // Host agent env vars outrank transient `mcp:<pid>:<nonce>` so `bsk mcp`
+        // and `bsk` CLI within the same host agent thread share one session.
+        let env_host_agent = HashMap::from([
             ("CODEX_THREAD_ID", "codex-9"),
             ("CURSOR_TRACE_ID", "cursor-9"),
         ]);
         assert_eq!(
-            resolve_caller_scope_with(None, None, |k| {
-                env_agents.get(k).map(|v| (*v).to_string())
+            resolve_caller_scope_with(None, Some("mcp:1:abc"), |k| {
+                env_host_agent.get(k).map(|v| (*v).to_string())
             }),
             "agent:codex:codex-9"
         );
+        assert_eq!(
+            resolve_caller_scope_with(None, None, |k| {
+                env_host_agent.get(k).map(|v| (*v).to_string())
+            }),
+            "agent:codex:codex-9"
+        );
+        // Without host agent env vars, MCP connection falls back to its exclusive transient scope.
+        assert_eq!(
+            resolve_caller_scope_with(None, Some("mcp:1:abc"), |_| None),
+            "mcp:1:abc"
+        );
         let env_dsh = HashMap::from([("DSH_SESSION_ID", "dsh-42")]);
         assert_eq!(
-            resolve_caller_scope_with(None, None, |k| { env_dsh.get(k).map(|v| (*v).to_string()) }),
+            resolve_caller_scope_with(None, Some("mcp:1:abc"), |k| {
+                env_dsh.get(k).map(|v| (*v).to_string())
+            }),
             "agent:dsh:dsh-42"
         );
         assert_eq!(resolve_caller_scope_with(None, None, |_| None), "default");
+    }
+
+    #[test]
+    fn inactive_tombstones_and_idle_start_locks_evict_at_256_lru_preserving_active() {
+        let sessions = SessionRegistry::new();
+        let scopes = ImplicitScopeRegistry::new();
+
+        // Pin two active sessions and one held start lock: they MUST NEVER be evicted.
+        sessions.insert(live_session("live-a", "b1"));
+        sessions.insert(live_session("live-b", "b1"));
+        scopes.bind_scope(
+            "scope:pinned-a",
+            SessionId("live-a".into()),
+            BrowserId("b1".into()),
+            false,
+        );
+        scopes.bind_scope(
+            "scope:pinned-b",
+            SessionId("live-b".into()),
+            BrowserId("b1".into()),
+            false,
+        );
+        let held_lock = scopes.scope_start_lock("mcp:held:0");
+
+        for i in 0..300 {
+            let transient_scope = format!("mcp:1:{i}");
+            let lock = scopes.scope_start_lock(&transient_scope);
+            drop(lock);
+            let sid = SessionId(format!("s-{i}"));
+            scopes.bind_scope(&transient_scope, sid.clone(), BrowserId("b1".into()), false);
+            scopes.on_session_ended(&sid, "session_stopped");
+            // Refresh `mcp:1:0` periodically so LRU order keeps it alive while `mcp:1:1` ages out.
+            if i == 200 {
+                let _ = scopes.resolve_implicit_session("mcp:1:0", &sessions);
+            }
+        }
+
+        assert_eq!(scopes.inactive_scope_count(), INACTIVE_SCOPE_LRU_CAP);
+        assert!(scopes.start_lock_count() <= INACTIVE_SCOPE_LRU_CAP);
+        assert!(Arc::strong_count(&held_lock) >= 2);
+        assert!(Arc::ptr_eq(
+            &held_lock,
+            &scopes.scope_start_lock("mcp:held:0")
+        ));
+
+        // Active bindings remain intact despite 300 transient scopes cycling through.
+        assert_eq!(
+            scopes
+                .resolve_implicit_session("scope:pinned-a", &sessions)
+                .unwrap(),
+            SessionId("live-a".into())
+        );
+        assert_eq!(
+            scopes
+                .resolve_implicit_session("scope:pinned-b", &sessions)
+                .unwrap(),
+            SessionId("live-b".into())
+        );
+
+        // `mcp:1:1` was never touched and must have been evicted back to `no_active_session`,
+        // whereas `mcp:1:0` (touched at i=200) and `mcp:1:299` retain their tombstones.
+        let evicted = scopes
+            .resolve_implicit_session("mcp:1:1", &sessions)
+            .unwrap_err();
+        assert_eq!(
+            evicted.data.unwrap()["reason"],
+            bsk_protocol::RpcErrorReason::NoActiveSession.as_str()
+        );
+        let retained_touched = scopes
+            .resolve_implicit_session("mcp:1:0", &sessions)
+            .unwrap_err();
+        assert_eq!(retained_touched.data.unwrap()["reason"], "session_stopped");
+        let retained_recent = scopes
+            .resolve_implicit_session("mcp:1:299", &sessions)
+            .unwrap_err();
+        assert_eq!(retained_recent.data.unwrap()["reason"], "session_stopped");
     }
 
     #[test]
@@ -749,9 +1086,12 @@ mod tests {
                 })
             };
             let meta = scopes.record_cooperate_result(&sid, &payload);
-            assert_eq!(meta["short_ctx"], format!("c{i}"));
-            assert_eq!(meta["short_obs"], format!("o{i}"));
-            assert_eq!(meta["cached_vom"], "@vom 1\n@e1 button \"Submit\"");
+            assert_eq!(meta.short_ctx.as_deref(), Some(format!("c{i}").as_str()));
+            assert_eq!(meta.short_obs.as_deref(), Some(format!("o{i}").as_str()));
+            assert_eq!(
+                meta.cached_vom.as_deref(),
+                Some("@vom 1\n@e1 button \"Submit\"")
+            );
         }
 
         // c1..c3 evicted, c4..c35 retained.
@@ -798,6 +1138,7 @@ mod tests {
                     "tab_id": 7,
                     "context_id": "uuid-stable-ctx",
                     "previous_context_id": "uuid-stable-ctx",
+                    "previous_observation_id": format!("uuid-obs-{}", poll - 1),
                     "observation_id": format!("uuid-obs-{poll}"),
                     "control_policy": "target",
                     "kind": "unchanged",
@@ -806,9 +1147,9 @@ mod tests {
                 })
             };
             let meta = scopes.record_cooperate_result(&sid, &payload);
-            assert_eq!(meta["short_ctx"], "c1");
-            assert_eq!(meta["short_obs"], format!("o{poll}"));
-            assert_eq!(meta["cache_reusable"], true);
+            assert_eq!(meta.short_ctx.as_deref(), Some("c1"));
+            assert_eq!(meta.short_obs.as_deref(), Some(format!("o{poll}").as_str()));
+            assert!(meta.cache_reusable);
         }
 
         assert_eq!(
@@ -819,95 +1160,196 @@ mod tests {
     }
 
     #[test]
-    fn cached_vom_remembers_a_token_budget_truncation() {
+    fn cached_vom_remembers_a_token_budget_truncation_and_rejects_unbounded_reuse() {
         let scopes = ImplicitScopeRegistry::new();
         let sid = SessionId("s-budget".into());
-        let baseline = scopes.record_cooperate_result(
+        let baseline = scopes.record_cooperate_result_with_budget(
             &sid,
+            Some(150),
             &json!({
                 "tab_id": 7,
                 "context_id": "ctx-1",
+                "observation_id": "obs-1",
                 "kind": "baseline",
-                "observation": { "text": "Header", "truncated": true }
+                "observation": { "text": "Header", "truncated": true, "next_cursor": "line:20" }
             }),
         );
-        assert_eq!(baseline["cached_vom_truncated"], true);
-        let unchanged = scopes.record_cooperate_result(
+        assert!(baseline.cached_vom_truncated);
+        assert_eq!(baseline.cached_vom_next_cursor.as_deref(), Some("line:20"));
+
+        // Same 150-token budget may reuse the truncated cache and preserves truncation metadata.
+        let unchanged_same_budget = scopes.record_cooperate_result_with_budget(
             &sid,
+            Some(150),
             &json!({
                 "tab_id": 7,
                 "context_id": "ctx-2",
                 "previous_context_id": "ctx-1",
+                "observation_id": "obs-2",
+                "previous_observation_id": "obs-1",
                 "kind": "unchanged",
                 "history_complete": true,
                 "changes": []
             }),
         );
-        assert_eq!(unchanged["cache_reusable"], true);
-        assert_eq!(unchanged["cached_vom_truncated"], true);
-        let full = scopes.record_cooperate_result(
-            &sid,
-            &json!({
-                "tab_id": 7,
-                "context_id": "ctx-3",
-                "kind": "baseline",
-                "observation": { "text": "Header\nFooter", "truncated": false }
-            }),
+        assert!(unchanged_same_budget.cache_reusable);
+        assert!(unchanged_same_budget.cached_vom_truncated);
+        assert_eq!(
+            unchanged_same_budget.cached_vom_next_cursor.as_deref(),
+            Some("line:20")
         );
-        assert_eq!(full["cached_vom_truncated"], false);
-    }
 
-    #[test]
-    fn delta_and_incomplete_history_clear_cached_vom_until_next_full_capture() {
-        let scopes = ImplicitScopeRegistry::new();
-        let sid = SessionId("s-strict".into());
-
-        let baseline = scopes.record_cooperate_result(
+        // Unbounded sync (`None`) MUST NOT reuse the 150-token truncated cache even if a stub sent `unchanged`.
+        let rejected_unbounded = scopes.record_cooperate_result_with_budget(
             &sid,
-            &json!({
-                "tab_id": 7,
-                "context_id": "ctx-1",
-                "control_policy": "strict",
-                "kind": "baseline",
-                "observation": {
-                    "url": "https://example.test/form",
-                    "title": "Form",
-                    "text": "@e1 textbox \"Email\" value=\"\""
-                }
-            }),
-        );
-        assert_eq!(baseline["cache_reusable"], true);
-
-        let delta = scopes.record_cooperate_result(
-            &sid,
-            &json!({
-                "tab_id": 7,
-                "context_id": "ctx-2",
-                "previous_context_id": "ctx-1",
-                "control_policy": "strict",
-                "kind": "delta",
-                "history_complete": true,
-                "changes": [{"frame_id": 0, "label": "Email", "value": "alice@example.test", "previous_value": ""}]
-            }),
-        );
-        assert_eq!(delta["cache_reusable"], false);
-        assert!(delta["cached_vom"].is_null());
-
-        // A follow-up `unchanged` after `delta` must NOT resurrect pre-delta stale VOM.
-        let post_delta_unchanged = scopes.record_cooperate_result(
-            &sid,
+            None,
             &json!({
                 "tab_id": 7,
                 "context_id": "ctx-3",
                 "previous_context_id": "ctx-2",
+                "observation_id": "obs-3",
+                "previous_observation_id": "obs-2",
+                "kind": "unchanged",
+                "history_complete": true,
+                "changes": []
+            }),
+        );
+        assert!(!rejected_unbounded.cache_reusable);
+        assert!(rejected_unbounded.cached_vom.is_none());
+
+        let full = scopes.record_cooperate_result_with_budget(
+            &sid,
+            None,
+            &json!({
+                "tab_id": 7,
+                "context_id": "ctx-4",
+                "observation_id": "obs-4",
+                "kind": "baseline",
+                "observation": { "text": "Header\nFooter", "truncated": false }
+            }),
+        );
+        assert!(!full.cached_vom_truncated);
+        assert!(full.cached_vom_next_cursor.is_none());
+    }
+
+    #[test]
+    fn text_delta_patches_cached_vom_while_field_delta_invalidates_it() {
+        let scopes = ImplicitScopeRegistry::new();
+        let sid = SessionId("s-delta".into());
+
+        let baseline = scopes.record_cooperate_result(
+            &sid,
+            &json!({
+                "tab_id": 7,
+                "context_id": "ctx-target",
+                "observation_id": "obs-1",
+                "control_policy": "target",
+                "kind": "baseline",
+                "observation": {
+                    "url": "https://example.test/live",
+                    "title": "Live",
+                    "text": "@vom 1\n  status \"Order pending\"\n  @e1 textbox \"Email\" value=\"old@example.test\""
+                }
+            }),
+        );
+        assert!(baseline.cache_reusable);
+
+        // Verified text delta patches `last_vom` in place so subsequent `sync` / `sync --match` hits updated cache.
+        let text_delta = scopes.record_cooperate_result(
+            &sid,
+            &json!({
+                "tab_id": 7,
+                "context_id": "ctx-target",
+                "previous_context_id": "ctx-target",
+                "observation_id": "obs-2",
+                "previous_observation_id": "obs-1",
+                "control_policy": "target",
+                "kind": "delta",
+                "history_complete": true,
+                "changes": [{
+                    "frame_id": 0,
+                    "kind": "text",
+                    "id": "status",
+                    "label": "status",
+                    "previous_value": "Order pending",
+                    "value": "Order shipped",
+                    "lines": [2]
+                }],
+                "observation_patch": {
+                    "lines": [{
+                        "line": 2,
+                        "previous": "  status \"Order pending\"",
+                        "text": "  status \"Order shipped\""
+                    }]
+                }
+            }),
+        );
+        assert!(text_delta.cache_reusable);
+        assert_eq!(
+            text_delta.cached_vom.as_deref(),
+            Some(
+                "@vom 1\n  status \"Order shipped\"\n  @e1 textbox \"Email\" value=\"old@example.test\""
+            )
+        );
+
+        let unchanged_after_text_delta = scopes.record_cooperate_result(
+            &sid,
+            &json!({
+                "tab_id": 7,
+                "context_id": "ctx-target",
+                "previous_context_id": "ctx-target",
+                "observation_id": "obs-3",
+                "previous_observation_id": "obs-2",
+                "control_policy": "target",
+                "kind": "unchanged",
+                "history_complete": true,
+                "changes": []
+            }),
+        );
+        assert!(unchanged_after_text_delta.cache_reusable);
+        assert!(
+            unchanged_after_text_delta
+                .cached_vom
+                .as_deref()
+                .unwrap()
+                .contains("Order shipped")
+        );
+
+        // Form field delta (without line patch covering `value="..."`) MUST clear `last_vom`.
+        let field_delta = scopes.record_cooperate_result(
+            &sid,
+            &json!({
+                "tab_id": 7,
+                "context_id": "ctx-4",
+                "previous_context_id": "ctx-target",
+                "observation_id": "obs-4",
+                "previous_observation_id": "obs-3",
+                "control_policy": "strict",
+                "kind": "delta",
+                "history_complete": true,
+                "changes": [{"frame_id": 0, "label": "Email", "value": "alice@example.test", "previous_value": "old@example.test"}]
+            }),
+        );
+        assert!(!field_delta.cache_reusable);
+        assert!(field_delta.cached_vom.is_none());
+
+        // A follow-up `unchanged` after field `delta` must NOT resurrect stale `value="old@example.test"`.
+        let post_field_unchanged = scopes.record_cooperate_result(
+            &sid,
+            &json!({
+                "tab_id": 7,
+                "context_id": "ctx-5",
+                "previous_context_id": "ctx-4",
+                "observation_id": "obs-5",
+                "previous_observation_id": "obs-4",
                 "control_policy": "strict",
                 "kind": "unchanged",
                 "history_complete": true,
                 "changes": []
             }),
         );
-        assert_eq!(post_delta_unchanged["cache_reusable"], false);
-        assert!(post_delta_unchanged["cached_vom"].is_null());
+        assert!(!post_field_unchanged.cache_reusable);
+        assert!(post_field_unchanged.cached_vom.is_none());
     }
 
     #[test]

@@ -20,7 +20,9 @@ pub use error::{
     JSONRPC_INVALID_REQUEST, JSONRPC_METHOD_NOT_FOUND, JSONRPC_PARSE_ERROR, RpcError,
     RpcErrorReason,
 };
-pub use frame::{EventFrame, EventKind, Frame, RequestFrame, ResponseBody, ResponseFrame, RpcId};
+pub use frame::{
+    EventFrame, EventKind, Frame, RequestFrame, ResponseBody, ResponseFrame, RpcId, WsCorrelation,
+};
 pub use local_auth::LOCAL_AUTH_KDF_DOMAIN;
 pub use method::{ActionMetadataPolicy, DeadlineKind, Method, OutcomeKind, RecipeStepKind};
 pub use system::{
