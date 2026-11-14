@@ -325,8 +325,9 @@ pub(crate) async fn release_full_page_async(
     caller_scope: &str,
     capture_id: &str,
 ) -> anyhow::Result<()> {
+    let sock = crate::cli::ensure_daemon::resolve_effective_sock(sock);
     tokio::time::timeout(Duration::from_secs(5), async {
-        let mut client = crate::ipc_client::IpcClient::connect(sock).await?;
+        let mut client = crate::ipc_client::IpcClient::connect(&sock).await?;
         let params = ScreenshotReleaseParams {
             session_id: session.into(),
             capture_id: capture_id.into(),

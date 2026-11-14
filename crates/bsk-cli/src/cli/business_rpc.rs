@@ -574,13 +574,14 @@ pub fn release_transfers<'a>(
     if ids.is_empty() {
         return Ok(());
     }
+    let sock = super::ensure_daemon::resolve_effective_sock(sock);
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .context("build runtime for transfer cleanup")?;
     rt.block_on(async {
         tokio::time::timeout(CLEANUP_TIMEOUT, async {
-            let mut client = IpcClient::connect(sock).await?;
+            let mut client = IpcClient::connect(&sock).await?;
             for id in ids {
                 client
                     .call::<_, TransferReleaseResult>(
@@ -953,5 +954,161 @@ mod tests {
                 .prepare_params(&Method::TransferBegin, Some(json!({"session_id":"s1"})))
                 .is_err()
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn redirected_optimistic_sock_is_honored_by_post_rpc_cleanup_helpers() {
+        use crate::cli::ensure_daemon::ensure_daemon_optimistic;
+        use crate::daemon::info::{self as daemon_info, DaemonInfo};
+        use crate::daemon::paths::{BSK_HOME_ENV, ensure_bsk_home, test_env_lock};
+        use serde_json::Value;
+        use std::sync::{Arc, Mutex};
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+        use tokio::net::UnixListener;
+
+        let _lock = test_env_lock();
+        let tmp = tempfile::tempdir_in("/tmp").unwrap();
+        let home = tmp.path().join("bsk-home");
+        unsafe {
+            std::env::set_var(BSK_HOME_ENV, &home);
+        }
+        ensure_bsk_home().unwrap();
+
+        let stale_sock = home.join("stale.sock");
+        // Bind and immediately drop so `stale.sock` exists on disk for the optimistic
+        // check, then deterministically fails `connect()` with `ConnectionRefused`.
+        drop(std::os::unix::net::UnixListener::bind(&stale_sock).unwrap());
+        let stale_info = DaemonInfo::now(std::process::id(), stale_sock.clone(), 52890, "0.5.0")
+            .with_protocol_version("2.0");
+        daemon_info::write(&stale_info).unwrap();
+
+        let optimistic_info = ensure_daemon_optimistic().unwrap();
+        assert_eq!(optimistic_info.sock_path, stale_sock);
+
+        // Replacement pre-envelope `2.0` daemon now serves at `fresh.sock`.
+        let fresh_sock = home.join("fresh.sock");
+        let fresh_sock_for_srv = fresh_sock.clone();
+        let fresh_sock_str = fresh_sock.to_string_lossy().into_owned();
+        let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(1);
+
+        let captured: Arc<Mutex<Vec<Value>>> = Arc::new(Mutex::new(Vec::new()));
+        let captured_srv = Arc::clone(&captured);
+
+        let srv_thread = std::thread::spawn(move || {
+            let srv_rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            srv_rt.block_on(async move {
+                let listener = UnixListener::bind(&fresh_sock_for_srv).unwrap();
+                ready_tx.send(()).unwrap();
+                while let Ok((stream, _)) = listener.accept().await {
+                    let (read, mut write) = stream.into_split();
+                    let mut reader = BufReader::new(read);
+                    let mut line = String::new();
+                    while reader.read_line(&mut line).await.unwrap_or(0) > 0 {
+                        let raw: Value = serde_json::from_str(line.trim_end()).unwrap();
+                        assert!(
+                            raw.get("meta").is_none(),
+                            "pre-envelope 2.0 fresh daemon must never receive wire `meta`: {raw}"
+                        );
+                        let method = raw["method"].as_str().unwrap_or("").to_string();
+                        captured_srv.lock().unwrap().push(raw.clone());
+                        let reply = match method.as_str() {
+                            "system.status" => json!({
+                                "id": raw["id"],
+                                "result": {
+                                    "daemon_version": "0.5.0",
+                                    "protocol_version": "2.0",
+                                    "pid": std::process::id(),
+                                    "uptime_secs": 1,
+                                    "ws_port": 52891,
+                                    "sock_path": fresh_sock_str,
+                                    "browsers": [],
+                                    "sessions": []
+                                }
+                            }),
+                            "system.ping" => json!({
+                                "id": raw["id"],
+                                "result": { "pong": true }
+                            }),
+                            "tool.screenshot_release" | "transfer.release" => json!({
+                                "id": raw["id"],
+                                "result": { "released": true }
+                            }),
+                            other => panic!("unexpected method on fresh.sock: {other}"),
+                        };
+                        let mut bytes = serde_json::to_vec(&reply).unwrap();
+                        bytes.push(b'\n');
+                        write.write_all(&bytes).await.unwrap();
+                        write.flush().await.unwrap();
+                        if method == "transfer.release" {
+                            return;
+                        }
+                        line.clear();
+                    }
+                }
+            });
+        });
+
+        ready_rx.recv().unwrap();
+        let fresh_info = DaemonInfo::now(std::process::id(), fresh_sock.clone(), 52891, "0.5.0")
+            .with_protocol_version("2.0");
+        daemon_info::write(&fresh_info).unwrap();
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let ctx = ClientContext {
+            scope: Some("cleanup-scope".into()),
+            ..ClientContext::default()
+        };
+        rt.block_on(async {
+            let _: bsk_protocol::PingResult = ctx
+                .call_async(
+                    optimistic_info.sock_path.clone(),
+                    "ping",
+                    Method::SystemPing,
+                    None::<()>,
+                    Duration::from_secs(5),
+                )
+                .await
+                .unwrap();
+
+            // Still passing `&optimistic_info.sock_path` (`stale.sock`), just as
+            // `screenshot.rs` does after `call_envelope_async` redirected!
+            crate::cli::screenshot::release_full_page_async(
+                &optimistic_info.sock_path,
+                "",
+                "scope:cleanup-scope",
+                "cap-redirect-1",
+            )
+            .await
+            .unwrap();
+        });
+
+        // Synchronous `release_transfers` builds its own runtime, just as `upload.rs`
+        // and `download.rs` invoke it with `&info.sock_path` (`stale.sock`).
+        super::release_transfers(&optimistic_info.sock_path, ["tr-redirect-1"]).unwrap();
+
+        srv_thread.join().unwrap();
+        let frames = captured.lock().unwrap();
+        let ss_rel = frames
+            .iter()
+            .find(|f| f["method"] == "tool.screenshot_release")
+            .expect("screenshot_release reached redirected fresh.sock");
+        assert_eq!(ss_rel["params"]["capture_id"], "cap-redirect-1");
+        assert_eq!(ss_rel["params"]["_caller_scope"], "scope:cleanup-scope");
+        let tr_rel = frames
+            .iter()
+            .find(|f| f["method"] == "transfer.release")
+            .expect("transfer.release reached redirected fresh.sock");
+        assert_eq!(tr_rel["params"]["transfer_id"], "tr-redirect-1");
+
+        unsafe {
+            std::env::remove_var(BSK_HOME_ENV);
+        }
     }
 }

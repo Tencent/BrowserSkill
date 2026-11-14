@@ -263,6 +263,10 @@
       "description": "Semver of the daemon binary (`env!(\"CARGO_PKG_VERSION\")`).",
       "type": "string"
     },
+    "ipc_envelope": {
+      "description": "True when the daemon's local IPC listener supports the out-of-band\n`IpcEnvelope` (`meta` header) in addition to legacy `\"2.0\"` `_`-prefixed\nscope fields. Omitted when false so pre-envelope `\"2.0\"` daemons\ndeserialize as `false` without bumping `PROTOCOL_VERSION`.",
+      "type": "boolean"
+    },
     "local_auth": {
       "anyOf": [
         {

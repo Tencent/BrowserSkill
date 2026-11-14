@@ -16,6 +16,10 @@
 //!   orphan reaping, unified 12-table `DaemonState::teardown_session` bug fixes (idle-timeout
 //!   `dialog_operations` cleanup + reason preservation across subsequent `BrowserGone`, unclaimed
 //!   `session_requests::cleanup` 12-table teardown), and 256-capacity LRU eviction.
+//! - Counterexample F: Bidirectional `IpcEnvelope` rolling-upgrade wire compatibility across
+//!   `StatusResult.ipc_envelope` + `DaemonInfo.ipc_envelope` (Scenario A: pre-envelope `"2.0"`
+//!   `bsk mcp`/CLI -> new daemon with slim-delta `_scope_meta` guard and `meta` spoof prevention;
+//!   Scenario B: new optimistic CLI & `bsk mcp` -> pre-envelope `"2.0"` daemon + live upgrade).
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -1278,6 +1282,16 @@ async fn counterexample_c_dialog_pending_reconciles_run_logs_wal_and_scopes_with
     let select_err = select_task.await.unwrap().unwrap_err();
     assert_eq!(select_err.code, ErrorCode::DialogPending);
 
+    // Settle the beforeunload dialog via top-level `bsk dialog accept dlg-beforeunload`
+    // so `ws.rs` processes `dialog.changed: null` (transitioning `Progress::Dialog` ->
+    // `Progress::Running`) strictly before `ToolOperationAwait` runs.
+    let accept_beforeunload = run_bsk(vec![
+        "dialog".into(),
+        "accept".into(),
+        "dlg-beforeunload".into(),
+    ]);
+    let accept_select_req = recv_ws(&mut ws).await;
+    assert_eq!(accept_select_req["method"], "tool.dialog_accept");
     ws.send(Message::Text(
         json!({
             "event": "dialog.changed",
@@ -1287,6 +1301,17 @@ async fn counterexample_c_dialog_pending_reconciles_run_logs_wal_and_scopes_with
     ))
     .await
     .unwrap();
+    ws.send(Message::Text(
+        json!({
+            "id": accept_select_req["id"],
+            "result": { "dialog": { "handled": "accepted" }, "effect_state": "committed" }
+        })
+        .to_string(),
+    ))
+    .await
+    .unwrap();
+    assert!(accept_beforeunload.await.unwrap().status.success());
+
     ws.send(Message::Text(
         json!({
             "id": select_req["id"],
@@ -2136,6 +2161,26 @@ async fn counterexample_e_truncated_delta_whitespace_delta_abrupt_mcp_rst_and_la
     .unwrap();
     let late_sync_err = late_sync_task.await.unwrap().unwrap_err();
     assert_eq!(late_sync_err.code, ErrorCode::DialogPending);
+    let late_op = state
+        .dialog_operations
+        .get(&late_sid, &late_op_id)
+        .expect("dialog operation registered before teardown");
+
+    // Clear the modal on the WS stream BEFORE tearing down `late_sid` so `late_op`
+    // transitions to `Progress::Running` (ordered ahead of `stop_late_ws` on the single WS).
+    ws.send(Message::Text(
+        json!({
+            "event": "dialog.changed",
+            "payload": {
+                "session_id": late_sid,
+                "operation_id": late_op_id,
+                "dialog": Value::Null
+            }
+        })
+        .to_string(),
+    ))
+    .await
+    .unwrap();
 
     // Tear down `late_sid` BEFORE the suspended `tool.cooperate` WS call finishes!
     let stop_late_sock = sock.clone();
@@ -2193,21 +2238,13 @@ async fn counterexample_e_truncated_delta_whitespace_delta_abrupt_mcp_rst_and_la
     ))
     .await
     .unwrap();
-    // Flush WS roundtrip via a quick `browser.list` IPC call to ensure the daemon processed the WS frame.
-    let _ = IpcClient::connect(&sock)
-        .await
-        .unwrap()
-        .call_with_id::<_, Value>(
-            "flush-after-late-ws".into(),
-            Method::BrowserList,
-            Some(json!({})),
-            Duration::from_secs(5),
-        )
-        .await
-        .unwrap()
-        .unwrap();
-    // Give the spawned `DialogOperation` background task a moment to run `reconcile_completed_tool_rpc`.
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    // Deterministic happens-before barrier: `work.finish(body)` inside the spawned
+    // `DialogOperation` task runs strictly AFTER `reconcile_completed_tool_rpc`.
+    let settled = late_op.await_result(5_000).await;
+    assert!(
+        matches!(settled, ResponseBody::Ok(ref v) if v["state"] == "completed"),
+        "expected late DialogOperation to settle cleanly, got {settled:?}"
+    );
 
     assert_eq!(
         state.scopes.tracked_session_count(),
@@ -2221,4 +2258,958 @@ async fn counterexample_e_truncated_delta_whitespace_delta_abrupt_mcp_rst_and_la
     );
 
     handle.shutdown().await;
+}
+
+/// Counterexample F (Bidirectional Rolling-Upgrade Wire Compatibility):
+/// - Scenario A (`Old 2.0 CLI/MCP -> New Wave 3A Daemon`):
+///   An already-running pre-envelope `"2.0"` `bsk mcp` / CLI sends raw `Frame` lines
+///   with legacy `_caller_scope`, `_bind_scope`, `_reuse_or_start_scope`,
+///   `_explicit_incognito`, and `_return_scope_meta` inside `params` (no `"meta"`).
+///   1) Calls route to the caller's bound scope rather than falling back to `"default"`
+///      (even when `"default"` is actively bound to a distractor session!).
+///   2) Extension WS frames receive zero `_...` scope keys.
+///   3) `tool.cooperate(action="sync")` echoes `_scope_meta` in-band with `meta`
+///      omitted on wire, suppresses `cache_reusable` on slim `delta` replies so old
+///      `"2.0"` CLI never hydrates full-page VOM onto a slim delta, and hydrates the
+///      daemon-patched VOM on the subsequent `unchanged` reply.
+///   4) When a frame carries BOTH non-empty `"meta"` AND legacy `_caller_scope`,
+///      `"meta"` wins unconditionally and legacy keys are stripped.
+/// - Scenario B (`New Wave 3A CLI & MCP -> Pre-Envelope 2.0 Daemon` + live upgrade/rollback
+///   + `ipc::serve` `RpcHandler` / `full_handler` envelope bridge):
+///   1) Against a pre-envelope `"2.0"` daemon (`daemon.json` with `protocol_version: "2.0"`
+///      and no `ipc_envelope`, plus `system.status` without `ipc_envelope`) — where `main`'s
+///      `bsk_protocol::Frame` `FrameVisitor` would silently ignore any wire `"meta"` field and
+///      lose scope directives — both optimistic `bsk` CLI (`bsk sync --json`) and a long-lived
+///      `bsk mcp` subprocess omit wire `"meta"`, send legacy `_...` keys, and lift in-band
+///      `_scope_meta` without leaking `_scope_meta` into outputs.
+///   2) Once the daemon on the same `sock_path` upgrades to `ipc_envelope: true`, the
+///      running `bsk mcp` immediately switches to native out-of-band `IpcEnvelope` `meta`.
+///   3) If the daemon on the same `sock_path` rolls back to a legacy `daemon.json` lacking
+///      `protocol_version` (`ipc_envelope: false`), `bsk mcp` `stdio` EOF reap clears the cached
+///      `true` capability and sends `session.stop` with legacy `_caller_scope` in `params`.
+///   4) Serving `ipc::full_handler` (through a `RpcHandler` wrapper) via `ipc::serve` preserves
+///      out-of-band `IpcRequestMeta` and `IpcResponseMeta` across `bsk open`, `bsk sync --match`,
+///      and `bsk click`.
+#[tokio::test]
+async fn counterexample_f_bidirectional_ipc_envelope_rolling_upgrade_compat() {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use tokio::net::UnixListener;
+
+    // =========================================================================
+    // Scenario A: Pre-envelope `2.0` MCP/CLI -> New Wave 3A Daemon
+    // =========================================================================
+    let sync_turn = Arc::new(AtomicUsize::new(0));
+    let sync_turn_ext = Arc::clone(&sync_turn);
+    let env = IsolatedEnv::start(move |req| {
+        // Verify zero legacy `_` scope keys ever leak to Chrome Extension WS!
+        if let Some(ref params) = req.params {
+            for forbidden in [
+                "_caller_scope",
+                "_bind_scope",
+                "_reuse_or_start_scope",
+                "_explicit_incognito",
+                "_return_scope_meta",
+                "_scope_meta",
+            ] {
+                assert!(
+                    params.get(forbidden).is_none(),
+                    "legacy IPC key `{forbidden}` leaked onto Extension WS: {params}"
+                );
+            }
+        }
+        match &req.method {
+            Method::ToolClick => ResponseBody::Ok(json!({
+                "tab_id": 11,
+                "x": 12.0,
+                "y": 34.0,
+                "effect_state": "committed"
+            })),
+            Method::ToolCooperate => {
+                let turn = sync_turn_ext.fetch_add(1, Ordering::SeqCst);
+                match turn {
+                    0 => ResponseBody::Ok(json!({
+                        "tab_id": 11,
+                        "control_policy": "target",
+                        "kind": "baseline",
+                        "history_complete": true,
+                        "context_id": "10101010-1010-4010-8010-101010101010",
+                        "observation_id": "20202020-2020-4020-8020-202020202020",
+                        "changes": [],
+                        "observation": {
+                            "observation_id": "20202020-2020-4020-8020-202020202020",
+                            "tab_id": 11,
+                            "url": "https://shop.test/cart",
+                            "title": "Cart",
+                            "text": "@e1 button \"Pay\"\n@e2 text \"Total $10\"",
+                            "ref_count": 2,
+                            "truncated": false
+                        },
+                        "state": { "mode": "ready", "revision": 1 }
+                    })),
+                    1 => ResponseBody::Ok(json!({
+                        "tab_id": 11,
+                        "control_policy": "target",
+                        "kind": "delta",
+                        "history_complete": true,
+                        "previous_context_id": "10101010-1010-4010-8010-101010101010",
+                        "context_id": "30303030-3030-4030-8030-303030303030",
+                        "observation_id": "40404040-4040-4040-8040-404040404040",
+                        "changes": [{
+                            "kind": "text",
+                            "label": "Total",
+                            "value": "Total $20"
+                        }],
+                        "observation_patch": {
+                            "lines": [{
+                                "line": 2,
+                                "previous": "@e2 text \"Total $10\"",
+                                "text": "@e2 text \"Total $20\""
+                            }]
+                        },
+                        "observation": {
+                            "observation_id": "40404040-4040-4040-8040-404040404040",
+                            "tab_id": 11,
+                            "url": "https://shop.test/cart",
+                            "title": "Cart",
+                            "ref_count": 2,
+                            "truncated": false
+                        },
+                        "state": { "mode": "ready", "revision": 2 }
+                    })),
+                    _ => ResponseBody::Ok(json!({
+                        "tab_id": 11,
+                        "control_policy": "target",
+                        "kind": "unchanged",
+                        "history_complete": true,
+                        "previous_context_id": "30303030-3030-4030-8030-303030303030",
+                        "context_id": "30303030-3030-4030-8030-303030303030",
+                        "observation_id": "40404040-4040-4040-8040-404040404040",
+                        "changes": [],
+                        "observation": {
+                            "observation_id": "40404040-4040-4040-8040-404040404040",
+                            "tab_id": 11,
+                            "url": "https://shop.test/cart",
+                            "title": "Cart",
+                            "ref_count": 2,
+                            "truncated": false
+                        },
+                        "state": { "mode": "ready", "revision": 2 }
+                    })),
+                }
+            }
+            other => panic!("unexpected method in Scenario A: {other:?}"),
+        }
+    })
+    .await;
+
+    async fn send_raw_uds(sock: &Path, payload: Value) -> Value {
+        let stream = UnixStream::connect(sock).await.unwrap();
+        let (read, mut write) = stream.into_split();
+        let mut line = serde_json::to_string(&payload).unwrap();
+        line.push('\n');
+        write.write_all(line.as_bytes()).await.unwrap();
+        write.flush().await.unwrap();
+        let mut reply_line = String::new();
+        BufReader::new(read)
+            .read_line(&mut reply_line)
+            .await
+            .unwrap();
+        serde_json::from_str(reply_line.trim_end()).unwrap()
+    }
+
+    // Bind `"default"` scope to a distractor session first so any silent fallback
+    // to `"default"` immediately hits the wrong session!
+    let (distractor_res, _) = IpcClient::connect(&env.sock)
+        .await
+        .unwrap()
+        .call_envelope::<_, Value>(
+            "bind-default-distractor",
+            Method::SessionStart,
+            Some(json!({})),
+            IpcRequestMeta {
+                caller_scope: Some("default".into()),
+                bind_scope: true,
+                reuse_or_start_scope: true,
+                ..Default::default()
+            },
+            Duration::from_secs(5),
+        )
+        .await
+        .unwrap();
+    let distractor_sid = distractor_res.unwrap()["session_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    // `system.status` advertises `ipc_envelope: true` on the new daemon.
+    let status_raw = send_raw_uds(
+        &env.sock,
+        json!({ "id": "st-1", "method": "system.status", "params": {} }),
+    )
+    .await;
+    assert_eq!(status_raw["result"]["ipc_envelope"], true);
+
+    // Old `2.0` MCP sends legacy `session.start` with `_caller_scope` + `_reuse_or_start_scope` in `params`.
+    let legacy_start = send_raw_uds(
+        &env.sock,
+        json!({
+            "id": "old-start-1",
+            "method": "session.start",
+            "params": {
+                "_caller_scope": "agent:codex:old-mcp",
+                "_bind_scope": true,
+                "_reuse_or_start_scope": true,
+                "_explicit_incognito": false
+            }
+        }),
+    )
+    .await;
+    let old_mcp_sid = legacy_start["result"]["session_id"]
+        .as_str()
+        .expect("legacy session.start succeeded")
+        .to_owned();
+    assert_ne!(
+        old_mcp_sid, distractor_sid,
+        "legacy _caller_scope must isolate session from default scope"
+    );
+
+    // Repeating legacy `_reuse_or_start_scope: true` reuses `old_mcp_sid`!
+    let legacy_reuse = send_raw_uds(
+        &env.sock,
+        json!({
+            "id": "old-start-2",
+            "method": "session.start",
+            "params": {
+                "_caller_scope": "agent:codex:old-mcp",
+                "_bind_scope": true,
+                "_reuse_or_start_scope": true,
+                "_explicit_incognito": false
+            }
+        }),
+    )
+    .await;
+    assert_eq!(legacy_reuse["result"]["session_id"], old_mcp_sid);
+
+    // Sync #1 (`baseline`) with legacy `_return_scope_meta: true`:
+    // echoes `_scope_meta` in-band with `meta` omitted on wire!
+    let sync1 = send_raw_uds(
+        &env.sock,
+        json!({
+            "id": "old-sync-1",
+            "method": "tool.cooperate",
+            "params": {
+                "session_id": "",
+                "action": "sync",
+                "control_policy": "target",
+                "_caller_scope": "agent:codex:old-mcp",
+                "_return_scope_meta": true
+            }
+        }),
+    )
+    .await;
+    assert!(
+        sync1.get("meta").is_none(),
+        "wire meta must stay omitted for legacy caller: {sync1}"
+    );
+    assert_eq!(sync1["result"]["_scope_meta"]["session_id"], old_mcp_sid);
+    assert_eq!(sync1["result"]["_scope_meta"]["cache_reusable"], true);
+    assert_eq!(
+        sync1["result"]["_scope_meta"]["cached_vom"],
+        "@e1 button \"Pay\"\n@e2 text \"Total $10\""
+    );
+
+    // Sync #2 (slim `delta` without `/observation/text`):
+    // outgoing legacy `_scope_meta` suppresses `cache_reusable` so old `2.0` CLI keeps delta slim!
+    let sync2 = send_raw_uds(
+        &env.sock,
+        json!({
+            "id": "old-sync-2",
+            "method": "tool.cooperate",
+            "params": {
+                "session_id": "",
+                "action": "sync",
+                "control_policy": "target",
+                "_caller_scope": "agent:codex:old-mcp",
+                "_return_scope_meta": true
+            }
+        }),
+    )
+    .await;
+    assert!(sync2.get("meta").is_none());
+    assert_eq!(sync2["result"]["kind"], "delta");
+    assert_eq!(
+        sync2["result"]["_scope_meta"]["cache_reusable"], false,
+        "slim delta must NOT advertise cache_reusable=true to pre-envelope 2.0 CLI: {sync2}"
+    );
+    assert!(sync2["result"]["_scope_meta"]["cached_vom"].is_null());
+
+    // Sync #3 (`unchanged` without `/observation/text`):
+    // outgoing legacy `_scope_meta` serves the daemon-patched `$20` VOM with `cache_reusable: true`!
+    let sync3 = send_raw_uds(
+        &env.sock,
+        json!({
+            "id": "old-sync-3",
+            "method": "tool.cooperate",
+            "params": {
+                "session_id": "",
+                "action": "sync",
+                "control_policy": "target",
+                "_caller_scope": "agent:codex:old-mcp",
+                "_return_scope_meta": true
+            }
+        }),
+    )
+    .await;
+    assert_eq!(sync3["result"]["kind"], "unchanged");
+    assert_eq!(sync3["result"]["_scope_meta"]["cache_reusable"], true);
+    assert_eq!(
+        sync3["result"]["_scope_meta"]["cached_vom"],
+        "@e1 button \"Pay\"\n@e2 text \"Total $20\""
+    );
+
+    // Legacy implicit `tool.click` (`session_id: ""` + `_caller_scope`) routes to `old_mcp_sid`
+    // and auto-injects `old_mcp_sid`'s `target` `context_id`!
+    let _ = env.take_requests();
+    let legacy_click = send_raw_uds(
+        &env.sock,
+        json!({
+            "id": "old-click-1",
+            "method": "tool.click",
+            "params": {
+                "session_id": "",
+                "target": { "ref": "e1" },
+                "_caller_scope": "agent:codex:old-mcp"
+            }
+        }),
+    )
+    .await;
+    assert_eq!(legacy_click["result"]["effect_state"], "committed");
+    let click_ws_reqs = env.take_requests();
+    assert_eq!(click_ws_reqs.len(), 1);
+    assert_eq!(
+        click_ws_reqs[0].params.as_ref().unwrap()["session_id"],
+        old_mcp_sid
+    );
+    assert_eq!(
+        click_ws_reqs[0].params.as_ref().unwrap()["context_id"],
+        "30303030-3030-4030-8030-303030303030"
+    );
+
+    // Adversarial spoof guard: when non-empty `meta` AND legacy `_caller_scope` are both sent,
+    // `meta` wins (`old_mcp_sid`), `_caller_scope: "default"` is ignored & stripped, and
+    // `_scope_meta` is NOT injected in-band.
+    let spoof_click = send_raw_uds(
+        &env.sock,
+        json!({
+            "id": "spoof-1",
+            "method": "tool.click",
+            "params": {
+                "session_id": "",
+                "target": { "ref": "e1" },
+                "_caller_scope": "default",
+                "_return_scope_meta": true
+            },
+            "meta": {
+                "caller_scope": "agent:codex:old-mcp"
+            }
+        }),
+    )
+    .await;
+    assert!(spoof_click["result"].get("_scope_meta").is_none());
+    let spoof_ws_reqs = env.take_requests();
+    assert_eq!(spoof_ws_reqs.len(), 1);
+    assert_eq!(
+        spoof_ws_reqs[0].params.as_ref().unwrap()["session_id"],
+        old_mcp_sid
+    );
+
+    // Explicit empty `"meta": {}` spoof guard: an envelope-mode frame with `"meta": {}`
+    // and forged `_caller_scope` + `_return_scope_meta` in `params` must NOT adopt
+    // `_caller_scope` (routes to `"default"` -> `distractor_sid`, NOT `old_mcp_sid`),
+    // must strip private `_` keys before WS forwarding, and must NOT inject `_scope_meta`.
+    let empty_meta_spoof = send_raw_uds(
+        &env.sock,
+        json!({
+            "id": "spoof-empty-meta",
+            "method": "tool.click",
+            "params": {
+                "session_id": "",
+                "target": { "ref": "e1" },
+                "_caller_scope": "agent:codex:old-mcp",
+                "_return_scope_meta": true
+            },
+            "meta": {}
+        }),
+    )
+    .await;
+    assert!(empty_meta_spoof["result"].get("_scope_meta").is_none());
+    let empty_meta_ws_reqs = env.take_requests();
+    assert_eq!(empty_meta_ws_reqs.len(), 1);
+    assert_eq!(
+        empty_meta_ws_reqs[0].params.as_ref().unwrap()["session_id"],
+        distractor_sid
+    );
+    assert!(
+        empty_meta_ws_reqs[0]
+            .params
+            .as_ref()
+            .unwrap()
+            .get("_caller_scope")
+            .is_none()
+    );
+    assert!(
+        empty_meta_ws_reqs[0]
+            .params
+            .as_ref()
+            .unwrap()
+            .get("_return_scope_meta")
+            .is_none()
+    );
+
+    env.shutdown().await;
+
+    // =========================================================================
+    // Scenario B: New Wave 3A CLI & MCP -> Pre-Envelope `2.0` Daemon (+ live upgrade)
+    // =========================================================================
+    let b_home = tempfile::tempdir_in("/tmp").unwrap();
+    let b_sock = b_home.path().join("legacy20.sock");
+    let listener = UnixListener::bind(&b_sock).unwrap();
+
+    // Pre-envelope `2.0` `daemon.json` written by `main` (`cfe1f84e`):
+    // has `protocol_version: Some("2.0")`, does NOT have `ipc_envelope: true`.
+    let legacy_info = DaemonInfo::now(std::process::id(), b_sock.clone(), 52888, "0.5.0")
+        .with_protocol_version("2.0");
+    bsk::daemon::info::write_to_path(&legacy_info, &b_home.path().join("daemon.json")).unwrap();
+
+    let advertise_envelope = Arc::new(AtomicBool::new(false));
+    let advertise_for_srv = Arc::clone(&advertise_envelope);
+    let captured_frames: Arc<Mutex<Vec<Value>>> = Arc::new(Mutex::new(Vec::new()));
+    let captured_for_srv = Arc::clone(&captured_frames);
+    let sock_for_srv = b_sock.clone();
+
+    let legacy_srv = tokio::spawn(async move {
+        loop {
+            let Ok((stream, _)) = listener.accept().await else {
+                break;
+            };
+            let advertise = Arc::clone(&advertise_for_srv);
+            let captured = Arc::clone(&captured_for_srv);
+            let sock_str = sock_for_srv.to_string_lossy().into_owned();
+            tokio::spawn(async move {
+                let (read, mut write) = stream.into_split();
+                let mut reader = BufReader::new(read);
+                let mut line = String::new();
+                while reader.read_line(&mut line).await.unwrap_or(0) > 0 {
+                    let raw: Value = serde_json::from_str(line.trim_end()).unwrap();
+                    let is_upgraded = advertise.load(Ordering::SeqCst);
+                    if !is_upgraded {
+                        assert!(
+                            raw.get("meta").is_none(),
+                            "pre-envelope 2.0 daemon must NEVER receive wire `meta`: {raw}"
+                        );
+                        // Also prove `bsk_protocol::Frame` decodes cleanly.
+                        let _: Frame = serde_json::from_str(line.trim_end()).unwrap();
+                    }
+                    captured.lock().unwrap().push(raw.clone());
+                    let id = raw["id"].clone();
+                    let method = raw["method"].as_str().unwrap_or("");
+                    let response = match method {
+                        "system.status" => {
+                            let mut st = json!({
+                                "daemon_version": "0.5.0",
+                                "protocol_version": "2.0",
+                                "pid": std::process::id(),
+                                "uptime_secs": 1,
+                                "ws_port": 52888,
+                                "sock_path": sock_str,
+                                "browsers": [],
+                                "sessions": []
+                            });
+                            if is_upgraded {
+                                st["ipc_envelope"] = json!(true);
+                            }
+                            json!({ "id": id, "result": st })
+                        }
+                        "session.start" => json!({
+                            "id": id,
+                            "result": {
+                                "session_id": "sess-from-legacy-20",
+                                "browser_instance_id": "br-20"
+                            }
+                        }),
+                        "tool.navigate" => json!({
+                            "id": id,
+                            "result": {
+                                "tab_id": 7,
+                                "url": "https://legacy.test/",
+                                "final_url": "https://legacy.test/",
+                                "reached": "load"
+                            }
+                        }),
+                        "tool.cooperate" => {
+                            let mut coop_res = json!({
+                                "tab_id": 7,
+                                "control_policy": "target",
+                                "kind": "unchanged",
+                                "history_complete": true,
+                                "context_id": "70707070-7070-4070-8070-707070707070",
+                                "observation_id": "80808080-8080-4080-8080-808080808080",
+                                "changes": [],
+                                "observation": {
+                                    "observation_id": "80808080-8080-4080-8080-808080808080",
+                                    "tab_id": 7,
+                                    "url": "https://legacy.test/",
+                                    "title": "Legacy 2.0",
+                                    "ref_count": 1,
+                                    "truncated": false
+                                },
+                                "state": { "mode": "ready", "revision": 1 }
+                            });
+                            let scope_meta = json!({
+                                "session_id": "sess-from-legacy-20",
+                                "tab_id": 7,
+                                "short_ctx": "c1",
+                                "short_obs": "o1",
+                                "cached_vom": "@e1 button \"Legacy OK\"",
+                                "cached_vom_truncated": false,
+                                "cached_url": "https://legacy.test/",
+                                "cached_title": "Legacy 2.0",
+                                "cache_reusable": true
+                            });
+                            if is_upgraded {
+                                json!({
+                                    "id": id,
+                                    "result": coop_res,
+                                    "meta": { "scope_meta": scope_meta }
+                                })
+                            } else {
+                                coop_res["_scope_meta"] = scope_meta;
+                                json!({ "id": id, "result": coop_res })
+                            }
+                        }
+                        "session.stop" => json!({
+                            "id": id,
+                            "result": { "stopped": ["sess-from-legacy-20"] }
+                        }),
+                        other => panic!("unexpected method in Scenario B: {other}"),
+                    };
+                    let mut bytes = serde_json::to_vec(&response).unwrap();
+                    bytes.push(b'\n');
+                    write.write_all(&bytes).await.unwrap();
+                    write.flush().await.unwrap();
+                    line.clear();
+                }
+            });
+        }
+    });
+
+    // B1. Optimistic single-UDS CLI fastpath (`bsk sync --scope rolling-cli --json`):
+    // Zero `system.status` probes, sends legacy `_caller_scope` + `_return_scope_meta`,
+    // lifts `_scope_meta` to hydrate `unchanged` VOM, and strips `_scope_meta` from stdout!
+    let mut cli_cmd = Command::new(env!("CARGO_BIN_EXE_bsk"));
+    cli_cmd
+        .args(["sync", "--scope", "rolling-cli", "--json"])
+        .env("BSK_HOME", b_home.path())
+        .env("BSK_AUTO_START", "0")
+        .env("BSK_AUTO_UPDATE", "off")
+        .env_remove("BSK_CANCEL_ON_STDIN_CLOSE")
+        .env_remove("BSK_SESSION")
+        .env_remove("BSK_SCOPE")
+        .kill_on_drop(true);
+    let cli_out = cli_cmd.output().await.unwrap();
+    assert!(
+        cli_out.status.success(),
+        "bsk sync against pre-envelope 2.0 daemon failed: {}",
+        String::from_utf8_lossy(&cli_out.stderr)
+    );
+    let cli_json: Value = serde_json::from_slice(&cli_out.stdout).unwrap();
+    assert_eq!(cli_json["session_id"], "sess-from-legacy-20");
+    assert_eq!(cli_json["ctx"], "c1");
+    assert_eq!(cli_json["obs"], "o1");
+    assert_eq!(cli_json["vom"], "@e1 button \"Legacy OK\"");
+    assert_no_private_ipc_keys(&cli_json, "Scenario B optimistic CLI sync stdout");
+
+    {
+        let frames = std::mem::take(&mut *captured_frames.lock().unwrap());
+        assert_eq!(
+            frames.len(),
+            1,
+            "optimistic daemon.json fastpath must issue 0 system.status probes: {frames:?}"
+        );
+        assert_eq!(frames[0]["method"], "tool.cooperate");
+        assert!(frames[0].get("meta").is_none());
+        assert_eq!(frames[0]["params"]["_caller_scope"], "scope:rolling-cli");
+        assert_eq!(frames[0]["params"]["_return_scope_meta"], true);
+    }
+
+    // B2. Long-lived `bsk mcp` subprocess talking to pre-envelope `2.0` daemon,
+    // THEN live-upgrading on the same socket path to `ipc_envelope: true`!
+    let mut mcp = McpProcess::spawn(b_home.path(), &[]).await;
+    let (open_err, open_res) = mcp
+        .call_tool(
+            "bsk_session",
+            json!({ "action": "open", "url": "https://legacy.test/" }),
+        )
+        .await;
+    assert!(
+        !open_err,
+        "MCP open against pre-envelope 2.0 daemon failed: {open_res}"
+    );
+    assert_eq!(open_res["session_id"], "sess-from-legacy-20");
+    assert_no_private_ipc_keys(&open_res, "Scenario B MCP open output");
+
+    let pre_upgrade_frames = std::mem::take(&mut *captured_frames.lock().unwrap());
+    let start_frame = pre_upgrade_frames
+        .iter()
+        .find(|f| f["method"] == "session.start")
+        .expect("MCP open issued session.start");
+    assert!(start_frame.get("meta").is_none());
+    assert!(
+        start_frame["params"]["_caller_scope"]
+            .as_str()
+            .unwrap()
+            .starts_with("mcp:")
+    );
+    assert_eq!(start_frame["params"]["_bind_scope"], true);
+    assert_eq!(start_frame["params"]["_reuse_or_start_scope"], true);
+
+    // Flip the daemon on the SAME `sock_path` to `ipc_envelope: true` (simulating `bsk update`)!
+    advertise_envelope.store(true, Ordering::SeqCst);
+    bsk::daemon::info::write_to_path(
+        &legacy_info.with_ipc_envelope(true),
+        &b_home.path().join("daemon.json"),
+    )
+    .unwrap();
+
+    let (sync_err, sync_res) = mcp
+        .call_tool(
+            "bsk_session",
+            json!({ "action": "sync", "match_text": ["Legacy"] }),
+        )
+        .await;
+    assert!(
+        !sync_err,
+        "MCP sync after rolling daemon upgrade failed: {sync_res}"
+    );
+    assert_eq!(
+        sync_res["context_id"],
+        "70707070-7070-4070-8070-707070707070"
+    );
+    assert_no_private_ipc_keys(&sync_res, "Scenario B MCP sync output after upgrade");
+
+    let post_upgrade_frames = std::mem::take(&mut *captured_frames.lock().unwrap());
+    let upgraded_coop = post_upgrade_frames
+        .iter()
+        .find(|f| f["method"] == "tool.cooperate")
+        .expect("MCP sync issued tool.cooperate");
+    assert!(
+        upgraded_coop["meta"]["caller_scope"]
+            .as_str()
+            .unwrap()
+            .starts_with("mcp:"),
+        "after live daemon upgrade, running MCP must switch to native `meta`: {upgraded_coop}"
+    );
+    assert_eq!(upgraded_coop["meta"]["return_scope_meta"], true);
+    assert!(upgraded_coop["params"].get("_caller_scope").is_none());
+    assert!(upgraded_coop["params"].get("_return_scope_meta").is_none());
+
+    // Closing MCP `stdio` EOF sends `session.stop` using the upgraded `ipc_envelope: true` header!
+    let mcp_exit = mcp.close_stdin_and_wait().await;
+    assert!(mcp_exit.success());
+    let eof_frames = std::mem::take(&mut *captured_frames.lock().unwrap());
+    let stop_frame = eof_frames
+        .iter()
+        .find(|f| f["method"] == "session.stop")
+        .expect("MCP EOF reaped transient session");
+    assert!(
+        stop_frame["meta"]["caller_scope"]
+            .as_str()
+            .unwrap()
+            .starts_with("mcp:")
+    );
+    assert!(stop_frame["params"].get("_caller_scope").is_none());
+
+    // B3. Rollback on the SAME `sock_path` to a legacy `daemon.json` WITHOUT `protocol_version`:
+    // A second `bsk mcp` first talks while `ipc_envelope: true` is active (caching `true`),
+    // then `daemon.json` rolls back to `protocol_version: None` (`ipc_envelope: false`) and
+    // `advertise_envelope` flips back to `false` before `stdio` EOF. `reap_orphan_transient_mcp_session`
+    // must refresh `(b_sock, false)` and send `session.stop` with `_caller_scope` in `params`!
+    let mut mcp_rb = McpProcess::spawn(b_home.path(), &[]).await;
+    let (rb_open_err, _) = mcp_rb
+        .call_tool(
+            "bsk_session",
+            json!({ "action": "open", "url": "https://legacy.test/" }),
+        )
+        .await;
+    assert!(!rb_open_err);
+    let _ = std::mem::take(&mut *captured_frames.lock().unwrap());
+
+    advertise_envelope.store(false, Ordering::SeqCst);
+    let downgraded_no_proto = DaemonInfo::now(std::process::id(), b_sock.clone(), 52888, "0.4.9");
+    assert!(downgraded_no_proto.protocol_version.is_none());
+    bsk::daemon::info::write_to_path(&downgraded_no_proto, &b_home.path().join("daemon.json"))
+        .unwrap();
+
+    let mcp_rb_exit = mcp_rb.close_stdin_and_wait().await;
+    assert!(mcp_rb_exit.success());
+    let rb_eof_frames = std::mem::take(&mut *captured_frames.lock().unwrap());
+    let rb_stop = rb_eof_frames
+        .iter()
+        .find(|f| f["method"] == "session.stop")
+        .expect("MCP EOF after rollback issued session.stop");
+    assert!(
+        rb_stop.get("meta").is_none(),
+        "rolled-back daemon without protocol_version must NOT receive wire meta: {rb_stop}"
+    );
+    assert!(
+        rb_stop["params"]["_caller_scope"]
+            .as_str()
+            .unwrap()
+            .starts_with("mcp:")
+    );
+
+    legacy_srv.abort();
+    let _ = legacy_srv.await;
+
+    // =========================================================================
+    // Scenario B4: `ipc::serve` + `RpcHandler` wrapper around `ipc::full_handler`
+    // =========================================================================
+    let b4_home = tempfile::tempdir_in("/tmp").unwrap();
+    let b4_sock = b4_home.path().join("rpc-handler-bridge.sock");
+    let b4_daemon = daemon::run(
+        DaemonConfig::new(0).with_local_auth(bsk::daemon::local_auth::LocalAuthMode::TrustLocal),
+        None,
+    )
+    .await
+    .unwrap();
+    let b4_ws_addr = b4_daemon.ws_addr();
+    let b4_info = DaemonInfo::now(
+        std::process::id(),
+        b4_sock.clone(),
+        b4_ws_addr.port(),
+        bsk::daemon::state::DAEMON_VERSION,
+    )
+    .with_protocol_version(bsk::daemon::state::PROTOCOL_VERSION)
+    .with_ipc_envelope(true);
+    bsk::daemon::info::write_to_path(&b4_info, &b4_home.path().join("daemon.json")).unwrap();
+
+    let inner_full = daemon::ipc::full_handler(
+        daemon::ipc::DaemonStatus {
+            started_at: std::time::Instant::now(),
+            ws_port: b4_ws_addr.port(),
+            sock_path: b4_sock.clone(),
+            daemon_version: bsk::daemon::state::DAEMON_VERSION,
+            protocol_version: bsk::daemon::state::PROTOCOL_VERSION,
+        },
+        b4_daemon.state(),
+    );
+    let b4_rpc_count = Arc::new(AtomicUsize::new(0));
+    let b4_rpc_count_mw = Arc::clone(&b4_rpc_count);
+    let wrapped_rpc_handler: daemon::ipc::RpcHandler = Arc::new(move |id, method, params| {
+        let count = Arc::clone(&b4_rpc_count_mw);
+        let fut = inner_full(id, method, params);
+        Box::pin(async move {
+            let body = fut.await;
+            count.fetch_add(1, Ordering::SeqCst);
+            body
+        })
+    });
+    let b4_listener = daemon::ipc::bind(&b4_sock).await.unwrap();
+    let (b4_stop_tx, b4_stop_rx) = tokio::sync::oneshot::channel::<()>();
+    let b4_srv = tokio::spawn(daemon::ipc::serve(
+        b4_listener,
+        wrapped_rpc_handler,
+        || {},
+        || {},
+        || {},
+        async move {
+            let _ = b4_stop_rx.await;
+        },
+    ));
+
+    let mut b4_ws = connect_ext(b4_ws_addr).await;
+    do_handshake(&mut b4_ws, TEST_EXT_ID).await;
+    let b4_ext_reqs = Arc::new(Mutex::new(Vec::new()));
+    let b4_sync_turn = Arc::new(AtomicUsize::new(0));
+    let b4_sync_turn_ext = Arc::clone(&b4_sync_turn);
+    spawn_mock_extension(b4_ws, Arc::clone(&b4_ext_reqs), move |req| {
+        match &req.method {
+            Method::ToolNavigate => ResponseBody::Ok(json!({
+                "tab_id": 21,
+                "url": "https://bridge.test/",
+                "final_url": "https://bridge.test/",
+                "reached": "load"
+            })),
+            Method::ToolClick => ResponseBody::Ok(json!({
+                "tab_id": 21,
+                "x": 10.0,
+                "y": 20.0,
+                "effect_state": "committed"
+            })),
+            Method::ToolCooperate => {
+                let turn = b4_sync_turn_ext.fetch_add(1, Ordering::SeqCst);
+                if turn == 0 {
+                    ResponseBody::Ok(json!({
+                        "tab_id": 21,
+                        "control_policy": "target",
+                        "kind": "baseline",
+                        "history_complete": true,
+                        "context_id": "90909090-9090-4090-8090-909090909090",
+                        "observation_id": "a0a0a0a0-a0a0-40a0-80a0-a0a0a0a0a0a0",
+                        "changes": [],
+                        "observation": {
+                            "observation_id": "a0a0a0a0-a0a0-40a0-80a0-a0a0a0a0a0a0",
+                            "tab_id": 21,
+                            "url": "https://bridge.test/",
+                            "title": "Bridge",
+                            "text": "@e1 button \"Submit\"\n@e2 text \"Balance $5\"",
+                            "ref_count": 2,
+                            "truncated": false
+                        },
+                        "state": { "mode": "ready", "revision": 1 }
+                    }))
+                } else {
+                    ResponseBody::Ok(json!({
+                        "tab_id": 21,
+                        "control_policy": "target",
+                        "kind": "delta",
+                        "history_complete": true,
+                        "previous_context_id": "90909090-9090-4090-8090-909090909090",
+                        "context_id": "b0b0b0b0-b0b0-40b0-80b0-b0b0b0b0b0b0",
+                        "observation_id": "c0c0c0c0-c0c0-40c0-80c0-c0c0c0c0c0c0",
+                        "changes": [{
+                            "kind": "text",
+                            "label": "Balance",
+                            "value": "Balance $25"
+                        }],
+                        "observation_patch": {
+                            "lines": [{
+                                "line": 2,
+                                "previous": "@e2 text \"Balance $5\"",
+                                "text": "@e2 text \"Balance $25\""
+                            }]
+                        },
+                        "observation": {
+                            "observation_id": "c0c0c0c0-c0c0-40c0-80c0-c0c0c0c0c0c0",
+                            "tab_id": 21,
+                            "url": "https://bridge.test/",
+                            "title": "Bridge",
+                            "ref_count": 2,
+                            "truncated": false
+                        },
+                        "state": { "mode": "ready", "revision": 2 }
+                    }))
+                }
+            }
+            other => panic!("unexpected method in Scenario B4: {other:?}"),
+        }
+    });
+
+    // Bind `"default"` on B4 to a distractor session so `--scope bridge-alpha` must be preserved!
+    let (b4_default, _) = IpcClient::connect(&b4_sock)
+        .await
+        .unwrap()
+        .call_envelope::<_, Value>(
+            "b4-default",
+            Method::SessionStart,
+            Some(json!({})),
+            IpcRequestMeta {
+                caller_scope: Some("default".into()),
+                bind_scope: true,
+                reuse_or_start_scope: true,
+                ..Default::default()
+            },
+            Duration::from_secs(5),
+        )
+        .await
+        .unwrap();
+    let b4_default_sid = b4_default.unwrap()["session_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    async fn run_b4_bsk(home: &Path, args: &[&str]) -> Value {
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_bsk"));
+        cmd.args(args)
+            .env("BSK_HOME", home)
+            .env("BSK_AUTO_START", "0")
+            .env("BSK_AUTO_UPDATE", "off")
+            .env_remove("BSK_CANCEL_ON_STDIN_CLOSE")
+            .env_remove("BSK_SESSION")
+            .env_remove("BSK_SCOPE")
+            .kill_on_drop(true);
+        let out = cmd.output().await.unwrap();
+        assert!(
+            out.status.success(),
+            "bsk {args:?} failed against RpcHandler ipc::serve:\nstdout: {}\nstderr: {}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        serde_json::from_slice(&out.stdout).unwrap()
+    }
+
+    let b4_open = run_b4_bsk(
+        b4_home.path(),
+        &[
+            "open",
+            "https://bridge.test/",
+            "--scope",
+            "bridge-alpha",
+            "--json",
+        ],
+    )
+    .await;
+    let b4_alpha_sid = b4_open["session_id"].as_str().unwrap().to_owned();
+    assert_ne!(
+        b4_alpha_sid, b4_default_sid,
+        "RpcHandler + ipc::serve must preserve caller_scope instead of falling back to default"
+    );
+
+    let b4_match = run_b4_bsk(
+        b4_home.path(),
+        &[
+            "sync",
+            "--match-text",
+            "$25",
+            "--scope",
+            "bridge-alpha",
+            "--json",
+        ],
+    )
+    .await;
+    assert_eq!(b4_match["session_id"], b4_alpha_sid);
+    assert!(
+        b4_match["vom"].as_str().unwrap().contains("Balance $25"),
+        "RpcHandler + ipc::serve must preserve out-of-band ScopeResultMeta on slim text delta: {b4_match}"
+    );
+
+    let b4_click = run_b4_bsk(
+        b4_home.path(),
+        &["click", "@e1", "--scope", "bridge-alpha", "--json"],
+    )
+    .await;
+    assert_eq!(b4_click["tab_id"], 21);
+    {
+        let reqs = b4_ext_reqs.lock().unwrap();
+        let click_req = reqs
+            .iter()
+            .find(|r| r.method == Method::ToolClick)
+            .expect("B4 click dispatched to extension");
+        assert_eq!(
+            click_req.params.as_ref().unwrap()["session_id"],
+            b4_alpha_sid
+        );
+        assert_eq!(
+            click_req.params.as_ref().unwrap()["context_id"],
+            "b0b0b0b0-b0b0-40b0-80b0-b0b0b0b0b0b0"
+        );
+    }
+    assert!(
+        b4_rpc_count.load(Ordering::SeqCst) >= 5,
+        "wrapped RpcHandler middleware must have served all B4 RPCs"
+    );
+
+    let _ = b4_stop_tx.send(());
+    let _ = b4_srv.await;
+    b4_daemon.shutdown().await;
 }

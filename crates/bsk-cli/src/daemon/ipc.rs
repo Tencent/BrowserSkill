@@ -90,15 +90,38 @@ impl IntoEnvelopeHandler for EnvelopeRpcHandler {
     }
 }
 
+#[derive(Default)]
+struct RpcHandlerEnvelopeBridge {
+    req_meta: Option<IpcRequestMeta>,
+    resp_meta: IpcResponseMeta,
+}
+
+tokio::task_local! {
+    static RPC_HANDLER_ENVELOPE_BRIDGE: std::sync::Mutex<RpcHandlerEnvelopeBridge>;
+}
+
 impl IntoEnvelopeHandler for RpcHandler {
     fn into_envelope_handler(self) -> EnvelopeRpcHandler {
-        Arc::new(move |rpc_id, method, params, _meta| {
+        Arc::new(move |rpc_id, method, params, meta| {
             let handler = Arc::clone(&self);
             Box::pin(async move {
-                (
-                    (handler)(rpc_id, method, params).await,
-                    IpcResponseMeta::default(),
-                )
+                let bridge = std::sync::Mutex::new(RpcHandlerEnvelopeBridge {
+                    req_meta: Some(meta),
+                    resp_meta: IpcResponseMeta::default(),
+                });
+                RPC_HANDLER_ENVELOPE_BRIDGE
+                    .scope(bridge, async move {
+                        let body = (handler)(rpc_id, method, params).await;
+                        let resp_meta = RPC_HANDLER_ENVELOPE_BRIDGE
+                            .try_with(|slot| {
+                                std::mem::take(
+                                    &mut slot.lock().unwrap_or_else(|p| p.into_inner()).resp_meta,
+                                )
+                            })
+                            .unwrap_or_default();
+                        (body, resp_meta)
+                    })
+                    .await
             })
         })
     }
@@ -149,6 +172,7 @@ impl DaemonStatus {
             browsers: Vec::new(),
             sessions: Vec::new(),
             version_skew_browsers: Vec::new(),
+            ipc_envelope: true,
         }
     }
 
@@ -192,6 +216,7 @@ impl DaemonStatus {
             browsers,
             sessions,
             version_skew_browsers,
+            ipc_envelope: true,
         }
     }
 }
@@ -372,16 +397,30 @@ fn reconcile_completed_tool_rpc(
     recorded_meta
 }
 
-/// Build a plain [`RpcHandler`] wrapper around [`full_envelope_handler`] for
-/// callers that invoke the handler directly with default request metadata.
+/// Build a plain [`RpcHandler`] wrapper around [`full_envelope_handler`].
+/// When invoked directly, uses default request metadata; when served through
+/// [`ipc::serve`] (directly or via a [`RpcHandler`] middleware wrapper), bridges
+/// [`IpcRequestMeta`] and [`IpcResponseMeta`] across the task-local envelope slot.
 pub fn full_handler(status: DaemonStatus, state: Arc<DaemonState>) -> RpcHandler {
     let envelope_handler = full_envelope_handler(status, state);
     Arc::new(move |rpc_id, method, params| {
         let envelope_handler = Arc::clone(&envelope_handler);
         Box::pin(async move {
-            (envelope_handler)(rpc_id, method, params, IpcRequestMeta::default())
-                .await
-                .0
+            let req_meta = RPC_HANDLER_ENVELOPE_BRIDGE
+                .try_with(|slot| {
+                    slot.lock()
+                        .unwrap_or_else(|p| p.into_inner())
+                        .req_meta
+                        .take()
+                })
+                .ok()
+                .flatten()
+                .unwrap_or_default();
+            let (body, resp_meta) = (envelope_handler)(rpc_id, method, params, req_meta).await;
+            let _ = RPC_HANDLER_ENVELOPE_BRIDGE.try_with(|slot| {
+                slot.lock().unwrap_or_else(|p| p.into_inner()).resp_meta = resp_meta;
+            });
+            body
         })
     })
 }
@@ -397,238 +436,273 @@ pub fn full_envelope_handler(status: DaemonStatus, state: Arc<DaemonState>) -> E
             let mut params_opt = Some(params);
             RequestFrame::strip_ws_correlation(&mut params_opt);
             let mut params = params_opt.unwrap_or(Value::Null);
-            if let Err(err) =
-                prepare_implicit_session_and_evidence(&state, &method, &mut params, &req_meta)
-            {
-                return (ResponseBody::Err(err), IpcResponseMeta::default());
+            let (req_meta, legacy_inband_scope_meta) =
+                IpcRequestMeta::extract_legacy_from_params(&mut params, req_meta);
+            let method_for_post = method.clone();
+            let (mut body, mut resp_meta) =
+                dispatch_envelope_rpc(&status, state, rpc_id, method, params, req_meta).await;
+            if legacy_inband_scope_meta {
+                attach_legacy_inband_scope_meta(&method_for_post, &mut body, &mut resp_meta);
             }
-            let reconcile_plan = ToolReconcilePlan::from_request(&method, &params, &req_meta);
-            let mut ticket = if method.is_tool() {
-                match state.audit.begin(
-                    params
-                        .get("session_id")
-                        .and_then(Value::as_str)
-                        .unwrap_or(""),
-                    &method,
-                    &params,
-                ) {
-                    Ok(ticket) => ticket,
-                    Err(_) => {
-                        return (
-                            ResponseBody::Err(RpcError {
-                                code: ErrorCode::ProtocolError,
-                                message: "Operation audit could not be saved; action was not dispatched. Check the audit page or turn recording off.".into(),
-                                data: None,
-                            }),
-                            IpcResponseMeta::default(),
-                        );
-                    }
-                }
-            } else {
-                None
-            };
-            let correlation = WsCorrelation {
-                audit_id: ticket.as_ref().map(|t| t.operation_id.clone()),
-                operation_id: None,
-            };
-            match method {
-                Method::ToolVideo => {
-                    return handle_video(
-                        &state,
-                        rpc_id,
-                        params,
-                        correlation,
-                        reconcile_plan,
-                        ticket.take(),
-                    )
-                    .await;
-                }
-                Method::ToolTabList
-                | Method::ToolTabCreate
-                | Method::ToolTabClose
-                | Method::ToolTabSelect
-                | Method::ToolTabBorrow
-                | Method::ToolTabReturn
-                | Method::ToolWindowResize
-                | Method::ToolEmulate
-                | Method::ToolScreenshot
-                | Method::ToolScreenshotFullPage
-                | Method::ToolScreenshotRead
-                | Method::ToolScreenshotRelease
-                | Method::ToolConsole
-                | Method::ToolDebug
-                | Method::ToolNetwork
-                | Method::ToolSnapshot
-                | Method::ToolObserve
-                | Method::ToolCooperate
-                | Method::ToolGetHtml
-                | Method::ToolRead
-                | Method::ToolExtract
-                | Method::ToolNavigate
-                | Method::ToolNavigateBack
-                | Method::ToolNavigateForward
-                | Method::ToolReload
-                | Method::ToolClick
-                | Method::ToolHover
-                | Method::ToolDrag
-                | Method::ToolWheel
-                | Method::ToolScrollTo
-                | Method::ToolFocus
-                | Method::ToolBlur
-                | Method::ToolFill
-                | Method::ToolPress
-                | Method::ToolSelect
-                | Method::ToolUpload
-                | Method::ToolDownload
-                | Method::ToolEvaluate
-                | Method::ToolWaitForNavigation
-                | Method::ToolWaitForElement
-                | Method::ToolRequestHelp
-                | Method::ToolRecordStart
-                | Method::ToolRecordStop
-                | Method::ToolRecordAwait
-                | Method::ToolDialogStatus
-                | Method::ToolDialogAccept
-                | Method::ToolDialogDismiss => {
-                    return handle_dialog_aware_dispatch(
-                        Arc::clone(&state),
-                        rpc_id,
-                        method,
-                        params,
-                        correlation,
-                        reconcile_plan,
-                        ticket.take(),
-                    )
-                    .await;
-                }
-                Method::ToolOperationAwait | Method::ToolOperationCancel => {
-                    return handle_operation(
-                        &state,
-                        rpc_id,
-                        method,
-                        params,
-                        &req_meta,
-                        ticket.take(),
-                    )
-                    .await;
-                }
-                Method::ToolWaitMs => {
-                    let body = handle_wait_ms(&state.abort_registry, rpc_id, params).await;
-                    let _ = reconcile_completed_tool_rpc(&state, &reconcile_plan, None, &body);
-                    if let Some(ticket) = ticket {
-                        state.audit.finish(ticket, &body);
-                    }
-                    return (body, IpcResponseMeta::default());
-                }
-                _ => {}
-            }
+            (body, resp_meta)
+        })
+    })
+}
 
-            let body = match method {
-                Method::LocalAuthPair
-                | Method::LocalAuthDevices
-                | Method::LocalAuthRevoke
-                | Method::LocalAuthRotate
-                | Method::LocalAuthSetMode => {
-                    super::local_auth::maintenance::handle(
-                        state.clone(),
-                        status.ws_port,
-                        method,
-                        params,
-                    )
-                    .await
-                }
-                Method::SystemPing => {
-                    let result = PingResult { pong: true };
-                    ResponseBody::Ok(serde_json::to_value(result).unwrap_or(Value::Null))
-                }
-                Method::SessionRunLog => {
-                    let session =
-                        SessionId(params["session_id"].as_str().unwrap_or_default().to_owned());
-                    if state.sessions.get(&session).is_some() {
-                        ResponseBody::Ok(
-                            serde_json::to_value(state.run_logs.read(&session.0))
-                                .unwrap_or(Value::Null),
-                        )
-                    } else {
-                        ResponseBody::Err(
-                            DispatchError::SessionNotFound {
-                                ended: state.sessions.end_info(&session),
-                            }
-                            .into_rpc(),
-                        )
-                    }
-                }
-                Method::SystemStatus => match handle_status(&status, &state, params).await {
-                    Ok(v) => ResponseBody::Ok(v),
-                    Err(e) => ResponseBody::Err(e),
-                },
-                Method::SessionStartTracked => {
-                    let tracked_incognito = params
-                        .get("incognito")
-                        .and_then(Value::as_bool)
-                        .unwrap_or(false);
-                    let body =
-                        super::session_requests::start(&state, rpc_id, params, &req_meta).await;
-                    if req_meta.bind_scope
-                        && let Some(scope) = req_meta.caller_scope.as_deref()
-                        && let ResponseBody::Ok(ref value) = body
-                        && let Some(sid_str) = value.get("session_id").and_then(Value::as_str)
-                    {
-                        let sid = SessionId(sid_str.to_owned());
-                        if let Some(session) = state.sessions.get(&sid) {
-                            state.scopes.bind_scope(
-                                scope,
-                                sid,
-                                session.browser_id,
-                                tracked_incognito,
-                            );
-                        }
-                    }
-                    body
-                }
-                Method::SessionRequest => super::session_requests::operate(&state, params).await,
-                Method::SessionStart => {
-                    match handle_session_start_scoped(&state, rpc_id, params, false, &req_meta)
-                        .await
-                    {
-                        Ok(v) => ResponseBody::Ok(v),
-                        Err(e) => ResponseBody::Err(e),
-                    }
-                }
-                Method::SessionStop => {
-                    match handle_session_stop(&state, rpc_id, params, &req_meta).await {
-                        Ok(v) => ResponseBody::Ok(v),
-                        Err(e) => ResponseBody::Err(e),
-                    }
-                }
-                Method::SessionStopAll => match handle_session_stop_all_rpc(&state, rpc_id).await {
-                    Ok(v) => ResponseBody::Ok(v),
-                    Err(e) => ResponseBody::Err(e),
-                },
-                Method::SessionList => handle_session_list(&state),
-                Method::LedgerRequest => handle_ledger_request(&state, params, &req_meta),
-                Method::BrowserList => match handle_browser_list(&state, params).await {
-                    Ok(v) => ResponseBody::Ok(v),
-                    Err(e) => ResponseBody::Err(e),
-                },
-                Method::TransferBegin => handle_transfer_begin(&state, params),
-                Method::TransferChunk => handle_transfer_chunk(&state, params),
-                Method::TransferFinish => handle_transfer_finish(&state, params),
-                Method::TransferRead => handle_transfer_read(&state, params),
-                Method::TransferRelease => handle_transfer_release(&state, params),
-                Method::Cancel => handle_cancel(&state, params),
-                other => ResponseBody::Err(RpcError {
-                    code: ErrorCode::UnknownMethod,
-                    message: format!("method not implemented yet: {other:?}"),
-                    data: None,
-                }),
-            };
+fn attach_legacy_inband_scope_meta(
+    method: &Method,
+    body: &mut ResponseBody,
+    resp_meta: &mut IpcResponseMeta,
+) {
+    let (ResponseBody::Ok(value), Some(mut scope_meta)) = (body, resp_meta.scope_meta.take())
+    else {
+        return;
+    };
+    // Pre-envelope `2.0` CLI (`main`) hydrated `observation.text` from
+    // `_scope_meta.cached_vom` whenever `cache_reusable` was true, without
+    // checking `kind == "unchanged"`. Keep daemon-internal `last_vom` patched,
+    // but suppress `cache_reusable`/`cached_vom` on outgoing legacy slim deltas.
+    let coop_val = if *method == Method::ToolOperationAwait {
+        value.get("result")
+    } else {
+        Some(&*value)
+    };
+    let is_slim_non_unchanged = coop_val.is_some_and(|cv| {
+        let has_obs_text = cv
+            .pointer("/observation/text")
+            .and_then(Value::as_str)
+            .is_some();
+        let is_unchanged = cv.get("kind").and_then(Value::as_str) == Some("unchanged");
+        !has_obs_text && !is_unchanged
+    });
+    if is_slim_non_unchanged {
+        scope_meta.cache_reusable = false;
+        scope_meta.cached_vom = None;
+        scope_meta.cached_vom_truncated = false;
+        scope_meta.cached_vom_next_cursor = None;
+    }
+    if let Some(obj) = value.as_object_mut()
+        && let Ok(serialized) = serde_json::to_value(scope_meta)
+    {
+        obj.insert(crate::ipc_client::LEGACY_SCOPE_META_KEY.into(), serialized);
+    }
+}
+
+async fn dispatch_envelope_rpc(
+    status: &DaemonStatus,
+    state: Arc<DaemonState>,
+    rpc_id: RpcId,
+    method: Method,
+    mut params: Value,
+    req_meta: IpcRequestMeta,
+) -> (ResponseBody, IpcResponseMeta) {
+    if let Err(err) = prepare_implicit_session_and_evidence(&state, &method, &mut params, &req_meta)
+    {
+        return (ResponseBody::Err(err), IpcResponseMeta::default());
+    }
+    let reconcile_plan = ToolReconcilePlan::from_request(&method, &params, &req_meta);
+    let mut ticket = if method.is_tool() {
+        match state.audit.begin(
+            params
+                .get("session_id")
+                .and_then(Value::as_str)
+                .unwrap_or(""),
+            &method,
+            &params,
+        ) {
+            Ok(ticket) => ticket,
+            Err(_) => {
+                return (
+                    ResponseBody::Err(RpcError {
+                        code: ErrorCode::ProtocolError,
+                        message: "Operation audit could not be saved; action was not dispatched. Check the audit page or turn recording off.".into(),
+                        data: None,
+                    }),
+                    IpcResponseMeta::default(),
+                );
+            }
+        }
+    } else {
+        None
+    };
+    let correlation = WsCorrelation {
+        audit_id: ticket.as_ref().map(|t| t.operation_id.clone()),
+        operation_id: None,
+    };
+    match method {
+        Method::ToolVideo => {
+            return handle_video(
+                &state,
+                rpc_id,
+                params,
+                correlation,
+                reconcile_plan,
+                ticket.take(),
+            )
+            .await;
+        }
+        Method::ToolTabList
+        | Method::ToolTabCreate
+        | Method::ToolTabClose
+        | Method::ToolTabSelect
+        | Method::ToolTabBorrow
+        | Method::ToolTabReturn
+        | Method::ToolWindowResize
+        | Method::ToolEmulate
+        | Method::ToolScreenshot
+        | Method::ToolScreenshotFullPage
+        | Method::ToolScreenshotRead
+        | Method::ToolScreenshotRelease
+        | Method::ToolConsole
+        | Method::ToolDebug
+        | Method::ToolNetwork
+        | Method::ToolSnapshot
+        | Method::ToolObserve
+        | Method::ToolCooperate
+        | Method::ToolGetHtml
+        | Method::ToolRead
+        | Method::ToolExtract
+        | Method::ToolNavigate
+        | Method::ToolNavigateBack
+        | Method::ToolNavigateForward
+        | Method::ToolReload
+        | Method::ToolClick
+        | Method::ToolHover
+        | Method::ToolDrag
+        | Method::ToolWheel
+        | Method::ToolScrollTo
+        | Method::ToolFocus
+        | Method::ToolBlur
+        | Method::ToolFill
+        | Method::ToolPress
+        | Method::ToolSelect
+        | Method::ToolUpload
+        | Method::ToolDownload
+        | Method::ToolEvaluate
+        | Method::ToolWaitForNavigation
+        | Method::ToolWaitForElement
+        | Method::ToolRequestHelp
+        | Method::ToolRecordStart
+        | Method::ToolRecordStop
+        | Method::ToolRecordAwait
+        | Method::ToolDialogStatus
+        | Method::ToolDialogAccept
+        | Method::ToolDialogDismiss => {
+            return handle_dialog_aware_dispatch(
+                Arc::clone(&state),
+                rpc_id,
+                method,
+                params,
+                correlation,
+                reconcile_plan,
+                ticket.take(),
+            )
+            .await;
+        }
+        Method::ToolOperationAwait | Method::ToolOperationCancel => {
+            return handle_operation(&state, rpc_id, method, params, &req_meta, ticket.take())
+                .await;
+        }
+        Method::ToolWaitMs => {
+            let body = handle_wait_ms(&state.abort_registry, rpc_id, params).await;
+            let _ = reconcile_completed_tool_rpc(&state, &reconcile_plan, None, &body);
             if let Some(ticket) = ticket {
                 state.audit.finish(ticket, &body);
             }
-            (body, IpcResponseMeta::default())
-        })
-    })
+            return (body, IpcResponseMeta::default());
+        }
+        _ => {}
+    }
+
+    let body = match method {
+        Method::LocalAuthPair
+        | Method::LocalAuthDevices
+        | Method::LocalAuthRevoke
+        | Method::LocalAuthRotate
+        | Method::LocalAuthSetMode => {
+            super::local_auth::maintenance::handle(state.clone(), status.ws_port, method, params)
+                .await
+        }
+        Method::SystemPing => {
+            let result = PingResult { pong: true };
+            ResponseBody::Ok(serde_json::to_value(result).unwrap_or(Value::Null))
+        }
+        Method::SessionRunLog => {
+            let session = SessionId(params["session_id"].as_str().unwrap_or_default().to_owned());
+            if state.sessions.get(&session).is_some() {
+                ResponseBody::Ok(
+                    serde_json::to_value(state.run_logs.read(&session.0)).unwrap_or(Value::Null),
+                )
+            } else {
+                ResponseBody::Err(
+                    DispatchError::SessionNotFound {
+                        ended: state.sessions.end_info(&session),
+                    }
+                    .into_rpc(),
+                )
+            }
+        }
+        Method::SystemStatus => match handle_status(status, &state, params).await {
+            Ok(v) => ResponseBody::Ok(v),
+            Err(e) => ResponseBody::Err(e),
+        },
+        Method::SessionStartTracked => {
+            let tracked_incognito = params
+                .get("incognito")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            let body = super::session_requests::start(&state, rpc_id, params, &req_meta).await;
+            if req_meta.bind_scope
+                && let Some(scope) = req_meta.caller_scope.as_deref()
+                && let ResponseBody::Ok(ref value) = body
+                && let Some(sid_str) = value.get("session_id").and_then(Value::as_str)
+            {
+                let sid = SessionId(sid_str.to_owned());
+                if let Some(session) = state.sessions.get(&sid) {
+                    state
+                        .scopes
+                        .bind_scope(scope, sid, session.browser_id, tracked_incognito);
+                }
+            }
+            body
+        }
+        Method::SessionRequest => super::session_requests::operate(&state, params).await,
+        Method::SessionStart => {
+            match handle_session_start_scoped(&state, rpc_id, params, false, &req_meta).await {
+                Ok(v) => ResponseBody::Ok(v),
+                Err(e) => ResponseBody::Err(e),
+            }
+        }
+        Method::SessionStop => match handle_session_stop(&state, rpc_id, params, &req_meta).await {
+            Ok(v) => ResponseBody::Ok(v),
+            Err(e) => ResponseBody::Err(e),
+        },
+        Method::SessionStopAll => match handle_session_stop_all_rpc(&state, rpc_id).await {
+            Ok(v) => ResponseBody::Ok(v),
+            Err(e) => ResponseBody::Err(e),
+        },
+        Method::SessionList => handle_session_list(&state),
+        Method::LedgerRequest => handle_ledger_request(&state, params, &req_meta),
+        Method::BrowserList => match handle_browser_list(&state, params).await {
+            Ok(v) => ResponseBody::Ok(v),
+            Err(e) => ResponseBody::Err(e),
+        },
+        Method::TransferBegin => handle_transfer_begin(&state, params),
+        Method::TransferChunk => handle_transfer_chunk(&state, params),
+        Method::TransferFinish => handle_transfer_finish(&state, params),
+        Method::TransferRead => handle_transfer_read(&state, params),
+        Method::TransferRelease => handle_transfer_release(&state, params),
+        Method::Cancel => handle_cancel(&state, params),
+        other => ResponseBody::Err(RpcError {
+            code: ErrorCode::UnknownMethod,
+            message: format!("method not implemented yet: {other:?}"),
+            data: None,
+        }),
+    };
+    if let Some(ticket) = ticket {
+        state.audit.finish(ticket, &body);
+    }
+    (body, IpcResponseMeta::default())
 }
 
 fn prepare_implicit_session_and_evidence(

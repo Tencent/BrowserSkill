@@ -174,7 +174,7 @@ pub(crate) fn start_detached(exe: &Path, args: &StartArgs) -> Result<daemon_info
         return Ok(daemon.info);
     }
 
-    start_background_at(exe, args, deadline)
+    start_background_at(exe, args, deadline).map(|(info, _)| info)
 }
 
 /// Whether this process can start a daemon that outlives it, as
@@ -221,7 +221,7 @@ pub(crate) fn start_owned(
 pub(crate) fn start_background(
     args: &StartArgs,
     deadline: Instant,
-) -> Result<daemon_info::DaemonInfo> {
+) -> Result<(daemon_info::DaemonInfo, String)> {
     let exe = std::env::current_exe().context("locate daemon executable")?;
     start_background_at(&exe, args, deadline)
 }
@@ -230,7 +230,7 @@ fn start_background_at(
     exe: &Path,
     args: &StartArgs,
     deadline: Instant,
-) -> Result<daemon_info::DaemonInfo> {
+) -> Result<(daemon_info::DaemonInfo, String)> {
     anyhow::ensure!(
         Instant::now() < deadline,
         "daemon startup deadline exceeded"
@@ -243,7 +243,7 @@ fn wait_for_background(
     mut child: DaemonChild,
     args: &StartArgs,
     deadline: Instant,
-) -> Result<daemon_info::DaemonInfo> {
+) -> Result<(daemon_info::DaemonInfo, String)> {
     let result = probe::wait_for_ready(deadline.saturating_duration_since(Instant::now()));
     let daemon = match result {
         Ok(daemon) => daemon,
@@ -270,7 +270,7 @@ fn wait_for_background(
             daemon.status.ws_port
         );
     }
-    Ok(daemon.info)
+    Ok((daemon.info, daemon.status.protocol_version))
 }
 
 // Automatic startup now makes the daemon a direct child of a business CLI.
@@ -612,7 +612,8 @@ fn serve(
             env!("CARGO_PKG_VERSION"),
         )
         .with_host_managed(!cfg.detached)
-        .with_protocol_version(crate::daemon::state::PROTOCOL_VERSION);
+        .with_protocol_version(crate::daemon::state::PROTOCOL_VERSION)
+        .with_ipc_envelope(true);
         daemon_info::write(&info).context("write daemon.json")?;
         info!(
             pid = info.pid,
@@ -1794,6 +1795,103 @@ mod tests {
             );
             std::thread::sleep(Duration::from_millis(10));
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn background_start_losing_race_preserves_winner_protocol_and_legacy_envelope_mode() {
+        use serde_json::{Value, json};
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+        use tokio::net::UnixListener;
+
+        crate::daemon::test_support::isolated(
+            concat!(
+                module_path!(),
+                "::background_start_losing_race_preserves_winner_protocol_and_legacy_envelope_mode"
+            ),
+            || {
+                let home = paths::bsk_home().unwrap();
+                let winner_sock = home.join("winner-legacy.sock");
+                let winner_sock_for_srv = winner_sock.clone();
+                let winner_sock_str = winner_sock.to_string_lossy().into_owned();
+                let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(1);
+
+                let srv = std::thread::spawn(move || {
+                    let srv_rt = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .unwrap();
+                    srv_rt.block_on(async move {
+                        let listener = UnixListener::bind(&winner_sock_for_srv).unwrap();
+                        ready_tx.send(()).unwrap();
+                        let (stream, _) = listener.accept().await.unwrap();
+                        let (read, mut write) = stream.into_split();
+                        let mut reader = BufReader::new(read);
+                        let mut line = String::new();
+                        reader.read_line(&mut line).await.unwrap();
+                        let raw: Value = serde_json::from_str(line.trim_end()).unwrap();
+                        assert_eq!(raw["method"], "system.status");
+                        // Concurrent pre-envelope winner advertises protocol "2.1" and omits `ipc_envelope`.
+                        let reply = json!({
+                            "id": raw["id"],
+                            "result": {
+                                "daemon_version": "0.5.0",
+                                "protocol_version": "2.1",
+                                "pid": std::process::id(),
+                                "uptime_secs": 1,
+                                "ws_port": 52892,
+                                "sock_path": winner_sock_str,
+                                "browsers": [],
+                                "sessions": []
+                            }
+                        });
+                        let mut bytes = serde_json::to_vec(&reply).unwrap();
+                        bytes.push(b'\n');
+                        write.write_all(&bytes).await.unwrap();
+                        write.flush().await.unwrap();
+                    });
+                });
+
+                ready_rx.recv().unwrap();
+                let winner_info = daemon_info::DaemonInfo::now(
+                    std::process::id(),
+                    winner_sock.clone(),
+                    52892,
+                    "0.5.0",
+                )
+                .with_protocol_version("2.1");
+                daemon_info::write(&winner_info).unwrap();
+
+                // Simulate our losing launcher child exiting on `daemon.lock` while the
+                // concurrent pre-envelope winner answers `wait_for_ready`.
+                let losing_child = std::process::Command::new("/bin/sh")
+                    .args(["-c", "exit 0"])
+                    .stdin(std::process::Stdio::null())
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .spawn()
+                    .unwrap();
+
+                // Seed stale `true` beforehand to prove `wait_for_background` -> `probe`
+                // records `false` and `ensure_daemon_with_protocol` never clobbers it back to `true`.
+                crate::ipc_client::record_endpoint_ipc_envelope(&winner_sock, true);
+
+                let (resolved_info, resolved_proto) = wait_for_background(
+                    losing_child,
+                    &StartArgs::default(),
+                    Instant::now() + Duration::from_secs(3),
+                )
+                .unwrap();
+                srv.join().unwrap();
+
+                assert_eq!(resolved_info.sock_path, winner_sock);
+                assert_eq!(resolved_proto, "2.1");
+                assert!(
+                    !crate::ipc_client::endpoint_supports_ipc_envelope(&winner_sock),
+                    "winning pre-envelope daemon must keep ipc_envelope=false"
+                );
+            },
+        );
     }
 
     #[test]

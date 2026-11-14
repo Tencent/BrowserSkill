@@ -846,6 +846,7 @@ mod m2_tests {
             browsers,
             sessions: Vec::new(),
             version_skew_browsers: skew,
+            ipc_envelope: true,
         }
     }
 

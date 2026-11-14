@@ -143,10 +143,10 @@ async fn reap_orphan_transient_mcp_session(server: &Server) {
     }
     let sock = match &server.daemon {
         Daemon::Fixed { sock, .. } => Some(sock.clone()),
-        Daemon::Discover => crate::daemon::info::read()
-            .ok()
-            .flatten()
-            .map(|info| info.sock_path),
+        Daemon::Discover => crate::daemon::info::read().ok().flatten().map(|info| {
+            crate::ipc_client::record_endpoint_ipc_envelope(&info.sock_path, info.ipc_envelope);
+            info.sock_path
+        }),
     };
     let Some(sock) = sock else {
         return;
