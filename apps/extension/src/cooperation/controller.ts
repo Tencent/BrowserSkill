@@ -905,7 +905,8 @@ export class CooperationController implements ControlAuthority {
       }
       if (state.held || state.working || this.humanActive(state))
         return failure("The user is still operating this tab; wait for hand-back");
-      await cdp.reconcileSoftDetachedFrames?.(state.tabId);
+      if (!cdpBlockedUrlReason(target.url))
+        await cdp.ensureAttachedToUrl?.(state.tabId, target.url);
       if (state.stopped) return stopped();
       const previousRefs = session.refStore;
       const previousRefRevision = previousRefs.revision;
@@ -1688,7 +1689,7 @@ export class CooperationController implements ControlAuthority {
     const rootFrameId = context?.evidence?.rootFrameId;
     const mainDocumentRef = (ref: string) => {
       const node = lookupSnapshotRef(session, ref, target.tabId);
-      return rootFrameId !== undefined && node?.frameId === rootFrameId && !node.cdpSessionId;
+      return rootFrameId !== undefined && node?.frameId === rootFrameId;
     };
     const mainDocumentTarget = (node?: DragTarget) =>
       node?.ref ? mainDocumentRef(node.ref) : !!node?.selector;
@@ -2085,8 +2086,11 @@ export class CooperationController implements ControlAuthority {
       const identity = {
         tabId: target.tabId,
         backendNodeId: node.backendNodeId,
-        frameId: node.frameId,
-        cdpSessionId: node.cdpTarget.sessionId,
+        frameId: node.handle?.frameId || node.frameId,
+        loaderId: node.handle?.loaderId,
+        ...(node.handle?.documentElementBackendNodeId !== undefined
+          ? { documentElementBackendNodeId: node.handle.documentElementBackendNodeId }
+          : {}),
       };
       const ref = session.refStore.allocateRef(identity);
       session.refStore.set(ref, node.backendNodeId, identity);
@@ -2116,8 +2120,15 @@ export class CooperationController implements ControlAuthority {
     try {
       await this.refresh(state);
       assert();
-      if (!mainDocumentAction) {
-        await cdp.reconcileSoftDetachedFrames?.(state.tabId);
+      if (
+        !mainDocumentAction &&
+        context &&
+        state.context &&
+        params.context_id === state.context.id &&
+        context.epoch === state.epoch &&
+        !cdpBlockedUrlReason(target.url)
+      ) {
+        await cdp.ensureAttachedToUrl?.(state.tabId, target.url);
         assert();
       }
       if (

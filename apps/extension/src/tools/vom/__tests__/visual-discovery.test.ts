@@ -119,8 +119,9 @@ async function document(
     frame,
     identity: {
       attachmentId: "attached",
-      target: frame.target,
+      tabId: frame.target.tabId,
       frameId: frame.frameId,
+      loaderId: frame.loaderId ?? "loader-1",
       documentElementBackendNodeId: 1,
     },
     index: normalized.index,
@@ -369,7 +370,7 @@ describe("Canvas discovery", () => {
     const result = await discoverVisualCandidates(facts([child, parent]));
     expect(result.complete).toBe(true);
     expect(result.candidates[0]).toMatchObject({
-      document: { frameId: "child", target: { sessionId: "remote" } },
+      document: { tabId: 1, frameId: "child" },
       region: { crop: { x: 100, y: 0, width: 100, height: 100 } },
     });
     const owner = parent.index.nodes.get(3)!;

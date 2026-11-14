@@ -13,8 +13,11 @@ import { isAbortError } from "./vom/capture-abort";
 // 4. Honour `AbortSignal` so canceled calls don't issue follow-up CDP
 //    commands.
 
-import { ChromiumCdp } from "@/browser-driver/chromium-cdp";
-import type { CdpTarget } from "@/browser-driver/frame-graph";
+import {
+  type FrameDocumentHandle,
+  type FrameNodeHandle,
+  isStaleFrameHandleError,
+} from "@/browser-driver/frame-graph";
 import {
   RECORD_PASSWORD_ATTRIBUTE,
   SENSITIVE_AUTOCOMPLETE_SELECTOR,
@@ -42,19 +45,22 @@ import type {
 import { type ClickOverlayDeps, withClickOverlay } from "./click-overlay";
 import { attachDialogs, markDialogCursor } from "./dialogs";
 import { backendNodeToObject } from "./element-geometry";
-import { cdpError, rpcError } from "./errors";
+import { rpcError } from "./errors";
 import { FOCUS_CHECK } from "./focus-state";
 import { resolveNodeGeometry, scrollElementAndFramesIntoView } from "./frame-geometry";
 import {
+  type CdpDispatchGuard,
   type CdpRunner,
   type ChromeTabsApi,
+  cdpRunnerForFrame,
   cdpRunnerForTarget,
-  chromeTabsApi,
+  delegateCdpRunner,
   enforceAgentWindow,
   isRpcError,
   lookupSession,
   type ResolvedTargetTab,
   resolveTargetTab,
+  sendToFrameHandle,
 } from "./shared";
 import { resolveSnapshotRef } from "./snapshot-ref";
 
@@ -69,8 +75,8 @@ export interface InteractionDeps extends ClickOverlayDeps {
 
 export interface ResolvedActionTarget {
   tab: ResolvedTargetTab;
+  handle: FrameNodeHandle;
   backendNodeId: number;
-  cdpTarget: CdpTarget;
   frameId?: string;
   usedRef?: string;
   usedSelector?: string;
@@ -79,14 +85,6 @@ export interface ResolvedActionTarget {
 
 const DEFAULT_TIMEOUT_MS = 30_000;
 const DEFAULT_HOVER_SETTLE_MS = 200;
-
-let defaultDeps: { cdp: ChromiumCdp; tabsApi: ChromeTabsApi } | null = null;
-function getDefaultDeps(): { cdp: ChromiumCdp; tabsApi: ChromeTabsApi } {
-  if (!defaultDeps) {
-    defaultDeps = { cdp: new ChromiumCdp(), tabsApi: chromeTabsApi };
-  }
-  return defaultDeps;
-}
 
 /**
  * Fold a list of `KeyModifier`s into CDP's bit layout (§4 of the
@@ -158,8 +156,8 @@ export async function resolveBackendNode(
   strictSelector = false,
 ): Promise<
   | {
+      handle: FrameNodeHandle;
       backendNodeId: number;
-      cdpTarget: CdpTarget;
       frameId?: string;
       usedRef?: string;
       usedSelector?: string;
@@ -183,29 +181,11 @@ export async function resolveBackendNode(
   }
   if (hasRef) {
     const ref = params.ref as string;
-    let resolved = resolveSnapshotRef(ctx, ref, target.tabId);
+    const resolved = resolveSnapshotRef(ctx, ref, target.tabId);
     if (isRpcError(resolved)) return resolved;
-    const reconcile =
-      cdp.reattachIfSoftDetached ??
-      (resolved.cdpSessionId ? cdp.reconcileSoftDetachedFrames : undefined);
-    if (reconcile) {
-      cdp.trackSessionTab?.(ctx.sessionId, target.tabId);
-      try {
-        await reconcile.call(cdp, target.tabId);
-      } catch (error) {
-        if (isAbortError(error)) return { code: "cancelled", message: `${toolName} aborted` };
-        return cdpError(error);
-      }
-      resolved = resolveSnapshotRef(ctx, ref, target.tabId);
-      if (isRpcError(resolved)) return resolved;
-    }
-    const rawTarget: CdpTarget = {
-      tabId: target.tabId,
-      ...(resolved.cdpSessionId ? { sessionId: resolved.cdpSessionId } : {}),
-    };
     return {
+      handle: resolved.handle,
       backendNodeId: resolved.backendNodeId,
-      cdpTarget: cdp.resolveTarget ? cdp.resolveTarget(rawTarget) : rawTarget,
       ...(resolved.frameId ? { frameId: resolved.frameId } : {}),
       usedRef: resolved.refKey,
       ...(resolved.rowAnchor ? { rowAnchor: resolved.rowAnchor } : {}),
@@ -262,7 +242,16 @@ export async function resolveBackendNode(
         message: "DOM.describeNode returned no backendNodeId",
       };
     }
-    return { backendNodeId, cdpTarget: { tabId: target.tabId }, usedSelector: params.selector };
+    return {
+      handle: {
+        tabId: target.tabId,
+        frameId: "",
+        loaderId: "",
+        backendNodeId,
+      },
+      backendNodeId,
+      usedSelector: params.selector,
+    };
   } catch (err) {
     return {
       code: "cdp_failed",
@@ -291,34 +280,41 @@ function checkFocusAbort(signal: AbortSignal | undefined): void {
 // Only focus/blur use this view. Guard every CDP boundary, including commands
 // inside selector resolution and frame scrolling, without changing other tools.
 function focusCdp(cdp: CdpRunner, signal: AbortSignal | undefined): CdpRunner {
-  const send = <T = unknown>(target: CdpTarget, method: string, params?: object): Promise<T> => {
-    checkFocusAbort(signal);
-    return cdpRunnerForTarget(cdp, target).send<T>(target.tabId, method, params);
-  };
-  return {
-    send: (tabId, method, params) => send({ tabId }, method, params),
-    sendToTarget: send,
-    trackSessionTab: cdp.trackSessionTab?.bind(cdp),
-    resolveTarget: cdp.resolveTarget?.bind(cdp),
-    reattachIfSoftDetached: cdp.reattachIfSoftDetached
-      ? (tabId) => {
-          checkFocusAbort(signal);
-          return cdp.reattachIfSoftDetached!(tabId);
-        }
-      : undefined,
-    reconcileSoftDetachedFrames: cdp.reconcileSoftDetachedFrames
-      ? (tabId) => {
-          checkFocusAbort(signal);
-          return cdp.reconcileSoftDetachedFrames!(tabId);
-        }
-      : undefined,
+  return delegateCdpRunner(cdp, {
+    send: <T = unknown>(tabId: number, method: string, params?: object) => {
+      checkFocusAbort(signal);
+      return cdp.send<T>(tabId, method, params);
+    },
+    sendToTarget: <T = unknown>(
+      target: Parameters<NonNullable<CdpRunner["sendToTarget"]>>[0],
+      method: string,
+      params?: object,
+    ) => {
+      checkFocusAbort(signal);
+      return cdpRunnerForTarget(cdp, target).send<T>(target.tabId, method, params);
+    },
+    sendToFrame: <T = unknown>(
+      handle: FrameDocumentHandle | FrameNodeHandle,
+      method: string,
+      params?: object,
+      guard?: CdpDispatchGuard,
+    ) => {
+      checkFocusAbort(signal);
+      return sendToFrameHandle<T>(cdp, handle, method, params, guard);
+    },
     getFrameGraph: cdp.getFrameGraph
       ? (tabId) => {
           checkFocusAbort(signal);
           return cdp.getFrameGraph!(tabId);
         }
       : undefined,
-  };
+    getMainFrameHandle: cdp.getMainFrameHandle
+      ? (tabId) => {
+          checkFocusAbort(signal);
+          return cdp.getMainFrameHandle!(tabId);
+        }
+      : undefined,
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -328,7 +324,7 @@ function focusCdp(cdp: CdpRunner, signal: AbortSignal | undefined): CdpRunner {
 export function handleFocus(
   manager: SessionManager,
   params: FocusParams,
-  deps: InteractionDeps = getDefaultDeps(),
+  deps: InteractionDeps,
 ): Promise<FocusResult | RpcError> {
   return changeFocus(manager, params, deps, "focus");
 }
@@ -336,7 +332,7 @@ export function handleFocus(
 export function handleBlur(
   manager: SessionManager,
   params: BlurParams,
-  deps: InteractionDeps = getDefaultDeps(),
+  deps: InteractionDeps,
 ): Promise<BlurResult | RpcError> {
   return changeFocus(manager, params, deps, "blur");
 }
@@ -377,18 +373,12 @@ async function changeFocus(
     const node = await resolveBackendNode(cdp, ctx, target, params, action);
     checkFocusAbort(deps.signal);
     if (isRpcError(node)) return node;
-    const nodeCdp = cdpRunnerForTarget(cdp, node.cdpTarget);
-    cleanupCdp = cdpRunnerForTarget(deps.cdp, node.cdpTarget);
+    const nodeCdp = cdpRunnerForFrame(cdp, node.handle);
+    cleanupCdp = cdpRunnerForFrame(deps.cdp, node.handle);
     deps.cdp.trackSessionTab?.(ctx.sessionId, tabId);
 
     if (action === "focus") {
-      const scrollErr = await scrollElementAndFramesIntoView(
-        cdp,
-        tabId,
-        node.cdpTarget,
-        node.backendNodeId,
-        node.frameId,
-      );
+      const scrollErr = await scrollElementAndFramesIntoView(cdp, tabId, node.handle);
       checkFocusAbort(deps.signal);
       if (scrollErr) return scrollErr;
     }
@@ -453,12 +443,13 @@ async function changeFocus(
       ...(action === "blur" ? { was_focused: wasFocused! } : {}),
     });
   } catch (err) {
-    return (
-      throwIfAborted(deps.signal) ?? {
-        code: "cdp_failed",
-        message: err instanceof Error ? err.message : String(err),
-      }
-    );
+    const aborted = throwIfAborted(deps.signal);
+    if (aborted) return aborted;
+    if (isStaleFrameHandleError(err)) return rpcError("not_found", "ref_not_found", err.message);
+    return {
+      code: "cdp_failed",
+      message: err instanceof Error ? err.message : String(err),
+    };
   } finally {
     if (objectId !== undefined && cleanupCdp && tabId !== undefined) {
       // Cleanup must also run after cancellation. Navigation may have already
@@ -491,7 +482,7 @@ export async function resolveActionTarget(
 export async function handleClick(
   manager: SessionManager,
   params: ClickParams,
-  deps: InteractionDeps = getDefaultDeps(),
+  deps: InteractionDeps,
 ): Promise<ClickResult | RpcError> {
   const ctxOrErr = lookupSession(manager, params, "click");
   if (isRpcError(ctxOrErr)) return ctxOrErr;
@@ -533,16 +524,9 @@ export async function clickResolvedTarget(
   }
 
   deps.cdp.trackSessionTab?.(ctx.sessionId, target.tabId);
-  const geometry = await resolveNodeGeometry(
-    deps.cdp,
-    target.tabId,
-    {
-      target: resolved.cdpTarget,
-      backendNodeId: resolved.backendNodeId,
-      ...(resolved.frameId ? { frameId: resolved.frameId } : {}),
-    },
-    { scrollIntoView: true },
-  );
+  const geometry = await resolveNodeGeometry(deps.cdp, target.tabId, resolved.handle, {
+    scrollIntoView: true,
+  });
   if (isRpcError(geometry)) return geometry;
   const centre = geometry.actionPoint;
 
@@ -563,7 +547,7 @@ export async function clickResolvedTarget(
       verifyOverlay,
       deps.cdp.verifyPointerTarget
         ? async () => {
-            await deps.cdp.verifyPointerTarget!({ ...resolved, tabId: target.tabId }, centre);
+            await deps.cdp.verifyPointerTarget!({ handle: resolved.handle }, centre);
             return null;
           }
         : undefined,
@@ -657,6 +641,9 @@ async function dispatchClickAtPoint(
     if (deps.signal?.aborted) return failure({ code: "cancelled", message: "click aborted" });
     return null;
   } catch (error) {
+    if (isStaleFrameHandleError(error)) {
+      return failure(rpcError("not_found", "ref_not_found", error.message));
+    }
     return failure({
       code:
         deps.signal?.aborted || isAbortError(error)
@@ -756,7 +743,7 @@ async function clickVisualPoint(
 export async function handleHover(
   manager: SessionManager,
   params: HoverParams,
-  deps: InteractionDeps = getDefaultDeps(),
+  deps: InteractionDeps,
 ): Promise<HoverResult | RpcError> {
   const ctxOrErr = lookupSession(manager, params, "hover");
   if (isRpcError(ctxOrErr)) return ctxOrErr;
@@ -775,16 +762,9 @@ export async function handleHover(
   if (cancelled) return cancelled;
 
   deps.cdp.trackSessionTab?.(ctx.sessionId, target.tabId);
-  const geometry = await resolveNodeGeometry(
-    deps.cdp,
-    target.tabId,
-    {
-      target: node.cdpTarget,
-      backendNodeId: node.backendNodeId,
-      ...(node.frameId ? { frameId: node.frameId } : {}),
-    },
-    { scrollIntoView: true },
-  );
+  const geometry = await resolveNodeGeometry(deps.cdp, target.tabId, node.handle, {
+    scrollIntoView: true,
+  });
   if (isRpcError(geometry)) return geometry;
   const centre = geometry.actionPoint;
 
@@ -1325,7 +1305,7 @@ const FILL_STEP3_FUNCTION = `async function(notifyInput, expected, wasSensitive,
 export async function handleFill(
   manager: SessionManager,
   params: FillParams,
-  deps: InteractionDeps = getDefaultDeps(),
+  deps: InteractionDeps,
 ): Promise<FillResult | RpcError> {
   if (!params || typeof params.value !== "string") {
     return { code: "invalid_params", message: "fill requires a value string" };
@@ -1345,24 +1325,26 @@ export async function handleFill(
   const node = await resolveBackendNode(deps.cdp, ctx, target, params, "fill");
   if (isRpcError(node)) return node;
   if (throwIfAborted(deps.signal)) return { code: "cancelled", message: "fill aborted" };
-  const nodeCdp = cdpRunnerForTarget(deps.cdp, node.cdpTarget);
+  const nodeCdp = cdpRunnerForFrame(deps.cdp, node.handle);
   deps.cdp.trackSessionTab?.(ctx.sessionId, target.tabId);
 
   if (node.frameId) {
-    const scrollErr = await scrollElementAndFramesIntoView(
-      deps.cdp,
-      target.tabId,
-      node.cdpTarget,
-      node.backendNodeId,
-      node.frameId,
-    );
+    const scrollErr = await scrollElementAndFramesIntoView(deps.cdp, target.tabId, node.handle);
     if (scrollErr) return scrollErr;
     if (throwIfAborted(deps.signal)) {
       return { code: "cancelled", message: "fill aborted" };
     }
   }
 
-  const objectIdOrErr = await backendNodeToObject(nodeCdp, target.tabId, node.backendNodeId);
+  let objectIdOrErr: string | RpcError;
+  try {
+    objectIdOrErr = await backendNodeToObject(nodeCdp, target.tabId, node.backendNodeId);
+  } catch (err) {
+    if (isStaleFrameHandleError(err)) {
+      return rpcError("not_found", "ref_not_found", err.message, PRE_WRITE_FAILURE);
+    }
+    throw err;
+  }
   if (isRpcError(objectIdOrErr)) return objectIdOrErr;
   const objectId = objectIdOrErr;
   const clearBefore = params.clear_before ?? true;
@@ -1511,7 +1493,7 @@ export async function handleFill(
     const canFlushWithPointer = async (): Promise<boolean> => {
       if (pointerFlush !== undefined) return pointerFlush;
       pointerFlush = step1.visible && step1.hovered === false;
-      if (step1.visible && step1.hovered === null && node.cdpTarget.sessionId) {
+      if (step1.visible && step1.hovered === null && node.frameId) {
         // The target's frame cannot read a cross-origin parent; ask the tab.
         const top = await deps.cdp
           .send<{ result?: { value?: unknown } }>(target.tabId, "Runtime.evaluate", {
@@ -1810,6 +1792,9 @@ export async function handleFill(
       ...(verification.formatted ? { formatted: true } : {}),
     });
   } catch (err) {
+    if (isStaleFrameHandleError(err)) {
+      return rpcError("not_found", "ref_not_found", err.message);
+    }
     return fillError("fill_failed", err instanceof Error ? err.message : String(err));
   } finally {
     await nodeCdp.send(target.tabId, "Runtime.releaseObject", { objectId }).catch(() => undefined);
@@ -2010,7 +1995,7 @@ function sleep(ms: number, signal: AbortSignal | undefined): Promise<void> {
 export async function handlePress(
   manager: SessionManager,
   params: PressParams,
-  deps: InteractionDeps = getDefaultDeps(),
+  deps: InteractionDeps,
 ): Promise<PressResult | RpcError> {
   const deadline = Date.now() + (params?.timeout_ms ?? deps.defaultTimeoutMs ?? DEFAULT_TIMEOUT_MS);
   if (!params || typeof params.key !== "string" || params.key.length === 0) {
@@ -2051,22 +2036,19 @@ export async function handlePress(
   return withInputReady(ctx, target.tabId, { ...deps, deadline }, async (input) => {
     // Optional focus before key dispatch.
     if (node) {
-      const nodeCdp = cdpRunnerForTarget(deps.cdp, node.cdpTarget);
+      const nodeCdp = cdpRunnerForFrame(deps.cdp, node.handle);
       try {
         deps.cdp.trackSessionTab?.(ctx.sessionId, target.tabId);
-        const scrollErr = await scrollElementAndFramesIntoView(
-          deps.cdp,
-          target.tabId,
-          node.cdpTarget,
-          node.backendNodeId,
-          node.frameId,
-        );
+        const scrollErr = await scrollElementAndFramesIntoView(deps.cdp, target.tabId, node.handle);
         if (scrollErr) return scrollErr;
         if (throwIfAborted(deps.signal)) {
           return { code: "cancelled", message: "press aborted" };
         }
         await nodeCdp.send(target.tabId, "DOM.focus", { backendNodeId: node.backendNodeId });
       } catch (err) {
+        if (isStaleFrameHandleError(err)) {
+          return rpcError("not_found", "ref_not_found", err.message);
+        }
         return {
           code: "cdp_failed",
           message: err instanceof Error ? err.message : String(err),
@@ -2259,7 +2241,7 @@ const SELECT_OPTIONS_FUNCTION = `function(values, commit) {
 export async function handleSelect(
   manager: SessionManager,
   params: SelectParams,
-  deps: InteractionDeps = getDefaultDeps(),
+  deps: InteractionDeps,
 ): Promise<SelectResult | RpcError> {
   if (!params || !Array.isArray(params.values)) {
     return { code: "invalid_params", message: "select requires a values array" };
@@ -2281,7 +2263,7 @@ export async function handleSelect(
 
   const node = await resolveBackendNode(deps.cdp, ctx, target, params, "select");
   if (isRpcError(node)) return node;
-  const nodeCdp = cdpRunnerForTarget(deps.cdp, node.cdpTarget);
+  const nodeCdp = cdpRunnerForFrame(deps.cdp, node.handle);
 
   let objectId: string;
   try {
@@ -2331,19 +2313,16 @@ export async function handleSelect(
     if (throwIfAborted(deps.signal)) {
       return { code: "cancelled", message: "select aborted" };
     }
-    const scrollErr = await scrollElementAndFramesIntoView(
-      deps.cdp,
-      target.tabId,
-      node.cdpTarget,
-      node.backendNodeId,
-      node.frameId,
-    );
+    const scrollErr = await scrollElementAndFramesIntoView(deps.cdp, target.tabId, node.handle);
     if (scrollErr) return scrollErr;
     if (throwIfAborted(deps.signal)) {
       return { code: "cancelled", message: "select aborted" };
     }
     await nodeCdp.send(target.tabId, "DOM.focus", { backendNodeId: node.backendNodeId });
   } catch (err) {
+    if (isStaleFrameHandleError(err)) {
+      return rpcError("not_found", "ref_not_found", err.message, PRE_WRITE_FAILURE);
+    }
     return {
       code: "cdp_failed",
       message: err instanceof Error ? err.message : String(err),

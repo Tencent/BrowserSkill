@@ -52,7 +52,7 @@ async function fixture(policy: "strict" | "target" = "target") {
   vi.mocked(resolveActionTarget).mockResolvedValue({
     tab,
     backendNodeId: 4,
-    cdpTarget: { tabId: 7 },
+    handle: { tabId: 7, frameId: "", loaderId: "", backendNodeId: 4 },
     usedRef: "e1",
   });
   const send = vi.fn(async () => ({}));

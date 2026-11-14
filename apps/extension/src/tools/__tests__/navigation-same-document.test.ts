@@ -10,7 +10,7 @@ import {
 import type { CdpRunner } from "../shared";
 
 const destination = "https://example.test/page#two";
-type Listener = Parameters<NonNullable<CdpRunner["onEvent"]>>[0];
+type Listener = Parameters<NonNullable<CdpRunner["onEvent"]>>[1];
 type Operation = "navigate" | "back" | "forward" | "reload";
 
 async function fixture() {
@@ -60,7 +60,7 @@ async function fixture() {
   });
   const cdp: CdpRunner = {
     send: send as CdpRunner["send"],
-    onEvent: (listener) => {
+    onEvent: (_tabId, listener) => {
       listeners.add(listener);
       return { dispose: () => listeners.delete(listener) };
     },

@@ -11,9 +11,12 @@ import { type CdpDebuggee, type CdpDebuggerApi, ChromiumCdp } from "@/browser-dr
 import { CooperationController } from "@/cooperation/controller";
 import { pointerTargetValidator } from "@/cooperation/pointer-target";
 import type { CooperationFrames, FrameState } from "@/cooperation/types";
+import { DebugManager } from "@/debug/manager";
 import { SessionManager } from "@/session-manager/manager";
+import { handleConsole } from "../console";
 import { handleClick, handleFill, handleFocus } from "../interaction";
-import { handleScreenshot, handleSnapshot } from "../observation";
+import { handleNetwork } from "../network";
+import { handleObserve, handleScreenshot, handleSnapshot } from "../observation";
 import { handleScrollTo } from "../scroll";
 import { sessionCdpRunner } from "../shared";
 import { handleUpload } from "../upload";
@@ -243,8 +246,6 @@ describe.skipIf(!process.env.BSK_TEST_CHROME)(
                 sessions.invalidateTabRefs(tabId);
                 controller.invalidate(tabId);
               },
-              onChildFramesRemapped: (tabId, remapped) =>
-                sessions.remapTabChildFrames(tabId, remapped),
               onChildFramesInvalidated: (tabId, stale) => {
                 sessions.invalidateTabChildFrames(tabId, stale);
                 controller.invalidateChildFrames(tabId);
@@ -295,9 +296,18 @@ describe.skipIf(!process.env.BSK_TEST_CHROME)(
               const inputRef = findRefByLabel("OOPIF Field");
               const btnRef = findRefByLabel("Confirm Payment");
               const uploadRef = findRefByLabel("Choose Receipt");
-              expect(
-                (ctx.refStore.resolveEntry(btnRef) as { cdpSessionId?: string }).cdpSessionId,
-              ).toBeTruthy();
+              const btnEntry = ctx.refStore.resolveEntry(btnRef);
+              expect(btnEntry?.kind).toBe("dom");
+              if (btnEntry?.kind === "dom") {
+                expect(btnEntry.handle).toMatchObject({
+                  tabId: 4,
+                  frameId: expect.any(String),
+                  loaderId: expect.any(String),
+                  backendNodeId: expect.any(Number),
+                });
+                expect("cdpSessionId" in btnEntry).toBe(false);
+                expect(btnEntry.handle && "cdpSessionId" in btnEntry.handle).toBe(false);
+              }
 
               const waitForSoftDetach = async () => {
                 await expect.poll(() => cdp.isAttached(4), { timeout: 2_000 }).toBe(false);
@@ -670,6 +680,505 @@ describe.skipIf(!process.env.BSK_TEST_CHROME)(
               expect(staleClick).toMatchObject({ code: "not_found" });
               expect(cdp.getAttachmentId(8)).not.toBe(initialAttachment);
             } finally {
+              cdp.dispose();
+            }
+          },
+        );
+      } finally {
+        await new Promise<void>((resolve, reject) =>
+          server.close((err) => (err ? reject(err) : resolve())),
+        );
+      }
+    }, 60_000);
+
+    it("survives cross-origin OOPIF soft-detach for visual @eN and --capture-id clicks, rejects document.open() & loaderId changes, and restores soft-detach after console/network/debug leases", async () => {
+      const server = createServer((req, res) => {
+        res.setHeader("Content-Type", "text/html; charset=utf-8");
+        if (req.url === "/child") {
+          res.end(`<!doctype html>
+              <style>html,body{margin:0;padding:8px;font:14px sans-serif} canvas{display:block;border:1px solid #222}</style>
+              <canvas id="oopif-canvas" aria-label="Signature Pad" width="160" height="60"></canvas>
+              <button id="oopif-dom-btn" type="button">Submit Signature</button>
+              <script>
+                const canvas = document.getElementById('oopif-canvas');
+                const ctx2d = canvas.getContext('2d');
+                ctx2d.fillStyle = '#1d4ed8';
+                ctx2d.fillRect(0, 0, 160, 60);
+                window.canvasClicks = [];
+                window.domClicks = 0;
+                canvas.addEventListener('click', (e) => {
+                  const r = canvas.getBoundingClientRect();
+                  window.canvasClicks.push({ x: Math.round(e.clientX - r.left), y: Math.round(e.clientY - r.top) });
+                });
+                document.getElementById('oopif-dom-btn').addEventListener('click', () => {
+                  window.domClicks += 1;
+                });
+                console.log('oopif-ready');
+              </script>`);
+          return;
+        }
+        if (req.url === "/child-after-nav") {
+          res.end(`<!doctype html>
+              <canvas id="oopif-canvas" aria-label="Signature Pad" width="160" height="60"></canvas>
+              <button id="oopif-dom-btn" type="button">Submit Signature</button>`);
+          return;
+        }
+        const port = (server.address() as { port: number }).port;
+        res.end(`<!doctype html>
+            <style>body{margin:0;padding:12px} iframe{width:460px;height:220px;border:1px solid #ccc;display:block}</style>
+            <iframe id="oopif" src="http://localhost:${port}/child"></iframe>`);
+      });
+      await new Promise<void>((resolve) => server.listen(0, resolve));
+      const port = (server.address() as { port: number }).port;
+      const hostUrl = `http://127.0.0.1:${port}/`;
+
+      try {
+        const { withChrome } = await import(
+          new URL(
+            "../../../../../evals/browser/cases/regression/snapshot-coordinates/chrome.mjs",
+            import.meta.url,
+          ).href
+        );
+        let forwardEvent: ((event: CdpEvent) => void) | undefined;
+        await withChrome(
+          {
+            executable: process.env.BSK_TEST_CHROME,
+            deviceScale: 1,
+            zoom: 1,
+            startupTimeout: 30_000,
+            onEvent: (event: CdpEvent) => forwardEvent?.(event),
+          },
+          async (send: Send) => {
+            const { targetId } = await send<{ targetId: string }>("Target.createTarget", {
+              url: hostUrl,
+            });
+            const { sessionId: monitorSession } = await send<{ sessionId: string }>(
+              "Target.attachToTarget",
+              { targetId, flatten: true },
+            );
+            const evalHost = async <T>(expression: string): Promise<T> => {
+              const reply = await send<{ result: { value: T } }>(
+                "Runtime.evaluate",
+                { expression, returnByValue: true },
+                monitorSession,
+              );
+              return reply.result.value;
+            };
+
+            let oopifTargetId = "";
+            await expect
+              .poll(async () => {
+                const { targetInfos } = await send<{
+                  targetInfos: { targetId: string; type: string; url: string }[];
+                }>("Target.getTargets");
+                const found = targetInfos.find(
+                  (t) => t.type === "iframe" && t.url === `http://localhost:${port}/child`,
+                );
+                if (found) oopifTargetId = found.targetId;
+                return Boolean(found);
+              })
+              .toBe(true);
+            const { sessionId: monitorOopif } = await send<{ sessionId: string }>(
+              "Target.attachToTarget",
+              { targetId: oopifTargetId, flatten: true },
+            );
+            await expect
+              .poll(async () => {
+                const r = await send<{ result: { value: string } }>(
+                  "Runtime.evaluate",
+                  { expression: "document.readyState", returnByValue: true },
+                  monitorOopif,
+                );
+                return r.result.value;
+              })
+              .toBe("complete");
+
+            let activeRootSession = "";
+            const childSessions = new Set<string>();
+            const seenChildSessions: string[] = [];
+            const eventListeners = new Set<CdpEventListener>();
+            forwardEvent = (event) => {
+              if (!activeRootSession) return;
+              if (
+                event.method === "Target.attachedToTarget" &&
+                event.sessionId === activeRootSession
+              ) {
+                const sid = (event.params as { sessionId?: string } | undefined)?.sessionId;
+                if (sid) {
+                  childSessions.add(sid);
+                  seenChildSessions.push(sid);
+                }
+              }
+              if (event.sessionId === activeRootSession) {
+                for (const fn of [...eventListeners]) fn({ tabId: 9 }, event.method, event.params);
+              } else if (event.sessionId && childSessions.has(event.sessionId)) {
+                for (const fn of [...eventListeners])
+                  fn({ tabId: 9, sessionId: event.sessionId }, event.method, event.params);
+              }
+            };
+
+            const api: CdpDebuggerApi = {
+              attach: async () => {
+                childSessions.clear();
+                const reply = await send<{ sessionId: string }>("Target.attachToTarget", {
+                  targetId,
+                  flatten: true,
+                });
+                activeRootSession = reply.sessionId;
+              },
+              detach: async () => {
+                const prev = activeRootSession;
+                activeRootSession = "";
+                childSessions.clear();
+                if (prev) await send("Target.detachFromTarget", { sessionId: prev });
+              },
+              sendCommand: async (target, method, params) => {
+                const sid = target.sessionId ?? activeRootSession;
+                if (!sid) throw new Error("debugger detached");
+                return send(method, params, sid);
+              },
+              onEvent: {
+                addListener: (fn: CdpEventListener) => eventListeners.add(fn),
+                removeListener: (fn: CdpEventListener) => eventListeners.delete(fn),
+              } as unknown as CdpDebuggerApi["onEvent"],
+              onDetach: {
+                addListener() {},
+                removeListener() {},
+              } as unknown as CdpDebuggerApi["onDetach"],
+            };
+
+            const sessions = new SessionManager({
+              agentWindow: {
+                create: async () => ({ windowId: 100, initialTabIds: [9] }),
+                remove: async () => {},
+                ensureActiveTab: async () => 9,
+              },
+            });
+            const ctx = await sessions.start("oopif-visual-and-leases");
+            const cdp = new ChromiumCdp(api, {
+              idleDetachMs: 350,
+              canControlDialog: () => true,
+              onDocumentChanged: (tabId) => sessions.invalidateTabRefs(tabId),
+              onChildFramesInvalidated: (tabId, staleFrameIds) =>
+                sessions.invalidateTabChildFrames(tabId, staleFrameIds),
+            });
+            stubInputClock(cdp);
+            const runner = sessionCdpRunner(cdp, ctx.sessionId, () => sessions.has(ctx.sessionId));
+            const tab = async () =>
+              ({
+                id: 9,
+                windowId: 100,
+                active: true,
+                url: await evalHost<string>("location.href"),
+              }) as chrome.tabs.Tab;
+            const tabsApi = {
+              get: tab,
+              query: async () => [await tab()],
+              sendMessage: async () => ({ ok: true }),
+            };
+            const prevChrome = (globalThis as { chrome?: unknown }).chrome;
+            (globalThis as { chrome?: unknown }).chrome = { tabs: tabsApi };
+
+            try {
+              const waitForSoftDetach = async () => {
+                await expect.poll(() => cdp.isAttached(9), { timeout: 3_000 }).toBe(false);
+              };
+
+              // --- Counterexample C: `console` / `network` + `debug start -> stop` lease recovery ---
+              const consoleRes = await handleConsole(
+                sessions,
+                { session_id: ctx.sessionId, tab_id: 9 },
+                { cdp: runner, tabsApi },
+              );
+              expect(consoleRes).not.toHaveProperty("code");
+              const networkRes = await handleNetwork(
+                sessions,
+                { session_id: ctx.sessionId, tab_id: 9 },
+                { cdp: runner, tabsApi },
+              );
+              expect(networkRes).not.toHaveProperty("code");
+              // One-shot `console` / `network` reads MUST NOT permanently block soft-detach!
+              await waitForSoftDetach();
+
+              // `DebugManager` (`bsk debug start`) holds a tab-scoped `onEvent` lease blocking soft-detach;
+              // `bsk debug stop` disposes the lease and restores soft-detach!
+              const debugManager = new DebugManager(sessions, cdp, tabsApi);
+              const debugRun = await debugManager.start(ctx.sessionId, 9, "lease-check");
+              expect(debugRun.state).toBe("capturing");
+              await new Promise((r) => setTimeout(r, 550));
+              expect(cdp.isAttached(9)).toBe(true);
+
+              const stoppedDebug = await debugManager.read({
+                session_id: ctx.sessionId,
+                action: "stop",
+                run_id: debugRun.id,
+              });
+              expect(stoppedDebug.run?.state).toBe("stopped");
+              await waitForSoftDetach();
+
+              // --- Counterexample A: Cross-origin OOPIF DOM @eN + visual @eN + --capture-id across Soft-Detach ---
+              const observed = await handleObserve(
+                sessions,
+                { session_id: ctx.sessionId, tab_id: 9 },
+                { cdp: runner, tabsApi },
+              );
+              if ("code" in observed) throw new Error(JSON.stringify(observed));
+              const findObservedRef = (needle: string): string => {
+                const line = observed.text.split("\n").find((l) => l.includes(needle));
+                const match = line?.match(/@(e\d+)/);
+                if (!match) throw new Error(`missing ref for "${needle}" in:\n${observed.text}`);
+                return match[1];
+              };
+              const canvasRef = findObservedRef("Signature Pad");
+              const domBtnRef = findObservedRef("Submit Signature");
+              const canvasEntry = ctx.refStore.resolveEntry(canvasRef);
+              expect(canvasEntry?.kind).toBe("visual-region");
+              if (canvasEntry?.kind === "visual-region") {
+                expect("cdpSessionId" in canvasEntry.candidate.document).toBe(false);
+              }
+
+              const captureApi = {
+                ...tabsApi,
+                captureVisibleTab: async () => {
+                  const shot = await send<{ data: string }>(
+                    "Page.captureScreenshot",
+                    { format: "png" },
+                    monitorSession,
+                  );
+                  return `data:image/png;base64,${shot.data}`;
+                },
+              };
+              const capturedShot = await handleScreenshot(
+                sessions,
+                { session_id: ctx.sessionId, tab_id: 9, ref: canvasRef },
+                {
+                  cdp: runner,
+                  tabsApi,
+                  captureApi,
+                  sendToTab: async () => ({ ok: true }),
+                },
+              );
+              if ("code" in capturedShot) throw new Error(JSON.stringify(capturedShot));
+              expect(capturedShot.capture_id).toEqual(expect.any(String));
+              const sessionsBeforeSoftDetach = seenChildSessions.length;
+
+              // Trigger Soft-Detach -> OOPIF receives a brand-new internal CDP sessionId on reconnect!
+              await waitForSoftDetach();
+              const captureIdClicked = await handleClick(
+                sessions,
+                {
+                  session_id: ctx.sessionId,
+                  tab_id: 9,
+                  ref: canvasRef,
+                  capture_id: capturedShot.capture_id!,
+                  image_x: Math.floor(capturedShot.width / 2),
+                  image_y: Math.floor(capturedShot.height / 2),
+                },
+                { cdp: runner, tabsApi, bypassOverlay: async () => {} },
+              );
+              expect(captureIdClicked).toMatchObject({ used_ref: canvasRef, tab_id: 9 });
+              expect(seenChildSessions.length).toBeGreaterThan(sessionsBeforeSoftDetach);
+
+              // Trigger another Soft-Detach -> visual-region @eN screenshot + pure --capture-id coordinate click + DOM @eN click!
+              await waitForSoftDetach();
+              const secondCanvasShot = await handleScreenshot(
+                sessions,
+                { session_id: ctx.sessionId, tab_id: 9, ref: canvasRef },
+                {
+                  cdp: runner,
+                  tabsApi,
+                  captureApi,
+                  sendToTab: async () => ({ ok: true }),
+                },
+              );
+              if ("code" in secondCanvasShot) throw new Error(JSON.stringify(secondCanvasShot));
+              expect(secondCanvasShot.capture_id).toEqual(expect.any(String));
+
+              await waitForSoftDetach();
+              const secondCaptureClicked = await handleClick(
+                sessions,
+                {
+                  session_id: ctx.sessionId,
+                  tab_id: 9,
+                  ref: canvasRef,
+                  capture_id: secondCanvasShot.capture_id!,
+                  image_x: Math.floor(secondCanvasShot.width / 2),
+                  image_y: Math.floor(secondCanvasShot.height / 2),
+                },
+                { cdp: runner, tabsApi, bypassOverlay: async () => {} },
+              );
+              expect(secondCaptureClicked).toMatchObject({ used_ref: canvasRef, tab_id: 9 });
+
+              await waitForSoftDetach();
+              const domBtnClicked = await handleClick(
+                sessions,
+                { session_id: ctx.sessionId, tab_id: 9, ref: domBtnRef },
+                { cdp: runner, tabsApi, bypassOverlay: async () => {} },
+              );
+              expect(domBtnClicked).toMatchObject({ used_ref: domBtnRef, tab_id: 9 });
+
+              const oopifCounts = await send<{
+                result: { value: { canvas: number; dom: number } };
+              }>(
+                "Runtime.evaluate",
+                {
+                  expression: "({ canvas: window.canvasClicks.length, dom: window.domClicks })",
+                  returnByValue: true,
+                },
+                monitorOopif,
+              );
+              expect(oopifCounts.result.value).toEqual({ canvas: 2, dom: 1 });
+
+              // --- Counterexample B1: Same-loaderId `document.open()` inside cross-origin OOPIF ---
+              const shotBeforeDocOpen = await handleScreenshot(
+                sessions,
+                { session_id: ctx.sessionId, tab_id: 9, ref: canvasRef },
+                {
+                  cdp: runner,
+                  tabsApi,
+                  captureApi,
+                  sendToTab: async () => ({ ok: true }),
+                },
+              );
+              if ("code" in shotBeforeDocOpen) throw new Error(JSON.stringify(shotBeforeDocOpen));
+              expect(shotBeforeDocOpen.capture_id).toEqual(expect.any(String));
+
+              await waitForSoftDetach();
+              await send(
+                "Runtime.evaluate",
+                {
+                  expression:
+                    'document.open(); document.write(\'<style>html,body{margin:0;padding:8px}</style><canvas id="oopif-canvas" aria-label="Signature Pad" width="160" height="60"></canvas><button id="oopif-dom-btn" type="button">Submit Signature</button><script>const c=document.getElementById("oopif-canvas").getContext("2d");c.fillStyle="#1d4ed8";c.fillRect(0,0,160,60);</script>\'); document.close();',
+                },
+                monitorOopif,
+              );
+
+              const staleCaptureClick = await handleClick(
+                sessions,
+                {
+                  session_id: ctx.sessionId,
+                  tab_id: 9,
+                  ref: canvasRef,
+                  capture_id: shotBeforeDocOpen.capture_id!,
+                  image_x: 20,
+                  image_y: 20,
+                },
+                { cdp: runner, tabsApi, bypassOverlay: async () => {} },
+              );
+              expect(staleCaptureClick).toMatchObject({
+                code: "not_found",
+                data: { reason: "visual_target_changed" },
+              });
+
+              const staleVisualShot = await handleScreenshot(
+                sessions,
+                { session_id: ctx.sessionId, tab_id: 9, ref: canvasRef },
+                {
+                  cdp: runner,
+                  tabsApi,
+                  captureApi,
+                  sendToTab: async () => ({ ok: true }),
+                },
+              );
+              expect(staleVisualShot).toMatchObject({
+                code: "not_found",
+                data: { reason: "visual_target_changed" },
+              });
+
+              const staleDomAfterDocOpen = await handleClick(
+                sessions,
+                { session_id: ctx.sessionId, tab_id: 9, ref: domBtnRef },
+                { cdp: runner, tabsApi, bypassOverlay: async () => {} },
+              );
+              expect(staleDomAfterDocOpen).toMatchObject({ code: "not_found" });
+
+              // --- Counterexample B2: Cross-origin OOPIF navigation changing `loaderId` ---
+              const reobserved = await handleObserve(
+                sessions,
+                { session_id: ctx.sessionId, tab_id: 9 },
+                { cdp: runner, tabsApi },
+              );
+              if ("code" in reobserved) throw new Error(JSON.stringify(reobserved));
+              const freshCanvasRef = reobserved.text
+                .split("\n")
+                .find((l) => l.includes("Signature Pad"))
+                ?.match(/@(e\d+)/)?.[1];
+              const freshDomBtnRef = reobserved.text
+                .split("\n")
+                .find((l) => l.includes("Submit Signature"))
+                ?.match(/@(e\d+)/)?.[1];
+              expect(freshCanvasRef).toBeTruthy();
+              expect(freshDomBtnRef).toBeTruthy();
+              const freshCanvasShot = await handleScreenshot(
+                sessions,
+                { session_id: ctx.sessionId, tab_id: 9, ref: freshCanvasRef! },
+                {
+                  cdp: runner,
+                  tabsApi,
+                  captureApi,
+                  sendToTab: async () => ({ ok: true }),
+                },
+              );
+              if ("code" in freshCanvasShot) throw new Error(JSON.stringify(freshCanvasShot));
+
+              await waitForSoftDetach();
+              await evalHost(
+                `document.getElementById('oopif').src = 'http://localhost:${port}/child-after-nav'`,
+              );
+              await expect
+                .poll(async () => {
+                  const { targetInfos } = await send<{
+                    targetInfos: { type: string; url: string }[];
+                  }>("Target.getTargets");
+                  return targetInfos.some(
+                    (t) =>
+                      t.type === "iframe" && t.url === `http://localhost:${port}/child-after-nav`,
+                  );
+                })
+                .toBe(true);
+
+              const staleCaptureAfterNav = await handleClick(
+                sessions,
+                {
+                  session_id: ctx.sessionId,
+                  tab_id: 9,
+                  ref: freshCanvasRef!,
+                  capture_id: freshCanvasShot.capture_id!,
+                  image_x: 20,
+                  image_y: 20,
+                },
+                { cdp: runner, tabsApi, bypassOverlay: async () => {} },
+              );
+              expect(staleCaptureAfterNav).toMatchObject({
+                code: "not_found",
+                data: {
+                  reason: expect.stringMatching(
+                    /^(visual_capture_stale|visual_target_changed|ref_not_found)$/,
+                  ),
+                  effect_state: "none",
+                },
+              });
+
+              const staleVisualAfterNav = await handleScreenshot(
+                sessions,
+                { session_id: ctx.sessionId, tab_id: 9, ref: freshCanvasRef! },
+                {
+                  cdp: runner,
+                  tabsApi,
+                  captureApi,
+                  sendToTab: async () => ({ ok: true }),
+                },
+              );
+              expect(staleVisualAfterNav).toMatchObject({ code: "not_found" });
+
+              const staleAfterNav = await handleClick(
+                sessions,
+                { session_id: ctx.sessionId, tab_id: 9, ref: freshDomBtnRef! },
+                { cdp: runner, tabsApi, bypassOverlay: async () => {} },
+              );
+              expect(staleAfterNav).toMatchObject({ code: "not_found" });
+            } finally {
+              (globalThis as { chrome?: unknown }).chrome = prevChrome;
               cdp.dispose();
             }
           },

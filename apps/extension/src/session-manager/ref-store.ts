@@ -1,3 +1,4 @@
+import type { FrameNodeHandle } from "@/browser-driver/frame-graph";
 import type { VisualCandidate } from "@/tools/vom/visual-discovery";
 
 export type BackendNodeId = number;
@@ -9,7 +10,9 @@ export interface DomRefEntry {
   backendNodeId: BackendNodeId;
   tabId: number | null;
   frameId?: string;
-  cdpSessionId?: string;
+  loaderId?: string;
+  documentElementBackendNodeId?: number;
+  handle?: FrameNodeHandle;
   generation: number;
 }
 
@@ -26,10 +29,27 @@ export interface DomRefInput {
   backendNodeId: BackendNodeId;
   tabId: number;
   frameId?: string;
-  cdpSessionId?: string;
+  loaderId?: string;
+  documentElementBackendNodeId?: number;
 }
 
 export type RefInput = VisualRefInput | BackendNodeId | DomRefInput;
+
+function buildDomHandle(
+  tabId: number,
+  backendNodeId: BackendNodeId,
+  frameId?: string,
+  loaderId?: string,
+  documentElementBackendNodeId?: number,
+): FrameNodeHandle {
+  return {
+    tabId,
+    frameId: frameId ?? "",
+    loaderId: loaderId ?? "",
+    backendNodeId,
+    ...(documentElementBackendNodeId !== undefined ? { documentElementBackendNodeId } : {}),
+  };
+}
 
 export class RefStore {
   private map = new Map<string, RefEntry>();
@@ -38,6 +58,7 @@ export class RefStore {
   private stable = false;
   private nextRef = 1;
   private readonly identities = new Map<number, Map<string, string>>();
+  private readonly documents = new Map<number, number>();
 
   get stableRefsEnabled(): boolean {
     return this.stable;
@@ -69,8 +90,8 @@ export class RefStore {
     }
     const key = JSON.stringify([
       this.documentRevision(input.tabId),
-      input.frameId,
-      input.cdpSessionId,
+      input.frameId ?? "",
+      input.loaderId ?? "",
       input.backendNodeId,
     ]);
     let ref = tab.get(key);
@@ -89,7 +110,6 @@ export class RefStore {
   get observationId(): string {
     return this.observationToken;
   }
-  private readonly documents = new Map<number, number>();
 
   get revision(): number {
     return this.generation;
@@ -138,17 +158,33 @@ export class RefStore {
     opts: {
       tabId?: number;
       frameId?: string;
-      cdpSessionId?: string;
+      loaderId?: string;
+      documentElementBackendNodeId?: number;
       rowAnchor?: string;
     } = {},
   ): void {
     this.reserveRef(ref);
+    const tabId = opts.tabId ?? null;
     this.map.set(normaliseRef(ref), {
       kind: "dom",
       backendNodeId: id,
-      tabId: opts.tabId ?? null,
+      tabId,
       ...(opts.frameId ? { frameId: opts.frameId } : {}),
-      ...(opts.cdpSessionId ? { cdpSessionId: opts.cdpSessionId } : {}),
+      ...(opts.loaderId ? { loaderId: opts.loaderId } : {}),
+      ...(opts.documentElementBackendNodeId !== undefined
+        ? { documentElementBackendNodeId: opts.documentElementBackendNodeId }
+        : {}),
+      ...(tabId !== null
+        ? {
+            handle: buildDomHandle(
+              tabId,
+              id,
+              opts.frameId,
+              opts.loaderId,
+              opts.documentElementBackendNodeId,
+            ),
+          }
+        : {}),
       ...(opts.rowAnchor ? { rowAnchor: opts.rowAnchor } : {}),
       generation: this.generation,
     });
@@ -164,7 +200,7 @@ export class RefStore {
     this.identities.delete(tabId);
     let changed = false;
     for (const [ref, entry] of this.map) {
-      const owner = entry.kind === "dom" ? entry.tabId : entry.candidate.document.target.tabId;
+      const owner = entry.kind === "dom" ? entry.tabId : entry.candidate.document.tabId;
       if (owner === tabId) {
         this.map.delete(ref);
         changed = true;
@@ -176,57 +212,20 @@ export class RefStore {
     }
   }
 
-  /** Migrate stable OOPIF ref keys and live DOM entries to their reattached `cdpSessionId`s. */
-  remapChildFrameSessions(tabId: number, remapped: ReadonlyMap<string, string>): void {
-    if (remapped.size === 0) return;
-    const tabIdentities = this.identities.get(tabId);
-    if (tabIdentities) {
-      const migrated = new Map<string, string>();
-      for (const [key, ref] of tabIdentities) {
-        try {
-          const parsed = JSON.parse(key) as [unknown, unknown, unknown, unknown];
-          const sessionId = typeof parsed[2] === "string" ? parsed[2] : undefined;
-          const nextSessionId = sessionId !== undefined ? remapped.get(sessionId) : undefined;
-          if (nextSessionId !== undefined && nextSessionId !== sessionId) {
-            parsed[2] = nextSessionId;
-            migrated.set(JSON.stringify(parsed), ref);
-            continue;
-          }
-        } catch {
-          // Preserve unparseable keys untouched; invalidateChildFrames cleans malformed entries.
-        }
-        migrated.set(key, ref);
-      }
-      this.identities.set(tabId, migrated);
-    }
-    for (const [ref, entry] of this.map) {
-      if (entry.kind === "dom" && entry.tabId === tabId && entry.cdpSessionId !== undefined) {
-        const nextSessionId = remapped.get(entry.cdpSessionId);
-        if (nextSessionId !== undefined && nextSessionId !== entry.cdpSessionId) {
-          this.map.set(ref, { ...entry, cdpSessionId: nextSessionId });
-        }
-      }
-    }
-  }
-
-  /** Drop child-frame refs whose OOPIF session disappeared or navigated across soft-detach. */
+  /** Drop child-frame DOM and visual refs whose frame disappeared or navigated across soft-detach. */
   invalidateChildFrames(
     tabId: number,
-    stale: { sessionIds: ReadonlySet<string>; frameIds: ReadonlySet<string> },
+    staleFrameIds: ReadonlySet<string>,
     forceRevisionBump = false,
   ): void {
-    if (stale.sessionIds.size === 0 && stale.frameIds.size === 0) return;
+    if (staleFrameIds.size === 0) return;
     const tabIdentities = this.identities.get(tabId);
     if (tabIdentities) {
       for (const key of tabIdentities.keys()) {
         try {
           const parsed = JSON.parse(key) as [unknown, unknown, unknown, unknown];
           const frameId = typeof parsed[1] === "string" ? parsed[1] : undefined;
-          const sessionId = typeof parsed[2] === "string" ? parsed[2] : undefined;
-          if (
-            (sessionId !== undefined && stale.sessionIds.has(sessionId)) ||
-            (frameId !== undefined && stale.frameIds.has(frameId))
-          ) {
+          if (frameId !== undefined && staleFrameIds.has(frameId)) {
             tabIdentities.delete(key);
           }
         } catch {
@@ -240,26 +239,19 @@ export class RefStore {
       if (entry.kind === "dom") {
         if (
           entry.tabId === tabId &&
-          ((entry.cdpSessionId !== undefined && stale.sessionIds.has(entry.cdpSessionId)) ||
-            (entry.frameId !== undefined && stale.frameIds.has(entry.frameId)))
+          entry.frameId !== undefined &&
+          staleFrameIds.has(entry.frameId)
         ) {
           this.map.delete(ref);
           changed = true;
         }
         continue;
       }
-      if (entry.candidate.document.target.tabId !== tabId) continue;
+      if (entry.candidate.document.tabId !== tabId) continue;
       let framePath = entry.candidate.framePath;
-      let isStaleVisual =
-        stale.frameIds.has(entry.candidate.document.frameId) ||
-        (entry.candidate.document.target.sessionId !== undefined &&
-          stale.sessionIds.has(entry.candidate.document.target.sessionId));
+      let isStaleVisual = staleFrameIds.has(entry.candidate.document.frameId);
       while (!isStaleVisual && framePath) {
-        if (
-          stale.frameIds.has(framePath.document.frameId) ||
-          (framePath.document.target.sessionId !== undefined &&
-            stale.sessionIds.has(framePath.document.target.sessionId))
-        ) {
+        if (staleFrameIds.has(framePath.document.frameId)) {
           isStaleVisual = true;
           break;
         }
@@ -298,7 +290,7 @@ export class RefStore {
       if (
         !document?.attachmentId ||
         !document.frameId ||
-        !Number.isSafeInteger(document.target?.tabId) ||
+        !Number.isSafeInteger(document.tabId) ||
         !Number.isSafeInteger(document.documentElementBackendNodeId) ||
         document.documentElementBackendNodeId <= 0 ||
         !Number.isSafeInteger(input.candidate.backendNodeId) ||
@@ -323,7 +315,17 @@ export class RefStore {
       backendNodeId: input.backendNodeId,
       tabId: input.tabId,
       ...(input.frameId ? { frameId: input.frameId } : {}),
-      ...(input.cdpSessionId ? { cdpSessionId: input.cdpSessionId } : {}),
+      ...(input.loaderId ? { loaderId: input.loaderId } : {}),
+      ...(input.documentElementBackendNodeId !== undefined
+        ? { documentElementBackendNodeId: input.documentElementBackendNodeId }
+        : {}),
+      handle: buildDomHandle(
+        input.tabId,
+        input.backendNodeId,
+        input.frameId,
+        input.loaderId,
+        input.documentElementBackendNodeId,
+      ),
       generation,
     };
   }

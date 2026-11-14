@@ -41,7 +41,7 @@ async function fixture(archive?: DebugArchive) {
     send: vi.fn(),
     sendAttached: sendAttached as never,
     ensureNetworkCapture: vi.fn(async () => {}),
-    onEvent: vi.fn((fn: typeof listener) => {
+    onEvent: vi.fn((_tabId: number, fn: NonNullable<typeof listener>) => {
       listener = fn;
       return { dispose };
     }),
@@ -1057,7 +1057,10 @@ describe("persistent debugging records", () => {
     const f = await fixture(new MemoryArchive());
     active.push(f.manager);
     const run = await f.manager.start("s1", 7);
+    expect(f.cdp.onEvent).toHaveBeenCalledWith(7, expect.any(Function));
+    expect(f.dispose).not.toHaveBeenCalled();
     f.manager.releaseSession("s1");
+    expect(f.dispose).toHaveBeenCalledOnce();
     await expect(
       f.manager.read({ action: "export", session_id: "s1", run_id: run.id }),
     ).rejects.toThrow("not found");

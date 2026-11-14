@@ -16,5 +16,6 @@
       "@browser-skill/i18n": ["../../packages/i18n/src/index.ts"],
       "@browser-skill/i18n/react": ["../../packages/i18n/src/react.tsx"]
     }
-  }
+  },
+  "include": ["src/**/*", "e2e/**/*", "*.ts", ".wxt/wxt.d.ts"]
 }

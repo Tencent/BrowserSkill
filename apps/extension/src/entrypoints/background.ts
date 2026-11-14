@@ -165,11 +165,8 @@ export default defineBackground(() => {
       sessions.invalidateTabRefs(tabId);
       cooperation.invalidate(tabId);
     },
-    onChildFramesRemapped: (tabId, remapped) => {
-      sessions.remapTabChildFrames(tabId, remapped);
-    },
-    onChildFramesInvalidated: (tabId, stale) => {
-      sessions.invalidateTabChildFrames(tabId, stale);
+    onChildFramesInvalidated: (tabId, staleFrameIds) => {
+      sessions.invalidateTabChildFrames(tabId, staleFrameIds);
       cooperation.invalidateChildFrames(tabId);
     },
     onSoftDetached: (tabId) => {

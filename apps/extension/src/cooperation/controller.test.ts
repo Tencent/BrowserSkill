@@ -29,7 +29,7 @@ vi.mock("@/tools/interaction", () => ({
   resolveActionTarget: vi.fn(async () => ({
     backendNodeId: 4,
     frameId: "frame",
-    cdpTarget: { tabId: 7 },
+    handle: { tabId: 7, frameId: "frame", loaderId: "loader-1", backendNodeId: 4 },
     tab: { tabId: 7 },
   })),
 }));
@@ -684,15 +684,15 @@ describe("shared-tab dispatch fences", () => {
     });
     // Resolves "eN" refs to backend node N.
     const refs = () =>
-      vi.mocked(resolveActionTarget).mockImplementation(
-        async (_c, _s, _t, params) =>
-          ({
-            backendNodeId: Number((params as { ref?: string }).ref?.replace(/^@?e/, "")),
-            frameId: "frame",
-            cdpTarget: { tabId: 7 },
-            tab: { tabId: 7 },
-          }) as Awaited<ReturnType<typeof resolveActionTarget>>,
-      );
+      vi.mocked(resolveActionTarget).mockImplementation(async (_c, _s, _t, params) => {
+        const backendNodeId = Number((params as { ref?: string }).ref?.replace(/^@?e/, ""));
+        return {
+          backendNodeId,
+          frameId: "frame",
+          handle: { tabId: 7, frameId: "frame", loaderId: "loader-1", backendNodeId },
+          tab: { tabId: 7 },
+        } as Awaited<ReturnType<typeof resolveActionTarget>>;
+      });
     const run = (
       f: Awaited<ReturnType<typeof fixture>>,
       context: string,
@@ -973,15 +973,15 @@ describe("shared-tab dispatch fences", () => {
 
     it("keeps explicit dependencies exact after learning page activity", async () => {
       live((tick) => scene(`10:00:0${tick}`));
-      vi.mocked(resolveActionTarget).mockImplementation(
-        async (_c, _s, _t, params) =>
-          ({
-            backendNodeId: (params as { ref?: string }).ref === "e5" ? 5 : 4,
-            frameId: "frame",
-            cdpTarget: { tabId: 7 },
-            tab: { tabId: 7 },
-          }) as Awaited<ReturnType<typeof resolveActionTarget>>,
-      );
+      vi.mocked(resolveActionTarget).mockImplementation(async (_c, _s, _t, params) => {
+        const backendNodeId = (params as { ref?: string }).ref === "e5" ? 5 : 4;
+        return {
+          backendNodeId,
+          frameId: "frame",
+          handle: { tabId: 7, frameId: "frame", loaderId: "loader-1", backendNodeId },
+          tab: { tabId: 7 },
+        } as Awaited<ReturnType<typeof resolveActionTarget>>;
+      });
       const f = await fixture();
       expect((await cycle(f, f.first.context_id)).message).toContain("changed by itself");
       const synced = await f.command("sync");
@@ -1102,15 +1102,15 @@ describe("shared-tab dispatch fences", () => {
         })),
       });
       live((tick) => shop(`$${100 + tick}`));
-      vi.mocked(resolveActionTarget).mockImplementation(
-        async (_c, _s, _t, params) =>
-          ({
-            backendNodeId: (params as { ref?: string }).ref === "e8" ? 8 : 4,
-            frameId: "frame",
-            cdpTarget: { tabId: 7 },
-            tab: { tabId: 7 },
-          }) as Awaited<ReturnType<typeof resolveActionTarget>>,
-      );
+      vi.mocked(resolveActionTarget).mockImplementation(async (_c, _s, _t, params) => {
+        const backendNodeId = (params as { ref?: string }).ref === "e8" ? 8 : 4;
+        return {
+          backendNodeId,
+          frameId: "frame",
+          handle: { tabId: 7, frameId: "frame", loaderId: "loader-1", backendNodeId },
+          tab: { tabId: 7 },
+        } as Awaited<ReturnType<typeof resolveActionTarget>>;
+      });
       const click = (f: Awaited<ReturnType<typeof fixture>>, context: string, ref: string) => {
         f.change({ structure: f.controller.view(7)!.revision + 100 });
         return f.controller.run(
@@ -2802,7 +2802,7 @@ describe.each([false, true])("selection action guards, explicit dependency=%s", 
     vi.mocked(resolveActionTarget).mockResolvedValue({
       backendNodeId: 4,
       frameId: "frame",
-      cdpTarget: { tabId: 7 },
+      handle: { tabId: 7, frameId: "frame", loaderId: "loader-1", backendNodeId: 4 },
       tab: { tabId: 7, windowId: 100, active: true },
     });
     const f = await fixture();
@@ -3307,7 +3307,7 @@ describe("strict evidence around the action's own preparation", () => {
     vi.mocked(resolveActionTarget).mockResolvedValue({
       backendNodeId,
       frameId: "frame",
-      cdpTarget: { tabId: 7 },
+      handle: { tabId: 7, frameId: "frame", loaderId: "loader-1", backendNodeId },
       tab: { tabId: 7 },
     } as Awaited<ReturnType<typeof resolveActionTarget>>);
   const run = (
@@ -3443,13 +3443,13 @@ describe("strict evidence around the action's own preparation", () => {
     vi.mocked(resolveActionTarget).mockResolvedValueOnce({
       backendNodeId: 5,
       frameId: "frame",
-      cdpTarget: { tabId: 7 },
+      handle: { tabId: 7, frameId: "frame", loaderId: "loader-1", backendNodeId: 5 },
       tab: { tabId: 7 },
     } as Awaited<ReturnType<typeof resolveActionTarget>>);
     vi.mocked(resolveActionTarget).mockResolvedValueOnce({
       backendNodeId: 8,
       frameId: "frame",
-      cdpTarget: { tabId: 7 },
+      handle: { tabId: 7, frameId: "frame", loaderId: "loader-1", backendNodeId: 8 },
       tab: { tabId: 7 },
     } as Awaited<ReturnType<typeof resolveActionTarget>>);
     const f = await fixture();
@@ -3861,18 +3861,18 @@ describe("tool.record_start cooperation guard", () => {
       deps!.refStore?.replace(
         oopifPresent
           ? [
-              ["e1", { backendNodeId: 10, tabId: 7, frameId: "root" }],
+              ["e1", { backendNodeId: 10, tabId: 7, frameId: "root", loaderId: "root-l1" }],
               [
                 "e2",
                 {
                   backendNodeId: 20,
                   tabId: 7,
                   frameId: "child",
-                  cdpSessionId: `oopif-${attachGen}`,
+                  loaderId: "child-l1",
                 },
               ],
             ]
-          : [["e1", { backendNodeId: 10, tabId: 7, frameId: "root" }]],
+          : [["e1", { backendNodeId: 10, tabId: 7, frameId: "root", loaderId: "root-l1" }]],
       );
       return {
         text: oopifPresent ? "Main [ref=@e1]; Child [ref=@e2]" : "Main [ref=@e1]",
@@ -3905,9 +3905,13 @@ describe("tool.record_start cooperation guard", () => {
       expect(await unchanged).toMatchObject({ kind: "unchanged" });
       expect(snapshotCount).toBe(1);
 
-      // Existing `@e2` bound to pre-soft-detach `oopif-1` transparently routes to `oopif-2`!
-      const resolved = await runner.sendToTarget!<{ sessionId: string }>(
-        { tabId: 7, sessionId: "oopif-1" },
+      // Existing `@e2` FrameNodeHandle transparently routes to `oopif-2` without storing `cdpSessionId`!
+      const e2Entry = f.sessions.get("shared")!.refStore.resolveEntry("e2");
+      if (!e2Entry || e2Entry.kind !== "dom" || !e2Entry.handle) {
+        throw new Error("expected e2 DOM FrameNodeHandle");
+      }
+      const resolved = await runner.sendToFrame!<{ sessionId: string }>(
+        e2Entry.handle,
         "DOM.resolveNode",
         { backendNodeId: 20 },
       );

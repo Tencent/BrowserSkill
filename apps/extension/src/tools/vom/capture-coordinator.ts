@@ -7,7 +7,13 @@ import {
   omitFrameSubtrees,
 } from "@/browser-driver/frame-graph";
 import { cssViewport, GeometryContext } from "../geometry/frame-context";
-import { type CdpRunner, cdpRunnerForTarget, sendToCdpTarget } from "../shared";
+import {
+  type CdpDispatchGuard,
+  type CdpRunner,
+  cdpRunnerForTarget,
+  delegateCdpRunner,
+  sendToCdpTarget,
+} from "../shared";
 import { collectOverlayExcludedBackendIds } from "./capture";
 import {
   isCaptureTerminalError as isCaptureAbort,
@@ -621,13 +627,35 @@ async function collectObservationFacts<T extends FrameOwnedAxNode>(
         }
         const identity: DocumentIdentity = {
           attachmentId: batch.snapshotAttachmentId,
-          target: frame.target,
+          tabId: frame.target.tabId,
           frameId: frame.frameId,
+          loaderId: frame.loaderId ?? "",
           documentElementBackendNodeId: doc.documentElementBackendNodeId,
         };
+        const identityCdp = cdp.sendToFrame
+          ? cdp
+          : delegateCdpRunner(cdp, {
+              sendToFrame: <T>(
+                _handle: unknown,
+                method: string,
+                params?: object,
+                guard?: CdpDispatchGuard,
+              ) => {
+                guard?.signal?.throwIfAborted();
+                if (
+                  guard?.attachmentId !== undefined &&
+                  cdp.getAttachmentId &&
+                  cdp.getAttachmentId(tabId) !== guard.attachmentId
+                ) {
+                  throw new Error("Debugger attachment changed before dispatch");
+                }
+                guard?.onDispatch?.();
+                return sendToCdpTarget<T>(cdp, batch.target, method, params);
+              },
+            });
         let verified: Awaited<ReturnType<typeof verifyDocumentIdentity>>;
         try {
-          verified = await verifyDocumentIdentity(cdp, identity, signal);
+          verified = await verifyDocumentIdentity(identityCdp, identity, signal);
         } catch (error) {
           forgetPendingAccessibility(tabId, axEnabled, error);
           throwCaptureAborted(signal);
@@ -637,8 +665,15 @@ async function collectObservationFacts<T extends FrameOwnedAxNode>(
         }
         const status =
           cdp.getAttachmentId?.(tabId) === identity.attachmentId ? verified : "changed";
-        if (status === "current") identities.set(frame.frameId, identity);
-        else {
+        if (status === "current") {
+          cdp.recordFrameDocumentElement?.(
+            tabId,
+            frame.frameId,
+            identity.loaderId,
+            identity.documentElementBackendNodeId,
+          );
+          identities.set(frame.frameId, identity);
+        } else {
           invalid.add(frame.frameId);
           issues.push({
             target: frame.target,
@@ -710,7 +745,7 @@ async function collectObservationFacts<T extends FrameOwnedAxNode>(
     if (cdp.getAttachmentId?.(tabId) !== identity.attachmentId) {
       invalid.add(frameId);
       issues.push({
-        target: identity.target,
+        target: selected.get(frameId)?.target ?? { tabId },
         frameId,
         stage: "identity",
         reason: "document-changed",

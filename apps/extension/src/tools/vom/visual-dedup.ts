@@ -35,9 +35,9 @@ export async function deduplicateVisualCandidates(
     } = candidate;
     const key = JSON.stringify([
       document.attachmentId,
-      document.target.tabId,
-      document.target.sessionId ?? null,
+      document.tabId,
       document.frameId,
+      document.loaderId,
       document.documentElementBackendNodeId,
       candidate.backendNodeId,
       candidate.parentBackendNodeId,

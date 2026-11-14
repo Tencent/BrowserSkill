@@ -7,11 +7,8 @@ export function pointerTargetValidator(
   cdp: CdpRunner,
 ): NonNullable<CdpRunner["verifyPointerTarget"]> {
   return async (target, point, offset = { x: 0, y: 0 }) => {
-    const geometry = await resolveNodeGeometry(cdp, target.tabId, {
-      target: target.cdpTarget,
-      backendNodeId: target.backendNodeId,
-      frameId: target.frameId,
-    });
+    const { handle } = target;
+    const geometry = await resolveNodeGeometry(cdp, handle.tabId, handle);
     if (
       isRpcError(geometry) ||
       Math.abs(geometry.actionPoint.x + offset.x - point.x) > 2 ||
@@ -24,7 +21,7 @@ export function pointerTargetValidator(
           "target",
           "Inspect the target's current position before choosing another action.",
           {
-            backend_node_id: target.backendNodeId,
+            backend_node_id: handle.backendNodeId,
             expected: point,
             actual: isRpcError(geometry) ? null : geometry.actionPoint,
           },
@@ -37,7 +34,7 @@ export function pointerTargetValidator(
           "The pointer target is covered or unavailable; synchronize before clicking",
           "target",
           "Inspect or dismiss the covering layer before choosing another action.",
-          { backend_node_id: target.backendNodeId, point },
+          { backend_node_id: handle.backendNodeId, point },
         ),
       );
   };

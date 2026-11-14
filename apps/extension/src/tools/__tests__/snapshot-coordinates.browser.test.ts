@@ -282,8 +282,9 @@ describe.skipIf(!process.env.BSK_TEST_CHROME)("real DOMSnapshot coordinate contr
                 if (configuration.fixture === "oopif-scrollbars")
                   expect(
                     await resolveNodeGeometry(cdp, 1, {
-                      target: frame.target,
+                      tabId: 1,
                       frameId: frame.frameId,
+                      loaderId: frame.loaderId ?? "",
                       backendNodeId: node!.backendNodeId,
                     }),
                   ).toMatchObject({ code: "permission_denied" });
@@ -297,8 +298,9 @@ describe.skipIf(!process.env.BSK_TEST_CHROME)("real DOMSnapshot coordinate contr
                 ).toBeLessThan(2);
               if (configuration.fixture !== "oopif-scrollbars") continue;
               const live = await resolveNodeGeometry(cdp, 1, {
-                target: frame.target,
+                tabId: 1,
                 frameId: frame.frameId,
+                loaderId: frame.loaderId ?? "",
                 backendNodeId: node!.backendNodeId,
               });
               if ("code" in live) throw new Error(live.message);

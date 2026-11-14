@@ -24,8 +24,7 @@ async function fixture(frame: "top" | "same-target" | "oopif" = "top") {
   const ctx = await manager.start("aa11");
   ctx.refStore.set("e3", 1234, {
     tabId: 4,
-    ...(frame !== "top" ? { frameId: "child" } : {}),
-    ...(frame === "oopif" ? { cdpSessionId: "child-session" } : {}),
+    ...(frame !== "top" ? { frameId: "child", loaderId: "child-loader" } : {}),
   });
   const abort = new AbortController();
   const graph: CdpFrameGraph = {
@@ -101,6 +100,12 @@ async function fixture(frame: "top" | "same-target" | "oopif" = "top") {
   const cdp: CdpRunner = {
     send: (tabId, method, params) => send({ tabId }, method, params),
     sendToTarget: send,
+    sendToFrame: (handle, method, params) => {
+      const target = handle.frameId
+        ? graph.frames.find((entry) => entry.frameId === handle.frameId)?.target
+        : undefined;
+      return send(target ?? { tabId: handle.tabId }, method, params);
+    },
     getFrameGraph: vi.fn(async () => {
       hooks.after({ target: { tabId: 4 }, method: "getFrameGraph", aborted: abort.signal.aborted });
       return graph;

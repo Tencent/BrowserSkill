@@ -22,6 +22,7 @@ determines which versions can connect.
 
 ### Changed
 
+- **Single `TabAttachment` state machine & `FrameNodeHandle` addressing**: Collapsed `ChromiumCdp`'s 33 parallel per-tab `Map`/`Set` fields into a single `Map<TabId, TabAttachment>` discriminated union (`detached | attaching | attached | soft_detached`), made `onEvent(tabId, handler)` a tab-scoped `Disposable` subscription holding an automatic idle lease, and sealed all transient `cdpSessionId` routing inside `browser-driver/` behind `FrameNodeHandle` and `FrameDocumentHandle` across `RefStore`, VOM visual observation and capture mappings, `read`, `extract`, `observation`, `interaction`, `waits`, `human-loop`, `recording`, and `CooperationController`.
 - **Protocol `2.0` baseline**: Raised `PROTOCOL_VERSION` and `MIN_COMPATIBLE_PROTOCOL` to `"2.0"`, eliminated extension/daemon legacy version drift, and slimmed `apps/extension/src/transport/generated/validators.js` by over 60% (`~992 KB` -> `<= 390 KB`).
 - **Daemon & extension routing consolidation**: Replaced 9 independent handwritten method tables and `OnceLock` process globals with generated/exhaustive `MethodSpec` tables and explicit `ClientContext` request state.
 - Unified all real-browser test and regression harnesses onto `BSK_TEST_CHROME`
@@ -37,6 +38,7 @@ determines which versions can connect.
 
 ### Fixed
 
+- Fixed cross-origin OOPIF `visual-region` `@eN` references and `--capture-id` coordinate clicks failing with `visual_target_changed` after 75s idle Soft-Detach reconnects (when Chrome assigns a new internal child `sessionId` while `frameId + loaderId` remain unchanged), deterministically rejected stale `FrameNodeHandle` / `FrameDocumentHandle` targets across child-frame `loaderId` navigations and same-`loaderId` `document.open()` replacements, and restored 75s idle Soft-Detach after one-shot `console` / `network` reads and `debug start -> stop` lease release.
 - Fixed native-dialog gate bypass when `tool.debug` (`replay`) triggers browser dialogs, missing `intent_wal` tracking on `download`/`dialog_accept`/`debug(replay)`/`navigate`/`reload`, and missing `EffectAwareAction` policies on `window_resize`/`emulate`/`tab_close`.
 - Fixed MCP error hints emitting CLI-only commands (such as `bsk ledger resolve`), missing `discard`/`exported` video cooperation actions, missing `navigate_back`/`forward`/`dialog_*` debug evidence classification, missing audit labels, and `recipe` `session_gone` detection of `session_stopped`/`no_active_session`.
 - Preserved user window focus on macOS and Linux/X11 Chromium when creating or
@@ -87,6 +89,7 @@ determines which versions can connect.
 
 ### Removed
 
+- Removed `reattachIfSoftDetached`, `reconcileSoftDetachedFrames`, and `resolveTarget` compensation hooks from `CdpRunner`, `RefStore.remapChildFrameSessions`, partial hand-written `CdpRunner` wrapper object literals (replaced with full `delegateCdpRunner` delegation), and isolated default `new ChromiumCdp()` fallback instances outside `background.ts`.
 - Removed deprecated `TraceV2` recording types/converters (retaining `TraceV3` only), all 9 legacy `1.x` `Feature::*` compatibility gates, extension/daemon `"1.6"`/`LEGACY_MIN_COMPATIBLE_PEER` shims, duplicate `DragParams.observation_id` / legacy drag modes, and duplicate `wire_*` runtime validators from generated TypeScript artifacts.
 - Retired and removed `packages/dsh-plugin-browserskill`, its standalone release
   workflow, and DSH-specific test shims; DeepSeek Harness now uses the standard

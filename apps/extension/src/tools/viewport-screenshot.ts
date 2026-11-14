@@ -6,7 +6,7 @@ import {
 import type { RpcError } from "@/transport/types";
 import { rpcError } from "./errors";
 import { parsePngDimensions } from "./png";
-import type { CdpRunner } from "./shared";
+import { type CdpRunner, delegateCdpRunner } from "./shared";
 import { BoundedWaitError, waitBounded } from "./transfer-transaction";
 import { isAbortError, throwIfAborted } from "./vom/capture-abort";
 import { verifyDocumentIdentity } from "./vom/document-identity";
@@ -81,26 +81,44 @@ function changed(): RpcError {
 
 /** Cleanup and identity probes must not auto-attach to a replacement connection. */
 function boundToAttachment(cdp: CdpRunner, tabId: number, attachmentId: string): CdpRunner {
-  return {
-    getAttachmentId: (id) => cdp.getAttachmentId?.(id),
+  return delegateCdpRunner(cdp, {
     send: <T>(id: number, method: string, params?: object) => {
       if (id !== tabId || cdp.getAttachmentId?.(id) !== attachmentId) {
         return Promise.reject(new Error("Screenshot attachment changed"));
       }
       return cdp.send<T>(id, method, params);
     },
-  };
+    ...(cdp.sendToFrame
+      ? {
+          sendToFrame: <T>(
+            handle: Parameters<NonNullable<CdpRunner["sendToFrame"]>>[0],
+            method: string,
+            params?: object,
+            guard?: Parameters<NonNullable<CdpRunner["sendToFrame"]>>[3],
+          ) => {
+            if (handle.tabId !== tabId || cdp.getAttachmentId?.(handle.tabId) !== attachmentId) {
+              return Promise.reject(new Error("Screenshot attachment changed"));
+            }
+            return cdp.sendToFrame!<T>(handle, method, params, {
+              ...guard,
+              attachmentId,
+            });
+          },
+        }
+      : {}),
+  });
 }
 
 /** Read only the main document identity, not a VOM/AX snapshot or frame graph. */
 async function readDocumentIdentity(cdp: CdpRunner, tabId: number, signal?: AbortSignal) {
   throwIfAborted(signal);
-  const tree = await cdp.send<{ frameTree?: { frame: { id: string } } }>(
+  const tree = await cdp.send<{ frameTree?: { frame: { id: string; loaderId?: string } } }>(
     tabId,
     "Page.getFrameTree",
   );
   const attachmentId = cdp.getAttachmentId?.(tabId);
   const frameId = tree.frameTree?.frame.id;
+  const loaderId = tree.frameTree?.frame.loaderId ?? "";
   if (!attachmentId || !frameId) return null;
   const bound = boundToAttachment(cdp, tabId, attachmentId);
   const objectGroup = `bsk-viewport-identity-${crypto.randomUUID()}`;
@@ -129,10 +147,12 @@ async function readDocumentIdentity(cdp: CdpRunner, tabId: number, signal?: Abor
     const node = root.result?.deepSerializedValue;
     const backendNodeId = node?.type === "node" ? node.value?.backendNodeId : undefined;
     if (backendNodeId === undefined || cdp.getAttachmentId?.(tabId) !== attachmentId) return null;
+    cdp.recordFrameDocumentElement?.(tabId, frameId, loaderId, backendNodeId);
     return {
       attachmentId,
+      tabId,
       frameId,
-      target: { tabId },
+      loaderId,
       documentElementBackendNodeId: backendNodeId,
     } satisfies DocumentIdentity;
   } finally {
@@ -164,14 +184,27 @@ export async function captureControlledViewport(
   };
   // Chrome cannot cancel dispatched reads. Retire their waiters and consume late
   // replies; never continue the pipeline after its cancellation or deadline.
-  const captureCdp: CdpRunner = {
-    getAttachmentId: (id) => cdp.getAttachmentId?.(id),
+  const captureCdp: CdpRunner = delegateCdpRunner(cdp, {
     send: (id, method, params) => {
       const cleanup = method === "Runtime.releaseObjectGroup";
       if (!cleanup) check();
       return wait(cdp.send(id, method, params), cleanup);
     },
-  };
+    ...(cdp.sendToFrame
+      ? {
+          sendToFrame: <T>(
+            handle: Parameters<NonNullable<CdpRunner["sendToFrame"]>>[0],
+            method: string,
+            params?: object,
+            guard?: Parameters<NonNullable<CdpRunner["sendToFrame"]>>[3],
+          ) => {
+            const cleanup = method === "Runtime.releaseObjectGroup";
+            if (!cleanup) check();
+            return wait(cdp.sendToFrame!<T>(handle, method, params, guard), cleanup);
+          },
+        }
+      : {}),
+  });
   const controlled = () => {
     check();
     return wait(stillControlled());

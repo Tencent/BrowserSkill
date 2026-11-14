@@ -133,7 +133,7 @@ function makeFakeCdp(opts?: {
       params?: object,
     ) => Promise<T>,
     trackSessionTab: vi.fn(),
-    onEvent: vi.fn((handler: EventListener) => {
+    onEvent: vi.fn((_tabId: number, handler: EventListener) => {
       events.push(handler);
       return {
         dispose: () => {

@@ -1,5 +1,5 @@
-import type { CdpRunner } from "../shared";
-import { sendToCdpTarget } from "../shared";
+import { isStaleFrameHandleError } from "@/browser-driver/frame-graph";
+import { type CdpRunner, sendToFrameHandle } from "../shared";
 import { isCaptureTerminalError, throwIfAborted } from "./capture-abort";
 import type { DocumentIdentity } from "./facts";
 import type { VisualCandidate } from "./visual-discovery";
@@ -60,13 +60,21 @@ async function verifyIdentity(
   objectGroup?: string;
   executionContextId?: number;
 }> {
-  const attached = () => cdp.getAttachmentId?.(identity.target.tabId) === identity.attachmentId;
+  const attached = () => cdp.getAttachmentId?.(identity.tabId) === identity.attachmentId;
   throwIfAborted(signal);
-  if (!attached()) return { status: "changed" };
+  const liveAttachment = cdp.getAttachmentId?.(identity.tabId);
+  if (liveAttachment !== undefined ? liveAttachment !== identity.attachmentId : !cdp.sendToFrame) {
+    return { status: "changed" };
+  }
   const objectGroup = `bsk-document-identity-${crypto.randomUUID()}`;
+  let dispatched = false;
   const send = <T>(method: string, params: object) => {
     throwIfAborted(signal);
-    return sendToCdpTarget<T>(cdp, identity.target, method, params);
+    dispatched = true;
+    return sendToFrameHandle<T>(cdp, identity, method, params, {
+      attachmentId: identity.attachmentId,
+      signal,
+    });
   };
   let objectId: string | undefined;
   let retained = false;
@@ -121,12 +129,18 @@ async function verifyIdentity(
   } catch (error) {
     throwIfAborted(signal);
     if (isCaptureTerminalError(error)) throw error;
+    if (isStaleFrameHandleError(error)) return { status: "changed" };
     return { status: attached() ? "unavailable" : "changed" };
   } finally {
-    if (!retained)
-      await sendToCdpTarget(cdp, identity.target, "Runtime.releaseObjectGroup", {
-        objectGroup,
-      }).catch(() => {});
+    if (!retained && dispatched && attached()) {
+      await sendToFrameHandle(
+        cdp,
+        identity,
+        "Runtime.releaseObjectGroup",
+        { objectGroup },
+        { attachmentId: identity.attachmentId },
+      ).catch(() => {});
+    }
     throwIfAborted(signal);
   }
 }

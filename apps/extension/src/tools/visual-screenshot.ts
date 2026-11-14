@@ -62,19 +62,15 @@ export async function captureVisualScreenshot(
       const clip = screenshotPageRect(region.crop, region.viewport);
       if (!clip) return stale("invalid screenshot coordinates");
       throwIfAborted(signal);
-      if (
-        cdp.getAttachmentId?.(candidate.document.target.tabId) !== candidate.document.attachmentId
-      )
+      if (cdp.getAttachmentId?.(candidate.document.tabId) !== candidate.document.attachmentId)
         return stale("visual attachment changed");
       const shot = await cdp.send<{ data?: string }>(
-        candidate.document.target.tabId,
+        candidate.document.tabId,
         "Page.captureScreenshot",
         { format: "png", captureBeyondViewport: false, clip: { ...clip.rect, scale } },
       );
       throwIfAborted(signal);
-      if (
-        cdp.getAttachmentId?.(candidate.document.target.tabId) !== candidate.document.attachmentId
-      )
+      if (cdp.getAttachmentId?.(candidate.document.tabId) !== candidate.document.attachmentId)
         return stale("visual attachment changed");
       let after: VisualTargetState | RpcError;
       let identityVerified = false;
@@ -94,9 +90,7 @@ export async function captureVisualScreenshot(
         const identityError = await verifyCapturedTarget(cdp, candidate, signal);
         if (identityError) return identityError;
       }
-      if (
-        cdp.getAttachmentId?.(candidate.document.target.tabId) !== candidate.document.attachmentId
-      )
+      if (cdp.getAttachmentId?.(candidate.document.tabId) !== candidate.document.attachmentId)
         return stale("visual attachment changed");
       const mapping = !("code" in after) && sameVisualMapping(region, after) ? region : undefined;
       const dims = shot.data ? parsePngDimensions(shot.data) : null;

@@ -48,11 +48,11 @@ function fixture() {
     cancel: vi.fn(async () => {}),
     removeFile: vi.fn(async () => {}),
   };
-  let listener!: Parameters<NonNullable<CdpRunner["onEvent"]>>[0];
+  let listener!: Parameters<NonNullable<CdpRunner["onEvent"]>>[1];
   const dispose = vi.fn();
   const cdp: CdpRunner = {
     send: vi.fn(async () => ({})) as CdpRunner["send"],
-    onEvent: (callback) => {
+    onEvent: (_tabId, callback) => {
       listener = callback;
       return { dispose };
     },
@@ -102,7 +102,7 @@ describe("download deadlines", () => {
     let settled = false;
     const pending = captureBrowserDownload({
       ...f,
-      target: { tabId: 7 },
+      handle: { tabId: 7, frameId: "", loaderId: "" },
       browserRelativeDir: "BrowserSkill/deadline",
       timeoutMs: 100,
       signal: abort.signal,
@@ -137,7 +137,7 @@ describe("download deadlines", () => {
     const trigger = vi.fn();
     const result = await captureBrowserDownload({
       ...f,
-      target: { tabId: 7 },
+      handle: { tabId: 7, frameId: "", loaderId: "" },
       browserRelativeDir: "BrowserSkill/deadline",
       timeoutMs: 100,
       signal: controller.signal,
@@ -164,7 +164,7 @@ describe("download deadlines", () => {
     let settled = false;
     const pending = captureBrowserDownload({
       ...f,
-      target: { tabId: 7 },
+      handle: { tabId: 7, frameId: "", loaderId: "" },
       browserRelativeDir: "BrowserSkill/deadline",
       timeoutMs: 100,
       trigger: async (mark) => {
@@ -201,7 +201,7 @@ describe("download deadlines", () => {
     let settled = false;
     const pending = captureBrowserDownload({
       ...f,
-      target: { tabId: 7 },
+      handle: { tabId: 7, frameId: "", loaderId: "" },
       browserRelativeDir: "BrowserSkill/deadline",
       timeoutMs: 100,
       trigger: async (mark) => {
@@ -227,7 +227,7 @@ describe("download deadlines", () => {
     let settled = false;
     const pending = captureBrowserDownload({
       ...f,
-      target: { tabId: 7 },
+      handle: { tabId: 7, frameId: "", loaderId: "" },
       browserRelativeDir: "BrowserSkill/deadline",
       timeoutMs: 100,
       trigger: async () => ({ code: "cancelled", message: "cancelled" }),
@@ -344,7 +344,7 @@ describe("human intervention and download ownership", () => {
     let settled = false;
     const pending = captureBrowserDownload({
       ...f,
-      target: { tabId: 7 },
+      handle: { tabId: 7, frameId: "", loaderId: "" },
       browserRelativeDir: "BrowserSkill/deadline",
       timeoutMs: 10_000,
       signal: operation.signal,
@@ -400,7 +400,7 @@ describe("human intervention and download ownership", () => {
     const input = new AbortController();
     const pending = captureBrowserDownload({
       ...f,
-      target: { tabId: 7 },
+      handle: { tabId: 7, frameId: "", loaderId: "" },
       browserRelativeDir: "BrowserSkill/deadline",
       timeoutMs: 10_000,
       inputSignal: input.signal,

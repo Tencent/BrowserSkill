@@ -11,7 +11,7 @@ type Send = <T = Record<string, unknown>>(
   params?: object,
   sessionId?: string,
 ) => Promise<T>;
-type Listener = Parameters<NonNullable<CdpRunner["onEvent"]>>[0];
+type Listener = Parameters<NonNullable<CdpRunner["onEvent"]>>[1];
 interface CdpEvent {
   sessionId?: string;
   method: string;
@@ -79,7 +79,7 @@ describe.skipIf(!process.env.BSK_TEST_CHROME)("real browser history navigation",
           const cdp: CdpRunner = {
             send: <T>(_tabId: number, method: string, params?: object) =>
               send<T>(method, params, sessionId),
-            onEvent: (listener) => {
+            onEvent: (_tabId, listener) => {
               listeners.add(listener);
               return { dispose: () => void listeners.delete(listener) };
             },

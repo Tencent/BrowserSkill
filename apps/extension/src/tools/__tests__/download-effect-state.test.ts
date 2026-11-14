@@ -18,7 +18,7 @@ describe("download trigger effect state", () => {
       const result = await captureBrowserDownload({
         cdp,
         downloads,
-        target: { tabId: 4 },
+        handle: { tabId: 4, frameId: "", loaderId: "" },
         browserRelativeDir: "BrowserSkill/effect",
         timeoutMs: 1_000,
         trigger: async (markDispatched) => {

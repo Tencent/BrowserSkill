@@ -368,7 +368,13 @@ export function describeSnapshotFrames(
       hint && cdpTargetKey(hint.target) === cdpTargetKey(target) ? hint : undefined;
     const url =
       (doc.documentURL === undefined ? undefined : strings[doc.documentURL]) || compatible?.url;
-    return { frameId, target, ...(url ? { url } : {}) } as CdpFrame;
+    return {
+      frameId,
+      target,
+      ...(compatible?.loaderId !== undefined ? { loaderId: compatible.loaderId } : {}),
+      ...(url ? { url } : {}),
+      ...(compatible?.urlFragment !== undefined ? { urlFragment: compatible.urlFragment } : {}),
+    } as CdpFrame;
   });
   const root = frames[0];
   if (root) {

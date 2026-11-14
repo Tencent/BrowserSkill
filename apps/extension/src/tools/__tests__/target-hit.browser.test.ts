@@ -192,7 +192,6 @@ it.skipIf(!process.env.BSK_TEST_CHROME)(
             ctx.refStore.set(ref, node.backendNodeId, {
               tabId: 4,
               frameId,
-              ...(childSession ? { cdpSessionId: childSession } : {}),
             });
             expect(await click({ ref })).toMatchObject({ used_ref: ref });
             const before = presses;

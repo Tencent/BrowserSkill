@@ -1,6 +1,7 @@
-import type { CdpTarget } from "@/browser-driver/frame-graph";
+import type { CdpDispatchGuard } from "@/browser-driver/chromium-cdp";
+import type { CdpTarget, FrameDocumentHandle, FrameNodeHandle } from "@/browser-driver/frame-graph";
 import type { InteractionDeps } from "./interaction";
-import { type CdpRunner, sendToCdpTarget } from "./shared";
+import { type CdpRunner, delegateCdpRunner, sendToCdpTarget } from "./shared";
 import { waitBounded } from "./transfer-transaction";
 
 /** A retired pointer transaction must never resume input when a CDP reply arrives late. */
@@ -63,35 +64,86 @@ export function pointerTransactionDeps(
     }
     return result;
   };
-  const cdp: CdpRunner = {
+  const cdp: CdpRunner = delegateCdpRunner(deps.cdp, {
     send: (tabId, method, params) => send({ tabId }, method, params),
     sendToTarget: send,
-    trackSessionTab: deps.cdp.trackSessionTab?.bind(deps.cdp),
-    verifyPointerTarget: deps.cdp.verifyPointerTarget?.bind(deps.cdp),
-    dialogCursor: deps.cdp.dialogCursor?.bind(deps.cdp),
-    dialogsSince: deps.cdp.dialogsSince?.bind(deps.cdp),
-    getAttachmentId: deps.cdp.getAttachmentId?.bind(deps.cdp),
-    resolveTarget: deps.cdp.resolveTarget?.bind(deps.cdp),
-    retainTabAttachment: deps.cdp.retainTabAttachment?.bind(deps.cdp),
-    reattachIfSoftDetached: deps.cdp.reattachIfSoftDetached
-      ? (tabId) => {
-          check();
-          return deps.cdp.reattachIfSoftDetached!(tabId);
+    ...(deps.cdp.sendGuarded
+      ? {
+          sendGuarded: <T = unknown>(
+            target: CdpTarget,
+            method: string,
+            params: object | undefined,
+            guard: CdpDispatchGuard,
+          ) => {
+            check();
+            return deps.cdp.sendGuarded!<T>(target, method, params, {
+              ...guard,
+              signal: guard.signal ?? signal,
+              attachmentId: guard.attachmentId ?? release?.attachmentId,
+              onDispatch: () => {
+                check();
+                if (
+                  release?.attachmentId !== undefined &&
+                  deps.cdp.getAttachmentId?.(target.tabId) !== release.attachmentId
+                )
+                  throw new Error("pointer attachment changed");
+                guard.onDispatch?.();
+              },
+            });
+          },
         }
-      : undefined,
-    reconcileSoftDetachedFrames: deps.cdp.reconcileSoftDetachedFrames
-      ? (tabId) => {
-          check();
-          return deps.cdp.reconcileSoftDetachedFrames!(tabId);
+      : {}),
+    ...(deps.cdp.sendToFrame
+      ? {
+          sendToFrame: <T = unknown>(
+            handle: FrameDocumentHandle | FrameNodeHandle,
+            method: string,
+            params?: object,
+            guard?: CdpDispatchGuard,
+          ) => {
+            check();
+            return deps.cdp.sendToFrame!<T>(handle, method, params, {
+              ...guard,
+              signal: guard?.signal ?? signal,
+              attachmentId: guard?.attachmentId ?? release?.attachmentId,
+              onDispatch: () => {
+                check();
+                if (
+                  release?.attachmentId !== undefined &&
+                  deps.cdp.getAttachmentId?.(handle.tabId) !== release.attachmentId
+                )
+                  throw new Error("pointer attachment changed");
+                guard?.onDispatch?.();
+              },
+            });
+          },
         }
-      : undefined,
-    getFrameGraph: deps.cdp.getFrameGraph
-      ? (tabId) => {
-          check();
-          return deps.cdp.getFrameGraph!(tabId);
+      : {}),
+    ...(deps.cdp.ensureAttachedToUrl
+      ? {
+          ensureAttachedToUrl: (tabId, expectedUrl) => {
+            check();
+            return deps.cdp.ensureAttachedToUrl!(tabId, expectedUrl);
+          },
         }
-      : undefined,
-  };
+      : {}),
+    ...(deps.cdp.getMainFrameHandle
+      ? {
+          getMainFrameHandle: (tabId, sig) => {
+            check();
+            return deps.cdp.getMainFrameHandle!(tabId, sig ?? signal);
+          },
+        }
+      : {}),
+    ...(deps.cdp.getFrameGraph
+      ? {
+          getFrameGraph: (tabId, sig) => {
+            check();
+            return deps.cdp.getFrameGraph!(tabId, sig ?? signal);
+          },
+        }
+      : {}),
+  });
   const cleanupInput = async (deadline: number): Promise<void> => {
     if (!release) return;
     const pending = release;

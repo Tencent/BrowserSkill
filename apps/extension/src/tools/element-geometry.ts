@@ -1,6 +1,7 @@
 // Resolve and scroll nodes inside one CDP target. Cross-frame projection
 // belongs to frame-geometry.ts.
 
+import { isStaleFrameHandleError } from "@/browser-driver/frame-graph";
 import type { RpcError } from "@/transport/types";
 import { rpcError } from "./errors";
 import {
@@ -41,6 +42,7 @@ export async function backendNodeToObject(
     }
     return objectId;
   } catch (err) {
+    if (isStaleFrameHandleError(err)) throw err;
     return {
       code: "cdp_failed",
       message: err instanceof Error ? err.message : String(err),
@@ -57,6 +59,7 @@ export async function scrollNodeIntoView(
     await cdp.send(tabId, "DOM.scrollIntoViewIfNeeded", { backendNodeId });
     return null;
   } catch (err) {
+    if (isStaleFrameHandleError(err)) throw err;
     console.debug("[bsk element-geometry] scrollIntoViewIfNeeded failed", err);
   }
 
@@ -72,6 +75,7 @@ export async function scrollNodeIntoView(
     });
     return null;
   } catch (err) {
+    if (isStaleFrameHandleError(err)) throw err;
     return {
       code: "cdp_failed",
       message: err instanceof Error ? err.message : String(err),
@@ -100,6 +104,7 @@ async function resolveVisibleContentRegion(
     });
     content = box.model?.content;
   } catch (err) {
+    if (isStaleFrameHandleError(err)) throw err;
     console.debug("[bsk element-geometry] getBoxModel failed", err);
   }
   try {
@@ -109,6 +114,7 @@ async function resolveVisibleContentRegion(
     const visible = validCdpRegion(quads.quads);
     if (visible.length > 0) return visible;
   } catch (err) {
+    if (isStaleFrameHandleError(err)) throw err;
     console.debug("[bsk element-geometry] getContentQuads failed", err);
   }
   const fallback = validCdpRegion(content ? [content] : undefined);

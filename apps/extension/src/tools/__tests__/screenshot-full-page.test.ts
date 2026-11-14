@@ -41,12 +41,12 @@ async function setup() {
     active: true,
     url: "https://example.test/",
   } as chrome.tabs.Tab;
-  let onEvent: Parameters<NonNullable<CdpRunner["onEvent"]>>[0] | undefined;
+  let onEvent: Parameters<NonNullable<CdpRunner["onEvent"]>>[1] | undefined;
   const disposeEvents = vi.fn(() => {
     onEvent = undefined;
   });
   const cdp = {
-    onEvent: vi.fn((handler: NonNullable<typeof onEvent>) => {
+    onEvent: vi.fn((_tabId: number, handler: NonNullable<typeof onEvent>) => {
       onEvent = handler;
       return { dispose: disposeEvents };
     }),
@@ -419,7 +419,7 @@ describe("Windows full-page rendering lifetime", () => {
     const { manager, deps, disposeEvents } = await setupWindowsCapture();
     vi.mocked(capturePage).mockImplementationOnce(async (options) => {
       await options.screenshot();
-      const frame = deps.cdp.onEvent.mock.calls[0][0];
+      const frame = deps.cdp.onEvent.mock.calls[0][1];
       frame({ tabId: 99 }, "Page.screencastFrame", { sessionId: 2 });
       frame({ tabId: 7, sessionId: "child" }, "Page.screencastFrame", { sessionId: 3 });
       frame({ tabId: 7 }, "Page.screencastVisibilityChanged", {});

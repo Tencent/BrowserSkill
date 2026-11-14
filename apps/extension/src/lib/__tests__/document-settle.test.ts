@@ -21,7 +21,7 @@ describe("waitForDocumentSettled", () => {
     vi.useFakeTimers();
     const { cdp, send } = quietCdp();
 
-    const settled = waitForDocumentSettled(cdp, { target: { tabId: 7 } });
+    const settled = waitForDocumentSettled(cdp, { tabId: 7 });
     await vi.advanceTimersByTimeAsync(180);
 
     await expect(settled).resolves.toBe("quiet");
@@ -35,7 +35,7 @@ describe("waitForDocumentSettled", () => {
     const controller = new AbortController();
     const settled = waitForDocumentSettled(
       cdp,
-      { target: { tabId: 7 } },
+      { tabId: 7 },
       {
         signal: controller.signal,
       },
@@ -56,8 +56,8 @@ describe("waitForDocumentSettled", () => {
     const cdp: CdpRunner = { send: send as unknown as CdpRunner["send"] };
 
     const settled = waitForDocumentSettled(cdp, {
-      target: { tabId: 7 },
-      frameId: "child-frame",
+      tabId: 7,
+      handle: { tabId: 7, frameId: "child-frame", loaderId: "loader-1" },
     });
     await vi.advanceTimersByTimeAsync(180);
 
@@ -74,28 +74,30 @@ describe("waitForDocumentSettled", () => {
     );
   });
 
-  it("routes an OOPIF probe through its CDP target session", async () => {
+  it("routes an OOPIF probe through its FrameDocumentHandle", async () => {
     vi.useFakeTimers();
     const send = vi.fn();
-    const sendToTarget = vi.fn(async (_target, method: string) => {
+    const sendToFrame = vi.fn(async (_handle, method: string) => {
       if (method === "Page.createIsolatedWorld") return { executionContextId: 27 };
       return { result: { value: { idleMs: 1_000, readyState: "complete" } } };
     });
     const cdp: CdpRunner = {
       send: send as unknown as CdpRunner["send"],
-      sendToTarget: sendToTarget as unknown as NonNullable<CdpRunner["sendToTarget"]>,
+      sendToFrame: sendToFrame as unknown as NonNullable<CdpRunner["sendToFrame"]>,
+      hasOwnFrameTarget: (_tabId, frameId) => frameId === "oopif-frame",
     };
 
-    const target = { tabId: 7, sessionId: "oopif-session" };
-    const settled = waitForDocumentSettled(cdp, { target, frameId: "oopif-frame" });
+    const handle = { tabId: 7, frameId: "oopif-frame", loaderId: "oopif-loader" };
+    const settled = waitForDocumentSettled(cdp, { tabId: 7, handle });
     await vi.advanceTimersByTimeAsync(180);
 
     await expect(settled).resolves.toBe("quiet");
     expect(send).not.toHaveBeenCalled();
-    expect(sendToTarget).toHaveBeenCalledWith(
-      target,
+    expect(sendToFrame).toHaveBeenCalledWith(
+      handle,
       "Runtime.evaluate",
       expect.objectContaining({ contextId: 27 }),
+      undefined,
     );
   });
 });

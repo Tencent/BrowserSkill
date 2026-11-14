@@ -28,7 +28,7 @@ async function setup(element?: HTMLElement, childSession = false) {
   const ctx = await manager.start("aa11");
   ctx.refStore.set("e1", 12, {
     tabId: 4,
-    ...(childSession ? { frameId: "child", cdpSessionId: "child-session" } : {}),
+    ...(childSession ? { frameId: "child", loaderId: "child-loader" } : {}),
   });
   const calls: Call[] = [];
   const afterCommand = vi.fn<(call: Call) => void>();
@@ -74,6 +74,15 @@ async function setup(element?: HTMLElement, childSession = false) {
   const cdp: CdpRunner = {
     send: (tabId, method, params) => send({ tabId }, method, params) as never,
     sendToTarget: send as CdpRunner["sendToTarget"],
+    sendToFrame: (handle, method, params) =>
+      send(
+        {
+          tabId: handle.tabId,
+          ...(childSession && handle.frameId === "child" ? { sessionId: "child-session" } : {}),
+        },
+        method,
+        params,
+      ) as never,
     getFrameGraph: vi.fn(async () => ({
       rootFrameId: "main",
       frames: [

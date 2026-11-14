@@ -17,6 +17,7 @@ CLI 和扩展可以分别发布，能否连接由协议兼容性决定。更新�
 
 ### 变更
 
+- **`ChromiumCdp` 单状态机与 `FrameNodeHandle` 寻址收口**：将 `ChromiumCdp` 原先散落的 33 张单标签页平行 `Map`/`Set` 收敛为唯一主表 `Map<TabId, TabAttachment>` 判别联合状态机（`detached | attaching | attached | soft_detached`），将 `onEvent(tabId, handler)` 改造为自动持有空闲租约的标签页级 `Disposable` 订阅，并通过 `FrameNodeHandle` 与 `FrameDocumentHandle` 将瞬态 `cdpSessionId` 彻底封入 `browser-driver/` 内部（全量覆盖 `RefStore`、VOM 视觉观测与截图坐标映射、`read`、`extract`、`observation`、`interaction`、`waits`、`human-loop`、`recording` 与 `CooperationController`）。
 - **协议基线直升 `2.0`**：将 `PROTOCOL_VERSION` 与 `MIN_COMPATIBLE_PROTOCOL` 同步升至 `"2.0"`，清除扩展与守护进程间的握手版本漂移，并将 `apps/extension/src/transport/generated/validators.js` 体积削减 60% 以上（`~992 KB` -> `<= 390 KB`）。
 - **收口守护进程/扩展分发与上下文全局状态**：以生成/穷尽的 `MethodSpec` 映射替代全栈 9 张手写方法表，并移除 `business_rpc.rs` 中的全局 `OnceLock` 上下文。
 - 将所有真浏览器测试与回归套件的环境变量统一收敛至 `BSK_TEST_CHROME` 与 `BSK_TEST_CLI`（补齐 Windows `.exe` 后缀并在隔离 daemon 用例中清理宿主子代理作用域环境变量），将 `.browser.test.ts` 与 `.bench.ts` 从单元测试配置剥离至 `apps/extension/vitest.browser.config.ts` 与零跳过运行器 `scripts/run-browser-tests.mjs`（将 `pnpm --filter @browser-skill/extension test:browser` 统一路由至该运行器，强制校验 `skipped === 0`、每个套件存在有效断言以及多目标参数逐项命中），并在 CI 中接入全部扩展真浏览器测试套件、`eval:browser:check` 与 `eval:browser:dynamic-read`（#731、#732）。
@@ -24,6 +25,7 @@ CLI 和扩展可以分别发布，能否连接由协议兼容性决定。更新�
 
 ### 修复
 
+- 修复跨源 OOPIF 内 `visual-region` `@eN` 视觉引用与 `--capture-id` 坐标点击在 75 秒空闲 Soft-Detach 重连分配新内部子会话 `sessionId`（`frameId + loaderId` 未变）后误报 `visual_target_changed` 断裂的缺陷，在子帧导航切换 `loaderId` 或同一 `loaderId` 下调用 `document.open()` 替换文档时确定性拒绝过期 `FrameNodeHandle` / `FrameDocumentHandle` 目标，并修复单次 `console` / `network` 读取及 `debug start -> stop` 释放租约后永久阻塞 75 秒空闲 Soft-Detach 的粘滞问题。
 - 修复 `tool.debug`（`replay`）绕过原生弹窗挂起门禁、`intent_wal` 漏掉 `download`/`dialog_accept`/`debug(replay)`/`navigate`/`reload` 以及 `window_resize`/`emulate`/`tab_close` 丢失 `EffectAwareAction` 超时策略的缺陷。
 - 修复 MCP 错误恢复提示直接回显 CLI 专属命令（如 `bsk ledger resolve`）、`tool.video` 漏掉 `discard`/`exported` 协作动作、调试证据分类遗漏 `navigate_back`/`forward`/`dialog_*`、审计 UI 标签缺失以及 `recipe` `session_gone` 漏判 `session_stopped`/`no_active_session` 的问题。
 - 修复 macOS 与 Linux/X11 Chromium 下后台创建或初始化 Agent 窗口及标签页抢占用户前台窗口焦点的问题（Linux 下 `chromeAgentWindowApi.create` 先创建非激活标签页再通过 `tabId` 建窗以规避 Chromium `Navigate()` `kShowWindow` 抢焦，且排除其他活跃或创建中的 Agent 窗口防跨会话串窗；macOS 下 `tool.tab_create` 与 `ensureActiveTab` 先创建非激活标签页再通过 `chrome.tabs.update` 在目标窗口内选中，建窗或激活失败时自动关闭新建标签页并在清理亦失败时认领至 `agentCreatedTabs` 防孤儿泄漏），在有头 Linux 与 Windows 平台（排除 `HeadlessChrome/`）为非当前标签页及后台遮挡或最小化 Agent 窗口上的 `screenshot` 与 `screenshot --full-page` 启用 Aura 合成器唤醒租约（及全页截图陈旧帧检测），并消除 `parsePngDimensions` 打包产物对脚本字符集的依赖（#731、#732）。
@@ -35,6 +37,7 @@ CLI 和扩展可以分别发布，能否连接由协议兼容性决定。更新�
 
 ### 移除
 
+- 从 `CdpRunner` 及上层调用栈净删 `reattachIfSoftDetached`、`reconcileSoftDetachedFrames` 与 `resolveTarget` 三大外泄补偿钩子，移除 `RefStore.remapChildFrameSessions`、手写残缺局部 `CdpRunner` 对象字面量（统一收口为 `delegateCdpRunner` 全量委托代理）以及 `background.ts` 以外所有孤立默认的 `new ChromiumCdp()` 野实例。
 - 移除已废弃的 `TraceV2` 录制协议类型与转换器（仅保留 `TraceV3`）、全部 9 套 `1.x` `Feature::*` 历史版本协商门禁、扩展/守护进程 `"1.6"`/`LEGACY_MIN_COMPATIBLE_PEER` 兼容兜底、重复字段 `DragParams.observation_id` / 旧拖拽模式以及生成 TS 产物中重复导出的 `wire_*` 运行时校验器。
 - 下线并整体移除 `packages/dsh-plugin-browserskill`、独立发版流水线及专属测试桩；DeepSeek Harness
   与其他 Agent 统一通过标准 `bsk` CLI 与 `bsk mcp` 调用，在途请求取消、协作结算、CLI 录屏导出与动态读取等真浏览器回归用例已完整迁移至 `bsk` CLI 与 `bsk mcp`（#731、#732）。

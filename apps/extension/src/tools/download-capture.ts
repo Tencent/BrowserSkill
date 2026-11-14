@@ -5,7 +5,7 @@
 // no CDP intent on the clicked target, so a navigation target that the clicked
 // tab opens after mouse press supplies the intent URL instead.
 
-import type { CdpTarget } from "@/browser-driver/frame-graph";
+import type { FrameDocumentHandle } from "@/browser-driver/frame-graph";
 import type { ClickResult, RpcError, TransferEffectState } from "@/transport/types";
 import { transferError } from "./errors";
 import { type CdpRunner, isRpcError } from "./shared";
@@ -64,7 +64,7 @@ export const chromeNavigationTargetsApi: NavigationTargetsApi = {
 
 export interface DownloadCaptureOptions {
   cdp: CdpRunner;
-  target: CdpTarget;
+  handle: FrameDocumentHandle;
   expectedFrameId?: string;
   downloads: DownloadsApi;
   navigationTargets?: NavigationTargetsApi;
@@ -108,10 +108,6 @@ function isInBrowserRelativeDir(filename: string, browserRelativeDir: string): b
   const parent = filename.split(/[\\/]/).slice(0, -1);
   const expected = browserRelativeDir.split("/");
   return parent.slice(-expected.length).join("/") === browserRelativeDir;
-}
-
-function sameTarget(source: { tabId?: number; sessionId?: string }, target: CdpTarget): boolean {
-  return source.tabId === target.tabId && source.sessionId === target.sessionId;
 }
 
 function matchesIntent(item: chrome.downloads.DownloadItem, intent: DownloadIntent): boolean {
@@ -329,14 +325,19 @@ export async function captureBrowserDownload(
   const navigationTargetListener = (
     details: chrome.webNavigation.WebNavigationSourceCallbackDetails,
   ) => {
-    if (settled || !dispatched || details.sourceTabId !== options.target.tabId) return;
+    if (settled || !dispatched || details.sourceTabId !== options.handle.tabId) return;
     popupUrls.add(details.url);
     reconcile();
   };
-  const cdpSubscription = options.cdp.onEvent?.((source, method, raw) => {
-    const expectedTarget = options.cdp.resolveTarget?.(options.target) ?? options.target;
-    if (settled || method !== "Page.downloadWillBegin" || !sameTarget(source, expectedTarget))
-      return;
+  let mockFrameKnown = !options.handle.frameId;
+  let mockFrameSessionId: string | undefined;
+  const cdpSubscription = options.cdp.onEvent?.(options.handle.tabId, (source, method, raw) => {
+    if (settled || method !== "Page.downloadWillBegin") return;
+    const matchesSource = options.cdp.isEventFromFrame
+      ? options.cdp.isEventFromFrame(source, options.handle)
+      : source.tabId === options.handle.tabId &&
+        (!mockFrameKnown || (source.sessionId ?? undefined) === mockFrameSessionId);
+    if (!matchesSource) return;
     if (capturedId !== undefined && options.inputSignal?.aborted) return;
     const event = raw as { url?: unknown; suggestedFilename?: unknown; frameId?: unknown };
     if (typeof event.url !== "string" || typeof event.suggestedFilename !== "string") return;
@@ -361,7 +362,18 @@ export async function captureBrowserDownload(
   let releaseTabAttachment: (() => void) | undefined;
 
   try {
-    releaseTabAttachment = options.cdp.retainTabAttachment?.(options.target.tabId);
+    releaseTabAttachment = options.cdp.retainTabAttachment?.(options.handle.tabId);
+    if (!options.cdp.isEventFromFrame && options.handle.frameId && options.cdp.getFrameGraph) {
+      const graph = await waitBounded(
+        options.cdp.getFrameGraph(options.handle.tabId),
+        deadline,
+        options.signal,
+        "resolving download frame target timed out",
+      );
+      mockFrameSessionId = graph.frames.find((entry) => entry.frameId === options.handle.frameId)
+        ?.target.sessionId;
+      mockFrameKnown = true;
+    }
     options.downloads.onDeterminingFilename.addListener(determiningListener);
     options.downloads.onCreated.addListener(createdListener);
     options.downloads.onChanged.addListener(changedListener);

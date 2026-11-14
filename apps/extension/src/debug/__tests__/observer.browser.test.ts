@@ -22,7 +22,7 @@ it.skipIf(!process.env.BSK_TEST_CHROME)(
           import.meta.url,
         ).href
       );
-      let listener: Parameters<NonNullable<DebugCdp["onEvent"]>>[0] | undefined;
+      let listener: Parameters<NonNullable<DebugCdp["onEvent"]>>[1] | undefined;
       await withChrome(
         {
           executable: process.env.BSK_TEST_CHROME,
@@ -58,7 +58,7 @@ it.skipIf(!process.env.BSK_TEST_CHROME)(
             ensureNetworkCapture: async () => {
               await send("Network.enable", {}, sessionId);
             },
-            onEvent: (fn: typeof listener) => {
+            onEvent: (_tabId: number, fn: NonNullable<typeof listener>) => {
               listener = fn;
               return {
                 dispose() {

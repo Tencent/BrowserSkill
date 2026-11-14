@@ -168,7 +168,7 @@ describe("RecordingObservationRuntime", () => {
         frames: [
           {
             frameId: "child",
-            target: { tabId: 7, sessionId: "oopif-session" },
+            handle: { tabId: 7, frameId: "child", loaderId: "child-loader" },
             recordingDocumentId: "producer-1",
           },
         ],
@@ -217,7 +217,7 @@ describe("RecordingObservationRuntime", () => {
         frames: [
           {
             frameId: "child",
-            target: { tabId: 7, sessionId: "oopif-session" },
+            handle: { tabId: 7, frameId: "child", loaderId: "child-loader" },
             recordingDocumentId: "producer-1",
           },
         ],
@@ -265,7 +265,11 @@ describe("RecordingObservationRuntime", () => {
     expect(captureRecordingObservation).toHaveBeenCalledTimes(3);
     expect(waitForDocumentSettled).toHaveBeenCalledWith(
       expect.anything(),
-      { frameId: "child", target: { tabId: 7, sessionId: "oopif-session" } },
+      {
+        tabId: 7,
+        frameId: "child",
+        handle: { tabId: 7, frameId: "child", loaderId: "child-loader" },
+      },
       { signal: expect.any(AbortSignal) },
     );
     const draft = drafts[0];

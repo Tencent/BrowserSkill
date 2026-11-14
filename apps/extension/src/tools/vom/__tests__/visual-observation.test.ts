@@ -29,8 +29,9 @@ import {
 
 const identity: DocumentIdentity = {
   attachmentId: "a",
-  target: { tabId: 4 },
+  tabId: 4,
   frameId: "top",
+  loaderId: "loader-top",
   documentElementBackendNodeId: 1,
 };
 const candidate = (id: number): VisualCandidate => ({
@@ -68,7 +69,7 @@ function fixture(count = 20, maxTokens?: number) {
     candidates,
     identities: new Map([["top", identity]]),
     rootIdentity: identity,
-    frames: new Map([["top", { target: identity.target }]]),
+    frames: new Map([["top", { loaderId: identity.loaderId }]]),
     render: prepareObservationRender(scene),
     notices: [],
     maxTokens,
@@ -121,8 +122,9 @@ describe("visual observation output", () => {
           viewport: { width: 1200, height: 800 },
           documents: [
             {
+              target: { tabId: 4 },
               frameId: "top",
-              target: identity.target,
+              loaderId: identity.loaderId,
               contextScopeId: "top",
               axNodes: [],
               domNodes: [1, 100, 101].map((id) => ({
