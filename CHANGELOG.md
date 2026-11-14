@@ -50,6 +50,10 @@ determines which versions can connect.
   claimed temporary tabs to prevent leaked `about:blank` fallback routing, and
   rechecked focus after transient X11 events when restoring task popup focus or
   routing an external link (#731, #732).
+- Accepted hyphen-prefixed base64url local `device_id` values (`Bytes<16>`) in
+  `bsk daemon revoke`, `bsk daemon rotate`, and `bsk daemon pair --replace`
+  without requiring `--`, while still rejecting malformed hyphenated flags at
+  CLI parse time (#732).
 - Failed closed with `invalid_params` when cooperation action metadata
   (`context_id`, `depends_on`, `observation_id`, `expect`) is supplied to
   unguarded CLI or MCP commands while stripping auxiliary follow-up RPCs inside
