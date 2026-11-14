@@ -23,7 +23,7 @@ describe("profile instructions", () => {
     const text = vi.mocked(navigator.clipboard.writeText).mock.calls[0]?.[0];
     expect(text).toContain('browser "Work" (instance ID: a1234567)');
     expect(text).toContain("bsk session start --browser a1234567 --json");
-    expect(text).toContain('bsk_session({ action: "start", browser: "a1234567" })');
+    expect(text).toContain('MCP: bsk_session({ action: "start", browser: "a1234567" })');
     expect(text).toContain("use the tool call instead of running the CLI command separately");
     expect(text).toContain("every new session for this task");
     expect(text).toContain("Do not omit --browser / browser or switch to another instance");

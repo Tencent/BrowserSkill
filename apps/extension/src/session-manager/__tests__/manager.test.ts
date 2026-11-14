@@ -34,7 +34,10 @@ describe("SessionManager", () => {
     aw.createMock.mockResolvedValueOnce({ windowId: 100, initialTabIds: [7], incognito: true });
     const sm = new SessionManager({ agentWindow: aw });
     expect((await sm.start("private", { incognito: true })).incognito).toBe(true);
-    expect(aw.createMock).toHaveBeenCalledWith("about:blank", { incognito: true });
+    expect(aw.createMock).toHaveBeenCalledWith("about:blank", {
+      incognito: true,
+      excludeWindowIds: expect.any(Set),
+    });
   });
 
   it("rolls back a normal window returned for an incognito request before initializing tabs", async () => {
@@ -53,7 +56,9 @@ describe("SessionManager", () => {
     const sm = new SessionManager({ agentWindow: aw, now: () => 1700000000000 });
     const ctx = await sm.start("aa11");
     expect(aw.createMock).toHaveBeenCalledOnce();
-    expect(aw.createMock).toHaveBeenCalledWith("about:blank", {});
+    expect(aw.createMock).toHaveBeenCalledWith("about:blank", {
+      excludeWindowIds: expect.any(Set),
+    });
     expect(aw.ensureActiveTabMock).toHaveBeenCalledOnce();
     expect(aw.ensureActiveTabMock).toHaveBeenCalledWith(100, "about:blank", expect.any(Set));
     expect(ctx.sessionId).toBe("aa11");
@@ -68,6 +73,7 @@ describe("SessionManager", () => {
     const ctx = await sm.start("aa11", { size: { width: 1280, height: 800 } });
     expect(aw.createMock).toHaveBeenCalledWith("about:blank", {
       size: { width: 1280, height: 800 },
+      excludeWindowIds: expect.any(Set),
     });
     expect(ctx.agentWindowId).toBe(100);
   });
@@ -78,7 +84,10 @@ describe("SessionManager", () => {
 
     await sm.start("aa11", { focused: false });
 
-    expect(aw.createMock).toHaveBeenCalledWith("about:blank", { focused: false });
+    expect(aw.createMock).toHaveBeenCalledWith("about:blank", {
+      focused: false,
+      excludeWindowIds: expect.any(Set),
+    });
   });
 
   it("indexes the session by sessionId and agent window id", async () => {
@@ -208,8 +217,10 @@ describe("SessionManager", () => {
       const sm = new SessionManager({ agentWindow: fakeAgentWindow() });
       const ctx = await sm.start("aa11");
       ctx.agentCreatedTabs.add(42);
+      (ctx.temporaryInputTabs ??= new Set()).add(42);
       sm.forgetClosedTab(42);
       expect(ctx.agentCreatedTabs.has(42)).toBe(false);
+      expect(ctx.temporaryInputTabs?.has(42)).toBe(false);
       expect(isAgentControlledTab(ctx, 0)).toBe(true);
     });
 

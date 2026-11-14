@@ -1,5 +1,5 @@
 // @vitest-environment node
-// Opt in with BSK_SCROLL_CHROME=/path/to/chrome. Uses an isolated browser/profile.
+// Opt in with BSK_TEST_CHROME=/path/to/chrome. Uses an isolated browser/profile.
 import { describe, expect, it } from "vitest";
 import type { CdpFrame, CdpFrameGraph, CdpTarget } from "@/browser-driver/frame-graph";
 import { pointerTargetValidator } from "@/cooperation/pointer-target";
@@ -30,7 +30,7 @@ async function withBrowser(
     ).href
   );
   await withChrome(
-    { executable: process.env.BSK_SCROLL_CHROME, deviceScale, zoom },
+    { executable: process.env.BSK_TEST_CHROME, deviceScale, zoom },
     async (send: Send) => run(await harness(send)),
   );
 }
@@ -188,7 +188,7 @@ function expectRect(actual: unknown, expected: ViewportRect) {
     expect(Math.abs((actual as ViewportRect)[key] - expected[key]), key).toBeLessThan(2);
 }
 
-describe.skipIf(!process.env.BSK_SCROLL_CHROME)("real browser scroll-to", () => {
+describe.skipIf(!process.env.BSK_TEST_CHROME)("real browser scroll-to", () => {
   it("measures scroll visibility in a background task without activating it", async () => {
     await withBrowser(async (h) => {
       await h.evaluate(
@@ -397,7 +397,7 @@ describe.skipIf(!process.env.BSK_SCROLL_CHROME)("real browser scroll-to", () => 
   }, 30_000);
 });
 
-describe.skipIf(!process.env.BSK_SCROLL_CHROME)("native target hit testing", () => {
+describe.skipIf(!process.env.BSK_TEST_CHROME)("native target hit testing", () => {
   it.each([
     { zoom: 1, dpr: 1 },
     { zoom: 1.25, dpr: 2 },

@@ -154,7 +154,7 @@
       "unavailableHint": "Conecte este perfil do navegador ao bsk para copiar as instruções.",
       "copyButton": "Copiar instruções",
       "copyFailed": "Não foi possível copiar as instruções. Tente novamente.",
-      "promptTemplate": "Para esta tarefa, use o BrowserSkill no navegador {{name}} (ID da instância: {{instanceId}}). Inicie cada nova sessão desta tarefa com a interface apropriada:\nCLI: {{command}}\nDeepSeek Harness: {{toolCall}}\nNo DeepSeek Harness, chame a ferramenta sem executar o comando CLI separadamente.\nSe esta instância não estiver conectada, pare e peça que eu reconecte este perfil. Não omita --browser / browser nem mude para outra instância.",
+      "promptTemplate": "Para esta tarefa, use o BrowserSkill no navegador {{name}} (ID da instância: {{instanceId}}). Inicie cada nova sessão desta tarefa com a interface apropriada:\nCLI: {{command}}\nMCP: {{toolCall}}\nCom ferramentas MCP, chame a ferramenta sem executar o comando CLI separadamente.\nSe esta instância não estiver conectada, pare e peça que eu reconecte este perfil. Não omita --browser / browser nem mude para outra instância.",
       "title": "Navegador atual",
       "unnamed": "Navegador sem nome"
     },

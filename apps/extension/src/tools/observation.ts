@@ -70,7 +70,11 @@ import {
   type ToolEffect,
 } from "./shared";
 import { lookupRefTarget, resolveSnapshotRef } from "./snapshot-ref";
-import { captureControlledViewport } from "./viewport-screenshot";
+import {
+  captureControlledViewport,
+  isHiddenCompositorSurface,
+  withAuraCompositorKeepalive,
+} from "./viewport-screenshot";
 import { type CapturedNode, type CapturedSurfaceProbe, probeHoverSurfaces } from "./vom/capture";
 import {
   type AccessibilityLease,
@@ -256,10 +260,12 @@ async function captureFullTabPng(
       cdp.trackSessionTab?.(ctx.sessionId, target.tabId);
       await cdp.ensureAttachedToUrl?.(target.tabId, target.url);
       if (signal?.aborted) return cancelled("screenshot");
-      const shot = await cdp.send<{ data?: string }>(target.tabId, "Page.captureScreenshot", {
-        format: "png",
-        fromSurface: true,
-      });
+      const shot = await withAuraCompositorKeepalive(cdp, target.tabId, true, signal, () =>
+        cdp.send<{ data?: string }>(target.tabId, "Page.captureScreenshot", {
+          format: "png",
+          fromSurface: true,
+        }),
+      );
       if (signal?.aborted) return cancelled("screenshot");
       if (shot.data) return shot.data;
       fallbackMsg = "Page.captureScreenshot returned no data";
@@ -314,10 +320,18 @@ export async function handleScreenshot(
         const missing = resolveSnapshotRef(ctx, ref, target.tabId);
         if (isRpcError(missing)) return missing;
       }
-      const captured = await withExtensionOverlayHidden(
+      const hiddenSurface = await isHiddenCompositorSurface(target.active, target.windowId);
+      const captured = await withAuraCompositorKeepalive(
+        deps.cdp,
         target.tabId,
-        () => captureVisualScreenshot(deps.cdp!, entry.candidate, signal),
-        deps.sendToTab,
+        hiddenSurface,
+        signal,
+        () =>
+          withExtensionOverlayHidden(
+            target.tabId,
+            () => captureVisualScreenshot(deps.cdp!, entry.candidate, signal),
+            deps.sendToTab,
+          ),
       );
       if (isRpcError(captured)) return captured;
       const { mapping, ...image } = captured;
@@ -351,18 +365,26 @@ export async function handleScreenshot(
       ...(node.cdpSessionId ? { sessionId: node.cdpSessionId } : {}),
     };
     const nodeTarget = cdp.resolveTarget ? cdp.resolveTarget(rawTarget) : rawTarget;
-    const captured = await withExtensionOverlayHidden(
+    const hiddenSurface = await isHiddenCompositorSurface(target.active, target.windowId);
+    const captured = await withAuraCompositorKeepalive(
+      cdp,
       target.tabId,
+      hiddenSurface,
+      signal,
       () =>
-        captureElementScreenshot(
-          cdp,
+        withExtensionOverlayHidden(
           target.tabId,
-          nodeTarget,
-          node.backendNodeId,
-          node.frameId,
-          signal,
+          () =>
+            captureElementScreenshot(
+              cdp,
+              target.tabId,
+              nodeTarget,
+              node.backendNodeId,
+              node.frameId,
+              signal,
+            ),
+          deps.sendToTab,
         ),
-      deps.sendToTab,
     );
     if (isRpcError(captured)) return captured;
     if (signal?.aborted) return cancelled("screenshot");
@@ -387,6 +409,7 @@ export async function handleScreenshot(
       );
     }
     cdp.trackSessionTab?.(ctx.sessionId, target.tabId);
+    let hiddenSurface = await isHiddenCompositorSurface(target.active, target.windowId);
     const captured = await captureControlledViewport(
       cdp,
       target.tabId,
@@ -394,6 +417,7 @@ export async function handleScreenshot(
         if (manager.get(ctx.sessionId) !== ctx || !isAgentControlledTab(ctx, target.tabId))
           return false;
         const tab = await deps.tabsApi.get(target.tabId);
+        if (await isHiddenCompositorSurface(tab.active, tab.windowId)) hiddenSurface = true;
         return (
           manager.get(ctx.sessionId) === ctx &&
           isAgentControlledTab(ctx, target.tabId) &&
@@ -403,6 +427,7 @@ export async function handleScreenshot(
       },
       signal,
       deps.sendToTab,
+      () => hiddenSurface,
     );
     if (isRpcError(captured)) return captured;
     return withShotDialogs({ ...captured, format: "png", tab_id: target.tabId });

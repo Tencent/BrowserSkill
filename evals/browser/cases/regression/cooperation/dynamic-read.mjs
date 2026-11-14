@@ -7,25 +7,43 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { promisify } from "node:util";
 import { withChrome } from "../snapshot-coordinates/chrome.mjs";
-import { createDshRegressionClient } from "./dsh-client.mjs";
 import { createMcpRegressionClient } from "./mcp-client.mjs";
 
 // Own every process/profile/session. Never reload the user's extension or daemon.
-const cli = resolve(process.env.BSK_DYNAMIC_CLI ?? "target/debug/bsk");
+const defaultCli = process.platform === "win32" ? "target/debug/bsk.exe" : "target/debug/bsk";
+const cli = resolve(process.env.BSK_TEST_CLI ?? defaultCli);
 const extensionPath = resolve(
   process.env.BSK_DYNAMIC_EXTENSION ?? "apps/extension/dist/chrome-mv3",
 );
-const executable = process.env.BSK_COOP_CHROME;
+const executable = process.env.BSK_TEST_CHROME;
 const port = Number(process.env.BSK_DYNAMIC_PORT ?? 52923);
 const artifacts = resolve(process.env.BSK_DYNAMIC_ARTIFACTS ?? "reports/dynamic-read");
-assert(executable, "BSK_COOP_CHROME must name an isolated-test browser executable");
+assert(executable, "BSK_TEST_CHROME must name an isolated-test browser executable");
 assert(port !== 52800);
 assert(
   (await readFile(join(extensionPath, "background.js"), "utf8")).includes(`ws://127.0.0.1:${port}`),
 );
 await mkdir(artifacts, { recursive: true });
 const home = await mkdtemp(join(tmpdir(), "bsk-dynamic-read-"));
-const env = { ...process.env, BSK_HOME: home, BSK_AUTO_START: "0", BSK_AUTO_UPDATE: "off" };
+const env = {
+  ...process.env,
+  HOME: home,
+  DSH_HOME: home,
+  BSK_HOME: home,
+  BSK_AUTO_START: "0",
+  BSK_AUTO_UPDATE: "off",
+};
+delete env.BSK_SESSION;
+delete env.BSK_SCOPE;
+for (const key of [
+  "CLAUDE_CODE_AGENT_ID",
+  "CODEX_THREAD_ID",
+  "ANTIGRAVITY_CONVERSATION_ID",
+  "CURSOR_TRACE_ID",
+  "DSH_SESSION_ID",
+]) {
+  delete env[key];
+}
 const exec = promisify(execFile);
 const evidence = [];
 const delay = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -274,8 +292,8 @@ try {
           }
           observed = await sync();
           context = observed.context_id;
-          // Change a checked fact in the browser's mouseover handler, after the
-          // initial check but before the final native press. No click may follow.
+          // Clicking #race hovers it first, mutating #price in mouseover after the read;
+          // pre-dispatch expect re-verification before mousePressed refuses without clicking.
           await bsk("race-move-away", ["hover", "#apply", ...scope, "--context", context]);
           await page("document.querySelector('#price').textContent='100';window.armRace=true");
           await read("race-before", "#price");
@@ -398,22 +416,13 @@ try {
           await bsk(`${policy}-stop`, ["session", "stop", session]);
         }
       }
-      for (const client of ["mcp", "dsh"]) {
-        const api =
-          client === "mcp"
-            ? await createMcpRegressionClient(cli, env)
-            : createDshRegressionClient(cli, env, { legacyStrict: false });
+      {
+        const client = "mcp";
+        const api = await createMcpRegressionClient(cli, env);
         let session;
         let clientSequence = 0;
         const call = async (label, name, args, reason) => {
-          let value;
-          try {
-            value = await api.run(name, args, client === "mcp" ? reason : undefined);
-          } catch (error) {
-            if (!reason) throw error;
-            assert.equal(error.data?.reason, reason);
-            value = { message: error.message, data: error.data };
-          }
+          const value = await api.run(name, args, reason);
           await writeFile(
             join(artifacts, `${client}-${String(++clientSequence).padStart(3, "0")}-${label}.json`),
             JSON.stringify({ name, args, value }, null, 2),
@@ -422,7 +431,7 @@ try {
         };
         try {
           const start = await call("start", "bsk_session", { action: "start" });
-          session = start.session_id ?? start.sessionId;
+          session = start.session_id;
           assert(session, JSON.stringify(start));
           await call("navigate", "bsk_page", {
             action: "navigate",
@@ -438,22 +447,13 @@ try {
           assert(Number(after.items[0].values.text) > Number(before.items[0].values.text));
           const facts = await read("#price");
           assert.equal(facts.items[0].values.text, "100");
-          const action = (selector, expect) =>
-            client === "mcp"
-              ? {
-                  action: "click",
-                  session,
-                  context: observed.context_id,
-                  params: { selector },
-                  ...(expect ? { expect } : {}),
-                }
-              : {
-                  action: "click",
-                  session,
-                  contextId: observed.context_id,
-                  target: selector,
-                  ...(expect ? { expect } : {}),
-                };
+          const action = (selector, expect) => ({
+            action: "click",
+            session,
+            context: observed.context_id,
+            params: { selector },
+            ...(expect ? { expect } : {}),
+          });
           const checks = [
             { target: "#price", field: "text", equals: "100" },
             { target: "#apply", field: "attribute", attribute: "data-record-id", equals: "42" },

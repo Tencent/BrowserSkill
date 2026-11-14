@@ -4,13 +4,65 @@ All notable changes to BrowserSkill will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 See the [Chinese changelog](CHANGELOG.zh-CN.md). Update both versions in the same PR.
 
-The CLI, extension, and DSH plugin may release separately. Protocol compatibility
+The CLI and extension may release separately. Protocol compatibility
 determines which versions can connect.
 
 ## [Unreleased]
 
+### Added
+
+- DeepSeek Harness (`dsh`) is now a first-class skill installation target via
+  `bsk install-skill --harness dsh` (honoring `$DSH_HOME`, defaulting to
+  `~/.dsh/skills`), `DSH_SESSION_ID` is recognized as an automatic host
+  subagent scope in `ImplicitScopeRegistry`, and MCP `bsk_session(action="start")`
+  now accepts `agent_name`, `project`, and `controller_color` controller identity
+  labels matching `bsk session start` (#731).
+
+### Changed
+
+- Unified all real-browser test and regression harnesses onto `BSK_TEST_CHROME`
+  and `BSK_TEST_CLI` (resolving Windows `.exe` binaries and stripping host agent
+  scope env vars in isolated daemon fixtures), separated `.browser.test.ts` and
+  `.bench.ts` from the unit Vitest configuration into
+  `apps/extension/vitest.browser.config.ts` and `scripts/run-browser-tests.mjs`
+  (routing `pnpm --filter @browser-skill/extension test:browser` through the
+  runner and enforcing `skipped === 0`, non-empty suite assertions, and
+  per-target suite coverage), and wired every extension `.browser.test.ts` suite
+  plus `eval:browser:check` and `eval:browser:dynamic-read` into CI (#731, #732).
+
 ### Fixed
 
+- Preserved user window focus on macOS and Linux/X11 Chromium when creating or
+  initializing background Agent Windows and tabs (`chromeAgentWindowApi.create`
+  seeding an inactive tab via `tabId` on Linux while excluding active or
+  starting Agent Windows from donor selection, and `tool.tab_create` /
+  `ensureActiveTab` creating inactive tabs before activating via
+  `chrome.tabs.update`, closing orphan tabs or claiming cleanup failures into
+  `agentCreatedTabs`), enabled the Aura screencast compositor keepalive (and
+  full-page stale-frame guard) on headed Linux and Windows across `screenshot`
+  and `screenshot --full-page` on unselected tabs and unfocused/occluded or
+  minimized Agent Windows (skipping `HeadlessChrome/`), and made
+  `parsePngDimensions` charset-independent when bundled (#731, #732).
+- Preserved foreground window focus during native pointer interactions (`click`,
+  `drag`, `download`, and `upload`) in background Linux Agent Windows, ordered
+  CDP focus emulation, temporary `about:blank` tab unselection, and background
+  lease visibility checks so shared tabs do not emit spurious `blur` events,
+  claimed temporary tabs to prevent leaked `about:blank` fallback routing, and
+  rechecked focus after transient X11 events when restoring task popup focus or
+  routing an external link (#731, #732).
+- Accepted hyphen-prefixed base64url local `device_id` values (`Bytes<16>`) in
+  `bsk daemon revoke`, `bsk daemon rotate`, and `bsk daemon pair --replace`
+  without requiring `--`, while still rejecting malformed hyphenated flags at
+  CLI parse time (#732).
+- Failed closed with `invalid_params` when cooperation action metadata
+  (`context_id`, `depends_on`, `observation_id`, `expect`) is supplied to
+  unguarded CLI or MCP commands while stripping auxiliary follow-up RPCs inside
+  multi-phase commands (`open`, `step`, `upload`, `download`, and
+  `screenshot --full-page`), and re-verified `--expect` business conditions in
+  `CooperationController` (`prepare` — including `primaryEffect` hover/focus
+  steps — and `beginDomMutation` before marking `nativeInputStarted`) under
+  `target` policy so last-moment DOM mutations fail closed before the committing
+  press or scripted mutation (#731, #732).
 - VOM tree folding (`shouldSkipRedundantRefChildren` and `renderTreeRows`) preserves
   independent interactive descendants under named interactive controls (such as Vue 3 +
   Element Plus nested `<el-sub-menu>` popups inside a parent `menuitem` or custom ARIA
@@ -25,6 +77,15 @@ determines which versions can connect.
   visibility checks, and collection limits ([#588](https://github.com/Tencent/BrowserSkill/issues/588),
   [#612](https://github.com/Tencent/BrowserSkill/pull/612)); added required pre-release
   audit scenario `EDGE-SLOTTED-LIST-EXTRACT`.
+
+### Removed
+
+- Retired and removed `packages/dsh-plugin-browserskill`, its standalone release
+  workflow, and DSH-specific test shims; DeepSeek Harness now uses the standard
+  `bsk` CLI and `bsk mcp` server (keeping video recording and host-filesystem
+  MP4 export intentionally CLI-only via `bsk video`), with in-flight MCP
+  cancellation, cooperation settlement, CLI video export, and dynamic-reading
+  browser regressions migrated to `bsk` CLI and `bsk mcp` (#731, #732).
 
 ## [0.5.0] - 2026-11-12
 

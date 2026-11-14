@@ -68,7 +68,13 @@ export async function handleDownload(
           ctx,
           target.tabId,
           // Focus cleanup must remain available after the click trigger is retired.
-          { cdp: deps.cdp, signal, deadline, registerCleanup: clickDeps.registerClickCleanup },
+          {
+            cdp: deps.cdp,
+            signal,
+            deadline,
+            preserveWindowFocus: true,
+            registerCleanup: clickDeps.registerClickCleanup,
+          },
           (input) =>
             clickResolvedTarget(ctx, address, {}, clickDeps, () => {
               input.markSent();

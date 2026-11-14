@@ -2,10 +2,9 @@ import assert from "node:assert/strict";
 import { readFile, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { join } from "node:path";
-import { createDshRegressionClient } from "./dsh-client.mjs";
 
-/** Legacy strict-policy file bytes and server effects, exercised through both shipped clients. */
-export async function runCompatibilityScenarios({ send, bsk, cli, env, directory, headful }) {
+/** Legacy strict-policy file bytes and server effects, exercised through the shipped CLI. */
+export async function runCompatibilityScenarios({ send, bsk, directory, headful }) {
   const html = await readFile(new URL("compatibility.html", import.meta.url));
   const bytes = Buffer.concat([
     Buffer.from([0, 255, 13, 10, ...Buffer.from("协作 file roundtrip")]),
@@ -94,37 +93,23 @@ export async function runCompatibilityScenarios({ send, bsk, cli, env, directory
     // need uninterrupted visibility and run in the isolated headless suite.
     const scenarios = headful
       ? ["tab", "window"].flatMap((placement) =>
-          ["cli", "dsh"].flatMap((client) =>
-            ["upload", "download"].map((first) => [client, first, placement]),
-          ),
+          ["upload", "download"].map((first) => ["cli", first, placement]),
         )
-      : [
-          ["cli", "foreground"],
-          ["dsh", "foreground"],
-        ];
+      : [["cli", "foreground"]];
     for (const [client, first, placement = "tab"] of scenarios) {
       const background = first !== "foreground";
       const origin = first === "download" || !headful ? "cross" : "same";
       const tag = `${client}-${first}-${placement}-${origin}`;
       console.error(`compatibility: ${tag}`);
-      const dsh = client === "dsh" ? createDshRegressionClient(cli, env) : undefined;
       let session, human, task, taskWindowId, cover, coverTabId, coverSession, otherWindow;
       try {
         const url = `http://127.0.0.1:${server.address().port}/?case=${tag}&origin=${origin}`;
         const existing = new Set(
           (await send("Target.getTargets")).targetInfos.map((t) => t.targetId),
         );
-        session = dsh
-          ? (
-              await dsh.run("bsk_session", {
-                action: "start",
-                noFocus: false,
-                ...(!background ? { url } : {}),
-              })
-            ).sessionId
-          : (await bsk(["session", "start", ...(background ? ["--focus"] : [])])).session_id;
+        session = (await bsk(["session", "start", ...(background ? ["--focus"] : [])])).session_id;
         const scope = ["--session", session];
-        if (!background && !dsh) await bsk(["navigate", url, ...scope]);
+        if (!background) await bsk(["navigate", url, ...scope]);
         task = await poll(async () =>
           (await send("Target.getTargets")).targetInfos.find(
             (t) =>
@@ -167,10 +152,7 @@ export async function runCompatibilityScenarios({ send, bsk, cli, env, directory
             ),
           );
         }
-        if (background)
-          await (dsh
-            ? dsh.run("bsk_page", { action: "navigate", session, url })
-            : bsk(["navigate", url, ...scope]));
+        if (background) await bsk(["navigate", url, ...scope]);
         if (!background) await send("Page.bringToFront", {}, human);
         const read = async (expression) => {
           const reply = await send("Runtime.evaluate", { expression, returnByValue: true }, human);
@@ -244,9 +226,7 @@ export async function runCompatibilityScenarios({ send, bsk, cli, env, directory
             );
         };
         const sync = async () => {
-          const state = await (dsh
-            ? dsh.run("bsk_session", { action: "sync", session })
-            : bsk(["cooperate", "sync", ...scope]));
+          const state = await bsk(["cooperate", "sync", ...scope]);
           assert.equal(
             state.control_policy,
             "strict",
@@ -256,11 +236,7 @@ export async function runCompatibilityScenarios({ send, bsk, cli, env, directory
         };
         const wait = async () =>
           assert.equal(
-            (
-              await (dsh
-                ? dsh.run("bsk_session", { action: "wait-user", session, timeoutMs: 3000 })
-                : bsk(["cooperate", "wait", ...scope, "--timeout-ms", "3000"]))
-            ).ready,
+            (await bsk(["cooperate", "wait", ...scope, "--timeout-ms", "3000"])).ready,
             true,
           );
         const act = async (action, args = {}, context) => {
@@ -271,7 +247,6 @@ export async function runCompatibilityScenarios({ send, bsk, cli, env, directory
             await assertParked();
           }
           const contextId = context ?? (await sync()).context_id;
-          if (dsh) return dsh.run("bsk_interact", { action, session, ...args, contextId });
           let command;
           if (action === "evaluate") command = ["evaluate", args.expression];
           else if (action === "upload")
@@ -536,7 +511,6 @@ export async function runCompatibilityScenarios({ send, bsk, cli, env, directory
               }
             : {}),
         });
-        if (dsh) assert(!dsh.calls.some((args) => args[0] === "cooperate" && args[1] === "enable"));
       } catch (error) {
         const visibility = (targetSession) =>
           targetSession &&
@@ -575,13 +549,8 @@ export async function runCompatibilityScenarios({ send, bsk, cli, env, directory
           cause: error,
         });
       } finally {
-        if (session)
-          await (dsh
-            ? dsh.run("bsk_session", { action: "stop", session })
-            : bsk(["session", "stop", session])
-          ).catch(() => {});
+        if (session) await bsk(["session", "stop", session]).catch(() => {});
         if (human) await send("Target.detachFromTarget", { sessionId: human }).catch(() => {});
-        await dsh?.dispose();
         for (const targetId of [otherWindow, cover, task?.targetId])
           if (targetId) await send("Target.closeTarget", { targetId }).catch(() => {});
       }

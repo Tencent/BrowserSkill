@@ -1,5 +1,5 @@
 // @vitest-environment node
-// Opt in with BSK_CLICK_CHROME; each test owns its browser, profile and HTTP server.
+// Opt in with BSK_TEST_CHROME; each test owns its browser, profile and HTTP server.
 
 import { readFileSync } from "node:fs";
 import { createServer } from "node:http";
@@ -36,7 +36,7 @@ interface CdpEvent {
 
 type CdpEventListener = (source: CdpDebuggee, method: string, params: unknown) => void;
 
-describe.skipIf(!process.env.BSK_CLICK_CHROME)("real browser click readiness", () => {
+describe.skipIf(!process.env.BSK_TEST_CHROME)("real browser click readiness", () => {
   it("delivers hidden native input, preserves disabled semantics and restores visibility", async () => {
     const server = createServer((_request, response) => {
       response.setHeader("Content-Type", "text/html");
@@ -56,7 +56,7 @@ describe.skipIf(!process.env.BSK_CLICK_CHROME)("real browser click readiness", (
       let onEvent: ((event: CdpEvent) => void) | undefined;
       await withChrome(
         {
-          executable: process.env.BSK_CLICK_CHROME,
+          executable: process.env.BSK_TEST_CHROME,
           deviceScale: 1.5,
           zoom: 1,
           // A standalone CI job starts Chrome cold, before frontend work warms the runner.
@@ -414,7 +414,7 @@ describe.skipIf(!process.env.BSK_CLICK_CHROME)("real browser click readiness", (
     const language = i18n.language;
     try {
       await withChrome(
-        { executable: process.env.BSK_CLICK_CHROME, deviceScale: 1, zoom: 1 },
+        { executable: process.env.BSK_TEST_CHROME, deviceScale: 1, zoom: 1 },
         async (send: Send) => {
           const { targetId } = await send<{ targetId: string }>("Target.createTarget", {
             url: "about:blank",
@@ -529,7 +529,7 @@ describe.skipIf(!process.env.BSK_CLICK_CHROME)("real browser click readiness", (
       ),
     );
     await withChrome(
-      { executable: process.env.BSK_CLICK_CHROME, deviceScale: 1, zoom: 1, startupTimeout: 30_000 },
+      { executable: process.env.BSK_TEST_CHROME, deviceScale: 1, zoom: 1, startupTimeout: 30_000 },
       async (send: Send) => {
         const { targetId } = await send<{ targetId: string }>("Target.createTarget", {
           url: "about:blank",

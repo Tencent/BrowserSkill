@@ -8,8 +8,8 @@ distance or scroll direction. Use [wheel](wheel.md) for native directional wheel
 | Entry point | Name |
 | --- | --- |
 | CLI | `bsk scroll-to` |
+| MCP | `bsk_interact` with `action: "scroll_to"` |
 | Wire protocol | `tool.scroll_to` |
-| DeepSeek Harness | `bsk_interact` with `action: "scroll-to"` |
 
 ## CLI
 
@@ -61,7 +61,7 @@ fail. The rectangle is not an occlusion or hit test: another element can cover
 the target, and the rectangle's center is not a guaranteed click point. Layout
 can change after the result; use fresh refs for subsequent interactions.
 
-## Protocol and plugin
+## Protocol and MCP
 
 The CLI sends a normal request through the daemon to the extension:
 
@@ -85,21 +85,20 @@ These target constraints are enforced by the handler. See the generated
 [result schema](../crates/bsk-protocol/schema/tool_scroll_to_result.json) for field
 types. The wire response wraps the result above in `{ "id": "scroll-1", "result": ... }`.
 
-The plugin exposes the same action with its usual camelCase parameters:
+`bsk mcp` exposes the same action via `bsk_interact`:
 
 ```json
 {
-  "action": "scroll-to",
+  "action": "scroll_to",
   "session": "abcd",
-  "target": "@e3",
-  "tabId": 42,
-  "timeoutMs": 5000
+  "context": "CURRENT",
+  "params": {
+    "ref": "@e3",
+    "tab_id": 42,
+    "timeout_ms": 5000
+  }
 }
 ```
-
-Call this through `bsk_interact` using a plugin-owned session. Its result
-contains `session`, `tabId`, `x`, `y`, `width` and `height` with the same bounds
-semantics. Omitted `session` uses the plugin's current session.
 
 ## Errors and interruption
 

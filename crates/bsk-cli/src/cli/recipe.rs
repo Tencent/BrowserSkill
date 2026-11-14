@@ -191,7 +191,7 @@ fn held(store: &Store, name: &str, checked: Option<&str>) -> Option<Refusal> {
         format!(
             "Run {run} stopped with an effect nobody has checked ({what}), so repeating it could \
              do it twice. Check the application's records for what it did, then run again with \
-             --checked {run} (checked in MCP and DSH).",
+             --checked {run} (checked in MCP).",
             run = unchecked.run_id
         ),
     ))

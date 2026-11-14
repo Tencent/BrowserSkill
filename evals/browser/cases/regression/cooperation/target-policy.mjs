@@ -1,21 +1,21 @@
 import assert from "node:assert/strict";
-import { createDshRegressionClient } from "./dsh-client.mjs";
 import { runIntentScenarios } from "./intent-signals.mjs";
+import { createMcpRegressionClient } from "./mcp-client.mjs";
 
 /** Exercise both shipped defaults through the installed extension, including real human input. */
 export async function runTargetPolicyScenarios({ send, bsk, cli, env, base }) {
   const results = [];
-  for (const client of ["cli", "dsh"]) {
-    const dsh =
-      client === "dsh" ? createDshRegressionClient(cli, env, { legacyStrict: false }) : undefined;
+  for (const client of ["cli", "mcp"]) {
+    const mcp = client === "mcp" ? await createMcpRegressionClient(cli, env) : undefined;
     let session, human, targetId;
     try {
       const url = `${base}/target-policy?client=${client}`;
-      session = dsh
-        ? (await dsh.run("bsk_session", { action: "start", url })).sessionId
+      session = mcp
+        ? (await mcp.run("bsk_session", { action: "start" })).session_id
         : (await bsk(["session", "start"])).session_id;
       const scope = ["--session", session];
-      if (!dsh) await bsk(["navigate", url, ...scope]);
+      if (mcp) await mcp.run("bsk_page", { action: "navigate", session, url });
+      else await bsk(["navigate", url, ...scope]);
       const target = (await send("Target.getTargets")).targetInfos.find(
         (entry) => entry.url === url,
       );
@@ -42,18 +42,18 @@ export async function runTargetPolicyScenarios({ send, bsk, cli, env, base }) {
         assert(performance.now() < deadline, "Target-policy fixture did not load");
         await new Promise((resolve) => setTimeout(resolve, 50));
       }
-      // No policy override: the new CLI and the shipped plugin must negotiate their own defaults.
+      // No policy override: the CLI and `bsk mcp` must negotiate their own defaults.
       const sync = () =>
-        dsh
-          ? dsh.run("bsk_session", { action: "sync", session })
+        mcp
+          ? mcp.run("bsk_session", { action: "sync", session })
           : bsk(["cooperate", "sync", ...scope]);
       const first = await sync();
       assert.equal(first.control_policy, "target", `${client} did not negotiate target by default`);
       const ref = first.observation.text.match(/(@e\d+) button "Apply"/)?.[1];
       assert(ref, JSON.stringify(first));
       const click = (context) =>
-        dsh
-          ? dsh.run("bsk_interact", { action: "click", session, target: ref, contextId: context })
+        mcp
+          ? mcp.run("bsk_interact", { action: "click", session, context, params: { ref } })
           : bsk(["click", ref, ...scope, "--context", context]);
       const tick = await read("ticks");
       assert.equal(await read("rotatePromo(1)"), "Promo slide 1");
@@ -66,8 +66,8 @@ export async function runTargetPolicyScenarios({ send, bsk, cli, env, base }) {
       await read(`const form = document.querySelector('form');
         form.insertAdjacentHTML('afterbegin', '<button type="button">Inserted</button>');
         form.prepend(document.querySelector('#human')); true`);
-      const observed = dsh
-        ? await dsh.run("bsk_inspect", { action: "snapshot", session })
+      const observed = mcp
+        ? await mcp.run("bsk_inspect", { action: "snapshot", session })
         : await bsk(["snapshot", ...scope]);
       assert(
         observed.text.includes(`${ref} button "Apply"`),
@@ -87,7 +87,7 @@ export async function runTargetPolicyScenarios({ send, bsk, cli, env, base }) {
           human,
         );
       assert.equal(await read("humanChanged"), true);
-      if (dsh) {
+      if (mcp) {
         await assert.rejects(
           click(first.context_id),
           (error) =>
@@ -101,8 +101,8 @@ export async function runTargetPolicyScenarios({ send, bsk, cli, env, base }) {
         assert.equal(refused.data.effect_state, "none");
       }
       assert.equal(await read("applied"), 3, "revoked context sent another click");
-      const ready = dsh
-        ? await dsh.run("bsk_session", { action: "wait-user", session, timeoutMs: 3000 })
+      const ready = mcp
+        ? await mcp.run("bsk_session", { action: "wait", session, timeout_ms: 3000 })
         : await bsk(["cooperate", "wait", ...scope, "--timeout-ms", "3000"]);
       assert.equal(ready.ready, true);
       const fresh = await sync();
@@ -112,7 +112,7 @@ export async function runTargetPolicyScenarios({ send, bsk, cli, env, base }) {
       assert.equal(await read("applied"), 4);
       const intentSignals = await runIntentScenarios({
         client,
-        dsh,
+        mcp,
         bsk,
         send,
         scope,
@@ -134,10 +134,10 @@ export async function runTargetPolicyScenarios({ send, bsk, cli, env, base }) {
       });
     } finally {
       if (session) {
-        if (dsh) await dsh.run("bsk_session", { action: "stop", session }).catch(() => {});
+        if (mcp) await mcp.run("bsk_session", { action: "stop", session }).catch(() => {});
         else await bsk(["session", "stop", session]).catch(() => {});
       }
-      await dsh?.dispose();
+      await mcp?.dispose();
       if (human) await send("Target.detachFromTarget", { sessionId: human }).catch(() => {});
       // Human-touched pages survive session stop; this fixture owns its isolated page.
       if (targetId) {

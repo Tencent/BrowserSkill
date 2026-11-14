@@ -503,16 +503,17 @@ export async function handleClick(
   if (isRpcError(target)) return target;
   const denied = enforceAgentWindow(ctx, target, "click");
   if (denied) return denied;
+  const readiness = { ...deps, deadline, preserveWindowFocus: true };
   if (isVisualPointRequest(params)) {
     const consumed = consumeVisualCapture(ctx.refStore, target.tabId, params);
     if (isRpcError(consumed)) return consumed;
-    return withInputReady(ctx, target.tabId, { ...deps, deadline }, (input) =>
+    return withInputReady(ctx, target.tabId, readiness, (input) =>
       clickVisualPoint(ctx, target, params, deps, consumed, input.markSent),
     );
   }
   const resolved = await resolveActionTarget(deps.cdp, ctx, target, params, "click");
   if (isRpcError(resolved)) return resolved;
-  return withInputReady(ctx, target.tabId, { ...deps, deadline }, (input) =>
+  return withInputReady(ctx, target.tabId, readiness, (input) =>
     clickResolvedTarget(ctx, resolved, params, deps, input.markSent),
   );
 }

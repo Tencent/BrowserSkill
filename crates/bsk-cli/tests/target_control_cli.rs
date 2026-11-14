@@ -51,11 +51,24 @@ async fn run_cli(
             write.write_all(&response).await.unwrap();
         }
     });
-    let command = Command::new(env!("CARGO_BIN_EXE_bsk"))
+    let mut command = Command::new(env!("CARGO_BIN_EXE_bsk"));
+    command
         .env("BSK_HOME", home.path())
         .env("BSK_AUTO_START", "0")
         .env("BSK_AUTO_UPDATE", "off")
         .env_remove("BSK_CANCEL_ON_STDIN_CLOSE")
+        .env_remove("BSK_SESSION")
+        .env_remove("BSK_SCOPE");
+    for key in [
+        "CLAUDE_CODE_AGENT_ID",
+        "CODEX_THREAD_ID",
+        "ANTIGRAVITY_CONVERSATION_ID",
+        "CURSOR_TRACE_ID",
+        "DSH_SESSION_ID",
+    ] {
+        command.env_remove(key);
+    }
+    let command = command
         .args(args)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -232,8 +245,10 @@ async fn step_keeps_auto_compatible_and_forwards_target_to_a_current_daemon() {
         assert_eq!(requests.len(), 3);
         assert_eq!(requests[0]["method"], "system.status");
         assert_eq!(requests[1]["method"], "tool.click");
+        assert_eq!(requests[1]["params"]["context_id"], "c");
         assert_eq!(requests[2]["method"], "tool.cooperate");
         assert_eq!(requests[2]["params"]["control_policy"], policy);
+        assert!(requests[2]["params"].get("context_id").is_none());
         let result: Value = serde_json::from_slice(&output.stdout).unwrap();
         assert_eq!(result["action"]["result"]["tab_id"], 7);
         assert_eq!(result["action_replayed"], false);
@@ -291,7 +306,16 @@ async fn dom_read_requires_new_daemon_and_never_falls_back_to_evaluate() {
     for protocol in ["1.8", "1.9"] {
         let (output, calls) = run_cli(
             protocol,
-            &["read", "--session", "s", "--selector", "#data", "--json"],
+            &[
+                "read",
+                "--session",
+                "s",
+                "--context",
+                "c",
+                "--selector",
+                "#data",
+                "--json",
+            ],
             result.clone(),
         )
         .await;
@@ -302,6 +326,10 @@ async fn dom_read_requires_new_daemon_and_never_falls_back_to_evaluate() {
             calls.iter().filter(|c| c["method"] == "tool.read").count(),
             usize::from(protocol == "1.9")
         );
+        if protocol == "1.9" {
+            let read_call = calls.iter().find(|c| c["method"] == "tool.read").unwrap();
+            assert_eq!(read_call["params"]["context_id"], "c");
+        }
         if protocol == "1.8" {
             assert_eq!(data["data"]["reason"], "unsupported_feature");
         }
@@ -325,4 +353,140 @@ async fn dom_read_requires_new_daemon_and_never_falls_back_to_evaluate() {
             .iter()
             .any(|c| c["method"] == "tool.read" || c["method"] == "tool.evaluate")
     );
+}
+
+#[tokio::test]
+async fn unguarded_commands_fail_closed_when_given_action_conditions_while_multi_phase_keeps_auxiliary_clean()
+ {
+    let expect_arg = r##"[{"target":"#price","field":"text","equals":"$12"}]"##;
+    for base in [
+        vec!["status"],
+        vec!["doctor"],
+        vec!["logs"],
+        vec!["snapshot", "--session", "s"],
+        vec!["observe", "--session", "s"],
+        vec!["screenshot", "--session", "s"],
+        vec!["wait-for-element", "#ready", "--session", "s"],
+        vec!["tab", "list", "--session", "s"],
+        vec!["tab", "create", "--session", "s"],
+        vec!["debug", "requests", "--session", "s"],
+        vec!["video", "status", "--session", "s"],
+        vec!["sync", "--session", "s"],
+    ] {
+        for condition in [
+            vec!["--context", "c"],
+            vec!["--observation", "o"],
+            vec!["--expect", expect_arg],
+        ] {
+            let mut args = base.clone();
+            args.extend(condition);
+            args.push("--json");
+            let (output, calls) = run_cli("1.9", &args, json!({})).await;
+            assert_eq!(output.status.code(), Some(1), "args: {args:?}");
+            let err: Value = serde_json::from_slice(&output.stdout).unwrap();
+            assert_eq!(err["code"], "invalid_params", "args: {args:?}");
+            assert!(
+                calls.is_empty(),
+                "unexpected daemon calls for {args:?}: {calls:?}"
+            );
+        }
+    }
+
+    // `read` accepts `--context`, but rejects `--expect`, `--observation`, and `--depends-on`.
+    for rejected in [
+        vec!["--observation", "o"],
+        vec!["--expect", expect_arg],
+        vec!["--context", "c", "--depends-on", "@e1"],
+    ] {
+        let mut args = vec!["read", "--session", "s", "--selector", "#x", "--json"];
+        args.extend(rejected);
+        let (output, calls) = run_cli("1.9", &args, json!({})).await;
+        assert_eq!(output.status.code(), Some(1), "args: {args:?}");
+        let err: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(err["code"], "invalid_params", "args: {args:?}");
+        assert!(
+            calls.is_empty(),
+            "unexpected daemon calls for {args:?}: {calls:?}"
+        );
+    }
+
+    // `observe --probe-hover` IS guarded and forwards action conditions.
+    let (output, calls) = run_cli(
+        "1.9",
+        &[
+            "observe",
+            "--probe-hover",
+            "--session",
+            "s",
+            "--context",
+            "c",
+            "--expect",
+            expect_arg,
+            "--json",
+        ],
+        json!({"tab_id":7,"url":"https://example.test/","title":"T","viewport":{"width":800,"height":600},"observation_id":"o2","captured_at":"now","text":"page","node_count":1,"ref_count":0,"truncated":false}),
+    )
+    .await;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let observe_call = calls
+        .iter()
+        .find(|c| c["method"] == "tool.observe")
+        .unwrap();
+    assert_eq!(observe_call["params"]["context_id"], "c");
+    assert!(observe_call["params"]["expect"].is_array());
+
+    // Multi-phase `screenshot --full-page --out` attaches conditions ONLY to `tool.screenshot_full_page`,
+    // keeping `tool.screenshot_read` and `tool.screenshot_release` clean.
+    let dir = tempfile::tempdir_in("/tmp").unwrap();
+    let out_path = dir.path().join("full.png");
+    let png_b64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
+    let (output, calls) = run_cli(
+        "1.9",
+        &[
+            "screenshot",
+            "--full-page",
+            "--out",
+            out_path.to_str().unwrap(),
+            "--session",
+            "s",
+            "--context",
+            "c",
+            "--expect",
+            expect_arg,
+            "--json",
+        ],
+        json!({
+            "tab_id": 7,
+            "capture_id": "cap-1",
+            "format": "png",
+            "byte_size": 68,
+            "width": 1,
+            "height": 1,
+            "data_base64": png_b64,
+            "next_offset": 68,
+            "eof": true,
+            "released": true
+        }),
+    )
+    .await;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let capture_call = calls
+        .iter()
+        .find(|c| c["method"] == "tool.screenshot_full_page")
+        .unwrap();
+    assert_eq!(capture_call["params"]["context_id"], "c");
+    assert!(capture_call["params"]["expect"].is_array());
+    for aux_method in ["tool.screenshot_read", "tool.screenshot_release"] {
+        let aux = calls.iter().find(|c| c["method"] == aux_method).unwrap();
+        assert!(aux["params"].get("context_id").is_none(), "{aux:?}");
+        assert!(aux["params"].get("expect").is_none(), "{aux:?}");
+    }
 }

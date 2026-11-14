@@ -47,6 +47,7 @@ static OBSERVATION_CONTEXT: std::sync::OnceLock<Option<String>> = std::sync::Onc
 static ACTION_EVIDENCE: std::sync::OnceLock<(Option<String>, Option<serde_json::Value>)> =
     std::sync::OnceLock::new();
 static TARGET_POLICY_REQUESTED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+static MULTI_PHASE_COMMAND: AtomicBool = AtomicBool::new(false);
 static EXPLICIT_CALLER_SCOPE: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
 
 // Keep the user's stop request even if the in-flight RPC finishes successfully.
@@ -72,6 +73,10 @@ pub fn set_action_evidence(observation: Option<String>, expect: Option<serde_jso
 
 pub fn set_target_policy_requested() {
     let _ = TARGET_POLICY_REQUESTED.set(true);
+}
+
+pub fn set_multi_phase_command() {
+    MULTI_PHASE_COMMAND.store(true, Ordering::Relaxed);
 }
 
 pub fn set_caller_scope(scope: Option<String>) {
@@ -168,6 +173,61 @@ pub(crate) fn with_context<P: Serialize>(
         .transpose()
 }
 
+pub(crate) fn method_accepts_action_metadata_with_params(
+    method: &Method,
+    params: Option<&serde_json::Value>,
+) -> bool {
+    match method {
+        Method::ToolObserve => {
+            params
+                .and_then(|v| v.get("probe_hover"))
+                .and_then(serde_json::Value::as_bool)
+                == Some(true)
+        }
+        Method::ToolDebug => params
+            .and_then(|v| v.get("action"))
+            .and_then(|a| {
+                serde_json::from_value::<bsk_protocol::tools::DebugAction>(a.clone()).ok()
+            })
+            .is_some_and(|a| a.cooperation_guarded()),
+        other => other.accepts_action_metadata(),
+    }
+}
+
+pub(crate) fn with_method_context<P: Serialize>(
+    method: &Method,
+    params: Option<P>,
+    context: Option<&str>,
+    dependencies: &[String],
+    observation: Option<&str>,
+    expect: Option<&serde_json::Value>,
+) -> anyhow::Result<Option<serde_json::Value>> {
+    let value = params.map(serde_json::to_value).transpose()?;
+    if method_accepts_action_metadata_with_params(method, value.as_ref()) {
+        anyhow::ensure!(
+            dependencies.is_empty() || context.is_some(),
+            "--depends-on requires --context"
+        );
+        with_context(value, context, dependencies, observation, expect)
+    } else if *method == Method::ToolRead {
+        anyhow::ensure!(
+            dependencies.is_empty() && observation.is_none() && expect.is_none(),
+            "--observation, --expect and --depends-on apply only to guarded browser actions; read accepts --context only"
+        );
+        with_context(value, context, &[], None, None)
+    } else {
+        anyhow::ensure!(
+            context.is_none()
+                && dependencies.is_empty()
+                && observation.is_none()
+                && expect.is_none(),
+            "action conditions (--context, --depends-on, --observation, --expect) do not apply to {}",
+            method.wire_name()
+        );
+        with_context(value, None, &[], None, None)
+    }
+}
+
 /// Issue a business RPC against the daemon with SIGINT-driven
 /// cancellation.
 pub fn call<P, R>(
@@ -225,20 +285,44 @@ where
         }));
     }
     let rpc_id: RpcId = format!("{}-{}", rpc_id_prefix, random_short_id());
-    let params = with_context(
-        params,
-        OBSERVATION_CONTEXT.get().and_then(|c| c.as_deref()),
-        OBSERVATION_DEPENDENCIES
-            .get()
-            .map(Vec::as_slice)
-            .unwrap_or_default(),
-        ACTION_EVIDENCE
-            .get()
-            .and_then(|(observation, _)| observation.as_deref()),
-        ACTION_EVIDENCE
-            .get()
-            .and_then(|(_, expect)| expect.as_ref()),
-    )?;
+    let value = params
+        .map(serde_json::to_value)
+        .transpose()
+        .map_err(|e| CliError::invalid_params(e.into()))?;
+    let strip_auxiliary = MULTI_PHASE_COMMAND.load(Ordering::Relaxed)
+        && !method_accepts_action_metadata_with_params(&method, value.as_ref());
+    let params = with_method_context(
+        &method,
+        value,
+        if strip_auxiliary {
+            None
+        } else {
+            OBSERVATION_CONTEXT.get().and_then(|c| c.as_deref())
+        },
+        if strip_auxiliary {
+            &[]
+        } else {
+            OBSERVATION_DEPENDENCIES
+                .get()
+                .map(Vec::as_slice)
+                .unwrap_or_default()
+        },
+        if strip_auxiliary {
+            None
+        } else {
+            ACTION_EVIDENCE
+                .get()
+                .and_then(|(observation, _)| observation.as_deref())
+        },
+        if strip_auxiliary {
+            None
+        } else {
+            ACTION_EVIDENCE
+                .get()
+                .and_then(|(_, expect)| expect.as_ref())
+        },
+    )
+    .map_err(CliError::invalid_params)?;
     let mut prechecked = super::protocol::precheck_cached_daemon_support(
         &sock,
         &method,

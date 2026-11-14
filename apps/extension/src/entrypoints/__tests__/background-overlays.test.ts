@@ -155,10 +155,16 @@ it("keeps task tabs ungrouped while showing controls after creation and attachme
   Object.assign(chrome.tabs, {
     query: vi.fn(async () => tabs),
     get: vi.fn(async (id: number) => tabs.find((tab) => tab.id === id)),
-    create: vi.fn(async () => {
-      tabs.push(created);
-      f.onCreated.emit(created);
-      return created;
+    create: vi.fn(async (props: chrome.tabs.CreateProperties) => {
+      const next = { ...created, active: props.active ?? true };
+      tabs.push(next);
+      f.onCreated.emit(next);
+      return next;
+    }),
+    update: vi.fn(async (id: number, props: chrome.tabs.UpdateProperties) => {
+      const tab = tabs.find((entry) => entry.id === id);
+      if (tab && props.active !== undefined) tab.active = props.active;
+      return tab;
     }),
   });
 

@@ -1,7 +1,7 @@
 //! The BrowserSkill MCP tools and their mapping onto daemon RPCs.
 //!
-//! Six coarse tools mirror the DSH plugin's grouping, each selecting an
-//! operation with `action`, and `bsk_plan` runs several input actions in one call.
+//! Six coarse tools group related operations behind `action`, and `bsk_plan`
+//! runs several input actions in one call.
 //! Arguments use the CLI and protocol field names.
 //! Every call is validated against its action's protocol type before anything
 //! reaches the daemon, and guarded actions reuse the `bsk step` preparation and
@@ -681,8 +681,9 @@ impl Evidence {
         .map_err(CliError::Local)
     }
 
-    fn attach(&self, params: Value) -> Result<Value, CliError> {
-        business_rpc::with_context(
+    fn attach(&self, method: &Method, params: Value) -> Result<Value, CliError> {
+        business_rpc::with_method_context(
+            method,
             Some(params),
             self.context.as_deref(),
             &self.depends_on,
@@ -753,6 +754,12 @@ struct SessionArgs {
     browser: Option<String>,
     /// start: task name shown in the Agent Window.
     name: Option<String>,
+    /// start: agent name displayed in the browser control overlay (1..=80 characters).
+    agent_name: Option<String>,
+    /// start: project label displayed alongside agent_name (1..=120 characters); requires agent_name.
+    project: Option<String>,
+    /// start: controller marker color as #RRGGBB; requires agent_name.
+    controller_color: Option<String>,
     /// start: open an incognito Agent Window (requires "Allow in incognito").
     incognito: Option<bool>,
     /// start: Agent Window width in CSS pixels (100-7680); requires height.
@@ -808,6 +815,9 @@ async fn session(
                 &[
                     "browser",
                     "name",
+                    "agent_name",
+                    "project",
+                    "controller_color",
                     "incognito",
                     "width",
                     "height",
@@ -815,6 +825,21 @@ async fn session(
                     "request_id",
                 ],
             )?;
+            if args.agent_name.is_none()
+                && (args.project.is_some() || args.controller_color.is_some())
+            {
+                return Err(invalid("project and controller_color require agent_name"));
+            }
+            let controller = args
+                .agent_name
+                .map(|name| bsk_protocol::tools::ControllerInfo {
+                    name,
+                    project: args.project,
+                    color: args.controller_color,
+                });
+            if let Some(controller) = &controller {
+                controller.validate().map_err(invalid)?;
+            }
             if args.width.is_some() != args.height.is_some() {
                 return Err(invalid("width and height must be given together"));
             }
@@ -839,6 +864,10 @@ async fn session(
                 params["incognito"] = true.into();
             }
             for (key, value) in [
+                (
+                    "controller",
+                    controller.map(|c| serde_json::to_value(c).unwrap()),
+                ),
                 ("browser_instance_id", args.browser.map(Value::from)),
                 ("task_name", args.name.map(Value::from)),
                 ("width", args.width.map(Value::from)),
@@ -1100,10 +1129,11 @@ async fn page(
         }
     };
     let evidence = Evidence::new(args.context, args.observation, None, None)?;
+    let timeout = timeout_of(&params, 30_000);
+    let params = evidence.attach(&method, params)?;
     let link = connect(daemon, control, conn_scope).await?;
     evidence.check(&link.protocol, false)?;
-    let timeout = timeout_of(&params, 30_000);
-    let value = link.rpc(method, evidence.attach(params)?, timeout).await?;
+    let value = link.rpc(method, params, timeout).await?;
     let is_error = matches!(
         args.action,
         PageAction::Navigate | PageAction::Back | PageAction::Forward | PageAction::Reload
@@ -1482,7 +1512,8 @@ async fn interact(link: &Link, prepared: Prepared) -> Result<Reply, CliError> {
             if is_evaluate && params["unverified"] == true {
                 crate::cli::evaluate::require_unverified_script(&link.protocol)?;
             }
-            let value = link.rpc(method, evidence.attach(params)?, timeout).await?;
+            let params = evidence.attach(&method, params)?;
+            let value = link.rpc(method, params, timeout).await?;
             Ok(Reply {
                 is_error: is_evaluate && value["ok"] == false,
                 ..Reply::json(value)
@@ -1497,11 +1528,19 @@ async fn interact(link: &Link, prepared: Prepared) -> Result<Reply, CliError> {
         } => {
             require_drag_mode(link, &method, &params)?;
             evidence.check(&link.protocol, target_policy)?;
-            // Like the CLI, caller evidence accompanies each request of the step.
+            // Only guarded actions receive caller evidence; readiness waits and post-sync stay clean.
             let (value, exit) = link
                 .blocking(move |rpc| {
                     step::run(&args, method, params, |method, params, timeout| {
-                        rpc(method, evidence.attach(params)?, timeout)
+                        let params = if business_rpc::method_accepts_action_metadata_with_params(
+                            &method,
+                            Some(&params),
+                        ) {
+                            evidence.attach(&method, params)?
+                        } else {
+                            params
+                        };
+                        rpc(method, params, timeout)
                     })
                 })
                 .await?;
@@ -1829,6 +1868,7 @@ async fn tabs(
         }
     };
     let evidence = Evidence::new(args.context, args.observation, None, None)?;
+    let params = evidence.attach(&method, params)?;
     let link = connect(daemon, control, conn_scope).await?;
     if args.confirmation_timeout_ms.is_some()
         && !bsk_protocol::tools::supports_borrow_confirmation_timeout(&link.protocol)
@@ -1840,7 +1880,7 @@ async fn tabs(
         ));
     }
     evidence.check(&link.protocol, false)?;
-    let value = link.rpc(method, evidence.attach(params)?, timeout).await?;
+    let value = link.rpc(method, params, timeout).await?;
     Ok(Reply::json(value))
 }
 
@@ -1925,10 +1965,12 @@ async fn assist(
                 return Err(invalid("window dimensions must be 100..=7680"));
             }
             let evidence = Evidence::new(args.context, args.observation, None, None)?;
+            let params = evidence.attach(
+                &Method::ToolWindowResize,
+                json!({"session_id":session, "width":width, "height":height}),
+            )?;
             let link = connect(daemon, control, conn_scope).await?;
             evidence.check(&link.protocol, false)?;
-            let params =
-                evidence.attach(json!({"session_id":session, "width":width, "height":height}))?;
             return Ok(Reply::json(
                 link.rpc(Method::ToolWindowResize, params, TOOL_IPC_TIMEOUT)
                     .await?,
@@ -1975,10 +2017,12 @@ async fn assist(
                 off: args.off.unwrap_or(false),
             })?;
             let evidence = Evidence::new(args.context, args.observation, None, None)?;
+            let params = evidence.attach(
+                &Method::ToolEmulate,
+                serde_json::to_value(params).map_err(|e| invalid(e.to_string()))?,
+            )?;
             let link = connect(daemon, control, conn_scope).await?;
             evidence.check(&link.protocol, false)?;
-            let params = evidence
-                .attach(serde_json::to_value(params).map_err(|e| invalid(e.to_string()))?)?;
             return Ok(Reply::json(
                 link.rpc(Method::ToolEmulate, params, TOOL_IPC_TIMEOUT)
                     .await?,
@@ -2184,7 +2228,7 @@ mod tests {
             panic!("expected a single action");
         };
         assert_eq!(method, Method::ToolClick);
-        let params = evidence.attach(params).unwrap();
+        let params = evidence.attach(&method, params).unwrap();
         assert_eq!(params["session_id"], "s1");
         assert_eq!(params["tab_id"], 7);
         assert_eq!(params["ref"], "@e3");
@@ -2377,5 +2421,70 @@ mod tests {
                 .unwrap()
                 .contains("unsupported")
         );
+        let reply = call(
+            &daemon,
+            &control,
+            None,
+            "bsk_session",
+            json!({"action":"start","project":"BrowserSkill"}),
+        )
+        .await;
+        assert!(
+            reply["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("require agent_name")
+        );
+
+        // Unguarded `bsk_page` and `bsk_tabs` actions fail closed on context/observation before connecting.
+        for (tool, bad_args) in [
+            (
+                "bsk_page",
+                json!({"action":"wait_for_navigation","session":"s","context":"ctx-1"}),
+            ),
+            (
+                "bsk_page",
+                json!({"action":"wait_for_element","session":"s","selector":"#ready","observation":"obs-1"}),
+            ),
+            (
+                "bsk_tabs",
+                json!({"action":"list","session":"s","context":"ctx-1"}),
+            ),
+            (
+                "bsk_tabs",
+                json!({"action":"create","session":"s","observation":"obs-1"}),
+            ),
+            (
+                "bsk_tabs",
+                json!({"action":"select","session":"s","tab_id":7,"context":"ctx-1"}),
+            ),
+            (
+                "bsk_tabs",
+                json!({"action":"borrow","session":"s","tab_id":7,"context":"ctx-1"}),
+            ),
+            (
+                "bsk_tabs",
+                json!({"action":"return","session":"s","tab_id":7,"observation":"obs-1"}),
+            ),
+            (
+                "bsk_assist",
+                json!({"action":"dialog_status","session":"s","context":"ctx-1"}),
+            ),
+        ] {
+            let reply = call(&daemon, &control, None, tool, bad_args.clone()).await;
+            assert_eq!(reply["isError"], true, "{tool} {bad_args}");
+            let body: Value =
+                serde_json::from_str(reply["content"][0]["text"].as_str().unwrap()).unwrap();
+            assert_eq!(body["code"], "invalid_params", "{tool} {bad_args}: {body}");
+        }
+
+        assert!(!business_rpc::method_accepts_action_metadata_with_params(
+            &Method::ToolObserve,
+            Some(&json!({"session_id":"s","probe_hover":false})),
+        ));
+        assert!(business_rpc::method_accepts_action_metadata_with_params(
+            &Method::ToolObserve,
+            Some(&json!({"session_id":"s","probe_hover":true})),
+        ));
     }
 }

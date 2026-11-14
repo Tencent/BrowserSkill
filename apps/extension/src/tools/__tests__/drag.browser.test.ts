@@ -33,7 +33,7 @@ const { rangeMarkup, rangeScript } = await import(
 let send: Send;
 let close: () => void;
 let run: Promise<void>;
-if (process.env.BSK_DRAG_CHROME) {
+if (process.env.BSK_TEST_CHROME) {
   beforeAll(async () => {
     const { withChrome } = await import(
       new URL(
@@ -45,7 +45,7 @@ if (process.env.BSK_DRAG_CHROME) {
       done = Promise.withResolvers<void>();
     close = done.resolve;
     run = withChrome(
-      { executable: process.env.BSK_DRAG_CHROME, deviceScale: 1, zoom: 1 },
+      { executable: process.env.BSK_TEST_CHROME, deviceScale: 1, zoom: 1 },
       async (s: Send) => {
         ready.resolve(s);
         await done.promise;
@@ -207,7 +207,7 @@ async function dndKitBundle() {
   return libraryBundle;
 }
 const ok = (result: unknown) => expect(result, JSON.stringify(result)).not.toHaveProperty("code");
-describe.skipIf(!process.env.BSK_DRAG_CHROME)("real browser drag", () => {
+describe.skipIf(!process.env.BSK_TEST_CHROME)("real browser drag", () => {
   it.each(["mouse", "pointer", "hold"])("moves %s with real input and releases", async (id) => {
     await withPage(async (h) => {
       ok(
@@ -641,7 +641,7 @@ describe.skipIf(!process.env.BSK_DRAG_CHROME)("real browser drag", () => {
     }, true));
 });
 
-describe.skipIf(!process.env.BSK_DRAG_CHROME)("click-move-click range selection", () => {
+describe.skipIf(!process.env.BSK_TEST_CHROME)("click-move-click range selection", () => {
   const setup = (h: Awaited<ReturnType<typeof harness>>) =>
     h.evaluate(`document.body.innerHTML=${JSON.stringify(rangeMarkup)};${rangeScript}`);
   const params = {

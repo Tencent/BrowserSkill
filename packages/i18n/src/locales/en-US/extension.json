@@ -154,7 +154,7 @@
       "unavailableHint": "Connect this browser profile to bsk to copy its instructions.",
       "copyButton": "Copy instructions",
       "copyFailed": "Could not copy the instructions. Please try again.",
-      "promptTemplate": "For this task, use BrowserSkill in browser {{name}} (instance ID: {{instanceId}}). Start every new session for this task with the appropriate interface:\nCLI: {{command}}\nDeepSeek Harness: {{toolCall}}\nIn DeepSeek Harness, use the tool call instead of running the CLI command separately.\nIf this instance is not connected, stop and ask me to reconnect this profile. Do not omit --browser / browser or switch to another instance.",
+      "promptTemplate": "For this task, use BrowserSkill in browser {{name}} (instance ID: {{instanceId}}). Start every new session for this task with the appropriate interface:\nCLI: {{command}}\nMCP: {{toolCall}}\nWith MCP tools, use the tool call instead of running the CLI command separately.\nIf this instance is not connected, stop and ask me to reconnect this profile. Do not omit --browser / browser or switch to another instance.",
       "title": "Current browser",
       "unnamed": "Unnamed browser"
     },

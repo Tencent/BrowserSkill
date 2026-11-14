@@ -263,7 +263,7 @@ const SCRIPT_CHANGE_RECOVERY = {
   target:
     "For data, use read/extract (fixed passive DOM queries) without another sync. For a script, read observed_changes and decide whether it touches what the script relies on. If those facts can be stated, pass them as explicit expect checks and omit observation_id: then only they are checked and the rest of the page may keep changing. Only if they cannot be stated, run evaluate with unverified, which compares nothing about the page; make the script check its own preconditions and throw when they do not hold. Do not resubmit the same script in a sync loop.",
   strict:
-    "Read observed_changes and decide whether it touches what the script relies on. If those regions can be named, synchronize and pass them with --depends-on (plugin: dependsOn): then only they, form values and modal layers are checked, and the rest of the page may keep changing. Only if they cannot be named, synchronize and run evaluate with unverified, which compares nothing about the page; make the script check its own preconditions and throw when they do not hold. Do not resubmit the same script in a sync loop.",
+    "Read observed_changes and decide whether it touches what the script relies on. If those regions can be named, synchronize and pass them with --depends-on (MCP: depends_on): then only they, form values and modal layers are checked, and the rest of the page may keep changing. Only if they cannot be named, synchronize and run evaluate with unverified, which compares nothing about the page; make the script check its own preconditions and throw when they do not hold. Do not resubmit the same script in a sync loop.",
 };
 
 function failure(message: string, effect: "none" | "unknown" = "none"): RpcError {
@@ -440,7 +440,8 @@ export class CooperationController implements ControlAuthority {
       tab.windowId !== session.agentWindowId ||
       this.deps.sessions.get(session.sessionId) !== session ||
       !this.hasSession(session.sessionId) ||
-      !isAgentControlledTab(session, tabId)
+      !isAgentControlledTab(session, tabId) ||
+      (session.temporaryInputTabs?.has(tabId) ?? false)
     )
       return;
     const state = this.track(
@@ -2073,6 +2074,12 @@ export class CooperationController implements ControlAuthority {
       if (error) throw new ActionCheckError((checkFailure = error));
       assert();
     };
+    const verifyExpectations = async () => {
+      if (!expectations.length) return;
+      const error = await checkExpectations(cdp, session, target, expectations);
+      if (error) throw new ActionCheckError((checkFailure = error));
+      assert();
+    };
     // Resolve selectors once per action. Handlers use the same concrete DOM node
     // that passed the checks, even if a list reorders during preparation.
     const pin = (node: ResolvedActionTarget) => {
@@ -2134,8 +2141,8 @@ export class CooperationController implements ControlAuthority {
           "This action requires an unused strict observation from cooperate sync",
           "observation",
           script
-            ? "Synchronize, inspect the result and pass the sync reply's top-level observation_id, not observation.observation_id, explicitly with --observation (plugin: observationId). On a page that keeps changing, state what the script relies on with explicit expect checks and omit observation_id: then only they are checked."
-            : "Synchronize, inspect the result and pass the sync reply's top-level observation_id, not observation.observation_id, explicitly with --observation (plugin: observationId).",
+            ? "Synchronize, inspect the result and pass the sync reply's top-level observation_id, not observation.observation_id, explicitly with --observation (MCP: observation). On a page that keeps changing, state what the script relies on with explicit expect checks and omit observation_id: then only they are checked."
+            : "Synchronize, inspect the result and pass the sync reply's top-level observation_id, not observation.observation_id, explicitly with --observation (MCP: observation).",
         );
       if (!visual && (primaryTarget?.ref || primaryTarget?.selector)) {
         const resolved = await resolveActionTarget(
@@ -2243,6 +2250,9 @@ export class CooperationController implements ControlAuthority {
           prepare: async (input, method) => {
             assert();
             if (targeted && isInternalActionStep(input, method, req.method === "tool.evaluate")) {
+              if (!nativeInputStarted && primaryEffect(method ?? "") && expectations.length > 0) {
+                await verifyExpectations();
+              }
               return;
             }
             await this.prepareFrames(state, operationSignal, input, method, deadline);
@@ -2260,6 +2270,8 @@ export class CooperationController implements ControlAuthority {
                 await verifyDecision(false);
               } else if (req.method === "tool.press" && input?.type === "keydown") {
                 await verifyDecision(true);
+              } else if (expectations.length > 0) {
+                await verifyExpectations();
               }
             }
           },
@@ -2301,6 +2313,9 @@ export class CooperationController implements ControlAuthority {
           beginDomMutation: async () => {
             if (targeted) {
               assert();
+              if (!nativeInputStarted && expectations.length > 0) {
+                await verifyExpectations();
+              }
               nativeInputStarted = true;
               return;
             }
