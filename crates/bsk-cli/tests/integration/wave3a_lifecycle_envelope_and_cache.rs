@@ -1988,93 +1988,97 @@ async fn counterexample_e_truncated_delta_whitespace_delta_abrupt_mcp_rst_and_la
     );
     assert_eq!(ws_collapse_json["truncated"], true);
 
-    // --- Part 3: Abrupt TCP `RST` (`ConnectionReset`) on `bsk mcp` stdin still reaps transient session ---
-    let tcp_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let tcp_addr = tcp_listener.local_addr().unwrap();
-    let parent_sock = tokio::net::TcpSocket::new_v4().unwrap();
-    let mut parent_tx = parent_sock.connect(tcp_addr).await.unwrap();
-    let (child_rx_std, _) = tcp_listener.accept().unwrap();
-    let child_stdin_fd = std::os::fd::OwnedFd::from(child_rx_std);
+    // --- Part 3 (Unix): Abrupt TCP `RST` (`ConnectionReset`) on `bsk mcp` stdin still reaps transient session ---
+    #[cfg(unix)]
+    {
+        let tcp_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let tcp_addr = tcp_listener.local_addr().unwrap();
+        let parent_sock = tokio::net::TcpSocket::new_v4().unwrap();
+        let mut parent_tx = parent_sock.connect(tcp_addr).await.unwrap();
+        let (child_rx_std, _) = tcp_listener.accept().unwrap();
+        let child_stdin_fd = std::os::fd::OwnedFd::from(child_rx_std);
 
-    let mut mcp_child = Command::new(env!("CARGO_BIN_EXE_bsk"))
-        .arg("mcp")
-        .env("BSK_HOME", temp.path())
-        .env("BSK_AUTO_START", "0")
-        .env("BSK_AUTO_UPDATE", "off")
-        .env_remove("BSK_CANCEL_ON_STDIN_CLOSE")
-        .env_remove("BSK_SESSION")
-        .env_remove("BSK_SCOPE")
-        .env_remove("CLAUDE_CODE_AGENT_ID")
-        .env_remove("CODEX_THREAD_ID")
-        .env_remove("ANTIGRAVITY_CONVERSATION_ID")
-        .env_remove("CURSOR_TRACE_ID")
-        .env_remove("DSH_SESSION_ID")
-        .stdin(Stdio::from(child_stdin_fd))
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true)
-        .spawn()
-        .expect("spawn bsk mcp with tcp stdin");
-    let mut mcp_stdout = BufReader::new(mcp_child.stdout.take().expect("mcp stdout"));
+        let mut mcp_child = Command::new(env!("CARGO_BIN_EXE_bsk"))
+            .arg("mcp")
+            .env("BSK_HOME", temp.path())
+            .env("BSK_AUTO_START", "0")
+            .env("BSK_AUTO_UPDATE", "off")
+            .env_remove("BSK_CANCEL_ON_STDIN_CLOSE")
+            .env_remove("BSK_SESSION")
+            .env_remove("BSK_SCOPE")
+            .env_remove("CLAUDE_CODE_AGENT_ID")
+            .env_remove("CODEX_THREAD_ID")
+            .env_remove("ANTIGRAVITY_CONVERSATION_ID")
+            .env_remove("CURSOR_TRACE_ID")
+            .env_remove("DSH_SESSION_ID")
+            .stdin(Stdio::from(child_stdin_fd))
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .expect("spawn bsk mcp with tcp stdin");
+        let mut mcp_stdout = BufReader::new(mcp_child.stdout.take().expect("mcp stdout"));
 
-    parent_tx
-        .write_all(
-            b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-11-25\",\"capabilities\":{},\"clientInfo\":{\"name\":\"rst-test\",\"version\":\"1.0\"}}}\n",
-        )
+        parent_tx
+            .write_all(
+                b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-11-25\",\"capabilities\":{},\"clientInfo\":{\"name\":\"rst-test\",\"version\":\"1.0\"}}}\n",
+            )
+            .await
+            .unwrap();
+        let mut init_line = String::new();
+        mcp_stdout.read_line(&mut init_line).await.unwrap();
+        assert!(init_line.contains("\"protocolVersion\""));
+
+        parent_tx
+            .write_all(
+                b"{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"bsk_session\",\"arguments\":{\"action\":\"start\"}}}\n",
+            )
+            .await
+            .unwrap();
+        let mcp_start_req = recv_ws(&mut ws).await;
+        assert_eq!(mcp_start_req["method"], "tool.session_start");
+        ws.send(Message::Text(
+            json!({ "id": mcp_start_req["id"], "result": { "agent_window_id": 402 } }).to_string(),
+        ))
         .await
         .unwrap();
-    let mut init_line = String::new();
-    mcp_stdout.read_line(&mut init_line).await.unwrap();
-    assert!(init_line.contains("\"protocolVersion\""));
+        let mut start_line = String::new();
+        mcp_stdout.read_line(&mut start_line).await.unwrap();
+        let start_rpc: Value = serde_json::from_str(start_line.trim()).unwrap();
+        let start_payload: Value =
+            serde_json::from_str(start_rpc["result"]["content"][0]["text"].as_str().unwrap())
+                .unwrap();
+        let rst_sid = start_payload["session_id"].as_str().unwrap().to_owned();
+        assert!(state.sessions.get(&SessionId(rst_sid.clone())).is_some());
 
-    parent_tx
-        .write_all(
-            b"{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"bsk_session\",\"arguments\":{\"action\":\"start\"}}}\n",
-        )
+        // Write an unterminated fragment so `read_message` blocks mid-line, then trigger TCP RST (`SO_LINGER=0`)!
+        parent_tx.write_all(b"{\"jsonrpc\":\"2.0\"").await.unwrap();
+        parent_tx.set_zero_linger().unwrap();
+        drop(parent_tx);
+
+        // `bsk mcp` must immediately invoke `tool.session_stop` to reap `rst_sid` before exiting on I/O error!
+        let mcp_stop_req = recv_ws(&mut ws).await;
+        assert_eq!(mcp_stop_req["method"], "tool.session_stop");
+        assert_eq!(mcp_stop_req["params"]["session_id"], rst_sid);
+        ws.send(Message::Text(
+            json!({ "id": mcp_stop_req["id"], "result": {} }).to_string(),
+        ))
         .await
         .unwrap();
-    let mcp_start_req = recv_ws(&mut ws).await;
-    assert_eq!(mcp_start_req["method"], "tool.session_start");
-    ws.send(Message::Text(
-        json!({ "id": mcp_start_req["id"], "result": { "agent_window_id": 402 } }).to_string(),
-    ))
-    .await
-    .unwrap();
-    let mut start_line = String::new();
-    mcp_stdout.read_line(&mut start_line).await.unwrap();
-    let start_rpc: Value = serde_json::from_str(start_line.trim()).unwrap();
-    let start_payload: Value =
-        serde_json::from_str(start_rpc["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
-    let rst_sid = start_payload["session_id"].as_str().unwrap().to_owned();
-    assert!(state.sessions.get(&SessionId(rst_sid.clone())).is_some());
 
-    // Write an unterminated fragment so `read_message` blocks mid-line, then trigger TCP RST (`SO_LINGER=0`)!
-    parent_tx.write_all(b"{\"jsonrpc\":\"2.0\"").await.unwrap();
-    parent_tx.set_zero_linger().unwrap();
-    drop(parent_tx);
-
-    // `bsk mcp` must immediately invoke `tool.session_stop` to reap `rst_sid` before exiting on I/O error!
-    let mcp_stop_req = recv_ws(&mut ws).await;
-    assert_eq!(mcp_stop_req["method"], "tool.session_stop");
-    assert_eq!(mcp_stop_req["params"]["session_id"], rst_sid);
-    ws.send(Message::Text(
-        json!({ "id": mcp_stop_req["id"], "result": {} }).to_string(),
-    ))
-    .await
-    .unwrap();
-
-    let mcp_out = tokio::time::timeout(Duration::from_secs(5), mcp_child.wait_with_output())
-        .await
-        .unwrap()
-        .unwrap();
-    assert!(
-        !mcp_out.status.success(),
-        "expected non-zero exit on stdin ConnectionReset, got success"
-    );
-    assert!(
-        state.sessions.get(&SessionId(rst_sid.clone())).is_none(),
-        "transient MCP session must be reaped even when stdin fails with ConnectionReset"
-    );
+        let mcp_out = tokio::time::timeout(Duration::from_secs(5), mcp_child.wait_with_output())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            !mcp_out.status.success(),
+            "expected non-zero exit on stdin ConnectionReset, got success"
+        );
+        assert!(
+            state.sessions.get(&SessionId(rst_sid.clone())).is_none(),
+            "transient MCP session must be reaped even when stdin fails with ConnectionReset"
+        );
+    }
 
     // --- Part 4: Suspended `DialogOperation` completing AFTER `teardown_session` must NOT resurrect zombie scope slot ---
     let late_sock = sock.clone();

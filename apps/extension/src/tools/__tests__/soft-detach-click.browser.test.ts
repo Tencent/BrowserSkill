@@ -560,6 +560,20 @@ describe.skipIf(!process.env.BSK_TEST_CHROME)(
               "Target.attachToTarget",
               { targetId, flatten: true },
             );
+            await expect
+              .poll(async () => {
+                const r = await send<{ result: { value: boolean } }>(
+                  "Runtime.evaluate",
+                  {
+                    expression:
+                      "location.href.startsWith('http://127.0.0.1:') && document.readyState === 'complete' && Boolean(document.getElementById('before'))",
+                    returnByValue: true,
+                  },
+                  monitorSession,
+                );
+                return r.result.value === true;
+              })
+              .toBe(true);
 
             let activeRootSession = "";
             const eventListeners = new Set<CdpEventListener>();
