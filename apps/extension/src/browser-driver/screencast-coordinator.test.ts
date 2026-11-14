@@ -4,12 +4,12 @@ import type { CdpRunner } from "@/tools/shared";
 import { ScreencastCoordinator, screencasts } from "./screencast-coordinator";
 
 it("shares one stream and ACK, restores remaining consumers and never stops a replacement attachment", async () => {
-  let event!: Parameters<NonNullable<CdpRunner["onEvent"]>>[0];
+  let event!: Parameters<NonNullable<CdpRunner["onEvent"]>>[1];
   let attachment = "original";
   const cdp: CdpRunner = {
     send: vi.fn(async () => ({}) as never),
     getAttachmentId: () => attachment,
-    onEvent: (handler) => {
+    onEvent: (_tabId, handler) => {
       event = handler;
       return { dispose: vi.fn() };
     },

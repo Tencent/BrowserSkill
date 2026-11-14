@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { StaleFrameHandleError } from "@/browser-driver/frame-graph";
 import type { CdpRunner } from "../../shared";
 import { verifyDocumentIdentity, verifyVisualTargetIdentity } from "../document-identity";
 import type { VisualCandidate } from "../visual-discovery";
@@ -6,8 +7,9 @@ import type { VisualCandidate } from "../visual-discovery";
 const candidate: VisualCandidate = {
   document: {
     attachmentId: "attached",
-    target: { tabId: 4, sessionId: "child-session" },
+    tabId: 4,
     frameId: "child-frame",
+    loaderId: "child-loader",
     documentElementBackendNodeId: 10,
   },
   backendNodeId: 20,
@@ -28,6 +30,7 @@ function fixture(
     fail?: string;
     abortAt?: string;
     detachAt?: string;
+    staleLoader?: boolean;
   } = {},
 ) {
   const controller = new AbortController();
@@ -68,11 +71,16 @@ function fixture(
   );
   const cdp = {
     send: vi.fn(),
-    sendToTarget: (
-      target: { tabId: number; sessionId?: string },
+    sendToFrame: (
+      handle: { tabId: number; frameId: string; loaderId: string },
       method: string,
       params: Record<string, unknown>,
-    ) => send(target.tabId, target.sessionId!, method, params),
+    ) => {
+      if (options.staleLoader || handle.loaderId !== "child-loader") {
+        throw new StaleFrameHandleError(handle);
+      }
+      return send(handle.tabId, "child-session", method, params);
+    },
     getAttachmentId: () => attachment,
   } as unknown as CdpRunner;
   return { cdp, send, controller };

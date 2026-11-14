@@ -89,7 +89,7 @@ async function harness(send: Send) {
     ctx.refStore.set("e1", backendNodeId, {
       tabId: 4,
       frameId: frame.frameId,
-      cdpSessionId: frame.target.sessionId,
+      loaderId: frame.loaderId,
     });
   const ref = async (frame: CdpFrame, selector = "#probe") => {
     const { executionContextId } = await send<{ executionContextId: number }>(

@@ -20,14 +20,12 @@
 //   `EvaluateResult { ok: false, error: { text, line?, column? } }`
 //   so the agent can read the throw text in-band (M9 review intent).
 
-import { ChromiumCdp } from "@/browser-driver/chromium-cdp";
 import type { SessionManager } from "@/session-manager/manager";
 import type { EvaluateError, EvaluateParams, EvaluateResult, RpcError } from "@/transport/types";
 import { attachDialogs, markDialogCursor } from "./dialogs";
 import {
   type CdpRunner,
   type ChromeTabsApi,
-  chromeTabsApi,
   enforceAgentWindow,
   isRpcError,
   lookupSession,
@@ -61,14 +59,6 @@ interface CdpExceptionDetails {
 interface RuntimeEvaluateReply {
   result?: CdpRemoteObject;
   exceptionDetails?: CdpExceptionDetails;
-}
-
-let defaultDeps: { cdp: ChromiumCdp; tabsApi: ChromeTabsApi } | null = null;
-function getDefaultDeps(): { cdp: ChromiumCdp; tabsApi: ChromeTabsApi } {
-  if (!defaultDeps) {
-    defaultDeps = { cdp: new ChromiumCdp(), tabsApi: chromeTabsApi };
-  }
-  return defaultDeps;
 }
 
 function abortedError(signal: AbortSignal | undefined): RpcError | null {
@@ -136,7 +126,7 @@ function extractValue(remote: CdpRemoteObject | undefined): unknown {
 export async function handleEvaluate(
   manager: SessionManager,
   params: EvaluateParams,
-  deps: EvaluateDeps = getDefaultDeps(),
+  deps: EvaluateDeps,
 ): Promise<EvaluateResult | RpcError> {
   if (!params || typeof params.expression !== "string" || params.expression.length === 0) {
     return { code: "invalid_params", message: "evaluate requires a non-empty expression" };

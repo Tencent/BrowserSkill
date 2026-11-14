@@ -182,19 +182,10 @@ export class SessionManager {
     for (const ctx of this.sessions.values()) ctx.refStore.invalidateTab(tabId);
   }
 
-  remapTabChildFrames(tabId: number, remapped: ReadonlyMap<string, string>): void {
-    for (const ctx of this.sessions.values()) {
-      ctx.refStore.remapChildFrameSessions(tabId, remapped);
-    }
-  }
-
-  invalidateTabChildFrames(
-    tabId: number,
-    stale: { sessionIds: ReadonlySet<string>; frameIds: ReadonlySet<string> },
-  ): void {
+  invalidateTabChildFrames(tabId: number, staleFrameIds: ReadonlySet<string>): void {
     for (const ctx of this.sessions.values()) {
       const ownsTab = isAgentControlledTab(ctx, tabId) || Boolean(ctx.observedTabs?.has(tabId));
-      ctx.refStore.invalidateChildFrames(tabId, stale, ownsTab);
+      ctx.refStore.invalidateChildFrames(tabId, staleFrameIds, ownsTab);
     }
   }
 

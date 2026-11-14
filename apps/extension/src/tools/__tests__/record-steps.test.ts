@@ -180,7 +180,7 @@ function makeFakeCdp(
       busyUntil = Date.now() + ms;
     },
     trackSessionTab: () => {},
-    onEvent: (handler: EventListener) => {
+    onEvent: (_tabId: number, handler: EventListener) => {
       events.push(handler);
       return {
         dispose: () => {

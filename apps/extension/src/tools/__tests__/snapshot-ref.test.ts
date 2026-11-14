@@ -24,10 +24,22 @@ describe("lookupSnapshotRef", () => {
     expect(lookupSnapshotRef(ctx, "@e3", 4)).toEqual({
       backendNodeId: 1234,
       refKey: "e3",
+      handle: {
+        tabId: 4,
+        frameId: "",
+        loaderId: "",
+        backendNodeId: 1234,
+      },
     });
     expect(lookupSnapshotRef(ctx, "e3", 4)).toEqual({
       backendNodeId: 1234,
       refKey: "e3",
+      handle: {
+        tabId: 4,
+        frameId: "",
+        loaderId: "",
+        backendNodeId: 1234,
+      },
     });
   });
 
@@ -46,20 +58,29 @@ describe("lookupSnapshotRef", () => {
 });
 
 describe("resolveSnapshotRef", () => {
-  it("preserves the frame and child session needed to route iframe refs", async () => {
+  it("preserves the FrameNodeHandle needed to route iframe refs", async () => {
     const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
     const ctx = await sm.start("aa11");
     ctx.refStore.set("e3", 1234, {
       tabId: 4,
       frameId: "child-frame",
-      cdpSessionId: "child-session",
+      loaderId: "child-loader",
+      documentElementBackendNodeId: 11,
     });
 
     const expected = {
       backendNodeId: 1234,
       refKey: "e3",
       frameId: "child-frame",
-      cdpSessionId: "child-session",
+      loaderId: "child-loader",
+      documentElementBackendNodeId: 11,
+      handle: {
+        tabId: 4,
+        frameId: "child-frame",
+        loaderId: "child-loader",
+        backendNodeId: 1234,
+        documentElementBackendNodeId: 11,
+      },
     };
     expect(lookupSnapshotRef(ctx, "@e3", 4)).toEqual(expected);
     expect(resolveSnapshotRef(ctx, "@e3", 4)).toEqual(expected);
@@ -98,13 +119,19 @@ describe("resolveSnapshotRef", () => {
     });
   });
 
-  it("returns backendNodeId and refKey on success", async () => {
+  it("returns backendNodeId, refKey and handle on success", async () => {
     const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
     const ctx = await sm.start("aa11");
     ctx.refStore.set("e3", 1234, { tabId: 4 });
     expect(resolveSnapshotRef(ctx, "@e3", 4)).toEqual({
       backendNodeId: 1234,
       refKey: "e3",
+      handle: {
+        tabId: 4,
+        frameId: "",
+        loaderId: "",
+        backendNodeId: 1234,
+      },
     });
   });
 });

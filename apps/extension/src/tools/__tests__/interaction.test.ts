@@ -241,7 +241,7 @@ describe("handleClick", () => {
     ctx.refStore.set("e3", 1234, {
       tabId: 4,
       frameId: "child-frame",
-      cdpSessionId: "child-session",
+      loaderId: "child-loader",
     });
     const fake = makeFakeCdp({
       "Input.dispatchMouseEvent": () => ({}),
@@ -253,12 +253,13 @@ describe("handleClick", () => {
     fake.cdp.getFrameGraph = vi.fn(async () => ({
       rootFrameId: "main",
       frames: [
-        { frameId: "main", target: { tabId: 4 } },
+        { frameId: "main", target: { tabId: 4 }, loaderId: "main-loader" },
         {
           frameId: "child-frame",
           parentFrameId: "main",
           ownerBackendNodeId: 99,
           target: { tabId: 4, sessionId: "child-session" },
+          loaderId: "child-loader",
         },
       ],
     }));
@@ -1479,7 +1480,7 @@ describe("click input readiness", () => {
       let cdpListener:
         | ((source: { tabId?: number }, method: string, params: unknown) => void)
         | undefined;
-      fake.cdp.onEvent = (fn) => {
+      fake.cdp.onEvent = (_tabId, fn) => {
         cdpListener = fn;
         return { dispose: () => {} };
       };
@@ -1695,7 +1696,7 @@ describe("handleFocus and handleBlur", () => {
     ctx.refStore.set("e3", 1234, {
       tabId: 4,
       frameId: "child-frame",
-      cdpSessionId: "child-session",
+      loaderId: "child-loader",
     });
     const fake = makeFakeCdp({
       "DOM.scrollIntoViewIfNeeded": () => ({}),
@@ -1703,12 +1704,13 @@ describe("handleFocus and handleBlur", () => {
     fake.cdp.getFrameGraph = vi.fn(async () => ({
       rootFrameId: "main",
       frames: [
-        { frameId: "main", target: { tabId: 4 } },
+        { frameId: "main", target: { tabId: 4 }, loaderId: "main-loader" },
         {
           frameId: "child-frame",
           parentFrameId: "main",
           ownerBackendNodeId: 99,
           target: { tabId: 4, sessionId: "child-session" },
+          loaderId: "child-loader",
         },
       ],
     }));

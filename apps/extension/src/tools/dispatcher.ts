@@ -584,20 +584,17 @@ export class ToolDispatcher {
       }
     },
     "tool.read": async (params, { signal, cdp }) =>
-      handleRead(this.sessions, params, cdp ? { cdp, tabsApi: chromeTabsApi } : undefined, signal),
+      cdp
+        ? handleRead(this.sessions, params, { cdp, tabsApi: chromeTabsApi }, signal)
+        : { code: "unsupported", message: "read requires CDP" },
     "tool.extract": async (params, { signal, cdp }) =>
-      handleExtract(
-        this.sessions,
-        params,
-        cdp ? { cdp, tabsApi: chromeTabsApi } : undefined,
-        signal,
-      ),
+      cdp
+        ? handleExtract(this.sessions, params, { cdp, tabsApi: chromeTabsApi }, signal)
+        : { code: "unsupported", message: "extract requires CDP" },
     "tool.wait_for_element": async (params, { signal, cdp }) =>
-      handleWaitForElement(
-        this.sessions,
-        params,
-        cdp ? { cdp, tabsApi: chromeTabsApi, signal } : undefined,
-      ),
+      cdp
+        ? handleWaitForElement(this.sessions, params, { cdp, tabsApi: chromeTabsApi, signal })
+        : { code: "unsupported", message: "wait_for_element requires CDP" },
     "tool.debug": async (params, { signal, cdp }) => {
       if (!this.debug)
         return {
@@ -712,11 +709,8 @@ export class ToolDispatcher {
       );
     },
     "tool.emulate": async (params, { signal, cdp }) => {
-      return handleEmulate(
-        this.sessions,
-        params,
-        cdp ? { cdp, tabsApi: chromeTabsApi, signal } : undefined,
-      );
+      if (!cdp) return { code: "unsupported", message: "emulate requires CDP" };
+      return handleEmulate(this.sessions, params, { cdp, tabsApi: chromeTabsApi, signal });
     },
     "tool.screenshot_full_page": async (params, { signal, cdp }) => {
       if (!cdp) return { code: "unsupported", message: "Full-page screenshot requires CDP" };
@@ -741,41 +735,33 @@ export class ToolDispatcher {
       return handleScreenshot(
         this.sessions,
         params,
-        cdp ? { cdp, tabsApi: chromeTabsCaptureApi, captureApi: chromeTabsCaptureApi } : undefined,
+        {
+          ...(cdp ? { cdp } : {}),
+          tabsApi: chromeTabsCaptureApi,
+          captureApi: chromeTabsCaptureApi,
+        },
         signal,
       );
     },
     "tool.console": async (params, { signal, cdp }) => {
-      return handleConsole(
-        this.sessions,
-        params,
-        cdp ? { cdp, tabsApi: chromeTabsApi } : undefined,
-        signal,
-      );
+      if (!cdp) return { code: "unsupported", message: "console requires CDP" };
+      return handleConsole(this.sessions, params, { cdp, tabsApi: chromeTabsApi }, signal);
     },
     "tool.network": async (params, { signal, cdp }) => {
-      return handleNetwork(
-        this.sessions,
-        params,
-        cdp ? { cdp, tabsApi: chromeTabsApi } : undefined,
-        signal,
-      );
+      if (!cdp) return { code: "unsupported", message: "network requires CDP" };
+      return handleNetwork(this.sessions, params, { cdp, tabsApi: chromeTabsApi }, signal);
     },
     "tool.snapshot": async (params, { signal, cdp }) => {
+      if (!cdp) return { code: "unsupported", message: "snapshot requires CDP" };
       return this.withHoverReassert(
         params,
-        () =>
-          handleSnapshot(
-            this.sessions,
-            params,
-            cdp ? { cdp, tabsApi: chromeTabsCaptureApi } : undefined,
-            signal,
-          ),
+        () => handleSnapshot(this.sessions, params, { cdp, tabsApi: chromeTabsCaptureApi }, signal),
         {},
         signal,
       );
     },
     "tool.observe": async (params, { signal, cdp }) => {
+      if (!cdp) return { code: "unsupported", message: "observe requires CDP" };
       const hoverScope = await this.resolveHoverLatchScope(params);
       throwIfDispatchAborted(signal);
       return this.withHoverReassert(
@@ -784,18 +770,16 @@ export class ToolDispatcher {
           handleObserve(
             this.sessions,
             params,
-            cdp
-              ? {
-                  cdp,
-                  tabsApi: chromeTabsCaptureApi,
-                  // Active hover probing is opt-in. A held hover latch still
-                  // suppresses it, because probing would move the cursor off
-                  // the element the caller is deliberately holding.
-                  conditionalSurfaceProbe:
-                    params.probe_hover === true && !this.hasHoverLatchForScope(hoverScope),
-                  hoverProbeBypassOverlay: bypassOverlay,
-                }
-              : undefined,
+            {
+              cdp,
+              tabsApi: chromeTabsCaptureApi,
+              // Active hover probing is opt-in. A held hover latch still
+              // suppresses it, because probing would move the cursor off
+              // the element the caller is deliberately holding.
+              conditionalSurfaceProbe:
+                params.probe_hover === true && !this.hasHoverLatchForScope(hoverScope),
+              hoverProbeBypassOverlay: bypassOverlay,
+            },
             signal,
           ),
         {},
@@ -803,194 +787,174 @@ export class ToolDispatcher {
       );
     },
     "tool.get_html": async (params, { signal, cdp }) => {
-      return handleGetHtml(
-        this.sessions,
-        params,
-        cdp ? { cdp, tabsApi: chromeTabsCaptureApi } : undefined,
-        signal,
-      );
+      if (!cdp) return { code: "unsupported", message: "get_html requires CDP" };
+      return handleGetHtml(this.sessions, params, { cdp, tabsApi: chromeTabsCaptureApi }, signal);
     },
     "tool.navigate": async (params, { signal, cdp }) => {
+      if (!cdp) return { code: "unsupported", message: "navigate requires CDP" };
       return this.withHoverReleaseForRequest(
         params,
         () =>
-          handleNavigate(
-            this.sessions,
-            params,
-            cdp ? { cdp, tabsApi: chromeTabsApi, signal, backgroundExecution: true } : undefined,
-          ),
+          handleNavigate(this.sessions, params, {
+            cdp,
+            tabsApi: chromeTabsApi,
+            signal,
+            backgroundExecution: true,
+          }),
         signal,
       );
     },
     "tool.navigate_back": async (params, { signal, cdp }) => {
+      if (!cdp) return { code: "unsupported", message: "navigate_back requires CDP" };
       return this.withHoverReleaseForRequest(
         params,
         () =>
-          handleNavigateBack(
-            this.sessions,
-            params,
-            cdp ? { cdp, tabsApi: chromeTabsApi, signal, backgroundExecution: true } : undefined,
-          ),
+          handleNavigateBack(this.sessions, params, {
+            cdp,
+            tabsApi: chromeTabsApi,
+            signal,
+            backgroundExecution: true,
+          }),
         signal,
       );
     },
     "tool.navigate_forward": async (params, { signal, cdp }) => {
+      if (!cdp) return { code: "unsupported", message: "navigate_forward requires CDP" };
       return this.withHoverReleaseForRequest(
         params,
         () =>
-          handleNavigateForward(
-            this.sessions,
-            params,
-            cdp ? { cdp, tabsApi: chromeTabsApi, signal, backgroundExecution: true } : undefined,
-          ),
+          handleNavigateForward(this.sessions, params, {
+            cdp,
+            tabsApi: chromeTabsApi,
+            signal,
+            backgroundExecution: true,
+          }),
         signal,
       );
     },
     "tool.reload": async (params, { signal, cdp }) => {
+      if (!cdp) return { code: "unsupported", message: "reload requires CDP" };
       return this.withHoverReleaseForRequest(
         params,
         () =>
-          handleReload(
-            this.sessions,
-            params,
-            cdp ? { cdp, tabsApi: chromeTabsApi, signal, backgroundExecution: true } : undefined,
-          ),
+          handleReload(this.sessions, params, {
+            cdp,
+            tabsApi: chromeTabsApi,
+            signal,
+            backgroundExecution: true,
+          }),
         signal,
       );
     },
     "tool.click": async (params, { signal, onInputSent, cdp }) => {
+      if (!cdp) return { code: "unsupported", message: "click requires CDP" };
       return this.withHoverReassert(
         params,
         () =>
-          handleClick(
-            this.sessions,
-            params,
-            cdp
-              ? {
-                  cdp,
-                  tabsApi: chromeTabsApi,
-                  signal,
-                  bypassOverlay,
-                  onInputSent,
-                }
-              : undefined,
-          ),
+          handleClick(this.sessions, params, {
+            cdp,
+            tabsApi: chromeTabsApi,
+            signal,
+            bypassOverlay,
+            onInputSent,
+          }),
         { releaseAfter: true },
         signal,
       );
     },
     "tool.hover": async (params, { signal, cdp }) => {
-      const result = await handleHover(
-        this.sessions,
-        params,
-        cdp
-          ? {
-              cdp,
-              tabsApi: chromeTabsApi,
-              signal,
-              bypassOverlay: (tabId, enabled) =>
-                this.setHoverBypass(params.session_id, tabId, enabled),
-              keepOverlayBypassAfterHover: true,
-            }
-          : undefined,
-      );
+      if (!cdp) return { code: "unsupported", message: "hover requires CDP" };
+      const result = await handleHover(this.sessions, params, {
+        cdp,
+        tabsApi: chromeTabsApi,
+        signal,
+        bypassOverlay: (tabId, enabled) => this.setHoverBypass(params.session_id, tabId, enabled),
+        keepOverlayBypassAfterHover: true,
+      });
       return this.rememberHover(params.session_id, result);
     },
     "tool.drag": async (params, { signal, onInputSent, cdp }) => {
+      if (!cdp) return { code: "unsupported", message: "drag requires CDP" };
       return this.withHoverReassert(
         params,
         () =>
-          handleDrag(
-            this.sessions,
-            params,
-            cdp ? { cdp, tabsApi: chromeTabsApi, signal, bypassOverlay, onInputSent } : undefined,
-          ),
+          handleDrag(this.sessions, params, {
+            cdp,
+            tabsApi: chromeTabsApi,
+            signal,
+            bypassOverlay,
+            onInputSent,
+          }),
         { releaseAfter: true },
         signal,
       );
     },
     "tool.wheel": async (params, { signal, cdp }) => {
+      if (!cdp) return { code: "unsupported", message: "wheel requires CDP" };
       return this.withHoverReassert(
         params,
         () =>
-          handleWheel(
-            this.sessions,
-            params,
-            cdp ? { cdp, tabsApi: chromeTabsApi, signal, bypassOverlay } : undefined,
-          ),
+          handleWheel(this.sessions, params, {
+            cdp,
+            tabsApi: chromeTabsApi,
+            signal,
+            bypassOverlay,
+          }),
         { releaseAfter: true },
         signal,
       );
     },
     "tool.scroll_to": async (params, { signal, cdp }) => {
+      if (!cdp) return { code: "unsupported", message: "scroll_to requires CDP" };
       return this.withHoverReleaseForRequest(
         params,
-        () =>
-          handleScrollTo(
-            this.sessions,
-            params,
-            cdp ? { cdp, tabsApi: chromeTabsApi, signal } : undefined,
-          ),
+        () => handleScrollTo(this.sessions, params, { cdp, tabsApi: chromeTabsApi, signal }),
         signal,
       );
     },
     "tool.focus": async (params, { signal, cdp }) => {
+      if (!cdp) return { code: "unsupported", message: "focus requires CDP" };
       return this.withHoverReleaseForRequest(
         params,
-        () =>
-          handleFocus(
-            this.sessions,
-            params,
-            cdp ? { cdp, tabsApi: chromeTabsApi, signal } : undefined,
-          ),
+        () => handleFocus(this.sessions, params, { cdp, tabsApi: chromeTabsApi, signal }),
         signal,
       );
     },
     "tool.blur": async (params, { signal, cdp }) => {
+      if (!cdp) return { code: "unsupported", message: "blur requires CDP" };
       return this.withHoverReleaseForRequest(
         params,
-        () =>
-          handleBlur(
-            this.sessions,
-            params,
-            cdp ? { cdp, tabsApi: chromeTabsApi, signal } : undefined,
-          ),
+        () => handleBlur(this.sessions, params, { cdp, tabsApi: chromeTabsApi, signal }),
         signal,
       );
     },
     "tool.fill": async (params, { signal, cdp }) => {
+      if (!cdp) return { code: "unsupported", message: "fill requires CDP" };
       return this.withHoverReleaseForRequest(
         params,
-        () =>
-          handleFill(
-            this.sessions,
-            params,
-            cdp ? { cdp, tabsApi: chromeTabsApi, signal } : undefined,
-          ),
+        () => handleFill(this.sessions, params, { cdp, tabsApi: chromeTabsApi, signal }),
         signal,
       );
     },
     "tool.press": async (params, { signal, onInputSent, cdp }) => {
+      if (!cdp) return { code: "unsupported", message: "press requires CDP" };
       return this.withHoverReleaseForRequest(
         params,
         () =>
-          handlePress(
-            this.sessions,
-            params,
-            cdp ? { cdp, tabsApi: chromeTabsApi, signal, onInputSent } : undefined,
-          ),
+          handlePress(this.sessions, params, {
+            cdp,
+            tabsApi: chromeTabsApi,
+            signal,
+            onInputSent,
+          }),
         signal,
       );
     },
     "tool.select": async (params, { signal, cdp }) => {
+      if (!cdp) return { code: "unsupported", message: "select requires CDP" };
       return this.withHoverReleaseForRequest(
         params,
-        () =>
-          handleSelect(
-            this.sessions,
-            params,
-            cdp ? { cdp, tabsApi: chromeTabsApi, signal } : undefined,
-          ),
+        () => handleSelect(this.sessions, params, { cdp, tabsApi: chromeTabsApi, signal }),
         signal,
       );
     },
@@ -1032,18 +996,16 @@ export class ToolDispatcher {
       );
     },
     "tool.evaluate": async (params, { signal, cdp }) => {
-      return handleEvaluate(
-        this.sessions,
-        params,
-        cdp ? { cdp, tabsApi: chromeTabsApi, signal } : undefined,
-      );
+      if (!cdp) return { code: "unsupported", message: "evaluate requires CDP" };
+      return handleEvaluate(this.sessions, params, { cdp, tabsApi: chromeTabsApi, signal });
     },
     "tool.wait_for_navigation": async (params, { signal, cdp }) => {
-      return handleWaitForNavigation(
-        this.sessions,
-        params,
-        cdp ? { cdp, tabsApi: chromeTabsApi, signal } : undefined,
-      );
+      if (!cdp) return { code: "unsupported", message: "wait_for_navigation requires CDP" };
+      return handleWaitForNavigation(this.sessions, params, {
+        cdp,
+        tabsApi: chromeTabsApi,
+        signal,
+      });
     },
     "tool.request_help": async (params, { signal, cdp }) => {
       return handleRequestHelp(this.sessions, params, {

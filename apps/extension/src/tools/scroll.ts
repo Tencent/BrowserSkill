@@ -1,5 +1,10 @@
-import { ChromiumCdp } from "@/browser-driver/chromium-cdp";
-import { type CdpTarget, cdpTargetKey } from "@/browser-driver/frame-graph";
+import type { CdpDispatchGuard } from "@/browser-driver/chromium-cdp";
+import {
+  type CdpTarget,
+  cdpTargetKey,
+  type FrameDocumentHandle,
+  type FrameNodeHandle,
+} from "@/browser-driver/frame-graph";
 import type { SessionManager } from "@/session-manager/manager";
 import type { RpcError, ScrollToParams, ScrollToResult } from "@/transport/types";
 import { attachDialogs, markDialogCursor } from "./dialogs";
@@ -11,12 +16,13 @@ import { scrollVisibleBounds } from "./scroll-visibility";
 import {
   type CdpRunner,
   type ChromeTabsApi,
-  chromeTabsApi,
+  delegateCdpRunner,
   enforceAgentWindow,
   isRpcError,
   lookupSession,
   resolveTargetTab,
   sendToCdpTarget,
+  sendToFrameHandle,
 } from "./shared";
 
 export interface ScrollToDeps {
@@ -25,16 +31,10 @@ export interface ScrollToDeps {
   signal?: AbortSignal;
 }
 
-let defaultDeps: { cdp: ChromiumCdp; tabsApi: ChromeTabsApi } | null = null;
-function getDefaultDeps(): { cdp: ChromiumCdp; tabsApi: ChromeTabsApi } {
-  if (!defaultDeps) defaultDeps = { cdp: new ChromiumCdp(), tabsApi: chromeTabsApi };
-  return defaultDeps;
-}
-
 export async function handleScrollTo(
   manager: SessionManager,
   params: ScrollToParams,
-  deps: ScrollToDeps = getDefaultDeps(),
+  deps: ScrollToDeps,
 ): Promise<ScrollToResult | RpcError> {
   const ctxOrErr = lookupSession(manager, params, "scroll-to");
   if (isRpcError(ctxOrErr)) return ctxOrErr;
@@ -50,6 +50,7 @@ export async function handleScrollTo(
   };
   const objectGroup = `bsk-scroll-${crypto.randomUUID()}`;
   const objectTargets = new Map<string, CdpTarget>();
+  const objectHandles = new Map<string, FrameDocumentHandle>();
   const send = async <T>(target: CdpTarget, method: string, args?: object): Promise<T> => {
     checkActive();
     // Also own objects allocated by the shared scroll fallback. Record the
@@ -64,36 +65,69 @@ export async function handleScrollTo(
     checkActive();
     return result;
   };
+  const sendFrame = async <T>(
+    handle: FrameDocumentHandle | FrameNodeHandle,
+    method: string,
+    args?: object,
+    guard?: CdpDispatchGuard,
+  ): Promise<T> => {
+    checkActive();
+    if (method === "DOM.resolveNode") {
+      objectHandles.set(`${handle.tabId}:${handle.frameId}:${handle.loaderId}`, {
+        tabId: handle.tabId,
+        frameId: handle.frameId,
+        loaderId: handle.loaderId,
+        ...(handle.documentElementBackendNodeId !== undefined
+          ? { documentElementBackendNodeId: handle.documentElementBackendNodeId }
+          : {}),
+      });
+    }
+    const result = await sendToFrameHandle<T>(
+      deps.cdp,
+      handle,
+      method,
+      method === "DOM.resolveNode" ? { ...args, objectGroup } : args,
+      guard,
+    );
+    checkActive();
+    return result;
+  };
   let graph: ReturnType<NonNullable<CdpRunner["getFrameGraph"]>> | undefined;
-  const cdp: CdpRunner = {
+  const cdp: CdpRunner = delegateCdpRunner(deps.cdp, {
     send: (tabId, method, args) => send({ tabId }, method, args),
     sendToTarget: send,
-    trackSessionTab: deps.cdp.trackSessionTab?.bind(deps.cdp),
-    resolveTarget: deps.cdp.resolveTarget?.bind(deps.cdp),
-    reattachIfSoftDetached: deps.cdp.reattachIfSoftDetached
-      ? async (tabId) => {
-          checkActive();
-          await deps.cdp.reattachIfSoftDetached!(tabId);
-          checkActive();
+    sendToFrame: sendFrame,
+    ...(deps.cdp.ensureAttachedToUrl
+      ? {
+          ensureAttachedToUrl: async (tabId, expectedUrl) => {
+            checkActive();
+            await deps.cdp.ensureAttachedToUrl!(tabId, expectedUrl);
+            checkActive();
+          },
         }
-      : undefined,
-    reconcileSoftDetachedFrames: deps.cdp.reconcileSoftDetachedFrames
-      ? async (tabId) => {
-          checkActive();
-          await deps.cdp.reconcileSoftDetachedFrames!(tabId);
-          checkActive();
+      : {}),
+    ...(deps.cdp.getMainFrameHandle
+      ? {
+          getMainFrameHandle: async (tabId, sig) => {
+            checkActive();
+            const result = await deps.cdp.getMainFrameHandle!(tabId, sig);
+            checkActive();
+            return result;
+          },
         }
-      : undefined,
-    getFrameGraph: deps.cdp.getFrameGraph
-      ? async (tabId) => {
-          checkActive();
-          graph ??= deps.cdp.getFrameGraph!(tabId);
-          const result = await graph;
-          checkActive();
-          return result;
+      : {}),
+    ...(deps.cdp.getFrameGraph
+      ? {
+          getFrameGraph: async (tabId) => {
+            checkActive();
+            graph ??= deps.cdp.getFrameGraph!(tabId);
+            const result = await graph;
+            checkActive();
+            return result;
+          },
         }
-      : undefined,
-  };
+      : {}),
+  });
   try {
     checkActive();
     const target = await resolveTargetTab(manager, ctx, params.tab_id, deps.tabsApi);
@@ -107,25 +141,10 @@ export async function handleScrollTo(
     if (isRpcError(node)) return node;
     deps.cdp.trackSessionTab?.(ctx.sessionId, target.tabId);
     return await withInputReady(ctx, target.tabId, { ...deps, deadline }, async () => {
-      const scrollError = await scrollElementAndFramesIntoView(
-        cdp,
-        target.tabId,
-        node.cdpTarget,
-        node.backendNodeId,
-        node.frameId,
-      );
+      const scrollError = await scrollElementAndFramesIntoView(cdp, target.tabId, node.handle);
       checkActive();
       if (scrollError) return scrollError;
-      const bounds = await scrollVisibleBounds(
-        cdp,
-        target.tabId,
-        {
-          target: node.cdpTarget,
-          backendNodeId: node.backendNodeId,
-          frameId: node.frameId,
-        },
-        deadline,
-      );
+      const bounds = await scrollVisibleBounds(cdp, target.tabId, node.handle, deadline);
       checkActive();
       if (!bounds)
         return rpcError(
@@ -146,8 +165,14 @@ export async function handleScrollTo(
     return cdpError(error);
   } finally {
     // Cleanup bypasses the cancellation guard and cannot replace the result.
+    const cleanup = deps.cdp.resourceCleanup ?? deps.cdp;
     for (const target of objectTargets.values()) {
-      await sendToCdpTarget(deps.cdp, target, "Runtime.releaseObjectGroup", { objectGroup }).catch(
+      await sendToCdpTarget(cleanup, target, "Runtime.releaseObjectGroup", { objectGroup }).catch(
+        () => {},
+      );
+    }
+    for (const handle of objectHandles.values()) {
+      await sendToFrameHandle(cleanup, handle, "Runtime.releaseObjectGroup", { objectGroup }).catch(
         () => {},
       );
     }

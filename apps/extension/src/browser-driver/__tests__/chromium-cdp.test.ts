@@ -13,6 +13,7 @@ import {
   DEFAULT_IDLE_DETACH_MS,
 } from "../chromium-cdp";
 import { CdpReadTimeoutError, READ_TIMEOUT_MS } from "../command-deadline";
+import { StaleFrameHandleError } from "../frame-graph";
 
 function fakeChromeEvent<TArgs extends unknown[]>() {
   const listeners = new Set<(...args: TArgs) => void>();
@@ -2287,26 +2288,60 @@ describe("idle soft-detach and immediate close/return detach", () => {
     }
   });
 
-  it.each([
-    "console",
-    "network",
-  ] as const)("blocks soft-detach when Guard 2 (%s diagnostic capture) is enabled", async (domain) => {
+  it("restores idle soft-detach after one-shot console/network reads and after disposing tab-scoped onEvent leases", async () => {
     vi.useFakeTimers();
-    const { api } = fakeApi();
+    const { api, onEvent } = fakeApi();
     const cdp = new ChromiumCdp(api, { idleDetachMs: 1_000 });
     try {
       cdp.trackSessionTab("sess-diag", 43);
-      if (domain === "console") await cdp.ensureConsoleCapture(43);
-      else await cdp.ensureNetworkCapture(43);
+      await cdp.ensureConsoleCapture(43);
+      await cdp.ensureNetworkCapture(43);
+      onEvent.fire({ tabId: 43 }, "Runtime.consoleAPICalled", {
+        type: "log",
+        args: [{ type: "string", value: "before-soft-detach" }],
+      });
 
-      await vi.advanceTimersByTimeAsync(10_000);
-      expect(api.detach).not.toHaveBeenCalled();
+      // One-shot `bsk console` / `bsk network` reads do NOT hold sticky domain guards:
+      // tab 43 soft-detaches cleanly once `idleDetachMs` elapses while keeping buffered logs.
+      await vi.advanceTimersByTimeAsync(999);
       expect(cdp.isAttached(43)).toBe(true);
-
-      // Hard detach on session stop still detaches immediately in 0ms.
-      await cdp.detachSession("sess-diag");
+      await vi.advanceTimersByTimeAsync(1);
       expect(api.detach).toHaveBeenCalledExactlyOnceWith({ tabId: 43 });
       expect(cdp.isAttached(43)).toBe(false);
+      expect(cdp.consoleEntriesSince(43, undefined, 10, 200, false).entries).toHaveLength(1);
+
+      // Reattaching via `ensureConsoleCapture` + subscribing via `onEvent(43, ...)` (like `bsk debug start`)
+      // holds an explicit lease that blocks soft-detach while active.
+      await cdp.ensureConsoleCapture(43);
+      const events: string[] = [];
+      const sub = cdp.onEvent(43, (_source, method) => {
+        events.push(method);
+      });
+      onEvent.fire({ tabId: 43 }, "Network.requestWillBeSent", {
+        requestId: "r-43",
+        request: { url: "https://example.test/ping", method: "GET" },
+      });
+      onEvent.fire({ tabId: 99 }, "Network.requestWillBeSent", {
+        requestId: "r-99",
+        request: { url: "https://other.test/ping", method: "GET" },
+      });
+      expect(events).toEqual(["Network.requestWillBeSent"]);
+
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(cdp.isAttached(43)).toBe(true);
+      expect(api.detach).toHaveBeenCalledTimes(1);
+
+      // Disposing the subscription (like `bsk debug stop`) drops leases to 0 and restarts the idle timer.
+      sub.dispose();
+      sub.dispose();
+      await vi.advanceTimersByTimeAsync(999);
+      expect(cdp.isAttached(43)).toBe(true);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(api.detach).toHaveBeenCalledTimes(2);
+      expect(cdp.isAttached(43)).toBe(false);
+
+      await cdp.detachSession("sess-diag");
+      expect(cdp.consoleEntriesSince(43, undefined, 10, 200, false).entries).toHaveLength(0);
     } finally {
       cdp.dispose();
     }
@@ -2599,12 +2634,12 @@ describe("idle soft-detach and immediate close/return detach", () => {
       const initialAttachmentId = cdp.getAttachmentId(50);
       expect(initialAttachmentId).toEqual(expect.any(String));
 
-      // Soft-detach after 75s idle, then reattach via `reattachIfSoftDetached` with unchanged root doc.
+      // Soft-detach after 75s idle, then reattach with unchanged root doc.
       await vi.advanceTimersByTimeAsync(DEFAULT_IDLE_DETACH_MS);
       expect(cdp.isAttached(50)).toBe(false);
       expect(cdp.getAttachmentId(50)).toBeUndefined();
 
-      await cdp.reattachIfSoftDetached(50);
+      await cdp.ensureAttached(50);
       expect(cdp.isAttached(50)).toBe(true);
       expect(cdp.getAttachmentId(50)).toBe(initialAttachmentId);
       expect(changed).not.toHaveBeenCalled();
@@ -2622,11 +2657,20 @@ describe("idle soft-detach and immediate close/return detach", () => {
       expect(rotatedAttachmentId).not.toBe(initialAttachmentId);
       expect(changed).toHaveBeenCalledExactlyOnceWith(50);
 
-      // Hard detach must NOT reattach on `reattachIfSoftDetached`.
+      // Hard detach drops soft-detach state and rejects guarded commands carrying the prior attachmentId without reattaching.
       const attachCallsBeforeHardDetach = vi.mocked(api.attach).mock.calls.length;
       await cdp.detach(50);
       expect(cdp.isAttached(50)).toBe(false);
-      await cdp.reattachIfSoftDetached(50);
+      await expect(
+        cdp.sendGuarded(
+          { tabId: 50 },
+          "Runtime.evaluate",
+          { expression: "1" },
+          {
+            attachmentId: rotatedAttachmentId,
+          },
+        ),
+      ).rejects.toThrow("Debugger attachment changed before dispatch");
       expect(cdp.isAttached(50)).toBe(false);
       expect(api.attach).toHaveBeenCalledTimes(attachCallsBeforeHardDetach);
     } finally {
@@ -2839,7 +2883,7 @@ describe("idle soft-detach and immediate close/return detach", () => {
       verifying = true;
       onEvent.fire({ tabId: 51 }, "Page.javascriptDialogClosed", { result: true });
       const ready = vi.fn();
-      const nextAction = cdp.reattachIfSoftDetached(51).then(ready);
+      const nextAction = cdp.ensureAttached(51).then(ready);
       // Both reads fit their own budgets. Together they take longer than 1s.
       await vi.advanceTimersByTimeAsync(1_001);
       expect(ready).not.toHaveBeenCalled();
@@ -2867,7 +2911,7 @@ describe("idle soft-detach and immediate close/return detach", () => {
       const attachmentId = cdp.getAttachmentId(51);
       await vi.advanceTimersByTimeAsync(DEFAULT_IDLE_DETACH_MS);
       blockEnable = true;
-      const reconnect = cdp.reattachIfSoftDetached(51);
+      const reconnect = cdp.ensureAttached(51);
       const failure = expect(reconnect).rejects.toThrow("Close any open browser dialog");
       await vi.advanceTimersByTimeAsync(READ_TIMEOUT_MS);
       await failure;
@@ -2876,17 +2920,18 @@ describe("idle soft-detach and immediate close/return detach", () => {
 
       blockEnable = false;
       blocked.resolve({});
-      await cdp.reattachIfSoftDetached(51);
+      await cdp.ensureAttached(51);
       expect(cdp.getAttachmentId(51)).toBe(attachmentId);
     } finally {
       cdp.dispose();
     }
   });
 
-  it("remaps unchanged OOPIFs across reconnects with late discovery events", async () => {
+  it("routes FrameNodeHandle across OOPIF soft-detach reconnects and rejects navigated or document.open() child frames", async () => {
     vi.useFakeTimers();
     const { api, onEvent } = fakeApi();
     let attachGeneration = 0;
+    let childADocElemBackendNodeId = 201;
     let childBState: { present: boolean; loaderId: string; url: string } = {
       present: true,
       loaderId: "child-b-loader-1",
@@ -2965,7 +3010,31 @@ describe("idle soft-detach and immediate close/return detach", () => {
         }
       }
       if (method === "DOM.getDocument") {
-        return { root: { backendNodeId: 1, documentURL: "https://host.test/" } };
+        if (target.sessionId?.endsWith("-a")) {
+          return {
+            root: {
+              backendNodeId: 2,
+              documentURL: "https://oopif-a.test/pay",
+              children: [{ nodeType: 1, backendNodeId: childADocElemBackendNodeId }],
+            },
+          };
+        }
+        if (target.sessionId?.endsWith("-b")) {
+          return {
+            root: {
+              backendNodeId: 3,
+              documentURL: childBState.url,
+              children: [{ nodeType: 1, backendNodeId: 301 }],
+            },
+          };
+        }
+        return {
+          root: {
+            backendNodeId: 1,
+            documentURL: "https://host.test/",
+            children: [{ nodeType: 1, backendNodeId: 101 }],
+          },
+        };
       }
       if (method === "DOM.resolveNode") {
         return { routedSessionId: target.sessionId };
@@ -2975,14 +3044,9 @@ describe("idle soft-detach and immediate close/return detach", () => {
 
     const refs = new RefStore();
     const docChanged = vi.fn((tabId: number) => refs.invalidateTab(tabId));
-    const childInvalidated = vi.fn(
-      (
-        tabId: number,
-        stale: { sessionIds: ReadonlySet<string>; frameIds: ReadonlySet<string> },
-      ) => {
-        refs.invalidateChildFrames(tabId, stale);
-      },
-    );
+    const childInvalidated = vi.fn((tabId: number, staleFrameIds: ReadonlySet<string>) => {
+      refs.invalidateChildFrames(tabId, staleFrameIds);
+    });
     const cdp = new ChromiumCdp(api, {
       onDocumentChanged: docChanged,
       onChildFramesInvalidated: childInvalidated,
@@ -2994,23 +3058,44 @@ describe("idle soft-detach and immediate close/return detach", () => {
       // Let frame discovery quiet timer settle so initial child frame trees are recorded.
       await vi.advanceTimersByTimeAsync(50);
 
-      refs.set("e1", 10, { tabId: 53, frameId: "root" });
-      refs.set("e2", 20, { tabId: 53, frameId: "child-a", cdpSessionId: "s1-a" });
-      refs.set("e3", 30, { tabId: 53, frameId: "child-b", cdpSessionId: "s1-b" });
+      refs.set("e1", 10, { tabId: 53, frameId: "root", loaderId: "root-loader-1" });
+      refs.set("e2", 20, {
+        tabId: 53,
+        frameId: "child-a",
+        loaderId: "child-a-loader-1",
+        documentElementBackendNodeId: 201,
+      });
+      refs.set("e3", 30, {
+        tabId: 53,
+        frameId: "child-b",
+        loaderId: "child-b-loader-1",
+      });
+      const e2Entry = refs.resolveEntry("e2");
+      const e3Entry = refs.resolveEntry("e3");
+      if (
+        e2Entry?.kind !== "dom" ||
+        !e2Entry.handle ||
+        e3Entry?.kind !== "dom" ||
+        !e3Entry.handle
+      ) {
+        throw new Error("expected dom ref entries with FrameNodeHandle");
+      }
+      const e2Handle = e2Entry.handle;
+      const e3Handle = e3Entry.handle;
       const initialRevision = refs.revision;
 
       // Soft-detach #1 -> reattach with unchanged OOPIFs (`s2-a`, `s2-b`).
       await vi.advanceTimersByTimeAsync(DEFAULT_IDLE_DETACH_MS);
       expect(cdp.isAttached(53)).toBe(false);
 
-      const resolveGen2 = cdp.sendToTarget<{ routedSessionId: string }>(
-        { tabId: 53, sessionId: "s1-a" },
+      const resolveGen2 = cdp.sendToFrame<{ routedSessionId: string }>(
+        e2Handle,
         "DOM.resolveNode",
         { backendNodeId: 20 },
       );
-      // A concurrent caller must wait for the same reconciliation.
-      const guardGen2 = cdp.sendGuarded<{ routedSessionId: string }>(
-        { tabId: 53, sessionId: "s1-b" },
+      // A concurrent caller must wait for the same reconciliation and route to `s2-b`.
+      const guardGen2 = cdp.sendToFrame<{ routedSessionId: string }>(
+        e3Handle,
         "DOM.resolveNode",
         { backendNodeId: 30 },
         {},
@@ -3032,35 +3117,39 @@ describe("idle soft-detach and immediate close/return detach", () => {
         url: "https://oopif-b.test/submitted",
       };
 
-      const resolveGen3FromS1 = cdp.sendToTarget<{ routedSessionId: string }>(
-        { tabId: 53, sessionId: "s1-a" },
+      const resolveGen3 = cdp.sendToFrame<{ routedSessionId: string }>(
+        e2Handle,
         "DOM.resolveNode",
         { backendNodeId: 20 },
       );
       await vi.advanceTimersByTimeAsync(50);
-      expect((await resolveGen3FromS1).routedSessionId).toBe("s3-a");
-      expect(cdp.resolveTarget({ tabId: 53, sessionId: "s2-a" })).toEqual({
-        tabId: 53,
-        sessionId: "s3-a",
-      });
+      expect((await resolveGen3).routedSessionId).toBe("s3-a");
 
       expect(docChanged).not.toHaveBeenCalled();
-      expect(childInvalidated).toHaveBeenCalledExactlyOnceWith(53, {
-        frameIds: new Set(["child-b"]),
-        sessionIds: new Set(["s2-b", "s1-b"]),
-      });
-      // Main ref `@e1` and unchanged OOPIF ref `@e2` remain valid; navigated OOPIF `@e3` is invalidated and revision bumped!
+      expect(childInvalidated).toHaveBeenCalledExactlyOnceWith(53, new Set(["child-b"]));
+      // Main ref `@e1` and unchanged OOPIF ref `@e2` remain valid; navigated OOPIF `@e3` is invalidated!
       expect(refs.resolve("e1", { tabId: 53 })).toBe(10);
       expect(refs.resolve("e2", { tabId: 53 })).toBe(20);
       expect(refs.resolve("e3", { tabId: 53 })).toBeNull();
       expect(refs.revision).toBeGreaterThan(initialRevision);
 
-      // Hard detach clears remapped sessions.
-      await cdp.detach(53);
-      expect(cdp.resolveTarget({ tabId: 53, sessionId: "s1-a" })).toEqual({
-        tabId: 53,
-        sessionId: "s1-a",
+      // Even if a caller directly invokes `sendToFrame` with the pre-navigation `FrameNodeHandle`
+      // (same `backendNodeId: 30` integer in the new renderer), `loaderId` mismatch rejects deterministically!
+      await expect(
+        cdp.sendToFrame(e3Handle, "DOM.resolveNode", { backendNodeId: 30 }),
+      ).rejects.toBeInstanceOf(StaleFrameHandleError);
+
+      // Same-`loaderId` `document.open()` replacing `documentElementBackendNodeId` on `child-a`
+      // also deterministically rejects `e2Handle` with `StaleFrameHandleError`!
+      childADocElemBackendNodeId = 999;
+      onEvent.fire({ tabId: 53, sessionId: "s3-a" }, "Page.documentOpened", {
+        frame: { id: "child-a", loaderId: "child-a-loader-1", url: "https://oopif-a.test/pay" },
       });
+      await expect(
+        cdp.sendToFrame(e2Handle, "DOM.resolveNode", { backendNodeId: 20 }),
+      ).rejects.toBeInstanceOf(StaleFrameHandleError);
+
+      await cdp.detach(53);
     } finally {
       cdp.dispose();
     }
@@ -3226,10 +3315,7 @@ describe("idle soft-detach and immediate close/return detach", () => {
       const reattach = cdp.ensureAttached(58);
       await vi.advanceTimersByTimeAsync(50);
       await reattach;
-      expect(childInvalidated).toHaveBeenCalledExactlyOnceWith(58, {
-        frameIds: new Set(["child-u"]),
-        sessionIds: new Set(["unprobed-1"]),
-      });
+      expect(childInvalidated).toHaveBeenCalledExactlyOnceWith(58, new Set(["child-u"]));
     } finally {
       cdp.dispose();
     }

@@ -1,24 +1,20 @@
 // Chromium `BrowserDriver` implementation. Wraps `chrome.debugger.*`
-// so each tool implementation can think in terms of typed `send<T>`
-// calls and a single attach-once-per-tab cache.
+// so each tool implementation can think in terms of typed `send<T>` /
+// `sendToFrame<T>` calls and a single per-tab discriminated-union state machine.
 //
 // Lifecycle notes:
 // * `chrome.debugger.attach()` will fail with "Another debugger is
-//   already attached" if invoked twice for the same tab — we track
-//   attachments in `attachedTabs` to coalesce. The CDP protocol
-//   version pinned here ("1.3") matches what intern uses and what
-//   Playwright targets for stable Chrome / Edge / Brave.
-// * Closing a tab implicitly detaches; we do not race-clean here.
-//   Higher-level code calls `detach()` explicitly when a session
-//   stops to keep the "Agent controlling — DevTools" infobar visible
-//   only while we actually need it.
-// * MV3 service workers can be evicted mid-call. The wrapper
-//   propagates `chrome.runtime.lastError` as a thrown Error so
-//   callers can decide whether to retry vs. surface an `cdp_failed`.
-// * Native JS dialogs (`alert` / `confirm` / `prompt` / `beforeunload`)
-//   block CDP until dismissed. We listen for `Page.javascriptDialogOpening`,
-//   retain pending state until an explicit agent decision, and record the
-//   actual closing event for tool results.
+//   already attached" if invoked twice for the same tab — each tab's
+//   lifecycle is tracked in `tabs: Map<number, TabAttachment>` as
+//   `Detached | Attaching | Attached | SoftDetached`.
+// * Closing a tab implicitly detaches; higher-level code calls `detach()`
+//   explicitly when a session stops so the "Agent controlling" infobar
+//   stays visible only while needed, and idle tabs soft-detach after 75s
+//   once all active leases (`retainTabAttachment` / `onEvent`) are released.
+// * Transient OOPIF `sessionId` strings never leave `browser-driver/`:
+//   upper layers address frames and nodes via `FrameDocumentHandle` /
+//   `FrameNodeHandle`, and `ChromiumCdp` validates `frameId` + `loaderId`
+//   (+ optional `documentElementBackendNodeId`) internally before routing.
 
 import type {
   ConsoleEntry,
@@ -40,17 +36,22 @@ import {
   type CdpFrameTreeNode,
   type CdpFrameTreeSource,
   type CdpTarget,
+  type FrameDocumentHandle,
+  type FrameNodeHandle,
   omitFrameSubtrees,
+  StaleFrameHandleError,
 } from "./frame-graph";
 import { NativeInputClock } from "./native-input-clock";
 import { sampleNativeInputClock } from "./native-input-probe";
 
 export type CdpDebuggee = chrome.debugger.Debuggee & { sessionId?: string };
 
+export type TabEventListener = (source: CdpDebuggee, method: string, params: unknown) => void;
+
 /** Guards checked at native dispatch, after any asynchronous connection setup. */
 export interface CdpDispatchGuard {
   signal?: AbortSignal;
-  /** Only use this live attachment; never reconnect a cleanup command. */
+  /** Only use this live (or soft-detached) attachment; never reconnect a hard-detached tab. */
   attachmentId?: string;
   /** Called immediately before native send, never for a cancelled or stale command. */
   onDispatch?(): void;
@@ -66,17 +67,7 @@ export interface CdpDebuggerApi {
   detach(target: CdpDebuggee): Promise<void>;
   sendCommand(target: CdpDebuggee, method: string, commandParams?: object): Promise<unknown>;
   getTargets?(): Promise<chrome.debugger.TargetInfo[]>;
-  /**
-   * Fires for every CDP event (`Page.lifecycleEvent`, `DOM.documentUpdated`,
-   * …). The first callback argument is the source debuggee; the second
-   * is the CDP method name; the third is the payload.
-   */
   onEvent: chrome.events.Event<(source: CdpDebuggee, method: string, params: unknown) => void>;
-  /**
-   * Fires when Chrome unilaterally detaches us — most commonly because
-   * the tab navigated to a chrome:// URL or the user clicked
-   * "Cancel debugging" on the system infobar.
-   */
   onDetach: chrome.events.Event<(source: chrome.debugger.Debuggee, reason: string) => void>;
 }
 
@@ -155,11 +146,200 @@ interface NetworkRequestMeta {
 
 interface FrameDiscoveryState {
   rootFrameId?: string;
+  rootNavigationEpoch: number;
   sessions: Set<string>;
   pending: Set<Promise<void>>;
   generation: number;
   enabled: Map<string, Promise<void>>;
   frameIds: Map<string, string>;
+}
+
+export interface TabLease {
+  readonly kind: "retain" | "subscription";
+  readonly reason: string;
+}
+
+export interface FrameRoute {
+  sessionId?: string;
+  loaderId: string;
+  authoritative: boolean;
+  parentFrameId?: string;
+  url?: string;
+  urlFragment?: string;
+  documentElementBackendNodeId?: number;
+  documentOpened?: boolean;
+}
+
+interface EmulationDomainState {
+  deviceMetrics: boolean;
+  userAgent: boolean;
+  touch: boolean;
+}
+
+interface EnabledDomainsState {
+  pageEnabled: boolean;
+  consoleEnabled: boolean;
+  passiveNetworkEnabled: boolean;
+  networkEnabled: boolean;
+}
+
+interface RootDocumentSignature {
+  probed: boolean;
+  dialogOpen?: boolean;
+  frameId?: string;
+  loaderId?: string;
+  url?: string;
+  urlFragment?: string;
+  backendNodeId?: number;
+  documentElementBackendNodeId?: number;
+  documentUrl?: string;
+}
+
+interface DeferredRootDocumentCheck {
+  expected: RootDocumentSignature;
+  verification?: Promise<void>;
+}
+
+interface PendingDialogState {
+  dialog: PendingJavaScriptDialog;
+  attachmentId: string;
+  defaultPrompt?: string;
+  hasBrowserHandler?: boolean;
+  source: CdpDebuggee;
+  resolving: boolean;
+  timer: ReturnType<typeof setTimeout>;
+  closed: Set<(result: JavaScriptDialogInfo | Error) => void>;
+}
+
+interface TabHistoryState {
+  owners: Set<string>;
+  claims: Map<string, object>;
+  dialogBuffer: JavaScriptDialogInfo[];
+  dialogSequence: number;
+  dialogGeneration: number;
+  consoleBuffer: ConsoleEntry[];
+  consoleSequence: number;
+  softDetachConsoleWaterMark?: number;
+  networkBuffer: NetworkEntry[];
+  networkSequence: number;
+}
+
+interface SoftDetachSnapshot {
+  attachmentId: string;
+  rootSignature: RootDocumentSignature;
+  frames: Map<string, FrameRoute>;
+}
+
+/**
+ * Single discriminated-union lifecycle for one browser tab's debugger state.
+ * Every per-tab field lives on its active variant rather than scattered across parallel Maps.
+ */
+export type TabAttachment =
+  | {
+      kind: "detached";
+      version: number;
+      detachInFlight?: Promise<void>;
+      fencedAttach?: Promise<void>;
+      leases: Set<TabLease>;
+      eventListeners: Set<TabEventListener>;
+      history: TabHistoryState;
+    }
+  | {
+      kind: "attaching";
+      version: number;
+      attachingId: string;
+      rawAttached: boolean;
+      attachInFlight: Promise<void>;
+      previousSoftDetach?: SoftDetachSnapshot;
+      frames: Map<string, FrameRoute>;
+      frameDiscovery: FrameDiscoveryState;
+      leases: Set<TabLease>;
+      eventListeners: Set<TabEventListener>;
+      inFlightCommands: number;
+      domains: EnabledDomainsState;
+      emulation?: EmulationDomainState;
+      networkRequestMeta: Map<string, NetworkRequestMeta>;
+      openDialog?: Promise<void>;
+      pendingDialog?: PendingDialogState;
+      deferredRootCheck?: DeferredRootDocumentCheck;
+      history: TabHistoryState;
+    }
+  | {
+      kind: "attached";
+      version: number;
+      attachmentId: string;
+      frames: Map<string, FrameRoute>;
+      frameDiscovery: FrameDiscoveryState;
+      leases: Set<TabLease>;
+      eventListeners: Set<TabEventListener>;
+      idleTimer?: ReturnType<typeof setTimeout>;
+      inFlightCommands: number;
+      domains: EnabledDomainsState;
+      emulation?: EmulationDomainState;
+      networkRequestMeta: Map<string, NetworkRequestMeta>;
+      openDialog?: Promise<void>;
+      pendingDialog?: PendingDialogState;
+      deferredRootCheck?: DeferredRootDocumentCheck;
+      history: TabHistoryState;
+    }
+  | {
+      kind: "soft_detached";
+      version: number;
+      snapshot: SoftDetachSnapshot;
+      detachInFlight?: Promise<void>;
+      leases: Set<TabLease>;
+      eventListeners: Set<TabEventListener>;
+      history: TabHistoryState;
+    };
+
+type ActiveTabAttachment = Extract<TabAttachment, { kind: "attaching" | "attached" }>;
+
+function createFrameDiscoveryState(): FrameDiscoveryState {
+  return {
+    rootNavigationEpoch: 0,
+    sessions: new Set(),
+    pending: new Set(),
+    generation: 0,
+    enabled: new Map(),
+    frameIds: new Map(),
+  };
+}
+
+function createEnabledDomainsState(): EnabledDomainsState {
+  return {
+    pageEnabled: false,
+    consoleEnabled: false,
+    passiveNetworkEnabled: false,
+    networkEnabled: false,
+  };
+}
+
+function createHistoryState(): TabHistoryState {
+  return {
+    owners: new Set(),
+    claims: new Map(),
+    dialogBuffer: [],
+    dialogSequence: 0,
+    dialogGeneration: 0,
+    consoleBuffer: [],
+    consoleSequence: 0,
+    networkBuffer: [],
+    networkSequence: 0,
+  };
+}
+
+function isActiveAttachment(entry: TabAttachment | undefined): entry is ActiveTabAttachment {
+  return entry?.kind === "attached" || entry?.kind === "attaching";
+}
+
+function maxConsoleTimestamp(entries: readonly ConsoleEntry[]): number | undefined {
+  let max: number | undefined;
+  for (const entry of entries) {
+    if (typeof entry.timestamp === "number" && Number.isFinite(entry.timestamp)) {
+      max = max === undefined ? entry.timestamp : Math.max(max, entry.timestamp);
+    }
+  }
+  return max;
 }
 
 async function settleBeforeDeadline(promises: Promise<void>[], deadline: number): Promise<boolean> {
@@ -184,13 +364,8 @@ export interface ChromiumCdpOptions {
   canControlDialog?: (tabId: number) => boolean | Promise<boolean>;
   /** Invalidate tab refs when the root document or debugger attachment changes. */
   onDocumentChanged?: (tabId: number) => void;
-  /** Notify tab observers when child OOPIF sessions are remapped across idle soft-detach. */
-  onChildFramesRemapped?: (tabId: number, remapped: ReadonlyMap<string, string>) => void;
-  /** Invalidate child-frame refs when OOPIF targets disappear or navigate across idle soft-detach. */
-  onChildFramesInvalidated?: (
-    tabId: number,
-    stale: { sessionIds: ReadonlySet<string>; frameIds: ReadonlySet<string> },
-  ) => void;
+  /** Invalidate child-frame refs when child frames disappear or navigate across idle soft-detach. */
+  onChildFramesInvalidated?: (tabId: number, staleFrameIds: ReadonlySet<string>) => void;
   /** Notify tab observers when `chrome.debugger` soft-detaches on idle without replacing the document. */
   onSoftDetached?: (tabId: number) => void;
   /**
@@ -200,37 +375,6 @@ export interface ChromiumCdpOptions {
    * omits `idleDetachMs`); `<= 0` disables it.
    */
   idleDetachMs?: number;
-}
-
-interface EmulationDomainState {
-  deviceMetrics: boolean;
-  userAgent: boolean;
-  touch: boolean;
-}
-
-interface RootDocumentSignature {
-  probed: boolean;
-  dialogOpen?: boolean;
-  frameId?: string;
-  loaderId?: string;
-  url?: string;
-  urlFragment?: string;
-  backendNodeId?: number;
-  documentElementBackendNodeId?: number;
-  documentUrl?: string;
-}
-
-interface DeferredRootDocumentCheck {
-  expected: RootDocumentSignature;
-  verification?: Promise<void>;
-}
-
-interface ChildFrameSignature {
-  sessionId: string;
-  frameId?: string;
-  loaderId?: string;
-  url?: string;
-  urlFragment?: string;
 }
 
 function sameRootDocumentSignature(
@@ -258,12 +402,8 @@ function sameRootDocumentSignature(
   );
 }
 
-function sameChildFrameSignature(
-  before: ChildFrameSignature,
-  after: ChildFrameSignature | undefined,
-): after is ChildFrameSignature {
-  if (!after || !before.frameId || before.frameId !== after.frameId) return false;
-  if (!before.loaderId || !after.loaderId) return false;
+function sameChildFrameRoute(before: FrameRoute, after: FrameRoute | undefined): boolean {
+  if (!after || !after.authoritative || !before.loaderId || !after.loaderId) return false;
   return (
     before.loaderId === after.loaderId &&
     before.url === after.url &&
@@ -271,144 +411,170 @@ function sameChildFrameSignature(
   );
 }
 
-const MAX_REMAPPED_CHILD_SESSIONS = 256;
-
 /**
- * Wrapper around `chrome.debugger` that owns the "attach once per
- * tabId" cache and exposes typed `send<T>()`.
+ * Wrapper around `chrome.debugger` that owns the single per-tab `TabAttachment`
+ * state machine and seals `cdpSessionId` routing behind `FrameDocumentHandle` / `FrameNodeHandle`.
  */
 export class ChromiumCdp {
   private readonly api: CdpDebuggerApi;
   private readonly inputClock = new NativeInputClock(() => sampleNativeInputClock(this.api));
   private readonly readGate = new CdpReadGate();
-  private readonly attachedTabs = new Set<number>();
-  private readonly softDetachedTabs = new Set<number>();
-  private readonly softDetachedDocSignatures = new Map<number, RootDocumentSignature>();
-  private readonly softDetachedAttachmentIds = new Map<number, string>();
-  private readonly softDetachedFrameSessions = new Map<number, Map<string, ChildFrameSignature>>();
-  private readonly remappedChildSessions = new Map<number, Map<string, string>>();
-  private readonly retainedAttachments = new Map<number, Set<object>>();
-  private readonly deferredRootDocumentChecks = new Map<number, DeferredRootDocumentCheck>();
-  private readonly claimAttempts = new Map<number, Map<string, object>>();
-  private readonly attachmentVersions = new Map<number, number>();
-  private readonly attachmentIds = new Map<number, string>();
-  private readonly attachingIds = new Map<number, string>();
-  private readonly attachInFlight = new Map<number, Promise<void>>();
-  private readonly detachInFlight = new Map<number, Promise<void>>();
-  private readonly inFlightCommands = new Map<number, number>();
-  private readonly idleTimers = new Map<number, ReturnType<typeof setTimeout>>();
-  private readonly activeEmulationTabs = new Map<number, EmulationDomainState>();
+  private readonly tabs = new Map<number, TabAttachment>();
   private readonly backgroundExecution = new BackgroundExecution(
-    (tabId) => this.attachmentIds.get(tabId),
+    (tabId) => this.getAttachmentId(tabId),
     (tabId, enabled) =>
       this.runTrackedSendCommand({ tabId }, "Emulation.setFocusEmulationEnabled", { enabled }),
   );
-  private readonly tabOwners = new Map<number, Set<string>>();
-  private syncGeneration = 0;
-  private readonly pendingDialogEntries = new Map<
-    number,
-    {
-      dialog: PendingJavaScriptDialog;
-      attachmentId: string;
-      defaultPrompt?: string;
-      hasBrowserHandler?: boolean;
-      source: CdpDebuggee;
-      resolving: boolean;
-      timer: ReturnType<typeof setTimeout>;
-      closed: Set<(result: JavaScriptDialogInfo | Error) => void>;
-    }
-  >();
-  private readonly openDialogs = new Map<number, Promise<void>>();
-  private readonly dialogGenerations = new Map<number, number>();
   private readonly dialogListeners = new Set<
     (tabId: number, dialog: PendingJavaScriptDialog | null, reason?: "decision_timeout") => void
   >();
-  private readonly dialogBuffers = new Map<number, JavaScriptDialogInfo[]>();
-  private readonly dialogSequences = new Map<number, number>();
-  private readonly consoleBuffers = new Map<number, ConsoleEntry[]>();
-  private readonly consoleSequences = new Map<number, number>();
-  private readonly consoleDomainsEnabledTabs = new Map<number, string>();
-  private readonly activeConsoleCaptureTabs = new Set<number>();
-  private readonly networkBuffers = new Map<number, NetworkEntry[]>();
-  private readonly networkSequences = new Map<number, number>();
-  private readonly networkDomainsEnabledTabs = new Set<number>();
-  private readonly passiveNetworkEnabledTabs = new Set<number>();
-  private readonly networkRequestMeta = new Map<number, Map<string, NetworkRequestMeta>>();
-  private readonly frameDiscovery = new Map<number, FrameDiscoveryState>();
+  private syncGeneration = 0;
+  private eventSubscription: { dispose(): void } | null = null;
   private detachSubscription: { dispose(): void } | null = null;
-  private dialogSubscription: { dispose(): void } | null = null;
-  private consoleSubscription: { dispose(): void } | null = null;
-  private networkSubscription: { dispose(): void } | null = null;
-  private frameTargetSubscription: { dispose(): void } | null = null;
 
   constructor(
     api: CdpDebuggerApi = chromeDebuggerApi,
     private readonly options: ChromiumCdpOptions = {},
   ) {
     this.api = api;
+    this.bindEvents();
     this.bindAutoDetach();
-    this.bindDialogHandler();
-    this.bindConsoleHandler();
-    this.bindNetworkHandler();
-    this.bindFrameTargetHandler();
+  }
+
+  private ensureTabEntry(tabId: number): TabAttachment {
+    const existing = this.tabs.get(tabId);
+    if (existing) return existing;
+    const created: TabAttachment = {
+      kind: "detached",
+      version: 0,
+      leases: new Set(),
+      eventListeners: new Set(),
+      history: createHistoryState(),
+    };
+    this.tabs.set(tabId, created);
+    return created;
+  }
+
+  private maybePruneDetachedEntry(tabId: number): void {
+    const entry = this.tabs.get(tabId);
+    if (!entry || entry.kind !== "detached") return;
+    if (
+      entry.version === 0 &&
+      !entry.detachInFlight &&
+      !entry.fencedAttach &&
+      entry.leases.size === 0 &&
+      entry.eventListeners.size === 0 &&
+      entry.history.owners.size === 0 &&
+      entry.history.claims.size === 0 &&
+      entry.history.dialogBuffer.length === 0 &&
+      entry.history.dialogSequence === 0 &&
+      entry.history.consoleBuffer.length === 0 &&
+      entry.history.consoleSequence === 0 &&
+      entry.history.networkBuffer.length === 0 &&
+      entry.history.networkSequence === 0
+    ) {
+      this.tabs.delete(tabId);
+    }
   }
 
   /** Identity of this actual debugger attachment, independent of frame topology. */
   getAttachmentId(tabId: number): string | undefined {
-    return this.attachmentIds.get(tabId);
+    const entry = this.tabs.get(tabId);
+    return entry?.kind === "attached" ? entry.attachmentId : undefined;
   }
 
-  /** Map a pre-soft-detach OOPIF child `sessionId` to its current reattached `sessionId`. */
-  resolveTarget<T extends CdpDebuggee>(target: T): T {
-    if (typeof target.tabId !== "number" || !target.sessionId) return target;
-    const remapped = this.remappedChildSessions.get(target.tabId)?.get(target.sessionId);
-    if (!remapped || remapped === target.sessionId) return target;
-    return { ...target, sessionId: remapped };
+  private activeOrAttachingId(tabId: number): string | undefined {
+    const entry = this.tabs.get(tabId);
+    if (entry?.kind === "attached") return entry.attachmentId;
+    if (entry?.kind === "attaching" && entry.rawAttached) return entry.attachingId;
+    return undefined;
   }
 
-  /** Prevent idle soft-detach while a passive CDP event operation (such as download) is active. */
-  retainTabAttachment(tabId: number): () => void {
-    const tokens = this.retainedAttachments.get(tabId) ?? new Set<object>();
-    const token = {};
-    tokens.add(token);
-    this.retainedAttachments.set(tabId, tokens);
+  /** Prevent idle soft-detach while a leased operation (download, screencast, debug capture) is active. */
+  retainTabAttachment(tabId: number, reason = "retain"): () => void {
+    return this.acquireLease(tabId, { kind: "retain", reason });
+  }
+
+  private acquireLease(tabId: number, lease: TabLease): () => void {
+    const entry = this.ensureTabEntry(tabId);
+    entry.leases.add(lease);
     this.clearIdleTimer(tabId);
     let released = false;
     return () => {
       if (released) return;
       released = true;
-      const current = this.retainedAttachments.get(tabId);
-      current?.delete(token);
-      if (current && current.size === 0) {
-        this.retainedAttachments.delete(tabId);
-      }
-      if (this.attachedTabs.has(tabId)) {
+      const current = this.tabs.get(tabId);
+      current?.leases.delete(lease);
+      if (current?.kind === "attached") {
         this.touchTabActivity(tabId);
+      } else {
+        this.maybePruneDetachedEntry(tabId);
       }
     };
   }
 
-  /** Reattach `tabId` only when it was previously idle-soft-detached; never reconnects hard-detached tabs. */
-  async reattachIfSoftDetached(tabId: number): Promise<void> {
-    const attaching = this.attachInFlight.get(tabId);
-    if (attaching) await attaching;
-    if (this.softDetachedTabs.has(tabId)) {
-      await this.ensureAttached(tabId);
-    } else if (this.attachedTabs.has(tabId)) {
-      this.touchTabActivity(tabId);
-      await this.verifyRootDocumentAfterDialog(tabId);
-    }
+  /**
+   * Subscribe to CDP events for `tabId` while holding an automatic idle lease.
+   * Disposing the subscription releases the lease so the tab regains 75s Soft-Detach.
+   */
+  onEvent(tabId: number, handler: TabEventListener): { dispose(): void } {
+    const entry = this.ensureTabEntry(tabId);
+    entry.eventListeners.add(handler);
+    const releaseLease = this.acquireLease(tabId, {
+      kind: "subscription",
+      reason: "event_subscription",
+    });
+    let disposed = false;
+    return {
+      dispose: () => {
+        if (disposed) return;
+        disposed = true;
+        this.tabs.get(tabId)?.eventListeners.delete(handler);
+        releaseLease();
+      },
+    };
   }
 
-  /** Reattach a soft-detached tab that had tracked OOPIFs so `sync` reconciles child-frame sessions. */
-  async reconcileSoftDetachedFrames(tabId: number): Promise<void> {
-    const attaching = this.attachInFlight.get(tabId);
-    if (attaching) await attaching;
-    if (this.softDetachedTabs.has(tabId) && this.softDetachedFrameSessions.has(tabId)) {
-      await this.ensureAttached(tabId);
-    } else {
-      await this.verifyRootDocumentAfterDialog(tabId);
+  /** True when `source` originated from `handle`'s current live CDP target in `tabId`. */
+  isEventFromFrame(source: CdpDebuggee, handle: FrameDocumentHandle): boolean {
+    if (source.tabId !== handle.tabId) return false;
+    if (!handle.frameId) return !source.sessionId;
+    const entry = this.tabs.get(handle.tabId);
+    if (isActiveAttachment(entry)) {
+      const route = entry.frames.get(handle.frameId);
+      if (route) return (source.sessionId ?? undefined) === route.sessionId;
+      for (const [sessionId, mappedFrameId] of entry.frameDiscovery.frameIds) {
+        if (mappedFrameId === handle.frameId) return source.sessionId === sessionId;
+      }
+      if (entry.frameDiscovery.rootFrameId === handle.frameId) return !source.sessionId;
     }
+    return !source.sessionId;
+  }
+
+  /** True when `frameId` and `parentFrameId` (or the root target when omitted) live in distinct CDP targets. */
+  hasOwnFrameTarget(tabId: number, frameId: string, parentFrameId?: string): boolean {
+    const entry = this.tabs.get(tabId);
+    if (!isActiveAttachment(entry)) return false;
+    const childRoute = entry.frames.get(frameId);
+    if (!childRoute) return false;
+    if (parentFrameId === undefined) return Boolean(childRoute.sessionId);
+    const parentRoute = entry.frames.get(parentFrameId);
+    if (!parentRoute) return false;
+    return childRoute.sessionId !== parentRoute.sessionId;
+  }
+
+  /** Cache verified `documentElementBackendNodeId` on a frame's live route until document replacement. */
+  recordFrameDocumentElement(
+    tabId: number,
+    frameId: string,
+    loaderId: string,
+    documentElementBackendNodeId: number,
+  ): void {
+    const entry = this.tabs.get(tabId);
+    if (!isActiveAttachment(entry) || !frameId) return;
+    const route = entry.frames.get(frameId);
+    if (!route || route.loaderId !== loaderId || route.documentOpened) return;
+    route.documentElementBackendNodeId = documentElementBackendNodeId;
   }
 
   prepareInputTimestamp() {
@@ -429,10 +595,9 @@ export class ChromiumCdp {
 
   /** Only explicit automation control may retain the focus/visibility override. */
   async acquireBackgroundExecution(sessionId: string, tabId: number): Promise<void> {
-    const attempts = this.claimAttempts.get(tabId) ?? new Map<string, object>();
+    const entry = this.ensureTabEntry(tabId);
     const attempt = {};
-    attempts.set(sessionId, attempt);
-    this.claimAttempts.set(tabId, attempts);
+    entry.history.claims.set(sessionId, attempt);
     const retained = this.backgroundExecution.has(sessionId, tabId);
     this.trackSessionTab(sessionId, tabId);
     this.backgroundExecution.retain(sessionId, tabId);
@@ -442,10 +607,12 @@ export class ChromiumCdp {
         throw new Error("Background execution was released during setup");
       }
     } catch (error) {
-      if (!retained && this.claimAttempts.get(tabId)?.get(sessionId) === attempt) {
-        this.claimAttempts.get(tabId)?.delete(sessionId);
+      const current = this.tabs.get(tabId);
+      if (!retained && current?.history.claims.get(sessionId) === attempt) {
+        current.history.claims.delete(sessionId);
         this.backgroundExecution.release(sessionId, tabId);
         await cleanupWait(this.backgroundExecution.synchronize(tabId)).catch(() => {});
+        this.maybePruneDetachedEntry(tabId);
       }
       throw error;
     }
@@ -475,151 +642,250 @@ export class ChromiumCdp {
   }
 
   private async ensureRawAttached(tabId: number): Promise<void> {
-    // Returning a tab clears the cache before Chrome finishes detaching.
-    // New observers must wait before opening the next connection to that tab.
-    const detaching = this.detachInFlight.get(tabId);
-    if (detaching) await detaching;
-    const existing = this.attachInFlight.get(tabId);
-    if (existing) {
-      await existing;
+    let entry = this.tabs.get(tabId);
+    if ((entry?.kind === "detached" || entry?.kind === "soft_detached") && entry.detachInFlight) {
+      await entry.detachInFlight;
+      entry = this.tabs.get(tabId);
     }
-    if (existing || this.attachedTabs.has(tabId)) {
+    if (entry?.kind === "detached" && entry.fencedAttach) {
+      await entry.fencedAttach;
+      return;
+    }
+    if (entry?.kind === "attaching") {
+      await entry.attachInFlight;
       await this.verifyRootDocumentAfterDialog(tabId);
       this.touchTabActivity(tabId);
       return;
     }
-    const version = this.attachmentVersions.get(tabId) ?? 0;
-    const wasSoftDetached = this.softDetachedTabs.has(tabId);
-    const previousDocSignature = this.softDetachedDocSignatures.get(tabId);
-    const previousAttachmentId = wasSoftDetached
-      ? this.softDetachedAttachmentIds.get(tabId)
-      : undefined;
-    const previousChildFrames = wasSoftDetached
-      ? this.softDetachedFrameSessions.get(tabId)
-      : undefined;
-    const check = () => {
-      if ((this.attachmentVersions.get(tabId) ?? 0) !== version)
-        throw new Error("Debugger attachment was released during setup");
+    if (entry?.kind === "attached") {
+      await this.verifyRootDocumentAfterDialog(tabId);
+      this.touchTabActivity(tabId);
+      return;
+    }
+
+    const base = this.ensureTabEntry(tabId);
+    const version = base.version;
+    const previousSoftDetach = base.kind === "soft_detached" ? base.snapshot : undefined;
+    let resolveAttach!: () => void;
+    let rejectAttach!: (err: Error) => void;
+    const attachInFlight = new Promise<void>((resolve, reject) => {
+      resolveAttach = resolve;
+      rejectAttach = reject;
+    });
+
+    const attachingEntry: Extract<TabAttachment, { kind: "attaching" }> = {
+      kind: "attaching",
+      version,
+      attachingId: previousSoftDetach?.attachmentId ?? crypto.randomUUID(),
+      rawAttached: false,
+      attachInFlight,
+      previousSoftDetach,
+      frames: new Map(),
+      frameDiscovery: createFrameDiscoveryState(),
+      leases: base.leases,
+      eventListeners: base.eventListeners,
+      inFlightCommands: 0,
+      domains: createEnabledDomainsState(),
+      networkRequestMeta: new Map(),
+      history: base.history,
     };
-    const attach = (async () => {
-      let currentAttachmentId =
-        (wasSoftDetached ? previousAttachmentId : undefined) ?? crypto.randomUUID();
+    this.tabs.set(tabId, attachingEntry);
+
+    const check = () => {
+      const current = this.tabs.get(tabId);
+      if (current !== attachingEntry || current.version !== version) {
+        throw new Error("Debugger attachment was released during setup");
+      }
+    };
+
+    try {
       await this.api.attach({ tabId }, CDP_PROTOCOL_VERSION);
+      attachingEntry.rawAttached = true;
       try {
         check();
-        this.attachingIds.set(tabId, currentAttachmentId);
         const pageEnabled = this.enablePageDomain(tabId);
         if (
-          wasSoftDetached &&
+          previousSoftDetach !== undefined &&
           !(await cleanupWait(pageEnabled, READ_TIMEOUT_MS)) &&
-          !this.pendingDialogEntries.has(tabId)
+          !attachingEntry.pendingDialog
         ) {
-          // Chrome can wait in Page.enable until a pre-existing native dialog closes.
           throw new Error(
             "Chrome did not respond during debugger reattachment. Close any open browser dialog and retry.",
           );
         }
         await pageEnabled;
+        attachingEntry.domains.pageEnabled = true;
         check();
         await this.enableNetworkDomainBestEffort(tabId);
         check();
+
         let rootDocumentUnchanged = false;
-        if (wasSoftDetached) {
+        if (previousSoftDetach !== undefined) {
           const currentDocSignature = await this.probeRootDocumentSignature(tabId);
           check();
           rootDocumentUnchanged = sameRootDocumentSignature(
-            previousDocSignature,
+            previousSoftDetach.rootSignature,
             currentDocSignature,
           );
           if (!rootDocumentUnchanged) {
-            currentAttachmentId = crypto.randomUUID();
-            this.attachingIds.set(tabId, currentAttachmentId);
-            const pendingDialog = this.pendingDialogEntries.get(tabId);
-            if (pendingDialog && pendingDialog.attachmentId === previousAttachmentId) {
-              pendingDialog.attachmentId = currentAttachmentId;
+            const previousAttachmentId = attachingEntry.attachingId;
+            attachingEntry.attachingId = crypto.randomUUID();
+            if (
+              attachingEntry.pendingDialog &&
+              attachingEntry.pendingDialog.attachmentId === previousAttachmentId
+            ) {
+              attachingEntry.pendingDialog.attachmentId = attachingEntry.attachingId;
             }
-            this.remappedChildSessions.delete(tabId);
             this.options.onDocumentChanged?.(tabId);
-          } else if (currentDocSignature.dialogOpen && previousDocSignature) {
-            this.deferredRootDocumentChecks.set(tabId, { expected: previousDocSignature });
+          } else if (currentDocSignature.dialogOpen) {
+            attachingEntry.deferredRootCheck = { expected: previousSoftDetach.rootSignature };
+          }
+          if (currentDocSignature.frameId) {
+            const existingRoot = attachingEntry.frames.get(currentDocSignature.frameId);
+            attachingEntry.frames.set(currentDocSignature.frameId, {
+              loaderId: currentDocSignature.loaderId ?? existingRoot?.loaderId ?? "",
+              authoritative: true,
+              url: currentDocSignature.url ?? existingRoot?.url,
+              urlFragment: currentDocSignature.urlFragment ?? existingRoot?.urlFragment,
+              documentElementBackendNodeId: currentDocSignature.documentElementBackendNodeId,
+            });
           }
         }
+
         await this.enableFrameDiscovery({ tabId }).catch((err) => {
           console.debug("[bsk cdp] frame discovery unavailable", { tabId, err });
         });
         check();
-        if (wasSoftDetached && rootDocumentUnchanged && previousChildFrames?.size) {
-          await this.reconcileSoftDetachedChildFrames(tabId, previousChildFrames, check);
+
+        if (previousSoftDetach !== undefined && rootDocumentUnchanged) {
+          const hadChildFrames = [...previousSoftDetach.frames.entries()].some(
+            ([frameId, route]) =>
+              frameId !== previousSoftDetach.rootSignature.frameId ||
+              route.sessionId !== undefined ||
+              route.parentFrameId !== undefined,
+          );
+          if (hadChildFrames || attachingEntry.frameDiscovery.sessions.size > 0) {
+            await this.reconcileSoftDetachedChildFrames(
+              tabId,
+              attachingEntry,
+              previousSoftDetach,
+              check,
+            );
+          }
         }
         check();
-        this.attachedTabs.add(tabId);
-        this.attachmentIds.set(tabId, currentAttachmentId);
-        this.attachingIds.delete(tabId);
-        this.softDetachedTabs.delete(tabId);
-        this.softDetachedDocSignatures.delete(tabId);
-        this.softDetachedAttachmentIds.delete(tabId);
-        this.softDetachedFrameSessions.delete(tabId);
+
+        const attachedEntry: Extract<TabAttachment, { kind: "attached" }> = {
+          kind: "attached",
+          version: attachingEntry.version,
+          attachmentId: attachingEntry.attachingId,
+          frames: attachingEntry.frames,
+          frameDiscovery: attachingEntry.frameDiscovery,
+          leases: attachingEntry.leases,
+          eventListeners: attachingEntry.eventListeners,
+          inFlightCommands: attachingEntry.inFlightCommands,
+          domains: attachingEntry.domains,
+          emulation: attachingEntry.emulation,
+          networkRequestMeta: attachingEntry.networkRequestMeta,
+          openDialog: attachingEntry.openDialog,
+          pendingDialog: attachingEntry.pendingDialog,
+          deferredRootCheck: attachingEntry.deferredRootCheck,
+          history: attachingEntry.history,
+        };
+        this.tabs.set(tabId, attachedEntry);
         this.touchTabActivity(tabId);
+        resolveAttach();
       } catch (err) {
-        // A CDP domain enable failed after the raw attach succeeded
-        // (e.g. `Page.enable` rejects because the tab just navigated to
-        // a chrome:// URL or the Web Store). `attachedTabs` does not yet
-        // hold `tabId`, so without rolling back the debugger would stay
-        // attached and the next `ensureAttached` would re-attach and hit
-        // "Another debugger is already attached" forever — the tab is
-        // unusable until the extension is reloaded. Detach directly
-        // (`this.detach()` is a no-op here because `attachedTabs` lacks
-        // the id) so the next attempt starts from a clean slate.
-        this.passiveNetworkEnabledTabs.delete(tabId);
-        if (this.attachingIds.get(tabId) === currentAttachmentId) {
-          this.attachingIds.delete(tabId);
-        }
-        this.deferredRootDocumentChecks.delete(tabId);
-        this.openDialogs.delete(tabId);
-        this.clearFrameState(tabId);
-        const pendingDialog = this.pendingDialogEntries.get(tabId);
-        if (pendingDialog && pendingDialog.attachmentId === currentAttachmentId) {
+        if (attachingEntry.pendingDialog) {
+          const pendingDialog = attachingEntry.pendingDialog;
+          attachingEntry.pendingDialog = undefined;
           clearTimeout(pendingDialog.timer);
-          this.pendingDialogEntries.delete(tabId);
-          for (const close of pendingDialog.closed)
+          for (const close of pendingDialog.closed) {
             close(new Error("Debugger attachment changed; dialog outcome is unknown"));
+          }
           this.emitDialogChanged(tabId, null);
         }
-        if (this.attachmentIds.get(tabId) === currentAttachmentId) {
-          this.attachedTabs.delete(tabId);
-          this.attachmentIds.delete(tabId);
-        }
-        if ((this.attachmentVersions.get(tabId) ?? 0) !== version) {
-          this.attachedTabs.delete(tabId);
-          this.attachmentIds.delete(tabId);
+        this.readGate.reset(tabId);
+        const current = this.tabs.get(tabId);
+        let restoredEntry:
+          | Extract<TabAttachment, { kind: "detached" | "soft_detached" }>
+          | undefined;
+        if (current === attachingEntry) {
+          restoredEntry = previousSoftDetach
+            ? {
+                kind: "soft_detached",
+                version: attachingEntry.version,
+                snapshot: previousSoftDetach,
+                leases: attachingEntry.leases,
+                eventListeners: attachingEntry.eventListeners,
+                history: attachingEntry.history,
+              }
+            : {
+                kind: "detached",
+                version: attachingEntry.version,
+                fencedAttach: attachInFlight,
+                leases: attachingEntry.leases,
+                eventListeners: attachingEntry.eventListeners,
+                history: attachingEntry.history,
+              };
+          this.tabs.set(tabId, restoredEntry);
+        } else {
           this.backgroundExecution.invalidate(tabId);
         }
-        await this.api.detach({ tabId }).catch((detachErr) => {
+        const rollbackDetach = this.api.detach({ tabId }).catch((detachErr) => {
           console.debug("[bsk cdp] rollback detach failed", { tabId, detachErr });
         });
+        if (restoredEntry?.kind === "soft_detached") {
+          restoredEntry.detachInFlight = rollbackDetach;
+        }
+        await rollbackDetach;
+        if (
+          restoredEntry?.kind === "soft_detached" &&
+          restoredEntry.detachInFlight === rollbackDetach
+        ) {
+          restoredEntry.detachInFlight = undefined;
+        }
         throw err;
       }
-    })()
-      .catch((err) => {
-        // Chrome surfaces "Another debugger is already attached" when
-        // (rare) the user opened DevTools on the same tab. Don't swallow
-        // — let the caller decide how to surface it.
-        throw normalizeError(err);
-      })
-      .finally(() => {
-        if (this.attachInFlight.get(tabId) === attach) {
-          this.attachingIds.delete(tabId);
-          this.attachInFlight.delete(tabId);
-        }
-      });
-    this.attachInFlight.set(tabId, attach);
-    await attach;
+    } catch (rawErr) {
+      const normalized = normalizeError(rawErr);
+      const latest = this.tabs.get(tabId);
+      if (latest === attachingEntry) {
+        this.tabs.set(
+          tabId,
+          previousSoftDetach
+            ? {
+                kind: "soft_detached",
+                version: attachingEntry.version,
+                snapshot: previousSoftDetach,
+                leases: attachingEntry.leases,
+                eventListeners: attachingEntry.eventListeners,
+                history: attachingEntry.history,
+              }
+            : {
+                kind: "detached",
+                version: attachingEntry.version,
+                leases: attachingEntry.leases,
+                eventListeners: attachingEntry.eventListeners,
+                history: attachingEntry.history,
+              },
+        );
+        this.maybePruneDetachedEntry(tabId);
+      } else if (latest?.kind === "detached" && latest.fencedAttach === attachInFlight) {
+        latest.fencedAttach = undefined;
+        this.maybePruneDetachedEntry(tabId);
+      }
+      void attachInFlight.catch(() => {});
+      rejectAttach(normalized);
+      throw normalized;
+    }
+
+    await attachInFlight;
     await this.verifyRootDocumentAfterDialog(tabId);
   }
 
   /**
-   * Send a CDP command and decode the result as `T`. Throws on any
-   * `chrome.runtime.lastError`.
+   * Send a CDP command to the tab's root session and decode the result as `T`.
    */
   async send<T = unknown>(
     tabId: number,
@@ -675,6 +941,440 @@ export class ChromiumCdp {
     }
   }
 
+  /**
+   * Route a node/frame-scoped CDP command via a stable `FrameDocumentHandle` / `FrameNodeHandle`:
+   * 1. Transparently reattaches when `SoftDetached` (respecting `guard.attachmentId` without resurrecting hard-detached tabs);
+   * 2. Resolves `handle.frameId` to its current `{ tabId, sessionId }` route and validates `loaderId` (+ optional `documentElementBackendNodeId`);
+   * 3. Deterministically rejects with `StaleFrameHandleError` if the target frame navigated or underwent `document.open()` replacement.
+   */
+  async sendToFrame<T = unknown>(
+    handle: FrameDocumentHandle | FrameNodeHandle,
+    method: string,
+    params?: object,
+    guard?: CdpDispatchGuard,
+  ): Promise<T> {
+    const { tabId } = handle;
+    guard?.signal?.throwIfAborted();
+
+    const currentBefore = this.tabs.get(tabId);
+    if (currentBefore?.kind === "attaching") {
+      await currentBefore.attachInFlight;
+    }
+    guard?.signal?.throwIfAborted();
+
+    if (guard?.attachmentId !== undefined) {
+      const state = this.tabs.get(tabId);
+      if (state?.kind === "soft_detached" && state.snapshot.attachmentId === guard.attachmentId) {
+        await this.ensureAttached(tabId);
+      } else if (state?.kind === "attached") {
+        await this.verifyRootDocumentAfterDialog(tabId);
+        this.touchTabActivity(tabId);
+      }
+      guard.signal?.throwIfAborted();
+      if (this.getAttachmentId(tabId) !== guard.attachmentId) {
+        throw new Error("Debugger attachment changed before dispatch");
+      }
+    } else {
+      await this.ensureAttached(tabId);
+      guard?.signal?.throwIfAborted();
+    }
+
+    // Legacy root shorthand (`frameId === ""` and `loaderId === ""`) routes directly to `{ tabId }`.
+    if (!handle.frameId && !handle.loaderId) {
+      if (guard) {
+        return this.sendGuarded<T>({ tabId }, method, params, guard);
+      }
+      return this.sendToTarget<T>({ tabId }, method, params);
+    }
+
+    const route = await this.resolveValidatedFrameRoute(handle, method, guard?.signal);
+    const target: CdpTarget = {
+      tabId,
+      ...(route.sessionId ? { sessionId: route.sessionId } : {}),
+    };
+
+    try {
+      return (await this.command(
+        target,
+        method,
+        params ?? {},
+        undefined,
+        () => {
+          guard?.signal?.throwIfAborted();
+          if (
+            guard?.attachmentId !== undefined &&
+            this.getAttachmentId(tabId) !== guard.attachmentId
+          ) {
+            throw new Error("Debugger attachment changed before dispatch");
+          }
+          const liveEntry = this.tabs.get(tabId);
+          const liveRoute =
+            liveEntry?.kind === "attached" ? liveEntry.frames.get(handle.frameId) : undefined;
+          if (
+            !liveRoute ||
+            liveRoute.sessionId !== route.sessionId ||
+            liveRoute.loaderId !== handle.loaderId ||
+            (handle.documentElementBackendNodeId !== undefined &&
+              method !== "Runtime.releaseObjectGroup" &&
+              method !== "Runtime.releaseObject" &&
+              (liveRoute.documentOpened ||
+                (liveRoute.documentElementBackendNodeId !== undefined &&
+                  liveRoute.documentElementBackendNodeId !== handle.documentElementBackendNodeId)))
+          ) {
+            throw new StaleFrameHandleError(tabId, handle.frameId);
+          }
+          guard?.onDispatch?.();
+        },
+        guard?.signal,
+      )) as T;
+    } catch (err) {
+      throw normalizeError(err);
+    }
+  }
+
+  private async resolveValidatedFrameRoute(
+    handle: FrameDocumentHandle | FrameNodeHandle,
+    method: string,
+    signal?: AbortSignal,
+  ): Promise<FrameRoute> {
+    const { tabId, frameId, loaderId } = handle;
+    const isCleanup = method === "Runtime.releaseObjectGroup" || method === "Runtime.releaseObject";
+    let entry = this.tabs.get(tabId);
+    if (entry?.kind !== "attached") throw new Error("debugger detached");
+
+    let route = entry.frames.get(frameId);
+    const needsRefresh =
+      !route || !route.authoritative || (entry.frameDiscovery.pending.size > 0 && !route.sessionId);
+    if (needsRefresh) {
+      await this.refreshFrameRoutes(tabId, signal);
+      entry = this.tabs.get(tabId);
+      if (entry?.kind !== "attached") throw new Error("debugger detached");
+      route = entry.frames.get(frameId);
+    }
+
+    if (!route) {
+      throw new StaleFrameHandleError(
+        tabId,
+        frameId,
+        `Frame ${frameId} is no longer present in tab ${tabId}`,
+      );
+    }
+    if (route.loaderId !== loaderId || (route.sessionId !== undefined && !loaderId)) {
+      throw new StaleFrameHandleError(
+        tabId,
+        frameId,
+        `Frame ${frameId} loader changed in tab ${tabId}`,
+      );
+    }
+
+    if (handle.documentElementBackendNodeId !== undefined && !isCleanup) {
+      if (route.documentElementBackendNodeId === undefined || route.documentOpened) {
+        const liveDocElementId = await this.probeFrameDocumentElementBackendNodeId(
+          tabId,
+          frameId,
+          route,
+          signal,
+        );
+        if (liveDocElementId !== undefined) {
+          route.documentElementBackendNodeId = liveDocElementId;
+          route.documentOpened = false;
+        } else if (route.documentOpened) {
+          throw new StaleFrameHandleError(
+            tabId,
+            frameId,
+            `Frame ${frameId} document was replaced via document.open()`,
+          );
+        }
+      }
+      if (
+        route.documentElementBackendNodeId !== undefined &&
+        route.documentElementBackendNodeId !== handle.documentElementBackendNodeId
+      ) {
+        throw new StaleFrameHandleError(
+          tabId,
+          frameId,
+          `Frame ${frameId} documentElement changed in tab ${tabId}`,
+        );
+      }
+    }
+
+    return route;
+  }
+
+  private async probeFrameDocumentElementBackendNodeId(
+    tabId: number,
+    frameId: string,
+    route: FrameRoute,
+    signal?: AbortSignal,
+  ): Promise<number | undefined> {
+    const target: CdpTarget = {
+      tabId,
+      ...(route.sessionId ? { sessionId: route.sessionId } : {}),
+    };
+    const isTargetRoot = !route.parentFrameId || route.sessionId !== undefined;
+    if (isTargetRoot) {
+      try {
+        const doc = (await this.command(
+          target,
+          "DOM.getDocument",
+          { depth: 1 },
+          READ_TIMEOUT_MS,
+          undefined,
+          signal,
+        )) as {
+          root?: { children?: { nodeType?: number; backendNodeId?: number }[] };
+        };
+        const docElementId = doc.root?.children?.find(
+          (child) => child.nodeType === 1,
+        )?.backendNodeId;
+        if (typeof docElementId === "number") return docElementId;
+      } catch (err) {
+        rethrowReadTimeout(err);
+      }
+    }
+    const objectGroup = `bsk-frame-doc-${crypto.randomUUID()}`;
+    try {
+      const world = (await this.command(
+        target,
+        "Page.createIsolatedWorld",
+        { frameId, worldName: "bsk-document-identity" },
+        READ_TIMEOUT_MS,
+        undefined,
+        signal,
+      )) as { executionContextId?: number };
+      if (typeof world.executionContextId !== "number") return undefined;
+      const reply = (await this.command(
+        target,
+        "Runtime.evaluate",
+        {
+          expression: "document.documentElement",
+          contextId: world.executionContextId,
+          objectGroup,
+          serializationOptions: {
+            serialization: "deep",
+            additionalParameters: { maxNodeDepth: 0, includeShadowTree: "none" },
+          },
+        },
+        READ_TIMEOUT_MS,
+        undefined,
+        signal,
+      )) as {
+        result?: { deepSerializedValue?: { type?: string; value?: { backendNodeId?: number } } };
+      };
+      const serialized = reply.result?.deepSerializedValue;
+      if (serialized?.type === "node" && typeof serialized.value?.backendNodeId === "number") {
+        return serialized.value.backendNodeId;
+      }
+      return undefined;
+    } catch (err) {
+      rethrowReadTimeout(err);
+      return undefined;
+    } finally {
+      await this.command(target, "Runtime.releaseObjectGroup", { objectGroup }).catch(() => {});
+    }
+  }
+
+  private async refreshFrameRoutes(tabId: number, signal?: AbortSignal): Promise<void> {
+    signal?.throwIfAborted();
+    const entry = this.tabs.get(tabId);
+    if (!isActiveAttachment(entry)) return;
+    await this.enableFrameDiscovery({ tabId }).catch(rethrowReadTimeout);
+    this.retryChildFrameDiscovery(tabId);
+    await this.drainFrameAttachTasks(tabId);
+    signal?.throwIfAborted();
+
+    const current = this.tabs.get(tabId);
+    if (!isActiveAttachment(current)) return;
+
+    const sources: CdpFrameTreeSource[] = [];
+    const root = (await this.command(
+      { tabId },
+      "Page.getFrameTree",
+      {},
+      READ_TIMEOUT_MS,
+      undefined,
+      signal,
+    )) as { frameTree?: CdpFrameTreeNode };
+    if (root.frameTree) {
+      sources.push({ target: { tabId }, tree: root.frameTree });
+    }
+
+    const sessions = [...current.frameDiscovery.sessions];
+    const childTrees = await Promise.all(
+      sessions.map(async (sessionId): Promise<CdpFrameTreeSource | null> => {
+        const target = { tabId, sessionId };
+        try {
+          const reply = (await this.command(
+            target,
+            "Page.getFrameTree",
+            {},
+            READ_TIMEOUT_MS,
+            undefined,
+            signal,
+          )) as { frameTree?: CdpFrameTreeNode };
+          if (reply.frameTree && isActiveAttachment(this.tabs.get(tabId))) {
+            current.frameDiscovery.frameIds.set(sessionId, reply.frameTree.frame.id);
+          }
+          return reply.frameTree ? { target, tree: reply.frameTree } : null;
+        } catch {
+          return null;
+        }
+      }),
+    );
+    for (const source of childTrees) {
+      if (source) sources.push(source);
+    }
+
+    const latest = this.tabs.get(tabId);
+    if (!isActiveAttachment(latest)) return;
+    this.syncRoutesFromSources(latest, sources);
+  }
+
+  private syncRoutesFromSources(
+    entry: ActiveTabAttachment,
+    sources: readonly CdpFrameTreeSource[],
+  ): void {
+    const discovered = buildFrameGraph(sources);
+    if (!discovered) return;
+    entry.frameDiscovery.rootFrameId = discovered.rootFrameId;
+    const nextFrames = new Map<string, FrameRoute>();
+    for (const frame of discovered.frames) {
+      const prev = entry.frames.get(frame.frameId);
+      const loaderId = frame.loaderId ?? "";
+      const sameDoc =
+        prev !== undefined &&
+        prev.sessionId === frame.target.sessionId &&
+        prev.loaderId === loaderId &&
+        !prev.documentOpened;
+      nextFrames.set(frame.frameId, {
+        ...(frame.target.sessionId ? { sessionId: frame.target.sessionId } : {}),
+        loaderId,
+        authoritative:
+          frame.frameId === discovered.rootFrameId ||
+          frame.target.sessionId !== undefined ||
+          Boolean(frame.loaderId),
+        ...(frame.parentFrameId ? { parentFrameId: frame.parentFrameId } : {}),
+        ...(frame.url ? { url: frame.url } : {}),
+        ...(frame.urlFragment !== undefined ? { urlFragment: frame.urlFragment } : {}),
+        ...(sameDoc && prev.documentElementBackendNodeId !== undefined
+          ? { documentElementBackendNodeId: prev.documentElementBackendNodeId }
+          : {}),
+        ...(prev?.documentOpened && prev.loaderId === loaderId ? { documentOpened: true } : {}),
+      });
+    }
+    entry.frames = nextFrames;
+  }
+
+  private harvestTreeIntoRoutes(
+    entry: ActiveTabAttachment,
+    target: CdpTarget,
+    tree: CdpFrameTreeNode,
+    isSubtreeRoot = true,
+  ): void {
+    const frameId = tree.frame.id;
+    if (!frameId) return;
+    if (!target.sessionId && isSubtreeRoot && !tree.frame.parentId) {
+      entry.frameDiscovery.rootFrameId = frameId;
+    } else if (target.sessionId && isSubtreeRoot) {
+      entry.frameDiscovery.frameIds.set(target.sessionId, frameId);
+    }
+
+    let ownedByOtherChildSession = false;
+    for (const [sessionId, mappedFrameId] of entry.frameDiscovery.frameIds) {
+      if (
+        mappedFrameId === frameId &&
+        sessionId !== target.sessionId &&
+        entry.frameDiscovery.sessions.has(sessionId)
+      ) {
+        ownedByOtherChildSession = true;
+        break;
+      }
+    }
+    const existing = entry.frames.get(frameId);
+    if (
+      !ownedByOtherChildSession &&
+      existing?.sessionId &&
+      existing.sessionId !== target.sessionId &&
+      entry.frameDiscovery.sessions.has(existing.sessionId)
+    ) {
+      ownedByOtherChildSession = true;
+    }
+
+    if (ownedByOtherChildSession) {
+      if (existing && tree.frame.parentId && !existing.parentFrameId) {
+        existing.parentFrameId = tree.frame.parentId;
+      }
+    } else {
+      const authoritative = isSubtreeRoot || Boolean(tree.frame.loaderId);
+      if (authoritative || !existing) {
+        const loaderId = tree.frame.loaderId ?? (authoritative ? "" : (existing?.loaderId ?? ""));
+        const sameDoc =
+          existing !== undefined &&
+          existing.sessionId === target.sessionId &&
+          existing.loaderId === loaderId &&
+          !existing.documentOpened;
+        entry.frames.set(frameId, {
+          ...(target.sessionId ? { sessionId: target.sessionId } : {}),
+          loaderId,
+          authoritative: authoritative || Boolean(existing?.authoritative),
+          ...(tree.frame.parentId || existing?.parentFrameId
+            ? { parentFrameId: tree.frame.parentId ?? existing?.parentFrameId }
+            : {}),
+          ...(tree.frame.url || existing?.url ? { url: tree.frame.url ?? existing?.url } : {}),
+          ...(tree.frame.urlFragment !== undefined || existing?.urlFragment !== undefined
+            ? { urlFragment: tree.frame.urlFragment ?? existing?.urlFragment }
+            : {}),
+          ...(sameDoc && existing.documentElementBackendNodeId !== undefined
+            ? { documentElementBackendNodeId: existing.documentElementBackendNodeId }
+            : {}),
+          ...(existing?.documentOpened && existing.loaderId === loaderId
+            ? { documentOpened: true }
+            : {}),
+        });
+      }
+    }
+
+    for (const child of tree.childFrames ?? []) {
+      this.harvestTreeIntoRoutes(entry, target, child, false);
+    }
+  }
+
+  /** Resolve the tab's current root `FrameDocumentHandle` (attaching or reattaching if needed). */
+  async getMainFrameHandle(tabId: number, signal?: AbortSignal): Promise<FrameDocumentHandle> {
+    signal?.throwIfAborted();
+    await this.ensureAttached(tabId);
+    signal?.throwIfAborted();
+    const entry = this.tabs.get(tabId);
+    if (entry?.kind === "attached" && entry.frameDiscovery.rootFrameId) {
+      const cached = entry.frames.get(entry.frameDiscovery.rootFrameId);
+      if (cached?.authoritative) {
+        return {
+          tabId,
+          frameId: entry.frameDiscovery.rootFrameId,
+          loaderId: cached.loaderId,
+          ...(cached.documentElementBackendNodeId !== undefined
+            ? { documentElementBackendNodeId: cached.documentElementBackendNodeId }
+            : {}),
+        };
+      }
+    }
+    const reply = (await this.command(
+      { tabId },
+      "Page.getFrameTree",
+      {},
+      READ_TIMEOUT_MS,
+      undefined,
+      signal,
+    )) as { frameTree?: CdpFrameTreeNode };
+    const rootFrame = reply.frameTree?.frame;
+    if (!rootFrame?.id) throw new Error("Page.getFrameTree returned no root frame");
+    return {
+      tabId,
+      frameId: rootFrame.id,
+      loaderId: rootFrame.loaderId ?? "",
+    };
+  }
+
   async getFrameGraph(tabId: number, signal?: AbortSignal): Promise<CdpFrameGraph> {
     signal?.throwIfAborted();
     await this.ensureAttached(tabId);
@@ -687,8 +1387,6 @@ export class ChromiumCdp {
         throw error;
       }
     };
-    // Frame discovery belongs to this attachment. An old tree reply must not
-    // reconnect a released tab, or continue against another reader's connection.
     const read = async <T>(
       target: CdpTarget,
       method: string,
@@ -706,9 +1404,6 @@ export class ChromiumCdp {
       }
     };
     check();
-    // Ordinary configuration failures leave the graph to the root tree. A
-    // timed-out read means the renderer is not answering: stop here instead of
-    // queueing the tree, owner and snapshot reads behind the stuck command.
     await this.enableFrameDiscovery({ tabId }).catch(rethrowReadTimeout);
     check();
     this.retryChildFrameDiscovery(tabId);
@@ -720,10 +1415,11 @@ export class ChromiumCdp {
     const isolateChildTimeout = (error: unknown, target: CdpTarget) => {
       check();
       if (!(error instanceof CdpReadTimeoutError)) return;
+      const entry = this.tabs.get(tabId);
       const frameId =
-        target.sessionId && this.frameDiscovery.get(tabId)?.frameIds.get(target.sessionId);
-      // A root timeout also gates child reads. Never mistake it for a local
-      // child failure, or guess ownership when discovery has no frame identity.
+        target.sessionId && isActiveAttachment(entry)
+          ? entry.frameDiscovery.frameIds.get(target.sessionId)
+          : undefined;
       if (!frameId || frameId === sources[0]?.tree.frame.id || error.sessionId !== target.sessionId)
         throw error;
       unavailable.set(frameId, target);
@@ -738,7 +1434,10 @@ export class ChromiumCdp {
       sources.push({ target: { tabId }, tree: root.frameTree });
     }
 
-    const sessions = [...(this.frameDiscovery.get(tabId)?.sessions ?? [])];
+    const activeEntry = this.tabs.get(tabId);
+    const sessions = isActiveAttachment(activeEntry)
+      ? [...activeEntry.frameDiscovery.sessions]
+      : [];
     const childTrees = await Promise.all(
       sessions.map(async (sessionId): Promise<CdpFrameTreeSource | null> => {
         const target = { tabId, sessionId };
@@ -749,8 +1448,10 @@ export class ChromiumCdp {
             {},
             READ_TIMEOUT_MS,
           );
-          if (reply.frameTree)
-            this.frameDiscovery.get(tabId)?.frameIds.set(sessionId, reply.frameTree.frame.id);
+          const current = this.tabs.get(tabId);
+          if (reply.frameTree && isActiveAttachment(current)) {
+            current.frameDiscovery.frameIds.set(sessionId, reply.frameTree.frame.id);
+          }
           return reply.frameTree ? { target, tree: reply.frameTree } : null;
         } catch (err) {
           isolateChildTimeout(err, target);
@@ -764,6 +1465,10 @@ export class ChromiumCdp {
 
     const discovered = buildFrameGraph(sources);
     if (!discovered) throw new Error("Page.getFrameTree returned no root frame");
+    const entryAfterTrees = this.tabs.get(tabId);
+    if (isActiveAttachment(entryAfterTrees)) {
+      this.syncRoutesFromSources(entryAfterTrees, sources);
+    }
     const graph = omitFrameSubtrees(discovered, unavailable);
     const frameById = new Map(graph.frames.map((frame) => [frame.frameId, frame]));
     await Promise.all(
@@ -777,7 +1482,6 @@ export class ChromiumCdp {
           });
           if (owner.backendNodeId !== undefined) frame.ownerBackendNodeId = owner.backendNodeId;
         } catch (err) {
-          // The frame may have navigated between tree capture and owner lookup.
           isolateChildTimeout(err, parent.target);
         }
       }),
@@ -788,7 +1492,7 @@ export class ChromiumCdp {
 
   /** Return a cursor marking the current dialog sequence for `tabId`. */
   dialogCursor(tabId: number): DialogCursor {
-    return this.dialogSequences.get(tabId) ?? 0;
+    return this.tabs.get(tabId)?.history.dialogSequence ?? 0;
   }
 
   /** `Emulation.setDeviceMetricsOverride` — pin the tab's viewport metrics. */
@@ -820,18 +1524,18 @@ export class ChromiumCdp {
 
   /** Dialogs observed on `tabId` with sequence strictly greater than `cursor`. */
   dialogsSince(tabId: number, cursor: DialogCursor): JavaScriptDialogInfo[] {
-    const buf = this.dialogBuffers.get(tabId) ?? [];
+    const buf = this.tabs.get(tabId)?.history.dialogBuffer ?? [];
     return buf.filter((entry) => entry.sequence > cursor);
   }
 
   /**
-   * Enable console capture for this tab on first use. Attach leaves Runtime
-   * off: while it is on, every `console.*` call builds argument previews,
-   * which anti-debugging pages time to detect a debugger.
+   * Enable console capture for this tab on first use within the current attachment.
+   * Does not retain an idle lease: once idle for 75s without active leases, the tab
+   * can still soft-detach cleanly.
    */
   async ensureConsoleCapture(tabId: number, signal?: AbortSignal): Promise<void> {
     signal?.throwIfAborted();
-    if (!this.attachedTabs.has(tabId)) {
+    if (!this.isAttached(tabId)) {
       await this.ensureAttached(tabId);
     }
     signal?.throwIfAborted();
@@ -846,10 +1550,10 @@ export class ChromiumCdp {
     maxTextChars: number,
     includeStack: boolean,
   ): ConsoleResult {
-    const buf = this.consoleBuffers.get(tabId) ?? [];
+    const history = this.tabs.get(tabId)?.history;
     const { entries, nextSince, truncated } = readBufferedEntries(
-      buf,
-      this.consoleSequences.get(tabId) ?? 0,
+      history?.consoleBuffer ?? [],
+      history?.consoleSequence ?? 0,
       since,
       limit,
       (entry) => projectConsoleEntry(entry, maxTextChars, includeStack),
@@ -864,7 +1568,7 @@ export class ChromiumCdp {
 
   /** Ensure CDP domains for network capture are enabled for this tab. */
   async ensureNetworkCapture(tabId: number): Promise<void> {
-    if (!this.attachedTabs.has(tabId)) {
+    if (!this.isAttached(tabId)) {
       await this.ensureAttached(tabId);
     }
     await this.enableNetworkDomain(tabId);
@@ -877,10 +1581,10 @@ export class ChromiumCdp {
     limit: number,
     maxTextChars: number,
   ): NetworkResult {
-    const buf = this.networkBuffers.get(tabId) ?? [];
+    const history = this.tabs.get(tabId)?.history;
     const { entries, nextSince, truncated } = readBufferedEntries(
-      buf,
-      this.networkSequences.get(tabId) ?? 0,
+      history?.networkBuffer ?? [],
+      history?.networkSequence ?? 0,
       since,
       limit,
       (entry) => projectNetworkEntry(entry, maxTextChars),
@@ -893,80 +1597,141 @@ export class ChromiumCdp {
     };
   }
 
-  private clearSoftDetachState(tabId: number): void {
-    this.softDetachedTabs.delete(tabId);
-    this.softDetachedDocSignatures.delete(tabId);
-    this.softDetachedAttachmentIds.delete(tabId);
-    this.softDetachedFrameSessions.delete(tabId);
-    this.remappedChildSessions.delete(tabId);
-    this.deferredRootDocumentChecks.delete(tabId);
-    this.attachingIds.delete(tabId);
+  private clearRetainLeases(entry: TabAttachment): void {
+    for (const lease of [...entry.leases]) {
+      if (lease.kind === "retain") entry.leases.delete(lease);
+    }
+  }
+
+  private resetDiagnosticHistory(history: TabHistoryState): void {
+    history.dialogGeneration += 1;
+    history.dialogBuffer.length = 0;
+    history.dialogSequence = 0;
+    history.consoleBuffer.length = 0;
+    history.consoleSequence = 0;
+    history.softDetachConsoleWaterMark = undefined;
+    history.networkBuffer.length = 0;
+    history.networkSequence = 0;
+  }
+
+  private closePendingDialogOnDetach(tabId: number, entry: TabAttachment | undefined): void {
+    if (!isActiveAttachment(entry) || !entry.pendingDialog) return;
+    const pending = entry.pendingDialog;
+    entry.pendingDialog = undefined;
+    entry.openDialog = undefined;
+    clearTimeout(pending.timer);
+    for (const close of pending.closed) {
+      close(new Error("Debugger attachment changed; dialog outcome is unknown"));
+    }
+    this.emitDialogChanged(tabId, null);
   }
 
   /** Detach if attached; never throws. */
   async detach(tabId: number, expectedAttachmentId?: string): Promise<void> {
     if (expectedAttachmentId !== undefined && this.getAttachmentId(tabId) !== expectedAttachmentId)
       return;
+    const entry = this.tabs.get(tabId);
+    if (!entry) return;
+
     this.clearIdleTimer(tabId);
-    this.attachmentVersions.set(tabId, (this.attachmentVersions.get(tabId) ?? 0) + 1);
-    const wasAttached = this.attachedTabs.delete(tabId);
-    const wasSoftDetached = this.softDetachedTabs.delete(tabId);
-    const existing = this.detachInFlight.get(tabId);
-    if (!wasAttached && !wasSoftDetached && !existing) {
-      this.clearSoftDetachState(tabId);
-      this.retainedAttachments.delete(tabId);
-      this.openDialogs.delete(tabId);
+    const nextVersion = entry.version + 1;
+    const wasAttached = entry.kind === "attached";
+    const wasSoftDetached = entry.kind === "soft_detached";
+    const existingDetach =
+      entry.kind === "detached" || entry.kind === "soft_detached"
+        ? entry.detachInFlight
+        : undefined;
+
+    const existingFencedAttach =
+      entry.kind === "attaching"
+        ? entry.attachInFlight
+        : entry.kind === "detached"
+          ? entry.fencedAttach
+          : undefined;
+
+    this.clearRetainLeases(entry);
+    if (!wasAttached && !wasSoftDetached && !existingDetach) {
+      this.closePendingDialogOnDetach(tabId, entry);
+      if (entry.kind === "attaching") {
+        this.resetDiagnosticHistory(entry.history);
+        this.readGate.reset(tabId);
+        this.backgroundExecution.invalidate(tabId);
+        this.tabs.set(tabId, {
+          kind: "detached",
+          version: nextVersion,
+          fencedAttach: existingFencedAttach,
+          leases: entry.leases,
+          eventListeners: entry.eventListeners,
+          history: entry.history,
+        });
+      } else {
+        entry.version = nextVersion;
+      }
+      this.maybePruneDetachedEntry(tabId);
       return;
     }
-    this.clearSoftDetachState(tabId);
-    this.retainedAttachments.delete(tabId);
-    this.attachmentIds.delete(tabId);
+
+    this.closePendingDialogOnDetach(tabId, entry);
+    this.resetDiagnosticHistory(entry.history);
+    this.readGate.reset(tabId);
+    this.backgroundExecution.invalidate(tabId);
+
+    const detachedEntry: Extract<TabAttachment, { kind: "detached" }> = {
+      kind: "detached",
+      version: nextVersion,
+      detachInFlight: existingDetach,
+      fencedAttach: existingFencedAttach,
+      leases: entry.leases,
+      eventListeners: entry.eventListeners,
+      history: entry.history,
+    };
+    this.tabs.set(tabId, detachedEntry);
+
     if (wasAttached || wasSoftDetached) {
       this.options.onDocumentChanged?.(tabId);
     }
-    this.backgroundExecution.invalidate(tabId);
-    this.activeEmulationTabs.delete(tabId);
-    this.clearDialogState(tabId);
-    this.clearConsoleState(tabId);
-    this.clearNetworkState(tabId);
-    this.clearFrameState(tabId);
+
     if (!wasAttached) {
-      if (existing) await cleanupWait(existing);
+      if (existingDetach) await cleanupWait(existingDetach);
+      this.maybePruneDetachedEntry(tabId);
       return;
     }
-    if (existing) await cleanupWait(existing);
-    const detach = (async () => {
+
+    if (existingDetach) await cleanupWait(existingDetach);
+    const detachWork = (async () => {
       try {
         await this.api.detach({ tabId });
       } catch (err) {
-        // Tab may already be gone — Chrome auto-detaches on close. Log
-        // at debug so production builds aren't noisy.
         console.debug("[bsk cdp] detach failed (likely tab already closed)", err);
       }
     })().finally(() => {
-      if (this.detachInFlight.get(tabId) === detach) {
-        this.detachInFlight.delete(tabId);
+      const current = this.tabs.get(tabId);
+      if (current?.kind === "detached" && current.detachInFlight === detachWork) {
+        current.detachInFlight = undefined;
+        this.maybePruneDetachedEntry(tabId);
       }
     });
-    this.detachInFlight.set(tabId, detach);
-    await cleanupWait(detach);
+    const current = this.tabs.get(tabId);
+    if (current?.kind === "detached") {
+      current.detachInFlight = detachWork;
+    }
+    await cleanupWait(detachWork);
   }
 
   /** True iff `ensureAttached(tabId)` has succeeded since the last detach. */
   isAttached(tabId: number): boolean {
-    return this.attachedTabs.has(tabId);
+    return this.tabs.get(tabId)?.kind === "attached";
   }
 
   /** Remember that `sessionId` used CDP on `tabId` so stop can detach it. */
   trackSessionTab(sessionId: string, tabId: number): void {
-    const owners = this.tabOwners.get(tabId) ?? new Set<string>();
-    owners.add(sessionId);
-    this.tabOwners.set(tabId, owners);
+    const entry = this.ensureTabEntry(tabId);
+    entry.history.owners.add(sessionId);
   }
 
   /** Identity of the latest acquisition, including repeated use on one attachment. */
   getSessionClaimId(sessionId: string, tabId: number): object | undefined {
-    return this.claimAttempts.get(tabId)?.get(sessionId);
+    return this.tabs.get(tabId)?.history.claims.get(sessionId);
   }
 
   /** Release one session's claim, preserving attachments still used by another. */
@@ -976,28 +1741,28 @@ export class ChromiumCdp {
     guard?: { ifClaim: object },
   ): Promise<void> {
     if (guard && this.getSessionClaimId(sessionId, tabId) !== guard.ifClaim) return;
-    this.claimAttempts.get(tabId)?.delete(sessionId);
+    const entry = this.tabs.get(tabId);
+    entry?.history.claims.delete(sessionId);
     this.backgroundExecution.release(sessionId, tabId);
-    const owners = this.tabOwners.get(tabId);
-    owners?.delete(sessionId);
-    if (owners?.size === 0) this.tabOwners.delete(tabId);
-    // Remove the old claim before yielding: a new acquisition must survive this
-    // cleanup, including when it uses the same session id.
-    const attaching = this.attachInFlight.get(tabId);
+    entry?.history.owners.delete(sessionId);
+
+    const hasOwners = () => (this.tabs.get(tabId)?.history.owners.size ?? 0) > 0;
+    const attaching = entry?.kind === "attaching" ? entry.attachInFlight : undefined;
     if (attaching && !(await cleanupWait(attaching.catch(() => {})))) {
-      if (!this.tabOwners.has(tabId)) await this.detach(tabId);
+      if (!hasOwners()) await this.detach(tabId);
       return;
     }
     try {
       if (!(await cleanupWait(this.backgroundExecution.synchronize(tabId))))
         throw new Error("Background execution cleanup timed out");
     } catch (error) {
-      // A failed disable must not leave a returned user page emulated just
-      // because a passive reader still owns the debugger. Readers can reattach.
       await this.detach(tabId);
       throw error;
     } finally {
-      if (!this.tabOwners.has(tabId)) await this.detach(tabId);
+      if (!hasOwners()) {
+        await this.detach(tabId);
+        this.maybePruneDetachedEntry(tabId);
+      }
     }
   }
 
@@ -1007,67 +1772,58 @@ export class ChromiumCdp {
     method: string,
     params?: object,
   ): Promise<T> {
-    if (!this.attachedTabs.has(target.tabId)) throw new Error("debugger detached");
-    return this.runTrackedSendCommand(this.resolveTarget(target), method, params) as Promise<T>;
-  }
-
-  /** Subscribe to all CDP events. Returned disposable removes the listener. */
-  onEvent(handler: (source: CdpDebuggee, method: string, params: unknown) => void): {
-    dispose(): void;
-  } {
-    this.api.onEvent.addListener(handler);
-    return {
-      dispose: () => this.api.onEvent.removeListener(handler),
-    };
+    if (!this.isAttached(target.tabId)) throw new Error("debugger detached");
+    return this.runTrackedSendCommand(target, method, params) as Promise<T>;
   }
 
   /** Best-effort detach of every cached tab. Used on session.stop. */
   async detachAll(): Promise<void> {
     this.inputClock.invalidate();
     this.clearAllIdleTimers();
-    const tabs = Array.from(this.attachedTabs);
-    const softTabs = Array.from(this.softDetachedTabs);
-    const inFlightDetaches = Array.from(this.detachInFlight.values());
-    for (const tabId of new Set([
-      ...tabs,
-      ...softTabs,
-      ...this.attachInFlight.keys(),
-      ...this.detachInFlight.keys(),
-    ]))
-      this.attachmentVersions.set(tabId, (this.attachmentVersions.get(tabId) ?? 0) + 1);
-    this.claimAttempts.clear();
-    this.tabOwners.clear();
+    const attachedTabIds: number[] = [];
+    const notifyTabIds: number[] = [];
+    const inFlightDetaches: Promise<void>[] = [];
+
+    for (const [tabId, entry] of this.tabs) {
+      if (entry.kind === "attached") {
+        attachedTabIds.push(tabId);
+        notifyTabIds.push(tabId);
+      } else if (entry.kind === "soft_detached") {
+        notifyTabIds.push(tabId);
+        if (entry.detachInFlight) inFlightDetaches.push(entry.detachInFlight);
+      } else if (entry.kind === "detached" && entry.detachInFlight) {
+        inFlightDetaches.push(entry.detachInFlight);
+      }
+      this.closePendingDialogOnDetach(tabId, entry);
+      this.clearRetainLeases(entry);
+      entry.history.owners.clear();
+      entry.history.claims.clear();
+      this.resetDiagnosticHistory(entry.history);
+      this.tabs.set(tabId, {
+        kind: "detached",
+        version: entry.version + 1,
+        fencedAttach:
+          entry.kind === "attaching"
+            ? entry.attachInFlight
+            : entry.kind === "detached"
+              ? entry.fencedAttach
+              : undefined,
+        leases: entry.leases,
+        eventListeners: entry.eventListeners,
+        history: entry.history,
+      });
+      this.maybePruneDetachedEntry(tabId);
+    }
+
     this.backgroundExecution.clear();
-    this.activeEmulationTabs.clear();
-    this.attachedTabs.clear();
-    this.softDetachedTabs.clear();
-    this.softDetachedDocSignatures.clear();
-    this.softDetachedAttachmentIds.clear();
-    this.softDetachedFrameSessions.clear();
-    this.remappedChildSessions.clear();
-    this.retainedAttachments.clear();
-    this.deferredRootDocumentChecks.clear();
-    this.openDialogs.clear();
-    this.attachingIds.clear();
-    this.attachmentIds.clear();
-    for (const tabId of new Set([...tabs, ...softTabs])) this.options.onDocumentChanged?.(tabId);
-    for (const tabId of this.pendingDialogEntries.keys()) this.clearDialogState(tabId);
-    this.dialogBuffers.clear();
-    this.dialogSequences.clear();
-    this.consoleBuffers.clear();
-    this.consoleSequences.clear();
-    this.consoleDomainsEnabledTabs.clear();
-    this.activeConsoleCaptureTabs.clear();
-    this.networkBuffers.clear();
-    this.networkSequences.clear();
-    this.networkDomainsEnabledTabs.clear();
-    this.passiveNetworkEnabledTabs.clear();
-    this.networkRequestMeta.clear();
-    this.frameDiscovery.clear();
     this.readGate.clear();
+    for (const tabId of notifyTabIds) {
+      this.options.onDocumentChanged?.(tabId);
+    }
+
     await Promise.all([
       ...inFlightDetaches.map((detach) => cleanupWait(detach)),
-      ...tabs.map(async (tabId) => {
+      ...attachedTabIds.map(async (tabId) => {
         try {
           await this.api.detach({ tabId });
         } catch (err) {
@@ -1084,7 +1840,10 @@ export class ChromiumCdp {
   ): Promise<unknown> {
     const tabId = target.tabId;
     if (typeof tabId === "number") {
-      this.inFlightCommands.set(tabId, (this.inFlightCommands.get(tabId) ?? 0) + 1);
+      const entry = this.tabs.get(tabId);
+      if (isActiveAttachment(entry)) {
+        entry.inFlightCommands += 1;
+      }
       this.touchTabActivity(tabId);
     }
     return this.api
@@ -1097,10 +1856,11 @@ export class ChromiumCdp {
       })
       .finally(() => {
         if (typeof tabId === "number") {
-          const remaining = (this.inFlightCommands.get(tabId) ?? 1) - 1;
-          if (remaining <= 0) this.inFlightCommands.delete(tabId);
-          else this.inFlightCommands.set(tabId, remaining);
-          if (this.attachedTabs.has(tabId)) {
+          const entry = this.tabs.get(tabId);
+          if (isActiveAttachment(entry)) {
+            entry.inFlightCommands = Math.max(0, entry.inFlightCommands - 1);
+          }
+          if (entry?.kind === "attached") {
             this.touchTabActivity(tabId);
           }
         }
@@ -1108,8 +1868,10 @@ export class ChromiumCdp {
   }
 
   private recordEmulationCommand(tabId: number, method: string, params?: object): void {
+    const entry = this.tabs.get(tabId);
+    if (!isActiveAttachment(entry)) return;
     const raw = (params ?? {}) as Record<string, unknown>;
-    const current = this.activeEmulationTabs.get(tabId) ?? {
+    const current = entry.emulation ?? {
       deviceMetrics: false,
       userAgent: false,
       touch: false,
@@ -1134,15 +1896,12 @@ export class ChromiumCdp {
         break;
     }
     if (!touched) return;
-    if (current.deviceMetrics || current.userAgent || current.touch) {
-      this.activeEmulationTabs.set(tabId, current);
-    } else {
-      this.activeEmulationTabs.delete(tabId);
-    }
+    entry.emulation =
+      current.deviceMetrics || current.userAgent || current.touch ? current : undefined;
   }
 
-  private hasActiveEmulation(tabId: number): boolean {
-    const state = this.activeEmulationTabs.get(tabId);
+  private hasActiveEmulation(entry: Extract<TabAttachment, { kind: "attached" }>): boolean {
+    const state = entry.emulation;
     return Boolean(state && (state.deviceMetrics || state.userAgent || state.touch));
   }
 
@@ -1152,67 +1911,64 @@ export class ChromiumCdp {
   }
 
   private clearIdleTimer(tabId: number): void {
-    const existing = this.idleTimers.get(tabId);
-    if (existing !== undefined) {
-      clearTimeout(existing);
-      this.idleTimers.delete(tabId);
+    const entry = this.tabs.get(tabId);
+    if (entry?.kind === "attached" && entry.idleTimer !== undefined) {
+      clearTimeout(entry.idleTimer);
+      entry.idleTimer = undefined;
     }
   }
 
   private clearAllIdleTimers(): void {
-    for (const timer of this.idleTimers.values()) clearTimeout(timer);
-    this.idleTimers.clear();
+    for (const entry of this.tabs.values()) {
+      if (entry.kind === "attached" && entry.idleTimer !== undefined) {
+        clearTimeout(entry.idleTimer);
+        entry.idleTimer = undefined;
+      }
+    }
   }
 
   private touchTabActivity(tabId: number): void {
-    this.clearIdleTimer(tabId);
-    const delayMs = this.idleDetachDelayMs();
-    if (
-      delayMs <= 0 ||
-      !this.attachedTabs.has(tabId) ||
-      (this.retainedAttachments.get(tabId)?.size ?? 0) > 0
-    ) {
-      return;
+    const entry = this.tabs.get(tabId);
+    if (entry?.kind !== "attached") return;
+    if (entry.idleTimer !== undefined) {
+      clearTimeout(entry.idleTimer);
+      entry.idleTimer = undefined;
     }
-    const timer = setTimeout(() => {
-      this.idleTimers.delete(tabId);
+    const delayMs = this.idleDetachDelayMs();
+    if (delayMs <= 0 || entry.leases.size > 0) return;
+    entry.idleTimer = setTimeout(() => {
+      const current = this.tabs.get(tabId);
+      if (current?.kind === "attached") current.idleTimer = undefined;
       void this.softDetachIdleTab(tabId);
     }, delayMs);
-    this.idleTimers.set(tabId, timer);
   }
 
   private canSoftDetachIdleTab(tabId: number): boolean {
-    if (!this.attachedTabs.has(tabId)) return false;
-    // Guard 1: No in-flight attach/detach, retained attachment lease, concurrent CDP command or pending frame task.
+    const entry = this.tabs.get(tabId);
+    if (entry?.kind !== "attached") return false;
+    // Guard 1: No active leases (`retainTabAttachment` or `onEvent`), in-flight CDP commands, or pending frame tasks.
     if (
-      this.attachInFlight.has(tabId) ||
-      this.detachInFlight.has(tabId) ||
-      (this.retainedAttachments.get(tabId)?.size ?? 0) > 0 ||
-      (this.inFlightCommands.get(tabId) ?? 0) > 0 ||
-      (this.frameDiscovery.get(tabId)?.pending.size ?? 0) > 0
+      entry.leases.size > 0 ||
+      entry.inFlightCommands > 0 ||
+      entry.frameDiscovery.pending.size > 0
     ) {
       return false;
     }
-    // Guard 2: No active console or network diagnostic capture enabled.
-    if (
-      this.consoleDomainsEnabledTabs.has(tabId) ||
-      this.activeConsoleCaptureTabs.has(tabId) ||
-      this.networkDomainsEnabledTabs.has(tabId)
-    ) {
+    // Guard 2: No persistent backgroundExecution anti-throttling or active Emulation override.
+    if (this.backgroundExecution.hasAny(tabId) || this.hasActiveEmulation(entry)) {
       return false;
     }
-    // Guard 3: No persistent backgroundExecution anti-throttling or active Emulation override.
-    if (this.backgroundExecution.hasAny(tabId) || this.hasActiveEmulation(tabId)) {
-      return false;
-    }
-    // Guard 4: No pending or opening native JavaScript dialog or post-dialog verification.
-    if (this.openDialogs.has(tabId) || this.deferredRootDocumentChecks.has(tabId)) {
+    // Guard 3: No pending or opening native JavaScript dialog or post-dialog verification.
+    if (entry.openDialog || entry.pendingDialog || entry.deferredRootCheck) {
       return false;
     }
     return true;
   }
 
-  private async probeRootDocumentSignature(tabId: number): Promise<RootDocumentSignature> {
+  private async probeRootDocumentSignature(
+    tabId: number,
+    outRootTree?: { tree?: CdpFrameTreeNode },
+  ): Promise<RootDocumentSignature> {
     try {
       let treeReply: unknown;
       const treeOk = await cleanupWait(
@@ -1221,21 +1977,21 @@ export class ChromiumCdp {
         }),
       );
       if (!treeOk) return { probed: false };
-      const frame = (
-        treeReply as
-          | {
-              frameTree?: {
-                frame?: {
-                  id?: string;
-                  parentId?: string;
-                  loaderId?: string;
-                  url?: string;
-                  urlFragment?: string;
-                };
-              };
-            }
-          | undefined
-      )?.frameTree?.frame;
+      const frameTree = (treeReply as { frameTree?: CdpFrameTreeNode } | undefined)?.frameTree;
+      if (outRootTree && frameTree) outRootTree.tree = frameTree;
+      const currentEntry = this.tabs.get(tabId);
+      if (frameTree && isActiveAttachment(currentEntry)) {
+        this.harvestTreeIntoRoutes(currentEntry, { tabId }, frameTree, true);
+      }
+      const frame = frameTree?.frame as
+        | {
+            id?: string;
+            parentId?: string;
+            loaderId?: string;
+            url?: string;
+            urlFragment?: string;
+          }
+        | undefined;
       const frameIdentity =
         frame && !frame.parentId
           ? {
@@ -1245,14 +2001,15 @@ export class ChromiumCdp {
               urlFragment: typeof frame.urlFragment === "string" ? frame.urlFragment : undefined,
             }
           : {};
-      const dialogOpening = this.openDialogs.get(tabId);
+      const entryForDialog = this.tabs.get(tabId);
+      const dialogOpening = isActiveAttachment(entryForDialog)
+        ? entryForDialog.openDialog
+        : undefined;
       if (dialogOpening) {
         await cleanupWait(dialogOpening);
       }
-      // When a native JS modal dialog is open, the renderer main thread is paused and
-      // `DOM.getDocument` hangs until the dialog is dismissed. Confirm root identity
-      // from `Page.getFrameTree` instead of blocking reattach on `DOM.getDocument`.
-      if (this.openDialogs.has(tabId)) {
+      const afterDialogEntry = this.tabs.get(tabId);
+      if (isActiveAttachment(afterDialogEntry) && afterDialogEntry.openDialog) {
         return {
           probed: true,
           dialogOpen: true,
@@ -1290,24 +2047,21 @@ export class ChromiumCdp {
     }
   }
 
-  private async probeChildFrameSignatures(
+  private async captureSnapshotFramesForSoftDetach(
     tabId: number,
-  ): Promise<Map<string, ChildFrameSignature>> {
-    const state = this.frameDiscovery.get(tabId);
-    const signatures = new Map<string, ChildFrameSignature>();
-    if (!state || state.sessions.size === 0) return signatures;
-    const sessions = [...state.sessions];
+    entry: Extract<TabAttachment, { kind: "attached" }>,
+    rootTree: CdpFrameTreeNode | undefined,
+    rootDoc: RootDocumentSignature,
+  ): Promise<Map<string, FrameRoute>> {
+    const sources: CdpFrameTreeSource[] = [];
+    if (rootTree) {
+      sources.push({ target: { tabId }, tree: rootTree });
+    }
+    const sessions = [...entry.frameDiscovery.sessions];
+    const unresolvedChildFrames = new Map<string, FrameRoute>();
+
     await Promise.all(
       sessions.map(async (sessionId) => {
-        let frame:
-          | {
-              id?: string;
-              parentId?: string;
-              loaderId?: string;
-              url?: string;
-              urlFragment?: string;
-            }
-          | undefined;
         try {
           let reply: unknown;
           const ok = await cleanupWait(
@@ -1315,115 +2069,137 @@ export class ChromiumCdp {
               reply = res;
             }),
           );
-          if (ok) {
-            frame = (
-              reply as
-                | {
-                    frameTree?: {
-                      frame?: {
-                        id?: string;
-                        parentId?: string;
-                        loaderId?: string;
-                        url?: string;
-                        urlFragment?: string;
-                      };
-                    };
-                  }
-                | undefined
-            )?.frameTree?.frame;
+          const tree = ok
+            ? (reply as { frameTree?: CdpFrameTreeNode } | undefined)?.frameTree
+            : undefined;
+          if (tree?.frame?.id) {
+            sources.push({ target: { tabId, sessionId }, tree });
+            return;
           }
         } catch {
-          // Fall back to cached Target.attachedToTarget metadata when child tree read fails.
+          // Fall back to cached frameId so stale refs are still invalidated if probing failed.
         }
-        const frameId =
-          (typeof frame?.id === "string" && frame.id ? frame.id : undefined) ??
-          state.frameIds.get(sessionId);
-        // Cached frame IDs locate stale refs. Only a fresh loader ID can prove continuity.
-        const loaderId = typeof frame?.loaderId === "string" ? frame.loaderId : undefined;
-        const url = typeof frame?.url === "string" ? frame.url : undefined;
-        const urlFragment = typeof frame?.urlFragment === "string" ? frame.urlFragment : undefined;
-        signatures.set(sessionId, {
-          sessionId,
-          frameId,
-          loaderId,
-          url,
-          urlFragment,
-        });
+        const fallbackFrameId = entry.frameDiscovery.frameIds.get(sessionId);
+        if (fallbackFrameId) {
+          unresolvedChildFrames.set(fallbackFrameId, {
+            sessionId,
+            loaderId: "",
+            authoritative: false,
+          });
+        }
       }),
     );
-    return signatures;
+
+    const snapshotFrames = new Map<string, FrameRoute>();
+    const discovered = buildFrameGraph(sources);
+    if (discovered) {
+      for (const frame of discovered.frames) {
+        snapshotFrames.set(frame.frameId, {
+          ...(frame.target.sessionId ? { sessionId: frame.target.sessionId } : {}),
+          loaderId: frame.loaderId ?? "",
+          authoritative:
+            frame.frameId === discovered.rootFrameId ||
+            (frame.target.sessionId !== undefined && Boolean(frame.loaderId)) ||
+            Boolean(frame.loaderId),
+          ...(frame.parentFrameId ? { parentFrameId: frame.parentFrameId } : {}),
+          ...(frame.url ? { url: frame.url } : {}),
+          ...(frame.urlFragment !== undefined ? { urlFragment: frame.urlFragment } : {}),
+          ...(frame.frameId === rootDoc.frameId &&
+          rootDoc.documentElementBackendNodeId !== undefined
+            ? { documentElementBackendNodeId: rootDoc.documentElementBackendNodeId }
+            : {}),
+        });
+      }
+    }
+    for (const [frameId, fallback] of unresolvedChildFrames) {
+      if (!snapshotFrames.get(frameId)?.loaderId) {
+        snapshotFrames.set(frameId, fallback);
+      }
+    }
+    for (const [frameId, prevRoute] of entry.frames) {
+      if (!snapshotFrames.has(frameId) && prevRoute.sessionId) {
+        snapshotFrames.set(frameId, {
+          sessionId: prevRoute.sessionId,
+          loaderId: "",
+          authoritative: false,
+          ...(prevRoute.parentFrameId ? { parentFrameId: prevRoute.parentFrameId } : {}),
+        });
+      }
+    }
+    return snapshotFrames;
   }
 
   private async reconcileSoftDetachedChildFrames(
     tabId: number,
-    previousChildFrames: Map<string, ChildFrameSignature>,
+    attachingEntry: Extract<TabAttachment, { kind: "attaching" }>,
+    previousSoftDetach: SoftDetachSnapshot,
     check: () => void,
   ): Promise<void> {
     await this.drainFrameAttachTasks(tabId);
     check();
-    const currentChildFrames = await this.probeChildFrameSignatures(tabId);
+
+    const sources: CdpFrameTreeSource[] = [];
+    try {
+      let rootReply: unknown;
+      const ok = await cleanupWait(
+        this.api.sendCommand({ tabId }, "Page.getFrameTree", {}).then((res) => {
+          rootReply = res;
+        }),
+      );
+      const tree = ok
+        ? (rootReply as { frameTree?: CdpFrameTreeNode } | undefined)?.frameTree
+        : undefined;
+      if (tree) sources.push({ target: { tabId }, tree });
+    } catch {
+      // Root failure is surfaced by root signature checks or subsequent reads.
+    }
     check();
-    const currentByFrameId = new Map<string, ChildFrameSignature>();
-    for (const sig of currentChildFrames.values()) {
-      if (sig.frameId && this.frameDiscovery.get(tabId)?.sessions.has(sig.sessionId))
-        currentByFrameId.set(sig.frameId, sig);
-    }
 
-    const stepRemap = new Map<string, string>();
-    const staleSessionIds = new Set<string>();
-    const staleFrameIds = new Set<string>();
-
-    for (const [oldSessionId, prevSig] of previousChildFrames) {
-      const nextSig = prevSig.frameId ? currentByFrameId.get(prevSig.frameId) : undefined;
-      if (sameChildFrameSignature(prevSig, nextSig)) {
-        stepRemap.set(oldSessionId, nextSig.sessionId);
-      } else {
-        staleSessionIds.add(oldSessionId);
-        if (prevSig.frameId) staleFrameIds.add(prevSig.frameId);
-      }
-    }
-
-    const existingRemap = this.remappedChildSessions.get(tabId);
-    const nextRemap = new Map<string, string>();
-    if (existingRemap) {
-      for (const [originSessionId, intermediateSessionId] of existingRemap) {
-        const chainedSessionId = stepRemap.get(intermediateSessionId);
-        if (chainedSessionId !== undefined) {
-          if (originSessionId !== chainedSessionId) {
-            nextRemap.set(originSessionId, chainedSessionId);
+    const sessions = [...attachingEntry.frameDiscovery.sessions];
+    await Promise.all(
+      sessions.map(async (sessionId) => {
+        try {
+          let reply: unknown;
+          const ok = await cleanupWait(
+            this.api.sendCommand({ tabId, sessionId }, "Page.getFrameTree", {}).then((res) => {
+              reply = res;
+            }),
+          );
+          const tree = ok
+            ? (reply as { frameTree?: CdpFrameTreeNode } | undefined)?.frameTree
+            : undefined;
+          if (tree?.frame?.id) {
+            attachingEntry.frameDiscovery.frameIds.set(sessionId, tree.frame.id);
+            sources.push({ target: { tabId, sessionId }, tree });
           }
-        } else if (
-          staleSessionIds.has(intermediateSessionId) ||
-          !currentChildFrames.has(intermediateSessionId)
-        ) {
-          staleSessionIds.add(originSessionId);
+        } catch {
+          // Unreadable child target fails continuity check below and invalidates its frameId.
         }
-      }
-    }
-    for (const [oldSessionId, newSessionId] of stepRemap) {
-      if (oldSessionId !== newSessionId) {
-        nextRemap.set(oldSessionId, newSessionId);
-      }
-    }
-    while (nextRemap.size > MAX_REMAPPED_CHILD_SESSIONS) {
-      const oldest = nextRemap.keys().next().value;
-      if (oldest === undefined) break;
-      nextRemap.delete(oldest);
-      staleSessionIds.add(oldest);
-    }
-    if (nextRemap.size > 0) {
-      this.remappedChildSessions.set(tabId, nextRemap);
-      this.options.onChildFramesRemapped?.(tabId, nextRemap);
-    } else {
-      this.remappedChildSessions.delete(tabId);
+      }),
+    );
+    check();
+
+    if (sources.length > 0) {
+      this.syncRoutesFromSources(attachingEntry, sources);
     }
 
-    if (staleSessionIds.size > 0 || staleFrameIds.size > 0) {
+    const rootFrameId = previousSoftDetach.rootSignature.frameId;
+    const staleFrameIds = new Set<string>();
+    for (const [frameId, prevRoute] of previousSoftDetach.frames) {
+      if (frameId === rootFrameId && !prevRoute.parentFrameId && !prevRoute.sessionId) continue;
+      const nextRoute = attachingEntry.frames.get(frameId);
+      if (
+        !sameChildFrameRoute(prevRoute, nextRoute) ||
+        (nextRoute?.sessionId !== undefined &&
+          !attachingEntry.frameDiscovery.sessions.has(nextRoute.sessionId))
+      ) {
+        staleFrameIds.add(frameId);
+      }
+    }
+
+    if (staleFrameIds.size > 0) {
       if (this.options.onChildFramesInvalidated) {
-        this.options.onChildFramesInvalidated(tabId, {
-          sessionIds: staleSessionIds,
-          frameIds: staleFrameIds,
-        });
+        this.options.onChildFramesInvalidated(tabId, staleFrameIds);
       } else {
         this.options.onDocumentChanged?.(tabId);
       }
@@ -1433,75 +2209,92 @@ export class ChromiumCdp {
   private async softDetachIdleTab(tabId: number): Promise<void> {
     this.clearIdleTimer(tabId);
     if (!this.canSoftDetachIdleTab(tabId)) return;
-    const versionBeforeProbe = this.attachmentVersions.get(tabId) ?? 0;
-    const [preDetachDoc, preDetachChildFrames] = await Promise.all([
-      this.probeRootDocumentSignature(tabId),
-      this.probeChildFrameSignatures(tabId),
-    ]);
+    const beforeEntry = this.tabs.get(tabId);
+    if (beforeEntry?.kind !== "attached") return;
+    const versionBeforeProbe = beforeEntry.version;
+
+    const rootTreeBox: { tree?: CdpFrameTreeNode } = {};
+    const preDetachDoc = await this.probeRootDocumentSignature(tabId, rootTreeBox);
+    const midEntry = this.tabs.get(tabId);
     if (
-      (this.attachmentVersions.get(tabId) ?? 0) !== versionBeforeProbe ||
-      this.idleTimers.has(tabId) ||
+      midEntry?.kind !== "attached" ||
+      midEntry.version !== versionBeforeProbe ||
+      midEntry.idleTimer !== undefined ||
       !this.canSoftDetachIdleTab(tabId)
     ) {
       return;
     }
-    const previousAttachmentId = this.attachmentIds.get(tabId);
-    this.attachmentVersions.set(tabId, (this.attachmentVersions.get(tabId) ?? 0) + 1);
-    this.attachedTabs.delete(tabId);
-    this.softDetachedTabs.add(tabId);
-    this.softDetachedDocSignatures.set(tabId, preDetachDoc);
-    if (previousAttachmentId !== undefined) {
-      this.softDetachedAttachmentIds.set(tabId, previousAttachmentId);
-    } else {
-      this.softDetachedAttachmentIds.delete(tabId);
+
+    const preDetachFrames = await this.captureSnapshotFramesForSoftDetach(
+      tabId,
+      midEntry,
+      rootTreeBox.tree,
+      preDetachDoc,
+    );
+    const liveEntry = this.tabs.get(tabId);
+    if (
+      liveEntry?.kind !== "attached" ||
+      liveEntry.version !== versionBeforeProbe ||
+      liveEntry.idleTimer !== undefined ||
+      !this.canSoftDetachIdleTab(tabId)
+    ) {
+      return;
     }
-    if (preDetachChildFrames.size > 0) {
-      this.softDetachedFrameSessions.set(tabId, preDetachChildFrames);
-    } else {
-      this.softDetachedFrameSessions.delete(tabId);
-    }
-    this.attachmentIds.delete(tabId);
-    // Preserve `this.tabOwners`, `this.claimAttempts`, and historical
-    // `consoleBuffers` / `consoleSequences` / `networkBuffers` / `networkSequences`
-    // so `since` cursors remain monotonic across transparent reattach, and do NOT
-    // fire `onDocumentChanged(tabId)`.
+
+    liveEntry.history.softDetachConsoleWaterMark =
+      maxConsoleTimestamp(liveEntry.history.consoleBuffer) ??
+      liveEntry.history.softDetachConsoleWaterMark;
+
+    const softDetachedEntry: Extract<TabAttachment, { kind: "soft_detached" }> = {
+      kind: "soft_detached",
+      version: liveEntry.version + 1,
+      snapshot: {
+        attachmentId: liveEntry.attachmentId,
+        rootSignature: preDetachDoc,
+        frames: preDetachFrames,
+      },
+      leases: liveEntry.leases,
+      eventListeners: liveEntry.eventListeners,
+      history: liveEntry.history,
+    };
+    this.tabs.set(tabId, softDetachedEntry);
+
     this.options.onSoftDetached?.(tabId);
     this.backgroundExecution.invalidate(tabId);
-    this.passiveNetworkEnabledTabs.delete(tabId);
-    this.networkRequestMeta.delete(tabId);
-    this.activeEmulationTabs.delete(tabId);
-    this.clearFrameState(tabId);
-    const detach = (async () => {
+    this.readGate.reset(tabId);
+
+    const detachWork = (async () => {
       try {
         await this.api.detach({ tabId });
       } catch (err) {
         console.debug("[bsk cdp] idle soft-detach failed (likely tab already closed)", err);
       }
     })().finally(() => {
-      if (this.detachInFlight.get(tabId) === detach) {
-        this.detachInFlight.delete(tabId);
+      const current = this.tabs.get(tabId);
+      if (current === softDetachedEntry && current.detachInFlight === detachWork) {
+        current.detachInFlight = undefined;
       }
     });
-    this.detachInFlight.set(tabId, detach);
-    await cleanupWait(detach);
+    softDetachedEntry.detachInFlight = detachWork;
+    await cleanupWait(detachWork);
   }
 
   private async command(
-    rawTarget: CdpDebuggee,
+    target: CdpDebuggee,
     method: string,
     params: object,
     readTimeoutMs?: number,
     beforeDispatch?: () => void,
     signal?: AbortSignal,
   ): Promise<unknown> {
-    const target = this.resolveTarget(rawTarget);
     const { tabId } = target;
-    const rootState =
-      method === "Page.getFrameTree" && !target.sessionId && typeof tabId === "number"
-        ? this.frameDiscoveryState(tabId)
+    const entryBefore = typeof tabId === "number" ? this.tabs.get(tabId) : undefined;
+    const discoveryBefore =
+      method === "Page.getFrameTree" && isActiveAttachment(entryBefore)
+        ? entryBefore.frameDiscovery
         : undefined;
-    const rootBefore = rootState?.rootFrameId;
-    const version = typeof tabId === "number" ? (this.attachmentVersions.get(tabId) ?? 0) : 0;
+    const rootEpochBefore = discoveryBefore?.rootNavigationEpoch;
+    const version = entryBefore?.version ?? 0;
     const result = await this.readGate.run(
       target,
       method,
@@ -1512,19 +2305,25 @@ export class ChromiumCdp {
       readTimeoutMs,
       signal,
     );
-    // Page.enable does not replay navigation for an already loaded tab. Learn
-    // its root from every tree-read path, including guarded passive reads.
-    // A delayed reply must not overwrite a newer attachment or root event.
-    if (
-      rootState &&
-      typeof tabId === "number" &&
-      this.frameDiscovery.get(tabId) === rootState &&
-      (this.attachmentVersions.get(tabId) ?? 0) === version &&
-      rootState.rootFrameId === rootBefore
-    ) {
-      const frame = (result as { frameTree?: CdpFrameTreeNode } | undefined)?.frameTree?.frame;
-      if (typeof frame?.id === "string" && frame.id && !frame.parentId)
-        rootState.rootFrameId = frame.id;
+    if (discoveryBefore && typeof tabId === "number") {
+      const entryAfter = this.tabs.get(tabId);
+      if (
+        isActiveAttachment(entryAfter) &&
+        entryAfter.frameDiscovery === discoveryBefore &&
+        entryAfter.version === version &&
+        (Boolean(target.sessionId) ||
+          entryAfter.frameDiscovery.rootNavigationEpoch === rootEpochBefore)
+      ) {
+        const frameTree = (result as { frameTree?: CdpFrameTreeNode } | undefined)?.frameTree;
+        if (frameTree) {
+          this.harvestTreeIntoRoutes(
+            entryAfter,
+            { tabId, ...(target.sessionId ? { sessionId: target.sessionId } : {}) },
+            frameTree,
+            true,
+          );
+        }
+      }
     }
     return result;
   }
@@ -1534,22 +2333,18 @@ export class ChromiumCdp {
   }
 
   private async enableConsoleDomains(tabId: number, signal?: AbortSignal): Promise<void> {
-    const attachmentId = this.getAttachmentId(tabId);
-    if (attachmentId === undefined) throw new Error("debugger detached");
+    const entry = this.tabs.get(tabId);
+    if (entry?.kind !== "attached") throw new Error("debugger detached");
+    const attachmentId = entry.attachmentId;
     const check = () => {
       signal?.throwIfAborted();
       if (this.getAttachmentId(tabId) !== attachmentId)
         throw new Error("Debugger attachment changed during console capture");
     };
     check();
-    if (this.consoleDomainsEnabledTabs.get(tabId) === attachmentId) return;
-    // Runtime carries page console calls and exceptions, so its failure is the
-    // caller's error. Log only adds browser-generated entries and stays
-    // best-effort. Either failure leaves the tab unmarked so the next read
-    // retries instead of silently returning no console output.
+    if (entry.domains.consoleEnabled) return;
     await this.command({ tabId }, "Runtime.enable", {}, READ_TIMEOUT_MS, check, signal);
     check();
-    this.activeConsoleCaptureTabs.add(tabId);
     let logEnabled = true;
     try {
       await this.command({ tabId }, "Log.enable", {}, READ_TIMEOUT_MS, check, signal);
@@ -1560,9 +2355,6 @@ export class ChromiumCdp {
       console.debug("[bsk cdp] console domain enable failed", { tabId, method: "Log.enable", err });
     }
     check();
-    // Runtime.enable replays stored console messages as events, which are not
-    // ordered with its command reply. One more renderer round trip lets them
-    // reach the buffer before the first read.
     await this.command(
       { tabId },
       "Runtime.evaluate",
@@ -1572,38 +2364,50 @@ export class ChromiumCdp {
       signal,
     );
     check();
-    if (logEnabled) this.consoleDomainsEnabledTabs.set(tabId, attachmentId);
+    const current = this.tabs.get(tabId);
+    if (current?.kind === "attached" && current.attachmentId === attachmentId) {
+      current.history.softDetachConsoleWaterMark = undefined;
+      if (logEnabled) current.domains.consoleEnabled = true;
+    }
   }
 
   private async enableNetworkDomain(tabId: number): Promise<void> {
-    if (this.networkDomainsEnabledTabs.has(tabId)) return;
-    if (!this.passiveNetworkEnabledTabs.has(tabId)) {
+    const entry = this.tabs.get(tabId);
+    if (!isActiveAttachment(entry) || entry.domains.networkEnabled) return;
+    if (!entry.domains.passiveNetworkEnabled) {
       await this.command({ tabId }, "Network.enable", {});
-      this.passiveNetworkEnabledTabs.add(tabId);
+      const current = this.tabs.get(tabId);
+      if (isActiveAttachment(current)) current.domains.passiveNetworkEnabled = true;
     }
-    this.networkDomainsEnabledTabs.add(tabId);
+    const current = this.tabs.get(tabId);
+    if (isActiveAttachment(current)) current.domains.networkEnabled = true;
   }
 
   private async enableNetworkDomainBestEffort(tabId: number): Promise<void> {
-    if (this.passiveNetworkEnabledTabs.has(tabId) || this.networkDomainsEnabledTabs.has(tabId)) {
+    const entry = this.tabs.get(tabId);
+    if (
+      !isActiveAttachment(entry) ||
+      entry.domains.passiveNetworkEnabled ||
+      entry.domains.networkEnabled
+    ) {
       return;
     }
     try {
       await this.command({ tabId }, "Network.enable", {});
-      this.passiveNetworkEnabledTabs.add(tabId);
+      const current = this.tabs.get(tabId);
+      if (isActiveAttachment(current)) current.domains.passiveNetworkEnabled = true;
     } catch (err) {
       console.debug("[bsk cdp] network domain enable failed", { tabId, err });
     }
   }
 
   private enableFrameDiscovery(target: CdpTarget): Promise<void> {
-    const state = this.frameDiscoveryState(target.tabId);
+    const entry = this.tabs.get(target.tabId);
+    if (!isActiveAttachment(entry)) return Promise.resolve();
+    const state = entry.frameDiscovery;
     const key = target.sessionId ?? "root";
     const existing = state.enabled.get(key);
     if (existing) return existing;
-    // Auto-attach remains enabled for this debugger session, including later
-    // navigation and new iframes. Reconfiguring it on every observation adds a
-    // browser round trip and needlessly repeats child-target discovery.
     let issued = false;
     const work = this.readGate
       .run(target, "Target.setAutoAttach", () => {
@@ -1625,7 +2429,6 @@ export class ChromiumCdp {
       })
       .then(() => {})
       .catch((error) => {
-        // Keep a timed-out configuration until Chrome actually settles it.
         if ((!issued || !(error instanceof CdpReadTimeoutError)) && state.enabled.get(key) === work)
           state.enabled.delete(key);
         throw error;
@@ -1634,87 +2437,167 @@ export class ChromiumCdp {
     return work;
   }
 
-  private bindFrameTargetHandler(): void {
-    if (this.frameTargetSubscription) return;
+  private bindEvents(): void {
+    if (this.eventSubscription) return;
     const listener = (source: CdpDebuggee, method: string, params: unknown) => {
       const tabId = source.tabId;
       if (typeof tabId !== "number") return;
-      const raw = (params ?? {}) as Record<string, unknown>;
-      const frame = raw.frame as { id?: string; parentId?: string } | undefined;
-      if (
-        !source.sessionId &&
-        frame?.id &&
-        !frame.parentId &&
-        ["Page.frameNavigated", "Page.documentOpened"].includes(method)
-      )
-        this.frameDiscoveryState(tabId).rootFrameId = frame.id;
-      const rootRouteChanged =
-        method === "Page.navigatedWithinDocument" &&
-        raw.frameId === this.frameDiscovery.get(tabId)?.rootFrameId;
-      // A child navigation/detach does not replace the root document. Keep this
-      // tab-wide invalidation limited to root changes; child lifetimes need
-      // frame-scoped handling rather than discarding unrelated page refs.
-      if (
-        !source.sessionId &&
-        (rootRouteChanged ||
-          method === "DOM.documentUpdated" ||
-          ((method === "Page.frameNavigated" || method === "Page.documentOpened") &&
-            frame &&
-            !frame.parentId))
-      ) {
-        this.remappedChildSessions.delete(tabId);
-        this.options.onDocumentChanged?.(tabId);
-      }
-      const sessionId = typeof raw.sessionId === "string" ? raw.sessionId : undefined;
-      if (!sessionId) return;
-
-      if (method === "Target.detachedFromTarget") {
-        const state = this.frameDiscovery.get(tabId);
-        state?.enabled.delete(sessionId);
-        state?.frameIds.delete(sessionId);
-        const remapped = this.remappedChildSessions.get(tabId);
-        if (remapped) {
-          for (const [oldSessionId, targetSessionId] of remapped) {
-            if (oldSessionId === sessionId || targetSessionId === sessionId) {
-              remapped.delete(oldSessionId);
-            }
+      this.handleDialogEvent(tabId, source, method, params);
+      this.handleConsoleEvent(tabId, method, params);
+      this.handleNetworkEvent(tabId, method, params);
+      this.handleFrameTargetEvent(tabId, source, method, params);
+      const entry = this.tabs.get(tabId);
+      if (entry?.eventListeners.size) {
+        for (const subscriber of [...entry.eventListeners]) {
+          try {
+            subscriber(source, method, params);
+          } catch (err) {
+            console.debug("[bsk cdp] tab event subscriber threw", { tabId, method, err });
           }
-          if (remapped.size === 0) this.remappedChildSessions.delete(tabId);
         }
-        this.readGate.reset(tabId, sessionId);
-        if (state?.sessions.delete(sessionId)) state.generation += 1;
-        return;
       }
-      if (method !== "Target.attachedToTarget") return;
-      const targetInfo = raw.targetInfo as { type?: string; targetId?: string } | undefined;
-      if (targetInfo?.type && targetInfo.type !== "iframe") return;
-
-      const state = this.frameDiscoveryState(tabId);
-      // Chromium iframe target IDs are their DevTools frame tokens. Remember
-      // this before the first tree read so an unresponsive OOPIF can be omitted.
-      if (targetInfo?.type === "iframe" && typeof targetInfo.targetId === "string")
-        state.frameIds.set(sessionId, targetInfo.targetId);
-      if (state.sessions.has(sessionId)) return;
-      state.sessions.add(sessionId);
-      state.generation += 1;
-
-      const task = this.initializeFrameTarget({ tabId, sessionId });
-      state.pending.add(task);
-      void task.finally(() => {
-        state.pending.delete(task);
-      });
     };
     this.api.onEvent.addListener(listener);
-    this.frameTargetSubscription = {
+    this.eventSubscription = {
       dispose: () => this.api.onEvent.removeListener(listener),
     };
   }
 
-  /** A late real failure may clear a previously timed-out configuration.
-   * Retry it under the same bounded drain as newly attached targets. */
+  private handleFrameTargetEvent(
+    tabId: number,
+    source: CdpDebuggee,
+    method: string,
+    params: unknown,
+  ): void {
+    const entry = this.tabs.get(tabId);
+    if (!isActiveAttachment(entry)) return;
+    const raw = (params ?? {}) as Record<string, unknown>;
+    const frame = raw.frame as
+      | {
+          id?: string;
+          parentId?: string;
+          loaderId?: string;
+          url?: string;
+          urlFragment?: string;
+        }
+      | undefined;
+
+    if (
+      !source.sessionId &&
+      frame?.id &&
+      !frame.parentId &&
+      (method === "Page.frameNavigated" || method === "Page.documentOpened")
+    ) {
+      entry.frameDiscovery.rootFrameId = frame.id;
+      entry.frameDiscovery.rootNavigationEpoch += 1;
+    }
+
+    if (method === "Page.frameNavigated" && typeof frame?.id === "string" && frame.id) {
+      if (!source.sessionId && !frame.parentId) {
+        entry.frames.clear();
+        entry.frames.set(frame.id, {
+          loaderId: typeof frame.loaderId === "string" ? frame.loaderId : "",
+          authoritative: true,
+          ...(typeof frame.url === "string" ? { url: frame.url } : {}),
+          ...(typeof frame.urlFragment === "string" ? { urlFragment: frame.urlFragment } : {}),
+        });
+      } else {
+        const existing = entry.frames.get(frame.id);
+        entry.frames.set(frame.id, {
+          ...(source.sessionId ? { sessionId: source.sessionId } : {}),
+          loaderId: typeof frame.loaderId === "string" ? frame.loaderId : "",
+          authoritative: true,
+          ...(frame.parentId || existing?.parentFrameId
+            ? { parentFrameId: frame.parentId ?? existing?.parentFrameId }
+            : {}),
+          ...(typeof frame.url === "string" ? { url: frame.url } : {}),
+          ...(typeof frame.urlFragment === "string" ? { urlFragment: frame.urlFragment } : {}),
+        });
+      }
+    } else if (method === "Page.documentOpened" && typeof frame?.id === "string" && frame.id) {
+      const existing = entry.frames.get(frame.id);
+      if (existing) {
+        existing.documentElementBackendNodeId = undefined;
+        existing.documentOpened = true;
+        if (typeof frame.loaderId === "string" && frame.loaderId) {
+          existing.loaderId = frame.loaderId;
+        }
+      } else {
+        entry.frames.set(frame.id, {
+          ...(source.sessionId ? { sessionId: source.sessionId } : {}),
+          loaderId: typeof frame.loaderId === "string" ? frame.loaderId : "",
+          authoritative: Boolean(frame.loaderId) || !frame.parentId,
+          ...(frame.parentId ? { parentFrameId: frame.parentId } : {}),
+          ...(typeof frame.url === "string" ? { url: frame.url } : {}),
+          documentOpened: true,
+        });
+      }
+    } else if (method === "DOM.documentUpdated") {
+      for (const route of entry.frames.values()) {
+        if ((route.sessionId ?? undefined) === (source.sessionId ?? undefined)) {
+          route.documentElementBackendNodeId = undefined;
+        }
+      }
+    } else if (method === "Page.frameDetached" && typeof raw.frameId === "string") {
+      entry.frames.delete(raw.frameId);
+    }
+
+    const rootRouteChanged =
+      method === "Page.navigatedWithinDocument" && raw.frameId === entry.frameDiscovery.rootFrameId;
+    if (
+      !source.sessionId &&
+      (rootRouteChanged ||
+        method === "DOM.documentUpdated" ||
+        ((method === "Page.frameNavigated" || method === "Page.documentOpened") &&
+          frame &&
+          !frame.parentId))
+    ) {
+      this.options.onDocumentChanged?.(tabId);
+    }
+
+    const sessionId = typeof raw.sessionId === "string" ? raw.sessionId : undefined;
+    if (!sessionId) return;
+
+    if (method === "Target.detachedFromTarget") {
+      const state = entry.frameDiscovery;
+      state.enabled.delete(sessionId);
+      state.frameIds.delete(sessionId);
+      for (const [frameId, route] of entry.frames) {
+        if (route.sessionId === sessionId) {
+          entry.frames.delete(frameId);
+        }
+      }
+      this.readGate.reset(tabId, sessionId);
+      if (state.sessions.delete(sessionId)) state.generation += 1;
+      return;
+    }
+    if (method !== "Target.attachedToTarget") return;
+    const targetInfo = raw.targetInfo as { type?: string; targetId?: string } | undefined;
+    if (targetInfo?.type && targetInfo.type !== "iframe") return;
+
+    const state = entry.frameDiscovery;
+    if (targetInfo?.type === "iframe" && typeof targetInfo.targetId === "string") {
+      state.frameIds.set(sessionId, targetInfo.targetId);
+      const existing = entry.frames.get(targetInfo.targetId);
+      if (existing && existing.sessionId !== sessionId) {
+        entry.frames.delete(targetInfo.targetId);
+      }
+    }
+    if (state.sessions.has(sessionId)) return;
+    state.sessions.add(sessionId);
+    state.generation += 1;
+
+    const task = this.initializeFrameTarget({ tabId, sessionId });
+    state.pending.add(task);
+    void task.finally(() => {
+      state.pending.delete(task);
+    });
+  }
+
   private retryChildFrameDiscovery(tabId: number): void {
-    const state = this.frameDiscovery.get(tabId);
-    if (!state) return;
+    const entry = this.tabs.get(tabId);
+    if (!isActiveAttachment(entry)) return;
+    const state = entry.frameDiscovery;
     for (const sessionId of state.sessions) {
       if (state.enabled.has(sessionId)) continue;
       const task = this.initializeFrameTarget({ tabId, sessionId });
@@ -1728,16 +2611,21 @@ export class ChromiumCdp {
   private async initializeFrameTarget(target: CdpTarget): Promise<void> {
     try {
       await this.enableFrameDiscovery(target);
+      await this.command(target, "Page.enable", {}, READ_TIMEOUT_MS).catch((err) => {
+        rethrowReadTimeout(err);
+      });
     } catch (err) {
       if (err instanceof CdpReadTimeoutError) {
-        // The command is still in flight and Chrome keeps the child session
-        // attached. Keep both the session and the pending configuration until
-        // Chrome settles it instead of resending or losing the frame.
         console.debug("[bsk cdp] child frame discovery timed out", { target });
         return;
       }
-      const state = this.frameDiscovery.get(target.tabId);
-      if (state?.sessions.delete(target.sessionId as string)) state.generation += 1;
+      const entry = this.tabs.get(target.tabId);
+      if (
+        isActiveAttachment(entry) &&
+        entry.frameDiscovery.sessions.delete(target.sessionId as string)
+      ) {
+        entry.frameDiscovery.generation += 1;
+      }
       console.debug("[bsk cdp] child frame target initialization failed", { target, err });
     }
   }
@@ -1745,17 +2633,16 @@ export class ChromiumCdp {
   private async drainFrameAttachTasks(tabId: number): Promise<void> {
     const deadline = Date.now() + FRAME_DISCOVERY_TIMEOUT_MS;
     while (Date.now() < deadline) {
-      const state = this.frameDiscovery.get(tabId);
+      const entry = this.tabs.get(tabId);
+      const state = isActiveAttachment(entry) ? entry.frameDiscovery : undefined;
       const generation = state?.generation ?? 0;
       if (state?.pending.size && !(await settleBeforeDeadline([...state.pending], deadline))) break;
 
-      // Target.setAutoAttach may enqueue the next attachedToTarget event after
-      // its command promise settles. Wait for a short quiet window, then finish
-      // only if neither the state object nor its generation changed.
       const quietTime = Math.min(FRAME_DISCOVERY_QUIET_MS, deadline - Date.now());
       if (quietTime <= 0) break;
       await new Promise<void>((resolve) => setTimeout(resolve, quietTime));
-      const current = this.frameDiscovery.get(tabId);
+      const latest = this.tabs.get(tabId);
+      const current = isActiveAttachment(latest) ? latest.frameDiscovery : undefined;
       if (
         current === state &&
         (current?.generation ?? 0) === generation &&
@@ -1767,29 +2654,15 @@ export class ChromiumCdp {
     console.debug("[bsk cdp] frame discovery did not reach quiescence before timeout", { tabId });
   }
 
-  private frameDiscoveryState(tabId: number): FrameDiscoveryState {
-    const existing = this.frameDiscovery.get(tabId);
-    if (existing) return existing;
-    const created: FrameDiscoveryState = {
-      sessions: new Set(),
-      pending: new Set(),
-      generation: 0,
-      enabled: new Map(),
-      frameIds: new Map(),
-    };
-    this.frameDiscovery.set(tabId, created);
-    return created;
-  }
-
-  private clearFrameState(tabId: number): void {
-    this.frameDiscovery.delete(tabId);
-    this.readGate.reset(tabId);
-  }
-
   pendingDialogs(tabId?: number): PendingJavaScriptDialog[] {
-    return [...this.pendingDialogEntries.values()]
-      .filter((entry) => tabId === undefined || entry.dialog.tab_id === tabId)
-      .map((entry) => ({ ...entry.dialog }));
+    const result: PendingJavaScriptDialog[] = [];
+    for (const [id, entry] of this.tabs) {
+      if (tabId !== undefined && id !== tabId) continue;
+      if (isActiveAttachment(entry) && entry.pendingDialog) {
+        result.push({ ...entry.pendingDialog.dialog });
+      }
+    }
+    return result;
   }
 
   onDialogChanged(
@@ -1817,133 +2690,142 @@ export class ChromiumCdp {
     text?: string,
     guard: Pick<CdpDispatchGuard, "signal" | "onDispatch"> = {},
   ): Promise<JavaScriptDialogInfo> {
-    const entry = [...this.pendingDialogEntries.values()].find((item) => item.dialog.id === id);
-    if (!entry) throw new Error("Dialog is no longer pending");
-    if (entry.resolving) throw new Error("Dialog decision is already in progress");
-    if (text !== undefined && (!accept || entry.dialog.type !== "prompt"))
+    let pending: PendingDialogState | undefined;
+    for (const tab of this.tabs.values()) {
+      if (isActiveAttachment(tab) && tab.pendingDialog?.dialog.id === id) {
+        pending = tab.pendingDialog;
+        break;
+      }
+    }
+    if (!pending) throw new Error("Dialog is no longer pending");
+    if (pending.resolving) throw new Error("Dialog decision is already in progress");
+    if (text !== undefined && (!accept || pending.dialog.type !== "prompt"))
       throw new Error("text is only valid when accepting a prompt");
     guard.signal?.throwIfAborted();
-    if (
-      this.options.canControlDialog &&
-      !(await this.options.canControlDialog(entry.dialog.tab_id))
-    )
+    const dialogTabId = pending.dialog.tab_id;
+    if (this.options.canControlDialog && !(await this.options.canControlDialog(dialogTabId)))
       throw new Error("Tab is no longer agent controlled");
-    // Scope checks can await tab metadata; repeat identity checks at native dispatch.
-    if (this.pendingDialogEntries.get(entry.dialog.tab_id) !== entry)
-      throw new Error("Dialog is no longer pending");
-    if (entry.resolving) throw new Error("Dialog decision is already in progress");
-    entry.resolving = true;
+    const currentPending = () => {
+      const tab = this.tabs.get(dialogTabId);
+      return isActiveAttachment(tab) ? tab.pendingDialog : undefined;
+    };
+    if (currentPending() !== pending) throw new Error("Dialog is no longer pending");
+    if (pending.resolving) throw new Error("Dialog decision is already in progress");
+    pending.resolving = true;
     let timeout: ReturnType<typeof setTimeout> | undefined;
     let closeListener: ((result: JavaScriptDialogInfo | Error) => void) | undefined;
     const closed = new Promise<JavaScriptDialogInfo>((resolve, reject) => {
       closeListener = (result) => (result instanceof Error ? reject(result) : resolve(result));
-      entry.closed.add(closeListener);
+      pending.closed.add(closeListener);
       timeout = setTimeout(() => reject(new Error("Browser did not confirm dialog closure")), 2000);
     });
-    // Attach a rejection handler immediately, including when native dispatch fails first.
     void closed.catch(() => {});
     try {
-      const activeAttachment = () =>
-        this.getAttachmentId(entry.dialog.tab_id) ?? this.attachingIds.get(entry.dialog.tab_id);
-      if (activeAttachment() !== entry.attachmentId) {
+      const activeAttachment = () => this.activeOrAttachingId(dialogTabId);
+      if (activeAttachment() !== pending.attachmentId) {
         throw new Error("Debugger attachment changed before dispatch");
       }
       await this.command(
-        { ...entry.source, tabId: entry.dialog.tab_id },
+        { ...pending.source, tabId: dialogTabId },
         "Page.handleJavaScriptDialog",
         {
           accept,
-          // CDP treats omitted promptText as empty, so preserve the full native
-          // default privately instead of reusing the bounded status preview.
-          ...(accept && entry.dialog.type === "prompt"
-            ? { promptText: text ?? entry.defaultPrompt ?? "" }
+          ...(accept && pending.dialog.type === "prompt"
+            ? { promptText: text ?? pending.defaultPrompt ?? "" }
             : {}),
         },
         undefined,
         () => {
           guard.signal?.throwIfAborted();
-          if (activeAttachment() !== entry.attachmentId)
+          if (activeAttachment() !== pending.attachmentId)
             throw new Error("Debugger attachment changed before dispatch");
-          if (this.pendingDialogEntries.get(entry.dialog.tab_id) !== entry)
+          if (currentPending() !== pending)
             throw new Error("Dialog changed before native dispatch");
           guard.onDispatch?.();
         },
         guard.signal,
       );
       const result = await closed;
-      await this.verifyRootDocumentAfterDialog(entry.dialog.tab_id);
+      await this.verifyRootDocumentAfterDialog(dialogTabId);
       return result;
     } finally {
       if (timeout) clearTimeout(timeout);
-      if (closeListener) entry.closed.delete(closeListener);
-      entry.resolving = false;
+      if (closeListener) pending.closed.delete(closeListener);
+      pending.resolving = false;
     }
   }
 
   private async verifyRootDocumentAfterDialog(tabId: number): Promise<void> {
-    const pending = this.deferredRootDocumentChecks.get(tabId);
-    if (!pending || !this.attachedTabs.has(tabId) || this.openDialogs.has(tabId)) return;
-    const version = this.attachmentVersions.get(tabId);
+    const entry = this.tabs.get(tabId);
+    if (entry?.kind !== "attached" || !entry.deferredRootCheck || entry.openDialog) return;
+    const pending = entry.deferredRootCheck;
+    const version = entry.version;
     pending.verification ??= (async () => {
       try {
         const current = await this.probeRootDocumentSignature(tabId);
-        if (this.deferredRootDocumentChecks.get(tabId) !== pending || this.openDialogs.has(tabId))
+        const live = this.tabs.get(tabId);
+        if (live?.kind !== "attached" || live.deferredRootCheck !== pending || live.openDialog)
           return;
-        this.deferredRootDocumentChecks.delete(tabId);
+        live.deferredRootCheck = undefined;
         if (current.dialogOpen || !sameRootDocumentSignature(pending.expected, current)) {
-          this.attachmentIds.set(tabId, crypto.randomUUID());
-          this.remappedChildSessions.delete(tabId);
+          live.attachmentId = crypto.randomUUID();
           this.options.onDocumentChanged?.(tabId);
         }
       } finally {
         pending.verification = undefined;
-        if (this.attachmentVersions.get(tabId) === version) this.touchTabActivity(tabId);
+        const live = this.tabs.get(tabId);
+        if (live?.kind === "attached" && live.version === version) {
+          this.touchTabActivity(tabId);
+        }
       }
     })();
     await pending.verification;
   }
 
-  private bindDialogHandler(): void {
-    if (this.dialogSubscription) return;
-    const listener = (source: CdpDebuggee, method: string, params: unknown) => {
-      const tabId = source.tabId;
-      if (typeof tabId !== "number") return;
-      if (method === "Page.javascriptDialogOpening") {
-        if (!this.attachmentIds.has(tabId) && !this.attachingIds.has(tabId)) return;
-        const generation = (this.dialogGenerations.get(tabId) ?? 0) + 1;
-        this.dialogGenerations.set(tabId, generation);
-        const opening = this.onJavaScriptDialogOpening(source, params, generation);
-        if (this.dialogGenerations.get(tabId) === generation) this.openDialogs.set(tabId, opening);
-      } else if (method === "Page.javascriptDialogClosed") {
-        this.dialogGenerations.set(tabId, (this.dialogGenerations.get(tabId) ?? 0) + 1);
-        this.openDialogs.delete(tabId);
-        this.touchTabActivity(tabId);
-        if (this.deferredRootDocumentChecks.has(tabId)) {
-          void this.verifyRootDocumentAfterDialog(tabId).catch((err) => {
-            console.debug("[bsk cdp] post-dialog document verification failed", { tabId, err });
-          });
-        }
-        const entry = this.pendingDialogEntries.get(tabId);
-        if (!entry) return;
-        const info: JavaScriptDialogInfo = {
-          tab_id: tabId,
-          type: entry.dialog.type,
-          message: entry.dialog.message,
-          url: entry.dialog.url,
-          default_prompt: entry.dialog.default_prompt,
-          has_browser_handler: entry.hasBrowserHandler,
-          handled: (params as { result?: boolean })?.result ? "accepted" : "dismissed",
-          sequence: entry.dialog.sequence,
-        };
-        clearTimeout(entry.timer);
-        this.pendingDialogEntries.delete(tabId);
-        this.appendDialog(tabId, info);
-        for (const close of entry.closed) close(info);
-        this.emitDialogChanged(tabId, null);
+  private handleDialogEvent(
+    tabId: number,
+    source: CdpDebuggee,
+    method: string,
+    params: unknown,
+  ): void {
+    const entry = this.tabs.get(tabId);
+    if (!isActiveAttachment(entry)) return;
+    if (method === "Page.javascriptDialogOpening") {
+      if (!this.activeOrAttachingId(tabId)) return;
+      const generation = entry.history.dialogGeneration + 1;
+      entry.history.dialogGeneration = generation;
+      const opening = this.onJavaScriptDialogOpening(source, params, generation);
+      const latest = this.tabs.get(tabId);
+      if (isActiveAttachment(latest) && latest.history.dialogGeneration === generation) {
+        latest.openDialog = opening;
       }
-    };
-    this.api.onEvent.addListener(listener);
-    this.dialogSubscription = { dispose: () => this.api.onEvent.removeListener(listener) };
+    } else if (method === "Page.javascriptDialogClosed") {
+      entry.history.dialogGeneration += 1;
+      entry.openDialog = undefined;
+      this.touchTabActivity(tabId);
+      if (entry.deferredRootCheck) {
+        void this.verifyRootDocumentAfterDialog(tabId).catch((err) => {
+          console.debug("[bsk cdp] post-dialog document verification failed", { tabId, err });
+        });
+      }
+      const pending = entry.pendingDialog;
+      if (!pending) return;
+      const info: JavaScriptDialogInfo = {
+        tab_id: tabId,
+        type: pending.dialog.type,
+        message: pending.dialog.message,
+        url: pending.dialog.url,
+        default_prompt: pending.dialog.default_prompt,
+        has_browser_handler: pending.hasBrowserHandler,
+        handled: (params as { result?: boolean })?.result ? "accepted" : "dismissed",
+        sequence: pending.dialog.sequence,
+      };
+      clearTimeout(pending.timer);
+      entry.pendingDialog = undefined;
+      appendBoundedList(entry.history.dialogBuffer, info, MAX_DIALOG_BUFFER);
+      for (const close of pending.closed) close(info);
+      this.emitDialogChanged(tabId, null);
+    }
   }
 
   private async onJavaScriptDialogOpening(
@@ -1954,21 +2836,24 @@ export class ChromiumCdp {
     const tabId = source.tabId;
     if (tabId === undefined) return;
     this.touchTabActivity(tabId);
-    const attachmentId = this.getAttachmentId(tabId) ?? this.attachingIds.get(tabId);
-    if (!attachmentId) return;
-    const attachmentVersion = this.attachmentVersions.get(tabId) ?? 0;
+    const attachmentId = this.activeOrAttachingId(tabId);
+    const initial = this.tabs.get(tabId);
+    if (!attachmentId || !isActiveAttachment(initial)) return;
+    const attachmentVersion = initial.version;
     const parsed = parseDialogOpeningParams(params);
     try {
       if (this.options.canControlDialog && !(await this.options.canControlDialog(tabId))) return;
-      const currentAttachmentId = this.getAttachmentId(tabId) ?? this.attachingIds.get(tabId);
+      const currentAttachmentId = this.activeOrAttachingId(tabId);
+      const current = this.tabs.get(tabId);
       if (
         !currentAttachmentId ||
-        (this.attachmentVersions.get(tabId) ?? 0) !== attachmentVersion ||
-        this.dialogGenerations.get(tabId) !== generation
+        !isActiveAttachment(current) ||
+        current.version !== attachmentVersion ||
+        current.history.dialogGeneration !== generation
       )
         return;
-      const sequence = (this.dialogSequences.get(tabId) ?? 0) + 1;
-      this.dialogSequences.set(tabId, sequence);
+      const sequence = current.history.dialogSequence + 1;
+      current.history.dialogSequence = sequence;
       const dialog: PendingJavaScriptDialog = {
         id: crypto.randomUUID(),
         tab_id: tabId,
@@ -1983,12 +2868,12 @@ export class ChromiumCdp {
         decision_deadline: Date.now() + 60000,
       };
       const timer = setTimeout(() => {
-        // A bounded fallback rejects; never confirms on behalf of an absent agent.
-        if (this.pendingDialogEntries.get(tabId)?.dialog.id !== dialog.id) return;
+        const live = this.tabs.get(tabId);
+        if (!isActiveAttachment(live) || live.pendingDialog?.dialog.id !== dialog.id) return;
         this.emitDialogChanged(tabId, dialog, "decision_timeout");
         void this.resolveDialog(dialog.id, false).catch(() => {});
       }, 60000);
-      this.pendingDialogEntries.set(tabId, {
+      current.pendingDialog = {
         dialog,
         source,
         attachmentId: currentAttachmentId,
@@ -1997,115 +2882,78 @@ export class ChromiumCdp {
         resolving: false,
         timer,
         closed: new Set(),
-      });
+      };
       this.emitDialogChanged(tabId, dialog);
     } catch (error) {
       console.debug("[bsk cdp] dialog state unavailable", error);
     }
   }
 
-  private appendDialog(tabId: number, entry: JavaScriptDialogInfo): void {
-    const buf = this.dialogBuffers.get(tabId) ?? [];
-    buf.push(entry);
-    while (buf.length > MAX_DIALOG_BUFFER) {
-      buf.shift();
+  private handleConsoleEvent(tabId: number, method: string, params: unknown): void {
+    switch (method) {
+      case "Runtime.consoleAPICalled":
+        this.appendConsole(tabId, parseConsoleApiCalled(params));
+        break;
+      case "Runtime.exceptionThrown":
+        this.appendConsole(tabId, parseExceptionThrown(params));
+        break;
+      case "Log.entryAdded":
+        this.appendConsole(tabId, parseLogEntry(params));
+        break;
     }
-    this.dialogBuffers.set(tabId, buf);
   }
 
-  private clearDialogState(tabId: number): void {
-    this.openDialogs.delete(tabId);
-    const pending = this.pendingDialogEntries.get(tabId);
-    if (pending) {
-      clearTimeout(pending.timer);
-      this.pendingDialogEntries.delete(tabId);
-      for (const close of pending.closed)
-        close(new Error("Debugger attachment changed; dialog outcome is unknown"));
-      this.emitDialogChanged(tabId, null);
+  private appendConsole(tabId: number, parsed: ParsedConsoleEntry | null): void {
+    if (!parsed) return;
+    const entry = this.ensureTabEntry(tabId);
+    const waterMark = entry.history.softDetachConsoleWaterMark;
+    if (
+      waterMark !== undefined &&
+      typeof parsed.timestamp === "number" &&
+      parsed.timestamp <= waterMark
+    ) {
+      return;
     }
-    this.dialogGenerations.set(tabId, (this.dialogGenerations.get(tabId) ?? 0) + 1);
-    this.dialogBuffers.delete(tabId);
-    this.dialogSequences.delete(tabId);
+    const sequence = entry.history.consoleSequence + 1;
+    entry.history.consoleSequence = sequence;
+    appendBoundedList(entry.history.consoleBuffer, { ...parsed, sequence }, MAX_CONSOLE_BUFFER);
   }
 
-  private bindConsoleHandler(): void {
-    if (this.consoleSubscription) return;
-    const listener = (source: chrome.debugger.Debuggee, method: string, params: unknown) => {
-      const tabId = source.tabId;
-      if (typeof tabId !== "number") return;
-      switch (method) {
-        case "Runtime.consoleAPICalled":
-          this.appendConsole(tabId, parseConsoleApiCalled(params));
-          break;
-        case "Runtime.exceptionThrown":
-          this.appendConsole(tabId, parseExceptionThrown(params));
-          break;
-        case "Log.entryAdded":
-          this.appendConsole(tabId, parseLogEntry(params));
-          break;
-      }
-    };
-    this.api.onEvent.addListener(listener);
-    this.consoleSubscription = {
-      dispose: () => this.api.onEvent.removeListener(listener),
-    };
+  private handleNetworkEvent(tabId: number, method: string, params: unknown): void {
+    switch (method) {
+      case "Network.requestWillBeSent":
+        this.rememberNetworkRequest(tabId, params);
+        break;
+      case "Network.responseReceived":
+        this.appendNetwork(
+          tabId,
+          parseNetworkResponse(this.getNetworkRequest(tabId, params), params),
+        );
+        break;
+      case "Network.loadingFailed":
+        this.appendNetwork(
+          tabId,
+          parseNetworkFailure(this.getNetworkRequest(tabId, params, true), params),
+        );
+        break;
+      case "Network.loadingFinished":
+        this.getNetworkRequest(tabId, params, true);
+        break;
+    }
   }
 
-  private appendConsole(tabId: number, entry: ParsedConsoleEntry | null): void {
-    if (!entry) return;
-    const sequence = (this.consoleSequences.get(tabId) ?? 0) + 1;
-    this.consoleSequences.set(tabId, sequence);
-    appendBoundedEntry(this.consoleBuffers, tabId, { ...entry, sequence }, MAX_CONSOLE_BUFFER);
-  }
-
-  private clearConsoleState(tabId: number): void {
-    this.consoleBuffers.delete(tabId);
-    this.consoleSequences.delete(tabId);
-    this.consoleDomainsEnabledTabs.delete(tabId);
-    this.activeConsoleCaptureTabs.delete(tabId);
-  }
-
-  private bindNetworkHandler(): void {
-    if (this.networkSubscription) return;
-    const listener = (source: chrome.debugger.Debuggee, method: string, params: unknown) => {
-      const tabId = source.tabId;
-      if (typeof tabId !== "number") return;
-      switch (method) {
-        case "Network.requestWillBeSent":
-          this.rememberNetworkRequest(tabId, params);
-          break;
-        case "Network.responseReceived":
-          this.appendNetwork(
-            tabId,
-            parseNetworkResponse(this.getNetworkRequest(tabId, params), params),
-          );
-          break;
-        case "Network.loadingFailed":
-          this.appendNetwork(
-            tabId,
-            parseNetworkFailure(this.getNetworkRequest(tabId, params, true), params),
-          );
-          break;
-        case "Network.loadingFinished":
-          this.getNetworkRequest(tabId, params, true);
-          break;
-      }
-    };
-    this.api.onEvent.addListener(listener);
-    this.networkSubscription = {
-      dispose: () => this.api.onEvent.removeListener(listener),
-    };
-  }
-
-  private appendNetwork(tabId: number, entry: ParsedNetworkEntry | null): void {
-    if (!entry) return;
-    const sequence = (this.networkSequences.get(tabId) ?? 0) + 1;
-    this.networkSequences.set(tabId, sequence);
-    appendBoundedEntry(this.networkBuffers, tabId, { ...entry, sequence }, MAX_NETWORK_BUFFER);
+  private appendNetwork(tabId: number, parsed: ParsedNetworkEntry | null): void {
+    if (!parsed) return;
+    const entry = this.ensureTabEntry(tabId);
+    const sequence = entry.history.networkSequence + 1;
+    entry.history.networkSequence = sequence;
+    appendBoundedList(entry.history.networkBuffer, { ...parsed, sequence }, MAX_NETWORK_BUFFER);
   }
 
   /** Remember `requestWillBeSent` metadata so responses/failures can be attributed. */
   private rememberNetworkRequest(tabId: number, params: unknown): void {
+    const entry = this.tabs.get(tabId);
+    if (!isActiveAttachment(entry)) return;
     const raw = (params ?? {}) as Record<string, unknown>;
     const id = typeof raw.requestId === "string" ? raw.requestId : undefined;
     const request = (raw.request ?? {}) as Record<string, unknown>;
@@ -2119,7 +2967,7 @@ export class ChromiumCdp {
       typeof raw.type === "string" ? raw.type : undefined,
       MAX_NETWORK_FIELD_LENGTH,
     );
-    const tabMeta = this.networkRequestMeta.get(tabId) ?? new Map<string, NetworkRequestMeta>();
+    const tabMeta = entry.networkRequestMeta;
     tabMeta.delete(id);
     tabMeta.set(id, {
       url: url.text,
@@ -2133,7 +2981,6 @@ export class ChromiumCdp {
       if (oldest === undefined) break;
       tabMeta.delete(oldest);
     }
-    this.networkRequestMeta.set(tabId, tabMeta);
   }
 
   /** Keep metadata through response headers; consume it only when loading ends. */
@@ -2142,50 +2989,58 @@ export class ChromiumCdp {
     params: unknown,
     finished = false,
   ): NetworkRequestMeta | undefined {
+    const entry = this.tabs.get(tabId);
+    if (!isActiveAttachment(entry)) return undefined;
     const raw = (params ?? {}) as Record<string, unknown>;
     const id = typeof raw.requestId === "string" ? raw.requestId : undefined;
     if (!id) return undefined;
-    const tabMeta = this.networkRequestMeta.get(tabId);
-    const info = tabMeta?.get(id);
-    if (finished) tabMeta?.delete(id);
-    if (tabMeta?.size === 0) this.networkRequestMeta.delete(tabId);
+    const info = entry.networkRequestMeta.get(id);
+    if (finished) entry.networkRequestMeta.delete(id);
     return info;
-  }
-
-  private clearNetworkState(tabId: number): void {
-    this.networkBuffers.delete(tabId);
-    this.networkSequences.delete(tabId);
-    this.networkDomainsEnabledTabs.delete(tabId);
-    this.passiveNetworkEnabledTabs.delete(tabId);
-    this.networkRequestMeta.delete(tabId);
   }
 
   private bindAutoDetach(): void {
     if (this.detachSubscription) return;
-    const listener = (source: chrome.debugger.Debuggee, _reason: string) => {
-      if (typeof source.tabId === "number") {
-        this.clearIdleTimer(source.tabId);
-        this.options.onDocumentChanged?.(source.tabId);
-        this.attachedTabs.delete(source.tabId);
-        this.clearSoftDetachState(source.tabId);
-        this.retainedAttachments.delete(source.tabId);
-        this.attachmentIds.delete(source.tabId);
-        this.attachmentVersions.set(
-          source.tabId,
-          (this.attachmentVersions.get(source.tabId) ?? 0) + 1,
-        );
-        this.backgroundExecution.invalidate(source.tabId);
-        this.activeEmulationTabs.delete(source.tabId);
-        if (_reason === "target_closed") {
-          this.claimAttempts.delete(source.tabId);
-          this.tabOwners.delete(source.tabId);
-          this.backgroundExecution.forget(source.tabId);
+    const listener = (source: chrome.debugger.Debuggee, reason: string) => {
+      const tabId = source.tabId;
+      if (typeof tabId !== "number") return;
+      this.clearIdleTimer(tabId);
+      const entry = this.tabs.get(tabId);
+      this.options.onDocumentChanged?.(tabId);
+      if (entry) {
+        this.closePendingDialogOnDetach(tabId, entry);
+        this.clearRetainLeases(entry);
+        if (reason === "target_closed") {
+          entry.leases.clear();
+          entry.eventListeners.clear();
+          entry.history.claims.clear();
+          entry.history.owners.clear();
+          this.backgroundExecution.forget(tabId);
         }
-        this.clearDialogState(source.tabId);
-        this.clearConsoleState(source.tabId);
-        this.clearNetworkState(source.tabId);
-        this.clearFrameState(source.tabId);
+        this.resetDiagnosticHistory(entry.history);
+        this.tabs.set(tabId, {
+          kind: "detached",
+          version: entry.version + 1,
+          detachInFlight:
+            entry.kind === "detached" || entry.kind === "soft_detached"
+              ? entry.detachInFlight
+              : undefined,
+          fencedAttach:
+            entry.kind === "attaching"
+              ? entry.attachInFlight
+              : entry.kind === "detached"
+                ? entry.fencedAttach
+                : undefined,
+          leases: entry.leases,
+          eventListeners: entry.eventListeners,
+          history: entry.history,
+        });
+        this.maybePruneDetachedEntry(tabId);
+      } else if (reason === "target_closed") {
+        this.backgroundExecution.forget(tabId);
       }
+      this.backgroundExecution.invalidate(tabId);
+      this.readGate.reset(tabId);
     };
     this.api.onDetach.addListener(listener);
     this.detachSubscription = {
@@ -2197,33 +3052,43 @@ export class ChromiumCdp {
   dispose(): void {
     this.inputClock.invalidate();
     this.clearAllIdleTimers();
-    this.openDialogs.clear();
-    this.deferredRootDocumentChecks.clear();
-    for (const tabId of this.pendingDialogEntries.keys()) this.clearDialogState(tabId);
+    for (const [tabId, entry] of this.tabs) {
+      this.closePendingDialogOnDetach(tabId, entry);
+      if (isActiveAttachment(entry)) {
+        entry.openDialog = undefined;
+        entry.deferredRootCheck = undefined;
+      }
+      entry.leases.clear();
+      entry.eventListeners.clear();
+    }
     this.dialogListeners.clear();
     this.detachSubscription?.dispose();
     this.detachSubscription = null;
-    this.dialogSubscription?.dispose();
-    this.dialogSubscription = null;
-    this.consoleSubscription?.dispose();
-    this.consoleSubscription = null;
-    this.networkSubscription?.dispose();
-    this.networkSubscription = null;
-    this.frameTargetSubscription?.dispose();
-    this.frameTargetSubscription = null;
+    this.eventSubscription?.dispose();
+    this.eventSubscription = null;
   }
 
   /** Detach tabs only when no other live session has claimed them. */
   async detachSession(sessionId: string): Promise<void> {
-    const owned = new Set([...this.tabOwners.keys(), ...this.claimAttempts.keys()]);
-    await Promise.all(Array.from(owned, (tabId) => this.releaseSessionTab(sessionId, tabId)));
+    const owned: number[] = [];
+    for (const [tabId, entry] of this.tabs) {
+      if (entry.history.owners.has(sessionId) || entry.history.claims.has(sessionId)) {
+        owned.push(tabId);
+      }
+    }
+    await Promise.all(owned.map((tabId) => this.releaseSessionTab(sessionId, tabId)));
   }
 
   /** Clean up ownership and fence any in-flight attachment when a tab closes. */
   forgetClosedTab(tabId: number): void {
     this.clearIdleTimer(tabId);
-    this.claimAttempts.delete(tabId);
-    this.tabOwners.delete(tabId);
+    const entry = this.tabs.get(tabId);
+    if (entry) {
+      entry.leases.clear();
+      entry.eventListeners.clear();
+      entry.history.claims.clear();
+      entry.history.owners.clear();
+    }
     this.backgroundExecution.forget(tabId);
     void this.detach(tabId);
   }
@@ -2239,26 +3104,28 @@ export class ChromiumCdp {
       seen.add(key);
       releases.push(this.releaseSessionTab(sessionId, tabId));
     };
-    for (const [tabId, owners] of this.tabOwners) {
-      for (const sessionId of owners) {
+    for (const [tabId, entry] of this.tabs) {
+      for (const sessionId of entry.history.owners) {
         if (!liveSessionIds.has(sessionId)) queueRelease(sessionId, tabId);
       }
-    }
-    for (const [tabId, claims] of this.claimAttempts) {
-      for (const sessionId of claims.keys()) {
+      for (const sessionId of entry.history.claims.keys()) {
         if (!liveSessionIds.has(sessionId)) queueRelease(sessionId, tabId);
       }
     }
     await Promise.all(releases);
     if (generation !== this.syncGeneration) return;
     const unowned: Promise<void>[] = [];
-    for (const tabId of new Set([
-      ...this.attachedTabs,
-      ...this.softDetachedTabs,
-      ...this.attachInFlight.keys(),
-      ...this.detachInFlight.keys(),
-    ])) {
-      if (!this.tabOwners.get(tabId)?.size && !this.claimAttempts.get(tabId)?.size) {
+    for (const [tabId, entry] of this.tabs) {
+      const hasAttachmentState =
+        entry.kind === "attached" ||
+        entry.kind === "soft_detached" ||
+        entry.kind === "attaching" ||
+        Boolean(entry.detachInFlight);
+      if (
+        hasAttachmentState &&
+        entry.history.owners.size === 0 &&
+        entry.history.claims.size === 0
+      ) {
         unowned.push(this.detach(tabId));
       }
     }
@@ -2266,16 +3133,9 @@ export class ChromiumCdp {
   }
 }
 
-function appendBoundedEntry<T>(
-  buffers: Map<number, T[]>,
-  tabId: number,
-  entry: T,
-  maxEntries: number,
-): void {
-  const buffer = buffers.get(tabId) ?? [];
+function appendBoundedList<T>(buffer: T[], entry: T, maxEntries: number): void {
   buffer.push(entry);
   while (buffer.length > maxEntries) buffer.shift();
-  buffers.set(tabId, buffer);
 }
 
 function readBufferedEntries<

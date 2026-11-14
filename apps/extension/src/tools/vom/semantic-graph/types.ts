@@ -20,6 +20,7 @@ export type SemanticNodeId = string;
 
 export interface SemanticFrame {
   frameId: string;
+  loaderId?: string;
   parentFrameId?: string;
   ownerBackendNodeId?: number;
   ownerNodeId?: SemanticNodeId;

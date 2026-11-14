@@ -15,8 +15,9 @@ function visual(): VisualRefInput {
     candidate: {
       document: {
         attachmentId: "a",
-        target: { tabId: 4, sessionId: "child" },
+        tabId: 4,
         frameId: "frame",
+        loaderId: "loader-1",
         documentElementBackendNodeId: 1,
       },
       backendNodeId: 42,

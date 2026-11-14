@@ -51,7 +51,7 @@ export async function handleDownload(
     let trigger: ReturnType<typeof pointerTransactionDeps> | undefined;
     const capture = await captureBrowserDownload({
       cdp: deps.cdp,
-      target: address.cdpTarget,
+      handle: address.handle,
       downloads: deps.downloads ?? chromeDownloadsApi,
       navigationTargets: deps.navigationTargets ?? chromeNavigationTargetsApi,
       browserRelativeDir: params.browser_relative_dir,

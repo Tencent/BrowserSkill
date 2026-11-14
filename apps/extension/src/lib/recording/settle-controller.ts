@@ -69,7 +69,7 @@ export class SettleController {
     this.#cdp = input.cdp;
     this.#tabsApi = input.tabsApi;
     this.#tabId = input.tabId;
-    this.#rootScope = { target: { tabId: input.tabId } };
+    this.#rootScope = { tabId: input.tabId };
   }
 
   get hasPending(): boolean {
@@ -91,10 +91,8 @@ export class SettleController {
     draftIndex: number,
     scope: DocumentSettleScope = this.#rootScope,
   ): void {
-    if (scope.target.tabId !== this.#tabId) {
-      throw new Error(
-        `settle scope tab ${scope.target.tabId} does not belong to tab ${this.#tabId}`,
-      );
+    if (scope.tabId !== this.#tabId) {
+      throw new Error(`settle scope tab ${scope.tabId} does not belong to tab ${this.#tabId}`);
     }
     const landing = drafts[draftIndex]?.preStateId;
     for (const [index, pending] of this.#pending) {

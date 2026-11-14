@@ -1,9 +1,7 @@
-import { ChromiumCdp } from "@/browser-driver/chromium-cdp";
 import type { SessionManager } from "@/session-manager/manager";
 import type { NetworkParams, NetworkResult, RpcError } from "@/transport/types";
 import {
   type ChromeTabsApi,
-  chromeTabsApi,
   isRpcError,
   lookupSession,
   parseBufferedReadBounds,
@@ -26,17 +24,10 @@ export interface NetworkDeps {
   tabsApi: ChromeTabsApi;
 }
 
-function defaultNetworkDeps(): NetworkDeps {
-  return {
-    cdp: new ChromiumCdp(),
-    tabsApi: chromeTabsApi,
-  };
-}
-
 export async function handleNetwork(
   manager: SessionManager,
   params: NetworkParams,
-  deps: NetworkDeps = defaultNetworkDeps(),
+  deps: NetworkDeps,
   signal?: AbortSignal,
 ): Promise<NetworkResult | RpcError> {
   if (signal?.aborted) return { code: "cancelled", message: "network aborted" };

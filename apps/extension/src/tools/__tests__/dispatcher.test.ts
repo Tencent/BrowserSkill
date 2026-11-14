@@ -83,7 +83,7 @@ function makeRecordTestCdp(tabId: number): TestDispatcherCdp {
     trackSessionTab: vi.fn(),
     detachSession: vi.fn(async () => {}),
     releaseSessionTab: vi.fn(async () => {}),
-    onEvent: (handler: EventListener) => {
+    onEvent: (_tabId: number, handler: EventListener) => {
       listeners.push(handler);
       return {
         dispose: () => {

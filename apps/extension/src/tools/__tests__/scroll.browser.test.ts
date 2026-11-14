@@ -94,7 +94,7 @@ async function harness(send: Send) {
     ctx.refStore.set("e1", backendNodeId, {
       tabId: 4,
       frameId: frame.frameId,
-      cdpSessionId: frame.target.sessionId,
+      loaderId: frame.loaderId,
     });
   const ref = async (frame: CdpFrame, selector = "#probe") => {
     const { executionContextId } = await send<{ executionContextId: number }>(
@@ -326,26 +326,22 @@ describe.skipIf(!process.env.BSK_TEST_CHROME)("real browser scroll-to", () => {
         for (const frame of frames) {
           const backendNodeId = await h.ref(frame);
           const result = await h.scroll({ ref: "e1" });
-          const geometry = await resolveNodeGeometry(h.cdp, 4, {
-            target: frame.target,
-            backendNodeId,
+          const handle = {
+            tabId: 4,
             frameId: frame.frameId,
-          });
+            loaderId: frame.loaderId ?? "",
+            backendNodeId,
+          };
+          const geometry = await resolveNodeGeometry(h.cdp, 4, handle);
           expect(isRpcError(geometry)).toBe(false);
           if (isRpcError(geometry)) throw new Error(geometry.message);
-          await pointerTargetValidator(h.cdp)(
-            { tabId: 4, cdpTarget: frame.target, backendNodeId, frameId: frame.frameId },
-            geometry.actionPoint,
-          );
+          await pointerTargetValidator(h.cdp)({ handle }, geometry.actionPoint);
           if (frame.target.sessionId) {
             await h.evaluate(
               "window.frameCover=document.createElement('div');frameCover.style='position:fixed;inset:0;z-index:99999;background:white';document.body.append(frameCover)",
             );
             await expect(
-              pointerTargetValidator(h.cdp)(
-                { tabId: 4, cdpTarget: frame.target, frameId: frame.frameId, backendNodeId },
-                geometry.actionPoint,
-              ),
+              pointerTargetValidator(h.cdp)({ handle }, geometry.actionPoint),
             ).rejects.toThrow(/covered/);
             await h.evaluate("frameCover.remove()");
           }
@@ -424,10 +420,12 @@ describe.skipIf(!process.env.BSK_TEST_CHROME)("native target hit testing", () =>
           const [frame] = await h.loadFrames();
           const backendNodeId = await h.ref(frame);
           const target = {
-            tabId: 4,
-            cdpTarget: frame.target,
-            frameId: frame.frameId,
-            backendNodeId,
+            handle: {
+              tabId: 4,
+              frameId: frame.frameId,
+              loaderId: frame.loaderId ?? "",
+              backendNodeId,
+            },
           };
           const verify = pointerTargetValidator(h.cdp);
           const point = await h.evaluate<{ x: number; y: number }>(
@@ -497,7 +495,14 @@ describe.skipIf(!process.env.BSK_TEST_CHROME)("native target hit testing", () =>
         );
         const [frame] = await h.loadFrames();
         const backendNodeId = await h.ref(frame);
-        const target = { tabId: 4, cdpTarget: frame.target, frameId: frame.frameId, backendNodeId };
+        const target = {
+          handle: {
+            tabId: 4,
+            frameId: frame.frameId,
+            loaderId: frame.loaderId ?? "",
+            backendNodeId,
+          },
+        };
         const verify = pointerTargetValidator(h.cdp);
         await h.evaluate("scrollTo(600,900)");
         const point = await h.evaluate<{ x: number; y: number }>(

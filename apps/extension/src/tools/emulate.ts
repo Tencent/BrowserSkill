@@ -10,7 +10,6 @@
 // reset fields set by an earlier one.
 
 import type { DeviceMetricsOverride, UserAgentOverride } from "@/browser-driver/chromium-cdp";
-import { ChromiumCdp } from "@/browser-driver/chromium-cdp";
 import type { SessionContext, SessionManager } from "@/session-manager/manager";
 import type {
   EmulateOverrides,
@@ -22,7 +21,6 @@ import type {
 import {
   type CdpRunner,
   type ChromeTabsApi,
-  chromeTabsApi,
   enforceAgentWindow,
   isRpcError,
   lookupSession,
@@ -48,13 +46,6 @@ export interface EmulateDeps {
   cdp: EmulateCdpRunner;
   tabsApi: ChromeTabsApi;
   signal?: AbortSignal;
-}
-
-function defaultEmulateDeps(): EmulateDeps {
-  return {
-    cdp: new ChromiumCdp(),
-    tabsApi: chromeTabsApi,
-  };
 }
 
 /**
@@ -209,7 +200,7 @@ export function validateOverrides(overrides: EmulateOverrides): RpcError | null 
 export async function handleEmulate(
   manager: SessionManager,
   params: EmulateParams,
-  deps: EmulateDeps = defaultEmulateDeps(),
+  deps: EmulateDeps,
 ): Promise<EmulateResult | RpcError> {
   if (deps.signal?.aborted) return { code: "cancelled", message: "emulate aborted" };
   const ctxOrErr = lookupSession(manager, params, "emulate");

@@ -6,7 +6,6 @@ import {
   type VomOptions,
   type VomScene,
 } from "@browser-skill/vom";
-import type { CdpTarget } from "@/browser-driver/frame-graph";
 import type { RefInput, RefStore } from "@/session-manager/ref-store";
 import type { ObserveResult, RpcError } from "@/transport/types";
 import type { CdpRunner } from "../shared";
@@ -116,7 +115,7 @@ export interface ObservationOutput {
   candidates: readonly VisualCandidate[];
   identities: Map<string, DocumentIdentity>;
   rootIdentity?: DocumentIdentity;
-  frames: Map<string, { target: CdpTarget; parentFrameId?: string }>;
+  frames: Map<string, { loaderId?: string; parentFrameId?: string }>;
   notices: string[];
   maxTokens?: number;
 }
@@ -154,7 +153,10 @@ export function prepareVisualObservation(
     frames: new Map(
       [...graph.frames].map(([id, frame]) => [
         id,
-        { target: frame.target, parentFrameId: frame.parentFrameId },
+        {
+          ...(frame.loaderId !== undefined ? { loaderId: frame.loaderId } : {}),
+          ...(frame.parentFrameId ? { parentFrameId: frame.parentFrameId } : {}),
+        },
       ]),
     ),
     notices,
@@ -322,7 +324,11 @@ export async function publishObservationPage(
         ref.ref,
         { kind: "visual-region", candidate: state.output.candidates[ref.visualKey] },
       ];
-    const target = ref.frameId ? state.output.frames.get(ref.frameId)?.target : undefined;
+    const frameMeta = ref.frameId ? state.output.frames.get(ref.frameId) : undefined;
+    const frameIdentity = ref.frameId
+      ? state.output.identities.get(ref.frameId)
+      : state.output.rootIdentity;
+    const loaderId = frameIdentity?.loaderId ?? frameMeta?.loaderId;
     return [
       ref.ref,
       {
@@ -330,8 +336,11 @@ export async function publishObservationPage(
         ...(ref.rowAnchor ? { rowAnchor: ref.rowAnchor } : {}),
         backendNodeId: ref.backendNodeId,
         tabId,
-        frameId: ref.frameId,
-        cdpSessionId: target?.sessionId,
+        frameId: ref.frameId ?? frameIdentity?.frameId,
+        ...(loaderId !== undefined ? { loaderId } : {}),
+        ...(frameIdentity?.documentElementBackendNodeId !== undefined
+          ? { documentElementBackendNodeId: frameIdentity.documentElementBackendNodeId }
+          : {}),
       },
     ];
   });

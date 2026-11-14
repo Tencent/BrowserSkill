@@ -1,5 +1,9 @@
-import { ChromiumCdp } from "@/browser-driver/chromium-cdp";
-import type { CdpFrame, CdpFrameGraph, CdpTarget } from "@/browser-driver/frame-graph";
+import type {
+  CdpFrame,
+  CdpFrameGraph,
+  FrameDocumentHandle,
+  FrameNodeHandle,
+} from "@/browser-driver/frame-graph";
 import type { SessionContext, SessionManager } from "@/session-manager/manager";
 import type { RpcError } from "@/transport/types";
 import { documentIdentity, type RuntimeReply, SERIALIZATION, unwrap } from "./dom-read-runtime";
@@ -10,11 +14,12 @@ import { ExtractionFailure, extractionFailure, validateExtract } from "./extract
 import {
   type CdpRunner,
   type ChromeTabsApi,
-  chromeTabsApi,
+  delegateCdpRunner,
   isRpcError,
   lookupSession,
   resolveCdpAccessibleTargetTab,
   sendToCdpTarget,
+  sendToFrameHandle,
 } from "./shared";
 import { resolveSnapshotRef } from "./snapshot-ref";
 import { isCaptureTerminalError, throwIfAborted } from "./vom/capture-abort";
@@ -48,7 +53,7 @@ function registry(ctx: SessionContext): Map<string, RetainedTarget> {
 }
 /** Preserve a discovery handle's tab before shared background preparation pins it. */
 export function extractTargetTab(ctx: SessionContext, targetId: string): number | undefined {
-  return registry(ctx).get(targetId)?.identity.target.tabId;
+  return registry(ctx).get(targetId)?.identity.tabId;
 }
 
 async function capture(
@@ -66,22 +71,17 @@ async function capture(
       node = await resolveVerifiedNode(cdp, identity, backendNodeId, signal);
       if (node.status !== "current") stale();
     }
-    const reply = await sendToCdpTarget<RuntimeReply>(
-      cdp,
-      identity.target,
-      "Runtime.callFunctionOn",
-      {
-        ...(node?.status === "current"
-          ? { objectId: node.objectId }
-          : { executionContextId: contextId }),
-        functionDeclaration: collectExtractDom.toString(),
-        arguments: [{ value: options }],
-        objectGroup: group,
-        ...(options.action === "discover"
-          ? { serializationOptions: SERIALIZATION }
-          : { returnByValue: true }),
-      },
-    );
+    const reply = await sendToFrameHandle<RuntimeReply>(cdp, identity, "Runtime.callFunctionOn", {
+      ...(node?.status === "current"
+        ? { objectId: node.objectId }
+        : { executionContextId: contextId }),
+      functionDeclaration: collectExtractDom.toString(),
+      arguments: [{ value: options }],
+      objectGroup: group,
+      ...(options.action === "discover"
+        ? { serializationOptions: SERIALIZATION }
+        : { returnByValue: true }),
+    });
     throwIfAborted(signal);
     const result = unwrap(reply) as RawCapture | undefined;
     if (!result || !Array.isArray(result.rows) || !Array.isArray(result.targets))
@@ -90,11 +90,11 @@ async function capture(
     if ((await verifyDocumentIdentity(cdp, identity, signal)) !== "current") stale();
     return result;
   } finally {
-    await sendToCdpTarget(cdp, identity.target, "Runtime.releaseObjectGroup", {
+    await sendToFrameHandle(cdp, identity, "Runtime.releaseObjectGroup", {
       objectGroup: group,
     }).catch(() => {});
     if (node?.status === "current")
-      await sendToCdpTarget(cdp, identity.target, "Runtime.releaseObjectGroup", {
+      await sendToFrameHandle(cdp, identity, "Runtime.releaseObjectGroup", {
         objectGroup: node.objectGroup,
       }).catch(() => {});
   }
@@ -141,7 +141,7 @@ async function frameVisible(
     if (owner.status !== "current") stale();
     try {
       const visible = unwrap(
-        await sendToCdpTarget<RuntimeReply>(cdp, parent.target, "Runtime.callFunctionOn", {
+        await sendToFrameHandle<RuntimeReply>(cdp, identity, "Runtime.callFunctionOn", {
           objectId: owner.objectId,
           functionDeclaration: frameOwnerVisible.toString(),
           returnByValue: true,
@@ -149,7 +149,7 @@ async function frameVisible(
       );
       if (visible !== true) return false;
     } finally {
-      await sendToCdpTarget(cdp, parent.target, "Runtime.releaseObjectGroup", {
+      await sendToFrameHandle(cdp, identity, "Runtime.releaseObjectGroup", {
         objectGroup: owner.objectGroup,
       }).catch(() => {});
     }
@@ -165,7 +165,7 @@ export interface ExtractDeps {
 export async function handleExtract(
   manager: SessionManager,
   params: ExtractParams,
-  deps: ExtractDeps = { cdp: new ChromiumCdp(), tabsApi: chromeTabsApi },
+  deps: ExtractDeps,
   signal?: AbortSignal,
 ): Promise<ExtractResult | RpcError> {
   try {
@@ -177,13 +177,13 @@ export async function handleExtract(
     const saved = params.target_id ? retained.get(params.target_id) : undefined;
     if (
       params.target_id &&
-      (!saved || (params.tab_id !== undefined && params.tab_id !== saved.identity.target.tabId))
+      (!saved || (params.tab_id !== undefined && params.tab_id !== saved.identity.tabId))
     )
       stale();
     const tab = await resolveCdpAccessibleTargetTab(
       manager,
       ctx,
-      params.tab_id ?? saved?.identity.target.tabId,
+      params.tab_id ?? saved?.identity.tabId,
       deps.tabsApi,
       "extract",
     );
@@ -202,25 +202,44 @@ export async function handleExtract(
       )
         stale();
     };
-    // Guard each native dispatch, including those in shared identity helpers.
-    const send = async <T>(target: CdpTarget, method: string, args?: object): Promise<T> => {
+    const guardFor = (method: string) => {
       if (method === "Runtime.releaseObjectGroup") {
-        if (deps.cdp.getAttachmentId?.(tab.tabId) !== attachmentId) return undefined as T;
-        return deps.cdp.sendGuarded
-          ? deps.cdp.sendGuarded<T>(target, method, args, { attachmentId })
-          : sendToCdpTarget<T>(deps.cdp, target, method, args);
+        if (deps.cdp.getAttachmentId?.(tab.tabId) !== attachmentId) return null;
+        return { attachmentId };
       }
       check();
-      return deps.cdp.sendGuarded
-        ? deps.cdp.sendGuarded<T>(target, method, args, { signal, attachmentId })
-        : sendToCdpTarget<T>(deps.cdp, target, method, args);
+      return { signal, attachmentId };
     };
-    const cdp: CdpRunner = {
-      send: <T>(tabId: number, method: string, args?: object) => send<T>({ tabId }, method, args),
-      sendToTarget: send,
-      getAttachmentId: (tabId) => deps.cdp.getAttachmentId?.(tabId),
-      resolveTarget: deps.cdp.resolveTarget?.bind(deps.cdp),
-    };
+    // Guard each native dispatch, including those in shared identity helpers.
+    const cdp = delegateCdpRunner(deps.cdp, {
+      send: async <T>(tabId: number, method: string, args?: object): Promise<T> => {
+        const guard = guardFor(method);
+        if (!guard) return undefined as T;
+        return deps.cdp.sendGuarded
+          ? deps.cdp.sendGuarded<T>({ tabId }, method, args, guard)
+          : deps.cdp.send<T>(tabId, method, args);
+      },
+      sendToTarget: async <T>(
+        target: Parameters<NonNullable<CdpRunner["sendToTarget"]>>[0],
+        method: string,
+        args?: object,
+      ): Promise<T> => {
+        const guard = guardFor(method);
+        if (!guard) return undefined as T;
+        return deps.cdp.sendGuarded
+          ? deps.cdp.sendGuarded<T>(target, method, args, guard)
+          : sendToCdpTarget<T>(deps.cdp, target, method, args);
+      },
+      sendToFrame: async <T>(
+        handle: FrameDocumentHandle | FrameNodeHandle,
+        method: string,
+        args?: object,
+      ): Promise<T> => {
+        const guard = guardFor(method);
+        if (!guard) return undefined as T;
+        return sendToFrameHandle<T>(deps.cdp, handle, method, args, guard);
+      },
+    });
     const graph = await deps.cdp.getFrameGraph?.(tab.tabId);
     check();
     const root = graph?.frames.find((frame) => frame.frameId === graph.rootFrameId);
@@ -234,29 +253,34 @@ export async function handleExtract(
     let backendNodeId: number | undefined;
     let expectedIdentity: DocumentIdentity | undefined;
     if (params.target_id) {
-      if (!saved || saved.identity.target.tabId !== tab.tabId) stale();
-      const resolvedSavedTarget = deps.cdp.resolveTarget
-        ? deps.cdp.resolveTarget(saved.identity.target)
-        : saved.identity.target;
-      expectedIdentity =
-        resolvedSavedTarget === saved.identity.target
-          ? saved.identity
-          : { ...saved.identity, target: resolvedSavedTarget };
+      if (!saved || saved.identity.tabId !== tab.tabId) stale();
+      expectedIdentity = saved.identity;
       backendNodeId = saved.backendNodeId;
-      const frame = graph!.frames.find((frame) => frame.frameId === saved.identity.frameId);
-      if (!frame || frame.target.sessionId !== resolvedSavedTarget.sessionId) stale();
+      const frame = graph!.frames.find(
+        (f) =>
+          f.frameId === saved.identity.frameId &&
+          (!saved.identity.loaderId || !f.loaderId || f.loaderId === saved.identity.loaderId),
+      );
+      if (!frame) stale();
       selectedFrame = frame;
     } else if (params.ref) {
       const ref = resolveSnapshotRef(ctx, params.ref, tab.tabId);
       if (isRpcError(ref)) return ref;
       const frame = graph!.frames.find(
-        (frame) => frame.frameId === (ref.frameId ?? graph!.rootFrameId),
+        (f) =>
+          f.frameId === (ref.frameId || graph!.rootFrameId) &&
+          (!ref.loaderId || !f.loaderId || f.loaderId === ref.loaderId),
       );
-      const expectedSessionId = ref.cdpSessionId
-        ? (deps.cdp.resolveTarget?.({ tabId: tab.tabId, sessionId: ref.cdpSessionId })?.sessionId ??
-          ref.cdpSessionId)
-        : undefined;
-      if (!frame || frame.target.sessionId !== expectedSessionId) stale();
+      if (!frame) stale();
+      if (ref.documentElementBackendNodeId !== undefined) {
+        expectedIdentity = {
+          attachmentId,
+          tabId: tab.tabId,
+          frameId: frame.frameId,
+          loaderId: frame.loaderId ?? ref.loaderId ?? "",
+          documentElementBackendNodeId: ref.documentElementBackendNodeId,
+        };
+      }
       selectedFrame = frame;
       backendNodeId = ref.backendNodeId;
     }

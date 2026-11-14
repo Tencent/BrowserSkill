@@ -32,7 +32,7 @@ describe("recording document marker", () => {
       frames: [
         {
           frameId: "child",
-          target: { tabId: 3, sessionId: "oopif-session" },
+          handle: { tabId: 3, frameId: "child", loaderId: "child-loader" },
           recordingDocumentId: "producer-1",
         },
       ],
@@ -41,8 +41,9 @@ describe("recording document marker", () => {
     });
 
     expect(index.documentScope("producer-1")).toEqual({
+      tabId: 3,
       frameId: "child",
-      target: { tabId: 3, sessionId: "oopif-session" },
+      handle: { tabId: 3, frameId: "child", loaderId: "child-loader" },
     });
   });
 
@@ -52,12 +53,12 @@ describe("recording document marker", () => {
       frames: [
         {
           frameId: "left",
-          target: { tabId: 3, sessionId: "left-session" },
+          handle: { tabId: 3, frameId: "left", loaderId: "left-loader" },
           recordingDocumentId: "duplicate",
         },
         {
           frameId: "right",
-          target: { tabId: 3, sessionId: "right-session" },
+          handle: { tabId: 3, frameId: "right", loaderId: "right-loader" },
           recordingDocumentId: "duplicate",
         },
       ],

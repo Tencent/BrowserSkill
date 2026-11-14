@@ -29,8 +29,9 @@ const styles = {
 const ancestor: VisualAncestor = {
   document: {
     attachmentId: "a",
-    target: { tabId: 1 },
+    tabId: 1,
     frameId: "main",
+    loaderId: "loader-1",
     documentElementBackendNodeId: 1,
   },
   backendNodeId: 2,
