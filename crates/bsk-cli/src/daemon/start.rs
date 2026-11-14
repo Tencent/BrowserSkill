@@ -1897,7 +1897,7 @@ mod tests {
         }
         .server_config()
         .unwrap();
-        assert!(restart_start_args(&cfg, 52800).is_err());
+        assert!(restart_start_args(&cfg, bsk_protocol::DEFAULT_DAEMON_PORT).is_err());
     }
 
     #[test]

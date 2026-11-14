@@ -52,7 +52,8 @@ const LEDGER_RPC_TIMEOUT: Duration = Duration::from_secs(10);
 const IMAGE_MARKER: &str = "(image in the next content block)";
 const VOM_MARKER: &str = "(VOM text in the next content block)";
 
-const TOOL_NAMES: [&str; 11] = [
+/// Canonical list of always-enabled MCP base tools exposed in `tools/list`.
+pub const BASE_TOOL_NAMES: [&str; 11] = [
     "bsk_session",
     "bsk_page",
     "bsk_inspect",
@@ -70,7 +71,7 @@ const TOOL_NAMES: [&str; 11] = [
 const RECIPE_TOOL: &str = "bsk_recipe";
 
 pub(crate) fn exists(name: &str) -> bool {
-    TOOL_NAMES.contains(&name) || (name == RECIPE_TOOL && recipe::enabled())
+    BASE_TOOL_NAMES.contains(&name) || (name == RECIPE_TOOL && recipe::enabled())
 }
 
 /// `tools/list` entries.

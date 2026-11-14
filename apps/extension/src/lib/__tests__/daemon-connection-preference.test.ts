@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import { DEFAULT_DAEMON_WS_URL } from "@/transport/generated/methods";
 import { readRemoteConnection } from "@/transport/remote-storage";
 import { WSTransport } from "@/transport/ws-transport";
 import { ConnectionController } from "../connection-controller";
@@ -95,7 +96,7 @@ it.each([true, false])("recovers failed startup while preserving enabled=%s", as
   );
   let valid = false;
   const transport = new WSTransport({
-    url: "ws://127.0.0.1:52800",
+    url: DEFAULT_DAEMON_WS_URL,
     webSocketFactory: (url) => {
       if (!valid) throw new Error("Connection settings are unavailable");
       return createSocket(url) as unknown as WebSocket;

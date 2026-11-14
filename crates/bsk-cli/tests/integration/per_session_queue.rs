@@ -1,0 +1,1595 @@
+//! M6.5 integration: per-session serial dispatch queue.
+//!
+//! Properties exercised:
+//! 1. Inside one session, only one `tool.*` dispatch is active at a time;
+//!    concurrent callers fast-fail with `session_busy`, while later calls
+//!    succeed after the active command completes.
+//! 2. Two sessions on the same browser run in parallel and never block
+//!    each other — releasing one session's gate must not unblock the
+//!    other's response.
+
+use std::collections::HashSet;
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::Duration;
+
+use bsk::daemon::queue::DispatchError;
+use bsk::daemon::{self, DaemonConfig};
+use bsk_protocol::system::{HandshakeParams, HandshakeResult};
+use bsk_protocol::tools::{SessionStartParams, SessionStartResult};
+use bsk_protocol::{
+    BrowserPeerInfo, ErrorCode, Frame, Method, RequestFrame, ResponseBody, ResponseFrame,
+};
+use futures_util::stream::{SplitSink, SplitStream};
+use futures_util::{SinkExt, StreamExt};
+use rand::Rng;
+use serde::Deserialize;
+use serde_json::json;
+use tokio::sync::{Mutex, mpsc};
+use tokio_tungstenite::tungstenite::handshake::client::generate_key;
+use tokio_tungstenite::tungstenite::http::Request;
+use tokio_tungstenite::tungstenite::protocol::Message;
+
+const TEST_EXT_ID: &str = "abcdefghijklmnopabcdefghijklmnop";
+
+fn tempfile_path(prefix: &str) -> PathBuf {
+    let mut p = std::env::temp_dir();
+    let mut rng = rand::thread_rng();
+    let suffix: String = (0..8)
+        .map(|_| char::from_digit(rng.gen_range(0..16), 16).unwrap())
+        .collect();
+    p.push(format!("{prefix}-{}-{suffix}.sock", std::process::id()));
+    p
+}
+
+async fn spawn_daemon() -> (daemon::DaemonHandle, PathBuf) {
+    let port = 0;
+    let sock = tempfile_path("bsk-test-queue");
+    let handle = daemon::run(
+        DaemonConfig::new(port).with_local_auth(bsk::daemon::local_auth::LocalAuthMode::TrustLocal),
+        Some(sock.clone()),
+    )
+    .await
+    .unwrap();
+    (handle, sock)
+}
+
+async fn connect_ext(
+    addr: std::net::SocketAddr,
+) -> tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>> {
+    let origin = format!("chrome-extension://{TEST_EXT_ID}");
+    let url = format!("ws://{addr}/");
+    let req = Request::builder()
+        .method("GET")
+        .uri(&url)
+        .header("Host", addr.to_string())
+        .header("Upgrade", "websocket")
+        .header("Connection", "Upgrade")
+        .header("Sec-WebSocket-Version", "13")
+        .header("Sec-WebSocket-Key", generate_key())
+        .header("Origin", origin)
+        .body(())
+        .unwrap();
+    let (ws, _resp) = tokio_tungstenite::connect_async(req).await.unwrap();
+    ws
+}
+
+async fn handshake_as_ext(
+    ws: &mut tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >,
+) -> HandshakeResult {
+    let params = HandshakeParams {
+        client: bsk_protocol::EXTENSION_CLIENT_ID.into(),
+        version: "0.1.0-dev.0".parse().unwrap(),
+        protocol_version: bsk::daemon::state::PROTOCOL_VERSION.into(),
+        instance_id: TEST_EXT_ID.into(),
+        browser: BrowserPeerInfo {
+            name: "chrome".into(),
+            version: "131.0".into(),
+        },
+        min_compatible_peer: Some("0.1.0-dev.0".parse().unwrap()),
+        min_compatible_protocol: Some(bsk::daemon::state::MIN_COMPATIBLE_PROTOCOL.into()),
+        label: "Test".into(),
+    };
+    let req = RequestFrame {
+        id: "hs".into(),
+        method: Method::SystemHandshake,
+        params: Some(serde_json::to_value(params).unwrap()),
+    };
+    ws.send(Message::Text(serde_json::to_string(&req).unwrap()))
+        .await
+        .unwrap();
+    let resp = ws.next().await.unwrap().unwrap();
+    let text = match resp {
+        Message::Text(t) => t,
+        _ => panic!("expected text frame"),
+    };
+    let resp: ResponseFrame = serde_json::from_str(&text).unwrap();
+    match resp.body {
+        ResponseBody::Ok(v) => serde_json::from_value(v).unwrap(),
+        ResponseBody::Err(e) => panic!("handshake rejected: {e:?}"),
+    }
+}
+
+type Ws =
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
+
+/// Drive a fake extension WS that:
+/// * auto-replies to `tool.session_start` / `tool.session_stop` (so the
+///   M5 round-trip works without test interaction),
+/// * for every other request, forwards it through `requests_tx` and
+///   awaits a reply payload from `replies_rx`,
+/// * uses split sink/stream so the reader can park on `.next()` without
+///   holding any writer-side mutex (avoiding a self-deadlock when the
+///   test driver wants to push a reply).
+async fn run_fake_extension(
+    ws: Ws,
+    next_window_id: Arc<Mutex<i64>>,
+    requests_tx: mpsc::UnboundedSender<(String, String)>, // (rpc_id, payload tag)
+    replies_rx: mpsc::UnboundedReceiver<(String, serde_json::Value)>, // (rpc_id, body)
+) {
+    run_fake_extension_with_reply(
+        ws,
+        next_window_id,
+        requests_tx,
+        replies_rx,
+        ResponseBody::Ok,
+    )
+    .await;
+}
+
+async fn run_fake_extension_with_reply(
+    ws: Ws,
+    next_window_id: Arc<Mutex<i64>>,
+    requests_tx: mpsc::UnboundedSender<(String, String)>,
+    mut replies_rx: mpsc::UnboundedReceiver<(String, serde_json::Value)>,
+    reply: impl Fn(serde_json::Value) -> ResponseBody + Send + 'static,
+) {
+    let (writer, reader) = ws.split();
+    let writer: Arc<Mutex<SplitSink<Ws, Message>>> = Arc::new(Mutex::new(writer));
+    let mut reader: SplitStream<Ws> = reader;
+
+    let reader_task = {
+        let writer = Arc::clone(&writer);
+        let next_window_id = Arc::clone(&next_window_id);
+        tokio::spawn(async move {
+            while let Some(Ok(msg)) = reader.next().await {
+                let text = match msg {
+                    Message::Text(t) => t,
+                    Message::Close(_) => break,
+                    _ => continue,
+                };
+                let frame: Frame = match serde_json::from_str(&text) {
+                    Ok(f) => f,
+                    Err(_) => continue,
+                };
+                if let Frame::Request(req) = frame {
+                    match req.method {
+                        Method::ToolSessionStart => {
+                            let _: SessionStartParams =
+                                serde_json::from_value(req.params.clone().unwrap()).unwrap();
+                            let id = {
+                                let mut g = next_window_id.lock().await;
+                                let v = *g;
+                                *g += 1;
+                                v
+                            };
+                            let reply = ResponseFrame {
+                                id: req.id.clone(),
+                                body: ResponseBody::Ok(
+                                    serde_json::to_value(SessionStartResult {
+                                        interaction: None,
+                                        agent_window_id: Some(id),
+                                    })
+                                    .unwrap(),
+                                ),
+                            };
+                            let mut w = writer.lock().await;
+                            w.send(Message::Text(serde_json::to_string(&reply).unwrap()))
+                                .await
+                                .unwrap();
+                        }
+                        Method::ToolSessionStop => {
+                            let reply = ResponseFrame {
+                                id: req.id.clone(),
+                                body: ResponseBody::Ok(json!({})),
+                            };
+                            let mut w = writer.lock().await;
+                            w.send(Message::Text(serde_json::to_string(&reply).unwrap()))
+                                .await
+                                .unwrap();
+                        }
+                        _ => {
+                            let tag = if req.method == Method::Cancel {
+                                format!(
+                                    "cancel:{}",
+                                    req.params.as_ref().unwrap()["rpc_id"].as_str().unwrap()
+                                )
+                            } else {
+                                req.params
+                                    .as_ref()
+                                    .and_then(|p| p.get("tag"))
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or_default()
+                                    .to_string()
+                            };
+                            let _ = requests_tx.send((req.id.clone(), tag));
+                        }
+                    }
+                }
+            }
+        })
+    };
+
+    let replies_task = tokio::spawn(async move {
+        while let Some((rpc_id, body)) = replies_rx.recv().await {
+            let frame = ResponseFrame {
+                id: rpc_id,
+                body: reply(body),
+            };
+            let mut w = writer.lock().await;
+            w.send(Message::Text(serde_json::to_string(&frame).unwrap()))
+                .await
+                .unwrap();
+        }
+    });
+    let _ = reader_task.await;
+    replies_task.abort();
+}
+
+#[derive(Deserialize)]
+struct StartReply {
+    session_id: String,
+}
+
+async fn ipc_session_start(sock: &PathBuf) -> String {
+    let mut ipc = bsk::ipc_client::IpcClient::connect(sock).await.unwrap();
+    let r: StartReply = ipc
+        .call::<(), _>("qs", Method::SessionStart, None, Duration::from_secs(5))
+        .await
+        .unwrap()
+        .expect("session.start ok");
+    r.session_id
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn video_stop_bypasses_a_busy_task_and_remains_available_after_teardown() {
+    let (handle, sock) = spawn_daemon().await;
+    let mut ws = connect_ext(handle.ws_addr()).await;
+    handshake_as_ext(&mut ws).await;
+    let (req_tx, mut req_rx) = mpsc::unbounded_channel();
+    let (reply_tx, reply_rx) = mpsc::unbounded_channel();
+    tokio::spawn(run_fake_extension(
+        ws,
+        Arc::new(Mutex::new(1)),
+        req_tx,
+        reply_rx,
+    ));
+    let session_id = ipc_session_start(&sock).await;
+    let state = handle.state();
+    let sid = bsk::daemon::sessions::SessionId(session_id.clone());
+    let browser_id = state.sessions.get(&sid).unwrap().browser_id.0;
+    let mut busy = Some({
+        let queues = Arc::clone(&state.tool_queues);
+        let sid = sid.clone();
+        tokio::spawn(async move {
+            queues
+                .dispatch(
+                    &sid,
+                    Method::ToolSnapshot,
+                    json!({"session_id": sid.0, "tag": "busy"}),
+                    Duration::from_secs(5),
+                    None,
+                )
+                .await
+        })
+    });
+    let (busy_id, _) = tokio::time::timeout(Duration::from_secs(2), req_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    for action in ["stop", "status"] {
+        let video = {
+            let sock = sock.clone();
+            let browser = browser_id.clone();
+            tokio::spawn(async move {
+                let mut ipc = bsk::ipc_client::IpcClient::connect(&sock).await.unwrap();
+                ipc.call::<_, serde_json::Value>(
+                    "video-control",
+                    Method::ToolVideo,
+                    Some(json!({
+                        "action": action,
+                        "browser": browser,
+                        "recording_id": "vid_0123456789abcdef0123456789abcdef",
+                        "capability": "private-grant"
+                    })),
+                    Duration::from_secs(3),
+                )
+                .await
+                .unwrap()
+                .unwrap()
+            })
+        };
+        let (id, _) = tokio::time::timeout(Duration::from_secs(2), req_rx.recv())
+            .await
+            .expect("video control was blocked by the task queue")
+            .unwrap();
+        reply_tx
+            .send((id, json!({"recording": {"state": "ready"}})))
+            .unwrap();
+        assert_eq!(video.await.unwrap()["browser"], browser_id);
+        if action == "stop" {
+            assert!(
+                !busy.as_ref().unwrap().is_finished(),
+                "video stop must not wait for the active tool"
+            );
+            reply_tx.send((busy_id.clone(), json!({}))).unwrap();
+            assert!(busy.take().unwrap().await.unwrap().is_ok());
+            let mut ipc = bsk::ipc_client::IpcClient::connect(&sock).await.unwrap();
+            ipc.call::<_, serde_json::Value>(
+                "stop-task",
+                Method::SessionStop,
+                Some(json!({"session_id": session_id})),
+                Duration::from_secs(3),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            assert!(state.sessions.get(&sid).is_none());
+        }
+    }
+    handle.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn same_session_dispatches_run_after_previous_completes() {
+    let (handle, sock) = spawn_daemon().await;
+    let mut ws = connect_ext(handle.ws_addr()).await;
+    let _ = handshake_as_ext(&mut ws).await;
+    let window_counter = Arc::new(Mutex::new(1_i64));
+    let (req_tx, mut req_rx) = mpsc::unbounded_channel::<(String, String)>();
+    let (reply_tx, reply_rx) = mpsc::unbounded_channel::<(String, serde_json::Value)>();
+    tokio::spawn(run_fake_extension(
+        ws,
+        Arc::clone(&window_counter),
+        req_tx,
+        reply_rx,
+    ));
+
+    let session_id = ipc_session_start(&sock).await;
+    let state = handle.state();
+
+    // Submit jobs one at a time: each dispatch must finish (freeing the
+    // session busy slot) before the next is released.
+    let total = 5;
+    for i in 0..total {
+        let queues = Arc::clone(&state.tool_queues);
+        let sid = bsk::daemon::sessions::SessionId(session_id.clone());
+        let i = i as u32;
+        let dispatch_task = tokio::spawn(async move {
+            queues
+                .dispatch(
+                    &sid,
+                    Method::ToolTabList,
+                    json!({"session_id": sid.0, "tag": format!("job-{i}")}),
+                    Duration::from_secs(5),
+                    None,
+                )
+                .await
+        });
+        let (rpc_id, tag) = tokio::time::timeout(Duration::from_secs(2), req_rx.recv())
+            .await
+            .expect("request did not reach extension")
+            .expect("request channel closed");
+        assert_eq!(tag, format!("job-{i}"));
+        reply_tx.send((rpc_id, json!({"acked": true}))).unwrap();
+        let r = dispatch_task.await.unwrap();
+        assert!(r.is_ok(), "dispatch should succeed, got {r:?}");
+    }
+
+    handle.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn session_stop_fast_fails_while_tool_is_in_flight() {
+    let (handle, sock) = spawn_daemon().await;
+    let mut ws = connect_ext(handle.ws_addr()).await;
+    let _ = handshake_as_ext(&mut ws).await;
+    let window_counter = Arc::new(Mutex::new(1_i64));
+    let (req_tx, mut req_rx) = mpsc::unbounded_channel::<(String, String)>();
+    let (reply_tx, reply_rx) = mpsc::unbounded_channel::<(String, serde_json::Value)>();
+    tokio::spawn(run_fake_extension(
+        ws,
+        Arc::clone(&window_counter),
+        req_tx,
+        reply_rx,
+    ));
+
+    let session_id = ipc_session_start(&sock).await;
+    let state = handle.state();
+    let sid = bsk::daemon::sessions::SessionId(session_id.clone());
+
+    let tool_task = {
+        let queues = Arc::clone(&state.tool_queues);
+        let sid = sid.clone();
+        tokio::spawn(async move {
+            queues
+                .dispatch(
+                    &sid,
+                    Method::ToolSnapshot,
+                    json!({"session_id": sid.0, "tag": "slow-tool"}),
+                    Duration::from_secs(5),
+                    None,
+                )
+                .await
+        })
+    };
+
+    let (tool_rpc_id, tag) = tokio::time::timeout(Duration::from_secs(2), req_rx.recv())
+        .await
+        .expect("slow tool did not reach extension")
+        .expect("request channel closed");
+    assert_eq!(tag, "slow-tool");
+
+    let stop_result = bsk::daemon::sessions::stop_session(
+        &state.browsers,
+        &state.sessions,
+        &state.tool_queues,
+        &state.session_interrupts,
+        &sid,
+        Duration::from_secs(5),
+        None,
+    )
+    .await;
+    assert!(
+        matches!(
+            stop_result,
+            Err(bsk::daemon::sessions::StopSessionError::SessionBusy)
+        ),
+        "session.stop should fast-fail while a tool is active, got {stop_result:?}"
+    );
+    assert!(
+        state.tool_queues.is_accepting(&sid),
+        "session should remain accepting after busy stop rejection"
+    );
+
+    let late = state
+        .tool_queues
+        .dispatch(
+            &sid,
+            Method::ToolTabList,
+            json!({"session_id": session_id, "tag": "late-tool"}),
+            Duration::from_secs(1),
+            None,
+        )
+        .await;
+    assert!(
+        matches!(late, Err(DispatchError::SessionBusy)),
+        "new tools should be rejected while session is busy, got {late:?}"
+    );
+
+    reply_tx
+        .send((tool_rpc_id, json!({"snapshot": "done"})))
+        .unwrap();
+    assert!(tool_task.await.unwrap().is_ok());
+
+    bsk::daemon::sessions::stop_session(
+        &state.browsers,
+        &state.sessions,
+        &state.tool_queues,
+        &state.session_interrupts,
+        &sid,
+        Duration::from_secs(5),
+        None,
+    )
+    .await
+    .expect("session.stop ok after tool completes");
+    assert!(state.sessions.get(&sid).is_none());
+    assert_eq!(state.tool_queues.len(), 0);
+
+    handle.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn concurrent_same_session_dispatch_returns_session_busy_immediately() {
+    let (handle, sock) = spawn_daemon().await;
+    let mut ws = connect_ext(handle.ws_addr()).await;
+    let _ = handshake_as_ext(&mut ws).await;
+    let window_counter = Arc::new(Mutex::new(1_i64));
+    let (req_tx, mut req_rx) = mpsc::unbounded_channel::<(String, String)>();
+    let (reply_tx, reply_rx) = mpsc::unbounded_channel::<(String, serde_json::Value)>();
+    tokio::spawn(run_fake_extension(
+        ws,
+        Arc::clone(&window_counter),
+        req_tx,
+        reply_rx,
+    ));
+
+    let session_id = ipc_session_start(&sock).await;
+    let state = handle.state();
+    let sid = bsk::daemon::sessions::SessionId(session_id.clone());
+
+    let first_task = {
+        let queues = Arc::clone(&state.tool_queues);
+        let sid = sid.clone();
+        tokio::spawn(async move {
+            queues
+                .dispatch(
+                    &sid,
+                    Method::ToolTabList,
+                    json!({"session_id": sid.0, "tag": "held-open"}),
+                    Duration::from_secs(5),
+                    None,
+                )
+                .await
+        })
+    };
+
+    let (first_rpc_id, tag) = tokio::time::timeout(Duration::from_secs(2), req_rx.recv())
+        .await
+        .expect("first tool did not reach extension")
+        .expect("request channel closed");
+    assert_eq!(tag, "held-open");
+
+    let busy = tokio::time::timeout(
+        Duration::from_millis(200),
+        state.tool_queues.dispatch(
+            &sid,
+            Method::ToolTabList,
+            json!({"session_id": session_id, "tag": "should-fail"}),
+            Duration::from_secs(5),
+            None,
+        ),
+    )
+    .await
+    .expect("busy dispatch should fast-fail immediately");
+    assert!(
+        matches!(busy, Err(DispatchError::SessionBusy)),
+        "second dispatch should fast-fail, got {busy:?}"
+    );
+    let rpc = DispatchError::SessionBusy.into_rpc();
+    assert_eq!(rpc.code, ErrorCode::Timeout);
+    assert_eq!(
+        rpc.data
+            .as_ref()
+            .and_then(|d| d.get("reason"))
+            .and_then(|v| v.as_str()),
+        Some(bsk_protocol::RpcErrorReason::SessionBusy.as_str())
+    );
+
+    reply_tx
+        .send((first_rpc_id, json!({"acked": true})))
+        .unwrap();
+    assert!(first_task.await.unwrap().is_ok());
+
+    let after_task = {
+        let queues = Arc::clone(&state.tool_queues);
+        let sid = sid.clone();
+        let session_id = session_id.clone();
+        tokio::spawn(async move {
+            queues
+                .dispatch(
+                    &sid,
+                    Method::ToolTabList,
+                    json!({"session_id": session_id, "tag": "after-first"}),
+                    Duration::from_secs(5),
+                    None,
+                )
+                .await
+        })
+    };
+    let (after_rpc_id, after_tag) = tokio::time::timeout(Duration::from_secs(2), req_rx.recv())
+        .await
+        .expect("after-first request did not reach extension")
+        .expect("request channel closed");
+    assert_eq!(after_tag, "after-first");
+    reply_tx
+        .send((after_rpc_id, json!({"acked": true})))
+        .unwrap();
+    let after = after_task.await.unwrap();
+    assert!(
+        after.is_ok(),
+        "dispatch should succeed after first completes, got {after:?}"
+    );
+
+    handle.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn dispatches_for_different_sessions_do_not_block_each_other() {
+    let (handle, sock) = spawn_daemon().await;
+    let mut ws = connect_ext(handle.ws_addr()).await;
+    let _ = handshake_as_ext(&mut ws).await;
+    let window_counter = Arc::new(Mutex::new(1_i64));
+    let (req_tx, mut req_rx) = mpsc::unbounded_channel::<(String, String)>();
+    let (reply_tx, reply_rx) = mpsc::unbounded_channel::<(String, serde_json::Value)>();
+    tokio::spawn(run_fake_extension(
+        ws,
+        Arc::clone(&window_counter),
+        req_tx,
+        reply_rx,
+    ));
+
+    let session_a = ipc_session_start(&sock).await;
+    let session_b = ipc_session_start(&sock).await;
+    assert_ne!(session_a, session_b);
+    let state = handle.state();
+
+    // Fire one job per session simultaneously. They must both arrive at
+    // the extension before either is replied to (proves cross-session
+    // parallelism).
+    let queues_for_a = Arc::clone(&state.tool_queues);
+    let sid_a = bsk::daemon::sessions::SessionId(session_a.clone());
+    let task_a = tokio::spawn(async move {
+        queues_for_a
+            .dispatch(
+                &sid_a,
+                Method::ToolTabList,
+                json!({"session_id": sid_a.0, "tag": "from-a"}),
+                Duration::from_secs(5),
+                None,
+            )
+            .await
+    });
+    let queues_for_b = Arc::clone(&state.tool_queues);
+    let sid_b = bsk::daemon::sessions::SessionId(session_b.clone());
+    let task_b = tokio::spawn(async move {
+        queues_for_b
+            .dispatch(
+                &sid_b,
+                Method::ToolTabList,
+                json!({"session_id": sid_b.0, "tag": "from-b"}),
+                Duration::from_secs(5),
+                None,
+            )
+            .await
+    });
+
+    let mut seen = HashSet::new();
+    let mut rpc_ids = Vec::new();
+    for _ in 0..2 {
+        let (rpc_id, tag) = tokio::time::timeout(Duration::from_secs(2), req_rx.recv())
+            .await
+            .expect("expected inbound request")
+            .unwrap();
+        seen.insert(tag);
+        rpc_ids.push(rpc_id);
+    }
+    assert!(
+        seen.contains("from-a") && seen.contains("from-b"),
+        "both sessions' requests must be forwarded in parallel, saw {seen:?}"
+    );
+
+    for id in rpc_ids {
+        reply_tx.send((id, json!({"acked": true}))).unwrap();
+    }
+    let _ = task_a.await.unwrap();
+    let _ = task_b.await.unwrap();
+
+    handle.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn dispatch_returns_session_not_found_for_unknown_session() {
+    let (handle, _sock) = spawn_daemon().await;
+    let queues = Arc::clone(&handle.state().tool_queues);
+    let result = queues
+        .dispatch(
+            &bsk::daemon::sessions::SessionId("zzzz".into()),
+            Method::ToolTabList,
+            json!({"session_id": "zzzz"}),
+            Duration::from_secs(1),
+            None,
+        )
+        .await;
+    match result {
+        Err(DispatchError::SessionNotFound { .. }) => {}
+        other => panic!("expected SessionNotFound, got {other:?}"),
+    }
+    // And the surfaced RpcError carries `not_found`.
+    let rpc = DispatchError::SessionNotFound { ended: None }.into_rpc();
+    assert_eq!(rpc.code, ErrorCode::NotFound);
+    handle.shutdown().await;
+}
+
+#[tokio::test]
+async fn wheel_deadline_cancels_the_extension_and_keeps_the_session_busy_during_cleanup() {
+    assert_deadline_waits_for_cleanup(
+        Method::ToolWheel,
+        json!({"delta_y": 120}),
+        json!({"delta_y": 120}),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn page_action_deadlines_keep_the_session_busy_during_cleanup() {
+    for method in [
+        Method::ToolClick,
+        Method::ToolPress,
+        Method::ToolFill,
+        Method::ToolSelect,
+    ] {
+        assert_deadline_waits_for_cleanup(method, json!({}), json!({"tab_id": 42})).await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn page_action_effect_survives_deadline_and_user_cancellation() {
+    for method in [
+        Method::ToolClick,
+        Method::ToolPress,
+        Method::ToolWheel,
+        Method::ToolFill,
+        Method::ToolSelect,
+    ] {
+        for user_cancel in [false, true] {
+            for (effect, reason) in [
+                ("none", "input_not_ready"),
+                ("unknown", "input_outcome_unknown"),
+                ("unknown", "input_paint_unconfirmed"),
+            ] {
+                if reason == "input_paint_unconfirmed" && method != Method::ToolWheel {
+                    continue;
+                }
+                let (handle, sock) = spawn_daemon().await;
+                let mut ws = connect_ext(handle.ws_addr()).await;
+                let _ = handshake_as_ext(&mut ws).await;
+                let (req_tx, mut req_rx) = mpsc::unbounded_channel();
+                let (reply_tx, reply_rx) = mpsc::unbounded_channel();
+                tokio::spawn(run_fake_extension_with_reply(
+                    ws,
+                    Arc::new(Mutex::new(100)),
+                    req_tx,
+                    reply_rx,
+                    |data| {
+                        ResponseBody::Err(bsk_protocol::RpcError {
+                            code: ErrorCode::Cancelled,
+                            message: "input aborted".into(),
+                            data: Some(data),
+                        })
+                    },
+                ));
+                let sid = bsk::daemon::sessions::SessionId(ipc_session_start(&sock).await);
+                let state = handle.state();
+                let guard = state
+                    .tool_inflight
+                    .register("input".into(), sid.clone())
+                    .unwrap();
+                let task = {
+                    let queues = Arc::clone(&state.tool_queues);
+                    let sid = sid.clone();
+                    let method = method.clone();
+                    let inflight = guard.entry();
+                    tokio::spawn(async move {
+                        queues
+                            .dispatch(
+                                &sid,
+                                method,
+                                json!({"session_id":sid.0}),
+                                Duration::from_millis(if user_cancel { 5000 } else { 20 }),
+                                Some(inflight),
+                            )
+                            .await
+                    })
+                };
+                let (rpc_id, _) = tokio::time::timeout(Duration::from_secs(2), req_rx.recv())
+                    .await
+                    .unwrap()
+                    .unwrap();
+                if user_cancel {
+                    state.tool_inflight.cancel_session(&sid);
+                } else {
+                    let (cancel_id, tag) =
+                        tokio::time::timeout(Duration::from_secs(2), req_rx.recv())
+                            .await
+                            .unwrap()
+                            .unwrap();
+                    assert_eq!(cancel_id, format!("deadline-cancel-{rpc_id}"));
+                    assert_eq!(tag, format!("cancel:{rpc_id}"));
+                }
+                // Give the cancelled waiter a scheduling opportunity before returning
+                // the extension's cleanup result, with no dependency on a browser.
+                tokio::time::sleep(Duration::from_millis(10)).await;
+                let data = json!({
+                    "effect_state": effect,
+                    "reason": reason,
+                });
+                reply_tx.send((rpc_id, data.clone())).unwrap();
+                let Err(DispatchError::Rpc(error)) =
+                    tokio::time::timeout(Duration::from_secs(2), task)
+                        .await
+                        .unwrap()
+                        .unwrap()
+                else {
+                    panic!("expected input cancellation");
+                };
+                assert_eq!(
+                    error.code,
+                    if user_cancel {
+                        ErrorCode::UserAborted
+                    } else {
+                        ErrorCode::Timeout
+                    }
+                );
+                let mut expected = data;
+                expected["phase"] = json!("execution");
+                expected["operation"] = json!(method);
+                assert_eq!(error.data, Some(expected));
+                drop(guard);
+                handle.shutdown().await;
+            }
+        }
+    }
+}
+
+async fn next_request(ws: &mut Ws) -> RequestFrame {
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if let Message::Text(text) = ws.next().await.unwrap().unwrap()
+                && let Frame::Request(request) = serde_json::from_str(&text).unwrap()
+            {
+                return request;
+            }
+        }
+    })
+    .await
+    .expect("expected a request from the daemon")
+}
+
+async fn end_session_after_tab_move(ws: &mut Ws, session_id: &str, rpc_id: &str) {
+    ws.send(Message::Text(
+        json!({
+            "event": "session.ended",
+            "payload": {"session_id": session_id, "reason": "user_moved_tab", "tab_id": 42},
+        })
+        .to_string(),
+    ))
+    .await
+    .unwrap();
+    let cancel = next_request(ws).await;
+    assert_eq!(cancel.method, Method::Cancel);
+    assert_eq!(cancel.params.unwrap()["rpc_id"], rpc_id);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_input_retains_terminal_reason_after_user_moves_tab() {
+    let (handle, _sock) = spawn_daemon().await;
+    let mut ws = connect_ext(handle.ws_addr()).await;
+    let _ = handshake_as_ext(&mut ws).await;
+    let state = handle.state();
+    for method in [Method::ToolClick, Method::ToolPress, Method::ToolWheel] {
+        for (deadline_first, cleanup_effect) in [
+            (false, Some("none")),
+            (false, Some("unknown")),
+            (false, None),
+            (true, Some("none")),
+            (true, None),
+        ] {
+            if deadline_first && method != Method::ToolClick {
+                continue;
+            }
+            let sid = state
+                .sessions
+                .reserve_id(
+                    bsk::daemon::browsers::BrowserId(TEST_EXT_ID.into()),
+                    8,
+                    || 0,
+                )
+                .unwrap();
+            state.tool_queues.spawn(sid.clone());
+            let guard = state
+                .tool_inflight
+                .register("input".into(), sid.clone())
+                .unwrap();
+            let task = {
+                let queues = Arc::clone(&state.tool_queues);
+                let sid = sid.clone();
+                let method = method.clone();
+                let inflight = guard.entry();
+                tokio::spawn(async move {
+                    queues
+                        .dispatch(
+                            &sid,
+                            method,
+                            json!({"session_id": sid.0, "tab_id": 42}),
+                            Duration::from_millis(if deadline_first { 20 } else { 5000 }),
+                            Some(inflight),
+                        )
+                        .await
+                })
+            };
+            let request = next_request(&mut ws).await;
+            assert_eq!(request.method, method);
+            if deadline_first {
+                let cancel = next_request(&mut ws).await;
+                assert_eq!(cancel.method, Method::Cancel);
+                assert_eq!(cancel.id, format!("deadline-cancel-{}", request.id));
+                assert_eq!(guard.entry().cancel_reason(), None);
+            }
+            end_session_after_tab_move(&mut ws, &sid.0, &request.id).await;
+            let mut data = json!({"effect_state": cleanup_effect.unwrap_or("unknown")});
+            if let Some(effect) = cleanup_effect {
+                data["cleanup_error"] = json!("focus cleanup failed");
+                if effect == "unknown" {
+                    data["reason"] = json!("input_outcome_unknown");
+                }
+                ws.send(Message::Text(
+                    serde_json::to_string(&ResponseFrame {
+                        id: request.id,
+                        body: ResponseBody::Err(bsk_protocol::RpcError {
+                            code: ErrorCode::Cancelled,
+                            message: "input aborted".into(),
+                            data: Some(data.clone()),
+                        }),
+                    })
+                    .unwrap(),
+                ))
+                .await
+                .unwrap();
+            }
+            let error = tokio::time::timeout(Duration::from_secs(4), task)
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap_err()
+                .into_rpc();
+            if deadline_first {
+                assert_eq!(error.code, ErrorCode::Timeout);
+                assert_eq!(
+                    error.message,
+                    if cleanup_effect.is_some() {
+                        "tool RPC timed out after 20ms"
+                    } else {
+                        "input timed out and extension cleanup could not be confirmed"
+                    }
+                );
+            } else if cleanup_effect.is_some() {
+                assert_eq!(error.code, ErrorCode::UserAborted);
+            } else {
+                assert_eq!(error.code, ErrorCode::Timeout);
+                assert_eq!(
+                    error.message,
+                    "cancelled tool did not finish cleanup within 2s"
+                );
+            }
+            data["reason"] = json!(bsk_protocol::RpcErrorReason::UserMovedTab.as_str());
+            data["phase"] = json!(if cleanup_effect.is_some() {
+                "execution"
+            } else {
+                "cleanup"
+            });
+            data["operation"] = json!(method);
+            assert_eq!(
+                error.data,
+                Some(data),
+                "{method:?}, deadline_first={deadline_first}, cleanup_effect={cleanup_effect:?}"
+            );
+            let rendered = bsk::cli::render_error::info_for_error(error.code, error.data.as_ref());
+            assert!(
+                rendered
+                    .hint
+                    .unwrap()
+                    .contains("this session cannot resume")
+            );
+            assert_eq!(
+                state.sessions.end_info(&sid).unwrap().reason,
+                "user_moved_tab"
+            );
+        }
+    }
+    drop(ws);
+    handle.shutdown().await;
+}
+
+#[tokio::test]
+async fn snapshot_outer_timeout_preserves_terminal_reason_without_extending_wait() {
+    let (handle, _sock) = spawn_daemon().await;
+    let mut ws = connect_ext(handle.ws_addr()).await;
+    let _ = handshake_as_ext(&mut ws).await;
+    let state = handle.state();
+    let browser_id = bsk::daemon::browsers::BrowserId(TEST_EXT_ID.into());
+    for end_session in [false, true] {
+        let sid = state
+            .sessions
+            .reserve_id(browser_id.clone(), 8, || 0)
+            .unwrap();
+        state.tool_queues.spawn(sid.clone());
+        let guard = state
+            .tool_inflight
+            .register("snapshot".into(), sid.clone())
+            .unwrap();
+        let task = {
+            let queues = Arc::clone(&state.tool_queues);
+            let sid = sid.clone();
+            let inflight = guard.entry();
+            tokio::spawn(async move {
+                queues
+                    .dispatch(
+                        &sid,
+                        Method::ToolSnapshot,
+                        json!({"session_id": sid.0, "tab_id": 42}),
+                        Duration::from_millis(1500),
+                        Some(inflight),
+                    )
+                    .await
+            })
+        };
+        let request = next_request(&mut ws).await;
+        assert_eq!(request.method, Method::ToolSnapshot);
+        // Cancellation at 1.2s pushes worker cleanup to ~3.2s, past the
+        // ordinary outer dispatch deadline of 1.5s + 1s.
+        tokio::time::pause();
+        tokio::time::advance(Duration::from_millis(1200)).await;
+        tokio::task::yield_now().await;
+        tokio::time::resume();
+        assert!(
+            !task.is_finished(),
+            "cancel must precede the worker's deadline"
+        );
+        if end_session {
+            end_session_after_tab_move(&mut ws, &sid.0, &request.id).await;
+        } else {
+            ws.send(Message::Text(
+                json!({
+                    "event": "session.user_interrupt",
+                    "payload": {"session_id": sid.0},
+                })
+                .to_string(),
+            ))
+            .await
+            .unwrap();
+            let cancel = next_request(&mut ws).await;
+            assert_eq!(cancel.method, Method::Cancel);
+            assert_eq!(cancel.params.unwrap()["rpc_id"], request.id);
+        }
+        tokio::time::pause();
+        tokio::time::advance(Duration::from_millis(1400)).await;
+        tokio::task::yield_now().await;
+        tokio::time::resume();
+        let error = tokio::time::timeout(Duration::from_secs(5), task)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap_err()
+            .into_rpc();
+        assert_eq!(error.code, ErrorCode::Timeout);
+        assert_eq!(error.message, "tool dispatch timed out");
+        // An outstanding extension waiter proves dispatch returned before
+        // worker cleanup. Resolve it now instead of using a narrow elapsed bound.
+        assert!(
+            state
+                .browsers
+                .get(&browser_id)
+                .unwrap()
+                .pending
+                .lock()
+                .unwrap()
+                .resolve(ResponseFrame {
+                    id: request.id,
+                    body: ResponseBody::Err(bsk_protocol::RpcError {
+                        code: ErrorCode::Cancelled,
+                        message: "snapshot cleanup completed".into(),
+                        data: None,
+                    }),
+                }),
+            "the outer timeout must not wait for the worker's cleanup deadline"
+        );
+        let rendered = bsk::cli::render_error::info_for_error(error.code, error.data.as_ref());
+        if end_session {
+            assert_eq!(
+                error.data,
+                Some(json!({"reason": bsk_protocol::RpcErrorReason::UserMovedTab.as_str()}))
+            );
+            assert!(
+                rendered
+                    .hint
+                    .unwrap()
+                    .contains("this session cannot resume")
+            );
+            assert_eq!(
+                state.sessions.end_info(&sid).unwrap().reason,
+                "user_moved_tab"
+            );
+            assert!(state.sessions.get(&sid).is_none());
+        } else {
+            assert!(error.data.is_none());
+            assert!(!rendered.hint.unwrap_or_default().contains("cannot resume"));
+            assert!(state.sessions.end_info(&sid).is_none());
+            assert!(state.sessions.get(&sid).is_some());
+        }
+    }
+    drop(ws);
+    handle.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn evaluate_cleanup_timeout_preserves_session_termination() {
+    let (handle, _sock) = spawn_daemon().await;
+    let mut ws = connect_ext(handle.ws_addr()).await;
+    let _ = handshake_as_ext(&mut ws).await;
+    let state = handle.state();
+    for (deadline_first, end_session) in [(true, false), (false, true), (true, true)] {
+        let sid = state
+            .sessions
+            .reserve_id(
+                bsk::daemon::browsers::BrowserId(TEST_EXT_ID.into()),
+                8,
+                || 0,
+            )
+            .unwrap();
+        state.tool_queues.spawn(sid.clone());
+        let guard = state
+            .tool_inflight
+            .register("evaluate".into(), sid.clone())
+            .unwrap();
+        let task = {
+            let queues = Arc::clone(&state.tool_queues);
+            let sid = sid.clone();
+            let inflight = guard.entry();
+            tokio::spawn(async move {
+                let timeout_ms = if deadline_first { 20 } else { 5000 };
+                queues
+                    .dispatch(
+                        &sid,
+                        Method::ToolEvaluate,
+                        json!({
+                            "session_id": sid.0,
+                            "tab_id": 42,
+                            "expression": "new Promise(() => {})",
+                            "await_promise": true,
+                            "timeout_ms": timeout_ms,
+                        }),
+                        Duration::from_millis(timeout_ms),
+                        Some(inflight),
+                    )
+                    .await
+            })
+        };
+        let request = next_request(&mut ws).await;
+        assert_eq!(request.method, Method::ToolEvaluate);
+        assert_eq!(
+            request.params.as_ref().unwrap()["expression"],
+            "new Promise(() => {})"
+        );
+        assert_eq!(request.params.as_ref().unwrap()["await_promise"], true);
+        if deadline_first {
+            let cancel = next_request(&mut ws).await;
+            assert_eq!(cancel.method, Method::Cancel);
+            assert_eq!(cancel.id, format!("deadline-cancel-{}", request.id));
+            assert_eq!(guard.entry().cancel_reason(), None);
+        }
+        if end_session {
+            end_session_after_tab_move(&mut ws, &sid.0, &request.id).await;
+        }
+        // Keep the connection open without replying, so the actual cleanup deadline expires.
+        let error = tokio::time::timeout(Duration::from_secs(4), task)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap_err()
+            .into_rpc();
+        assert_eq!(error.code, ErrorCode::Timeout);
+        assert_eq!(
+            error.message,
+            if deadline_first {
+                "page operation timed out and extension cleanup could not be confirmed; page effects may have occurred"
+            } else {
+                "cancelled tool did not finish cleanup within 2s"
+            }
+        );
+        let mut expected = json!({"reason": if end_session {
+            bsk_protocol::RpcErrorReason::UserMovedTab.as_str()
+        } else {
+            "cancel_cleanup_timeout"
+        }});
+        expected["effect_state"] = json!("unknown");
+        expected["phase"] = json!("cleanup");
+        expected["operation"] = json!("tool.evaluate");
+        assert_eq!(
+            error.data,
+            Some(expected),
+            "deadline_first={deadline_first}, end_session={end_session}"
+        );
+        let rendered = bsk::cli::render_error::info_for_error(error.code, error.data.as_ref());
+        let hint = rendered.hint.unwrap();
+        if end_session {
+            assert!(hint.contains("this session cannot resume"));
+            assert_eq!(
+                state.sessions.end_info(&sid).unwrap().reason,
+                "user_moved_tab"
+            );
+            assert!(state.sessions.get(&sid).is_none());
+        } else {
+            assert!(hint.contains("observe the page before deciding whether to retry"));
+            assert!(!hint.contains("cannot resume"));
+            assert!(state.sessions.end_info(&sid).is_none());
+            assert!(state.sessions.get(&sid).is_some());
+        }
+    }
+    drop(ws);
+    handle.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn session_end_preserves_cleanup_details_and_transfer_results() {
+    let (handle, _sock) = spawn_daemon().await;
+    let mut ws = connect_ext(handle.ws_addr()).await;
+    let _ = handshake_as_ext(&mut ws).await;
+    let state = handle.state();
+    let evaluate_params = json!({"expression": "new Promise(() => {})", "await_promise": true});
+    for (method, mut params, reply) in [
+        (
+            Method::ToolEvaluate,
+            evaluate_params.clone(),
+            ResponseBody::Err(bsk_protocol::RpcError {
+                code: ErrorCode::CdpFailed,
+                message: "evaluate cleanup failed".into(),
+                data: Some(json!({
+                    "reason": "evaluate_cleanup_failed",
+                    "effect_state": "unknown",
+                    "cleanup_error": "debugger command did not settle",
+                })),
+            }),
+        ),
+        (
+            Method::ToolEvaluate,
+            evaluate_params,
+            ResponseBody::Err(bsk_protocol::RpcError {
+                code: ErrorCode::CdpFailed,
+                message: "evaluate cleanup failed".into(),
+                data: Some(json!("extension cleanup diagnostic")),
+            }),
+        ),
+        (
+            Method::ToolUpload,
+            json!({"selector": "input[type=file]", "files": [{"transfer_id": "upload-ready", "name": "report.txt"}]}),
+            ResponseBody::Ok(
+                json!({"tab_id": 42, "used_selector": "input[type=file]", "file_names": ["report.txt"]}),
+            ),
+        ),
+        (
+            Method::ToolDownload,
+            json!({"selector": "#download"}),
+            ResponseBody::Err(bsk_protocol::RpcError {
+                code: ErrorCode::Cancelled,
+                message: "download cleanup incomplete".into(),
+                data: Some(json!({
+                    "reason": "transfer_outcome_unknown",
+                    "effect_state": "unknown",
+                    "phase": "cleanup",
+                    "cleanup_error": "download cancellation was not acknowledged",
+                })),
+            }),
+        ),
+    ] {
+        let sid = state
+            .sessions
+            .reserve_id(
+                bsk::daemon::browsers::BrowserId(TEST_EXT_ID.into()),
+                8,
+                || 0,
+            )
+            .unwrap();
+        state.tool_queues.spawn(sid.clone());
+        let guard = state
+            .tool_inflight
+            .register("cleanup".into(), sid.clone())
+            .unwrap();
+        params["session_id"] = json!(sid.0);
+        params["tab_id"] = json!(42);
+        let task = {
+            let queues = Arc::clone(&state.tool_queues);
+            let sid = sid.clone();
+            let inflight = guard.entry();
+            let method = method.clone();
+            tokio::spawn(async move {
+                queues
+                    .dispatch(&sid, method, params, Duration::from_secs(5), Some(inflight))
+                    .await
+            })
+        };
+        let request = next_request(&mut ws).await;
+        assert_eq!(request.method, method);
+        end_session_after_tab_move(&mut ws, &sid.0, &request.id).await;
+        ws.send(Message::Text(
+            serde_json::to_string(&ResponseFrame {
+                id: request.id,
+                body: reply.clone(),
+            })
+            .unwrap(),
+        ))
+        .await
+        .unwrap();
+        let result = tokio::time::timeout(Duration::from_secs(2), task)
+            .await
+            .unwrap()
+            .unwrap();
+        match reply {
+            ResponseBody::Ok(expected) => assert_eq!(result.unwrap(), expected),
+            ResponseBody::Err(expected) => {
+                let actual = result.unwrap_err().into_rpc();
+                assert_eq!(actual.code, expected.code);
+                assert_eq!(actual.message, expected.message);
+                let data = actual.data.as_ref().unwrap();
+                assert_eq!(
+                    data["reason"],
+                    bsk_protocol::RpcErrorReason::UserMovedTab.as_str()
+                );
+                match expected.data.unwrap() {
+                    serde_json::Value::Object(fields) => {
+                        for (key, value) in fields {
+                            if key != "reason" {
+                                assert_eq!(data[&key], value, "{method:?}, field={key}");
+                            }
+                        }
+                    }
+                    diagnostic => assert_eq!(data["details"], diagnostic),
+                }
+                let rendered =
+                    bsk::cli::render_error::info_for_error(actual.code, actual.data.as_ref());
+                assert!(
+                    rendered
+                        .hint
+                        .unwrap()
+                        .contains("this session cannot resume")
+                );
+            }
+        }
+        assert_eq!(
+            state.sessions.end_info(&sid).unwrap().reason,
+            "user_moved_tab"
+        );
+    }
+    drop(ws);
+    handle.shutdown().await;
+}
+
+#[tokio::test]
+async fn full_page_screenshot_deadline_keeps_the_session_busy_until_page_cleanup() {
+    assert_deadline_waits_for_cleanup(
+        Method::ToolScreenshotFullPage,
+        json!({"tab_id": 42}),
+        json!({"export_id": "capture", "width": 800, "height": 2000, "bytes": 1024}),
+    )
+    .await;
+}
+
+async fn assert_deadline_waits_for_cleanup(
+    method: Method,
+    params: serde_json::Value,
+    result: serde_json::Value,
+) {
+    for acknowledge_cleanup in [true, false] {
+        let (handle, sock) = spawn_daemon().await;
+        let mut ws = connect_ext(handle.ws_addr()).await;
+        let _ = handshake_as_ext(&mut ws).await;
+        let (req_tx, mut req_rx) = mpsc::unbounded_channel();
+        let (reply_tx, reply_rx) = mpsc::unbounded_channel();
+        tokio::spawn(run_fake_extension(
+            ws,
+            Arc::new(Mutex::new(100)),
+            req_tx,
+            reply_rx,
+        ));
+        let session_id = ipc_session_start(&sock).await;
+        let sid = bsk::daemon::sessions::SessionId(session_id);
+        let queues = Arc::clone(&handle.state().tool_queues);
+        let task = {
+            let queues = Arc::clone(&queues);
+            let sid = sid.clone();
+            let method = method.clone();
+            let mut params = params.clone();
+            params["session_id"] = json!(sid.0);
+            tokio::spawn(async move {
+                queues
+                    .dispatch(&sid, method, params, Duration::from_millis(20), None)
+                    .await
+            })
+        };
+        let (rpc_id, _) = tokio::time::timeout(Duration::from_secs(2), req_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let (cancel_id, tag) = tokio::time::timeout(Duration::from_secs(2), req_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(cancel_id, format!("deadline-cancel-{rpc_id}"));
+        assert_eq!(tag, format!("cancel:{rpc_id}"));
+        // Outlive the ordinary response grace: the caller and queue must still
+        // wait for page cleanup instead of abandoning the outstanding input.
+        tokio::time::pause();
+        tokio::time::advance(Duration::from_millis(1100)).await;
+        tokio::task::yield_now().await;
+        assert!(!task.is_finished());
+        assert!(matches!(
+            queues
+                .dispatch(
+                    &sid,
+                    Method::ToolTabList,
+                    json!({"session_id":sid.0}),
+                    Duration::from_secs(1),
+                    None
+                )
+                .await,
+            Err(DispatchError::SessionBusy)
+        ));
+        if acknowledge_cleanup {
+            // Resume real clock before sending over the WebSocket loopback.
+            tokio::time::resume();
+            // Even a late success cannot turn a daemon deadline into success.
+            reply_tx.send((rpc_id, result.clone())).unwrap();
+        } else {
+            tokio::time::advance(Duration::from_secs(1)).await;
+            tokio::task::yield_now().await;
+            tokio::time::resume();
+        }
+        let Err(DispatchError::Rpc(error)) = tokio::time::timeout(Duration::from_secs(3), task)
+            .await
+            .unwrap()
+            .unwrap()
+        else {
+            panic!("expected a structured timeout");
+        };
+        assert_eq!(error.code, ErrorCode::Timeout);
+        if matches!(
+            method,
+            Method::ToolClick
+                | Method::ToolPress
+                | Method::ToolWheel
+                | Method::ToolFill
+                | Method::ToolSelect
+        ) {
+            let data = error.data.unwrap();
+            assert_eq!(data["reason"], "input_outcome_unknown");
+            assert_eq!(data["effect_state"], "unknown");
+        } else if !acknowledge_cleanup {
+            assert_eq!(error.data.unwrap()["reason"], "cancel_cleanup_timeout");
+        }
+        let next = {
+            let sid = sid.clone();
+            tokio::spawn(async move {
+                queues
+                    .dispatch(
+                        &sid,
+                        Method::ToolTabList,
+                        json!({"session_id":sid.0}),
+                        Duration::from_secs(2),
+                        None,
+                    )
+                    .await
+            })
+        };
+        let (next_id, _) = tokio::time::timeout(Duration::from_secs(2), req_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        reply_tx.send((next_id, json!({"ok":true}))).unwrap();
+        assert!(next.await.unwrap().is_ok());
+        handle.shutdown().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn debug_activity_wait_and_busy_observe_without_dispatching_or_cancelling_work() {
+    let (handle, sock) = spawn_daemon().await;
+    let mut ws = connect_ext(handle.ws_addr()).await;
+    handshake_as_ext(&mut ws).await;
+    let (req_tx, mut req_rx) = mpsc::unbounded_channel();
+    let (reply_tx, reply_rx) = mpsc::unbounded_channel();
+    tokio::spawn(run_fake_extension(
+        ws,
+        Arc::new(Mutex::new(1)),
+        req_tx,
+        reply_rx,
+    ));
+    let session = ipc_session_start(&sock).await;
+    let first = {
+        let sock = sock.clone();
+        let session = session.clone();
+        tokio::spawn(async move {
+            bsk::ipc_client::IpcClient::connect(&sock)
+                .await
+                .unwrap()
+                .call_with_id::<_, serde_json::Value>(
+                    "original".into(),
+                    Method::ToolTabList,
+                    Some(json!({"session_id":session,"tag":"held"})),
+                    Duration::from_secs(5),
+                )
+                .await
+                .unwrap()
+        })
+    };
+    let (original_rpc, _) = tokio::time::timeout(Duration::from_secs(2), req_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    let mut client = bsk::ipc_client::IpcClient::connect(&sock).await.unwrap();
+    let busy = client
+        .call::<_, serde_json::Value>(
+            "busy",
+            Method::ToolTabList,
+            Some(json!({"session_id":session})),
+            Duration::from_secs(2),
+        )
+        .await
+        .unwrap()
+        .unwrap_err();
+    let data = busy.data.unwrap();
+    assert_eq!(data["reason"], "session_busy");
+    assert_eq!(data["dispatched"], false);
+    assert_eq!(data["activity"]["command_id"], "original");
+    let activity = client
+        .call::<_, serde_json::Value>(
+            "activity",
+            Method::ToolDebug,
+            Some(json!({"session_id":session,"action":"activity"})),
+            Duration::from_secs(2),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(activity["activity"]["method"], "tool.tab_list");
+    assert_eq!(activity["activity"]["state"], "running");
+    let timeout = client
+        .call::<_, serde_json::Value>(
+            "poll",
+            Method::ToolDebug,
+            Some(json!({"session_id":session,"action":"wait","wait_ms":0})),
+            Duration::from_secs(2),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(timeout["activity"]["wait_complete"], false);
+    assert_eq!(timeout["activity"]["wait_timed_out"], true);
+    let old_command = client.call::<_, serde_json::Value>("older", Method::ToolDebug, Some(json!({"session_id":session,"action":"wait","command_id":"already-finished","wait_ms":0})), Duration::from_secs(2)).await.unwrap().unwrap();
+    assert_eq!(old_command["activity"]["wait_complete"], true);
+    let state = handle.state();
+    let token = bsk::daemon::abort::AbortToken::new();
+    token.cancel();
+    let cancelled = state
+        .tool_queues
+        .wait_idle(
+            &bsk::daemon::sessions::SessionId(session.clone()),
+            Some("original"),
+            1000,
+            token,
+        )
+        .await;
+    assert!(
+        matches!(cancelled, Err(DispatchError::Rpc(error)) if error.code == ErrorCode::Cancelled)
+    );
+    assert_eq!(
+        state
+            .tool_queues
+            .activity(&bsk::daemon::sessions::SessionId(session.clone()))
+            .unwrap()
+            .command_id
+            .as_deref(),
+        Some("original")
+    );
+    let waiter = {
+        let sock = sock.clone();
+        let session = session.clone();
+        tokio::spawn(async move {
+            bsk::ipc_client::IpcClient::connect(&sock).await.unwrap()
+                .call::<_, serde_json::Value>("waiter", Method::ToolDebug, Some(json!({"session_id":session,"action":"wait","command_id":"original","wait_ms":2000})), Duration::from_secs(3)).await.unwrap().unwrap()
+        })
+    };
+    assert!(
+        req_rx.try_recv().is_err(),
+        "observers must not reach the extension"
+    );
+    reply_tx.send((original_rpc, json!({"done":true}))).unwrap();
+    assert!(first.await.unwrap().is_ok());
+    assert_eq!(waiter.await.unwrap()["activity"]["wait_complete"], true);
+    assert!(
+        req_rx.try_recv().is_err(),
+        "waiting must not retry the original command"
+    );
+    handle.shutdown().await;
+}

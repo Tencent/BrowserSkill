@@ -1,4 +1,8 @@
-import { MIN_COMPATIBLE_PROTOCOL, PROTOCOL_VERSION } from "./generated/methods";
+import {
+  EXTENSION_CLIENT_ID,
+  MIN_COMPATIBLE_PROTOCOL,
+  PROTOCOL_VERSION,
+} from "./generated/methods";
 import { decodeHandshakeResult } from "./protocol";
 import type { Transport } from "./transport";
 import type {
@@ -23,7 +27,7 @@ export const EXTENSION_VERSION: string =
  * daemons. New code sends `"0.0.0"`; compat decisions ignore this.
  */
 export const MIN_COMPATIBLE_PEER = "0.0.0";
-export const CLIENT_ID = "browser-skill-extension";
+export const CLIENT_ID = EXTENSION_CLIENT_ID;
 
 export interface BrowserMeta {
   name: string;

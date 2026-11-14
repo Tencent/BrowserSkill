@@ -181,7 +181,7 @@ mod tests {
         let info = DaemonInfo::now(
             std::process::id(),
             tmp.path().join("daemon.sock"),
-            52800,
+            crate::daemon::DEFAULT_WS_PORT,
             "0.1.0-test",
         );
         write_to_path(&info, &path).unwrap();

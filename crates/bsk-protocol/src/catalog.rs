@@ -14,6 +14,12 @@ use crate::{
 
 pub const PROTOCOL_VERSION: &str = "2.0";
 pub const MIN_COMPATIBLE_PROTOCOL: &str = "2.0";
+pub const DEFAULT_DAEMON_PORT: u16 = 52800;
+pub const DEFAULT_DAEMON_WS_URL: &str = "ws://127.0.0.1:52800";
+pub const EXTENSION_CLIENT_ID: &str = "browser-skill-extension";
+pub const LOCAL_PAIRING_FRAGMENT_PREFIX: &str = "bsk-local.v1.";
+pub const REMOTE_AUTH_SUBPROTOCOL_PREFIX: &str = "bsk-auth.";
+pub const INSTANCE_ID_HEX_LENGTH: usize = 8;
 
 /// Returns whether `peer_protocol` satisfies the local protocol compatibility gate.
 pub fn is_protocol_compatible(peer_protocol: &str) -> bool {
@@ -172,6 +178,13 @@ pub fn export() -> Value {
         "constants": {
             "TRACE_VERSION_V3": crate::tools::TRACE_VERSION_V3,
             "VOM_FORMAT_VERSION": crate::tools::VOM_FORMAT_VERSION,
+            "DEFAULT_DAEMON_PORT": DEFAULT_DAEMON_PORT,
+            "DEFAULT_DAEMON_WS_URL": DEFAULT_DAEMON_WS_URL,
+            "EXTENSION_CLIENT_ID": EXTENSION_CLIENT_ID,
+            "LOCAL_PAIRING_FRAGMENT_PREFIX": LOCAL_PAIRING_FRAGMENT_PREFIX,
+            "REMOTE_AUTH_SUBPROTOCOL_PREFIX": REMOTE_AUTH_SUBPROTOCOL_PREFIX,
+            "LOCAL_AUTH_KDF_DOMAIN": crate::local_auth::LOCAL_AUTH_KDF_DOMAIN,
+            "INSTANCE_ID_HEX_LENGTH": INSTANCE_ID_HEX_LENGTH,
         },
         "debug_actions": crate::tools::DebugAction::ALL.iter().map(|action| json!({
             "action": action,

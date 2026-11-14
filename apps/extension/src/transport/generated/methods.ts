@@ -2,6 +2,13 @@
 import type * as Types from './types';
 export const PROTOCOL_VERSION = "2.0";
 export const MIN_COMPATIBLE_PROTOCOL = "2.0";
+export const DEFAULT_DAEMON_PORT = 52800;
+export const DEFAULT_DAEMON_WS_URL = "ws://127.0.0.1:52800";
+export const EXTENSION_CLIENT_ID = "browser-skill-extension";
+export const INSTANCE_ID_HEX_LENGTH = 8;
+export const LOCAL_AUTH_KDF_DOMAIN = "bsk-local-auth-v1";
+export const LOCAL_PAIRING_FRAGMENT_PREFIX = "bsk-local.v1.";
+export const REMOTE_AUTH_SUBPROTOCOL_PREFIX = "bsk-auth.";
 export const TRACE_VERSION_V3 = 3;
 export const VOM_FORMAT_VERSION = 1;
 export const eventNames = [

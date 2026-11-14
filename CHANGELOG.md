@@ -33,6 +33,7 @@ determines which versions can connect.
   runner and enforcing `skipped === 0`, non-empty suite assertions, and
   per-target suite coverage), and wired every extension `.browser.test.ts` suite
   plus `eval:browser:check` and `eval:browser:dynamic-read` into CI (#731, #732).
+- Converged scattered default daemon ports, WebSocket URLs, pairing/auth protocol constants, instance ID length, JSON-RPC standard error codes, and `BASE_TOOL_NAMES` into `bsk-protocol` / `bsk` SSOT exports (eliminating hand-maintained duplicates and brittle collection-length assertions), consolidated Rust integration test binaries from 51 to 6 while adding `debug = "line-tables-only"` for `dev`/`test` profiles, split extension Vitest unit runs into `unit-node` and `unit-dom` projects under `threads` pool while removing dead/trivial tests and consolidating single-helper files, replaced fixed wall-clock test sleeps with deterministic clock/mtime/readiness control, added `copyIsolatedExtension` to eliminate redundant per-port `ext:build` CI steps, and added Rust Cargo cache and batched CI steps in `.github/workflows/ci.yml`.
 
 ### Fixed
 

@@ -1,4 +1,5 @@
 import { normalizeDaemonPort } from "@/transport/daemon-endpoint";
+import { INSTANCE_ID_HEX_LENGTH } from "@/transport/generated/methods";
 
 const STORAGE_KEY = "bsk_instance_id";
 const LABEL_STORAGE_KEY = "bh_label";
@@ -41,10 +42,10 @@ export function defaultStorage(): StorageBackend {
 }
 
 /** Length of newly generated browser instance ids (8 hex chars → 32 bits). */
-export const INSTANCE_ID_LENGTH = 8;
+export const INSTANCE_ID_LENGTH = INSTANCE_ID_HEX_LENGTH;
 
 /** Matches ids produced by {@link generateShortInstanceId}. */
-export const SHORT_INSTANCE_ID_PATTERN = /^[0-9a-f]{8}$/;
+export const SHORT_INSTANCE_ID_PATTERN = new RegExp(`^[0-9a-f]{${INSTANCE_ID_LENGTH}}$`);
 
 function generateShortInstanceId(): string {
   const buf = new Uint8Array(INSTANCE_ID_LENGTH / 2);

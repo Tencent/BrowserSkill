@@ -4,6 +4,12 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+pub const JSONRPC_PARSE_ERROR: i64 = -32700;
+pub const JSONRPC_INVALID_REQUEST: i64 = -32600;
+pub const JSONRPC_METHOD_NOT_FOUND: i64 = -32601;
+pub const JSONRPC_INVALID_PARAMS: i64 = -32602;
+pub const JSONRPC_INTERNAL_ERROR: i64 = -32603;
+
 /// Wire-format JSON-RPC error object carried inside [`crate::frame::ResponseFrame`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -516,7 +522,6 @@ mod user_aborted_tests {
     #[test]
     fn rpc_error_reason_all_matches_wire_names_uniquely() {
         let mut seen = std::collections::HashSet::new();
-        assert_eq!(RpcErrorReason::ALL.len(), 123);
         for &reason in RpcErrorReason::ALL {
             assert!(
                 seen.insert(reason),

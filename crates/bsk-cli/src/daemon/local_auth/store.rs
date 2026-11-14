@@ -206,7 +206,8 @@ impl PairingStore {
                 },
             );
             Ok(format!(
-                "ws://127.0.0.1:{port}/#bsk-local.v1.{}.{}.{}",
+                "ws://127.0.0.1:{port}/#{}{}.{}.{}",
+                bsk_protocol::LOCAL_PAIRING_FRAGMENT_PREFIX,
                 state.daemon_id.encode(),
                 id.encode(),
                 key.encode()
@@ -451,7 +452,7 @@ mod optional_timestamp {
 mod tests {
     use super::*;
     fn pairing(store: &PairingStore, replace: Option<&str>) -> (String, Bytes<32>) {
-        let link = store.pair(52800, replace).unwrap();
+        let link = store.pair(crate::daemon::DEFAULT_WS_PORT, replace).unwrap();
         let parts: Vec<_> = link.split('.').collect();
         (
             parts[parts.len() - 2].into(),
@@ -480,7 +481,7 @@ mod tests {
         for _ in 1..16 {
             pairing(&store, None);
         }
-        assert!(store.pair(52800, None).is_err());
+        assert!(store.pair(crate::daemon::DEFAULT_WS_PORT, None).is_err());
         store
             .update(|s| {
                 s.devices.get_mut(&id).unwrap().expires_at = Some(now() - 1);

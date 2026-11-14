@@ -6,6 +6,7 @@ import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { promisify } from "node:util";
+import { copyIsolatedExtension } from "../../../local-pairing.mjs";
 import { withChrome } from "../snapshot-coordinates/chrome.mjs";
 import { attachExtensionWorker, runCompatibilityScenarios } from "./compatibility.mjs";
 import { runFrameObservabilityScenarios } from "./frame-observability.mjs";
@@ -19,7 +20,7 @@ import { runTargetPolicyScenarios } from "./target-policy.mjs";
 const executable = process.env.BSK_TEST_CHROME;
 const defaultCli = process.platform === "win32" ? "target/debug/bsk.exe" : "target/debug/bsk";
 const cli = resolve(process.env.BSK_TEST_CLI ?? defaultCli);
-const extensionPath = resolve(process.env.BSK_COOP_EXTENSION ?? "apps/extension/dist/chrome-mv3");
+const extensionSource = resolve(process.env.BSK_COOP_EXTENSION ?? "apps/extension/dist/chrome-mv3");
 const port = Number(process.env.BSK_COOP_PORT ?? 52917);
 const artifacts = process.env.BSK_COOP_ARTIFACTS;
 const loadExtensionOverCdp =
@@ -40,11 +41,12 @@ assert(
   "Choose one coverage subset",
 );
 assert(port !== 52800 && Number.isInteger(port));
-assert(
-  (await readFile(join(extensionPath, "background.js"), "utf8")).includes(`ws://127.0.0.1:${port}`),
-  "Build with BSK_DAEMON_WS_URL pointing to the isolated test port",
-);
 const directory = await mkdtemp(join(tmpdir(), "bsk-cooperation-"));
+const extensionPath = await copyIsolatedExtension(
+  extensionSource,
+  join(directory, "extension"),
+  port,
+);
 const env = {
   ...process.env,
   BSK_HOME: directory,

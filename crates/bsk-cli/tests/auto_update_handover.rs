@@ -515,7 +515,7 @@ fn l11b_revocation_during_auto_update_survives_process_handover() {
     fixture.server.hold_archive.store(true, Ordering::SeqCst);
     let lock = bsk::daemon::lockfile::acquire_at(&fixture.home).unwrap();
     let store = PairingStore::open(&lock).unwrap();
-    store.pair(52800, None).unwrap();
+    store.pair(bsk_protocol::DEFAULT_DAEMON_PORT, None).unwrap();
     let id = store.devices()[0].device_id.clone();
     let pending = Pending {
         txn: random(),

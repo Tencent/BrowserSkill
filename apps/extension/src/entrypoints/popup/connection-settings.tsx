@@ -3,6 +3,7 @@ import { Button, Input, Label } from "@browser-skill/ui";
 import { RiAlertLine } from "@remixicon/react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { DEFAULT_DAEMON_PORT, resolveDaemonWsUrl } from "@/transport/daemon-endpoint";
+import { DEFAULT_DAEMON_WS_URL } from "@/transport/generated/methods";
 import type { LocalAuthStatus } from "@/transport/local-auth";
 import { parseLocalPairing } from "@/transport/local-credentials";
 import { parseRemoteEndpoint, remoteAuthorizationStatus } from "@/transport/remote-endpoint";
@@ -482,7 +483,9 @@ export function ConnectionSettings({
                   type="password"
                   autoComplete="off"
                   spellCheck={false}
-                  placeholder={mode === "local" ? "ws://127.0.0.1:52800/#…" : "wss://…/extension#…"}
+                  placeholder={
+                    mode === "local" ? `${DEFAULT_DAEMON_WS_URL}/#…` : "wss://…/extension#…"
+                  }
                   value={draft}
                   disabled={!ready || busy}
                   aria-invalid={error === "format" || undefined}

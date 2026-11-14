@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 import react from "@vitejs/plugin-react";
 import { defineConfig } from "vitest/config";
+import { DEFAULT_DAEMON_WS_URL } from "./src/transport/generated/methods";
 
 const pkg = JSON.parse(readFileSync(path.resolve(__dirname, "package.json"), "utf8")) as {
   version: string;
@@ -19,7 +20,7 @@ export default defineConfig({
   },
   define: {
     __BSK_EXT_VERSION__: JSON.stringify(pkg.version),
-    __BSK_DAEMON_WS_URL__: JSON.stringify(process.env.BSK_DAEMON_WS_URL ?? "ws://127.0.0.1:52800"),
+    __BSK_DAEMON_WS_URL__: JSON.stringify(process.env.BSK_DAEMON_WS_URL ?? DEFAULT_DAEMON_WS_URL),
   },
   resolve: {
     alias: {

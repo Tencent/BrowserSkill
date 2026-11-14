@@ -106,3 +106,20 @@ pub async fn wait_for_session_not_accepting(queues: &Arc<ToolQueueRegistry>, sid
     )
     .await;
 }
+
+pub fn bsk_bin() -> std::path::PathBuf {
+    std::path::PathBuf::from(env!("CARGO_BIN_EXE_bsk"))
+}
+
+#[cfg(unix)]
+pub fn wait_for_pid_exit(pid: i32, timeout: Duration) -> bool {
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        let alive = unsafe { libc::kill(pid, 0) } == 0;
+        if !alive {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    false
+}

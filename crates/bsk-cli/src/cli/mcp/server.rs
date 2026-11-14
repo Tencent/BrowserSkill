@@ -22,10 +22,10 @@ pub const PROTOCOL_VERSIONS: &[&str] = &["2025-11-25", "2025-06-18", "2025-03-26
 /// Upper bound for one inbound message. Larger lines are rejected and skipped.
 const MAX_MESSAGE_BYTES: usize = 8 * 1024 * 1024;
 
-const PARSE_ERROR: i64 = -32700;
-const INVALID_REQUEST: i64 = -32600;
-const METHOD_NOT_FOUND: i64 = -32601;
-const INVALID_PARAMS: i64 = -32602;
+const PARSE_ERROR: i64 = bsk_protocol::JSONRPC_PARSE_ERROR;
+const INVALID_REQUEST: i64 = bsk_protocol::JSONRPC_INVALID_REQUEST;
+const METHOD_NOT_FOUND: i64 = bsk_protocol::JSONRPC_METHOD_NOT_FOUND;
+const INVALID_PARAMS: i64 = bsk_protocol::JSONRPC_INVALID_PARAMS;
 
 const INSTRUCTIONS: &str = "BrowserSkill drives the user's signed-in Chrome or Edge in a separate Agent Window. \
 Workflow: bsk_session open (or start, then bsk_page navigate and bsk_session sync), which returns context_id and a VOM observation with @eN refs; \

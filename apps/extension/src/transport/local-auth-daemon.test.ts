@@ -9,7 +9,8 @@ import { promisify } from "node:util";
 import { IDBFactory } from "fake-indexeddb";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import WebSocket from "ws";
-import { EXTENSION_VERSION, PROTOCOL_VERSION } from "./handshake";
+import { DEFAULT_DAEMON_WS_URL, EXTENSION_CLIENT_ID, PROTOCOL_VERSION } from "./generated/methods";
+import { EXTENSION_VERSION } from "./handshake";
 import { authenticateLocal, createLocalAuthenticator, LocalAuthError } from "./local-auth";
 import * as localCredentials from "./local-credentials";
 import { readLocalState } from "./local-credentials";
@@ -108,7 +109,7 @@ async function handshake(ws: WebSocket) {
       id: "handshake",
       method: "system.handshake",
       params: {
-        client: "browser-skill-extension",
+        client: EXTENSION_CLIENT_ID,
         version: EXTENSION_VERSION,
         protocol_version: PROTOCOL_VERSION,
         instance_id: instance,
@@ -240,7 +241,7 @@ it.skipIf(!old)(
 it.skipIf(!current || !old)(
   "current CLI can issue, list and revoke remote grants on the released daemon",
   async () => {
-    const serverArgs = ["--mode", "server", "--public-url", "ws://127.0.0.1:52800/extension"];
+    const serverArgs = ["--mode", "server", "--public-url", `${DEFAULT_DAEMON_WS_URL}/extension`];
     const url = await start(old!, 0, serverArgs);
     const link = new URL(await cli(current!, "daemon", "pair"));
     expect(link.pathname).toBe("/extension");
