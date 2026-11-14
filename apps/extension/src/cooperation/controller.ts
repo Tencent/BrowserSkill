@@ -338,6 +338,19 @@ export class CooperationController implements ControlAuthority {
   enabled(tabId: number): boolean {
     return this.tabs.has(tabId);
   }
+
+  /** Resolve the controlled tab owning `contextId` within `sessionId`, if tracked. */
+  contextTabId(sessionId: string, contextId: string): number | undefined {
+    for (const [tabId, state] of this.tabs) {
+      if (
+        state.sessionId === sessionId &&
+        (state.context?.id === contextId || state.baseline?.id === contextId)
+      ) {
+        return tabId;
+      }
+    }
+    return undefined;
+  }
   hasSession(sessionId: string): boolean {
     return this.defaultTabs.has(sessionId);
   }
@@ -1170,6 +1183,7 @@ export class CooperationController implements ControlAuthority {
     };
     state.working = true;
     try {
+      assert();
       const result = await invoke(
         guardedRunner(cdp, {
           prepare: async () => {
@@ -1196,10 +1210,40 @@ export class CooperationController implements ControlAuthority {
           },
         }),
       );
-      return revoked ? failure(revoked, sent ? "unknown" : "none") : result;
+      if (state.stopped) return stopped(sent ? "unknown" : "none");
+      if (signal.aborted)
+        return {
+          code: "cancelled",
+          message: "Initial page operation cancelled",
+          data: {
+            effect_state: sent ? "unknown" : "none",
+            phase: sent ? "execution" : "precondition",
+          },
+        };
+      if (revoked) return failure(revoked, sent ? "unknown" : "none");
+      if (isRpcError(result) && result.data?.effect_state === undefined) {
+        const effect = sent ? "unknown" : "none";
+        return {
+          ...result,
+          data: {
+            ...result.data,
+            effect_state: effect,
+            phase: result.data?.phase ?? (sent ? "execution" : "precondition"),
+          },
+        };
+      }
+      return result;
     } catch (error) {
       if (state.stopped) return stopped(sent ? "unknown" : "none");
-      if (signal.aborted) return { code: "cancelled", message: "Initial page operation cancelled" };
+      if (signal.aborted)
+        return {
+          code: "cancelled",
+          message: "Initial page operation cancelled",
+          data: {
+            effect_state: sent ? "unknown" : "none",
+            phase: sent ? "execution" : "precondition",
+          },
+        };
       return failure(
         error instanceof Error ? error.message : String(error),
         sent ? "unknown" : "none",
@@ -1354,6 +1398,16 @@ export class CooperationController implements ControlAuthority {
       if (states.some((state) => state.stopped)) return stopped(sent ? "unknown" : "none");
       if (signal.aborted) signal.throwIfAborted();
       if (revoked) return refusal(revoked);
+      if (isRpcError(result) && result.data?.effect_state === undefined) {
+        return {
+          ...result,
+          data: {
+            ...result.data,
+            effect_state: sent ? "unknown" : "none",
+            phase: result.data?.phase ?? (sent ? "execution" : "precondition"),
+          },
+        };
+      }
       return result;
     } catch (error) {
       if (states.some((state) => state.stopped)) return stopped(sent ? "unknown" : "none");
@@ -2123,7 +2177,16 @@ export class CooperationController implements ControlAuthority {
                 "Observe the current page and choose a target again. Nothing was sent.",
             },
           }
-        : error;
+        : error.data?.effect_state !== undefined
+          ? error
+          : {
+              ...error,
+              data: {
+                ...error.data,
+                phase: error.data?.phase ?? "target",
+                effect_state: "none",
+              },
+            };
     let fallbackBootstrap = false;
     try {
       await this.refresh(state);
@@ -2209,6 +2272,7 @@ export class CooperationController implements ControlAuthority {
           return {
             code: "invalid_params",
             message: "depends_on requires at most 16 observed refs/selectors",
+            data: { phase: "precondition", effect_state: "none" },
           };
         if (params.depends_on.length) {
           // Dependencies constrain the decision even when a key has no target.
@@ -2222,7 +2286,7 @@ export class CooperationController implements ControlAuthority {
               /^@?e\d+$/.test(dependency) ? { ref: dependency } : { selector: dependency },
               "action dependency",
             );
-            if (isRpcError(resolved)) return resolved;
+            if (isRpcError(resolved)) return targetError(resolved);
             evidenceTargets.push(resolved);
           }
         }
@@ -2414,6 +2478,7 @@ export class CooperationController implements ControlAuthority {
           data: {
             effect_state: sent ? "unknown" : "none",
             phase: sent ? "execution" : "precondition",
+            ...(sent ? { tab_id: state.tabId } : {}),
           },
         };
       }
@@ -2425,9 +2490,9 @@ export class CooperationController implements ControlAuthority {
           : undefined);
       if (checkFailure || reason)
         return reportFailure(checkFailure?.message ?? reason!, sent ? "unknown" : "none");
-      if (targetPolicy && isRpcError(result)) {
+      if (isRpcError(result)) {
         const effect = result.data?.effect_state ?? (sent ? "unknown" : "none");
-        if (effect === "unknown" || detachedByHandler || postRefreshFailed)
+        if (targetPolicy && (effect === "unknown" || detachedByHandler || postRefreshFailed))
           state.context = undefined;
         return {
           ...result,
@@ -2455,6 +2520,7 @@ export class CooperationController implements ControlAuthority {
           data: {
             effect_state: sent ? "unknown" : "none",
             phase: sent ? "execution" : "precondition",
+            ...(sent ? { tab_id: state.tabId } : {}),
           },
         };
       }

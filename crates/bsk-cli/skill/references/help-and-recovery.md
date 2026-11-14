@@ -64,4 +64,4 @@ checked; `evaluate --unverified` is the last resort when that cannot be stated
 ([scripts](cooperation.md#scripts)). A refusal is known to have no effect only
 when effect_state=none; unknown results still require application inspection.
 
-In MCP, handle human/dialog/control flows via `bsk_assist` (`request_help`, `dialog_accept`, `dialog_dismiss`, `tab_borrow`, `emulate`, `operation_await`) and resolve uncertain WAL effects via `bsk_ledger` (`status`, `resolve`).
+In MCP, handle human/dialog/control flows via `bsk_assist` (`request_help`, `dialog_status`, `dialog_accept`, `dialog_dismiss`, `emulate`, `operation_await`, `operation_cancel`), borrow or return user tabs via `bsk_tabs` (`borrow`, `return`), and resolve uncertain WAL effects via `bsk_ledger` (`status`, `resolve`).

@@ -3940,4 +3940,150 @@ describe("tool.record_start cooperation guard", () => {
       vi.useRealTimers();
     }
   });
+
+  it("tags strict-policy post-dispatch tool errors with effect_state unknown and bootstrap aborts with none", async () => {
+    vi.mocked(handleSnapshot).mockImplementation(async () => ({
+      text: "City: Shanghai; Submit [ref=@e1]",
+      ref_count: 1,
+      tab_id: 7,
+      truncated: false,
+    }));
+
+    // 1. Strict policy: `fixture()` syncs under `strict` policy; fail AFTER `beginDomMutation` / `sendGuarded`.
+    const f = await fixture();
+    expect(f.first.control_policy).toBe("strict");
+
+    expect(
+      await f.controller.run(
+        {
+          id: "strict-fill",
+          method: "tool.fill",
+          params: {
+            session_id: "shared",
+            tab_id: 7,
+            ref: "@e1",
+            value: "secret",
+            context_id: f.first.context_id,
+          },
+        },
+        f.cdp,
+        f.abort.signal,
+        async (runner) => {
+          await runner.sendGuarded?.(
+            { tabId: 7 },
+            "Input.insertText",
+            { text: "secret" },
+            { signal: f.abort.signal },
+          );
+          return {
+            code: "permission_denied",
+            message: "fill verification failed after write",
+            data: { reason: "fill_value_mismatch" },
+          };
+        },
+      ),
+    ).toMatchObject({
+      code: "permission_denied",
+      data: {
+        reason: "fill_value_mismatch",
+        effect_state: "unknown",
+        phase: "execution",
+      },
+    });
+
+    // 2. Bootstrap initial blank-tab navigation cancelled BEFORE dispatch tags `effect_state: "none"`.
+    const blank = await fixture({ url: "about:blank", sync: false });
+    blank.abort.abort();
+    expect(
+      await blank.controller.run(
+        {
+          id: "bootstrap-nav-abort",
+          method: "tool.navigate",
+          params: { session_id: "shared", tab_id: 7, url: "https://example.test" },
+        },
+        blank.cdp,
+        blank.abort.signal,
+        async () => ({ tab_id: 7, url: "https://example.test" }),
+      ),
+    ).toMatchObject({
+      code: "cancelled",
+      data: {
+        effect_state: "none",
+        phase: "precondition",
+      },
+    });
+
+    // 3. Strict-policy `depends_on` validation and pre-dispatch resolution failures carry `effect_state: "none"`.
+    const strictDep = await fixture();
+    expect(
+      await strictDep.controller.run(
+        {
+          id: "strict-bad-dep",
+          method: "tool.evaluate",
+          params: {
+            session_id: "shared",
+            tab_id: 7,
+            expression: "1",
+            context_id: strictDep.first.context_id,
+            depends_on: [""],
+          },
+        },
+        strictDep.cdp,
+        strictDep.abort.signal,
+        async () => ({ ok: true }),
+      ),
+    ).toMatchObject({
+      code: "invalid_params",
+      data: {
+        effect_state: "none",
+        phase: "precondition",
+      },
+    });
+    vi.mocked(resolveActionTarget).mockResolvedValueOnce({
+      code: "cdp_failed",
+      message: "DOM.querySelector failed",
+    });
+    expect(
+      await strictDep.controller.run(
+        {
+          id: "strict-missing-dep",
+          method: "tool.evaluate",
+          params: {
+            session_id: "shared",
+            tab_id: 7,
+            expression: "1",
+            context_id: strictDep.first.context_id,
+            depends_on: ["@e999"],
+          },
+        },
+        strictDep.cdp,
+        strictDep.abort.signal,
+        async () => ({ ok: true }),
+      ),
+    ).toMatchObject({
+      data: {
+        effect_state: "none",
+      },
+    });
+
+    // 4. `manageTabs` (`tool.tab_select`) stamps `effect_state` onto untagged RpcErrors.
+    expect(
+      await strictDep.controller.run(
+        {
+          id: "tab-select-err",
+          method: "tool.tab_select",
+          params: { session_id: "shared", tab_id: 7 },
+        },
+        strictDep.cdp,
+        strictDep.abort.signal,
+        async () => ({ code: "cdp_failed", message: "tab activation failed before mutation" }),
+      ),
+    ).toMatchObject({
+      code: "cdp_failed",
+      data: {
+        effect_state: "none",
+        phase: "precondition",
+      },
+    });
+  });
 });

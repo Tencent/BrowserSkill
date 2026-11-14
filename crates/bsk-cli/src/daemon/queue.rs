@@ -455,6 +455,7 @@ impl ToolQueueRegistry {
         milliseconds: u32,
         cancel: AbortToken,
     ) -> Result<DebugActivity, DispatchError> {
+        let _activity_lease = self.sessions.begin_activity(sid);
         let deadline = tokio::time::Instant::now() + Duration::from_millis(milliseconds.into());
         loop {
             let mut activity = self.activity(sid)?;
@@ -514,6 +515,7 @@ impl ToolQueueRegistry {
                 return Err(DispatchError::SessionStopping);
             }
         }
+        let _activity_lease = self.sessions.begin_activity(sid);
         let (respond_tx, _respond_rx) = oneshot::channel();
         let job = ToolJob {
             method,
@@ -699,30 +701,32 @@ async fn forward_one(
             .as_ref()
             .is_some_and(AbortToken::is_cancelled)
     {
-        return Err(cancelled_error(
+        return Err(tag_not_dispatched(cancelled_error(
             job.inflight.as_deref(),
             "tool dispatch cancelled before forwarding",
-        ));
+        )));
     }
     let Some(session) = sessions.get(sid) else {
-        return Err(RpcError {
+        return Err(tag_not_dispatched(RpcError {
             code: ErrorCode::NotFound,
             message: format!("session {sid} no longer exists"),
             data: None,
-        });
+        }));
     };
     let Some(client) = browsers.get(&session.browser_id) else {
-        return Err(RpcError {
+        return Err(tag_not_dispatched(RpcError {
             code: ErrorCode::NotFound,
             message: "owning browser is no longer connected".into(),
             data: None,
-        });
+        }));
     };
     // The browser is registered but has stopped answering; a call would
     // only hang until its own deadline. Nothing has been sent yet, so this
     // is the one place where "not executed" is certain.
     if client.is_unresponsive() {
-        return Err(super::browsers::extension_unresponsive_error());
+        return Err(tag_not_dispatched(
+            super::browsers::extension_unresponsive_error(),
+        ));
     }
     let rpc_id = next_rpc_id("tool");
     let request = RequestFrame::for_extension_ws(
@@ -757,10 +761,10 @@ async fn forward_one(
             match outcome {
                 PromoteOutcome::Promoted => Some(entry.cancel_token()),
                 PromoteOutcome::Cancelled => {
-                    return Err(cancelled_error(
+                    return Err(tag_not_dispatched(cancelled_error(
                         Some(entry),
                         "tool dispatch cancelled before forwarding",
-                    ));
+                    )));
                 }
                 PromoteOutcome::SendFailed => return Err(not_dispatched_error(dispatched)),
             }
@@ -774,10 +778,10 @@ async fn forward_one(
                 .as_ref()
                 .is_some_and(AbortToken::is_cancelled)
             {
-                return Err(cancelled_error(
+                return Err(tag_not_dispatched(cancelled_error(
                     None,
                     "session lifecycle cancelled before forwarding",
-                ));
+                )));
             }
             dispatched = Some(client.dispatch(request));
             if dispatched.as_ref().is_some_and(Result::is_err) {
@@ -1139,19 +1143,41 @@ fn link_failure_error(method: &Method, err: RpcError) -> RpcError {
     err
 }
 
+/// Stamp structured pre-dispatch absence proof onto errors returned strictly
+/// before `BrowserClient::dispatch` places any frame onto the browser socket.
+fn tag_not_dispatched(mut err: RpcError) -> RpcError {
+    let data = err.data.get_or_insert_with(|| serde_json::json!({}));
+    if data.is_null() {
+        *data = serde_json::json!({});
+    } else if !data.is_object() {
+        *data = serde_json::json!({ "details": data.take() });
+    }
+    data["dispatched"] = serde_json::json!(false);
+    data["effect_state"] = serde_json::json!("none");
+    if data.get("phase").is_none() {
+        data["phase"] = serde_json::json!("precondition");
+    }
+    if err.code == ErrorCode::Cancelled && data.get("reason").is_none() {
+        data["reason"] =
+            serde_json::json!(bsk_protocol::RpcErrorReason::CancelledBeforeDispatch.as_str());
+    }
+    err
+}
+
 /// Nothing left the daemon, so this call certainly had no effect: report
 /// why without any unknown-outcome wording.
 fn not_dispatched_error(
     dispatched: Option<Result<oneshot::Receiver<ResponseFrame>, super::browsers::SendError>>,
 ) -> RpcError {
-    match dispatched {
+    let err = match dispatched {
         Some(Err(super::browsers::SendError::Terminated(cause))) => cause,
         _ => RpcError {
             code: ErrorCode::ProtocolError,
             message: "browser sink closed before request was queued".into(),
             data: Some(super::browsers::extension_disconnected_data()),
         },
-    }
+    };
+    tag_not_dispatched(err)
 }
 
 fn is_effect_aware_action(method: &Method) -> bool {
@@ -1163,7 +1189,18 @@ fn is_effect_aware_action(method: &Method) -> bool {
 fn input_effect_data(method: &Method, response: Option<&ResponseBody>, phase: &str) -> Value {
     let mut data = match response {
         Some(ResponseBody::Err(err)) => err.data.clone().filter(Value::is_object),
-        _ => None,
+        Some(ResponseBody::Ok(val)) => {
+            let mut obj = serde_json::json!({});
+            if let Some(tid) = val
+                .get("tab_id")
+                .and_then(Value::as_i64)
+                .or_else(|| val.pointer("/dialog/tab_id").and_then(Value::as_i64))
+            {
+                obj["tab_id"] = serde_json::json!(tid);
+            }
+            Some(obj)
+        }
+        None => None,
     }
     .unwrap_or_else(|| serde_json::json!({}));
     if !matches!(

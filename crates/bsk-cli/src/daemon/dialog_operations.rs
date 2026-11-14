@@ -144,16 +144,55 @@ impl DialogOperation {
 }
 
 #[derive(Debug, Default)]
-pub struct DialogOperations(Mutex<HashMap<String, Arc<DialogOperation>>>);
+pub struct DialogOperations {
+    entries: Mutex<HashMap<String, Arc<DialogOperation>>>,
+    decision_locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+}
 
 impl DialogOperations {
+    /// Per-session async mutex serializing `tool.dialog_accept` and
+    /// `tool.dialog_dismiss` while the primary serial tool queue stays held by
+    /// the dialog-suspended action.
+    pub fn decision_lock(&self, session_id: &str) -> Arc<tokio::sync::Mutex<()>> {
+        let mut locks = self
+            .decision_locks
+            .lock()
+            .expect("dialog decision_locks poisoned");
+        if locks.len() >= MAX_OPERATIONS && !locks.contains_key(session_id) {
+            locks.retain(|_, lock| Arc::strong_count(lock) > 1);
+        }
+        Arc::clone(
+            locks
+                .entry(session_id.to_owned())
+                .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(()))),
+        )
+    }
+
+    /// Return the `tab_id` of an active `DialogPending` operation in `session_id` when known.
+    pub fn active_dialog_tab_id(&self, session_id: &str) -> Option<i64> {
+        let entries = self
+            .entries
+            .lock()
+            .expect("dialog operation registry poisoned");
+        entries
+            .values()
+            .filter(|entry| entry.session_id == session_id)
+            .find_map(|entry| match &*entry.progress.borrow() {
+                Progress::Dialog(dialog) => dialog.get("tab_id").and_then(Value::as_i64),
+                _ => None,
+            })
+    }
+
     pub fn register(
         &self,
         session_id: &str,
         cli_rpc_id: &str,
         method: Method,
     ) -> Result<Arc<DialogOperation>, RpcError> {
-        let mut entries = self.0.lock().expect("dialog operation registry poisoned");
+        let mut entries = self
+            .entries
+            .lock()
+            .expect("dialog operation registry poisoned");
         entries.retain(|_, entry| !matches!(*entry.progress.borrow(), Progress::Complete(_, at) if at.elapsed() >= RESULT_TTL));
         if entries.len() >= MAX_OPERATIONS {
             let oldest = entries
@@ -190,23 +229,30 @@ impl DialogOperations {
     }
 
     pub fn get(&self, session_id: &str, id: &str) -> Option<Arc<DialogOperation>> {
-        self.0.lock().expect("dialog operation registry poisoned").get(id)
+        self.entries
+            .lock()
+            .expect("dialog operation registry poisoned")
+            .get(id)
             .filter(|entry| entry.session_id == session_id && !matches!(*entry.progress.borrow(), Progress::Complete(_, at) if at.elapsed() >= RESULT_TTL))
             .cloned()
     }
 
     pub fn remove(&self, id: &str) {
-        self.0
+        self.entries
             .lock()
             .expect("dialog operation registry poisoned")
             .remove(id);
     }
 
     pub fn remove_session(&self, session_id: &str) {
-        self.0
+        self.entries
             .lock()
             .expect("dialog operation registry poisoned")
             .retain(|_, entry| entry.session_id != session_id);
+        self.decision_locks
+            .lock()
+            .expect("dialog decision_locks poisoned")
+            .remove(session_id);
     }
 
     /// WS caller verifies that this browser still owns the payload's session.

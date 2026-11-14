@@ -181,7 +181,6 @@ impl IpcRequestMeta {
 /// Daemon-cached observation metadata returned out-of-band alongside a
 /// `tool.cooperate` (or `operation_await`) reply when `return_scope_meta` is requested.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct ScopeResultMeta {
     pub session_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -249,7 +248,6 @@ impl ScopeResultMeta {
 
 /// Response-side transport metadata on the local CLI/MCP ↔ daemon IPC link.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct IpcResponseMeta {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scope_meta: Option<ScopeResultMeta>,
@@ -875,7 +873,7 @@ mod platform {
         const CONNECT_BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 
         pub async fn connect_path(pipe_name: PathBuf) -> Result<Self> {
-            let name = pipe_name.to_string_lossy().into_owned();
+            let name = crate::daemon::paths::endpoint_pipe_name(&pipe_name);
             let connect_loop = async {
                 loop {
                     match ClientOptions::new().open(&name) {

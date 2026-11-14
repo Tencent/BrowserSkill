@@ -657,7 +657,7 @@ async fn start_real_daemon(home: &std::path::Path) -> (Child, DaemonInfo) {
     let info = loop {
         if let Ok(bytes) = std::fs::read(&daemon_json)
             && let Ok(info) = serde_json::from_slice::<DaemonInfo>(&bytes)
-            && tokio::net::UnixStream::connect(&info.sock_path)
+            && bsk::ipc_client::Client::connect_path(info.sock_path.clone())
                 .await
                 .is_ok()
         {
@@ -674,7 +674,7 @@ async fn start_real_daemon(home: &std::path::Path) -> (Child, DaemonInfo) {
 
 #[tokio::test]
 async fn wave2_full_chain_ssot_mcp_parity_and_counterexamples() {
-    let home = tempfile::tempdir_in("/tmp").unwrap();
+    let home = crate::support::short_tempdir();
     let (_daemon, info) = start_real_daemon(home.path()).await;
 
     // Chain C: reject protocol "1.9" browser before registering.

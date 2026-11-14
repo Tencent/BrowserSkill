@@ -290,6 +290,7 @@ fn run_start(
             width: args.width,
             height: args.height,
             focused: Some(args.focus),
+            bind_scope: true,
         },
     );
     waited.store(true, Ordering::SeqCst);
@@ -329,6 +330,7 @@ pub struct SessionStartOptions {
     pub width: Option<u32>,
     pub height: Option<u32>,
     pub focused: Option<bool>,
+    pub bind_scope: bool,
 }
 
 /// Start a session and open the Agent Window. Used by `session start` and `record start`.
@@ -367,7 +369,7 @@ pub fn start_session_with_context(
         focused: Some(opts.focused.unwrap_or(false)),
     };
     let caller_scope = ctx.resolved_caller_scope();
-    let meta = if crate::daemon::scopes::is_isolated_scope(&caller_scope) {
+    let meta = if opts.bind_scope && crate::daemon::scopes::is_isolated_scope(&caller_scope) {
         crate::ipc_client::IpcRequestMeta {
             caller_scope: Some(caller_scope),
             bind_scope: true,

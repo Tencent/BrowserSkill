@@ -25,14 +25,8 @@ mod foreground_smoke;
 #[path = "integration/idle_exit.rs"]
 mod idle_exit;
 #[cfg(unix)]
-#[path = "integration/ipc_client.rs"]
-mod ipc_client;
-#[cfg(unix)]
 #[path = "integration/logs_cmd.rs"]
 mod logs_cmd;
-#[cfg(unix)]
-#[path = "integration/plan_cli.rs"]
-mod plan_cli;
 #[cfg(unix)]
 #[path = "integration/recipe_cli.rs"]
 mod recipe_cli;
@@ -42,18 +36,21 @@ mod status_cmd;
 #[cfg(unix)]
 #[path = "integration/step_cancel.rs"]
 mod step_cancel;
-#[cfg(unix)]
+
+#[path = "integration/ipc_client.rs"]
+mod ipc_client;
+#[path = "integration/plan_cli.rs"]
+mod plan_cli;
 #[path = "integration/target_control_cli.rs"]
 mod target_control_cli;
-#[cfg(unix)]
 #[path = "integration/wave2_ssot_mcp_e2e.rs"]
 mod wave2_ssot_mcp_e2e;
-#[cfg(unix)]
 #[path = "integration/wave2_zero_ceremony_lifecycle.rs"]
 mod wave2_zero_ceremony_lifecycle;
-#[cfg(unix)]
 #[path = "integration/wave3a_lifecycle_envelope_and_cache.rs"]
 mod wave3a_lifecycle_envelope_and_cache;
+#[path = "integration/wave3c_liveness_wal_and_cache.rs"]
+mod wave3c_liveness_wal_and_cache;
 
 #[path = "integration/audit_ws.rs"]
 mod audit_ws;

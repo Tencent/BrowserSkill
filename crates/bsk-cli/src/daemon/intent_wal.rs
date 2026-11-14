@@ -331,12 +331,15 @@ impl IntentWal {
         ticket.finished = true;
         let next_state = classify_dispatch_outcome(method, outcome);
         let resolved_tab_id = match outcome {
-            Ok(val) => val.get("tab_id").and_then(Value::as_i64),
-            Err(DispatchError::Rpc(err)) => err
-                .data
-                .as_ref()
-                .and_then(|d| d.get("tab_id"))
-                .and_then(Value::as_i64),
+            Ok(val) => val
+                .get("tab_id")
+                .and_then(Value::as_i64)
+                .or_else(|| val.pointer("/dialog/tab_id").and_then(Value::as_i64)),
+            Err(DispatchError::Rpc(err)) => err.data.as_ref().and_then(|d| {
+                d.get("tab_id")
+                    .and_then(Value::as_i64)
+                    .or_else(|| d.pointer("/dialog/tab_id").and_then(Value::as_i64))
+            }),
             Err(_) => None,
         };
 
@@ -344,8 +347,8 @@ impl IntentWal {
         let Some(mut entry) = guard.dispatched.remove(&ticket.operation_id) else {
             return next_state;
         };
-        if entry.tab_id.is_none() && resolved_tab_id.is_some() {
-            entry.tab_id = resolved_tab_id;
+        if let Some(tab_id) = resolved_tab_id {
+            entry.tab_id = Some(tab_id);
         }
         entry.state = next_state;
         entry.updated_at = now_rfc3339();
@@ -795,37 +798,29 @@ fn classify_rpc_error(method: &Method, err: &RpcError) -> IntentState {
             return IntentState::Settled;
         }
         if let Some(reason) = data.get("reason").and_then(Value::as_str) {
+            if reason == bsk_protocol::RpcErrorReason::CancelledBeforeDispatch.as_str()
+                || reason == bsk_protocol::RpcErrorReason::SessionBusy.as_str()
+            {
+                return IntentState::Settled;
+            }
             if matches!(
                 reason,
                 "input_outcome_unknown"
                     | "transfer_outcome_unknown"
                     | "transfer_timeout"
                     | "cancel_cleanup_timeout"
+                    | "borrow_outcome_unknown"
             ) {
                 return IntentState::Unknown;
             }
-            if reason == "extension_unresponsive" {
-                // `forward_one` checks `client.is_unresponsive()` strictly before
-                // dispatching any frame to the browser socket.
-                return IntentState::Settled;
-            }
         }
-    }
-
-    // Pre-flight cancellations and pre-send sink closures in `queue.rs` never put
-    // a request frame onto the browser WebSocket.
-    if err.message.contains("cancelled before forwarding")
-        || err
-            .message
-            .contains("browser sink closed before request was queued")
-    {
-        return IntentState::Settled;
     }
 
     if matches!(
         err.code,
         ErrorCode::Timeout
             | ErrorCode::Cancelled
+            | ErrorCode::UserAborted
             | ErrorCode::NoBrowserConnected
             | ErrorCode::ProtocolError
     ) {

@@ -6,20 +6,15 @@ use std::{
     sync::{Arc, Mutex},
     time::Duration,
 };
-use tokio::{
-    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
-    net::UnixListener,
-    process::Command,
-};
+use tokio::process::Command;
 
 async fn run_cli(
     protocol: &'static str,
     args: &[&str],
     tool_reply: Value,
 ) -> (std::process::Output, Vec<Value>) {
-    let home = tempfile::tempdir_in("/tmp").unwrap();
+    let home = crate::support::short_tempdir();
     let sock = home.path().join("ipc.sock");
-    let listener = UnixListener::bind(&sock).unwrap();
     let info = DaemonInfo::now(std::process::id(), sock.clone(), 0, "0.4.0");
     std::fs::write(
         home.path().join("daemon.json"),
@@ -28,26 +23,17 @@ async fn run_cli(
     .unwrap();
     let requests = Arc::new(Mutex::new(Vec::new()));
     let captured = requests.clone();
-    let server = tokio::spawn(async move {
-        loop {
-            let (stream, _) = listener.accept().await.unwrap();
-            let (read, mut write) = stream.into_split();
-            let mut line = String::new();
-            BufReader::new(read).read_line(&mut line).await.unwrap();
-            let request: Value = serde_json::from_str(&line).unwrap();
-            captured.lock().unwrap().push(request.clone());
-            let result = if request["method"] == "system.status" {
-                json!({"daemon_version":"0.4.0","protocol_version":protocol,
-                    "pid":std::process::id(),"uptime_secs":0,"ws_port":0,"sock_path":sock,
-                    "browsers":[],"sessions":[]})
-            } else {
-                tool_reply.clone()
-            };
-            let mut response =
-                serde_json::to_vec(&json!({"id":request["id"], "result":result})).unwrap();
-            response.push(b'\n');
-            write.write_all(&response).await.unwrap();
-        }
+    let sock_for_srv = sock.clone();
+    let server = crate::support::spawn_raw_ipc_server(&sock, move |request| {
+        captured.lock().unwrap().push(request.clone());
+        let result = if request["method"] == "system.status" {
+            json!({"daemon_version":"0.4.0","protocol_version":protocol,
+                "pid":std::process::id(),"uptime_secs":0,"ws_port":0,"sock_path":sock_for_srv,
+                "browsers":[],"sessions":[]})
+        } else {
+            tool_reply.clone()
+        };
+        json!({"id":request["id"], "result":result})
     });
     let mut command = Command::new(env!("CARGO_BIN_EXE_bsk"));
     command
@@ -435,7 +421,7 @@ async fn unguarded_commands_fail_closed_when_given_action_conditions_while_multi
 
     // Multi-phase `screenshot --full-page --out` attaches conditions ONLY to `tool.screenshot_full_page`,
     // keeping `tool.screenshot_read` and `tool.screenshot_release` clean.
-    let dir = tempfile::tempdir_in("/tmp").unwrap();
+    let dir = crate::support::short_tempdir();
     let out_path = dir.path().join("full.png");
     let png_b64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
     let (output, calls) = run_cli(

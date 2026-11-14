@@ -41,7 +41,6 @@ use futures_util::stream::{SplitSink, SplitStream};
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::net::UnixStream;
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 use tokio_tungstenite::tungstenite::handshake::client::generate_key;
 use tokio_tungstenite::tungstenite::http::Request;
@@ -98,7 +97,7 @@ impl IsolatedEnv {
     where
         F: Fn(&RequestFrame) -> ResponseBody + Send + Sync + 'static,
     {
-        let home = tempfile::tempdir_in("/tmp").unwrap();
+        let home = crate::support::short_tempdir();
         let sock = home.path().join("ipc.sock");
         let handle = daemon::run(config, Some(sock.clone())).await.unwrap();
         let ws_addr = handle.ws_addr();
@@ -908,7 +907,7 @@ async fn counterexample_b_wait_for_falls_back_to_full_snapshot_when_max_tokens_t
 #[tokio::test]
 async fn counterexample_c_dialog_pending_reconciles_run_logs_wal_and_scopes_with_pure_ipc_envelopes()
  {
-    let temp = tempfile::tempdir_in("/tmp").unwrap();
+    let temp = crate::support::short_tempdir();
     let sock = temp.path().join("ipc.sock");
     let handle = daemon::run(
         DaemonConfig::new(0).with_local_auth(bsk::daemon::local_auth::LocalAuthMode::TrustLocal),
@@ -1032,11 +1031,10 @@ async fn counterexample_c_dialog_pending_reconciles_run_logs_wal_and_scopes_with
     let open_out = open_task.await.unwrap();
     assert!(open_out.status.success());
 
-    // 2. Verify raw local Unix socket `IpcEnvelope` wire format carries `meta` cleanly outside `params` and `result`.
+    // 2. Verify raw local IPC `IpcEnvelope` wire format carries `meta` cleanly outside `params` and `result`.
     let raw_sync_task = {
         let sock = sock.clone();
         tokio::spawn(async move {
-            let mut stream = UnixStream::connect(&sock).await.unwrap();
             let raw_req = json!({
                 "id": "wire-check-1",
                 "method": "tool.cooperate",
@@ -1046,14 +1044,7 @@ async fn counterexample_c_dialog_pending_reconciles_run_logs_wal_and_scopes_with
                     "return_scope_meta": true
                 }
             });
-            stream
-                .write_all(format!("{raw_req}\n").as_bytes())
-                .await
-                .unwrap();
-            let mut reader = BufReader::new(stream);
-            let mut line = String::new();
-            reader.read_line(&mut line).await.unwrap();
-            serde_json::from_str::<Value>(line.trim()).unwrap()
+            crate::support::send_raw_ipc(&sock, &raw_req).await
         })
     };
     let wire_ws_req = recv_ws(&mut ws).await;
@@ -1692,7 +1683,7 @@ async fn counterexample_d_host_scope_sharing_mcp_eof_reap_unified_teardown_and_l
 #[tokio::test]
 async fn counterexample_e_truncated_delta_whitespace_delta_abrupt_mcp_rst_and_late_teardown_liveness()
  {
-    let temp = tempfile::tempdir_in("/tmp").unwrap();
+    let temp = crate::support::short_tempdir();
     let sock = temp.path().join("ipc.sock");
     let handle = daemon::run(
         DaemonConfig::new(0).with_local_auth(bsk::daemon::local_auth::LocalAuthMode::TrustLocal),
@@ -1997,93 +1988,97 @@ async fn counterexample_e_truncated_delta_whitespace_delta_abrupt_mcp_rst_and_la
     );
     assert_eq!(ws_collapse_json["truncated"], true);
 
-    // --- Part 3: Abrupt TCP `RST` (`ConnectionReset`) on `bsk mcp` stdin still reaps transient session ---
-    let tcp_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let tcp_addr = tcp_listener.local_addr().unwrap();
-    let parent_sock = tokio::net::TcpSocket::new_v4().unwrap();
-    let mut parent_tx = parent_sock.connect(tcp_addr).await.unwrap();
-    let (child_rx_std, _) = tcp_listener.accept().unwrap();
-    let child_stdin_fd = std::os::fd::OwnedFd::from(child_rx_std);
+    // --- Part 3 (Unix): Abrupt TCP `RST` (`ConnectionReset`) on `bsk mcp` stdin still reaps transient session ---
+    #[cfg(unix)]
+    {
+        let tcp_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let tcp_addr = tcp_listener.local_addr().unwrap();
+        let parent_sock = tokio::net::TcpSocket::new_v4().unwrap();
+        let mut parent_tx = parent_sock.connect(tcp_addr).await.unwrap();
+        let (child_rx_std, _) = tcp_listener.accept().unwrap();
+        let child_stdin_fd = std::os::fd::OwnedFd::from(child_rx_std);
 
-    let mut mcp_child = Command::new(env!("CARGO_BIN_EXE_bsk"))
-        .arg("mcp")
-        .env("BSK_HOME", temp.path())
-        .env("BSK_AUTO_START", "0")
-        .env("BSK_AUTO_UPDATE", "off")
-        .env_remove("BSK_CANCEL_ON_STDIN_CLOSE")
-        .env_remove("BSK_SESSION")
-        .env_remove("BSK_SCOPE")
-        .env_remove("CLAUDE_CODE_AGENT_ID")
-        .env_remove("CODEX_THREAD_ID")
-        .env_remove("ANTIGRAVITY_CONVERSATION_ID")
-        .env_remove("CURSOR_TRACE_ID")
-        .env_remove("DSH_SESSION_ID")
-        .stdin(Stdio::from(child_stdin_fd))
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true)
-        .spawn()
-        .expect("spawn bsk mcp with tcp stdin");
-    let mut mcp_stdout = BufReader::new(mcp_child.stdout.take().expect("mcp stdout"));
+        let mut mcp_child = Command::new(env!("CARGO_BIN_EXE_bsk"))
+            .arg("mcp")
+            .env("BSK_HOME", temp.path())
+            .env("BSK_AUTO_START", "0")
+            .env("BSK_AUTO_UPDATE", "off")
+            .env_remove("BSK_CANCEL_ON_STDIN_CLOSE")
+            .env_remove("BSK_SESSION")
+            .env_remove("BSK_SCOPE")
+            .env_remove("CLAUDE_CODE_AGENT_ID")
+            .env_remove("CODEX_THREAD_ID")
+            .env_remove("ANTIGRAVITY_CONVERSATION_ID")
+            .env_remove("CURSOR_TRACE_ID")
+            .env_remove("DSH_SESSION_ID")
+            .stdin(Stdio::from(child_stdin_fd))
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .expect("spawn bsk mcp with tcp stdin");
+        let mut mcp_stdout = BufReader::new(mcp_child.stdout.take().expect("mcp stdout"));
 
-    parent_tx
-        .write_all(
-            b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-11-25\",\"capabilities\":{},\"clientInfo\":{\"name\":\"rst-test\",\"version\":\"1.0\"}}}\n",
-        )
+        parent_tx
+            .write_all(
+                b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-11-25\",\"capabilities\":{},\"clientInfo\":{\"name\":\"rst-test\",\"version\":\"1.0\"}}}\n",
+            )
+            .await
+            .unwrap();
+        let mut init_line = String::new();
+        mcp_stdout.read_line(&mut init_line).await.unwrap();
+        assert!(init_line.contains("\"protocolVersion\""));
+
+        parent_tx
+            .write_all(
+                b"{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"bsk_session\",\"arguments\":{\"action\":\"start\"}}}\n",
+            )
+            .await
+            .unwrap();
+        let mcp_start_req = recv_ws(&mut ws).await;
+        assert_eq!(mcp_start_req["method"], "tool.session_start");
+        ws.send(Message::Text(
+            json!({ "id": mcp_start_req["id"], "result": { "agent_window_id": 402 } }).to_string(),
+        ))
         .await
         .unwrap();
-    let mut init_line = String::new();
-    mcp_stdout.read_line(&mut init_line).await.unwrap();
-    assert!(init_line.contains("\"protocolVersion\""));
+        let mut start_line = String::new();
+        mcp_stdout.read_line(&mut start_line).await.unwrap();
+        let start_rpc: Value = serde_json::from_str(start_line.trim()).unwrap();
+        let start_payload: Value =
+            serde_json::from_str(start_rpc["result"]["content"][0]["text"].as_str().unwrap())
+                .unwrap();
+        let rst_sid = start_payload["session_id"].as_str().unwrap().to_owned();
+        assert!(state.sessions.get(&SessionId(rst_sid.clone())).is_some());
 
-    parent_tx
-        .write_all(
-            b"{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"bsk_session\",\"arguments\":{\"action\":\"start\"}}}\n",
-        )
+        // Write an unterminated fragment so `read_message` blocks mid-line, then trigger TCP RST (`SO_LINGER=0`)!
+        parent_tx.write_all(b"{\"jsonrpc\":\"2.0\"").await.unwrap();
+        parent_tx.set_zero_linger().unwrap();
+        drop(parent_tx);
+
+        // `bsk mcp` must immediately invoke `tool.session_stop` to reap `rst_sid` before exiting on I/O error!
+        let mcp_stop_req = recv_ws(&mut ws).await;
+        assert_eq!(mcp_stop_req["method"], "tool.session_stop");
+        assert_eq!(mcp_stop_req["params"]["session_id"], rst_sid);
+        ws.send(Message::Text(
+            json!({ "id": mcp_stop_req["id"], "result": {} }).to_string(),
+        ))
         .await
         .unwrap();
-    let mcp_start_req = recv_ws(&mut ws).await;
-    assert_eq!(mcp_start_req["method"], "tool.session_start");
-    ws.send(Message::Text(
-        json!({ "id": mcp_start_req["id"], "result": { "agent_window_id": 402 } }).to_string(),
-    ))
-    .await
-    .unwrap();
-    let mut start_line = String::new();
-    mcp_stdout.read_line(&mut start_line).await.unwrap();
-    let start_rpc: Value = serde_json::from_str(start_line.trim()).unwrap();
-    let start_payload: Value =
-        serde_json::from_str(start_rpc["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
-    let rst_sid = start_payload["session_id"].as_str().unwrap().to_owned();
-    assert!(state.sessions.get(&SessionId(rst_sid.clone())).is_some());
 
-    // Write an unterminated fragment so `read_message` blocks mid-line, then trigger TCP RST (`SO_LINGER=0`)!
-    parent_tx.write_all(b"{\"jsonrpc\":\"2.0\"").await.unwrap();
-    parent_tx.set_zero_linger().unwrap();
-    drop(parent_tx);
-
-    // `bsk mcp` must immediately invoke `tool.session_stop` to reap `rst_sid` before exiting on I/O error!
-    let mcp_stop_req = recv_ws(&mut ws).await;
-    assert_eq!(mcp_stop_req["method"], "tool.session_stop");
-    assert_eq!(mcp_stop_req["params"]["session_id"], rst_sid);
-    ws.send(Message::Text(
-        json!({ "id": mcp_stop_req["id"], "result": {} }).to_string(),
-    ))
-    .await
-    .unwrap();
-
-    let mcp_out = tokio::time::timeout(Duration::from_secs(5), mcp_child.wait_with_output())
-        .await
-        .unwrap()
-        .unwrap();
-    assert!(
-        !mcp_out.status.success(),
-        "expected non-zero exit on stdin ConnectionReset, got success"
-    );
-    assert!(
-        state.sessions.get(&SessionId(rst_sid.clone())).is_none(),
-        "transient MCP session must be reaped even when stdin fails with ConnectionReset"
-    );
+        let mcp_out = tokio::time::timeout(Duration::from_secs(5), mcp_child.wait_with_output())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            !mcp_out.status.success(),
+            "expected non-zero exit on stdin ConnectionReset, got success"
+        );
+        assert!(
+            state.sessions.get(&SessionId(rst_sid.clone())).is_none(),
+            "transient MCP session must be reaped even when stdin fails with ConnectionReset"
+        );
+    }
 
     // --- Part 4: Suspended `DialogOperation` completing AFTER `teardown_session` must NOT resurrect zombie scope slot ---
     let late_sock = sock.clone();
@@ -2293,7 +2288,6 @@ async fn counterexample_e_truncated_delta_whitespace_delta_abrupt_mcp_rst_and_la
 #[tokio::test]
 async fn counterexample_f_bidirectional_ipc_envelope_rolling_upgrade_compat() {
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-    use tokio::net::UnixListener;
 
     // =========================================================================
     // Scenario A: Pre-envelope `2.0` MCP/CLI -> New Wave 3A Daemon
@@ -2403,18 +2397,7 @@ async fn counterexample_f_bidirectional_ipc_envelope_rolling_upgrade_compat() {
     .await;
 
     async fn send_raw_uds(sock: &Path, payload: Value) -> Value {
-        let stream = UnixStream::connect(sock).await.unwrap();
-        let (read, mut write) = stream.into_split();
-        let mut line = serde_json::to_string(&payload).unwrap();
-        line.push('\n');
-        write.write_all(line.as_bytes()).await.unwrap();
-        write.flush().await.unwrap();
-        let mut reply_line = String::new();
-        BufReader::new(read)
-            .read_line(&mut reply_line)
-            .await
-            .unwrap();
-        serde_json::from_str(reply_line.trim_end()).unwrap()
+        crate::support::send_raw_ipc(sock, &payload).await
     }
 
     // Bind `"default"` scope to a distractor session first so any silent fallback
@@ -2671,9 +2654,8 @@ async fn counterexample_f_bidirectional_ipc_envelope_rolling_upgrade_compat() {
     // =========================================================================
     // Scenario B: New Wave 3A CLI & MCP -> Pre-Envelope `2.0` Daemon (+ live upgrade)
     // =========================================================================
-    let b_home = tempfile::tempdir_in("/tmp").unwrap();
+    let b_home = crate::support::short_tempdir();
     let b_sock = b_home.path().join("legacy20.sock");
-    let listener = UnixListener::bind(&b_sock).unwrap();
 
     // Pre-envelope `2.0` `daemon.json` written by `main` (`cfe1f84e`):
     // has `protocol_version: Some("2.0")`, does NOT have `ipc_envelope: true`.
@@ -2687,119 +2669,99 @@ async fn counterexample_f_bidirectional_ipc_envelope_rolling_upgrade_compat() {
     let captured_for_srv = Arc::clone(&captured_frames);
     let sock_for_srv = b_sock.clone();
 
-    let legacy_srv = tokio::spawn(async move {
-        loop {
-            let Ok((stream, _)) = listener.accept().await else {
-                break;
-            };
-            let advertise = Arc::clone(&advertise_for_srv);
-            let captured = Arc::clone(&captured_for_srv);
-            let sock_str = sock_for_srv.to_string_lossy().into_owned();
-            tokio::spawn(async move {
-                let (read, mut write) = stream.into_split();
-                let mut reader = BufReader::new(read);
-                let mut line = String::new();
-                while reader.read_line(&mut line).await.unwrap_or(0) > 0 {
-                    let raw: Value = serde_json::from_str(line.trim_end()).unwrap();
-                    let is_upgraded = advertise.load(Ordering::SeqCst);
-                    if !is_upgraded {
-                        assert!(
-                            raw.get("meta").is_none(),
-                            "pre-envelope 2.0 daemon must NEVER receive wire `meta`: {raw}"
-                        );
-                        // Also prove `bsk_protocol::Frame` decodes cleanly.
-                        let _: Frame = serde_json::from_str(line.trim_end()).unwrap();
-                    }
-                    captured.lock().unwrap().push(raw.clone());
-                    let id = raw["id"].clone();
-                    let method = raw["method"].as_str().unwrap_or("");
-                    let response = match method {
-                        "system.status" => {
-                            let mut st = json!({
-                                "daemon_version": "0.5.0",
-                                "protocol_version": "2.0",
-                                "pid": std::process::id(),
-                                "uptime_secs": 1,
-                                "ws_port": 52888,
-                                "sock_path": sock_str,
-                                "browsers": [],
-                                "sessions": []
-                            });
-                            if is_upgraded {
-                                st["ipc_envelope"] = json!(true);
-                            }
-                            json!({ "id": id, "result": st })
-                        }
-                        "session.start" => json!({
-                            "id": id,
-                            "result": {
-                                "session_id": "sess-from-legacy-20",
-                                "browser_instance_id": "br-20"
-                            }
-                        }),
-                        "tool.navigate" => json!({
-                            "id": id,
-                            "result": {
-                                "tab_id": 7,
-                                "url": "https://legacy.test/",
-                                "final_url": "https://legacy.test/",
-                                "reached": "load"
-                            }
-                        }),
-                        "tool.cooperate" => {
-                            let mut coop_res = json!({
-                                "tab_id": 7,
-                                "control_policy": "target",
-                                "kind": "unchanged",
-                                "history_complete": true,
-                                "context_id": "70707070-7070-4070-8070-707070707070",
-                                "observation_id": "80808080-8080-4080-8080-808080808080",
-                                "changes": [],
-                                "observation": {
-                                    "observation_id": "80808080-8080-4080-8080-808080808080",
-                                    "tab_id": 7,
-                                    "url": "https://legacy.test/",
-                                    "title": "Legacy 2.0",
-                                    "ref_count": 1,
-                                    "truncated": false
-                                },
-                                "state": { "mode": "ready", "revision": 1 }
-                            });
-                            let scope_meta = json!({
-                                "session_id": "sess-from-legacy-20",
-                                "tab_id": 7,
-                                "short_ctx": "c1",
-                                "short_obs": "o1",
-                                "cached_vom": "@e1 button \"Legacy OK\"",
-                                "cached_vom_truncated": false,
-                                "cached_url": "https://legacy.test/",
-                                "cached_title": "Legacy 2.0",
-                                "cache_reusable": true
-                            });
-                            if is_upgraded {
-                                json!({
-                                    "id": id,
-                                    "result": coop_res,
-                                    "meta": { "scope_meta": scope_meta }
-                                })
-                            } else {
-                                coop_res["_scope_meta"] = scope_meta;
-                                json!({ "id": id, "result": coop_res })
-                            }
-                        }
-                        "session.stop" => json!({
-                            "id": id,
-                            "result": { "stopped": ["sess-from-legacy-20"] }
-                        }),
-                        other => panic!("unexpected method in Scenario B: {other}"),
-                    };
-                    let mut bytes = serde_json::to_vec(&response).unwrap();
-                    bytes.push(b'\n');
-                    write.write_all(&bytes).await.unwrap();
-                    write.flush().await.unwrap();
-                    line.clear();
+    let legacy_srv = crate::support::spawn_raw_ipc_server(&b_sock, move |raw| {
+        let is_upgraded = advertise_for_srv.load(Ordering::SeqCst);
+        if !is_upgraded {
+            assert!(
+                raw.get("meta").is_none(),
+                "pre-envelope 2.0 daemon must NEVER receive wire `meta`: {raw}"
+            );
+            // Also prove `bsk_protocol::Frame` decodes cleanly.
+            let _: Frame = serde_json::from_value(raw.clone()).unwrap();
+        }
+        captured_for_srv.lock().unwrap().push(raw.clone());
+        let id = raw["id"].clone();
+        let method = raw["method"].as_str().unwrap_or("");
+        let sock_str = sock_for_srv.to_string_lossy().into_owned();
+        match method {
+            "system.status" => {
+                let mut st = json!({
+                    "daemon_version": "0.5.0",
+                    "protocol_version": "2.0",
+                    "pid": std::process::id(),
+                    "uptime_secs": 1,
+                    "ws_port": 52888,
+                    "sock_path": sock_str,
+                    "browsers": [],
+                    "sessions": []
+                });
+                if is_upgraded {
+                    st["ipc_envelope"] = json!(true);
                 }
-            });
+                json!({ "id": id, "result": st })
+            }
+            "session.start" => json!({
+                "id": id,
+                "result": {
+                    "session_id": "sess-from-legacy-20",
+                    "browser_instance_id": "br-20"
+                }
+            }),
+            "tool.navigate" => json!({
+                "id": id,
+                "result": {
+                    "tab_id": 7,
+                    "url": "https://legacy.test/",
+                    "final_url": "https://legacy.test/",
+                    "reached": "load"
+                }
+            }),
+            "tool.cooperate" => {
+                let mut coop_res = json!({
+                    "tab_id": 7,
+                    "control_policy": "target",
+                    "kind": "unchanged",
+                    "history_complete": true,
+                    "context_id": "70707070-7070-4070-8070-707070707070",
+                    "observation_id": "80808080-8080-4080-8080-808080808080",
+                    "changes": [],
+                    "observation": {
+                        "observation_id": "80808080-8080-4080-8080-808080808080",
+                        "tab_id": 7,
+                        "url": "https://legacy.test/",
+                        "title": "Legacy 2.0",
+                        "ref_count": 1,
+                        "truncated": false
+                    },
+                    "state": { "mode": "ready", "revision": 1 }
+                });
+                let scope_meta = json!({
+                    "session_id": "sess-from-legacy-20",
+                    "tab_id": 7,
+                    "short_ctx": "c1",
+                    "short_obs": "o1",
+                    "cached_vom": "@e1 button \"Legacy OK\"",
+                    "cached_vom_truncated": false,
+                    "cached_url": "https://legacy.test/",
+                    "cached_title": "Legacy 2.0",
+                    "cache_reusable": true
+                });
+                if is_upgraded {
+                    json!({
+                        "id": id,
+                        "result": coop_res,
+                        "meta": { "scope_meta": scope_meta }
+                    })
+                } else {
+                    coop_res["_scope_meta"] = scope_meta;
+                    json!({ "id": id, "result": coop_res })
+                }
+            }
+            "session.stop" => json!({
+                "id": id,
+                "result": { "stopped": ["sess-from-legacy-20"] }
+            }),
+            other => panic!("unexpected method in Scenario B: {other}"),
         }
     });
 
@@ -2974,7 +2936,7 @@ async fn counterexample_f_bidirectional_ipc_envelope_rolling_upgrade_compat() {
     // =========================================================================
     // Scenario B4: `ipc::serve` + `RpcHandler` wrapper around `ipc::full_handler`
     // =========================================================================
-    let b4_home = tempfile::tempdir_in("/tmp").unwrap();
+    let b4_home = crate::support::short_tempdir();
     let b4_sock = b4_home.path().join("rpc-handler-bridge.sock");
     let b4_daemon = daemon::run(
         DaemonConfig::new(0).with_local_auth(bsk::daemon::local_auth::LocalAuthMode::TrustLocal),

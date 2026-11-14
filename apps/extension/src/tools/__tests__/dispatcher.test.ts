@@ -2803,4 +2803,186 @@ describe("implicit auto-borrow when confirmTabBorrow is false", () => {
       vi.unstubAllGlobals();
     }
   });
+
+  it("attaches resolved tab_id to unknown-effect action failures and marks pre-invoke cancel as not dispatched", async () => {
+    vi.stubGlobal("chrome", {
+      storage: { onChanged: { addListener: vi.fn() } },
+      tabs: {
+        get: vi.fn(async () => ({ id: 42, windowId: 100, url: "https://shop.test" })),
+        query: vi.fn(async () => [
+          { id: 42, windowId: 100, active: true, url: "https://shop.test" },
+        ]),
+        sendMessage: vi.fn(async () => ({})),
+      },
+      windows: {
+        get: vi.fn(async () => ({ id: 100, incognito: false })),
+      },
+    });
+    const { transport, sent, deliver } = fakeTransport();
+    const sessions = new SessionManager({
+      agentWindow: {
+        create: vi.fn(async () => ({ windowId: 100, initialTabIds: [42] })),
+        remove: vi.fn(async () => {}),
+        ensureActiveTab: vi.fn(async () => 42),
+      },
+    });
+    await sessions.start("aa99");
+    const cooperation = new CooperationController({
+      sessions,
+      readFrames: async () => ({
+        frames: new Map([
+          [
+            0,
+            {
+              document: "doc-42",
+              focusIsDocument: true,
+              revision: 0,
+              structure: 0,
+              human: 0,
+              busy: false,
+              editing: false,
+              lastInput: 0,
+              fields: [],
+              events: [],
+            },
+          ],
+        ]),
+        gaps: [],
+      }),
+      resumeFrames: async () => {},
+      changed: vi.fn(),
+    });
+    cooperation.startSession("aa99");
+    let abortInFlightEvaluate = false;
+    const cdp = {
+      send: vi.fn(async <T>(_target: unknown, method: string) => {
+        if (method === "Runtime.evaluate") {
+          if (abortInFlightEvaluate) {
+            dispatcher.inflightAbortControllers.get("post-invoke-cancel")?.abort();
+            const abortErr = new Error("Aborted");
+            abortErr.name = "AbortError";
+            throw abortErr;
+          }
+          throw new Error("WebSocket closed mid-evaluate");
+        }
+        return {} as T;
+      }),
+      sendGuarded: vi.fn(
+        async <T>(
+          target: unknown,
+          method: string,
+          _params: Record<string, unknown> | undefined,
+          guard: { onDispatch?: () => void },
+        ) => {
+          guard.onDispatch?.();
+          return (await cdp.send(target, method)) as T;
+        },
+      ),
+      detachSession: vi.fn(async () => {}),
+      acquireBackgroundExecution: vi.fn(async () => {}),
+      releaseSessionTab: vi.fn(async () => {}),
+    };
+    let abortDuringDebugBefore = false;
+    let dispatcher!: ToolDispatcher;
+    dispatcher = new ToolDispatcher({
+      transport,
+      sessions,
+      cooperation,
+      cdp: cdp as unknown as TestDispatcherCdp,
+      interactionPreferences: makePreferenceStore(false),
+      debug: {
+        before: async (req: { id: string }) => {
+          if (abortDuringDebugBefore) {
+            dispatcher.inflightAbortControllers.get(req.id)?.abort();
+          }
+          return undefined;
+        },
+        after: () => {},
+        dispose: () => {},
+      } as never,
+    });
+    dispatcher.start();
+    try {
+      deliver({
+        id: "sync-42",
+        method: "tool.cooperate",
+        params: { session_id: "aa99", tab_id: 42, action: "sync" },
+      });
+      await vi.waitFor(() => expect(sent).toHaveLength(1));
+      const ctxId = (sent[0] as { result: { context_id: string } }).result.context_id;
+
+      deliver({
+        id: "post-write-err",
+        method: "tool.evaluate",
+        params: { session_id: "aa99", expression: "mutate()", unverified: true, context_id: ctxId },
+      });
+      await vi.waitFor(() => expect(sent).toHaveLength(2));
+      expect(sent[1]).toMatchObject({
+        id: "post-write-err",
+        error: {
+          code: "cdp_failed",
+          data: {
+            effect_state: "unknown",
+            phase: "execution",
+            tab_id: 42,
+          },
+        },
+      });
+
+      abortDuringDebugBefore = true;
+      deliver({
+        id: "pre-invoke-cancel",
+        method: "tool.evaluate",
+        params: { session_id: "aa99", expression: "never()", unverified: true, context_id: ctxId },
+      });
+      await vi.waitFor(() => expect(sent).toHaveLength(3));
+      expect(sent[2]).toMatchObject({
+        id: "pre-invoke-cancel",
+        error: {
+          code: "cancelled",
+          data: {
+            dispatched: false,
+            effect_state: "none",
+            phase: "precondition",
+          },
+        },
+      });
+
+      // Re-sync and prove an in-flight `AbortError` thrown after `invoked = true`
+      // (with omitted `tab_id`) still carries `tab_id: 42` resolved from `context_id`.
+      abortDuringDebugBefore = false;
+      deliver({
+        id: "resync-42",
+        method: "tool.cooperate",
+        params: { session_id: "aa99", tab_id: 42, action: "sync" },
+      });
+      await vi.waitFor(() => expect(sent).toHaveLength(4));
+      const nextCtxId = (sent[3] as { result: { context_id: string } }).result.context_id;
+
+      abortInFlightEvaluate = true;
+      deliver({
+        id: "post-invoke-cancel",
+        method: "tool.evaluate",
+        params: {
+          session_id: "aa99",
+          expression: "inFlight()",
+          unverified: true,
+          context_id: nextCtxId,
+        },
+      });
+      await vi.waitFor(() => expect(sent).toHaveLength(5));
+      expect(sent[4]).toMatchObject({
+        id: "post-invoke-cancel",
+        error: {
+          code: "cancelled",
+          data: {
+            tab_id: 42,
+          },
+        },
+      });
+    } finally {
+      dispatcher.stop();
+      vi.unstubAllGlobals();
+    }
+  });
 });

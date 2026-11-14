@@ -385,14 +385,58 @@ fn reconcile_completed_tool_rpc(
             .record_tab_transition(&tab.session_id, &tab.method, &tab.req_params, value);
     }
     if let Some((method, params)) = &plan.logged {
+        let hydrated_body;
+        let body_for_log = if *method == Method::ToolCooperate
+            && let ResponseBody::Ok(val) = body
+            && val.pointer("/observation/text").is_none()
+            && val.get("kind").and_then(Value::as_str) == Some("delta")
+            && let Some(ref meta) = recorded_meta
+            && meta.cache_reusable
+            && let Some(ref cached_vom) = meta.cached_vom
+        {
+            let mut cloned = val.clone();
+            if !cloned.get("observation").is_some_and(Value::is_object) {
+                cloned["observation"] = serde_json::json!({});
+            }
+            cloned["observation"]["text"] = Value::String(cached_vom.clone());
+            hydrated_body = ResponseBody::Ok(cloned);
+            &hydrated_body
+        } else {
+            body
+        };
         let is_live = |id: &str| state.sessions.get(&SessionId(id.to_owned())).is_some();
         if let Some(op_id) = operation_id {
             state
                 .run_logs
-                .resolve_operation(is_live, op_id, method, params, body);
+                .resolve_operation(is_live, op_id, method, params, body_for_log);
         } else {
-            state.run_logs.record(is_live, method, params, body);
+            state.run_logs.record(is_live, method, params, body_for_log);
         }
+    }
+    if recorded_meta.is_none()
+        && plan.return_scope_meta
+        && let Some((_, params)) = &plan.logged
+        && let Some(sid) = params
+            .get("session_id")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+    {
+        let applied_ctx = params
+            .get("context_id")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned);
+        let applied_tab = match body {
+            ResponseBody::Ok(val) => val.get("tab_id").and_then(Value::as_i64),
+            _ => None,
+        }
+        .or_else(|| params.get("tab_id").and_then(Value::as_i64));
+        recorded_meta = Some(ScopeResultMeta {
+            session_id: sid.to_owned(),
+            tab_id: applied_tab,
+            short_ctx: applied_ctx,
+            ..Default::default()
+        });
     }
     recorded_meta
 }
@@ -629,7 +673,7 @@ async fn dispatch_envelope_rpc(
         }
         Method::SessionRunLog => {
             let session = SessionId(params["session_id"].as_str().unwrap_or_default().to_owned());
-            if state.sessions.get(&session).is_some() {
+            if state.sessions.touch(&session) {
                 ResponseBody::Ok(
                     serde_json::to_value(state.run_logs.read(&session.0)).unwrap_or(Value::Null),
                 )
@@ -807,14 +851,17 @@ async fn handle_video(
         }
         return (body, IpcResponseMeta::default());
     }
+    let mut video_activity_lease = None;
     let browser = if let Some(session_id) = params.get("session_id").and_then(Value::as_str) {
-        let Some(session) = state.sessions.get(&SessionId(session_id.into())) else {
+        let sid = SessionId(session_id.into());
+        let Some(session) = state.sessions.get(&sid) else {
             let body = ResponseBody::Err(invalid_params("Video task session is no longer active"));
             if let Some(ticket) = ticket.take() {
                 state.audit.finish(ticket, &body);
             }
             return (body, IpcResponseMeta::default());
         };
+        video_activity_lease = state.sessions.begin_activity(&sid);
         state.browsers.get(&session.browser_id)
     } else {
         match state
@@ -896,6 +943,7 @@ async fn handle_video(
         value["browser"] = Value::String(browser.id.0.clone());
     }
     let _ = reconcile_completed_tool_rpc(state, &reconcile_plan, None, &result);
+    drop(video_activity_lease);
     if let Some(ticket) = ticket.take() {
         state.audit.finish(ticket, &result);
     }
@@ -1031,7 +1079,8 @@ async fn handle_operation(
             IpcResponseMeta::default(),
         );
     }
-    let Some(session) = state.sessions.get(&SessionId(p.session_id.clone())) else {
+    let op_sid = SessionId(p.session_id.clone());
+    let Some(session) = state.sessions.get(&op_sid) else {
         return finish_with(
             ResponseBody::Err(RpcError {
                 code: ErrorCode::NotFound,
@@ -1041,6 +1090,7 @@ async fn handle_operation(
             IpcResponseMeta::default(),
         );
     };
+    let _activity_lease = state.sessions.begin_activity(&op_sid);
     if state.browsers.get(&session.browser_id).is_none() {
         return finish_with(
             ResponseBody::Err(RpcError {
@@ -1132,18 +1182,6 @@ async fn handle_tool_dispatch(
             data: None,
         });
     }
-    let wal_mutating = super::intent_wal::IntentWal::is_wal_tracked(&method, &params);
-    let wal_tab_id = wal_mutating
-        .then(|| {
-            params
-                .get("tab_id")
-                .and_then(Value::as_i64)
-                .or_else(|| state.scopes.active_tab_id(&session_id))
-        })
-        .flatten();
-    if wal_mutating && let Err(err) = state.intent_wal.check_gate(&session_id, wal_tab_id) {
-        return ResponseBody::Err(err);
-    }
     let timeout = match tool_dispatch_transport_timeout(&method, &params) {
         Ok(timeout) => timeout,
         Err(err) => return ResponseBody::Err(err),
@@ -1158,12 +1196,71 @@ async fn handle_tool_dispatch(
             });
         }
     };
+    let _dialog_decision_guard = if matches!(
+        method,
+        Method::ToolDialogAccept | Method::ToolDialogDismiss
+    ) {
+        let lock = state.dialog_operations.decision_lock(&session_id.0);
+        let cancel_token = inflight_guard.entry().cancel_token();
+        tokio::select! {
+            guard = lock.lock_owned() => Some(guard),
+            _ = cancel_token.cancelled() => {
+                return ResponseBody::Err(RpcError {
+                    code: ErrorCode::Cancelled,
+                    message: "dialog decision cancelled before dispatch".into(),
+                    data: Some(serde_json::json!({
+                        "reason": bsk_protocol::RpcErrorReason::CancelledBeforeDispatch.as_str(),
+                        "dispatched": false,
+                        "effect_state": "none",
+                        "phase": "precondition",
+                    })),
+                });
+            }
+            _ = tokio::time::sleep(timeout) => {
+                return ResponseBody::Err(RpcError {
+                    code: ErrorCode::Timeout,
+                    message: "timed out waiting for in-flight dialog decision".into(),
+                    data: Some(serde_json::json!({
+                        "reason": bsk_protocol::RpcErrorReason::SessionBusy.as_str(),
+                        "dispatched": false,
+                        "effect_state": "none",
+                        "phase": "precondition",
+                    })),
+                });
+            }
+        }
+    } else {
+        None
+    };
+    let wal_mutating = super::intent_wal::IntentWal::is_wal_tracked(&method, &params);
+    let wal_tab_id = wal_mutating
+        .then(|| {
+            if method == Method::ToolDialogAccept {
+                state.dialog_operations.active_dialog_tab_id(&session_id.0)
+            } else {
+                params
+                    .get("tab_id")
+                    .and_then(Value::as_i64)
+                    .or_else(|| {
+                        params
+                            .get("context_id")
+                            .and_then(Value::as_str)
+                            .and_then(|ctx| state.scopes.tab_id_for_context(&session_id, ctx))
+                    })
+                    .or_else(|| state.scopes.active_tab_id(&session_id))
+            }
+        })
+        .flatten();
+    if wal_mutating && let Err(err) = state.intent_wal.check_gate(&session_id, wal_tab_id) {
+        return ResponseBody::Err(err);
+    }
     if method == Method::ToolDebug
         && matches!(
             params.get("action").and_then(Value::as_str),
             Some("activity" | "wait")
         )
     {
+        state.sessions.touch(&session_id);
         let p: bsk_protocol::tools::DebugParams = match serde_json::from_value(params) {
             Ok(value) => value,
             Err(error) => return ResponseBody::Err(invalid_params(error.to_string())),
@@ -1293,6 +1390,7 @@ async fn handle_tool_dispatch(
             .intent_wal
             .finish_dispatch(wal_ticket, &method, &outcome);
     }
+    drop(_dialog_decision_guard);
     match outcome {
         Ok(v) if method == Method::ToolDownload => {
             let id = download_transfer_id.expect("download transfer allocated");
@@ -1359,6 +1457,12 @@ async fn handle_tool_dispatch(
                     "activity": state.tool_queues.activity(&session_id).ok(),
                     "wait": { "action": "wait", "session_id": session_id.0, "wait_ms": 10000 },
                 }));
+            } else if let Some(tid) = wal_tab_id
+                && let Some(obj) = error.data.as_mut().and_then(Value::as_object_mut)
+                && obj.contains_key("effect_state")
+                && !obj.contains_key("tab_id")
+            {
+                obj.insert("tab_id".into(), Value::from(tid));
             }
             ResponseBody::Err(error)
         }
@@ -1826,9 +1930,7 @@ pub(super) async fn handle_session_start_scoped(
     };
 
     let scope = req_meta.caller_scope.as_deref().unwrap_or("default");
-    let binds_caller_scope = req_meta.bind_scope
-        || req_meta.reuse_or_start_scope
-        || super::scopes::is_isolated_scope(scope);
+    let binds_caller_scope = req_meta.bind_scope || req_meta.reuse_or_start_scope;
     let scope_lock = binds_caller_scope.then(|| state.scopes.scope_start_lock(scope));
     let _scope_guard = match &scope_lock {
         Some(lock) => Some(lock.lock().await),
@@ -1921,10 +2023,7 @@ pub(super) async fn handle_session_start_scoped(
             if let Some(name) = task_name {
                 state.audit.set_name(&session.id.0, &name);
             }
-            if req_meta.bind_scope
-                || req_meta.reuse_or_start_scope
-                || super::scopes::is_isolated_scope(scope)
-            {
+            if req_meta.bind_scope || req_meta.reuse_or_start_scope {
                 state.scopes.bind_scope(
                     scope,
                     session.id.clone(),
@@ -2404,6 +2503,9 @@ fn handle_ledger_request(
                     None => None,
                 },
             };
+            if let Some(ref sid) = sid {
+                state.sessions.touch(sid);
+            }
             let reply = state.intent_wal.status(sid.as_ref());
             ResponseBody::Ok(serde_json::to_value(reply).unwrap_or(Value::Null))
         }
@@ -2443,6 +2545,7 @@ fn handle_ledger_request(
                     }
                 }
             };
+            state.sessions.touch(&sid);
             let reply = state
                 .intent_wal
                 .resolve(&sid, p.tab_id, p.operation_id.as_deref());
@@ -2680,8 +2783,8 @@ mod windows {
         first: Option<NamedPipeServer>,
     }
 
-    pub async fn bind(_path: &Path) -> Result<NamedPipeListener> {
-        let pipe_name = crate::daemon::paths::pipe_name();
+    pub async fn bind(path: &Path) -> Result<NamedPipeListener> {
+        let pipe_name = crate::daemon::paths::endpoint_pipe_name(path);
         let first = ServerOptions::new()
             .first_pipe_instance(true)
             .access_inbound(true)

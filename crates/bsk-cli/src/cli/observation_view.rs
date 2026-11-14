@@ -45,6 +45,49 @@ pub(crate) fn read(path: &Path) -> anyhow::Result<Value> {
         value = value["post"].take();
     }
     ensure!(value.is_object(), "file contains no synchronization reply");
+    if value.get("observation").is_none()
+        && let Some(vom) = value
+            .get("vom")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+    {
+        let mut obs = json!({ "text": vom });
+        if let Some(obs_id) = value.get("observation_id").and_then(Value::as_str) {
+            obs["observation_id"] = Value::String(obs_id.to_owned());
+        }
+        if let Some(tid) = value.get("tab_id").and_then(Value::as_i64) {
+            obs["tab_id"] = Value::from(tid);
+        }
+        if let Some(trunc) = value.get("truncated").and_then(Value::as_bool) {
+            obs["truncated"] = Value::Bool(trunc);
+        }
+        if let Some(cur) = value.get("next_cursor").and_then(Value::as_str) {
+            obs["next_cursor"] = Value::String(cur.to_owned());
+        }
+        if let Some(url) = value
+            .get("url")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+        {
+            obs["url"] = Value::String(url.to_owned());
+        }
+        if let Some(title) = value
+            .get("title")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+        {
+            obs["title"] = Value::String(title.to_owned());
+        }
+        let sid = value
+            .get("session_id")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_owned();
+        value["observation"] = obs;
+        if value.get("observation_origin").is_none() {
+            attach(&mut value, &sid, None);
+        }
+    }
     Ok(value)
 }
 
