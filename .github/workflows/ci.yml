@@ -103,10 +103,28 @@ jobs:
           restore-keys: ${{ runner.os }}-cargo-windows-daemon-
 
       - name: Run Windows unit tests
-        run: cargo test -p bsk --lib --locked -- daemon::ipc::windows::tests daemon::start::windows::tests daemon::audit::tests cli::plan:: cli::recipe:: daemon::remote::authorization::tests daemon::lockfile::tests skill_install cli::update::
+        run: >-
+          cargo test -p bsk --lib --locked --
+          daemon::ipc::windows::tests
+          daemon::start::windows::tests
+          daemon::audit::tests
+          cli::plan::
+          cli::recipe::
+          daemon::remote::authorization::tests
+          daemon::lockfile::tests
+          skill_install
+          cli::update::
 
       - name: Run Windows integration tests
-        run: cargo test -p bsk --test integration --locked -- cli_usage_errors:: cli_parse:: audit_ws:: interaction_preferences:: remote_server:: skill_install_legacy:: auto_update_policy::
+        run: >-
+          cargo test -p bsk --test integration --locked --
+          cli_usage_errors::
+          cli_parse::
+          audit_ws::
+          interaction_preferences::
+          remote_server::
+          skill_install_legacy::
+          auto_update_policy::
 
       - name: Verify background startup refusal inside the runner Job
         run: cargo test -p bsk --test windows_daemon_start --locked restrictive_job_refuses_explicit_and_automatic_start_without_a_daemon -- --exact
