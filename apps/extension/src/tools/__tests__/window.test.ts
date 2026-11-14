@@ -86,7 +86,12 @@ describe("handleWindowResize", () => {
       { session_id: "aa11", width: 1280, height: 800 },
       f.deps,
     );
-    expect(result).toEqual({ window_id: 100, width: 1280, height: 800 });
+    expect(result).toEqual({
+      window_id: 100,
+      width: 1280,
+      height: 800,
+      actual_viewport: { width: 1280, height: 657 },
+    });
     expect(f.windows.update).toHaveBeenCalledExactlyOnceWith(100, { width: 1280, height: 800 });
   });
 
@@ -163,7 +168,7 @@ describe("handleWindowResize", () => {
     expect(f.windows.update).not.toHaveBeenCalled();
   });
 
-  it("reports constrained window bounds instead of echoing the request", async () => {
+  it("returns a partial success when the browser constrains the requested window size", async () => {
     const sm = await makeManager();
     const f = resizeFixture({ actual: { width: 1200, height: 800 } });
     const result = await handleWindowResize(
@@ -171,16 +176,40 @@ describe("handleWindowResize", () => {
       { session_id: "aa11", width: 1280, height: 800 },
       f.deps,
     );
-    expect(result).toMatchObject({
-      code: "protocol_error",
+    expect(result).toEqual({
+      window_id: 100,
+      width: 1200,
+      height: 800,
+      requested: { width: 1280, height: 800 },
+      actual_viewport: { width: 1200, height: 657 },
+      warnings: ["size_constrained"],
+    });
+    expect(f.wait).not.toHaveBeenCalled();
+  });
+
+  it("reports both a constrained window and a viewport that did not follow", async () => {
+    const sm = await makeManager();
+    const f = resizeFixture({ actual: { width: 1200, height: 875 }, frozenViewport: true });
+    const params = { session_id: "aa11", width: 1200, height: 900 };
+    const result = await handleWindowResize(sm, params, f.deps);
+
+    expect(result).toEqual({
+      window_id: 100,
+      width: 1200,
+      height: 875,
+      requested: { width: 1200, height: 900 },
+      actual_viewport: { width: 900, height: 557 },
+      warnings: ["size_constrained", "viewport_did_not_follow"],
+    });
+    expect(await handleWindowResize(sm, params, f.deps)).toMatchObject({
+      code: "cdp_failed",
       data: {
-        reason: "window_resize_constrained",
-        effect_state: "committed",
-        requested: { width: 1280, height: 800 },
-        actual_window: { width: 1200, height: 800 },
+        reason: "window_resize_viewport_unchanged",
+        requested: { width: 1200, height: 900 },
+        actual_window: { width: 1200, height: 875 },
       },
     });
-    expect(f.wait).toHaveBeenCalledTimes(20);
+    expect(f.windows.update).toHaveBeenCalledOnce();
   });
 
   it("reports a viewport that remains fixed despite the window changing", async () => {
@@ -191,14 +220,12 @@ describe("handleWindowResize", () => {
       { session_id: "aa11", width: 1280, height: 800 },
       f.deps,
     );
-    expect(result).toMatchObject({
-      code: "cdp_failed",
-      data: {
-        reason: "window_resize_viewport_unchanged",
-        effect_state: "committed",
-        before_viewport: { width: 900, height: 557 },
-        actual_viewport: { width: 900, height: 557 },
-      },
+    expect(result).toEqual({
+      window_id: 100,
+      width: 1280,
+      height: 800,
+      actual_viewport: { width: 900, height: 557 },
+      warnings: ["viewport_did_not_follow"],
     });
   });
 
@@ -207,7 +234,8 @@ describe("handleWindowResize", () => {
     const f = resizeFixture({ frozenViewport: true });
     const params = { session_id: "aa11", width: 1280, height: 800 };
     expect(await handleWindowResize(sm, params, f.deps)).toMatchObject({
-      data: { reason: "window_resize_viewport_unchanged", effect_state: "committed" },
+      actual_viewport: { width: 900, height: 557 },
+      warnings: ["viewport_did_not_follow"],
     });
     expect(await handleWindowResize(sm, params, f.deps)).toMatchObject({
       data: { reason: "window_resize_viewport_unchanged", effect_state: "none" },
@@ -218,6 +246,7 @@ describe("handleWindowResize", () => {
       window_id: 100,
       width: 1280,
       height: 800,
+      actual_viewport: { width: 1280, height: 657 },
     });
   });
 
@@ -285,6 +314,7 @@ describe("handleWindowResize", () => {
       window_id: 100,
       width: 900,
       height: 700,
+      actual_viewport: { width: 900, height: 557 },
     });
     expect(f.windows.update).toHaveBeenCalledTimes(2);
   });
@@ -299,16 +329,18 @@ describe("handleWindowResize", () => {
     expect(await handleWindowResize(sm, { session_id: "aa11", ...requested }, f.deps)).toEqual({
       window_id: 100,
       ...requested,
+      actual_viewport: { width: 180, height: 111 },
     });
   });
 
-  it("still rejects a pinned viewport for a larger resize at 500% zoom", async () => {
+  it("returns the actual viewport when a pinned viewport cannot follow at 500% zoom", async () => {
     const sm = await makeManager();
     const f = resizeFixture({ frozenViewport: true, zoom: 5 });
     f.state.viewport = { width: 180, height: 111 };
     const params = { session_id: "aa11", width: 920, height: 720 };
     expect(await handleWindowResize(sm, params, f.deps)).toMatchObject({
-      data: { reason: "window_resize_viewport_unchanged", effect_state: "committed" },
+      actual_viewport: { width: 180, height: 111 },
+      warnings: ["viewport_did_not_follow"],
     });
     expect(await handleWindowResize(sm, params, f.deps)).toMatchObject({
       data: { reason: "window_resize_viewport_unchanged", effect_state: "none" },
@@ -359,7 +391,12 @@ describe("handleWindowResize", () => {
     const f = resizeFixture({ delayViewport: true });
     expect(
       await handleWindowResize(sm, { session_id: "aa11", width: 1280, height: 800 }, f.deps),
-    ).toEqual({ window_id: 100, width: 1280, height: 800 });
+    ).toEqual({
+      window_id: 100,
+      width: 1280,
+      height: 800,
+      actual_viewport: { width: 1280, height: 657 },
+    });
     expect(f.wait).toHaveBeenCalledTimes(2);
   });
 
@@ -368,7 +405,12 @@ describe("handleWindowResize", () => {
     const f = resizeFixture({ frozenViewport: true });
     expect(
       await handleWindowResize(sm, { session_id: "aa11", width: 900, height: 700 }, f.deps),
-    ).toEqual({ window_id: 100, width: 900, height: 700 });
+    ).toEqual({
+      window_id: 100,
+      width: 900,
+      height: 700,
+      actual_viewport: { width: 900, height: 557 },
+    });
   });
 
   it("reports a tab becoming inactive after the window update", async () => {

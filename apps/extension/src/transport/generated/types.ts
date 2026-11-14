@@ -317,3 +317,5 @@ export type { WheelParams } from './input';
 export type { WheelResult } from './output';
 export type { WindowResizeParams } from './input';
 export type { WindowResizeResult } from './output';
+export type { WindowResizeSize } from './output';
+export type { WindowResizeWarning } from './output';

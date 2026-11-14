@@ -1041,6 +1041,11 @@ export type VideoResult =
  */
 export type WaitForNavigationReached =
   "load" | "domcontentloaded" | "networkidle" | "commit" | "timeout";
+/**
+ * This interface was referenced by `ProtocolTypes`'s JSON-Schema
+ * via the `definition` "WindowResizeWarning".
+ */
+export type WindowResizeWarning = "size_constrained" | "viewport_did_not_follow";
 
 export interface ProtocolTypes {
   ActionExpectation: ActionExpectation;
@@ -1361,6 +1366,8 @@ export interface ProtocolTypes {
   WheelResult: WheelResult;
   WindowResizeParams: WindowResizeParams;
   WindowResizeResult: WindowResizeResult;
+  WindowResizeSize: WindowResizeSize;
+  WindowResizeWarning: WindowResizeWarning;
 }
 /**
  * Caller-supplied facts checked immediately before starting an action.
@@ -5694,7 +5701,30 @@ export interface WindowResizeParams {
  * via the `definition` "WindowResizeResult".
  */
 export interface WindowResizeResult {
+  /**
+   * The target tab's actual CSS layout viewport when it could be measured.
+   */
+  actual_viewport?: WindowResizeSize;
   height: number;
+  /**
+   * Requested outer size, present when the browser constrained the request.
+   */
+  requested?: WindowResizeSize;
+  /**
+   * Non-fatal differences between the requested size and the observed result.
+   */
+  warnings?: WindowResizeWarning[];
+  /**
+   * Actual outer window size after the browser applies platform constraints.
+   */
   width: number;
   window_id: number;
+}
+/**
+ * This interface was referenced by `ProtocolTypes`'s JSON-Schema
+ * via the `definition` "WindowResizeSize".
+ */
+export interface WindowResizeSize {
+  height: number;
+  width: number;
 }

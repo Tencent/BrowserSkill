@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 use anyhow::Context;
 use bsk_protocol::Method;
-use bsk_protocol::tools::{WindowResizeParams, WindowResizeResult};
+use bsk_protocol::tools::{WindowResizeParams, WindowResizeResult, WindowResizeWarning};
 use clap::{Args, Subcommand};
 
 use crate::cli::TOOL_IPC_TIMEOUT;
@@ -98,13 +98,51 @@ fn run_resize(
             println!("{json}");
         }
         Format::Human => {
-            println!(
-                "resized window_id={} to {}x{}",
-                reply.window_id, reply.width, reply.height
-            );
+            for line in human_resize_lines(&reply) {
+                println!("{line}");
+            }
         }
     }
     Ok(())
+}
+
+fn human_resize_lines(reply: &WindowResizeResult) -> Vec<String> {
+    let mut lines = vec![if let Some(viewport) = &reply.actual_viewport {
+        format!(
+            "resized window_id={} outer={}x{} viewport={}x{}",
+            reply.window_id, reply.width, reply.height, viewport.width, viewport.height
+        )
+    } else {
+        format!(
+            "resized window_id={} to {}x{}",
+            reply.window_id, reply.width, reply.height
+        )
+    }];
+
+    for warning in &reply.warnings {
+        match warning {
+            WindowResizeWarning::SizeConstrained => {
+                let message = match &reply.requested {
+                    Some(requested) => format!(
+                        "warning: browser constrained requested outer size {}x{} to {}x{}",
+                        requested.width, requested.height, reply.width, reply.height
+                    ),
+                    None => {
+                        "warning: browser constrained the requested outer window size".to_owned()
+                    }
+                };
+                lines.push(message);
+            }
+            WindowResizeWarning::ViewportDidNotFollow => {
+                lines.push(
+                    "warning: the tab viewport did not follow the resize; synchronize before further page actions"
+                        .to_owned(),
+                );
+            }
+        }
+    }
+
+    lines
 }
 
 fn ipc_call<P, R>(
@@ -119,4 +157,36 @@ where
     R: serde::de::DeserializeOwned + Send + 'static,
 {
     ctx.call::<P, R>(sock, rpc_id_prefix, method, Some(params), TOOL_IPC_TIMEOUT)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bsk_protocol::tools::WindowResizeSize;
+
+    #[test]
+    fn human_output_reports_constrained_outer_size_and_viewport() {
+        let result = WindowResizeResult {
+            window_id: 42,
+            width: 1200,
+            height: 875,
+            requested: Some(WindowResizeSize {
+                width: 1200,
+                height: 900,
+            }),
+            actual_viewport: Some(WindowResizeSize {
+                width: 1185,
+                height: 523,
+            }),
+            warnings: vec![WindowResizeWarning::SizeConstrained],
+        };
+
+        assert_eq!(
+            human_resize_lines(&result),
+            vec![
+                "resized window_id=42 outer=1200x875 viewport=1185x523",
+                "warning: browser constrained requested outer size 1200x900 to 1200x875",
+            ]
+        );
+    }
 }

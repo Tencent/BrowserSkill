@@ -2593,7 +2593,12 @@ describe("implicit auto-borrow when confirmTabBorrow is false", () => {
       await vi.waitFor(() => expect(sent).toHaveLength(1));
       expect(sent[0]).toEqual({
         id: "resize-1",
-        result: { window_id: 100, width: 1024, height: 768 },
+        result: {
+          window_id: 100,
+          width: 1024,
+          height: 768,
+          actual_viewport: { width: 1024, height: 768 },
+        },
       });
       expect(cdp.isAttached(7)).toBe(true);
 

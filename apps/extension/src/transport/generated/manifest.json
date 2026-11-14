@@ -1,6 +1,6 @@
 {
   "source": "bsk-protocol",
-  "fingerprint": "376971af7e1737f3a3d86eb96b2238c5e27f3538474e09709e7f2b42bf07dca8",
+  "fingerprint": "e87880c691437afe204cccfee9f30deeb80e8a3a1e1d7ce5f734c0ea8c371ff9",
   "protocol_version": "2.0",
   "min_compatible_protocol": "2.0",
   "events": [
@@ -385,6 +385,8 @@
     "WheelParams",
     "WheelResult",
     "WindowResizeParams",
-    "WindowResizeResult"
+    "WindowResizeResult",
+    "WindowResizeSize",
+    "WindowResizeWarning"
   ]
 }

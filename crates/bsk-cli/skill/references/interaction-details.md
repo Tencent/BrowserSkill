@@ -274,10 +274,15 @@ To retain messages across navigation, read `console` before reproducing the issu
 `emulate --device iphone-14` affects one tab; `--off` restores it.
 `window resize` changes outer window dimensions, not an exact viewport size. It
 checks the actual bounds and whether the target tab's viewport follows a change.
+The result reports the outer size and, when available, the resulting tab viewport.
+If the browser or window manager constrains the requested bounds, the resize
+returns a partial-success warning with the requested and actual sizes; inspect
+the reported viewport before deciding whether to continue.
 If the target tab is inactive, select it within the Agent Window and sync before
 resizing. A fixed emulated viewport may need its own `emulate` adjustment; resize
 does not clear emulation or focus the window. When a resize reports an unconfirmed
 result, inspect its actual dimensions and sync before deciding what to do next.
+After each resize, synchronize again before reusing page references or observations.
 `evaluate` is a last resort: inspect JSON `.ok`, since a script exception can have
 CLI exit code 0. Never evaluate secrets. On a page that keeps changing, state what
 the script relies on with `--expect` rather than retrying; `--unverified` skips the

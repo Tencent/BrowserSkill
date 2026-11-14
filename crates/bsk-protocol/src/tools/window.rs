@@ -43,10 +43,33 @@ pub struct WindowResizeParams {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
-pub struct WindowResizeResult {
-    pub window_id: i64,
+#[serde(rename_all = "snake_case")]
+pub enum WindowResizeWarning {
+    SizeConstrained,
+    ViewportDidNotFollow,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct WindowResizeSize {
     pub width: u32,
     pub height: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct WindowResizeResult {
+    pub window_id: i64,
+    /// Actual outer window size after the browser applies platform constraints.
+    pub width: u32,
+    pub height: u32,
+    /// Requested outer size, present when the browser constrained the request.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requested: Option<WindowResizeSize>,
+    /// The target tab's actual CSS layout viewport when it could be measured.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actual_viewport: Option<WindowResizeSize>,
+    /// Non-fatal differences between the requested size and the observed result.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<WindowResizeWarning>,
 }
 
 #[cfg(test)]
@@ -81,10 +104,46 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(result.window_id, 42);
+        assert_eq!(result.requested, None);
+        assert_eq!(result.actual_viewport, None);
+        assert!(result.warnings.is_empty());
         let encoded = serde_json::to_value(result).unwrap();
         assert_eq!(
             encoded,
             json!({ "window_id": 42, "width": 1280, "height": 800 })
+        );
+    }
+
+    #[test]
+    fn window_resize_result_reports_constrained_bounds_and_viewport() {
+        let result = WindowResizeResult {
+            window_id: 42,
+            width: 1200,
+            height: 875,
+            requested: Some(WindowResizeSize {
+                width: 1200,
+                height: 900,
+            }),
+            actual_viewport: Some(WindowResizeSize {
+                width: 1185,
+                height: 523,
+            }),
+            warnings: vec![
+                WindowResizeWarning::SizeConstrained,
+                WindowResizeWarning::ViewportDidNotFollow,
+            ],
+        };
+
+        assert_eq!(
+            serde_json::to_value(result).unwrap(),
+            json!({
+                "window_id": 42,
+                "width": 1200,
+                "height": 875,
+                "requested": { "width": 1200, "height": 900 },
+                "actual_viewport": { "width": 1185, "height": 523 },
+                "warnings": ["size_constrained", "viewport_did_not_follow"]
+            })
         );
     }
 }

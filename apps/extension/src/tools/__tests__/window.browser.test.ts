@@ -162,7 +162,12 @@ describe.skipIf(!process.env.BSK_TEST_CHROME)("window resize in a real browser",
               { session_id: "agent", tab_id: tabId, width: 1100, height: 800 },
               deps,
             ),
-          ).toEqual({ window_id: windowId, width: 1100, height: 800 });
+          ).toMatchObject({
+            window_id: windowId,
+            width: 1100,
+            height: 800,
+            actual_viewport: { width: expect.any(Number), height: expect.any(Number) },
+          });
           await evaluate(`chrome.tabs.setZoom(${tabId},5)`);
           const pageZoom = async () => {
             const metrics = await cdp.send<{ cssVisualViewport?: { zoom?: number } }>(
@@ -178,7 +183,12 @@ describe.skipIf(!process.env.BSK_TEST_CHROME)("window resize in a real browser",
               { session_id: "agent", tab_id: tabId, width: 1103, height: 800 },
               deps,
             ),
-          ).toEqual({ window_id: windowId, width: 1103, height: 800 });
+          ).toMatchObject({
+            window_id: windowId,
+            width: 1103,
+            height: 800,
+            actual_viewport: { width: expect.any(Number), height: expect.any(Number) },
+          });
           await evaluate(`chrome.tabs.setZoom(${tabId},1)`);
           await poll(async () => (await pageZoom()) === 1);
           await cdp.send(tabId, "Emulation.setDeviceMetricsOverride", {
@@ -196,7 +206,9 @@ describe.skipIf(!process.env.BSK_TEST_CHROME)("window resize in a real browser",
           });
           const params = { session_id: "agent", tab_id: tabId, width: 900, height: 700 };
           expect(await handleWindowResize(manager, params, deps)).toMatchObject({
-            data: { reason: "window_resize_viewport_unchanged", effect_state: "committed" },
+            width: 900,
+            height: 700,
+            warnings: ["viewport_did_not_follow"],
           });
           expect(await handleWindowResize(manager, params, deps)).toMatchObject({
             data: { reason: "window_resize_viewport_unchanged", effect_state: "none" },

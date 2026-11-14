@@ -1,12 +1,70 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
+  "definitions": {
+    "WindowResizeSize": {
+      "properties": {
+        "height": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "width": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "width",
+        "height"
+      ],
+      "type": "object"
+    },
+    "WindowResizeWarning": {
+      "enum": [
+        "size_constrained",
+        "viewport_did_not_follow"
+      ],
+      "type": "string"
+    }
+  },
   "properties": {
+    "actual_viewport": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/WindowResizeSize"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "The target tab's actual CSS layout viewport when it could be measured."
+    },
     "height": {
       "format": "uint32",
       "minimum": 0,
       "type": "integer"
     },
+    "requested": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/WindowResizeSize"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Requested outer size, present when the browser constrained the request."
+    },
+    "warnings": {
+      "description": "Non-fatal differences between the requested size and the observed result.",
+      "items": {
+        "$ref": "#/definitions/WindowResizeWarning"
+      },
+      "type": "array"
+    },
     "width": {
+      "description": "Actual outer window size after the browser applies platform constraints.",
       "format": "uint32",
       "minimum": 0,
       "type": "integer"

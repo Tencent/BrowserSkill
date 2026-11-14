@@ -5,7 +5,12 @@ import {
   type SessionContext,
   type SessionManager,
 } from "@/session-manager/manager";
-import type { RpcError, WindowResizeParams, WindowResizeResult } from "@/transport/types";
+import type {
+  RpcError,
+  WindowResizeParams,
+  WindowResizeResult,
+  WindowResizeWarning,
+} from "@/transport/types";
 import type { LayoutMetrics } from "./geometry/frame-context";
 import { validateWindowSize } from "./session";
 import {
@@ -24,7 +29,10 @@ type Viewport = { size: Size; zoom: number };
 
 // A retry at the same window size cannot prove that a previously stale viewport
 // caught up. Remember that failure until the viewport or window actually changes.
-const unconfirmed = new WeakMap<SessionContext, Map<number, { window: Size; viewport: Size }>>();
+const unconfirmed = new WeakMap<
+  SessionContext,
+  Map<number, { requested: Size; window: Size; viewport: Size }>
+>();
 
 function sameSize(a: Size, b: Size): boolean {
   return a.width === b.width && a.height === b.height;
@@ -63,6 +71,22 @@ function size(bounds: WindowBounds): Size | undefined {
     height > 0
     ? { width, height }
     : undefined;
+}
+
+function resizeResult(
+  windowId: number,
+  actualWindow: Size,
+  requested: Size,
+  actualViewport: Viewport | undefined,
+  warnings: WindowResizeWarning[] = [],
+): WindowResizeResult {
+  return {
+    window_id: windowId,
+    ...actualWindow,
+    ...(!sameSize(actualWindow, requested) ? { requested } : {}),
+    ...(actualViewport ? { actual_viewport: actualViewport.size } : {}),
+    ...(warnings.length > 0 ? { warnings } : {}),
+  };
 }
 
 async function viewport(cdp: CdpRunner, tabId: number): Promise<Viewport> {
@@ -160,7 +184,7 @@ export async function handleWindowResize(
   const previousFailure = unconfirmed.get(ctx)?.get(target.tabId);
   if (
     previousFailure &&
-    sameSize(beforeWindow, requested) &&
+    sameSize(previousFailure.requested, requested) &&
     sameSize(previousFailure.window, beforeWindow) &&
     sameSize(previousFailure.viewport, beforeViewport.size)
   )
@@ -171,6 +195,7 @@ export async function handleWindowResize(
         reason: "window_resize_viewport_unchanged",
         effect_state: "none",
         tab_id: target.tabId,
+        requested: previousFailure.requested,
         actual_window: beforeWindow,
         actual_viewport: beforeViewport.size,
         recovery:
@@ -185,7 +210,11 @@ export async function handleWindowResize(
       // a same-size retry must not mistake an unchanged viewport for success.
       if (!viewportFollowed(beforeViewport, beforeViewport, beforeWindow, requested)) {
         const tabs = unconfirmed.get(ctx) ?? new Map();
-        tabs.set(target.tabId, { window: requested, viewport: beforeViewport.size });
+        tabs.set(target.tabId, {
+          requested,
+          window: requested,
+          viewport: beforeViewport.size,
+        });
         unconfirmed.set(ctx, tabs);
       } else {
         // Idempotent and rounding-only updates do not require a viewport change.
@@ -240,13 +269,17 @@ export async function handleWindowResize(
       actualWindow = size(await deps.windows.get(ctx.agentWindowId));
       if (!actualWindow) throw new Error("the browser did not return usable window bounds");
       actualViewport = await viewport(deps.cdp, target.tabId);
-      if (
-        actualWindow.width === requested.width &&
-        actualWindow.height === requested.height &&
-        viewportFollowed(beforeViewport, actualViewport, beforeWindow, actualWindow)
-      ) {
+      const followed = viewportFollowed(beforeViewport, actualViewport, beforeWindow, actualWindow);
+      const constrained = !sameSize(actualWindow, requested);
+      if (!constrained && followed) {
         clearUnconfirmed(ctx, target.tabId);
-        return { window_id: ctx.agentWindowId, ...actualWindow };
+        return resizeResult(ctx.agentWindowId, actualWindow, requested, actualViewport);
+      }
+      if (constrained && followed) {
+        clearUnconfirmed(ctx, target.tabId);
+        return resizeResult(ctx.agentWindowId, actualWindow, requested, actualViewport, [
+          "size_constrained",
+        ]);
       }
       if (attempt < 20) await wait(50);
     }
@@ -269,41 +302,24 @@ export async function handleWindowResize(
     };
   }
 
-  if (
-    actualWindow &&
-    actualViewport &&
-    !viewportFollowed(beforeViewport, actualViewport, beforeWindow, actualWindow)
-  ) {
-    const tabs = unconfirmed.get(ctx) ?? new Map();
-    tabs.set(target.tabId, { window: actualWindow, viewport: actualViewport.size });
-    unconfirmed.set(ctx, tabs);
-  }
-  if (actualWindow?.width !== requested.width || actualWindow?.height !== requested.height)
+  if (!actualWindow || !actualViewport)
     return {
-      code: "protocol_error",
-      message: `Window resize requested ${requested.width}x${requested.height}, but the browser reports ${actualWindow?.width ?? "?"}x${actualWindow?.height ?? "?"}.`,
+      code: "cdp_failed",
+      message: "Window update was sent, but its resulting dimensions could not be verified.",
       data: {
-        reason: "window_resize_constrained",
+        reason: "window_resize_unconfirmed",
         effect_state: "committed",
-        requested,
-        actual_window: actualWindow,
-        actual_viewport: actualViewport?.size,
         recovery:
-          "Inspect the actual window size; the browser or window manager may have constrained it.",
+          "Inspect the window and viewport, then synchronize before deciding what to do next.",
       },
     };
-  return {
-    code: "cdp_failed",
-    message: `Window resized to ${actualWindow.width}x${actualWindow.height}, but tab ${target.tabId}'s viewport did not follow the change.`,
-    data: {
-      reason: "window_resize_viewport_unchanged",
-      effect_state: "committed",
-      tab_id: target.tabId,
-      before_viewport: beforeViewport.size,
-      actual_viewport: actualViewport?.size,
-      actual_window: actualWindow,
-      recovery:
-        "Inspect the tab's visibility and viewport emulation, then synchronize before deciding what to do next.",
-    },
-  };
+
+  if (!viewportFollowed(beforeViewport, actualViewport, beforeWindow, actualWindow)) {
+    const tabs = unconfirmed.get(ctx) ?? new Map();
+    tabs.set(target.tabId, { requested, window: actualWindow, viewport: actualViewport.size });
+    unconfirmed.set(ctx, tabs);
+  }
+  const warnings: WindowResizeWarning[] = ["viewport_did_not_follow"];
+  if (!sameSize(actualWindow, requested)) warnings.unshift("size_constrained");
+  return resizeResult(ctx.agentWindowId, actualWindow, requested, actualViewport, warnings);
 }
