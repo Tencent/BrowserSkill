@@ -211,5 +211,43 @@ mod tests {
                 false
             );
         }
+
+        for passive_read in [
+            "snapshot",
+            "get_html",
+            "read",
+            "extract",
+            "screenshot",
+            "console",
+            "network",
+            "wait_for_navigation",
+            "wait_for_element",
+        ] {
+            let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join(format!("schema/tool_{passive_read}_params.json"));
+            let schema: Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+            assert_eq!(
+                schema["additionalProperties"], false,
+                "{passive_read}.additionalProperties"
+            );
+            assert_eq!(
+                schema["properties"]["context_id"]["type"],
+                json!(["string", "null"]),
+                "{passive_read}.context_id"
+            );
+            assert!(
+                !schema["required"]
+                    .as_array()
+                    .unwrap()
+                    .contains(&json!("context_id")),
+                "{passive_read}.required"
+            );
+            for forbidden in ["observation_id", "depends_on", "expect"] {
+                assert!(
+                    schema["properties"].get(forbidden).is_none(),
+                    "{passive_read} must not accept {forbidden}"
+                );
+            }
+        }
     }
 }

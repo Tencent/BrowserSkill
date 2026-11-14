@@ -1452,7 +1452,7 @@ struct InspectArgs {
     scope: Option<String>,
     /// Tab to read; defaults to the session's current task tab.
     tab_id: Option<i64>,
-    /// read, full_page screenshot, observe: context_id from the latest sync.
+    /// Optional context_id from the latest sync (validates context and binds tab without renewing control; ignored by view).
     context: Option<String>,
     /// observe, snapshot: approximate token cap for the rendered tree.
     max_tokens: Option<u32>,
@@ -1685,6 +1685,7 @@ async fn inspect(
                 "out",
                 "overwrite",
                 "full_page",
+                "context",
             ],
         )?;
         if let Some(ref out) = args.out
@@ -1696,7 +1697,7 @@ async fn inspect(
         let params = protocol::<ScreenshotParams>(
             arguments,
             session,
-            &["scope", "out", "overwrite", "full_page"],
+            &["scope", "out", "overwrite", "full_page", "context"],
             &[],
         )?;
         let link = connect(daemon, control).await?;
@@ -1759,6 +1760,7 @@ async fn inspect(
         input.remove("extract_action");
         input.remove("session");
         input.remove("scope");
+        input.remove("context");
         input.remove("out");
         input.remove("overwrite");
         input.remove("format");
@@ -1863,22 +1865,22 @@ async fn inspect(
         ),
         InspectAction::Snapshot => (
             Method::ToolSnapshot,
-            protocol::<SnapshotParams>(arguments, session, &["scope"], &[])?,
+            protocol::<SnapshotParams>(arguments, session, &["scope", "context"], &[])?,
             Some("/text"),
         ),
         InspectAction::Html => (
             Method::ToolGetHtml,
-            protocol::<GetHtmlParams>(arguments, session, &["scope"], &[])?,
+            protocol::<GetHtmlParams>(arguments, session, &["scope", "context"], &[])?,
             None,
         ),
         InspectAction::Console => (
             Method::ToolConsole,
-            protocol::<ConsoleParams>(arguments, session, &["scope"], &[])?,
+            protocol::<ConsoleParams>(arguments, session, &["scope", "context"], &[])?,
             None,
         ),
         InspectAction::Network => (
             Method::ToolNetwork,
-            protocol::<NetworkParams>(arguments, session, &["scope"], &[])?,
+            protocol::<NetworkParams>(arguments, session, &["scope", "context"], &[])?,
             None,
         ),
         InspectAction::Screenshot | InspectAction::Extract | InspectAction::View => unreachable!(),
@@ -4098,11 +4100,7 @@ mod tests {
         assert_eq!(click_params["depends_on"], json!(["dep-1"]));
         assert!(click_params["expect"].is_array());
 
-        // ToolRead rejects depends_on/observation_id/expect, but accepts context_id alone.
-        assert!(
-            ctx.prepare_params(&Method::ToolRead, Some(json!({"session_id": "s1"})))
-                .is_err()
-        );
+        // Passive-read tools reject depends_on/observation_id/expect, but accept context_id alone.
         let read_ctx = build_ctx(
             None,
             Some("scope-1"),
@@ -4112,12 +4110,28 @@ mod tests {
             None,
         )
         .unwrap();
-        let read_params = read_ctx
-            .prepare_params(&Method::ToolRead, Some(json!({"session_id": ""})))
-            .unwrap()
-            .unwrap();
-        assert_eq!(read_params["context_id"], "ctx-1");
-        assert_eq!(read_params["_caller_scope"], "scope:scope-1");
+        for passive_method in [
+            Method::ToolRead,
+            Method::ToolSnapshot,
+            Method::ToolGetHtml,
+            Method::ToolExtract,
+            Method::ToolScreenshot,
+            Method::ToolConsole,
+            Method::ToolNetwork,
+            Method::ToolWaitForNavigation,
+            Method::ToolWaitForElement,
+        ] {
+            assert!(
+                ctx.prepare_params(&passive_method, Some(json!({"session_id": "s1"})))
+                    .is_err()
+            );
+            let read_params = read_ctx
+                .prepare_params(&passive_method, Some(json!({"session_id": ""})))
+                .unwrap()
+                .unwrap();
+            assert_eq!(read_params["context_id"], "ctx-1");
+            assert_eq!(read_params["_caller_scope"], "scope:scope-1");
+        }
 
         // Wait tool never receives leaked expect/observation/context metadata via without_action_metadata().
         let wait_params = ctx

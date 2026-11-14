@@ -398,7 +398,7 @@ export const videoActions = [
 export type VideoActionName = typeof videoActions[number]["action"];
 export const methods = [
   {
-    "action_metadata": false,
+    "action_metadata": "none",
     "audit_key": "cooperate",
     "auto_borrow_write": false,
     "auto_inject_context": "never",
@@ -429,7 +429,7 @@ export const methods = [
     "wal_tracking": "never"
   },
   {
-    "action_metadata": false,
+    "action_metadata": "none",
     "audit_key": null,
     "auto_borrow_write": false,
     "auto_inject_context": "never",
@@ -460,7 +460,7 @@ export const methods = [
     "wal_tracking": "never"
   },
   {
-    "action_metadata": false,
+    "action_metadata": "none",
     "audit_key": null,
     "auto_borrow_write": false,
     "auto_inject_context": "never",
@@ -491,7 +491,7 @@ export const methods = [
     "wal_tracking": "never"
   },
   {
-    "action_metadata": false,
+    "action_metadata": "none",
     "audit_key": null,
     "auto_borrow_write": false,
     "auto_inject_context": "never",
@@ -522,7 +522,7 @@ export const methods = [
     "wal_tracking": "never"
   },
   {
-    "action_metadata": false,
+    "action_metadata": "none",
     "audit_key": null,
     "auto_borrow_write": false,
     "auto_inject_context": "never",
@@ -553,7 +553,7 @@ export const methods = [
     "wal_tracking": "never"
   },
   {
-    "action_metadata": false,
+    "action_metadata": "none",
     "audit_key": null,
     "auto_borrow_write": false,
     "auto_inject_context": "never",
@@ -584,7 +584,7 @@ export const methods = [
     "wal_tracking": "never"
   },
   {
-    "action_metadata": false,
+    "action_metadata": "none",
     "audit_key": null,
     "auto_borrow_write": false,
     "auto_inject_context": "never",
@@ -615,7 +615,7 @@ export const methods = [
     "wal_tracking": "never"
   },
   {
-    "action_metadata": false,
+    "action_metadata": "none",
     "audit_key": null,
     "auto_borrow_write": false,
     "auto_inject_context": "never",
@@ -646,7 +646,7 @@ export const methods = [
     "wal_tracking": "never"
   },
   {
-    "action_metadata": false,
+    "action_metadata": "none",
     "audit_key": null,
     "auto_borrow_write": false,
     "auto_inject_context": "never",
@@ -677,7 +677,7 @@ export const methods = [
     "wal_tracking": "never"
   },
   {
-    "action_metadata": false,
+    "action_metadata": "none",
     "audit_key": null,
     "auto_borrow_write": false,
     "auto_inject_context": "never",
@@ -708,7 +708,7 @@ export const methods = [
     "wal_tracking": "never"
   },
   {
-    "action_metadata": false,
+    "action_metadata": "none",
     "audit_key": null,
     "auto_borrow_write": false,
     "auto_inject_context": "never",
@@ -739,7 +739,7 @@ export const methods = [
     "wal_tracking": "never"
   },
   {
-    "action_metadata": false,
+    "action_metadata": "none",
     "audit_key": null,
     "auto_borrow_write": false,
     "auto_inject_context": "never",
@@ -770,7 +770,7 @@ export const methods = [
     "wal_tracking": "never"
   },
   {
-    "action_metadata": false,
+    "action_metadata": "none",
     "audit_key": null,
     "auto_borrow_write": false,
     "auto_inject_context": "never",
@@ -801,7 +801,7 @@ export const methods = [
     "wal_tracking": "never"
   },
   {
-    "action_metadata": false,
+    "action_metadata": "none",
     "audit_key": null,
     "auto_borrow_write": false,
     "auto_inject_context": "never",
@@ -832,7 +832,7 @@ export const methods = [
     "wal_tracking": "never"
   },
   {
-    "action_metadata": false,
+    "action_metadata": "none",
     "audit_key": null,
     "auto_borrow_write": false,
     "auto_inject_context": "never",
@@ -863,7 +863,7 @@ export const methods = [
     "wal_tracking": "never"
   },
   {
-    "action_metadata": false,
+    "action_metadata": "none",
     "audit_key": null,
     "auto_borrow_write": false,
     "auto_inject_context": "never",
@@ -894,7 +894,7 @@ export const methods = [
     "wal_tracking": "never"
   },
   {
-    "action_metadata": false,
+    "action_metadata": "none",
     "audit_key": null,
     "auto_borrow_write": false,
     "auto_inject_context": "never",
@@ -925,7 +925,7 @@ export const methods = [
     "wal_tracking": "never"
   },
   {
-    "action_metadata": false,
+    "action_metadata": "none",
     "audit_key": null,
     "auto_borrow_write": false,
     "auto_inject_context": "never",
@@ -956,7 +956,7 @@ export const methods = [
     "wal_tracking": "never"
   },
   {
-    "action_metadata": false,
+    "action_metadata": "none",
     "audit_key": null,
     "auto_borrow_write": false,
     "auto_inject_context": "never",
@@ -987,7 +987,7 @@ export const methods = [
     "wal_tracking": "never"
   },
   {
-    "action_metadata": false,
+    "action_metadata": "none",
     "audit_key": "sessionStart",
     "auto_borrow_write": false,
     "auto_inject_context": "never",
@@ -1018,7 +1018,7 @@ export const methods = [
     "wal_tracking": "never"
   },
   {
-    "action_metadata": false,
+    "action_metadata": "none",
     "audit_key": "sessionStop",
     "auto_borrow_write": false,
     "auto_inject_context": "never",
@@ -1049,7 +1049,7 @@ export const methods = [
     "wal_tracking": "never"
   },
   {
-    "action_metadata": true,
+    "action_metadata": "full",
     "audit_key": "resize",
     "auto_borrow_write": false,
     "auto_inject_context": "always",
@@ -1080,7 +1080,7 @@ export const methods = [
     "wal_tracking": "never"
   },
   {
-    "action_metadata": true,
+    "action_metadata": "full",
     "audit_key": "emulate",
     "auto_borrow_write": true,
     "auto_inject_context": "always",
@@ -1111,7 +1111,7 @@ export const methods = [
     "wal_tracking": "never"
   },
   {
-    "action_metadata": false,
+    "action_metadata": "none",
     "audit_key": "tabList",
     "auto_borrow_write": false,
     "auto_inject_context": "never",
@@ -1142,7 +1142,7 @@ export const methods = [
     "wal_tracking": "never"
   },
   {
-    "action_metadata": false,
+    "action_metadata": "none",
     "audit_key": "tabCreate",
     "auto_borrow_write": false,
     "auto_inject_context": "never",
@@ -1173,7 +1173,7 @@ export const methods = [
     "wal_tracking": "never"
   },
   {
-    "action_metadata": true,
+    "action_metadata": "full",
     "audit_key": "tabClose",
     "auto_borrow_write": false,
     "auto_inject_context": "always",
@@ -1204,7 +1204,7 @@ export const methods = [
     "wal_tracking": "never"
   },
   {
-    "action_metadata": false,
+    "action_metadata": "none",
     "audit_key": "tabBorrow",
     "auto_borrow_write": false,
     "auto_inject_context": "never",
@@ -1235,7 +1235,7 @@ export const methods = [
     "wal_tracking": "never"
   },
   {
-    "action_metadata": false,
+    "action_metadata": "none",
     "audit_key": "tabReturn",
     "auto_borrow_write": false,
     "auto_inject_context": "never",
@@ -1266,7 +1266,7 @@ export const methods = [
     "wal_tracking": "never"
   },
   {
-    "action_metadata": false,
+    "action_metadata": "none",
     "audit_key": "tabSelect",
     "auto_borrow_write": false,
     "auto_inject_context": "never",
@@ -1297,7 +1297,7 @@ export const methods = [
     "wal_tracking": "never"
   },
   {
-    "action_metadata": true,
+    "action_metadata": "full",
     "audit_key": "navigate",
     "auto_borrow_write": true,
     "auto_inject_context": "always",
@@ -1328,7 +1328,7 @@ export const methods = [
     "wal_tracking": "always"
   },
   {
-    "action_metadata": true,
+    "action_metadata": "full",
     "audit_key": "navigateBack",
     "auto_borrow_write": true,
     "auto_inject_context": "always",
@@ -1360,7 +1360,7 @@ export const methods = [
     "wal_tracking": "always"
   },
   {
-    "action_metadata": true,
+    "action_metadata": "full",
     "audit_key": "navigateForward",
     "auto_borrow_write": true,
     "auto_inject_context": "always",
@@ -1392,7 +1392,7 @@ export const methods = [
     "wal_tracking": "always"
   },
   {
-    "action_metadata": true,
+    "action_metadata": "full",
     "audit_key": "reload",
     "auto_borrow_write": true,
     "auto_inject_context": "always",
@@ -1424,7 +1424,7 @@ export const methods = [
     "wal_tracking": "always"
   },
   {
-    "action_metadata": true,
+    "action_metadata": "full",
     "audit_key": "click",
     "auto_borrow_write": true,
     "auto_inject_context": "always",
@@ -1456,7 +1456,7 @@ export const methods = [
     "wal_tracking": "always"
   },
   {
-    "action_metadata": true,
+    "action_metadata": "full",
     "audit_key": "hover",
     "auto_borrow_write": true,
     "auto_inject_context": "always",
@@ -1488,7 +1488,7 @@ export const methods = [
     "wal_tracking": "never"
   },
   {
-    "action_metadata": true,
+    "action_metadata": "full",
     "audit_key": "drag",
     "auto_borrow_write": true,
     "auto_inject_context": "always",
@@ -1520,7 +1520,7 @@ export const methods = [
     "wal_tracking": "always"
   },
   {
-    "action_metadata": true,
+    "action_metadata": "full",
     "audit_key": "scroll",
     "auto_borrow_write": true,
     "auto_inject_context": "always",
@@ -1552,7 +1552,7 @@ export const methods = [
     "wal_tracking": "never"
   },
   {
-    "action_metadata": true,
+    "action_metadata": "full",
     "audit_key": "scroll",
     "auto_borrow_write": true,
     "auto_inject_context": "always",
@@ -1584,7 +1584,7 @@ export const methods = [
     "wal_tracking": "never"
   },
   {
-    "action_metadata": true,
+    "action_metadata": "full",
     "audit_key": "focus",
     "auto_borrow_write": true,
     "auto_inject_context": "always",
@@ -1616,7 +1616,7 @@ export const methods = [
     "wal_tracking": "never"
   },
   {
-    "action_metadata": true,
+    "action_metadata": "full",
     "audit_key": "blur",
     "auto_borrow_write": true,
     "auto_inject_context": "always",
@@ -1648,7 +1648,7 @@ export const methods = [
     "wal_tracking": "never"
   },
   {
-    "action_metadata": true,
+    "action_metadata": "full",
     "audit_key": "fill",
     "auto_borrow_write": true,
     "auto_inject_context": "always",
@@ -1680,7 +1680,7 @@ export const methods = [
     "wal_tracking": "always"
   },
   {
-    "action_metadata": true,
+    "action_metadata": "full",
     "audit_key": "press",
     "auto_borrow_write": true,
     "auto_inject_context": "always",
@@ -1712,7 +1712,7 @@ export const methods = [
     "wal_tracking": "always"
   },
   {
-    "action_metadata": true,
+    "action_metadata": "full",
     "audit_key": "select",
     "auto_borrow_write": true,
     "auto_inject_context": "always",
@@ -1744,7 +1744,7 @@ export const methods = [
     "wal_tracking": "always"
   },
   {
-    "action_metadata": true,
+    "action_metadata": "full",
     "audit_key": "upload",
     "auto_borrow_write": true,
     "auto_inject_context": "always",
@@ -1776,7 +1776,7 @@ export const methods = [
     "wal_tracking": "always"
   },
   {
-    "action_metadata": true,
+    "action_metadata": "full",
     "audit_key": "download",
     "auto_borrow_write": true,
     "auto_inject_context": "always",
@@ -1808,7 +1808,7 @@ export const methods = [
     "wal_tracking": "always"
   },
   {
-    "action_metadata": false,
+    "action_metadata": "context_only",
     "audit_key": "read",
     "auto_borrow_write": false,
     "auto_inject_context": "never",
@@ -1839,7 +1839,7 @@ export const methods = [
     "wal_tracking": "never"
   },
   {
-    "action_metadata": true,
+    "action_metadata": "full",
     "audit_key": "read",
     "auto_borrow_write": false,
     "auto_inject_context": "dynamic_observe",
@@ -1870,7 +1870,7 @@ export const methods = [
     "wal_tracking": "never"
   },
   {
-    "action_metadata": false,
+    "action_metadata": "context_only",
     "audit_key": "read",
     "auto_borrow_write": false,
     "auto_inject_context": "never",
@@ -1901,7 +1901,7 @@ export const methods = [
     "wal_tracking": "never"
   },
   {
-    "action_metadata": false,
+    "action_metadata": "context_only",
     "audit_key": "read",
     "auto_borrow_write": false,
     "auto_inject_context": "never",
@@ -1932,7 +1932,7 @@ export const methods = [
     "wal_tracking": "never"
   },
   {
-    "action_metadata": false,
+    "action_metadata": "context_only",
     "audit_key": "read",
     "auto_borrow_write": false,
     "auto_inject_context": "never",
@@ -1963,7 +1963,7 @@ export const methods = [
     "wal_tracking": "never"
   },
   {
-    "action_metadata": false,
+    "action_metadata": "context_only",
     "audit_key": "screenshot",
     "auto_borrow_write": false,
     "auto_inject_context": "never",
@@ -1994,7 +1994,7 @@ export const methods = [
     "wal_tracking": "never"
   },
   {
-    "action_metadata": true,
+    "action_metadata": "full",
     "audit_key": "screenshotFullPage",
     "auto_borrow_write": true,
     "auto_inject_context": "always",
@@ -2025,7 +2025,7 @@ export const methods = [
     "wal_tracking": "never"
   },
   {
-    "action_metadata": false,
+    "action_metadata": "none",
     "audit_key": "screenshotRead",
     "auto_borrow_write": false,
     "auto_inject_context": "never",
@@ -2056,7 +2056,7 @@ export const methods = [
     "wal_tracking": "never"
   },
   {
-    "action_metadata": false,
+    "action_metadata": "none",
     "audit_key": "screenshotRelease",
     "auto_borrow_write": false,
     "auto_inject_context": "never",
@@ -2087,7 +2087,7 @@ export const methods = [
     "wal_tracking": "never"
   },
   {
-    "action_metadata": false,
+    "action_metadata": "context_only",
     "audit_key": "console",
     "auto_borrow_write": false,
     "auto_inject_context": "never",
@@ -2118,7 +2118,7 @@ export const methods = [
     "wal_tracking": "never"
   },
   {
-    "action_metadata": true,
+    "action_metadata": "full",
     "audit_key": "debug",
     "auto_borrow_write": false,
     "auto_inject_context": "dynamic_debug",
@@ -2149,7 +2149,7 @@ export const methods = [
     "wal_tracking": "dynamic_debug"
   },
   {
-    "action_metadata": false,
+    "action_metadata": "context_only",
     "audit_key": "network",
     "auto_borrow_write": false,
     "auto_inject_context": "never",
@@ -2180,7 +2180,7 @@ export const methods = [
     "wal_tracking": "never"
   },
   {
-    "action_metadata": true,
+    "action_metadata": "full",
     "audit_key": "evaluate",
     "auto_borrow_write": true,
     "auto_inject_context": "always",
@@ -2212,7 +2212,7 @@ export const methods = [
     "wal_tracking": "always"
   },
   {
-    "action_metadata": false,
+    "action_metadata": "none",
     "audit_key": "dialogStatus",
     "auto_borrow_write": false,
     "auto_inject_context": "never",
@@ -2243,7 +2243,7 @@ export const methods = [
     "wal_tracking": "never"
   },
   {
-    "action_metadata": false,
+    "action_metadata": "none",
     "audit_key": "dialogAccept",
     "auto_borrow_write": false,
     "auto_inject_context": "never",
@@ -2274,7 +2274,7 @@ export const methods = [
     "wal_tracking": "always"
   },
   {
-    "action_metadata": false,
+    "action_metadata": "none",
     "audit_key": "dialogDismiss",
     "auto_borrow_write": false,
     "auto_inject_context": "never",
@@ -2305,7 +2305,7 @@ export const methods = [
     "wal_tracking": "never"
   },
   {
-    "action_metadata": false,
+    "action_metadata": "none",
     "audit_key": "operationAwait",
     "auto_borrow_write": false,
     "auto_inject_context": "never",
@@ -2336,7 +2336,7 @@ export const methods = [
     "wal_tracking": "never"
   },
   {
-    "action_metadata": false,
+    "action_metadata": "none",
     "audit_key": "operationCancel",
     "auto_borrow_write": false,
     "auto_inject_context": "never",
@@ -2367,7 +2367,7 @@ export const methods = [
     "wal_tracking": "never"
   },
   {
-    "action_metadata": false,
+    "action_metadata": "context_only",
     "audit_key": "wait",
     "auto_borrow_write": true,
     "auto_inject_context": "never",
@@ -2398,7 +2398,7 @@ export const methods = [
     "wal_tracking": "never"
   },
   {
-    "action_metadata": false,
+    "action_metadata": "context_only",
     "audit_key": "waitForElement",
     "auto_borrow_write": true,
     "auto_inject_context": "never",
@@ -2429,7 +2429,7 @@ export const methods = [
     "wal_tracking": "never"
   },
   {
-    "action_metadata": false,
+    "action_metadata": "none",
     "audit_key": "wait",
     "auto_borrow_write": false,
     "auto_inject_context": "never",
@@ -2460,7 +2460,7 @@ export const methods = [
     "wal_tracking": "never"
   },
   {
-    "action_metadata": false,
+    "action_metadata": "none",
     "audit_key": "help",
     "auto_borrow_write": false,
     "auto_inject_context": "never",
@@ -2491,7 +2491,7 @@ export const methods = [
     "wal_tracking": "never"
   },
   {
-    "action_metadata": false,
+    "action_metadata": "none",
     "audit_key": "recordStart",
     "auto_borrow_write": false,
     "auto_inject_context": "never",
@@ -2522,7 +2522,7 @@ export const methods = [
     "wal_tracking": "never"
   },
   {
-    "action_metadata": false,
+    "action_metadata": "none",
     "audit_key": "recordStop",
     "auto_borrow_write": false,
     "auto_inject_context": "never",
@@ -2553,7 +2553,7 @@ export const methods = [
     "wal_tracking": "never"
   },
   {
-    "action_metadata": false,
+    "action_metadata": "none",
     "audit_key": "recordAwait",
     "auto_borrow_write": false,
     "auto_inject_context": "never",
@@ -2584,7 +2584,7 @@ export const methods = [
     "wal_tracking": "never"
   },
   {
-    "action_metadata": false,
+    "action_metadata": "none",
     "audit_key": "video",
     "auto_borrow_write": false,
     "auto_inject_context": "never",
@@ -2615,7 +2615,7 @@ export const methods = [
     "wal_tracking": "never"
   },
   {
-    "action_metadata": false,
+    "action_metadata": "none",
     "audit_key": null,
     "auto_borrow_write": false,
     "auto_inject_context": "never",
@@ -2646,7 +2646,7 @@ export const methods = [
     "wal_tracking": "never"
   },
   {
-    "action_metadata": false,
+    "action_metadata": "none",
     "audit_key": null,
     "auto_borrow_write": false,
     "auto_inject_context": "never",
@@ -2677,7 +2677,7 @@ export const methods = [
     "wal_tracking": "never"
   },
   {
-    "action_metadata": false,
+    "action_metadata": "none",
     "audit_key": null,
     "auto_borrow_write": false,
     "auto_inject_context": "never",
@@ -2708,7 +2708,7 @@ export const methods = [
     "wal_tracking": "never"
   },
   {
-    "action_metadata": false,
+    "action_metadata": "none",
     "audit_key": null,
     "auto_borrow_write": false,
     "auto_inject_context": "never",
@@ -2739,7 +2739,7 @@ export const methods = [
     "wal_tracking": "never"
   },
   {
-    "action_metadata": false,
+    "action_metadata": "none",
     "audit_key": null,
     "auto_borrow_write": false,
     "auto_inject_context": "never",
@@ -2770,7 +2770,7 @@ export const methods = [
     "wal_tracking": "never"
   },
   {
-    "action_metadata": false,
+    "action_metadata": "none",
     "audit_key": null,
     "auto_borrow_write": false,
     "auto_inject_context": "never",

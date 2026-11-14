@@ -237,13 +237,20 @@ pub fn reason_for_data(data: Option<&serde_json::Value>) -> Option<&str> {
 /// Look up rendering info using `(code, data.reason)` when a reason-
 /// specific override exists; otherwise fall back to [`info_for`].
 pub fn info_for_error(code: ErrorCode, data: Option<&serde_json::Value>) -> RenderInfo {
+    reason_info_for_error(code, data).unwrap_or_else(|| info_for(code))
+}
+
+/// Look up only the reason-specific rendering override for `(code, data.reason)`,
+/// returning `None` when `data.reason` is absent, unknown, or delegates to the
+/// base [`ErrorCode`] fallback.
+pub fn reason_info_for_error(
+    code: ErrorCode,
+    data: Option<&serde_json::Value>,
+) -> Option<RenderInfo> {
     let base = info_for(code);
-    let Some(raw_reason) = reason_for_data(data) else {
-        return base;
-    };
-    let Some(reason) = RpcErrorReason::from_wire(raw_reason) else {
-        return base;
-    };
+    let raw_reason = reason_for_data(data)?;
+    let reason = RpcErrorReason::from_wire(raw_reason)?;
+    let info = |summary, hint, mcp_hint, exit_code| Some(info(summary, hint, mcp_hint, exit_code));
     let detail = data
         .and_then(|d| d.get("component"))
         .and_then(|value| value.as_str());
@@ -365,7 +372,9 @@ pub fn info_for_error(code: ErrorCode, data: Option<&serde_json::Value>) -> Rend
         ) => info(
             "local file validation failed",
             Some("check the local file path and permissions"),
-            None,
+            Some(
+                "check the local file path and permissions, or pass overwrite=true when replacing an existing output file",
+            ),
             1,
         ),
         (ErrorCode::InvalidParams, RpcErrorReason::BorrowAgentWindowTab) => info(
@@ -1030,7 +1039,7 @@ pub fn info_for_error(code: ErrorCode, data: Option<&serde_json::Value>) -> Rend
             None,
             base.exit_code,
         ),
-        (_, RpcErrorReason::DialogPending) => info_for(ErrorCode::DialogPending),
+        (_, RpcErrorReason::DialogPending) => Some(info_for(ErrorCode::DialogPending)),
         (_, RpcErrorReason::CancelledBeforeDispatch) => info(
             "request cancelled before reaching the browser",
             Some("no browser action was dispatched; safe to retry once ready"),
@@ -1131,7 +1140,7 @@ pub fn info_for_error(code: ErrorCode, data: Option<&serde_json::Value>) -> Rend
             | RpcErrorReason::CancelCleanupTimeout
             | RpcErrorReason::Cancelled
             | RpcErrorReason::CliParseError,
-        ) => base,
+        ) => None,
     }
 }
 

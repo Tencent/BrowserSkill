@@ -27,6 +27,18 @@ pub enum MethodEffect {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
+pub enum ActionMetadataPolicy {
+    /// Rejects all action metadata (`context_id`, `depends_on`, `observation_id`, `expect`).
+    None,
+    /// Passive read: accepts optional `context_id` to validate context and bind tab without
+    /// renewing control; rejects `depends_on`, `observation_id`, and `expect`.
+    ContextOnly,
+    /// Guarded/transient action: accepts full [`ActionMetadata`].
+    Full,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
 pub enum DeadlineKind {
     Standard,
     FullPage,
@@ -149,8 +161,7 @@ pub enum RecipeStepKind {
 pub struct MethodSpec {
     pub owner: MethodOwner,
     pub effect: MethodEffect,
-    #[serde(rename = "action_metadata")]
-    pub accepts_action_metadata: bool,
+    pub action_metadata: ActionMetadataPolicy,
     pub deadline: DeadlineKind,
     pub response_grace: bool,
     pub cancel_at_deadline: bool,
@@ -323,7 +334,7 @@ macro_rules! method_spec {
     (
         owner: $owner:ident,
         effect: $effect:ident,
-        action_metadata: $meta:expr,
+        action_metadata: $meta:ident,
         remote_allowed: $remote:expr,
         deadline: $deadline:ident,
         response_grace: $grace:expr,
@@ -349,7 +360,7 @@ macro_rules! method_spec {
         &MethodSpec {
             owner: MethodOwner::$owner,
             effect: MethodEffect::$effect,
-            accepts_action_metadata: $meta,
+            action_metadata: ActionMetadataPolicy::$meta,
             deadline: DeadlineKind::$deadline,
             response_grace: $grace,
             cancel_at_deadline: $cancel,
@@ -381,539 +392,539 @@ impl Method {
         use RecipeStepKind::*;
         match self {
             Self::ToolCooperate => method_spec!(
-                owner: Extension, effect: ControlPlane, action_metadata: false, remote_allowed: true,
+                owner: Extension, effect: ControlPlane, action_metadata: None, remote_allowed: true,
                 deadline: Standard, response_grace: false, cancel_at_deadline: false, outcome: Ordinary,
                 wal: Never, dialog: Gated, queue: CooperateDynamic, implicit_session: Always, auto_inject: Never, tab_transition: false,
                 background: None, resume: Effect, opens_tabs: false, auto_borrow_write: false, cooperation: Cooperate, dom_targeted: false, bootstrap: false,
                 debug_evidence: None, audit_key: Some("cooperate"), recipe: Cooperate
             ),
             Self::LocalAuthPair => method_spec!(
-                owner: Daemon, effect: ControlPlane, action_metadata: false, remote_allowed: true,
+                owner: Daemon, effect: ControlPlane, action_metadata: None, remote_allowed: true,
                 deadline: Standard, response_grace: false, cancel_at_deadline: false, outcome: Ordinary,
                 wal: Never, dialog: Bypass, queue: Serial, implicit_session: Never, auto_inject: Never, tab_transition: false,
                 background: None, resume: Effect, opens_tabs: false, auto_borrow_write: false, cooperation: None, dom_targeted: false, bootstrap: false,
                 debug_evidence: None, audit_key: None, recipe: Ignore
             ),
             Self::LocalAuthDevices => method_spec!(
-                owner: Daemon, effect: ControlPlane, action_metadata: false, remote_allowed: true,
+                owner: Daemon, effect: ControlPlane, action_metadata: None, remote_allowed: true,
                 deadline: Standard, response_grace: false, cancel_at_deadline: false, outcome: Ordinary,
                 wal: Never, dialog: Bypass, queue: Serial, implicit_session: Never, auto_inject: Never, tab_transition: false,
                 background: None, resume: Effect, opens_tabs: false, auto_borrow_write: false, cooperation: None, dom_targeted: false, bootstrap: false,
                 debug_evidence: None, audit_key: None, recipe: Ignore
             ),
             Self::LocalAuthRevoke => method_spec!(
-                owner: Daemon, effect: ControlPlane, action_metadata: false, remote_allowed: true,
+                owner: Daemon, effect: ControlPlane, action_metadata: None, remote_allowed: true,
                 deadline: Standard, response_grace: false, cancel_at_deadline: false, outcome: Ordinary,
                 wal: Never, dialog: Bypass, queue: Serial, implicit_session: Never, auto_inject: Never, tab_transition: false,
                 background: None, resume: Effect, opens_tabs: false, auto_borrow_write: false, cooperation: None, dom_targeted: false, bootstrap: false,
                 debug_evidence: None, audit_key: None, recipe: Ignore
             ),
             Self::LocalAuthRotate => method_spec!(
-                owner: Daemon, effect: ControlPlane, action_metadata: false, remote_allowed: true,
+                owner: Daemon, effect: ControlPlane, action_metadata: None, remote_allowed: true,
                 deadline: Standard, response_grace: false, cancel_at_deadline: false, outcome: Ordinary,
                 wal: Never, dialog: Bypass, queue: Serial, implicit_session: Never, auto_inject: Never, tab_transition: false,
                 background: None, resume: Effect, opens_tabs: false, auto_borrow_write: false, cooperation: None, dom_targeted: false, bootstrap: false,
                 debug_evidence: None, audit_key: None, recipe: Ignore
             ),
             Self::LocalAuthSetMode => method_spec!(
-                owner: Daemon, effect: ControlPlane, action_metadata: false, remote_allowed: true,
+                owner: Daemon, effect: ControlPlane, action_metadata: None, remote_allowed: true,
                 deadline: Standard, response_grace: false, cancel_at_deadline: false, outcome: Ordinary,
                 wal: Never, dialog: Bypass, queue: Serial, implicit_session: Never, auto_inject: Never, tab_transition: false,
                 background: None, resume: Effect, opens_tabs: false, auto_borrow_write: false, cooperation: None, dom_targeted: false, bootstrap: false,
                 debug_evidence: None, audit_key: None, recipe: Ignore
             ),
             Self::AuditRequest => method_spec!(
-                owner: Daemon, effect: ControlPlane, action_metadata: false, remote_allowed: true,
+                owner: Daemon, effect: ControlPlane, action_metadata: None, remote_allowed: true,
                 deadline: Standard, response_grace: false, cancel_at_deadline: false, outcome: Ordinary,
                 wal: Never, dialog: Bypass, queue: Serial, implicit_session: Never, auto_inject: Never, tab_transition: false,
                 background: None, resume: Effect, opens_tabs: false, auto_borrow_write: false, cooperation: None, dom_targeted: false, bootstrap: false,
                 debug_evidence: None, audit_key: None, recipe: Ignore
             ),
             Self::LedgerRequest => method_spec!(
-                owner: Daemon, effect: ControlPlane, action_metadata: false, remote_allowed: true,
+                owner: Daemon, effect: ControlPlane, action_metadata: None, remote_allowed: true,
                 deadline: Standard, response_grace: false, cancel_at_deadline: false, outcome: Ordinary,
                 wal: Never, dialog: Bypass, queue: Serial, implicit_session: Never, auto_inject: Never, tab_transition: false,
                 background: None, resume: Effect, opens_tabs: false, auto_borrow_write: false, cooperation: None, dom_targeted: false, bootstrap: false,
                 debug_evidence: None, audit_key: None, recipe: Ignore
             ),
             Self::SystemHandshake => method_spec!(
-                owner: Daemon, effect: ControlPlane, action_metadata: false, remote_allowed: true,
+                owner: Daemon, effect: ControlPlane, action_metadata: None, remote_allowed: true,
                 deadline: Standard, response_grace: false, cancel_at_deadline: false, outcome: Ordinary,
                 wal: Never, dialog: Bypass, queue: Serial, implicit_session: Never, auto_inject: Never, tab_transition: false,
                 background: None, resume: Effect, opens_tabs: false, auto_borrow_write: false, cooperation: None, dom_targeted: false, bootstrap: false,
                 debug_evidence: None, audit_key: None, recipe: Ignore
             ),
             Self::SystemPing => method_spec!(
-                owner: Daemon, effect: ControlPlane, action_metadata: false, remote_allowed: true,
+                owner: Daemon, effect: ControlPlane, action_metadata: None, remote_allowed: true,
                 deadline: Standard, response_grace: false, cancel_at_deadline: false, outcome: Ordinary,
                 wal: Never, dialog: Bypass, queue: Serial, implicit_session: Never, auto_inject: Never, tab_transition: false,
                 background: None, resume: Effect, opens_tabs: false, auto_borrow_write: false, cooperation: None, dom_targeted: false, bootstrap: false,
                 debug_evidence: None, audit_key: None, recipe: Ignore
             ),
             Self::SystemStatus => method_spec!(
-                owner: Daemon, effect: ControlPlane, action_metadata: false, remote_allowed: true,
+                owner: Daemon, effect: ControlPlane, action_metadata: None, remote_allowed: true,
                 deadline: Standard, response_grace: false, cancel_at_deadline: false, outcome: Ordinary,
                 wal: Never, dialog: Bypass, queue: Serial, implicit_session: Never, auto_inject: Never, tab_transition: false,
                 background: None, resume: Effect, opens_tabs: false, auto_borrow_write: false, cooperation: None, dom_targeted: false, bootstrap: false,
                 debug_evidence: None, audit_key: None, recipe: Ignore
             ),
             Self::SessionStart => method_spec!(
-                owner: Daemon, effect: ControlPlane, action_metadata: false, remote_allowed: true,
+                owner: Daemon, effect: ControlPlane, action_metadata: None, remote_allowed: true,
                 deadline: Standard, response_grace: false, cancel_at_deadline: false, outcome: Ordinary,
                 wal: Never, dialog: Bypass, queue: Serial, implicit_session: Never, auto_inject: Never, tab_transition: false,
                 background: None, resume: Effect, opens_tabs: false, auto_borrow_write: false, cooperation: None, dom_targeted: false, bootstrap: false,
                 debug_evidence: None, audit_key: None, recipe: Ignore
             ),
             Self::SessionStartTracked => method_spec!(
-                owner: Daemon, effect: ControlPlane, action_metadata: false, remote_allowed: true,
+                owner: Daemon, effect: ControlPlane, action_metadata: None, remote_allowed: true,
                 deadline: Standard, response_grace: false, cancel_at_deadline: false, outcome: Ordinary,
                 wal: Never, dialog: Bypass, queue: Serial, implicit_session: Never, auto_inject: Never, tab_transition: false,
                 background: None, resume: Effect, opens_tabs: false, auto_borrow_write: false, cooperation: None, dom_targeted: false, bootstrap: false,
                 debug_evidence: None, audit_key: None, recipe: Ignore
             ),
             Self::SessionRequest => method_spec!(
-                owner: Daemon, effect: ControlPlane, action_metadata: false, remote_allowed: true,
+                owner: Daemon, effect: ControlPlane, action_metadata: None, remote_allowed: true,
                 deadline: Standard, response_grace: false, cancel_at_deadline: false, outcome: Ordinary,
                 wal: Never, dialog: Bypass, queue: Serial, implicit_session: Never, auto_inject: Never, tab_transition: false,
                 background: None, resume: Effect, opens_tabs: false, auto_borrow_write: false, cooperation: None, dom_targeted: false, bootstrap: false,
                 debug_evidence: None, audit_key: None, recipe: Ignore
             ),
             Self::SessionStop => method_spec!(
-                owner: Daemon, effect: ControlPlane, action_metadata: false, remote_allowed: true,
+                owner: Daemon, effect: ControlPlane, action_metadata: None, remote_allowed: true,
                 deadline: Standard, response_grace: false, cancel_at_deadline: false, outcome: Ordinary,
                 wal: Never, dialog: Bypass, queue: Serial, implicit_session: Never, auto_inject: Never, tab_transition: false,
                 background: None, resume: Effect, opens_tabs: false, auto_borrow_write: false, cooperation: None, dom_targeted: false, bootstrap: false,
                 debug_evidence: None, audit_key: None, recipe: Ignore
             ),
             Self::SessionStopAll => method_spec!(
-                owner: Daemon, effect: ControlPlane, action_metadata: false, remote_allowed: true,
+                owner: Daemon, effect: ControlPlane, action_metadata: None, remote_allowed: true,
                 deadline: Standard, response_grace: false, cancel_at_deadline: false, outcome: Ordinary,
                 wal: Never, dialog: Bypass, queue: Serial, implicit_session: Never, auto_inject: Never, tab_transition: false,
                 background: None, resume: Effect, opens_tabs: false, auto_borrow_write: false, cooperation: None, dom_targeted: false, bootstrap: false,
                 debug_evidence: None, audit_key: None, recipe: Ignore
             ),
             Self::SessionList => method_spec!(
-                owner: Daemon, effect: ControlPlane, action_metadata: false, remote_allowed: true,
+                owner: Daemon, effect: ControlPlane, action_metadata: None, remote_allowed: true,
                 deadline: Standard, response_grace: false, cancel_at_deadline: false, outcome: Ordinary,
                 wal: Never, dialog: Bypass, queue: Serial, implicit_session: Never, auto_inject: Never, tab_transition: false,
                 background: None, resume: Effect, opens_tabs: false, auto_borrow_write: false, cooperation: None, dom_targeted: false, bootstrap: false,
                 debug_evidence: None, audit_key: None, recipe: Ignore
             ),
             Self::SessionRunLog => method_spec!(
-                owner: Daemon, effect: ControlPlane, action_metadata: false, remote_allowed: true,
+                owner: Daemon, effect: ControlPlane, action_metadata: None, remote_allowed: true,
                 deadline: Standard, response_grace: false, cancel_at_deadline: false, outcome: Ordinary,
                 wal: Never, dialog: Bypass, queue: Serial, implicit_session: Always, auto_inject: Never, tab_transition: false,
                 background: None, resume: Effect, opens_tabs: false, auto_borrow_write: false, cooperation: None, dom_targeted: false, bootstrap: false,
                 debug_evidence: None, audit_key: None, recipe: Ignore
             ),
             Self::BrowserList => method_spec!(
-                owner: Daemon, effect: ControlPlane, action_metadata: false, remote_allowed: true,
+                owner: Daemon, effect: ControlPlane, action_metadata: None, remote_allowed: true,
                 deadline: Standard, response_grace: false, cancel_at_deadline: false, outcome: Ordinary,
                 wal: Never, dialog: Bypass, queue: Serial, implicit_session: Never, auto_inject: Never, tab_transition: false,
                 background: None, resume: Effect, opens_tabs: false, auto_borrow_write: false, cooperation: None, dom_targeted: false, bootstrap: false,
                 debug_evidence: None, audit_key: None, recipe: Ignore
             ),
             Self::ToolSessionStart => method_spec!(
-                owner: Extension, effect: ControlPlane, action_metadata: false, remote_allowed: true,
+                owner: Extension, effect: ControlPlane, action_metadata: None, remote_allowed: true,
                 deadline: Standard, response_grace: false, cancel_at_deadline: false, outcome: Ordinary,
                 wal: Never, dialog: Bypass, queue: Serial, implicit_session: Never, auto_inject: Never, tab_transition: false,
                 background: None, resume: Effect, opens_tabs: false, auto_borrow_write: false, cooperation: SessionStart, dom_targeted: false, bootstrap: false,
                 debug_evidence: None, audit_key: Some("sessionStart"), recipe: Ignore
             ),
             Self::ToolSessionStop => method_spec!(
-                owner: Extension, effect: ControlPlane, action_metadata: false, remote_allowed: true,
+                owner: Extension, effect: ControlPlane, action_metadata: None, remote_allowed: true,
                 deadline: Standard, response_grace: false, cancel_at_deadline: false, outcome: Ordinary,
                 wal: Never, dialog: Bypass, queue: Serial, implicit_session: Never, auto_inject: Never, tab_transition: false,
                 background: None, resume: Effect, opens_tabs: false, auto_borrow_write: false, cooperation: Session, dom_targeted: false, bootstrap: false,
                 debug_evidence: None, audit_key: Some("sessionStop"), recipe: Ignore
             ),
             Self::ToolWindowResize => method_spec!(
-                owner: Extension, effect: BrowserMutation, action_metadata: true, remote_allowed: true,
+                owner: Extension, effect: BrowserMutation, action_metadata: Full, remote_allowed: true,
                 deadline: Standard, response_grace: false, cancel_at_deadline: true, outcome: EffectAwareAction,
                 wal: Never, dialog: Gated, queue: Serial, implicit_session: Always, auto_inject: Always, tab_transition: false,
                 background: None, resume: Effect, opens_tabs: false, auto_borrow_write: false, cooperation: GuardedAction, dom_targeted: false, bootstrap: true,
                 debug_evidence: None, audit_key: Some("resize"), recipe: Ignore
             ),
             Self::ToolEmulate => method_spec!(
-                owner: Extension, effect: BrowserMutation, action_metadata: true, remote_allowed: true,
+                owner: Extension, effect: BrowserMutation, action_metadata: Full, remote_allowed: true,
                 deadline: Standard, response_grace: false, cancel_at_deadline: true, outcome: EffectAwareAction,
                 wal: Never, dialog: Gated, queue: Serial, implicit_session: Always, auto_inject: Always, tab_transition: false,
                 background: Controlled, resume: Effect, opens_tabs: false, auto_borrow_write: true, cooperation: GuardedAction, dom_targeted: false, bootstrap: true,
                 debug_evidence: None, audit_key: Some("emulate"), recipe: Ignore
             ),
             Self::ToolTabList => method_spec!(
-                owner: Extension, effect: PassiveRead, action_metadata: false, remote_allowed: true,
+                owner: Extension, effect: PassiveRead, action_metadata: None, remote_allowed: true,
                 deadline: Standard, response_grace: false, cancel_at_deadline: false, outcome: Ordinary,
                 wal: Never, dialog: Gated, queue: Serial, implicit_session: Always, auto_inject: Never, tab_transition: false,
                 background: None, resume: Effect, opens_tabs: false, auto_borrow_write: false, cooperation: Session, dom_targeted: false, bootstrap: false,
                 debug_evidence: None, audit_key: Some("tabList"), recipe: Ignore
             ),
             Self::ToolTabCreate => method_spec!(
-                owner: Extension, effect: BrowserMutation, action_metadata: false, remote_allowed: true,
+                owner: Extension, effect: BrowserMutation, action_metadata: None, remote_allowed: true,
                 deadline: Standard, response_grace: false, cancel_at_deadline: false, outcome: Ordinary,
                 wal: Never, dialog: Gated, queue: Serial, implicit_session: Always, auto_inject: Never, tab_transition: true,
                 background: None, resume: Effect, opens_tabs: false, auto_borrow_write: false, cooperation: ManageTabs, dom_targeted: false, bootstrap: false,
                 debug_evidence: None, audit_key: Some("tabCreate"), recipe: Ignore
             ),
             Self::ToolTabClose => method_spec!(
-                owner: Extension, effect: BrowserMutation, action_metadata: true, remote_allowed: true,
+                owner: Extension, effect: BrowserMutation, action_metadata: Full, remote_allowed: true,
                 deadline: Standard, response_grace: false, cancel_at_deadline: true, outcome: EffectAwareAction,
                 wal: Never, dialog: Gated, queue: Serial, implicit_session: Always, auto_inject: Always, tab_transition: true,
                 background: None, resume: Effect, opens_tabs: false, auto_borrow_write: false, cooperation: GuardedAction, dom_targeted: false, bootstrap: true,
                 debug_evidence: None, audit_key: Some("tabClose"), recipe: Ignore
             ),
             Self::ToolTabBorrow => method_spec!(
-                owner: Extension, effect: BrowserMutation, action_metadata: false, remote_allowed: true,
+                owner: Extension, effect: BrowserMutation, action_metadata: None, remote_allowed: true,
                 deadline: BorrowConfirmation, response_grace: false, cancel_at_deadline: true, outcome: Ordinary,
                 wal: Never, dialog: Gated, queue: Serial, implicit_session: Always, auto_inject: Never, tab_transition: true,
                 background: None, resume: Effect, opens_tabs: false, auto_borrow_write: false, cooperation: ManageTabs, dom_targeted: false, bootstrap: false,
                 debug_evidence: None, audit_key: Some("tabBorrow"), recipe: TabBorrow
             ),
             Self::ToolTabReturn => method_spec!(
-                owner: Extension, effect: BrowserMutation, action_metadata: false, remote_allowed: true,
+                owner: Extension, effect: BrowserMutation, action_metadata: None, remote_allowed: true,
                 deadline: Standard, response_grace: false, cancel_at_deadline: false, outcome: Ordinary,
                 wal: Never, dialog: Gated, queue: Serial, implicit_session: Always, auto_inject: Never, tab_transition: true,
                 background: None, resume: Effect, opens_tabs: false, auto_borrow_write: false, cooperation: ManageTabs, dom_targeted: false, bootstrap: false,
                 debug_evidence: None, audit_key: Some("tabReturn"), recipe: TabReturn
             ),
             Self::ToolTabSelect => method_spec!(
-                owner: Extension, effect: BrowserMutation, action_metadata: false, remote_allowed: true,
+                owner: Extension, effect: BrowserMutation, action_metadata: None, remote_allowed: true,
                 deadline: Standard, response_grace: false, cancel_at_deadline: false, outcome: Ordinary,
                 wal: Never, dialog: Gated, queue: Serial, implicit_session: Always, auto_inject: Never, tab_transition: true,
                 background: None, resume: Effect, opens_tabs: false, auto_borrow_write: false, cooperation: ManageTabs, dom_targeted: false, bootstrap: false,
                 debug_evidence: None, audit_key: Some("tabSelect"), recipe: Ignore
             ),
             Self::ToolNavigate => method_spec!(
-                owner: Extension, effect: BrowserMutation, action_metadata: true, remote_allowed: true,
+                owner: Extension, effect: BrowserMutation, action_metadata: Full, remote_allowed: true,
                 deadline: Standard, response_grace: true, cancel_at_deadline: true, outcome: EffectAwareAction,
                 wal: Always, dialog: Gated, queue: Serial, implicit_session: Always, auto_inject: Always, tab_transition: false,
                 background: Navigation, resume: Effect, opens_tabs: false, auto_borrow_write: true, cooperation: GuardedAction, dom_targeted: false, bootstrap: true,
                 debug_evidence: Navigation, audit_key: Some("navigate"), recipe: Navigate
             ),
             Self::ToolNavigateBack => method_spec!(
-                owner: Extension, effect: BrowserMutation, action_metadata: true, remote_allowed: true,
+                owner: Extension, effect: BrowserMutation, action_metadata: Full, remote_allowed: true,
                 deadline: Standard, response_grace: true, cancel_at_deadline: true, outcome: EffectAwareAction,
                 wal: Always, dialog: Gated, queue: Serial, implicit_session: Always, auto_inject: Always, tab_transition: false,
                 background: Navigation, resume: Effect, opens_tabs: false, auto_borrow_write: true, cooperation: GuardedAction, dom_targeted: false, bootstrap: false,
                 debug_evidence: Navigation, audit_key: Some("navigateBack"), recipe: Skip { reason: "history_navigation" }
             ),
             Self::ToolNavigateForward => method_spec!(
-                owner: Extension, effect: BrowserMutation, action_metadata: true, remote_allowed: true,
+                owner: Extension, effect: BrowserMutation, action_metadata: Full, remote_allowed: true,
                 deadline: Standard, response_grace: true, cancel_at_deadline: true, outcome: EffectAwareAction,
                 wal: Always, dialog: Gated, queue: Serial, implicit_session: Always, auto_inject: Always, tab_transition: false,
                 background: Navigation, resume: Effect, opens_tabs: false, auto_borrow_write: true, cooperation: GuardedAction, dom_targeted: false, bootstrap: false,
                 debug_evidence: Navigation, audit_key: Some("navigateForward"), recipe: Skip { reason: "history_navigation" }
             ),
             Self::ToolReload => method_spec!(
-                owner: Extension, effect: BrowserMutation, action_metadata: true, remote_allowed: true,
+                owner: Extension, effect: BrowserMutation, action_metadata: Full, remote_allowed: true,
                 deadline: Standard, response_grace: true, cancel_at_deadline: true, outcome: EffectAwareAction,
                 wal: Always, dialog: Gated, queue: Serial, implicit_session: Always, auto_inject: Always, tab_transition: false,
                 background: Navigation, resume: Effect, opens_tabs: false, auto_borrow_write: true, cooperation: GuardedAction, dom_targeted: false, bootstrap: false,
                 debug_evidence: Navigation, audit_key: Some("reload"), recipe: Skip { reason: "history_navigation" }
             ),
             Self::ToolClick => method_spec!(
-                owner: Extension, effect: BrowserMutation, action_metadata: true, remote_allowed: true,
+                owner: Extension, effect: BrowserMutation, action_metadata: Full, remote_allowed: true,
                 deadline: Standard, response_grace: false, cancel_at_deadline: true, outcome: EffectAwareAction,
                 wal: Always, dialog: Gated, queue: Serial, implicit_session: Always, auto_inject: Always, tab_transition: false,
                 background: Controlled, resume: Effect, opens_tabs: true, auto_borrow_write: true, cooperation: GuardedAction, dom_targeted: true, bootstrap: false,
                 debug_evidence: Action, audit_key: Some("click"), recipe: Extract { action: "click" }
             ),
             Self::ToolHover => method_spec!(
-                owner: Extension, effect: TransientInput, action_metadata: true, remote_allowed: true,
+                owner: Extension, effect: TransientInput, action_metadata: Full, remote_allowed: true,
                 deadline: Standard, response_grace: false, cancel_at_deadline: true, outcome: EffectAwareAction,
                 wal: Never, dialog: Gated, queue: Serial, implicit_session: Always, auto_inject: Always, tab_transition: false,
                 background: Controlled, resume: Effect, opens_tabs: false, auto_borrow_write: true, cooperation: GuardedAction, dom_targeted: true, bootstrap: false,
                 debug_evidence: Action, audit_key: Some("hover"), recipe: Extract { action: "hover" }
             ),
             Self::ToolDrag => method_spec!(
-                owner: Extension, effect: BrowserMutation, action_metadata: true, remote_allowed: true,
+                owner: Extension, effect: BrowserMutation, action_metadata: Full, remote_allowed: true,
                 deadline: Standard, response_grace: false, cancel_at_deadline: true, outcome: EffectAwareAction,
                 wal: Always, dialog: Gated, queue: Serial, implicit_session: Always, auto_inject: Always, tab_transition: false,
                 background: Controlled, resume: Effect, opens_tabs: true, auto_borrow_write: true, cooperation: GuardedAction, dom_targeted: true, bootstrap: false,
                 debug_evidence: Action, audit_key: Some("drag"), recipe: Skip { reason: "drag" }
             ),
             Self::ToolWheel => method_spec!(
-                owner: Extension, effect: BrowserMutation, action_metadata: true, remote_allowed: true,
+                owner: Extension, effect: BrowserMutation, action_metadata: Full, remote_allowed: true,
                 deadline: Standard, response_grace: false, cancel_at_deadline: true, outcome: EffectAwareAction,
                 wal: Never, dialog: Gated, queue: Serial, implicit_session: Always, auto_inject: Always, tab_transition: false,
                 background: Controlled, resume: Effect, opens_tabs: false, auto_borrow_write: true, cooperation: GuardedAction, dom_targeted: true, bootstrap: false,
                 debug_evidence: Action, audit_key: Some("scroll"), recipe: Skip { reason: "wheel" }
             ),
             Self::ToolScrollTo => method_spec!(
-                owner: Extension, effect: BrowserMutation, action_metadata: true, remote_allowed: true,
+                owner: Extension, effect: BrowserMutation, action_metadata: Full, remote_allowed: true,
                 deadline: Standard, response_grace: false, cancel_at_deadline: true, outcome: EffectAwareAction,
                 wal: Never, dialog: Gated, queue: Serial, implicit_session: Always, auto_inject: Always, tab_transition: false,
                 background: Controlled, resume: Effect, opens_tabs: false, auto_borrow_write: true, cooperation: GuardedAction, dom_targeted: true, bootstrap: false,
                 debug_evidence: Action, audit_key: Some("scroll"), recipe: Extract { action: "scroll-to" }
             ),
             Self::ToolFocus => method_spec!(
-                owner: Extension, effect: BrowserMutation, action_metadata: true, remote_allowed: true,
+                owner: Extension, effect: BrowserMutation, action_metadata: Full, remote_allowed: true,
                 deadline: Standard, response_grace: false, cancel_at_deadline: true, outcome: EffectAwareAction,
                 wal: Never, dialog: Gated, queue: Serial, implicit_session: Always, auto_inject: Always, tab_transition: false,
                 background: Controlled, resume: Effect, opens_tabs: false, auto_borrow_write: true, cooperation: GuardedAction, dom_targeted: true, bootstrap: false,
                 debug_evidence: Action, audit_key: Some("focus"), recipe: Skip { reason: "focus" }
             ),
             Self::ToolBlur => method_spec!(
-                owner: Extension, effect: BrowserMutation, action_metadata: true, remote_allowed: true,
+                owner: Extension, effect: BrowserMutation, action_metadata: Full, remote_allowed: true,
                 deadline: Standard, response_grace: false, cancel_at_deadline: true, outcome: EffectAwareAction,
                 wal: Never, dialog: Gated, queue: Serial, implicit_session: Always, auto_inject: Always, tab_transition: false,
                 background: Controlled, resume: Effect, opens_tabs: false, auto_borrow_write: true, cooperation: GuardedAction, dom_targeted: true, bootstrap: false,
                 debug_evidence: Action, audit_key: Some("blur"), recipe: Skip { reason: "focus" }
             ),
             Self::ToolFill => method_spec!(
-                owner: Extension, effect: BrowserMutation, action_metadata: true, remote_allowed: true,
+                owner: Extension, effect: BrowserMutation, action_metadata: Full, remote_allowed: true,
                 deadline: Standard, response_grace: false, cancel_at_deadline: true, outcome: EffectAwareAction,
                 wal: Always, dialog: Gated, queue: Serial, implicit_session: Always, auto_inject: Always, tab_transition: false,
                 background: Controlled, resume: Effect, opens_tabs: false, auto_borrow_write: true, cooperation: GuardedAction, dom_targeted: true, bootstrap: false,
                 debug_evidence: FormInput, audit_key: Some("fill"), recipe: Extract { action: "fill" }
             ),
             Self::ToolPress => method_spec!(
-                owner: Extension, effect: BrowserMutation, action_metadata: true, remote_allowed: true,
+                owner: Extension, effect: BrowserMutation, action_metadata: Full, remote_allowed: true,
                 deadline: Standard, response_grace: false, cancel_at_deadline: true, outcome: EffectAwareAction,
                 wal: Always, dialog: Gated, queue: Serial, implicit_session: Always, auto_inject: Always, tab_transition: false,
                 background: Controlled, resume: Effect, opens_tabs: true, auto_borrow_write: true, cooperation: GuardedAction, dom_targeted: true, bootstrap: false,
                 debug_evidence: Action, audit_key: Some("press"), recipe: Extract { action: "press" }
             ),
             Self::ToolSelect => method_spec!(
-                owner: Extension, effect: BrowserMutation, action_metadata: true, remote_allowed: true,
+                owner: Extension, effect: BrowserMutation, action_metadata: Full, remote_allowed: true,
                 deadline: Standard, response_grace: false, cancel_at_deadline: true, outcome: EffectAwareAction,
                 wal: Always, dialog: Gated, queue: Serial, implicit_session: Always, auto_inject: Always, tab_transition: false,
                 background: Controlled, resume: Effect, opens_tabs: false, auto_borrow_write: true, cooperation: GuardedAction, dom_targeted: true, bootstrap: false,
                 debug_evidence: FormInput, audit_key: Some("select"), recipe: Extract { action: "select" }
             ),
             Self::ToolUpload => method_spec!(
-                owner: Extension, effect: BrowserMutation, action_metadata: true, remote_allowed: false,
+                owner: Extension, effect: BrowserMutation, action_metadata: Full, remote_allowed: false,
                 deadline: Standard, response_grace: true, cancel_at_deadline: true, outcome: FileTransfer,
                 wal: Always, dialog: Gated, queue: Serial, implicit_session: Always, auto_inject: Always, tab_transition: false,
                 background: Controlled, resume: Effect, opens_tabs: false, auto_borrow_write: true, cooperation: GuardedAction, dom_targeted: true, bootstrap: false,
                 debug_evidence: Action, audit_key: Some("upload"), recipe: Skip { reason: "file_transfer" }
             ),
             Self::ToolDownload => method_spec!(
-                owner: Extension, effect: BrowserMutation, action_metadata: true, remote_allowed: false,
+                owner: Extension, effect: BrowserMutation, action_metadata: Full, remote_allowed: false,
                 deadline: Standard, response_grace: true, cancel_at_deadline: true, outcome: FileTransfer,
                 wal: Always, dialog: Gated, queue: Serial, implicit_session: Always, auto_inject: Always, tab_transition: false,
                 background: Controlled, resume: Effect, opens_tabs: false, auto_borrow_write: true, cooperation: GuardedAction, dom_targeted: true, bootstrap: false,
                 debug_evidence: Action, audit_key: Some("download"), recipe: Skip { reason: "file_transfer" }
             ),
             Self::ToolSnapshot => method_spec!(
-                owner: Extension, effect: PassiveRead, action_metadata: false, remote_allowed: true,
+                owner: Extension, effect: PassiveRead, action_metadata: ContextOnly, remote_allowed: true,
                 deadline: Standard, response_grace: false, cancel_at_deadline: false, outcome: Ordinary,
                 wal: Never, dialog: Gated, queue: Serial, implicit_session: Always, auto_inject: Never, tab_transition: false,
                 background: Accessible, resume: Effect, opens_tabs: false, auto_borrow_write: false, cooperation: PassiveRead, dom_targeted: false, bootstrap: false,
                 debug_evidence: None, audit_key: Some("read"), recipe: Observe
             ),
             Self::ToolObserve => method_spec!(
-                owner: Extension, effect: TransientInput, action_metadata: true, remote_allowed: true,
+                owner: Extension, effect: TransientInput, action_metadata: Full, remote_allowed: true,
                 deadline: Standard, response_grace: false, cancel_at_deadline: false, outcome: Ordinary,
                 wal: Never, dialog: Gated, queue: Serial, implicit_session: Always, auto_inject: DynamicObserve, tab_transition: false,
                 background: Accessible, resume: Effect, opens_tabs: false, auto_borrow_write: false, cooperation: PassiveRead, dom_targeted: false, bootstrap: false,
                 debug_evidence: None, audit_key: Some("read"), recipe: Observe
             ),
             Self::ToolGetHtml => method_spec!(
-                owner: Extension, effect: PassiveRead, action_metadata: false, remote_allowed: true,
+                owner: Extension, effect: PassiveRead, action_metadata: ContextOnly, remote_allowed: true,
                 deadline: Standard, response_grace: false, cancel_at_deadline: false, outcome: Ordinary,
                 wal: Never, dialog: Gated, queue: Serial, implicit_session: Always, auto_inject: Never, tab_transition: false,
                 background: Accessible, resume: Effect, opens_tabs: false, auto_borrow_write: false, cooperation: PassiveRead, dom_targeted: false, bootstrap: false,
                 debug_evidence: None, audit_key: Some("read"), recipe: Ignore
             ),
             Self::ToolRead => method_spec!(
-                owner: Extension, effect: PassiveRead, action_metadata: false, remote_allowed: true,
+                owner: Extension, effect: PassiveRead, action_metadata: ContextOnly, remote_allowed: true,
                 deadline: Standard, response_grace: false, cancel_at_deadline: false, outcome: Ordinary,
                 wal: Never, dialog: Gated, queue: Serial, implicit_session: Always, auto_inject: Never, tab_transition: false,
                 background: Accessible, resume: Effect, opens_tabs: false, auto_borrow_write: false, cooperation: PassiveRead, dom_targeted: false, bootstrap: false,
                 debug_evidence: None, audit_key: Some("read"), recipe: Ignore
             ),
             Self::ToolExtract => method_spec!(
-                owner: Extension, effect: PassiveRead, action_metadata: false, remote_allowed: true,
+                owner: Extension, effect: PassiveRead, action_metadata: ContextOnly, remote_allowed: true,
                 deadline: Standard, response_grace: false, cancel_at_deadline: false, outcome: Ordinary,
                 wal: Never, dialog: Gated, queue: Serial, implicit_session: Always, auto_inject: Never, tab_transition: false,
                 background: Accessible, resume: Effect, opens_tabs: false, auto_borrow_write: false, cooperation: PassiveRead, dom_targeted: false, bootstrap: false,
                 debug_evidence: None, audit_key: Some("read"), recipe: Ignore
             ),
             Self::ToolScreenshot => method_spec!(
-                owner: Extension, effect: PassiveRead, action_metadata: false, remote_allowed: true,
+                owner: Extension, effect: PassiveRead, action_metadata: ContextOnly, remote_allowed: true,
                 deadline: Standard, response_grace: false, cancel_at_deadline: false, outcome: Ordinary,
                 wal: Never, dialog: Gated, queue: Serial, implicit_session: Always, auto_inject: Never, tab_transition: false,
                 background: Accessible, resume: Effect, opens_tabs: false, auto_borrow_write: false, cooperation: PassiveRead, dom_targeted: false, bootstrap: false,
                 debug_evidence: None, audit_key: Some("screenshot"), recipe: Ignore
             ),
             Self::ToolScreenshotFullPage => method_spec!(
-                owner: Extension, effect: TransientInput, action_metadata: true, remote_allowed: true,
+                owner: Extension, effect: TransientInput, action_metadata: Full, remote_allowed: true,
                 deadline: FullPage, response_grace: false, cancel_at_deadline: true, outcome: Ordinary,
                 wal: Never, dialog: Gated, queue: Serial, implicit_session: Always, auto_inject: Always, tab_transition: false,
                 background: Controlled, resume: Effect, opens_tabs: false, auto_borrow_write: true, cooperation: GuardedAction, dom_targeted: false, bootstrap: false,
                 debug_evidence: None, audit_key: Some("screenshotFullPage"), recipe: Ignore
             ),
             Self::ToolScreenshotRead => method_spec!(
-                owner: Extension, effect: PassiveRead, action_metadata: false, remote_allowed: true,
+                owner: Extension, effect: PassiveRead, action_metadata: None, remote_allowed: true,
                 deadline: Standard, response_grace: false, cancel_at_deadline: false, outcome: Ordinary,
                 wal: Never, dialog: Gated, queue: Serial, implicit_session: Always, auto_inject: Never, tab_transition: false,
                 background: None, resume: Effect, opens_tabs: false, auto_borrow_write: false, cooperation: Session, dom_targeted: false, bootstrap: false,
                 debug_evidence: None, audit_key: Some("screenshotRead"), recipe: Ignore
             ),
             Self::ToolScreenshotRelease => method_spec!(
-                owner: Extension, effect: ControlPlane, action_metadata: false, remote_allowed: true,
+                owner: Extension, effect: ControlPlane, action_metadata: None, remote_allowed: true,
                 deadline: Standard, response_grace: false, cancel_at_deadline: false, outcome: Ordinary,
                 wal: Never, dialog: Gated, queue: Serial, implicit_session: Always, auto_inject: Never, tab_transition: false,
                 background: None, resume: Effect, opens_tabs: false, auto_borrow_write: false, cooperation: Session, dom_targeted: false, bootstrap: false,
                 debug_evidence: None, audit_key: Some("screenshotRelease"), recipe: Ignore
             ),
             Self::ToolConsole => method_spec!(
-                owner: Extension, effect: PassiveRead, action_metadata: false, remote_allowed: true,
+                owner: Extension, effect: PassiveRead, action_metadata: ContextOnly, remote_allowed: true,
                 deadline: Standard, response_grace: false, cancel_at_deadline: false, outcome: Ordinary,
                 wal: Never, dialog: Gated, queue: Serial, implicit_session: Always, auto_inject: Never, tab_transition: false,
                 background: Accessible, resume: Effect, opens_tabs: false, auto_borrow_write: false, cooperation: PassiveRead, dom_targeted: false, bootstrap: false,
                 debug_evidence: None, audit_key: Some("console"), recipe: Ignore
             ),
             Self::ToolDebug => method_spec!(
-                owner: Extension, effect: ControlPlane, action_metadata: true, remote_allowed: true,
+                owner: Extension, effect: ControlPlane, action_metadata: Full, remote_allowed: true,
                 deadline: Standard, response_grace: false, cancel_at_deadline: false, outcome: Ordinary,
                 wal: DynamicDebug, dialog: DynamicDebug, queue: Serial, implicit_session: Always, auto_inject: DynamicDebug, tab_transition: false,
                 background: None, resume: Effect, opens_tabs: false, auto_borrow_write: false, cooperation: Debug, dom_targeted: false, bootstrap: false,
                 debug_evidence: None, audit_key: Some("debug"), recipe: Ignore
             ),
             Self::ToolNetwork => method_spec!(
-                owner: Extension, effect: PassiveRead, action_metadata: false, remote_allowed: true,
+                owner: Extension, effect: PassiveRead, action_metadata: ContextOnly, remote_allowed: true,
                 deadline: Standard, response_grace: false, cancel_at_deadline: false, outcome: Ordinary,
                 wal: Never, dialog: Gated, queue: Serial, implicit_session: Always, auto_inject: Never, tab_transition: false,
                 background: Accessible, resume: Effect, opens_tabs: false, auto_borrow_write: false, cooperation: PassiveRead, dom_targeted: false, bootstrap: false,
                 debug_evidence: None, audit_key: Some("network"), recipe: Ignore
             ),
             Self::ToolEvaluate => method_spec!(
-                owner: Extension, effect: BrowserMutation, action_metadata: true, remote_allowed: true,
+                owner: Extension, effect: BrowserMutation, action_metadata: Full, remote_allowed: true,
                 deadline: Standard, response_grace: false, cancel_at_deadline: true, outcome: EffectAwareAction,
                 wal: Always, dialog: Gated, queue: Serial, implicit_session: Always, auto_inject: Always, tab_transition: false,
                 background: Accessible, resume: Effect, opens_tabs: false, auto_borrow_write: true, cooperation: GuardedAction, dom_targeted: false, bootstrap: false,
                 debug_evidence: Action, audit_key: Some("evaluate"), recipe: Skip { reason: "script" }
             ),
             Self::ToolDialogStatus => method_spec!(
-                owner: Extension, effect: PassiveRead, action_metadata: false, remote_allowed: true,
+                owner: Extension, effect: PassiveRead, action_metadata: None, remote_allowed: true,
                 deadline: Standard, response_grace: false, cancel_at_deadline: false, outcome: Ordinary,
                 wal: Never, dialog: Bypass, queue: Unlocked, implicit_session: Always, auto_inject: Never, tab_transition: false,
                 background: None, resume: Never, opens_tabs: false, auto_borrow_write: false, cooperation: Dialog, dom_targeted: false, bootstrap: false,
                 debug_evidence: None, audit_key: Some("dialogStatus"), recipe: Ignore
             ),
             Self::ToolDialogAccept => method_spec!(
-                owner: Extension, effect: BrowserMutation, action_metadata: false, remote_allowed: true,
+                owner: Extension, effect: BrowserMutation, action_metadata: None, remote_allowed: true,
                 deadline: Standard, response_grace: false, cancel_at_deadline: false, outcome: Ordinary,
                 wal: Always, dialog: Bypass, queue: Unlocked, implicit_session: Always, auto_inject: Never, tab_transition: false,
                 background: None, resume: Never, opens_tabs: false, auto_borrow_write: false, cooperation: Dialog, dom_targeted: false, bootstrap: false,
                 debug_evidence: Dialog, audit_key: Some("dialogAccept"), recipe: Ignore
             ),
             Self::ToolDialogDismiss => method_spec!(
-                owner: Extension, effect: ControlPlane, action_metadata: false, remote_allowed: true,
+                owner: Extension, effect: ControlPlane, action_metadata: None, remote_allowed: true,
                 deadline: Standard, response_grace: false, cancel_at_deadline: false, outcome: Ordinary,
                 wal: Never, dialog: Bypass, queue: Unlocked, implicit_session: Always, auto_inject: Never, tab_transition: false,
                 background: None, resume: Never, opens_tabs: false, auto_borrow_write: false, cooperation: Dialog, dom_targeted: false, bootstrap: false,
                 debug_evidence: Dialog, audit_key: Some("dialogDismiss"), recipe: Ignore
             ),
             Self::ToolOperationAwait => method_spec!(
-                owner: Daemon, effect: PassiveRead, action_metadata: false, remote_allowed: true,
+                owner: Daemon, effect: PassiveRead, action_metadata: None, remote_allowed: true,
                 deadline: Standard, response_grace: false, cancel_at_deadline: false, outcome: Ordinary,
                 wal: Never, dialog: Bypass, queue: Serial, implicit_session: Always, auto_inject: Never, tab_transition: false,
                 background: None, resume: Effect, opens_tabs: false, auto_borrow_write: false, cooperation: None, dom_targeted: false, bootstrap: false,
                 debug_evidence: None, audit_key: Some("operationAwait"), recipe: Ignore
             ),
             Self::ToolOperationCancel => method_spec!(
-                owner: Daemon, effect: ControlPlane, action_metadata: false, remote_allowed: true,
+                owner: Daemon, effect: ControlPlane, action_metadata: None, remote_allowed: true,
                 deadline: Standard, response_grace: false, cancel_at_deadline: false, outcome: Ordinary,
                 wal: Never, dialog: Bypass, queue: Serial, implicit_session: Always, auto_inject: Never, tab_transition: false,
                 background: None, resume: Effect, opens_tabs: false, auto_borrow_write: false, cooperation: None, dom_targeted: false, bootstrap: false,
                 debug_evidence: None, audit_key: Some("operationCancel"), recipe: Ignore
             ),
             Self::ToolWaitForNavigation => method_spec!(
-                owner: Extension, effect: PassiveRead, action_metadata: false, remote_allowed: true,
+                owner: Extension, effect: PassiveRead, action_metadata: ContextOnly, remote_allowed: true,
                 deadline: Standard, response_grace: true, cancel_at_deadline: false, outcome: Ordinary,
                 wal: Never, dialog: Gated, queue: Serial, implicit_session: Always, auto_inject: Never, tab_transition: false,
                 background: Controlled, resume: Effect, opens_tabs: false, auto_borrow_write: true, cooperation: PassiveRead, dom_targeted: false, bootstrap: false,
                 debug_evidence: None, audit_key: Some("wait"), recipe: Ignore
             ),
             Self::ToolWaitForElement => method_spec!(
-                owner: Extension, effect: PassiveRead, action_metadata: false, remote_allowed: true,
+                owner: Extension, effect: PassiveRead, action_metadata: ContextOnly, remote_allowed: true,
                 deadline: Standard, response_grace: true, cancel_at_deadline: false, outcome: Ordinary,
                 wal: Never, dialog: Gated, queue: Serial, implicit_session: Always, auto_inject: Never, tab_transition: false,
                 background: Controlled, resume: Effect, opens_tabs: false, auto_borrow_write: true, cooperation: PassiveRead, dom_targeted: false, bootstrap: false,
                 debug_evidence: None, audit_key: Some("waitForElement"), recipe: WaitElement
             ),
             Self::ToolWaitMs => method_spec!(
-                owner: Daemon, effect: PassiveRead, action_metadata: false, remote_allowed: true,
+                owner: Daemon, effect: PassiveRead, action_metadata: None, remote_allowed: true,
                 deadline: Standard, response_grace: false, cancel_at_deadline: false, outcome: Ordinary,
                 wal: Never, dialog: Bypass, queue: Serial, implicit_session: Never, auto_inject: Never, tab_transition: false,
                 background: None, resume: Effect, opens_tabs: false, auto_borrow_write: false, cooperation: None, dom_targeted: false, bootstrap: false,
                 debug_evidence: None, audit_key: Some("wait"), recipe: Ignore
             ),
             Self::ToolRequestHelp => method_spec!(
-                owner: Extension, effect: PassiveRead, action_metadata: false, remote_allowed: true,
+                owner: Extension, effect: PassiveRead, action_metadata: None, remote_allowed: true,
                 deadline: Standard, response_grace: true, cancel_at_deadline: true, outcome: Ordinary,
                 wal: Never, dialog: Gated, queue: Serial, implicit_session: Always, auto_inject: Never, tab_transition: false,
                 background: None, resume: Always, opens_tabs: false, auto_borrow_write: false, cooperation: RequestHelp, dom_targeted: false, bootstrap: false,
                 debug_evidence: None, audit_key: Some("help"), recipe: Ignore
             ),
             Self::ToolRecordStart => method_spec!(
-                owner: Extension, effect: BrowserMutation, action_metadata: false, remote_allowed: true,
+                owner: Extension, effect: BrowserMutation, action_metadata: None, remote_allowed: true,
                 deadline: Standard, response_grace: false, cancel_at_deadline: false, outcome: Ordinary,
                 wal: Never, dialog: Gated, queue: Serial, implicit_session: Always, auto_inject: Never, tab_transition: false,
                 background: None, resume: Always, opens_tabs: false, auto_borrow_write: false, cooperation: RecordStart, dom_targeted: false, bootstrap: false,
                 debug_evidence: None, audit_key: Some("recordStart"), recipe: Ignore
             ),
             Self::ToolRecordStop => method_spec!(
-                owner: Extension, effect: PassiveRead, action_metadata: false, remote_allowed: true,
+                owner: Extension, effect: PassiveRead, action_metadata: None, remote_allowed: true,
                 deadline: Standard, response_grace: false, cancel_at_deadline: false, outcome: Ordinary,
                 wal: Never, dialog: Bypass, queue: Unlocked, implicit_session: Always, auto_inject: Never, tab_transition: false,
                 background: None, resume: Effect, opens_tabs: false, auto_borrow_write: false, cooperation: Session, dom_targeted: false, bootstrap: false,
                 debug_evidence: None, audit_key: Some("recordStop"), recipe: Ignore
             ),
             Self::ToolRecordAwait => method_spec!(
-                owner: Extension, effect: PassiveRead, action_metadata: false, remote_allowed: true,
+                owner: Extension, effect: PassiveRead, action_metadata: None, remote_allowed: true,
                 deadline: Standard, response_grace: false, cancel_at_deadline: false, outcome: Ordinary,
                 wal: Never, dialog: Gated, queue: Serial, implicit_session: Always, auto_inject: Never, tab_transition: false,
                 background: None, resume: Effect, opens_tabs: false, auto_borrow_write: false, cooperation: Session, dom_targeted: false, bootstrap: false,
                 debug_evidence: None, audit_key: Some("recordAwait"), recipe: Ignore
             ),
             Self::ToolVideo => method_spec!(
-                owner: Extension, effect: ControlPlane, action_metadata: false, remote_allowed: true,
+                owner: Extension, effect: ControlPlane, action_metadata: None, remote_allowed: true,
                 deadline: Standard, response_grace: false, cancel_at_deadline: false, outcome: Ordinary,
                 wal: Never, dialog: DynamicVideo, queue: VideoDynamic, implicit_session: DynamicVideo, auto_inject: Never, tab_transition: false,
                 background: None, resume: Effect, opens_tabs: false, auto_borrow_write: false, cooperation: Video, dom_targeted: false, bootstrap: false,
                 debug_evidence: None, audit_key: Some("video"), recipe: Ignore
             ),
             Self::TransferBegin => method_spec!(
-                owner: Daemon, effect: ControlPlane, action_metadata: false, remote_allowed: true,
+                owner: Daemon, effect: ControlPlane, action_metadata: None, remote_allowed: true,
                 deadline: Standard, response_grace: false, cancel_at_deadline: false, outcome: Ordinary,
                 wal: Never, dialog: Bypass, queue: Serial, implicit_session: Always, auto_inject: Never, tab_transition: false,
                 background: None, resume: Effect, opens_tabs: false, auto_borrow_write: false, cooperation: None, dom_targeted: false, bootstrap: false,
                 debug_evidence: None, audit_key: None, recipe: Ignore
             ),
             Self::TransferChunk => method_spec!(
-                owner: Daemon, effect: ControlPlane, action_metadata: false, remote_allowed: true,
+                owner: Daemon, effect: ControlPlane, action_metadata: None, remote_allowed: true,
                 deadline: Standard, response_grace: false, cancel_at_deadline: false, outcome: Ordinary,
                 wal: Never, dialog: Bypass, queue: Serial, implicit_session: Never, auto_inject: Never, tab_transition: false,
                 background: None, resume: Effect, opens_tabs: false, auto_borrow_write: false, cooperation: None, dom_targeted: false, bootstrap: false,
                 debug_evidence: None, audit_key: None, recipe: Ignore
             ),
             Self::TransferFinish => method_spec!(
-                owner: Daemon, effect: ControlPlane, action_metadata: false, remote_allowed: true,
+                owner: Daemon, effect: ControlPlane, action_metadata: None, remote_allowed: true,
                 deadline: Standard, response_grace: false, cancel_at_deadline: false, outcome: Ordinary,
                 wal: Never, dialog: Bypass, queue: Serial, implicit_session: Never, auto_inject: Never, tab_transition: false,
                 background: None, resume: Effect, opens_tabs: false, auto_borrow_write: false, cooperation: None, dom_targeted: false, bootstrap: false,
                 debug_evidence: None, audit_key: None, recipe: Ignore
             ),
             Self::TransferRead => method_spec!(
-                owner: Daemon, effect: ControlPlane, action_metadata: false, remote_allowed: true,
+                owner: Daemon, effect: ControlPlane, action_metadata: None, remote_allowed: true,
                 deadline: Standard, response_grace: false, cancel_at_deadline: false, outcome: Ordinary,
                 wal: Never, dialog: Bypass, queue: Serial, implicit_session: Never, auto_inject: Never, tab_transition: false,
                 background: None, resume: Effect, opens_tabs: false, auto_borrow_write: false, cooperation: None, dom_targeted: false, bootstrap: false,
                 debug_evidence: None, audit_key: None, recipe: Ignore
             ),
             Self::TransferRelease => method_spec!(
-                owner: Daemon, effect: ControlPlane, action_metadata: false, remote_allowed: true,
+                owner: Daemon, effect: ControlPlane, action_metadata: None, remote_allowed: true,
                 deadline: Standard, response_grace: false, cancel_at_deadline: false, outcome: Ordinary,
                 wal: Never, dialog: Bypass, queue: Serial, implicit_session: Never, auto_inject: Never, tab_transition: false,
                 background: None, resume: Effect, opens_tabs: false, auto_borrow_write: false, cooperation: None, dom_targeted: false, bootstrap: false,
                 debug_evidence: None, audit_key: None, recipe: Ignore
             ),
             Self::Cancel => method_spec!(
-                owner: Shared, effect: ControlPlane, action_metadata: false, remote_allowed: true,
+                owner: Shared, effect: ControlPlane, action_metadata: None, remote_allowed: true,
                 deadline: Standard, response_grace: false, cancel_at_deadline: false, outcome: Ordinary,
                 wal: Never, dialog: Bypass, queue: Serial, implicit_session: Never, auto_inject: Never, tab_transition: false,
                 background: None, resume: Effect, opens_tabs: false, auto_borrow_write: false, cooperation: None, dom_targeted: false, bootstrap: false,
@@ -930,10 +941,15 @@ impl Method {
         self.spec().effect
     }
 
-    /// Whether the wire parameter contract merges [`ActionMetadata`]
+    /// Compile-time action metadata acceptance policy (`None`, `ContextOnly`, or `Full`).
+    pub const fn action_metadata_policy(&self) -> ActionMetadataPolicy {
+        self.spec().action_metadata
+    }
+
+    /// Whether the wire parameter contract merges full [`ActionMetadata`]
     /// (`context_id`, `observation_id`, `depends_on`, `expect`).
     pub const fn accepts_action_metadata(&self) -> bool {
-        self.spec().accepts_action_metadata
+        matches!(self.action_metadata_policy(), ActionMetadataPolicy::Full)
     }
 
     /// Whether this method belongs to the `tool.*` namespace audited and
@@ -1051,9 +1067,16 @@ mod tests {
                 method.wire_name(),
             );
             assert_eq!(
-                spec.accepts_action_metadata,
+                spec.action_metadata == ActionMetadataPolicy::Full,
                 spec.auto_inject_context != AutoInjectContext::Never,
                 "{} action_metadata and auto_inject_context out of sync",
+                method.wire_name(),
+            );
+            assert_eq!(
+                spec.action_metadata == ActionMetadataPolicy::ContextOnly,
+                spec.cooperation == CooperationMode::PassiveRead
+                    && spec.effect == MethodEffect::PassiveRead,
+                "{} ContextOnly policy must match passive-read cooperation methods",
                 method.wire_name(),
             );
             if matches!(

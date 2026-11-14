@@ -1,6 +1,6 @@
 {
   "source": "bsk-protocol",
-  "fingerprint": "77527f4c995ce877ffadd8d8e1c353521395ad605b266e87645894573b11b0aa",
+  "fingerprint": "7e211eaa1cee6ed018e9e3ae6a09abcfc89fd3f51696ca9161542df076916322",
   "protocol_version": "2.0",
   "min_compatible_protocol": "2.0",
   "events": [

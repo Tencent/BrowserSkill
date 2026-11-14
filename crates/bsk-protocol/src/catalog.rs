@@ -7,7 +7,10 @@ use schemars::{JsonSchema, Schema, SchemaGenerator, generate::SchemaSettings};
 use serde::Serialize;
 use serde_json::{Value, json};
 
-use crate::{ErrorCode, EventKind, Method, RpcError, RpcErrorReason, method::MethodSpec};
+use crate::{
+    ActionMetadataPolicy, ErrorCode, EventKind, Method, RpcError, RpcErrorReason,
+    method::MethodSpec,
+};
 
 pub const PROTOCOL_VERSION: &str = "2.0";
 pub const MIN_COMPATIBLE_PROTOCOL: &str = "2.0";
@@ -107,20 +110,44 @@ fn describe(settings: SchemaSettings) -> (Vec<MethodDescriptor>, Value) {
         .and_then(Value::as_object)
         .expect("ActionMetadata properties")
         .clone();
+    let context_only_property = json!({
+        "description": "Optional cooperation context validated by the extension without renewing control.",
+        "type": ["string", "null"],
+    });
     for descriptor in &methods {
-        if !descriptor.spec.accepts_action_metadata {
-            continue;
+        match descriptor.spec.action_metadata {
+            ActionMetadataPolicy::None => continue,
+            ActionMetadataPolicy::ContextOnly => {
+                let schema_obj = definitions
+                    .get_mut(&descriptor.params)
+                    .and_then(Value::as_object_mut)
+                    .unwrap_or_else(|| panic!("{} schema must be an object", descriptor.params));
+                let properties = schema_obj
+                    .get_mut("properties")
+                    .and_then(Value::as_object_mut)
+                    .unwrap_or_else(|| {
+                        panic!("{} properties must be an object", descriptor.params)
+                    });
+                properties
+                    .entry("context_id")
+                    .or_insert_with(|| context_only_property.clone());
+                schema_obj.insert("additionalProperties".into(), json!(false));
+            }
+            ActionMetadataPolicy::Full => {
+                let schema_obj = definitions
+                    .get_mut(&descriptor.params)
+                    .and_then(Value::as_object_mut)
+                    .unwrap_or_else(|| panic!("{} schema must be an object", descriptor.params));
+                let properties = schema_obj
+                    .get_mut("properties")
+                    .and_then(Value::as_object_mut)
+                    .unwrap_or_else(|| {
+                        panic!("{} properties must be an object", descriptor.params)
+                    });
+                properties.extend(metadata_properties.clone());
+                schema_obj.insert("additionalProperties".into(), json!(false));
+            }
         }
-        let schema_obj = definitions
-            .get_mut(&descriptor.params)
-            .and_then(Value::as_object_mut)
-            .unwrap_or_else(|| panic!("{} schema must be an object", descriptor.params));
-        let properties = schema_obj
-            .get_mut("properties")
-            .and_then(Value::as_object_mut)
-            .unwrap_or_else(|| panic!("{} properties must be an object", descriptor.params));
-        properties.extend(metadata_properties.clone());
-        schema_obj.insert("additionalProperties".into(), json!(false));
     }
     (
         methods,

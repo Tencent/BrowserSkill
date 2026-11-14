@@ -1216,6 +1216,10 @@ export interface ConsoleStackFrame {
  */
 export interface ConsoleParams {
   /**
+   * Optional cooperation context validated by the extension without renewing control.
+   */
+  context_id?: string;
+  /**
    * Include structured stack frames. Defaults to false.
    */
   include_stack?: boolean;
@@ -2349,6 +2353,10 @@ export interface ExtractField {
  */
 export interface ExtractParams {
   action: ExtractAction;
+  /**
+   * Optional cooperation context validated by the extension without renewing control.
+   */
+  context_id?: string;
   fields?: ExtractField[];
   item_selector?: string;
   max_bytes?: number;
@@ -2570,6 +2578,10 @@ export interface FocusResult {
  * via the `definition` "GetHtmlParams".
  */
 export interface GetHtmlParams {
+  /**
+   * Optional cooperation context validated by the extension without renewing control.
+   */
+  context_id?: string;
   /**
    * Truncate the HTML to at most this many bytes. Optional;
    * extension applies a sensible default (`524288` = 512 KiB) when
@@ -3001,6 +3013,10 @@ export interface NetworkEntry {
  * via the `definition` "NetworkParams".
  */
 export interface NetworkParams {
+  /**
+   * Optional cooperation context validated by the extension without renewing control.
+   */
+  context_id?: string;
   /**
    * Maximum number of entries to return. Extension applies safe defaults and caps.
    */
@@ -3662,6 +3678,10 @@ export interface ScreenshotFullPageResult {
  */
 export interface ScreenshotParams {
   /**
+   * Optional cooperation context validated by the extension without renewing control.
+   */
+  context_id?: string;
+  /**
    * Optional `@e<N>` ref allocated by the last `tool.snapshot`.
    * Accepts both `"e3"` and `"@e3"`.
    */
@@ -3970,6 +3990,10 @@ export interface SessionStopParams {
  * via the `definition` "SnapshotParams".
  */
 export interface SnapshotParams {
+  /**
+   * Optional cooperation context validated by the extension without renewing control.
+   */
+  context_id?: string;
   /**
    * Cap the depth of the rendered tree (defense against very deep
    * pages). Implementation-defined default; agents typically use
@@ -4416,6 +4440,10 @@ export interface VideoReadResult {
  */
 export interface WaitForElementParams {
   /**
+   * Optional cooperation context validated by the extension without renewing control.
+   */
+  context_id?: string;
+  /**
    * Polling interval, shortened near the deadline to allow a final probe.
    * Defaults to 100ms; values outside 16..=2000ms are rejected.
    */
@@ -4476,6 +4504,10 @@ export interface WaitForElementResult {
  * via the `definition` "WaitForNavigationParams".
  */
 export interface WaitForNavigationParams {
+  /**
+   * Optional cooperation context validated by the extension without renewing control.
+   */
+  context_id?: string;
   session_id: string;
   /**
    * Target tab. Defaults to the Agent Window's currently active tab.

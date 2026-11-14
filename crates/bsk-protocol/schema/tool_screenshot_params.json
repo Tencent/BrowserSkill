@@ -3,6 +3,13 @@
   "additionalProperties": false,
   "description": "Parameters for `tool.screenshot`. Omit `ref` to capture the visible\ntab; pass an `@e<N>` ref from the last `tool.snapshot` to crop to\nthat element.",
   "properties": {
+    "context_id": {
+      "description": "Optional cooperation context validated by the extension without renewing control.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
     "ref": {
       "description": "Optional `@e<N>` ref allocated by the last `tool.snapshot`.\nAccepts both `\"e3\"` and `\"@e3\"`.",
       "type": [

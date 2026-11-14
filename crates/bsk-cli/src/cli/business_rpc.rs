@@ -20,7 +20,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use anyhow::Context;
-use bsk_protocol::{CancelParams, CancelResult, ErrorCode, Method, RpcError, RpcId};
+use bsk_protocol::{
+    ActionMetadataPolicy, CancelParams, CancelResult, ErrorCode, Method, RpcError, RpcId,
+};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use tokio::time::{Instant, timeout_at};
@@ -140,24 +142,32 @@ impl ClientContext {
                 "depends_on requires context"
             )));
         }
-        if *method == Method::ToolRead {
-            if !self.depends_on.is_empty() || self.observation_id.is_some() || self.expect.is_some()
-            {
-                return Err(CliError::invalid_params(anyhow::anyhow!(
-                    "{} does not accept depends_on, observation_id, or expect",
-                    method.wire_name()
-                )));
+        let policy = method.action_metadata_policy();
+        match policy {
+            ActionMetadataPolicy::None => {
+                if self.context_id.is_some()
+                    || !self.depends_on.is_empty()
+                    || self.observation_id.is_some()
+                    || self.expect.is_some()
+                {
+                    return Err(CliError::invalid_params(anyhow::anyhow!(
+                        "{} does not accept action metadata (context_id, depends_on, observation_id, expect)",
+                        method.wire_name()
+                    )));
+                }
             }
-        } else if !method.accepts_action_metadata()
-            && (self.context_id.is_some()
-                || !self.depends_on.is_empty()
-                || self.observation_id.is_some()
-                || self.expect.is_some())
-        {
-            return Err(CliError::invalid_params(anyhow::anyhow!(
-                "{} does not accept action metadata (context_id, depends_on, observation_id, expect)",
-                method.wire_name()
-            )));
+            ActionMetadataPolicy::ContextOnly => {
+                if !self.depends_on.is_empty()
+                    || self.observation_id.is_some()
+                    || self.expect.is_some()
+                {
+                    return Err(CliError::invalid_params(anyhow::anyhow!(
+                        "{} does not accept depends_on, observation_id, or expect",
+                        method.wire_name()
+                    )));
+                }
+            }
+            ActionMetadataPolicy::Full => {}
         }
 
         let mut value = params
@@ -167,68 +177,72 @@ impl ClientContext {
             return Ok(value);
         };
 
-        if *method == Method::ToolRead {
-            if ["depends_on", "observation_id", "expect"]
-                .iter()
-                .any(|key| object.get(*key).is_some_and(|v| !v.is_null()))
-            {
-                return Err(CliError::invalid_params(anyhow::anyhow!(
-                    "{} does not accept depends_on, observation_id, or expect",
-                    method.wire_name()
-                )));
-            }
-            if let Some(context) = &self.context_id {
-                if let Some(existing) = object.get("context_id").filter(|v| !v.is_null()) {
-                    if existing.as_str() != Some(context.as_str()) {
-                        return Err(CliError::invalid_params(anyhow::anyhow!(
-                            "--context conflicts with the action's context_id"
-                        )));
-                    }
-                } else {
-                    object.insert("context_id".into(), context.clone().into());
-                }
-            }
-        } else if !method.accepts_action_metadata() {
-            if ["context_id", "depends_on", "observation_id", "expect"]
-                .iter()
-                .any(|key| object.get(*key).is_some_and(|v| !v.is_null()))
-            {
-                return Err(CliError::invalid_params(anyhow::anyhow!(
-                    "{} does not accept action metadata (context_id, depends_on, observation_id, expect)",
-                    method.wire_name()
-                )));
-            }
-        } else {
-            if let Some(context) = &self.context_id {
-                if let Some(existing) = object.get("context_id").filter(|v| !v.is_null()) {
-                    if existing.as_str() != Some(context.as_str()) {
-                        return Err(CliError::invalid_params(anyhow::anyhow!(
-                            "--context conflicts with the action's context_id"
-                        )));
-                    }
-                } else {
-                    object.insert("context_id".into(), context.clone().into());
-                }
-                if !self.depends_on.is_empty() {
-                    object.insert(
-                        "depends_on".into(),
-                        serde_json::to_value(&self.depends_on)
-                            .map_err(|err| CliError::Local(err.into()))?,
-                    );
-                }
-            }
-            if let Some(observation) = &self.observation_id {
-                if let Some(existing) = object.get("observation_id").filter(|v| !v.is_null())
-                    && existing.as_str() != Some(observation.as_str())
+        match policy {
+            ActionMetadataPolicy::None => {
+                if ["context_id", "depends_on", "observation_id", "expect"]
+                    .iter()
+                    .any(|key| object.get(*key).is_some_and(|v| !v.is_null()))
                 {
                     return Err(CliError::invalid_params(anyhow::anyhow!(
-                        "--observation conflicts with the action's observation_id"
+                        "{} does not accept action metadata (context_id, depends_on, observation_id, expect)",
+                        method.wire_name()
                     )));
                 }
-                object.insert("observation_id".into(), observation.clone().into());
             }
-            if let Some(expect) = &self.expect {
-                object.insert("expect".into(), expect.clone());
+            ActionMetadataPolicy::ContextOnly => {
+                if ["depends_on", "observation_id", "expect"]
+                    .iter()
+                    .any(|key| object.get(*key).is_some_and(|v| !v.is_null()))
+                {
+                    return Err(CliError::invalid_params(anyhow::anyhow!(
+                        "{} does not accept depends_on, observation_id, or expect",
+                        method.wire_name()
+                    )));
+                }
+                if let Some(context) = &self.context_id {
+                    if let Some(existing) = object.get("context_id").filter(|v| !v.is_null()) {
+                        if existing.as_str() != Some(context.as_str()) {
+                            return Err(CliError::invalid_params(anyhow::anyhow!(
+                                "--context conflicts with the action's context_id"
+                            )));
+                        }
+                    } else {
+                        object.insert("context_id".into(), context.clone().into());
+                    }
+                }
+            }
+            ActionMetadataPolicy::Full => {
+                if let Some(context) = &self.context_id {
+                    if let Some(existing) = object.get("context_id").filter(|v| !v.is_null()) {
+                        if existing.as_str() != Some(context.as_str()) {
+                            return Err(CliError::invalid_params(anyhow::anyhow!(
+                                "--context conflicts with the action's context_id"
+                            )));
+                        }
+                    } else {
+                        object.insert("context_id".into(), context.clone().into());
+                    }
+                    if !self.depends_on.is_empty() {
+                        object.insert(
+                            "depends_on".into(),
+                            serde_json::to_value(&self.depends_on)
+                                .map_err(|err| CliError::Local(err.into()))?,
+                        );
+                    }
+                }
+                if let Some(observation) = &self.observation_id {
+                    if let Some(existing) = object.get("observation_id").filter(|v| !v.is_null())
+                        && existing.as_str() != Some(observation.as_str())
+                    {
+                        return Err(CliError::invalid_params(anyhow::anyhow!(
+                            "--observation conflicts with the action's observation_id"
+                        )));
+                    }
+                    object.insert("observation_id".into(), observation.clone().into());
+                }
+                if let Some(expect) = &self.expect {
+                    object.insert("expect".into(), expect.clone());
+                }
             }
         }
 
@@ -715,13 +729,40 @@ mod tests {
             context_id: Some("ctx-read".into()),
             ..ClientContext::default()
         };
-        let read_params = read_ctx
-            .prepare_params(&Method::ToolRead, Some(json!({"session_id":"s1"})))
-            .unwrap()
-            .unwrap();
-        assert_eq!(read_params["context_id"], "ctx-read");
+        for passive_method in [
+            Method::ToolSnapshot,
+            Method::ToolGetHtml,
+            Method::ToolRead,
+            Method::ToolExtract,
+            Method::ToolScreenshot,
+            Method::ToolConsole,
+            Method::ToolNetwork,
+            Method::ToolWaitForNavigation,
+            Method::ToolWaitForElement,
+        ] {
+            let passive_params = read_ctx
+                .prepare_params(&passive_method, Some(json!({"session_id":"s1"})))
+                .unwrap()
+                .unwrap();
+            assert_eq!(passive_params["context_id"], "ctx-read");
+            let inline_params = ClientContext::default()
+                .prepare_params(
+                    &passive_method,
+                    Some(json!({"session_id":"s1","context_id":"ctx-inline"})),
+                )
+                .unwrap()
+                .unwrap();
+            assert_eq!(inline_params["context_id"], "ctx-inline");
+            assert!(
+                ctx.prepare_params(&passive_method, Some(json!({"session_id":"s1"})))
+                    .is_err(),
+                "{} must reject expect/observation/depends_on",
+                passive_method.wire_name()
+            );
+        }
         assert!(
-            ctx.prepare_params(&Method::ToolRead, Some(json!({"session_id":"s1"})))
+            read_ctx
+                .prepare_params(&Method::TransferBegin, Some(json!({"session_id":"s1"})))
                 .is_err()
         );
     }

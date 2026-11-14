@@ -28,7 +28,6 @@ use super::navigation::WaitUntil;
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
 pub struct WaitForNavigationParams {
     pub session_id: String,
     /// Target tab. Defaults to the Agent Window's currently active tab.
@@ -130,7 +129,6 @@ impl ElementState {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
 pub struct WaitForElementParams {
     pub session_id: String,
     /// Optional `@e<N>` ref from the latest snapshot or observe.

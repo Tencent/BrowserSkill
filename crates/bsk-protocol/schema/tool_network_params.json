@@ -2,6 +2,13 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "additionalProperties": false,
   "properties": {
+    "context_id": {
+      "description": "Optional cooperation context validated by the extension without renewing control.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
     "limit": {
       "description": "Maximum number of entries to return. Extension applies safe defaults and caps.",
       "format": "uint32",

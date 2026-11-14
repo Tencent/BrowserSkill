@@ -51,6 +51,50 @@ function makeRequest(method: string, params: unknown): RequestFrame {
   return { id: "r-1", method, params };
 }
 
+function makeRecordTestCdp(tabId: number): TestDispatcherCdp {
+  type EventListener = (source: chrome.debugger.Debuggee, method: string, params: unknown) => void;
+  const listeners: EventListener[] = [];
+  return {
+    send: vi.fn(async (_tabId: number, method: string) => {
+      if (method === "Page.getFrameTree") {
+        return { frameTree: { frame: { id: "frame-1", loaderId: "loader-before" } } };
+      }
+      if (method === "Page.navigate") {
+        for (const listener of [...listeners]) {
+          listener({ tabId }, "Page.lifecycleEvent", {
+            name: "load",
+            frameId: "frame-1",
+            loaderId: "loader-after",
+          });
+        }
+        return { frameId: "frame-1", loaderId: "loader-after" };
+      }
+      if (method === "Page.getLayoutMetrics") {
+        return { cssLayoutViewport: { clientWidth: 1280, clientHeight: 720 } };
+      }
+      if (method === "Runtime.evaluate") {
+        return { result: { value: { idleMs: 10_000, readyState: "complete" } } };
+      }
+      if (method === "Accessibility.getFullAXTree") {
+        return { nodes: [] };
+      }
+      return {};
+    }),
+    trackSessionTab: vi.fn(),
+    detachSession: vi.fn(async () => {}),
+    releaseSessionTab: vi.fn(async () => {}),
+    onEvent: (handler: EventListener) => {
+      listeners.push(handler);
+      return {
+        dispose: () => {
+          const idx = listeners.indexOf(handler);
+          if (idx >= 0) listeners.splice(idx, 1);
+        },
+      };
+    },
+  } as unknown as TestDispatcherCdp;
+}
+
 describe("ToolDispatcher", () => {
   it.each([
     false,
@@ -252,7 +296,14 @@ describe("ToolDispatcher", () => {
     } as unknown as TestDispatcherCdp;
     const dispatcher = new ToolDispatcher({ transport, sessions, cdp });
     dispatcher.start();
-    deliver(makeRequest(method, { session_id: "test", expression: "document.title" }));
+    deliver(
+      makeRequest(
+        method,
+        method === "tool.evaluate"
+          ? { session_id: "test", expression: "document.title" }
+          : { session_id: "test" },
+      ),
+    );
     await vi.waitFor(() => expect(sent).toHaveLength(1));
     expect(sent[0]).toMatchObject({
       error: {
@@ -316,9 +367,11 @@ describe("ToolDispatcher", () => {
       () => () => {},
       () => () => {},
     );
+    const cdp = makeRecordTestCdp(7);
     const dispatcher = new ToolDispatcher({
       transport,
       sessions,
+      cdp,
       recording: {
         tabsApi: {
           get: vi.fn(async () => tab),
@@ -1986,11 +2039,18 @@ it.each([
   ).mockImplementation(async (_req, _signal, inputSent) => {
     inputSent(10);
     for (const fn of listeners) fn({ sourceTabId: 10, sourceFrameId: 0, tabId: 20 });
-    return {};
+    return { tab_id: 10 };
   });
   dispatcher.start();
   try {
-    f.deliver({ id: "open", method, params: { session_id: "popup", tab_id: 10, key: "Enter" } });
+    f.deliver({
+      id: "open",
+      method,
+      params:
+        method === "tool.click"
+          ? { session_id: "popup", tab_id: 10, selector: "#open" }
+          : { session_id: "popup", tab_id: 10, key: "Enter" },
+    });
     await vi.waitFor(() => expect(f.sent.some((r) => "id" in r && r.id === "open")).toBe(true));
     expect(task.observedTabs?.has(20)).toBe(true);
     expect(task.agentCreatedTabs.has(20)).toBe(false);
@@ -2586,15 +2646,11 @@ describe("implicit auto-borrow when confirmTabBorrow is false", () => {
       () => () => {},
       () => () => {},
     );
-    const cdp = {
-      send: vi.fn(async <T>() => ({}) as T),
-      detachSession: vi.fn(async () => {}),
-      releaseSessionTab: vi.fn(async () => {}),
-    };
+    const cdp = makeRecordTestCdp(8);
     const dispatcher = new ToolDispatcher({
       transport,
       sessions,
-      cdp: cdp as unknown as TestDispatcherCdp,
+      cdp,
       recording: {
         tabsApi: {
           get: vi.fn(async () => borrowedTab),
@@ -2629,6 +2685,110 @@ describe("implicit auto-borrow when confirmTabBorrow is false", () => {
     } finally {
       dispatcher.stop();
       resetBrowserObservationForTests();
+    }
+  });
+
+  it("accepts optional context_id on passive reads and rejects full action metadata", async () => {
+    const tab = {
+      id: 7,
+      windowId: 4242,
+      active: true,
+      status: "complete",
+      url: "https://example.com/order",
+    } as chrome.tabs.Tab;
+    vi.stubGlobal("chrome", {
+      tabs: {
+        get: vi.fn(async () => tab),
+        query: vi.fn(async () => [tab]),
+      },
+    });
+    const { transport, sent, deliver } = fakeTransport();
+    const sessions = new SessionManager({
+      agentWindow: {
+        create: vi.fn(async () => ({ windowId: 4242, initialTabIds: [7] })),
+        remove: vi.fn(async () => {}),
+        ensureActiveTab: vi.fn(async () => 7),
+      },
+    });
+    await sessions.start("aa11");
+    const cooperation = new CooperationController({
+      sessions,
+      readFrames: async () => ({
+        frames: new Map([
+          [
+            0,
+            {
+              document: "doc-a",
+              focusIsDocument: true,
+              revision: 0,
+              structure: 0,
+              human: 0,
+              busy: false,
+              editing: false,
+              lastInput: 0,
+              fields: [],
+              events: [],
+            },
+          ],
+        ]),
+        gaps: [],
+      }),
+      resumeFrames: async () => {},
+      changed: vi.fn(),
+    });
+    cooperation.startSession("aa11");
+    const cdp = {
+      ensureConsoleCapture: vi.fn(async () => {}),
+      consoleEntriesSince: vi.fn(() => ({
+        tab_id: 7,
+        entries: [],
+        next_since: 0,
+        truncated: false,
+      })),
+      send: vi.fn(async () => ({})),
+    } as unknown as TestDispatcherCdp;
+    const dispatcher = new ToolDispatcher({ transport, sessions, cdp, cooperation });
+    dispatcher.start();
+    try {
+      deliver({
+        id: "forged-ctx",
+        method: "tool.console",
+        params: { session_id: "aa11", tab_id: 7, context_id: "ctx-forged" },
+      });
+      await vi.waitFor(() => expect(sent).toHaveLength(1));
+      expect(sent[0]).toMatchObject({
+        id: "forged-ctx",
+        error: { code: "permission_denied" },
+      });
+
+      deliver({
+        id: "null-ctx",
+        method: "tool.console",
+        params: { session_id: "aa11", tab_id: 7, context_id: null },
+      });
+      await vi.waitFor(() => expect(sent).toHaveLength(2));
+      expect(sent[1]).toMatchObject({
+        id: "null-ctx",
+        result: { tab_id: 7, entries: [] },
+      });
+
+      deliver({
+        id: "forbidden-expect",
+        method: "tool.snapshot",
+        params: {
+          session_id: "aa11",
+          tab_id: 7,
+          expect: [{ target: "#ok", field: "exists", equals: true }],
+        },
+      });
+      await vi.waitFor(() => expect(sent).toHaveLength(3));
+      expect(sent[2]).toMatchObject({
+        id: "forbidden-expect",
+        error: { code: "invalid_params" },
+      });
+    } finally {
+      dispatcher.stop();
+      vi.unstubAllGlobals();
     }
   });
 });

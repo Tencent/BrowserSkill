@@ -55,6 +55,13 @@
     "action": {
       "$ref": "#/definitions/ExtractAction"
     },
+    "context_id": {
+      "description": "Optional cooperation context validated by the extension without renewing control.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
     "fields": {
       "items": {
         "$ref": "#/definitions/ExtractField"
