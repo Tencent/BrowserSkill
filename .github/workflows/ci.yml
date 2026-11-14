@@ -248,10 +248,13 @@ jobs:
           cache: pnpm
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
-      - name: Prepare extension types
-        run: pnpm --filter @browser-skill/extension exec wxt prepare
-      - name: Run download cancellation browser regression
-        run: node scripts/run-browser-tests.mjs src/tools/__tests__/download-deadline.browser.test.ts
+      - name: Build extension
+        run: pnpm --filter @browser-skill/extension build
+      - name: Run download cancellation and long-screenshot renderer regressions
+        run: >-
+          node scripts/run-browser-tests.mjs
+          src/tools/__tests__/download-deadline.browser.test.ts
+          src/long-screenshot/renderer.browser.test.ts
 
   browser-input:
     name: Browser input readiness regression
@@ -354,7 +357,6 @@ jobs:
       - name: Run full-page screenshot, incognito and remote-connection regressions
         run: >-
           node scripts/run-browser-tests.mjs
-          src/long-screenshot/renderer.browser.test.ts
           src/long-screenshot/long-screenshot.browser.test.ts
           src/long-screenshot/agent.browser.test.ts
           src/tools/__tests__/background-full-page.browser.test.ts

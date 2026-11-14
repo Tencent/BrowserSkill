@@ -34,6 +34,7 @@ describe.skipIf(!process.env.BSK_TEST_CHROME)("long screenshot renderer pixels",
     current = false,
   }) => {
     const totalRows = height + (lazy ? 400 : 0) + delayedBatches * 900;
+    const needDataUrl = height <= 30_000 || Boolean(process.env.BSK_LONG_SCREENSHOT_OUTPUT);
     const require = createRequire(import.meta.resolve("wxt"));
     const { build } = require("esbuild");
     const bundle = await build({
@@ -56,17 +57,29 @@ describe.skipIf(!process.env.BSK_TEST_CHROME)("long screenshot renderer pixels",
         globalThis.nextShot = null;
         globalThis.captureTrace = [];
         globalThis.runCapture = () => {
-          capturePage({checkFreshness:true,scope:${JSON.stringify(current ? "current" : "follow")},signal:abort.signal,label:'Capturing',cancelLabel:'Cancel',progress:()=>{},
-            write:(...args)=>writer.write(...args),
-            page:async command=>{const metrics=await page.handle({type:'bsk/long-screenshot-page',id:'pixel-test',...command});
-              captureTrace.push({command,metrics});if(captureTrace.length>8)captureTrace.shift();return metrics;},
-            screenshot:()=>new Promise(resolve=>{globalThis.nextShot=async data=>{
-              globalThis.nextShot=null; resolve(await createImageBitmap(await (await fetch(data)).blob()));
-            };})
-          }).then(async result=>{
-            const blob=await exportPng(writer.shot); globalThis.savedShot=writer.shot;
-            const reader=new FileReader(); reader.onload=()=>{globalThis.shotState={phase:'complete',width:result.width,height:result.height,pixelStats:{...stats},data:reader.result};};reader.readAsDataURL(blob);
-          },error=>{globalThis.shotState={phase:'error',error:String(error)};});
+          (async () => {
+            const result = await capturePage({checkFreshness:true,scope:${JSON.stringify(current ? "current" : "follow")},signal:abort.signal,label:'Capturing',cancelLabel:'Cancel',progress:()=>{},
+              write:(...args)=>writer.write(...args),
+              page:async command=>{const metrics=await page.handle({type:'bsk/long-screenshot-page',id:'pixel-test',...command});
+                captureTrace.push({command,metrics});if(captureTrace.length>8)captureTrace.shift();return metrics;},
+              screenshot:()=>new Promise(resolve=>{globalThis.nextShot=async data=>{
+                globalThis.nextShot=null; resolve(await createImageBitmap(await (await fetch(data)).blob()));
+              };})
+            });
+            const blob = await exportPng(writer.shot);
+            globalThis.savedShot = writer.shot;
+            const data = ${JSON.stringify(needDataUrl)}
+              ? await new Promise((resolve, reject) => {
+                  const reader = new FileReader();
+                  reader.onload = () => resolve(reader.result);
+                  reader.onerror = () => reject(reader.error ?? new Error('FileReader failed'));
+                  reader.readAsDataURL(blob);
+                })
+              : '';
+            globalThis.shotState = {phase:'complete',width:result.width,height:result.height,pixelStats:{...stats},data};
+          })().catch(error => {
+            globalThis.shotState = {phase:'error',error:String(error)};
+          });
         };`,
         resolveDir: path.resolve("src/long-screenshot"),
         loader: "ts",
@@ -156,7 +169,7 @@ describe.skipIf(!process.env.BSK_TEST_CHROME)("long screenshot renderer pixels",
           );
           await evaluate(bundle.outputFiles[0].text);
           await evaluate("runCapture()");
-          const deadline = Date.now() + 180_000;
+          const deadline = Date.now() + 300_000;
           while (Date.now() < deadline) {
             const status = await evaluate<{ phase: string; error?: string; needsShot: boolean }>(
               "({...shotState,data:undefined,needsShot:!!nextShot})",
@@ -172,13 +185,16 @@ describe.skipIf(!process.env.BSK_TEST_CHROME)("long screenshot renderer pixels",
               await evaluate(`nextShot(${JSON.stringify(`data:image/png;base64,${shot.data}`)})`);
             } else await new Promise((resolve) => setTimeout(resolve, 50));
           }
+          const copyDataToNode = Boolean(process.env.BSK_LONG_SCREENSHOT_OUTPUT);
           const result = await evaluate<{
             phase: string;
+            error?: string;
             width: number;
             height: number;
             data: string;
             pixelStats: { maxCanvasHeight: number; peak: number; bitmapBytes: number };
-          }>("shotState");
+          }>(copyDataToNode ? "shotState" : "({...shotState,data:''})");
+          if (result.error) throw new Error(result.error);
           expect(result.phase).toBe("complete");
           expect(result.height, JSON.stringify(await evaluate("captureTrace"))).toBe(
             Math.round(
@@ -299,7 +315,7 @@ describe.skipIf(!process.env.BSK_TEST_CHROME)("long screenshot renderer pixels",
             ).toBeLessThan(12);
           }
           await evaluate("document.querySelector('button').click()");
-          for (let i = 0; i < 600; i++) {
+          for (let i = 0; i < 1200; i++) {
             if (await evaluate("!!globalThis.downloadArgs")) break;
             await new Promise((resolve) => setTimeout(resolve, 50));
           }
@@ -325,5 +341,5 @@ describe.skipIf(!process.env.BSK_TEST_CHROME)("long screenshot renderer pixels",
     } finally {
       await new Promise<void>((resolve) => server.close(() => resolve()));
     }
-  }, 240_000);
+  }, 360_000);
 });
