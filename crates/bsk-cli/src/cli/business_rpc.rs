@@ -29,7 +29,7 @@ use tokio::time::{Instant, timeout_at};
 use tracing::debug;
 
 use crate::cli::error::CliError;
-use crate::ipc_client::IpcClient;
+use crate::ipc_client::{IpcClient, IpcRequestMeta, IpcResponseMeta};
 
 /// Total budget after cancellation is observed: connecting, sending cancel,
 /// retrying before registration, and waiting for the original RPC to settle.
@@ -301,14 +301,29 @@ impl ClientContext {
             }
         }
 
-        let has_empty_session = object
-            .get("session_id")
-            .is_some_and(|v| v.is_null() || v.as_str().is_some_and(|s| s.trim().is_empty()));
-        if has_empty_session && !object.contains_key("_caller_scope") {
-            object.insert("_caller_scope".into(), self.resolved_caller_scope().into());
-        }
-
         Ok(value)
+    }
+
+    /// Prepare both the clean business JSON `params` and the out-of-band
+    /// [`IpcRequestMeta`] envelope header for `method`.
+    pub fn prepare_envelope<P: Serialize>(
+        &self,
+        method: &Method,
+        params: Option<P>,
+        mut meta: IpcRequestMeta,
+    ) -> Result<(Option<serde_json::Value>, IpcRequestMeta), CliError> {
+        let value = self.prepare_params(method, params)?;
+        let has_empty_session = value
+            .as_ref()
+            .and_then(|v| v.as_object())
+            .and_then(|obj| obj.get("session_id"))
+            .is_some_and(|v| v.is_null() || v.as_str().is_some_and(|s| s.trim().is_empty()));
+        if meta.caller_scope.is_none()
+            && (has_empty_session || meta.bind_scope || meta.reuse_or_start_scope)
+        {
+            meta.caller_scope = Some(self.resolved_caller_scope());
+        }
+        Ok((value, meta))
     }
 
     /// Issue a business RPC against the daemon with SIGINT-driven cancellation.
@@ -324,12 +339,45 @@ impl ClientContext {
         P: Serialize,
         R: DeserializeOwned + Send + 'static,
     {
+        self.call_envelope::<P, R>(
+            sock,
+            rpc_id_prefix,
+            method,
+            params,
+            IpcRequestMeta::default(),
+            call_timeout,
+        )
+        .map(|(reply, _)| reply)
+    }
+
+    /// Issue a business RPC with an explicit [`IpcRequestMeta`] envelope and
+    /// return both the decoded reply and [`IpcResponseMeta`].
+    pub fn call_envelope<P, R>(
+        &self,
+        sock: PathBuf,
+        rpc_id_prefix: &str,
+        method: Method,
+        params: Option<P>,
+        meta: IpcRequestMeta,
+        call_timeout: Duration,
+    ) -> Result<(R, IpcResponseMeta), CliError>
+    where
+        P: Serialize,
+        R: DeserializeOwned + Send + 'static,
+    {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .context("build tokio runtime for business RPC")
             .map_err(CliError::Local)?;
-        rt.block_on(self.call_async::<P, R>(sock, rpc_id_prefix, method, params, call_timeout))
+        rt.block_on(self.call_envelope_async::<P, R>(
+            sock,
+            rpc_id_prefix,
+            method,
+            params,
+            meta,
+            call_timeout,
+        ))
     }
 
     /// Same as [`ClientContext::call`] but assumes a pre-existing tokio runtime context.
@@ -341,6 +389,32 @@ impl ClientContext {
         params: Option<P>,
         call_timeout: Duration,
     ) -> Result<R, CliError>
+    where
+        P: Serialize,
+        R: DeserializeOwned + Send + 'static,
+    {
+        self.call_envelope_async::<P, R>(
+            sock,
+            rpc_id_prefix,
+            method,
+            params,
+            IpcRequestMeta::default(),
+            call_timeout,
+        )
+        .await
+        .map(|(reply, _)| reply)
+    }
+
+    /// Same as [`ClientContext::call_envelope`] inside an existing tokio runtime.
+    pub async fn call_envelope_async<P, R>(
+        &self,
+        sock: PathBuf,
+        rpc_id_prefix: &str,
+        method: Method,
+        params: Option<P>,
+        meta: IpcRequestMeta,
+        call_timeout: Duration,
+    ) -> Result<(R, IpcResponseMeta), CliError>
     where
         P: Serialize,
         R: DeserializeOwned + Send + 'static,
@@ -358,7 +432,7 @@ impl ClientContext {
             }));
         }
         let rpc_id: RpcId = format!("{}-{}", rpc_id_prefix, random_short_id());
-        let params = self.prepare_params(&method, params)?;
+        let (params, meta) = self.prepare_envelope(&method, params, meta)?;
         // Optimistic single-UDS fast path: connect once and send the target RPC directly.
         // Fail-safe auto-spawn: ONLY if initial connect() fails before any bytes are written
         // (NotFound / ConnectionRefused on an unverified optimistic daemon.json candidate),
@@ -390,12 +464,18 @@ impl ClientContext {
         let main_fut = async move {
             action_started_ref.store(true, Ordering::Relaxed);
             client
-                .call_with_id::<serde_json::Value, R>(rpc_id_for_call, method, params, call_timeout)
+                .call_envelope_with_id::<serde_json::Value, R>(
+                    rpc_id_for_call,
+                    method,
+                    params,
+                    meta,
+                    call_timeout,
+                )
                 .await
         };
         tokio::pin!(main_fut);
 
-        let outcome = tokio::select! {
+        let (outcome, resp_meta) = tokio::select! {
             biased;
             // Arm cancellation before the RPC can dispatch browser input.
             sig = wait_for_cancel(parent_cancel) => {
@@ -446,7 +526,9 @@ impl ClientContext {
             res = &mut main_fut => res?,
         };
 
-        outcome.map_err(CliError::from_rpc)
+        outcome
+            .map(|reply| (reply, resp_meta))
+            .map_err(CliError::from_rpc)
     }
 }
 
@@ -492,13 +574,14 @@ pub fn release_transfers<'a>(
     if ids.is_empty() {
         return Ok(());
     }
+    let sock = super::ensure_daemon::resolve_effective_sock(sock);
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .context("build runtime for transfer cleanup")?;
     rt.block_on(async {
         tokio::time::timeout(CLEANUP_TIMEOUT, async {
-            let mut client = IpcClient::connect(sock).await?;
+            let mut client = IpcClient::connect(&sock).await?;
             for id in ids {
                 client
                     .call::<_, TransferReleaseResult>(
@@ -759,15 +842,23 @@ mod tests {
         );
         let stripped = ctx.without_action_metadata();
         assert_eq!(stripped.scope.as_deref(), Some("agent-1"));
-        let wait_params = stripped
-            .prepare_params(&Method::ToolWaitForElement, Some(json!({"session_id":""})))
-            .unwrap()
+        let (wait_params, wait_meta) = stripped
+            .prepare_envelope(
+                &Method::ToolWaitForElement,
+                Some(json!({"session_id":""})),
+                crate::ipc_client::IpcRequestMeta::default(),
+            )
             .unwrap();
+        let wait_params = wait_params.unwrap();
         assert!(wait_params.get("expect").is_none());
         assert!(wait_params.get("context_id").is_none());
+        assert_eq!(wait_params, json!({"session_id": ""}));
         assert_eq!(
-            wait_params["_caller_scope"],
-            crate::daemon::scopes::resolve_caller_scope_from_env(Some("agent-1"), None)
+            wait_meta.caller_scope.as_deref(),
+            Some(
+                crate::daemon::scopes::resolve_caller_scope_from_env(Some("agent-1"), None)
+                    .as_str()
+            )
         );
 
         let mcp_ctx = ClientContext::for_mcp(Some("mcp:42:nonce"), None, None, vec![], None, None)
@@ -863,5 +954,161 @@ mod tests {
                 .prepare_params(&Method::TransferBegin, Some(json!({"session_id":"s1"})))
                 .is_err()
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn redirected_optimistic_sock_is_honored_by_post_rpc_cleanup_helpers() {
+        use crate::cli::ensure_daemon::ensure_daemon_optimistic;
+        use crate::daemon::info::{self as daemon_info, DaemonInfo};
+        use crate::daemon::paths::{BSK_HOME_ENV, ensure_bsk_home, test_env_lock};
+        use serde_json::Value;
+        use std::sync::{Arc, Mutex};
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+        use tokio::net::UnixListener;
+
+        let _lock = test_env_lock();
+        let tmp = tempfile::tempdir_in("/tmp").unwrap();
+        let home = tmp.path().join("bsk-home");
+        unsafe {
+            std::env::set_var(BSK_HOME_ENV, &home);
+        }
+        ensure_bsk_home().unwrap();
+
+        let stale_sock = home.join("stale.sock");
+        // Bind and immediately drop so `stale.sock` exists on disk for the optimistic
+        // check, then deterministically fails `connect()` with `ConnectionRefused`.
+        drop(std::os::unix::net::UnixListener::bind(&stale_sock).unwrap());
+        let stale_info = DaemonInfo::now(std::process::id(), stale_sock.clone(), 52890, "0.5.0")
+            .with_protocol_version("2.0");
+        daemon_info::write(&stale_info).unwrap();
+
+        let optimistic_info = ensure_daemon_optimistic().unwrap();
+        assert_eq!(optimistic_info.sock_path, stale_sock);
+
+        // Replacement pre-envelope `2.0` daemon now serves at `fresh.sock`.
+        let fresh_sock = home.join("fresh.sock");
+        let fresh_sock_for_srv = fresh_sock.clone();
+        let fresh_sock_str = fresh_sock.to_string_lossy().into_owned();
+        let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(1);
+
+        let captured: Arc<Mutex<Vec<Value>>> = Arc::new(Mutex::new(Vec::new()));
+        let captured_srv = Arc::clone(&captured);
+
+        let srv_thread = std::thread::spawn(move || {
+            let srv_rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            srv_rt.block_on(async move {
+                let listener = UnixListener::bind(&fresh_sock_for_srv).unwrap();
+                ready_tx.send(()).unwrap();
+                while let Ok((stream, _)) = listener.accept().await {
+                    let (read, mut write) = stream.into_split();
+                    let mut reader = BufReader::new(read);
+                    let mut line = String::new();
+                    while reader.read_line(&mut line).await.unwrap_or(0) > 0 {
+                        let raw: Value = serde_json::from_str(line.trim_end()).unwrap();
+                        assert!(
+                            raw.get("meta").is_none(),
+                            "pre-envelope 2.0 fresh daemon must never receive wire `meta`: {raw}"
+                        );
+                        let method = raw["method"].as_str().unwrap_or("").to_string();
+                        captured_srv.lock().unwrap().push(raw.clone());
+                        let reply = match method.as_str() {
+                            "system.status" => json!({
+                                "id": raw["id"],
+                                "result": {
+                                    "daemon_version": "0.5.0",
+                                    "protocol_version": "2.0",
+                                    "pid": std::process::id(),
+                                    "uptime_secs": 1,
+                                    "ws_port": 52891,
+                                    "sock_path": fresh_sock_str,
+                                    "browsers": [],
+                                    "sessions": []
+                                }
+                            }),
+                            "system.ping" => json!({
+                                "id": raw["id"],
+                                "result": { "pong": true }
+                            }),
+                            "tool.screenshot_release" | "transfer.release" => json!({
+                                "id": raw["id"],
+                                "result": { "released": true }
+                            }),
+                            other => panic!("unexpected method on fresh.sock: {other}"),
+                        };
+                        let mut bytes = serde_json::to_vec(&reply).unwrap();
+                        bytes.push(b'\n');
+                        write.write_all(&bytes).await.unwrap();
+                        write.flush().await.unwrap();
+                        if method == "transfer.release" {
+                            return;
+                        }
+                        line.clear();
+                    }
+                }
+            });
+        });
+
+        ready_rx.recv().unwrap();
+        let fresh_info = DaemonInfo::now(std::process::id(), fresh_sock.clone(), 52891, "0.5.0")
+            .with_protocol_version("2.0");
+        daemon_info::write(&fresh_info).unwrap();
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let ctx = ClientContext {
+            scope: Some("cleanup-scope".into()),
+            ..ClientContext::default()
+        };
+        rt.block_on(async {
+            let _: bsk_protocol::PingResult = ctx
+                .call_async(
+                    optimistic_info.sock_path.clone(),
+                    "ping",
+                    Method::SystemPing,
+                    None::<()>,
+                    Duration::from_secs(5),
+                )
+                .await
+                .unwrap();
+
+            // Still passing `&optimistic_info.sock_path` (`stale.sock`), just as
+            // `screenshot.rs` does after `call_envelope_async` redirected!
+            crate::cli::screenshot::release_full_page_async(
+                &optimistic_info.sock_path,
+                "",
+                "scope:cleanup-scope",
+                "cap-redirect-1",
+            )
+            .await
+            .unwrap();
+        });
+
+        // Synchronous `release_transfers` builds its own runtime, just as `upload.rs`
+        // and `download.rs` invoke it with `&info.sock_path` (`stale.sock`).
+        super::release_transfers(&optimistic_info.sock_path, ["tr-redirect-1"]).unwrap();
+
+        srv_thread.join().unwrap();
+        let frames = captured.lock().unwrap();
+        let ss_rel = frames
+            .iter()
+            .find(|f| f["method"] == "tool.screenshot_release")
+            .expect("screenshot_release reached redirected fresh.sock");
+        assert_eq!(ss_rel["params"]["capture_id"], "cap-redirect-1");
+        assert_eq!(ss_rel["params"]["_caller_scope"], "scope:cleanup-scope");
+        let tr_rel = frames
+            .iter()
+            .find(|f| f["method"] == "transfer.release")
+            .expect("transfer.release reached redirected fresh.sock");
+        assert_eq!(tr_rel["params"]["transfer_id"], "tr-redirect-1");
+
+        unsafe {
+            std::env::remove_var(BSK_HOME_ENV);
+        }
     }
 }

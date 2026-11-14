@@ -51,6 +51,9 @@ mod wave2_ssot_mcp_e2e;
 #[cfg(unix)]
 #[path = "integration/wave2_zero_ceremony_lifecycle.rs"]
 mod wave2_zero_ceremony_lifecycle;
+#[cfg(unix)]
+#[path = "integration/wave3a_lifecycle_envelope_and_cache.rs"]
+mod wave3a_lifecycle_envelope_and_cache;
 
 #[path = "integration/audit_ws.rs"]
 mod audit_ws;

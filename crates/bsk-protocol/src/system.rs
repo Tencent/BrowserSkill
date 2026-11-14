@@ -629,6 +629,12 @@ pub struct StatusResult {
     /// `BrowserStatusEntry.version_skew`.
     #[serde(default)]
     pub version_skew_browsers: Vec<VersionSkewEntry>,
+    /// True when the daemon's local IPC listener supports the out-of-band
+    /// `IpcEnvelope` (`meta` header) in addition to legacy `"2.0"` `_`-prefixed
+    /// scope fields. Omitted when false so pre-envelope `"2.0"` daemons
+    /// deserialize as `false` without bumping `PROTOCOL_VERSION`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub ipc_envelope: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -674,5 +680,14 @@ mod status_compat_tests {
             .expect("legacy skew entry should deserialize");
         assert_eq!(skew.server_protocol_version, "");
         assert_eq!(skew.client_protocol_version, "");
+        assert!(
+            !status.ipc_envelope,
+            "pre-envelope StatusResult payloads must default ipc_envelope to false"
+        );
+        let round_trip = serde_json::to_value(&status).expect("StatusResult serializes");
+        assert!(
+            round_trip.get("ipc_envelope").is_none(),
+            "false ipc_envelope must be omitted on wire: {round_trip}"
+        );
     }
 }

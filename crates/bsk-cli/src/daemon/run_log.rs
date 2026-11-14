@@ -4,7 +4,7 @@
 //! keeps metadata only: an action, the role, name and context its ref had when it was
 //! used, and when that ref first appeared. Input values are never kept. Everything
 //! stays in memory, is bounded per session, and goes when the session ends.
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Mutex;
 
 use bsk_protocol::{ErrorCode, Method, ResponseBody, RpcError};
@@ -78,6 +78,8 @@ struct SessionLog {
     masked: HashSet<String>,
     heading: Option<String>,
     context: Option<String>,
+    pending_ops: HashMap<String, usize>,
+    resolved_ops: VecDeque<String>,
 }
 
 #[derive(Debug, Default)]
@@ -305,9 +307,133 @@ impl SessionLog {
             });
         }
     }
+
+    fn record_dialog_pending(&mut self, operation_id: &str, method: &Method) {
+        if self.resolved_ops.iter().any(|done| done == operation_id)
+            || self.pending_ops.contains_key(operation_id)
+        {
+            return;
+        }
+        if !method.is_mutating() && !matches!(method, Method::ToolHover) {
+            return;
+        }
+        if self.log.steps.len() >= MAX_STEPS {
+            self.log.truncated = true;
+            return;
+        }
+        let idx = self.log.steps.len();
+        self.log.steps.push(LoggedStep::Uncertain {
+            method: method_name(method),
+        });
+        self.pending_ops.insert(operation_id.to_owned(), idx);
+    }
+
+    fn resolve_operation(
+        &mut self,
+        operation_id: &str,
+        method: &Method,
+        params: &Value,
+        body: &ResponseBody,
+    ) {
+        if self.resolved_ops.iter().any(|done| done == operation_id) {
+            return;
+        }
+        if self.resolved_ops.len() >= 64 {
+            self.resolved_ops.pop_front();
+        }
+        self.resolved_ops.push_back(operation_id.to_owned());
+
+        let Some(pending_idx) = self.pending_ops.remove(operation_id) else {
+            match body {
+                ResponseBody::Ok(result) => self.finished_ok(method, params, result),
+                ResponseBody::Err(error) => self.finished_err(method, error),
+            }
+            return;
+        };
+
+        let saved_steps = std::mem::take(&mut self.log.steps);
+        let saved_truncated = self.log.truncated;
+        self.log.truncated = false;
+        match body {
+            ResponseBody::Ok(result) => self.finished_ok(method, params, result),
+            ResponseBody::Err(error) => self.finished_err(method, error),
+        }
+        let produced = std::mem::replace(&mut self.log.steps, saved_steps);
+        self.log.truncated = saved_truncated;
+
+        if pending_idx < self.log.steps.len() {
+            let mut iter = produced.into_iter();
+            if let Some(first) = iter.next() {
+                self.log.steps[pending_idx] = first;
+                for extra in iter {
+                    self.push(extra);
+                }
+            } else {
+                self.log.steps.remove(pending_idx);
+                for idx in self.pending_ops.values_mut() {
+                    if *idx > pending_idx {
+                        *idx -= 1;
+                    }
+                }
+            }
+        } else {
+            for step in produced {
+                self.push(step);
+            }
+        }
+    }
 }
 
 impl RunLogs {
+    pub fn remove_session(&self, session: &str) {
+        self.0.lock().expect("run log poisoned").remove(session);
+    }
+
+    /// Record a dialog-suspended action as temporarily `Uncertain` keyed by
+    /// `operation_id` so final resolution via [`Self::resolve_operation`]
+    /// replaces it in place with the true outcome.
+    pub fn record_dialog_pending(
+        &self,
+        live: impl Fn(&str) -> bool,
+        operation_id: &str,
+        method: &Method,
+        params: &Value,
+    ) {
+        let Some(session) = params["session_id"].as_str() else {
+            return;
+        };
+        let mut logs = self.0.lock().expect("run log poisoned");
+        logs.retain(|id, _| live(id));
+        if !live(session) {
+            return;
+        }
+        logs.entry(session.to_owned())
+            .or_default()
+            .record_dialog_pending(operation_id, method);
+    }
+
+    /// Reconcile a completed dialog-gated operation, replacing any prior
+    /// `DialogPending` `Uncertain` placeholder in place.
+    pub fn resolve_operation(
+        &self,
+        live: impl Fn(&str) -> bool,
+        operation_id: &str,
+        method: &Method,
+        params: &Value,
+        body: &ResponseBody,
+    ) {
+        let Some(session) = params["session_id"].as_str() else {
+            return;
+        };
+        let mut logs = self.0.lock().expect("run log poisoned");
+        logs.retain(|id, _| live(id));
+        if !live(session) {
+            return;
+        }
+        logs.entry(session.to_owned())
+            .or_default()
+            .resolve_operation(operation_id, method, params, body);
+    }
     /// Called for every finished RPC. `live` says whether a session still exists.
     pub fn record(
         &self,
@@ -625,5 +751,29 @@ mod tests {
             json!({}),
         );
         assert!(logs.read("s").borrowed_tabs.is_empty());
+    }
+
+    #[test]
+    fn dialog_pending_resolution_is_idempotent() {
+        let logs = RunLogs::default();
+        sync(&logs, PAGE, "c");
+        let params = json!({"session_id":"s","ref":"@e3"});
+        logs.record_dialog_pending(|_| true, "op-dup-1", &Method::ToolClick, &params);
+        assert_eq!(logs.read("s").steps.len(), 1);
+        assert!(matches!(
+            logs.read("s").steps[0],
+            LoggedStep::Uncertain { .. }
+        ));
+
+        let done = ok(json!({"tab_id":1}));
+        logs.resolve_operation(|_| true, "op-dup-1", &Method::ToolClick, &params, &done);
+        logs.resolve_operation(|_| true, "op-dup-1", &Method::ToolClick, &params, &done);
+        let view = logs.read("s");
+        assert_eq!(
+            view.steps.len(),
+            1,
+            "duplicate resolve_operation must not append a second step: {view:?}"
+        );
+        assert!(matches!(view.steps[0], LoggedStep::Action { .. }));
     }
 }

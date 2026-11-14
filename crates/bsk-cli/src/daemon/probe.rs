@@ -83,11 +83,17 @@ pub(crate) async fn probe_async(timeout: Duration, params: StatusParams) -> Resu
                 .map(|(_, status)| status.pid);
             if unchanged && mismatch.is_none() {
                 return match result? {
-                    Some((client, status)) => Ok(Probe::Ready(Box::new(VerifiedDaemon {
-                        info,
-                        status,
-                        client,
-                    }))),
+                    Some((client, status)) => {
+                        crate::ipc_client::record_endpoint_ipc_envelope(
+                            &info.sock_path,
+                            status.ipc_envelope,
+                        );
+                        Ok(Probe::Ready(Box::new(VerifiedDaemon {
+                            info,
+                            status,
+                            client,
+                        })))
+                    }
                     None => Ok(Probe::Absent(Some(info))),
                 };
             }

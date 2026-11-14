@@ -31,7 +31,8 @@ use bsk_protocol::tools::{
     UploadParams, WaitMsParams, WaitMsResult,
 };
 use bsk_protocol::{
-    CancelParams, CancelResult, ErrorCode, Method, PingResult, ResponseBody, RpcError, RpcId,
+    CancelParams, CancelResult, ErrorCode, Method, PingResult, RequestFrame, ResponseBody,
+    RpcError, RpcId, WsCorrelation,
 };
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -40,11 +41,12 @@ use tokio::sync::{Notify, watch};
 use tokio::task::JoinHandle;
 use tracing::{debug, warn};
 
+use crate::ipc_client::{IpcRequestMeta, IpcResponseMeta, ScopeResultMeta};
+
 use super::abort::{AbortRegistry, AbortToken};
 use super::queue::{DEFAULT_TOOL_TIMEOUT, DispatchError};
 use super::sessions::{
     AgentWindowOptions, SessionId, StartSessionError, StopSessionError, snapshot_status_entries,
-    stop_session,
 };
 use super::state::{DAEMON_VERSION, DaemonState, PROTOCOL_VERSION};
 
@@ -60,6 +62,70 @@ pub type RpcHandler = Arc<
         + Sync
         + 'static,
 >;
+
+/// Envelope-aware IPC handler carrying out-of-band [`IpcRequestMeta`] and
+/// [`IpcResponseMeta`] so caller scope and cached observation metadata never
+/// pollute business `params` / `result` JSON objects.
+pub type EnvelopeRpcHandler = Arc<
+    dyn Fn(
+            RpcId,
+            Method,
+            Value,
+            IpcRequestMeta,
+        ) -> Pin<Box<dyn Future<Output = (ResponseBody, IpcResponseMeta)> + Send>>
+        + Send
+        + Sync
+        + 'static,
+>;
+
+/// Adapter allowing `ipc::serve` to accept either a plain [`RpcHandler`] (used
+/// by minimal ping/system tests) or the production [`EnvelopeRpcHandler`].
+pub trait IntoEnvelopeHandler {
+    fn into_envelope_handler(self) -> EnvelopeRpcHandler;
+}
+
+impl IntoEnvelopeHandler for EnvelopeRpcHandler {
+    fn into_envelope_handler(self) -> EnvelopeRpcHandler {
+        self
+    }
+}
+
+#[derive(Default)]
+struct RpcHandlerEnvelopeBridge {
+    req_meta: Option<IpcRequestMeta>,
+    resp_meta: IpcResponseMeta,
+}
+
+tokio::task_local! {
+    static RPC_HANDLER_ENVELOPE_BRIDGE: std::sync::Mutex<RpcHandlerEnvelopeBridge>;
+}
+
+impl IntoEnvelopeHandler for RpcHandler {
+    fn into_envelope_handler(self) -> EnvelopeRpcHandler {
+        Arc::new(move |rpc_id, method, params, meta| {
+            let handler = Arc::clone(&self);
+            Box::pin(async move {
+                let bridge = std::sync::Mutex::new(RpcHandlerEnvelopeBridge {
+                    req_meta: Some(meta),
+                    resp_meta: IpcResponseMeta::default(),
+                });
+                RPC_HANDLER_ENVELOPE_BRIDGE
+                    .scope(bridge, async move {
+                        let body = (handler)(rpc_id, method, params).await;
+                        let resp_meta = RPC_HANDLER_ENVELOPE_BRIDGE
+                            .try_with(|slot| {
+                                std::mem::take(
+                                    &mut slot.lock().unwrap_or_else(|p| p.into_inner()).resp_meta,
+                                )
+                            })
+                            .unwrap_or_default();
+                        (body, resp_meta)
+                    })
+                    .await
+            })
+        })
+    }
+}
 
 const DEFAULT_RPC_TIMEOUT: Duration = Duration::from_secs(15);
 // Some tools own their operation deadline and answer exactly at it: the file
@@ -106,6 +172,7 @@ impl DaemonStatus {
             browsers: Vec::new(),
             sessions: Vec::new(),
             version_skew_browsers: Vec::new(),
+            ipc_envelope: true,
         }
     }
 
@@ -149,6 +216,7 @@ impl DaemonStatus {
             browsers,
             sessions,
             version_skew_browsers,
+            ipc_envelope: true,
         }
     }
 }
@@ -199,325 +267,449 @@ pub fn system_handler(status: DaemonStatus) -> RpcHandler {
     })
 }
 
-/// Build the production handler: `system.*` plus M4 (`browser.list`),
-/// M5 (`session.*`), M6–M9 tool methods, and the M9.3 daemon-local
-/// `tool.wait_ms` / `cancel` paths.
-pub fn full_handler(status: DaemonStatus, state: Arc<DaemonState>) -> RpcHandler {
-    Arc::new(move |rpc_id, method, params| {
-        let status = status.clone();
-        let state = Arc::clone(&state);
-        Box::pin(async move {
-            let mut params = params;
-            let scope_meta = strip_envelope_scope_meta(&mut params);
-            if let Err(err) =
-                prepare_implicit_session_and_evidence(&state, &method, &mut params, &scope_meta)
-            {
-                return ResponseBody::Err(err);
-            }
-            let cooperate_sync_session = (method == Method::ToolCooperate)
-                .then(|| {
-                    let action = params.get("action").and_then(Value::as_str)?;
-                    if matches!(action, "sync" | "enable") {
-                        let sid = params
-                            .get("session_id")
-                            .and_then(Value::as_str)
-                            .filter(|s| !s.is_empty())
-                            .map(|s| SessionId(s.to_string()))?;
-                        let req_tab_id = params.get("tab_id").and_then(Value::as_i64);
-                        Some((sid, action == "sync", req_tab_id))
-                    } else {
-                        None
-                    }
-                })
-                .flatten();
-            let tab_transition = method
-                .spec()
-                .tab_transition
-                .then(|| {
+#[derive(Debug, Clone)]
+struct CooperateSyncPlan {
+    session_id: SessionId,
+    is_sync: bool,
+    req_tab_id: Option<i64>,
+    requested_max_tokens: Option<u32>,
+}
+
+#[derive(Debug, Clone)]
+struct TabTransitionPlan {
+    session_id: SessionId,
+    method: Method,
+    req_params: Value,
+}
+
+#[derive(Debug, Clone, Default)]
+struct ToolReconcilePlan {
+    cooperate: Option<CooperateSyncPlan>,
+    tab_transition: Option<TabTransitionPlan>,
+    logged: Option<(Method, Value)>,
+    return_scope_meta: bool,
+}
+
+impl ToolReconcilePlan {
+    fn from_request(method: &Method, params: &Value, req_meta: &IpcRequestMeta) -> Self {
+        let cooperate = (*method == Method::ToolCooperate)
+            .then(|| {
+                let action = params.get("action").and_then(Value::as_str)?;
+                if matches!(action, "sync" | "enable") {
                     let sid = params
                         .get("session_id")
                         .and_then(Value::as_str)
                         .filter(|s| !s.is_empty())
                         .map(|s| SessionId(s.to_string()))?;
-                    Some((sid, method.clone(), params.clone()))
+                    let req_tab_id = params.get("tab_id").and_then(Value::as_i64);
+                    let requested_max_tokens = params
+                        .get("max_tokens")
+                        .and_then(Value::as_u64)
+                        .and_then(|n| u32::try_from(n).ok());
+                    Some(CooperateSyncPlan {
+                        session_id: sid,
+                        is_sync: action == "sync",
+                        req_tab_id,
+                        requested_max_tokens,
+                    })
+                } else {
+                    None
+                }
+            })
+            .flatten();
+        let tab_transition = method
+            .spec()
+            .tab_transition
+            .then(|| {
+                let sid = params
+                    .get("session_id")
+                    .and_then(Value::as_str)
+                    .filter(|s| !s.is_empty())
+                    .map(|s| SessionId(s.to_string()))?;
+                Some(TabTransitionPlan {
+                    session_id: sid,
+                    method: method.clone(),
+                    req_params: params.clone(),
                 })
-                .flatten();
-            let mut ticket = if method.is_tool() {
-                match state.audit.begin(params.get("session_id").and_then(Value::as_str).unwrap_or(""), &method, &params) {
-                    Ok(ticket) => ticket,
-                    Err(_) => return ResponseBody::Err(RpcError { code: ErrorCode::ProtocolError, message: "Operation audit could not be saved; action was not dispatched. Check the audit page or turn recording off.".into(), data: None }),
-                }
-            } else {
-                None
-            };
-            if let Some(ticket) = &ticket
-                && let Some(object) = params.as_object_mut()
-            {
-                object.insert(
-                    "_audit_id".into(),
-                    Value::String(ticket.operation_id.clone()),
-                );
-            }
-            let logged = method.is_tool().then(|| (method.clone(), params.clone()));
-            let body = match method {
-                Method::LocalAuthPair
-                | Method::LocalAuthDevices
-                | Method::LocalAuthRevoke
-                | Method::LocalAuthRotate
-                | Method::LocalAuthSetMode => {
-                    super::local_auth::maintenance::handle(
-                        state.clone(),
-                        status.ws_port,
-                        method,
-                        params,
-                    )
-                    .await
-                }
-                Method::SystemPing => {
-                    let result = PingResult { pong: true };
-                    ResponseBody::Ok(serde_json::to_value(result).unwrap_or(Value::Null))
-                }
-                Method::SessionRunLog => {
-                    let session =
-                        SessionId(params["session_id"].as_str().unwrap_or_default().to_owned());
-                    // An empty log would read as a session that did nothing, so a
-                    // mistyped or stopped session is reported as missing.
-                    if state.sessions.get(&session).is_some() {
-                        ResponseBody::Ok(
-                            serde_json::to_value(state.run_logs.read(&session.0))
-                                .unwrap_or(Value::Null),
-                        )
-                    } else {
-                        ResponseBody::Err(
-                            DispatchError::SessionNotFound {
-                                ended: state.sessions.end_info(&session),
-                            }
-                            .into_rpc(),
-                        )
-                    }
-                }
-                Method::SystemStatus => match handle_status(&status, &state, params).await {
-                    Ok(v) => ResponseBody::Ok(v),
-                    Err(e) => ResponseBody::Err(e),
-                },
-                Method::SessionStartTracked => {
-                    let tracked_incognito = params
-                        .get("incognito")
-                        .and_then(Value::as_bool)
-                        .unwrap_or(false);
-                    let body = super::session_requests::start(&state, rpc_id, params).await;
-                    if scope_meta.bind_scope
-                        && let Some(scope) = scope_meta.caller_scope.as_deref()
-                        && let ResponseBody::Ok(ref value) = body
-                        && let Some(sid_str) = value.get("session_id").and_then(Value::as_str)
-                    {
-                        let sid = SessionId(sid_str.to_owned());
-                        if let Some(session) = state.sessions.get(&sid) {
-                            state.scopes.bind_scope(
-                                scope,
-                                sid,
-                                session.browser_id,
-                                tracked_incognito,
-                            );
-                        }
-                    }
-                    body
-                }
-                Method::SessionRequest => super::session_requests::operate(&state, params).await,
-                Method::SessionStart => {
-                    match handle_session_start_scoped(&state, rpc_id, params, false, &scope_meta)
-                        .await
-                    {
-                        Ok(v) => ResponseBody::Ok(v),
-                        Err(e) => ResponseBody::Err(e),
-                    }
-                }
-                Method::SessionStop => {
-                    match handle_session_stop(&state, rpc_id, params, &scope_meta).await {
-                        Ok(v) => ResponseBody::Ok(v),
-                        Err(e) => ResponseBody::Err(e),
-                    }
-                }
-                Method::SessionStopAll => match handle_session_stop_all_rpc(&state, rpc_id).await {
-                    Ok(v) => ResponseBody::Ok(v),
-                    Err(e) => ResponseBody::Err(e),
-                },
-                Method::SessionList => handle_session_list(&state),
-                Method::LedgerRequest => handle_ledger_request(&state, params, &scope_meta),
-                Method::BrowserList => match handle_browser_list(&state, params).await {
-                    Ok(v) => ResponseBody::Ok(v),
-                    Err(e) => ResponseBody::Err(e),
-                },
-                Method::TransferBegin => handle_transfer_begin(&state, params),
-                Method::TransferChunk => handle_transfer_chunk(&state, params),
-                Method::TransferFinish => handle_transfer_finish(&state, params),
-                Method::TransferRead => handle_transfer_read(&state, params),
-                Method::TransferRelease => handle_transfer_release(&state, params),
-                Method::ToolVideo => handle_video(&state, rpc_id, params, ticket.take()).await,
-                Method::ToolTabList
-                | Method::ToolTabCreate
-                | Method::ToolTabClose
-                | Method::ToolTabSelect
-                | Method::ToolTabBorrow
-                | Method::ToolTabReturn
-                | Method::ToolWindowResize
-                | Method::ToolEmulate
-                | Method::ToolScreenshot
-                | Method::ToolScreenshotFullPage
-                | Method::ToolScreenshotRead
-                | Method::ToolScreenshotRelease
-                | Method::ToolConsole
-                | Method::ToolDebug
-                | Method::ToolNetwork
-                | Method::ToolSnapshot
-                | Method::ToolObserve
-                | Method::ToolCooperate
-                | Method::ToolGetHtml
-                | Method::ToolRead
-                | Method::ToolExtract
-                | Method::ToolNavigate
-                | Method::ToolNavigateBack
-                | Method::ToolNavigateForward
-                | Method::ToolReload
-                | Method::ToolClick
-                | Method::ToolHover
-                | Method::ToolDrag
-                | Method::ToolWheel
-                | Method::ToolScrollTo
-                | Method::ToolFocus
-                | Method::ToolBlur
-                | Method::ToolFill
-                | Method::ToolPress
-                | Method::ToolSelect
-                | Method::ToolUpload
-                | Method::ToolDownload
-                | Method::ToolEvaluate
-                | Method::ToolWaitForNavigation
-                | Method::ToolWaitForElement
-                | Method::ToolRequestHelp
-                | Method::ToolRecordStart
-                | Method::ToolRecordStop
-                | Method::ToolRecordAwait
-                | Method::ToolDialogStatus
-                | Method::ToolDialogAccept
-                | Method::ToolDialogDismiss => {
-                    handle_dialog_aware_dispatch(
-                        Arc::clone(&state),
-                        rpc_id,
-                        method,
-                        params,
-                        ticket.take(),
-                    )
-                    .await
-                }
-                Method::ToolOperationAwait | Method::ToolOperationCancel => {
-                    handle_operation(&state, rpc_id, method, params).await
-                }
-                Method::ToolWaitMs => handle_wait_ms(&state.abort_registry, rpc_id, params).await,
-                Method::Cancel => handle_cancel(&state, params),
-                other => ResponseBody::Err(RpcError {
-                    code: ErrorCode::UnknownMethod,
-                    message: format!("method not implemented yet: {other:?}"),
-                    data: None,
-                }),
-            };
-            let mut body = body;
-            if let (Some((sid, is_sync, req_tab_id)), ResponseBody::Ok(value)) =
-                (&cooperate_sync_session, &mut body)
-            {
-                let recorded = state.scopes.record_cooperate_result(sid, value);
-                if *is_sync {
-                    let synced_tab_id = value
-                        .get("tab_id")
-                        .and_then(Value::as_i64)
-                        .or(*req_tab_id)
-                        .or_else(|| state.scopes.active_tab_id(sid));
-                    state
-                        .intent_wal
-                        .reconcile_tab(sid, synced_tab_id, "cooperate_sync");
-                }
-                if scope_meta.return_scope_meta
-                    && let Some(obj) = value.as_object_mut()
-                {
-                    obj.insert("_scope_meta".into(), recorded);
-                }
-            }
-            if let (Some((sid, req_method, req_params)), ResponseBody::Ok(value)) =
-                (&tab_transition, &body)
-            {
-                state
-                    .scopes
-                    .record_tab_transition(sid, req_method, req_params, value);
-            }
-            if let Some(ticket) = ticket {
-                state.audit.finish(ticket, &body);
-            }
-            if let Some((method, params)) = logged {
-                state.run_logs.record(
-                    |id| state.sessions.get(&SessionId(id.to_owned())).is_some(),
-                    &method,
-                    &params,
-                    &body,
-                );
-            }
+            })
+            .flatten();
+        let logged = (!matches!(
+            method,
+            Method::ToolOperationAwait | Method::ToolOperationCancel
+        ) && method.is_tool())
+        .then(|| (method.clone(), params.clone()));
+        Self {
+            cooperate,
+            tab_transition,
+            logged,
+            return_scope_meta: req_meta.return_scope_meta,
+        }
+    }
+}
+
+/// Unified post-completion reconciliation across `scopes`, `intent_wal`, and
+/// `run_logs`. Invoked identically whether a tool RPC finishes synchronously or
+/// settles asynchronously after `DialogPending` via `tool.dialog.*` + `operation_await`.
+fn reconcile_completed_tool_rpc(
+    state: &DaemonState,
+    plan: &ToolReconcilePlan,
+    operation_id: Option<&str>,
+    body: &ResponseBody,
+) -> Option<ScopeResultMeta> {
+    let mut recorded_meta = None;
+    if let (Some(coop), ResponseBody::Ok(value)) = (&plan.cooperate, body)
+        && state.sessions.get(&coop.session_id).is_some()
+    {
+        let recorded = state.scopes.record_cooperate_result_with_budget(
+            &coop.session_id,
+            coop.requested_max_tokens,
+            value,
+        );
+        if coop.is_sync {
+            let synced_tab_id = value
+                .get("tab_id")
+                .and_then(Value::as_i64)
+                .or(coop.req_tab_id)
+                .or_else(|| state.scopes.active_tab_id(&coop.session_id));
+            state
+                .intent_wal
+                .reconcile_tab(&coop.session_id, synced_tab_id, "cooperate_sync");
+        }
+        recorded_meta = Some(recorded);
+    }
+    if let (Some(tab), ResponseBody::Ok(value)) = (&plan.tab_transition, body)
+        && state.sessions.get(&tab.session_id).is_some()
+    {
+        state
+            .scopes
+            .record_tab_transition(&tab.session_id, &tab.method, &tab.req_params, value);
+    }
+    if let Some((method, params)) = &plan.logged {
+        let is_live = |id: &str| state.sessions.get(&SessionId(id.to_owned())).is_some();
+        if let Some(op_id) = operation_id {
+            state
+                .run_logs
+                .resolve_operation(is_live, op_id, method, params, body);
+        } else {
+            state.run_logs.record(is_live, method, params, body);
+        }
+    }
+    recorded_meta
+}
+
+/// Build a plain [`RpcHandler`] wrapper around [`full_envelope_handler`].
+/// When invoked directly, uses default request metadata; when served through
+/// [`ipc::serve`] (directly or via a [`RpcHandler`] middleware wrapper), bridges
+/// [`IpcRequestMeta`] and [`IpcResponseMeta`] across the task-local envelope slot.
+pub fn full_handler(status: DaemonStatus, state: Arc<DaemonState>) -> RpcHandler {
+    let envelope_handler = full_envelope_handler(status, state);
+    Arc::new(move |rpc_id, method, params| {
+        let envelope_handler = Arc::clone(&envelope_handler);
+        Box::pin(async move {
+            let req_meta = RPC_HANDLER_ENVELOPE_BRIDGE
+                .try_with(|slot| {
+                    slot.lock()
+                        .unwrap_or_else(|p| p.into_inner())
+                        .req_meta
+                        .take()
+                })
+                .ok()
+                .flatten()
+                .unwrap_or_default();
+            let (body, resp_meta) = (envelope_handler)(rpc_id, method, params, req_meta).await;
+            let _ = RPC_HANDLER_ENVELOPE_BRIDGE.try_with(|slot| {
+                slot.lock().unwrap_or_else(|p| p.into_inner()).resp_meta = resp_meta;
+            });
             body
         })
     })
 }
 
-#[derive(Debug, Default, Clone)]
-pub(super) struct EnvelopeScopeMeta {
-    pub caller_scope: Option<String>,
-    pub bind_scope: bool,
-    pub reuse_or_start_scope: bool,
-    pub explicit_incognito: bool,
-    pub return_scope_meta: bool,
+/// Build the production envelope handler: `system.*` plus M4 (`browser.list`),
+/// M5 (`session.*`), M6–M9 tool methods, and the M9.3 daemon-local
+/// `tool.wait_ms` / `cancel` paths.
+pub fn full_envelope_handler(status: DaemonStatus, state: Arc<DaemonState>) -> EnvelopeRpcHandler {
+    Arc::new(move |rpc_id, method, params, req_meta| {
+        let status = status.clone();
+        let state = Arc::clone(&state);
+        Box::pin(async move {
+            let mut params_opt = Some(params);
+            RequestFrame::strip_ws_correlation(&mut params_opt);
+            let mut params = params_opt.unwrap_or(Value::Null);
+            let (req_meta, legacy_inband_scope_meta) =
+                IpcRequestMeta::extract_legacy_from_params(&mut params, req_meta);
+            let method_for_post = method.clone();
+            let (mut body, mut resp_meta) =
+                dispatch_envelope_rpc(&status, state, rpc_id, method, params, req_meta).await;
+            if legacy_inband_scope_meta {
+                attach_legacy_inband_scope_meta(&method_for_post, &mut body, &mut resp_meta);
+            }
+            (body, resp_meta)
+        })
+    })
 }
 
-fn strip_envelope_scope_meta(params: &mut Value) -> EnvelopeScopeMeta {
-    let mut meta = EnvelopeScopeMeta::default();
-    if let Some(object) = params.as_object_mut() {
-        // Internal correlation and caller-scope hints are stripped here and never
-        // forwarded onto the extension WebSocket wire.
-        object.remove("_audit_id");
-        object.remove("_operation_id");
-        meta.caller_scope = object
-            .remove("_caller_scope")
-            .and_then(|v| v.as_str().map(str::to_owned));
-        meta.bind_scope = object
-            .remove("_bind_scope")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
-        meta.reuse_or_start_scope = object
-            .remove("_reuse_or_start_scope")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
-        meta.explicit_incognito = object
-            .remove("_explicit_incognito")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
-        meta.return_scope_meta = object
-            .remove("_return_scope_meta")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
+fn attach_legacy_inband_scope_meta(
+    method: &Method,
+    body: &mut ResponseBody,
+    resp_meta: &mut IpcResponseMeta,
+) {
+    let (ResponseBody::Ok(value), Some(mut scope_meta)) = (body, resp_meta.scope_meta.take())
+    else {
+        return;
+    };
+    // Pre-envelope `2.0` CLI (`main`) hydrated `observation.text` from
+    // `_scope_meta.cached_vom` whenever `cache_reusable` was true, without
+    // checking `kind == "unchanged"`. Keep daemon-internal `last_vom` patched,
+    // but suppress `cache_reusable`/`cached_vom` on outgoing legacy slim deltas.
+    let coop_val = if *method == Method::ToolOperationAwait {
+        value.get("result")
+    } else {
+        Some(&*value)
+    };
+    let is_slim_non_unchanged = coop_val.is_some_and(|cv| {
+        let has_obs_text = cv
+            .pointer("/observation/text")
+            .and_then(Value::as_str)
+            .is_some();
+        let is_unchanged = cv.get("kind").and_then(Value::as_str) == Some("unchanged");
+        !has_obs_text && !is_unchanged
+    });
+    if is_slim_non_unchanged {
+        scope_meta.cache_reusable = false;
+        scope_meta.cached_vom = None;
+        scope_meta.cached_vom_truncated = false;
+        scope_meta.cached_vom_next_cursor = None;
     }
-    meta
+    if let Some(obj) = value.as_object_mut()
+        && let Ok(serialized) = serde_json::to_value(scope_meta)
+    {
+        obj.insert(crate::ipc_client::LEGACY_SCOPE_META_KEY.into(), serialized);
+    }
 }
 
-fn strip_daemon_internal_fields(params: &Value) -> Value {
-    let mut cleaned = params.clone();
-    if let Some(object) = cleaned.as_object_mut() {
-        object.remove("_audit_id");
-        object.remove("_operation_id");
+async fn dispatch_envelope_rpc(
+    status: &DaemonStatus,
+    state: Arc<DaemonState>,
+    rpc_id: RpcId,
+    method: Method,
+    mut params: Value,
+    req_meta: IpcRequestMeta,
+) -> (ResponseBody, IpcResponseMeta) {
+    if let Err(err) = prepare_implicit_session_and_evidence(&state, &method, &mut params, &req_meta)
+    {
+        return (ResponseBody::Err(err), IpcResponseMeta::default());
     }
-    cleaned
+    let reconcile_plan = ToolReconcilePlan::from_request(&method, &params, &req_meta);
+    let mut ticket = if method.is_tool() {
+        match state.audit.begin(
+            params
+                .get("session_id")
+                .and_then(Value::as_str)
+                .unwrap_or(""),
+            &method,
+            &params,
+        ) {
+            Ok(ticket) => ticket,
+            Err(_) => {
+                return (
+                    ResponseBody::Err(RpcError {
+                        code: ErrorCode::ProtocolError,
+                        message: "Operation audit could not be saved; action was not dispatched. Check the audit page or turn recording off.".into(),
+                        data: None,
+                    }),
+                    IpcResponseMeta::default(),
+                );
+            }
+        }
+    } else {
+        None
+    };
+    let correlation = WsCorrelation {
+        audit_id: ticket.as_ref().map(|t| t.operation_id.clone()),
+        operation_id: None,
+    };
+    match method {
+        Method::ToolVideo => {
+            return handle_video(
+                &state,
+                rpc_id,
+                params,
+                correlation,
+                reconcile_plan,
+                ticket.take(),
+            )
+            .await;
+        }
+        Method::ToolTabList
+        | Method::ToolTabCreate
+        | Method::ToolTabClose
+        | Method::ToolTabSelect
+        | Method::ToolTabBorrow
+        | Method::ToolTabReturn
+        | Method::ToolWindowResize
+        | Method::ToolEmulate
+        | Method::ToolScreenshot
+        | Method::ToolScreenshotFullPage
+        | Method::ToolScreenshotRead
+        | Method::ToolScreenshotRelease
+        | Method::ToolConsole
+        | Method::ToolDebug
+        | Method::ToolNetwork
+        | Method::ToolSnapshot
+        | Method::ToolObserve
+        | Method::ToolCooperate
+        | Method::ToolGetHtml
+        | Method::ToolRead
+        | Method::ToolExtract
+        | Method::ToolNavigate
+        | Method::ToolNavigateBack
+        | Method::ToolNavigateForward
+        | Method::ToolReload
+        | Method::ToolClick
+        | Method::ToolHover
+        | Method::ToolDrag
+        | Method::ToolWheel
+        | Method::ToolScrollTo
+        | Method::ToolFocus
+        | Method::ToolBlur
+        | Method::ToolFill
+        | Method::ToolPress
+        | Method::ToolSelect
+        | Method::ToolUpload
+        | Method::ToolDownload
+        | Method::ToolEvaluate
+        | Method::ToolWaitForNavigation
+        | Method::ToolWaitForElement
+        | Method::ToolRequestHelp
+        | Method::ToolRecordStart
+        | Method::ToolRecordStop
+        | Method::ToolRecordAwait
+        | Method::ToolDialogStatus
+        | Method::ToolDialogAccept
+        | Method::ToolDialogDismiss => {
+            return handle_dialog_aware_dispatch(
+                Arc::clone(&state),
+                rpc_id,
+                method,
+                params,
+                correlation,
+                reconcile_plan,
+                ticket.take(),
+            )
+            .await;
+        }
+        Method::ToolOperationAwait | Method::ToolOperationCancel => {
+            return handle_operation(&state, rpc_id, method, params, &req_meta, ticket.take())
+                .await;
+        }
+        Method::ToolWaitMs => {
+            let body = handle_wait_ms(&state.abort_registry, rpc_id, params).await;
+            let _ = reconcile_completed_tool_rpc(&state, &reconcile_plan, None, &body);
+            if let Some(ticket) = ticket {
+                state.audit.finish(ticket, &body);
+            }
+            return (body, IpcResponseMeta::default());
+        }
+        _ => {}
+    }
+
+    let body = match method {
+        Method::LocalAuthPair
+        | Method::LocalAuthDevices
+        | Method::LocalAuthRevoke
+        | Method::LocalAuthRotate
+        | Method::LocalAuthSetMode => {
+            super::local_auth::maintenance::handle(state.clone(), status.ws_port, method, params)
+                .await
+        }
+        Method::SystemPing => {
+            let result = PingResult { pong: true };
+            ResponseBody::Ok(serde_json::to_value(result).unwrap_or(Value::Null))
+        }
+        Method::SessionRunLog => {
+            let session = SessionId(params["session_id"].as_str().unwrap_or_default().to_owned());
+            if state.sessions.get(&session).is_some() {
+                ResponseBody::Ok(
+                    serde_json::to_value(state.run_logs.read(&session.0)).unwrap_or(Value::Null),
+                )
+            } else {
+                ResponseBody::Err(
+                    DispatchError::SessionNotFound {
+                        ended: state.sessions.end_info(&session),
+                    }
+                    .into_rpc(),
+                )
+            }
+        }
+        Method::SystemStatus => match handle_status(status, &state, params).await {
+            Ok(v) => ResponseBody::Ok(v),
+            Err(e) => ResponseBody::Err(e),
+        },
+        Method::SessionStartTracked => {
+            let tracked_incognito = params
+                .get("incognito")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            let body = super::session_requests::start(&state, rpc_id, params, &req_meta).await;
+            if req_meta.bind_scope
+                && let Some(scope) = req_meta.caller_scope.as_deref()
+                && let ResponseBody::Ok(ref value) = body
+                && let Some(sid_str) = value.get("session_id").and_then(Value::as_str)
+            {
+                let sid = SessionId(sid_str.to_owned());
+                if let Some(session) = state.sessions.get(&sid) {
+                    state
+                        .scopes
+                        .bind_scope(scope, sid, session.browser_id, tracked_incognito);
+                }
+            }
+            body
+        }
+        Method::SessionRequest => super::session_requests::operate(&state, params).await,
+        Method::SessionStart => {
+            match handle_session_start_scoped(&state, rpc_id, params, false, &req_meta).await {
+                Ok(v) => ResponseBody::Ok(v),
+                Err(e) => ResponseBody::Err(e),
+            }
+        }
+        Method::SessionStop => match handle_session_stop(&state, rpc_id, params, &req_meta).await {
+            Ok(v) => ResponseBody::Ok(v),
+            Err(e) => ResponseBody::Err(e),
+        },
+        Method::SessionStopAll => match handle_session_stop_all_rpc(&state, rpc_id).await {
+            Ok(v) => ResponseBody::Ok(v),
+            Err(e) => ResponseBody::Err(e),
+        },
+        Method::SessionList => handle_session_list(&state),
+        Method::LedgerRequest => handle_ledger_request(&state, params, &req_meta),
+        Method::BrowserList => match handle_browser_list(&state, params).await {
+            Ok(v) => ResponseBody::Ok(v),
+            Err(e) => ResponseBody::Err(e),
+        },
+        Method::TransferBegin => handle_transfer_begin(&state, params),
+        Method::TransferChunk => handle_transfer_chunk(&state, params),
+        Method::TransferFinish => handle_transfer_finish(&state, params),
+        Method::TransferRead => handle_transfer_read(&state, params),
+        Method::TransferRelease => handle_transfer_release(&state, params),
+        Method::Cancel => handle_cancel(&state, params),
+        other => ResponseBody::Err(RpcError {
+            code: ErrorCode::UnknownMethod,
+            message: format!("method not implemented yet: {other:?}"),
+            data: None,
+        }),
+    };
+    if let Some(ticket) = ticket {
+        state.audit.finish(ticket, &body);
+    }
+    (body, IpcResponseMeta::default())
 }
 
 fn prepare_implicit_session_and_evidence(
     state: &DaemonState,
     method: &Method,
     params: &mut Value,
-    scope_meta: &EnvelopeScopeMeta,
+    req_meta: &IpcRequestMeta,
 ) -> Result<(), RpcError> {
     if !method.implicit_session_with_params(params) {
         return Ok(());
@@ -541,17 +733,17 @@ fn prepare_implicit_session_and_evidence(
         Some(sid) => SessionId(sid),
         None => {
             // Only resolve an implicit session when the caller signalled an implicit
-            // CLI/MCP invocation via `_caller_scope` OR passed an empty `session_id: ""`
-            // placeholder from an optional `--session` flag; raw protocol unit tests
-            // sending malformed JSON without `session_id` keep InvalidParams.
+            // CLI/MCP invocation via `req_meta.caller_scope` OR passed an empty
+            // `session_id: ""` placeholder from an optional `--session` flag; raw
+            // protocol unit tests sending malformed JSON without `session_id` keep InvalidParams.
             let has_empty_placeholder = obj
                 .get("session_id")
                 .and_then(Value::as_str)
                 .is_some_and(|s| s.trim().is_empty());
-            if scope_meta.caller_scope.is_none() && !has_empty_placeholder {
+            if req_meta.caller_scope.is_none() && !has_empty_placeholder {
                 return Ok(());
             }
-            let scope = scope_meta.caller_scope.as_deref().unwrap_or("default");
+            let scope = req_meta.caller_scope.as_deref().unwrap_or("default");
             let resolved = state
                 .scopes
                 .resolve_implicit_session(scope, &state.sessions)?;
@@ -603,17 +795,17 @@ async fn handle_video(
     state: &Arc<DaemonState>,
     rpc_id: RpcId,
     params: Value,
+    correlation: WsCorrelation,
+    reconcile_plan: ToolReconcilePlan,
     mut ticket: Option<super::audit::Ticket>,
-) -> ResponseBody {
+) -> (ResponseBody, IpcResponseMeta) {
     use super::browsers::SendError;
-    if let Err(error) = serde_json::from_value::<bsk_protocol::tools::VideoParams>(
-        strip_daemon_internal_fields(&params),
-    ) {
+    if let Err(error) = serde_json::from_value::<bsk_protocol::tools::VideoParams>(params.clone()) {
         let body = ResponseBody::Err(invalid_params(error.to_string()));
         if let Some(ticket) = ticket.take() {
             state.audit.finish(ticket, &body);
         }
-        return body;
+        return (body, IpcResponseMeta::default());
     }
     let browser = if let Some(session_id) = params.get("session_id").and_then(Value::as_str) {
         let Some(session) = state.sessions.get(&SessionId(session_id.into())) else {
@@ -621,7 +813,7 @@ async fn handle_video(
             if let Some(ticket) = ticket.take() {
                 state.audit.finish(ticket, &body);
             }
-            return body;
+            return (body, IpcResponseMeta::default());
         };
         state.browsers.get(&session.browser_id)
     } else {
@@ -637,7 +829,7 @@ async fn handle_video(
                 if let Some(ticket) = ticket.take() {
                     state.audit.finish(ticket, &body);
                 }
-                return body;
+                return (body, IpcResponseMeta::default());
             }
         }
     };
@@ -648,63 +840,66 @@ async fn handle_video(
         if let Some(ticket) = ticket.take() {
             state.audit.finish(ticket, &body);
         }
-        return body;
+        return (body, IpcResponseMeta::default());
     };
-    let mut result = if Method::ToolVideo.dialog_gated_with_params(&params) {
-        handle_dialog_aware_dispatch(
+    if Method::ToolVideo.dialog_gated_with_params(&params) {
+        return handle_dialog_aware_dispatch(
             Arc::clone(state),
             rpc_id,
             Method::ToolVideo,
             params,
+            correlation,
+            reconcile_plan,
             ticket.take(),
         )
-        .await
-    } else {
-        let id = format!("video-{}", uuid::Uuid::new_v4().simple());
-        let receiver = match browser.dispatch(bsk_protocol::RequestFrame {
-            id: id.clone(),
-            method: Method::ToolVideo,
-            params: Some(params),
-        }) {
-            Ok(receiver) => receiver,
-            Err(SendError::Terminated(error)) => {
-                let body = ResponseBody::Err(error);
-                if let Some(ticket) = ticket.take() {
-                    state.audit.finish(ticket, &body);
-                }
-                return body;
+        .await;
+    }
+    let id = format!("video-{}", uuid::Uuid::new_v4().simple());
+    let receiver = match browser.dispatch(RequestFrame::for_extension_ws(
+        id.clone(),
+        Method::ToolVideo,
+        params,
+        &correlation,
+    )) {
+        Ok(receiver) => receiver,
+        Err(SendError::Terminated(error)) => {
+            let body = ResponseBody::Err(error);
+            if let Some(ticket) = ticket.take() {
+                state.audit.finish(ticket, &body);
             }
-            Err(SendError::SinkClosed) => {
-                let body = ResponseBody::Err(invalid_params("Recording browser disconnected"));
-                if let Some(ticket) = ticket.take() {
-                    state.audit.finish(ticket, &body);
-                }
-                return body;
-            }
-        };
-        let reply = tokio::time::timeout(Duration::from_secs(32), receiver).await;
-        browser
-            .pending
-            .lock()
-            .expect("browser pending poisoned")
-            .cancel(&id);
-        match reply {
-            Ok(Ok(frame)) => frame.body,
-            Ok(Err(_)) => ResponseBody::Err(invalid_params("Recording browser disconnected")),
-            Err(_) => ResponseBody::Err(RpcError {
-                code: ErrorCode::Timeout,
-                message: "Video service timed out; use video list/status before retrying".into(),
-                data: None,
-            }),
+            return (body, IpcResponseMeta::default());
         }
+        Err(SendError::SinkClosed) => {
+            let body = ResponseBody::Err(invalid_params("Recording browser disconnected"));
+            if let Some(ticket) = ticket.take() {
+                state.audit.finish(ticket, &body);
+            }
+            return (body, IpcResponseMeta::default());
+        }
+    };
+    let reply = tokio::time::timeout(Duration::from_secs(32), receiver).await;
+    browser
+        .pending
+        .lock()
+        .expect("browser pending poisoned")
+        .cancel(&id);
+    let mut result = match reply {
+        Ok(Ok(frame)) => frame.body,
+        Ok(Err(_)) => ResponseBody::Err(invalid_params("Recording browser disconnected")),
+        Err(_) => ResponseBody::Err(RpcError {
+            code: ErrorCode::Timeout,
+            message: "Video service timed out; use video list/status before retrying".into(),
+            data: None,
+        }),
     };
     if let ResponseBody::Ok(value) = &mut result {
         value["browser"] = Value::String(browser.id.0.clone());
     }
+    let _ = reconcile_completed_tool_rpc(state, &reconcile_plan, None, &result);
     if let Some(ticket) = ticket.take() {
         state.audit.finish(ticket, &result);
     }
-    result
+    (result, IpcResponseMeta::default())
 }
 
 /// IPC entry point for `tool.*` RPCs (M6+). Looks up the per-session
@@ -712,27 +907,28 @@ async fn handle_video(
 /// BrowserSink directly. `tool.session_start` / `tool.session_stop`
 /// stay on the direct path because they manage the queue lifecycle
 /// itself.
-///
-/// Registers a fresh [`super::inflight::ToolInflightEntry`] BEFORE
-/// the per-session queue takes over so a `cancel { rpc_id }` arriving
-/// while the job is still queued has something to trip — that's the
-/// fix for review C2 (queued cancels were previously invisible to
-/// `handle_cancel`). The same entry covers the in-flight phase too,
-/// so the worker can short-circuit via its cancel token instead of
-/// hand-rolling a second mechanism.
 async fn handle_dialog_aware_dispatch(
     state: Arc<DaemonState>,
     cli_rpc_id: RpcId,
     method: Method,
-    mut params: Value,
+    params: Value,
+    mut correlation: WsCorrelation,
+    reconcile_plan: ToolReconcilePlan,
     ticket: Option<super::audit::Ticket>,
-) -> ResponseBody {
+) -> (ResponseBody, IpcResponseMeta) {
+    let return_scope_meta = reconcile_plan.return_scope_meta;
     if !method.dialog_gated_with_params(&params) {
-        let body = handle_tool_dispatch(&state, cli_rpc_id, method, params).await;
+        let body = handle_tool_dispatch(&state, cli_rpc_id, method, params, correlation).await;
+        let scope_meta = reconcile_completed_tool_rpc(&state, &reconcile_plan, None, &body);
         if let Some(ticket) = ticket {
             state.audit.finish(ticket, &body);
         }
-        return body;
+        return (
+            body,
+            IpcResponseMeta {
+                scope_meta: return_scope_meta.then_some(scope_meta).flatten(),
+            },
+        );
     }
     let session = params
         .get("session_id")
@@ -748,14 +944,16 @@ async fn handle_dialog_aware_dispatch(
             if let Some(ticket) = ticket {
                 state.audit.finish(ticket, &body);
             }
-            return body;
+            return (body, IpcResponseMeta::default());
         }
     };
-    if let Some(params) = params.as_object_mut() {
-        params.insert("_operation_id".into(), Value::String(operation.id.clone()));
-    }
+    correlation.operation_id = Some(operation.id.clone());
     let work = Arc::clone(&operation);
     let background = Arc::clone(&state);
+    let op_id_for_reconcile = operation.id.clone();
+    let plan_for_bg = reconcile_plan.clone();
+    let method_for_pending = method.clone();
+    let params_for_pending = params.clone();
     tokio::spawn(async move {
         use futures_util::FutureExt;
         let body = std::panic::AssertUnwindSafe(handle_tool_dispatch(
@@ -763,6 +961,7 @@ async fn handle_dialog_aware_dispatch(
             cli_rpc_id,
             method,
             params,
+            correlation,
         ))
         .catch_unwind()
         .await
@@ -773,6 +972,15 @@ async fn handle_dialog_aware_dispatch(
                 data: None,
             })
         });
+        let scope_meta = reconcile_completed_tool_rpc(
+            &background,
+            &plan_for_bg,
+            Some(&op_id_for_reconcile),
+            &body,
+        );
+        if let Some(meta) = scope_meta {
+            work.set_scope_meta(Some(meta));
+        }
         if let Some(ticket) = ticket {
             background.audit.finish(ticket, &body);
         }
@@ -780,9 +988,18 @@ async fn handle_dialog_aware_dispatch(
     });
     let (body, suspended) = operation.initial_response().await;
     if !suspended {
+        let scope_meta = return_scope_meta.then(|| operation.scope_meta()).flatten();
         state.dialog_operations.remove(&operation.id);
+        (body, IpcResponseMeta { scope_meta })
+    } else {
+        state.run_logs.record_dialog_pending(
+            |id| state.sessions.get(&SessionId(id.to_owned())).is_some(),
+            &operation.id,
+            &method_for_pending,
+            &params_for_pending,
+        );
+        (body, IpcResponseMeta::default())
     }
-    body
 }
 
 async fn handle_operation(
@@ -790,49 +1007,93 @@ async fn handle_operation(
     cli_rpc_id: RpcId,
     method: Method,
     params: Value,
-) -> ResponseBody {
-    let p: bsk_protocol::tools::OperationParams =
-        match serde_json::from_value(strip_daemon_internal_fields(&params)) {
-            Ok(p) => p,
-            Err(error) => return ResponseBody::Err(invalid_params(error.to_string())),
-        };
+    req_meta: &IpcRequestMeta,
+    ticket: Option<super::audit::Ticket>,
+) -> (ResponseBody, IpcResponseMeta) {
+    let finish_with = |body: ResponseBody, meta: IpcResponseMeta| {
+        if let Some(ticket) = ticket {
+            state.audit.finish(ticket, &body);
+        }
+        (body, meta)
+    };
+    let p: bsk_protocol::tools::OperationParams = match serde_json::from_value(params) {
+        Ok(p) => p,
+        Err(error) => {
+            return finish_with(
+                ResponseBody::Err(invalid_params(error.to_string())),
+                IpcResponseMeta::default(),
+            );
+        }
+    };
     if p.wait_ms.is_some_and(|ms| ms > 60000) {
-        return ResponseBody::Err(invalid_params("wait_ms must be 0..60000"));
+        return finish_with(
+            ResponseBody::Err(invalid_params("wait_ms must be 0..60000")),
+            IpcResponseMeta::default(),
+        );
     }
     let Some(session) = state.sessions.get(&SessionId(p.session_id.clone())) else {
-        return ResponseBody::Err(RpcError {
-            code: ErrorCode::NotFound,
-            message: "session no longer exists".into(),
-            data: None,
-        });
+        return finish_with(
+            ResponseBody::Err(RpcError {
+                code: ErrorCode::NotFound,
+                message: "session no longer exists".into(),
+                data: None,
+            }),
+            IpcResponseMeta::default(),
+        );
     };
     if state.browsers.get(&session.browser_id).is_none() {
-        return ResponseBody::Err(RpcError {
-            code: ErrorCode::NotFound,
-            message: "owning browser disconnected; original effect is unknown".into(),
-            data: None,
-        });
+        return finish_with(
+            ResponseBody::Err(RpcError {
+                code: ErrorCode::NotFound,
+                message: "owning browser disconnected; original effect is unknown".into(),
+                data: None,
+            }),
+            IpcResponseMeta::default(),
+        );
     }
     let Some(operation) = state.dialog_operations.get(&p.session_id, &p.operation_id) else {
-        return ResponseBody::Err(RpcError { code: ErrorCode::NotFound, message: "operation not found in this session or its retained result expired; do not replay an action with unknown effects".into(), data: None });
+        return finish_with(
+            ResponseBody::Err(RpcError {
+                code: ErrorCode::NotFound,
+                message: "operation not found in this session or its retained result expired; do not replay an action with unknown effects".into(),
+                data: None,
+            }),
+            IpcResponseMeta::default(),
+        );
     };
     if method == Method::ToolOperationCancel {
-        return handle_cancel(state, serde_json::json!({"rpc_id":operation.cli_rpc_id}));
+        let body = handle_cancel(state, serde_json::json!({"rpc_id":operation.cli_rpc_id}));
+        return finish_with(body, IpcResponseMeta::default());
     }
     let guard = match state.abort_registry.register(cli_rpc_id) {
         Ok(guard) => guard,
         Err(error) => {
-            return ResponseBody::Err(RpcError {
-                code: ErrorCode::ProtocolError,
-                message: format!("operation await registration failed: {error:?}"),
-                data: None,
-            });
+            return finish_with(
+                ResponseBody::Err(RpcError {
+                    code: ErrorCode::ProtocolError,
+                    message: format!("operation await registration failed: {error:?}"),
+                    data: None,
+                }),
+                IpcResponseMeta::default(),
+            );
         }
     };
-    tokio::select! {
+    let body = tokio::select! {
         body = operation.await_result(p.wait_ms.unwrap_or(10000)) => body,
-        _ = guard.token().cancelled() => ResponseBody::Err(RpcError { code: ErrorCode::Cancelled, message: "Result wait cancelled; the original operation continues. Use operation cancel to stop it".into(), data: None }),
-    }
+        _ = guard.token().cancelled() => ResponseBody::Err(RpcError {
+            code: ErrorCode::Cancelled,
+            message: "Result wait cancelled; the original operation continues. Use operation cancel to stop it".into(),
+            data: None,
+        }),
+    };
+    let scope_meta = if req_meta.return_scope_meta
+        && matches!(&body, ResponseBody::Ok(val) if val.get("state").and_then(Value::as_str) == Some("completed"))
+    {
+        operation.scope_meta()
+    } else {
+        None
+    };
+    finish_with(body, IpcResponseMeta { scope_meta })
 }
 
 async fn handle_tool_dispatch(
@@ -840,6 +1101,7 @@ async fn handle_tool_dispatch(
     cli_rpc_id: RpcId,
     method: Method,
     params: Value,
+    correlation: WsCorrelation,
 ) -> ResponseBody {
     let session_id = match params.get("session_id").and_then(|v| v.as_str()) {
         Some(s) if !s.is_empty() => SessionId(s.to_string()),
@@ -851,8 +1113,6 @@ async fn handle_tool_dispatch(
             });
         }
     };
-    // Reject before allocating local transfer resources. The extension also
-    // enforces this for third-party gateways backed by a local-mode daemon.
     if state.config.server.is_some() && !method.spec().remote_allowed {
         return ResponseBody::Err(RpcError {
             code: ErrorCode::Unsupported,
@@ -863,15 +1123,6 @@ async fn handle_tool_dispatch(
             data: None,
         });
     }
-    // Pre-flight: if the user has clicked the agent-window mask's
-    // stop button, every session carries a one-shot "pending
-    // interrupt" marker. The marker is consumed by the next method
-    // that dispatches browser/page input (which is rejected with
-    // `UserAborted`). Passive reads and control-plane RPCs pass through
-    // transparently — gating them would prevent the agent from observing
-    // page state before asking the user, or from cleanly tearing down the
-    // session. Classification lives on `Method::effect()` so adding a new
-    // tool variant requires an explicit classification call.
     if method.requires_interrupt_gate_with_params(&params)
         && state.session_interrupts.try_consume(&session_id)
     {
@@ -913,11 +1164,10 @@ async fn handle_tool_dispatch(
             Some("activity" | "wait")
         )
     {
-        let p: bsk_protocol::tools::DebugParams =
-            match serde_json::from_value(strip_daemon_internal_fields(&params)) {
-                Ok(value) => value,
-                Err(error) => return ResponseBody::Err(invalid_params(error.to_string())),
-            };
+        let p: bsk_protocol::tools::DebugParams = match serde_json::from_value(params) {
+            Ok(value) => value,
+            Err(error) => return ResponseBody::Err(invalid_params(error.to_string())),
+        };
         if p.wait_ms.is_some_and(|ms| ms > 60000)
             || p.command_id.as_ref().is_some_and(|id| id.len() > 200)
         {
@@ -945,22 +1195,13 @@ async fn handle_tool_dispatch(
             Err(error) => ResponseBody::Err(error.into_rpc()),
         };
     }
-    // Transfer staging normalizes typed params; retain observation and operation bindings.
-    let operation_id = params.get("_operation_id").cloned();
-    let metadata: Vec<_> = [
-        "_audit_id",
-        "context_id",
-        "depends_on",
-        "expect",
-        "observation_id",
-    ]
-    .into_iter()
-    .filter_map(|key| params.get(key).cloned().map(|value| (key, value)))
-    .collect();
+    // Transfer staging normalizes typed params; retain public action evidence fields.
+    let metadata: Vec<_> = ["context_id", "depends_on", "expect", "observation_id"]
+        .into_iter()
+        .filter_map(|key| params.get(key).cloned().map(|value| (key, value)))
+        .collect();
     let mut params = params;
     if method == Method::ToolTabBorrow {
-        // Old CLI clients can still send this field. Never forward their
-        // override to an older extension that would act on it.
         if let Some(confirm) = params.get("confirm")
             && !confirm.is_boolean()
             && !confirm.is_null()
@@ -973,11 +1214,10 @@ async fn handle_tool_dispatch(
     }
     let mut download_transfer_id: Option<String> = None;
     if method == Method::ToolUpload {
-        let mut upload: UploadParams =
-            match serde_json::from_value(strip_daemon_internal_fields(&params)) {
-                Ok(v) => v,
-                Err(err) => return ResponseBody::Err(invalid_params(err.to_string())),
-            };
+        let mut upload: UploadParams = match serde_json::from_value(params) {
+            Ok(v) => v,
+            Err(err) => return ResponseBody::Err(invalid_params(err.to_string())),
+        };
         if upload.files.is_empty() || upload.files.len() > super::file_transfer::MAX_UPLOAD_FILES {
             return ResponseBody::Err(invalid_params(format!(
                 "upload requires 1..={} files",
@@ -994,11 +1234,10 @@ async fn handle_tool_dispatch(
         }
         params = serde_json::to_value(upload).unwrap_or(Value::Null);
     } else if method == Method::ToolDownload {
-        let mut download: DownloadParams =
-            match serde_json::from_value(strip_daemon_internal_fields(&params)) {
-                Ok(v) => v,
-                Err(err) => return ResponseBody::Err(invalid_params(err.to_string())),
-            };
+        let mut download: DownloadParams = match serde_json::from_value(params) {
+            Ok(v) => v,
+            Err(err) => return ResponseBody::Err(invalid_params(err.to_string())),
+        };
         let staging = match state.transfers.begin_download(&session_id.0) {
             Ok(v) => v,
             Err(err) => return ResponseBody::Err(err),
@@ -1013,27 +1252,39 @@ async fn handle_tool_dispatch(
             object.insert(key.into(), value);
         }
     }
-    if let Some(operation_id) = operation_id
-        && let Some(object) = params.as_object_mut()
-    {
-        object.insert("_operation_id".into(), operation_id);
-    }
     let entry = inflight_guard.entry();
     let wal_ticket = wal_mutating.then(|| {
-        let op_id = params.get("_operation_id").and_then(Value::as_str);
-        state
-            .intent_wal
-            .begin_dispatch(&session_id, wal_tab_id, op_id, &method, &params)
+        state.intent_wal.begin_dispatch(
+            &session_id,
+            wal_tab_id,
+            correlation.operation_id.as_deref(),
+            &method,
+            &params,
+        )
     });
     let outcome = if method.queue_unlocked_with_params(&params) {
         state
             .tool_queues
-            .dispatch_unlocked(&session_id, method.clone(), params, timeout, Some(entry))
+            .dispatch_unlocked_with_context(
+                &session_id,
+                method.clone(),
+                params,
+                correlation,
+                timeout,
+                Some(entry),
+            )
             .await
     } else {
         state
             .tool_queues
-            .dispatch(&session_id, method.clone(), params, timeout, Some(entry))
+            .dispatch_with_context(
+                &session_id,
+                method.clone(),
+                params,
+                correlation,
+                timeout,
+                Some(entry),
+            )
             .await
     };
     drop(inflight_guard);
@@ -1085,7 +1336,14 @@ async fn handle_tool_dispatch(
                 }
             }
         }
-        Ok(v) => ResponseBody::Ok(v),
+        Ok(mut v) => {
+            if method == Method::ToolVideo
+                && let Some(sess) = state.sessions.get(&session_id)
+            {
+                v["browser"] = Value::String(sess.browser_id.0);
+            }
+            ResponseBody::Ok(v)
+        }
         Err(err) => {
             if let Some(id) = download_transfer_id {
                 state
@@ -1194,7 +1452,7 @@ async fn handle_wait_ms(
     rpc_id: RpcId,
     params: Value,
 ) -> ResponseBody {
-    let params: WaitMsParams = match serde_json::from_value(strip_daemon_internal_fields(&params)) {
+    let params: WaitMsParams = match serde_json::from_value(params) {
         Ok(p) => p,
         Err(err) => {
             return ResponseBody::Err(RpcError {
@@ -1355,7 +1613,7 @@ fn tool_dispatch_timeout(params: &Value) -> Result<Duration, RpcError> {
 fn tool_dispatch_transport_timeout(method: &Method, params: &Value) -> Result<Duration, RpcError> {
     if *method == Method::ToolCooperate {
         let parsed: bsk_protocol::tools::CooperateParams =
-            serde_json::from_value(strip_daemon_internal_fields(params))
+            serde_json::from_value(params.clone())
                 .map_err(|error| invalid_params(error.to_string()))?;
         if parsed.timeout_ms.is_some_and(|ms| ms > 25_000) {
             return Err(invalid_params("cooperation wait is bounded to 25000ms"));
@@ -1456,7 +1714,7 @@ type SessionStopReply = Result<CliSessionStopResult, RpcError>;
 #[derive(Debug)]
 pub(super) struct RecordSessionStop {
     created_at_ms: i64,
-    result: watch::Receiver<Option<SessionStopReply>>,
+    pub(super) result: watch::Receiver<Option<SessionStopReply>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1510,23 +1768,12 @@ fn clamp_browser_wait(wait_ms: Option<u64>) -> Option<Duration> {
     ))
 }
 
-pub(super) async fn handle_session_start(
-    state: &Arc<DaemonState>,
-    rpc_id: RpcId,
-    params: Value,
-    recoverable: bool,
-) -> Result<Value, RpcError> {
-    let mut params = params;
-    let scope_meta = strip_envelope_scope_meta(&mut params);
-    handle_session_start_scoped(state, rpc_id, params, recoverable, &scope_meta).await
-}
-
 pub(super) async fn handle_session_start_scoped(
     state: &Arc<DaemonState>,
     rpc_id: RpcId,
     params: Value,
     recoverable: bool,
-    scope_meta: &EnvelopeScopeMeta,
+    req_meta: &IpcRequestMeta,
 ) -> Result<Value, RpcError> {
     let task_name = params
         .get("task_name")
@@ -1578,16 +1825,16 @@ pub(super) async fn handle_session_start_scoped(
         }
     };
 
-    let scope = scope_meta.caller_scope.as_deref().unwrap_or("default");
-    let binds_caller_scope = scope_meta.bind_scope
-        || scope_meta.reuse_or_start_scope
+    let scope = req_meta.caller_scope.as_deref().unwrap_or("default");
+    let binds_caller_scope = req_meta.bind_scope
+        || req_meta.reuse_or_start_scope
         || super::scopes::is_isolated_scope(scope);
     let scope_lock = binds_caller_scope.then(|| state.scopes.scope_start_lock(scope));
     let _scope_guard = match &scope_lock {
         Some(lock) => Some(lock.lock().await),
         None => None,
     };
-    if scope_meta.reuse_or_start_scope
+    if req_meta.reuse_or_start_scope
         && let Some((binding, live)) = state.scopes.active_binding(scope, &state.sessions)
     {
         if let Some(ref selector) = params.browser_instance_id {
@@ -1615,7 +1862,7 @@ pub(super) async fn handle_session_start_scoped(
                 }
             }
         }
-        if (scope_meta.explicit_incognito && params.incognito != binding.incognito)
+        if (req_meta.explicit_incognito && params.incognito != binding.incognito)
             || (params.incognito && !binding.incognito)
         {
             return Err(RpcError {
@@ -1645,11 +1892,10 @@ pub(super) async fn handle_session_start_scoped(
             };
             return Ok(serde_json::to_value(result).unwrap_or(Value::Null));
         }
-        state.scopes.on_session_ended(
+        state.teardown_session(
             &binding.session_id,
             bsk_protocol::RpcErrorReason::BrowserDisconnected.as_str(),
         );
-        state.intent_wal.on_session_ended(&binding.session_id);
     }
 
     let requested_incognito = params.incognito;
@@ -1675,8 +1921,8 @@ pub(super) async fn handle_session_start_scoped(
             if let Some(name) = task_name {
                 state.audit.set_name(&session.id.0, &name);
             }
-            if scope_meta.bind_scope
-                || scope_meta.reuse_or_start_scope
+            if req_meta.bind_scope
+                || req_meta.reuse_or_start_scope
                 || super::scopes::is_isolated_scope(scope)
             {
                 state.scopes.bind_scope(
@@ -1797,7 +2043,7 @@ async fn handle_session_stop(
     state: &Arc<DaemonState>,
     rpc_id: RpcId,
     params: Value,
-    scope_meta: &EnvelopeScopeMeta,
+    req_meta: &IpcRequestMeta,
 ) -> Result<Value, RpcError> {
     let abort_guard = state
         .abort_registry
@@ -1823,7 +2069,7 @@ async fn handle_session_stop(
     let session_id = match params.session_id.filter(|s| !s.trim().is_empty()) {
         Some(s) => SessionId(s),
         None => {
-            if let Some(scope) = scope_meta.caller_scope.as_deref() {
+            if let Some(scope) = req_meta.caller_scope.as_deref() {
                 state
                     .scopes
                     .resolve_implicit_session(scope, &state.sessions)?
@@ -1945,32 +2191,21 @@ async fn stop_one_session(
     session_id: &SessionId,
     cancel: Option<AbortToken>,
 ) -> SessionStopReply {
-    match stop_session(
-        &state.browsers,
-        &state.sessions,
-        &state.tool_queues,
-        &state.session_interrupts,
-        session_id,
-        DEFAULT_SESSION_STOP_TIMEOUT,
-        cancel,
-    )
-    .await
+    match state
+        .stop_session_with_reason(
+            session_id,
+            bsk_protocol::RpcErrorReason::SessionStopped.as_str(),
+            DEFAULT_SESSION_STOP_TIMEOUT,
+            cancel,
+        )
+        .await
     {
-        Ok(stop) => {
-            state.transfers.release_session(&session_id.0);
-            state.dialog_operations.remove_session(&session_id.0);
-            state.scopes.on_session_ended(
-                session_id,
-                bsk_protocol::RpcErrorReason::SessionStopped.as_str(),
-            );
-            state.intent_wal.on_session_ended(session_id);
-            Ok(CliSessionStopResult {
-                stopped: vec![session_id.0.clone()],
-                failed: Vec::new(),
-                returned_tab_ids: stop.returned_tab_ids,
-                return_failures: stop.return_failures,
-            })
-        }
+        Ok(stop) => Ok(CliSessionStopResult {
+            stopped: vec![session_id.0.clone()],
+            failed: Vec::new(),
+            returned_tab_ids: stop.returned_tab_ids,
+            return_failures: stop.return_failures,
+        }),
         Err(StopSessionError::ReturnFailures(stop)) => {
             let message = format!(
                 "failed to return borrowed tabs during session stop ({} failure(s)); session left running",
@@ -2051,24 +2286,16 @@ async fn handle_session_stop_all(
                 data: None,
             });
         }
-        match stop_session(
-            &state.browsers,
-            &state.sessions,
-            &state.tool_queues,
-            &state.session_interrupts,
-            &id,
-            DEFAULT_SESSION_STOP_TIMEOUT,
-            cancel.clone(),
-        )
-        .await
+        match state
+            .stop_session_with_reason(
+                &id,
+                bsk_protocol::RpcErrorReason::SessionStopped.as_str(),
+                DEFAULT_SESSION_STOP_TIMEOUT,
+                cancel.clone(),
+            )
+            .await
         {
             Ok(stop) => {
-                state.transfers.release_session(&id.0);
-                state.dialog_operations.remove_session(&id.0);
-                state
-                    .scopes
-                    .on_session_ended(&id, bsk_protocol::RpcErrorReason::SessionStopped.as_str());
-                state.intent_wal.on_session_ended(&id);
                 stopped.push(id.0);
                 returned_tab_ids.extend(stop.returned_tab_ids);
                 return_failures.extend(stop.return_failures);
@@ -2132,7 +2359,7 @@ fn handle_session_list(state: &Arc<DaemonState>) -> ResponseBody {
 fn handle_ledger_request(
     state: &Arc<DaemonState>,
     params: Value,
-    scope_meta: &EnvelopeScopeMeta,
+    req_meta: &IpcRequestMeta,
 ) -> ResponseBody {
     #[derive(serde::Deserialize)]
     struct LedgerParams {
@@ -2160,7 +2387,7 @@ fn handle_ledger_request(
         "status" => {
             let sid = match explicit_sid {
                 Some(sid) => Some(sid),
-                None => match scope_meta.caller_scope.as_deref() {
+                None => match req_meta.caller_scope.as_deref() {
                     Some(scope) => {
                         match state
                             .scopes
@@ -2184,7 +2411,7 @@ fn handle_ledger_request(
             let sid = match explicit_sid {
                 Some(sid) => sid,
                 None => {
-                    let scope_res = scope_meta
+                    let scope_res = req_meta
                         .caller_scope
                         .as_deref()
                         .ok_or_else(|| {
@@ -2203,7 +2430,7 @@ fn handle_ledger_request(
                                     state.intent_wal.find_unknown_session_by_operation(op_id)
                             {
                                 sid
-                            } else if let Some(raw) = scope_meta
+                            } else if let Some(raw) = req_meta
                                 .caller_scope
                                 .as_deref()
                                 .and_then(|sc| sc.strip_prefix("session_env:"))
@@ -2269,7 +2496,7 @@ impl IpcServer {
             daemon_version: DAEMON_VERSION,
             protocol_version: PROTOCOL_VERSION,
         };
-        let handler = full_handler(status, Arc::clone(&self.state));
+        let handler = full_envelope_handler(status, Arc::clone(&self.state));
         let listener = bind(&sock_path).await?;
         let shutdown = Arc::new(Notify::new());
         let shutdown_signal = Arc::clone(&shutdown);
@@ -2292,13 +2519,17 @@ mod unix {
     use std::sync::Arc;
 
     use anyhow::{Context, Result};
-    use bsk_protocol::{ErrorCode, Frame, RequestFrame, ResponseBody, RpcError};
+    use bsk_protocol::{ErrorCode, ResponseBody, RpcError};
     use serde_json::Value;
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     use tokio::net::{UnixListener, UnixStream};
     use tracing::{debug, info, warn};
 
-    use super::RpcHandler;
+    use crate::ipc_client::{
+        IpcEnvelope, IpcRequestEnvelope, IpcResponseEnvelope, IpcResponseMeta,
+    };
+
+    use super::{EnvelopeRpcHandler, IntoEnvelopeHandler};
 
     /// Bind the IPC server. Unbinds a stale socket if present (the daemon
     /// lock has already prevented two daemons running, so this is safe).
@@ -2318,17 +2549,19 @@ mod unix {
     }
 
     /// Run the IPC server loop until `shutdown` resolves.
-    pub async fn serve<S>(
+    pub async fn serve<H, S>(
         listener: UnixListener,
-        handler: RpcHandler,
+        handler: H,
         on_open: impl Fn() + Send + Sync + 'static,
         on_activity: impl Fn() + Send + Sync + 'static,
         on_close: impl Fn() + Send + Sync + 'static,
         shutdown: S,
     ) where
+        H: IntoEnvelopeHandler,
         S: std::future::Future<Output = ()> + Send + 'static,
     {
         info!("ipc server listening");
+        let handler = handler.into_envelope_handler();
         let on_open = Arc::new(on_open);
         let on_activity = Arc::new(on_activity);
         let on_close = Arc::new(on_close);
@@ -2365,7 +2598,7 @@ mod unix {
 
     async fn handle_connection(
         stream: UnixStream,
-        handler: RpcHandler,
+        handler: EnvelopeRpcHandler,
         on_activity: Arc<dyn Fn() + Send + Sync>,
     ) -> Result<()> {
         let (read_half, mut write_half) = stream.into_split();
@@ -2383,24 +2616,33 @@ mod unix {
                 continue;
             }
 
-            let response = match serde_json::from_str::<Frame>(trimmed) {
-                Ok(Frame::Request(RequestFrame { id, method, params })) => {
+            let response = match serde_json::from_str::<IpcEnvelope>(trimmed) {
+                Ok(IpcEnvelope::Request(IpcRequestEnvelope {
+                    id,
+                    method,
+                    params,
+                    meta,
+                })) => {
                     let params = params.unwrap_or(Value::Null);
-                    let body = (handler)(id.clone(), method, params).await;
-                    let frame = bsk_protocol::ResponseFrame { id, body };
-                    serde_json::to_string(&Frame::Response(frame))?
+                    let (body, resp_meta) = (handler)(id.clone(), method, params, meta).await;
+                    serde_json::to_string(&IpcEnvelope::Response(IpcResponseEnvelope {
+                        id,
+                        body,
+                        meta: resp_meta,
+                    }))?
                 }
                 Ok(other) => {
                     debug!(?other, "ipc client sent non-request frame");
                     continue;
                 }
-                Err(err) => serde_json::to_string(&Frame::Response(bsk_protocol::ResponseFrame {
+                Err(err) => serde_json::to_string(&IpcEnvelope::Response(IpcResponseEnvelope {
                     id: "0".into(),
                     body: ResponseBody::Err(RpcError {
                         code: ErrorCode::ProtocolError,
                         message: format!("invalid frame: {err}"),
                         data: None,
                     }),
+                    meta: IpcResponseMeta::default(),
                 }))?,
             };
 
@@ -2421,13 +2663,17 @@ mod windows {
     use std::sync::Arc;
 
     use anyhow::{Context, Result};
-    use bsk_protocol::{ErrorCode, Frame, RequestFrame, ResponseBody, RpcError};
+    use bsk_protocol::{ErrorCode, ResponseBody, RpcError};
     use serde_json::Value;
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     use tokio::net::windows::named_pipe::{NamedPipeServer, ServerOptions};
     use tracing::{debug, info, warn};
 
-    use super::RpcHandler;
+    use crate::ipc_client::{
+        IpcEnvelope, IpcRequestEnvelope, IpcResponseEnvelope, IpcResponseMeta,
+    };
+
+    use super::{EnvelopeRpcHandler, IntoEnvelopeHandler};
 
     pub struct NamedPipeListener {
         pipe_name: String,
@@ -2448,17 +2694,19 @@ mod windows {
         })
     }
 
-    pub async fn serve<S>(
+    pub async fn serve<H, S>(
         mut listener: NamedPipeListener,
-        handler: RpcHandler,
+        handler: H,
         on_open: impl Fn() + Send + Sync + 'static,
         on_activity: impl Fn() + Send + Sync + 'static,
         on_close: impl Fn() + Send + Sync + 'static,
         shutdown: S,
     ) where
+        H: IntoEnvelopeHandler,
         S: std::future::Future<Output = ()> + Send + 'static,
     {
         info!(pipe = %listener.pipe_name, "ipc named-pipe server listening");
+        let handler = handler.into_envelope_handler();
         let on_open = Arc::new(on_open);
         let on_activity = Arc::new(on_activity);
         let on_close = Arc::new(on_close);
@@ -2534,7 +2782,7 @@ mod windows {
 
     async fn handle_connection(
         pipe: NamedPipeServer,
-        handler: RpcHandler,
+        handler: EnvelopeRpcHandler,
         on_activity: Arc<dyn Fn() + Send + Sync>,
     ) -> Result<()> {
         let (read_half, mut write_half) = tokio::io::split(pipe);
@@ -2552,24 +2800,33 @@ mod windows {
                 continue;
             }
 
-            let response = match serde_json::from_str::<Frame>(trimmed) {
-                Ok(Frame::Request(RequestFrame { id, method, params })) => {
+            let response = match serde_json::from_str::<IpcEnvelope>(trimmed) {
+                Ok(IpcEnvelope::Request(IpcRequestEnvelope {
+                    id,
+                    method,
+                    params,
+                    meta,
+                })) => {
                     let params = params.unwrap_or(Value::Null);
-                    let body = (handler)(id.clone(), method, params).await;
-                    let frame = bsk_protocol::ResponseFrame { id, body };
-                    serde_json::to_string(&Frame::Response(frame))?
+                    let (body, resp_meta) = (handler)(id.clone(), method, params, meta).await;
+                    serde_json::to_string(&IpcEnvelope::Response(IpcResponseEnvelope {
+                        id,
+                        body,
+                        meta: resp_meta,
+                    }))?
                 }
                 Ok(other) => {
                     debug!(?other, "named-pipe client sent non-request frame");
                     continue;
                 }
-                Err(err) => serde_json::to_string(&Frame::Response(bsk_protocol::ResponseFrame {
+                Err(err) => serde_json::to_string(&IpcEnvelope::Response(IpcResponseEnvelope {
                     id: "0".into(),
                     body: ResponseBody::Err(RpcError {
                         code: ErrorCode::ProtocolError,
                         message: format!("invalid frame: {err}"),
                         data: None,
                     }),
+                    meta: IpcResponseMeta::default(),
                 }))?,
             };
 

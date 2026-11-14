@@ -398,6 +398,15 @@ impl<'a> Output<'a> {
         })
     }
 
+    pub(crate) fn with_resolved_session(mut self, resolved: Option<&'a str>) -> Self {
+        if self.session.trim().is_empty()
+            && let Some(sid) = resolved.filter(|s| !s.trim().is_empty())
+        {
+            self.session = sid;
+        }
+        self
+    }
+
     pub(crate) fn finish(self, mut reply: Value, mut exit: u8) -> Result<(), CliError> {
         if business_rpc::cancel_requested() {
             reply["ok"] = false.into();
@@ -458,21 +467,34 @@ pub fn dispatch(
     let aux_ctx = op_ctx.without_action_metadata();
     let mut first_rpc = true;
     let daemon = ensure_daemon().context("ensure daemon is running")?;
+    let need_scope_meta = session.trim().is_empty();
+    let mut resolved_session: Option<String> = None;
     let (reply, exit) = run(&args, method, params, |method, params, timeout| {
         let rpc_ctx = if std::mem::take(&mut first_rpc) {
             &op_ctx
         } else {
             &aux_ctx
         };
-        rpc_ctx.call(
+        let meta = crate::ipc_client::IpcRequestMeta {
+            return_scope_meta: need_scope_meta && method == Method::ToolCooperate,
+            ..Default::default()
+        };
+        let (val, resp_meta) = rpc_ctx.call_envelope(
             daemon.sock_path.clone(),
             "step",
             method,
             Some(params),
+            meta,
             timeout,
-        )
+        )?;
+        if let Some(sm) = resp_meta.scope_meta {
+            resolved_session = Some(sm.session_id);
+        }
+        Ok(val)
     });
-    output.finish(reply, exit)
+    output
+        .with_resolved_session(resolved_session.as_deref())
+        .finish(reply, exit)
 }
 
 #[cfg(test)]

@@ -410,17 +410,30 @@ impl Link {
         params: Value,
         timeout: Duration,
     ) -> Result<Value, CliError> {
-        let mut params = ctx
-            .prepare_params(&method, Some(params))?
-            .unwrap_or(Value::Null);
-        if matches!(method, Method::SessionStart | Method::SessionStartTracked)
-            && let Some(object) = params.as_object_mut()
-        {
-            object
-                .entry("_caller_scope")
-                .or_insert_with(|| Value::String(ctx.resolved_caller_scope()));
-            object.entry("_bind_scope").or_insert(Value::Bool(true));
-        }
+        let initial_meta = if matches!(method, Method::SessionStart | Method::SessionStartTracked) {
+            crate::ipc_client::IpcRequestMeta {
+                caller_scope: Some(ctx.resolved_caller_scope()),
+                bind_scope: true,
+                ..Default::default()
+            }
+        } else {
+            crate::ipc_client::IpcRequestMeta::default()
+        };
+        self.rpc_envelope(ctx, method, params, initial_meta, timeout)
+            .await
+            .map(|(value, _)| value)
+    }
+
+    async fn rpc_envelope(
+        &self,
+        ctx: &ClientContext,
+        method: Method,
+        params: Value,
+        meta: crate::ipc_client::IpcRequestMeta,
+        timeout: Duration,
+    ) -> Result<(Value, crate::ipc_client::IpcResponseMeta), CliError> {
+        let (params, meta) = ctx.prepare_envelope(&method, Some(params), meta)?;
+        let params = params.unwrap_or(Value::Null);
         let rpc_id = format!("mcp-{}", uuid::Uuid::new_v4());
         {
             let mut current = self.control.current.lock().unwrap();
@@ -439,33 +452,39 @@ impl Link {
         let operation = async {
             let mut client = IpcClient::connect(&self.sock).await?;
             if self.control.is_cancelled() {
-                return Ok(Err(RpcError {
-                    code: ErrorCode::Cancelled,
-                    message: "tool call cancelled before dispatch".into(),
-                    data: Some(json!({
-                        "reason": RpcErrorReason::CancelledBeforeDispatch,
-                        "effect_state": "none",
-                    })),
-                }));
+                return Ok((
+                    Err(RpcError {
+                        code: ErrorCode::Cancelled,
+                        message: "tool call cancelled before dispatch".into(),
+                        data: Some(json!({
+                            "reason": RpcErrorReason::CancelledBeforeDispatch,
+                            "effect_state": "none",
+                        })),
+                    }),
+                    crate::ipc_client::IpcResponseMeta::default(),
+                ));
             }
             client
-                .call_with_id::<Value, Value>(rpc_id, method, Some(params), timeout)
+                .call_envelope_with_id::<Value, Value>(rpc_id, method, Some(params), meta, timeout)
                 .await
         };
         let outcome = tokio::select! {
             biased;
-            _ = self.control.notify.notified() => Ok(Err(RpcError {
-                code: ErrorCode::Cancelled,
-                message: "tool call cancelled".into(),
-                // It may already have reached the daemon; never claim no effect.
-                data: Some(json!({"reason": RpcErrorReason::Cancelled, "effect_state": "unknown"})),
-            })),
+            _ = self.control.notify.notified() => Ok((
+                Err(RpcError {
+                    code: ErrorCode::Cancelled,
+                    message: "tool call cancelled".into(),
+                    // It may already have reached the daemon; never claim no effect.
+                    data: Some(json!({"reason": RpcErrorReason::Cancelled, "effect_state": "unknown"})),
+                }),
+                crate::ipc_client::IpcResponseMeta::default(),
+            )),
             outcome = operation => outcome,
         };
         self.control.current.lock().unwrap().take();
         match outcome {
-            Ok(Ok(value)) => Ok(value),
-            Ok(Err(err)) => Err(CliError::from_rpc(err)),
+            Ok((Ok(value), resp_meta)) => Ok((value, resp_meta)),
+            Ok((Err(err), _)) => Err(CliError::from_rpc(err)),
             Err(err) => Err(CliError::Local(err)),
         }
     }
@@ -484,6 +503,33 @@ impl Link {
         tokio::task::spawn_blocking(move || {
             run(&|ctx, method, params, timeout| {
                 handle.block_on(link.rpc(ctx, method, params, timeout))
+            })
+        })
+        .await
+        .map_err(|err| CliError::Local(anyhow::anyhow!("tool call task failed: {err}")))
+    }
+
+    async fn blocking_envelope<T, F>(&self, run: F) -> Result<T, CliError>
+    where
+        T: Send + 'static,
+        F: FnOnce(
+                &dyn Fn(
+                    &ClientContext,
+                    Method,
+                    Value,
+                    crate::ipc_client::IpcRequestMeta,
+                    Duration,
+                )
+                    -> Result<(Value, crate::ipc_client::IpcResponseMeta), CliError>,
+            ) -> T
+            + Send
+            + 'static,
+    {
+        let link = self.clone();
+        let handle = tokio::runtime::Handle::current();
+        tokio::task::spawn_blocking(move || {
+            run(&|ctx, method, params, meta, timeout| {
+                handle.block_on(link.rpc_envelope(ctx, method, params, meta, timeout))
             })
         })
         .await
@@ -1021,10 +1067,6 @@ async fn session(
                 let mut start_payload = json!({
                     "incognito": incognito,
                     "focused": args.focus.unwrap_or(false),
-                    "_caller_scope": aux_ctx.resolved_caller_scope(),
-                    "_bind_scope": true,
-                    "_reuse_or_start_scope": true,
-                    "_explicit_incognito": incognito,
                 });
                 if let Some(ref browser) = args.browser {
                     start_payload["browser_instance_id"] = Value::String(browser.clone());
@@ -1033,11 +1075,19 @@ async fn session(
                     start_payload["width"] = Value::from(w);
                     start_payload["height"] = Value::from(h);
                 }
-                let reply = link
-                    .rpc(
+                let start_meta = crate::ipc_client::IpcRequestMeta {
+                    caller_scope: Some(aux_ctx.resolved_caller_scope()),
+                    bind_scope: true,
+                    reuse_or_start_scope: true,
+                    explicit_incognito: incognito,
+                    return_scope_meta: false,
+                };
+                let (reply, _) = link
+                    .rpc_envelope(
                         &aux_ctx,
                         Method::SessionStart,
                         start_payload,
+                        start_meta,
                         Duration::from_secs(75),
                     )
                     .await?;
@@ -1072,8 +1122,8 @@ async fn session(
             let max_tokens = args.max_tokens;
             let wait_for = args.wait_for.clone();
             let wait_not = args.wait_not.clone();
-            let mut reply = link
-                .blocking(move |rpc| {
+            let synced = link
+                .blocking_envelope(move |rpc| {
                     lifecycle::settled_sync_with_conditions_using(
                         Some(sid_for_wait.as_str()),
                         nav_tab_id,
@@ -1083,11 +1133,14 @@ async fn session(
                         wait_not.as_deref(),
                         wait_budget_ms,
                         "committed",
-                        |_, method, params| rpc(&aux_ctx, method, params, TOOL_IPC_TIMEOUT),
+                        |_, method, params, meta| {
+                            rpc(&aux_ctx, method, params, meta, TOOL_IPC_TIMEOUT)
+                        },
                         std::thread::sleep,
                     )
                 })
                 .await??;
+            let mut reply = synced.reply;
             if let Some(obj) = reply.as_object_mut() {
                 obj.entry("session_id")
                     .or_insert_with(|| Value::String(session_id));
@@ -1213,7 +1266,8 @@ async fn session(
             let aux_ctx = ctx.without_action_metadata();
             let link = connect(daemon, control).await?;
 
-            let mut reply = if syncing && has_wait_conditions {
+            let has_match_text = args.match_text.as_ref().is_some_and(|v| !v.is_empty());
+            let (mut reply, sync_scope_meta) = if syncing && has_wait_conditions {
                 let explicit_session = args.session.filter(|s| !s.trim().is_empty());
                 let wait_budget_ms = u32::try_from(args.timeout_ms.unwrap_or(5_000))
                     .map_err(|_| invalid("timeout_ms out of range"))?;
@@ -1222,21 +1276,25 @@ async fn session(
                 let max_tokens = args.max_tokens;
                 let wait_for = args.wait_for.clone();
                 let wait_not = args.wait_not.clone();
-                link.blocking(move |rpc| {
-                    lifecycle::settled_sync_with_conditions_using(
-                        explicit_session.as_deref(),
-                        tab_id,
-                        control_policy,
-                        max_tokens,
-                        wait_for.as_deref(),
-                        wait_not.as_deref(),
-                        wait_budget_ms,
-                        "none",
-                        |_, method, params| rpc(&aux_ctx, method, params, TOOL_IPC_TIMEOUT),
-                        std::thread::sleep,
-                    )
-                })
-                .await??
+                let synced = link
+                    .blocking_envelope(move |rpc| {
+                        lifecycle::settled_sync_with_conditions_using(
+                            explicit_session.as_deref(),
+                            tab_id,
+                            control_policy,
+                            max_tokens,
+                            wait_for.as_deref(),
+                            wait_not.as_deref(),
+                            wait_budget_ms,
+                            "none",
+                            |_, method, params, meta| {
+                                rpc(&aux_ctx, method, params, meta, TOOL_IPC_TIMEOUT)
+                            },
+                            std::thread::sleep,
+                        )
+                    })
+                    .await??;
+                (synced.reply, synced.scope_meta)
             } else {
                 let params = CooperateParams {
                     control_policy: policy,
@@ -1248,36 +1306,69 @@ async fn session(
                 };
                 if args.settle.unwrap_or(false) {
                     let wait_ms = args.timeout_ms;
-                    link.blocking(move |rpc| {
-                        cooperate::settle::run(|mode| {
+                    link.blocking_envelope(move |rpc| {
+                        let mut latest_meta = None;
+                        let val = cooperate::settle::run(|mode| {
                             let mut current = params.clone();
                             if matches!(mode, CooperateAction::Wait) {
                                 current.control_policy = None;
                                 current.timeout_ms = Some(wait_ms.unwrap_or(1000));
                             }
+                            let is_sync = matches!(mode, CooperateAction::Sync);
                             current.action = mode;
-                            rpc(
+                            let meta = crate::ipc_client::IpcRequestMeta {
+                                return_scope_meta: has_match_text && is_sync,
+                                ..Default::default()
+                            };
+                            let (val, resp_meta) = rpc(
                                 &aux_ctx,
                                 Method::ToolCooperate,
                                 serde_json::to_value(current).unwrap_or_default(),
+                                meta,
                                 TOOL_IPC_TIMEOUT,
-                            )
-                        })
+                            )?;
+                            if is_sync {
+                                latest_meta = resp_meta.scope_meta;
+                            }
+                            Ok(val)
+                        })?;
+                        Ok::<_, CliError>((val, latest_meta))
                     })
                     .await??
                 } else {
-                    link.rpc(
-                        &ctx,
-                        Method::ToolCooperate,
-                        serde_json::to_value(params).unwrap_or_default(),
-                        TOOL_IPC_TIMEOUT,
-                    )
-                    .await?
+                    let meta = crate::ipc_client::IpcRequestMeta {
+                        return_scope_meta: syncing && has_match_text,
+                        ..Default::default()
+                    };
+                    let (val, resp_meta) = link
+                        .rpc_envelope(
+                            &ctx,
+                            Method::ToolCooperate,
+                            serde_json::to_value(params).unwrap_or_default(),
+                            meta,
+                            TOOL_IPC_TIMEOUT,
+                        )
+                        .await?;
+                    (val, resp_meta.scope_meta)
                 }
             };
             if syncing {
                 cooperate::verify_policy(&reply, policy)?;
                 if let Some(needles) = args.match_text.filter(|v| !v.is_empty()) {
+                    if reply.pointer("/observation/text").is_none()
+                        && let Some(meta) = sync_scope_meta.as_ref()
+                        && meta.cache_reusable
+                        && let Some(cached_vom) = meta.cached_vom.as_deref()
+                    {
+                        if !reply.get("observation").is_some_and(Value::is_object) {
+                            reply["observation"] = json!({});
+                        }
+                        reply["observation"]["text"] = Value::String(cached_vom.to_string());
+                        reply["observation"]["truncated"] = Value::Bool(meta.cached_vom_truncated);
+                        if let Some(cursor) = meta.cached_vom_next_cursor.as_deref() {
+                            reply["observation"]["next_cursor"] = Value::String(cursor.to_string());
+                        }
+                    }
                     cooperate::presentation::filter(
                         &mut reply,
                         &needles,
@@ -4127,16 +4218,22 @@ mod tests {
         )
         .unwrap();
         // Mutating tool accepting metadata receives context_id/observation_id/expect/depends_on,
-        // and injects `_caller_scope` when `session_id` is empty.
-        let click_params = ctx
-            .prepare_params(&Method::ToolClick, Some(json!({"session_id": ""})))
-            .unwrap()
+        // and populates `IpcRequestMeta.caller_scope` out-of-band when `session_id` is empty.
+        let (click_params, click_meta) = ctx
+            .prepare_envelope(
+                &Method::ToolClick,
+                Some(json!({"session_id": ""})),
+                crate::ipc_client::IpcRequestMeta::default(),
+            )
             .unwrap();
-        assert_eq!(click_params["_caller_scope"], "scope:scope-1");
+        let click_params = click_params.unwrap();
+        assert_eq!(click_meta.caller_scope.as_deref(), Some("scope:scope-1"));
+        assert_eq!(click_params["session_id"], "");
         assert_eq!(click_params["context_id"], "ctx-1");
         assert_eq!(click_params["observation_id"], "obs-1");
         assert_eq!(click_params["depends_on"], json!(["dep-1"]));
         assert!(click_params["expect"].is_array());
+        assert_eq!(click_params.as_object().unwrap().len(), 5);
 
         // Passive-read tools reject depends_on/observation_id/expect, but accept context_id alone.
         let read_ctx = build_ctx(
@@ -4152,12 +4249,19 @@ mod tests {
             ctx.prepare_params(&Method::ToolRead, Some(json!({"session_id": "s1"})))
                 .is_err()
         );
-        let read_params = read_ctx
-            .prepare_params(&Method::ToolRead, Some(json!({"session_id": ""})))
-            .unwrap()
+        let (read_params, read_meta) = read_ctx
+            .prepare_envelope(
+                &Method::ToolRead,
+                Some(json!({"session_id": ""})),
+                crate::ipc_client::IpcRequestMeta::default(),
+            )
             .unwrap();
-        assert_eq!(read_params["context_id"], "ctx-1");
-        assert_eq!(read_params["_caller_scope"], "scope:scope-1");
+        let read_params = read_params.unwrap();
+        assert_eq!(
+            read_params,
+            json!({"session_id": "", "context_id": "ctx-1"})
+        );
+        assert_eq!(read_meta.caller_scope.as_deref(), Some("scope:scope-1"));
 
         for passive_method in [
             Method::ToolSnapshot,
@@ -4183,16 +4287,17 @@ mod tests {
         }
 
         // Wait tool never receives leaked expect/observation/context metadata via without_action_metadata().
-        let wait_params = ctx
+        let (wait_params, wait_meta) = ctx
             .without_action_metadata()
-            .prepare_params(&Method::ToolWaitForElement, Some(json!({"session_id": ""})))
-            .unwrap()
+            .prepare_envelope(
+                &Method::ToolWaitForElement,
+                Some(json!({"session_id": ""})),
+                crate::ipc_client::IpcRequestMeta::default(),
+            )
             .unwrap();
-        assert!(wait_params.get("context_id").is_none());
-        assert!(wait_params.get("observation_id").is_none());
-        assert!(wait_params.get("expect").is_none());
-        assert!(wait_params.get("depends_on").is_none());
-        assert_eq!(wait_params["_caller_scope"], "scope:scope-1");
+        let wait_params = wait_params.unwrap();
+        assert_eq!(wait_params, json!({"session_id": ""}));
+        assert_eq!(wait_meta.caller_scope.as_deref(), Some("scope:scope-1"));
     }
 
     #[test]

@@ -1285,7 +1285,7 @@ mod tests {
                     use crate::daemon::browsers::{
                         BrowserClient, BrowserId, BrowserSink, Liveness, next_browser_generation,
                     };
-                    use crate::daemon::ipc::{DaemonStatus, full_handler};
+                    use crate::daemon::ipc::DaemonStatus;
                     use crate::daemon::sessions::Session;
                     use crate::daemon::start::DaemonConfig;
                     use crate::daemon::state::{DAEMON_VERSION, DaemonState, PROTOCOL_VERSION};
@@ -1374,7 +1374,7 @@ mod tests {
                         }
                     });
 
-                    let handler = full_handler(
+                    let handler = crate::daemon::ipc::full_envelope_handler(
                         DaemonStatus {
                             started_at: Instant::now(),
                             ws_port: 0,
@@ -1384,28 +1384,32 @@ mod tests {
                         },
                         Arc::clone(&state),
                     );
+                    let checkout_meta = crate::ipc_client::IpcRequestMeta {
+                        caller_scope: Some("scope:checkout".into()),
+                        ..Default::default()
+                    };
 
                     // Initial `bsk sync` records `active_tab_id = 10` for implicit calls.
-                    let sync0 = handler(
+                    let (sync0, _) = handler(
                         "rpc-sync-0".into(),
                         Method::ToolCooperate,
                         json!({
-                            "_caller_scope": "scope:checkout",
                             "action": "sync",
                             "control_policy": "target",
                         }),
+                        checkout_meta.clone(),
                     )
                     .await;
                     assert!(matches!(sync0, ResponseBody::Ok(_)));
 
                     // 1. Bare CSS selector `#pay-btn` click returns `Timeout` / `unknown` -> freezes tab 10.
-                    let click1 = handler(
+                    let (click1, _) = handler(
                         "rpc-click-1".into(),
                         Method::ToolClick,
                         json!({
-                            "_caller_scope": "scope:checkout",
                             "selector": "#pay-btn",
                         }),
+                        checkout_meta.clone(),
                     )
                     .await;
                     assert!(matches!(
@@ -1417,13 +1421,13 @@ mod tests {
                     ));
 
                     // 2. Blind replay via `--ref e1` on the same tab is rejected in <1ms!
-                    let replay = handler(
+                    let (replay, _) = handler(
                         "rpc-click-replay".into(),
                         Method::ToolClick,
                         json!({
-                            "_caller_scope": "scope:checkout",
                             "ref": "e1",
                         }),
+                        checkout_meta.clone(),
                     )
                     .await;
                     match replay {
@@ -1441,15 +1445,15 @@ mod tests {
                         ("rpc-read", Method::ToolRead),
                         ("rpc-net", Method::ToolNetwork),
                     ] {
-                        let res =
-                            handler(id.into(), m, json!({ "_caller_scope": "scope:checkout" }))
-                                .await;
+                        let (res, _) =
+                            handler(id.into(), m, json!({}), checkout_meta.clone()).await;
                         assert!(matches!(res, ResponseBody::Ok(_)));
                     }
-                    let status_res = handler(
+                    let (status_res, _) = handler(
                         "rpc-ledger-status".into(),
                         Method::LedgerRequest,
-                        json!({ "action": "status", "_caller_scope": "scope:checkout" }),
+                        json!({ "action": "status" }),
+                        checkout_meta.clone(),
                     )
                     .await;
                     let ResponseBody::Ok(status_val) = status_res else {
@@ -1459,22 +1463,23 @@ mod tests {
                     assert_eq!(status_val["pending_unknown"].as_array().unwrap().len(), 1);
 
                     // 4. `bsk sync` (`tool.cooperate` `action: "sync"`) auto-reconciles `UNKNOWN -> RECONCILED`!
-                    let sync1 = handler(
+                    let (sync1, _) = handler(
                         "rpc-sync-1".into(),
                         Method::ToolCooperate,
                         json!({
-                            "_caller_scope": "scope:checkout",
                             "action": "sync",
                             "control_policy": "target",
                         }),
+                        checkout_meta.clone(),
                     )
                     .await;
                     assert!(matches!(sync1, ResponseBody::Ok(_)));
 
-                    let status_after = handler(
+                    let (status_after, _) = handler(
                         "rpc-ledger-status-2".into(),
                         Method::LedgerRequest,
-                        json!({ "action": "status", "_caller_scope": "scope:checkout" }),
+                        json!({ "action": "status" }),
+                        checkout_meta.clone(),
                     )
                     .await;
                     let ResponseBody::Ok(status_after_val) = status_after else {
@@ -1483,13 +1488,13 @@ mod tests {
                     assert_eq!(status_after_val["frozen"], false);
 
                     // 5. Follow-up `tool.click` now succeeds cleanly!
-                    let click2 = handler(
+                    let (click2, _) = handler(
                         "rpc-click-2".into(),
                         Method::ToolClick,
                         json!({
-                            "_caller_scope": "scope:checkout",
                             "selector": "#pay-btn",
                         }),
+                        checkout_meta,
                     )
                     .await;
                     assert!(matches!(click2, ResponseBody::Ok(_)));

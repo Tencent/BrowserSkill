@@ -3,17 +3,19 @@
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
+use bsk_protocol::tools::SessionStopResult;
 use tokio::task::JoinHandle;
 
-use super::abort::AbortRegistry;
+use super::abort::{AbortRegistry, AbortToken};
 use super::browsers::{BrowserId, BrowserRegistry};
 use super::file_transfer::TransferRegistry;
-use super::inflight::ToolInflightRegistry;
+use super::inflight::{CancelReason, ToolInflightRegistry};
 use super::ipc::{IpcHandle, RecordSessionStop};
 use super::queue::ToolQueueRegistry;
 use super::session_interrupt::SessionInterruptRegistry;
-use super::sessions::{SessionId, SessionRegistry};
+use super::sessions::{SessionId, SessionRegistry, StopSessionError, send_session_stop};
 use super::start::DaemonConfig;
 use super::ws::WsHandle;
 
@@ -67,10 +69,81 @@ pub struct DaemonState {
 }
 
 impl DaemonState {
-    /// Forget every session owned by `browser_id`: drop its queue and
-    /// interrupt state, release its transfers, clear its dialog
-    /// operations, and tombstone why the ids ended so later dispatches
-    /// answer "browser disconnected" instead of a bare not-found.
+    /// Single authoritative session teardown entry point across the daemon.
+    ///
+    /// Reconciles all 12 session-associated state tables (`sessions`,
+    /// `record_session_stops`, `session_requests`, `tool_queues`,
+    /// `abort_registry`, `tool_inflight`, `dialog_operations`,
+    /// `session_interrupts`, `transfers`, `run_logs`, `scopes`, and
+    /// `intent_wal`) and returns `true` when `session_id` was live in
+    /// [`SessionRegistry`] at teardown time.
+    pub fn teardown_session(&self, session_id: &SessionId, reason: &'static str) -> bool {
+        if reason == bsk_protocol::RpcErrorReason::UserMovedTab.as_str() {
+            let snapshots = self
+                .tool_inflight
+                .cancel_session_with_reason(session_id, CancelReason::UserMovedTab);
+            for snap in snapshots {
+                if let (Some(browser_id), Some(ws_rpc_id)) = (snap.browser_id, snap.ws_rpc_id)
+                    && let Err(err) = super::cancel_forward::forward_cancel_to_browser(
+                        self,
+                        &browser_id,
+                        &ws_rpc_id,
+                    )
+                {
+                    tracing::warn!(
+                        %browser_id,
+                        %ws_rpc_id,
+                        %err,
+                        "failed to forward session cancellation to extension"
+                    );
+                }
+            }
+        }
+        let removed = self.sessions.teardown(session_id, reason);
+        self.record_session_stops
+            .lock()
+            .unwrap()
+            .retain(|id, stop| id != session_id || stop.result.borrow().is_none());
+        for rpc_id in self.session_requests.on_session_ended(session_id) {
+            self.abort_registry.cancel(&rpc_id);
+        }
+        self.tool_queues.remove(session_id);
+        self.dialog_operations.remove_session(&session_id.0);
+        self.session_interrupts.drop_session(session_id);
+        self.transfers.release_session(&session_id.0);
+        self.run_logs.remove_session(&session_id.0);
+        self.scopes.on_session_ended(session_id, reason);
+        self.intent_wal.on_session_ended(session_id);
+        removed
+    }
+
+    /// Round-trip `tool.session_stop` to the owning extension and, on success,
+    /// atomically finalize all daemon session state through
+    /// [`Self::teardown_session`] with `reason`.
+    pub async fn stop_session_with_reason(
+        &self,
+        session_id: &SessionId,
+        reason: &'static str,
+        timeout_dur: Duration,
+        cancel: Option<AbortToken>,
+    ) -> Result<SessionStopResult, StopSessionError> {
+        let (result, graceful_audit) = send_session_stop(
+            &self.browsers,
+            &self.sessions,
+            &self.tool_queues,
+            session_id,
+            timeout_dur,
+            cancel,
+        )
+        .await?;
+        if graceful_audit {
+            self.sessions.mark_graceful_audit_end(session_id);
+        }
+        self.teardown_session(session_id, reason);
+        Ok(result)
+    }
+
+    /// Forget every session owned by `browser_id` through [`Self::teardown_session`].
     ///
     /// Shared by every browser-driven purge (maintainer review of
     /// issue #465): the reconnect-time stale purge, the ordinary socket
@@ -81,15 +154,10 @@ impl DaemonState {
         end_reason: &'static str,
         note: &'static str,
     ) {
-        for session in self.sessions.purge_browser(browser_id) {
-            self.tool_queues.remove(&session.id);
-            self.session_interrupts.drop_session(&session.id);
-            self.transfers.release_session(&session.id.0);
-            self.dialog_operations.remove_session(&session.id.0);
-            self.sessions.remember_end(&session.id, end_reason);
-            self.scopes.on_session_ended(&session.id, end_reason);
-            self.intent_wal.on_session_ended(&session.id);
-            tracing::debug!(session = %session.id, note);
+        for session_id in self.sessions.ids_for_browser(browser_id) {
+            if self.teardown_session(&session_id, end_reason) {
+                tracing::debug!(session = %session_id, note);
+            }
         }
     }
 }

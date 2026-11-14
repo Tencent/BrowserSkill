@@ -111,10 +111,7 @@ async fn do_handshake_protocol(ws: &mut Ws, protocol: &str) -> HandshakeResult {
 }
 
 fn strip_envelope_params(params: &mut Option<Value>) {
-    if let Some(Value::Object(map)) = params {
-        map.remove("_audit_id");
-        map.remove("_operation_id");
-    }
+    bsk_protocol::RequestFrame::strip_ws_correlation(params);
 }
 
 /// Fake extension that auto-replies to `tool.session_start` /

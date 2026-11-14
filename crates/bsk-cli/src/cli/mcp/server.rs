@@ -6,6 +6,7 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use serde_json::{Value, json};
@@ -51,6 +52,7 @@ pub enum Daemon {
 struct Server {
     daemon: Daemon,
     conn_scope: String,
+    may_own_transient_session: AtomicBool,
     out: mpsc::UnboundedSender<Value>,
     calls: Mutex<HashMap<String, Arc<CallControl>>>,
 }
@@ -83,23 +85,25 @@ where
     let server = Arc::new(Server {
         daemon,
         conn_scope,
+        may_own_transient_session: AtomicBool::new(false),
         out,
         calls: Mutex::default(),
     });
     let mut reader = BufReader::new(reader);
     let mut tasks = JoinSet::new();
-    loop {
-        match read_message(&mut reader).await? {
-            Inbound::Eof => break,
-            Inbound::TooLong => server.send(error(
+    let read_result: std::io::Result<()> = loop {
+        match read_message(&mut reader).await {
+            Ok(Inbound::Eof) => break Ok(()),
+            Ok(Inbound::TooLong) => server.send(error(
                 Value::Null,
                 INVALID_REQUEST,
                 format!("message exceeds {MAX_MESSAGE_BYTES} bytes"),
             )),
-            Inbound::Line(line) => server.handle(&line, &mut tasks),
+            Ok(Inbound::Line(line)) => server.handle(&line, &mut tasks),
+            Err(err) => break Err(err),
         }
         while tasks.try_join_next().is_some() {}
-    }
+    };
     // The client is gone: stop daemon work whose result nobody can receive.
     let controls: Vec<_> = server.calls.lock().unwrap().values().cloned().collect();
     let mut cancellations = JoinSet::new();
@@ -115,9 +119,58 @@ where
     .await;
     tasks.shutdown().await;
     cancellations.shutdown().await;
+    reap_orphan_transient_mcp_session(&server).await;
     drop(server);
-    writer_task.await??;
+    let writer_result = writer_task.await;
+    read_result?;
+    writer_result??;
     Ok(())
+}
+
+/// When an MCP `stdio` client disconnects at EOF and this server was running
+/// under its own exclusive transient `mcp:<pid>:<nonce>` scope (no `BSK_SCOPE`,
+/// `BSK_SESSION`, or `HOST_AGENT_ENV_KEYS` shared scope), ask an already-running
+/// daemon to stop any session bound to that transient scope immediately rather
+/// than leaving an orphan Agent Window until the 5-minute idle timeout.
+async fn reap_orphan_transient_mcp_session(server: &Server) {
+    if !server.may_own_transient_session.load(Ordering::Relaxed) {
+        return;
+    }
+    let effective_scope =
+        crate::daemon::scopes::resolve_caller_scope_from_env(None, Some(&server.conn_scope));
+    if effective_scope != server.conn_scope {
+        return;
+    }
+    let sock = match &server.daemon {
+        Daemon::Fixed { sock, .. } => Some(sock.clone()),
+        Daemon::Discover => crate::daemon::info::read().ok().flatten().map(|info| {
+            crate::ipc_client::record_endpoint_ipc_envelope(&info.sock_path, info.ipc_envelope);
+            info.sock_path
+        }),
+    };
+    let Some(sock) = sock else {
+        return;
+    };
+    let stop_timeout = std::time::Duration::from_secs(5);
+    let _ = tokio::time::timeout(stop_timeout, async {
+        let Ok(mut client) = crate::ipc_client::IpcClient::connect(sock).await else {
+            return;
+        };
+        let meta = crate::ipc_client::IpcRequestMeta {
+            caller_scope: Some(server.conn_scope.clone()),
+            ..Default::default()
+        };
+        let _ = client
+            .call_envelope::<Value, Value>(
+                "mcp-eof-stop",
+                bsk_protocol::Method::SessionStop,
+                Some(json!({ "all": false })),
+                meta,
+                stop_timeout,
+            )
+            .await;
+    })
+    .await;
 }
 
 /// Read one newline-terminated message without unbounded buffering.
@@ -222,6 +275,18 @@ impl Server {
         }
         let name = name.to_owned();
         let arguments = params.get("arguments").cloned().unwrap_or(Value::Null);
+        let has_explicit_scope = arguments
+            .get("scope")
+            .and_then(Value::as_str)
+            .is_some_and(|s| !s.trim().is_empty());
+        let has_explicit_session = arguments
+            .get("session")
+            .and_then(Value::as_str)
+            .is_some_and(|s| !s.trim().is_empty());
+        if !has_explicit_scope && (!has_explicit_session || name == "bsk_session") {
+            self.may_own_transient_session
+                .store(true, Ordering::Relaxed);
+        }
         let key = id.to_string();
         let control = Arc::new(CallControl::default());
         {
