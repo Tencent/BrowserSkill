@@ -14,6 +14,7 @@ CLI 和扩展可以分别发布，能否连接由协议兼容性决定。更新�
   `DSH_SESSION_ID` 作为宿主子代理并发隔离作用域，且 MCP `bsk_session(action="start")`
   同步支持与 `bsk session start` 一致的 `agent_name`、`project` 与 `controller_color`
   控制方身份标识（#731）。
+- 在扩展弹窗“自动化设置”中新增 **最小化打开 Agent 窗口** 开关（`bsk_interaction_preferences.openAgentWindowMinimized`，默认关闭），开启后新建的后台 Agent 窗口直接以最小化状态启动而不在屏幕上闪出白框，显式前台打开的会话（`--focus`）与操作录制仍保持正常显示（[#649](https://github.com/Tencent/BrowserSkill/issues/649)）。
 
 ### 变更
 

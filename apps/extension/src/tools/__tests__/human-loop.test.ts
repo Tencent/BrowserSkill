@@ -154,6 +154,7 @@ describe("handleRequestHelp", () => {
     vi.spyOn(preferences, "get").mockReturnValue({
       confirmTabBorrow: true,
       requestHelpEnabled: false,
+      openAgentWindowMinimized: false,
     });
     const deps = baseDeps({ preferences });
     expect(await handleRequestHelp(fakeManager("abcd", 99, 5), baseParams(), deps)).toMatchObject({
@@ -174,6 +175,7 @@ describe("handleRequestHelp", () => {
     vi.spyOn(preferences, "get").mockImplementation(() => ({
       confirmTabBorrow: true,
       requestHelpEnabled: enabled,
+      openAgentWindowMinimized: false,
     }));
     let respond!: (value: unknown) => void;
     const deps = baseDeps({
@@ -215,6 +217,7 @@ describe("handleRequestHelp", () => {
     vi.spyOn(preferences, "get").mockImplementation(() => ({
       confirmTabBorrow: true,
       requestHelpEnabled: enabled,
+      openAgentWindowMinimized: false,
     }));
     vi.spyOn(preferences, "subscribe").mockImplementation((listener) => {
       changed = () => listener(preferences.get());
@@ -258,6 +261,7 @@ describe("handleRequestHelp", () => {
     vi.spyOn(preferences, "get").mockImplementation(() => ({
       confirmTabBorrow: true,
       requestHelpEnabled: enabled,
+      openAgentWindowMinimized: false,
     }));
     vi.spyOn(preferences, "subscribe").mockImplementation((listener) => {
       changed = () => listener(preferences.get());

@@ -112,7 +112,11 @@
       "readFailed": "설정을 불러오지 못했습니다. 확장 프로그램을 다시 여세요.",
       "writeFailed": "저장하지 못했습니다. 설정은 변경되지 않았습니다. 다시 시도하세요.",
       "confirmTabBorrowInfoLabel": "탭 빌리기 확인 안내",
-      "requestHelpEnabledInfoLabel": "사용자 도움 요청 안내"
+      "requestHelpEnabledInfoLabel": "사용자 도움 요청 안내",
+      "openAgentWindowMinimized": "Agent 창을 최소화하여 열기",
+      "openAgentWindowMinimizedHint": "켜면 새 백그라운드 Agent 창이 화면에 나타나지 않고 처음부터 최소화된 상태로 열립니다. 끄면 포커스 없는 일반 창으로 열립니다.",
+      "openAgentWindowMinimizedScope": "이 브라우저 프로필에 자동 저장되며 새 백그라운드 Agent 창에 적용됩니다. 명시적인 포그라운드 세션과 작업 기록은 계속 화면에 표시된 상태로 열립니다.",
+      "openAgentWindowMinimizedInfoLabel": "Agent 창 최소화 열기 안내"
     },
     "remoteLocal": "로컬로 전환",
     "remotePairing": "페어링 링크",

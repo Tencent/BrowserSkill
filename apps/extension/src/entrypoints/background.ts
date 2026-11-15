@@ -469,14 +469,23 @@ export default defineBackground(() => {
   attachRecordFinishListener(recordDeps);
   attachRecordQueryListener(recordDeps);
 
+  let lastInteractionPolicy = interactionPolicy(interactionPreferences.get());
   interactionPreferences.subscribe((preferences) => {
+    const nextPolicy = interactionPolicy(preferences);
+    if (
+      nextPolicy.borrow_confirmation === lastInteractionPolicy.borrow_confirmation &&
+      nextPolicy.request_help === lastInteractionPolicy.request_help
+    ) {
+      return;
+    }
+    lastInteractionPolicy = nextPolicy;
     for (const ctx of sessions.list()) {
       try {
         transport.send({
           event: "session.interaction_changed",
           payload: {
             session_id: ctx.sessionId,
-            interaction: interactionPolicy(preferences),
+            interaction: nextPolicy,
           },
         });
       } catch {
