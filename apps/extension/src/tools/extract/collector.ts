@@ -289,11 +289,11 @@ export function collectExtractDom(this: Element, options: CollectorOptions): Raw
       }
       if (node instanceof HTMLInputElement) {
         if (nodeVisible && !["checkbox", "radio", "file", "image"].includes(node.type))
-          append(node.value, "pre-wrap");
+          append(caseText(node.value, node), "pre-wrap");
         continue;
       }
       if (node instanceof HTMLTextAreaElement) {
-        if (nodeVisible) append(node.value, "pre-wrap");
+        if (nodeVisible) append(caseText(node.value, node), "pre-wrap");
         continue;
       }
       if (node instanceof HTMLSelectElement) {

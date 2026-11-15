@@ -52,11 +52,12 @@ beforeEach(() => {
   document.head.innerHTML = "";
   document.body.innerHTML = "";
   // happy-dom ships no UA stylesheet, so `[hidden]` would not hide anything and
-  // the collector would see a visible box where a browser sees none. Emulate the
-  // one UA rule that matters, first in document order so author rules still win
-  // exactly as they do in a browser.
+  // form controls would inherit ancestor `text-transform` instead of defaulting
+  // to `none`. Emulate the UA rules that matter, first in document order so
+  // author rules still win exactly as they do in a browser.
   const ua = document.createElement("style");
-  ua.textContent = "[hidden] { display: none; }";
+  ua.textContent =
+    "[hidden] { display: none; } input, textarea, select, button { text-transform: none; }";
   document.head.appendChild(ua);
 });
 describe("structured extraction facts", () => {
@@ -92,6 +93,75 @@ describe("structured extraction facts", () => {
       ],
     });
     expect(result.rows).toEqual([{ text: "PAID", raw: "paid" }]);
+  });
+
+  it("applies explicit CSS case transforms to input and textarea values with UA defaults, locale rules, and shadow host language", () => {
+    document.head.insertAdjacentHTML(
+      "beforeend",
+      `<style>
+        #t { text-transform: uppercase; }
+        #t input.upper { text-transform: uppercase; }
+        #t input.literal { text-transform: none; }
+        #t textarea.lower { text-transform: lowercase; }
+      </style>`,
+    );
+    document.body.innerHTML = `<table id="t" lang="tr"><tbody><tr>
+        <td><input value="iı"></td>
+        <td><input class="upper" value="iı"></td>
+        <td><input class="upper literal" value="PaId"></td>
+        <td><input class="upper" lang="de" value="straße"></td>
+        <td><textarea class="lower">Iİ\n  SECOND</textarea></td>
+        <td><input type="password" style="text-transform:uppercase" value="secret">ok</td>
+      </tr></tbody></table>
+      <ul id="l"><li><input class="code" style="text-transform:uppercase" data-raw="abc-12" value="abc-12"></li></ul>`;
+
+    expect(extract("#t").rows).toEqual([
+      {
+        c1: "iı",
+        c2: "İI",
+        c3: "PaId",
+        c4: "STRASSE",
+        c5: "ıi\n  second",
+        c6: "OK",
+      },
+    ]);
+
+    const listResult = extract("#l", {
+      action: "list",
+      fields: [
+        { key: "text", selector: "input", read: "text" },
+        { key: "raw", selector: "input", read: "attribute", attribute: "data-raw" },
+      ],
+    });
+    expect(listResult.rows).toEqual([{ text: "ABC-12", raw: "abc-12" }]);
+
+    // Controls inside an open shadow root inherit locale casing from the shadow host ancestry.
+    document.body.innerHTML = `<table id="shadow-table" lang="en"><tbody><tr>
+      <td lang="tr"><div id="host"></div></td>
+    </tr></tbody></table>`;
+    document.getElementById("host")!.attachShadow({
+      mode: "open",
+    }).innerHTML = `<input style="text-transform:uppercase" value="iı">`;
+    expect(extract("#shadow-table").rows).toEqual([{ c1: "İI" }]);
+  });
+
+  it("charges the byte budget for transformed input and textarea values", () => {
+    const options = validateExtract({
+      session_id: "test",
+      action: "table",
+      selector: "#t",
+      max_bytes: 1024,
+    });
+    for (const transform of ["none", "uppercase"]) {
+      document.body.innerHTML = `<table id="t"><tr><td><input style="text-transform:${transform}" value="${"ŉ".repeat(400)}"></td></tr></table>`;
+      const raw = collectExtractDom.call(document.documentElement, options);
+      if (transform === "none") expect(raw.error).toBeUndefined();
+      else
+        expect(raw.error).toMatchObject({
+          reason: "extract_limit",
+          message: "Text byte budget exceeded",
+        });
+    }
   });
 
   it.each([
