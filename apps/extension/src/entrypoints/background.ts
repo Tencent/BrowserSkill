@@ -35,7 +35,12 @@ import {
 import { nextOverlayVersion } from "@/lib/overlay-version";
 import { POPUP_PORT_NAME, type PopupInbound, type PopupOutbound } from "@/lib/popup-bridge";
 import { recordFrameCoordinator } from "@/lib/recording/frame-coordinator";
-import { attachSessionsLiveFlag } from "@/lib/sessions-live-flag";
+import {
+  ensureOverlayInjected,
+  forgetOverlayInjectedTab,
+  injectCooperationAllFrames,
+  RuntimeContentScriptCoordinator,
+} from "@/lib/runtime-content-scripts";
 import { captureTaskPreview, focusTask } from "@/lib/task-preview";
 import { attachUiChannel } from "@/lib/ui-channel";
 import { attachLongScreenshot } from "@/long-screenshot/background";
@@ -54,12 +59,14 @@ import {
 import { ToolDispatcher } from "@/tools/dispatcher";
 import { clearHelpForSession, hasActiveHelp } from "@/tools/human-loop";
 import {
+  activeRecordingCount,
   attachRecordFinishListener,
   attachRecordQueryListener,
   attachRecordStepListener,
   clearRecordingForSession,
   hasActiveRecording,
   type RecordRuntimeDeps,
+  subscribeActiveRecordings,
 } from "@/tools/record";
 import { cdpBlockedUrlReason, chromeTabsApi } from "@/tools/shared";
 import { chromeTabMutationApi } from "@/tools/tabs";
@@ -148,6 +155,9 @@ export default defineBackground(() => {
         /* Disconnect cleanup ends the owning sessions. */
       }
     },
+    (details) => {
+      void ensureOverlayInjected(details.tabId, { documentId: details.documentId });
+    },
   );
   // Default collaboration is always present; only explicit help or recording
   // suspends routing of unrelated tabs out of the task window.
@@ -189,6 +199,9 @@ export default defineBackground(() => {
     host: videoHost,
     owner: () => requestedConnection?.key ?? "unavailable",
     overlay: async (tabId, recordingId) => {
+      if (recordingId !== null) {
+        await ensureOverlayInjected(tabId);
+      }
       try {
         // Another content script can receive messages before the overlay script
         // mounts, resolving undefined instead of reporting a missing receiver.
@@ -242,7 +255,11 @@ export default defineBackground(() => {
     if (source.tabId !== undefined)
       void video.stopTab(source.tabId, "debugger_detached").catch(() => {});
   });
-  const sessionsLive = attachSessionsLiveFlag({ manager: sessions });
+  const runtimeScripts = new RuntimeContentScriptCoordinator({
+    liveSessions: () => sessions.list().length,
+    activeRecordings: () => activeRecordingCount() ?? 0,
+  });
+  subscribeActiveRecordings?.(() => runtimeScripts.sync());
   const popupSnapshotRefreshers = new Set<() => void>();
   const controlModes = new Map<string, OverlayMode>();
   const minimizedControlSessions = new Set<string>();
@@ -332,20 +349,22 @@ export default defineBackground(() => {
     };
   }
 
-  async function pushOverlayStateToTab(
-    tabId: number,
-    state: OverlayAgentStateMessage,
-  ): Promise<void> {
-    try {
-      await chrome.tabs.sendMessage(tabId, state);
-    } catch {
-      // Restricted pages and not-yet-loaded content scripts cannot receive messages.
-    }
+  function isControlledTabInWindow(tabId?: number, windowId?: number): boolean {
+    if (typeof tabId !== "number" || typeof windowId !== "number") return false;
+    const ctx = sessions.findByWindowId(windowId);
+    return ctx !== null && isAgentControlledTab(ctx, tabId);
   }
 
   async function pushOverlayStateForTab(tabId: number, windowId?: number): Promise<void> {
+    if (isControlledTabInWindow(tabId, windowId)) {
+      await ensureOverlayInjected(tabId);
+    }
     const state = overlayStateForTab(tabId, windowId);
-    await pushOverlayStateToTab(tabId, state);
+    try {
+      await chrome.tabs.sendMessage(tabId, state);
+    } catch {
+      // Restricted pages and uninjected free tabs cannot receive messages.
+    }
   }
 
   async function pushOverlayStateForWindow(windowId: number): Promise<void> {
@@ -365,12 +384,12 @@ export default defineBackground(() => {
     }
   }
 
-  function onOverlaySessionStateChanged(): void {
+  function onOverlaySessionStateChanged(): Promise<void> {
     cooperation.syncSessions();
     windowRouting.sync();
     debug.sync();
     video.sync();
-    void sessionsLive.syncFromManager();
+    const scriptSync = runtimeScripts.sync();
     const liveSessionIds = new Set(sessions.list().map((ctx) => ctx.sessionId));
     for (const sessionId of controlModes.keys()) {
       if (!liveSessionIds.has(sessionId)) controlModes.delete(sessionId);
@@ -383,6 +402,7 @@ export default defineBackground(() => {
     });
     pushAllAgentOverlayStates();
     for (const refresh of popupSnapshotRefreshers) refresh();
+    return scriptSync;
   }
 
   function onBrowserControlResumed(sessionId: string): void {
@@ -426,16 +446,16 @@ export default defineBackground(() => {
         .catch((error) => console.debug("[bsk] observed tab release failed", error));
   });
   chrome.tabs.onRemoved.addListener((tabId, removeInfo) => {
+    forgetOverlayInjectedTab(tabId);
     void video.stopTab(tabId, "tab_closed").catch(() => {});
     debug.stopTab(tabId, "tab_closed");
     sessions.forgetClosedTab(tabId, { isWindowClosing: removeInfo.isWindowClosing });
     cdp.forgetClosedTab?.(tabId);
     debug.sync();
   });
-  // Re-sync the storage.session flag on SW startup so a previous SW's
-  // stale `true` does not keep waking us on every page load until the
-  // first mutation (review M4/M5 round 3 m-R3-1).
-  void sessionsLive.refresh();
+  // Reconcile dynamic Tier B content-script registrations on SW startup so
+  // idle browser startups always begin with zero registered content scripts.
+  void runtimeScripts.sync();
   const cleanupAfterDisconnect = createDisconnectCleanup({
     manager: sessions,
     // Same contract as the dispatcher's `tool.session_stop`: without these
@@ -454,6 +474,9 @@ export default defineBackground(() => {
     sendToTab: (tabId: number, msg: Parameters<typeof chrome.tabs.sendMessage>[1]) =>
       chrome.tabs.sendMessage(tabId, msg),
     bypassOverlay: async (tabId: number, enabled: boolean) => {
+      if (enabled) {
+        await ensureOverlayInjected(tabId);
+      }
       try {
         await chrome.tabs.sendMessage(tabId, {
           type: OVERLAY_AUTOMATION_BYPASS,
@@ -497,8 +520,12 @@ export default defineBackground(() => {
     onSessionsChanged: onOverlaySessionStateChanged,
     onBrowserControlResumed,
     onAgentTabClaimed: (tabId, windowId) => {
-      void cooperation.observeTab(tabId).catch(() => {});
-      void pushOverlayStateForTab(tabId, windowId);
+      void injectCooperationAllFrames(tabId)
+        .catch(() => {})
+        .then(() => {
+          void cooperation.observeTab(tabId).catch(() => {});
+          void pushOverlayStateForTab(tabId, windowId);
+        });
     },
     approveBorrow: async (ctx) => {
       await interactionPreferences.readyOrFallback();
@@ -618,6 +645,7 @@ export default defineBackground(() => {
       beforeDisconnect: cleanup,
       onDisconnected: cleanup,
     });
+    await sessions.reapOrphanAgentWindows();
   })().catch((err) => {
     console.error("[browser-skill] controller failed to attach", err);
   });

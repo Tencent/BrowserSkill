@@ -742,6 +742,41 @@ describe("requestBorrowConfirmation", () => {
     expect(allowed).toBe(true);
     expect(tabs.sendMessage).toHaveBeenCalledTimes(2);
   });
+
+  it("injects Tier A content.js into the candidate user tab before sending borrow-request", async () => {
+    const order: string[] = [];
+    const executeScript = vi.fn(async () => {
+      order.push("inject");
+      return [];
+    });
+    vi.stubGlobal("chrome", { scripting: { executeScript } });
+    try {
+      windows.getLastFocused.mockResolvedValue(
+        userWindowWithActiveTab({ windowId: 10, tabId: 77 }),
+      );
+      tabs.sendMessage.mockImplementation(async (_tabId: number, msg: { type?: string }) => {
+        order.push(`send:${msg.type}`);
+        if (msg.type === "borrow-request") {
+          return { type: "borrow-response", allowed: true };
+        }
+        return undefined;
+      });
+
+      const pending = requestBorrowConfirmation(77, {
+        deps: { tabs, windows, notifications },
+      });
+      await vi.runAllTimersAsync();
+      await expect(pending).resolves.toBe(true);
+      expect(executeScript).toHaveBeenCalledWith({
+        target: { tabId: 77 },
+        files: ["content-scripts/content.js"],
+      });
+      expect(order[0]).toBe("inject");
+      expect(order[1]).toBe("send:borrow-request");
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
 });
 
 describe("isInjectableContentScriptUrl", () => {

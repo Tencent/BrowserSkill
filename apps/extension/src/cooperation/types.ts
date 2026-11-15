@@ -139,7 +139,8 @@ export interface CooperationParams {
   control_policy?: "auto" | "strict" | "target";
 }
 
-export const COOPERATION_READY = "cooperation.ready";
+export const COOPERATION_ARM_FRAME = "cooperation.arm_frame";
+export const COOPERATION_SUBFRAME_READY = "cooperation.subframe_ready";
 export const COOPERATION_MESSAGE = "cooperation.frame";
 export const COOPERATION_CONTROL = "cooperation.control";
 export const COOPERATION_READ = "cooperation.read";

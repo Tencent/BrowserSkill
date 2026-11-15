@@ -388,6 +388,7 @@ jobs:
           src/tools/__tests__/background-full-page.browser.test.ts
           src/session-manager/__tests__/incognito.browser.test.ts
           src/transport/__tests__/remote-connection.browser.test.ts
+          src/entrypoints/__tests__/runtime-injection.browser.test.ts
       - name: Run headed background execution, screenshot and window-routing regressions
         run: |
           sudo apt-get update
