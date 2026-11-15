@@ -34,10 +34,14 @@ enum Direction {
 struct Entry {
     session_id: String,
     direction: Direction,
+    dir: PathBuf,
     path: PathBuf,
     expected_size: Option<u64>,
     written: u64,
     ready: bool,
+    busy: bool,
+    readers: usize,
+    released: bool,
 }
 
 /// Browser download path after the daemon has verified that it belongs to
@@ -161,47 +165,76 @@ impl TransferRegistry {
     pub fn begin_upload(&self, p: TransferBeginParams) -> Result<TransferBeginResult, RpcError> {
         self.ensure_root()
             .map_err(|err| protocol_error(err.to_string()))?;
-        let basename = safe_upload_basename(&p.name)?;
+        let basename = safe_upload_basename(&p.name)?.to_owned();
         if p.byte_size > MAX_TRANSFER_BYTES {
             return Err(invalid(format!(
                 "file size {} exceeds transfer limit {}",
                 p.byte_size, MAX_TRANSFER_BYTES
             )));
         }
-        let mut entries = self.entries.lock().unwrap();
-        let session_bytes: u64 = entries
-            .values()
-            .filter(|entry| entry.session_id == p.session_id)
-            .map(|entry| entry.expected_size.unwrap_or(entry.written))
-            .sum();
-        if session_bytes.saturating_add(p.byte_size) > MAX_TRANSFER_BYTES {
-            return Err(invalid(format!(
-                "session transfer staging exceeds limit {}",
-                MAX_TRANSFER_BYTES
-            )));
-        }
         let id = new_id();
         let dir = self.root.join(&id);
-        fs::create_dir(&dir).map_err(io_error)?;
-        set_private_dir(&dir).map_err(io_error)?;
         let path = dir.join(basename);
-        let file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&path)
-            .map_err(io_error)?;
-        set_private_file(&file).map_err(io_error)?;
-        entries.insert(
-            id.clone(),
-            Entry {
-                session_id: p.session_id,
-                direction: Direction::Upload,
-                path,
-                expected_size: Some(p.byte_size),
-                written: 0,
-                ready: false,
-            },
-        );
+        {
+            let mut entries = self.entries.lock().unwrap();
+            let session_bytes: u64 = entries
+                .values()
+                .filter(|entry| !entry.released && entry.session_id == p.session_id)
+                .map(|entry| entry.expected_size.unwrap_or(entry.written))
+                .sum();
+            if session_bytes.saturating_add(p.byte_size) > MAX_TRANSFER_BYTES {
+                return Err(invalid(format!(
+                    "session transfer staging exceeds limit {}",
+                    MAX_TRANSFER_BYTES
+                )));
+            }
+            entries.insert(
+                id.clone(),
+                Entry {
+                    session_id: p.session_id,
+                    direction: Direction::Upload,
+                    dir: dir.clone(),
+                    path: path.clone(),
+                    expected_size: Some(p.byte_size),
+                    written: 0,
+                    ready: false,
+                    busy: true,
+                    readers: 0,
+                    released: false,
+                },
+            );
+        }
+
+        let create_res = (|| -> Result<(), RpcError> {
+            fs::create_dir(&dir).map_err(io_error)?;
+            set_private_dir(&dir).map_err(io_error)?;
+            let file = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&path)
+                .map_err(io_error)?;
+            set_private_file(&file).map_err(io_error)?;
+            Ok(())
+        })();
+
+        let cleanup_dir = {
+            let mut entries = self.entries.lock().unwrap();
+            match (&create_res, entries.get_mut(&id)) {
+                (Ok(()), Some(entry)) if !entry.released => {
+                    entry.busy = false;
+                    false
+                }
+                _ => {
+                    entries.remove(&id);
+                    true
+                }
+            }
+        };
+        if cleanup_dir {
+            let _ = fs::remove_dir_all(&dir);
+            create_res?;
+            return Err(not_found("transfer not found"));
+        }
         Ok(TransferBeginResult {
             transfer_id: id,
             chunk_size: TRANSFER_CHUNK_SIZE,
@@ -215,29 +248,57 @@ impl TransferRegistry {
         if bytes.len() > TRANSFER_CHUNK_SIZE as usize {
             return Err(invalid("transfer chunk exceeds negotiated size"));
         }
-        let mut entries = self.entries.lock().unwrap();
-        let entry = entries
-            .get_mut(&p.transfer_id)
-            .ok_or_else(|| not_found("transfer not found"))?;
-        if entry.direction != Direction::Upload || entry.ready {
-            return Err(invalid("transfer is not writable"));
-        }
-        if p.offset != entry.written {
-            return Err(invalid(format!(
-                "non-sequential transfer offset: expected {}, got {}",
-                entry.written, p.offset
-            )));
-        }
-        let next = entry.written.saturating_add(bytes.len() as u64);
-        if next > entry.expected_size.unwrap_or(MAX_TRANSFER_BYTES) {
-            return Err(invalid("transfer exceeds declared byte size"));
-        }
-        let mut file = OpenOptions::new()
+        let (path, dir, next) = {
+            let mut entries = self.entries.lock().unwrap();
+            let entry = entries
+                .get_mut(&p.transfer_id)
+                .filter(|entry| !entry.released)
+                .ok_or_else(|| not_found("transfer not found"))?;
+            if entry.direction != Direction::Upload || entry.ready || entry.busy {
+                return Err(invalid("transfer is not writable"));
+            }
+            if p.offset != entry.written {
+                return Err(invalid(format!(
+                    "non-sequential transfer offset: expected {}, got {}",
+                    entry.written, p.offset
+                )));
+            }
+            let next = entry.written.saturating_add(bytes.len() as u64);
+            if next > entry.expected_size.unwrap_or(MAX_TRANSFER_BYTES) {
+                return Err(invalid("transfer exceeds declared byte size"));
+            }
+            entry.busy = true;
+            (entry.path.clone(), entry.dir.clone(), next)
+        };
+
+        let write_res = OpenOptions::new()
             .append(true)
-            .open(&entry.path)
-            .map_err(io_error)?;
-        file.write_all(&bytes).map_err(io_error)?;
-        entry.written = next;
+            .open(&path)
+            .and_then(|mut file| file.write_all(&bytes))
+            .map_err(io_error);
+
+        let released_mid_flight = {
+            let mut entries = self.entries.lock().unwrap();
+            match entries.get_mut(&p.transfer_id) {
+                Some(entry) if entry.released => {
+                    entries.remove(&p.transfer_id);
+                    true
+                }
+                Some(entry) => {
+                    entry.busy = false;
+                    if write_res.is_ok() {
+                        entry.written = next;
+                    }
+                    false
+                }
+                None => false,
+            }
+        };
+        if released_mid_flight {
+            let _ = fs::remove_dir_all(&dir);
+            return Err(not_found("transfer not found"));
+        }
+        write_res?;
         Ok(TransferChunkResult {
             next_offset: next,
             eof: false,
@@ -249,8 +310,9 @@ impl TransferRegistry {
         let mut entries = self.entries.lock().unwrap();
         let entry = entries
             .get_mut(&p.transfer_id)
+            .filter(|entry| !entry.released)
             .ok_or_else(|| not_found("transfer not found"))?;
-        if entry.direction != Direction::Upload {
+        if entry.direction != Direction::Upload || entry.busy {
             return Err(invalid("transfer is not an upload"));
         }
         if entry.written != entry.expected_size.unwrap_or(entry.written) {
@@ -277,10 +339,12 @@ impl TransferRegistry {
             .map(|id| {
                 let entry = entries
                     .get(id)
+                    .filter(|entry| !entry.released)
                     .ok_or_else(|| not_found("upload transfer not found"))?;
                 if entry.session_id != session_id
                     || entry.direction != Direction::Upload
                     || !entry.ready
+                    || entry.busy
                 {
                     return Err(permission(
                         "upload transfer is outside this session or not ready",
@@ -303,10 +367,14 @@ impl TransferRegistry {
             Entry {
                 session_id: session_id.to_string(),
                 direction: Direction::Download,
-                path: dir.clone(),
+                dir: dir.clone(),
+                path: dir,
                 expected_size: None,
                 written: 0,
                 ready: false,
+                busy: false,
+                readers: 0,
+                released: false,
             },
         );
         Ok(DownloadStaging {
@@ -316,83 +384,147 @@ impl TransferRegistry {
     }
 
     pub fn import_download(&self, id: &str, reported_path: &Path) -> Result<u64, RpcError> {
-        let mut entries = self.entries.lock().unwrap();
-        let entry = entries
-            .get_mut(id)
-            .ok_or_else(|| not_found("download transfer not found"))?;
-        if entry.direction != Direction::Download {
-            return Err(permission("transfer is not a download capability"));
-        }
-        let browser_file = ValidatedBrowserFile::validate(reported_path, id)?;
-        let canonical = browser_file.path.canonicalize().map_err(io_error)?;
-        let meta = fs::metadata(&canonical).map_err(io_error)?;
-        if !meta.is_file() || meta.len() > MAX_TRANSFER_BYTES {
-            return Err(invalid(
-                "download is not a regular file or exceeds the transfer limit",
-            ));
-        }
+        let dir = {
+            let mut entries = self.entries.lock().unwrap();
+            let entry = entries
+                .get_mut(id)
+                .filter(|entry| !entry.released)
+                .ok_or_else(|| not_found("download transfer not found"))?;
+            if entry.direction != Direction::Download {
+                return Err(permission("transfer is not a download capability"));
+            }
+            if entry.busy || entry.ready {
+                return Err(invalid("download transfer is already finalized or busy"));
+            }
+            entry.busy = true;
+            entry.dir.clone()
+        };
 
-        let destination = entry.path.join("payload");
-        let source = File::open(&canonical).map_err(io_error)?;
-        let mut destination_file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&destination)
+        let destination = dir.join("payload");
+        let import_res = (|| -> Result<u64, RpcError> {
+            let browser_file = ValidatedBrowserFile::validate(reported_path, id)?;
+            let canonical = browser_file.path.canonicalize().map_err(io_error)?;
+            let meta = fs::metadata(&canonical).map_err(io_error)?;
+            if !meta.is_file() || meta.len() > MAX_TRANSFER_BYTES {
+                return Err(invalid(
+                    "download is not a regular file or exceeds the transfer limit",
+                ));
+            }
+            let source = File::open(&canonical).map_err(io_error)?;
+            let mut destination_file = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&destination)
+                .map_err(io_error)?;
+            let copied = std::io::copy(
+                &mut source.take(MAX_TRANSFER_BYTES.saturating_add(1)),
+                &mut destination_file,
+            )
             .map_err(io_error)?;
-        let copied = std::io::copy(
-            &mut source.take(MAX_TRANSFER_BYTES.saturating_add(1)),
-            &mut destination_file,
-        )
-        .map_err(io_error)?;
-        if copied > MAX_TRANSFER_BYTES {
-            let _ = fs::remove_file(&destination);
-            return Err(invalid("download exceeds the transfer limit"));
+            if copied > MAX_TRANSFER_BYTES {
+                let _ = fs::remove_file(&destination);
+                return Err(invalid("download exceeds the transfer limit"));
+            }
+            browser_file.remove_source()?;
+            Ok(copied)
+        })();
+
+        let released_mid_flight = {
+            let mut entries = self.entries.lock().unwrap();
+            match entries.get_mut(id) {
+                Some(entry) if entry.released => {
+                    entries.remove(id);
+                    true
+                }
+                Some(entry) => {
+                    entry.busy = false;
+                    if let Ok(copied) = import_res {
+                        entry.path = destination;
+                        entry.written = copied;
+                        entry.expected_size = Some(copied);
+                        entry.ready = true;
+                    }
+                    false
+                }
+                None => false,
+            }
+        };
+        if released_mid_flight {
+            let _ = fs::remove_dir_all(&dir);
+            return Err(not_found("download transfer not found"));
         }
-        entry.path = destination;
-        entry.written = copied;
-        entry.expected_size = Some(copied);
-        entry.ready = true;
-        browser_file.remove_source()?;
-        Ok(copied)
+        import_res
     }
 
     pub fn read_chunk(&self, p: TransferReadParams) -> Result<TransferChunkResult, RpcError> {
-        let entries = self.entries.lock().unwrap();
-        let entry = entries
-            .get(&p.transfer_id)
-            .ok_or_else(|| not_found("transfer not found"))?;
-        if entry.direction != Direction::Download || !entry.ready {
-            return Err(invalid("transfer is not readable"));
+        let (path, dir, total_written) = {
+            let mut entries = self.entries.lock().unwrap();
+            let entry = entries
+                .get_mut(&p.transfer_id)
+                .filter(|entry| !entry.released)
+                .ok_or_else(|| not_found("transfer not found"))?;
+            if entry.direction != Direction::Download || !entry.ready || entry.busy {
+                return Err(invalid("transfer is not readable"));
+            }
+            if p.offset > entry.written {
+                return Err(invalid("read offset is beyond transfer length"));
+            }
+            entry.readers += 1;
+            (entry.path.clone(), entry.dir.clone(), entry.written)
+        };
+
+        let read_res = (|| -> Result<TransferChunkResult, RpcError> {
+            let mut file = File::open(&path).map_err(io_error)?;
+            file.seek(SeekFrom::Start(p.offset)).map_err(io_error)?;
+            let mut buf = vec![0u8; TRANSFER_CHUNK_SIZE as usize];
+            let count = file.read(&mut buf).map_err(io_error)?;
+            buf.truncate(count);
+            let next = p.offset + count as u64;
+            Ok(TransferChunkResult {
+                next_offset: next,
+                eof: next >= total_written,
+                data_base64: Some(base64::engine::general_purpose::STANDARD.encode(buf)),
+            })
+        })();
+
+        let cleanup_dir = {
+            let mut entries = self.entries.lock().unwrap();
+            match entries.get_mut(&p.transfer_id) {
+                Some(entry) => {
+                    entry.readers = entry.readers.saturating_sub(1);
+                    if entry.released && entry.readers == 0 && !entry.busy {
+                        entries.remove(&p.transfer_id);
+                        true
+                    } else {
+                        false
+                    }
+                }
+                None => false,
+            }
+        };
+        if cleanup_dir {
+            let _ = fs::remove_dir_all(&dir);
         }
-        if p.offset > entry.written {
-            return Err(invalid("read offset is beyond transfer length"));
-        }
-        let mut file = File::open(&entry.path).map_err(io_error)?;
-        file.seek(SeekFrom::Start(p.offset)).map_err(io_error)?;
-        let mut buf = vec![0u8; TRANSFER_CHUNK_SIZE as usize];
-        let count = file.read(&mut buf).map_err(io_error)?;
-        buf.truncate(count);
-        let next = p.offset + count as u64;
-        Ok(TransferChunkResult {
-            next_offset: next,
-            eof: next >= entry.written,
-            data_base64: Some(base64::engine::general_purpose::STANDARD.encode(buf)),
-        })
+        read_res
     }
 
     pub fn release(&self, p: TransferIdParams) -> TransferReleaseResult {
-        let entry = self.entries.lock().unwrap().remove(&p.transfer_id);
-        if let Some(entry) = entry {
-            let dir = if entry.path.is_dir() {
-                entry.path
-            } else {
-                entry.path.parent().unwrap_or(&self.root).to_path_buf()
-            };
+        let remove_dir = {
+            let mut entries = self.entries.lock().unwrap();
+            match entries.get_mut(&p.transfer_id) {
+                None => return TransferReleaseResult { released: false },
+                Some(entry) if entry.released => return TransferReleaseResult { released: false },
+                Some(entry) if entry.busy || entry.readers > 0 => {
+                    entry.released = true;
+                    None
+                }
+                Some(_) => entries.remove(&p.transfer_id).map(|entry| entry.dir),
+            }
+        };
+        if let Some(dir) = remove_dir {
             let _ = fs::remove_dir_all(dir);
-            TransferReleaseResult { released: true }
-        } else {
-            TransferReleaseResult { released: false }
         }
+        TransferReleaseResult { released: true }
     }
 
     pub fn release_session(&self, session_id: &str) {
@@ -401,7 +533,7 @@ impl TransferRegistry {
             .lock()
             .unwrap()
             .iter()
-            .filter(|(_, entry)| entry.session_id == session_id)
+            .filter(|(_, entry)| !entry.released && entry.session_id == session_id)
             .map(|(id, _)| id.clone())
             .collect();
         for id in ids {

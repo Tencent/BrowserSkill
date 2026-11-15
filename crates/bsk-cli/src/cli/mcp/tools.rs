@@ -13,6 +13,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use bsk_protocol::system::{BrowserListResult, SessionListResult};
 use bsk_protocol::tools::{
     ActionExpectation, BlurParams, ConsoleParams, ControlPolicy, CooperateAction, CooperateParams,
     DebugAction, DebugParams, DebugReplaySpec, DebugResult, DebugRuleSpec, DialogHandleParams,
@@ -39,8 +40,8 @@ use crate::cli::business_rpc::{self, ClientContext, ipc_timeout};
 use crate::cli::error::{CliError, mcp_json_error_value};
 use crate::cli::{
     TOOL_IPC_TIMEOUT, cooperate, debug, download, emulate, ensure_daemon, extract, lifecycle,
-    observation_view, plan, recipe, record, record_recovery, record_state, screenshot, step,
-    upload, video,
+    observation_view, orchestration, plan, recipe, record, record_recovery, record_state,
+    screenshot, step, upload, video,
 };
 use crate::ipc_client::IpcClient;
 
@@ -399,7 +400,7 @@ impl CallControl {
         let Some((sock, rpc_id)) = current else {
             return;
         };
-        let deadline = tokio::time::Instant::now() + business_rpc::CANCEL_RESPONSE_GRACE;
+        let deadline = tokio::time::Instant::now() + orchestration::CANCEL_RESPONSE_GRACE;
         let _ = business_rpc::send_cancel(&sock, &rpc_id, deadline).await;
     }
 }
@@ -474,18 +475,31 @@ impl Link {
                 .call_envelope_with_id::<Value, Value>(rpc_id, method, Some(params), meta, timeout)
                 .await
         };
+        tokio::pin!(operation);
         let outcome = tokio::select! {
             biased;
-            _ = self.control.notify.notified() => Ok((
-                Err(RpcError {
-                    code: ErrorCode::Cancelled,
-                    message: "tool call cancelled".into(),
-                    // It may already have reached the daemon; never claim no effect.
-                    data: Some(json!({"reason": RpcErrorReason::Cancelled, "effect_state": "unknown"})),
-                }),
-                crate::ipc_client::IpcResponseMeta::default(),
-            )),
-            outcome = operation => outcome,
+            _ = self.control.notify.notified() => {
+                orchestration::await_cancelled_operation(
+                    &mut operation,
+                    orchestration::CANCEL_RESPONSE_GRACE,
+                )
+                .await
+                .unwrap_or_else(|| {
+                    Ok((
+                        Err(RpcError {
+                            code: ErrorCode::Cancelled,
+                            message: "tool call cancelled".into(),
+                            // Grace elapsed without a daemon reply; never claim no effect.
+                            data: Some(json!({
+                                "reason": RpcErrorReason::Cancelled,
+                                "effect_state": "unknown",
+                            })),
+                        }),
+                        crate::ipc_client::IpcResponseMeta::default(),
+                    ))
+                })
+            }
+            outcome = &mut operation => outcome,
         };
         self.control.current.lock().unwrap().take();
         match outcome {
@@ -1028,12 +1042,7 @@ async fn session(
             }
             let timeout_ms = args
                 .timeout_ms
-                .map(|ms| {
-                    if !(1..=120_000).contains(&ms) {
-                        return Err(invalid("timeout_ms must be 1..=120000"));
-                    }
-                    Ok(ms as u32)
-                })
+                .map(|ms| orchestration::validate_open_timeout_ms(ms).map_err(invalid))
                 .transpose()?;
             let ctx = build_ctx(conn_scope, args.scope.as_deref(), None, None, None, None)?;
             let aux_ctx = ctx.without_action_metadata();
@@ -1042,35 +1051,27 @@ async fn session(
             let explicit_session = args.session.filter(|s| !s.trim().is_empty());
             let session_id = if let Some(sid) = explicit_session {
                 if let Some(requested_browser) = args.browser.as_deref() {
-                    let list = link
+                    let list_val = link
                         .rpc(&aux_ctx, Method::SessionList, json!({}), TOOL_IPC_TIMEOUT)
                         .await?;
-                    let entry = list["sessions"]
-                        .as_array()
-                        .and_then(|arr| arr.iter().find(|s| s["session_id"].as_str() == Some(&sid)))
-                        .ok_or_else(|| {
-                            CliError::from_rpc(RpcError {
-                                code: ErrorCode::NotFound,
-                                message: format!("session '{sid}' does not exist"),
-                                data: None,
-                            })
-                        })?;
-                    let actual_browser = entry["browser_instance_id"].as_str().unwrap_or_default();
+                    let list: SessionListResult = serde_json::from_value(list_val)
+                        .map_err(|err| CliError::Local(anyhow::anyhow!(err)))?;
+                    let actual_browser =
+                        orchestration::find_session_bound_browser(&list.sessions, &sid)
+                            .map_err(CliError::from_rpc)?;
                     if actual_browser != requested_browser {
-                        let browsers = link
+                        let browsers_val = link
                             .rpc(&aux_ctx, Method::BrowserList, json!({}), TOOL_IPC_TIMEOUT)
                             .await?;
-                        let matches_label = browsers["browsers"].as_array().is_some_and(|arr| {
-                            arr.iter().any(|b| {
-                                b["instance_id"].as_str() == Some(actual_browser)
-                                    && b["label"].as_str() == Some(requested_browser)
-                            })
-                        });
-                        if !matches_label {
-                            return Err(invalid(format!(
-                                "session '{sid}' is on browser '{actual_browser}', not '{requested_browser}'"
-                            )));
-                        }
+                        let browsers: BrowserListResult = serde_json::from_value(browsers_val)
+                            .map_err(|err| CliError::Local(anyhow::anyhow!(err)))?;
+                        orchestration::check_explicit_session_browser_conflict(
+                            &sid,
+                            actual_browser,
+                            requested_browser,
+                            &browsers.browsers,
+                        )
+                        .map_err(CliError::from_rpc)?;
                     }
                 }
                 sid
@@ -1157,7 +1158,7 @@ async fn session(
                 })
                 .await??;
             let mut reply = synced.reply;
-            hydrate_mcp_cached_observation(&mut reply, synced.scope_meta.as_ref());
+            orchestration::hydrate_cached_observation(&mut reply, synced.scope_meta.as_ref());
             if let Some(obj) = reply.as_object_mut() {
                 obj.entry("session_id")
                     .or_insert_with(|| Value::String(session_id));
@@ -1269,13 +1270,8 @@ async fn session(
                 return Err(invalid("timeout_ms must be 0..=25000"));
             }
             if syncing && let Some(ms) = args.timeout_ms {
-                if has_wait_conditions && !(1..=120_000).contains(&ms) {
-                    return Err(invalid(
-                        "timeout_ms must be 1..=120000 with wait_for/wait_not",
-                    ));
-                } else if !has_wait_conditions && ms > 25_000 {
-                    return Err(invalid("timeout_ms must be 0..=25000"));
-                }
+                orchestration::validate_sync_timeout_ms(ms, has_wait_conditions, true)
+                    .map_err(invalid)?;
             }
             let policy: Option<ControlPolicy> = syncing
                 .then(|| cooperate::Policy::from(args.policy.unwrap_or(Policy::Auto)).into());
@@ -1383,7 +1379,7 @@ async fn session(
                     || has_wait_conditions
                     || has_match_text;
                 if should_hydrate {
-                    hydrate_mcp_cached_observation(&mut reply, sync_scope_meta.as_ref());
+                    orchestration::hydrate_cached_observation(&mut reply, sync_scope_meta.as_ref());
                 }
                 if let Some(needles) = args.match_text.filter(|v| !v.is_empty()) {
                     cooperate::presentation::filter(
@@ -2230,6 +2226,12 @@ fn interact_prepare(args: InteractArgs, conn_scope: Option<&str>) -> Result<Prep
                 )));
             }
             validate_transfer_target(input.ref_.as_deref(), input.selector.as_deref())?;
+            let timeout_ms = match input.timeout_ms {
+                Some(ms) => {
+                    orchestration::validate_positive_timeout_ms(u64::from(ms)).map_err(invalid)?
+                }
+                None => 120_000,
+            };
             let sources = input
                 .files
                 .iter()
@@ -2243,7 +2245,7 @@ fn interact_prepare(args: InteractArgs, conn_scope: Option<&str>) -> Result<Prep
                 selector: input.selector,
                 sources,
                 mode: input.mode,
-                timeout_ms: input.timeout_ms.unwrap_or(120_000),
+                timeout_ms,
             });
         }
         InteractAction::Download => {
@@ -2258,7 +2260,12 @@ fn interact_prepare(args: InteractArgs, conn_scope: Option<&str>) -> Result<Prep
                 return Err(download::output_exists(&input.out));
             }
             validate_transfer_target(input.ref_.as_deref(), input.selector.as_deref())?;
-            let timeout_ms = input.timeout_ms.unwrap_or(120_000);
+            let timeout_ms = match input.timeout_ms {
+                Some(ms) => {
+                    orchestration::validate_positive_timeout_ms(u64::from(ms)).map_err(invalid)?
+                }
+                None => 120_000,
+            };
             return Ok(Prepared::Download {
                 ctx,
                 params: DownloadParams {
@@ -2289,6 +2296,16 @@ fn interact_prepare(args: InteractArgs, conn_scope: Option<&str>) -> Result<Prep
             params["session_id"] = args.session.unwrap_or_default().into();
             if let Some(tab_id) = args.tab_id {
                 params["tab_id"] = tab_id.into();
+            }
+            if let Some(ms_val) = params.get("timeout_ms") {
+                let raw = ms_val
+                    .as_u64()
+                    .ok_or_else(|| invalid("timeout_ms must be a positive integer"))?;
+                if matches!(args.action, InteractAction::Evaluate) {
+                    orchestration::validate_positive_timeout_ms(raw).map_err(invalid)?;
+                } else {
+                    orchestration::validate_action_timeout_ms(raw).map_err(invalid)?;
+                }
             }
             let (method, params) = match args.action {
                 InteractAction::Focus => (Method::ToolFocus, step::typed::<FocusParams>(&params)),
@@ -2752,36 +2769,6 @@ fn plan_prepare(
     prepared.until_visible = args.until_visible;
     prepared.wait_timeout_ms = wait_timeout_ms;
     Ok((prepared, ctx))
-}
-
-fn hydrate_mcp_cached_observation(
-    reply: &mut Value,
-    scope_meta: Option<&crate::ipc_client::ScopeResultMeta>,
-) {
-    if reply.pointer("/observation/text").is_none()
-        && let Some(meta) = scope_meta
-        && meta.cache_reusable
-        && let Some(cached_vom) = meta.cached_vom.as_deref()
-    {
-        if !reply.get("observation").is_some_and(Value::is_object) {
-            reply["observation"] = json!({});
-        }
-        reply["observation"]["text"] = Value::String(cached_vom.to_string());
-        reply["observation"]["truncated"] = Value::Bool(meta.cached_vom_truncated);
-        if let Some(cursor) = meta.cached_vom_next_cursor.as_deref() {
-            reply["observation"]["next_cursor"] = Value::String(cursor.to_string());
-        }
-        if reply.pointer("/observation/url").is_none()
-            && let Some(url) = meta.cached_url.as_deref().filter(|s| !s.is_empty())
-        {
-            reply["observation"]["url"] = Value::String(url.to_string());
-        }
-        if reply.pointer("/observation/title").is_none()
-            && let Some(title) = meta.cached_title.as_deref().filter(|s| !s.is_empty())
-        {
-            reply["observation"]["title"] = Value::String(title.to_string());
-        }
-    }
 }
 
 async fn run_plan(

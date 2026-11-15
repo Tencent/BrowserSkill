@@ -33,6 +33,7 @@ pub mod navigate;
 pub mod network;
 pub mod observation_view;
 pub mod observe;
+pub mod orchestration;
 pub mod plan;
 pub mod read;
 pub mod recipe;

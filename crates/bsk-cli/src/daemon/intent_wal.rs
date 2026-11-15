@@ -46,11 +46,17 @@ const MAX_LOCATOR_CHARS: usize = 120;
 
 pub const RECOVERY_GUIDANCE: &str = "Run `bsk sync` on this tab to observe current state and auto-reconcile, or inspect with `bsk read` / `bsk network` and run `bsk ledger resolve`. Do not blindly replay the prior action.";
 
+#[derive(Debug)]
+enum WalDiskOp {
+    Append(Vec<u8>),
+    Compact(Vec<u8>),
+}
+
 #[derive(Debug, Default)]
-struct WalInner {
-    ledger_path: Option<PathBuf>,
-    writer: Option<File>,
-    bytes_written: u64,
+struct WalState {
+    has_disk: bool,
+    approx_bytes: u64,
+    pending_ops: VecDeque<WalDiskOp>,
     /// In-flight `DISPATCHED` entries keyed by `operation_id`.
     dispatched: HashMap<String, LedgerEntry>,
     /// Unreconciled `UNKNOWN` entries indexed by `(SessionId, Option<i64>)`.
@@ -59,9 +65,17 @@ struct WalInner {
     recent: VecDeque<LedgerEntry>,
 }
 
+#[derive(Debug, Default)]
+struct WalDisk {
+    ledger_path: Option<PathBuf>,
+    writer: Option<File>,
+    bytes_written: u64,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct IntentWal {
-    inner: Arc<Mutex<WalInner>>,
+    state: Arc<Mutex<WalState>>,
+    disk: Arc<Mutex<WalDisk>>,
 }
 
 /// RAII guard for an in-flight mutating tool dispatch.
@@ -88,14 +102,21 @@ impl IntentWal {
     /// Leftover `DISPATCHED` records from a prior daemon run are automatically
     /// promoted to `UNKNOWN`.
     pub fn new(ledger_path: Option<PathBuf>) -> Self {
-        let mut inner = WalInner {
-            ledger_path,
-            ..WalInner::default()
+        let mut state = WalState {
+            has_disk: ledger_path.is_some(),
+            ..WalState::default()
         };
-        inner.load_from_disk();
-        Self {
-            inner: Arc::new(Mutex::new(inner)),
-        }
+        let mut disk = WalDisk {
+            ledger_path,
+            ..WalDisk::default()
+        };
+        load_from_disk(&mut state, &mut disk);
+        let wal = Self {
+            state: Arc::new(Mutex::new(state)),
+            disk: Arc::new(Mutex::new(disk)),
+        };
+        wal.flush_pending();
+        wal
     }
 
     /// Pure in-memory WAL constructor for unit/embedded setups without disk backing.
@@ -211,7 +232,7 @@ impl IntentWal {
         session_id: &SessionId,
         effective_tab_id: Option<i64>,
     ) -> Result<(), RpcError> {
-        let guard = self.inner.lock().expect("intent_wal poisoned");
+        let guard = self.state.lock().expect("intent_wal state poisoned");
         let Some(prior) = guard.find_blocking_unknown(session_id, effective_tab_id) else {
             return Ok(());
         };
@@ -240,8 +261,7 @@ impl IntentWal {
         })
     }
 
-    /// Record `DISPATCHED` immediately before forwarding a mutating RPC to the extension.
-    pub fn begin_dispatch(
+    fn record_begin(
         &self,
         session_id: &SessionId,
         effective_tab_id: Option<i64>,
@@ -267,10 +287,10 @@ impl IntentWal {
             reconciled_by: None,
         };
         {
-            let mut guard = self.inner.lock().expect("intent_wal poisoned");
+            let mut guard = self.state.lock().expect("intent_wal state poisoned");
             guard.upsert_recent(entry.clone());
-            guard.append_entry(&entry);
-            guard.dispatched.insert(op_id.clone(), entry);
+            guard.dispatched.insert(op_id.clone(), entry.clone());
+            guard.enqueue_entry(&entry);
         }
         IntentTicket {
             wal: self.clone(),
@@ -279,9 +299,36 @@ impl IntentWal {
         }
     }
 
-    /// Finalise an `IntentTicket` into either `SETTLED` or `UNKNOWN` based on
-    /// the queue/extension dispatch outcome.
-    pub fn finish_dispatch(
+    /// Record `DISPATCHED` immediately before forwarding a mutating RPC to the extension.
+    pub fn begin_dispatch(
+        &self,
+        session_id: &SessionId,
+        effective_tab_id: Option<i64>,
+        operation_id: Option<&str>,
+        method: &Method,
+        params: &Value,
+    ) -> IntentTicket {
+        let ticket = self.record_begin(session_id, effective_tab_id, operation_id, method, params);
+        self.flush_pending();
+        ticket
+    }
+
+    /// Async-friendly variant of [`Self::begin_dispatch`] that flushes queued WAL bytes
+    /// on the blocking pool without holding `state` across disk I/O.
+    pub async fn begin_dispatch_async(
+        &self,
+        session_id: &SessionId,
+        effective_tab_id: Option<i64>,
+        operation_id: Option<&str>,
+        method: &Method,
+        params: &Value,
+    ) -> IntentTicket {
+        let ticket = self.record_begin(session_id, effective_tab_id, operation_id, method, params);
+        self.flush_pending_async().await;
+        ticket
+    }
+
+    fn record_finish(
         &self,
         mut ticket: IntentTicket,
         method: &Method,
@@ -302,7 +349,7 @@ impl IntentWal {
             Err(_) => None,
         };
 
-        let mut guard = self.inner.lock().expect("intent_wal poisoned");
+        let mut guard = self.state.lock().expect("intent_wal state poisoned");
         let Some(mut entry) = guard.dispatched.remove(&ticket.operation_id) else {
             return next_state;
         };
@@ -312,37 +359,71 @@ impl IntentWal {
         entry.state = next_state;
         entry.updated_at = now_rfc3339();
         guard.upsert_recent(entry.clone());
-        guard.append_entry(&entry);
         if next_state == IntentState::Unknown {
             let key = (SessionId(entry.session_id.clone()), entry.tab_id);
-            guard.unknown.entry(key).or_default().push(entry);
+            guard.unknown.entry(key).or_default().push(entry.clone());
         }
+        guard.enqueue_entry(&entry);
+        next_state
+    }
+
+    /// Finalise an `IntentTicket` into either `SETTLED` or `UNKNOWN` based on
+    /// the queue/extension dispatch outcome.
+    pub fn finish_dispatch(
+        &self,
+        ticket: IntentTicket,
+        method: &Method,
+        outcome: &Result<Value, DispatchError>,
+    ) -> IntentState {
+        let next_state = self.record_finish(ticket, method, outcome);
+        self.flush_pending();
+        next_state
+    }
+
+    /// Async-friendly variant of [`Self::finish_dispatch`] that flushes WAL records
+    /// on the blocking pool.
+    pub async fn finish_dispatch_async(
+        &self,
+        ticket: IntentTicket,
+        method: &Method,
+        outcome: &Result<Value, DispatchError>,
+    ) -> IntentState {
+        let next_state = self.record_finish(ticket, method, outcome);
+        self.flush_pending_async().await;
         next_state
     }
 
     fn mark_abandoned(&self, operation_id: &str) {
-        let mut guard = self.inner.lock().expect("intent_wal poisoned");
-        let Some(mut entry) = guard.dispatched.remove(operation_id) else {
-            return;
+        let recorded = {
+            let mut guard = self.state.lock().expect("intent_wal state poisoned");
+            let Some(mut entry) = guard.dispatched.remove(operation_id) else {
+                return;
+            };
+            entry.state = IntentState::Unknown;
+            entry.updated_at = now_rfc3339();
+            guard.upsert_recent(entry.clone());
+            let key = (SessionId(entry.session_id.clone()), entry.tab_id);
+            guard.unknown.entry(key).or_default().push(entry.clone());
+            guard.enqueue_entry(&entry);
+            guard.has_disk
         };
-        entry.state = IntentState::Unknown;
-        entry.updated_at = now_rfc3339();
-        guard.upsert_recent(entry.clone());
-        guard.append_entry(&entry);
-        let key = (SessionId(entry.session_id.clone()), entry.tab_id);
-        guard.unknown.entry(key).or_default().push(entry);
+        if recorded {
+            if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                let wal = self.clone();
+                drop(handle.spawn_blocking(move || wal.flush_pending()));
+            } else {
+                self.flush_pending();
+            }
+        }
     }
 
-    /// Zero-ceremony auto-reconciliation triggered when `bsk sync` succeeds on `tab_id`.
-    /// Transitions matching `UNKNOWN` entries on `(session_id, tab_id)` (plus any
-    /// tab-ambiguous `(session_id, None)` entries) to `RECONCILED`.
-    pub fn reconcile_tab(
+    fn record_reconcile_tab(
         &self,
         session_id: &SessionId,
         synced_tab_id: Option<i64>,
         reconciled_by: &str,
     ) -> usize {
-        let mut guard = self.inner.lock().expect("intent_wal poisoned");
+        let mut guard = self.state.lock().expect("intent_wal state poisoned");
         let matching_keys: Vec<(SessionId, Option<i64>)> = guard
             .unknown
             .keys()
@@ -364,7 +445,7 @@ impl IntentWal {
                     entry.updated_at = now.clone();
                     entry.reconciled_by = Some(reconciled_by.to_owned());
                     guard.upsert_recent(entry.clone());
-                    guard.append_entry(&entry);
+                    guard.enqueue_entry(&entry);
                     count += 1;
                 }
             }
@@ -372,14 +453,42 @@ impl IntentWal {
         count
     }
 
-    /// Explicit manual resolution (`bsk ledger resolve`).
-    pub fn resolve(
+    /// Zero-ceremony auto-reconciliation triggered when `bsk sync` succeeds on `tab_id`.
+    /// Transitions matching `UNKNOWN` entries on `(session_id, tab_id)` (plus any
+    /// tab-ambiguous `(session_id, None)` entries) to `RECONCILED`.
+    pub fn reconcile_tab(
+        &self,
+        session_id: &SessionId,
+        synced_tab_id: Option<i64>,
+        reconciled_by: &str,
+    ) -> usize {
+        let count = self.record_reconcile_tab(session_id, synced_tab_id, reconciled_by);
+        if count > 0 {
+            self.flush_pending();
+        }
+        count
+    }
+
+    pub async fn reconcile_tab_async(
+        &self,
+        session_id: &SessionId,
+        synced_tab_id: Option<i64>,
+        reconciled_by: &str,
+    ) -> usize {
+        let count = self.record_reconcile_tab(session_id, synced_tab_id, reconciled_by);
+        if count > 0 {
+            self.flush_pending_async().await;
+        }
+        count
+    }
+
+    fn record_resolve(
         &self,
         session_id: &SessionId,
         tab_id: Option<i64>,
         operation_id: Option<&str>,
     ) -> LedgerResolveReply {
-        let mut guard = self.inner.lock().expect("intent_wal poisoned");
+        let mut guard = self.state.lock().expect("intent_wal state poisoned");
         let op_filter = operation_id.map(str::trim).filter(|s| !s.is_empty());
         let now = now_rfc3339();
         let mut resolved = Vec::new();
@@ -404,7 +513,7 @@ impl IntentWal {
                     entry.updated_at = now.clone();
                     entry.reconciled_by = Some("ledger_resolve".to_owned());
                     guard.upsert_recent(entry.clone());
-                    guard.append_entry(&entry);
+                    guard.enqueue_entry(&entry);
                     resolved.push(entry);
                 } else {
                     remaining.push(entry);
@@ -422,6 +531,33 @@ impl IntentWal {
         }
     }
 
+    /// Explicit manual resolution (`bsk ledger resolve`).
+    pub fn resolve(
+        &self,
+        session_id: &SessionId,
+        tab_id: Option<i64>,
+        operation_id: Option<&str>,
+    ) -> LedgerResolveReply {
+        let reply = self.record_resolve(session_id, tab_id, operation_id);
+        if reply.resolved_count > 0 {
+            self.flush_pending();
+        }
+        reply
+    }
+
+    pub async fn resolve_async(
+        &self,
+        session_id: &SessionId,
+        tab_id: Option<i64>,
+        operation_id: Option<&str>,
+    ) -> LedgerResolveReply {
+        let reply = self.record_resolve(session_id, tab_id, operation_id);
+        if reply.resolved_count > 0 {
+            self.flush_pending_async().await;
+        }
+        reply
+    }
+
     /// Find the owning `SessionId` for a pending `UNKNOWN` `operation_id` when
     /// unambiguous (used when `bsk ledger resolve --operation-id <id>` is run
     /// without an active bound scope, e.g. after daemon restart).
@@ -430,7 +566,7 @@ impl IntentWal {
         if wanted.is_empty() {
             return None;
         }
-        let guard = self.inner.lock().expect("intent_wal poisoned");
+        let guard = self.state.lock().expect("intent_wal state poisoned");
         let mut found: Option<SessionId> = None;
         for ((sid, _), entries) in &guard.unknown {
             if entries.iter().any(|e| e.operation_id == wanted) {
@@ -445,7 +581,7 @@ impl IntentWal {
 
     /// Inspect pending `UNKNOWN` intents and recent ledger entries (`bsk ledger status`).
     pub fn status(&self, session_id: Option<&SessionId>) -> LedgerStatusReply {
-        let guard = self.inner.lock().expect("intent_wal poisoned");
+        let guard = self.state.lock().expect("intent_wal state poisoned");
         let mut pending_unknown: Vec<LedgerEntry> = guard
             .unknown
             .iter()
@@ -476,15 +612,50 @@ impl IntentWal {
     /// Clear in-memory `UNKNOWN` freeze entries when a session ends so closed
     /// sessions do not accumulate unbounded state in memory.
     pub fn on_session_ended(&self, session_id: &SessionId) {
-        let mut guard = self.inner.lock().expect("intent_wal poisoned");
+        let mut guard = self.state.lock().expect("intent_wal state poisoned");
         guard.unknown.retain(|(sid, _), _| sid != session_id);
         guard
             .dispatched
             .retain(|_, entry| entry.session_id != session_id.0);
     }
+
+    fn flush_pending(&self) {
+        let needs_flush = {
+            let guard = self.state.lock().expect("intent_wal state poisoned");
+            guard.has_disk && !guard.pending_ops.is_empty()
+        };
+        if !needs_flush {
+            return;
+        }
+        let mut disk = self.disk.lock().expect("intent_wal disk poisoned");
+        loop {
+            let ops: VecDeque<WalDiskOp> = {
+                let mut guard = self.state.lock().expect("intent_wal state poisoned");
+                if guard.pending_ops.is_empty() {
+                    break;
+                }
+                std::mem::take(&mut guard.pending_ops)
+            };
+            for op in ops {
+                disk.apply(op);
+            }
+        }
+    }
+
+    async fn flush_pending_async(&self) {
+        let needs_flush = {
+            let guard = self.state.lock().expect("intent_wal state poisoned");
+            guard.has_disk && !guard.pending_ops.is_empty()
+        };
+        if !needs_flush {
+            return;
+        }
+        let wal = self.clone();
+        let _ = tokio::task::spawn_blocking(move || wal.flush_pending()).await;
+    }
 }
 
-impl WalInner {
+impl WalState {
     fn find_blocking_unknown(
         &self,
         session_id: &SessionId,
@@ -530,120 +701,26 @@ impl WalInner {
         }
     }
 
-    fn load_from_disk(&mut self) {
-        let Some(path) = self.ledger_path.clone() else {
-            return;
-        };
-        if !path.exists() {
-            return;
-        }
-        let file = match File::open(&path) {
-            Ok(f) => f,
-            Err(err) => {
-                warn!(path = %path.display(), error = %err, "failed to open intent_ledger.jsonl");
-                return;
-            }
-        };
-        self.bytes_written = file.metadata().map(|m| m.len()).unwrap_or(0);
-
-        let reader = BufReader::new(file);
-        let mut ordered_ids: Vec<String> = Vec::new();
-        let mut latest_by_op: HashMap<String, LedgerEntry> = HashMap::new();
-
-        for line in reader.lines() {
-            let Ok(raw) = line else {
-                break;
-            };
-            let trimmed = raw.trim();
-            if trimmed.is_empty() {
-                continue;
-            }
-            let Ok(entry) = serde_json::from_str::<LedgerEntry>(trimmed) else {
-                continue;
-            };
-            if let Some(pos) = ordered_ids.iter().position(|id| id == &entry.operation_id) {
-                ordered_ids.remove(pos);
-            }
-            ordered_ids.push(entry.operation_id.clone());
-            latest_by_op.insert(entry.operation_id.clone(), entry);
-        }
-
-        let now = now_rfc3339();
-        let mut promoted: Vec<LedgerEntry> = Vec::new();
-        for op_id in ordered_ids {
-            let Some(mut entry) = latest_by_op.remove(&op_id) else {
-                continue;
-            };
-            if entry.state == IntentState::Dispatched {
-                entry.state = IntentState::Unknown;
-                entry.updated_at = now.clone();
-                promoted.push(entry.clone());
-            }
-            if entry.state == IntentState::Unknown {
-                let key = (SessionId(entry.session_id.clone()), entry.tab_id);
-                self.unknown.entry(key).or_default().push(entry.clone());
-            }
-            self.upsert_recent(entry);
-        }
-
-        for entry in promoted {
-            self.append_entry(&entry);
-        }
-    }
-
-    fn ensure_writer(&mut self) -> Option<&mut File> {
-        let path = self.ledger_path.as_ref()?;
-        if self.writer.is_none() {
-            if let Some(parent) = path.parent() {
-                let _ = fs::create_dir_all(parent);
-                #[cfg(unix)]
-                {
-                    use std::os::unix::fs::PermissionsExt;
-                    let _ = fs::set_permissions(parent, fs::Permissions::from_mode(0o700));
-                }
-            }
-            let file = match open_private_append(path) {
-                Ok(f) => f,
-                Err(err) => {
-                    warn!(path = %path.display(), error = %err, "failed to open intent_ledger.jsonl for append");
-                    return None;
-                }
-            };
-            self.bytes_written = file.metadata().map(|m| m.len()).unwrap_or(0);
-            self.writer = Some(file);
-        }
-        self.writer.as_mut()
-    }
-
-    fn append_entry(&mut self, entry: &LedgerEntry) {
-        if self.ledger_path.is_none() {
+    fn enqueue_entry(&mut self, entry: &LedgerEntry) {
+        if !self.has_disk {
             return;
         }
         let Ok(mut line) = serde_json::to_vec(entry) else {
             return;
         };
         line.push(b'\n');
-        if self.bytes_written.saturating_add(line.len() as u64) > MAX_LEDGER_BYTES {
-            self.compact_on_disk();
-        }
-        let line_len = line.len() as u64;
-        if let Some(writer) = self.ensure_writer() {
-            if let Err(err) = writer.write_all(&line) {
-                warn!(error = %err, "failed to append to intent_ledger.jsonl");
-                self.writer = None;
-            } else {
-                self.bytes_written = self.bytes_written.saturating_add(line_len);
-            }
+        if self.approx_bytes.saturating_add(line.len() as u64) > MAX_LEDGER_BYTES {
+            let snapshot = self.serialize_compacted_snapshot();
+            self.approx_bytes = snapshot.len() as u64;
+            self.pending_ops.clear();
+            self.pending_ops.push_back(WalDiskOp::Compact(snapshot));
+        } else {
+            self.approx_bytes = self.approx_bytes.saturating_add(line.len() as u64);
+            self.pending_ops.push_back(WalDiskOp::Append(line));
         }
     }
 
-    fn compact_on_disk(&mut self) {
-        let Some(path) = self.ledger_path.clone() else {
-            return;
-        };
-        self.writer = None;
-        let tmp_path = path.with_extension("jsonl.tmp");
-
+    fn serialize_compacted_snapshot(&self) -> Vec<u8> {
         // Retain all active DISPATCHED / UNKNOWN entries plus recent history without duplicates.
         let mut retained: Vec<LedgerEntry> = Vec::new();
         let mut seen: HashMap<String, usize> = HashMap::new();
@@ -675,9 +752,121 @@ impl WalInner {
                 buf.push(b'\n');
             }
         }
+        buf
+    }
+}
 
-        if write_private_atomic(&tmp_path, &path, &buf).is_ok() {
-            self.bytes_written = buf.len() as u64;
+fn load_from_disk(state: &mut WalState, disk: &mut WalDisk) {
+    let Some(path) = disk.ledger_path.clone() else {
+        return;
+    };
+    if !path.exists() {
+        return;
+    }
+    let file = match File::open(&path) {
+        Ok(f) => f,
+        Err(err) => {
+            warn!(path = %path.display(), error = %err, "failed to open intent_ledger.jsonl");
+            return;
+        }
+    };
+    let initial_bytes = file.metadata().map(|m| m.len()).unwrap_or(0);
+    disk.bytes_written = initial_bytes;
+    state.approx_bytes = initial_bytes;
+
+    let reader = BufReader::new(file);
+    let mut ordered_ids: Vec<String> = Vec::new();
+    let mut latest_by_op: HashMap<String, LedgerEntry> = HashMap::new();
+
+    for line in reader.lines() {
+        let Ok(raw) = line else {
+            break;
+        };
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let Ok(entry) = serde_json::from_str::<LedgerEntry>(trimmed) else {
+            continue;
+        };
+        if let Some(pos) = ordered_ids.iter().position(|id| id == &entry.operation_id) {
+            ordered_ids.remove(pos);
+        }
+        ordered_ids.push(entry.operation_id.clone());
+        latest_by_op.insert(entry.operation_id.clone(), entry);
+    }
+
+    let now = now_rfc3339();
+    let mut promoted: Vec<LedgerEntry> = Vec::new();
+    for op_id in ordered_ids {
+        let Some(mut entry) = latest_by_op.remove(&op_id) else {
+            continue;
+        };
+        if entry.state == IntentState::Dispatched {
+            entry.state = IntentState::Unknown;
+            entry.updated_at = now.clone();
+            promoted.push(entry.clone());
+        }
+        if entry.state == IntentState::Unknown {
+            let key = (SessionId(entry.session_id.clone()), entry.tab_id);
+            state.unknown.entry(key).or_default().push(entry.clone());
+        }
+        state.upsert_recent(entry);
+    }
+
+    for entry in promoted {
+        state.enqueue_entry(&entry);
+    }
+}
+
+impl WalDisk {
+    fn ensure_writer(&mut self) -> Option<&mut File> {
+        let path = self.ledger_path.as_ref()?;
+        if self.writer.is_none() {
+            if let Some(parent) = path.parent() {
+                let _ = fs::create_dir_all(parent);
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    let _ = fs::set_permissions(parent, fs::Permissions::from_mode(0o700));
+                }
+            }
+            let file = match open_private_append(path) {
+                Ok(f) => f,
+                Err(err) => {
+                    warn!(path = %path.display(), error = %err, "failed to open intent_ledger.jsonl for append");
+                    return None;
+                }
+            };
+            self.bytes_written = file.metadata().map(|m| m.len()).unwrap_or(0);
+            self.writer = Some(file);
+        }
+        self.writer.as_mut()
+    }
+
+    fn apply(&mut self, op: WalDiskOp) {
+        match op {
+            WalDiskOp::Append(line) => {
+                let line_len = line.len() as u64;
+                if let Some(writer) = self.ensure_writer() {
+                    if let Err(err) = writer.write_all(&line) {
+                        warn!(error = %err, "failed to append to intent_ledger.jsonl");
+                        self.writer = None;
+                    } else {
+                        self.bytes_written = self.bytes_written.saturating_add(line_len);
+                    }
+                }
+            }
+            WalDiskOp::Compact(snapshot) => {
+                let Some(path) = self.ledger_path.clone() else {
+                    return;
+                };
+                self.writer = None;
+                let tmp_path = path.with_extension("jsonl.tmp");
+                if write_private_atomic(&tmp_path, &path, &snapshot).is_ok() {
+                    self.bytes_written = snapshot.len() as u64;
+                }
+            }
         }
     }
 }

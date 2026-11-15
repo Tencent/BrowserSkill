@@ -78,25 +78,31 @@ impl DaemonState {
     /// `intent_wal`) and returns `true` when `session_id` was live in
     /// [`SessionRegistry`] at teardown time.
     pub fn teardown_session(&self, session_id: &SessionId, reason: &'static str) -> bool {
-        if reason == bsk_protocol::RpcErrorReason::UserMovedTab.as_str() {
-            let snapshots = self
-                .tool_inflight
-                .cancel_session_with_reason(session_id, CancelReason::UserMovedTab);
-            for snap in snapshots {
-                if let (Some(browser_id), Some(ws_rpc_id)) = (snap.browser_id, snap.ws_rpc_id)
-                    && let Err(err) = super::cancel_forward::forward_cancel_to_browser(
-                        self,
-                        &browser_id,
-                        &ws_rpc_id,
-                    )
-                {
-                    tracing::warn!(
-                        %browser_id,
-                        %ws_rpc_id,
-                        %err,
-                        "failed to forward session cancellation to extension"
-                    );
-                }
+        let (cancel_reason, include_dialog_retained) =
+            if reason == bsk_protocol::RpcErrorReason::UserMovedTab.as_str() {
+                (CancelReason::UserMovedTab, true)
+            } else if reason == bsk_protocol::RpcErrorReason::SessionStopped.as_str() {
+                (CancelReason::SessionEnded(reason), false)
+            } else {
+                (CancelReason::SessionEnded(reason), true)
+            };
+        let snapshots = self.tool_inflight.cancel_session_filtered(
+            session_id,
+            cancel_reason,
+            include_dialog_retained,
+        );
+        for snap in snapshots {
+            if let (Some(browser_id), Some(ws_rpc_id)) = (snap.browser_id, snap.ws_rpc_id)
+                && let Err(err) =
+                    super::cancel_forward::forward_cancel_to_browser(self, &browser_id, &ws_rpc_id)
+                && reason != bsk_protocol::RpcErrorReason::BrowserDisconnected.as_str()
+            {
+                tracing::warn!(
+                    %browser_id,
+                    %ws_rpc_id,
+                    %err,
+                    "failed to forward session cancellation to extension"
+                );
             }
         }
         let removed = self.sessions.teardown(session_id, reason);

@@ -51,6 +51,8 @@ mod wave2_zero_ceremony_lifecycle;
 mod wave3a_lifecycle_envelope_and_cache;
 #[path = "integration/wave3c_liveness_wal_and_cache.rs"]
 mod wave3c_liveness_wal_and_cache;
+#[path = "integration/wave4b_pipeline_and_orchestration.rs"]
+mod wave4b_pipeline_and_orchestration;
 
 #[path = "integration/audit_ws.rs"]
 mod audit_ws;

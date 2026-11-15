@@ -376,7 +376,13 @@ pub(super) async fn drive_connection<S: tokio::io::AsyncRead + tokio::io::AsyncW
         liveness: super::browsers::Liveness::default(),
     });
     // Restore opt-in before making the browser available to CLI callers.
-    let audit_ready = state.audit.configure(&browser_id.0, audit_enabled).is_ok();
+    let audit_ready = {
+        let state = Arc::clone(&state);
+        let browser = browser_id.0.clone();
+        tokio::task::spawn_blocking(move || state.audit.configure(&browser, audit_enabled).is_ok())
+            .await
+            .unwrap_or(false)
+    };
     state.browsers.insert(Arc::clone(&client));
     authorization.register(&client);
     drop(registration);
@@ -522,7 +528,15 @@ async fn handle_inbound_text(state: &Arc<DaemonState>, client: &Arc<BrowserClien
             }
         }
         Frame::Event(ev) => match ev {
-            EventFrame::AuditContext(ctx) => state.audit.context(&client.id.0, &ctx),
+            EventFrame::AuditContext(ctx) => {
+                if state.audit.needs_context(&client.id.0, &ctx.operation_id) {
+                    let state = Arc::clone(state);
+                    let browser = client.id.0.clone();
+                    let _ =
+                        tokio::task::spawn_blocking(move || state.audit.context(&browser, &ctx))
+                            .await;
+                }
+            }
             EventFrame::DialogChanged(dlg) => {
                 if state
                     .sessions
@@ -574,7 +588,18 @@ async fn handle_inbound_text(state: &Arc<DaemonState>, client: &Arc<BrowserClien
         },
         Frame::Request(req) => {
             let body = if req.method == bsk_protocol::Method::AuditRequest {
-                handle_audit_request(state, &client.id.0, req.params.unwrap_or_default())
+                let state = Arc::clone(state);
+                let browser = client.id.0.clone();
+                let params = req.params.unwrap_or_default();
+                tokio::task::spawn_blocking(move || handle_audit_request(&state, &browser, params))
+                    .await
+                    .unwrap_or_else(|_| {
+                        ResponseBody::Err(RpcError {
+                            code: bsk_protocol::ErrorCode::ProtocolError,
+                            message: "Audit request failed. Check local storage, task availability, or retry.".into(),
+                            data: None,
+                        })
+                    })
             } else {
                 ResponseBody::Err(RpcError {
                     code: bsk_protocol::ErrorCode::UnknownMethod,

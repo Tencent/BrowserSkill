@@ -55,7 +55,12 @@ pub enum DeadlineKind {
 #[serde(rename_all = "snake_case")]
 pub enum OutcomeKind {
     Ordinary,
-    EffectAwareAction,
+    SessionStop,
+    TabBorrow,
+    RequestHelp,
+    FullPageCapture,
+    EffectAwareInput,
+    EffectAwarePage,
     FileTransfer,
 }
 
@@ -539,21 +544,21 @@ impl Method {
             ),
             Self::ToolSessionStop => method_spec!(
                 owner: Extension, effect: ControlPlane, action_metadata: None, remote_allowed: true,
-                deadline: Standard, response_grace: false, cancel_at_deadline: false, outcome: Ordinary,
+                deadline: Standard, response_grace: false, cancel_at_deadline: false, outcome: SessionStop,
                 wal: Never, dialog: Bypass, queue: Serial, implicit_session: Never, auto_inject: Never, tab_transition: false,
                 background: None, resume: Effect, opens_tabs: false, auto_borrow_write: false, cooperation: Session, dom_targeted: false, bootstrap: false,
                 debug_evidence: None, audit_key: Some("sessionStop"), recipe: Ignore
             ),
             Self::ToolWindowResize => method_spec!(
                 owner: Extension, effect: BrowserMutation, action_metadata: Full, remote_allowed: true,
-                deadline: Standard, response_grace: false, cancel_at_deadline: true, outcome: EffectAwareAction,
+                deadline: Standard, response_grace: false, cancel_at_deadline: true, outcome: EffectAwareInput,
                 wal: Never, dialog: Gated, queue: Serial, implicit_session: Always, auto_inject: Always, tab_transition: false,
                 background: None, resume: Effect, opens_tabs: false, auto_borrow_write: false, cooperation: GuardedAction, dom_targeted: false, bootstrap: true,
                 debug_evidence: None, audit_key: Some("resize"), recipe: Ignore
             ),
             Self::ToolEmulate => method_spec!(
                 owner: Extension, effect: BrowserMutation, action_metadata: Full, remote_allowed: true,
-                deadline: Standard, response_grace: false, cancel_at_deadline: true, outcome: EffectAwareAction,
+                deadline: Standard, response_grace: false, cancel_at_deadline: true, outcome: EffectAwareInput,
                 wal: Never, dialog: Gated, queue: Serial, implicit_session: Always, auto_inject: Always, tab_transition: false,
                 background: Controlled, resume: Effect, opens_tabs: false, auto_borrow_write: true, cooperation: GuardedAction, dom_targeted: false, bootstrap: true,
                 debug_evidence: None, audit_key: Some("emulate"), recipe: Ignore
@@ -574,14 +579,14 @@ impl Method {
             ),
             Self::ToolTabClose => method_spec!(
                 owner: Extension, effect: BrowserMutation, action_metadata: Full, remote_allowed: true,
-                deadline: Standard, response_grace: false, cancel_at_deadline: true, outcome: EffectAwareAction,
+                deadline: Standard, response_grace: false, cancel_at_deadline: true, outcome: EffectAwareInput,
                 wal: Never, dialog: Gated, queue: Serial, implicit_session: Always, auto_inject: Always, tab_transition: true,
                 background: None, resume: Effect, opens_tabs: false, auto_borrow_write: false, cooperation: GuardedAction, dom_targeted: false, bootstrap: true,
                 debug_evidence: None, audit_key: Some("tabClose"), recipe: Ignore
             ),
             Self::ToolTabBorrow => method_spec!(
                 owner: Extension, effect: BrowserMutation, action_metadata: None, remote_allowed: true,
-                deadline: BorrowConfirmation, response_grace: false, cancel_at_deadline: true, outcome: Ordinary,
+                deadline: BorrowConfirmation, response_grace: false, cancel_at_deadline: true, outcome: TabBorrow,
                 wal: Never, dialog: Gated, queue: Serial, implicit_session: Always, auto_inject: Never, tab_transition: true,
                 background: None, resume: Effect, opens_tabs: false, auto_borrow_write: false, cooperation: ManageTabs, dom_targeted: false, bootstrap: false,
                 debug_evidence: None, audit_key: Some("tabBorrow"), recipe: TabBorrow
@@ -602,98 +607,98 @@ impl Method {
             ),
             Self::ToolNavigate => method_spec!(
                 owner: Extension, effect: BrowserMutation, action_metadata: Full, remote_allowed: true,
-                deadline: Standard, response_grace: true, cancel_at_deadline: true, outcome: EffectAwareAction,
+                deadline: Standard, response_grace: true, cancel_at_deadline: true, outcome: EffectAwarePage,
                 wal: Always, dialog: Gated, queue: Serial, implicit_session: Always, auto_inject: Always, tab_transition: false,
                 background: Navigation, resume: Effect, opens_tabs: false, auto_borrow_write: true, cooperation: GuardedAction, dom_targeted: false, bootstrap: true,
                 debug_evidence: Navigation, audit_key: Some("navigate"), recipe: Navigate
             ),
             Self::ToolNavigateBack => method_spec!(
                 owner: Extension, effect: BrowserMutation, action_metadata: Full, remote_allowed: true,
-                deadline: Standard, response_grace: true, cancel_at_deadline: true, outcome: EffectAwareAction,
+                deadline: Standard, response_grace: true, cancel_at_deadline: true, outcome: EffectAwarePage,
                 wal: Always, dialog: Gated, queue: Serial, implicit_session: Always, auto_inject: Always, tab_transition: false,
                 background: Navigation, resume: Effect, opens_tabs: false, auto_borrow_write: true, cooperation: GuardedAction, dom_targeted: false, bootstrap: false,
                 debug_evidence: Navigation, audit_key: Some("navigateBack"), recipe: Skip { reason: "history_navigation" }
             ),
             Self::ToolNavigateForward => method_spec!(
                 owner: Extension, effect: BrowserMutation, action_metadata: Full, remote_allowed: true,
-                deadline: Standard, response_grace: true, cancel_at_deadline: true, outcome: EffectAwareAction,
+                deadline: Standard, response_grace: true, cancel_at_deadline: true, outcome: EffectAwarePage,
                 wal: Always, dialog: Gated, queue: Serial, implicit_session: Always, auto_inject: Always, tab_transition: false,
                 background: Navigation, resume: Effect, opens_tabs: false, auto_borrow_write: true, cooperation: GuardedAction, dom_targeted: false, bootstrap: false,
                 debug_evidence: Navigation, audit_key: Some("navigateForward"), recipe: Skip { reason: "history_navigation" }
             ),
             Self::ToolReload => method_spec!(
                 owner: Extension, effect: BrowserMutation, action_metadata: Full, remote_allowed: true,
-                deadline: Standard, response_grace: true, cancel_at_deadline: true, outcome: EffectAwareAction,
+                deadline: Standard, response_grace: true, cancel_at_deadline: true, outcome: EffectAwarePage,
                 wal: Always, dialog: Gated, queue: Serial, implicit_session: Always, auto_inject: Always, tab_transition: false,
                 background: Navigation, resume: Effect, opens_tabs: false, auto_borrow_write: true, cooperation: GuardedAction, dom_targeted: false, bootstrap: false,
                 debug_evidence: Navigation, audit_key: Some("reload"), recipe: Skip { reason: "history_navigation" }
             ),
             Self::ToolClick => method_spec!(
                 owner: Extension, effect: BrowserMutation, action_metadata: Full, remote_allowed: true,
-                deadline: Standard, response_grace: false, cancel_at_deadline: true, outcome: EffectAwareAction,
+                deadline: Standard, response_grace: false, cancel_at_deadline: true, outcome: EffectAwareInput,
                 wal: Always, dialog: Gated, queue: Serial, implicit_session: Always, auto_inject: Always, tab_transition: false,
                 background: Controlled, resume: Effect, opens_tabs: true, auto_borrow_write: true, cooperation: GuardedAction, dom_targeted: true, bootstrap: false,
                 debug_evidence: Action, audit_key: Some("click"), recipe: Extract { action: "click" }
             ),
             Self::ToolHover => method_spec!(
                 owner: Extension, effect: TransientInput, action_metadata: Full, remote_allowed: true,
-                deadline: Standard, response_grace: false, cancel_at_deadline: true, outcome: EffectAwareAction,
+                deadline: Standard, response_grace: false, cancel_at_deadline: true, outcome: EffectAwareInput,
                 wal: Never, dialog: Gated, queue: Serial, implicit_session: Always, auto_inject: Always, tab_transition: false,
                 background: Controlled, resume: Effect, opens_tabs: false, auto_borrow_write: true, cooperation: GuardedAction, dom_targeted: true, bootstrap: false,
                 debug_evidence: Action, audit_key: Some("hover"), recipe: Extract { action: "hover" }
             ),
             Self::ToolDrag => method_spec!(
                 owner: Extension, effect: BrowserMutation, action_metadata: Full, remote_allowed: true,
-                deadline: Standard, response_grace: false, cancel_at_deadline: true, outcome: EffectAwareAction,
+                deadline: Standard, response_grace: false, cancel_at_deadline: true, outcome: EffectAwareInput,
                 wal: Always, dialog: Gated, queue: Serial, implicit_session: Always, auto_inject: Always, tab_transition: false,
                 background: Controlled, resume: Effect, opens_tabs: true, auto_borrow_write: true, cooperation: GuardedAction, dom_targeted: true, bootstrap: false,
                 debug_evidence: Action, audit_key: Some("drag"), recipe: Skip { reason: "drag" }
             ),
             Self::ToolWheel => method_spec!(
                 owner: Extension, effect: BrowserMutation, action_metadata: Full, remote_allowed: true,
-                deadline: Standard, response_grace: false, cancel_at_deadline: true, outcome: EffectAwareAction,
+                deadline: Standard, response_grace: false, cancel_at_deadline: true, outcome: EffectAwareInput,
                 wal: Never, dialog: Gated, queue: Serial, implicit_session: Always, auto_inject: Always, tab_transition: false,
                 background: Controlled, resume: Effect, opens_tabs: false, auto_borrow_write: true, cooperation: GuardedAction, dom_targeted: true, bootstrap: false,
                 debug_evidence: Action, audit_key: Some("scroll"), recipe: Skip { reason: "wheel" }
             ),
             Self::ToolScrollTo => method_spec!(
                 owner: Extension, effect: BrowserMutation, action_metadata: Full, remote_allowed: true,
-                deadline: Standard, response_grace: false, cancel_at_deadline: true, outcome: EffectAwareAction,
+                deadline: Standard, response_grace: false, cancel_at_deadline: true, outcome: EffectAwareInput,
                 wal: Never, dialog: Gated, queue: Serial, implicit_session: Always, auto_inject: Always, tab_transition: false,
                 background: Controlled, resume: Effect, opens_tabs: false, auto_borrow_write: true, cooperation: GuardedAction, dom_targeted: true, bootstrap: false,
                 debug_evidence: Action, audit_key: Some("scroll"), recipe: Extract { action: "scroll-to" }
             ),
             Self::ToolFocus => method_spec!(
                 owner: Extension, effect: BrowserMutation, action_metadata: Full, remote_allowed: true,
-                deadline: Standard, response_grace: false, cancel_at_deadline: true, outcome: EffectAwareAction,
+                deadline: Standard, response_grace: false, cancel_at_deadline: true, outcome: EffectAwareInput,
                 wal: Never, dialog: Gated, queue: Serial, implicit_session: Always, auto_inject: Always, tab_transition: false,
                 background: Controlled, resume: Effect, opens_tabs: false, auto_borrow_write: true, cooperation: GuardedAction, dom_targeted: true, bootstrap: false,
                 debug_evidence: Action, audit_key: Some("focus"), recipe: Skip { reason: "focus" }
             ),
             Self::ToolBlur => method_spec!(
                 owner: Extension, effect: BrowserMutation, action_metadata: Full, remote_allowed: true,
-                deadline: Standard, response_grace: false, cancel_at_deadline: true, outcome: EffectAwareAction,
+                deadline: Standard, response_grace: false, cancel_at_deadline: true, outcome: EffectAwareInput,
                 wal: Never, dialog: Gated, queue: Serial, implicit_session: Always, auto_inject: Always, tab_transition: false,
                 background: Controlled, resume: Effect, opens_tabs: false, auto_borrow_write: true, cooperation: GuardedAction, dom_targeted: true, bootstrap: false,
                 debug_evidence: Action, audit_key: Some("blur"), recipe: Skip { reason: "focus" }
             ),
             Self::ToolFill => method_spec!(
                 owner: Extension, effect: BrowserMutation, action_metadata: Full, remote_allowed: true,
-                deadline: Standard, response_grace: false, cancel_at_deadline: true, outcome: EffectAwareAction,
+                deadline: Standard, response_grace: false, cancel_at_deadline: true, outcome: EffectAwareInput,
                 wal: Always, dialog: Gated, queue: Serial, implicit_session: Always, auto_inject: Always, tab_transition: false,
                 background: Controlled, resume: Effect, opens_tabs: false, auto_borrow_write: true, cooperation: GuardedAction, dom_targeted: true, bootstrap: false,
                 debug_evidence: FormInput, audit_key: Some("fill"), recipe: Extract { action: "fill" }
             ),
             Self::ToolPress => method_spec!(
                 owner: Extension, effect: BrowserMutation, action_metadata: Full, remote_allowed: true,
-                deadline: Standard, response_grace: false, cancel_at_deadline: true, outcome: EffectAwareAction,
+                deadline: Standard, response_grace: false, cancel_at_deadline: true, outcome: EffectAwareInput,
                 wal: Always, dialog: Gated, queue: Serial, implicit_session: Always, auto_inject: Always, tab_transition: false,
                 background: Controlled, resume: Effect, opens_tabs: true, auto_borrow_write: true, cooperation: GuardedAction, dom_targeted: true, bootstrap: false,
                 debug_evidence: Action, audit_key: Some("press"), recipe: Extract { action: "press" }
             ),
             Self::ToolSelect => method_spec!(
                 owner: Extension, effect: BrowserMutation, action_metadata: Full, remote_allowed: true,
-                deadline: Standard, response_grace: false, cancel_at_deadline: true, outcome: EffectAwareAction,
+                deadline: Standard, response_grace: false, cancel_at_deadline: true, outcome: EffectAwareInput,
                 wal: Always, dialog: Gated, queue: Serial, implicit_session: Always, auto_inject: Always, tab_transition: false,
                 background: Controlled, resume: Effect, opens_tabs: false, auto_borrow_write: true, cooperation: GuardedAction, dom_targeted: true, bootstrap: false,
                 debug_evidence: FormInput, audit_key: Some("select"), recipe: Extract { action: "select" }
@@ -756,7 +761,7 @@ impl Method {
             ),
             Self::ToolScreenshotFullPage => method_spec!(
                 owner: Extension, effect: TransientInput, action_metadata: Full, remote_allowed: true,
-                deadline: FullPage, response_grace: false, cancel_at_deadline: true, outcome: Ordinary,
+                deadline: FullPage, response_grace: false, cancel_at_deadline: true, outcome: FullPageCapture,
                 wal: Never, dialog: Gated, queue: Serial, implicit_session: Always, auto_inject: Always, tab_transition: false,
                 background: Controlled, resume: Effect, opens_tabs: false, auto_borrow_write: true, cooperation: GuardedAction, dom_targeted: false, bootstrap: false,
                 debug_evidence: None, audit_key: Some("screenshotFullPage"), recipe: Ignore
@@ -798,7 +803,7 @@ impl Method {
             ),
             Self::ToolEvaluate => method_spec!(
                 owner: Extension, effect: BrowserMutation, action_metadata: Full, remote_allowed: true,
-                deadline: Standard, response_grace: false, cancel_at_deadline: true, outcome: EffectAwareAction,
+                deadline: Standard, response_grace: false, cancel_at_deadline: true, outcome: EffectAwarePage,
                 wal: Always, dialog: Gated, queue: Serial, implicit_session: Always, auto_inject: Always, tab_transition: false,
                 background: Accessible, resume: Effect, opens_tabs: false, auto_borrow_write: true, cooperation: GuardedAction, dom_targeted: false, bootstrap: false,
                 debug_evidence: Action, audit_key: Some("evaluate"), recipe: Skip { reason: "script" }
@@ -812,7 +817,7 @@ impl Method {
             ),
             Self::ToolDialogAccept => method_spec!(
                 owner: Extension, effect: BrowserMutation, action_metadata: None, remote_allowed: true,
-                deadline: Standard, response_grace: false, cancel_at_deadline: true, outcome: EffectAwareAction,
+                deadline: Standard, response_grace: false, cancel_at_deadline: true, outcome: EffectAwareInput,
                 wal: Always, dialog: Bypass, queue: Unlocked, implicit_session: Always, auto_inject: Never, tab_transition: false,
                 background: None, resume: Never, opens_tabs: false, auto_borrow_write: false, cooperation: Dialog, dom_targeted: false, bootstrap: false,
                 debug_evidence: Dialog, audit_key: Some("dialogAccept"), recipe: Ignore
@@ -861,7 +866,7 @@ impl Method {
             ),
             Self::ToolRequestHelp => method_spec!(
                 owner: Extension, effect: PassiveRead, action_metadata: None, remote_allowed: true,
-                deadline: Standard, response_grace: true, cancel_at_deadline: true, outcome: Ordinary,
+                deadline: Standard, response_grace: true, cancel_at_deadline: true, outcome: RequestHelp,
                 wal: Never, dialog: Gated, queue: Serial, implicit_session: Always, auto_inject: Never, tab_transition: false,
                 background: None, resume: Always, opens_tabs: false, auto_borrow_write: false, cooperation: RequestHelp, dom_targeted: false, bootstrap: false,
                 debug_evidence: None, audit_key: Some("help"), recipe: Ignore
@@ -1138,8 +1143,16 @@ mod tests {
                     | Method::ToolTabClose
                     | Method::ToolDialogAccept
             ) {
-                assert_eq!(spec.outcome, OutcomeKind::EffectAwareAction);
+                assert_eq!(spec.outcome, OutcomeKind::EffectAwareInput);
                 assert!(spec.cancel_at_deadline);
+            }
+            if spec.cancel_at_deadline {
+                assert_ne!(
+                    spec.outcome,
+                    OutcomeKind::Ordinary,
+                    "{} sets cancel_at_deadline=true so it must declare a specific OutcomeKind",
+                    method.wire_name()
+                );
             }
         }
     }
