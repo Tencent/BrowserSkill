@@ -3431,4 +3431,78 @@ describe("idle soft-detach and immediate close/return detach", () => {
       cdp.dispose();
     }
   });
+
+  it("releases object groups on navigated frame handles without refreshing frame routes or reattaching", async () => {
+    const { api, onEvent } = fakeApi();
+    let frameTreeCalls = 0;
+    vi.mocked(api.sendCommand).mockImplementation(async (_target, method) => {
+      if (method === "Page.getFrameTree") {
+        frameTreeCalls++;
+        return {
+          frameTree: {
+            frame: { id: "root", loaderId: "loader-1", url: "https://example.test/" },
+            childFrames: [
+              {
+                frame: {
+                  id: "child",
+                  parentId: "root",
+                  loaderId: "child-loader-1",
+                  url: "https://example.test/child",
+                },
+              },
+            ],
+          },
+        };
+      }
+      return {};
+    });
+    const cdp = new ChromiumCdp(api);
+    try {
+      await cdp.ensureAttached(58);
+      await cdp.getFrameDocuments(58);
+      const initialTreeCalls = frameTreeCalls;
+
+      // Simulate same-process child frame navigation updating `loaderId`.
+      onEvent.fire({ tabId: 58 }, "Page.frameNavigated", {
+        frame: {
+          id: "child",
+          parentId: "root",
+          loaderId: "child-loader-2",
+          url: "https://example.test/child-next",
+        },
+      });
+
+      const staleChildHandle = {
+        tabId: 58,
+        frameId: "child",
+        loaderId: "child-loader-1",
+        backendNodeId: 77,
+      };
+      // Normal reads/writes on stale loaderId deterministically reject.
+      await expect(
+        cdp.sendToFrame(staleChildHandle, "DOM.resolveNode", { backendNodeId: 77 }),
+      ).rejects.toMatchObject({ name: "StaleFrameHandleError" });
+
+      // Cleanup (`Runtime.releaseObjectGroup` / `Runtime.releaseObject`) still dispatches
+      // to the session without calling `Page.getFrameTree` or throwing `StaleFrameHandleError`.
+      await expect(
+        cdp.sendToFrame(
+          staleChildHandle,
+          "Runtime.releaseObjectGroup",
+          { objectGroup: "bsk-test-group" },
+          { allowReattach: false },
+        ),
+      ).resolves.toEqual({});
+      expect(frameTreeCalls).toBe(initialTreeCalls);
+      expect(api.sendCommand).toHaveBeenLastCalledWith(
+        { tabId: 58 },
+        "Runtime.releaseObjectGroup",
+        {
+          objectGroup: "bsk-test-group",
+        },
+      );
+    } finally {
+      cdp.dispose();
+    }
+  });
 });

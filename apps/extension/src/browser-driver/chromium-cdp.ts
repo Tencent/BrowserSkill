@@ -1045,20 +1045,15 @@ export class ChromiumCdp {
       return this.sendToTarget<T>({ tabId }, method, params);
     }
 
-    const route = await this.resolveValidatedFrameRoute(
-      handle,
-      method,
-      guard?.signal,
-      guard?.ignoreFrameNavigation === true,
-    );
-    const target: CdpTarget = {
-      tabId,
-      ...(route.sessionId ? { sessionId: route.sessionId } : {}),
-    };
     const ignoreNav =
       guard?.ignoreFrameNavigation === true ||
       method === "Runtime.releaseObjectGroup" ||
       method === "Runtime.releaseObject";
+    const route = await this.resolveValidatedFrameRoute(handle, method, guard?.signal, ignoreNav);
+    const target: CdpTarget = {
+      tabId,
+      ...(route.sessionId ? { sessionId: route.sessionId } : {}),
+    };
 
     try {
       return (await this.command(
@@ -1122,7 +1117,7 @@ export class ChromiumCdp {
 
     let route = entry.frames.get(frameId);
     const needsRefresh =
-      !ignoreFrameNavigation &&
+      !isCleanup &&
       (!route ||
         !route.authoritative ||
         (entry.frameDiscovery.pending.size > 0 && !route.sessionId));
@@ -1132,7 +1127,7 @@ export class ChromiumCdp {
       if (entry?.kind !== "attached") throw new Error("debugger detached");
       route = entry.frames.get(frameId);
     }
-    if (!route && ignoreFrameNavigation) {
+    if (!route && isCleanup) {
       for (const [sessionId, mappedFrameId] of entry.frameDiscovery.frameIds) {
         if (mappedFrameId === frameId) {
           return { sessionId, loaderId: "", authoritative: false };
@@ -1151,10 +1146,7 @@ export class ChromiumCdp {
       );
     }
     const requiresNonEmptyLoader = "backendNodeId" in handle && route.sessionId !== undefined;
-    if (
-      !ignoreFrameNavigation &&
-      (route.loaderId !== loaderId || (requiresNonEmptyLoader && !loaderId))
-    ) {
+    if (!isCleanup && (route.loaderId !== loaderId || (requiresNonEmptyLoader && !loaderId))) {
       throw new StaleFrameHandleError(
         tabId,
         frameId,

@@ -316,9 +316,9 @@ export async function handleWaitForElement(
   const objectHandles = new Map<string, FrameDocumentHandle>();
   let finished = false;
   const releaseHandle = (handle: FrameDocumentHandle) => {
-    // Cleanup must not extend the wait's deadline or delay cancellation.
+    // Cleanup must not extend the wait's deadline, delay cancellation, or resurrect detached tabs.
     void (deps.cdp.resourceCleanup ?? deps.cdp)
-      .sendToFrame(handle, "Runtime.releaseObjectGroup", { objectGroup }, undefined)
+      .sendToFrame(handle, "Runtime.releaseObjectGroup", { objectGroup }, { allowReattach: false })
       .catch(() => {});
   };
   const sendFrame = async <T>(

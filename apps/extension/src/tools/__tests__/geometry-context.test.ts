@@ -476,4 +476,16 @@ describe("measurement geometry context", () => {
       height: 1000,
     });
   });
+
+  it("shares Page.getLayoutMetrics cache between process boundary and frame projections", async () => {
+    const cdp = driver();
+    const context = new GeometryContext(cdp, 4, graph);
+    await context.layoutMetrics(process);
+    await context.topLayoutMetrics(process);
+    await context.targetProjection("child");
+    await context.targetViewport("child");
+    expect(
+      cdp.calls.mock.calls.filter(([, method]) => method === "Page.getLayoutMetrics"),
+    ).toHaveLength(1);
+  });
 });

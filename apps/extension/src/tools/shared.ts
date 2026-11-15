@@ -255,8 +255,79 @@ export type CdpRunnerStubOverrides = Partial<Omit<CdpRunner, "send">> & {
 export function createStubCdpRunner<T extends CdpRunnerStubOverrides>(
   overrides: T,
 ): CdpRunner & Omit<NoInfer<T>, keyof CdpRunner> {
-  const { send, ...restOverrides } = overrides;
+  const { send, sendToFrame: rawSendToFrame, ...restOverrides } = overrides;
   const typedSend = send as CdpRunner["send"];
+  const resolveSelf = (self: unknown): CdpRunner =>
+    self !== null &&
+    typeof self === "object" &&
+    typeof (self as Partial<CdpRunner>).send === "function" &&
+    typeof (self as Partial<CdpRunner>).getAttachmentId === "function"
+      ? (self as CdpRunner)
+      : stub;
+  const applyDispatchGuard = (
+    self: CdpRunner,
+    handle: FrameDocumentHandle | FrameNodeHandle,
+    guard?: CdpDispatchGuard,
+  ) => {
+    guard?.signal?.throwIfAborted();
+    if (guard?.allowReattach === false && self.getAttachmentId(handle.tabId) === undefined) {
+      throw new Error("debugger detached");
+    }
+    if (guard?.attachmentId !== undefined) {
+      const currentAttachment = self.getAttachmentId(handle.tabId);
+      if (currentAttachment !== guard.attachmentId) {
+        throw new Error("Debugger attachment changed before dispatch");
+      }
+    }
+    guard?.onDispatch?.();
+  };
+
+  let wrappedSendToFrame: CdpRunner["sendToFrame"] | undefined;
+  if (rawSendToFrame) {
+    const mockFn = rawSendToFrame as CdpRunner["sendToFrame"] & {
+      getMockImplementation?: () => CdpRunner["sendToFrame"] | undefined;
+      mockImplementation?: (fn: CdpRunner["sendToFrame"]) => unknown;
+    };
+    if (
+      typeof mockFn.getMockImplementation === "function" &&
+      typeof mockFn.mockImplementation === "function"
+    ) {
+      const impl = mockFn.getMockImplementation();
+      if (impl && impl.length < 4) {
+        mockFn.mockImplementation(async function <R = unknown>(
+          this: unknown,
+          handle: FrameDocumentHandle | FrameNodeHandle,
+          _method: string,
+          _params?: object,
+          guard?: CdpDispatchGuard,
+        ): Promise<R> {
+          applyDispatchGuard(resolveSelf(this), handle, guard);
+          return (await impl.apply(
+            this,
+            arguments as unknown as Parameters<CdpRunner["sendToFrame"]>,
+          )) as R;
+        });
+      }
+      wrappedSendToFrame = mockFn;
+    } else if (rawSendToFrame.length < 4) {
+      wrappedSendToFrame = async function <R = unknown>(
+        this: unknown,
+        handle: FrameDocumentHandle | FrameNodeHandle,
+        _method: string,
+        _params?: object,
+        guard?: CdpDispatchGuard,
+      ): Promise<R> {
+        applyDispatchGuard(resolveSelf(this), handle, guard);
+        return (await rawSendToFrame.apply(
+          this,
+          arguments as unknown as Parameters<CdpRunner["sendToFrame"]>,
+        )) as R;
+      };
+    } else {
+      wrappedSendToFrame = rawSendToFrame;
+    }
+  }
+
   const stub: CdpRunner = {
     prepareInputTimestamp: async () => ({
       timestamp: Date.now(),
@@ -264,38 +335,34 @@ export function createStubCdpRunner<T extends CdpRunnerStubOverrides>(
       assertValid: () => {},
     }),
     send: typedSend,
-    sendToFrame: async <T = unknown>(
+    sendToFrame: async function <R = unknown>(
+      this: unknown,
       handle: FrameDocumentHandle | FrameNodeHandle,
       method: string,
       params?: object,
       guard?: CdpDispatchGuard,
-    ): Promise<T> => {
-      guard?.signal?.throwIfAborted();
-      if (guard?.attachmentId !== undefined) {
-        const currentAttachment = stub.getAttachmentId(handle.tabId);
-        if (currentAttachment !== guard.attachmentId) {
-          throw new Error("Debugger attachment changed before dispatch");
-        }
-      }
-      guard?.onDispatch?.();
+    ): Promise<R> {
+      const self = resolveSelf(this);
+      applyDispatchGuard(self, handle, guard);
       if (guard?.signal !== undefined) {
-        return stub.send<T>(handle.tabId, method, params, guard.signal);
+        return self.send<R>(handle.tabId, method, params, guard.signal);
       }
       return params !== undefined
-        ? stub.send<T>(handle.tabId, method, params)
-        : stub.send<T>(handle.tabId, method);
+        ? self.send<R>(handle.tabId, method, params)
+        : self.send<R>(handle.tabId, method);
     },
-    getMainFrameHandle: async (tabId: number, signal?: AbortSignal) => {
+    getMainFrameHandle: async function (this: unknown, tabId: number, signal?: AbortSignal) {
+      const self = resolveSelf(this);
       signal?.throwIfAborted();
       try {
         const tree = await (signal !== undefined
-          ? stub.send<{ frameTree?: { frame?: { id?: string; loaderId?: string } } }>(
+          ? self.send<{ frameTree?: { frame?: { id?: string; loaderId?: string } } }>(
               tabId,
               "Page.getFrameTree",
               {},
               signal,
             )
-          : stub.send<{ frameTree?: { frame?: { id?: string; loaderId?: string } } }>(
+          : self.send<{ frameTree?: { frame?: { id?: string; loaderId?: string } } }>(
               tabId,
               "Page.getFrameTree",
               {},
@@ -317,7 +384,12 @@ export function createStubCdpRunner<T extends CdpRunnerStubOverrides>(
       }
       return toFrameDocumentHandle(tabId, { frameId: "root", loaderId: "" });
     },
-    getFrameDocuments: async (tabId: number, signal?: AbortSignal): Promise<FrameDocumentGraph> => {
+    getFrameDocuments: async function (
+      this: unknown,
+      tabId: number,
+      signal?: AbortSignal,
+    ): Promise<FrameDocumentGraph> {
+      const self = resolveSelf(this);
       signal?.throwIfAborted();
       try {
         type RawFrameNode = {
@@ -331,8 +403,8 @@ export function createStubCdpRunner<T extends CdpRunnerStubOverrides>(
           childFrames?: RawFrameNode[];
         };
         const tree = await (signal !== undefined
-          ? stub.send<{ frameTree?: RawFrameNode }>(tabId, "Page.getFrameTree", {}, signal)
-          : stub.send<{ frameTree?: RawFrameNode }>(tabId, "Page.getFrameTree", {}));
+          ? self.send<{ frameTree?: RawFrameNode }>(tabId, "Page.getFrameTree", {}, signal)
+          : self.send<{ frameTree?: RawFrameNode }>(tabId, "Page.getFrameTree", {}));
         const rootFrame = tree?.frameTree?.frame;
         if (rootFrame?.id) {
           const rootLoaderId = rootFrame.loaderId ?? "";
@@ -375,10 +447,9 @@ export function createStubCdpRunner<T extends CdpRunnerStubOverrides>(
             }
           };
           walkChildren(tree.frameTree?.childFrames, rootFrame.id);
+          const attachmentId = self.getAttachmentId(tabId);
           return {
-            ...(stub.getAttachmentId(tabId) !== undefined
-              ? { attachmentId: stub.getAttachmentId(tabId) }
-              : {}),
+            ...(attachmentId !== undefined ? { attachmentId } : {}),
             rootFrameId: rootFrame.id,
             frames,
           };
@@ -391,10 +462,9 @@ export function createStubCdpRunner<T extends CdpRunnerStubOverrides>(
           throw err;
         }
       }
+      const attachmentId = self.getAttachmentId(tabId);
       return {
-        ...(stub.getAttachmentId(tabId) !== undefined
-          ? { attachmentId: stub.getAttachmentId(tabId) }
-          : {}),
+        ...(attachmentId !== undefined ? { attachmentId } : {}),
         rootFrameId: "",
         frames: [],
       };
@@ -426,6 +496,7 @@ export function createStubCdpRunner<T extends CdpRunnerStubOverrides>(
       truncated: false,
     }),
     ...restOverrides,
+    ...(wrappedSendToFrame ? { sendToFrame: wrappedSendToFrame } : {}),
   };
   return stub as CdpRunner & NoInfer<T>;
 }
@@ -445,13 +516,65 @@ export function sendToFrameHandle<T = unknown>(
     : cdp.sendToFrame<T>(handle, method);
 }
 
+const RELEASE_OBJECT_METHODS = new Set(["Runtime.releaseObjectGroup", "Runtime.releaseObject"]);
+
+function buildFrameCleanupGuard(
+  baseGuard: CdpDispatchGuard | undefined,
+  callGuard: CdpDispatchGuard | undefined,
+): CdpDispatchGuard {
+  const attachmentId = callGuard?.attachmentId ?? baseGuard?.attachmentId;
+  const ignoreFrameNavigation =
+    callGuard?.ignoreFrameNavigation ?? baseGuard?.ignoreFrameNavigation;
+  return {
+    ...(attachmentId !== undefined ? { attachmentId } : {}),
+    ...(ignoreFrameNavigation !== undefined ? { ignoreFrameNavigation } : {}),
+    allowReattach: false,
+  };
+}
+
 export function cdpRunnerForFrame(
   cdp: CdpRunner,
   handle: FrameDocumentHandle | FrameNodeHandle,
   guard?: CdpDispatchGuard,
 ): CdpRunner {
+  const remapTarget = (
+    target: FrameDocumentHandle | FrameNodeHandle,
+  ): FrameDocumentHandle | FrameNodeHandle =>
+    target.tabId === handle.tabId && !target.frameId && !target.loaderId ? handle : target;
+  const resourceCleanup = cdp.resourceCleanup
+    ? delegateCdpRunner(cdp.resourceCleanup, {
+        send: <T = unknown>(_tabId: number, method: string, params?: object) =>
+          cdp.resourceCleanup!.sendToFrame<T>(
+            handle,
+            method,
+            params,
+            buildFrameCleanupGuard(guard, undefined),
+          ),
+        sendToFrame: <T = unknown>(
+          target: FrameDocumentHandle | FrameNodeHandle,
+          method: string,
+          params?: object,
+          callGuard?: CdpDispatchGuard,
+        ) =>
+          cdp.resourceCleanup!.sendToFrame<T>(
+            remapTarget(target),
+            method,
+            params,
+            buildFrameCleanupGuard(guard, callGuard),
+          ),
+      })
+    : undefined;
   return delegateCdpRunner(cdp, {
+    ...(resourceCleanup ? { resourceCleanup } : {}),
     send: <T = unknown>(_tabId: number, method: string, params?: object, signal?: AbortSignal) => {
+      if (RELEASE_OBJECT_METHODS.has(method)) {
+        return (cdp.resourceCleanup ?? cdp).sendToFrame<T>(
+          handle,
+          method,
+          params,
+          buildFrameCleanupGuard(guard, undefined),
+        );
+      }
       const effectiveGuard = signal && !guard?.signal ? { ...guard, signal } : guard;
       if (effectiveGuard !== undefined) {
         return cdp.sendToFrame<T>(handle, method, params, effectiveGuard);
@@ -459,6 +582,36 @@ export function cdpRunnerForFrame(
       return params !== undefined
         ? cdp.sendToFrame<T>(handle, method, params)
         : cdp.sendToFrame<T>(handle, method);
+    },
+    sendToFrame: <T = unknown>(
+      target: FrameDocumentHandle | FrameNodeHandle,
+      method: string,
+      params?: object,
+      callGuard?: CdpDispatchGuard,
+    ) => {
+      const remapped = remapTarget(target);
+      if (RELEASE_OBJECT_METHODS.has(method)) {
+        return (cdp.resourceCleanup ?? cdp).sendToFrame<T>(
+          remapped,
+          method,
+          params,
+          buildFrameCleanupGuard(guard, callGuard),
+        );
+      }
+      const mergedGuard =
+        guard || callGuard
+          ? {
+              ...guard,
+              ...callGuard,
+              signal: callGuard?.signal ?? guard?.signal,
+            }
+          : undefined;
+      if (mergedGuard !== undefined) {
+        return cdp.sendToFrame<T>(remapped, method, params, mergedGuard);
+      }
+      return params !== undefined
+        ? cdp.sendToFrame<T>(remapped, method, params)
+        : cdp.sendToFrame<T>(remapped, method);
     },
   });
 }

@@ -989,7 +989,7 @@ describe("wait-for-element regression coverage", () => {
       { tabId: 4, frameId: "child-frame", loaderId: "child-loader" },
       "Runtime.releaseObjectGroup",
       { objectGroup: expect.any(String) },
-      undefined,
+      { allowReattach: false },
     );
     expect(fake.sent).toHaveLength(0);
   });

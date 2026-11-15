@@ -83,6 +83,7 @@ describe("nodeContentRegion", () => {
       "DOM.getContentQuads",
       "DOM.resolveNode",
       "Runtime.callFunctionOn",
+      "Runtime.releaseObject",
     ]);
   });
 });

@@ -71,6 +71,7 @@ export function pointerTransactionDeps(
     return result;
   };
   const cdp: CdpRunner = delegateCdpRunner(deps.cdp, {
+    resourceCleanup: deps.cdp.resourceCleanup ?? deps.cdp,
     send: <T>(tabId: number, method: string, params?: object, sig?: AbortSignal) =>
       sendFrame<T>(toRootFrameHandle(tabId), method, params, sig ? { signal: sig } : undefined),
     sendToFrame: sendFrame,

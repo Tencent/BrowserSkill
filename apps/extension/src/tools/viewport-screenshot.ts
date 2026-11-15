@@ -6,7 +6,7 @@ import {
 import type { RpcError } from "@/transport/types";
 import { rpcError } from "./errors";
 import { parsePngDimensions } from "./png";
-import { type CdpRunner, delegateCdpRunner } from "./shared";
+import { type CdpRunner, delegateCdpRunner, toRootFrameHandle } from "./shared";
 import { BoundedWaitError, waitBounded } from "./transfer-transaction";
 import { isAbortError, throwIfAborted } from "./vom/capture-abort";
 import { verifyDocumentIdentity } from "./vom/document-identity";
@@ -97,10 +97,18 @@ function boundToAttachment(cdp: CdpRunner, tabId: number, attachmentId: string):
       if (handle.tabId !== tabId || cdp.getAttachmentId(handle.tabId) !== attachmentId) {
         return Promise.reject(new Error("Screenshot attachment changed"));
       }
-      return cdp.sendToFrame<T>(handle, method, params, {
-        ...guard,
-        attachmentId,
-      });
+      const isCleanup =
+        method === "Runtime.releaseObjectGroup" || method === "Runtime.releaseObject";
+      return (isCleanup ? (cdp.resourceCleanup ?? cdp) : cdp).sendToFrame<T>(
+        handle,
+        method,
+        params,
+        {
+          ...guard,
+          attachmentId,
+          ...(isCleanup ? { allowReattach: false } : {}),
+        },
+      );
     },
   });
 }
@@ -152,7 +160,14 @@ async function readDocumentIdentity(cdp: CdpRunner, tabId: number, signal?: Abor
       documentElementBackendNodeId: backendNodeId,
     } satisfies DocumentIdentity;
   } finally {
-    await bound.send(tabId, "Runtime.releaseObjectGroup", { objectGroup }).catch(() => {});
+    await bound
+      .sendToFrame(
+        toRootFrameHandle(tabId),
+        "Runtime.releaseObjectGroup",
+        { objectGroup },
+        { allowReattach: false },
+      )
+      .catch(() => {});
   }
 }
 

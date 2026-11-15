@@ -3,6 +3,7 @@ import {
   type FrameDocumentHandle,
   type FrameDocumentInfo,
   type FrameProcessBoundary,
+  frameProcessBoundary,
   frameProcessIdentityKey,
 } from "@/browser-driver/frame-handles";
 import {
@@ -108,7 +109,7 @@ export class GeometryContext {
   }
 
   private endpointForFrame(frame: FrameDocumentInfo): GeometryEndpoint {
-    return this.frameHandles?.get(frame.frameId) ?? frame.handle;
+    return this.frameHandles?.get(frame.frameId) ?? frameProcessBoundary(frame);
   }
 
   private async request<T>(

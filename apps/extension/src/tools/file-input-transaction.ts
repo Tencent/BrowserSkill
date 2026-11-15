@@ -488,7 +488,8 @@ export async function uploadThroughActivatedFileInput(
             !(
               err instanceof Error &&
               (err.message === "No resources owned on this tab" ||
-                err.message === "debugger detached")
+                err.message === "debugger detached" ||
+                err.message === "Debugger attachment changed before dispatch")
             ) &&
             !isStaleFrameHandleError(err)
           ) {
@@ -501,7 +502,7 @@ export async function uploadThroughActivatedFileInput(
         ? (outcome.data?.effect_state as TransferEffectState | undefined)
         : "committed";
       if (effect === "unknown" || cleanupFailed) {
-        await options.cdp.detach?.(handle.tabId);
+        await options.cdp.detach?.(handle.tabId).catch(() => {});
       }
       if (cleanupFailed && isRpcError(outcome)) {
         outcome.data = { ...outcome.data, cleanup_state: "failed" };

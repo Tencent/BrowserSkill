@@ -80,6 +80,7 @@ export async function handleScrollTo(
   };
   let graph: Promise<FrameDocumentGraph> | undefined;
   const cdp: CdpRunner = delegateCdpRunner(deps.cdp, {
+    resourceCleanup: deps.cdp.resourceCleanup ?? deps.cdp,
     send: <T>(tabId: number, method: string, args?: object, sig?: AbortSignal) =>
       sendFrame<T>(toRootFrameHandle(tabId), method, args, sig ? { signal: sig } : undefined),
     sendToFrame: sendFrame,

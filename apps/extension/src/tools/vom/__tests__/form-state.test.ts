@@ -209,6 +209,7 @@ describe("form state identity", () => {
         handle,
         "Runtime.releaseObjectGroup",
         expect.anything(),
+        { allowReattach: false },
       );
     }
     expect(send).not.toHaveBeenCalled();
@@ -248,6 +249,37 @@ describe("form state identity", () => {
       name: "AbortError",
     });
     expect(send).toHaveBeenCalledWith(7, "Runtime.releaseObjectGroup", expect.anything());
+  });
+
+  it("releases OOPIF remote objects through cdpRunnerForFrame even after guard.signal aborts", async () => {
+    const controller = new AbortController();
+    const handle = toFrameDocumentHandle(7, { frameId: "oopif-frame", loaderId: "loader-1" });
+    const nodes = await decodeControls(snapshot([[{ id: 11, value: "old" }]]));
+    const sendToFrame = vi.fn(async (_h, method, _params, guard) => {
+      guard?.signal?.throwIfAborted();
+      if (method === "Runtime.evaluate") {
+        controller.abort();
+        return reply([[11, state("new")]]);
+      }
+      return {};
+    });
+    const cdp = createStubCdpRunner({
+      send: vi.fn(async () => ({})) as CdpRunner["send"],
+      sendToFrame: sendToFrame as CdpRunner["sendToFrame"],
+    });
+    const scoped = cdpRunnerForFrame(cdp, handle, {
+      ignoreFrameNavigation: true,
+      signal: controller.signal,
+    });
+    await expect(
+      enrichFormControlStates(scoped, 7, nodes, controller.signal),
+    ).rejects.toMatchObject({ name: "AbortError" });
+    expect(sendToFrame).toHaveBeenLastCalledWith(
+      handle,
+      "Runtime.releaseObjectGroup",
+      expect.objectContaining({ objectGroup: expect.any(String) }),
+      { ignoreFrameNavigation: true, allowReattach: false },
+    );
   });
 
   it("does not report success when cancelled during object cleanup", async () => {

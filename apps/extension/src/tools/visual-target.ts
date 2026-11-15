@@ -230,11 +230,11 @@ async function readFrame(
   } finally {
     if (cdp.getAttachmentId?.(document.tabId) === document.attachmentId) {
       await sendToFrameHandle(
-        cdp,
+        cdp.resourceCleanup ?? cdp,
         document,
         "Runtime.releaseObjectGroup",
         { objectGroup: verified.objectGroup },
-        { attachmentId: document.attachmentId },
+        { attachmentId: document.attachmentId, allowReattach: false },
       ).catch(() => {});
     }
     throwIfAborted(signal);
@@ -470,11 +470,11 @@ export async function verifyCapturedTarget(
       const verified = await resolveVerifiedNode(cdp, frame.document, anchor, signal);
       if (verified.status !== "current") return stale(`visual DOM identity ${verified.status}`);
       await sendToFrameHandle(
-        cdp,
+        cdp.resourceCleanup ?? cdp,
         frame.document,
         "Runtime.releaseObjectGroup",
         { objectGroup: verified.objectGroup },
-        { attachmentId: frame.document.attachmentId },
+        { attachmentId: frame.document.attachmentId, allowReattach: false },
       ).catch(() => {});
       throwIfAborted(signal);
       if (frame.parent) {
@@ -599,11 +599,11 @@ export async function verifyVisualHit(
     } finally {
       if (cdp.getAttachmentId?.(document.tabId) === document.attachmentId) {
         await sendToFrameHandle(
-          cdp,
+          cdp.resourceCleanup ?? cdp,
           document,
           "Runtime.releaseObjectGroup",
           { objectGroup: verified.objectGroup },
-          { attachmentId: document.attachmentId },
+          { attachmentId: document.attachmentId, allowReattach: false },
         ).catch(() => {});
       }
       throwIfAborted(signal);

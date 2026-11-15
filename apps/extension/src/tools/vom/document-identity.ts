@@ -134,11 +134,11 @@ async function verifyIdentity(
   } finally {
     if (!retained && dispatched && attached()) {
       await sendToFrameHandle(
-        cdp,
+        cdp.resourceCleanup ?? cdp,
         identity,
         "Runtime.releaseObjectGroup",
         { objectGroup },
-        { attachmentId: identity.attachmentId },
+        { attachmentId: identity.attachmentId, allowReattach: false },
       ).catch(() => {});
     }
     throwIfAborted(signal);
