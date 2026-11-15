@@ -15,6 +15,15 @@ import {
 import { GeometryContext } from "./geometry/frame-context";
 import { type CdpRunner, sendToFrameHandle } from "./shared";
 
+const VISIBILITY_TIMEOUT_MESSAGE = "scroll visibility measurement timed out";
+
+class VisibilityMeasurementTimeout extends Error {
+  constructor() {
+    super(VISIBILITY_TIMEOUT_MESSAGE);
+    this.name = "VisibilityMeasurementTimeout";
+  }
+}
+
 // Ask the renderer to apply containing-block clips (including shadow DOM),
 // instead of treating layout quads as visible pixels. Each document is measured
 // locally; the existing frame projections supply the top-viewport coordinates.
@@ -36,7 +45,7 @@ const VISIBLE_RECT = `function(timeoutMs) {
     }, { root: element.ownerDocument });
     const timer = setTimeout(() => {
       observer.disconnect();
-      reject(new Error('scroll-to visibility measurement timed out'));
+      reject(new Error(${JSON.stringify(VISIBILITY_TIMEOUT_MESSAGE)}));
     }, timeoutMs);
     observer.observe(element);
   });
@@ -54,21 +63,31 @@ async function visibleRect(
     { backendNodeId: address.backendNodeId },
   );
   if (!resolved.object?.objectId) throw new Error("scroll-to could not resolve the target element");
-  const reply = await sendToFrameHandle<{
+  let reply: {
     result?: { value?: ViewportRect | null };
     exceptionDetails?: { text?: string; exception?: { description?: string } };
-  }>(cdp, address, "Runtime.callFunctionOn", {
-    objectId: resolved.object.objectId,
-    functionDeclaration: VISIBLE_RECT,
-    // Bound this read even if a background document stops rendering. Its
-    // observer always disconnects; cancellation cannot leave a live observer.
-    arguments: [{ value: Math.max(1, Math.min(1_000, deadline - Date.now())) }],
-    awaitPromise: true,
-    returnByValue: true,
-  });
+  };
+  try {
+    reply = await sendToFrameHandle(cdp, address, "Runtime.callFunctionOn", {
+      objectId: resolved.object.objectId,
+      functionDeclaration: VISIBLE_RECT,
+      // Bound this read even if a background document stops rendering. Its
+      // observer always disconnects; cancellation cannot leave a live observer.
+      arguments: [{ value: Math.max(1, Math.min(1_000, deadline - Date.now())) }],
+      awaitPromise: true,
+      returnByValue: true,
+    });
+  } catch (error) {
+    if (error instanceof Error && error.message.includes(VISIBILITY_TIMEOUT_MESSAGE)) {
+      throw new VisibilityMeasurementTimeout();
+    }
+    throw error;
+  }
   if (reply.exceptionDetails) {
     const details = reply.exceptionDetails;
-    throw new Error(details.exception?.description ?? details.text ?? "visibility script failed");
+    const message = details.exception?.description ?? details.text ?? "visibility script failed";
+    if (message.includes(VISIBILITY_TIMEOUT_MESSAGE)) throw new VisibilityMeasurementTimeout();
+    throw new Error(message);
   }
   const rect = reply.result?.value;
   if (rect === null) return null;
@@ -123,31 +142,42 @@ export async function scrollVisibleBounds(
   tabId: number,
   address: NodeAddress,
   deadline: number,
+  options: { fallbackRegion?: Region } = {},
 ): Promise<ViewportRect | null> {
-  const context = new GeometryContext(cdp, tabId);
-  const rect = await visibleRect(cdp, address, deadline);
-  if (!rect) return null;
-  let region = await projectRect(context, address, rect);
-  if (address.frameId) {
-    const ancestry = await context.ancestry(address.frameId);
-    if (!ancestry) throw new Error("scroll-to could not resolve the frame ancestry");
-    for (const child of ancestry) {
-      const parent = child.parentFrameId ? await context.frame(child.parentFrameId) : undefined;
-      if (!parent || child.ownerBackendNodeId === undefined) {
-        throw new Error("scroll-to could not resolve the frame owner");
+  try {
+    const context = new GeometryContext(cdp, tabId);
+    const rect = await visibleRect(cdp, address, deadline);
+    if (!rect) return null;
+    let region = await projectRect(context, address, rect);
+    if (address.frameId) {
+      const ancestry = await context.ancestry(address.frameId);
+      if (!ancestry) throw new Error("scroll-to could not resolve the frame ancestry");
+      for (const child of ancestry) {
+        const parent = child.parentFrameId ? await context.frame(child.parentFrameId) : undefined;
+        if (!parent || child.ownerBackendNodeId === undefined) {
+          throw new Error("scroll-to could not resolve the frame owner");
+        }
+        const owner: FrameNodeHandle = {
+          tabId,
+          frameId: parent.frameId,
+          loaderId: parent.loaderId ?? "",
+          backendNodeId: child.ownerBackendNodeId,
+        };
+        // A visible child document can still have a hidden or clipped iframe.
+        const ownerRect = await visibleRect(cdp, owner, deadline);
+        if (!ownerRect) return null;
+        const clips = await projectRect(context, owner, ownerRect);
+        region = region.flatMap((polygon) => clips.map((clip) => clipPolygon(polygon, clip)));
       }
-      const owner: FrameNodeHandle = {
-        tabId,
-        frameId: parent.frameId,
-        loaderId: parent.loaderId ?? "",
-        backendNodeId: child.ownerBackendNodeId,
-      };
-      // A visible child document can still have a hidden or clipped iframe.
-      const ownerRect = await visibleRect(cdp, owner, deadline);
-      if (!ownerRect) return null;
-      const clips = await projectRect(context, owner, ownerRect);
-      region = region.flatMap((polygon) => clips.map((clip) => clipPolygon(polygon, clip)));
     }
+    return regionBounds(region);
+  } catch (error) {
+    if (error instanceof VisibilityMeasurementTimeout && options.fallbackRegion?.length) {
+      // Wheel already resolved fresh CDP content quads and clipped frame geometry before
+      // dispatch. Reuse that exact hit-test region only when the renderer observer stalls;
+      // do not enlarge the scroll timeout or fall back to un-clipped layout bounds.
+      return regionBounds(options.fallbackRegion);
+    }
+    throw error;
   }
-  return regionBounds(region);
 }

@@ -317,6 +317,30 @@ describe("handleWheel", () => {
     expect(await f.run({ ref: "@e3" })).toMatchObject({ x: 20, y: 40 });
   });
 
+  it("uses the fresh clipped CDP geometry when an OOPIF visibility observer times out", async () => {
+    const f = await fixture("oopif");
+    f.hooks.reply = (call) => {
+      if (
+        call.method === "Runtime.callFunctionOn" &&
+        String(call.params?.functionDeclaration).includes("IntersectionObserver")
+      ) {
+        return { exceptionDetails: { text: "Error: scroll visibility measurement timed out" } };
+      }
+      return undefined;
+    };
+
+    expect(await f.run({ ref: "@e3" })).toMatchObject({
+      tab_id: 4,
+      used_ref: "e3",
+      x: 324,
+      y: 386,
+      delta_y: 120,
+    });
+    expect(
+      f.calls.filter((call) => call.params?.type === "mouseWheel").map((call) => call.params),
+    ).toEqual([{ type: "mouseWheel", x: 324, y: 386, deltaX: 0, deltaY: 120, modifiers: 0 }]);
+  });
+
   it.each([
     1234, 99,
   ])("rejects a hidden or fully clipped node %i before sending input", async (node) => {
