@@ -839,7 +839,7 @@ pub enum LoggedStep {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         key: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        modifiers: Option<serde_json::Value>,
+        modifiers: Option<Vec<crate::tools::KeyModifier>>,
         /// The first heading of the page it acted on.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         heading: Option<String>,

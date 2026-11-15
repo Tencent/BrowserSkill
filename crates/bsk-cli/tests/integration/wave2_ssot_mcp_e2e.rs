@@ -345,7 +345,8 @@ fn spawn_mock_extension(
                         let seq = st.sync_seq;
                         let ctx_id = format!("{seq:08}-1111-4111-8111-111111111111");
                         let obs_id = format!("{seq:08}-aaaa-4aaa-8aaa-aaaaaaaaaaaa");
-                        reply_now = Some(ResponseBody::Ok(json!({
+                        let payload = json!({
+                            "kind": "baseline",
                             "tab_id": tab_id,
                             "control_policy": "target",
                             "context_id": ctx_id,
@@ -353,14 +354,18 @@ fn spawn_mock_extension(
                             "observation": {
                                 "observation_id": obs_id,
                                 "tab_id": tab_id,
-                                "url": format!("https://example.com/tab/{tab_id}"),
-                                "title": format!("Page {tab_id}"),
                                 "text": "@e1 button \"Save\"\n@e2 file \"Upload\"\n@e5 link \"Download\"",
                                 "ref_count": 3,
                                 "truncated": false,
                             },
-                            "state": { "mode": "ready", "revision": seq },
-                        })));
+                            "activity": [],
+                            "history_complete": false,
+                            "state": { "mode": "ready", "revision": seq, "editing": false },
+                        });
+                        let _: bsk_protocol::tools::CooperateResult =
+                            serde_json::from_value(payload.clone())
+                                .expect("mock ToolCooperate payload must match CooperateResult");
+                        reply_now = Some(ResponseBody::Ok(payload));
                     }
                     Method::ToolWaitForElement => {
                         let sid = params["session_id"].as_str().unwrap_or("");
@@ -1281,7 +1286,7 @@ async fn wave2_full_chain_ssot_mcp_parity_and_counterexamples() {
         (
             Method::SessionStart,
             json!({
-                "name": "rogue",
+                "task_name": "rogue",
                 "rogue_field": true
             }),
         ),

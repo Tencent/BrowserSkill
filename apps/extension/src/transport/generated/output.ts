@@ -511,7 +511,7 @@ export type LoggedStep =
       heading?: string;
       key?: string;
       kind: "action";
-      modifiers?: unknown;
+      modifiers?: KeyModifier[];
       sensitive: boolean;
       target: LoggedTarget;
       /**

@@ -26,12 +26,12 @@ Reusable trace, dialog, and metadata filenames are compatibility aliases, not a 
 
 ## Guarded action metadata and expectations
 
-Guarded action parameter schemas (`accepts_action_metadata()`) automatically compose the shared
-`ActionMetadata` fields (`context_id`, `observation_id`, `depends_on`, `expect`) in `src/catalog.rs`
-so both generated extension contracts and standalone JSON Schemas expose the exact wire shape.
-Rust operation structs describe the operation itself; merge serialized `ActionMetadata` into the
-same params object when issuing a guarded request. Do not deserialize the combined object into an
-operation struct and reserialize it without preserving its metadata.
+Guarded action parameter structs (`ActionMetadataPolicy::Full`) embed the shared `ActionMetadata`
+fields (`context_id`, `observation_id`, `depends_on`, `expect`) natively with
+`#[serde(deny_unknown_fields)]`, while passive read structs (`ContextOnly` and `TabBindingContext`)
+embed optional `context_id: Option<String>` with `#[serde(deny_unknown_fields)]`. Both standalone
+JSON Schemas and generated TypeScript contracts derive directly from the Rust structs without
+post-hoc schema surgery or manual metadata key copying.
 
 `expect` supports up to 16 exact conditions. Selectors search the main document; use observed
 refs for iframe/shadow-root targets. `text` compares raw `textContent`, including whitespace.
@@ -74,37 +74,34 @@ by local policy; an unauthenticated peer can never authorize a downgrade.
 
 | Concern | Authoritative location | Enforcement |
 | --- | --- | --- |
-| Wire names, payload pairs, owner, browser effect, action metadata | `src/method.rs` | One macro generates the Rust enum, exhaustive methods and export metadata |
-| Optional features and peer requirements | `src/compatibility.rs` and method feature lists | Shared CLI/daemon preflight, status diagnostics and generated extension metadata |
-| Wire fields, events, error codes, constraints | Rust structs/enums under `src/` | Schemars produces schemas for both deserialization and serialization |
-| Debug action owner, effect, cooperation gating | `src/tools/debug.rs` | The CLI parser, extension cooperation guard and generated metadata consume the same actions |
-| Extension implementations | `apps/extension/src/tools/dispatcher.ts` | `ToolHandlerMap` requires every extension method with its own parameter/result types |
-| Background targeting, popup tracking, remote support, cooperation role | `apps/extension/src/tools/policy.ts` | Complete `Record<ExtensionToolMethod, ToolPolicy>` consumed by dispatcher, background targeting and cooperation |
-| Daemon deadlines, grace and cancellation | `crates/bsk-cli/src/daemon/tool_policy.rs` | Exhaustive `Method` match consumed by IPC and the queue |
+| Wire names, payload pairs, owner, browser effect, action metadata, deadlines, queue/WAL/dialog/cooperation policy | `src/method.rs` (`MethodSpec`) | One macro + exhaustive `Method::spec()` table consumed across CLI, daemon, recipe, audit, debug, and extension |
+| Wire fields, events, error codes, constraints | Rust structs/enums under `src/` | Schemars produces concrete schemas for both deserialization and serialization |
+| Debug & video sub-action policy | `src/tools/debug.rs` and `src/tools/video.rs` | CLI parser, daemon dispatch, extension cooperation guard, and generated metadata consume the same action tables |
+| Extension implementations | `apps/extension/src/tools/dispatcher.ts` and `apps/extension/src/cooperation/controller.ts` | `ToolHandlerMap` + `CooperationController.command` enforce parameter/result types against generated contracts |
+| Extension method policy projection | `apps/extension/src/tools/policy.ts` | Derived from generated `MethodSpec` catalog metadata |
 
-Adding an extension method requires choosing its Rust payloads and effects, generating the contract,
-and implementing its handler and local policies. Missing cases produce compilation errors. Browser
-permissions, session ownership, readiness and value-dependent behavior still belong in handlers;
-JSON Schema cannot establish those facts about a running browser.
+Adding an extension method requires choosing its Rust payloads and `MethodSpec` properties,
+generating the contract, and implementing its handler. Missing cases produce compilation errors.
+Browser permissions, session ownership, readiness and value-dependent behavior still belong in
+handlers; JSON Schema cannot establish those facts about a running browser.
 
-Daemon-local session lifecycle and local-auth maintenance payloads deliberately remain private to
-the daemon. Their catalog entries use arbitrary JSON and are not advertised as validated extension
-contracts. Extension payloads, handshake metadata, cancellation, events and error codes are included
-in the export. `tool.cooperate` has typed parameters while retaining its flexible JSON response.
+Every RPC method in `Method` (extension tools, daemon session lifecycle, local-auth maintenance,
+audit, ledger, and staged file transfer) and every `EventFrame` variant has concrete typed Rust
+request/response/event payloads exported through `src/catalog.rs` and `crates/bsk-protocol/schema/`.
 
 ## Receiving and sending are different contracts
 
 Serde may accept an omitted defaulted field while always serializing it. Schemars therefore exports
 both input and output contracts. The generated `input.ts` represents normalized tool parameters;
-`output.ts` represents tool results. The small `types.ts` facade selects the appropriate direction.
-The existing transport module reexports them and retains only transport envelopes and local error
-interpretation helpers. Handshake audit fields and session-stop window-release metadata have named
-Rust wire envelopes, so they no longer depend on ad hoc JSON insertion.
+`output.ts` represents tool results and outbound events. The small `types.ts` facade selects the
+appropriate direction. The transport module reexports them and retains only transport envelopes and
+local error interpretation helpers. Handshake audit fields and session-stop window-release metadata
+have named Rust wire envelopes, so they no longer depend on ad hoc JSON insertion.
 
-At the WebSocket boundary, envelope guards reject scalars, arrays and ambiguous frames. Internal
-daemon correlation fields (`_audit_id`, `_operation_id`) are read by the dispatcher and stripped
-before static wire validation. Generated immutable normalizers convert `null` on optional typed
-fields to omission; arbitrary JSON and dictionary values retain their `null`. A second check
+At the WebSocket boundary, envelope guards reject scalars, arrays and ambiguous frames. Daemon
+correlation identifiers (`audit_id`, `operation_id`) travel as top-level `RequestFrame` fields
+rather than mutating business `params`. Generated immutable normalizers convert `null` on optional
+typed fields to omission; arbitrary JSON and dictionary values retain their `null`. A second check
 verifies the normalized representation. Handshake responses follow the same input path. Unknown
 methods fail explicitly. Results are checked against the sender contract before being sent; invalid
 results report `protocol_error` with an unknown effect, not a safe-to-retry promise.

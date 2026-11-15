@@ -12,6 +12,7 @@ import { resolveActionTarget } from "@/tools/interaction";
 import { captureVomObservation, handleSnapshot } from "@/tools/observation";
 import { type CdpRunner, sessionCdpRunner } from "@/tools/shared";
 import { handleTabBorrow, handleTabCreate, handleTabReturn, handleTabSelect } from "@/tools/tabs";
+import { validateToolResult } from "@/transport/protocol";
 import { CooperationController } from "./controller";
 import { FrameCollectionError, FrameUnresponsiveError } from "./frame-error";
 import type { CooperationFrames, FrameState } from "./types";
@@ -4084,6 +4085,27 @@ describe("tool.record_start cooperation guard", () => {
         effect_state: "none",
         phase: "precondition",
       },
+    });
+  });
+
+  it("validates cooperate status/sync against CooperateResult and fails wait immediately when the tab closes", async () => {
+    const f = await fixture();
+    expect(validateToolResult("tool.cooperate", f.first)).toBeUndefined();
+    const status = await f.command("status");
+    expect(validateToolResult("tool.cooperate", status)).toBeUndefined();
+
+    await f.controller.control(7, f.controller.view(7)!.revision, "hold");
+    const waiting = f.controller.command(
+      { session_id: "shared", tab_id: 7, action: "wait", timeout_ms: 15000 },
+      f.cdp,
+      f.abort.signal,
+    );
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    f.controller.releaseTab(7);
+    await expect(waiting).resolves.toMatchObject({
+      code: "permission_denied",
+      message: "Shared-tab control has ended",
+      data: { effect_state: "none" },
     });
   });
 });

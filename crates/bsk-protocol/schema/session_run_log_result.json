@@ -1,6 +1,16 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "definitions": {
+    "KeyModifier": {
+      "description": "Keyboard modifier flags. Multiple flags may be combined; the\nextension folds them into CDP's bitfield (`alt=1, ctrl=2, meta=4,\nshift=8`).",
+      "enum": [
+        "alt",
+        "ctrl",
+        "meta",
+        "shift"
+      ],
+      "type": "string"
+    },
     "LoggedStep": {
       "oneOf": [
         {
@@ -65,7 +75,15 @@
               "const": "action",
               "type": "string"
             },
-            "modifiers": true,
+            "modifiers": {
+              "items": {
+                "$ref": "#/definitions/KeyModifier"
+              },
+              "type": [
+                "array",
+                "null"
+              ]
+            },
             "sensitive": {
               "default": false,
               "type": "boolean"

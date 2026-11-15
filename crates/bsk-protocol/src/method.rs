@@ -957,8 +957,9 @@ impl Method {
     /// - `Full` for guarded browser actions (including dynamic `observe` only when
     ///   `probe_hover == true` and `debug` only when `action.cooperation_guarded()`).
     /// - `ContextOnly` for `tool.read` (`--context` / `context` allowed from callers).
-    /// - `None` for all other methods (including `TabBindingContext` passive reads, which only
-    ///   accept daemon-injected `context_id` from `--tab` scope resolution).
+    /// - `None` for all other methods (including `TabBindingContext` passive reads, whose
+    ///   wire contract accepts `context_id` to resolve a target tab without renewing
+    ///   control while CLI/MCP callers do not pass `--context` / `context` directly).
     pub fn caller_action_metadata_policy_with_params(
         &self,
         params: Option<&serde_json::Value>,
@@ -1377,6 +1378,64 @@ mod tests {
                 "{wire} result ({result_name}) must not be an untyped boolean/Value schema"
             );
         }
+
+        fn collect_boolean_property_paths(
+            node: &serde_json::Value,
+            path: &str,
+            out: &mut Vec<String>,
+        ) {
+            let Some(obj) = node.as_object() else {
+                if let Some(arr) = node.as_array() {
+                    for (idx, item) in arr.iter().enumerate() {
+                        collect_boolean_property_paths(item, &format!("{path}[{idx}]"), out);
+                    }
+                }
+                return;
+            };
+            if let Some(props) = obj.get("properties").and_then(|v| v.as_object()) {
+                for (prop, sub) in props {
+                    let next = format!("{path}.{prop}");
+                    if sub.is_boolean() {
+                        out.push(next);
+                    } else {
+                        collect_boolean_property_paths(sub, &next, out);
+                    }
+                }
+            }
+            for key in ["items", "anyOf", "oneOf", "allOf"] {
+                if let Some(sub) = obj.get(key) {
+                    collect_boolean_property_paths(sub, &format!("{path}.{key}"), out);
+                }
+            }
+        }
+
+        let expected_untyped = vec![
+            "AuditEvent.data".to_string(),
+            "DebugResult.capabilities".to_string(),
+            "EvaluateResult.value".to_string(),
+            "OperationAwaitResult.oneOf[0].result".to_string(),
+            "RpcError.data".to_string(),
+        ];
+
+        let mut input_bool_props = Vec::new();
+        for (name, def) in input_defs {
+            collect_boolean_property_paths(def, name, &mut input_bool_props);
+        }
+        input_bool_props.sort();
+        assert_eq!(
+            input_bool_props, expected_untyped,
+            "unexpected untyped boolean property schemas in input definitions"
+        );
+
+        let mut output_bool_props = Vec::new();
+        for (name, def) in output_defs {
+            collect_boolean_property_paths(def, name, &mut output_bool_props);
+        }
+        output_bool_props.sort();
+        assert_eq!(
+            output_bool_props, expected_untyped,
+            "unexpected untyped boolean property schemas in output definitions"
+        );
     }
 
     #[test]

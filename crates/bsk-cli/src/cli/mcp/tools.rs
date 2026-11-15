@@ -314,6 +314,7 @@ fn strip_optional_null(property: &mut Map<String, Value>) {
             for (k, v) in single {
                 property.entry(k).or_insert(v);
             }
+            break;
         }
     }
 }
@@ -352,10 +353,16 @@ fn strip_schema(schema: &mut Value, depth: usize) {
     }
     for keyword in ["items", "additionalProperties", "not"] {
         if let Some(nested) = object.get_mut(keyword) {
-            strip_schema(nested, depth + 1);
+            if let Some(arr) = nested.as_array_mut() {
+                for item in arr {
+                    strip_schema(item, depth + 1);
+                }
+            } else {
+                strip_schema(nested, depth + 1);
+            }
         }
     }
-    for keyword in ["anyOf", "oneOf", "allOf"] {
+    for keyword in ["anyOf", "oneOf", "allOf", "prefixItems"] {
         if let Some(Value::Array(nested)) = object.get_mut(keyword) {
             for item in nested {
                 strip_schema(item, depth + 1);
@@ -4642,5 +4649,40 @@ mod tests {
             &Method::ToolObserve,
             Some(&json!({"session_id":"s","probe_hover":true})),
         ));
+
+        // Collapsing an Option<T> (`anyOf: [T, null]`) must not strip a legitimate
+        // inner `oneOf` null branch on `T` (e.g. `ActionExpectation.equals`).
+        let mut schema = json!({
+            "description": "Root struct doc",
+            "type": "object",
+            "properties": {
+                "equals": {
+                    "description": "Expected literal value",
+                    "anyOf": [
+                        {
+                            "oneOf": [
+                                { "type": "string" },
+                                { "type": "boolean" },
+                                { "type": "null" }
+                            ]
+                        },
+                        { "type": "null" }
+                    ]
+                }
+            }
+        });
+        strip_schema(&mut schema, 0);
+        assert!(schema.get("description").is_none());
+        assert_eq!(
+            schema["properties"]["equals"]["description"],
+            "Expected literal value"
+        );
+        let inner = schema["properties"]["equals"]["oneOf"].as_array().unwrap();
+        assert_eq!(
+            inner.len(),
+            3,
+            "inner oneOf null branch must survive: {inner:?}"
+        );
+        assert!(inner.contains(&json!({ "type": "null" })));
     }
 }

@@ -181,6 +181,19 @@ impl EventFrame {
         kind: EventKind,
         payload: serde_json::Value,
     ) -> Result<Self, serde_json::Error> {
+        let payload = match kind {
+            EventKind::SystemHeartbeat
+            | EventKind::BrowserDisconnected
+            | EventKind::BrowserConnected
+                if payload.is_null() =>
+            {
+                empty_json_object()
+            }
+            _ => payload,
+        };
+        if !payload.is_object() {
+            return Err(de::Error::custom("event payload must be a JSON object"));
+        }
         Ok(match kind {
             EventKind::AuditContext => Self::AuditContext(serde_json::from_value(payload)?),
             EventKind::DialogChanged => Self::DialogChanged(serde_json::from_value(payload)?),
@@ -683,6 +696,36 @@ mod tests {
             let frame: Frame = serde_json::from_value(wire.clone()).unwrap();
             assert_eq!(frame, Frame::Response(response.clone()));
             assert_eq!(serde_json::to_value(response).unwrap(), wire);
+        }
+    }
+
+    #[test]
+    fn empty_event_payloads_accept_omitted_empty_and_null_while_rejecting_scalars_or_required_null()
+    {
+        for wire in [
+            serde_json::json!({ "event": "system.heartbeat" }),
+            serde_json::json!({ "event": "system.heartbeat", "payload": {} }),
+            serde_json::json!({ "event": "system.heartbeat", "payload": null }),
+        ] {
+            let ev: EventFrame = serde_json::from_value(wire.clone()).unwrap();
+            assert_eq!(ev, EventFrame::SystemHeartbeat(EmptyEventPayload {}));
+            let frame: Frame = serde_json::from_value(wire).unwrap();
+            assert_eq!(frame, Frame::Event(ev));
+        }
+        for wire in [
+            serde_json::json!({ "event": "browser.connected", "payload": null }),
+            serde_json::json!({ "event": "browser.disconnected", "payload": null }),
+        ] {
+            assert!(serde_json::from_value::<EventFrame>(wire.clone()).is_ok());
+            assert!(serde_json::from_value::<Frame>(wire).is_ok());
+        }
+        for bad in [
+            serde_json::json!({ "event": "system.heartbeat", "payload": [] }),
+            serde_json::json!({ "event": "system.heartbeat", "payload": "bad" }),
+            serde_json::json!({ "event": "session.ended", "payload": null }),
+        ] {
+            assert!(serde_json::from_value::<EventFrame>(bad.clone()).is_err());
+            assert!(serde_json::from_value::<Frame>(bad).is_err());
         }
     }
 }
