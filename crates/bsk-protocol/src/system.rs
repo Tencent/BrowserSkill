@@ -676,6 +676,13 @@ pub struct DaemonSessionStartParams {
     pub focused: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub task_name: Option<String>,
+    /// Null placeholder tolerated when callers share a payload builder with
+    /// `session.start_tracked`; non-null values require `session.start_tracked`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<String>,
+    /// Deprecated legacy CLI override accepted and ignored so browser policy governs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unattended: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -696,6 +703,9 @@ pub struct DaemonSessionStartTrackedParams {
     pub focused: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub task_name: Option<String>,
+    /// Deprecated legacy CLI override accepted and ignored so browser policy governs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unattended: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

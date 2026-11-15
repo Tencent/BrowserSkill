@@ -180,6 +180,7 @@ pub(super) async fn start(
         height,
         focused,
         task_name,
+        unattended: _,
     } = tracked;
     let params = serde_json::to_value(DaemonSessionStartParams {
         controller,
@@ -189,6 +190,8 @@ pub(super) async fn start(
         height,
         focused,
         task_name,
+        request_id: None,
+        unattended: None,
     })
     .unwrap_or(Value::Null);
     let Some(expires) = token_expiry(&id) else {

@@ -79,6 +79,13 @@
         "null"
       ]
     },
+    "unattended": {
+      "description": "Deprecated legacy CLI override accepted and ignored so browser policy governs.",
+      "type": [
+        "boolean",
+        "null"
+      ]
+    },
     "width": {
       "format": "uint32",
       "minimum": 0,

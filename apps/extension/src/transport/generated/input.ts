@@ -1960,7 +1960,16 @@ export interface DaemonSessionStartParams {
   focused?: boolean;
   height?: number;
   incognito?: boolean;
+  /**
+   * Null placeholder tolerated when callers share a payload builder with
+   * `session.start_tracked`; non-null values require `session.start_tracked`.
+   */
+  request_id?: string;
   task_name?: string;
+  /**
+   * Deprecated legacy CLI override accepted and ignored so browser policy governs.
+   */
+  unattended?: boolean;
   width?: number;
 }
 /**
@@ -1993,6 +2002,10 @@ export interface DaemonSessionStartTrackedParams {
   incognito?: boolean;
   request_id: string;
   task_name?: string;
+  /**
+   * Deprecated legacy CLI override accepted and ignored so browser policy governs.
+   */
+  unattended?: boolean;
   width?: number;
 }
 /**

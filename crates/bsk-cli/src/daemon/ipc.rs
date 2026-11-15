@@ -1820,6 +1820,9 @@ pub(super) async fn handle_session_start_scoped(
         })?;
     let cancel = abort_guard.token().clone();
     let params: DaemonSessionStartParams = parse_params_or_default(params)?;
+    if !recoverable && params.request_id.is_some() {
+        return Err(invalid_params("request_id requires session.start_tracked"));
+    }
     let incognito = params.incognito.unwrap_or(false);
     let task_name = params.task_name;
     if let Some(controller) = &params.controller {
