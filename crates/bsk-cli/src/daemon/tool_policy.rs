@@ -12,8 +12,19 @@ pub enum Deadline {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Outcome {
     Ordinary,
-    EffectAwareAction,
+    SessionStop,
+    TabBorrow,
+    RequestHelp,
+    FullPageCapture,
+    EffectAwareInput,
+    EffectAwarePage,
     FileTransfer,
+}
+
+impl Outcome {
+    pub const fn is_effect_aware_action(self) -> bool {
+        matches!(self, Self::EffectAwareInput | Self::EffectAwarePage)
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -33,7 +44,12 @@ pub fn execution_policy(method: &Method) -> ExecutionPolicy {
     };
     let outcome = match spec.outcome {
         OutcomeKind::Ordinary => Outcome::Ordinary,
-        OutcomeKind::EffectAwareAction => Outcome::EffectAwareAction,
+        OutcomeKind::SessionStop => Outcome::SessionStop,
+        OutcomeKind::TabBorrow => Outcome::TabBorrow,
+        OutcomeKind::RequestHelp => Outcome::RequestHelp,
+        OutcomeKind::FullPageCapture => Outcome::FullPageCapture,
+        OutcomeKind::EffectAwareInput => Outcome::EffectAwareInput,
+        OutcomeKind::EffectAwarePage => Outcome::EffectAwarePage,
         OutcomeKind::FileTransfer => Outcome::FileTransfer,
     };
     ExecutionPolicy {
@@ -56,7 +72,8 @@ mod tests {
             Method::ToolTabClose,
         ] {
             let policy = execution_policy(&method);
-            assert_eq!(policy.outcome, Outcome::EffectAwareAction);
+            assert_eq!(policy.outcome, Outcome::EffectAwareInput);
+            assert!(policy.outcome.is_effect_aware_action());
             assert!(policy.cancel_at_deadline);
         }
     }

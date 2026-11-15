@@ -168,13 +168,20 @@ pub(crate) fn action_params(
         object.insert("tab_id".into(), tab.into());
     }
     if let Some(ms) = v.get("timeout_ms") {
-        ensure!(
-            ms.as_u64().is_some_and(|ms| (1..=30000).contains(&ms)),
-            "action timeout_ms must be 1..=30000"
-        );
+        let raw = ms
+            .as_u64()
+            .ok_or_else(|| anyhow::anyhow!("action timeout_ms must be 1..=30000"))?;
+        super::orchestration::validate_action_timeout_ms(raw).map_err(anyhow::Error::msg)?;
     }
     let result = match action {
-        Action::Click => (Method::ToolClick, typed::<ClickParams>(&v)?),
+        Action::Click => {
+            let parsed: ClickParams =
+                serde_json::from_value(v.clone()).context("invalid action parameters")?;
+            let normalized = serde_json::to_value(&parsed)?;
+            known_keys(&v, &normalized)?;
+            super::orchestration::validate_click_params(&parsed).map_err(anyhow::Error::msg)?;
+            (Method::ToolClick, normalized)
+        }
         Action::Press => (Method::ToolPress, typed::<PressParams>(&v)?),
         Action::Fill => (Method::ToolFill, typed::<FillParams>(&v)?),
         Action::Hover => (Method::ToolHover, typed::<HoverParams>(&v)?),
@@ -185,7 +192,7 @@ pub(crate) fn action_params(
         Action::Navigate => (Method::ToolNavigate, typed::<NavigateParams>(&v)?),
     };
     match action {
-        Action::Navigate => {}
+        Action::Navigate | Action::Click => {}
         Action::Drag => {
             target(&result.1["source"], true)?;
             ensure!(

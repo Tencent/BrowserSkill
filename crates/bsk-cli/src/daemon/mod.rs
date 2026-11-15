@@ -10,6 +10,8 @@ pub mod inflight;
 pub mod info;
 pub mod intent_wal;
 pub mod ipc;
+mod ipc_sessions;
+mod ipc_transport;
 pub(crate) mod json_store;
 pub mod local_auth;
 pub mod lockfile;
@@ -26,6 +28,7 @@ pub mod sessions;
 pub mod start;
 pub(crate) mod start_error;
 pub mod state;
+mod tool_pipeline;
 mod tool_policy;
 pub mod ws;
 

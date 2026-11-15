@@ -106,6 +106,10 @@ jobs:
         run: >-
           cargo test -p bsk --lib --locked --
           daemon::ipc::
+          daemon::tool_pipeline::
+          daemon::inflight::
+          daemon::tool_policy::
+          daemon::file_transfer::
           daemon::paths::tests
           daemon::start::windows::tests
           daemon::audit::tests
@@ -116,6 +120,7 @@ jobs:
           daemon::sessions::
           daemon::queue::
           ipc_client::tests
+          cli::orchestration::tests
           cli::lifecycle::tests
           cli::observation_view::tests
           cli::plan::
@@ -145,6 +150,7 @@ jobs:
           wave2_zero_ceremony_lifecycle::
           wave3a_lifecycle_envelope_and_cache::
           wave3c_liveness_wal_and_cache::
+          wave4b_pipeline_and_orchestration::
 
       - name: Verify background startup refusal inside the runner Job
         run: cargo test -p bsk --test windows_daemon_start --locked restrictive_job_refuses_explicit_and_automatic_start_without_a_daemon -- --exact

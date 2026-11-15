@@ -31,9 +31,7 @@ use tracing::debug;
 use crate::cli::error::CliError;
 use crate::ipc_client::{IpcClient, IpcRequestMeta, IpcResponseMeta};
 
-/// Total budget after cancellation is observed: connecting, sending cancel,
-/// retrying before registration, and waiting for the original RPC to settle.
-pub const CANCEL_RESPONSE_GRACE: Duration = Duration::from_secs(2);
+pub use crate::cli::orchestration::CANCEL_RESPONSE_GRACE;
 
 const CANCEL_RETRY_INITIAL: Duration = Duration::from_millis(10);
 const CANCEL_RETRY_MAX: Duration = Duration::from_millis(250);
@@ -488,9 +486,11 @@ impl ClientContext {
                     }
                     main_fut.await
                 };
-                match timeout_at(deadline, settle).await {
-                    Ok(res) => res?,
-                    Err(_) => {
+                match crate::cli::orchestration::await_cancelled_operation_until(deadline, settle)
+                    .await
+                {
+                    Some(res) => res?,
+                    None => {
                         debug!(
                             rpc_id = %rpc_id_for_cancel,
                             "cancel grace elapsed; synthesising cancelled error"

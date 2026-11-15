@@ -48,6 +48,7 @@ struct Inner {
 #[derive(Debug)]
 pub struct AuditStore {
     root: Option<PathBuf>,
+    io_lock: Mutex<()>,
     inner: Mutex<Inner>,
 }
 
@@ -62,6 +63,7 @@ impl AuditStore {
     pub fn new(root: Option<PathBuf>) -> Self {
         Self {
             root,
+            io_lock: Mutex::new(()),
             inner: Mutex::new(Inner::default()),
         }
     }
@@ -72,11 +74,40 @@ impl AuditStore {
             .context("Audit directory is unavailable")
     }
 
-    fn load(&self, inner: &mut Inner) -> Result<()> {
-        if inner.loaded {
+    /// Lock-free-of-disk fast check: returns `true` only when `session_id` belongs to a
+    /// live session whose browser currently has local audit collection enabled.
+    pub fn needs_begin(&self, session_id: &str) -> bool {
+        let inner = self.inner.lock().unwrap();
+        inner
+            .sessions
+            .get(session_id)
+            .is_some_and(|live| inner.enabled.contains(&live.session.browser_id.0))
+    }
+
+    /// Fast in-memory check for inbound `AuditContext` events from `ws.rs`.
+    pub fn needs_context(&self, browser: &str, operation_id: &str) -> bool {
+        let inner = self.inner.lock().unwrap();
+        inner.pending.get(operation_id).is_some_and(|ticket| {
+            ticket.browser_id == browser
+                && inner.enabled.contains(browser)
+                && inner.epochs.get(browser).copied().unwrap_or(0) == ticket.epoch
+        })
+    }
+
+    /// Fast in-memory check for session audit markers.
+    pub fn needs_marker(&self, session_id: &str) -> bool {
+        let inner = self.inner.lock().unwrap();
+        inner.sessions.get(session_id).is_some_and(|live| {
+            live.run_id.is_some() && inner.enabled.contains(&live.session.browser_id.0)
+        })
+    }
+
+    fn ensure_loaded_unlocked(&self) -> Result<()> {
+        if self.inner.lock().unwrap().loaded {
             return Ok(());
         }
         let root = self.directory()?;
+        let mut loaded_runs = BTreeMap::new();
         if root.exists() {
             for entry in fs::read_dir(root)? {
                 let entry = entry?;
@@ -105,11 +136,19 @@ impl AuditStore {
                 if run.status == "running" {
                     run.status = "interrupted".into();
                 }
-                inner.runs.insert(run.id.clone(), run);
+                loaded_runs.insert(run.id.clone(), run);
             }
         }
-        inner.loaded = true;
-        self.prune(inner, now_ms())
+        {
+            let mut inner = self.inner.lock().unwrap();
+            if !inner.loaded {
+                for (id, run) in loaded_runs {
+                    inner.runs.entry(id).or_insert(run);
+                }
+                inner.loaded = true;
+            }
+        }
+        self.prune_unlocked(now_ms())
     }
 
     fn path(&self, id: &str) -> Result<PathBuf> {
@@ -123,7 +162,7 @@ impl AuditStore {
         Ok(self.directory()?.join(format!("{id}.jsonl")))
     }
 
-    fn append(&self, inner: &mut Inner, id: &str, event: AuditEvent) -> Result<()> {
+    fn write_event_to_disk(&self, id: &str, event: &AuditEvent) -> Result<()> {
         let root = self.directory()?;
         fs::create_dir_all(root)?;
         #[cfg(unix)]
@@ -159,34 +198,39 @@ impl AuditStore {
                 bail!("Audit file has an incomplete trailing record");
             }
         }
-        let mut line = serde_json::to_vec(&event)?;
+        let mut line = serde_json::to_vec(event)?;
         line.push(b'\n');
         file.write_all(&line)?;
         file.sync_data()?;
+        Ok(())
+    }
+
+    fn append_unlocked(&self, id: &str, event: AuditEvent) -> Result<()> {
+        self.write_event_to_disk(id, &event)?;
+        let mut inner = self.inner.lock().unwrap();
         if let Some(run) = inner.runs.get_mut(id) {
             project(run, &event);
         }
         Ok(())
     }
 
-    fn ensure_run(
-        &self,
-        inner: &mut Inner,
-        session_id: &str,
-        partial: bool,
-    ) -> Result<Option<String>> {
-        let Some(live) = inner.sessions.get(session_id).cloned() else {
-            return Ok(None);
+    fn ensure_run_unlocked(&self, session_id: &str, partial: bool) -> Result<Option<String>> {
+        let live = {
+            let inner = self.inner.lock().unwrap();
+            let Some(live) = inner.sessions.get(session_id).cloned() else {
+                return Ok(None);
+            };
+            if !inner.enabled.contains(&live.session.browser_id.0) {
+                return Ok(None);
+            }
+            if let Some(id) = live.run_id {
+                return Ok(Some(id));
+            }
+            live
         };
-        if !inner.enabled.contains(&live.session.browser_id.0) {
-            return Ok(None);
-        }
-        if let Some(id) = live.run_id {
-            return Ok(Some(id));
-        }
-        self.load(inner)?;
+        self.ensure_loaded_unlocked()?;
         let at = now_ms();
-        self.prune(inner, at)?;
+        self.prune_unlocked(at)?;
         let id = format!("{at}-{}", uuid::Uuid::new_v4());
         let run = AuditRun {
             id: id.clone(),
@@ -202,69 +246,108 @@ impl AuditStore {
             errors: 0,
             partial,
         };
-        self.append(
-            inner,
-            &id,
-            event("started", None, serde_json::to_value(&run)?),
-        )?;
+        let started = event("started", None, serde_json::to_value(&run)?);
+        self.write_event_to_disk(&id, &started)?;
+        let mut inner = self.inner.lock().unwrap();
         inner.runs.insert(id.clone(), run);
-        inner.sessions.get_mut(session_id).unwrap().run_id = Some(id.clone());
+        if let Some(live_mut) = inner.sessions.get_mut(session_id) {
+            live_mut.run_id = Some(id.clone());
+        }
         Ok(Some(id))
     }
 
     pub fn session_started(&self, session: &Session) {
-        let mut inner = self.inner.lock().unwrap();
-        inner.sessions.insert(
-            session.id.0.clone(),
-            LiveSession {
-                session: session.clone(),
-                run_id: None,
-                name: None,
-            },
-        );
-        if self.ensure_run(&mut inner, &session.id.0, false).is_err() {
-            inner
+        let enabled = {
+            let mut inner = self.inner.lock().unwrap();
+            inner.sessions.insert(
+                session.id.0.clone(),
+                LiveSession {
+                    session: session.clone(),
+                    run_id: None,
+                    name: None,
+                },
+            );
+            inner.enabled.contains(&session.browser_id.0)
+        };
+        if !enabled {
+            return;
+        }
+        let _io = self.io_lock.lock().unwrap();
+        if self.ensure_run_unlocked(&session.id.0, false).is_err() {
+            self.inner
+                .lock()
+                .unwrap()
                 .last_error
                 .insert(session.browser_id.0.clone(), "write_failed".into());
         }
     }
 
     pub fn set_name(&self, session_id: &str, name: &str) {
-        let mut inner = self.inner.lock().unwrap();
         let name = safe_text(name);
-        let Some(live) = inner.sessions.get_mut(session_id) else {
-            return;
+        let needs_disk = {
+            let mut inner = self.inner.lock().unwrap();
+            let Some(live) = inner.sessions.get_mut(session_id) else {
+                return;
+            };
+            live.name = Some(name.clone());
+            let browser = live.session.browser_id.0.clone();
+            inner.enabled.contains(&browser)
         };
-        live.name = Some(name.clone());
-        let id = live.run_id.clone();
-        let browser = live.session.browser_id.0.clone();
-        if inner.enabled.contains(&browser)
-            && let Some(id) = id
+        if !needs_disk {
+            return;
+        }
+        let _io = self.io_lock.lock().unwrap();
+        let target = {
+            let inner = self.inner.lock().unwrap();
+            inner.sessions.get(session_id).and_then(|live| {
+                let browser = live.session.browser_id.0.clone();
+                inner
+                    .enabled
+                    .contains(&browser)
+                    .then_some(live.run_id.clone().map(|id| (id, browser)))
+                    .flatten()
+            })
+        };
+        if let Some((id, browser)) = target
             && self
-                .append(&mut inner, &id, event("named", None, json!({"name": name})))
+                .append_unlocked(&id, event("named", None, json!({"name": name})))
                 .is_err()
         {
-            inner.last_error.insert(browser, "write_failed".into());
+            self.inner
+                .lock()
+                .unwrap()
+                .last_error
+                .insert(browser, "write_failed".into());
         }
     }
 
     pub fn session_ended(&self, session_id: &str, status: &str) {
-        let mut inner = self.inner.lock().unwrap();
-        if let Some(live) = inner.sessions.remove(session_id)
-            && let Some(id) = live.run_id
         {
+            let mut inner = self.inner.lock().unwrap();
+            let needs_io = inner.sessions.get(session_id).is_some_and(|live| {
+                live.run_id.is_some() || inner.enabled.contains(&live.session.browser_id.0)
+            });
+            if !needs_io {
+                inner.sessions.remove(session_id);
+                return;
+            }
+        }
+        let _io = self.io_lock.lock().unwrap();
+        let removed = self
+            .inner
+            .lock()
+            .unwrap()
+            .sessions
+            .remove(session_id)
+            .and_then(|live| live.run_id.map(|id| (id, live.session.browser_id.0)));
+        if let Some((id, browser_id)) = removed {
             // Even while recording is paused, close the history's lifecycle.
             if self
-                .append(
-                    &mut inner,
-                    &id,
-                    event("ended", None, json!({"status": status})),
-                )
+                .append_unlocked(&id, event("ended", None, json!({"status": status})))
                 .is_err()
             {
-                inner
-                    .last_error
-                    .insert(live.session.browser_id.0, "write_failed".into());
+                let mut inner = self.inner.lock().unwrap();
+                inner.last_error.insert(browser_id, "write_failed".into());
                 if let Some(run) = inner.runs.get_mut(&id) {
                     run.status = "interrupted".into();
                 }
@@ -273,21 +356,31 @@ impl AuditStore {
     }
 
     pub fn configure(&self, browser: &str, enabled: bool) -> Result<Value> {
-        let mut inner = self.inner.lock().unwrap();
-        let previous = inner.enabled.contains(browser);
-        // Apply the privacy preference before any fallible I/O. A broken disk
-        // must never prevent the user from stopping collection.
-        if enabled {
-            inner.enabled.insert(browser.into());
-        } else {
-            inner.enabled.remove(browser);
-        }
-        if previous != enabled {
-            *inner.epochs.entry(browser.into()).or_default() += 1;
-        }
+        let _io = self.io_lock.lock().unwrap();
+        let (previous, sessions) = {
+            let mut inner = self.inner.lock().unwrap();
+            let previous = inner.enabled.contains(browser);
+            // Apply the privacy preference before any fallible I/O. A broken disk
+            // must never prevent the user from stopping collection.
+            if enabled {
+                inner.enabled.insert(browser.into());
+            } else {
+                inner.enabled.remove(browser);
+            }
+            if previous != enabled {
+                *inner.epochs.entry(browser.into()).or_default() += 1;
+            }
+            let sessions: Vec<_> = inner
+                .sessions
+                .iter()
+                .filter(|(_, l)| l.session.browser_id.0 == browser)
+                .map(|(id, live)| (id.clone(), live.run_id.clone()))
+                .collect();
+            (previous, sessions)
+        };
         let result = (|| -> Result<Value> {
             if enabled || previous {
-                self.load(&mut inner)?;
+                self.ensure_loaded_unlocked()?;
             }
             if enabled {
                 let root = self.directory()?;
@@ -302,30 +395,25 @@ impl AuditStore {
                 probe.write_all(b"audit-ready\n")?;
                 probe.as_file().sync_data()?;
             }
-            let sessions: Vec<_> = inner
-                .sessions
-                .iter()
-                .filter(|(_, l)| l.session.browser_id.0 == browser)
-                .map(|(id, live)| (id.clone(), live.run_id.clone()))
-                .collect();
             for (sid, run) in sessions {
                 if let Some(id) = run.filter(|_| previous != enabled) {
-                    self.append(
-                        &mut inner,
+                    self.append_unlocked(
                         &id,
                         event(if enabled { "resumed" } else { "paused" }, None, json!({})),
                     )?;
                 } else if enabled {
-                    self.ensure_run(&mut inner, &sid, true)?;
+                    self.ensure_run_unlocked(&sid, true)?;
                 }
             }
-            if inner.loaded {
-                self.prune(&mut inner, now_ms())?;
+            if self.inner.lock().unwrap().loaded {
+                self.prune_unlocked(now_ms())?;
             }
             Ok(json!({"enabled": enabled, "directory": self.directory()?, "retention_days": 30}))
         })();
         if result.is_err() {
-            inner
+            self.inner
+                .lock()
+                .unwrap()
                 .last_error
                 .insert(browser.into(), "write_failed".into());
         }
@@ -340,71 +428,93 @@ impl AuditStore {
         method: &Method,
         params: &Value,
     ) -> Result<Option<Ticket>> {
-        let mut inner = self.inner.lock().unwrap();
-        let Some(id) = self.ensure_run(&mut inner, session_id, true)? else {
+        if !self.needs_begin(session_id) {
+            return Ok(None);
+        }
+        let _io = self.io_lock.lock().unwrap();
+        let Some(id) = self.ensure_run_unlocked(session_id, true)? else {
             return Ok(None);
         };
-        let browser = inner.runs[&id].browser_id.clone();
-        let ticket = Ticket {
-            run_id: id,
-            operation_id: uuid::Uuid::new_v4().to_string(),
-            epoch: *inner.epochs.get(&browser).unwrap_or(&0),
-            browser_id: browser.clone(),
+        let ticket = {
+            let inner = self.inner.lock().unwrap();
+            let browser = inner.runs[&id].browser_id.clone();
+            Ticket {
+                run_id: id,
+                operation_id: uuid::Uuid::new_v4().to_string(),
+                epoch: *inner.epochs.get(&browser).unwrap_or(&0),
+                browser_id: browser,
+            }
         };
         let mut data = safe_params(params);
         data["method"] = serde_json::to_value(method)?;
         if self
-            .append(
-                &mut inner,
+            .append_unlocked(
                 &ticket.run_id,
                 event("operation_started", Some(&ticket.operation_id), data),
             )
             .is_err()
         {
-            inner.last_error.insert(browser, "write_failed".into());
+            self.inner
+                .lock()
+                .unwrap()
+                .last_error
+                .insert(ticket.browser_id, "write_failed".into());
             bail!("Operation audit could not be saved; action was not dispatched");
         }
-        inner
+        self.inner
+            .lock()
+            .unwrap()
             .pending
             .insert(ticket.operation_id.clone(), ticket.clone());
         Ok(Some(ticket))
     }
 
     pub fn finish(&self, ticket: Ticket, body: &ResponseBody) {
-        let mut inner = self.inner.lock().unwrap();
-        inner.pending.remove(&ticket.operation_id);
-        // A disable/re-enable during the call leaves the result explicitly unknown.
-        if !inner.enabled.contains(&ticket.browser_id)
-            || inner.epochs.get(&ticket.browser_id).copied().unwrap_or(0) != ticket.epoch
-        {
+        let _io = self.io_lock.lock().unwrap();
+        let should_append = {
+            let mut inner = self.inner.lock().unwrap();
+            inner.pending.remove(&ticket.operation_id);
+            // A disable/re-enable during the call leaves the result explicitly unknown.
+            inner.enabled.contains(&ticket.browser_id)
+                && inner.epochs.get(&ticket.browser_id).copied().unwrap_or(0) == ticket.epoch
+        };
+        if !should_append {
             return;
         }
         let data = safe_outcome(body);
         if self
-            .append(
-                &mut inner,
+            .append_unlocked(
                 &ticket.run_id,
                 event("operation_finished", Some(&ticket.operation_id), data),
             )
             .is_err()
         {
-            inner
+            self.inner
+                .lock()
+                .unwrap()
                 .last_error
                 .insert(ticket.browser_id, "write_failed".into());
         }
     }
 
     pub fn context(&self, browser: &str, data: &AuditContextEvent) {
-        let mut inner = self.inner.lock().unwrap();
-        let Some(ticket) = inner.pending.get(&data.operation_id).cloned() else {
-            return;
-        };
-        if ticket.browser_id != browser
-            || !inner.enabled.contains(browser)
-            || inner.epochs.get(browser).copied().unwrap_or(0) != ticket.epoch
-        {
+        if !self.needs_context(browser, &data.operation_id) {
             return;
         }
+        let _io = self.io_lock.lock().unwrap();
+        let ticket = {
+            let inner = self.inner.lock().unwrap();
+            let Some(ticket) = inner.pending.get(&data.operation_id).cloned() else {
+                return;
+            };
+            if ticket.browser_id != browser
+                || !inner.enabled.contains(browser)
+                || inner.epochs.get(browser).copied().unwrap_or(0) != ticket.epoch
+            {
+                return;
+            }
+            ticket
+        };
         let mut metadata = json!({});
         if let Some(url) = data.url.as_deref().and_then(safe_url) {
             metadata["page_url"] = json!(url);
@@ -416,40 +526,55 @@ impl AuditStore {
             metadata["tab_id"] = json!(tab);
         }
         if self
-            .append(
-                &mut inner,
+            .append_unlocked(
                 &ticket.run_id,
                 event("context", Some(&ticket.operation_id), metadata),
             )
             .is_err()
         {
-            inner
+            self.inner
+                .lock()
+                .unwrap()
                 .last_error
                 .insert(browser.into(), "write_failed".into());
         }
     }
 
     pub fn marker(&self, session_id: &str, kind: &str) {
-        let mut inner = self.inner.lock().unwrap();
-        let Some(live) = inner.sessions.get(session_id).cloned() else {
+        if !self.needs_marker(session_id) {
             return;
+        }
+        let _io = self.io_lock.lock().unwrap();
+        let target = {
+            let inner = self.inner.lock().unwrap();
+            let Some(live) = inner.sessions.get(session_id).cloned() else {
+                return;
+            };
+            inner
+                .enabled
+                .contains(&live.session.browser_id.0)
+                .then_some(live.run_id.map(|id| (id, live.session.browser_id.0)))
+                .flatten()
         };
-        if inner.enabled.contains(&live.session.browser_id.0)
-            && let Some(id) = live.run_id
+        if let Some((id, browser_id)) = target
             && self
-                .append(&mut inner, &id, event(kind, None, json!({})))
+                .append_unlocked(&id, event(kind, None, json!({})))
                 .is_err()
         {
-            inner
+            self.inner
+                .lock()
+                .unwrap()
                 .last_error
-                .insert(live.session.browser_id.0, "write_failed".into());
+                .insert(browser_id, "write_failed".into());
         }
     }
 
     pub fn list(&self, browser: &str, offset: usize, limit: usize) -> Result<Value> {
-        let mut inner = self.inner.lock().unwrap();
-        self.load(&mut inner)?;
-        self.prune(&mut inner, now_ms())?;
+        let _io = self.io_lock.lock().unwrap();
+        self.ensure_loaded_unlocked()?;
+        self.prune_unlocked(now_ms())?;
+        let directory = self.directory()?;
+        let inner = self.inner.lock().unwrap();
         let mut runs: Vec<_> = inner
             .runs
             .values()
@@ -465,55 +590,86 @@ impl AuditStore {
             .collect();
         Ok(
             json!({"runs": page, "total": total, "enabled": inner.enabled.contains(browser),
-            "error": inner.last_error.get(browser), "directory": self.directory()?, "retention_days": 30}),
+            "error": inner.last_error.get(browser), "directory": directory, "retention_days": 30}),
         )
     }
 
     pub fn get(&self, browser: &str, id: &str, offset: usize, limit: usize) -> Result<Value> {
-        let mut inner = self.inner.lock().unwrap();
-        self.load(&mut inner)?;
-        let run = inner
-            .runs
-            .get(id)
-            .filter(|run| run.browser_id == browser)
-            .context("Audit task not found")?;
+        let _io = self.io_lock.lock().unwrap();
+        self.ensure_loaded_unlocked()?;
+        let (run, pending_operations, error) = {
+            let inner = self.inner.lock().unwrap();
+            let run = inner
+                .runs
+                .get(id)
+                .filter(|run| run.browser_id == browser)
+                .cloned()
+                .context("Audit task not found")?;
+            let pending_operations: Vec<String> = inner
+                .pending
+                .values()
+                .filter(|ticket| {
+                    ticket.run_id == id
+                        && inner.enabled.contains(browser)
+                        && inner.epochs.get(browser).copied().unwrap_or(0) == ticket.epoch
+                })
+                .map(|ticket| ticket.operation_id.clone())
+                .collect();
+            let error = inner.last_error.get(browser).cloned();
+            (run, pending_operations, error)
+        };
         let events = read_events(&self.path(id)?)?;
         let total = events.len();
-        let pending_operations: Vec<_> = inner
-            .pending
-            .values()
-            .filter(|ticket| {
-                ticket.run_id == id
-                    && inner.enabled.contains(browser)
-                    && inner.epochs.get(browser).copied().unwrap_or(0) == ticket.epoch
-            })
-            .map(|ticket| &ticket.operation_id)
-            .collect();
         let page: Vec<_> = events
             .into_iter()
             .skip(offset)
             .take(limit.clamp(1, 500))
             .collect();
         Ok(json!({"run": run, "events": page, "total": total,
-                "pending_operations": pending_operations, "error": inner.last_error.get(browser)}))
+                "pending_operations": pending_operations, "error": error}))
     }
 
     pub fn delete(&self, browser: &str, id: &str) -> Result<Value> {
-        let mut inner = self.inner.lock().unwrap();
-        self.load(&mut inner)?;
-        let run = inner
-            .runs
-            .get(id)
-            .filter(|run| run.browser_id == browser)
-            .context("Audit task not found")?;
-        if run.status == "running" || inner.pending.values().any(|ticket| ticket.run_id == id) {
-            bail!("Cannot delete an active audit task");
+        let _io = self.io_lock.lock().unwrap();
+        self.ensure_loaded_unlocked()?;
+        {
+            let inner = self.inner.lock().unwrap();
+            let run = inner
+                .runs
+                .get(id)
+                .filter(|run| run.browser_id == browser)
+                .context("Audit task not found")?;
+            if run.status == "running" || inner.pending.values().any(|ticket| ticket.run_id == id) {
+                bail!("Cannot delete an active audit task");
+            }
         }
         fs::remove_file(self.path(id)?)?;
-        inner.runs.remove(id);
+        self.inner.lock().unwrap().runs.remove(id);
         Ok(json!({"deleted": true}))
     }
 
+    fn prune_unlocked(&self, now: i64) -> Result<()> {
+        let expired: Vec<_> = {
+            let inner = self.inner.lock().unwrap();
+            inner
+                .runs
+                .values()
+                .filter(|run| {
+                    run.status != "running"
+                        && run.updated_at < now - RETENTION_MS
+                        && !inner.pending.values().any(|ticket| ticket.run_id == run.id)
+                })
+                .map(|run| run.id.clone())
+                .collect()
+        };
+        for id in expired {
+            fs::remove_file(self.path(&id)?)?;
+            self.inner.lock().unwrap().runs.remove(&id);
+        }
+        Ok(())
+    }
+
+    #[cfg(test)]
     fn prune(&self, inner: &mut Inner, now: i64) -> Result<()> {
         let expired: Vec<_> = inner
             .runs

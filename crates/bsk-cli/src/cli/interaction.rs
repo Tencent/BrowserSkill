@@ -165,7 +165,6 @@ pub fn dispatch_click(
     let modifiers = parse_modifiers(&args.modifiers)
         .map_err(|e| CliError::Local(anyhow::anyhow!("--modifiers: {e}")))?;
     let op_ctx = ctx.with_scope(args.scope.as_deref());
-    let info = ensure_daemon().context("ensure daemon is running")?;
     let params = ClickParams {
         capture_id: args.capture_id.clone(),
         image_x: args.image_x,
@@ -187,6 +186,9 @@ pub fn dispatch_click(
         depends_on: None,
         expect: None,
     };
+    crate::cli::orchestration::validate_click_params(&params)
+        .map_err(|msg| CliError::invalid_params(anyhow::anyhow!(msg)))?;
+    let info = ensure_daemon().context("ensure daemon is running")?;
     let reply: ClickResult = call(
         info.sock_path,
         &op_ctx,

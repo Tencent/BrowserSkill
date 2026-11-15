@@ -8,14 +8,13 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use anyhow::Context;
-use bsk_protocol::system::{BrowserStatusEntry, SessionStatusEntry};
+use bsk_protocol::system::{BrowserListResult, SessionListResult};
 use bsk_protocol::tools::{
     ControlPolicy, CooperateAction, CooperateParams, NavigateParams, NavigateResult,
     SnapshotParams, SnapshotResult, WaitUntil,
 };
 use bsk_protocol::{ErrorCode, Method, RpcError};
 use clap::Args;
-use serde::Deserialize;
 use serde_json::{Value, json};
 
 use super::cooperate::{self, Policy};
@@ -119,7 +118,7 @@ pub struct SyncArgs {
     pub wait_not: Option<String>,
 
     /// Bounded wait timeout in milliseconds (default 5000ms for `--wait-for` / `--wait-not`).
-    #[arg(long = "timeout-ms", value_parser = clap::value_parser!(u32).range(1..=25_000))]
+    #[arg(long = "timeout-ms", value_parser = clap::value_parser!(u32).range(1..=120_000))]
     pub timeout_ms: Option<u32>,
 
     /// Token budget for the VOM observation.
@@ -238,6 +237,11 @@ pub fn dispatch_sync(
     ctx: &business_rpc::ClientContext,
     format: Format,
 ) -> Result<(), CliError> {
+    let has_wait_conditions = args.wait_for.is_some() || args.wait_not.is_some();
+    if let Some(ms) = args.timeout_ms {
+        super::orchestration::validate_sync_timeout_ms(u64::from(ms), has_wait_conditions, false)
+            .map_err(|msg| CliError::invalid_params(anyhow::anyhow!(msg)))?;
+    }
     let op_ctx = ctx.with_scope(args.scope.as_deref());
     op_ctx.prepare_params(&Method::ToolCooperate, Some(json!({})))?;
     let aux_ctx = op_ctx.without_action_metadata();
@@ -426,58 +430,33 @@ fn verify_explicit_session_browser(
     session_id: &str,
     requested_browser: &str,
 ) -> Result<(), CliError> {
-    #[derive(Deserialize)]
-    struct SessionsResp {
-        sessions: Vec<SessionStatusEntry>,
-    }
-    #[derive(Deserialize)]
-    struct BrowsersResp {
-        browsers: Vec<BrowserStatusEntry>,
-    }
-    let list: SessionsResp = ctx.call(
+    let list: SessionListResult = ctx.call(
         sock.to_path_buf(),
         "open-sessions",
         Method::SessionList,
         Some(json!({})),
         TOOL_IPC_TIMEOUT,
     )?;
-    let Some(entry) = list.sessions.iter().find(|s| s.session_id == session_id) else {
-        return Err(CliError::from_rpc(RpcError {
-            code: ErrorCode::NotFound,
-            message: format!("session '{session_id}' does not exist"),
-            data: None,
-        }));
-    };
-    if entry.browser_instance_id == requested_browser {
+    let bound_browser =
+        super::orchestration::find_session_bound_browser(&list.sessions, session_id)
+            .map_err(CliError::from_rpc)?;
+    if bound_browser == requested_browser {
         return Ok(());
     }
-    let browsers: BrowsersResp = ctx.call(
+    let browsers: BrowserListResult = ctx.call(
         sock.to_path_buf(),
         "open-browsers",
         Method::BrowserList,
         Some(json!({})),
         TOOL_IPC_TIMEOUT,
     )?;
-    let matches_label = browsers
-        .browsers
-        .iter()
-        .any(|b| b.instance_id == entry.browser_instance_id && b.label == requested_browser);
-    if !matches_label {
-        return Err(CliError::from_rpc(RpcError {
-            code: ErrorCode::InvalidParams,
-            message: format!(
-                "session '{session_id}' belongs to browser '{}', which conflicts with --browser '{requested_browser}'",
-                entry.browser_instance_id
-            ),
-            data: Some(json!({
-                "reason": bsk_protocol::RpcErrorReason::ScopeBrowserConflict.as_str(),
-                "session_id": session_id,
-                "bound_browser": entry.browser_instance_id,
-                "requested_browser": requested_browser,
-            })),
-        }));
-    }
-    Ok(())
+    super::orchestration::check_explicit_session_browser_conflict(
+        session_id,
+        bound_browser,
+        requested_browser,
+        &browsers.browsers,
+    )
+    .map_err(CliError::from_rpc)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1061,57 +1040,12 @@ fn format_state_receipt(
     // `delta` (without `--match-text` or `--json`) stays slim; unpatched field
     // deltas set `cache_reusable = false` and `cached_vom = None`, so stale VOM
     // is never resurrected.
-    let mut hydrated_from_cache = false;
-    if reply.pointer("/observation/text").is_none()
-        && (!emit_unchanged_flag
-            || unchanged
-            || !match_text.is_empty()
-            || matches!(format, Format::Json))
+    let hydrated_from_cache = (!emit_unchanged_flag
+        || unchanged
+        || !match_text.is_empty()
+        || matches!(format, Format::Json))
         && cache_reusable
-        && let Some(cached_vom) = meta.and_then(|m| m.cached_vom.as_deref())
-    {
-        if !reply.get("observation").is_some_and(Value::is_object) {
-            reply["observation"] = json!({});
-        }
-        reply["observation"]["text"] = Value::String(cached_vom.to_string());
-        reply["observation"]["truncated"] =
-            Value::Bool(meta.is_some_and(|m| m.cached_vom_truncated));
-        if let Some(cursor) = meta.and_then(|m| m.cached_vom_next_cursor.as_deref()) {
-            reply["observation"]["next_cursor"] = Value::String(cursor.to_string());
-        }
-        if reply.pointer("/observation/observation_id").is_none()
-            && let Some(obs_id) = reply.get("observation_id").and_then(Value::as_str)
-        {
-            reply["observation"]["observation_id"] = Value::String(obs_id.to_string());
-        }
-        if reply.pointer("/observation/tab_id").is_none()
-            && let Some(tid) = reply
-                .get("tab_id")
-                .and_then(Value::as_i64)
-                .or_else(|| meta.and_then(|m| m.tab_id))
-        {
-            reply["observation"]["tab_id"] = Value::from(tid);
-        }
-        if reply.pointer("/observation/url").is_none()
-            && let Some(u) = reply
-                .pointer("/state/url")
-                .and_then(Value::as_str)
-                .or_else(|| meta.and_then(|m| m.cached_url.as_deref()))
-                .filter(|s| !s.is_empty())
-        {
-            reply["observation"]["url"] = Value::String(u.to_string());
-        }
-        if reply.pointer("/observation/title").is_none()
-            && let Some(t) = reply
-                .pointer("/state/title")
-                .and_then(Value::as_str)
-                .or_else(|| meta.and_then(|m| m.cached_title.as_deref()))
-                .filter(|s| !s.is_empty())
-        {
-            reply["observation"]["title"] = Value::String(t.to_string());
-        }
-        hydrated_from_cache = true;
-    }
+        && super::orchestration::hydrate_cached_observation(reply, meta);
 
     if !match_text.is_empty() {
         cooperate::presentation::filter(reply, match_text, context_lines as usize);

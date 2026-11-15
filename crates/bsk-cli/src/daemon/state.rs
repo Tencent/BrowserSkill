@@ -77,26 +77,36 @@ impl DaemonState {
     /// `session_interrupts`, `transfers`, `run_logs`, `scopes`, and
     /// `intent_wal`) and returns `true` when `session_id` was live in
     /// [`SessionRegistry`] at teardown time.
-    pub fn teardown_session(&self, session_id: &SessionId, reason: &'static str) -> bool {
-        if reason == bsk_protocol::RpcErrorReason::UserMovedTab.as_str() {
-            let snapshots = self
-                .tool_inflight
-                .cancel_session_with_reason(session_id, CancelReason::UserMovedTab);
-            for snap in snapshots {
-                if let (Some(browser_id), Some(ws_rpc_id)) = (snap.browser_id, snap.ws_rpc_id)
-                    && let Err(err) = super::cancel_forward::forward_cancel_to_browser(
-                        self,
-                        &browser_id,
-                        &ws_rpc_id,
-                    )
-                {
-                    tracing::warn!(
-                        %browser_id,
-                        %ws_rpc_id,
-                        %err,
-                        "failed to forward session cancellation to extension"
-                    );
-                }
+    fn teardown_session_in_memory(
+        &self,
+        session_id: &SessionId,
+        reason: &'static str,
+    ) -> (bool, Vec<std::path::PathBuf>, u64) {
+        let (cancel_reason, include_dialog_retained) =
+            if reason == bsk_protocol::RpcErrorReason::UserMovedTab.as_str() {
+                (CancelReason::UserMovedTab, true)
+            } else if reason == bsk_protocol::RpcErrorReason::SessionStopped.as_str() {
+                (CancelReason::SessionEnded(reason), false)
+            } else {
+                (CancelReason::SessionEnded(reason), true)
+            };
+        let snapshots = self.tool_inflight.cancel_session_filtered(
+            session_id,
+            cancel_reason,
+            include_dialog_retained,
+        );
+        for snap in snapshots {
+            if let (Some(browser_id), Some(ws_rpc_id)) = (snap.browser_id, snap.ws_rpc_id)
+                && let Err(err) =
+                    super::cancel_forward::forward_cancel_to_browser(self, &browser_id, &ws_rpc_id)
+                && reason != bsk_protocol::RpcErrorReason::BrowserDisconnected.as_str()
+            {
+                tracing::warn!(
+                    %browser_id,
+                    %ws_rpc_id,
+                    %err,
+                    "failed to forward session cancellation to extension"
+                );
             }
         }
         let removed = self.sessions.teardown(session_id, reason);
@@ -110,10 +120,27 @@ impl DaemonState {
         self.tool_queues.remove(session_id);
         self.dialog_operations.remove_session(&session_id.0);
         self.session_interrupts.drop_session(session_id);
-        self.transfers.release_session(&session_id.0);
+        let transfer_dirs = self.transfers.drain_session_dirs(&session_id.0);
         self.run_logs.remove_session(&session_id.0);
         self.scopes.on_session_ended(session_id, reason);
-        self.intent_wal.on_session_ended(session_id);
+        let wal_seq = self.intent_wal.record_session_ended(session_id);
+        (removed, transfer_dirs, wal_seq)
+    }
+
+    pub fn teardown_session(&self, session_id: &SessionId, reason: &'static str) -> bool {
+        let (removed, transfer_dirs, wal_seq) = self.teardown_session_in_memory(session_id, reason);
+        if !transfer_dirs.is_empty() || wal_seq > 0 {
+            let wal = self.intent_wal.clone();
+            let cleanup = move || {
+                TransferRegistry::remove_dirs(transfer_dirs);
+                wal.flush_up_to(wal_seq);
+            };
+            if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                drop(handle.spawn_blocking(cleanup));
+            } else {
+                cleanup();
+            }
+        }
         removed
     }
 
@@ -139,7 +166,15 @@ impl DaemonState {
         if graceful_audit {
             self.sessions.mark_graceful_audit_end(session_id);
         }
-        self.teardown_session(session_id, reason);
+        let (_, transfer_dirs, wal_seq) = self.teardown_session_in_memory(session_id, reason);
+        if !transfer_dirs.is_empty() || wal_seq > 0 {
+            let wal = self.intent_wal.clone();
+            let _ = tokio::task::spawn_blocking(move || {
+                TransferRegistry::remove_dirs(transfer_dirs);
+                wal.flush_up_to(wal_seq);
+            })
+            .await;
+        }
         Ok(result)
     }
 
