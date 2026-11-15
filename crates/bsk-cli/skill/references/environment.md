@@ -134,3 +134,13 @@ the current connection; use `pair --replace BROWSER_ID` only for an intended
 replacement. `replace_mismatch` needs a normal link for the new profile; revoke
 an unused old device separately. Never enable skip/trust-local automatically.
 Independent bsk homes require separate pairings.
+
+## Reloading an unpacked development extension
+
+Only when the user explicitly asks to update a local unpacked BrowserSkill build,
+and after the selected browser has no active sessions, run
+`bsk ext reload --browser <instance-id-or-label>`. The command is one-shot and
+manual; it does not reload during ordinary sessions or monitor builds in the
+background. Wait for the extension to reconnect, then check `bsk browsers` for
+the new version. The command requires protocol 2.1 or newer; use Chrome's manual
+Reload for older extensions or if the command is unavailable.

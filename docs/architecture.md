@@ -20,7 +20,7 @@ flowchart TB
   Agent <-->|stdio MCP| MCP[bsk mcp — 11 domain tools]
   CLI <-->|IpcEnvelope JSONL / UDS or Named Pipe| Daemon[bsk daemon]
   MCP <-->|IpcEnvelope JSONL / UDS or Named Pipe| Daemon
-  Daemon <-->|WebSocket JSON — Protocol 2.0| Ext[bsk extension MV3]
+  Daemon <-->|WebSocket JSON — Protocol 2.1| Ext[bsk extension MV3]
   end
 
   subgraph browser [Chromium]

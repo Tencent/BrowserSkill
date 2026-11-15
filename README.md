@@ -343,6 +343,8 @@ pnpm ext:build
 
 The CLI is built under `target/release/`; load `apps/extension/dist/chrome-mv3/` as an unpacked extension. For extension development, use `pnpm ext:dev`.
 
+After replacing files in an unpacked extension directory, run `bsk ext reload --browser <id-or-label>` to reload that browser without opening `chrome://extensions`. The command is explicit and refuses to proceed while that browser has active sessions. Manual Reload in Chrome remains available.
+
 | Directory | Component |
 | --- | --- |
 | `crates/bsk-cli` | CLI, daemon, and bundled agent skill |

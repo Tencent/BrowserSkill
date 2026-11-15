@@ -116,6 +116,8 @@ export type { EventFrame } from './output';
 export type { EventKind } from './output';
 export type { ExpectationField } from './input';
 export type { ExpectedValue } from './input';
+export type { ExtensionReloadParams } from './input';
+export type { ExtensionReloadResult } from './output';
 export type { ExtractAction } from './output';
 export type { ExtractColumn } from './output';
 export type { ExtractCompleteness } from './output';

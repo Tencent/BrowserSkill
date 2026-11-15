@@ -11,7 +11,7 @@ use crate::{
     ErrorCode, EventFrame, EventKind, Method, RpcError, RpcErrorReason, method::MethodSpec,
 };
 
-pub const PROTOCOL_VERSION: &str = "2.0";
+pub const PROTOCOL_VERSION: &str = "2.1";
 pub const MIN_COMPATIBLE_PROTOCOL: &str = "2.0";
 pub const DEFAULT_DAEMON_PORT: u16 = 52800;
 pub const DEFAULT_DAEMON_WS_URL: &str = "ws://127.0.0.1:52800";

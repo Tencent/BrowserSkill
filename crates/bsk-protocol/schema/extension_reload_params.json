@@ -1,0 +1,16 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
+  "description": "One-shot request to reload an idle extension after replacing an unpacked build.",
+  "properties": {
+    "browser_instance_id": {
+      "description": "Browser instance id or label. Omit only when exactly one browser is connected.",
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  },
+  "title": "ExtensionReloadParams",
+  "type": "object"
+}

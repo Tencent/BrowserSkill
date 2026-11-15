@@ -655,6 +655,22 @@ pub struct BrowserListResult {
     pub browsers: Vec<BrowserStatusEntry>,
 }
 
+/// One-shot request to reload an idle extension after replacing an unpacked build.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ExtensionReloadParams {
+    /// Browser instance id or label. Omit only when exactly one browser is connected.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub browser_instance_id: Option<String>,
+}
+
+/// The extension accepted a user-requested reload and is about to restart.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ExtensionReloadResult {
+    pub scheduled: bool,
+    pub browser_instance_id: String,
+}
+
 // ---------------------------------------------------------------------------
 // Daemon session lifecycle (`session.*`)
 // ---------------------------------------------------------------------------

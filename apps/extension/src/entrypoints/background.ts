@@ -490,6 +490,7 @@ export default defineBackground(() => {
     debug,
     video,
     interactionPreferences,
+    reloadExtension: () => chrome.runtime.reload(),
     transport,
     sessions,
     cdp,

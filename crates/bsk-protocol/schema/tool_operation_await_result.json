@@ -51,6 +51,7 @@
         "session.list",
         "session.run_log",
         "browser.list",
+        "extension.reload",
         "tool.session_start",
         "tool.session_stop",
         "tool.window_resize",

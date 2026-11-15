@@ -19,6 +19,7 @@ pub mod emulate;
 pub mod ensure_daemon;
 pub mod error;
 pub mod evaluate;
+pub mod extension;
 pub mod extract;
 pub mod get_html;
 pub mod human_loop;
@@ -191,6 +192,10 @@ pub enum Command {
 
     /// List connected browsers.
     Browsers,
+
+    /// Explicit extension lifecycle commands.
+    #[command(name = "ext", subcommand)]
+    Extension(extension::ExtensionCmd),
 
     /// Tab management commands.
     Tab(TabCmd),

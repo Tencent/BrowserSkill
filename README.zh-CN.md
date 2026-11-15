@@ -336,6 +336,8 @@ pnpm ext:build
 
 CLI 产物位于 `target/release/`；将 `apps/extension/dist/chrome-mv3/` 作为解压后的扩展加载。开发扩展时使用 `pnpm ext:dev`。
 
+替换 unpacked 扩展目录中的文件后，可运行 `bsk ext reload --browser <id-or-label>`，无需打开 `chrome://extensions` 即可重载指定浏览器中的扩展。该命令需显式调用；浏览器有活动会话时会拒绝重载。Chrome 中的手动 Reload 仍可使用。
+
 | 目录 | 内容 |
 | --- | --- |
 | `crates/bsk-cli` | CLI、daemon 和内置 Agent skill |

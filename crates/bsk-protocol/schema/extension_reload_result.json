@@ -1,0 +1,18 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "description": "The extension accepted a user-requested reload and is about to restart.",
+  "properties": {
+    "browser_instance_id": {
+      "type": "string"
+    },
+    "scheduled": {
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "scheduled",
+    "browser_instance_id"
+  ],
+  "title": "ExtensionReloadResult",
+  "type": "object"
+}

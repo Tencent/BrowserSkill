@@ -68,7 +68,7 @@ function deferredFakeTransport(): { transport: Transport; emit: (frame: Protocol
 
 describe("performHandshake", () => {
   it("advertises the protocol compatibility boundary", () => {
-    expect(PROTOCOL_VERSION).toBe("2.0");
+    expect(PROTOCOL_VERSION).toBe("2.1");
     expect(MIN_COMPATIBLE_PROTOCOL).toBe("2.0");
   });
 

@@ -7,13 +7,13 @@ use std::time::Duration;
 use bsk_protocol::system::{
     BrowserListParams, BrowserListResult, BrowserStatusEntry, DaemonSessionStartParams,
     DaemonSessionStartResult, DaemonSessionStopAllParams, DaemonSessionStopFailure,
-    DaemonSessionStopParams, DaemonSessionStopResult, LedgerRequestParams, SessionListParams,
-    SessionListResult, SessionRunLogParams, StatusParams,
+    DaemonSessionStopParams, DaemonSessionStopResult, ExtensionReloadParams, ExtensionReloadResult,
+    LedgerRequestParams, SessionListParams, SessionListResult, SessionRunLogParams, StatusParams,
 };
 use bsk_protocol::tools::{
     TransferBeginParams, TransferChunkParams, TransferIdParams, TransferReadParams,
 };
-use bsk_protocol::{ErrorCode, Method, ResponseBody, RpcError, RpcId};
+use bsk_protocol::{ErrorCode, Method, RequestFrame, ResponseBody, RpcError, RpcId, WsCorrelation};
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 use tokio::sync::watch;
@@ -778,6 +778,94 @@ pub(super) async fn handle_browser_list(
     Ok(serde_json::to_value(BrowserListResult { browsers }).unwrap_or(Value::Null))
 }
 
+pub(super) async fn handle_extension_reload(
+    state: &Arc<DaemonState>,
+    rpc_id: RpcId,
+    params: Value,
+) -> Result<Value, RpcError> {
+    let params: ExtensionReloadParams =
+        serde_json::from_value(params).map_err(|err| invalid_params(err.to_string()))?;
+    let client = state
+        .browsers
+        .select(params.browser_instance_id.as_deref())
+        .map_err(|err| map_select_browser_error(&state.browsers, err))?;
+    if !matches!(
+        bsk_protocol::system::compare_protocol(&client.extension_protocol_version, "2.1"),
+        Some(std::cmp::Ordering::Equal | std::cmp::Ordering::Greater)
+    ) {
+        return Err(RpcError {
+            code: ErrorCode::Unsupported,
+            message: format!(
+                "extension reload requires protocol 2.1 or newer; this browser uses {}",
+                client.extension_protocol_version
+            ),
+            data: None,
+        });
+    }
+    let active_sessions = state.sessions.count_for_browser(&client.id);
+    if active_sessions > 0 {
+        return Err(RpcError {
+            code: ErrorCode::Unsupported,
+            message: format!(
+                "cannot reload BrowserSkill while {} session(s) are active; close them first",
+                active_sessions
+            ),
+            data: Some(serde_json::json!({
+                "reason": "session_busy",
+                "browser_instance_id": client.id.0.clone(),
+                "session_count": active_sessions,
+            })),
+        });
+    }
+
+    let request_id = format!("extension-reload-{rpc_id}");
+    let request = RequestFrame::for_extension_ws(
+        request_id,
+        Method::ExtensionReload,
+        serde_json::to_value(ExtensionReloadParams {
+            browser_instance_id: Some(client.id.0.clone()),
+        })
+        .unwrap_or(Value::Null),
+        &WsCorrelation::default(),
+    );
+    let response = client.dispatch(request).map_err(|err| RpcError {
+        code: ErrorCode::ProtocolError,
+        message: format!("could not send extension reload request: {err:?}"),
+        data: None,
+    })?;
+    let response = tokio::time::timeout(Duration::from_secs(5), response)
+        .await
+        .map_err(|_| RpcError {
+            code: ErrorCode::Timeout,
+            message: "timed out waiting for the extension reload acknowledgement".into(),
+            data: None,
+        })?
+        .map_err(|_| RpcError {
+            code: ErrorCode::ProtocolError,
+            message: "browser disconnected before acknowledging extension reload".into(),
+            data: None,
+        })?;
+    match response.body {
+        ResponseBody::Err(error) => Err(error),
+        ResponseBody::Ok(value) => {
+            let result: ExtensionReloadResult =
+                serde_json::from_value(value).map_err(|err| RpcError {
+                    code: ErrorCode::ProtocolError,
+                    message: format!("invalid extension reload acknowledgement: {err}"),
+                    data: None,
+                })?;
+            if !result.scheduled || result.browser_instance_id != client.id.0 {
+                return Err(RpcError {
+                    code: ErrorCode::ProtocolError,
+                    message: "extension returned an invalid reload acknowledgement".into(),
+                    data: None,
+                });
+            }
+            Ok(serde_json::to_value(result).unwrap_or(Value::Null))
+        }
+    }
+}
+
 pub(super) async fn handle_transfer_begin(state: &Arc<DaemonState>, params: Value) -> ResponseBody {
     let p: TransferBeginParams = match serde_json::from_value(params) {
         Ok(v) => v,
@@ -876,5 +964,127 @@ pub(super) async fn handle_transfer_release(
             message: format!("transfer.release worker failed: {join_err}"),
             data: None,
         }),
+    }
+}
+
+#[cfg(test)]
+mod extension_reload_tests {
+    use super::*;
+    use crate::daemon::browsers::{
+        BrowserClient, BrowserId, BrowserSink, Liveness, Pending, next_browser_generation,
+    };
+    use crate::daemon::sessions::{Session, SessionId};
+    use crate::daemon::{DaemonConfig, DaemonState};
+    use bsk_protocol::{Frame, ResponseFrame};
+    use tokio::sync::mpsc;
+
+    fn connected_browser(
+        protocol_version: &str,
+    ) -> (Arc<BrowserClient>, mpsc::UnboundedReceiver<Frame>) {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let client = Arc::new(BrowserClient {
+            id: BrowserId("b1234567".into()),
+            browser_name: "chrome".into(),
+            browser_version: "157.0".into(),
+            extension_version: "0.5.0".into(),
+            extension_protocol_version: protocol_version.into(),
+            label: "dev".into(),
+            sink: BrowserSink { tx },
+            pending: std::sync::Mutex::new(Pending::default()),
+            generation: next_browser_generation(),
+            connected_at_ms: 0,
+            version_skew: false,
+            liveness: Liveness::default(),
+        });
+        (client, rx)
+    }
+
+    #[tokio::test]
+    async fn refuses_to_reload_a_browser_with_an_active_session() {
+        let state = Arc::new(DaemonState::new(DaemonConfig::new(0)));
+        let (client, mut receiver) = connected_browser("2.1");
+        state.browsers.insert(Arc::clone(&client));
+        state.sessions.insert(Session {
+            controller: None,
+            interaction: None,
+            id: SessionId("sess".into()),
+            browser_id: client.id.clone(),
+            agent_window_id: None,
+            created_at_ms: 0,
+        });
+
+        let error = handle_extension_reload(
+            &state,
+            "ipc-1".into(),
+            serde_json::json!({"browser_instance_id": "b1234567"}),
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(error.code, ErrorCode::Unsupported);
+        assert_eq!(
+            error.data.as_ref().and_then(|data| data.get("reason")),
+            Some(&serde_json::json!("session_busy"))
+        );
+        assert!(matches!(
+            receiver.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+    }
+
+    #[tokio::test]
+    async fn forwards_reload_to_the_selected_extension_and_returns_its_ack() {
+        let state = Arc::new(DaemonState::new(DaemonConfig::new(0)));
+        let (client, mut receiver) = connected_browser("2.1");
+        state.browsers.insert(Arc::clone(&client));
+        let response_client = Arc::clone(&client);
+        let response_task = tokio::spawn(async move {
+            let Some(Frame::Request(request)) = receiver.recv().await else {
+                panic!("expected extension reload request");
+            };
+            assert_eq!(request.method, Method::ExtensionReload);
+            response_client
+                .pending
+                .lock()
+                .unwrap()
+                .resolve(ResponseFrame {
+                    id: request.id,
+                    body: ResponseBody::Ok(serde_json::json!({
+                        "scheduled": true,
+                        "browser_instance_id": "b1234567"
+                    })),
+                });
+        });
+
+        let result = handle_extension_reload(
+            &state,
+            "ipc-2".into(),
+            serde_json::json!({"browser_instance_id": "b1234567"}),
+        )
+        .await
+        .unwrap();
+        response_task.await.unwrap();
+
+        let result: ExtensionReloadResult = serde_json::from_value(result).unwrap();
+        assert!(result.scheduled);
+        assert_eq!(result.browser_instance_id, "b1234567");
+    }
+
+    #[tokio::test]
+    async fn refuses_to_send_reload_to_an_extension_before_protocol_2_1() {
+        let state = Arc::new(DaemonState::new(DaemonConfig::new(0)));
+        let (client, mut receiver) = connected_browser("2.0");
+        state.browsers.insert(client);
+
+        let error = handle_extension_reload(&state, "ipc-3".into(), serde_json::json!({}))
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.code, ErrorCode::Unsupported);
+        assert!(error.message.contains("protocol 2.1 or newer"));
+        assert!(matches!(
+            receiver.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
     }
 }

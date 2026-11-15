@@ -1,7 +1,7 @@
 {
   "source": "bsk-protocol",
-  "fingerprint": "376971af7e1737f3a3d86eb96b2238c5e27f3538474e09709e7f2b42bf07dca8",
-  "protocol_version": "2.0",
+  "fingerprint": "b096833335edae055df39835514b2990099b5531da77a540ab73f215fa140e47",
+  "protocol_version": "2.1",
   "min_compatible_protocol": "2.0",
   "events": [
     "audit.context",
@@ -185,6 +185,8 @@
     "EventKind",
     "ExpectationField",
     "ExpectedValue",
+    "ExtensionReloadParams",
+    "ExtensionReloadResult",
     "ExtractAction",
     "ExtractColumn",
     "ExtractCompleteness",
