@@ -207,13 +207,6 @@ impl ToolInflightEntry {
             .dialog_retained = true;
     }
 
-    pub fn is_dialog_retained(&self) -> bool {
-        self.inner
-            .lock()
-            .expect("ToolInflightEntry poisoned")
-            .dialog_retained
-    }
-
     /// Map this entry's recorded [`CancelReason`] to the structured IPC [`RpcError`].
     pub fn cancel_error(&self, default_msg: &str) -> RpcError {
         match self.cancel_reason() {

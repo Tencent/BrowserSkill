@@ -1922,7 +1922,438 @@ async fn canvas_click_validation_and_mcp_browser_conflict_and_graceful_cancel_pa
         "session stop must reap all remaining session-owned upload transfers"
     );
 
+    // 5. MCP `timeout_ms: 0` / `confirmation_timeout_ms: 0` fails closed locally on `bsk_page`,
+    //    `bsk_inspect(full_page=true)`, `bsk_tabs(borrow)`, and `bsk_assist(request_help)` (CLI parity).
+    for (tool_name, bad_args) in [
+        (
+            "bsk_page",
+            json!({ "action": "navigate", "url": "https://example.test/", "timeout_ms": 0 }),
+        ),
+        (
+            "bsk_inspect",
+            json!({ "action": "screenshot", "full_page": true, "timeout_ms": 0 }),
+        ),
+        (
+            "bsk_tabs",
+            json!({ "action": "borrow", "tab_id": 21, "confirmation_timeout_ms": 0 }),
+        ),
+        (
+            "bsk_assist",
+            json!({ "action": "request_help", "prompt": "solve captcha", "timeout_ms": 0 }),
+        ),
+    ] {
+        let bad_timeout_reply = mcp.call_tool(tool_name, bad_args).await;
+        assert_eq!(
+            bad_timeout_reply["isError"], true,
+            "{tool_name} must reject zero timeout_ms locally: {bad_timeout_reply}"
+        );
+        assert!(
+            bad_timeout_reply["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("timeout_ms"),
+            "unexpected {tool_name} zero-timeout message: {bad_timeout_reply}"
+        );
+    }
+
     drop(mcp);
     let _ = run_bsk_at(home.path(), &["daemon", "stop"], &[]).await;
     let _ = daemon_child.kill().await;
+
+    // 6. Restarting a fresh daemon on the SAME `BSK_HOME` after `sid` had an `UNKNOWN` WAL entry
+    //    and then cleanly stopped via `bsk_session(stop)` must NOT resurrect `sid` as `frozen: true`!
+    let mut restarted_child = Command::new(env!("CARGO_BIN_EXE_bsk"))
+        .args(["daemon", "start", "--foreground", "--port", "0"])
+        .env("BSK_HOME", home.path())
+        .env("BSK_AUTO_UPDATE", "off")
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .expect("spawn restarted foreground daemon");
+    let restart_deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        if let Ok(Some(restarted_info)) = bsk::daemon::info::read_from_path(&daemon_json_path)
+            && restarted_info.pid != info.pid
+        {
+            break;
+        }
+        assert!(
+            Instant::now() < restart_deadline,
+            "restarted foreground daemon never updated daemon.json"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let post_restart_ledger = run_bsk_at(home.path(), &["ledger", "status", "--json"], &[]).await;
+    assert!(
+        post_restart_ledger.status.success(),
+        "{post_restart_ledger:?}"
+    );
+    let post_restart_json: Value = serde_json::from_slice(&post_restart_ledger.stdout).unwrap();
+    assert_eq!(
+        post_restart_json["frozen"], false,
+        "cleanly stopped session resurrected as frozen after daemon restart: {post_restart_json}"
+    );
+    assert!(
+        post_restart_json["pending_unknown"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    let _ = run_bsk_at(home.path(), &["daemon", "stop"], &[]).await;
+    let _ = restarted_child.kill().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn file_transfer_teardown_effect_state_dialog_lock_cancel_and_wait_ms_activity_lease() {
+    let home = crate::support::short_tempdir();
+    let sock = home.path().join("ipc.sock");
+    let mut config =
+        DaemonConfig::new(0).with_local_auth(bsk::daemon::local_auth::LocalAuthMode::TrustLocal);
+    // Short session idle threshold (120ms, tick=100ms) so an unleased 350ms `wait_ms` would be reaped!
+    config.session_idle = Duration::from_millis(120);
+    let handle = daemon::run(config, Some(sock.clone())).await.unwrap();
+    let mut ws = connect_ext(handle.ws_addr()).await;
+    do_handshake(&mut ws, TEST_EXT_ID, "Wave4BReviewChrome").await;
+
+    let (writer, mut reader): (SplitSink<Ws, Message>, SplitStream<Ws>) = ws.split();
+    let writer = Arc::new(tokio::sync::Mutex::new(writer));
+    let (upload_ws_tx, mut upload_ws_rx) = tokio::sync::mpsc::unbounded_channel::<RequestFrame>();
+    let (dialog_ws_tx, mut dialog_ws_rx) = tokio::sync::mpsc::unbounded_channel::<RequestFrame>();
+    let upload_mode = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let upload_mode_bg = Arc::clone(&upload_mode);
+    let upload_cancel_notify = Arc::new(tokio::sync::Notify::new());
+    let upload_cancel_notify_bg = Arc::clone(&upload_cancel_notify);
+    let writer_bg = Arc::clone(&writer);
+
+    tokio::spawn(async move {
+        let mut win_id = 500i64;
+        while let Some(Ok(Message::Text(text))) = reader.next().await {
+            let Ok(Frame::Request(req)) = serde_json::from_str::<Frame>(&text) else {
+                continue;
+            };
+            let writer_task = Arc::clone(&writer_bg);
+            let upload_tx = upload_ws_tx.clone();
+            let dialog_tx = dialog_ws_tx.clone();
+            let mode_ref = Arc::clone(&upload_mode_bg);
+            let cancel_sig = Arc::clone(&upload_cancel_notify_bg);
+            if req.method == Method::ToolSessionStart {
+                win_id += 1;
+            }
+            let assigned_win = win_id;
+            tokio::spawn(async move {
+                match req.method {
+                    Method::ToolSessionStart => {
+                        send_ws_response(
+                            &writer_task,
+                            req.id,
+                            ResponseBody::Ok(
+                                serde_json::to_value(SessionStartResult {
+                                    interaction: None,
+                                    agent_window_id: Some(assigned_win),
+                                })
+                                .unwrap(),
+                            ),
+                        )
+                        .await;
+                    }
+                    Method::ToolSessionStop => {
+                        send_ws_response(&writer_task, req.id, ResponseBody::Ok(json!({}))).await;
+                    }
+                    Method::ToolUpload => {
+                        let mode = mode_ref.fetch_add(1, Ordering::SeqCst);
+                        let _ = upload_tx.send(req.clone());
+                        cancel_sig.notified().await;
+                        let body = if mode == 0 {
+                            ResponseBody::Err(bsk_protocol::RpcError {
+                                code: ErrorCode::Cancelled,
+                                message: "aborted mid-upload".into(),
+                                data: Some(json!({ "tab_id": 31 })),
+                            })
+                        } else {
+                            ResponseBody::Err(bsk_protocol::RpcError {
+                                code: ErrorCode::Cancelled,
+                                message: "aborted before upload dispatch".into(),
+                                data: Some(json!({
+                                    "reason": RpcErrorReason::CancelledBeforeDispatch.as_str(),
+                                    "dispatched": false,
+                                    "effect_state": "none",
+                                    "phase": "precondition"
+                                })),
+                            })
+                        };
+                        send_ws_response(&writer_task, req.id, body).await;
+                    }
+                    Method::ToolDialogAccept => {
+                        let _ = dialog_tx.send(req);
+                    }
+                    Method::Cancel => {
+                        cancel_sig.notify_waiters();
+                        send_ws_response(
+                            &writer_task,
+                            req.id,
+                            ResponseBody::Ok(json!({ "cancelled": true })),
+                        )
+                        .await;
+                    }
+                    _ => {
+                        send_ws_response(&writer_task, req.id, ResponseBody::Ok(json!({}))).await;
+                    }
+                }
+            });
+        }
+    });
+
+    let mut admin = IpcClient::connect(&sock).await.unwrap();
+
+    // --- 1. Scope-bound `ToolWaitMs` holds a `SessionActivityGuard` lease across `session_idle` (120ms) ---
+    let (s_wait_val, _) = admin
+        .call_envelope::<Value, Value>(
+            "start-wait-lease",
+            Method::SessionStart,
+            Some(json!({})),
+            IpcRequestMeta {
+                caller_scope: Some("scope-wait-lease".into()),
+                bind_scope: true,
+                ..Default::default()
+            },
+            Duration::from_secs(5),
+        )
+        .await
+        .unwrap();
+    let s_wait = s_wait_val.unwrap()["session_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    let (wait_ok, _) = admin
+        .call_envelope::<Value, Value>(
+            "wait-across-idle",
+            Method::ToolWaitMs,
+            Some(json!({ "duration_ms": 350 })),
+            IpcRequestMeta {
+                caller_scope: Some("scope-wait-lease".into()),
+                ..Default::default()
+            },
+            Duration::from_secs(5),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        wait_ok.expect("scope-bound wait_ms must hold activity lease")["waited_ms"],
+        350
+    );
+    assert!(
+        handle
+            .state()
+            .sessions
+            .get(&bsk::daemon::sessions::SessionId(s_wait.clone()))
+            .is_some(),
+        "session must remain alive immediately after leased wait_ms"
+    );
+
+    // --- 2. `Outcome::FileTransfer` cancelled by `SessionWindowClosed` preserves `effect_state` + `tab_id`/`dispatched` ---
+    for (idx, expect_effect, expect_dispatched, expect_tab) in [
+        (0usize, "unknown", None, Some(31i64)),
+        (1usize, "none", Some(false), None),
+    ] {
+        let started: Value = admin
+            .call(
+                &format!("start-ft-{idx}"),
+                Method::SessionStart,
+                Some(json!({})),
+                Duration::from_secs(5),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        let s_ft = started["session_id"].as_str().unwrap().to_owned();
+        let begin: TransferBeginResult = admin
+            .call(
+                &format!("begin-ft-{idx}"),
+                Method::TransferBegin,
+                Some(TransferBeginParams {
+                    session_id: s_ft.clone(),
+                    name: "doc.txt".into(),
+                    byte_size: 4,
+                }),
+                Duration::from_secs(5),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        let _: TransferChunkResult = admin
+            .call(
+                &format!("chunk-ft-{idx}"),
+                Method::TransferChunk,
+                Some(TransferChunkParams {
+                    transfer_id: begin.transfer_id.clone(),
+                    offset: 0,
+                    data_base64: base64::engine::general_purpose::STANDARD.encode(b"test"),
+                }),
+                Duration::from_secs(5),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        let _: TransferReadyResult = admin
+            .call(
+                &format!("fin-ft-{idx}"),
+                Method::TransferFinish,
+                Some(TransferIdParams {
+                    transfer_id: begin.transfer_id.clone(),
+                }),
+                Duration::from_secs(5),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+
+        let up_sock = sock.clone();
+        let s_ft_up = s_ft.clone();
+        let tid = begin.transfer_id.clone();
+        let up_task = tokio::spawn(async move {
+            let mut c = IpcClient::connect(&up_sock).await.unwrap();
+            c.call::<Value, Value>(
+                &format!("up-ft-{idx}"),
+                Method::ToolUpload,
+                Some(json!({
+                    "session_id": s_ft_up,
+                    "ref": "@e1",
+                    "files": [{ "transfer_id": tid, "name": "doc.txt" }]
+                })),
+                Duration::from_secs(5),
+            )
+            .await
+            .unwrap()
+        });
+
+        let _ = tokio::time::timeout(Duration::from_secs(5), upload_ws_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        send_ws_event(
+            &writer,
+            EventFrame::SessionWindowClosed(SessionWindowClosedEvent {
+                session_id: s_ft.clone(),
+                reason: Some(SessionWindowClosedReason::UserClosedWindow),
+                return_failures: Vec::new(),
+            }),
+        )
+        .await;
+
+        let err = up_task.await.unwrap().unwrap_err();
+        assert_eq!(err.code, ErrorCode::NotFound);
+        let data = err.data.expect("error data present");
+        assert_eq!(
+            data["reason"],
+            RpcErrorReason::SessionWindowClosed.as_str(),
+            "terminal reason preserved: {data}"
+        );
+        assert_eq!(
+            data["effect_state"], expect_effect,
+            "file-transfer effect_state must NOT be dropped on session teardown: {data}"
+        );
+        if let Some(dispatched) = expect_dispatched {
+            assert_eq!(data["dispatched"], dispatched, "{data}");
+        }
+        if let Some(tab_id) = expect_tab {
+            assert_eq!(data["tab_id"], tab_id, "{data}");
+        }
+    }
+
+    // --- 3. `ToolDialogAccept` queued on `decision_lock` honors `UserAborted` & `SessionWindowClosed` ---
+    let s_dlg_val: Value = admin
+        .call(
+            "start-dlg-lock",
+            Method::SessionStart,
+            Some(json!({})),
+            Duration::from_secs(5),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    let s_dlg = s_dlg_val["session_id"].as_str().unwrap().to_owned();
+
+    let d1_sock = sock.clone();
+    let s_dlg_1 = s_dlg.clone();
+    let d1_task = tokio::spawn(async move {
+        let mut c = IpcClient::connect(&d1_sock).await.unwrap();
+        c.call_with_id::<Value, Value>(
+            "dlg-1-holder".into(),
+            Method::ToolDialogAccept,
+            Some(json!({ "session_id": s_dlg_1 })),
+            Duration::from_secs(5),
+        )
+        .await
+        .unwrap()
+    });
+    let d1_ws = tokio::time::timeout(Duration::from_secs(5), dialog_ws_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+
+    // Launch second `ToolDialogAccept`, which blocks on `dialog_operations.decision_lock(&s_dlg)`.
+    let d2_sock = sock.clone();
+    let s_dlg_2 = s_dlg.clone();
+    let d2_task = tokio::spawn(async move {
+        let mut c = IpcClient::connect(&d2_sock).await.unwrap();
+        c.call_with_id::<Value, Value>(
+            "dlg-2-waiter".into(),
+            Method::ToolDialogAccept,
+            Some(json!({ "session_id": s_dlg_2 })),
+            Duration::from_secs(5),
+        )
+        .await
+        .unwrap()
+    });
+    let reg_deadline = Instant::now() + Duration::from_secs(2);
+    while handle
+        .state()
+        .tool_inflight
+        .get(&"dlg-2-waiter".into())
+        .is_none()
+    {
+        assert!(
+            Instant::now() < reg_deadline,
+            "dlg-2-waiter never registered"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+
+    send_ws_event(
+        &writer,
+        EventFrame::SessionUserInterrupt(SessionUserInterruptEvent {
+            session_id: s_dlg.clone(),
+        }),
+    )
+    .await;
+
+    let d2_err = tokio::time::timeout(Duration::from_secs(2), d2_task)
+        .await
+        .expect("dlg-2-waiter woke on user_interrupt")
+        .unwrap()
+        .unwrap_err();
+    assert_eq!(
+        d2_err.code,
+        ErrorCode::UserAborted,
+        "decision_lock cancel must report UserAborted on user_interrupt: {d2_err:?}"
+    );
+    let d2_data = d2_err.data.unwrap();
+    assert_eq!(d2_data["dispatched"], false);
+    assert_eq!(d2_data["effect_state"], "none");
+
+    send_ws_response(
+        &writer,
+        d1_ws.id,
+        ResponseBody::Err(bsk_protocol::RpcError {
+            code: ErrorCode::UserAborted,
+            message: "interrupted".into(),
+            data: Some(json!({ "effect_state": "none", "dispatched": false })),
+        }),
+    )
+    .await;
+    let _ = d1_task.await.unwrap();
+
+    handle.shutdown().await;
 }

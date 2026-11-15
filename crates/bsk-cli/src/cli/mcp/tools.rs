@@ -1471,6 +1471,9 @@ async fn page(
         let value = link.rpc(&ctx, Method::ToolWaitMs, params, timeout).await?;
         return Ok(Reply::json(value));
     }
+    if let Some(ms) = args.timeout_ms {
+        orchestration::validate_positive_timeout_ms(u64::from(ms)).map_err(invalid)?;
+    }
     let session = args.session.as_deref().unwrap_or("");
     let meta = ["scope", "context", "observation"];
     let load = ("wait_until", json!("load"));
@@ -1731,7 +1734,12 @@ async fn inspect(
             if !overwrite && out.exists() {
                 return Err(download::output_exists(&out));
             }
-            let timeout_ms = args.timeout_ms.unwrap_or(120_000);
+            let timeout_ms = match args.timeout_ms {
+                Some(ms) => {
+                    orchestration::validate_positive_timeout_ms(u64::from(ms)).map_err(invalid)?
+                }
+                None => 120_000,
+            };
             let params = serde_json::to_value(ScreenshotFullPageParams {
                 scope: fp_scope,
                 session_id: session.to_owned(),
@@ -2872,6 +2880,9 @@ async fn tabs(
             protocol::<TabReturnParams>(arguments, session, &meta, &[])?,
         ),
         TabsAction::Borrow => {
+            if let Some(ms) = args.confirmation_timeout_ms {
+                orchestration::validate_positive_timeout_ms(u64::from(ms)).map_err(invalid)?;
+            }
             timeout =
                 Duration::from_millis(u64::from(args.confirmation_timeout_ms.unwrap_or(60_000)))
                     + Duration::from_secs(15)
@@ -3073,6 +3084,9 @@ async fn assist(
             ));
         }
         AssistAction::RequestHelp => {
+            if let Some(ms) = args.timeout_ms {
+                orchestration::validate_positive_timeout_ms(u64::from(ms)).map_err(invalid)?;
+            }
             let params = protocol::<RequestHelpParams>(
                 arguments,
                 session,

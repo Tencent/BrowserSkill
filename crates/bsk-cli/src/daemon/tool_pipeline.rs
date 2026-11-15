@@ -432,6 +432,9 @@ pub(super) async fn execute_tool_rpc(
                 .as_deref()
                 .and_then(|scope| state.scopes.active_binding(scope, &state.sessions))
                 .map(|(binding, _)| binding.session_id);
+            let _activity_lease = wait_sid
+                .as_ref()
+                .and_then(|sid| state.sessions.begin_activity(sid));
             let body = handle_wait_ms_with_session(
                 &state.abort_registry,
                 &state.tool_inflight,
@@ -869,42 +872,48 @@ async fn handle_tool_dispatch(
             });
         }
     };
-    let _dialog_decision_guard = if matches!(
-        method,
-        Method::ToolDialogAccept | Method::ToolDialogDismiss
-    ) {
-        let lock = state.dialog_operations.decision_lock(&session_id.0);
-        let cancel_token = inflight_guard.entry().cancel_token();
-        tokio::select! {
-            guard = lock.lock_owned() => Some(guard),
-            _ = cancel_token.cancelled() => {
-                return ResponseBody::Err(RpcError {
-                    code: ErrorCode::Cancelled,
-                    message: "dialog decision cancelled before dispatch".into(),
-                    data: Some(serde_json::json!({
-                        "reason": bsk_protocol::RpcErrorReason::CancelledBeforeDispatch.as_str(),
-                        "dispatched": false,
-                        "effect_state": "none",
-                        "phase": "precondition",
-                    })),
-                });
+    let _dialog_decision_guard =
+        if matches!(method, Method::ToolDialogAccept | Method::ToolDialogDismiss) {
+            let lock = state.dialog_operations.decision_lock(&session_id.0);
+            let cancel_token = inflight_guard.entry().cancel_token();
+            tokio::select! {
+                guard = lock.lock_owned() => Some(guard),
+                _ = cancel_token.cancelled() => {
+                    let mut err = inflight_guard
+                        .entry()
+                        .cancel_error("dialog decision cancelled before dispatch");
+                    let mut data = err
+                        .data
+                        .take()
+                        .filter(Value::is_object)
+                        .unwrap_or_else(|| serde_json::json!({}));
+                    if data.get("reason").is_none() {
+                        data["reason"] = serde_json::json!(
+                            bsk_protocol::RpcErrorReason::CancelledBeforeDispatch.as_str()
+                        );
+                    }
+                    data["dispatched"] = serde_json::json!(false);
+                    data["effect_state"] = serde_json::json!("none");
+                    data["phase"] = serde_json::json!("precondition");
+                    err.data = Some(data);
+                    return ResponseBody::Err(err);
+                }
+                _ = tokio::time::sleep(timeout) => {
+                    return ResponseBody::Err(RpcError {
+                        code: ErrorCode::Timeout,
+                        message: "timed out waiting for in-flight dialog decision".into(),
+                        data: Some(serde_json::json!({
+                            "reason": bsk_protocol::RpcErrorReason::SessionBusy.as_str(),
+                            "dispatched": false,
+                            "effect_state": "none",
+                            "phase": "precondition",
+                        })),
+                    });
+                }
             }
-            _ = tokio::time::sleep(timeout) => {
-                return ResponseBody::Err(RpcError {
-                    code: ErrorCode::Timeout,
-                    message: "timed out waiting for in-flight dialog decision".into(),
-                    data: Some(serde_json::json!({
-                        "reason": bsk_protocol::RpcErrorReason::SessionBusy.as_str(),
-                        "dispatched": false,
-                        "effect_state": "none",
-                        "phase": "precondition",
-                    })),
-                });
-            }
-        }
-    } else {
-        None
-    };
+        } else {
+            None
+        };
     let wal_mutating = super::intent_wal::IntentWal::is_wal_tracked(&method, &params);
     let wal_tab_id = wal_mutating
         .then(|| {
@@ -1240,21 +1249,26 @@ pub(super) async fn handle_wait_ms_with_session(
     let abort_tok = abort_guard.token().clone();
     let inflight_tok = inflight_guard.entry().cancel_token();
     let result = tokio::select! {
+        biased;
+        _ = inflight_tok.cancelled() => {
+            ResponseBody::Err(inflight_guard.entry().cancel_error("wait_ms cancelled"))
+        }
+        _ = abort_tok.cancelled() => {
+            if inflight_guard.entry().is_cancelled() {
+                ResponseBody::Err(inflight_guard.entry().cancel_error("wait_ms cancelled"))
+            } else {
+                ResponseBody::Err(RpcError {
+                    code: ErrorCode::Cancelled,
+                    message: "wait_ms cancelled".into(),
+                    data: None,
+                })
+            }
+        }
         _ = tokio::time::sleep(Duration::from_millis(params.duration_ms)) => {
             ResponseBody::Ok(
                 serde_json::to_value(WaitMsResult { waited_ms: params.duration_ms })
                     .unwrap_or(Value::Null),
             )
-        }
-        _ = inflight_tok.cancelled() => {
-            ResponseBody::Err(inflight_guard.entry().cancel_error("wait_ms cancelled"))
-        }
-        _ = abort_tok.cancelled() => {
-            ResponseBody::Err(RpcError {
-                code: ErrorCode::Cancelled,
-                message: "wait_ms cancelled".into(),
-                data: None,
-            })
         }
     };
     drop(inflight_guard);

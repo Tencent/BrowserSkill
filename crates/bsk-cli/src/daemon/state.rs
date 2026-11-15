@@ -77,7 +77,11 @@ impl DaemonState {
     /// `session_interrupts`, `transfers`, `run_logs`, `scopes`, and
     /// `intent_wal`) and returns `true` when `session_id` was live in
     /// [`SessionRegistry`] at teardown time.
-    pub fn teardown_session(&self, session_id: &SessionId, reason: &'static str) -> bool {
+    fn teardown_session_in_memory(
+        &self,
+        session_id: &SessionId,
+        reason: &'static str,
+    ) -> (bool, Vec<std::path::PathBuf>, u64) {
         let (cancel_reason, include_dialog_retained) =
             if reason == bsk_protocol::RpcErrorReason::UserMovedTab.as_str() {
                 (CancelReason::UserMovedTab, true)
@@ -116,10 +120,27 @@ impl DaemonState {
         self.tool_queues.remove(session_id);
         self.dialog_operations.remove_session(&session_id.0);
         self.session_interrupts.drop_session(session_id);
-        self.transfers.release_session(&session_id.0);
+        let transfer_dirs = self.transfers.drain_session_dirs(&session_id.0);
         self.run_logs.remove_session(&session_id.0);
         self.scopes.on_session_ended(session_id, reason);
-        self.intent_wal.on_session_ended(session_id);
+        let wal_seq = self.intent_wal.record_session_ended(session_id);
+        (removed, transfer_dirs, wal_seq)
+    }
+
+    pub fn teardown_session(&self, session_id: &SessionId, reason: &'static str) -> bool {
+        let (removed, transfer_dirs, wal_seq) = self.teardown_session_in_memory(session_id, reason);
+        if !transfer_dirs.is_empty() || wal_seq > 0 {
+            let wal = self.intent_wal.clone();
+            let cleanup = move || {
+                TransferRegistry::remove_dirs(transfer_dirs);
+                wal.flush_up_to(wal_seq);
+            };
+            if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                drop(handle.spawn_blocking(cleanup));
+            } else {
+                cleanup();
+            }
+        }
         removed
     }
 
@@ -145,7 +166,15 @@ impl DaemonState {
         if graceful_audit {
             self.sessions.mark_graceful_audit_end(session_id);
         }
-        self.teardown_session(session_id, reason);
+        let (_, transfer_dirs, wal_seq) = self.teardown_session_in_memory(session_id, reason);
+        if !transfer_dirs.is_empty() || wal_seq > 0 {
+            let wal = self.intent_wal.clone();
+            let _ = tokio::task::spawn_blocking(move || {
+                TransferRegistry::remove_dirs(transfer_dirs);
+                wal.flush_up_to(wal_seq);
+            })
+            .await;
+        }
         Ok(result)
     }
 

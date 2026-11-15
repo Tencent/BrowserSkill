@@ -527,18 +527,32 @@ impl TransferRegistry {
         TransferReleaseResult { released: true }
     }
 
-    pub fn release_session(&self, session_id: &str) {
-        let ids: Vec<String> = self
-            .entries
-            .lock()
-            .unwrap()
-            .iter()
-            .filter(|(_, entry)| !entry.released && entry.session_id == session_id)
-            .map(|(id, _)| id.clone())
-            .collect();
-        for id in ids {
-            self.release(TransferIdParams { transfer_id: id });
+    pub fn drain_session_dirs(&self, session_id: &str) -> Vec<PathBuf> {
+        let mut entries = self.entries.lock().unwrap();
+        let mut dirs = Vec::new();
+        entries.retain(|_, entry| {
+            if entry.session_id != session_id {
+                return true;
+            }
+            if entry.busy || entry.readers > 0 {
+                entry.released = true;
+                true
+            } else {
+                dirs.push(entry.dir.clone());
+                false
+            }
+        });
+        dirs
+    }
+
+    pub fn remove_dirs(dirs: Vec<PathBuf>) {
+        for dir in dirs {
+            let _ = fs::remove_dir_all(dir);
         }
+    }
+
+    pub fn release_session(&self, session_id: &str) {
+        Self::remove_dirs(self.drain_session_dirs(session_id));
     }
 }
 

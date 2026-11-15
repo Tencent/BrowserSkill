@@ -904,20 +904,34 @@ async fn forward_one(
                             job.inflight.as_deref(),
                             "tool dispatch cancelled after extension cleanup",
                         );
-                        if cancelled.data.is_none() {
-                            if transfer_effect(err) == Some("none") {
-                                cancelled.data = err.data.clone();
-                            } else {
-                                let mut data = err
-                                    .data
-                                    .clone()
-                                    .filter(Value::is_object)
-                                    .unwrap_or_else(|| serde_json::json!({}));
-                                data["reason"] = serde_json::json!("transfer_outcome_unknown");
-                                data["effect_state"] = serde_json::json!("unknown");
-                                cancelled.data = Some(data);
+                        let terminal_reason = cancelled
+                            .data
+                            .as_ref()
+                            .and_then(|d| d.get("reason"))
+                            .and_then(Value::as_str)
+                            .map(str::to_owned);
+                        let mut data = if transfer_effect(err) == Some("none") {
+                            err.data
+                                .clone()
+                                .filter(Value::is_object)
+                                .unwrap_or_else(|| serde_json::json!({ "effect_state": "none" }))
+                        } else {
+                            let mut data = err
+                                .data
+                                .clone()
+                                .filter(Value::is_object)
+                                .unwrap_or_else(|| serde_json::json!({}));
+                            data["reason"] = serde_json::json!("transfer_outcome_unknown");
+                            data["effect_state"] = serde_json::json!("unknown");
+                            if data.get("phase").is_none() {
+                                data["phase"] = serde_json::json!("execution");
                             }
+                            data
+                        };
+                        if let Some(reason) = terminal_reason {
+                            data["reason"] = serde_json::json!(reason);
                         }
+                        cancelled.data = Some(data);
                         return Err(cancelled);
                     }
                 }

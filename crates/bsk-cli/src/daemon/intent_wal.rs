@@ -41,6 +41,8 @@ use super::sessions::SessionId;
 const MAX_LEDGER_BYTES: u64 = 512 * 1024;
 /// Maximum number of recent ledger entries retained in memory and across compaction.
 const RECENT_ENTRY_CAP: usize = 64;
+/// Maximum number of ended session tombstones retained for in-flight WAL settlement.
+const ENDED_SESSION_CAP: usize = 256;
 /// Maximum characters retained in a selector or locator summary.
 const MAX_LOCATOR_CHARS: usize = 120;
 
@@ -56,13 +58,17 @@ enum WalDiskOp {
 struct WalState {
     has_disk: bool,
     approx_bytes: u64,
-    pending_ops: VecDeque<WalDiskOp>,
+    next_seq: u64,
+    flushed_seq: u64,
+    pending_ops: VecDeque<(u64, WalDiskOp)>,
     /// In-flight `DISPATCHED` entries keyed by `operation_id`.
     dispatched: HashMap<String, LedgerEntry>,
     /// Unreconciled `UNKNOWN` entries indexed by `(SessionId, Option<i64>)`.
     unknown: HashMap<(SessionId, Option<i64>), Vec<LedgerEntry>>,
     /// Bounded ring of the most recent ledger snapshots (one per `operation_id`).
     recent: VecDeque<LedgerEntry>,
+    /// Bounded ring of torn-down `session_id`s so late in-flight settlements do not freeze dead sessions.
+    ended_sessions: VecDeque<String>,
 }
 
 #[derive(Debug, Default)]
@@ -111,11 +117,12 @@ impl IntentWal {
             ..WalDisk::default()
         };
         load_from_disk(&mut state, &mut disk);
+        let init_seq = state.next_seq;
         let wal = Self {
             state: Arc::new(Mutex::new(state)),
             disk: Arc::new(Mutex::new(disk)),
         };
-        wal.flush_pending();
+        wal.flush_up_to(init_seq);
         wal
     }
 
@@ -268,7 +275,7 @@ impl IntentWal {
         operation_id: Option<&str>,
         method: &Method,
         params: &Value,
-    ) -> IntentTicket {
+    ) -> (IntentTicket, u64) {
         let op_id = operation_id
             .map(str::trim)
             .filter(|s| !s.is_empty())
@@ -286,17 +293,20 @@ impl IntentWal {
             updated_at: now,
             reconciled_by: None,
         };
-        {
+        let seq = {
             let mut guard = self.state.lock().expect("intent_wal state poisoned");
             guard.upsert_recent(entry.clone());
             guard.dispatched.insert(op_id.clone(), entry.clone());
-            guard.enqueue_entry(&entry);
-        }
-        IntentTicket {
-            wal: self.clone(),
-            operation_id: op_id,
-            finished: false,
-        }
+            guard.enqueue_entry(&entry)
+        };
+        (
+            IntentTicket {
+                wal: self.clone(),
+                operation_id: op_id,
+                finished: false,
+            },
+            seq,
+        )
     }
 
     /// Record `DISPATCHED` immediately before forwarding a mutating RPC to the extension.
@@ -308,8 +318,9 @@ impl IntentWal {
         method: &Method,
         params: &Value,
     ) -> IntentTicket {
-        let ticket = self.record_begin(session_id, effective_tab_id, operation_id, method, params);
-        self.flush_pending();
+        let (ticket, seq) =
+            self.record_begin(session_id, effective_tab_id, operation_id, method, params);
+        self.flush_up_to(seq);
         ticket
     }
 
@@ -323,8 +334,9 @@ impl IntentWal {
         method: &Method,
         params: &Value,
     ) -> IntentTicket {
-        let ticket = self.record_begin(session_id, effective_tab_id, operation_id, method, params);
-        self.flush_pending_async().await;
+        let (ticket, seq) =
+            self.record_begin(session_id, effective_tab_id, operation_id, method, params);
+        self.flush_up_to_async(seq).await;
         ticket
     }
 
@@ -333,7 +345,7 @@ impl IntentWal {
         mut ticket: IntentTicket,
         method: &Method,
         outcome: &Result<Value, DispatchError>,
-    ) -> IntentState {
+    ) -> (IntentState, u64) {
         ticket.finished = true;
         let next_state = classify_dispatch_outcome(method, outcome);
         let resolved_tab_id = match outcome {
@@ -351,20 +363,25 @@ impl IntentWal {
 
         let mut guard = self.state.lock().expect("intent_wal state poisoned");
         let Some(mut entry) = guard.dispatched.remove(&ticket.operation_id) else {
-            return next_state;
+            return (next_state, 0);
         };
         if let Some(tab_id) = resolved_tab_id {
             entry.tab_id = Some(tab_id);
         }
-        entry.state = next_state;
+        if next_state == IntentState::Unknown && guard.is_session_ended(&entry.session_id) {
+            entry.state = IntentState::Reconciled;
+            entry.reconciled_by = Some("session_ended".to_owned());
+        } else {
+            entry.state = next_state;
+        }
         entry.updated_at = now_rfc3339();
         guard.upsert_recent(entry.clone());
-        if next_state == IntentState::Unknown {
+        if entry.state == IntentState::Unknown {
             let key = (SessionId(entry.session_id.clone()), entry.tab_id);
             guard.unknown.entry(key).or_default().push(entry.clone());
         }
-        guard.enqueue_entry(&entry);
-        next_state
+        let seq = guard.enqueue_entry(&entry);
+        (entry.state, seq)
     }
 
     /// Finalise an `IntentTicket` into either `SETTLED` or `UNKNOWN` based on
@@ -375,8 +392,8 @@ impl IntentWal {
         method: &Method,
         outcome: &Result<Value, DispatchError>,
     ) -> IntentState {
-        let next_state = self.record_finish(ticket, method, outcome);
-        self.flush_pending();
+        let (next_state, seq) = self.record_finish(ticket, method, outcome);
+        self.flush_up_to(seq);
         next_state
     }
 
@@ -388,31 +405,37 @@ impl IntentWal {
         method: &Method,
         outcome: &Result<Value, DispatchError>,
     ) -> IntentState {
-        let next_state = self.record_finish(ticket, method, outcome);
-        self.flush_pending_async().await;
+        let (next_state, seq) = self.record_finish(ticket, method, outcome);
+        self.flush_up_to_async(seq).await;
         next_state
     }
 
     fn mark_abandoned(&self, operation_id: &str) {
-        let recorded = {
+        let seq = {
             let mut guard = self.state.lock().expect("intent_wal state poisoned");
             let Some(mut entry) = guard.dispatched.remove(operation_id) else {
                 return;
             };
-            entry.state = IntentState::Unknown;
+            if guard.is_session_ended(&entry.session_id) {
+                entry.state = IntentState::Reconciled;
+                entry.reconciled_by = Some("session_ended".to_owned());
+            } else {
+                entry.state = IntentState::Unknown;
+            }
             entry.updated_at = now_rfc3339();
             guard.upsert_recent(entry.clone());
-            let key = (SessionId(entry.session_id.clone()), entry.tab_id);
-            guard.unknown.entry(key).or_default().push(entry.clone());
-            guard.enqueue_entry(&entry);
-            guard.has_disk
+            if entry.state == IntentState::Unknown {
+                let key = (SessionId(entry.session_id.clone()), entry.tab_id);
+                guard.unknown.entry(key).or_default().push(entry.clone());
+            }
+            guard.enqueue_entry(&entry)
         };
-        if recorded {
+        if seq > 0 {
             if let Ok(handle) = tokio::runtime::Handle::try_current() {
                 let wal = self.clone();
-                drop(handle.spawn_blocking(move || wal.flush_pending()));
+                drop(handle.spawn_blocking(move || wal.flush_up_to(seq)));
             } else {
-                self.flush_pending();
+                self.flush_up_to(seq);
             }
         }
     }
@@ -422,7 +445,7 @@ impl IntentWal {
         session_id: &SessionId,
         synced_tab_id: Option<i64>,
         reconciled_by: &str,
-    ) -> usize {
+    ) -> (usize, u64) {
         let mut guard = self.state.lock().expect("intent_wal state poisoned");
         let matching_keys: Vec<(SessionId, Option<i64>)> = guard
             .unknown
@@ -434,10 +457,11 @@ impl IntentWal {
             .cloned()
             .collect();
         if matching_keys.is_empty() {
-            return 0;
+            return (0, 0);
         }
         let now = now_rfc3339();
         let mut count = 0;
+        let mut seq = 0;
         for key in matching_keys {
             if let Some(entries) = guard.unknown.remove(&key) {
                 for mut entry in entries {
@@ -445,12 +469,12 @@ impl IntentWal {
                     entry.updated_at = now.clone();
                     entry.reconciled_by = Some(reconciled_by.to_owned());
                     guard.upsert_recent(entry.clone());
-                    guard.enqueue_entry(&entry);
+                    seq = guard.enqueue_entry(&entry);
                     count += 1;
                 }
             }
         }
-        count
+        (count, seq)
     }
 
     /// Zero-ceremony auto-reconciliation triggered when `bsk sync` succeeds on `tab_id`.
@@ -462,10 +486,8 @@ impl IntentWal {
         synced_tab_id: Option<i64>,
         reconciled_by: &str,
     ) -> usize {
-        let count = self.record_reconcile_tab(session_id, synced_tab_id, reconciled_by);
-        if count > 0 {
-            self.flush_pending();
-        }
+        let (count, seq) = self.record_reconcile_tab(session_id, synced_tab_id, reconciled_by);
+        self.flush_up_to(seq);
         count
     }
 
@@ -475,10 +497,8 @@ impl IntentWal {
         synced_tab_id: Option<i64>,
         reconciled_by: &str,
     ) -> usize {
-        let count = self.record_reconcile_tab(session_id, synced_tab_id, reconciled_by);
-        if count > 0 {
-            self.flush_pending_async().await;
-        }
+        let (count, seq) = self.record_reconcile_tab(session_id, synced_tab_id, reconciled_by);
+        self.flush_up_to_async(seq).await;
         count
     }
 
@@ -487,11 +507,12 @@ impl IntentWal {
         session_id: &SessionId,
         tab_id: Option<i64>,
         operation_id: Option<&str>,
-    ) -> LedgerResolveReply {
+    ) -> (LedgerResolveReply, u64) {
         let mut guard = self.state.lock().expect("intent_wal state poisoned");
         let op_filter = operation_id.map(str::trim).filter(|s| !s.is_empty());
         let now = now_rfc3339();
         let mut resolved = Vec::new();
+        let mut seq = 0;
 
         let candidate_keys: Vec<(SessionId, Option<i64>)> = guard
             .unknown
@@ -513,7 +534,7 @@ impl IntentWal {
                     entry.updated_at = now.clone();
                     entry.reconciled_by = Some("ledger_resolve".to_owned());
                     guard.upsert_recent(entry.clone());
-                    guard.enqueue_entry(&entry);
+                    seq = guard.enqueue_entry(&entry);
                     resolved.push(entry);
                 } else {
                     remaining.push(entry);
@@ -524,11 +545,14 @@ impl IntentWal {
             }
         }
 
-        LedgerResolveReply {
-            session_id: Some(session_id.0.clone()),
-            resolved_count: resolved.len(),
-            resolved,
-        }
+        (
+            LedgerResolveReply {
+                session_id: Some(session_id.0.clone()),
+                resolved_count: resolved.len(),
+                resolved,
+            },
+            seq,
+        )
     }
 
     /// Explicit manual resolution (`bsk ledger resolve`).
@@ -538,10 +562,8 @@ impl IntentWal {
         tab_id: Option<i64>,
         operation_id: Option<&str>,
     ) -> LedgerResolveReply {
-        let reply = self.record_resolve(session_id, tab_id, operation_id);
-        if reply.resolved_count > 0 {
-            self.flush_pending();
-        }
+        let (reply, seq) = self.record_resolve(session_id, tab_id, operation_id);
+        self.flush_up_to(seq);
         reply
     }
 
@@ -551,10 +573,8 @@ impl IntentWal {
         tab_id: Option<i64>,
         operation_id: Option<&str>,
     ) -> LedgerResolveReply {
-        let reply = self.record_resolve(session_id, tab_id, operation_id);
-        if reply.resolved_count > 0 {
-            self.flush_pending_async().await;
-        }
+        let (reply, seq) = self.record_resolve(session_id, tab_id, operation_id);
+        self.flush_up_to_async(seq).await;
         reply
     }
 
@@ -609,53 +629,114 @@ impl IntentWal {
         }
     }
 
-    /// Clear in-memory `UNKNOWN` freeze entries when a session ends so closed
-    /// sessions do not accumulate unbounded state in memory.
-    pub fn on_session_ended(&self, session_id: &SessionId) {
+    /// Record session teardown in memory and enqueue `RECONCILED` (`session_ended`)
+    /// records for any pending `UNKNOWN` entries on `session_id`, leaving active
+    /// `DISPATCHED` tickets intact so their imminent settlement records accurate
+    /// `SETTLED` or `RECONCILED` state in `recent` and on disk.
+    pub(super) fn record_session_ended(&self, session_id: &SessionId) -> u64 {
         let mut guard = self.state.lock().expect("intent_wal state poisoned");
-        guard.unknown.retain(|(sid, _), _| sid != session_id);
-        guard
-            .dispatched
-            .retain(|_, entry| entry.session_id != session_id.0);
+        guard.mark_session_ended(&session_id.0);
+        let matching_keys: Vec<(SessionId, Option<i64>)> = guard
+            .unknown
+            .keys()
+            .filter(|(sid, _)| sid == session_id)
+            .cloned()
+            .collect();
+        if matching_keys.is_empty() {
+            return 0;
+        }
+        let now = now_rfc3339();
+        let mut seq = 0;
+        for key in matching_keys {
+            if let Some(entries) = guard.unknown.remove(&key) {
+                for mut entry in entries {
+                    entry.state = IntentState::Reconciled;
+                    entry.updated_at = now.clone();
+                    entry.reconciled_by = Some("session_ended".to_owned());
+                    guard.upsert_recent(entry.clone());
+                    seq = guard.enqueue_entry(&entry);
+                }
+            }
+        }
+        seq
     }
 
-    fn flush_pending(&self) {
-        let needs_flush = {
-            let guard = self.state.lock().expect("intent_wal state poisoned");
-            guard.has_disk && !guard.pending_ops.is_empty()
-        };
-        if !needs_flush {
-            return;
-        }
-        let mut disk = self.disk.lock().expect("intent_wal disk poisoned");
-        loop {
-            let ops: VecDeque<WalDiskOp> = {
-                let mut guard = self.state.lock().expect("intent_wal state poisoned");
-                if guard.pending_ops.is_empty() {
-                    break;
-                }
-                std::mem::take(&mut guard.pending_ops)
-            };
-            for op in ops {
-                disk.apply(op);
+    /// Clear in-memory `UNKNOWN` freeze entries when a session ends so closed
+    /// sessions do not accumulate unbounded state in memory or resurrect on restart.
+    pub fn on_session_ended(&self, session_id: &SessionId) {
+        let seq = self.record_session_ended(session_id);
+        if seq > 0 {
+            if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                let wal = self.clone();
+                drop(handle.spawn_blocking(move || wal.flush_up_to(seq)));
+            } else {
+                self.flush_up_to(seq);
             }
         }
     }
 
-    async fn flush_pending_async(&self) {
+    pub(super) fn flush_up_to(&self, target_seq: u64) {
+        if target_seq == 0 {
+            return;
+        }
+        {
+            let guard = self.state.lock().expect("intent_wal state poisoned");
+            if !guard.has_disk || guard.flushed_seq >= target_seq {
+                return;
+            }
+        }
+        let mut disk = self.disk.lock().expect("intent_wal disk poisoned");
+        loop {
+            let batch: Vec<(u64, WalDiskOp)> = {
+                let mut guard = self.state.lock().expect("intent_wal state poisoned");
+                if guard.flushed_seq >= target_seq || guard.pending_ops.is_empty() {
+                    break;
+                }
+                std::mem::take(&mut guard.pending_ops).into()
+            };
+            let mut max_seq = 0u64;
+            for (seq, op) in batch {
+                disk.apply(op);
+                max_seq = max_seq.max(seq);
+            }
+            if max_seq > 0 {
+                let mut guard = self.state.lock().expect("intent_wal state poisoned");
+                guard.flushed_seq = guard.flushed_seq.max(max_seq);
+            }
+        }
+    }
+
+    pub(super) async fn flush_up_to_async(&self, target_seq: u64) {
+        if target_seq == 0 {
+            return;
+        }
         let needs_flush = {
             let guard = self.state.lock().expect("intent_wal state poisoned");
-            guard.has_disk && !guard.pending_ops.is_empty()
+            guard.has_disk && guard.flushed_seq < target_seq
         };
         if !needs_flush {
             return;
         }
         let wal = self.clone();
-        let _ = tokio::task::spawn_blocking(move || wal.flush_pending()).await;
+        let _ = tokio::task::spawn_blocking(move || wal.flush_up_to(target_seq)).await;
     }
 }
 
 impl WalState {
+    fn mark_session_ended(&mut self, session_id: &str) {
+        if let Some(pos) = self.ended_sessions.iter().position(|s| s == session_id) {
+            self.ended_sessions.remove(pos);
+        }
+        self.ended_sessions.push_back(session_id.to_owned());
+        while self.ended_sessions.len() > ENDED_SESSION_CAP {
+            self.ended_sessions.pop_front();
+        }
+    }
+
+    fn is_session_ended(&self, session_id: &str) -> bool {
+        self.ended_sessions.iter().any(|s| s == session_id)
+    }
+
     fn find_blocking_unknown(
         &self,
         session_id: &SessionId,
@@ -701,23 +782,27 @@ impl WalState {
         }
     }
 
-    fn enqueue_entry(&mut self, entry: &LedgerEntry) {
+    fn enqueue_entry(&mut self, entry: &LedgerEntry) -> u64 {
         if !self.has_disk {
-            return;
+            return 0;
         }
         let Ok(mut line) = serde_json::to_vec(entry) else {
-            return;
+            return 0;
         };
         line.push(b'\n');
+        self.next_seq = self.next_seq.saturating_add(1);
+        let seq = self.next_seq;
         if self.approx_bytes.saturating_add(line.len() as u64) > MAX_LEDGER_BYTES {
             let snapshot = self.serialize_compacted_snapshot();
             self.approx_bytes = snapshot.len() as u64;
             self.pending_ops.clear();
-            self.pending_ops.push_back(WalDiskOp::Compact(snapshot));
+            self.pending_ops
+                .push_back((seq, WalDiskOp::Compact(snapshot)));
         } else {
             self.approx_bytes = self.approx_bytes.saturating_add(line.len() as u64);
-            self.pending_ops.push_back(WalDiskOp::Append(line));
+            self.pending_ops.push_back((seq, WalDiskOp::Append(line)));
         }
+        seq
     }
 
     fn serialize_compacted_snapshot(&self) -> Vec<u8> {
@@ -904,6 +989,7 @@ fn write_private_atomic(tmp_path: &Path, dst_path: &Path, bytes: &[u8]) -> std::
             let _ = file.set_permissions(fs::Permissions::from_mode(0o600));
         }
         file.write_all(bytes)?;
+        file.sync_data()?;
     }
     fs::rename(tmp_path, dst_path)
 }
@@ -1645,6 +1731,117 @@ mod tests {
                     driver.abort();
                 });
             },
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn begin_dispatch_async_waits_for_concurrent_drained_batch_write_and_session_end_persists_reconciliation()
+     {
+        let tmp = TempDir::new().unwrap();
+        let ledger_path = tmp.path().join("intent_ledger.jsonl");
+        let wal = IntentWal::new(Some(ledger_path.clone()));
+        let s_a = sid("sess-wal-a");
+        let s_b = sid("sess-wal-b");
+
+        // Simulate Session A holding `disk` mid-write AFTER draining Session B's queued op
+        // (`pending_ops` is empty, while `flushed_seq < target_seq`).
+        let (ticket_b, seq_b) = wal.record_begin(
+            &s_b,
+            Some(9),
+            Some("op-b-race"),
+            &Method::ToolClick,
+            &json!({ "ref": "@e9" }),
+        );
+        let drained: Vec<(u64, WalDiskOp)> = {
+            let mut guard = wal.state.lock().unwrap();
+            std::mem::take(&mut guard.pending_ops).into()
+        };
+        assert_eq!(drained.len(), 1);
+
+        let (locked_tx, locked_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let wal_writer = wal.clone();
+        let writer_thread = std::thread::spawn(move || {
+            let mut disk_guard = wal_writer.disk.lock().unwrap();
+            locked_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+            for (seq, op) in drained {
+                disk_guard.apply(op);
+                let mut st = wal_writer.state.lock().unwrap();
+                st.flushed_seq = st.flushed_seq.max(seq);
+            }
+        });
+        locked_rx.recv().unwrap();
+
+        let wal_waiter = wal.clone();
+        let mut flush_task = tokio::spawn(async move {
+            wal_waiter.flush_up_to_async(seq_b).await;
+        });
+
+        // Must NOT return early just because `pending_ops` is empty!
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(15), &mut flush_task)
+                .await
+                .is_err(),
+            "flush_up_to_async returned before drained WAL batch hit disk!"
+        );
+
+        // Now complete Session A's disk write + `flushed_seq` commit and release `disk`.
+        release_tx.send(()).unwrap();
+        writer_thread.join().unwrap();
+
+        tokio::time::timeout(std::time::Duration::from_secs(2), flush_task)
+            .await
+            .expect("flush_up_to_async completes once drained batch commits")
+            .unwrap();
+        let on_disk_before_finish = fs::read_to_string(&ledger_path).unwrap();
+        assert!(on_disk_before_finish.contains("op-b-race"));
+
+        // Exercise `on_session_ended` while `ticket_b` is in-flight (`Dispatched`) and `s_a` has `Unknown`.
+        let ticket_a = wal
+            .begin_dispatch_async(
+                &s_a,
+                Some(4),
+                Some("op-a-unk"),
+                &Method::ToolClick,
+                &json!({ "ref": "@e4" }),
+            )
+            .await;
+        assert_eq!(
+            wal.finish_dispatch_async(ticket_a, &Method::ToolClick, &Err(DispatchError::Timeout))
+                .await,
+            IntentState::Unknown
+        );
+        let seq_end_a = wal.record_session_ended(&s_a);
+        wal.flush_up_to_async(seq_end_a).await;
+        let seq_end_b = wal.record_session_ended(&s_b);
+        wal.flush_up_to_async(seq_end_b).await;
+
+        // `ticket_b` finishes with Timeout AFTER `s_b` ended -> transitions directly to `Reconciled("session_ended")`.
+        assert_eq!(
+            wal.finish_dispatch_async(ticket_b, &Method::ToolClick, &Err(DispatchError::Timeout))
+                .await,
+            IntentState::Reconciled
+        );
+
+        let live_status = wal.status(None);
+        assert!(!live_status.frozen);
+        assert!(
+            live_status
+                .recent
+                .iter()
+                .all(|e| e.state == IntentState::Reconciled
+                    && e.reconciled_by.as_deref() == Some("session_ended")),
+            "unexpected recent entries: {:?}",
+            live_status.recent
+        );
+
+        // Daemon restart on the same `intent_ledger.jsonl` must NOT resurrect ended sessions as frozen!
+        let restarted = IntentWal::new(Some(ledger_path));
+        let restarted_status = restarted.status(None);
+        assert!(
+            !restarted_status.frozen,
+            "ended sessions resurrected as frozen on restart: {restarted_status:?}"
         );
     }
 }

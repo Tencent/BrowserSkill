@@ -580,7 +580,15 @@ async fn handle_inbound_text(state: &Arc<DaemonState>, client: &Arc<BrowserClien
                 handle_session_ended(state, &client.id, &ended);
             }
             EventFrame::SessionUserInterrupt(interrupt) => {
-                handle_session_user_interrupt(state, &client.id, &interrupt);
+                if let Some(sid) = apply_session_user_interrupt(state, &client.id, &interrupt)
+                    && state.audit.needs_marker(&sid)
+                {
+                    let state = Arc::clone(state);
+                    let _ = tokio::task::spawn_blocking(move || {
+                        state.audit.marker(&sid, "user_interrupt");
+                    })
+                    .await;
+                }
             }
             other @ (EventFrame::BrowserConnected(_) | EventFrame::BrowserDisconnected(_)) => {
                 debug!(event = ?other.kind(), "event received (no handler yet)");
@@ -739,14 +747,14 @@ fn handle_session_ended(state: &Arc<DaemonState>, sender: &BrowserId, ended: &Se
 /// forwarded over WS we additionally push a per-RPC cancel frame so
 /// the extension's dispatcher can abort its `AbortController` —
 /// this is the same shape `handle_cancel` uses, just iterated.
-fn handle_session_user_interrupt(
+fn apply_session_user_interrupt(
     state: &Arc<DaemonState>,
     sender: &BrowserId,
     interrupt: &SessionUserInterruptEvent,
-) {
+) -> Option<String> {
     if interrupt.session_id.is_empty() {
         warn!("session.user_interrupt event missing session_id");
-        return;
+        return None;
     }
     let sid = super::sessions::SessionId(interrupt.session_id.clone());
     // Same ownership guard as window_closed: a browser must not be able
@@ -761,7 +769,7 @@ fn handle_session_user_interrupt(
             owner = %session.browser_id,
             "ignoring session.user_interrupt from a browser that does not own this session"
         );
-        return;
+        return None;
     }
     let snapshots = state.tool_inflight.cancel_session(&sid);
     info!(session = %sid, count = snapshots.len(), "user-interrupt: cancelled inflight tools");
@@ -780,8 +788,19 @@ fn handle_session_user_interrupt(
         }
     }
 
-    state.audit.marker(&sid.0, "user_interrupt");
     state.session_interrupts.mark(&sid);
+    Some(sid.0)
+}
+
+#[cfg(test)]
+fn handle_session_user_interrupt(
+    state: &Arc<DaemonState>,
+    sender: &BrowserId,
+    interrupt: &SessionUserInterruptEvent,
+) {
+    if let Some(sid) = apply_session_user_interrupt(state, sender, interrupt) {
+        state.audit.marker(&sid, "user_interrupt");
+    }
 }
 
 #[cfg(test)]
