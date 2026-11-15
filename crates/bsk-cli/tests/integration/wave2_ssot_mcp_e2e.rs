@@ -234,6 +234,8 @@ async fn handshake_ws(
         id: "hs-e2e".into(),
         method: Method::SystemHandshake,
         params: Some(serde_json::to_value(params).unwrap()),
+        audit_id: None,
+        operation_id: None,
     };
     ws.send(Message::Text(serde_json::to_string(&req).unwrap()))
         .await
@@ -296,6 +298,10 @@ fn spawn_mock_extension(
             };
             let req_id = req.id.clone();
             let params = req.params.clone().unwrap_or(Value::Null);
+            assert!(
+                params.get("_audit_id").is_none() && params.get("_operation_id").is_none(),
+                "WS RequestFrame.params must never contain _audit_id/_operation_id: {req:?}"
+            );
             let mut reply_now: Option<ResponseBody> = None;
 
             {
@@ -339,7 +345,8 @@ fn spawn_mock_extension(
                         let seq = st.sync_seq;
                         let ctx_id = format!("{seq:08}-1111-4111-8111-111111111111");
                         let obs_id = format!("{seq:08}-aaaa-4aaa-8aaa-aaaaaaaaaaaa");
-                        reply_now = Some(ResponseBody::Ok(json!({
+                        let payload = json!({
+                            "kind": "baseline",
                             "tab_id": tab_id,
                             "control_policy": "target",
                             "context_id": ctx_id,
@@ -347,14 +354,18 @@ fn spawn_mock_extension(
                             "observation": {
                                 "observation_id": obs_id,
                                 "tab_id": tab_id,
-                                "url": format!("https://example.com/tab/{tab_id}"),
-                                "title": format!("Page {tab_id}"),
                                 "text": "@e1 button \"Save\"\n@e2 file \"Upload\"\n@e5 link \"Download\"",
                                 "ref_count": 3,
                                 "truncated": false,
                             },
-                            "state": { "mode": "ready", "revision": seq },
-                        })));
+                            "activity": [],
+                            "history_complete": false,
+                            "state": { "mode": "ready", "revision": seq, "editing": false },
+                        });
+                        let _: bsk_protocol::tools::CooperateResult =
+                            serde_json::from_value(payload.clone())
+                                .expect("mock ToolCooperate payload must match CooperateResult");
+                        reply_now = Some(ResponseBody::Ok(payload));
                     }
                     Method::ToolWaitForElement => {
                         let sid = params["session_id"].as_str().unwrap_or("");
@@ -375,21 +386,23 @@ fn spawn_mock_extension(
                         })));
                     }
                     Method::ToolUpload => {
-                        let sid = params["session_id"].as_str().unwrap_or("");
-                        let tab_id = *st.session_tabs.get(sid).unwrap_or(&7);
-                        let names: Vec<Value> = params["files"]
-                            .as_array()
-                            .map(|arr| arr.iter().map(|f| f["name"].clone()).collect())
-                            .unwrap_or_default();
+                        let parsed: bsk_protocol::tools::UploadParams =
+                            serde_json::from_value(params.clone())
+                                .expect("strict UploadParams on WS");
+                        let tab_id = *st.session_tabs.get(&parsed.session_id).unwrap_or(&7);
+                        let names: Vec<String> =
+                            parsed.files.iter().map(|f| f.name.clone()).collect();
                         reply_now = Some(ResponseBody::Ok(json!({
                             "tab_id": tab_id,
-                            "used_ref": params.get("ref").cloned().unwrap_or(Value::Null),
+                            "used_ref": parsed.ref_,
                             "file_names": names,
                         })));
                     }
                     Method::ToolDownload => {
-                        let sid = params["session_id"].as_str().unwrap_or("");
-                        let tab_id = *st.session_tabs.get(sid).unwrap_or(&7);
+                        let parsed: bsk_protocol::tools::DownloadParams =
+                            serde_json::from_value(params.clone())
+                                .expect("strict DownloadParams on WS");
+                        let tab_id = *st.session_tabs.get(&parsed.session_id).unwrap_or(&7);
                         if st.fail_next_download_unknown {
                             st.fail_next_download_unknown = false;
                             reply_now = Some(ResponseBody::Err(RpcError {
@@ -407,6 +420,33 @@ fn spawn_mock_extension(
                                 "suggested_filename": "report.txt",
                                 "byte_size": 5,
                             })));
+                        }
+                    }
+                    Method::ToolSnapshot => {
+                        match serde_json::from_value::<bsk_protocol::tools::SnapshotParams>(
+                            params.clone(),
+                        ) {
+                            Ok(parsed) => {
+                                let tab_id = *st.session_tabs.get(&parsed.session_id).unwrap_or(&7);
+                                reply_now = Some(ResponseBody::Ok(
+                                    serde_json::to_value(bsk_protocol::tools::SnapshotResult {
+                                        observation_id: Some("obs-snap-1".into()),
+                                        text: "@e1 button \"Save\"".into(),
+                                        ref_count: 1,
+                                        tab_id,
+                                        truncated: false,
+                                        dialogs: Vec::new(),
+                                    })
+                                    .unwrap(),
+                                ));
+                            }
+                            Err(err) => {
+                                reply_now = Some(ResponseBody::Err(RpcError {
+                                    code: ErrorCode::InvalidParams,
+                                    message: err.to_string(),
+                                    data: None,
+                                }));
+                            }
                         }
                     }
                     Method::ToolRead => {
@@ -522,7 +562,7 @@ fn spawn_mock_extension(
                         let sid = params["session_id"].as_str().unwrap_or("").to_owned();
                         if action == "replay" && st.suspend_next_debug_replay {
                             st.suspend_next_debug_replay = false;
-                            let op_id = params["_operation_id"].as_str().unwrap().to_owned();
+                            let op_id = req.operation_id.clone().unwrap();
                             out_queue.push_back(json!({
                                 "event": "dialog.changed",
                                 "payload": {
@@ -702,6 +742,46 @@ async fn wave2_full_chain_ssot_mcp_parity_and_counterexamples() {
     assert_eq!(hs_result.protocol_version, "2.0");
     assert_eq!(hs_result.min_compatible_protocol.as_deref(), Some("2.0"));
 
+    // Enable operation audit over WS (`AuditRequestParams` -> `AuditRequestResult::Configure`)
+    // so every subsequent tool RPC carries `audit_id` on `RequestFrame` without mutating `params`.
+    ws.send(Message::Text(
+        serde_json::to_string(&Frame::Request(RequestFrame {
+            id: "aud-cfg".into(),
+            method: Method::AuditRequest,
+            params: Some(
+                serde_json::to_value(bsk_protocol::AuditRequestParams {
+                    action: "configure".into(),
+                    enabled: Some(true),
+                    ..Default::default()
+                })
+                .unwrap(),
+            ),
+            audit_id: None,
+            operation_id: None,
+        }))
+        .unwrap(),
+    ))
+    .await
+    .unwrap();
+    let aud_cfg_text = loop {
+        match ws.next().await.expect("ws frame").expect("ws ok") {
+            Message::Text(t) => break t,
+            _ => continue,
+        }
+    };
+    let Frame::Response(aud_cfg_resp) = serde_json::from_str::<Frame>(&aud_cfg_text).unwrap()
+    else {
+        panic!("expected audit.request response frame, got: {aud_cfg_text}");
+    };
+    let aud_cfg: bsk_protocol::AuditRequestResult = match aud_cfg_resp.body {
+        ResponseBody::Ok(v) => serde_json::from_value(v).unwrap(),
+        ResponseBody::Err(e) => panic!("audit.request configure failed: {e:?}"),
+    };
+    assert!(matches!(
+        aud_cfg,
+        bsk_protocol::AuditRequestResult::Configure { enabled: true, .. }
+    ));
+
     let ext_state = Arc::new(Mutex::new(MockExtensionState::default()));
     let _ext_task = spawn_mock_extension(ws, Arc::clone(&ext_state));
 
@@ -730,6 +810,34 @@ async fn wave2_full_chain_ssot_mcp_parity_and_counterexamples() {
             "bsk_video",
             "bsk_record",
         ]
+    );
+    let tools_arr = list_reply["result"]["tools"].as_array().unwrap();
+    for tool_def in tools_arr {
+        let schema = &tool_def["inputSchema"];
+        assert!(schema.get("description").is_none());
+        assert!(schema.get("$schema").is_none());
+        assert!(schema.get("title").is_none());
+    }
+    let interact_def = tools_arr
+        .iter()
+        .find(|t| t["name"] == "bsk_interact")
+        .unwrap();
+    assert!(
+        interact_def["inputSchema"]["properties"]["expect"]["items"]["properties"]["target"]
+            ["description"]
+            .as_str()
+            .is_some_and(|s| s.contains("CSS selector")),
+        "nested ActionExpectation.target description stripped from tools/list"
+    );
+    let assist_def = tools_arr
+        .iter()
+        .find(|t| t["name"] == "bsk_assist")
+        .unwrap();
+    assert!(
+        assist_def["inputSchema"]["properties"]["targets"]["items"]["description"]
+            .as_str()
+            .is_some_and(|s| s.contains("ref")),
+        "nested HelpTarget description stripped from tools/list"
     );
 
     // Chain A.2: dual-scope isolation across agent-alpha (tab 7) and agent-beta (tab 8).
@@ -857,7 +965,13 @@ async fn wave2_full_chain_ssot_mcp_parity_and_counterexamples() {
             .iter()
             .find(|r| r.method == Method::ToolUpload)
             .expect("tool.upload sent");
-        assert!(upload_req.params.as_ref().unwrap().get("expect").is_some());
+        assert!(upload_req.audit_id.is_some());
+        assert!(upload_req.operation_id.is_some());
+        let upload_wire: bsk_protocol::tools::UploadParams =
+            serde_json::from_value(upload_req.params.clone().unwrap()).unwrap();
+        assert_eq!(upload_wire.context_id.as_deref(), Some(next_ctx.as_str()));
+        assert_eq!(upload_wire.expect.as_ref().map(Vec::len), Some(1));
+        assert!(upload_wire.files[0].staged_path.is_some());
     }
 
     // Chain A.5: bsk_inspect read with context carries translated context_id to WS.
@@ -1134,6 +1248,149 @@ async fn wave2_full_chain_ssot_mcp_parity_and_counterexamples() {
         )
         .await;
     assert_eq!(click_resumed["tab_id"], 7);
+
+    // Wave 4a Counterexample 3: Forged WS correlation keys & unknown fields fail closed
+    // at daemon ingress (`#[serde(deny_unknown_fields)]` across UploadParams, DownloadParams,
+    // CooperateParams, SessionStartRpcParams, and LedgerRequestParams) before any WS frame
+    // reaches the extension.
+    let before_forged = ext_state.lock().unwrap().recorded.len();
+    let mut raw_ipc = bsk::ipc_client::IpcClient::connect(&info.sock_path)
+        .await
+        .expect("connect raw IPC client");
+    for (method, bad_params) in [
+        (
+            Method::ToolUpload,
+            json!({
+                "session_id": &sess_alpha,
+                "ref": "@e2",
+                "files": [{ "transfer_id": "tx-fake", "name": "a.txt" }],
+                "_operation_id": "forged-op"
+            }),
+        ),
+        (
+            Method::ToolDownload,
+            json!({
+                "session_id": &sess_alpha,
+                "ref": "@e5",
+                "_audit_id": "forged-audit"
+            }),
+        ),
+        (
+            Method::ToolCooperate,
+            json!({
+                "session_id": &sess_alpha,
+                "action": "status",
+                "rogue_field": 1
+            }),
+        ),
+        (
+            Method::SessionStart,
+            json!({
+                "task_name": "rogue",
+                "rogue_field": true
+            }),
+        ),
+        (
+            Method::LedgerRequest,
+            json!({
+                "action": "status",
+                "rogue_field": 1
+            }),
+        ),
+    ] {
+        let outcome = raw_ipc
+            .call::<Value, Value>(
+                "forged",
+                method.clone(),
+                Some(bad_params),
+                Duration::from_secs(2),
+            )
+            .await
+            .expect("IPC transport ok");
+        let err = outcome.expect_err("expected InvalidParams at daemon ingress");
+        assert_eq!(
+            err.code,
+            ErrorCode::InvalidParams,
+            "for {method:?}: {err:?}"
+        );
+        assert!(
+            err.message.contains("unknown field"),
+            "expected unknown field rejection for {method:?}, got: {}",
+            err.message
+        );
+    }
+    assert_eq!(
+        ext_state.lock().unwrap().recorded.len(),
+        before_forged,
+        "forged/unknown fields must be rejected before extension WS dispatch"
+    );
+
+    // TabBindingContext `SnapshotParams` (`#[serde(deny_unknown_fields)]`): rejects `expect`
+    // while accepting passive tab-binding `context_id` from a raw protocol caller.
+    let snap_bad_expect = raw_ipc
+        .call::<Value, Value>(
+            "snap-bad",
+            Method::ToolSnapshot,
+            Some(json!({
+                "session_id": &sess_alpha,
+                "expect": [{ "target": "@e1", "field": "exists", "equals": true }]
+            })),
+            Duration::from_secs(2),
+        )
+        .await
+        .expect("IPC transport ok")
+        .expect_err("SnapshotParams must reject expect");
+    assert_eq!(snap_bad_expect.code, ErrorCode::InvalidParams);
+    assert!(snap_bad_expect.message.contains("unknown field"));
+
+    // Raw protocol caller passing TabBindingContext `context_id` on `tool.snapshot` succeeds
+    // and passes `SnapshotParams` (`#[serde(deny_unknown_fields)]`) cleanly to the extension.
+    let snap_raw = raw_ipc
+        .call::<Value, bsk_protocol::tools::SnapshotResult>(
+            "snap-ctx",
+            Method::ToolSnapshot,
+            Some(json!({
+                "session_id": &sess_alpha,
+                "context_id": &next_ctx
+            })),
+            Duration::from_secs(2),
+        )
+        .await
+        .expect("IPC transport ok")
+        .expect("SnapshotParams with context_id should succeed");
+    assert_eq!(snap_raw.tab_id, 7);
+
+    // Wave 4a Counterexample 4: `TabBindingContext` CLI/MCP caller asymmetry —
+    // `bsk_inspect(action="snapshot")` rejects caller-supplied `context` before daemon contact,
+    // while `bsk_inspect(action="snapshot")` without `context` succeeds end-to-end.
+    let before_mcp_snap_err = ext_state.lock().unwrap().recorded.len();
+    let snap_ctx_err = mcp
+        .call_err(
+            "bsk_inspect",
+            json!({
+                "action": "snapshot",
+                "scope": "agent-alpha",
+                "context": &next_ctx
+            }),
+        )
+        .await;
+    assert_eq!(snap_ctx_err["code"], "invalid_params");
+    assert_eq!(
+        ext_state.lock().unwrap().recorded.len(),
+        before_mcp_snap_err,
+        "bsk_inspect(snapshot) with caller context must fail closed before WS dispatch"
+    );
+
+    let snap_mcp_ok = mcp
+        .call_ok(
+            "bsk_inspect",
+            json!({
+                "action": "snapshot",
+                "scope": "agent-alpha"
+            }),
+        )
+        .await;
+    assert_eq!(snap_mcp_ok["tab_id"], 7);
 
     // Cleanly stop scoped sessions.
     let _ = mcp

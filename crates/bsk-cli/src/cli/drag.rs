@@ -148,6 +148,10 @@ pub fn dispatch(
         hold_ms: Some(args.hold),
         duration_ms: Some(args.duration),
         timeout_ms: Some(args.timeout),
+        context_id: None,
+        observation_id: None,
+        depends_on: None,
+        expect: None,
     };
     let info = ensure_daemon().context("ensure daemon is running")?;
     let reply: DragResult = op_ctx.call(

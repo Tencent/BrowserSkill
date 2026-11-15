@@ -29,8 +29,8 @@ use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
+pub use bsk_protocol::system::{IntentState, LedgerEntry, LedgerResolveReply, LedgerStatusReply};
 use bsk_protocol::{ErrorCode, Method, RpcError};
-use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tracing::warn;
 
@@ -45,47 +45,6 @@ const RECENT_ENTRY_CAP: usize = 64;
 const MAX_LOCATOR_CHARS: usize = 120;
 
 pub const RECOVERY_GUIDANCE: &str = "Run `bsk sync` on this tab to observe current state and auto-reconcile, or inspect with `bsk read` / `bsk network` and run `bsk ledger resolve`. Do not blindly replay the prior action.";
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "UPPERCASE")]
-pub enum IntentState {
-    Dispatched,
-    Settled,
-    Unknown,
-    Reconciled,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct LedgerEntry {
-    pub operation_id: String,
-    pub session_id: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tab_id: Option<i64>,
-    pub method: String,
-    pub target_summary: String,
-    pub state: IntentState,
-    pub dispatched_at: String,
-    pub updated_at: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub reconciled_by: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct LedgerStatusReply {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub session_id: Option<String>,
-    pub frozen: bool,
-    pub pending_unknown: Vec<LedgerEntry>,
-    pub recent: Vec<LedgerEntry>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct LedgerResolveReply {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub session_id: Option<String>,
-    pub resolved_count: usize,
-    pub resolved: Vec<LedgerEntry>,
-}
 
 #[derive(Debug, Default)]
 struct WalInner {

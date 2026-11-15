@@ -11,9 +11,13 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, anyhow};
-use bsk_protocol::system::{HandshakeCompat, HandshakeResult, evaluate_handshake_compat};
-use bsk_protocol::tools::ReturnFailure;
-use bsk_protocol::{Frame, RequestFrame, ResponseBody, ResponseFrame, RpcError};
+use bsk_protocol::system::{
+    AuditRequestParams, HandshakeCompat, HandshakeResult, evaluate_handshake_compat,
+};
+use bsk_protocol::{
+    EventFrame, Frame, RequestFrame, ResponseBody, ResponseFrame, RpcError, SessionEndedEvent,
+    SessionUserInterruptEvent, SessionWindowClosedEvent,
+};
 use futures_util::{SinkExt, StreamExt};
 use semver::Version;
 use tokio::net::{TcpListener, TcpStream};
@@ -517,72 +521,55 @@ async fn handle_inbound_text(state: &Arc<DaemonState>, client: &Arc<BrowserClien
                 debug!(id = %resp.id, "response for unknown rpc id (ignored)");
             }
         }
-        Frame::Event(ev) => match ev.event {
-            bsk_protocol::EventKind::AuditContext => state.audit.context(&client.id.0, &ev.payload),
-            bsk_protocol::EventKind::DialogChanged => {
-                if let Some(sid) = ev.payload["session_id"].as_str()
-                    && state
-                        .sessions
-                        .get(&super::sessions::SessionId(sid.into()))
-                        .is_some_and(|s| s.browser_id == client.id)
+        Frame::Event(ev) => match ev {
+            EventFrame::AuditContext(ctx) => state.audit.context(&client.id.0, &ctx),
+            EventFrame::DialogChanged(dlg) => {
+                if state
+                    .sessions
+                    .get(&super::sessions::SessionId(dlg.session_id.clone()))
+                    .is_some_and(|s| s.browser_id == client.id)
                 {
-                    state.dialog_operations.dialog_changed(&ev.payload);
-                    if let Some(id) = ev.payload["operation_id"].as_str()
-                        && let Some(operation) = state.dialog_operations.get(sid, id)
+                    state.dialog_operations.dialog_changed(&dlg);
+                    if let Some(id) = dlg.operation_id.as_deref()
+                        && let Some(operation) = state.dialog_operations.get(&dlg.session_id, id)
                         && let Some(inflight) = state.tool_inflight.get(&operation.cli_rpc_id)
                     {
-                        inflight
-                            .dialog_pending
-                            .send_replace(ev.payload["dialog"].is_object());
+                        inflight.dialog_pending.send_replace(dlg.dialog.is_some());
                     }
                 }
             }
-            bsk_protocol::EventKind::SystemHeartbeat => {
+            EventFrame::SystemHeartbeat(_) => {
                 // `touch()` already ran for this frame in the read loop;
                 // additionally opt this browser in to liveness reaping now
                 // that we know it speaks the heartbeat.
                 client.mark_heartbeat_seen();
                 debug!(id = %client.id, "heartbeat");
             }
-            bsk_protocol::EventKind::SessionActivity => {
-                #[derive(serde::Deserialize)]
-                struct Activity {
-                    session_id: String,
-                    idle_protected: bool,
-                }
-                if let Ok(activity) = serde_json::from_value::<Activity>(ev.payload) {
-                    state.sessions.update_activity(
-                        &super::sessions::SessionId(activity.session_id),
-                        &client.id,
-                        activity.idle_protected,
-                    );
-                }
+            EventFrame::SessionActivity(activity) => {
+                state.sessions.update_activity(
+                    &super::sessions::SessionId(activity.session_id),
+                    &client.id,
+                    activity.idle_protected,
+                );
             }
-            bsk_protocol::EventKind::SessionInteractionChanged => {
-                #[derive(serde::Deserialize)]
-                struct Change {
-                    session_id: String,
-                    interaction: bsk_protocol::tools::InteractionPolicy,
-                }
-                if let Ok(change) = serde_json::from_value::<Change>(ev.payload) {
-                    state.sessions.update_interaction(
-                        &super::sessions::SessionId(change.session_id),
-                        &client.id,
-                        change.interaction,
-                    );
-                }
+            EventFrame::SessionInteractionChanged(change) => {
+                state.sessions.update_interaction(
+                    &super::sessions::SessionId(change.session_id),
+                    &client.id,
+                    change.interaction,
+                );
             }
-            bsk_protocol::EventKind::SessionWindowClosed => {
-                handle_session_window_closed(state, &client.id, &ev.payload);
+            EventFrame::SessionWindowClosed(closed) => {
+                handle_session_window_closed(state, &client.id, &closed);
             }
-            bsk_protocol::EventKind::SessionEnded => {
-                handle_session_ended(state, &client.id, &ev.payload);
+            EventFrame::SessionEnded(ended) => {
+                handle_session_ended(state, &client.id, &ended);
             }
-            bsk_protocol::EventKind::SessionUserInterrupt => {
-                handle_session_user_interrupt(state, &client.id, &ev.payload);
+            EventFrame::SessionUserInterrupt(interrupt) => {
+                handle_session_user_interrupt(state, &client.id, &interrupt);
             }
-            other => {
-                debug!(event = ?other, "event received (no handler yet)");
+            other @ (EventFrame::BrowserConnected(_) | EventFrame::BrowserDisconnected(_)) => {
+                debug!(event = ?other.kind(), "event received (no handler yet)");
             }
         },
         Frame::Request(req) => {
@@ -607,35 +594,24 @@ fn handle_audit_request(
     browser: &str,
     params: serde_json::Value,
 ) -> ResponseBody {
-    let action = params
-        .get("action")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or("");
-    let id = params
-        .get("id")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or("");
-    let offset = params
-        .get("offset")
-        .and_then(serde_json::Value::as_u64)
-        .unwrap_or(0)
-        .min(1_000_000) as usize;
-    let limit = params
-        .get("limit")
-        .and_then(serde_json::Value::as_u64)
-        .unwrap_or(100)
-        .min(500) as usize;
-    let result = match action {
-        "configure" => match params.get("enabled").and_then(serde_json::Value::as_bool) {
-            Some(enabled) => state.audit.configure(browser, enabled),
-            None => Err(anyhow!("Missing enabled preference")),
-        },
-        "list" => state.audit.list(browser, offset, limit),
-        "get" => state.audit.get(browser, id, offset, limit),
-        "delete" => state.audit.delete(browser, id),
-        "open_directory" => open_audit_directory(&state.audit),
-        _ => Err(anyhow!("Unknown audit action")),
-    };
+    let result = serde_json::from_value::<AuditRequestParams>(params)
+        .map_err(|err| anyhow!(err))
+        .and_then(|params| {
+            let id = params.id.as_deref().unwrap_or("");
+            let offset = params.offset.unwrap_or(0).min(1_000_000) as usize;
+            let limit = params.limit.unwrap_or(100).min(500) as usize;
+            match params.action.as_str() {
+                "configure" => match params.enabled {
+                    Some(enabled) => state.audit.configure(browser, enabled),
+                    None => Err(anyhow!("Missing enabled preference")),
+                },
+                "list" => state.audit.list(browser, offset, limit),
+                "get" => state.audit.get(browser, id, offset, limit),
+                "delete" => state.audit.delete(browser, id),
+                "open_directory" => open_audit_directory(&state.audit),
+                _ => Err(anyhow!("Unknown audit action")),
+            }
+        });
     match result {
         Ok(value) => ResponseBody::Ok(value),
         Err(_) => ResponseBody::Err(RpcError {
@@ -663,23 +639,13 @@ fn open_audit_directory(audit: &super::audit::AuditStore) -> anyhow::Result<serd
 fn handle_session_window_closed(
     state: &Arc<DaemonState>,
     sender: &BrowserId,
-    payload: &serde_json::Value,
+    closed: &SessionWindowClosedEvent,
 ) {
-    let Some(session_id) = payload.get("session_id").and_then(|v| v.as_str()) else {
+    if closed.session_id.is_empty() {
         warn!("session.window_closed event missing session_id");
         return;
-    };
-    let return_failures: Vec<ReturnFailure> = payload
-        .get("return_failures")
-        .cloned()
-        .map(serde_json::from_value)
-        .transpose()
-        .unwrap_or_else(|err| {
-            warn!(%err, session = %session_id, "invalid session.window_closed return_failures payload");
-            None
-        })
-        .unwrap_or_default();
-    let session_id = super::sessions::SessionId(session_id.to_string());
+    }
+    let session_id = super::sessions::SessionId(closed.session_id.clone());
     // Reject events that target a session owned by a *different* browser.
     // Without this, any connected extension (or any same-machine process
     // that completed the WS handshake) could tear down another browser's
@@ -705,7 +671,7 @@ fn handle_session_window_closed(
     } else {
         debug!(session = %session_id, "session.window_closed for unknown session id");
     }
-    for failure in return_failures {
+    for failure in &closed.return_failures {
         warn!(
             session = %session_id,
             tab_id = failure.tab_id,
@@ -716,25 +682,15 @@ fn handle_session_window_closed(
     }
 }
 
-fn handle_session_ended(state: &Arc<DaemonState>, sender: &BrowserId, payload: &serde_json::Value) {
-    #[derive(serde::Deserialize)]
-    struct Ended {
-        session_id: String,
-        reason: String,
-        tab_id: u64,
-    }
-    let Ok(ended) = serde_json::from_value::<Ended>(payload.clone()) else {
-        warn!("invalid session.ended payload");
-        return;
-    };
+fn handle_session_ended(state: &Arc<DaemonState>, sender: &BrowserId, ended: &SessionEndedEvent) {
     if ended.session_id.is_empty()
-        || ended.reason != bsk_protocol::RpcErrorReason::UserMovedTab.as_str()
-        || ended.tab_id == 0
+        || ended.reason != bsk_protocol::SessionEndedReason::UserMovedTab
+        || ended.tab_id <= 0
     {
         warn!("invalid session.ended reason or resource identity");
         return;
     }
-    let sid = super::sessions::SessionId(ended.session_id);
+    let sid = super::sessions::SessionId(ended.session_id.clone());
     let Some(session) = state.sessions.get(&sid) else {
         // Duplicates and late events must not cancel work for an unverified id.
         debug!(session = %sid, "session.ended for unknown session id");
@@ -750,14 +706,6 @@ fn handle_session_ended(state: &Arc<DaemonState>, sender: &BrowserId, payload: &
     }
 }
 
-fn extract_session_id(payload: &serde_json::Value) -> Option<super::sessions::SessionId> {
-    payload
-        .get("session_id")
-        .and_then(|v| v.as_str())
-        .filter(|s| !s.is_empty())
-        .map(|s| super::sessions::SessionId(s.to_string()))
-}
-
 /// Extension-originated request to interrupt every inflight + queued
 /// `tool.*` call for a session. Maps to `cancel_session` on the
 /// inflight registry, which trips each entry's cancel token AND
@@ -769,12 +717,13 @@ fn extract_session_id(payload: &serde_json::Value) -> Option<super::sessions::Se
 fn handle_session_user_interrupt(
     state: &Arc<DaemonState>,
     sender: &BrowserId,
-    payload: &serde_json::Value,
+    interrupt: &SessionUserInterruptEvent,
 ) {
-    let Some(sid) = extract_session_id(payload) else {
+    if interrupt.session_id.is_empty() {
         warn!("session.user_interrupt event missing session_id");
         return;
-    };
+    }
+    let sid = super::sessions::SessionId(interrupt.session_id.clone());
     // Same ownership guard as window_closed: a browser must not be able
     // to cancel another browser's inflight tools or trip its interrupt
     // marker by sending user_interrupt with a foreign session_id.
@@ -852,26 +801,45 @@ mod session_user_interrupt_tests {
     use crate::daemon::sessions::SessionId;
 
     #[test]
-    fn session_user_interrupt_payload_extracts_session_id() {
-        let payload = serde_json::json!({ "session_id": "sess-9" });
-        let sid = extract_session_id(&payload).expect("session id present");
-        assert_eq!(sid.0, "sess-9");
+    fn session_user_interrupt_payload_decodes_session_id() {
+        let ev = EventFrame::from_parts(
+            bsk_protocol::EventKind::SessionUserInterrupt,
+            serde_json::json!({ "session_id": "sess-9" }),
+        )
+        .expect("session id present");
+        assert!(matches!(ev, EventFrame::SessionUserInterrupt(ref i) if i.session_id == "sess-9"));
     }
 
     #[test]
-    fn session_user_interrupt_payload_missing_session_id_returns_none() {
-        let payload = serde_json::json!({});
-        assert!(extract_session_id(&payload).is_none());
+    fn session_user_interrupt_payload_missing_or_non_string_session_id_is_rejected() {
+        for payload in [
+            serde_json::json!({}),
+            serde_json::json!({ "session_id": 42 }),
+        ] {
+            assert!(
+                EventFrame::from_parts(bsk_protocol::EventKind::SessionUserInterrupt, payload)
+                    .is_err()
+            );
+        }
     }
 
     #[test]
-    fn session_user_interrupt_payload_empty_session_id_returns_none() {
-        assert!(extract_session_id(&serde_json::json!({"session_id": ""})).is_none());
-    }
-
-    #[test]
-    fn session_user_interrupt_payload_non_string_session_id_returns_none() {
-        assert!(extract_session_id(&serde_json::json!({"session_id": 42})).is_none());
+    fn session_user_interrupt_empty_session_id_is_ignored() {
+        let state = test_only_daemon_state();
+        let sid_a = SessionId("A".into());
+        let g_a = state
+            .tool_inflight
+            .register("a".into(), sid_a.clone())
+            .unwrap();
+        handle_session_user_interrupt(
+            &state,
+            &BrowserId("sender".into()),
+            &SessionUserInterruptEvent {
+                session_id: String::new(),
+            },
+        );
+        assert!(g_a.entry().cancel_reason().is_none());
+        assert!(!state.session_interrupts.try_consume(&sid_a));
     }
 
     #[test]
@@ -893,7 +861,9 @@ mod session_user_interrupt_tests {
         handle_session_user_interrupt(
             &state,
             &BrowserId("sender".into()),
-            &serde_json::json!({"session_id": "A"}),
+            &SessionUserInterruptEvent {
+                session_id: "A".into(),
+            },
         );
 
         assert_eq!(g_a.entry().cancel_reason(), Some(CancelReason::UserAborted));
@@ -909,7 +879,9 @@ mod session_user_interrupt_tests {
         handle_session_user_interrupt(
             &state,
             &BrowserId("sender".into()),
-            &serde_json::json!({"session_id": "A"}),
+            &SessionUserInterruptEvent {
+                session_id: "A".into(),
+            },
         );
 
         assert!(
@@ -935,7 +907,13 @@ mod session_user_interrupt_tests {
             .register("rpc-1".into(), sid.clone())
             .unwrap();
 
-        handle_session_user_interrupt(&state, &owner, &serde_json::json!({"session_id": sid.0}));
+        handle_session_user_interrupt(
+            &state,
+            &owner,
+            &SessionUserInterruptEvent {
+                session_id: sid.0.clone(),
+            },
+        );
 
         assert_eq!(
             guard.entry().cancel_reason(),
@@ -958,7 +936,13 @@ mod session_user_interrupt_tests {
             .register("rpc-1".into(), sid.clone())
             .unwrap();
 
-        handle_session_user_interrupt(&state, &attacker, &serde_json::json!({"session_id": sid.0}));
+        handle_session_user_interrupt(
+            &state,
+            &attacker,
+            &SessionUserInterruptEvent {
+                session_id: sid.0.clone(),
+            },
+        );
 
         assert!(
             guard.entry().cancel_reason().is_none(),
@@ -979,7 +963,15 @@ mod session_user_interrupt_tests {
             .reserve_id(owner.clone(), 8, || 0)
             .expect("reserved session id");
 
-        handle_session_window_closed(&state, &owner, &serde_json::json!({"session_id": sid.0}));
+        handle_session_window_closed(
+            &state,
+            &owner,
+            &SessionWindowClosedEvent {
+                session_id: sid.0.clone(),
+                reason: None,
+                return_failures: Vec::new(),
+            },
+        );
 
         assert!(
             state.sessions.get(&sid).is_none(),
@@ -997,7 +989,15 @@ mod session_user_interrupt_tests {
             .reserve_id(owner.clone(), 8, || 0)
             .expect("reserved session id");
 
-        handle_session_window_closed(&state, &attacker, &serde_json::json!({"session_id": sid.0}));
+        handle_session_window_closed(
+            &state,
+            &attacker,
+            &SessionWindowClosedEvent {
+                session_id: sid.0.clone(),
+                reason: None,
+                return_failures: Vec::new(),
+            },
+        );
 
         assert!(
             state.sessions.get(&sid).is_some(),
@@ -1005,8 +1005,12 @@ mod session_user_interrupt_tests {
         );
     }
 
-    fn user_moved_tab_payload(sid: &SessionId) -> serde_json::Value {
-        serde_json::json!({ "session_id": sid.0, "reason": "user_moved_tab", "tab_id": 42 })
+    fn user_moved_tab_payload(sid: &SessionId) -> SessionEndedEvent {
+        SessionEndedEvent {
+            session_id: sid.0.clone(),
+            reason: bsk_protocol::SessionEndedReason::UserMovedTab,
+            tab_id: 42,
+        }
     }
 
     #[tokio::test]
@@ -1157,12 +1161,25 @@ mod session_user_interrupt_tests {
             &BrowserId("foreign".into()),
             &user_moved_tab_payload(&sid),
         );
-        for payload in [
+        for raw in [
             serde_json::json!({ "session_id": sid.0, "reason": "unknown", "tab_id": 42 }),
-            serde_json::json!({ "session_id": sid.0, "reason": "user_moved_tab", "tab_id": 0 }),
             serde_json::json!({ "session_id": sid.0, "reason": "user_moved_tab" }),
         ] {
-            handle_session_ended(&state, &owner, &payload);
+            assert!(EventFrame::from_parts(bsk_protocol::EventKind::SessionEnded, raw).is_err());
+        }
+        for invalid in [
+            SessionEndedEvent {
+                session_id: sid.0.clone(),
+                reason: bsk_protocol::SessionEndedReason::UserMovedTab,
+                tab_id: 0,
+            },
+            SessionEndedEvent {
+                session_id: String::new(),
+                reason: bsk_protocol::SessionEndedReason::UserMovedTab,
+                tab_id: 42,
+            },
+        ] {
+            handle_session_ended(&state, &owner, &invalid);
         }
         assert!(state.sessions.get(&sid).is_some());
         assert!(state.sessions.end_info(&sid).is_none());

@@ -17,7 +17,8 @@
   },
   "required": [
     "tab_id",
-    "window_id"
+    "window_id",
+    "url"
   ],
   "title": "TabCreateResult",
   "type": "object"

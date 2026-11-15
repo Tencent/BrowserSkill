@@ -279,9 +279,10 @@ fn tool<T: JsonSchema>(name: &str, title: &str, description: &str, hints: Hints)
     })
 }
 
-/// Compact JSON Schema: inlined, without draft or title noise. Only the
-/// tool's own argument descriptions are kept; nested protocol types keep
-/// their structure but not their (Rust-facing) doc comments.
+/// Compact JSON Schema: inlined, without draft or title noise. The root
+/// struct doc comment is stripped because the tool definition already carries
+/// a top-level `description`, while argument and nested property descriptions
+/// are preserved for MCP clients.
 fn input_schema<T: JsonSchema>() -> Value {
     let settings = SchemaSettings::draft07().with(|settings| {
         settings.inline_subschemas = true;
@@ -313,6 +314,7 @@ fn strip_optional_null(property: &mut Map<String, Value>) {
             for (k, v) in single {
                 property.entry(k).or_insert(v);
             }
+            break;
         }
     }
 }
@@ -324,8 +326,9 @@ fn strip_schema(schema: &mut Value, depth: usize) {
     for keyword in ["$schema", "title", "format", "definitions"] {
         object.remove(keyword);
     }
-    // Root: the tool; depth 1: its arguments, whose descriptions are ours.
-    if depth != 1 {
+    // Strip only the root struct doc comment (the tool object itself has its own
+    // top-level `description`); preserve property descriptions at all nested depths.
+    if depth == 0 {
         object.remove("description");
     }
     let required: Vec<String> = object
@@ -350,10 +353,16 @@ fn strip_schema(schema: &mut Value, depth: usize) {
     }
     for keyword in ["items", "additionalProperties", "not"] {
         if let Some(nested) = object.get_mut(keyword) {
-            strip_schema(nested, depth + 1);
+            if let Some(arr) = nested.as_array_mut() {
+                for item in arr {
+                    strip_schema(item, depth + 1);
+                }
+            } else {
+                strip_schema(nested, depth + 1);
+            }
         }
     }
-    for keyword in ["anyOf", "oneOf", "allOf"] {
+    for keyword in ["anyOf", "oneOf", "allOf", "prefixItems"] {
         if let Some(Value::Array(nested)) = object.get_mut(keyword) {
             for item in nested {
                 strip_schema(item, depth + 1);
@@ -1114,6 +1123,10 @@ async fn session(
                         tab_id: None,
                         wait_until: Some(WaitUntil::Load),
                         timeout_ms: Some(nav_timeout_ms),
+                        context_id: None,
+                        observation_id: None,
+                        depends_on: None,
+                        expect: None,
                     })
                     .unwrap(),
                     ipc_timeout(nav_timeout_ms),
@@ -1728,6 +1741,10 @@ async fn inspect(
                 session_id: session.to_owned(),
                 tab_id: args.tab_id,
                 timeout_ms: Some(timeout_ms),
+                context_id: None,
+                observation_id: None,
+                depends_on: None,
+                expect: None,
             })
             .map_err(|e| invalid(e.to_string()))?;
             ctx.validate_action_metadata(&Method::ToolScreenshotFullPage, Some(&params))?;
@@ -2252,6 +2269,10 @@ fn interact_prepare(args: InteractArgs, conn_scope: Option<&str>) -> Result<Prep
                     timeout_ms: Some(timeout_ms),
                     browser_relative_dir: None,
                     max_byte_size: None,
+                    context_id: None,
+                    observation_id: None,
+                    depends_on: None,
+                    expect: None,
                 },
                 out: input.out,
                 overwrite: input.overwrite,
@@ -2414,6 +2435,10 @@ async fn interact(link: &Link, prepared: Prepared) -> Result<Reply, CliError> {
                     .collect(),
                 mode,
                 timeout_ms: Some(timeout_ms),
+                context_id: None,
+                observation_id: None,
+                depends_on: None,
+                expect: None,
             })
             .map_err(|e| invalid(e.to_string()))?;
 
@@ -3511,6 +3536,10 @@ fn validate_debug_args(
         fields: args.fields,
         wait_ms: args.wait_ms,
         command_id: args.command_id,
+        context_id: None,
+        observation_id: None,
+        depends_on: None,
+        expect: None,
     };
     Ok((ctx, params, args.output))
 }
@@ -4132,13 +4161,46 @@ mod tests {
         let schema = input_schema::<AssistArgs>();
         assert!(schema.get("$schema").is_none());
         assert!(schema.get("title").is_none());
+        assert!(schema.get("description").is_none());
         // A property literally named `title` must survive keyword stripping.
         assert!(schema["properties"]["title"].is_object());
+        assert!(
+            schema["properties"]["title"]["description"]
+                .as_str()
+                .is_some_and(|s| !s.is_empty())
+        );
+        assert!(
+            schema["properties"]["targets"]["items"]["description"]
+                .as_str()
+                .is_some_and(|s| s.contains("ref"))
+        );
         assert_eq!(schema["required"], json!(["action"]));
         let interact = input_schema::<InteractArgs>();
+        assert!(interact.get("description").is_none());
         assert_eq!(interact["properties"]["params"]["type"], "object");
         assert_eq!(interact["properties"]["expect"]["type"], "array");
+        assert!(
+            interact["properties"]["expect"]["items"]["properties"]["target"]["description"]
+                .as_str()
+                .is_some_and(|s| s.contains("CSS selector"))
+        );
+        assert!(
+            interact["properties"]["expect"]["items"]["properties"]["equals"]["description"]
+                .as_str()
+                .is_some_and(|s| s.contains("textContent"))
+        );
         assert!(!interact.to_string().contains("\"format\""));
+
+        for def in definitions() {
+            let input_schema = &def["inputSchema"];
+            assert!(
+                input_schema.get("description").is_none(),
+                "{} leaked root inputSchema description",
+                def["name"]
+            );
+            assert!(input_schema.get("$schema").is_none());
+            assert!(input_schema.get("title").is_none());
+        }
     }
 
     #[test]
@@ -4587,5 +4649,40 @@ mod tests {
             &Method::ToolObserve,
             Some(&json!({"session_id":"s","probe_hover":true})),
         ));
+
+        // Collapsing an Option<T> (`anyOf: [T, null]`) must not strip a legitimate
+        // inner `oneOf` null branch on `T` (e.g. `ActionExpectation.equals`).
+        let mut schema = json!({
+            "description": "Root struct doc",
+            "type": "object",
+            "properties": {
+                "equals": {
+                    "description": "Expected literal value",
+                    "anyOf": [
+                        {
+                            "oneOf": [
+                                { "type": "string" },
+                                { "type": "boolean" },
+                                { "type": "null" }
+                            ]
+                        },
+                        { "type": "null" }
+                    ]
+                }
+            }
+        });
+        strip_schema(&mut schema, 0);
+        assert!(schema.get("description").is_none());
+        assert_eq!(
+            schema["properties"]["equals"]["description"],
+            "Expected literal value"
+        );
+        let inner = schema["properties"]["equals"]["oneOf"].as_array().unwrap();
+        assert_eq!(
+            inner.len(),
+            3,
+            "inner oneOf null branch must survive: {inner:?}"
+        );
+        assert!(inner.contains(&json!({ "type": "null" })));
     }
 }

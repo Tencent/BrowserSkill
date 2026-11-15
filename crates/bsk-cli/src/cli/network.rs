@@ -60,6 +60,7 @@ fn run(
         since: args.since,
         limit: args.limit,
         max_text_chars: args.max_text_chars,
+        context_id: None,
     };
     let reply: NetworkResult = call(sock, ctx, params)?;
     render(&reply, format)

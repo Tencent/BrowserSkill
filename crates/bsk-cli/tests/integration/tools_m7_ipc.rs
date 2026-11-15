@@ -98,6 +98,8 @@ async fn do_handshake_protocol(ws: &mut Ws, protocol: &str) -> HandshakeResult {
         id: "hs".into(),
         method: Method::SystemHandshake,
         params: Some(serde_json::to_value(params).unwrap()),
+        audit_id: None,
+        operation_id: None,
     };
     ws.send(Message::Text(serde_json::to_string(&req).unwrap()))
         .await
@@ -223,6 +225,10 @@ async fn navigate_round_trips_wait_until_and_reached() {
             tab_id: None,
             wait_until: Some(WaitUntil::DomContentLoaded),
             timeout_ms: Some(5_000),
+            context_id: None,
+            observation_id: None,
+            depends_on: None,
+            expect: None,
         },
     )
     .await
@@ -300,6 +306,10 @@ async fn navigate_back_round_trips_previous_url() {
             tab_id: None,
             wait_until: Some(WaitUntil::Load),
             timeout_ms: Some(5_000),
+            context_id: None,
+            observation_id: None,
+            depends_on: None,
+            expect: None,
         },
     )
     .await
@@ -313,6 +323,10 @@ async fn navigate_back_round_trips_previous_url() {
             tab_id: None,
             wait_until: Some(WaitUntil::Load),
             timeout_ms: Some(5_000),
+            context_id: None,
+            observation_id: None,
+            depends_on: None,
+            expect: None,
         },
     )
     .await
@@ -327,6 +341,10 @@ async fn navigate_back_round_trips_previous_url() {
             wait_until: Some(WaitUntil::Load),
             timeout_ms: Some(5_000),
             hard: Some(true),
+            context_id: None,
+            observation_id: None,
+            depends_on: None,
+            expect: None,
         },
     )
     .await
@@ -388,6 +406,10 @@ async fn click_round_trips_ref_and_modifiers() {
             click_count: Some(1),
             modifiers: Some(vec![KeyModifier::Ctrl, KeyModifier::Shift]),
             timeout_ms: Some(5_000),
+            context_id: None,
+            observation_id: None,
+            depends_on: None,
+            expect: None,
         },
     )
     .await
@@ -430,6 +452,10 @@ async fn focus_round_trips_verified_state() {
             selector: None,
             tab_id: None,
             timeout_ms: Some(5_000),
+            context_id: None,
+            observation_id: None,
+            depends_on: None,
+            expect: None,
         },
     )
     .await
@@ -473,6 +499,10 @@ async fn blur_round_trips_previous_focus_state() {
             selector: Some("#search".into()),
             tab_id: None,
             timeout_ms: Some(5_000),
+            context_id: None,
+            observation_id: None,
+            depends_on: None,
+            expect: None,
         },
     )
     .await
@@ -519,6 +549,10 @@ async fn scroll_to_round_trips_visible_bounds() {
             selector: None,
             tab_id: None,
             timeout_ms: Some(5_000),
+            context_id: None,
+            observation_id: None,
+            depends_on: None,
+            expect: None,
         },
     )
     .await
@@ -566,6 +600,10 @@ async fn fill_round_trips_clear_before_default() {
             tab_id: None,
             clear_before: None,
             timeout_ms: Some(5_000),
+            context_id: None,
+            observation_id: None,
+            depends_on: None,
+            expect: None,
         },
     )
     .await
@@ -610,6 +648,10 @@ async fn press_round_trips_compound_key() {
             tab_id: None,
             hold_ms: None,
             timeout_ms: Some(5_000),
+            context_id: None,
+            observation_id: None,
+            depends_on: None,
+            expect: None,
         },
     )
     .await
@@ -654,6 +696,10 @@ async fn select_round_trips_values() {
             selector: None,
             tab_id: None,
             timeout_ms: Some(5_000),
+            context_id: None,
+            observation_id: None,
+            depends_on: None,
+            expect: None,
         },
     )
     .await
@@ -697,6 +743,10 @@ async fn m7_tools_propagate_extension_errors() {
             tab_id: None,
             wait_until: None,
             timeout_ms: Some(5_000),
+            context_id: None,
+            observation_id: None,
+            depends_on: None,
+            expect: None,
         },
     )
     .await
@@ -711,6 +761,10 @@ async fn m7_tools_propagate_extension_errors() {
             tab_id: None,
             wait_until: None,
             timeout_ms: Some(5_000),
+            context_id: None,
+            observation_id: None,
+            depends_on: None,
+            expect: None,
         },
     )
     .await
@@ -725,6 +779,10 @@ async fn m7_tools_propagate_extension_errors() {
             tab_id: None,
             wait_until: None,
             timeout_ms: Some(5_000),
+            context_id: None,
+            observation_id: None,
+            depends_on: None,
+            expect: None,
         },
     )
     .await
@@ -740,6 +798,10 @@ async fn m7_tools_propagate_extension_errors() {
             wait_until: None,
             timeout_ms: Some(5_000),
             hard: None,
+            context_id: None,
+            observation_id: None,
+            depends_on: None,
+            expect: None,
         },
     )
     .await
@@ -761,6 +823,10 @@ async fn m7_tools_propagate_extension_errors() {
             click_count: None,
             modifiers: None,
             timeout_ms: Some(5_000),
+            context_id: None,
+            observation_id: None,
+            depends_on: None,
+            expect: None,
         },
     )
     .await
@@ -778,6 +844,10 @@ async fn m7_tools_propagate_extension_errors() {
             tab_id: None,
             clear_before: None,
             timeout_ms: Some(5_000),
+            context_id: None,
+            observation_id: None,
+            depends_on: None,
+            expect: None,
         },
     )
     .await
@@ -796,6 +866,10 @@ async fn m7_tools_propagate_extension_errors() {
             tab_id: None,
             hold_ms: None,
             timeout_ms: Some(5_000),
+            context_id: None,
+            observation_id: None,
+            depends_on: None,
+            expect: None,
         },
     )
     .await
@@ -812,6 +886,10 @@ async fn m7_tools_propagate_extension_errors() {
             selector: None,
             tab_id: None,
             timeout_ms: Some(5_000),
+            context_id: None,
+            observation_id: None,
+            depends_on: None,
+            expect: None,
         },
     )
     .await
@@ -861,6 +939,10 @@ async fn wheel_round_trips_native_deltas_and_point() {
             delta_y: 600.0,
             modifiers: None,
             timeout_ms: Some(5_000),
+            context_id: None,
+            observation_id: None,
+            depends_on: None,
+            expect: None,
         },
     )
     .await
@@ -894,6 +976,8 @@ async fn click_move_click_rejects_pre_2_0_peer_and_forwards_both_drag_modes_unde
         id: "hs-old".into(),
         method: Method::SystemHandshake,
         params: Some(serde_json::to_value(params).unwrap()),
+        audit_id: None,
+        operation_id: None,
     };
     old_ws
         .send(Message::Text(serde_json::to_string(&hs).unwrap()))

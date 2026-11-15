@@ -1,0 +1,79 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "definitions": {
+    "BrowserStatusEntry": {
+      "description": "Snapshot of a single connected extension (extension client view).",
+      "properties": {
+        "browser_name": {
+          "type": "string"
+        },
+        "browser_version": {
+          "type": "string"
+        },
+        "connected_at_ms": {
+          "default": 0,
+          "description": "Unix epoch milliseconds at which the extension completed the\ndaemon handshake. Stable across reconnects only via the\nbest-effort registry generation; clients should treat this as a\nrough \"online since\" hint, not a strong identity.",
+          "format": "int64",
+          "type": "integer"
+        },
+        "extension_protocol_version": {
+          "default": "",
+          "description": "Protocol version the extension advertised at handshake.",
+          "type": "string"
+        },
+        "extension_version": {
+          "type": "string"
+        },
+        "instance_id": {
+          "description": "Stable id assigned by the extension; matches `HandshakeParams::instance_id`.",
+          "type": "string"
+        },
+        "label": {
+          "type": "string"
+        },
+        "session_count": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "unresponsive": {
+          "default": false,
+          "description": "The socket is still registered, but a call failed after this\nheartbeat-capable extension missed two heartbeats. Cleared when any\nframe arrives.",
+          "type": "boolean"
+        },
+        "version_skew": {
+          "default": false,
+          "description": "`true` when the browser's `protocol_version` differs from the\ndaemon's (same major, minor drift). Connection is still allowed.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "instance_id",
+        "browser_name",
+        "browser_version",
+        "extension_version",
+        "label",
+        "session_count",
+        "connected_at_ms",
+        "version_skew",
+        "extension_protocol_version",
+        "unresponsive"
+      ],
+      "type": "object"
+    }
+  },
+  "description": "`browser.list` response payload.",
+  "properties": {
+    "browsers": {
+      "items": {
+        "$ref": "#/definitions/BrowserStatusEntry"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "browsers"
+  ],
+  "title": "BrowserListResult",
+  "type": "object"
+}

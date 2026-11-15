@@ -141,6 +141,7 @@ fn params(args: &ExtractArgs) -> anyhow::Result<ExtractParams> {
         max_columns: args.max_columns,
         max_bytes: args.max_bytes,
         timeout_ms: args.timeout_ms,
+        context_id: None,
     })
 }
 pub fn dispatch(

@@ -106,7 +106,7 @@ async fn a_sequential_ipc_agent_can_decide_a_modal_and_retrieve_the_original_res
     };
     let req = receive(&mut ws).await;
     assert_eq!(req["method"], "tool.evaluate");
-    let op = req["params"]["_operation_id"].as_str().unwrap().to_owned();
+    let op = req["operation_id"].as_str().unwrap().to_owned();
     assert_ne!(op, "forged");
     let dialog = json!({"id":"dlg", "tab_id":7, "type":"prompt", "message":"Name", "default_prompt":"anonymous", "sequence":1, "decision_deadline":60000});
     send(&mut ws, json!({"event":"dialog.changed","payload":{"session_id":session,"operation_id":op,"dialog":dialog}})).await;
@@ -163,7 +163,8 @@ async fn a_sequential_ipc_agent_can_decide_a_modal_and_retrieve_the_original_res
     );
 
     let mut other_browser = connect(handle.ws_addr(), "other-browser").await;
-    send(&mut other_browser, json!({"event":"dialog.changed","payload":{"session_id":session,"operation_id":op,"dialog":{"id":"spoof"}}})).await;
+    let spoof_dialog = json!({"id":"spoof", "tab_id":7, "type":"confirm", "message":"spoof", "sequence":1, "decision_deadline":60000});
+    send(&mut other_browser, json!({"event":"dialog.changed","payload":{"session_id":session,"operation_id":op,"dialog":spoof_dialog}})).await;
     let pending = call(
         &sock,
         "still-pending",

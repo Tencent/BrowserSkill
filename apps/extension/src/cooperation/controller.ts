@@ -16,7 +16,13 @@ import {
 } from "@/tools/shared";
 import { lookupSnapshotRef } from "@/tools/snapshot-ref";
 import { AccessibilityLease } from "@/tools/vom/capture-coordinator";
-import type { DragTarget, RequestFrame, RpcError } from "@/transport/types";
+import type {
+  CooperateBaselineReason,
+  CooperateResult,
+  DragTarget,
+  RequestFrame,
+  RpcError,
+} from "@/transport/types";
 import {
   ActionCheckError,
   actionError,
@@ -499,11 +505,13 @@ export class CooperationController implements ControlAuthority {
     this.deps.changed(tabId);
     this.sessionActivity(state.sessionId);
   }
-  view(tabId: number): CooperationView | undefined {
-    const state = this.tabs.get(tabId);
-    if (!state) return;
+  private isLiveTab(state: TabState): boolean {
+    return this.tabs.get(state.tabId) === state && this.deps.sessions.has(state.sessionId);
+  }
+  private stateView(state: TabState): CooperationView {
+    const target = !state.held && !this.humanActive(state) ? state.target : undefined;
     return {
-      target: !state.held && !this.humanActive(state) ? state.target : undefined,
+      ...(target ? { target } : {}),
       revision: state.revision,
       // Explicit human ownership survives navigation and unavailable collection.
       mode:
@@ -522,6 +530,10 @@ export class CooperationController implements ControlAuthority {
                     : "syncing",
       editing: [...state.frames.values()].some((frame) => frame.editing),
     };
+  }
+  view(tabId: number): CooperationView | undefined {
+    const state = this.tabs.get(tabId);
+    return state ? this.stateView(state) : undefined;
   }
   private humanBusyOrRecentInput(state: TabState): boolean {
     return [...state.frames.values()].some(
@@ -798,7 +810,11 @@ export class CooperationController implements ControlAuthority {
     state.unresponsive = undefined;
     return frames;
   }
-  async command(params: CooperationParams, cdp: CdpRunner, signal: AbortSignal): Promise<unknown> {
+  async command(
+    params: CooperationParams,
+    cdp: CdpRunner,
+    signal: AbortSignal,
+  ): Promise<CooperateResult | RpcError> {
     const session = this.deps.sessions.get(params.session_id);
     if (!session) return { code: "not_found", message: "Unknown session" };
     cdp = sessionCdpRunner(
@@ -853,7 +869,12 @@ export class CooperationController implements ControlAuthority {
         try {
           await this.refresh(state);
         } catch (error) {
-          if (params.action !== "wait" || signal.aborted || error instanceof FrameCollectionError)
+          if (
+            params.action !== "wait" ||
+            !this.isLiveTab(state) ||
+            signal.aborted ||
+            error instanceof FrameCollectionError
+          )
             throw error;
           state.unavailable = true;
         }
@@ -887,6 +908,7 @@ export class CooperationController implements ControlAuthority {
         }
       }
       if (state.stopped && params.action !== "status") return stopped();
+      if (!this.isLiveTab(state)) return failure("Shared-tab control has ended");
       if (params.action !== "sync" && params.action !== "enable") {
         if (
           params.action === "wait" &&
@@ -900,7 +922,7 @@ export class CooperationController implements ControlAuthority {
           activity: state.activity.filter(
             (event) => event.cursor > (state.baseline?.activityCursor ?? 0),
           ),
-          state: this.view(state.tabId),
+          state: this.stateView(state),
           ready:
             !state.unavailable &&
             !state.held &&
@@ -960,8 +982,8 @@ export class CooperationController implements ControlAuthority {
             ? textDelta(baseline.held, params.max_tokens, baseline.frames, before)
             : undefined;
         const text = typeof patched === "object" ? patched : undefined;
-        const delta = baseline && (exact || !!text);
-        const baselineReason = delta
+        const delta = Boolean(baseline && (exact || !!text));
+        const baselineReason: CooperateBaselineReason | undefined = delta
           ? undefined
           : !baseline
             ? "no_previous_observation"
@@ -975,15 +997,16 @@ export class CooperationController implements ControlAuthority {
                     ? "media_changed"
                     : !sameBudget
                       ? "token_budget_changed"
-                      : (patched ??
-                        (!sameFrames(baseline.frames, before, "structure")
+                      : typeof patched === "string"
+                        ? patched
+                        : !sameFrames(baseline.frames, before, "structure")
                           ? "structure_changed"
-                          : "focus_changed"));
+                          : "focus_changed";
         // The private evidence describes the text and focus as they were captured.
         if (text && (text.lines.length || text.focusMoved)) evidence = undefined;
         // A delta updates the model's field values. Refresh private semantic
         // evidence too, without replacing refs or repeating page text to the model.
-        if (delta && !sameFields(baseline.frames, before))
+        if (delta && baseline && !sameFields(baseline.frames, before))
           await captureVomObservation(guardedRunner(cdp), state.tabId, target.url, {
             signal,
             accessibilityLease: state.accessibilityLease,
@@ -1085,49 +1108,15 @@ export class CooperationController implements ControlAuthority {
         );
         const historyGap = state.historyGap;
         state.historyGap = false;
-        return {
+        const base = {
           tab_id: state.tabId,
           context_id: context.id,
           control_policy: session.controlPolicy ?? "strict",
           ...(state.frameGaps.length ? { frame_gaps: state.frameGaps } : {}),
-          ...(targetPolicy ? { observation_id: context.observationId } : {}),
-          kind: delta
-            ? !text && sameFrames(baseline.frames, after, "revision")
-              ? "unchanged"
-              : "delta"
-            : "baseline",
+          ...(targetPolicy && context.observationId
+            ? { observation_id: context.observationId }
+            : {}),
           ...(baselineReason ? { baseline_reason: baselineReason } : {}),
-          ...(delta
-            ? {
-                previous_context_id: baseline.id,
-                // One context id spans many observations under target control.
-                ...(targetPolicy && baseline.observationId
-                  ? { previous_observation_id: baseline.observationId }
-                  : {}),
-                ...(text ? { observation_patch: { lines: text.lines } } : {}),
-                changes: [
-                  ...(text?.changes ?? []),
-                  ...[...after].flatMap(([frameId, frame]) =>
-                    frame.fields.flatMap((field) => {
-                      const previous = baseline.frames
-                        .get(frameId)
-                        ?.fields.find((old) =>
-                          field.id ? old.id === field.id : old.label === field.label,
-                        );
-                      return previous?.value === field.value
-                        ? []
-                        : [
-                            {
-                              frame_id: frameId,
-                              ...field,
-                              ...(previous ? { previous_value: previous.value } : {}),
-                            },
-                          ];
-                    }),
-                  ),
-                ],
-              }
-            : { observation }),
           activity,
           history_complete:
             !historyGap &&
@@ -1139,19 +1128,56 @@ export class CooperationController implements ControlAuthority {
                 (f.events[0]?.sequence ?? f.human + 1) <= old.human + 1
               );
             }),
-          state: { ...this.view(state.tabId), mode: "ready" },
+          state: { ...this.stateView(state), mode: "ready" as const },
+        };
+        if (delta && baseline) {
+          return {
+            ...base,
+            kind: !text && sameFrames(baseline.frames, after, "revision") ? "unchanged" : "delta",
+            previous_context_id: baseline.id,
+            ...(targetPolicy && baseline.observationId
+              ? { previous_observation_id: baseline.observationId }
+              : {}),
+            ...(text ? { observation_patch: { lines: text.lines } } : {}),
+            changes: [
+              ...(text?.changes ?? []),
+              ...[...after].flatMap(([frameId, frame]) =>
+                frame.fields.flatMap((field) => {
+                  const previous = baseline.frames
+                    .get(frameId)
+                    ?.fields.find((old) =>
+                      field.id ? old.id === field.id : old.label === field.label,
+                    );
+                  return previous?.value === field.value
+                    ? []
+                    : [
+                        {
+                          frame_id: frameId,
+                          ...field,
+                          ...(previous ? { previous_value: previous.value } : {}),
+                        },
+                      ];
+                }),
+              ),
+            ],
+          };
+        }
+        return {
+          ...base,
+          kind: "baseline",
+          observation: observation!,
         };
       } finally {
         state.working = false;
         state.lastAgentActivity = this.now();
-        this.changed(state);
+        if (this.tabs.get(state.tabId) === state) this.changed(state);
       }
     } catch (error) {
       if (state.stopped) return stopped();
       if (signal.aborted) return { code: "cancelled", message: "Cooperation wait cancelled" };
       state.unavailable = true;
       state.context = undefined;
-      this.changed(state);
+      if (this.tabs.get(state.tabId) === state) this.changed(state);
       if (error instanceof FrameCollectionError) return error.toRpcError();
       return withUnresponsiveFrames(
         failure(error instanceof Error ? error.message : String(error)),

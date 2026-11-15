@@ -283,6 +283,8 @@ async fn handshake_with_protocol(ws: &mut TestWs, protocol: &str) -> HandshakeRe
         id: "hs".into(),
         method: Method::SystemHandshake,
         params: Some(serde_json::to_value(params).unwrap()),
+        audit_id: None,
+        operation_id: None,
     };
     ws.send(Message::Text(serde_json::to_string(&req).unwrap()))
         .await
@@ -447,6 +449,8 @@ async fn cli_incognito_start_checks_extension_support_and_preserves_normal_start
         id: "hs-old".into(),
         method: Method::SystemHandshake,
         params: Some(serde_json::to_value(params).unwrap()),
+        audit_id: None,
+        operation_id: None,
     };
     old_ws
         .send(Message::Text(serde_json::to_string(&req).unwrap()))
@@ -1127,6 +1131,8 @@ async fn connect_second_ext(
         id: "hs".into(),
         method: Method::SystemHandshake,
         params: Some(serde_json::to_value(params).unwrap()),
+        audit_id: None,
+        operation_id: None,
     };
     b.send(Message::Text(serde_json::to_string(&hs).unwrap()))
         .await
@@ -1404,13 +1410,12 @@ async fn session_window_closed_event_purges_session() {
     assert_eq!(state.sessions.len(), 1);
 
     // Send `session.window_closed` event from the fake extension.
-    let event = bsk_protocol::EventFrame {
-        event: bsk_protocol::EventKind::SessionWindowClosed,
-        payload: serde_json::json!({
-            "session_id": "zzzz",
-            "reason": "user_closed_window",
-        }),
-    };
+    let event =
+        bsk_protocol::EventFrame::SessionWindowClosed(bsk_protocol::SessionWindowClosedEvent {
+            session_id: "zzzz".into(),
+            reason: Some(bsk_protocol::SessionWindowClosedReason::UserClosedWindow),
+            return_failures: Vec::new(),
+        });
     ws.send(Message::Text(
         serde_json::to_string(&bsk_protocol::Frame::Event(event)).unwrap(),
     ))

@@ -1,37 +1,26 @@
 //! IPC and offline maintenance share exactly the same operations.
 
-use super::{LocalAuth, LocalAuthMode};
+use super::LocalAuth;
 use anyhow::{Result, ensure};
+use bsk_protocol::local_auth::{
+    LocalAuthDevicesParams, LocalAuthPairParams, LocalAuthPairResult, LocalAuthRevokeParams,
+    LocalAuthRevokeResult, LocalAuthRotateParams, LocalAuthRotateResult, LocalAuthSetModeParams,
+    LocalAuthSetModeResult,
+};
 use bsk_protocol::{ErrorCode, Method, ResponseBody, RpcError};
-use serde::Deserialize;
 use serde_json::{Value, json};
 use std::{path::Path, sync::Arc};
 
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct PairParams {
-    replace: Option<String>,
-}
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RevokeParams {
-    device_id: Option<String>,
-    #[serde(default)]
-    all: bool,
-}
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RotateParams {
-    device_id: String,
-}
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ModeParams {
-    mode: LocalAuthMode,
-}
 fn params<T: serde::de::DeserializeOwned>(value: Value) -> Result<T> {
     serde_json::from_value(value)
         .map_err(|_| anyhow::anyhow!("invalid pairing maintenance parameters"))
+}
+
+fn empty_params(value: Value) -> Result<()> {
+    if !value.is_null() {
+        let _: LocalAuthDevicesParams = params(value)?;
+    }
+    Ok(())
 }
 
 /// Pre-local-pairing daemons used the file-locked remote store directly.
@@ -44,16 +33,21 @@ pub fn execute_legacy_remote(home: &Path, method: Method, value: Value) -> Resul
     );
     match method {
         Method::LocalAuthPair => {
-            let args: PairParams = params(value)?;
+            let args: LocalAuthPairParams = params(value)?;
             ensure!(
                 args.replace.is_none(),
                 "--replace requires a newer local daemon"
             );
-            Ok(json!({"link":remote.pair()?}))
+            Ok(serde_json::to_value(LocalAuthPairResult {
+                link: remote.pair()?,
+            })?)
         }
-        Method::LocalAuthDevices => Ok(Value::Array(remote_devices(&remote)?)),
+        Method::LocalAuthDevices => {
+            empty_params(value)?;
+            Ok(Value::Array(remote_devices(&remote)?))
+        }
         Method::LocalAuthRevoke => {
-            let args: RevokeParams = params(value)?;
+            let args: LocalAuthRevokeParams = params(value)?;
             ensure!(
                 args.all != args.device_id.is_some(),
                 "specify a device or --all"
@@ -70,7 +64,9 @@ pub fn execute_legacy_remote(home: &Path, method: Method, value: Value) -> Resul
                     "device grant not found"
                 );
             }
-            Ok(json!({"revoked":true}))
+            Ok(serde_json::to_value(LocalAuthRevokeResult {
+                revoked: true,
+            })?)
         }
         _ => anyhow::bail!("local pairing maintenance requires a newer daemon"),
     }
@@ -101,7 +97,7 @@ pub fn execute(
     let remote = super::super::remote::authorization::AuthorizationStore::at_home(home);
     match method {
         Method::LocalAuthPair => {
-            let args: PairParams = params(value)?;
+            let args: LocalAuthPairParams = params(value)?;
             let link = if server {
                 ensure!(
                     args.replace.is_none(),
@@ -111,9 +107,10 @@ pub fn execute(
             } else {
                 local.store.pair(port, args.replace.as_deref())?
             };
-            Ok(json!({"link": link}))
+            Ok(serde_json::to_value(LocalAuthPairResult { link })?)
         }
         Method::LocalAuthDevices => {
+            empty_params(value)?;
             let mut devices = serde_json::to_value(local.store.devices())?
                 .as_array()
                 .unwrap()
@@ -122,7 +119,7 @@ pub fn execute(
             Ok(Value::Array(devices))
         }
         Method::LocalAuthRevoke => {
-            let args: RevokeParams = params(value)?;
+            let args: LocalAuthRevokeParams = params(value)?;
             ensure!(
                 args.all != args.device_id.is_some(),
                 "specify a device or --all"
@@ -138,17 +135,23 @@ pub fn execute(
                     ensure!(remote.revoke(id)?, "device grant not found");
                 }
             }
-            Ok(json!({"revoked":true}))
+            Ok(serde_json::to_value(LocalAuthRevokeResult {
+                revoked: true,
+            })?)
         }
         Method::LocalAuthRotate => {
-            let args: RotateParams = params(value)?;
+            let args: LocalAuthRotateParams = params(value)?;
             local.store.request_rotation(&args.device_id)?;
-            Ok(json!({"rotate_on_next_connection":true}))
+            Ok(serde_json::to_value(LocalAuthRotateResult {
+                rotate_on_next_connection: true,
+            })?)
         }
         Method::LocalAuthSetMode => {
-            let args: ModeParams = params(value)?;
+            let args: LocalAuthSetModeParams = params(value)?;
             local.set_mode(home, args.mode)?;
-            Ok(json!({"local_auth":args.mode}))
+            Ok(serde_json::to_value(LocalAuthSetModeResult {
+                local_auth: args.mode,
+            })?)
         }
         _ => anyhow::bail!("unsupported pairing maintenance operation"),
     }
@@ -172,7 +175,7 @@ pub async fn handle(
     }
     // A rotation request cannot be lost behind an in-flight activation commit.
     let _rotation_guard = if method == Method::LocalAuthRotate {
-        match serde_json::from_value::<RotateParams>(params.clone())
+        match serde_json::from_value::<LocalAuthRotateParams>(params.clone())
             .ok()
             .and_then(|args| state.local_auth.store.resolve(&args.device_id).ok())
         {

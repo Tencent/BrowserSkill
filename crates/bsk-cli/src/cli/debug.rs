@@ -197,6 +197,10 @@ impl DebugArgs {
             fields: self.fields,
             wait_ms: self.wait_ms,
             command_id: self.command_id,
+            context_id: None,
+            observation_id: None,
+            depends_on: None,
+            expect: None,
         })
     }
 }

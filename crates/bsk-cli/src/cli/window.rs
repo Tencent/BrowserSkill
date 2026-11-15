@@ -79,6 +79,10 @@ fn run_resize(
         tab_id: None,
         width: args.width,
         height: args.height,
+        context_id: None,
+        observation_id: None,
+        depends_on: None,
+        expect: None,
     };
     let reply: WindowResizeResult = ipc_call(
         "window-resize-1",

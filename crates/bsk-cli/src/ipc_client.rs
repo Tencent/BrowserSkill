@@ -421,10 +421,10 @@ impl<'de> Visitor<'de> for IpcEnvelopeVisitor {
                     "mixed event and rpc frame fields".into(),
                 )));
             }
-            return Ok(IpcEnvelope::Event(EventFrame {
-                event,
-                payload: payload.unwrap_or(serde_json::Value::Null),
-            }));
+            return Ok(IpcEnvelope::Event(
+                EventFrame::from_parts(event, payload.unwrap_or_else(|| serde_json::json!({})))
+                    .map_err(de::Error::custom)?,
+            ));
         }
 
         if payload.is_some() {

@@ -262,6 +262,10 @@ pub fn build_params(args: &EmulateArgs) -> Result<EmulateParams, CliError> {
             tab_id: args.tab_id,
             off: Some(true),
             overrides: None,
+            context_id: None,
+            observation_id: None,
+            depends_on: None,
+            expect: None,
         });
     }
 
@@ -353,6 +357,10 @@ pub fn build_params(args: &EmulateArgs) -> Result<EmulateParams, CliError> {
         tab_id: args.tab_id,
         off: None,
         overrides: Some(overrides),
+        context_id: None,
+        observation_id: None,
+        depends_on: None,
+        expect: None,
     })
 }
 

@@ -13,7 +13,7 @@ use std::sync::Mutex;
 use base64::Engine;
 use bsk_protocol::tools::{
     TransferBeginParams, TransferBeginResult, TransferChunkParams, TransferChunkResult,
-    TransferIdParams, TransferReadyResult, TransferReleaseResult,
+    TransferIdParams, TransferReadParams, TransferReadyResult, TransferReleaseResult,
 };
 use bsk_protocol::{ErrorCode, RpcError};
 use uuid::Uuid;
@@ -356,7 +356,7 @@ impl TransferRegistry {
         Ok(copied)
     }
 
-    pub fn read_chunk(&self, p: TransferChunkParams) -> Result<TransferChunkResult, RpcError> {
+    pub fn read_chunk(&self, p: TransferReadParams) -> Result<TransferChunkResult, RpcError> {
         let entries = self.entries.lock().unwrap();
         let entry = entries
             .get(&p.transfer_id)
@@ -645,10 +645,10 @@ mod tests {
         );
         assert!(!inside.exists());
         let chunk = registry
-            .read_chunk(TransferChunkParams {
+            .read_chunk(TransferReadParams {
                 transfer_id: staging.transfer_id,
                 offset: 0,
-                data_base64: String::new(),
+                data_base64: None,
             })
             .unwrap();
         assert_eq!(

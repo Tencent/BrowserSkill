@@ -1,0 +1,33 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
+  "properties": {
+    "action": {
+      "type": "string"
+    },
+    "operation_id": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "session_id": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "tab_id": {
+      "format": "int64",
+      "type": [
+        "integer",
+        "null"
+      ]
+    }
+  },
+  "required": [
+    "action"
+  ],
+  "title": "LedgerRequestParams",
+  "type": "object"
+}

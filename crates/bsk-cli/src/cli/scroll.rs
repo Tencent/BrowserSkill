@@ -50,6 +50,10 @@ pub fn dispatch(
         selector,
         tab_id: args.tab_id,
         timeout_ms: Some(args.timeout),
+        context_id: None,
+        observation_id: None,
+        depends_on: None,
+        expect: None,
     };
     let reply: ScrollToResult = op_ctx.call(
         info.sock_path,

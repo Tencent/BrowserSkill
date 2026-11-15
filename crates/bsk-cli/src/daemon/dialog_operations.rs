@@ -6,8 +6,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use bsk_protocol::{ErrorCode, Method, ResponseBody, RpcError};
-use serde_json::{Value, json};
+use bsk_protocol::tools::{OperationAwaitResult, PendingJavaScriptDialog};
+use bsk_protocol::{DialogChangedEvent, ErrorCode, Method, ResponseBody, RpcError};
+use serde_json::json;
 use tokio::sync::watch;
 
 use crate::ipc_client::ScopeResultMeta;
@@ -19,7 +20,7 @@ const MAX_RESULT_BYTES: usize = 4 * 1024 * 1024;
 #[derive(Debug, Clone)]
 enum Progress {
     Running,
-    Dialog(Value),
+    Dialog(PendingJavaScriptDialog),
     Complete(ResponseBody, Instant),
 }
 
@@ -59,7 +60,7 @@ impl DialogOperation {
             .send_replace(Progress::Complete(body, Instant::now()));
     }
 
-    fn pending(&self, dialog: Value) -> ResponseBody {
+    fn pending(&self, dialog: PendingJavaScriptDialog) -> ResponseBody {
         ResponseBody::Err(RpcError {
             code: ErrorCode::DialogPending,
             message: "Original operation is suspended for a dialog decision; do not repeat it"
@@ -120,14 +121,21 @@ impl DialogOperation {
                             "retained operation result exceeds 4 MiB; action was already dispatched and must not be replayed",
                         );
                     }
-                    return ResponseBody::Ok(match body {
-                        ResponseBody::Ok(result) => {
-                            json!({"operation_id":self.id, "method":self.method, "state":"completed", "result":result})
-                        }
-                        ResponseBody::Err(error) => {
-                            json!({"operation_id":self.id, "method":self.method, "state":"failed", "error":error})
-                        }
-                    });
+                    let payload = match body {
+                        ResponseBody::Ok(result) => OperationAwaitResult::Completed {
+                            operation_id: self.id.clone(),
+                            method: self.method.clone(),
+                            result,
+                        },
+                        ResponseBody::Err(error) => OperationAwaitResult::Failed {
+                            operation_id: self.id.clone(),
+                            method: self.method.clone(),
+                            error,
+                        },
+                    };
+                    return ResponseBody::Ok(
+                        serde_json::to_value(payload).unwrap_or(serde_json::Value::Null),
+                    );
                 }
                 Progress::Running => {}
             }
@@ -135,8 +143,12 @@ impl DialogOperation {
                 .await
                 .is_err()
             {
+                let payload = OperationAwaitResult::Running {
+                    operation_id: self.id.clone(),
+                    method: self.method.clone(),
+                };
                 return ResponseBody::Ok(
-                    json!({"operation_id":self.id, "method":self.method, "state":"running"}),
+                    serde_json::to_value(payload).unwrap_or(serde_json::Value::Null),
                 );
             }
         }
@@ -178,7 +190,7 @@ impl DialogOperations {
             .values()
             .filter(|entry| entry.session_id == session_id)
             .find_map(|entry| match &*entry.progress.borrow() {
-                Progress::Dialog(dialog) => dialog.get("tab_id").and_then(Value::as_i64),
+                Progress::Dialog(dialog) => Some(dialog.tab_id),
                 _ => None,
             })
     }
@@ -256,24 +268,20 @@ impl DialogOperations {
     }
 
     /// WS caller verifies that this browser still owns the payload's session.
-    pub fn dialog_changed(&self, payload: &Value) {
-        let (Some(session), Some(id)) = (
-            payload["session_id"].as_str(),
-            payload["operation_id"].as_str(),
-        ) else {
+    pub fn dialog_changed(&self, ev: &DialogChangedEvent) {
+        let Some(id) = ev.operation_id.as_deref() else {
             return;
         };
-        let Some(entry) = self.get(session, id) else {
+        let Some(entry) = self.get(&ev.session_id, id) else {
             return;
         };
         entry.progress.send_if_modified(|progress| {
             if matches!(progress, Progress::Complete(..)) {
                 return false;
             }
-            *progress = if payload["dialog"].is_object() {
-                Progress::Dialog(payload["dialog"].clone())
-            } else {
-                Progress::Running
+            *progress = match &ev.dialog {
+                Some(dialog) => Progress::Dialog(dialog.clone()),
+                None => Progress::Running,
             };
             true
         });
@@ -307,6 +315,33 @@ fn bound_result(body: ResponseBody) -> ResponseBody {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bsk_protocol::tools::JavaScriptDialogType;
+
+    fn sample_dialog(id: &str) -> PendingJavaScriptDialog {
+        PendingJavaScriptDialog {
+            id: id.into(),
+            tab_id: 7,
+            dialog_type: JavaScriptDialogType::Confirm,
+            message: "Confirm?".into(),
+            url: None,
+            default_prompt: None,
+            sequence: 1,
+            decision_deadline: 60_000,
+        }
+    }
+
+    fn dialog_event(
+        session_id: &str,
+        operation_id: &str,
+        dialog: Option<PendingJavaScriptDialog>,
+    ) -> DialogChangedEvent {
+        DialogChangedEvent {
+            session_id: session_id.into(),
+            tab_id: dialog.as_ref().map(|d| d.tab_id),
+            dialog,
+            operation_id: Some(operation_id.into()),
+        }
+    }
 
     #[tokio::test]
     async fn a_sequential_caller_receives_pending_then_the_exact_original_result() {
@@ -314,7 +349,11 @@ mod tests {
         let op = registry
             .register("session", "cli-1", Method::ToolEvaluate)
             .unwrap();
-        registry.dialog_changed(&json!({"session_id":"session", "operation_id":op.id, "dialog":{"id":"first", "type":"confirm"}}));
+        registry.dialog_changed(&dialog_event(
+            "session",
+            &op.id,
+            Some(sample_dialog("first")),
+        ));
         let (body, suspended) = op.initial_response().await;
         assert!(suspended);
         let ResponseBody::Err(pending) = body else {
@@ -322,8 +361,7 @@ mod tests {
         };
         assert_eq!(pending.code, ErrorCode::DialogPending);
         assert_eq!(pending.data.unwrap()["operation_id"], op.id);
-        registry
-            .dialog_changed(&json!({"session_id":"session", "operation_id":op.id, "dialog":null}));
+        registry.dialog_changed(&dialog_event("session", &op.id, None));
         op.finish(ResponseBody::Ok(json!({"ok":true,"value":false})));
         for _ in 0..2 {
             let ResponseBody::Ok(result) = op.await_result(0).await else {
@@ -340,15 +378,11 @@ mod tests {
         let op = registry
             .register("owner", "cli-2", Method::ToolClick)
             .unwrap();
-        registry.dialog_changed(
-            &json!({"session_id":"other", "operation_id":op.id, "dialog":{"id":"wrong"}}),
-        );
+        registry.dialog_changed(&dialog_event("other", &op.id, Some(sample_dialog("wrong"))));
         assert!(matches!(*op.progress.borrow(), Progress::Running));
         assert!(registry.get("other", &op.id).is_none());
         op.finish(ResponseBody::Ok(json!("original")));
-        registry.dialog_changed(
-            &json!({"session_id":"owner", "operation_id":op.id, "dialog":{"id":"late"}}),
-        );
+        registry.dialog_changed(&dialog_event("owner", &op.id, Some(sample_dialog("late"))));
         let ResponseBody::Ok(result) = op.await_result(0).await else {
             panic!("missing result");
         };
@@ -362,9 +396,7 @@ mod tests {
             .register("owner", "cli-3", Method::ToolEvaluate)
             .unwrap();
         for id in ["first", "second"] {
-            registry.dialog_changed(
-                &json!({"session_id":"owner", "operation_id":op.id, "dialog":{"id":id}}),
-            );
+            registry.dialog_changed(&dialog_event("owner", &op.id, Some(sample_dialog(id))));
             let ResponseBody::Err(pending) = op.await_result(0).await else {
                 panic!("expected pending");
             };
@@ -421,9 +453,7 @@ mod tests {
         let op = registry
             .register("owner", "large", Method::ToolEvaluate)
             .unwrap();
-        registry.dialog_changed(
-            &json!({"session_id":"owner", "operation_id":op.id, "dialog":{"id":"first"}}),
-        );
+        registry.dialog_changed(&dialog_event("owner", &op.id, Some(sample_dialog("first"))));
         op.initial_response().await;
         op.finish(ResponseBody::Ok(json!("x".repeat(MAX_RESULT_BYTES + 1))));
         let ResponseBody::Ok(result) = op.await_result(0).await else {

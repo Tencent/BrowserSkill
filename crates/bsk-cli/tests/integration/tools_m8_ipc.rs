@@ -92,6 +92,8 @@ async fn do_handshake(ws: &mut Ws) -> HandshakeResult {
         id: "hs".into(),
         method: Method::SystemHandshake,
         params: Some(serde_json::to_value(params).unwrap()),
+        audit_id: None,
+        operation_id: None,
     };
     ws.send(Message::Text(serde_json::to_string(&req).unwrap()))
         .await
@@ -106,10 +108,6 @@ async fn do_handshake(ws: &mut Ws) -> HandshakeResult {
         ResponseBody::Ok(v) => serde_json::from_value(v).unwrap(),
         ResponseBody::Err(e) => panic!("handshake rejected: {e:?}"),
     }
-}
-
-fn strip_envelope_params(params: &mut Option<Value>) {
-    bsk_protocol::RequestFrame::strip_ws_correlation(params);
 }
 
 fn run_extension<F>(ws: Ws, reply: F)
@@ -132,10 +130,9 @@ where
                 Ok(f) => f,
                 Err(_) => continue,
             };
-            let Frame::Request(mut req) = frame else {
+            let Frame::Request(req) = frame else {
                 continue;
             };
-            strip_envelope_params(&mut req.params);
             let body = match req.method {
                 Method::ToolSessionStart => {
                     let _: SessionStartParams =
@@ -249,6 +246,10 @@ async fn tab_close_round_trips_tab_id() {
         TabCloseParams {
             session_id,
             tab_id: 33,
+            context_id: None,
+            observation_id: None,
+            depends_on: None,
+            expect: None,
         },
     )
     .await
@@ -279,6 +280,10 @@ async fn tab_close_propagates_invalid_params_for_borrowed_tab() {
         TabCloseParams {
             session_id,
             tab_id: 33,
+            context_id: None,
+            observation_id: None,
+            depends_on: None,
+            expect: None,
         },
     )
     .await

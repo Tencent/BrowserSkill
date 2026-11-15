@@ -59,6 +59,26 @@ pub struct OperationParams {
     pub wait_ms: Option<u32>,
 }
 
+/// Retained or still-running status returned by `tool.operation_await`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum OperationAwaitResult {
+    Completed {
+        operation_id: String,
+        method: crate::Method,
+        result: serde_json::Value,
+    },
+    Failed {
+        operation_id: String,
+        method: crate::Method,
+        error: crate::RpcError,
+    },
+    Running {
+        operation_id: String,
+        method: crate::Method,
+    },
+}
+
 /// Native JS dialog kind reported by CDP.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]

@@ -430,7 +430,7 @@ export const methods = [
     },
     "remote_allowed": true,
     "response_grace": false,
-    "result": "AnyValue",
+    "result": "CooperateResult",
     "resume_control": "effect",
     "tab_transition": false,
     "wal_tracking": "never"
@@ -454,14 +454,14 @@ export const methods = [
     "opens_tabs": false,
     "outcome": "ordinary",
     "owner": "daemon",
-    "params": "AnyValue",
+    "params": "LocalAuthPairParams",
     "queue_mode": "serial",
     "recipe_step": {
       "kind": "ignore"
     },
     "remote_allowed": true,
     "response_grace": false,
-    "result": "AnyValue",
+    "result": "LocalAuthPairResult",
     "resume_control": "effect",
     "tab_transition": false,
     "wal_tracking": "never"
@@ -485,14 +485,14 @@ export const methods = [
     "opens_tabs": false,
     "outcome": "ordinary",
     "owner": "daemon",
-    "params": "AnyValue",
+    "params": "LocalAuthDevicesParams",
     "queue_mode": "serial",
     "recipe_step": {
       "kind": "ignore"
     },
     "remote_allowed": true,
     "response_grace": false,
-    "result": "AnyValue",
+    "result": "LocalAuthDevicesResult",
     "resume_control": "effect",
     "tab_transition": false,
     "wal_tracking": "never"
@@ -516,14 +516,14 @@ export const methods = [
     "opens_tabs": false,
     "outcome": "ordinary",
     "owner": "daemon",
-    "params": "AnyValue",
+    "params": "LocalAuthRevokeParams",
     "queue_mode": "serial",
     "recipe_step": {
       "kind": "ignore"
     },
     "remote_allowed": true,
     "response_grace": false,
-    "result": "AnyValue",
+    "result": "LocalAuthRevokeResult",
     "resume_control": "effect",
     "tab_transition": false,
     "wal_tracking": "never"
@@ -547,14 +547,14 @@ export const methods = [
     "opens_tabs": false,
     "outcome": "ordinary",
     "owner": "daemon",
-    "params": "AnyValue",
+    "params": "LocalAuthRotateParams",
     "queue_mode": "serial",
     "recipe_step": {
       "kind": "ignore"
     },
     "remote_allowed": true,
     "response_grace": false,
-    "result": "AnyValue",
+    "result": "LocalAuthRotateResult",
     "resume_control": "effect",
     "tab_transition": false,
     "wal_tracking": "never"
@@ -578,14 +578,14 @@ export const methods = [
     "opens_tabs": false,
     "outcome": "ordinary",
     "owner": "daemon",
-    "params": "AnyValue",
+    "params": "LocalAuthSetModeParams",
     "queue_mode": "serial",
     "recipe_step": {
       "kind": "ignore"
     },
     "remote_allowed": true,
     "response_grace": false,
-    "result": "AnyValue",
+    "result": "LocalAuthSetModeResult",
     "resume_control": "effect",
     "tab_transition": false,
     "wal_tracking": "never"
@@ -609,14 +609,14 @@ export const methods = [
     "opens_tabs": false,
     "outcome": "ordinary",
     "owner": "daemon",
-    "params": "AnyValue",
+    "params": "AuditRequestParams",
     "queue_mode": "serial",
     "recipe_step": {
       "kind": "ignore"
     },
     "remote_allowed": true,
     "response_grace": false,
-    "result": "AnyValue",
+    "result": "AuditRequestResult",
     "resume_control": "effect",
     "tab_transition": false,
     "wal_tracking": "never"
@@ -640,14 +640,14 @@ export const methods = [
     "opens_tabs": false,
     "outcome": "ordinary",
     "owner": "daemon",
-    "params": "AnyValue",
+    "params": "LedgerRequestParams",
     "queue_mode": "serial",
     "recipe_step": {
       "kind": "ignore"
     },
     "remote_allowed": true,
     "response_grace": false,
-    "result": "AnyValue",
+    "result": "LedgerRequestResult",
     "resume_control": "effect",
     "tab_transition": false,
     "wal_tracking": "never"
@@ -764,14 +764,14 @@ export const methods = [
     "opens_tabs": false,
     "outcome": "ordinary",
     "owner": "daemon",
-    "params": "AnyValue",
+    "params": "DaemonSessionStartParams",
     "queue_mode": "serial",
     "recipe_step": {
       "kind": "ignore"
     },
     "remote_allowed": true,
     "response_grace": false,
-    "result": "AnyValue",
+    "result": "DaemonSessionStartResult",
     "resume_control": "effect",
     "tab_transition": false,
     "wal_tracking": "never"
@@ -795,14 +795,14 @@ export const methods = [
     "opens_tabs": false,
     "outcome": "ordinary",
     "owner": "daemon",
-    "params": "AnyValue",
+    "params": "DaemonSessionStartTrackedParams",
     "queue_mode": "serial",
     "recipe_step": {
       "kind": "ignore"
     },
     "remote_allowed": true,
     "response_grace": false,
-    "result": "AnyValue",
+    "result": "DaemonSessionStartResult",
     "resume_control": "effect",
     "tab_transition": false,
     "wal_tracking": "never"
@@ -826,14 +826,14 @@ export const methods = [
     "opens_tabs": false,
     "outcome": "ordinary",
     "owner": "daemon",
-    "params": "AnyValue",
+    "params": "SessionRequestParams",
     "queue_mode": "serial",
     "recipe_step": {
       "kind": "ignore"
     },
     "remote_allowed": true,
     "response_grace": false,
-    "result": "AnyValue",
+    "result": "SessionRequestResult",
     "resume_control": "effect",
     "tab_transition": false,
     "wal_tracking": "never"
@@ -857,14 +857,14 @@ export const methods = [
     "opens_tabs": false,
     "outcome": "ordinary",
     "owner": "daemon",
-    "params": "AnyValue",
+    "params": "DaemonSessionStopParams",
     "queue_mode": "serial",
     "recipe_step": {
       "kind": "ignore"
     },
     "remote_allowed": true,
     "response_grace": false,
-    "result": "AnyValue",
+    "result": "DaemonSessionStopResult",
     "resume_control": "effect",
     "tab_transition": false,
     "wal_tracking": "never"
@@ -888,14 +888,14 @@ export const methods = [
     "opens_tabs": false,
     "outcome": "ordinary",
     "owner": "daemon",
-    "params": "AnyValue",
+    "params": "DaemonSessionStopAllParams",
     "queue_mode": "serial",
     "recipe_step": {
       "kind": "ignore"
     },
     "remote_allowed": true,
     "response_grace": false,
-    "result": "AnyValue",
+    "result": "DaemonSessionStopResult",
     "resume_control": "effect",
     "tab_transition": false,
     "wal_tracking": "never"
@@ -919,14 +919,14 @@ export const methods = [
     "opens_tabs": false,
     "outcome": "ordinary",
     "owner": "daemon",
-    "params": "AnyValue",
+    "params": "SessionListParams",
     "queue_mode": "serial",
     "recipe_step": {
       "kind": "ignore"
     },
     "remote_allowed": true,
     "response_grace": false,
-    "result": "AnyValue",
+    "result": "SessionListResult",
     "resume_control": "effect",
     "tab_transition": false,
     "wal_tracking": "never"
@@ -950,14 +950,14 @@ export const methods = [
     "opens_tabs": false,
     "outcome": "ordinary",
     "owner": "daemon",
-    "params": "AnyValue",
+    "params": "SessionRunLogParams",
     "queue_mode": "serial",
     "recipe_step": {
       "kind": "ignore"
     },
     "remote_allowed": true,
     "response_grace": false,
-    "result": "AnyValue",
+    "result": "RunLog",
     "resume_control": "effect",
     "tab_transition": false,
     "wal_tracking": "never"
@@ -988,7 +988,7 @@ export const methods = [
     },
     "remote_allowed": true,
     "response_grace": false,
-    "result": "AnyValue",
+    "result": "BrowserListResult",
     "resume_control": "effect",
     "tab_transition": false,
     "wal_tracking": "never"
@@ -1815,7 +1815,7 @@ export const methods = [
     "wal_tracking": "always"
   },
   {
-    "action_metadata": "context_only",
+    "action_metadata": "tab_binding_context",
     "audit_key": "read",
     "auto_borrow_write": false,
     "auto_inject_context": "never",
@@ -1877,7 +1877,7 @@ export const methods = [
     "wal_tracking": "never"
   },
   {
-    "action_metadata": "context_only",
+    "action_metadata": "tab_binding_context",
     "audit_key": "read",
     "auto_borrow_write": false,
     "auto_inject_context": "never",
@@ -1939,7 +1939,7 @@ export const methods = [
     "wal_tracking": "never"
   },
   {
-    "action_metadata": "context_only",
+    "action_metadata": "tab_binding_context",
     "audit_key": "read",
     "auto_borrow_write": false,
     "auto_inject_context": "never",
@@ -1970,7 +1970,7 @@ export const methods = [
     "wal_tracking": "never"
   },
   {
-    "action_metadata": "context_only",
+    "action_metadata": "tab_binding_context",
     "audit_key": "screenshot",
     "auto_borrow_write": false,
     "auto_inject_context": "never",
@@ -2094,7 +2094,7 @@ export const methods = [
     "wal_tracking": "never"
   },
   {
-    "action_metadata": "context_only",
+    "action_metadata": "tab_binding_context",
     "audit_key": "console",
     "auto_borrow_write": false,
     "auto_inject_context": "never",
@@ -2156,7 +2156,7 @@ export const methods = [
     "wal_tracking": "dynamic_debug"
   },
   {
-    "action_metadata": "context_only",
+    "action_metadata": "tab_binding_context",
     "audit_key": "network",
     "auto_borrow_write": false,
     "auto_inject_context": "never",
@@ -2337,7 +2337,7 @@ export const methods = [
     },
     "remote_allowed": true,
     "response_grace": false,
-    "result": "AnyValue",
+    "result": "OperationAwaitResult",
     "resume_control": "effect",
     "tab_transition": false,
     "wal_tracking": "never"
@@ -2374,7 +2374,7 @@ export const methods = [
     "wal_tracking": "never"
   },
   {
-    "action_metadata": "context_only",
+    "action_metadata": "tab_binding_context",
     "audit_key": "wait",
     "auto_borrow_write": true,
     "auto_inject_context": "never",
@@ -2405,7 +2405,7 @@ export const methods = [
     "wal_tracking": "never"
   },
   {
-    "action_metadata": "context_only",
+    "action_metadata": "tab_binding_context",
     "audit_key": "waitForElement",
     "auto_borrow_write": true,
     "auto_inject_context": "never",
@@ -2640,14 +2640,14 @@ export const methods = [
     "opens_tabs": false,
     "outcome": "ordinary",
     "owner": "daemon",
-    "params": "AnyValue",
+    "params": "TransferBeginParams",
     "queue_mode": "serial",
     "recipe_step": {
       "kind": "ignore"
     },
     "remote_allowed": true,
     "response_grace": false,
-    "result": "AnyValue",
+    "result": "TransferBeginResult",
     "resume_control": "effect",
     "tab_transition": false,
     "wal_tracking": "never"
@@ -2671,14 +2671,14 @@ export const methods = [
     "opens_tabs": false,
     "outcome": "ordinary",
     "owner": "daemon",
-    "params": "AnyValue",
+    "params": "TransferChunkParams",
     "queue_mode": "serial",
     "recipe_step": {
       "kind": "ignore"
     },
     "remote_allowed": true,
     "response_grace": false,
-    "result": "AnyValue",
+    "result": "TransferChunkResult",
     "resume_control": "effect",
     "tab_transition": false,
     "wal_tracking": "never"
@@ -2702,14 +2702,14 @@ export const methods = [
     "opens_tabs": false,
     "outcome": "ordinary",
     "owner": "daemon",
-    "params": "AnyValue",
+    "params": "TransferIdParams",
     "queue_mode": "serial",
     "recipe_step": {
       "kind": "ignore"
     },
     "remote_allowed": true,
     "response_grace": false,
-    "result": "AnyValue",
+    "result": "TransferReadyResult",
     "resume_control": "effect",
     "tab_transition": false,
     "wal_tracking": "never"
@@ -2733,14 +2733,14 @@ export const methods = [
     "opens_tabs": false,
     "outcome": "ordinary",
     "owner": "daemon",
-    "params": "AnyValue",
+    "params": "TransferReadParams",
     "queue_mode": "serial",
     "recipe_step": {
       "kind": "ignore"
     },
     "remote_allowed": true,
     "response_grace": false,
-    "result": "AnyValue",
+    "result": "TransferChunkResult",
     "resume_control": "effect",
     "tab_transition": false,
     "wal_tracking": "never"
@@ -2764,14 +2764,14 @@ export const methods = [
     "opens_tabs": false,
     "outcome": "ordinary",
     "owner": "daemon",
-    "params": "AnyValue",
+    "params": "TransferIdParams",
     "queue_mode": "serial",
     "recipe_step": {
       "kind": "ignore"
     },
     "remote_allowed": true,
     "response_grace": false,
-    "result": "AnyValue",
+    "result": "TransferReleaseResult",
     "resume_control": "effect",
     "tab_transition": false,
     "wal_tracking": "never"
@@ -2809,7 +2809,7 @@ export const methods = [
   }
 ] as const;
 export interface ToolMap {
-  "tool.cooperate": { params: Types.CooperateParams; result: Types.AnyValue };
+  "tool.cooperate": { params: Types.CooperateParams; result: Types.CooperateResult };
   "tool.session_start": { params: Types.SessionStartParams; result: Types.SessionStartResult };
   "tool.session_stop": { params: Types.SessionStopParams; result: Types.SessionStopOutcome };
   "tool.window_resize": { params: Types.WindowResizeParams; result: Types.WindowResizeResult };

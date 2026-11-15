@@ -102,6 +102,8 @@ async fn do_handshake(ws: &mut Ws) -> HandshakeResult {
         id: "hs".into(),
         method: Method::SystemHandshake,
         params: Some(serde_json::to_value(params).unwrap()),
+        audit_id: None,
+        operation_id: None,
     };
     ws.send(Message::Text(serde_json::to_string(&req).unwrap()))
         .await
@@ -233,6 +235,10 @@ async fn evaluate_round_trips_ok_with_value() {
             return_by_value: Some(true),
             timeout_ms: None,
             unverified: None,
+            context_id: None,
+            observation_id: None,
+            depends_on: None,
+            expect: None,
         },
     )
     .await
@@ -283,6 +289,10 @@ async fn evaluate_round_trips_dialogs_payload() {
             return_by_value: None,
             timeout_ms: None,
             unverified: None,
+            context_id: None,
+            observation_id: None,
+            depends_on: None,
+            expect: None,
         },
     )
     .await
@@ -327,6 +337,10 @@ async fn evaluate_round_trips_exception_as_in_band_error() {
             return_by_value: None,
             timeout_ms: None,
             unverified: None,
+            context_id: None,
+            observation_id: None,
+            depends_on: None,
+            expect: None,
         },
     )
     .await
@@ -362,6 +376,10 @@ async fn evaluate_propagates_permission_denied() {
             return_by_value: None,
             timeout_ms: None,
             unverified: None,
+            context_id: None,
+            observation_id: None,
+            depends_on: None,
+            expect: None,
         },
     )
     .await
@@ -390,6 +408,10 @@ async fn evaluate_returns_not_found_for_unknown_session() {
             return_by_value: None,
             timeout_ms: None,
             unverified: None,
+            context_id: None,
+            observation_id: None,
+            depends_on: None,
+            expect: None,
         },
     )
     .await
@@ -432,6 +454,7 @@ async fn wait_for_navigation_round_trips_reached() {
             tab_id: None,
             wait_until: Some(WaitUntil::Load),
             timeout_ms: Some(1_000),
+            context_id: None,
         },
     )
     .await
@@ -467,6 +490,7 @@ async fn wait_for_navigation_reports_timeout_payload() {
             tab_id: None,
             wait_until: Some(WaitUntil::Load),
             timeout_ms: Some(25),
+            context_id: None,
         },
     )
     .await
@@ -559,6 +583,8 @@ async fn wait_ms_cancellation_returns_cancelled_via_method_cancel() {
         id: "wait-cancel-1".into(),
         method: Method::ToolWaitMs,
         params: Some(serde_json::to_value(WaitMsParams { duration_ms: 5_000 }).unwrap()),
+        audit_id: None,
+        operation_id: None,
     });
     let mut line = serde_json::to_string(&wait_frame).unwrap();
     line.push('\n');

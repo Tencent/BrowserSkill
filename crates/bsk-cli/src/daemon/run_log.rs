@@ -7,8 +7,8 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Mutex;
 
+pub use bsk_protocol::system::{LoggedStep, RunLog};
 use bsk_protocol::{ErrorCode, Method, ResponseBody, RpcError};
-use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::cli::recipe::vom::{self, Target};
@@ -16,51 +16,6 @@ use crate::cli::recipe::vom::{self, Target};
 const MAX_STEPS: usize = 200;
 const MAX_REFS: usize = 8000;
 const MAX_TEXT: usize = 256;
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum LoggedStep {
-    /// An explicit navigation. A query string may hold data, so only its presence is kept.
-    Navigate {
-        origin: Option<String>,
-        path: Option<String>,
-        dropped_query: bool,
-    },
-    Action {
-        action: String,
-        target: Target,
-        element: String,
-        /// The observation this ref first appeared in.
-        first_seen: u32,
-        /// How many option values a select chose, never which.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        values: Option<usize>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        key: Option<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        modifiers: Option<Value>,
-        /// The first heading of the page it acted on.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        heading: Option<String>,
-        #[serde(default)]
-        sensitive: bool,
-    },
-    /// The caller waited for a condition here, so the page changed in between.
-    Wait,
-    /// An action a recipe cannot hold.
-    Skipped { method: String, reason: String },
-    /// An action whose effect is not known.
-    Uncertain { method: String },
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-pub struct RunLog {
-    pub steps: Vec<LoggedStep>,
-    pub observations: u32,
-    /// Steps were dropped after the bound.
-    pub truncated: bool,
-    pub borrowed_tabs: Vec<i64>,
-}
 
 #[derive(Debug, Clone)]
 struct KnownRef {
@@ -281,11 +236,31 @@ impl SessionLog {
             (known, target, tab.heading.clone())
         };
         let key = params["key"].as_str().map(str::to_owned);
-        let modifiers = params.get("modifiers").cloned();
-        // A single character is typed text, which is an input value.
+        let modifiers = (action == "press")
+            .then(|| {
+                params
+                    .get("modifiers")
+                    .and_then(|v| {
+                        serde_json::from_value::<Vec<bsk_protocol::tools::KeyModifier>>(v.clone())
+                            .ok()
+                    })
+                    .filter(|mods| !mods.is_empty())
+            })
+            .flatten();
+        let has_shortcut_modifier = modifiers.as_deref().is_some_and(|mods| {
+            mods.iter().any(|m| {
+                matches!(
+                    m,
+                    bsk_protocol::tools::KeyModifier::Alt
+                        | bsk_protocol::tools::KeyModifier::Ctrl
+                        | bsk_protocol::tools::KeyModifier::Meta
+                )
+            })
+        });
+        // A single character without Ctrl/Alt/Meta is typed text, which is an input value.
         if key
             .as_deref()
-            .is_some_and(|key| key.chars().count() == 1 && modifiers.is_none())
+            .is_some_and(|key| key.chars().count() == 1 && !has_shortcut_modifier)
         {
             return self.skip(method, "character_key");
         }
@@ -953,5 +928,61 @@ mod tests {
             "duplicate resolve_operation must not append a second step: {view:?}"
         );
         assert!(matches!(view.steps[0], LoggedStep::Action { .. }));
+    }
+
+    #[test]
+    fn character_key_privacy_filter_rejects_empty_null_or_shift_modifiers_while_keeping_shortcuts()
+    {
+        let logs = RunLogs::default();
+        sync(&logs, PAGE, "c");
+        for bypass_attempt in [
+            json!({"session_id":"s","ref":"@e2","key":"s","modifiers":[]}),
+            json!({"session_id":"s","ref":"@e2","key":"s","modifiers":null}),
+            json!({"session_id":"s","ref":"@e2","key":"s","modifiers":["shift"]}),
+        ] {
+            record(&logs, Method::ToolPress, bypass_attempt, json!({}));
+        }
+        record(
+            &logs,
+            Method::ToolPress,
+            json!({"session_id":"s","ref":"@e2","key":"a","modifiers":["ctrl"]}),
+            json!({}),
+        );
+        record(
+            &logs,
+            Method::ToolClick,
+            json!({"session_id":"s","ref":"@e3","modifiers":["shift"]}),
+            json!({}),
+        );
+        let steps = logs.read("s").steps;
+        assert_eq!(steps.len(), 5, "{steps:?}");
+        for step in &steps[0..3] {
+            assert_eq!(
+                *step,
+                LoggedStep::Skipped {
+                    method: "tool.press".into(),
+                    reason: "character_key".into(),
+                }
+            );
+        }
+        assert!(matches!(
+            &steps[3],
+            LoggedStep::Action {
+                action,
+                key: Some(key),
+                modifiers: Some(mods),
+                ..
+            } if action == "press"
+                && key == "a"
+                && mods == &[bsk_protocol::tools::KeyModifier::Ctrl]
+        ));
+        assert!(matches!(
+            &steps[4],
+            LoggedStep::Action {
+                action,
+                modifiers: None,
+                ..
+            } if action == "click"
+        ));
     }
 }

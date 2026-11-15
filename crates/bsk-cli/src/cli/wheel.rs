@@ -72,6 +72,10 @@ pub fn dispatch(
             Some(modifiers)
         },
         timeout_ms: Some(args.timeout),
+        context_id: None,
+        observation_id: None,
+        depends_on: None,
+        expect: None,
     };
     let reply: WheelResult = op_ctx.call(
         info.sock_path,

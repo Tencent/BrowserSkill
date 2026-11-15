@@ -68,6 +68,8 @@ pub async fn send_handshake(
         id: "hs-1".into(),
         method: Method::SystemHandshake,
         params: Some(serde_json::to_value(params).unwrap()),
+        audit_id: None,
+        operation_id: None,
     };
     ws.send(Message::Text(serde_json::to_string(&req).unwrap()))
         .await
@@ -170,6 +172,8 @@ async fn ws_kicks_non_handshake_first_frame() {
         id: "1".into(),
         method: Method::ToolTabList,
         params: Some(serde_json::json!({"session_id":"foo"})),
+        audit_id: None,
+        operation_id: None,
     };
     ws.send(Message::Text(serde_json::to_string(&bad).unwrap()))
         .await

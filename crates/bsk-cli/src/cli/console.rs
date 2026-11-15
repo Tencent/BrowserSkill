@@ -65,6 +65,7 @@ fn run(
         limit: args.limit,
         max_text_chars: args.max_text_chars,
         include_stack: args.include_stack.then_some(true),
+        context_id: None,
     };
     let reply: ConsoleResult = call(sock, ctx, params)?;
     render(&reply, format)

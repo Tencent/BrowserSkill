@@ -108,7 +108,8 @@
   "required": [
     "text",
     "ref_count",
-    "tab_id"
+    "tab_id",
+    "truncated"
   ],
   "title": "SnapshotResult",
   "type": "object"

@@ -66,6 +66,7 @@ fn run(
         tab_id: args.tab_id,
         ref_: args.ref_.clone(),
         max_bytes: args.max_bytes,
+        context_id: None,
     };
     let reply: GetHtmlResult = call(sock, ctx, params)?;
     if let Some(out) = &args.out {

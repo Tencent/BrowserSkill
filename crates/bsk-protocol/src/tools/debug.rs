@@ -64,67 +64,90 @@ debug_actions! {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct DebugParams {
     pub session_id: String,
     pub action: DebugAction,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tab_id: Option<i64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub run_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub since: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(range(min = 1, max = 100))]
     pub limit: Option<u32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub part: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(range(min = 0, max = 65536))]
     pub offset: Option<u32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(range(min = 1, max = 16384))]
     pub max_chars: Option<u32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pointer: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rule: Option<DebugRuleSpec>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub replay: Option<DebugReplaySpec>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(range(min = 4096, max = 262144))]
     pub budget: Option<u32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(range(min = 0, max = 60000))]
     pub slow_ms: Option<u32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(range(min = 100, max = 10000))]
     pub window_ms: Option<u32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub include_controlled: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub method: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resource_type: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(range(min = 100, max = 599))]
     pub status: Option<u16>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub state: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kind: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fields: Option<Vec<String>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(range(min = 0, max = 60000))]
     pub wait_ms: Option<u32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub command_id: Option<String>,
+    /// Context actually returned by sync. Reusable for target-policy DOM actions;
+    /// strict policy consumes it after one action. Never fill it from cached state.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(with = "String")]
+    pub context_id: Option<String>,
+    /// Sync's single-use baseline for untargeted/visual actions under target policy,
+    /// including untargeted keys and displacement-only drags. Drags with a
+    /// target ref/selector need only context_id. A script needs it only when it
+    /// states no expect facts; passing both checks the whole page as well.
+    /// Strict-policy drag instead accepts its legacy ref-map observation token.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observation_id: Option<String>,
+    /// Strict policy only: observed decision regions. Target policy requires exact
+    /// business facts in expect; regions cannot be translated to facts automatically.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(with = "Vec<String>", length(max = 16))]
+    pub depends_on: Option<Vec<String>>,
+    /// Literal conditions checked before input. Selectors search the main document;
+    /// use observed refs for iframe/shadow-root targets. Text includes all whitespace.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(with = "Vec<super::ActionExpectation>", length(max = 16))]
+    pub expect: Option<Vec<super::ActionExpectation>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
