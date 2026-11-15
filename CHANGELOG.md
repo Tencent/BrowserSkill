@@ -95,6 +95,10 @@ determines which versions can connect.
   visibility checks, and collection limits ([#588](https://github.com/Tencent/BrowserSkill/issues/588),
   [#612](https://github.com/Tencent/BrowserSkill/pull/612)); added required pre-release
   audit scenario `EDGE-SLOTTED-LIST-EXTRACT`.
+- Action recording resolves `aria-labelledby` ID references within `el.getRootNode()`
+  instead of `document` so controls inside a `ShadowRoot` record their shadow-scoped
+  accessible label rather than dropping clicks or reading unrelated light-DOM elements with
+  the same ID ([#646](https://github.com/Tencent/BrowserSkill/issues/646)).
 
 ### Removed
 

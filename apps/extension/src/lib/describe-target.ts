@@ -41,9 +41,12 @@ export function isActionableLabel(name: string, max = ACTIONABLE_LABEL_MAX): boo
 function labelledByText(el: Element): string | null {
   const ids = el.getAttribute("aria-labelledby");
   if (!ids) return null;
+  const root = el.getRootNode() as Partial<NonElementParentNode>;
+  if (typeof root.getElementById !== "function") return null;
   const parts = ids
     .split(/\s+/)
-    .map((id) => document.getElementById(id)?.textContent ?? "")
+    .filter(Boolean)
+    .map((id) => root.getElementById!(id)?.textContent ?? "")
     .map(normalizeWhitespace)
     .filter(Boolean);
   return parts.length ? truncate(parts.join(" ")) : null;

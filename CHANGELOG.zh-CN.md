@@ -43,6 +43,7 @@ CLI 和扩展可以分别发布，能否连接由协议兼容性决定。更新�
 - 对不支持协作动作条件（`context_id`、`depends_on`、`observation_id`、`expect`）的 CLI 与 MCP 顶层命令恢复 `invalid_params` 失败关闭拒绝，同时保留 `open`、`step`、`upload`、`download` 与 `screenshot --full-page` 等多阶段命令内部辅助 RPC 的元数据剥离；并在 `target` 策略下于 `CooperationController` 的 `prepare`（含 `primaryEffect` 悬停/聚焦步骤）与 `beginDomMutation`（标记 `nativeInputStarted` 之前）二次核验 `--expect` 业务条件，确保末刻 DOM 变更在提交按压或脚本变异前失败关闭（#731、#732）。
 - VOM 树折叠规则（`shouldSkipRedundantRefChildren` 与 `renderTreeRows`）识别具名交互父节点下独立可交互的后代（如 Vue 3 + Element Plus 将二级浮层嵌在父 `menuitem` 内的多级 `<el-sub-menu>` 或自定义 ARIA `combobox` 弹出项），使每个已展开、可操作的子项在 `bsk sync`、`observe` 和 `snapshot` 中均输出独立行与专属 `@eN` 引用，同时保持被动内部包装节点、继承 `cursor: pointer` / 标题皮肤点击节点及原生 `<input>` / `<textarea>` / `<select>` 的折叠行为不变而不产生重复伪引用，并新增发版前必测用例 `EDGE-NESTED-MENU-REFS`。
 - 结构化列表提取（`extract list`）支持通过 open Shadow DOM `<slot>` 投影分配的列表项及默认链接（`url`），保留插槽渲染顺序、闭合 `<details>` 隐藏行位置、嵌套子列表项与链接归属、可见性判断及采集限制（[#588](https://github.com/Tencent/BrowserSkill/issues/588)、[#612](https://github.com/Tencent/BrowserSkill/pull/612)），并新增发版前必测用例 `EDGE-SLOTTED-LIST-EXTRACT`。
+- 修复操作录制在解析 `aria-labelledby` 时固定查找外层 `document` 而未在目标元素所属 `el.getRootNode()` 命名作用域内查找的问题，使 `ShadowRoot` 内仅由内部 `aria-labelledby` 命名的控件能够正常录制点击，不再漏录或误取外层文档中同 ID 元素的无关文本（[#646](https://github.com/Tencent/BrowserSkill/issues/646)）。
 
 ### 移除
 
