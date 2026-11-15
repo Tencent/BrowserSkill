@@ -255,9 +255,10 @@ function pieceCost(piece: string, english: boolean, traditional: boolean): numbe
       continue;
     }
     const start = i;
-    if (cp >= 0xd800 && cp <= 0xdbff && i + 1 < piece.length) {
-      cp = ((cp - 0xd800) << 10) + (piece.charCodeAt(++i) - 0xdc00) + 0x10000;
-    }
+    // codePointAt combines only valid pairs; a lone surrogate must not consume
+    // the next symbol or produce a value outside the Unicode range.
+    cp = piece.codePointAt(i)!;
+    if (cp > 0xffff) i++;
     if (isHan(cp)) han++;
     else if (isKana(cp)) kana++;
     else if (isHangul(cp)) hangul++;
