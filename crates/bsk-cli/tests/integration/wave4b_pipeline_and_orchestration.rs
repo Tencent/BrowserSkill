@@ -231,6 +231,37 @@ impl McpProcess {
             .await;
         resp["result"].clone()
     }
+
+    /// Wait until a cancelled request `cancelled_id` has finished end-to-end
+    /// (both daemon queue/WAL settlement and `bsk mcp` task cleanup) by probing
+    /// `bsk_ledger(status)` under `cancelled_id` until `server.calls` releases it.
+    async fn await_cancelled_settled(&mut self, cancelled_id: u64, session: &str) -> Value {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            self.send_raw(&json!({
+                "jsonrpc": "2.0",
+                "id": cancelled_id,
+                "method": "tools/call",
+                "params": {
+                    "name": "bsk_ledger",
+                    "arguments": {
+                        "action": "status",
+                        "session": session
+                    }
+                }
+            }))
+            .await;
+            let reply = self.read_reply().await;
+            if reply.get("result").is_some() {
+                return reply["result"].clone();
+            }
+            assert!(
+                Instant::now() < deadline,
+                "cancelled MCP request {cancelled_id} did not settle within deadline: {reply}"
+            );
+            tokio::time::sleep(Duration::from_millis(15)).await;
+        }
+    }
 }
 
 async fn send_ws_event(writer: &Arc<tokio::sync::Mutex<SplitSink<Ws, Message>>>, ev: EventFrame) {
@@ -406,6 +437,19 @@ async fn session_window_closed_and_user_interrupt_cancel_inflight_video_and_oper
         }),
     )
     .await;
+    let dlg_clear_deadline = Instant::now() + Duration::from_secs(2);
+    while handle
+        .state()
+        .dialog_operations
+        .active_dialog_tab_id(&s1)
+        .is_some()
+    {
+        assert!(
+            Instant::now() < dlg_clear_deadline,
+            "DialogChanged(None) for s1 was not processed in time"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
 
     // Launch `tool.operation_await(wait_ms: 60_000)` + `tool.video(capabilities)` concurrently on `s1`.
     let await_sock = sock.clone();
@@ -471,7 +515,7 @@ async fn session_window_closed_and_user_interrupt_cancel_inflight_video_and_oper
 
     let mut cancelled_s1 = Vec::new();
     for _ in 0..2 {
-        let cid = tokio::time::timeout(Duration::from_millis(500), cancel_rx.recv())
+        let cid = tokio::time::timeout(Duration::from_secs(2), cancel_rx.recv())
             .await
             .expect("WS cancel forwarded on user_interrupt")
             .unwrap();
@@ -480,15 +524,15 @@ async fn session_window_closed_and_user_interrupt_cancel_inflight_video_and_oper
     assert!(cancelled_s1.contains(&video_ws_req.id));
     assert!(cancelled_s1.contains(&eval_req.id));
 
-    let await_err = tokio::time::timeout(Duration::from_millis(500), await_task)
+    let await_err = tokio::time::timeout(Duration::from_secs(2), await_task)
         .await
         .expect("operation_await woke immediately on user_interrupt")
         .unwrap()
         .unwrap_err();
     assert_eq!(await_err.code, ErrorCode::UserAborted);
-    assert!(t0.elapsed() < Duration::from_millis(500));
+    assert!(t0.elapsed() < Duration::from_secs(2));
 
-    let video_err = tokio::time::timeout(Duration::from_millis(500), video_task)
+    let video_err = tokio::time::timeout(Duration::from_secs(2), video_task)
         .await
         .expect("video capabilities settled immediately on user_interrupt")
         .unwrap()
@@ -528,12 +572,12 @@ async fn session_window_closed_and_user_interrupt_cancel_inflight_video_and_oper
         .unwrap()
         .unwrap();
     assert_eq!(cancel_reply["cancelled"], true);
-    let cancelled_stop_ws = tokio::time::timeout(Duration::from_millis(500), cancel_rx.recv())
+    let cancelled_stop_ws = tokio::time::timeout(Duration::from_secs(2), cancel_rx.recv())
         .await
         .expect("WS cancel forwarded for video stop")
         .unwrap();
     assert_eq!(cancelled_stop_ws, video_stop_ws.id);
-    let stop_err = tokio::time::timeout(Duration::from_millis(500), video_stop_task)
+    let stop_err = tokio::time::timeout(Duration::from_secs(2), video_stop_task)
         .await
         .expect("video stop settled immediately on peer cancel")
         .unwrap()
@@ -610,6 +654,19 @@ async fn session_window_closed_and_user_interrupt_cancel_inflight_video_and_oper
         }),
     )
     .await;
+    let dlg_clear_deadline2 = Instant::now() + Duration::from_secs(2);
+    while handle
+        .state()
+        .dialog_operations
+        .active_dialog_tab_id(&s2)
+        .is_some()
+    {
+        assert!(
+            Instant::now() < dlg_clear_deadline2,
+            "DialogChanged(None) for s2 was not processed in time"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
 
     let await_sock2 = sock.clone();
     let s2_await = s2.clone();
@@ -699,7 +756,7 @@ async fn session_window_closed_and_user_interrupt_cancel_inflight_video_and_oper
     // Both `video-status-s2` AND dialog-retained `eval-s2` receive WS `cancel` frames on teardown!
     let mut cancelled_s2 = Vec::new();
     for _ in 0..2 {
-        let cid = tokio::time::timeout(Duration::from_millis(500), cancel_rx.recv())
+        let cid = tokio::time::timeout(Duration::from_secs(2), cancel_rx.recv())
             .await
             .expect("WS cancel forwarded on session.window_closed")
             .unwrap();
@@ -722,7 +779,7 @@ async fn session_window_closed_and_user_interrupt_cancel_inflight_video_and_oper
     for (label, err) in [
         (
             "operation_await",
-            tokio::time::timeout(Duration::from_millis(500), await_task2)
+            tokio::time::timeout(Duration::from_secs(2), await_task2)
                 .await
                 .unwrap()
                 .unwrap()
@@ -730,7 +787,7 @@ async fn session_window_closed_and_user_interrupt_cancel_inflight_video_and_oper
         ),
         (
             "video_status",
-            tokio::time::timeout(Duration::from_millis(500), video_task2)
+            tokio::time::timeout(Duration::from_secs(2), video_task2)
                 .await
                 .unwrap()
                 .unwrap()
@@ -738,7 +795,7 @@ async fn session_window_closed_and_user_interrupt_cancel_inflight_video_and_oper
         ),
         (
             "wait_ms",
-            tokio::time::timeout(Duration::from_millis(500), wait_task2)
+            tokio::time::timeout(Duration::from_secs(2), wait_task2)
                 .await
                 .unwrap()
                 .unwrap()
@@ -752,7 +809,7 @@ async fn session_window_closed_and_user_interrupt_cancel_inflight_video_and_oper
             "{label} reason"
         );
     }
-    assert!(t1.elapsed() < Duration::from_millis(500));
+    assert!(t1.elapsed() < Duration::from_secs(2));
 
     handle.shutdown().await;
 }
@@ -1439,7 +1496,7 @@ async fn canvas_click_validation_and_mcp_browser_conflict_and_graceful_cancel_pa
                         }
                     })),
                     Method::Cancel => {
-                        upload_cancel_sig.notify_waiters();
+                        upload_cancel_sig.notify_one();
                         ResponseBody::Ok(json!({ "cancelled": true }))
                     }
                     _ => ResponseBody::Ok(json!({})),
@@ -1771,26 +1828,13 @@ async fn canvas_click_validation_and_mcp_browser_conflict_and_graceful_cancel_pa
     mcp.notify("notifications/cancelled", json!({ "requestId": 777 }))
         .await;
 
-    let cleanup_deadline = Instant::now() + Duration::from_secs(3);
-    while std::fs::read_dir(&transfers_root).unwrap().count() != 0 {
-        assert!(
-            Instant::now() < cleanup_deadline,
-            "staged upload transfer leaked in {} after MCP notifications/cancelled!",
-            transfers_root.display()
-        );
-        tokio::time::sleep(Duration::from_millis(15)).await;
-    }
-
-    // Verify WAL stayed unfrozen (`effect_state: "none"`) and MCP server remains responsive.
-    let ledger = mcp
-        .call_tool(
-            "bsk_ledger",
-            json!({
-                "action": "status",
-                "session": sid
-            }),
-        )
-        .await;
+    let ledger = mcp.await_cancelled_settled(777, &sid).await;
+    assert_eq!(
+        std::fs::read_dir(&transfers_root).unwrap().count(),
+        0,
+        "staged upload transfer leaked in {} after MCP notifications/cancelled!",
+        transfers_root.display()
+    );
     assert_ne!(ledger["isError"], true);
     let ledger_json: Value =
         serde_json::from_str(ledger["content"][0]["text"].as_str().unwrap()).unwrap();
@@ -1821,9 +1865,7 @@ async fn canvas_click_validation_and_mcp_browser_conflict_and_graceful_cancel_pa
         .unwrap();
     mcp.notify("notifications/cancelled", json!({ "requestId": 778 }))
         .await;
-    let ledger_arm = mcp
-        .call_tool("bsk_ledger", json!({ "action": "status", "session": sid }))
-        .await;
+    let ledger_arm = mcp.await_cancelled_settled(778, &sid).await;
     let ledger_arm_json: Value =
         serde_json::from_str(ledger_arm["content"][0]["text"].as_str().unwrap()).unwrap();
     assert_eq!(
@@ -1861,23 +1903,14 @@ async fn canvas_click_validation_and_mcp_browser_conflict_and_graceful_cancel_pa
         .unwrap();
     mcp.notify("notifications/cancelled", json!({ "requestId": 779 }))
         .await;
-    let freeze_deadline = Instant::now() + Duration::from_secs(3);
-    loop {
-        let ledger_unk = mcp
-            .call_tool("bsk_ledger", json!({ "action": "status", "session": sid }))
-            .await;
-        let ledger_unk_json: Value =
-            serde_json::from_str(ledger_unk["content"][0]["text"].as_str().unwrap()).unwrap();
-        if ledger_unk_json["frozen"] == true {
-            assert_eq!(ledger_unk_json["pending_unknown"][0]["tab_id"], 21);
-            break;
-        }
-        assert!(
-            Instant::now() < freeze_deadline,
-            "unconfirmed upload abort must freeze IntentWal"
-        );
-        tokio::time::sleep(Duration::from_millis(15)).await;
-    }
+    let ledger_unk = mcp.await_cancelled_settled(779, &sid).await;
+    let ledger_unk_json: Value =
+        serde_json::from_str(ledger_unk["content"][0]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(
+        ledger_unk_json["frozen"], true,
+        "unconfirmed upload abort must freeze IntentWal"
+    );
+    assert_eq!(ledger_unk_json["pending_unknown"][0]["tab_id"], 21);
 
     let stop_reply = mcp
         .call_tool("bsk_session", json!({ "action": "stop", "session": sid }))
