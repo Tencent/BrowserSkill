@@ -85,4 +85,35 @@ describe("NativeInputClock", () => {
     );
     expect(timedOut).toHaveBeenCalledTimes(1);
   });
+
+  it("uses an uncalibrated timestamp only for the opt-in restricted offscreen attach error", async () => {
+    const restricted = vi.fn(async () => {
+      throw new NativeInputClockError(
+        "Native input clock calibration failed: Cannot attach to this target.",
+      );
+    });
+    const disabled = new NativeInputClock(restricted);
+    await expect(disabled.prepare()).rejects.toThrow("Cannot attach to this target");
+
+    const enabledSample = vi.fn(async () => {
+      throw new NativeInputClockError(
+        "Native input clock calibration failed: Cannot attach to this target.",
+      );
+    });
+    const enabled = new NativeInputClock(enabledSample, () => true);
+    const prepared = await enabled.prepare();
+    expect(prepared.nativeTimestamp).toBeCloseTo(prepared.timestamp / 1000, 6);
+    expect(() => prepared.assertValid()).not.toThrow();
+    const subsequent = await enabled.prepare();
+    expect(subsequent.nativeTimestamp).toBeCloseTo(subsequent.timestamp / 1000, 6);
+    expect(enabledSample).toHaveBeenCalledOnce();
+
+    const unrelated = new NativeInputClock(
+      vi.fn(async () => {
+        throw new NativeInputClockError("Native clock probes were incomplete");
+      }),
+      () => true,
+    );
+    await expect(unrelated.prepare()).rejects.toThrow("Native clock probes were incomplete");
+  });
 });

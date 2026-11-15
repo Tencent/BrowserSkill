@@ -112,7 +112,10 @@
       "readFailed": "Impossibile caricare le impostazioni. Riapri l'estensione.",
       "writeFailed": "Impossibile salvare. Le tue impostazioni non sono cambiate. Riprova.",
       "confirmTabBorrowInfoLabel": "Informazioni sulla conferma del prestito di schede",
-      "requestHelpEnabledInfoLabel": "Informazioni sulle richieste di aiuto umano"
+      "requestHelpEnabledInfoLabel": "Informazioni sulle richieste di aiuto umano",
+      "allowUncalibratedNativeInput": "Consenti input nativo non calibrato",
+      "allowUncalibratedNativeInputHint": "Attivalo solo se Chrome rifiuta la connessione al documento di calibrazione nascosto. Usa timestamp senza compensazione della deriva e può ridurre il rilevamento delle azioni umane. Disattivato per impostazione predefinita.",
+      "allowUncalibratedNativeInputInfoLabel": "Informazioni sull’input nativo non calibrato"
     },
     "remoteLocal": "Passa a locale",
     "remotePairing": "Link di associazione",

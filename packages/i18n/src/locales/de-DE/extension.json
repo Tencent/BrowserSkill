@@ -112,7 +112,10 @@
       "readFailed": "Einstellungen konnten nicht geladen werden. Öffnen Sie die Erweiterung erneut.",
       "writeFailed": "Speichern nicht möglich. Ihre Einstellungen wurden nicht geändert. Versuchen Sie es erneut.",
       "confirmTabBorrowInfoLabel": "Über die Bestätigung des Tab-Ausleihens",
-      "requestHelpEnabledInfoLabel": "Über Anfragen nach menschlicher Hilfe"
+      "requestHelpEnabledInfoLabel": "Über Anfragen nach menschlicher Hilfe",
+      "allowUncalibratedNativeInput": "Nicht kalibrierte native Eingaben erlauben",
+      "allowUncalibratedNativeInputHint": "Nur aktivieren, wenn Chrome die Verbindung zum verborgenen Kalibrierungsdokument verweigert. Verwendet Zeitstempel ohne Driftkorrektur und kann die Erkennung menschlicher Eingaben beeinträchtigen. Standardmäßig deaktiviert.",
+      "allowUncalibratedNativeInputInfoLabel": "Über nicht kalibrierte native Eingaben"
     },
     "remoteLocal": "Zu lokal wechseln",
     "remotePairing": "Kopplungslink",

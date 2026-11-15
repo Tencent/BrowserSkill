@@ -10,6 +10,11 @@ export function InteractionSettings() {
   const [loaded, setLoaded] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<"read" | "write" | null>(null);
+  const preferenceKeys = [
+    "confirmTabBorrow",
+    "requestHelpEnabled",
+    "allowUncalibratedNativeInput",
+  ] as const;
 
   useEffect(() => {
     let active = true;
@@ -46,7 +51,7 @@ export function InteractionSettings() {
       data-slot="popup-interaction-settings"
     >
       <h2 className="text-sm font-medium">{t("popup.interaction.title")}</h2>
-      {(["confirmTabBorrow", "requestHelpEnabled"] as const).map((key) => (
+      {preferenceKeys.map((key) => (
         <div className="relative flex items-center justify-between gap-2" key={key}>
           <span className="flex min-w-0 items-center gap-1">
             <label
@@ -62,7 +67,7 @@ export function InteractionSettings() {
           </span>
           <Switch
             id={`interaction-${key}`}
-            checked={preferences[key]}
+            checked={preferences[key] ?? false}
             disabled={!loaded || saving}
             onCheckedChange={(value) => void update(key, value)}
             aria-label={t(`popup.interaction.${key}`)}

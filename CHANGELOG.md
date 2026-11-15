@@ -11,6 +11,7 @@ determines which versions can connect.
 
 ### Added
 
+- Added an opt-in native-input timestamp fallback for Chrome builds that refuse to attach the extension's hidden clock-probe document. It is disabled by default and applies only to that specific attach error.
 - **MCP 100% parity**: Added `bsk_ledger`, `bsk_debug`, `bsk_video`, and `bsk_record` first-class tools alongside full CLI parity on existing tools (`session open/stop --all`, `sync` waits/filters, `wait_ms`, `view`, full-page `screenshot` / `extract` `--out`/`--overwrite`/`--format`/`--csv-safe`, `read` `context`, `upload`/`download`, `tab_borrow`, full `emulate`, and `operation_await --out/--overwrite`), unified behind request-scoped `ClientContext`.
 - **Compile-time `MethodSpec` & `RpcErrorReason` SSOT**: Defined exhaustive `bsk_protocol::method::MethodSpec` metadata across all 77 RPC methods (exported to TypeScript `transport/generated/`) and exhaustive `RpcErrorReason` variants with dual CLI/MCP recovery hints (`cli_hint` / `mcp_hint`).
 - DeepSeek Harness (`dsh`) is now a first-class skill installation target via

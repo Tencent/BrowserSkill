@@ -161,6 +161,8 @@ export default defineBackground(() => {
   });
   attachAuditBridge(controller, transport);
   const cdp = new ChromiumCdp(undefined, {
+    allowUncalibratedNativeInput: () =>
+      interactionPreferences.get().allowUncalibratedNativeInput === true,
     onDocumentChanged: (tabId) => {
       sessions.invalidateTabRefs(tabId);
       cooperation.invalidate(tabId);

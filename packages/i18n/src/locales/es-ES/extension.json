@@ -112,7 +112,10 @@
       "readFailed": "No se pudieron cargar los ajustes. Vuelve a abrir la extensión.",
       "writeFailed": "No se pudo guardar. Tus ajustes no han cambiado. Inténtalo de nuevo.",
       "confirmTabBorrowInfoLabel": "Acerca de la confirmación para tomar prestadas pestañas",
-      "requestHelpEnabledInfoLabel": "Acerca de las solicitudes de ayuda humana"
+      "requestHelpEnabledInfoLabel": "Acerca de las solicitudes de ayuda humana",
+      "allowUncalibratedNativeInput": "Permitir entrada nativa sin calibrar",
+      "allowUncalibratedNativeInputHint": "Actívalo solo si Chrome rechaza la conexión al documento de calibración oculto. Usa marcas de tiempo sin compensación de deriva y puede debilitar la detección de acciones humanas. Está desactivado de forma predeterminada.",
+      "allowUncalibratedNativeInputInfoLabel": "Acerca de la entrada nativa sin calibrar"
     },
     "remoteLocal": "Cambiar a local",
     "remotePairing": "Enlace de emparejamiento",

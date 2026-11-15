@@ -10,6 +10,7 @@ describe("automation settings", () => {
     vi.spyOn(interactionPreferences, "get").mockReturnValue({
       confirmTabBorrow: true,
       requestHelpEnabled: true,
+      allowUncalibratedNativeInput: false,
     });
     vi.spyOn(interactionPreferences, "subscribe").mockReturnValue(() => {});
     vi.spyOn(interactionPreferences, "set").mockResolvedValue();
@@ -21,7 +22,7 @@ describe("automation settings", () => {
 
   it("keeps explanations in labelled info tooltips without changing a preference on click", async () => {
     render(<InteractionSettings />);
-    for (const name of ["借用标签页确认说明", "人工协助说明"]) {
+    for (const name of ["借用标签页确认说明", "人工协助说明", "未校准原生输入说明"]) {
       const info = screen.getByRole("button", { name });
       const tooltip = document.getElementById(info.getAttribute("aria-describedby")!);
       expect(tooltip?.getAttribute("role")).toBe("tooltip");
@@ -31,7 +32,7 @@ describe("automation settings", () => {
       fireEvent.click(info);
     }
     expect(interactionPreferences.set).not.toHaveBeenCalled();
-    expect(screen.getAllByRole("tooltip")).toHaveLength(2);
+    expect(screen.getAllByRole("tooltip")).toHaveLength(3);
     expect(document.querySelector('[data-slot="popup-interaction-settings"] > p')).toBeNull();
   });
 
@@ -44,6 +45,7 @@ describe("automation settings", () => {
       expect(interactionPreferences.set).toHaveBeenCalledWith({
         confirmTabBorrow: false,
         requestHelpEnabled: true,
+        allowUncalibratedNativeInput: false,
       }),
     );
     const help = screen.getByRole("switch", { name: "允许请求人工协助" });
@@ -53,6 +55,22 @@ describe("automation settings", () => {
       expect(interactionPreferences.set).toHaveBeenCalledWith({
         confirmTabBorrow: true,
         requestHelpEnabled: false,
+        allowUncalibratedNativeInput: false,
+      }),
+    );
+  });
+
+  it("keeps uncalibrated native input disabled until explicitly enabled", async () => {
+    render(<InteractionSettings />);
+    const fallback = screen.getByRole("switch", { name: "允许未校准的原生输入" });
+    await waitFor(() => expect((fallback as HTMLButtonElement).disabled).toBe(false));
+    expect(fallback.getAttribute("aria-checked")).toBe("false");
+    fireEvent.click(fallback);
+    await waitFor(() =>
+      expect(interactionPreferences.set).toHaveBeenCalledWith({
+        confirmTabBorrow: true,
+        requestHelpEnabled: true,
+        allowUncalibratedNativeInput: true,
       }),
     );
   });

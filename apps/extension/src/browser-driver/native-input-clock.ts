@@ -59,6 +59,8 @@ const PROBE_PRECISION_MS = 0.25;
 // is a subset of each sample's interval, keeping midpoint error `<= 1.0ms` (`< INPUT_CLOCK_PRECISION_MS = 1.5ms`).
 const MAX_SAMPLE_SPAN_MS = 0.5;
 const MAX_CALIBRATION_ATTEMPTS = 3;
+const RESTRICTED_OFFSCREEN_ATTACH_ERROR =
+  "Native input clock calibration failed: Cannot attach to this target.";
 
 function reading(): Reading {
   for (let attempt = 0; attempt < 3; attempt++) {
@@ -87,8 +89,27 @@ export class NativeInputClock {
   private calibration?: Calibration;
   private pending?: Promise<void>;
   private revision = 0;
+  private offscreenAttachRestricted = false;
 
-  constructor(private readonly sample: () => Promise<NativeClockSample[]>) {}
+  constructor(
+    private readonly sample: () => Promise<NativeClockSample[]>,
+    private readonly allowUncalibratedInput: () => boolean = () => false,
+  ) {}
+
+  private prepareUncalibrated(): NativeInputTimestamp {
+    const reference = reading();
+    return {
+      timestamp: reference.wall,
+      nativeTimestamp: reference.wall / 1000,
+      assertValid: () => {
+        if (!sameClock(reference, reading())) {
+          throw new NativeInputClockError(
+            "The browser's input clock changed before native dispatch",
+          );
+        }
+      },
+    };
+  }
 
   invalidate(): void {
     this.revision++;
@@ -170,6 +191,9 @@ export class NativeInputClock {
   }
 
   async prepare(): Promise<NativeInputTimestamp> {
+    if (this.offscreenAttachRestricted && this.allowUncalibratedInput()) {
+      return this.prepareUncalibrated();
+    }
     if (this.calibration && !sameClock(this.calibration.reference, reading())) this.invalidate();
     if (!this.calibration) {
       if (!this.pending) {
@@ -178,7 +202,19 @@ export class NativeInputClock {
         });
         this.pending = pending;
       }
-      await this.pending;
+      try {
+        await this.pending;
+      } catch (error) {
+        if (
+          this.allowUncalibratedInput() &&
+          error instanceof NativeInputClockError &&
+          error.message === RESTRICTED_OFFSCREEN_ATTACH_ERROR
+        ) {
+          this.offscreenAttachRestricted = true;
+          return this.prepareUncalibrated();
+        }
+        throw error;
+      }
     }
     const calibration = this.calibration;
     const current = reading();

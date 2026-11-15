@@ -337,7 +337,11 @@ describe("interaction preferences", () => {
     const store = new InteractionPreferenceStore(storage);
     await store.readyOrFallback();
     await Promise.all([store.ready(), store.ready(), store.readyOrFallback()]);
-    expect(store.get()).toEqual({ confirmTabBorrow: false, requestHelpEnabled: false });
+    expect(store.get()).toEqual({
+      confirmTabBorrow: false,
+      requestHelpEnabled: false,
+      allowUncalibratedNativeInput: false,
+    });
     expect(storage.get).toHaveBeenCalledTimes(2);
     expect(addListener).toHaveBeenCalledOnce();
     expect(storage.set).not.toHaveBeenCalled();
@@ -350,7 +354,11 @@ describe("interaction preferences", () => {
     const storage = { get: vi.fn().mockRejectedValue(new Error("failed")), set: vi.fn() };
     const store = new InteractionPreferenceStore(storage);
     await expect(store.ready()).rejects.toThrow("failed");
-    const preferences = { confirmTabBorrow: enabled, requestHelpEnabled: enabled };
+    const preferences = {
+      confirmTabBorrow: enabled,
+      requestHelpEnabled: enabled,
+      allowUncalibratedNativeInput: false,
+    };
     listener({ [INTERACTION_STORAGE_KEY]: { newValue: preferences } }, "local");
     await store.ready();
     expect(store.get()).toEqual(preferences);
@@ -371,7 +379,11 @@ describe("interaction preferences", () => {
     listener({ [INTERACTION_STORAGE_KEY]: { newValue: { requestHelpEnabled: false } } }, "local");
     reject(new Error("late failure"));
     await pending;
-    expect(store.get()).toEqual({ confirmTabBorrow: true, requestHelpEnabled: false });
+    expect(store.get()).toEqual({
+      confirmTabBorrow: true,
+      requestHelpEnabled: false,
+      allowUncalibratedNativeInput: false,
+    });
   });
 
   it("does not replace a newer storage event with a stale retry result", async () => {
@@ -394,7 +406,11 @@ describe("interaction preferences", () => {
     listener({ [INTERACTION_STORAGE_KEY]: { newValue: { confirmTabBorrow: false } } }, "local");
     read({ [INTERACTION_STORAGE_KEY]: DEFAULT_INTERACTION_PREFERENCES });
     await retry;
-    expect(store.get()).toEqual({ confirmTabBorrow: false, requestHelpEnabled: true });
+    expect(store.get()).toEqual({
+      confirmTabBorrow: false,
+      requestHelpEnabled: true,
+      allowUncalibratedNativeInput: false,
+    });
     expect(addListener).toHaveBeenCalledOnce();
   });
 
@@ -410,6 +426,11 @@ describe("interaction preferences", () => {
     expect(normalizeInteractionPreferences({ confirmTabBorrow: false })).toEqual({
       confirmTabBorrow: false,
       requestHelpEnabled: true,
+      allowUncalibratedNativeInput: false,
+    });
+    expect(normalizeInteractionPreferences({ allowUncalibratedNativeInput: true })).toEqual({
+      ...DEFAULT_INTERACTION_PREFERENCES,
+      allowUncalibratedNativeInput: true,
     });
   });
 
@@ -462,7 +483,11 @@ describe("interaction preferences", () => {
     );
     written();
     await pending;
-    expect(store.get()).toEqual({ confirmTabBorrow: true, requestHelpEnabled: false });
+    expect(store.get()).toEqual({
+      confirmTabBorrow: true,
+      requestHelpEnabled: false,
+      allowUncalibratedNativeInput: false,
+    });
   });
 
   it.each([

@@ -375,6 +375,8 @@ export interface ChromiumCdpOptions {
    * omits `idleDetachMs`); `<= 0` disables it.
    */
   idleDetachMs?: number;
+  /** Explicit opt-in for dispatching uncalibrated timestamps when Chrome blocks the offscreen probe. */
+  allowUncalibratedNativeInput?: () => boolean;
 }
 
 function sameRootDocumentSignature(
@@ -417,7 +419,7 @@ function sameChildFrameRoute(before: FrameRoute, after: FrameRoute | undefined):
  */
 export class ChromiumCdp {
   private readonly api: CdpDebuggerApi;
-  private readonly inputClock = new NativeInputClock(() => sampleNativeInputClock(this.api));
+  private readonly inputClock: NativeInputClock;
   private readonly readGate = new CdpReadGate();
   private readonly tabs = new Map<number, TabAttachment>();
   private readonly backgroundExecution = new BackgroundExecution(
@@ -437,6 +439,10 @@ export class ChromiumCdp {
     private readonly options: ChromiumCdpOptions = {},
   ) {
     this.api = api;
+    this.inputClock = new NativeInputClock(
+      () => sampleNativeInputClock(this.api),
+      options.allowUncalibratedNativeInput,
+    );
     this.bindEvents();
     this.bindAutoDetach();
   }

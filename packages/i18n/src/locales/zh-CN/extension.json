@@ -112,7 +112,10 @@
       "readFailed": "无法读取自动化设置，请重新打开插件。",
       "writeFailed": "保存失败，设置未更改，请重试。",
       "confirmTabBorrowInfoLabel": "借用标签页确认说明",
-      "requestHelpEnabledInfoLabel": "人工协助说明"
+      "requestHelpEnabledInfoLabel": "人工协助说明",
+      "allowUncalibratedNativeInput": "允许未校准的原生输入",
+      "allowUncalibratedNativeInputHint": "仅在 Chrome 拒绝连接隐藏时钟探测文档时启用。此模式使用未做时钟漂移补偿的时间戳，可能影响对人工操作的识别。默认关闭。",
+      "allowUncalibratedNativeInputInfoLabel": "未校准原生输入说明"
     },
     "remoteLocal": "切换到本机",
     "remotePairing": "配对链接",

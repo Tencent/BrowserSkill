@@ -112,7 +112,10 @@
       "readFailed": "無法讀取自動化設定，請重新開啟擴充功能。",
       "writeFailed": "儲存失敗，設定未變更，請再試一次。",
       "confirmTabBorrowInfoLabel": "借用分頁確認說明",
-      "requestHelpEnabledInfoLabel": "人工協助說明"
+      "requestHelpEnabledInfoLabel": "人工協助說明",
+      "allowUncalibratedNativeInput": "允許未校準的原生輸入",
+      "allowUncalibratedNativeInputHint": "僅在 Chrome 拒絕連接隱藏時鐘探測文件時啟用。此模式使用未經時鐘漂移補償的時間戳，可能影響對人工操作的辨識。預設關閉。",
+      "allowUncalibratedNativeInputInfoLabel": "未校準原生輸入說明"
     },
     "remoteLocal": "切換至本機",
     "remotePairing": "配對連結",
