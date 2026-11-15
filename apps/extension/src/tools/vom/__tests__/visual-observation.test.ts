@@ -996,11 +996,11 @@ it("preserves DOM labels for audit on the first and continuation pages", async (
           {
             id: "audit-click",
             method: "tool.click",
+            audit_id: "operation-test",
             params: {
               session_id: ctx.sessionId,
               tab_id: 4,
               ref,
-              _audit_id: "operation-test",
             },
           },
           manager,
@@ -1025,11 +1025,11 @@ it("preserves DOM labels for audit on the first and continuation pages", async (
         {
           id: "audit-visual",
           method: "tool.click",
+          audit_id: "operation-test",
           params: {
             session_id: ctx.sessionId,
             tab_id: 4,
             ref: "e1",
-            _audit_id: "operation-test",
           },
         },
         manager,

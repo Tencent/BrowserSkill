@@ -195,6 +195,10 @@ pub fn dispatch_open(
             tab_id: None,
             wait_until: Some(WaitUntil::Load),
             timeout_ms: Some(nav_timeout_ms),
+            context_id: None,
+            observation_id: None,
+            depends_on: None,
+            expect: None,
         }),
         business_rpc::ipc_timeout(nav_timeout_ms),
     )?;
@@ -738,6 +742,7 @@ fn read_snapshot(
         tab_id,
         max_depth: None,
         max_tokens,
+        context_id: None,
     })
     .map_err(|e| CliError::Local(e.into()))?;
     let (snapshot_val, _) = call_rpc(
@@ -975,13 +980,24 @@ fn format_activity_lines(reply: &Value) -> Vec<String> {
     activity
         .iter()
         .map(|event| {
-            let kind = event
-                .get("type")
-                .and_then(Value::as_str)
-                .unwrap_or("activity");
-            let label = event.get("label").and_then(Value::as_str).unwrap_or("");
-            let quoted_label = serde_json::to_string(label).unwrap_or_else(|_| "\"\"".into());
-            format!("[activity type={kind} label={quoted_label}]")
+            if let Ok(typed) =
+                serde_json::from_value::<bsk_protocol::tools::CooperateActivity>(event.clone())
+            {
+                let quoted_label =
+                    serde_json::to_string(&typed.label).unwrap_or_else(|_| "\"\"".into());
+                format!(
+                    "[activity type={} label={quoted_label}]",
+                    typed.activity_type
+                )
+            } else {
+                let kind = event
+                    .get("type")
+                    .and_then(Value::as_str)
+                    .unwrap_or("activity");
+                let label = event.get("label").and_then(Value::as_str).unwrap_or("");
+                let quoted_label = serde_json::to_string(label).unwrap_or_else(|_| "\"\"".into());
+                format!("[activity type={kind} label={quoted_label}]")
+            }
         })
         .collect()
 }
@@ -1919,7 +1935,15 @@ mod tests {
                                 "kind": "delta",
                                 "history_complete": false,
                                 "changes": [{ "frame_id": 0, "label": "Amount", "previous_value": "10", "value": "100" }],
-                                "activity": [{ "kind": "human_input", "label": "Amount" }],
+                                "activity": [{
+                                    "sequence": 1,
+                                    "type": "pointerdown",
+                                    "label": "Amount",
+                                    "at": 1000.0,
+                                    "frame_id": 0,
+                                    "document": "doc-1",
+                                    "cursor": 1,
+                                }],
                             }),
                             2 => json!({
                                 "tab_id": 7,
@@ -1952,9 +1976,24 @@ mod tests {
             state.reply["changes"],
             json!([{ "frame_id": 0, "label": "Amount", "previous_value": "10", "value": "1000" }])
         );
+        let typed_activity: Vec<bsk_protocol::tools::CooperateActivity> = serde_json::from_value(
+            state.reply["activity"].clone(),
+        )
+        .expect("activity fixture must conform to canonical CooperateActivity wire contract");
+        assert_eq!(typed_activity.len(), 1);
+        assert_eq!(typed_activity[0].activity_type, "pointerdown");
+        assert_eq!(typed_activity[0].label, "Amount");
         assert_eq!(
             state.reply["activity"],
-            json!([{ "kind": "human_input", "label": "Amount" }])
+            json!([{
+                "sequence": 1,
+                "type": "pointerdown",
+                "label": "Amount",
+                "at": 1000.0,
+                "frame_id": 0,
+                "document": "doc-1",
+                "cursor": 1,
+            }])
         );
         assert_eq!(state.reply["history_complete"], false);
         assert!(state.carried_activity);
@@ -1971,13 +2010,16 @@ mod tests {
         )
         .unwrap();
         assert!(human.contains("history_complete=false"), "{human}");
-        assert!(human.contains("Amount"), "{human}");
+        assert!(
+            human.contains("[activity type=pointerdown label=\"Amount\"]"),
+            "{human}"
+        );
         let json_out: Value = serde_json::from_str(
             &format_state_receipt(state, None, None, None, None, &[], 12, true, Format::Json)
                 .unwrap(),
         )
         .unwrap();
-        assert_eq!(json_out["activity"][0]["kind"], "human_input");
+        assert_eq!(json_out["activity"][0]["type"], "pointerdown");
     }
 
     #[test]

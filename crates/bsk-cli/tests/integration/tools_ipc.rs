@@ -94,6 +94,8 @@ async fn do_handshake_protocol(ws: &mut Ws, protocol: &str) -> HandshakeResult {
         id: "hs".into(),
         method: Method::SystemHandshake,
         params: Some(serde_json::to_value(params).unwrap()),
+        audit_id: None,
+        operation_id: None,
     };
     ws.send(Message::Text(serde_json::to_string(&req).unwrap()))
         .await
@@ -108,10 +110,6 @@ async fn do_handshake_protocol(ws: &mut Ws, protocol: &str) -> HandshakeResult {
         ResponseBody::Ok(v) => serde_json::from_value(v).unwrap(),
         ResponseBody::Err(e) => panic!("handshake rejected: {e:?}"),
     }
-}
-
-fn strip_envelope_params(params: &mut Option<Value>) {
-    bsk_protocol::RequestFrame::strip_ws_correlation(params);
 }
 
 /// Fake extension that auto-replies to `tool.session_start` /
@@ -137,10 +135,9 @@ where
                 Ok(f) => f,
                 Err(_) => continue,
             };
-            let Frame::Request(mut req) = frame else {
+            let Frame::Request(req) = frame else {
                 continue;
             };
-            strip_envelope_params(&mut req.params);
             let body = match req.method {
                 Method::ToolSessionStart => {
                     let _: SessionStartParams =
@@ -329,6 +326,7 @@ async fn screenshot_returns_image_base64_with_dimensions() {
             session_id,
             tab_id: Some(7),
             ref_: None,
+            context_id: None,
         },
     )
     .await
@@ -379,6 +377,7 @@ async fn screenshot_forwards_ref_to_extension() {
             session_id,
             tab_id: Some(7),
             ref_: Some("@e5".into()),
+            context_id: None,
         },
     )
     .await
@@ -436,6 +435,7 @@ async fn console_returns_buffered_entries() {
             limit: Some(50),
             max_text_chars: Some(1000),
             include_stack: Some(false),
+            context_id: None,
         },
     )
     .await
@@ -492,6 +492,7 @@ async fn network_returns_buffered_entries() {
             since: Some(3),
             limit: Some(50),
             max_text_chars: Some(1000),
+            context_id: None,
         },
     )
     .await
@@ -533,6 +534,7 @@ async fn snapshot_returns_text_and_ref_count() {
             tab_id: None,
             max_depth: None,
             max_tokens: None,
+            context_id: None,
         },
     )
     .await
@@ -580,6 +582,10 @@ async fn observe_returns_semantic_text_and_ref_count() {
             max_tokens: None,
             debug_surfaces: false,
             probe_hover: false,
+            context_id: None,
+            observation_id: None,
+            depends_on: None,
+            expect: None,
         },
     )
     .await
@@ -625,6 +631,7 @@ async fn get_html_round_trips_with_ref_alias() {
             tab_id: Some(4),
             ref_: Some("e3".into()),
             max_bytes: None,
+            context_id: None,
         },
     )
     .await
@@ -685,6 +692,7 @@ async fn extract_round_trips_with_ref_alias_and_row_values() {
             max_columns: None,
             max_bytes: None,
             timeout_ms: None,
+            context_id: None,
         },
     )
     .await
@@ -754,6 +762,8 @@ async fn dom_read_forwards_directly_and_rejects_pre_2_0_extensions_at_handshake(
         id: "hs-old".into(),
         method: Method::SystemHandshake,
         params: Some(serde_json::to_value(params).unwrap()),
+        audit_id: None,
+        operation_id: None,
     };
     old_ws
         .send(Message::Text(serde_json::to_string(&req).unwrap()))

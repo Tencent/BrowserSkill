@@ -22,13 +22,7 @@ fn date(value: i64) -> String {
         .unwrap()
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum DeviceStatus {
-    Unactivated,
-    Active,
-    Revoked,
-}
+pub use bsk_protocol::local_auth::PairedDeviceStatus as DeviceStatus;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Pending {

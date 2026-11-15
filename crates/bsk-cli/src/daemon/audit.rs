@@ -9,8 +9,8 @@ use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
-use bsk_protocol::{ErrorCode, Method, ResponseBody};
-use serde::{Deserialize, Serialize};
+pub use bsk_protocol::system::{AuditEvent, AuditRun};
+use bsk_protocol::{AuditContextEvent, ErrorCode, Method, ResponseBody};
 use serde_json::{Value, json};
 
 use super::sessions::Session;
@@ -18,31 +18,6 @@ use super::sessions::Session;
 const RETENTION_MS: i64 = 30 * 24 * 60 * 60 * 1000;
 const MAX_RUN_BYTES: u64 = 16 * 1024 * 1024;
 const PAGE_SIZE: usize = 100;
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AuditEvent {
-    pub at: i64,
-    pub kind: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub operation_id: Option<String>,
-    pub data: Value,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AuditRun {
-    pub id: String,
-    pub browser_id: String,
-    pub session_id: String,
-    pub started_at: i64,
-    pub recorded_at: i64,
-    pub updated_at: i64,
-    pub status: String,
-    pub name: Option<String>,
-    pub site: Option<String>,
-    pub operations: usize,
-    pub errors: usize,
-    pub partial: bool,
-}
 
 #[derive(Debug, Clone)]
 struct LiveSession {
@@ -419,14 +394,9 @@ impl AuditStore {
         }
     }
 
-    pub fn context(&self, browser: &str, data: &Value) {
+    pub fn context(&self, browser: &str, data: &AuditContextEvent) {
         let mut inner = self.inner.lock().unwrap();
-        let Some(ticket) = data
-            .get("operation_id")
-            .and_then(Value::as_str)
-            .and_then(|id| inner.pending.get(id))
-            .cloned()
-        else {
+        let Some(ticket) = inner.pending.get(&data.operation_id).cloned() else {
             return;
         };
         if ticket.browser_id != browser
@@ -436,13 +406,13 @@ impl AuditStore {
             return;
         }
         let mut metadata = json!({});
-        if let Some(url) = data.get("url").and_then(Value::as_str).and_then(safe_url) {
+        if let Some(url) = data.url.as_deref().and_then(safe_url) {
             metadata["page_url"] = json!(url);
         }
-        if let Some(target) = data.get("target").and_then(Value::as_str) {
+        if let Some(target) = data.target.as_deref() {
             metadata["target"] = json!(safe_text(target));
         }
-        if let Some(tab) = data.get("tab_id").and_then(Value::as_i64) {
+        if let Some(tab) = data.tab_id {
             metadata["tab_id"] = json!(tab);
         }
         if self
@@ -776,9 +746,22 @@ mod tests {
         let ticket = store.begin("abcd", &Method::ToolFill, &json!({"ref":"@e2", "value":"raw-password", "selector":"[value=raw-password]", "url":"https://user:raw-password@example.com/private-path?token=raw-password#raw-password"})).unwrap().unwrap();
         store.context(
             "browser-b",
-            &json!({"operation_id":ticket.operation_id, "target":"foreign-target"}),
+            &AuditContextEvent {
+                operation_id: ticket.operation_id.clone(),
+                tab_id: None,
+                url: None,
+                target: Some("foreign-target".into()),
+            },
         );
-        store.context("browser-a", &json!({"operation_id":ticket.operation_id, "target":"Search", "url":"https://example.com/private-path"}));
+        store.context(
+            "browser-a",
+            &AuditContextEvent {
+                operation_id: ticket.operation_id.clone(),
+                tab_id: None,
+                url: Some("https://example.com/private-path".into()),
+                target: Some("Search".into()),
+            },
+        );
         store.finish(
             ticket,
             &ResponseBody::Ok(json!({"value":"raw-password", "text":"private-page", "ok":true})),

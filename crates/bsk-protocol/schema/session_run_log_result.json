@@ -1,0 +1,205 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "definitions": {
+    "LoggedStep": {
+      "oneOf": [
+        {
+          "description": "An explicit navigation. A query string may hold data, so only its presence is kept.",
+          "properties": {
+            "dropped_query": {
+              "type": "boolean"
+            },
+            "kind": {
+              "const": "navigate",
+              "type": "string"
+            },
+            "origin": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "path": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "kind",
+            "origin",
+            "path",
+            "dropped_query"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "action": {
+              "type": "string"
+            },
+            "element": {
+              "type": "string"
+            },
+            "first_seen": {
+              "description": "The observation this ref first appeared in.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "heading": {
+              "description": "The first heading of the page it acted on.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "key": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "kind": {
+              "const": "action",
+              "type": "string"
+            },
+            "modifiers": true,
+            "sensitive": {
+              "default": false,
+              "type": "boolean"
+            },
+            "target": {
+              "$ref": "#/definitions/LoggedTarget"
+            },
+            "values": {
+              "description": "How many option values a select chose, never which.",
+              "format": "uint",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "kind",
+            "action",
+            "target",
+            "element",
+            "first_seen",
+            "sensitive"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "The caller waited for a condition here, so the page changed in between.",
+          "properties": {
+            "kind": {
+              "const": "wait",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "An action a recipe cannot hold.",
+          "properties": {
+            "kind": {
+              "const": "skipped",
+              "type": "string"
+            },
+            "method": {
+              "type": "string"
+            },
+            "reason": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "method",
+            "reason"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "An action whose effect is not known.",
+          "properties": {
+            "kind": {
+              "const": "uncertain",
+              "type": "string"
+            },
+            "method": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "method"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "LoggedTarget": {
+      "additionalProperties": false,
+      "description": "Stable element description shared between recipe VOM matching and `session.run_log`.",
+      "properties": {
+        "ctx": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "name": {
+          "type": "string"
+        },
+        "role": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "role",
+        "name"
+      ],
+      "type": "object"
+    }
+  },
+  "properties": {
+    "borrowed_tabs": {
+      "items": {
+        "format": "int64",
+        "type": "integer"
+      },
+      "type": "array"
+    },
+    "observations": {
+      "format": "uint32",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "steps": {
+      "items": {
+        "$ref": "#/definitions/LoggedStep"
+      },
+      "type": "array"
+    },
+    "truncated": {
+      "description": "Steps were dropped after the bound.",
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "steps",
+    "observations",
+    "truncated",
+    "borrowed_tabs"
+  ],
+  "title": "RunLog",
+  "type": "object"
+}

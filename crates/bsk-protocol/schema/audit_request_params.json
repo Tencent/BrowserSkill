@@ -1,0 +1,40 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "description": "Inbound WS request from extension UI (`audit.request`).\nExtra fields (such as untrusted `browser_id`) are ignored by the daemon,\nwhich always scopes queries to the authenticated WS peer identity.",
+  "properties": {
+    "action": {
+      "default": "",
+      "type": "string"
+    },
+    "enabled": {
+      "type": [
+        "boolean",
+        "null"
+      ]
+    },
+    "id": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "limit": {
+      "format": "uint64",
+      "minimum": 0,
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "offset": {
+      "format": "uint64",
+      "minimum": 0,
+      "type": [
+        "integer",
+        "null"
+      ]
+    }
+  },
+  "title": "AuditRequestParams",
+  "type": "object"
+}

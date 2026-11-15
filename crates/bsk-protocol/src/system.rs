@@ -649,6 +649,353 @@ pub struct UnpairedAttempt {
     pub extension_version: Option<String>,
 }
 
+/// `browser.list` response payload.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct BrowserListResult {
+    pub browsers: Vec<BrowserStatusEntry>,
+}
+
+// ---------------------------------------------------------------------------
+// Daemon session lifecycle (`session.*`)
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct DaemonSessionStartParams {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub controller: Option<crate::tools::ControllerInfo>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub incognito: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub browser_instance_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub width: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub height: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub focused: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_name: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct DaemonSessionStartTrackedParams {
+    pub request_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub controller: Option<crate::tools::ControllerInfo>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub incognito: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub browser_instance_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub width: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub height: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub focused: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_name: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct DaemonSessionStartResult {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interaction: Option<crate::tools::InteractionPolicy>,
+    pub session_id: String,
+    pub browser_instance_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_window_id: Option<i64>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionRequestAction {
+    #[default]
+    Status,
+    Prepare,
+    Cancel,
+    Claim,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionRequestState {
+    Prepared,
+    Starting,
+    Ready,
+    Active,
+    Cancelling,
+    Closed,
+    CleanupFailed,
+    Failed,
+    Unknown,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SessionRequestParams {
+    pub request_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub action: Option<SessionRequestAction>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct SessionRequestResult {
+    pub request_id: String,
+    pub state: SessionRequestState,
+    #[serde(default)]
+    pub session: Option<SessionStatusEntry>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cleanup_error: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct DaemonSessionStopParams {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    #[serde(default)]
+    pub all: bool,
+    #[serde(default)]
+    pub recording: bool,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct DaemonSessionStopAllParams {}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct DaemonSessionStopFailure {
+    pub session_id: String,
+    pub code: crate::ErrorCode,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct DaemonSessionStopResult {
+    pub stopped: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub failed: Vec<DaemonSessionStopFailure>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub returned_tab_ids: Vec<i64>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub return_failures: Vec<crate::tools::ReturnFailure>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SessionListParams {}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct SessionListResult {
+    pub sessions: Vec<SessionStatusEntry>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SessionRunLogParams {
+    pub session_id: String,
+}
+
+/// Stable element description shared between recipe VOM matching and `session.run_log`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct LoggedTarget {
+    pub role: String,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ctx: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum LoggedStep {
+    /// An explicit navigation. A query string may hold data, so only its presence is kept.
+    Navigate {
+        origin: Option<String>,
+        path: Option<String>,
+        dropped_query: bool,
+    },
+    Action {
+        action: String,
+        target: LoggedTarget,
+        element: String,
+        /// The observation this ref first appeared in.
+        first_seen: u32,
+        /// How many option values a select chose, never which.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        values: Option<usize>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        key: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        modifiers: Option<serde_json::Value>,
+        /// The first heading of the page it acted on.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        heading: Option<String>,
+        #[serde(default)]
+        sensitive: bool,
+    },
+    /// The caller waited for a condition here, so the page changed in between.
+    Wait,
+    /// An action a recipe cannot hold.
+    Skipped { method: String, reason: String },
+    /// An action whose effect is not known.
+    Uncertain { method: String },
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct RunLog {
+    pub steps: Vec<LoggedStep>,
+    pub observations: u32,
+    /// Steps were dropped after the bound.
+    pub truncated: bool,
+    pub borrowed_tabs: Vec<i64>,
+}
+
+// ---------------------------------------------------------------------------
+// Intent WAL (`ledger.request`)
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "UPPERCASE")]
+pub enum IntentState {
+    Dispatched,
+    Settled,
+    Unknown,
+    Reconciled,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct LedgerEntry {
+    pub operation_id: String,
+    pub session_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tab_id: Option<i64>,
+    pub method: String,
+    pub target_summary: String,
+    pub state: IntentState,
+    pub dispatched_at: String,
+    pub updated_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reconciled_by: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct LedgerStatusReply {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    pub frozen: bool,
+    pub pending_unknown: Vec<LedgerEntry>,
+    pub recent: Vec<LedgerEntry>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct LedgerResolveReply {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    pub resolved_count: usize,
+    pub resolved: Vec<LedgerEntry>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct LedgerRequestParams {
+    pub action: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tab_id: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operation_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(untagged)]
+pub enum LedgerRequestResult {
+    Status(LedgerStatusReply),
+    Resolve(LedgerResolveReply),
+}
+
+// ---------------------------------------------------------------------------
+// Operation audit (`audit.request`)
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct AuditEvent {
+    pub at: i64,
+    pub kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operation_id: Option<String>,
+    pub data: serde_json::Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct AuditRun {
+    pub id: String,
+    pub browser_id: String,
+    pub session_id: String,
+    pub started_at: i64,
+    pub recorded_at: i64,
+    pub updated_at: i64,
+    pub status: String,
+    pub name: Option<String>,
+    pub site: Option<String>,
+    pub operations: usize,
+    pub errors: usize,
+    pub partial: bool,
+}
+
+/// Inbound WS request from extension UI (`audit.request`).
+/// Extra fields (such as untrusted `browser_id`) are ignored by the daemon,
+/// which always scopes queries to the authenticated WS peer identity.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct AuditRequestParams {
+    #[serde(default)]
+    pub action: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub offset: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(untagged)]
+pub enum AuditRequestResult {
+    List {
+        runs: Vec<AuditRun>,
+        total: usize,
+        enabled: bool,
+        #[serde(default)]
+        error: Option<String>,
+        directory: String,
+        retention_days: u32,
+    },
+    Get {
+        run: AuditRun,
+        events: Vec<AuditEvent>,
+        total: usize,
+        pending_operations: Vec<String>,
+        #[serde(default)]
+        error: Option<String>,
+    },
+    Configure {
+        enabled: bool,
+        directory: String,
+        retention_days: u32,
+    },
+    Deleted {
+        deleted: bool,
+    },
+    Opened {
+        opened: bool,
+    },
+}
+
 #[cfg(test)]
 mod status_compat_tests {
     use super::*;

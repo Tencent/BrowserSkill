@@ -111,7 +111,7 @@ pub struct SessionStopParams {
     pub session_id: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct ReturnFailure {
     pub tab_id: i64,
     pub code: ErrorCode,

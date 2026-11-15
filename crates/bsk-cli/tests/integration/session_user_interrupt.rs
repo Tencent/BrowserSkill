@@ -20,8 +20,8 @@ use bsk::ipc_client::IpcClient;
 use bsk_protocol::system::{HandshakeParams, HandshakeResult};
 use bsk_protocol::tools::SessionStartResult;
 use bsk_protocol::{
-    BrowserPeerInfo, ErrorCode, EventFrame, EventKind, Frame, Method, RequestFrame, ResponseBody,
-    ResponseFrame, RpcError,
+    BrowserPeerInfo, ErrorCode, EventFrame, Frame, Method, RequestFrame, ResponseBody,
+    ResponseFrame, RpcError, SessionUserInterruptEvent,
 };
 use futures_util::{SinkExt, StreamExt};
 use rand::Rng;
@@ -96,6 +96,8 @@ async fn handshake_as_ext(
         id: "hs".into(),
         method: Method::SystemHandshake,
         params: Some(serde_json::to_value(params).unwrap()),
+        audit_id: None,
+        operation_id: None,
     };
     ws.send(Message::Text(serde_json::to_string(&req).unwrap()))
         .await
@@ -251,10 +253,9 @@ async fn session_user_interrupt_event_cancels_inflight_with_user_aborted() {
     // 5. Fake extension EMITS the SessionUserInterrupt event over WS
     //    (this is what the real Extension's background SW will do
     //    when the user clicks the mask interrupt button).
-    let event = EventFrame {
-        event: EventKind::SessionUserInterrupt,
-        payload: json!({"session_id": session_id}),
-    };
+    let event = EventFrame::SessionUserInterrupt(SessionUserInterruptEvent {
+        session_id: session_id.clone(),
+    });
     {
         let mut g = event_ws.lock().await;
         g.send(Message::Text(serde_json::to_string(&event).unwrap()))
@@ -381,10 +382,9 @@ async fn assert_idle_interrupt_rejects(method: Method) {
         .expect("session.start succeeded");
 
     // No tool inflight. The user clicks stop — emit the WS event.
-    let event = EventFrame {
-        event: EventKind::SessionUserInterrupt,
-        payload: json!({"session_id": start.session_id.clone()}),
-    };
+    let event = EventFrame::SessionUserInterrupt(SessionUserInterruptEvent {
+        session_id: start.session_id.clone(),
+    });
     {
         let mut g = ws_sink.lock().await;
         g.send(Message::Text(serde_json::to_string(&event).unwrap()))
@@ -518,10 +518,9 @@ async fn read_only_tool_passes_through_without_consuming_interrupt_marker() {
         .expect("session.start succeeded");
 
     // User clicks stop while idle.
-    let event = EventFrame {
-        event: EventKind::SessionUserInterrupt,
-        payload: json!({"session_id": start.session_id.clone()}),
-    };
+    let event = EventFrame::SessionUserInterrupt(SessionUserInterruptEvent {
+        session_id: start.session_id.clone(),
+    });
     {
         let mut g = ws_sink.lock().await;
         g.send(tokio_tungstenite::tungstenite::protocol::Message::Text(
@@ -669,10 +668,9 @@ async fn user_interrupt_marker_survives_long_delay_before_next_tool() {
         .unwrap()
         .expect("session.start succeeded");
 
-    let event = EventFrame {
-        event: EventKind::SessionUserInterrupt,
-        payload: json!({"session_id": start.session_id.clone()}),
-    };
+    let event = EventFrame::SessionUserInterrupt(SessionUserInterruptEvent {
+        session_id: start.session_id.clone(),
+    });
     {
         let mut g = ws_sink.lock().await;
         g.send(tokio_tungstenite::tungstenite::protocol::Message::Text(

@@ -72,6 +72,10 @@ fn run(
         max_tokens: args.max_tokens,
         debug_surfaces: args.debug_surfaces,
         probe_hover: args.probe_hover,
+        context_id: None,
+        observation_id: None,
+        depends_on: None,
+        expect: None,
     };
     let reply: ObserveResult = call(sock, ctx, params)?;
     match format {

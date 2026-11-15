@@ -4,23 +4,13 @@
 //! the `@eN` refs of the current observation. Matching is exact, and anything this
 //! parser cannot read simply does not match, which stops the run instead of guessing.
 //! `tests/fixtures/vom_contract.json` is shared with the renderer's own tests.
-use serde::{Deserialize, Serialize};
+pub use bsk_protocol::system::LoggedTarget as Target;
 
 /// How the renderer replaces the value of a sensitive field.
 pub(crate) const SENSITIVE_MASK: &str = "•••";
 const DRAG_HINTS: [&str; 3] = ["[draggable]", "[drop-target]", "[drag-handle]"];
 /// States the extension appends to a name. They change while the name does not.
 const NAME_STATES: [&str; 2] = [" [has-submenu]", " [expanded]"];
-
-/// A stable description of an element: exact role, name and, when needed, context.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Target {
-    pub role: String,
-    pub name: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub ctx: Option<String>,
-}
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub(crate) struct Line {

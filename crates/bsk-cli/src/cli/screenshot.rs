@@ -76,6 +76,7 @@ fn run(
         session_id: args.session.clone().unwrap_or_default(),
         tab_id: args.tab_id,
         ref_: args.ref_.clone(),
+        context_id: None,
     };
     let reply: ScreenshotResult = call(sock, ctx, params)?;
     let out_path = match &args.out {
@@ -149,6 +150,10 @@ fn run_full_page(
             session_id: session.clone(),
             tab_id: args.tab_id,
             timeout_ms: Some(timeout),
+            context_id: None,
+            observation_id: None,
+            depends_on: None,
+            expect: None,
         }),
         Duration::from_millis(u64::from(timeout) + 5_000),
     )?;

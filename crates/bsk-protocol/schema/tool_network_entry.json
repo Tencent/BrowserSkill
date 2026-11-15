@@ -85,7 +85,8 @@
   },
   "required": [
     "sequence",
-    "kind"
+    "kind",
+    "truncated"
   ],
   "title": "NetworkEntry",
   "type": "object"

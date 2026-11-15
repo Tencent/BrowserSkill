@@ -92,6 +92,10 @@ pub fn dispatch(
         return_by_value: Some(args.return_by_value),
         timeout_ms: Some(args.timeout),
         unverified: args.unverified.then_some(true),
+        context_id: None,
+        observation_id: None,
+        depends_on: None,
+        expect: None,
     };
     let reply = call(info.sock_path, &op_ctx, params, args.timeout)?;
     render(&reply, format)

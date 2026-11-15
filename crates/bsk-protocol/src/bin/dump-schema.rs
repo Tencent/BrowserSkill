@@ -30,8 +30,8 @@ fn references(value: &Value, names: &mut BTreeSet<String>) {
     }
 }
 
-fn standalone(catalog: &Value, name: &str) -> Value {
-    let definitions = catalog["schema"]["definitions"]
+fn standalone(catalog: &Value, schema_key: &str, name: &str) -> Value {
+    let definitions = catalog[schema_key]["definitions"]
         .as_object()
         .expect("definitions");
     let mut root = definitions.get(name).expect("root definition").clone();
@@ -54,7 +54,7 @@ fn standalone(catalog: &Value, name: &str) -> Value {
         references(&schema, &mut pending);
         included.insert(next, schema);
     }
-    root["$schema"] = catalog["schema"]["$schema"].clone();
+    root["$schema"] = catalog[schema_key]["$schema"].clone();
     root["title"] = Value::String(name.to_owned());
     if !included.is_empty() {
         root["definitions"] = Value::Object(included);
@@ -90,41 +90,51 @@ fn main() {
         } else {
             wire.replace('.', "_")
         };
-        for part in ["params", "result"] {
+        for (part, schema_key) in [("params", "schema"), ("result", "output_schema")] {
             let name = method[part].as_str().expect("contract name");
-            // Daemon-private payloads are intentionally not extension contracts.
-            if method["owner"] == "daemon"
-                && catalog["schema"]["definitions"][name] == Value::Bool(true)
-            {
-                continue;
-            }
-            write_schema(&dir, &format!("{base}_{part}"), standalone(&catalog, name));
+            write_schema(
+                &dir,
+                &format!("{base}_{part}"),
+                standalone(&catalog, schema_key, name),
+            );
         }
     }
     // Stable file aliases for reusable CLI/documentation schemas. Their shapes
     // still come from the catalog; this list cannot hide a method from generation.
-    for (name, file) in [
-        ("PendingJavaScriptDialog", "pending_javascript_dialog"),
-        ("RpcErrorReason", "rpc_error_reason"),
-        ("DialogHandleParams", "tool_dialog_handle_params"),
-        ("OperationParams", "tool_operation_params"),
-        ("ActionExpectation", "action_expectation"),
-        ("ActionMetadata", "action_metadata"),
-        ("VideoRecording", "video_recording"),
-        ("VideoGrant", "video_grant"),
-        ("VideoReadResult", "tool_video_read_result"),
-        ("EmulateOverrides", "tool_emulate_overrides"),
-        ("UserAgentMetadata", "tool_emulate_user_agent_metadata"),
-        ("ConsoleEntry", "tool_console_entry"),
-        ("ConsoleStackFrame", "tool_console_stack_frame"),
-        ("NetworkEntry", "tool_network_entry"),
-        ("EvaluateError", "tool_evaluate_error"),
-        ("TraceV3", "trace_v3"),
-        ("TraceV3", "trace"),
-        ("StepV3", "trace_step_v3"),
-        ("StepV3", "trace_step"),
+    for (name, file, schema_key) in [
+        (
+            "PendingJavaScriptDialog",
+            "pending_javascript_dialog",
+            "output_schema",
+        ),
+        ("RpcErrorReason", "rpc_error_reason", "output_schema"),
+        ("DialogHandleParams", "tool_dialog_handle_params", "schema"),
+        ("OperationParams", "tool_operation_params", "schema"),
+        ("ActionExpectation", "action_expectation", "schema"),
+        ("ActionMetadata", "action_metadata", "schema"),
+        ("VideoRecording", "video_recording", "output_schema"),
+        ("VideoGrant", "video_grant", "output_schema"),
+        ("VideoReadResult", "tool_video_read_result", "output_schema"),
+        ("EmulateOverrides", "tool_emulate_overrides", "schema"),
+        (
+            "UserAgentMetadata",
+            "tool_emulate_user_agent_metadata",
+            "schema",
+        ),
+        ("ConsoleEntry", "tool_console_entry", "output_schema"),
+        (
+            "ConsoleStackFrame",
+            "tool_console_stack_frame",
+            "output_schema",
+        ),
+        ("NetworkEntry", "tool_network_entry", "output_schema"),
+        ("EvaluateError", "tool_evaluate_error", "output_schema"),
+        ("TraceV3", "trace_v3", "output_schema"),
+        ("TraceV3", "trace", "output_schema"),
+        ("StepV3", "trace_step_v3", "output_schema"),
+        ("StepV3", "trace_step", "output_schema"),
     ] {
-        write_schema(&dir, file, standalone(&catalog, name));
+        write_schema(&dir, file, standalone(&catalog, schema_key, name));
     }
 }
 
@@ -137,7 +147,7 @@ mod tests {
     #[test]
     fn composition_preserves_operation_fields_and_exposes_condition_limits() {
         let original = serde_json::to_value(catalog::schema_for::<DragParams>()).unwrap();
-        let value = standalone(&catalog::export(), "DragParams");
+        let value = standalone(&catalog::export(), "schema", "DragParams");
         assert_eq!(value["required"], original["required"]);
         for (name, property) in original["properties"].as_object().unwrap() {
             assert_eq!(&value["properties"][name], property, "{name}");
@@ -249,5 +259,17 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn result_schemas_use_serialize_contract_instead_of_deserialize_contract() {
+        let exported = catalog::export();
+        // `ConsoleResult.entries` and `ConsoleResult.truncated` have `#[serde(default)]`
+        // without `skip_serializing_if`, so they are optional on deserialize (`schema`)
+        // but always emitted on serialize (`output_schema`).
+        let output = standalone(&exported, "output_schema", "ConsoleResult");
+        let required = output["required"].as_array().unwrap();
+        assert!(required.contains(&json!("entries")));
+        assert!(required.contains(&json!("truncated")));
     }
 }

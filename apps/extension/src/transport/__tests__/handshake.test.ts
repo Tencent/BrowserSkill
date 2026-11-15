@@ -198,7 +198,7 @@ describe("performHandshake", () => {
       rpcId: "hs-target",
     });
 
-    emit({ event: "browser.event", payload: { ignored: true } });
+    emit({ event: "browser.connected", payload: {} });
     emit({
       id: "hs-other",
       result: {

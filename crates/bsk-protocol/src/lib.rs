@@ -21,13 +21,28 @@ pub use error::{
     RpcErrorReason,
 };
 pub use frame::{
-    EventFrame, EventKind, Frame, RequestFrame, ResponseBody, ResponseFrame, RpcId, WsCorrelation,
+    AuditContextEvent, DialogChangedEvent, EmptyEventPayload, EventFrame, EventKind, Frame,
+    RequestFrame, ResponseBody, ResponseFrame, RpcId, SessionActivityEvent, SessionEndedEvent,
+    SessionEndedReason, SessionInteractionChangedEvent, SessionUserInterruptEvent,
+    SessionWindowClosedEvent, SessionWindowClosedReason, WsCorrelation,
 };
-pub use local_auth::LOCAL_AUTH_KDF_DOMAIN;
+pub use local_auth::{
+    LOCAL_AUTH_KDF_DOMAIN, LocalAuthDevicesParams, LocalAuthDevicesResult, LocalAuthMode,
+    LocalAuthPairParams, LocalAuthPairResult, LocalAuthRevokeParams, LocalAuthRevokeResult,
+    LocalAuthRotateParams, LocalAuthRotateResult, LocalAuthSetModeParams, LocalAuthSetModeResult,
+    PairedDeviceStatus, PairedDeviceSummary,
+};
 pub use method::{ActionMetadataPolicy, DeadlineKind, Method, OutcomeKind, RecipeStepKind};
 pub use system::{
-    BrowserListParams, BrowserPeerInfo, BrowserStatusEntry, HandshakeCompat, HandshakeParams,
-    HandshakeResult, PingParams, PingResult, SessionStatusEntry, StatusParams, StatusResult,
-    VersionSkewEntry, compare_protocol, evaluate_handshake_compat,
+    AuditEvent, AuditRequestParams, AuditRequestResult, AuditRun, BrowserListParams,
+    BrowserListResult, BrowserPeerInfo, BrowserStatusEntry, DaemonSessionStartParams,
+    DaemonSessionStartResult, DaemonSessionStartTrackedParams, DaemonSessionStopAllParams,
+    DaemonSessionStopFailure, DaemonSessionStopParams, DaemonSessionStopResult, HandshakeCompat,
+    HandshakeParams, HandshakeResult, IntentState, LedgerEntry, LedgerRequestParams,
+    LedgerRequestResult, LedgerResolveReply, LedgerStatusReply, LoggedStep, LoggedTarget,
+    PingParams, PingResult, RunLog, SessionListParams, SessionListResult, SessionRequestAction,
+    SessionRequestParams, SessionRequestResult, SessionRequestState, SessionRunLogParams,
+    SessionStatusEntry, StatusParams, StatusResult, VersionSkewEntry, compare_protocol,
+    evaluate_handshake_compat,
 };
 pub use tools::*;

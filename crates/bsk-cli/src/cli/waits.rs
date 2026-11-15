@@ -71,6 +71,7 @@ pub fn dispatch_wait_for_navigation(
         tab_id: args.tab_id,
         wait_until: Some(args.wait_until.into()),
         timeout_ms: Some(args.timeout),
+        context_id: None,
     };
     let reply = call_wait_for_navigation(info.sock_path, &op_ctx, params, args.timeout)?;
     render_wait_for_navigation(&reply, format)
@@ -213,6 +214,7 @@ pub fn dispatch_wait_for_element(
         tab_id: args.tab_id,
         timeout_ms: Some(args.timeout),
         poll_ms: Some(args.poll_ms),
+        context_id: None,
     };
     let reply: WaitForElementResult = op_ctx.call(
         info.sock_path,

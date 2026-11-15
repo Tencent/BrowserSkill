@@ -74,6 +74,8 @@ async fn do_handshake(ws: &mut Ws, instance_id: &str) -> HandshakeResult {
         id: "hs".into(),
         method: Method::SystemHandshake,
         params: Some(serde_json::to_value(params).unwrap()),
+        audit_id: None,
+        operation_id: None,
     };
     ws.send(Message::Text(serde_json::to_string(&req).unwrap()))
         .await
@@ -475,7 +477,7 @@ async fn wave3c_unlocked_liveness_lease_and_dialog_accept_serialization() {
                     Method::ToolClick => {
                         let params = req.params.unwrap();
                         let sid = params["session_id"].as_str().unwrap().to_owned();
-                        let op_id = params["_operation_id"].as_str().unwrap().to_owned();
+                        let op_id = req.operation_id.unwrap();
                         // Emit `dialog.changed` opening `dlg-race-1` on `tab_id: 77`, suspending `ToolClick`!
                         let evt = json!({
                             "event": "dialog.changed",

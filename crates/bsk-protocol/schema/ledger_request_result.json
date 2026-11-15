@@ -1,0 +1,128 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "anyOf": [
+    {
+      "$ref": "#/definitions/LedgerStatusReply"
+    },
+    {
+      "$ref": "#/definitions/LedgerResolveReply"
+    }
+  ],
+  "definitions": {
+    "IntentState": {
+      "enum": [
+        "DISPATCHED",
+        "SETTLED",
+        "UNKNOWN",
+        "RECONCILED"
+      ],
+      "type": "string"
+    },
+    "LedgerEntry": {
+      "properties": {
+        "dispatched_at": {
+          "type": "string"
+        },
+        "method": {
+          "type": "string"
+        },
+        "operation_id": {
+          "type": "string"
+        },
+        "reconciled_by": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "session_id": {
+          "type": "string"
+        },
+        "state": {
+          "$ref": "#/definitions/IntentState"
+        },
+        "tab_id": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "target_summary": {
+          "type": "string"
+        },
+        "updated_at": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "operation_id",
+        "session_id",
+        "method",
+        "target_summary",
+        "state",
+        "dispatched_at",
+        "updated_at"
+      ],
+      "type": "object"
+    },
+    "LedgerResolveReply": {
+      "properties": {
+        "resolved": {
+          "items": {
+            "$ref": "#/definitions/LedgerEntry"
+          },
+          "type": "array"
+        },
+        "resolved_count": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "session_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "resolved_count",
+        "resolved"
+      ],
+      "type": "object"
+    },
+    "LedgerStatusReply": {
+      "properties": {
+        "frozen": {
+          "type": "boolean"
+        },
+        "pending_unknown": {
+          "items": {
+            "$ref": "#/definitions/LedgerEntry"
+          },
+          "type": "array"
+        },
+        "recent": {
+          "items": {
+            "$ref": "#/definitions/LedgerEntry"
+          },
+          "type": "array"
+        },
+        "session_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "frozen",
+        "pending_unknown",
+        "recent"
+      ],
+      "type": "object"
+    }
+  },
+  "title": "LedgerRequestResult"
+}

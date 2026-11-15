@@ -772,6 +772,8 @@ pub(crate) async fn start_session_recoverable(
         id: rpc_id.clone(),
         method: bsk_protocol::Method::ToolSessionStart,
         params: Some(serde_json::to_value(&params).unwrap()),
+        audit_id: None,
+        operation_id: None,
     };
     if cancel.as_ref().is_some_and(AbortToken::is_cancelled) {
         sessions.cancel_reservation(&session_id);
@@ -964,6 +966,8 @@ async fn finish_aborted_start(
         id: format!("cancel-{rpc_id}"),
         method: Method::Cancel,
         params: Some(serde_json::json!({ "rpc_id": rpc_id })),
+        audit_id: None,
+        operation_id: None,
     });
     if client.sink.send(cancel).is_err() {
         client.pending.lock().unwrap().cancel(rpc_id);
@@ -1063,6 +1067,8 @@ async fn rollback_extension_session(
             })
             .expect("serialize session_start rollback params"),
         ),
+        audit_id: None,
+        operation_id: None,
     };
     let waiter = match client.dispatch(request) {
         Ok(waiter) => waiter,

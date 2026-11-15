@@ -7,8 +7,8 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Mutex;
 
+pub use bsk_protocol::system::{LoggedStep, RunLog};
 use bsk_protocol::{ErrorCode, Method, ResponseBody, RpcError};
-use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::cli::recipe::vom::{self, Target};
@@ -16,51 +16,6 @@ use crate::cli::recipe::vom::{self, Target};
 const MAX_STEPS: usize = 200;
 const MAX_REFS: usize = 8000;
 const MAX_TEXT: usize = 256;
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum LoggedStep {
-    /// An explicit navigation. A query string may hold data, so only its presence is kept.
-    Navigate {
-        origin: Option<String>,
-        path: Option<String>,
-        dropped_query: bool,
-    },
-    Action {
-        action: String,
-        target: Target,
-        element: String,
-        /// The observation this ref first appeared in.
-        first_seen: u32,
-        /// How many option values a select chose, never which.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        values: Option<usize>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        key: Option<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        modifiers: Option<Value>,
-        /// The first heading of the page it acted on.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        heading: Option<String>,
-        #[serde(default)]
-        sensitive: bool,
-    },
-    /// The caller waited for a condition here, so the page changed in between.
-    Wait,
-    /// An action a recipe cannot hold.
-    Skipped { method: String, reason: String },
-    /// An action whose effect is not known.
-    Uncertain { method: String },
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-pub struct RunLog {
-    pub steps: Vec<LoggedStep>,
-    pub observations: u32,
-    /// Steps were dropped after the bound.
-    pub truncated: bool,
-    pub borrowed_tabs: Vec<i64>,
-}
 
 #[derive(Debug, Clone)]
 struct KnownRef {

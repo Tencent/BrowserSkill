@@ -72,6 +72,8 @@ async fn handshake(ws: &mut Ws) {
             })
             .unwrap(),
         ),
+        audit_id: None,
+        operation_id: None,
     };
     ws.send(Message::Text(serde_json::to_string(&request).unwrap()))
         .await

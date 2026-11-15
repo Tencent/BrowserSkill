@@ -58,6 +58,7 @@ fn run(
         tab_id: args.tab_id,
         max_depth: args.max_depth,
         max_tokens: args.max_tokens,
+        context_id: None,
     };
     let reply: SnapshotResult = call(sock, ctx, params)?;
     match format {

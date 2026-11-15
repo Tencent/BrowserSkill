@@ -207,6 +207,10 @@ fn run_close(
     let params = TabCloseParams {
         session_id: args.session.unwrap_or_default(),
         tab_id: args.tab_id,
+        context_id: None,
+        observation_id: None,
+        depends_on: None,
+        expect: None,
     };
     let reply: TabCloseResult =
         ipc_call("tab-close-1", &op_ctx, Method::ToolTabClose, sock, params)?;

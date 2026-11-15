@@ -58,34 +58,14 @@ pub(crate) fn caller_action_metadata_policy(
     method: &Method,
     params: Option<&serde_json::Value>,
 ) -> ActionMetadataPolicy {
-    if method_accepts_action_metadata_with_params(method, params) {
-        ActionMetadataPolicy::Full
-    } else if *method == Method::ToolRead {
-        ActionMetadataPolicy::ContextOnly
-    } else {
-        ActionMetadataPolicy::None
-    }
+    method.caller_action_metadata_policy_with_params(params)
 }
 
 pub(crate) fn method_accepts_action_metadata_with_params(
     method: &Method,
     params: Option<&serde_json::Value>,
 ) -> bool {
-    match method {
-        Method::ToolObserve => {
-            params
-                .and_then(|v| v.get("probe_hover"))
-                .and_then(serde_json::Value::as_bool)
-                == Some(true)
-        }
-        Method::ToolDebug => params
-            .and_then(|v| v.get("action"))
-            .and_then(|a| {
-                serde_json::from_value::<bsk_protocol::tools::DebugAction>(a.clone()).ok()
-            })
-            .is_some_and(|a| a.cooperation_guarded()),
-        other => other.accepts_action_metadata(),
-    }
+    method.caller_action_metadata_policy_with_params(params) == ActionMetadataPolicy::Full
 }
 
 /// Request-scoped context replacing process-wide global action metadata and caller scope state.
@@ -184,7 +164,7 @@ impl ClientContext {
     ) -> Result<ActionMetadataPolicy, CliError> {
         let caller_policy = caller_action_metadata_policy(method, params);
         match caller_policy {
-            ActionMetadataPolicy::None => {
+            ActionMetadataPolicy::None | ActionMetadataPolicy::TabBindingContext => {
                 if self.has_any_action_metadata() {
                     return Err(CliError::invalid_params(anyhow::anyhow!(
                         "action conditions (--context, --depends-on, --observation, --expect) do not apply to {}",
@@ -242,7 +222,7 @@ impl ClientContext {
                     )));
                 }
             }
-            ActionMetadataPolicy::ContextOnly => {
+            ActionMetadataPolicy::ContextOnly | ActionMetadataPolicy::TabBindingContext => {
                 if ["depends_on", "observation_id", "expect"]
                     .iter()
                     .any(|key| object.get(*key).is_some_and(|v| !v.is_null()))

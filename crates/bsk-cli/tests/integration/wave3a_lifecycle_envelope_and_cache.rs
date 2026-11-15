@@ -10,7 +10,7 @@
 //!   reconciliation closure (`run_logs` resolved to real completed step rather than `Uncertain`,
 //!   `intent_wal` unlocked without `uncertain_prior_effect`, `scopes` updated) + `IpcEnvelope`
 //!   wire purity (zero private `_` keys in local IPC `params`/`result`, while extension WS frames
-//!   still carry `_operation_id` / `_audit_id`).
+//!   carry top-level `operation_id` / `audit_id` without mutating `params`).
 //! - Counterexample D: Host-agent scope sharing (`HOST_AGENT_ENV_KEYS` outranks transient
 //!   `mcp:<pid>:<nonce>`, surviving MCP `stdio` EOF) vs isolated `bsk mcp` immediate `stdio` EOF
 //!   orphan reaping, unified 12-table `DaemonState::teardown_session` bug fixes (idle-timeout
@@ -211,6 +211,8 @@ async fn do_handshake(ws: &mut Ws, instance_id: &str) -> HandshakeResult {
         id: "hs".into(),
         method: Method::SystemHandshake,
         params: Some(serde_json::to_value(params).unwrap()),
+        audit_id: None,
+        operation_id: None,
     };
     ws.send(Message::Text(serde_json::to_string(&req).unwrap()))
         .await
@@ -894,8 +896,8 @@ async fn counterexample_b_wait_for_falls_back_to_full_snapshot_when_max_tokens_t
 
 /// Counterexample C:
 /// 1) Local `IpcEnvelope` wire frames carry request/response metadata outside `params`/`result`,
-///    keeping business payloads 100% free of private `_` keys while extension WS frames still
-///    carry `_operation_id`.
+///    keeping business payloads 100% free of private `_` keys while extension WS frames carry
+///    top-level `operation_id`.
 /// 2) When a mutating action (`bsk click @e1`) triggers a native modal (`DialogPending`) and is
 ///    settled via `bsk dialog accept` + `bsk operation await`, the unified completion hook:
 ///    - resolves `run_logs` in-place to `Outcome::Done` (`uncertain == 0`, never stranded as `Uncertain`),
@@ -985,7 +987,8 @@ async fn counterexample_c_dialog_pending_reconciles_run_logs_wal_and_scopes_with
     let nav_req = recv_ws(&mut ws).await;
     assert_eq!(nav_req["method"], "tool.navigate");
     let sid = nav_req["params"]["session_id"].as_str().unwrap().to_owned();
-    assert!(nav_req["params"]["_operation_id"].is_string());
+    assert!(nav_req["operation_id"].is_string());
+    assert_no_private_ipc_keys(&nav_req["params"], "ws_nav_params");
     ws.send(Message::Text(
         json!({
             "id": nav_req["id"],
@@ -1082,10 +1085,8 @@ async fn counterexample_c_dialog_pending_reconciles_run_logs_wal_and_scopes_with
     let click_task = run_bsk(vec!["click".into(), "@e1".into(), "--json".into()]);
     let click_req = recv_ws(&mut ws).await;
     assert_eq!(click_req["method"], "tool.click");
-    let click_op_id = click_req["params"]["_operation_id"]
-        .as_str()
-        .unwrap()
-        .to_owned();
+    let click_op_id = click_req["operation_id"].as_str().unwrap().to_owned();
+    assert_no_private_ipc_keys(&click_req["params"], "ws_click_params");
     let dlg = json!({
         "id": "dlg-confirm-1",
         "tab_id": 11,
@@ -1246,10 +1247,7 @@ async fn counterexample_c_dialog_pending_reconciles_run_logs_wal_and_scopes_with
     });
     let select_req = recv_ws(&mut ws).await;
     assert_eq!(select_req["method"], "tool.tab_select");
-    let select_op_id = select_req["params"]["_operation_id"]
-        .as_str()
-        .unwrap()
-        .to_owned();
+    let select_op_id = select_req["operation_id"].as_str().unwrap().to_owned();
     ws.send(Message::Text(
         json!({
             "event": "dialog.changed",
@@ -2130,10 +2128,7 @@ async fn counterexample_e_truncated_delta_whitespace_delta_abrupt_mcp_rst_and_la
     });
     let late_sync_ws = recv_ws(&mut ws).await;
     assert_eq!(late_sync_ws["method"], "tool.cooperate");
-    let late_op_id = late_sync_ws["params"]["_operation_id"]
-        .as_str()
-        .unwrap()
-        .to_owned();
+    let late_op_id = late_sync_ws["operation_id"].as_str().unwrap().to_owned();
     ws.send(Message::Text(
         json!({
             "event": "dialog.changed",

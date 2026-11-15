@@ -109,6 +109,10 @@ pub fn dispatch(
             .collect(),
         mode: args.mode.into(),
         timeout_ms: Some(args.timeout),
+        context_id: None,
+        observation_id: None,
+        depends_on: None,
+        expect: None,
     };
     let result = op_ctx.call::<_, UploadResult>(
         info.sock_path.clone(),

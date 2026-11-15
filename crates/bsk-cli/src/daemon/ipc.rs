@@ -23,19 +23,21 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use bsk_protocol::system::{
-    BrowserListParams, BrowserStatusEntry, SessionStatusEntry, StatusParams, StatusResult,
+    BrowserListParams, BrowserListResult, BrowserStatusEntry, DaemonSessionStartParams,
+    DaemonSessionStartResult, DaemonSessionStopAllParams, DaemonSessionStopFailure,
+    DaemonSessionStopParams, DaemonSessionStopResult, LedgerRequestParams, SessionListParams,
+    SessionListResult, SessionRunLogParams, SessionStatusEntry, StatusParams, StatusResult,
     VersionSkewEntry,
 };
 use bsk_protocol::tools::{
-    DownloadParams, DownloadResult, ReturnFailure, TransferBeginParams, TransferIdParams,
-    UploadParams, WaitMsParams, WaitMsResult,
+    DownloadParams, DownloadResult, TransferBeginParams, TransferIdParams, UploadParams,
+    WaitMsParams, WaitMsResult,
 };
 use bsk_protocol::{
     CancelParams, CancelResult, ErrorCode, Method, PingResult, RequestFrame, ResponseBody,
     RpcError, RpcId, WsCorrelation,
 };
 use serde::de::DeserializeOwned;
-use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::sync::{Notify, watch};
 use tokio::task::JoinHandle;
@@ -473,13 +475,10 @@ pub fn full_handler(status: DaemonStatus, state: Arc<DaemonState>) -> RpcHandler
 /// M5 (`session.*`), M6–M9 tool methods, and the M9.3 daemon-local
 /// `tool.wait_ms` / `cancel` paths.
 pub fn full_envelope_handler(status: DaemonStatus, state: Arc<DaemonState>) -> EnvelopeRpcHandler {
-    Arc::new(move |rpc_id, method, params, req_meta| {
+    Arc::new(move |rpc_id, method, mut params, req_meta| {
         let status = status.clone();
         let state = Arc::clone(&state);
         Box::pin(async move {
-            let mut params_opt = Some(params);
-            RequestFrame::strip_ws_correlation(&mut params_opt);
-            let mut params = params_opt.unwrap_or(Value::Null);
             let (req_meta, legacy_inband_scope_meta) =
                 IpcRequestMeta::extract_legacy_from_params(&mut params, req_meta);
             let method_for_post = method.clone();
@@ -672,7 +671,16 @@ async fn dispatch_envelope_rpc(
             ResponseBody::Ok(serde_json::to_value(result).unwrap_or(Value::Null))
         }
         Method::SessionRunLog => {
-            let session = SessionId(params["session_id"].as_str().unwrap_or_default().to_owned());
+            let p: SessionRunLogParams = match serde_json::from_value(params) {
+                Ok(p) => p,
+                Err(err) => {
+                    return (
+                        ResponseBody::Err(invalid_params(err.to_string())),
+                        IpcResponseMeta::default(),
+                    );
+                }
+            };
+            let session = SessionId(p.session_id);
             if state.sessions.touch(&session) {
                 ResponseBody::Ok(
                     serde_json::to_value(state.run_logs.read(&session.0)).unwrap_or(Value::Null),
@@ -721,11 +729,11 @@ async fn dispatch_envelope_rpc(
             Ok(v) => ResponseBody::Ok(v),
             Err(e) => ResponseBody::Err(e),
         },
-        Method::SessionStopAll => match handle_session_stop_all_rpc(&state, rpc_id).await {
+        Method::SessionStopAll => match handle_session_stop_all_rpc(&state, rpc_id, params).await {
             Ok(v) => ResponseBody::Ok(v),
             Err(e) => ResponseBody::Err(e),
         },
-        Method::SessionList => handle_session_list(&state),
+        Method::SessionList => handle_session_list(&state, params),
         Method::LedgerRequest => handle_ledger_request(&state, params, &req_meta),
         Method::BrowserList => match handle_browser_list(&state, params).await {
             Ok(v) => ResponseBody::Ok(v),
@@ -1292,11 +1300,6 @@ async fn handle_tool_dispatch(
             Err(error) => ResponseBody::Err(error.into_rpc()),
         };
     }
-    // Transfer staging normalizes typed params; retain public action evidence fields.
-    let metadata: Vec<_> = ["context_id", "depends_on", "expect", "observation_id"]
-        .into_iter()
-        .filter_map(|key| params.get(key).cloned().map(|value| (key, value)))
-        .collect();
     let mut params = params;
     if method == Method::ToolTabBorrow {
         if let Some(confirm) = params.get("confirm")
@@ -1343,11 +1346,6 @@ async fn handle_tool_dispatch(
         download.max_byte_size = Some(super::file_transfer::MAX_TRANSFER_BYTES);
         download_transfer_id = Some(staging.transfer_id);
         params = serde_json::to_value(download).unwrap_or(Value::Null);
-    }
-    if let Some(object) = params.as_object_mut() {
-        for (key, value) in metadata {
-            object.insert(key.into(), value);
-        }
     }
     let entry = inflight_guard.entry();
     let wal_ticket = wal_mutating.then(|| {
@@ -1754,81 +1752,14 @@ fn tool_dispatch_transport_timeout(method: &Method, params: &Value) -> Result<Du
     })
 }
 
-// Local CLI-facing shapes. Intentionally distinct from
-// `bsk_protocol::tools::SessionStart*` (which describes the WS-facing
-// `tool.session_*` round-trip with the extension) so the two sides can
-// evolve independently.
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct CliSessionStartParams {
-    #[serde(default)]
-    pub controller: Option<bsk_protocol::tools::ControllerInfo>,
-    #[serde(default)]
-    pub incognito: bool,
-    #[serde(default)]
-    pub browser_instance_id: Option<String>,
-    #[serde(default)]
-    pub width: Option<u32>,
-    #[serde(default)]
-    pub height: Option<u32>,
-    #[serde(default)]
-    pub focused: Option<bool>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct CliSessionStartResult {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub interaction: Option<bsk_protocol::tools::InteractionPolicy>,
-    pub session_id: String,
-    pub browser_instance_id: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub agent_window_id: Option<i64>,
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-struct CliSessionStopParams {
-    #[serde(default)]
-    pub session_id: Option<String>,
-    #[serde(default)]
-    pub all: bool,
-    #[serde(default)]
-    pub recording: bool,
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub(super) struct CliSessionStopResult {
-    stopped: Vec<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    failed: Vec<CliSessionStopFailure>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    returned_tab_ids: Vec<i64>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    return_failures: Vec<ReturnFailure>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct CliSessionStopFailure {
-    pub session_id: String,
-    pub code: ErrorCode,
-    pub message: String,
-}
-
+pub(super) type CliSessionStopResult = DaemonSessionStopResult;
+type CliSessionStopFailure = DaemonSessionStopFailure;
 type SessionStopReply = Result<CliSessionStopResult, RpcError>;
 
 #[derive(Debug)]
 pub(super) struct RecordSessionStop {
     created_at_ms: i64,
     pub(super) result: watch::Receiver<Option<SessionStopReply>>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct SessionListResult {
-    pub sessions: Vec<SessionStatusEntry>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct BrowserListResult {
-    pub browsers: Vec<BrowserStatusEntry>,
 }
 
 async fn handle_status(
@@ -1879,10 +1810,6 @@ pub(super) async fn handle_session_start_scoped(
     recoverable: bool,
     req_meta: &IpcRequestMeta,
 ) -> Result<Value, RpcError> {
-    let task_name = params
-        .get("task_name")
-        .and_then(Value::as_str)
-        .map(str::to_owned);
     let abort_guard = state
         .abort_registry
         .register(rpc_id)
@@ -1892,22 +1819,9 @@ pub(super) async fn handle_session_start_scoped(
             data: None,
         })?;
     let cancel = abort_guard.token().clone();
-    let params: CliSessionStartParams = if params.is_null() {
-        CliSessionStartParams {
-            controller: None,
-            incognito: false,
-            browser_instance_id: None,
-            width: None,
-            height: None,
-            focused: None,
-        }
-    } else {
-        serde_json::from_value(params).map_err(|err| RpcError {
-            code: ErrorCode::InvalidParams,
-            message: err.to_string(),
-            data: None,
-        })?
-    };
+    let params: DaemonSessionStartParams = parse_params_or_default(params)?;
+    let incognito = params.incognito.unwrap_or(false);
+    let task_name = params.task_name;
     if let Some(controller) = &params.controller {
         controller.validate().map_err(|message| RpcError {
             code: ErrorCode::InvalidParams,
@@ -1964,8 +1878,8 @@ pub(super) async fn handle_session_start_scoped(
                 }
             }
         }
-        if (req_meta.explicit_incognito && params.incognito != binding.incognito)
-            || (params.incognito && !binding.incognito)
+        if (req_meta.explicit_incognito && incognito != binding.incognito)
+            || (incognito && !binding.incognito)
         {
             return Err(RpcError {
                 code: ErrorCode::InvalidParams,
@@ -1986,7 +1900,7 @@ pub(super) async fn handle_session_start_scoped(
         }
         if state.browsers.get(&binding.browser_id).is_some() {
             state.sessions.touch(&binding.session_id);
-            let result = CliSessionStartResult {
+            let result = DaemonSessionStartResult {
                 interaction: live.interaction,
                 session_id: live.id.0,
                 browser_instance_id: live.browser_id.0,
@@ -2000,7 +1914,7 @@ pub(super) async fn handle_session_start_scoped(
         );
     }
 
-    let requested_incognito = params.incognito;
+    let requested_incognito = incognito;
     match super::sessions::start_session_recoverable(
         &state.browsers,
         &state.sessions,
@@ -2008,7 +1922,7 @@ pub(super) async fn handle_session_start_scoped(
         params.browser_instance_id.as_deref(),
         AgentWindowOptions {
             controller: params.controller,
-            incognito: params.incognito,
+            incognito,
             size: window_size,
             focused: params.focused,
         },
@@ -2031,7 +1945,7 @@ pub(super) async fn handle_session_start_scoped(
                     requested_incognito,
                 );
             }
-            let result = CliSessionStartResult {
+            let result = DaemonSessionStartResult {
                 interaction: session.interaction,
                 session_id: session.id.0.clone(),
                 browser_instance_id: session.browser_id.0.clone(),
@@ -2153,15 +2067,7 @@ async fn handle_session_stop(
             data: None,
         })?;
     let cancel = abort_guard.token().clone();
-    let params: CliSessionStopParams = if params.is_null() {
-        CliSessionStopParams::default()
-    } else {
-        serde_json::from_value(params).map_err(|err| RpcError {
-            code: ErrorCode::InvalidParams,
-            message: err.to_string(),
-            data: None,
-        })?
-    };
+    let params: DaemonSessionStopParams = parse_params_or_default(params)?;
     if params.all {
         return handle_session_stop_all(state, Some(cancel)).await;
     }
@@ -2348,7 +2254,9 @@ fn map_stop_error(err: StopSessionError) -> RpcError {
 async fn handle_session_stop_all_rpc(
     state: &Arc<DaemonState>,
     rpc_id: RpcId,
+    params: Value,
 ) -> Result<Value, RpcError> {
+    let _: DaemonSessionStopAllParams = parse_params_or_default(params)?;
     let abort_guard = state
         .abort_registry
         .register(rpc_id)
@@ -2445,7 +2353,10 @@ async fn handle_session_stop_all(
     Ok(serde_json::to_value(result).unwrap_or(Value::Null))
 }
 
-fn handle_session_list(state: &Arc<DaemonState>) -> ResponseBody {
+fn handle_session_list(state: &Arc<DaemonState>, params: Value) -> ResponseBody {
+    if let Err(err) = parse_params_or_default::<SessionListParams>(params) {
+        return ResponseBody::Err(err);
+    }
     let sessions: Vec<_> = state
         .sessions
         .snapshot()
@@ -2460,18 +2371,7 @@ fn handle_ledger_request(
     params: Value,
     req_meta: &IpcRequestMeta,
 ) -> ResponseBody {
-    #[derive(serde::Deserialize)]
-    struct LedgerParams {
-        action: String,
-        #[serde(default)]
-        session_id: Option<String>,
-        #[serde(default)]
-        tab_id: Option<i64>,
-        #[serde(default)]
-        operation_id: Option<String>,
-    }
-
-    let p: LedgerParams = match serde_json::from_value(params) {
+    let p: LedgerRequestParams = match serde_json::from_value(params) {
         Ok(p) => p,
         Err(err) => return ResponseBody::Err(invalid_params(err.to_string())),
     };
@@ -3348,6 +3248,8 @@ mod tests {
             id: "p1".into(),
             method: Method::SystemPing,
             params: None,
+            audit_id: None,
+            operation_id: None,
         });
         let mut line = serde_json::to_string(&frame).unwrap();
         line.push('\n');
@@ -3395,6 +3297,8 @@ mod tests {
             id: "p2".into(),
             method: Method::SystemHandshake,
             params: None,
+            audit_id: None,
+            operation_id: None,
         });
         let mut line = serde_json::to_string(&frame).unwrap();
         line.push('\n');

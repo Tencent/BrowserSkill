@@ -322,6 +322,66 @@ impl GlobalFlags {
     }
 }
 
+fn command_caller_action_metadata_policy(command: &Command) -> bsk_protocol::ActionMetadataPolicy {
+    use bsk_protocol::{ActionMetadataPolicy, Method};
+    let (method, params) = match command {
+        // `open` and `step` wrap a guarded browser action (`tool.navigate` / inner step action).
+        Command::Open(_) | Command::Step(_) => (Method::ToolNavigate, None),
+        Command::Upload(_) => (Method::ToolUpload, None),
+        Command::Download(_) => (Method::ToolDownload, None),
+        Command::Screenshot(args) => (
+            if args.full_page {
+                Method::ToolScreenshotFullPage
+            } else {
+                Method::ToolScreenshot
+            },
+            None,
+        ),
+        Command::Navigate(_) => (Method::ToolNavigate, None),
+        Command::NavigateBack(_) => (Method::ToolNavigateBack, None),
+        Command::NavigateForward(_) => (Method::ToolNavigateForward, None),
+        Command::Reload(_) => (Method::ToolReload, None),
+        Command::Click(_) => (Method::ToolClick, None),
+        Command::Hover(_) => (Method::ToolHover, None),
+        Command::Drag(_) => (Method::ToolDrag, None),
+        Command::Wheel(_) => (Method::ToolWheel, None),
+        Command::ScrollTo(_) => (Method::ToolScrollTo, None),
+        Command::Focus(_) => (Method::ToolFocus, None),
+        Command::Blur(_) => (Method::ToolBlur, None),
+        Command::Fill(_) => (Method::ToolFill, None),
+        Command::Press(_) => (Method::ToolPress, None),
+        Command::Select(_) => (Method::ToolSelect, None),
+        Command::Evaluate(_) => (Method::ToolEvaluate, None),
+        Command::Emulate(_) => (Method::ToolEmulate, None),
+        Command::Window(WindowCmd {
+            sub: window::WindowSub::Resize(_),
+        }) => (Method::ToolWindowResize, None),
+        Command::Tab(TabCmd {
+            sub: tab::TabSub::Close(_),
+        }) => (Method::ToolTabClose, None),
+        Command::Observe(args) => (
+            Method::ToolObserve,
+            Some(serde_json::json!({ "probe_hover": args.probe_hover })),
+        ),
+        Command::Debug(args) => (
+            Method::ToolDebug,
+            Some(serde_json::json!({ "action": args.action })),
+        ),
+        Command::Read(_) => (Method::ToolRead, None),
+        Command::Snapshot(_) => (Method::ToolSnapshot, None),
+        Command::Console(_) => (Method::ToolConsole, None),
+        Command::Network(_) => (Method::ToolNetwork, None),
+        Command::GetHtml(_) => (Method::ToolGetHtml, None),
+        Command::Extract(_) => (Method::ToolExtract, None),
+        Command::WaitForNavigation(_) => (Method::ToolWaitForNavigation, None),
+        Command::WaitForElement(_) => (Method::ToolWaitForElement, None),
+        Command::WaitMs(_) => (Method::ToolWaitMs, None),
+        Command::RequestHelp(_) => (Method::ToolRequestHelp, None),
+        _ => return ActionMetadataPolicy::None,
+    };
+    method.caller_action_metadata_policy_with_params(params.as_ref())
+}
+
 /// Fail closed when caller action conditions are supplied to commands that never verify them.
 pub fn validate_command_evidence(
     command: &Command,
@@ -335,64 +395,34 @@ pub fn validate_command_evidence(
     {
         return Ok(());
     }
-    let accepts_full_evidence = match command {
-        Command::Open(_) | Command::Step(_) | Command::Upload(_) | Command::Download(_) => true,
-        Command::Screenshot(args) if args.full_page => true,
-        Command::Navigate(_)
-        | Command::NavigateBack(_)
-        | Command::NavigateForward(_)
-        | Command::Reload(_)
-        | Command::Click(_)
-        | Command::Hover(_)
-        | Command::Drag(_)
-        | Command::Wheel(_)
-        | Command::ScrollTo(_)
-        | Command::Focus(_)
-        | Command::Blur(_)
-        | Command::Fill(_)
-        | Command::Press(_)
-        | Command::Select(_)
-        | Command::Evaluate(_)
-        | Command::Emulate(_)
-        | Command::Window(WindowCmd {
-            sub: window::WindowSub::Resize(_),
-        })
-        | Command::Tab(TabCmd {
-            sub: tab::TabSub::Close(_),
-        }) => true,
-        Command::Observe(args) if args.probe_hover => true,
-        Command::Debug(args)
-            if serde_json::from_value::<bsk_protocol::tools::DebugAction>(
-                serde_json::Value::String(args.action.clone()),
-            )
-            .is_ok_and(|a| a.cooperation_guarded()) =>
-        {
-            true
+    match command_caller_action_metadata_policy(command) {
+        bsk_protocol::ActionMetadataPolicy::Full => {
+            if !flags.depends_on.is_empty() && flags.context.is_none() {
+                return Err(error::CliError::invalid_params(anyhow::anyhow!(
+                    "--depends-on requires --context"
+                )));
+            }
+            Ok(())
         }
-        _ => false,
-    };
-    if accepts_full_evidence {
-        if !flags.depends_on.is_empty() && flags.context.is_none() {
-            return Err(error::CliError::invalid_params(anyhow::anyhow!(
-                "--depends-on requires --context"
-            )));
+        bsk_protocol::ActionMetadataPolicy::ContextOnly => {
+            if !flags.depends_on.is_empty() || flags.observation.is_some() || flags.expect.is_some()
+            {
+                return Err(error::CliError::invalid_params(anyhow::anyhow!(
+                    "--observation, --expect and --depends-on apply only to guarded browser actions; read accepts --context only"
+                )));
+            }
+            Ok(())
         }
-        return Ok(());
-    }
-    if matches!(command, Command::Read(_)) {
-        if !flags.depends_on.is_empty() || flags.observation.is_some() || flags.expect.is_some() {
-            return Err(error::CliError::invalid_params(anyhow::anyhow!(
-                "--observation, --expect and --depends-on apply only to guarded browser actions; read accepts --context only"
-            )));
+        bsk_protocol::ActionMetadataPolicy::None
+        | bsk_protocol::ActionMetadataPolicy::TabBindingContext => {
+            if flags.has_any_evidence() {
+                return Err(error::CliError::invalid_params(anyhow::anyhow!(
+                    "action conditions (--context, --depends-on, --observation, --expect) apply only to guarded browser actions and read (--context)"
+                )));
+            }
+            Ok(())
         }
-        return Ok(());
     }
-    if flags.has_any_evidence() {
-        return Err(error::CliError::invalid_params(anyhow::anyhow!(
-            "action conditions (--context, --depends-on, --observation, --expect) apply only to guarded browser actions and read (--context)"
-        )));
-    }
-    Ok(())
 }
 
 #[cfg(test)]

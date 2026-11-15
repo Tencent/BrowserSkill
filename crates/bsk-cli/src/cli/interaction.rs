@@ -182,6 +182,10 @@ pub fn dispatch_click(
             Some(modifiers)
         },
         timeout_ms: Some(args.timeout),
+        context_id: None,
+        observation_id: None,
+        depends_on: None,
+        expect: None,
     };
     let reply: ClickResult = call(
         info.sock_path,
@@ -276,6 +280,10 @@ pub fn dispatch_hover(
         },
         settle_ms: Some(args.settle),
         timeout_ms: Some(args.timeout),
+        context_id: None,
+        observation_id: None,
+        depends_on: None,
+        expect: None,
     };
     let reply: HoverResult = call(
         info.sock_path,
@@ -348,6 +356,10 @@ pub fn dispatch_focus(
         selector,
         tab_id: args.tab_id,
         timeout_ms: Some(args.timeout),
+        context_id: None,
+        observation_id: None,
+        depends_on: None,
+        expect: None,
     };
     let reply: FocusResult = call(
         info.sock_path,
@@ -414,6 +426,10 @@ pub fn dispatch_blur(
         selector,
         tab_id: args.tab_id,
         timeout_ms: Some(args.timeout),
+        context_id: None,
+        observation_id: None,
+        depends_on: None,
+        expect: None,
     };
     let reply: BlurResult = call(
         info.sock_path,
@@ -499,6 +515,10 @@ pub fn dispatch_fill(
         tab_id: args.tab_id,
         clear_before: if args.no_clear { Some(false) } else { None },
         timeout_ms: Some(args.timeout),
+        context_id: None,
+        observation_id: None,
+        depends_on: None,
+        expect: None,
     };
     let reply: FillResult = call(
         info.sock_path,
@@ -584,6 +604,10 @@ pub fn dispatch_press(
         tab_id: args.tab_id,
         hold_ms: args.hold_ms,
         timeout_ms: Some(args.timeout),
+        context_id: None,
+        observation_id: None,
+        depends_on: None,
+        expect: None,
     };
     let reply: PressResult = call(
         info.sock_path,
@@ -677,6 +701,10 @@ pub fn dispatch_select(
         selector,
         tab_id: args.tab_id,
         timeout_ms: Some(args.timeout),
+        context_id: None,
+        observation_id: None,
+        depends_on: None,
+        expect: None,
     };
     let reply: SelectResult = call(
         info.sock_path,

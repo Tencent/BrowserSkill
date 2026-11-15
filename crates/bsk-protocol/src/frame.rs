@@ -13,16 +13,13 @@ use crate::method::Method;
 pub type RpcId = String;
 
 /// Daemon-to-extension WS correlation identifiers carried alongside an
-/// outbound [`RequestFrame`] and stripped by the extension's transport codec
-/// (`apps/extension/src/transport/protocol.ts`) before schema validation.
+/// outbound [`RequestFrame`] at the frame envelope level, keeping `params`
+/// bit-for-bit clean for schema validation and downstream dispatch.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct WsCorrelation {
     pub audit_id: Option<String>,
     pub operation_id: Option<String>,
 }
-
-const WS_AUDIT_ID_FIELD: &str = concat!("_", "audit_id");
-const WS_OPERATION_ID_FIELD: &str = concat!("_", "operation_id");
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RequestFrame {
@@ -30,47 +27,29 @@ pub struct RequestFrame {
     pub method: Method,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub params: Option<serde_json::Value>,
+    /// Daemon-issued operation audit correlation id on outbound WS requests.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audit_id: Option<String>,
+    /// Daemon-issued dialog-retention operation correlation id on outbound WS requests.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operation_id: Option<String>,
 }
 
 impl RequestFrame {
-    /// Build an outbound daemon→extension WS request frame, stripping any
-    /// caller-forged correlation keys from `params` before attaching
-    /// daemon-issued [`WsCorrelation`] identifiers.
+    /// Build an outbound daemon→extension WS request frame with top-level
+    /// [`WsCorrelation`] fields without mutating `params`.
     pub fn for_extension_ws(
         id: RpcId,
         method: Method,
-        mut params: serde_json::Value,
+        params: serde_json::Value,
         correlation: &WsCorrelation,
     ) -> Self {
-        if let Some(obj) = params.as_object_mut() {
-            obj.remove(WS_AUDIT_ID_FIELD);
-            obj.remove(WS_OPERATION_ID_FIELD);
-            if let Some(audit_id) = &correlation.audit_id {
-                obj.insert(
-                    WS_AUDIT_ID_FIELD.to_owned(),
-                    serde_json::Value::String(audit_id.clone()),
-                );
-            }
-            if let Some(operation_id) = &correlation.operation_id {
-                obj.insert(
-                    WS_OPERATION_ID_FIELD.to_owned(),
-                    serde_json::Value::String(operation_id.clone()),
-                );
-            }
-        }
         Self {
             id,
             method,
             params: Some(params),
-        }
-    }
-
-    /// Strip WS transport correlation keys from `params` (mirrors
-    /// `stripEnvelopeParams` in `apps/extension/src/transport/protocol.ts`).
-    pub fn strip_ws_correlation(params: &mut Option<serde_json::Value>) {
-        if let Some(serde_json::Value::Object(map)) = params {
-            map.remove(WS_AUDIT_ID_FIELD);
-            map.remove(WS_OPERATION_ID_FIELD);
+            audit_id: correlation.audit_id.clone(),
+            operation_id: correlation.operation_id.clone(),
         }
     }
 }
@@ -87,11 +66,162 @@ pub enum ResponseBody {
     Err(RpcError),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct EventFrame {
-    pub event: EventKind,
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct EmptyEventPayload {}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct AuditContextEvent {
+    pub operation_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tab_id: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct DialogChangedEvent {
+    pub session_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tab_id: Option<i64>,
     #[serde(default)]
-    pub payload: serde_json::Value,
+    pub dialog: Option<crate::tools::PendingJavaScriptDialog>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operation_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct SessionActivityEvent {
+    pub session_id: String,
+    pub idle_protected: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionWindowClosedReason {
+    UserClosedWindow,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct SessionWindowClosedEvent {
+    pub session_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<SessionWindowClosedReason>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub return_failures: Vec<crate::tools::ReturnFailure>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionEndedReason {
+    UserMovedTab,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct SessionEndedEvent {
+    pub session_id: String,
+    pub reason: SessionEndedReason,
+    pub tab_id: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct SessionUserInterruptEvent {
+    pub session_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct SessionInteractionChangedEvent {
+    pub session_id: String,
+    pub interaction: crate::tools::InteractionPolicy,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
+#[serde(tag = "event", content = "payload")]
+pub enum EventFrame {
+    #[serde(rename = "audit.context")]
+    AuditContext(AuditContextEvent),
+    #[serde(rename = "dialog.changed")]
+    DialogChanged(DialogChangedEvent),
+    #[serde(rename = "system.heartbeat")]
+    SystemHeartbeat(EmptyEventPayload),
+    #[serde(rename = "session.activity")]
+    SessionActivity(SessionActivityEvent),
+    #[serde(rename = "session.window_closed")]
+    SessionWindowClosed(SessionWindowClosedEvent),
+    #[serde(rename = "session.ended")]
+    SessionEnded(SessionEndedEvent),
+    #[serde(rename = "session.user_interrupt")]
+    SessionUserInterrupt(SessionUserInterruptEvent),
+    #[serde(rename = "session.interaction_changed")]
+    SessionInteractionChanged(SessionInteractionChangedEvent),
+    #[serde(rename = "browser.disconnected")]
+    BrowserDisconnected(EmptyEventPayload),
+    #[serde(rename = "browser.connected")]
+    BrowserConnected(EmptyEventPayload),
+}
+
+impl EventFrame {
+    pub const fn kind(&self) -> EventKind {
+        match self {
+            Self::AuditContext(_) => EventKind::AuditContext,
+            Self::DialogChanged(_) => EventKind::DialogChanged,
+            Self::SystemHeartbeat(_) => EventKind::SystemHeartbeat,
+            Self::SessionActivity(_) => EventKind::SessionActivity,
+            Self::SessionWindowClosed(_) => EventKind::SessionWindowClosed,
+            Self::SessionEnded(_) => EventKind::SessionEnded,
+            Self::SessionUserInterrupt(_) => EventKind::SessionUserInterrupt,
+            Self::SessionInteractionChanged(_) => EventKind::SessionInteractionChanged,
+            Self::BrowserDisconnected(_) => EventKind::BrowserDisconnected,
+            Self::BrowserConnected(_) => EventKind::BrowserConnected,
+        }
+    }
+
+    pub fn from_parts(
+        kind: EventKind,
+        payload: serde_json::Value,
+    ) -> Result<Self, serde_json::Error> {
+        Ok(match kind {
+            EventKind::AuditContext => Self::AuditContext(serde_json::from_value(payload)?),
+            EventKind::DialogChanged => Self::DialogChanged(serde_json::from_value(payload)?),
+            EventKind::SystemHeartbeat => Self::SystemHeartbeat(serde_json::from_value(payload)?),
+            EventKind::SessionActivity => Self::SessionActivity(serde_json::from_value(payload)?),
+            EventKind::SessionWindowClosed => {
+                Self::SessionWindowClosed(serde_json::from_value(payload)?)
+            }
+            EventKind::SessionEnded => Self::SessionEnded(serde_json::from_value(payload)?),
+            EventKind::SessionUserInterrupt => {
+                Self::SessionUserInterrupt(serde_json::from_value(payload)?)
+            }
+            EventKind::SessionInteractionChanged => {
+                Self::SessionInteractionChanged(serde_json::from_value(payload)?)
+            }
+            EventKind::BrowserDisconnected => {
+                Self::BrowserDisconnected(serde_json::from_value(payload)?)
+            }
+            EventKind::BrowserConnected => Self::BrowserConnected(serde_json::from_value(payload)?),
+        })
+    }
+}
+
+impl<'de> Deserialize<'de> for EventFrame {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct WireEventFrame {
+            event: EventKind,
+            #[serde(default = "empty_json_object")]
+            payload: serde_json::Value,
+        }
+        let wire = WireEventFrame::deserialize(deserializer)?;
+        Self::from_parts(wire.event, wire.payload).map_err(de::Error::custom)
+    }
+}
+
+fn empty_json_object() -> serde_json::Value {
+    serde_json::Value::Object(Default::default())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
@@ -255,6 +385,8 @@ impl<'de> Visitor<'de> for FrameVisitor {
         let mut id = None::<RpcId>;
         let mut method = None::<Method>;
         let mut params = None::<serde_json::Value>;
+        let mut audit_id = None::<String>;
+        let mut operation_id = None::<String>;
         let mut result = None::<serde_json::Value>;
         let mut error = None::<RpcError>;
         let mut event = None::<EventKind>;
@@ -279,6 +411,18 @@ impl<'de> Visitor<'de> for FrameVisitor {
                         return Err(de::Error::duplicate_field("params"));
                     }
                     params = Some(map.next_value()?);
+                }
+                "audit_id" => {
+                    if audit_id.is_some() {
+                        return Err(de::Error::duplicate_field("audit_id"));
+                    }
+                    audit_id = Some(map.next_value()?);
+                }
+                "operation_id" => {
+                    if operation_id.is_some() {
+                        return Err(de::Error::duplicate_field("operation_id"));
+                    }
+                    operation_id = Some(map.next_value()?);
                 }
                 "result" => {
                     if result.is_some() {
@@ -313,14 +457,21 @@ impl<'de> Visitor<'de> for FrameVisitor {
 
         if event.is_some() {
             let event = event.ok_or_else(|| de::Error::missing_field("event"))?;
-            let payload = payload.unwrap_or(serde_json::Value::Object(Default::default()));
-            return Ok(Frame::Event(EventFrame { event, payload }));
+            let payload = payload.unwrap_or_else(empty_json_object);
+            let event_frame = EventFrame::from_parts(event, payload).map_err(de::Error::custom)?;
+            return Ok(Frame::Event(event_frame));
         }
 
         if method.is_some() {
             let id = id.ok_or_else(|| de::Error::missing_field("id"))?;
             let method = method.ok_or_else(|| de::Error::missing_field("method"))?;
-            return Ok(Frame::Request(RequestFrame { id, method, params }));
+            return Ok(Frame::Request(RequestFrame {
+                id,
+                method,
+                params,
+                audit_id,
+                operation_id,
+            }));
         }
 
         let id = id.ok_or_else(|| de::Error::missing_field("id"))?;
@@ -360,7 +511,8 @@ mod tests {
         // Mirrors exactly what the extension sends: { event, payload: {} }.
         let wire = serde_json::json!({ "event": "system.heartbeat", "payload": {} });
         let frame: EventFrame = serde_json::from_value(wire).unwrap();
-        assert_eq!(frame.event, EventKind::SystemHeartbeat);
+        assert_eq!(frame.kind(), EventKind::SystemHeartbeat);
+        assert_eq!(frame, EventFrame::SystemHeartbeat(EmptyEventPayload {}));
     }
 
     #[test]
@@ -371,16 +523,17 @@ mod tests {
 
     #[test]
     fn session_user_interrupt_event_frame_round_trips() {
-        let frame = EventFrame {
-            event: EventKind::SessionUserInterrupt,
-            payload: serde_json::json!({ "session_id": "sess-1" }),
-        };
+        let frame = EventFrame::SessionUserInterrupt(SessionUserInterruptEvent {
+            session_id: "sess-1".into(),
+        });
         let v = serde_json::to_value(&frame).unwrap();
         let back: EventFrame = serde_json::from_value(v).unwrap();
-        assert_eq!(back.event, EventKind::SessionUserInterrupt);
+        assert_eq!(back.kind(), EventKind::SessionUserInterrupt);
         assert_eq!(
-            back.payload.get("session_id").and_then(|v| v.as_str()),
-            Some("sess-1"),
+            back,
+            EventFrame::SessionUserInterrupt(SessionUserInterruptEvent {
+                session_id: "sess-1".into(),
+            })
         );
     }
 
@@ -391,8 +544,36 @@ mod tests {
             "payload": { "session_id": "sess-1", "reason": "user_moved_tab", "tab_id": 42 },
         });
         let frame: Frame = serde_json::from_value(wire.clone()).unwrap();
-        assert!(matches!(&frame, Frame::Event(event) if event.event == EventKind::SessionEnded));
+        assert!(matches!(
+            &frame,
+            Frame::Event(EventFrame::SessionEnded(ev))
+                if ev.session_id == "sess-1"
+                    && ev.reason == SessionEndedReason::UserMovedTab
+                    && ev.tab_id == 42
+        ));
         assert_eq!(serde_json::to_value(frame).unwrap(), wire);
+    }
+
+    #[test]
+    fn request_frame_for_extension_ws_carries_correlation_out_of_band() {
+        let original_params = serde_json::json!({ "session_id": "s1", "selector": "#go" });
+        let req = RequestFrame::for_extension_ws(
+            "rpc-9".into(),
+            Method::ToolClick,
+            original_params.clone(),
+            &WsCorrelation {
+                audit_id: Some("aud-1".into()),
+                operation_id: Some("op-1".into()),
+            },
+        );
+        let wire = serde_json::to_value(Frame::Request(req.clone())).unwrap();
+        assert_eq!(wire["params"], original_params);
+        assert_eq!(wire["audit_id"], "aud-1");
+        assert_eq!(wire["operation_id"], "op-1");
+        assert!(wire["params"].get("_audit_id").is_none());
+        assert!(wire["params"].get("_operation_id").is_none());
+        let decoded: Frame = serde_json::from_value(wire).unwrap();
+        assert_eq!(decoded, Frame::Request(req));
     }
 
     #[test]

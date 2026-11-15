@@ -98,10 +98,10 @@ async fn records_production_dispatch_and_isolates_browser_history() {
         send(&mut ws, json!({"id":request["id"],"result":{"agent_window_id":42}})).await;
         let session = ok(start.await.unwrap())["session_id"].as_str().unwrap().to_owned();
 
-        let call = tokio::spawn(handler("click".into(), Method::ToolClick, json!({"session_id":session,"ref":"@e1","_audit_id":"caller-forgery"})));
+        let call = tokio::spawn(handler("click".into(), Method::ToolClick, json!({"session_id":session,"ref":"@e1","_audit_id":"caller-forgery","audit_id":"caller-forgery"})));
         let request = receive(&mut ws).await;
         assert_eq!(request["method"], "tool.click");
-        let operation = &request["params"]["_audit_id"];
+        let operation = &request["audit_id"];
         assert!(operation.is_string());
         assert_ne!(operation, "caller-forgery");
         send(&mut ws, json!({"event":"audit.context","payload":{
@@ -125,6 +125,7 @@ async fn records_production_dispatch_and_isolates_browser_history() {
         audit(&mut ws, json!({"action":"configure","enabled":false})).await;
         let fill = tokio::spawn(handler("fill".into(), Method::ToolFill, json!({"session_id":session,"ref":"@e1","value":"private-input"})));
         let request = receive(&mut ws).await;
+        assert!(request.get("audit_id").is_none());
         assert!(request["params"].get("_audit_id").is_none());
         send(&mut ws, json!({"id":request["id"],"result":{}})).await;
         ok(fill.await.unwrap());

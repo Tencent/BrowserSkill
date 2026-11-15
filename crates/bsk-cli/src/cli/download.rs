@@ -7,9 +7,7 @@ use std::time::Duration;
 
 use anyhow::Context;
 use base64::Engine;
-use bsk_protocol::tools::{
-    DownloadParams, DownloadResult, TransferChunkParams, TransferChunkResult,
-};
+use bsk_protocol::tools::{DownloadParams, DownloadResult, TransferChunkResult};
 use bsk_protocol::{ErrorCode, Method};
 use clap::Args;
 use uuid::Uuid;
@@ -66,6 +64,10 @@ pub fn dispatch(
         timeout_ms: Some(args.timeout),
         browser_relative_dir: None,
         max_byte_size: None,
+        context_id: None,
+        observation_id: None,
+        depends_on: None,
+        expect: None,
     };
     let reply: DownloadResult = op_ctx.call(
         info.sock_path.clone(),
@@ -175,10 +177,10 @@ pub(crate) fn write_transfer(
                 sock.to_path_buf(),
                 "transfer-read",
                 Method::TransferRead,
-                Some(TransferChunkParams {
+                Some(bsk_protocol::tools::TransferReadParams {
                     transfer_id: id.to_string(),
                     offset,
-                    data_base64: String::new(),
+                    data_base64: None,
                 }),
                 Duration::from_secs(30),
             )?;

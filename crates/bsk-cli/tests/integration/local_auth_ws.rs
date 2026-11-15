@@ -737,6 +737,8 @@ async fn l11_pair_activate_call_and_revoke_cleans_up_before_success() {
             id: "snapshot".into(),
             method: bsk_protocol::Method::ToolSnapshot,
             params: Some(json!({"session_id":session})),
+            audit_id: None,
+            operation_id: None,
         })
         .unwrap();
     let request: Value = serde_json::from_str(&receive(&mut socket).await).unwrap();
@@ -752,6 +754,8 @@ async fn l11_pair_activate_call_and_revoke_cleans_up_before_success() {
             id: "unfinished".into(),
             method: bsk_protocol::Method::ToolSnapshot,
             params: None,
+            audit_id: None,
+            operation_id: None,
         })
         .unwrap();
     let _ = receive(&mut socket).await;

@@ -191,6 +191,10 @@ pub fn dispatch_navigate(
         tab_id: args.tab_id,
         wait_until: Some(args.wait_until.into()),
         timeout_ms: Some(args.timeout),
+        context_id: None,
+        observation_id: None,
+        depends_on: None,
+        expect: None,
     };
     let reply: NavigateResult = call(
         info.sock_path,
@@ -215,6 +219,10 @@ pub fn dispatch_navigate_back(
         tab_id: args.tab_id,
         wait_until: Some(args.wait_until.into()),
         timeout_ms: Some(args.timeout),
+        context_id: None,
+        observation_id: None,
+        depends_on: None,
+        expect: None,
     };
     let reply: NavigateBackResult = call(
         info.sock_path,
@@ -239,6 +247,10 @@ pub fn dispatch_navigate_forward(
         tab_id: args.tab_id,
         wait_until: Some(args.wait_until.into()),
         timeout_ms: Some(args.timeout),
+        context_id: None,
+        observation_id: None,
+        depends_on: None,
+        expect: None,
     };
     let reply: NavigateForwardResult = call(
         info.sock_path,
@@ -264,6 +276,10 @@ pub fn dispatch_reload(
         wait_until: Some(args.wait_until.into()),
         timeout_ms: Some(args.timeout),
         hard: if args.hard { Some(true) } else { None },
+        context_id: None,
+        observation_id: None,
+        depends_on: None,
+        expect: None,
     };
     let reply: ReloadResult = call(
         info.sock_path,

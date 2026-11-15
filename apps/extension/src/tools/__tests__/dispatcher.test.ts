@@ -234,13 +234,15 @@ describe("ToolDispatcher", () => {
     deliver({
       id: "capture",
       method: "tool.screenshot",
-      params: { session_id: "owner", _operation_id: "op-1" },
+      operation_id: "op-1",
+      params: { session_id: "owner" },
     });
     await vi.waitFor(() => expect(debug.before).toHaveBeenCalled());
     deliver({
       id: "sync",
       method: "tool.cooperate",
-      params: { session_id: "owner", action: "sync", _operation_id: "op-2" },
+      operation_id: "op-2",
+      params: { session_id: "owner", action: "sync" },
     });
     await vi.waitFor(() => expect(sent).toHaveLength(1));
     expect(sent[0]).toMatchObject({

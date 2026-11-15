@@ -371,14 +371,8 @@ export class ToolDispatcher {
         return;
       }
     }
-    const rawEnvelope =
-      typeof raw.params === "object" && raw.params !== null && !Array.isArray(raw.params)
-        ? (raw.params as { _operation_id?: unknown; _audit_id?: unknown })
-        : undefined;
-    const rawOperationId =
-      typeof rawEnvelope?._operation_id === "string" ? rawEnvelope._operation_id : undefined;
-    const rawAuditId =
-      typeof rawEnvelope?._audit_id === "string" ? rawEnvelope._audit_id : undefined;
+    const rawOperationId = typeof raw.operation_id === "string" ? raw.operation_id : undefined;
+    const rawAuditId = typeof raw.audit_id === "string" ? raw.audit_id : undefined;
 
     const decoded = decodeToolRequest(raw);
     if (!decoded.ok) {
@@ -464,16 +458,7 @@ export class ToolDispatcher {
         // Best-effort context must never prevent the requested operation.
         if (rawAuditId) {
           try {
-            const context = await auditContext(
-              {
-                ...req,
-                params: {
-                  ...(req.params as Record<string, unknown>),
-                  _audit_id: rawAuditId,
-                },
-              },
-              this.sessions,
-            );
+            const context = await auditContext({ ...req, audit_id: rawAuditId }, this.sessions);
             if (context) this.transport.send({ event: "audit.context", payload: context });
           } catch {
             /* The daemon still has the original operation metadata. */

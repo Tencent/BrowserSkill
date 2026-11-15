@@ -40,8 +40,6 @@ export function validateRead(params: ReadParams): ReadOptions {
     "session_id",
     "tab_id",
     "context_id",
-    "_audit_id",
-    "_operation_id",
     "selector",
     "ref",
     "fields",

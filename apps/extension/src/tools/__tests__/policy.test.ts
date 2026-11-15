@@ -33,16 +33,16 @@ describe("protocol-backed extension policies", () => {
     expect(eventNames).toContain("session.ended");
   });
 
-  it("strips daemon envelope metadata before validating strict-schema tool requests", () => {
+  it("accepts top-level correlation fields on RequestFrame while rejecting smuggled _audit_id/_operation_id in params", () => {
     const decoded = decodeToolRequest({
       id: "read-1",
       method: "tool.read",
+      audit_id: "audit-123",
+      operation_id: "op-456",
       params: {
         session_id: "aa11",
         selector: "#price",
         context_id: null,
-        _audit_id: "audit-123",
-        _operation_id: "op-456",
       },
     });
     expect(decoded.ok).toBe(true);
@@ -55,5 +55,19 @@ describe("protocol-backed extension policies", () => {
         selector: "#price",
       },
     });
+
+    const smuggled = decodeToolRequest({
+      id: "read-2",
+      method: "tool.read",
+      params: {
+        session_id: "aa11",
+        selector: "#price",
+        _audit_id: "forged-audit",
+      },
+    });
+    expect(smuggled.ok).toBe(false);
+    if (!smuggled.ok) {
+      expect(smuggled.error.code).toBe("invalid_params");
+    }
   });
 });

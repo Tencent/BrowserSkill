@@ -4,6 +4,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::catalog::{MethodDescriptor, MethodOwner};
+use crate::local_auth::*;
 use crate::system::*;
 use crate::tools::*;
 use crate::{CancelParams, CancelResult};
@@ -30,9 +31,14 @@ pub enum MethodEffect {
 pub enum ActionMetadataPolicy {
     /// Rejects all action metadata (`context_id`, `depends_on`, `observation_id`, `expect`).
     None,
-    /// Passive read: accepts optional `context_id` to validate context and bind tab without
-    /// renewing control; rejects `depends_on`, `observation_id`, and `expect`.
+    /// Passive read (`tool.read`): accepts optional caller-supplied `context_id` to validate
+    /// context and bind tab without renewing control; rejects `depends_on`, `observation_id`,
+    /// and `expect`.
     ContextOnly,
+    /// Passive read whose daemon-to-extension wire payload accepts optional `context_id` to bind
+    /// a scoped tab without renewing control, while caller CLI/MCP/IPC surfaces fail closed on
+    /// caller-supplied `context_id`.
+    TabBindingContext,
     /// Guarded/transient action: accepts full [`ActionMetadata`].
     Full,
 }
@@ -214,25 +220,25 @@ macro_rules! methods {
 }
 
 methods! {
-    ToolCooperate => ("tool.cooperate", CooperateParams, serde_json::Value),
-    LocalAuthPair => ("local_auth.pair", serde_json::Value, serde_json::Value),
-    LocalAuthDevices => ("local_auth.devices", serde_json::Value, serde_json::Value),
-    LocalAuthRevoke => ("local_auth.revoke", serde_json::Value, serde_json::Value),
-    LocalAuthRotate => ("local_auth.rotate", serde_json::Value, serde_json::Value),
-    LocalAuthSetMode => ("local_auth.set_mode", serde_json::Value, serde_json::Value),
-    AuditRequest => ("audit.request", serde_json::Value, serde_json::Value),
-    LedgerRequest => ("ledger.request", serde_json::Value, serde_json::Value),
+    ToolCooperate => ("tool.cooperate", CooperateParams, CooperateResult),
+    LocalAuthPair => ("local_auth.pair", LocalAuthPairParams, LocalAuthPairResult),
+    LocalAuthDevices => ("local_auth.devices", LocalAuthDevicesParams, LocalAuthDevicesResult),
+    LocalAuthRevoke => ("local_auth.revoke", LocalAuthRevokeParams, LocalAuthRevokeResult),
+    LocalAuthRotate => ("local_auth.rotate", LocalAuthRotateParams, LocalAuthRotateResult),
+    LocalAuthSetMode => ("local_auth.set_mode", LocalAuthSetModeParams, LocalAuthSetModeResult),
+    AuditRequest => ("audit.request", AuditRequestParams, AuditRequestResult),
+    LedgerRequest => ("ledger.request", LedgerRequestParams, LedgerRequestResult),
     SystemHandshake => ("system.handshake", HandshakeRequest, HandshakeResponse),
     SystemPing => ("system.ping", PingParams, PingResult),
     SystemStatus => ("system.status", StatusParams, StatusResult),
-    SessionStart => ("session.start", serde_json::Value, serde_json::Value),
-    SessionStartTracked => ("session.start_tracked", serde_json::Value, serde_json::Value),
-    SessionRequest => ("session.request", serde_json::Value, serde_json::Value),
-    SessionStop => ("session.stop", serde_json::Value, serde_json::Value),
-    SessionStopAll => ("session.stop_all", serde_json::Value, serde_json::Value),
-    SessionList => ("session.list", serde_json::Value, serde_json::Value),
-    SessionRunLog => ("session.run_log", serde_json::Value, serde_json::Value),
-    BrowserList => ("browser.list", BrowserListParams, serde_json::Value),
+    SessionStart => ("session.start", DaemonSessionStartParams, DaemonSessionStartResult),
+    SessionStartTracked => ("session.start_tracked", DaemonSessionStartTrackedParams, DaemonSessionStartResult),
+    SessionRequest => ("session.request", SessionRequestParams, SessionRequestResult),
+    SessionStop => ("session.stop", DaemonSessionStopParams, DaemonSessionStopResult),
+    SessionStopAll => ("session.stop_all", DaemonSessionStopAllParams, DaemonSessionStopResult),
+    SessionList => ("session.list", SessionListParams, SessionListResult),
+    SessionRunLog => ("session.run_log", SessionRunLogParams, RunLog),
+    BrowserList => ("browser.list", BrowserListParams, BrowserListResult),
     ToolSessionStart => ("tool.session_start", SessionStartParams, SessionStartResult),
     ToolSessionStop => ("tool.session_stop", SessionStopParams, SessionStopOutcome),
     ToolWindowResize => ("tool.window_resize", WindowResizeParams, WindowResizeResult),
@@ -275,7 +281,7 @@ methods! {
     ToolDialogStatus => ("tool.dialog_status", DialogStatusParams, DialogStatusResult),
     ToolDialogAccept => ("tool.dialog_accept", DialogHandleParams, DialogHandleResult),
     ToolDialogDismiss => ("tool.dialog_dismiss", DialogHandleParams, DialogHandleResult),
-    ToolOperationAwait => ("tool.operation_await", OperationParams, serde_json::Value),
+    ToolOperationAwait => ("tool.operation_await", OperationParams, OperationAwaitResult),
     ToolOperationCancel => ("tool.operation_cancel", OperationParams, CancelResult),
     ToolWaitForNavigation => ("tool.wait_for_navigation", WaitForNavigationParams, WaitForNavigationResult),
     ToolWaitForElement => ("tool.wait_for_element", WaitForElementParams, WaitForElementResult),
@@ -285,11 +291,11 @@ methods! {
     ToolRecordStop => ("tool.record_stop", RecordStopParams, RecordStopResult),
     ToolRecordAwait => ("tool.record_await", RecordAwaitParams, RecordAwaitResult),
     ToolVideo => ("tool.video", VideoParams, VideoResult),
-    TransferBegin => ("transfer.begin", serde_json::Value, serde_json::Value),
-    TransferChunk => ("transfer.chunk", serde_json::Value, serde_json::Value),
-    TransferFinish => ("transfer.finish", serde_json::Value, serde_json::Value),
-    TransferRead => ("transfer.read", serde_json::Value, serde_json::Value),
-    TransferRelease => ("transfer.release", serde_json::Value, serde_json::Value),
+    TransferBegin => ("transfer.begin", TransferBeginParams, TransferBeginResult),
+    TransferChunk => ("transfer.chunk", TransferChunkParams, TransferChunkResult),
+    TransferFinish => ("transfer.finish", TransferIdParams, TransferReadyResult),
+    TransferRead => ("transfer.read", TransferReadParams, TransferChunkResult),
+    TransferRelease => ("transfer.release", TransferIdParams, TransferReleaseResult),
     Cancel => ("cancel", CancelParams, CancelResult),
 }
 
@@ -707,7 +713,7 @@ impl Method {
                 debug_evidence: Action, audit_key: Some("download"), recipe: Skip { reason: "file_transfer" }
             ),
             Self::ToolSnapshot => method_spec!(
-                owner: Extension, effect: PassiveRead, action_metadata: ContextOnly, remote_allowed: true,
+                owner: Extension, effect: PassiveRead, action_metadata: TabBindingContext, remote_allowed: true,
                 deadline: Standard, response_grace: false, cancel_at_deadline: false, outcome: Ordinary,
                 wal: Never, dialog: Gated, queue: Serial, implicit_session: Always, auto_inject: Never, tab_transition: false,
                 background: Accessible, resume: Effect, opens_tabs: false, auto_borrow_write: false, cooperation: PassiveRead, dom_targeted: false, bootstrap: false,
@@ -721,7 +727,7 @@ impl Method {
                 debug_evidence: None, audit_key: Some("read"), recipe: Observe
             ),
             Self::ToolGetHtml => method_spec!(
-                owner: Extension, effect: PassiveRead, action_metadata: ContextOnly, remote_allowed: true,
+                owner: Extension, effect: PassiveRead, action_metadata: TabBindingContext, remote_allowed: true,
                 deadline: Standard, response_grace: false, cancel_at_deadline: false, outcome: Ordinary,
                 wal: Never, dialog: Gated, queue: Serial, implicit_session: Always, auto_inject: Never, tab_transition: false,
                 background: Accessible, resume: Effect, opens_tabs: false, auto_borrow_write: false, cooperation: PassiveRead, dom_targeted: false, bootstrap: false,
@@ -735,14 +741,14 @@ impl Method {
                 debug_evidence: None, audit_key: Some("read"), recipe: Ignore
             ),
             Self::ToolExtract => method_spec!(
-                owner: Extension, effect: PassiveRead, action_metadata: ContextOnly, remote_allowed: true,
+                owner: Extension, effect: PassiveRead, action_metadata: TabBindingContext, remote_allowed: true,
                 deadline: Standard, response_grace: false, cancel_at_deadline: false, outcome: Ordinary,
                 wal: Never, dialog: Gated, queue: Serial, implicit_session: Always, auto_inject: Never, tab_transition: false,
                 background: Accessible, resume: Effect, opens_tabs: false, auto_borrow_write: false, cooperation: PassiveRead, dom_targeted: false, bootstrap: false,
                 debug_evidence: None, audit_key: Some("read"), recipe: Ignore
             ),
             Self::ToolScreenshot => method_spec!(
-                owner: Extension, effect: PassiveRead, action_metadata: ContextOnly, remote_allowed: true,
+                owner: Extension, effect: PassiveRead, action_metadata: TabBindingContext, remote_allowed: true,
                 deadline: Standard, response_grace: false, cancel_at_deadline: false, outcome: Ordinary,
                 wal: Never, dialog: Gated, queue: Serial, implicit_session: Always, auto_inject: Never, tab_transition: false,
                 background: Accessible, resume: Effect, opens_tabs: false, auto_borrow_write: false, cooperation: PassiveRead, dom_targeted: false, bootstrap: false,
@@ -770,7 +776,7 @@ impl Method {
                 debug_evidence: None, audit_key: Some("screenshotRelease"), recipe: Ignore
             ),
             Self::ToolConsole => method_spec!(
-                owner: Extension, effect: PassiveRead, action_metadata: ContextOnly, remote_allowed: true,
+                owner: Extension, effect: PassiveRead, action_metadata: TabBindingContext, remote_allowed: true,
                 deadline: Standard, response_grace: false, cancel_at_deadline: false, outcome: Ordinary,
                 wal: Never, dialog: Gated, queue: Serial, implicit_session: Always, auto_inject: Never, tab_transition: false,
                 background: Accessible, resume: Effect, opens_tabs: false, auto_borrow_write: false, cooperation: PassiveRead, dom_targeted: false, bootstrap: false,
@@ -784,7 +790,7 @@ impl Method {
                 debug_evidence: None, audit_key: Some("debug"), recipe: Ignore
             ),
             Self::ToolNetwork => method_spec!(
-                owner: Extension, effect: PassiveRead, action_metadata: ContextOnly, remote_allowed: true,
+                owner: Extension, effect: PassiveRead, action_metadata: TabBindingContext, remote_allowed: true,
                 deadline: Standard, response_grace: false, cancel_at_deadline: false, outcome: Ordinary,
                 wal: Never, dialog: Gated, queue: Serial, implicit_session: Always, auto_inject: Never, tab_transition: false,
                 background: Accessible, resume: Effect, opens_tabs: false, auto_borrow_write: false, cooperation: PassiveRead, dom_targeted: false, bootstrap: false,
@@ -833,14 +839,14 @@ impl Method {
                 debug_evidence: None, audit_key: Some("operationCancel"), recipe: Ignore
             ),
             Self::ToolWaitForNavigation => method_spec!(
-                owner: Extension, effect: PassiveRead, action_metadata: ContextOnly, remote_allowed: true,
+                owner: Extension, effect: PassiveRead, action_metadata: TabBindingContext, remote_allowed: true,
                 deadline: Standard, response_grace: true, cancel_at_deadline: false, outcome: Ordinary,
                 wal: Never, dialog: Gated, queue: Serial, implicit_session: Always, auto_inject: Never, tab_transition: false,
                 background: Controlled, resume: Effect, opens_tabs: false, auto_borrow_write: true, cooperation: PassiveRead, dom_targeted: false, bootstrap: false,
                 debug_evidence: None, audit_key: Some("wait"), recipe: Ignore
             ),
             Self::ToolWaitForElement => method_spec!(
-                owner: Extension, effect: PassiveRead, action_metadata: ContextOnly, remote_allowed: true,
+                owner: Extension, effect: PassiveRead, action_metadata: TabBindingContext, remote_allowed: true,
                 deadline: Standard, response_grace: true, cancel_at_deadline: false, outcome: Ordinary,
                 wal: Never, dialog: Gated, queue: Serial, implicit_session: Always, auto_inject: Never, tab_transition: false,
                 background: Controlled, resume: Effect, opens_tabs: false, auto_borrow_write: true, cooperation: PassiveRead, dom_targeted: false, bootstrap: false,
@@ -941,9 +947,45 @@ impl Method {
         self.spec().effect
     }
 
-    /// Compile-time action metadata acceptance policy (`None`, `ContextOnly`, or `Full`).
+    /// Compile-time wire action metadata acceptance policy
+    /// (`None`, `ContextOnly`, `TabBindingContext`, or `Full`).
     pub const fn action_metadata_policy(&self) -> ActionMetadataPolicy {
         self.spec().action_metadata
+    }
+
+    /// Param-sensitive caller action-metadata policy derived purely from `MethodSpec`:
+    /// - `Full` for guarded browser actions (including dynamic `observe` only when
+    ///   `probe_hover == true` and `debug` only when `action.cooperation_guarded()`).
+    /// - `ContextOnly` for `tool.read` (`--context` / `context` allowed from callers).
+    /// - `None` for all other methods (including `TabBindingContext` passive reads, which only
+    ///   accept daemon-injected `context_id` from `--tab` scope resolution).
+    pub fn caller_action_metadata_policy_with_params(
+        &self,
+        params: Option<&serde_json::Value>,
+    ) -> ActionMetadataPolicy {
+        match self.spec().action_metadata {
+            ActionMetadataPolicy::None | ActionMetadataPolicy::TabBindingContext => {
+                ActionMetadataPolicy::None
+            }
+            ActionMetadataPolicy::ContextOnly => ActionMetadataPolicy::ContextOnly,
+            ActionMetadataPolicy::Full => {
+                let guarded = match self.spec().auto_inject_context {
+                    AutoInjectContext::Always => true,
+                    AutoInjectContext::Never => false,
+                    AutoInjectContext::DynamicObserve => params.is_some_and(|p| {
+                        p.get("probe_hover") == Some(&serde_json::Value::Bool(true))
+                    }),
+                    AutoInjectContext::DynamicDebug => params
+                        .and_then(parse_debug_action)
+                        .is_some_and(|action| action.cooperation_guarded()),
+                };
+                if guarded {
+                    ActionMetadataPolicy::Full
+                } else {
+                    ActionMetadataPolicy::None
+                }
+            }
+        }
     }
 
     /// Whether the wire parameter contract merges full [`ActionMetadata`]
@@ -1073,10 +1115,19 @@ mod tests {
                 method.wire_name(),
             );
             assert_eq!(
-                spec.action_metadata == ActionMetadataPolicy::ContextOnly,
+                matches!(
+                    spec.action_metadata,
+                    ActionMetadataPolicy::ContextOnly | ActionMetadataPolicy::TabBindingContext
+                ),
                 spec.cooperation == CooperationMode::PassiveRead
                     && spec.effect == MethodEffect::PassiveRead,
-                "{} ContextOnly policy must match passive-read cooperation methods",
+                "{} ContextOnly/TabBindingContext policy must match passive-read cooperation methods",
+                method.wire_name(),
+            );
+            assert_eq!(
+                spec.action_metadata == ActionMetadataPolicy::ContextOnly,
+                *method == Method::ToolRead,
+                "{} only tool.read accepts caller-supplied context_id as a passive read",
                 method.wire_name(),
             );
             if matches!(
@@ -1304,5 +1355,84 @@ mod tests {
         assert!(Method::ToolFocus.requires_interrupt_gate());
         assert!(Method::ToolBlur.requires_interrupt_gate());
         assert!(!Method::Cancel.requires_interrupt_gate());
+    }
+
+    #[test]
+    fn every_method_uses_concrete_non_boolean_contracts() {
+        let exported = crate::catalog::export();
+        let input_defs = exported["schema"]["definitions"].as_object().unwrap();
+        let output_defs = exported["output_schema"]["definitions"]
+            .as_object()
+            .unwrap();
+        for method in exported["methods"].as_array().unwrap() {
+            let wire = method["method"].as_str().unwrap();
+            let params_name = method["params"].as_str().unwrap();
+            let result_name = method["result"].as_str().unwrap();
+            assert!(
+                !input_defs[params_name].is_boolean(),
+                "{wire} params ({params_name}) must not be an untyped boolean/Value schema"
+            );
+            assert!(
+                !output_defs[result_name].is_boolean(),
+                "{wire} result ({result_name}) must not be an untyped boolean/Value schema"
+            );
+        }
+    }
+
+    #[test]
+    fn caller_action_metadata_policy_tracks_method_spec_and_dynamic_subactions() {
+        assert_eq!(
+            Method::ToolRead.caller_action_metadata_policy_with_params(None),
+            ActionMetadataPolicy::ContextOnly
+        );
+        for passive in [
+            Method::ToolSnapshot,
+            Method::ToolGetHtml,
+            Method::ToolExtract,
+            Method::ToolScreenshot,
+            Method::ToolConsole,
+            Method::ToolNetwork,
+            Method::ToolWaitForNavigation,
+            Method::ToolWaitForElement,
+        ] {
+            assert_eq!(
+                passive.caller_action_metadata_policy_with_params(None),
+                ActionMetadataPolicy::None,
+                "{} must reject caller-supplied action metadata",
+                passive.wire_name()
+            );
+        }
+        assert_eq!(
+            Method::ToolObserve
+                .caller_action_metadata_policy_with_params(Some(&json!({"probe_hover": false}))),
+            ActionMetadataPolicy::None
+        );
+        assert_eq!(
+            Method::ToolObserve
+                .caller_action_metadata_policy_with_params(Some(&json!({"probe_hover": true}))),
+            ActionMetadataPolicy::Full
+        );
+        assert_eq!(
+            Method::ToolDebug
+                .caller_action_metadata_policy_with_params(Some(&json!({"action": "request"}))),
+            ActionMetadataPolicy::None
+        );
+        assert_eq!(
+            Method::ToolDebug
+                .caller_action_metadata_policy_with_params(Some(&json!({"action": "replay"}))),
+            ActionMetadataPolicy::Full
+        );
+        assert_eq!(
+            Method::ToolClick.caller_action_metadata_policy_with_params(None),
+            ActionMetadataPolicy::Full
+        );
+        assert_eq!(
+            Method::ToolUpload.caller_action_metadata_policy_with_params(None),
+            ActionMetadataPolicy::Full
+        );
+        assert_eq!(
+            Method::ToolDownload.caller_action_metadata_policy_with_params(None),
+            ActionMetadataPolicy::Full
+        );
     }
 }

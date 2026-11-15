@@ -802,6 +802,8 @@ async fn forward_one(
             id: format!("cancel-{rpc_id}"),
             method: Method::Cancel,
             params: Some(serde_json::json!({ "rpc_id": rpc_id })),
+            audit_id: None,
+            operation_id: None,
         });
         if let Err(err) = client.sink.send(cancel) {
             warn!(%rpc_id, ?err, "failed to forward session lifecycle cancel");
@@ -818,6 +820,8 @@ async fn forward_one(
                 id: format!("deadline-cancel-{rpc_id}"),
                 method: Method::Cancel,
                 params: Some(serde_json::json!({ "rpc_id": rpc_id })),
+                audit_id: None,
+                operation_id: None,
             }))
             .is_ok()
     };

@@ -170,11 +170,59 @@ async function compileTypes(schema) {
 }
 const inputTypes = await compileTypes(normalized);
 const outputTypes = await compileTypes(outputSchema);
-const paramNames = new Set(catalog.methods.map((method) => method.params));
+function collectRefClosure(roots, defs) {
+  const seen = new Set();
+  const queue = roots.filter((name) => name in defs);
+  while (queue.length) {
+    const current = queue.pop();
+    if (seen.has(current)) continue;
+    seen.add(current);
+    const visit = (node) => {
+      if (!node || typeof node !== "object") return;
+      if (typeof node.$ref === "string" && node.$ref.startsWith("#/definitions/")) {
+        const target = node.$ref.slice("#/definitions/".length);
+        if (!seen.has(target) && target in defs) queue.push(target);
+      }
+      for (const value of Object.values(node)) {
+        if (Array.isArray(value)) value.forEach(visit);
+        else if (value && typeof value === "object") visit(value);
+      }
+    };
+    visit(defs[current]);
+  }
+  return seen;
+}
+const directInputRoots = new Set([
+  ...catalog.methods.map((method) => method.params),
+  "CancelParams",
+  "ActionMetadata",
+  "ActionExpectation",
+  "DialogHandleParams",
+  "OperationParams",
+]);
+const directOutputRoots = [
+  ...catalog.methods.map((method) => method.result),
+  "CancelResult",
+  "RpcError",
+  "ErrorCode",
+  "RpcErrorReason",
+  "EventKind",
+  "EventFrame",
+  "PendingJavaScriptDialog",
+  "TraceV3",
+  "StepV3",
+  "VideoAction",
+];
+const inputClosure = collectRefClosure([...directInputRoots], definitions);
+const outputClosure = collectRefClosure(directOutputRoots, outputSchema.definitions);
+const exportFromInput = (name) =>
+  directInputRoots.has(name) || (inputClosure.has(name) && !outputClosure.has(name));
 const types =
   banner +
   names
-    .map((name) => `export type { ${name} } from './${paramNames.has(name) ? "input" : "output"}';`)
+    .map(
+      (name) => `export type { ${name} } from './${exportFromInput(name) ? "input" : "output"}';`,
+    )
     .join("\n") +
   "\n";
 
