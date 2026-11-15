@@ -27,7 +27,11 @@ import { isMissingNode } from "./errors";
 // selector / frame handling identical to every other tool.
 
 import type { CdpDispatchGuard } from "@/browser-driver/chromium-cdp";
-import type { CdpTarget, FrameDocumentHandle, FrameNodeHandle } from "@/browser-driver/frame-graph";
+import {
+  type FrameDocumentHandle,
+  type FrameNodeHandle,
+  toRootFrameHandle,
+} from "@/browser-driver/frame-handles";
 import type { SessionContext, SessionManager } from "@/session-manager/manager";
 import { normaliseRef } from "@/session-manager/ref-store";
 import type {
@@ -51,7 +55,6 @@ import {
   isRpcError,
   lookupSession,
   resolveTargetTab,
-  sendToCdpTarget,
   sendToFrameHandle,
 } from "./shared";
 
@@ -312,38 +315,11 @@ export async function handleWaitForElement(
   const objectGroup = `bsk-wait-for-element-${crypto.randomUUID()}`;
   const objectHandles = new Map<string, FrameDocumentHandle>();
   let finished = false;
-  const releaseTarget = (objectTarget: CdpTarget) => {
-    void sendToCdpTarget(
-      deps.cdp.resourceCleanup ?? deps.cdp,
-      objectTarget,
-      "Runtime.releaseObjectGroup",
-      {
-        objectGroup,
-      },
-    ).catch(() => {});
-  };
   const releaseHandle = (handle: FrameDocumentHandle) => {
     // Cleanup must not extend the wait's deadline or delay cancellation.
-    void sendToFrameHandle(
-      deps.cdp.resourceCleanup ?? deps.cdp,
-      handle,
-      "Runtime.releaseObjectGroup",
-      { objectGroup },
-    ).catch(() => {});
-  };
-  const send = async <T>(cdpTarget: CdpTarget, method: string, args?: object): Promise<T> => {
-    checkBudget(deadline, deps.signal);
-    try {
-      return await (deps.cdp.sendGuarded
-        ? deps.cdp.sendGuarded<T>(cdpTarget, method, args, {
-            signal: deps.signal,
-            onDispatch: () => checkBudget(deadline, deps.signal),
-          })
-        : sendToCdpTarget<T>(deps.cdp, cdpTarget, method, args));
-    } finally {
-      // A resolveNode reply may allocate a handle after timeout/cancellation.
-      if (finished && method === "DOM.resolveNode") releaseTarget(cdpTarget);
-    }
+    void (deps.cdp.resourceCleanup ?? deps.cdp)
+      .sendToFrame(handle, "Runtime.releaseObjectGroup", { objectGroup }, undefined)
+      .catch(() => {});
   };
   const sendFrame = async <T>(
     handle: FrameDocumentHandle | FrameNodeHandle,
@@ -352,55 +328,57 @@ export async function handleWaitForElement(
     guard?: CdpDispatchGuard,
   ): Promise<T> => {
     checkBudget(deadline, deps.signal);
-    if (!deps.cdp.sendToFrame && deps.cdp.sendGuarded && !handle.frameId) {
-      return send({ tabId: handle.tabId }, method, args);
-    }
+    const docHandle: FrameDocumentHandle = {
+      tabId: handle.tabId,
+      frameId: handle.frameId,
+      loaderId: handle.loaderId,
+      ...(handle.documentElementBackendNodeId !== undefined
+        ? { documentElementBackendNodeId: handle.documentElementBackendNodeId }
+        : {}),
+    };
+    let dispatchedResolve = false;
     try {
       return await sendToFrameHandle<T>(deps.cdp, handle, method, args, {
         ...guard,
         signal: guard?.signal ?? deps.signal,
         onDispatch: () => {
           checkBudget(deadline, deps.signal);
+          if (method === "DOM.resolveNode") {
+            dispatchedResolve = true;
+            objectHandles.set(
+              `${docHandle.tabId}:${docHandle.frameId}:${docHandle.loaderId}`,
+              docHandle,
+            );
+          }
           guard?.onDispatch?.();
         },
       });
     } finally {
-      if (finished && method === "DOM.resolveNode") releaseHandle(handle);
+      // A resolveNode reply may allocate a handle after timeout/cancellation.
+      if (finished && dispatchedResolve) releaseHandle(docHandle);
     }
   };
   const probeCdp: CdpRunner = delegateCdpRunner(deps.cdp, {
-    send: (tabId, method, args) => send({ tabId }, method, args),
-    sendToTarget: send,
+    send: <T>(tabId: number, method: string, args?: object, sig?: AbortSignal) =>
+      sendFrame<T>(toRootFrameHandle(tabId), method, args, sig ? { signal: sig } : undefined),
     sendToFrame: sendFrame,
-    ...(deps.cdp.ensureAttachedToUrl
-      ? {
-          ensureAttachedToUrl: async (tabId, expectedUrl) => {
-            checkBudget(deadline, deps.signal);
-            await deps.cdp.ensureAttachedToUrl!(tabId, expectedUrl);
-            checkBudget(deadline, deps.signal);
-          },
-        }
-      : {}),
-    ...(deps.cdp.getMainFrameHandle
-      ? {
-          getMainFrameHandle: async (tabId, sig) => {
-            checkBudget(deadline, deps.signal);
-            const result = await deps.cdp.getMainFrameHandle!(tabId, sig ?? deps.signal);
-            checkBudget(deadline, deps.signal);
-            return result;
-          },
-        }
-      : {}),
-    ...(deps.cdp.getFrameGraph
-      ? {
-          getFrameGraph: async (tabId, sig) => {
-            checkBudget(deadline, deps.signal);
-            const result = await deps.cdp.getFrameGraph!(tabId, sig ?? deps.signal);
-            checkBudget(deadline, deps.signal);
-            return result;
-          },
-        }
-      : {}),
+    ensureAttachedToUrl: async (tabId, expectedUrl) => {
+      checkBudget(deadline, deps.signal);
+      await deps.cdp.ensureAttachedToUrl(tabId, expectedUrl);
+      checkBudget(deadline, deps.signal);
+    },
+    getMainFrameHandle: async (tabId, sig) => {
+      checkBudget(deadline, deps.signal);
+      const result = await deps.cdp.getMainFrameHandle(tabId, sig ?? deps.signal);
+      checkBudget(deadline, deps.signal);
+      return result;
+    },
+    getFrameDocuments: async (tabId, sig) => {
+      checkBudget(deadline, deps.signal);
+      const result = await deps.cdp.getFrameDocuments(tabId, sig ?? deps.signal);
+      checkBudget(deadline, deps.signal);
+      return result;
+    },
   });
   let probe: Probe | undefined;
 
@@ -490,7 +468,6 @@ async function probeState(
       ? { documentElementBackendNodeId: node.handle.documentElementBackendNodeId }
       : {}),
   };
-  objectHandles.set(`${docHandle.tabId}:${docHandle.frameId}:${docHandle.loaderId}`, docHandle);
   try {
     const resolved = await sendToFrameHandle<{ object?: { objectId?: string } }>(
       cdp,
@@ -499,6 +476,9 @@ async function probeState(
       { backendNodeId: node.backendNodeId, objectGroup },
     );
     objectId = resolved.object?.objectId;
+    if (objectId) {
+      objectHandles.set(`${docHandle.tabId}:${docHandle.frameId}:${docHandle.loaderId}`, docHandle);
+    }
   } catch (error) {
     // A missing ref identifies a removed node. A selector may already match
     // its replacement, so only a fresh lookup can establish its absence.

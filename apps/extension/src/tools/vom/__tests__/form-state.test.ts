@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
-import { type CdpRunner, cdpRunnerForTarget } from "../../shared";
+import { toFrameDocumentHandle } from "@/browser-driver/frame-handles";
+import { type CdpRunner, cdpRunnerForFrame, createStubCdpRunner } from "../../shared";
 import { enrichFormControlStates } from "../form-capture";
 import { decodeDocument } from "../snapshot";
 
@@ -92,7 +93,7 @@ async function fakeCdp(
     return {};
   });
   const nodes = await decodeControls(snap);
-  return { send, cdp: { send: send as CdpRunner["send"] }, nodes };
+  return { send, cdp: createStubCdpRunner({ send: send as CdpRunner["send"] }), nodes };
 }
 
 async function decodeControls(snap: ReturnType<typeof snapshot>) {
@@ -188,20 +189,24 @@ describe("form state identity", () => {
   });
 
   it("keeps identical backend ids in different OOPIF targets separate", async () => {
-    const sendToTarget = vi.fn(async (target, method) => {
-      if (method === "Runtime.evaluate") return reply([[11, state(target.sessionId)]]);
+    const sendToFrame = vi.fn(async (handle, method) => {
+      if (method === "Runtime.evaluate") return reply([[11, state(handle.frameId)]]);
       return {};
     });
     const send = vi.fn(async () => {
       throw new Error("unexpected top-level target");
     });
-    const cdp = { send, sendToTarget } as unknown as CdpRunner;
-    for (const sessionId of ["left-frame", "right-frame"]) {
+    const cdp = createStubCdpRunner({
+      send: send as unknown as CdpRunner["send"],
+      sendToFrame: sendToFrame as unknown as CdpRunner["sendToFrame"],
+    });
+    for (const frameId of ["left-frame", "right-frame"]) {
+      const handle = toFrameDocumentHandle(7, { frameId });
       const nodes = await decodeControls(snapshot([[{ id: 11, value: "old" }]]));
-      await enrichFormControlStates(cdpRunnerForTarget(cdp, { tabId: 7, sessionId }), 7, nodes);
-      expect(nodes[0].find((n) => n.backendNodeId === 11)?.formValue).toBe(sessionId);
-      expect(sendToTarget).toHaveBeenCalledWith(
-        { tabId: 7, sessionId },
+      await enrichFormControlStates(cdpRunnerForFrame(cdp, handle), 7, nodes);
+      expect(nodes[0].find((n) => n.backendNodeId === 11)?.formValue).toBe(frameId);
+      expect(sendToFrame).toHaveBeenCalledWith(
+        handle,
         "Runtime.releaseObjectGroup",
         expect.anything(),
       );
@@ -248,13 +253,13 @@ describe("form state identity", () => {
   it("does not report success when cancelled during object cleanup", async () => {
     const controller = new AbortController();
     const nodes = await decodeControls(snapshot([[{ id: 11, value: "old" }]]));
-    const cdp: CdpRunner = {
+    const cdp: CdpRunner = createStubCdpRunner({
       send: vi.fn(async (_tabId, method) => {
         if (method === "Runtime.evaluate") return reply([[11, state("new")]]);
         if (method === "Runtime.releaseObjectGroup") controller.abort();
         return {};
       }) as CdpRunner["send"],
-    };
+    });
     await expect(enrichFormControlStates(cdp, 7, nodes, controller.signal)).rejects.toMatchObject({
       name: "AbortError",
     });
@@ -386,7 +391,7 @@ it.each([
     if (method === "Runtime.callFunctionOn") return { result: { value: inForm } };
     return {};
   });
-  await enrichFormControlStates({ send: send as CdpRunner["send"] }, 7, nodes);
+  await enrichFormControlStates(createStubCdpRunner({ send: send as CdpRunner["send"] }), 7, nodes);
   expect(send).toHaveBeenCalledWith(
     7,
     "DOM.resolveNode",
@@ -406,7 +411,7 @@ it("bounds missing range-owner reads and keeps the uninspected remainder unknown
     if (method === "Runtime.callFunctionOn") return { result: { value: false } };
     return {};
   });
-  await enrichFormControlStates({ send: send as CdpRunner["send"] }, 7, nodes);
+  await enrichFormControlStates(createStubCdpRunner({ send: send as CdpRunner["send"] }), 7, nodes);
   expect(send.mock.calls.filter(([, method]) => method === "DOM.resolveNode")).toHaveLength(64);
   expect(nodes[0].find((n) => n.backendNodeId === 64)?.inForm).toBe(false);
   expect(nodes[0].find((n) => n.backendNodeId === 65)?.inForm).toBeUndefined();
@@ -433,12 +438,14 @@ it("drains in-flight range reads before releasing objects after a terminal error
     return {};
   });
   let settled = false;
-  const result = enrichFormControlStates({ send: send as CdpRunner["send"] }, 7, nodes).catch(
-    (error) => {
-      settled = true;
-      return error;
-    },
-  );
+  const result = enrichFormControlStates(
+    createStubCdpRunner({ send: send as CdpRunner["send"] }),
+    7,
+    nodes,
+  ).catch((error) => {
+    settled = true;
+    return error;
+  });
   await vi.waitFor(() => expect(resolveSecond).toBeTypeOf("function"));
   const error = Object.assign(new Error("renderer timed out"), { name: "CdpReadTimeoutError" });
   rejectFirst(error);
@@ -452,23 +459,27 @@ it("drains in-flight range reads before releasing objects after a terminal error
 });
 
 it("keeps fallback owner reads with identical backend ids scoped to their OOPIF target", async () => {
-  const sendToTarget = vi.fn(async (target, method) => {
+  const sendToFrame = vi.fn(async (handle, method) => {
     if (method === "Runtime.evaluate") return reply([]);
     if (method === "DOM.resolveNode") return { object: { objectId: "range" } };
     if (method === "Runtime.callFunctionOn")
-      return { result: { value: target.sessionId === "owned-frame" } };
+      return { result: { value: handle.frameId === "owned-frame" } };
     return {};
   });
   const send = vi.fn(async () => {
     throw new Error("unexpected root target");
   });
-  const cdp = { send, sendToTarget } as unknown as CdpRunner;
-  for (const sessionId of ["owned-frame", "free-frame"]) {
+  const cdp = createStubCdpRunner({
+    send: send as unknown as CdpRunner["send"],
+    sendToFrame: sendToFrame as unknown as CdpRunner["sendToFrame"],
+  });
+  for (const frameId of ["owned-frame", "free-frame"]) {
+    const handle = toFrameDocumentHandle(7, { frameId });
     const nodes = await decodeControls(snapshot([[{ id: 11, type: "range", value: "0" }]]));
-    await enrichFormControlStates(cdpRunnerForTarget(cdp, { tabId: 7, sessionId }), 7, nodes);
-    expect(nodes[0].find((n) => n.backendNodeId === 11)?.inForm).toBe(sessionId === "owned-frame");
-    expect(sendToTarget).toHaveBeenCalledWith(
-      { tabId: 7, sessionId },
+    await enrichFormControlStates(cdpRunnerForFrame(cdp, handle), 7, nodes);
+    expect(nodes[0].find((n) => n.backendNodeId === 11)?.inForm).toBe(frameId === "owned-frame");
+    expect(sendToFrame).toHaveBeenCalledWith(
+      handle,
       "Runtime.callFunctionOn",
       expect.objectContaining({ objectId: "range" }),
     );

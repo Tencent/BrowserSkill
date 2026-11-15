@@ -1,9 +1,4 @@
-import {
-  type CdpFrameTreeNode,
-  cdpTargetKey,
-  type FrameDocumentHandle,
-  type FrameNodeHandle,
-} from "@/browser-driver/frame-graph";
+import type { FrameDocumentHandle, FrameNodeHandle } from "@/browser-driver/frame-handles";
 import { type Point, unprojectPoint } from "./geometry";
 import { cssViewport, GeometryContext, type LayoutMetrics } from "./geometry/frame-context";
 import { type CdpRunner, sendToFrameHandle } from "./shared";
@@ -53,13 +48,13 @@ export async function pointBelongsToTarget(
   const frameId =
     handle.frameId ||
     (
-      await sendToFrameHandle<{ frameTree?: CdpFrameTreeNode }>(
+      await sendToFrameHandle<{ frameTree?: { frame?: { id?: string } } }>(
         cdp,
         handle,
         "Page.getFrameTree",
         {},
       )
-    ).frameTree?.frame.id;
+    ).frameTree?.frame?.id;
   if (!frameId || hit.frameId !== frameId) return false;
 
   const [resolvedTarget, resolvedHit] = await Promise.all([
@@ -120,14 +115,14 @@ export async function pointReachesTarget(
   };
   try {
     let local = point;
-    if (target.handle.frameId && cdp.getFrameGraph) {
+    if (target.handle.frameId) {
       const context = new GeometryContext(cdp, target.handle.tabId);
       const frame = await context.frame(target.handle.frameId);
       if (!frame) return false;
       if (target.handle.loaderId && frame.loaderId && frame.loaderId !== target.handle.loaderId) {
         return false;
       }
-      if (frame.target.sessionId) {
+      if (frame.isOutOfProcess) {
         const ancestry = await context.ancestry(target.handle.frameId);
         const projection = await context.targetProjection(target.handle.frameId);
         if (!ancestry || !projection) return false;
@@ -135,7 +130,7 @@ export async function pointReachesTarget(
         for (const child of ancestry) {
           const parent = child.parentFrameId && (await context.frame(child.parentFrameId));
           if (!parent) return false;
-          if (cdpTargetKey(child.target) === cdpTargetKey(parent.target)) continue;
+          if (child.processKey === parent.processKey) continue;
           if (child.ownerBackendNodeId === undefined) return false;
           owners.push({
             handle: {
@@ -162,9 +157,13 @@ export async function pointReachesTarget(
     const cleanup = cdp.resourceCleanup ?? cdp;
     await Promise.all(
       [...touched.values()].map((address) =>
-        sendToFrameHandle(cleanup, address, "Runtime.releaseObjectGroup", { objectGroup }).catch(
-          () => {},
-        ),
+        sendToFrameHandle(
+          cleanup,
+          address,
+          "Runtime.releaseObjectGroup",
+          { objectGroup },
+          { allowReattach: false },
+        ).catch(() => {}),
       ),
     );
   }

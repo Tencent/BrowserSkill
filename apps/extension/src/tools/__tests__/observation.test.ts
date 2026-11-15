@@ -1,9 +1,10 @@
 import { renderVom } from "@browser-skill/vom";
 import { describe, expect, it, vi } from "vitest";
+import { createFrameDocumentInfo, toFrameDocumentHandle } from "@/browser-driver/frame-handles";
 import { CAPTURE_SUPPRESS, type CaptureSuppressMessage } from "@/lib/capture-suppress-bridge";
 import { OVERLAY_HOST_MARKER_ATTR, OVERLAY_HOST_NAME } from "@/lib/overlay-bridge";
 import { SessionManager } from "@/session-manager/manager";
-import type { CdpRunner } from "@/tools/shared";
+import { type CdpRunner, createStubCdpRunner } from "@/tools/shared";
 import type { BuildVomSceneOptions, VomFrameDocument } from "../observation";
 import {
   buildFrameVomScene,
@@ -23,6 +24,30 @@ interface SceneFixture extends CapturedSceneInput {
   documents?: VomFrameDocument[];
 }
 
+function frameDoc(
+  input: Omit<VomFrameDocument, "handle" | "loaderId" | "processKey" | "isOutOfProcess"> & {
+    tabId?: number;
+    loaderId?: string;
+    processKey?: string;
+    isOutOfProcess?: boolean;
+  },
+): VomFrameDocument {
+  const {
+    tabId = 7,
+    loaderId = "",
+    processKey = "root",
+    isOutOfProcess = processKey !== "root",
+    ...rest
+  } = input;
+  return {
+    ...rest,
+    loaderId,
+    processKey,
+    isOutOfProcess,
+    handle: toFrameDocumentHandle(tabId, { frameId: rest.frameId, loaderId }),
+  };
+}
+
 // Only supplies the common root fixture; child documents declare their own ownership.
 function buildTestScene(
   axNodes: CdpAxNode[],
@@ -32,14 +57,13 @@ function buildTestScene(
   const rootFrameId = captured.rootFrameId ?? "root";
   return buildFrameVomScene(
     [
-      {
+      frameDoc({
         frameId: rootFrameId,
         contextScopeId: rootFrameId,
-        target: { tabId: 7 },
         url: options.pageUrl,
         domNodes: captured.nodes,
         axNodes,
-      },
+      }),
       ...(captured.documents ?? []),
     ],
     captured,
@@ -102,7 +126,13 @@ function makeFakeCdp(handlers: Record<string, (params?: object) => unknown>) {
     if (!handler) throw new Error(`unexpected CDP call ${method}`);
     return handler(params);
   });
-  return { cdp: { send, trackSessionTab: vi.fn() } as unknown as CdpRunner, sent };
+  return {
+    cdp: createStubCdpRunner({
+      send: send as unknown as CdpRunner["send"],
+      trackSessionTab: vi.fn(),
+    }),
+    sent,
+  };
 }
 
 describe("stripDataUrlPrefix", () => {
@@ -617,54 +647,53 @@ describe("buildFrameVomScene", () => {
     });
     const result = buildFrameVomScene(
       [
-        {
+        frameDoc({
           frameId: "main",
           contextScopeId: "main",
-          target: { tabId: 7 },
           domNodes: mainNodes,
           axNodes: [
             axNode("root", 1, "RootWebArea"),
             axNode("frame-1", 10, "Iframe", "root", "First"),
             axNode("frame-2", 20, "Iframe", "root", "Second"),
           ],
-        },
-        {
+        }),
+        frameDoc({
           frameId: "first",
           contextScopeId: "first",
           parentFrameId: "main",
           ownerBackendNodeId: 10,
-          target: { tabId: 7, sessionId: "session-first" },
+          processKey: "oopif:first",
           domNodes: firstNodes,
           axNodes: [
             axNode("root", 100, "RootWebArea"),
             axNode("button", 101, "button", "root", "First action"),
           ],
-        },
-        {
+        }),
+        frameDoc({
           frameId: "second",
           contextScopeId: "second",
           parentFrameId: "main",
           ownerBackendNodeId: 20,
-          target: { tabId: 7, sessionId: "session-second" },
+          processKey: "oopif:second",
           domNodes: secondNodes,
           axNodes: [
             axNode("root", 200, "RootWebArea"),
             axNode("heading", 201, "heading", "root", "Second heading"),
             axNode("nested-frame", 210, "Iframe", "root", "Nested"),
           ],
-        },
-        {
+        }),
+        frameDoc({
           frameId: "nested",
           contextScopeId: "nested",
           parentFrameId: "second",
           ownerBackendNodeId: 210,
-          target: { tabId: 7, sessionId: "session-nested" },
+          processKey: "oopif:nested",
           domNodes: nestedNodes,
           axNodes: [
             axNode("root", 300, "RootWebArea"),
             axNode("input", 301, "textbox", "root", "Nested field"),
           ],
-        },
+        }),
       ],
       captured,
     );
@@ -700,31 +729,32 @@ describe("buildFrameVomScene", () => {
     const owners = [owner(10), owner(20)];
     const result = buildFrameVomScene(
       [
-        {
+        frameDoc({
           frameId: "main",
           contextScopeId: "main",
-          target: { tabId: 7 },
           domNodes: owners,
           axNodes: [],
-        },
-        ...["left", "right"].map((frameId, i) => ({
-          frameId,
-          contextScopeId: frameId,
-          parentFrameId: "main",
-          ownerBackendNodeId: owners[i].backendNodeId,
-          target: { tabId: 7, sessionId: frameId },
-          excludedBackendNodeIds: new Set(i === 0 ? [7] : []),
-          domNodes: [],
-          axNodes: [
-            {
-              nodeId: "button",
-              frameId,
-              backendDOMNodeId: 7,
-              role: { type: "role", value: "button" },
-              name: { type: "computedString", value: frameId + " action" },
-            },
-          ],
-        })),
+        }),
+        ...["left", "right"].map((frameId, i) =>
+          frameDoc({
+            frameId,
+            contextScopeId: frameId,
+            parentFrameId: "main",
+            ownerBackendNodeId: owners[i].backendNodeId,
+            processKey: `oopif:${frameId}`,
+            excludedBackendNodeIds: new Set(i === 0 ? [7] : []),
+            domNodes: [],
+            axNodes: [
+              {
+                nodeId: "button",
+                frameId,
+                backendDOMNodeId: 7,
+                role: { type: "role", value: "button" },
+                name: { type: "computedString", value: frameId + " action" },
+              },
+            ],
+          }),
+        ),
       ],
       {
         nodes: owners,
@@ -760,18 +790,16 @@ describe("buildFrameVomScene", () => {
 
     const result = buildFrameVomScene(
       [
-        {
+        frameDoc({
           frameId: "main",
           contextScopeId: "main",
-          target: { tabId: 7 },
           domNodes: [],
           axNodes: [],
-        },
-        {
+        }),
+        frameDoc({
           frameId: "child",
           contextScopeId: "child",
           parentFrameId: "main",
-          target: { tabId: 7 },
           domNodes: [childNode],
           axNodes: [
             {
@@ -782,7 +810,7 @@ describe("buildFrameVomScene", () => {
               name: { type: "computedString", value: "Child action" },
             },
           ],
-        },
+        }),
       ],
       captured,
     );
@@ -825,10 +853,9 @@ describe("buildFrameVomScene", () => {
 
     const result = buildFrameVomScene(
       [
-        {
+        frameDoc({
           frameId: "main",
           contextScopeId: "main",
-          target: { tabId: 7 },
           domNodes: mainNodes,
           axNodes: [
             {
@@ -844,13 +871,13 @@ describe("buildFrameVomScene", () => {
               name: { type: "computedString", value: "Remote" },
             },
           ],
-        },
-        {
+        }),
+        frameDoc({
           frameId: "child",
           contextScopeId: "child",
           parentFrameId: "main",
           ownerBackendNodeId: 10,
-          target: { tabId: 7, sessionId: "child-session" },
+          processKey: "oopif:child",
           domNodes: [],
           axNodes: [
             {
@@ -866,7 +893,7 @@ describe("buildFrameVomScene", () => {
               name: { type: "computedString", value: "AX fallback action" },
             },
           ],
-        },
+        }),
       ],
       captured,
     );
@@ -1113,12 +1140,11 @@ describe("buildFrameVomScene", () => {
         },
       ],
       documents: [
-        {
+        frameDoc({
           frameId: "child",
           contextScopeId: "child",
           parentFrameId: "root",
           ownerBackendNodeId: 20,
-          target: { tabId: 7 },
           axNodes: [],
           domNodes: [
             {
@@ -1142,7 +1168,7 @@ describe("buildFrameVomScene", () => {
               pointerEvents: "auto",
             },
           ],
-        },
+        }),
       ],
       excludedBackendNodeIds: new Set(),
     };
@@ -1216,12 +1242,11 @@ describe("buildFrameVomScene", () => {
         },
       ],
       documents: [
-        {
+        frameDoc({
           frameId: "child",
           contextScopeId: "child",
           parentFrameId: "root",
           ownerBackendNodeId: 20,
-          target: { tabId: 7 },
           axNodes: [axNodes[2]],
           domNodes: [
             {
@@ -1235,7 +1260,7 @@ describe("buildFrameVomScene", () => {
               pointerEvents: "auto",
             },
           ],
-        },
+        }),
       ],
       excludedBackendNodeIds: new Set(),
     };
@@ -1295,12 +1320,11 @@ describe("buildFrameVomScene", () => {
           },
         ],
         documents: [
-          {
+          frameDoc({
             frameId: "child",
             contextScopeId: "child",
             parentFrameId: "root",
             ownerBackendNodeId: 20,
-            target: { tabId: 7 },
             axNodes: [],
             domNodes: [
               {
@@ -1324,7 +1348,7 @@ describe("buildFrameVomScene", () => {
                 pointerEvents: "auto",
               },
             ],
-          },
+          }),
         ],
         excludedBackendNodeIds: new Set(),
       },
@@ -1376,12 +1400,11 @@ describe("buildFrameVomScene", () => {
           },
         ],
         documents: [
-          {
+          frameDoc({
             frameId: "child",
             contextScopeId: "child",
             parentFrameId: "root",
             ownerBackendNodeId: 20,
-            target: { tabId: 7 },
             axNodes: [],
             domNodes: [
               {
@@ -1405,7 +1428,7 @@ describe("buildFrameVomScene", () => {
                 pointerEvents: "auto",
               },
             ],
-          },
+          }),
         ],
         excludedBackendNodeIds: new Set(),
       },
@@ -2411,7 +2434,9 @@ describe("buildFrameVomScene", () => {
 
     expect(scene.nodes.find((node) => node.backendNodeId === 20)).toEqual(
       expect.objectContaining({
-        name: "Products [expanded]",
+        name: "Products",
+        hasPopup: true,
+        expanded: true,
         attrs: expect.objectContaining({
           "aria-expanded": "true",
           "aria-controls": "products-panel",
@@ -2421,10 +2446,11 @@ describe("buildFrameVomScene", () => {
     expect(scene.activeScopeBlocks).toEqual([
       {
         triggerId: scene.nodes.find((node) => node.backendNodeId === 20)!.id,
-        label: "Products [expanded]",
+        label: "Products",
         lines: ["Shoes Bags"],
       },
     ]);
+    expect(renderVom(scene).text).toContain('@e1 button "Products" [expanded]');
     expect(scene.nodes.find((node) => node.backendNodeId === 30)?.sensitive).toBe(true);
   });
 
@@ -2605,14 +2631,10 @@ describe("handleSnapshot", () => {
     };
     const send = vi.fn(sendImpl);
     const trackSessionTab = vi.fn();
-    const cdp = {
-      send: send as unknown as <T = unknown>(
-        tabId: number,
-        method: string,
-        params?: object,
-      ) => Promise<T>,
+    const cdp = createStubCdpRunner({
+      send: send as unknown as CdpRunner["send"],
       trackSessionTab,
-    };
+    });
     return {
       cdp,
       tabsApi: {
@@ -2728,14 +2750,10 @@ describe("handleSnapshot", () => {
       sm,
       { session_id: "aa11" },
       {
-        cdp: {
-          send: send as unknown as <T = unknown>(
-            tabId: number,
-            method: string,
-            params?: object,
-          ) => Promise<T>,
+        cdp: createStubCdpRunner({
+          send: send as unknown as CdpRunner["send"],
           trackSessionTab: vi.fn(),
-        },
+        }),
         tabsApi: {
           get: vi.fn(
             async (tabId: number) =>
@@ -2841,14 +2859,10 @@ describe("handleSnapshot", () => {
       sm,
       { session_id: "aa11", probe_hover: true },
       {
-        cdp: {
-          send: send as unknown as <T = unknown>(
-            tabId: number,
-            method: string,
-            params?: object,
-          ) => Promise<T>,
+        cdp: createStubCdpRunner({
+          send: send as unknown as CdpRunner["send"],
           trackSessionTab: vi.fn(),
-        },
+        }),
         tabsApi: {
           get: vi.fn(
             async (tabId: number) =>
@@ -2935,14 +2949,10 @@ describe("handleSnapshot", () => {
       throw new Error(`unexpected CDP method ${method}`);
     });
     const deps = {
-      cdp: {
-        send: send as unknown as <T = unknown>(
-          tabId: number,
-          method: string,
-          params?: object,
-        ) => Promise<T>,
+      cdp: createStubCdpRunner({
+        send: send as unknown as CdpRunner["send"],
         trackSessionTab: vi.fn(),
-      },
+      }),
       tabsApi: {
         get: vi.fn(
           async (tabId: number) => ({ id: tabId, windowId: 100, active: true }) as chrome.tabs.Tab,
@@ -3132,14 +3142,10 @@ describe("handleSnapshot", () => {
       throw new Error(`unexpected CDP method ${method}`);
     });
     const deps = {
-      cdp: {
-        send: send as unknown as <T = unknown>(
-          tabId: number,
-          method: string,
-          params?: object,
-        ) => Promise<T>,
+      cdp: createStubCdpRunner({
+        send: send as unknown as CdpRunner["send"],
         trackSessionTab: vi.fn(),
-      },
+      }),
       tabsApi: {
         get: vi.fn(),
         query: vi.fn(async () => [{ id: 4, windowId: 100, active: true } as chrome.tabs.Tab]),
@@ -3148,7 +3154,12 @@ describe("handleSnapshot", () => {
 
     const pending = handleSnapshot(sm, { session_id: "aa11" }, deps, controller.signal);
     await vi.waitFor(() =>
-      expect(send).toHaveBeenCalledWith(4, "DOMSnapshot.captureSnapshot", expect.any(Object)),
+      expect(send).toHaveBeenCalledWith(
+        4,
+        "DOMSnapshot.captureSnapshot",
+        expect.any(Object),
+        controller.signal,
+      ),
     );
     controller.abort();
     resolveCapture({ strings: [], documents: [] });
@@ -3166,13 +3177,9 @@ describe("handleSnapshot", () => {
     };
     const send = vi.fn(sendImpl);
     const deps = {
-      cdp: {
-        send: send as unknown as <T = unknown>(
-          tabId: number,
-          method: string,
-          params?: object,
-        ) => Promise<T>,
-      },
+      cdp: createStubCdpRunner({
+        send: send as unknown as CdpRunner["send"],
+      }),
       tabsApi: {
         get: vi.fn(
           async (tabId: number) => ({ id: tabId, windowId: 100, active: true }) as chrome.tabs.Tab,
@@ -3194,10 +3201,10 @@ describe("handleSnapshot", () => {
       throw new Error(`unexpected CDP method ${method}`);
     });
     return {
-      cdp: {
-        send: send as unknown as <T>(t: number, m: string, p?: object) => Promise<T>,
+      cdp: createStubCdpRunner({
+        send: send as unknown as CdpRunner["send"],
         trackSessionTab: vi.fn(),
-      },
+      }),
       tabsApi: {
         get: vi.fn(
           async (tabId: number) => ({ id: tabId, windowId: 100, active: true }) as chrome.tabs.Tab,
@@ -3447,7 +3454,7 @@ describe("handleSnapshot", () => {
       if (method === "Accessibility.getFullAXTree") return { nodes: mainAx };
       throw new Error(`unexpected root CDP method ${method}`);
     });
-    const sendToTarget = vi.fn(async (_target, method: string) => {
+    const sendToChildFrame = vi.fn(async (method: string) => {
       if (method === "Runtime.evaluate") return { result: { value: { width: 400, height: 300 } } };
       if (method === "Page.getLayoutMetrics" && ownerGeometry !== "unavailable")
         return {
@@ -3461,23 +3468,32 @@ describe("handleSnapshot", () => {
       if (method === "Accessibility.getFullAXTree") return { nodes: childAx };
       throw new Error(`unexpected child CDP method ${method}`);
     });
-    const cdp = {
+    const cdp = createStubCdpRunner({
       send: send as unknown as CdpRunner["send"],
-      sendToTarget: sendToTarget as unknown as NonNullable<CdpRunner["sendToTarget"]>,
-      getFrameGraph: vi.fn(async () => ({
+      getAttachmentId: () => undefined,
+      hasOwnFrameTarget: (_tabId, frameId) => frameId === "child",
+      sendToFrame: (async (handle, method, params, guard) => {
+        if (handle.frameId === "child") {
+          return sendToChildFrame(method);
+        }
+        return cdp.send(handle.tabId, method, params, guard?.signal);
+      }) as CdpRunner["sendToFrame"],
+      getFrameDocuments: vi.fn(async () => ({
         rootFrameId: "main",
         frames: [
-          { frameId: "main", target: { tabId: 4 } },
-          {
+          createFrameDocumentInfo({ tabId: 4, frameId: "main" }),
+          createFrameDocumentInfo({
+            tabId: 4,
             frameId: "child",
             parentFrameId: "main",
             ownerBackendNodeId: 12,
-            target: { tabId: 4, sessionId: "child-session" },
-          },
+            processKey: "oopif:child",
+            isOutOfProcess: true,
+          }),
         ],
       })),
       trackSessionTab: vi.fn(),
-    } satisfies CdpRunner;
+    });
     return {
       cdp,
       tabsApi: {
@@ -3533,12 +3549,12 @@ describe("handleSnapshot", () => {
       },
     ];
     const deps = makeOverlayDeps(ax, snapshot, VP_METRICS);
-    const cdp: CdpRunner = {
+    const cdp: CdpRunner = createStubCdpRunner({
       ...deps.cdp,
-      getFrameGraph: async () => {
+      getFrameDocuments: async () => {
         throw new Error("graph unavailable");
       },
-    };
+    });
     const result = await captureVomObservation(
       cdp,
       4,
@@ -3786,11 +3802,13 @@ describe("handleSnapshot", () => {
     ["Accessibility.getFullAXTree", "ax"],
   ])("reports partial capture when child %s fails", async (failedMethod, stage) => {
     const { cdp } = makeFrameAwareDeps("available");
-    const send = cdp.sendToTarget;
-    cdp.sendToTarget = async (target, method, params) => {
-      if (method === failedMethod) throw new Error("unavailable child data");
-      return send(target, method, params);
-    };
+    const send = cdp.sendToFrame;
+    cdp.sendToFrame = (async (handle, method, params, guard) => {
+      if (handle.frameId === "child" && method === failedMethod) {
+        throw new Error("unavailable child data");
+      }
+      return send(handle, method, params, guard);
+    }) as CdpRunner["sendToFrame"];
     for (const maxTokens of [undefined, 100, 0]) {
       const result = await captureVomObservation(cdp, 4, "https://example.com", { maxTokens });
       expect(result.text).toContain(`@warning observation incomplete: some ${stage} data`);
@@ -3812,7 +3830,11 @@ describe("handleSnapshot", () => {
     cdp.send = async (tabId, method, params) => {
       const result = await send(tabId, method, params);
       if (method === "DOMSnapshot.captureSnapshot") {
-        const child = await cdp.sendToTarget({ tabId, sessionId: "child-session" }, method, params);
+        const child = await cdp.sendToFrame(
+          toFrameDocumentHandle(tabId, { frameId: "child" }),
+          method,
+          params,
+        );
         (result as { documents: unknown[] }).documents.push(
           ...(child as { documents: unknown[] }).documents,
         );
@@ -4116,10 +4138,10 @@ describe("handleSnapshot", () => {
       throw new Error(`unexpected ${method}`);
     });
     const deps = {
-      cdp: {
-        send: send as unknown as <T>(t: number, m: string, p?: object) => Promise<T>,
+      cdp: createStubCdpRunner({
+        send: send as unknown as CdpRunner["send"],
         trackSessionTab: vi.fn(),
-      },
+      }),
       tabsApi: {
         get: vi.fn(
           async (tabId: number) => ({ id: tabId, windowId: 100, active: true }) as chrome.tabs.Tab,
@@ -4325,10 +4347,10 @@ describe("handleSnapshot", () => {
       throw new Error(`unexpected ${method}`);
     });
     const deps = {
-      cdp: {
-        send: send as unknown as <T>(t: number, m: string, p?: object) => Promise<T>,
+      cdp: createStubCdpRunner({
+        send: send as unknown as CdpRunner["send"],
         trackSessionTab: vi.fn(),
-      },
+      }),
       tabsApi: {
         get: vi.fn(
           async (tabId: number) => ({ id: tabId, windowId: 100, active: true }) as chrome.tabs.Tab,
@@ -4358,14 +4380,10 @@ describe("handleGetHtml", () => {
     const send = vi.fn(sendImpl);
     const trackSessionTab = vi.fn();
     // Cast to the generic CdpRunner.send signature for handleGetHtml.
-    const cdp = {
-      send: send as unknown as <T = unknown>(
-        tabId: number,
-        method: string,
-        params?: object,
-      ) => Promise<T>,
+    const cdp = createStubCdpRunner({
+      send: send as unknown as CdpRunner["send"],
       trackSessionTab,
-    };
+    });
     return {
       cdp,
       tabsApi: {

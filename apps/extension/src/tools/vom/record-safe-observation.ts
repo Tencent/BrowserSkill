@@ -1,5 +1,5 @@
 import type { Rect, RenderedRef, VomResult } from "@browser-skill/vom";
-import type { FrameDocumentHandle } from "@/browser-driver/frame-graph";
+import type { FrameDocumentHandle } from "@/browser-driver/frame-handles";
 import { readRecordingDocumentIdentity } from "@/shared/recording-document-identity";
 import type { CapturedSurfaceProbe } from "./capture";
 import type {
@@ -69,7 +69,7 @@ function projectFrames(
     return {
       frameId: document.frameId,
       handle: {
-        tabId: document.target.tabId,
+        tabId: document.handle.tabId,
         frameId: document.frameId,
         loaderId: document.loaderId ?? "",
         ...(documentElementBackendNodeId !== undefined ? { documentElementBackendNodeId } : {}),

@@ -1,12 +1,12 @@
 import { describe, expect, it, vi } from "vitest";
 import {
-  type CdpFrameGraph,
-  type CdpTarget,
+  type FrameDocumentGraph,
   type FrameNodeHandle,
   StaleFrameHandleError,
-} from "@/browser-driver/frame-graph";
+  toFrameDocumentHandle,
+} from "@/browser-driver/frame-handles";
 import { projectPolygon, type Quad, unprojectPoint } from "../geometry";
-import type { CdpRunner } from "../shared";
+import { type CdpRunner, createStubCdpRunner } from "../shared";
 import { pointBelongsToTarget, pointReachesTarget } from "../target-hit";
 
 describe("hit-test document identity", () => {
@@ -27,7 +27,7 @@ describe("hit-test document identity", () => {
           throw new Error(`Unexpected method ${method}`);
       }
     });
-    const cdp = { send } as unknown as CdpRunner;
+    const cdp = createStubCdpRunner({ send });
     const check = (frameId?: string) =>
       pointBelongsToTarget(
         cdp,
@@ -133,29 +133,48 @@ function nestedFrames(blocked?: string) {
   const root = { tabId: 4 };
   const parent = { tabId: 4, sessionId: "parent" };
   const child = { tabId: 4, sessionId: "child" };
-  const graph: CdpFrameGraph = {
+  const targetByFrame = new Map<string, { tabId: number; sessionId?: string }>([
+    ["root-frame", root],
+    ["parent-frame", parent],
+    ["child-frame", child],
+  ]);
+  const graph: FrameDocumentGraph = {
     rootFrameId: "root-frame",
     frames: [
-      { frameId: "root-frame", loaderId: "root-loader", target: root },
       {
+        handle: toFrameDocumentHandle(4, { frameId: "root-frame", loaderId: "root-loader" }),
+        frameId: "root-frame",
+        loaderId: "root-loader",
+        processKey: "root",
+        isOutOfProcess: false,
+      },
+      {
+        handle: toFrameDocumentHandle(4, { frameId: "parent-frame", loaderId: "parent-loader" }),
         frameId: "parent-frame",
         loaderId: "parent-loader",
         parentFrameId: "root-frame",
-        target: parent,
         ownerBackendNodeId: 100,
+        processKey: "oopif:parent",
+        isOutOfProcess: true,
       },
       {
+        handle: toFrameDocumentHandle(4, { frameId: "child-frame", loaderId: "child-loader" }),
         frameId: "child-frame",
         loaderId: "child-loader",
         parentFrameId: "parent-frame",
-        target: child,
         ownerBackendNodeId: 200,
+        processKey: "oopif:child",
+        isOutOfProcess: true,
       },
     ],
   };
   const hits: { target: string; x: number; y: number }[] = [];
   const released: string[] = [];
-  const request = async (target: CdpTarget, method: string, params?: object): Promise<unknown> => {
+  const request = async (
+    target: { tabId: number; sessionId?: string },
+    method: string,
+    params?: object,
+  ): Promise<unknown> => {
     const key = target.sessionId ?? "root";
     const p = params as Record<string, unknown>;
     const sizes = { root: [1000, 800], parent: [400, 300], child: [200, 100] };
@@ -195,19 +214,19 @@ function nestedFrames(blocked?: string) {
         throw new Error(`Unexpected method ${method}`);
     }
   };
-  const cdp: CdpRunner = {
+  const cdp: CdpRunner = createStubCdpRunner({
     send: ((_tab, method, params) => request(root, method, params)) as CdpRunner["send"],
-    sendToTarget: request as CdpRunner["sendToTarget"],
     sendToFrame: ((handle, method, params) => {
+      if (!handle.frameId) return request(root, method, params);
       const frame = graph.frames.find((entry) => entry.frameId === handle.frameId);
       if (!frame || (handle.loaderId && frame.loaderId !== handle.loaderId)) {
         throw new StaleFrameHandleError(handle);
       }
-      return request(frame.target, method, params);
+      return request(targetByFrame.get(frame.frameId) ?? root, method, params);
     }) as CdpRunner["sendToFrame"],
     hasOwnFrameTarget: (_tab, frameId) => frameId !== "root-frame",
-    getFrameGraph: async () => graph,
-  };
+    getFrameDocuments: async () => graph,
+  });
   const handle: FrameNodeHandle = {
     tabId: 4,
     frameId: "child-frame",

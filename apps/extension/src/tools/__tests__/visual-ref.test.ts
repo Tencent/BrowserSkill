@@ -47,7 +47,7 @@ async function setup() {
   const send = vi.fn(async () => {
     throw new Error("unexpected target operation");
   });
-  const cdp = { send, sendToTarget: send, trackSessionTab: vi.fn() } as unknown as CdpRunner;
+  const cdp = { send, sendToFrame: send, trackSessionTab: vi.fn() } as unknown as CdpRunner;
   const tab = { id: 4, windowId: 100, active: true, url: "https://example.com" } as chrome.tabs.Tab;
   const tabsApi = { get: vi.fn(async () => tab), query: vi.fn(async () => [tab]) };
   return { manager, ctx, send, cdp, tabsApi };

@@ -3,11 +3,11 @@
 // chooser events and a frame-scoped DOM probe are independent input-location
 // signals, so event delivery is not required for standard file inputs.
 
-import { isStaleFrameHandleError } from "@/browser-driver/frame-graph";
+import { isStaleFrameHandleError } from "@/browser-driver/frame-handles";
 import type { ClickResult, RpcError, TransferEffectState } from "@/transport/types";
 import { rpcError, transferError } from "./errors";
 import type { ResolvedActionTarget } from "./interaction";
-import { type CdpRunner, isRpcError, sendToFrameHandle } from "./shared";
+import { type CdpRunner, isRpcError, sendToFrameHandle, withRemoteObject } from "./shared";
 import { BoundedWaitError, remainingMs, waitBounded } from "./transfer-transaction";
 
 const CLEANUP_TIMEOUT_MS = 1_000;
@@ -110,11 +110,10 @@ export async function uploadThroughActivatedFileInput(
   const objectGroup = `bsk-upload-${crypto.randomUUID()}`;
   const stateKey = `__bskUpload_${crypto.randomUUID().replaceAll("-", "")}`;
   const chooserEvents: ChooserEvent[] = [];
-  let mockFrameKnown = !handle.frameId;
-  let mockFrameSessionId: string | undefined;
   let interceptionArmed = false;
   let probeArmed = false;
   let triggerObjectId: string | undefined;
+  let objectGroupRequested = false;
   let releaseTabAttachment: (() => void) | undefined;
   let chooserSubscription: { dispose(): void } | undefined;
   let outcome: FileInputTransactionResult | RpcError = transferFailure(
@@ -126,30 +125,15 @@ export async function uploadThroughActivatedFileInput(
   );
 
   try {
-    releaseTabAttachment = options.cdp.retainTabAttachment?.(handle.tabId);
-    chooserSubscription = options.cdp.onEvent?.(handle.tabId, (source, method, raw) => {
+    releaseTabAttachment = options.cdp.retainTabAttachment(handle.tabId);
+    chooserSubscription = options.cdp.onEvent(handle.tabId, (source, method, raw) => {
       if (method !== "Page.fileChooserOpened") return;
-      const matchesSource = options.cdp.isEventFromFrame
-        ? options.cdp.isEventFromFrame(source, handle)
-        : source.tabId === handle.tabId &&
-          (!mockFrameKnown || (source.sessionId ?? undefined) === mockFrameSessionId);
-      if (!matchesSource) return;
+      if (!options.cdp.isEventFromFrame(source, handle)) return;
       const event = raw as ChooserEvent;
       chooserEvents.push(event);
     });
 
     try {
-      if (!options.cdp.isEventFromFrame && handle.frameId && options.cdp.getFrameGraph) {
-        const graph = await waitBounded(
-          options.cdp.getFrameGraph(handle.tabId),
-          deadline,
-          options.signal,
-          "resolving upload frame target timed out",
-        );
-        mockFrameSessionId = graph.frames.find((entry) => entry.frameId === handle.frameId)?.target
-          .sessionId;
-        mockFrameKnown = true;
-      }
       await waitBounded(
         sendToFrameHandle(options.cdp, handle, "Page.setInterceptFileChooserDialog", {
           enabled: true,
@@ -177,6 +161,7 @@ export async function uploadThroughActivatedFileInput(
     }
 
     try {
+      objectGroupRequested = true;
       const resolved = await waitBounded(
         sendToFrameHandle<{ object?: { objectId?: string } }>(
           options.cdp,
@@ -359,16 +344,24 @@ export async function uploadThroughActivatedFileInput(
         const inputError = runtimeError(input, "failed to resolve activated file input object");
         if (inputError) throw inputError;
         if (!input.result?.objectId) throw new Error("activated file input returned no objectId");
-        const described = await sendToFrameHandle<{ node?: { backendNodeId?: number } }>(
+        backendNodeId = await withRemoteObject(
           options.cdp,
           handle,
-          "DOM.describeNode",
-          { objectId: input.result.objectId },
+          input.result.objectId,
+          async (inputObjectId) => {
+            const described = await sendToFrameHandle<{ node?: { backendNodeId?: number } }>(
+              options.cdp,
+              handle,
+              "DOM.describeNode",
+              { objectId: inputObjectId },
+            );
+            const nodeId = described.node?.backendNodeId;
+            if (typeof nodeId !== "number") {
+              throw new Error("DOM.describeNode returned no file input backendNodeId");
+            }
+            return nodeId;
+          },
         );
-        backendNodeId = described.node?.backendNodeId;
-        if (typeof backendNodeId !== "number") {
-          throw new Error("DOM.describeNode returned no file input backendNodeId");
-        }
       }
 
       if (!multiple && options.files.length !== 1) {
@@ -476,20 +469,32 @@ export async function uploadThroughActivatedFileInput(
           cleanupFailed = true;
         }
       }
-      try {
-        await waitBounded(
-          sendToFrameHandle(
-            options.cdp.resourceCleanup ?? options.cdp,
-            handle,
-            "Runtime.releaseObjectGroup",
-            { objectGroup },
-          ),
-          Date.now() + CLEANUP_TIMEOUT_MS,
-          undefined,
-          "releasing upload object group timed out",
-        );
-      } catch {
-        cleanupFailed = true;
+      if (objectGroupRequested) {
+        try {
+          await waitBounded(
+            sendToFrameHandle(
+              options.cdp.resourceCleanup ?? options.cdp,
+              handle,
+              "Runtime.releaseObjectGroup",
+              { objectGroup },
+              { allowReattach: false },
+            ),
+            Date.now() + CLEANUP_TIMEOUT_MS,
+            undefined,
+            "releasing upload object group timed out",
+          );
+        } catch (err) {
+          if (
+            !(
+              err instanceof Error &&
+              (err.message === "No resources owned on this tab" ||
+                err.message === "debugger detached")
+            ) &&
+            !isStaleFrameHandleError(err)
+          ) {
+            cleanupFailed = true;
+          }
+        }
       }
 
       const effect = isRpcError(outcome)

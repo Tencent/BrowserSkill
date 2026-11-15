@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { CdpRunner } from "@/tools/shared";
+import { type CdpRunner, createStubCdpRunner } from "@/tools/shared";
 import { waitForDocumentSettled } from "../recording/document-settle";
 
 function quietCdp(): { cdp: CdpRunner; send: ReturnType<typeof vi.fn> } {
@@ -7,7 +7,7 @@ function quietCdp(): { cdp: CdpRunner; send: ReturnType<typeof vi.fn> } {
     result: { value: { idleMs: 1_000, readyState: "complete" } },
   }));
   return {
-    cdp: { send: send as unknown as CdpRunner["send"] },
+    cdp: createStubCdpRunner({ send: send as unknown as CdpRunner["send"] }),
     send,
   };
 }
@@ -53,7 +53,7 @@ describe("waitForDocumentSettled", () => {
       if (method === "Page.createIsolatedWorld") return { executionContextId: 91 };
       return { result: { value: { idleMs: 1_000, readyState: "complete" } } };
     });
-    const cdp: CdpRunner = { send: send as unknown as CdpRunner["send"] };
+    const cdp: CdpRunner = createStubCdpRunner({ send: send as unknown as CdpRunner["send"] });
 
     const settled = waitForDocumentSettled(cdp, {
       tabId: 7,
@@ -81,11 +81,11 @@ describe("waitForDocumentSettled", () => {
       if (method === "Page.createIsolatedWorld") return { executionContextId: 27 };
       return { result: { value: { idleMs: 1_000, readyState: "complete" } } };
     });
-    const cdp: CdpRunner = {
+    const cdp: CdpRunner = createStubCdpRunner({
       send: send as unknown as CdpRunner["send"],
-      sendToFrame: sendToFrame as unknown as NonNullable<CdpRunner["sendToFrame"]>,
+      sendToFrame: sendToFrame as unknown as CdpRunner["sendToFrame"],
       hasOwnFrameTarget: (_tabId, frameId) => frameId === "oopif-frame",
-    };
+    });
 
     const handle = { tabId: 7, frameId: "oopif-frame", loaderId: "oopif-loader" };
     const settled = waitForDocumentSettled(cdp, { tabId: 7, handle });
@@ -97,7 +97,6 @@ describe("waitForDocumentSettled", () => {
       handle,
       "Runtime.evaluate",
       expect.objectContaining({ contextId: 27 }),
-      undefined,
     );
   });
 });

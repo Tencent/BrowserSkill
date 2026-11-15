@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
+import { type CdpDebuggee, type CdpDebuggerApi, ChromiumCdp } from "@/browser-driver/chromium-cdp";
 import { SessionManager } from "@/session-manager/manager";
-import type { CdpRunner } from "@/tools/shared";
+import { type CdpRunner, createStubCdpRunner } from "@/tools/shared";
 import { handleEvaluate } from "../evaluate";
 
 function fakeAgentWindow(ids: number[]) {
@@ -54,10 +55,13 @@ function makeFakeCdp(opts: FakeCdpOptions = {}) {
       if (opts.evaluate) return opts.evaluate(params);
       return { result: { type: "number", value: 2 } };
     }
+    if (method === "Runtime.releaseObject") {
+      return {};
+    }
     throw new Error(`unexpected CDP call ${method}`);
   };
   const send = vi.fn(sendImpl);
-  const cdp: CdpRunner = {
+  const cdp: CdpRunner = createStubCdpRunner({
     send: send as unknown as <T = unknown>(
       tabId: number,
       method: string,
@@ -68,7 +72,7 @@ function makeFakeCdp(opts: FakeCdpOptions = {}) {
     dialogsSince: vi.fn((_tabId: number, cursor: number) =>
       dialogRecords.filter((d) => d.sequence > cursor),
     ),
-  };
+  });
   const windowId = opts.windowId ?? 100;
   const tabsApi = {
     get: vi.fn(async (tabId: number) => ({ id: tabId, windowId, active: true }) as chrome.tabs.Tab),
@@ -310,5 +314,104 @@ describe("handleEvaluate", () => {
       code: "permission_denied",
       data: { reason: "agent_window_scope" },
     });
+  });
+
+  it("deterministically releases V8 RemoteObjects via Runtime.releaseObject when return_by_value=false", async () => {
+    const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
+    await sm.start("aa11");
+    const abort = new AbortController();
+    const fake = makeFakeCdp({
+      evaluate: () => {
+        abort.abort();
+        return {
+          result: {
+            type: "object",
+            className: "HTMLDivElement",
+            objectId: "leaked-node-handle-9",
+            description: "div#app",
+          },
+        };
+      },
+    });
+    const res = await handleEvaluate(
+      sm,
+      {
+        session_id: "aa11",
+        expression: "document.getElementById('app')",
+        return_by_value: false,
+      },
+      { cdp: fake.cdp, tabsApi: fake.tabsApi, signal: abort.signal },
+    );
+    expect(res).toMatchObject({
+      code: "cancelled",
+      data: { effect_state: "unknown" },
+    });
+    expect(fake.sent).toContainEqual({
+      tabId: 4,
+      method: "Runtime.releaseObject",
+      params: { objectId: "leaked-node-handle-9" },
+    });
+  });
+
+  it("does not resurrect a detached tab or mask the result when releasing RemoteObjects on exit", async () => {
+    const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
+    await sm.start("aa11");
+    const detachListeners = new Set<(source: chrome.debugger.Debuggee, reason: string) => void>();
+    const api: CdpDebuggerApi = {
+      attach: vi.fn(async () => {}),
+      detach: vi.fn(async () => {}),
+      sendCommand: vi.fn(async (target: CdpDebuggee, method: string) => {
+        if (method === "Runtime.evaluate") {
+          for (const listener of detachListeners) {
+            listener({ tabId: target.tabId }, "target_closed");
+          }
+          return {
+            result: {
+              type: "object",
+              className: "HTMLDivElement",
+              objectId: "detached-node-1",
+              description: "div#gone",
+            },
+          };
+        }
+        return {};
+      }),
+      // biome-ignore lint/suspicious/noExplicitAny: minimal chrome.events.Event shim
+      onEvent: { addListener: vi.fn(), removeListener: vi.fn() } as any,
+      onDetach: {
+        addListener: vi.fn((cb) => detachListeners.add(cb)),
+        removeListener: vi.fn((cb) => detachListeners.delete(cb)),
+        // biome-ignore lint/suspicious/noExplicitAny: minimal chrome.events.Event shim
+      } as any,
+    };
+    const realCdp = new ChromiumCdp(api);
+    const tabsApi = {
+      get: vi.fn(
+        async (tabId: number) => ({ id: tabId, windowId: 100, active: true }) as chrome.tabs.Tab,
+      ),
+      query: vi.fn(async () => [{ id: 4, windowId: 100, active: true } as chrome.tabs.Tab]),
+    };
+
+    const res = await handleEvaluate(
+      sm,
+      {
+        session_id: "aa11",
+        expression: "document.getElementById('gone')",
+        return_by_value: false,
+      },
+      { cdp: realCdp, tabsApi },
+    );
+    expect(res).toMatchObject({
+      ok: true,
+      tab_id: 4,
+      value: {
+        type: "object",
+        className: "HTMLDivElement",
+        objectId: "detached-node-1",
+        description: "div#gone",
+      },
+    });
+    expect(api.attach).toHaveBeenCalledTimes(1);
+    expect(realCdp.getAttachmentId(4)).toBeUndefined();
   });
 });

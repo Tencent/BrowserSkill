@@ -5,7 +5,7 @@ import type { DragParams } from "@/transport/types";
 import { withClickOverlay } from "../click-overlay";
 import { validateDrag } from "../drag";
 import { pointerTransactionDeps } from "../pointer-transaction";
-import type { CdpRunner } from "../shared";
+import { type CdpRunner, createStubCdpRunner } from "../shared";
 
 it.each([
   { source: { selector: "" } },
@@ -33,12 +33,12 @@ it.each([
 it("cancels native drag and releases the last position after control is revoked", async () => {
   let revoked = false;
   const sent: { method: string; params?: object }[] = [];
-  const raw: CdpRunner = {
+  const raw: CdpRunner = createStubCdpRunner({
     send: vi.fn(async (_tab, method, params) => {
       sent.push({ method, params });
       return {};
     }) as CdpRunner["send"],
-  };
+  });
   const cdp = guardedRunner(raw, {
     prepare: async () => {
       if (revoked) throw new Error("revoked");
@@ -80,7 +80,7 @@ it("cancels native drag and releases the last position after control is revoked"
   ).rejects.toThrow();
 });
 it("does not allow an unrelated request to cancel dragging after revocation", async () => {
-  const raw: CdpRunner = { send: vi.fn() as CdpRunner["send"] };
+  const raw: CdpRunner = createStubCdpRunner({ send: vi.fn() as CdpRunner["send"] });
   const cdp = guardedRunner(raw, {
     prepare: async () => {
       throw new Error("revoked");
@@ -92,13 +92,13 @@ it("does not allow an unrelated request to cancel dragging after revocation", as
 
 it("does not release a replacement attachment after native cancellation settles", async () => {
   let attachment = "original";
-  const cdp: CdpRunner = {
+  const cdp: CdpRunner = createStubCdpRunner({
     getAttachmentId: () => attachment,
     send: vi.fn(async (_tab, method) => {
       if (method === "Input.cancelDragging") attachment = "replacement";
       return {};
     }) as CdpRunner["send"],
-  };
+  });
   const scope = pointerTransactionDeps(
     { cdp, tabsApi: { get: vi.fn(), query: vi.fn() } },
     undefined,
@@ -125,13 +125,13 @@ it("does not release a replacement attachment after native cancellation settles"
 });
 
 it("does not complete a drop when native cancellation cannot be confirmed", async () => {
-  const cdp: CdpRunner = {
+  const cdp: CdpRunner = createStubCdpRunner({
     send: vi.fn(async (_tab, method) => {
       if (method === "Input.cancelDragging") throw new Error("disconnected");
       return {};
     }) as CdpRunner["send"],
     detach: vi.fn(async () => {}),
-  };
+  });
   const scope = pointerTransactionDeps(
     { cdp, tabsApi: { get: vi.fn(), query: vi.fn() } },
     undefined,
@@ -160,11 +160,11 @@ it("does not complete a drop when native cancellation cannot be confirmed", asyn
 
 it("refuses a long gesture before input when overlay passthrough cannot cover it", async () => {
   let passthrough = false;
-  const cdp: CdpRunner = {
+  const cdp: CdpRunner = createStubCdpRunner({
     send: vi.fn(async () => ({
       result: { value: passthrough ? "clear" : "covered" },
     })) as CdpRunner["send"],
-  };
+  });
   const action = vi.fn(async () => ({ done: true }));
   const result = await withClickOverlay(
     4,

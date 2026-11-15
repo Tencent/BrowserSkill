@@ -1,5 +1,6 @@
 import { isVomReferenceNode, renderVom } from "@browser-skill/vom";
 import { describe, expect, it } from "vitest";
+import { rootProcessBoundary, toFrameDocumentHandle } from "@/browser-driver/frame-handles";
 import type { CapturedNode } from "../capture";
 import type { FrameDocument } from "../frame-document";
 import { normalizeDocument } from "../normalize";
@@ -39,8 +40,11 @@ function document(
 ): FrameDocument<SemanticAxNode> {
   return {
     frameId,
+    loaderId: "",
+    processKey: "root",
+    isOutOfProcess: false,
     contextScopeId: frameId,
-    target: { tabId: 1 },
+    handle: toFrameDocumentHandle(1, { frameId }),
     axNodes,
     domNodes,
     ...frame,
@@ -1168,12 +1172,12 @@ it("strips direct hidden #text from textstyle stealth containers while preservin
     strings,
     {
       frameId: "main",
-      target: { tabId: 1 },
+      process: rootProcessBoundary(1),
       ownerFrameBackendNodeId: null,
       projection: {
         status: "available",
         projection: {
-          source: { target: { tabId: 1 }, frameId: "main" },
+          source: { process: rootProcessBoundary(1), frameId: "main" },
           geometry: { sourceClips: [], edges: [], topViewport: { width: 800, height: 600 } },
         },
       },
@@ -1220,8 +1224,11 @@ it("strips direct hidden #text from textstyle stealth containers while preservin
 
   const frameDoc: FrameDocument<SemanticAxNode> = {
     frameId: "main",
+    loaderId: "",
+    processKey: "root",
+    isOutOfProcess: false,
     contextScopeId: "main",
-    target: { tabId: 1 },
+    handle: toFrameDocumentHandle(1, { frameId: "main" }),
     axNodes,
     domNodes: normalized.nodes,
     excludedBackendNodeIds: normalized.index.excludedBackendNodeIds,

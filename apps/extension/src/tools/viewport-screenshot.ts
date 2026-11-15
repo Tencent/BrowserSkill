@@ -83,29 +83,25 @@ function changed(): RpcError {
 function boundToAttachment(cdp: CdpRunner, tabId: number, attachmentId: string): CdpRunner {
   return delegateCdpRunner(cdp, {
     send: <T>(id: number, method: string, params?: object) => {
-      if (id !== tabId || cdp.getAttachmentId?.(id) !== attachmentId) {
+      if (id !== tabId || cdp.getAttachmentId(id) !== attachmentId) {
         return Promise.reject(new Error("Screenshot attachment changed"));
       }
       return cdp.send<T>(id, method, params);
     },
-    ...(cdp.sendToFrame
-      ? {
-          sendToFrame: <T>(
-            handle: Parameters<NonNullable<CdpRunner["sendToFrame"]>>[0],
-            method: string,
-            params?: object,
-            guard?: Parameters<NonNullable<CdpRunner["sendToFrame"]>>[3],
-          ) => {
-            if (handle.tabId !== tabId || cdp.getAttachmentId?.(handle.tabId) !== attachmentId) {
-              return Promise.reject(new Error("Screenshot attachment changed"));
-            }
-            return cdp.sendToFrame!<T>(handle, method, params, {
-              ...guard,
-              attachmentId,
-            });
-          },
-        }
-      : {}),
+    sendToFrame: <T>(
+      handle: Parameters<CdpRunner["sendToFrame"]>[0],
+      method: string,
+      params?: object,
+      guard?: Parameters<CdpRunner["sendToFrame"]>[3],
+    ) => {
+      if (handle.tabId !== tabId || cdp.getAttachmentId(handle.tabId) !== attachmentId) {
+        return Promise.reject(new Error("Screenshot attachment changed"));
+      }
+      return cdp.sendToFrame<T>(handle, method, params, {
+        ...guard,
+        attachmentId,
+      });
+    },
   });
 }
 
@@ -190,20 +186,16 @@ export async function captureControlledViewport(
       if (!cleanup) check();
       return wait(cdp.send(id, method, params), cleanup);
     },
-    ...(cdp.sendToFrame
-      ? {
-          sendToFrame: <T>(
-            handle: Parameters<NonNullable<CdpRunner["sendToFrame"]>>[0],
-            method: string,
-            params?: object,
-            guard?: Parameters<NonNullable<CdpRunner["sendToFrame"]>>[3],
-          ) => {
-            const cleanup = method === "Runtime.releaseObjectGroup";
-            if (!cleanup) check();
-            return wait(cdp.sendToFrame!<T>(handle, method, params, guard), cleanup);
-          },
-        }
-      : {}),
+    sendToFrame: <T>(
+      handle: Parameters<CdpRunner["sendToFrame"]>[0],
+      method: string,
+      params?: object,
+      guard?: Parameters<CdpRunner["sendToFrame"]>[3],
+    ) => {
+      const cleanup = method === "Runtime.releaseObjectGroup";
+      if (!cleanup) check();
+      return wait(cdp.sendToFrame<T>(handle, method, params, guard), cleanup);
+    },
   });
   const controlled = () => {
     check();

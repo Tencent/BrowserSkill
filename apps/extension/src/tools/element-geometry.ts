@@ -1,7 +1,7 @@
 // Resolve and scroll nodes inside one CDP target. Cross-frame projection
 // belongs to frame-geometry.ts.
 
-import { isStaleFrameHandleError } from "@/browser-driver/frame-graph";
+import { isStaleFrameHandleError } from "@/browser-driver/frame-handles";
 import type { RpcError } from "@/transport/types";
 import { rpcError } from "./errors";
 import {

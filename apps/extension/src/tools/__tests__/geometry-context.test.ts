@@ -1,5 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
-import type { CdpFrameGraph } from "@/browser-driver/frame-graph";
+import {
+  createFrameDocumentInfo,
+  type FrameDocumentGraph,
+  rootProcessBoundary,
+  toFrameDocumentHandle,
+} from "@/browser-driver/frame-handles";
 import { resolveNodeGeometry } from "../frame-geometry";
 import { rectPolygon } from "../geometry";
 import {
@@ -9,20 +14,20 @@ import {
   snapshotViewportRect,
 } from "../geometry/coordinate-types";
 import { GeometryContext, snapshotLayoutScale } from "../geometry/frame-context";
-import type { CdpRunner } from "../shared";
+import { type CdpRunner, createStubCdpRunner } from "../shared";
 
-const target = { tabId: 4 };
-const graph: CdpFrameGraph = {
+const process = rootProcessBoundary(4);
+const graph: FrameDocumentGraph = {
   rootFrameId: "main",
   frames: [
-    { frameId: "main", target, loaderId: "main-loader" },
-    {
+    createFrameDocumentInfo({ tabId: 4, frameId: "main", loaderId: "main-loader" }),
+    createFrameDocumentInfo({
+      tabId: 4,
       frameId: "child",
       parentFrameId: "main",
       ownerBackendNodeId: 10,
-      target,
       loaderId: "child-loader",
-    },
+    }),
   ],
 };
 
@@ -42,7 +47,11 @@ function driver() {
     if (method === "Runtime.releaseObject") return {};
     throw new Error(method);
   });
-  return { send: send as CdpRunner["send"], getFrameGraph: vi.fn(async () => graph), calls: send };
+  return createStubCdpRunner({
+    send: send as CdpRunner["send"],
+    getFrameDocuments: vi.fn(async () => graph),
+    calls: send,
+  });
 }
 
 describe("measurement geometry context", () => {
@@ -63,7 +72,7 @@ describe("measurement geometry context", () => {
     expect(
       snapshotViewportRect(
         [160 * scale, 320 * scale, 120 * scale, 40 * scale],
-        { target },
+        { process },
         coordinates,
       )?.rect,
     ).toEqual({ x: 80, y: 120, width: 120, height: 40 });
@@ -71,7 +80,7 @@ describe("measurement geometry context", () => {
 
   it("uses CSS root scroll only for missing snapshot offsets, without scaling it twice", () => {
     const coordinates = snapshotCoordinates({ scrollOffsetX: 80 }, 2, { x: 999, y: 100 });
-    expect(snapshotViewportRect([200, 800, 240, 80], { target }, coordinates)?.rect).toEqual({
+    expect(snapshotViewportRect([200, 800, 240, 80], { process }, coordinates)?.rect).toEqual({
       x: 60,
       y: 300,
       width: 120,
@@ -100,7 +109,7 @@ describe("measurement geometry context", () => {
       }),
     ).toBe(2);
     expect(snapshotCoordinates({ scrollOffsetX: 0, scrollOffsetY: 0 }, null)).toBeNull();
-    expect(snapshotViewportRect([10, 20, 120, 40], { target }, null)).toBeNull();
+    expect(snapshotViewportRect([10, 20, 120, 40], { process }, null)).toBeNull();
   });
 
   it("shares in-flight frame measurements, but never shares them with the next context", async () => {
@@ -110,20 +119,20 @@ describe("measurement geometry context", () => {
       Array.from({ length: 20 }, () => context.targetProjection("child")),
     );
     expect(results.every((value) => value === results[0])).toBe(true);
-    expect(cdp.getFrameGraph).toHaveBeenCalledTimes(1);
+    expect(cdp.getFrameDocuments).toHaveBeenCalledTimes(1);
     expect(cdp.calls.mock.calls.map(([, method]) => method)).toEqual([
       "Page.getLayoutMetrics",
       "DOM.getBoxModel",
     ]);
     await new GeometryContext(cdp, 4).targetProjection("child");
-    expect(cdp.getFrameGraph).toHaveBeenCalledTimes(2);
+    expect(cdp.getFrameDocuments).toHaveBeenCalledTimes(2);
     expect(cdp.calls.mock.calls).toHaveLength(4);
   });
 
   it("projects frame-local snapshot CSS bounds through the scaled owner content quad", async () => {
     const cdp = driver();
     const context = new GeometryContext(cdp, 4);
-    const source = { target, frameId: "child" };
+    const source = { process, frameId: "child" };
     const projection = await context.snapshotProjection(source, 10, [], {
       width: 1000,
       height: 1000,
@@ -187,10 +196,10 @@ describe("measurement geometry context", () => {
       return original(tabId, method, params);
     };
     const context = new GeometryContext(cdp, 4);
-    context.registerSnapshotOwners(target, new Set([10, 11]));
+    context.registerSnapshotOwners(process, new Set([10, 11]));
     const values = await Promise.all(
       [10, 11].map((id) =>
-        context.snapshotProjection({ target, frameId: String(id) }, id, [], {
+        context.snapshotProjection({ process, frameId: String(id) }, id, [], {
           width: 1000,
           height: 1000,
         }),
@@ -199,7 +208,7 @@ describe("measurement geometry context", () => {
     expect(values.every((value) => value.status === "available")).toBe(true);
     expect(calls.filter((method) => method === "DOM.resolveNode")).toHaveLength(1);
     expect(calls.filter((method) => method === "Runtime.evaluate")).toHaveLength(1);
-    await new GeometryContext(cdp, 4).snapshotProjection({ target, frameId: "child" }, 10, [], {
+    await new GeometryContext(cdp, 4).snapshotProjection({ process, frameId: "child" }, 10, [], {
       width: 1000,
       height: 1000,
     });
@@ -227,10 +236,10 @@ describe("measurement geometry context", () => {
       return original(tabId, method, params);
     };
     const context = new GeometryContext(cdp, 4, undefined, controller.signal);
-    context.registerSnapshotOwners(target, new Set([10, 11]));
+    context.registerSnapshotOwners(process, new Set([10, 11]));
     let settled = false;
     const operation = context
-      .snapshotProjection({ target, frameId: "child" }, 10, [], { width: 1000, height: 1000 })
+      .snapshotProjection({ process, frameId: "child" }, 10, [], { width: 1000, height: 1000 })
       .finally(() => {
         settled = true;
       });
@@ -246,11 +255,11 @@ describe("measurement geometry context", () => {
   it("rejects owner mismatches and invalid numeric bounds", () => {
     const input = snapshotViewportRect(
       [30, 50, 120, 40],
-      { target, frameId: "main" },
+      { process, frameId: "main" },
       { layoutUnitsPerCssPixel: 1, scrollCss: { x: 10, y: 20 } },
     )!;
     const projection = {
-      source: { target, frameId: "main" },
+      source: { process, frameId: "main" },
       geometry: { sourceClips: [], edges: [], topViewport: { width: 800, height: 600 } },
     };
     expect(projectSnapshotRect(input, projection)).toEqual({
@@ -260,44 +269,44 @@ describe("measurement geometry context", () => {
       height: 40,
     });
     expect(
-      projectSnapshotRect(input, { ...projection, source: { target, frameId: "other" } }),
+      projectSnapshotRect(input, { ...projection, source: { process, frameId: "other" } }),
     ).toBeNull();
     expect(
       projectSnapshotRect(input, {
         ...projection,
-        source: { target: { tabId: 5 }, frameId: "main" },
+        source: { process: rootProcessBoundary(5), frameId: "main" },
       }),
     ).toBeNull();
     expect(
       snapshotViewportRect(
         [0, 0, NaN, 40],
-        { target },
+        { process },
         { layoutUnitsPerCssPixel: 1, scrollCss: { x: 0, y: 0 } },
       ),
     ).toBeNull();
     expect(
       snapshotViewportRect(
         [0, 0, 10, 40],
-        { target },
+        { process },
         { layoutUnitsPerCssPixel: 1, scrollCss: { x: Infinity, y: 0 } },
       ),
     ).toBeNull();
   });
 
   it("does not turn a border quad or a failed owner read into a content projection", async () => {
-    const cdp: CdpRunner = {
+    const cdp: CdpRunner = createStubCdpRunner({
       send: vi.fn(async () => ({
         model: { border: [0, 0, 100, 0, 100, 100, 0, 100] },
       })) as CdpRunner["send"],
-    };
+    });
     expect(
-      await new GeometryContext(cdp, 4).snapshotProjection({ target, frameId: "child" }, 10, [], {
+      await new GeometryContext(cdp, 4).snapshotProjection({ process, frameId: "child" }, 10, [], {
         width: 100,
         height: 100,
       }),
     ).toEqual({
       status: "unavailable",
-      source: { target, frameId: "child" },
+      source: { process, frameId: "child" },
       ownerBackendNodeId: 10,
     });
   });
@@ -305,7 +314,7 @@ describe("measurement geometry context", () => {
   it("keeps ancestor clips in target coordinates instead of applying nested offsets twice", async () => {
     const cdp = driver();
     const projection = await new GeometryContext(cdp, 4).snapshotProjection(
-      { target, frameId: "nested" },
+      { process, frameId: "nested" },
       10,
       [rectPolygon({ x: 60, y: 620, w: 100, h: 100 })],
       { width: 1000, height: 1000 },
@@ -313,7 +322,7 @@ describe("measurement geometry context", () => {
     if (projection.status !== "available") throw new Error("expected available projection");
     const input = snapshotViewportRect(
       [0, 0, 300, 200],
-      { target, frameId: "nested" },
+      { process, frameId: "nested" },
       { layoutUnitsPerCssPixel: 1, scrollCss: { x: 0, y: 0 } },
     );
     expect(projectSnapshotRect(input!, projection.projection)).toEqual({
@@ -326,18 +335,18 @@ describe("measurement geometry context", () => {
 
   it("rejects malformed frame ancestry without looping", async () => {
     const cdp = driver();
-    const cycle: CdpFrameGraph = {
+    const cycle: FrameDocumentGraph = {
       rootFrameId: "a",
       frames: [
-        { frameId: "a", parentFrameId: "b", target },
-        { frameId: "b", parentFrameId: "a", target },
+        createFrameDocumentInfo({ tabId: 4, frameId: "a", parentFrameId: "b" }),
+        createFrameDocumentInfo({ tabId: 4, frameId: "b", parentFrameId: "a" }),
       ],
     };
     expect(await new GeometryContext(cdp, 4, cycle).targetProjection("a")).toBeNull();
     expect(cdp.calls).not.toHaveBeenCalled();
-    const orphan: CdpFrameGraph = {
+    const orphan: FrameDocumentGraph = {
       rootFrameId: "a",
-      frames: [{ frameId: "a", parentFrameId: "missing", target }],
+      frames: [createFrameDocumentInfo({ tabId: 4, frameId: "a", parentFrameId: "missing" })],
     };
     expect(await new GeometryContext(cdp, 4, orphan).targetProjection("a")).toBeNull();
   });
@@ -372,13 +381,13 @@ describe("measurement geometry context", () => {
     });
     const controller = new AbortController();
     const context = new GeometryContext(
-      { send: send as CdpRunner["send"] },
+      createStubCdpRunner({ send: send as CdpRunner["send"] }),
       4,
       undefined,
       controller.signal,
     );
     const tasks = Array.from({ length: 8 }, (_, index) =>
-      context.viewport({ tabId: 4, sessionId: String(index) }),
+      context.viewport(toFrameDocumentHandle(4, { frameId: `frame-${index}` })),
     );
     const settled = Promise.allSettled(tasks);
     expect(send).toHaveBeenCalledTimes(4);
@@ -401,7 +410,7 @@ describe("measurement geometry context", () => {
     });
     const context = new GeometryContext(cdp, 4, undefined, controller.signal);
     await expect(
-      context.snapshotProjection({ target, frameId: "child" }, 10, [], {
+      context.snapshotProjection({ process, frameId: "child" }, 10, [], {
         width: 1000,
         height: 1000,
       }),
@@ -437,7 +446,7 @@ describe("measurement geometry context", () => {
         { scrollIntoView: true },
       ),
     ).toMatchObject({ topBounds: { x: 60, y: 620, width: 40, height: 20 } });
-    expect(cdp.getFrameGraph).toHaveBeenCalledTimes(1);
+    expect(cdp.getFrameDocuments).toHaveBeenCalledTimes(1);
     expect(cdp.calls.mock.calls.filter(([, method]) => method === "DOM.getBoxModel")).toHaveLength(
       2, // Target layout flush plus the iframe owner, both measured after scrolling.
     );
@@ -459,10 +468,10 @@ describe("measurement geometry context", () => {
     const cdp = driver();
     cdp.calls.mockRejectedValueOnce(new Error("unavailable"));
     const context = new GeometryContext(cdp, 4);
-    await expect(context.viewport(target)).rejects.toThrow("unavailable");
-    await expect(context.viewport(target)).rejects.toThrow("unavailable");
+    await expect(context.viewport(process)).rejects.toThrow("unavailable");
+    await expect(context.viewport(process)).rejects.toThrow("unavailable");
     expect(cdp.calls).toHaveBeenCalledTimes(1);
-    expect(await new GeometryContext(cdp, 4).viewport(target)).toEqual({
+    expect(await new GeometryContext(cdp, 4).viewport(process)).toEqual({
       width: 1000,
       height: 1000,
     });

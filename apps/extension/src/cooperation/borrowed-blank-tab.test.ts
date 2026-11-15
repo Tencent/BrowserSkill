@@ -1,6 +1,6 @@
 import { afterEach, expect, it, vi } from "vitest";
 import { SessionManager } from "@/session-manager/manager";
-import type { CdpRunner } from "@/tools/shared";
+import { type CdpRunner, createStubCdpRunner } from "@/tools/shared";
 import { CooperationController } from "./controller";
 import { FrameCollectionError } from "./frame-error";
 import type { CooperationFrames, FrameState } from "./types";
@@ -68,10 +68,10 @@ async function fixture(
     return { frames: new Map([[0, structuredClone(frame)]]), gaps: [] };
   });
   const send = vi.fn(async () => ({}));
-  const cdp = {
-    send,
+  const cdp: CdpRunner = createStubCdpRunner({
+    send: send as CdpRunner["send"],
     runBrowserMutation: async <T>(op: () => Promise<T>) => op(),
-  } as unknown as CdpRunner;
+  });
   const controller = new CooperationController({
     sessions,
     readFrames: readFrames as never,

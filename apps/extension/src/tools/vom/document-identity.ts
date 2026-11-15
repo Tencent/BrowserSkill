@@ -1,4 +1,4 @@
-import { isStaleFrameHandleError } from "@/browser-driver/frame-graph";
+import { isStaleFrameHandleError } from "@/browser-driver/frame-handles";
 import { type CdpRunner, sendToFrameHandle } from "../shared";
 import { isCaptureTerminalError, throwIfAborted } from "./capture-abort";
 import type { DocumentIdentity } from "./facts";

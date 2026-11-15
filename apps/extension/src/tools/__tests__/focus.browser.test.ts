@@ -3,7 +3,7 @@
 import { describe, expect, it } from "vitest";
 import { SessionManager } from "@/session-manager/manager";
 import { handleBlur, handleFocus } from "../interaction";
-import type { CdpRunner } from "../shared";
+import { type CdpRunner, createStubCdpRunner } from "../shared";
 
 type Send = <T = Record<string, unknown>>(
   method: string,
@@ -61,14 +61,14 @@ async function withFocusBrowser(
       const ctx = await manager.start("aa11");
       const calls: string[] = [];
       const afterCommand = { current: (_method: string) => {} };
-      const cdp: CdpRunner = {
+      const cdp: CdpRunner = createStubCdpRunner({
         send: async (_tabId, method, params) => {
           calls.push(method);
           const result = await send(method, params, sessionId);
           afterCommand.current(method);
           return result as never;
         },
-      };
+      });
       const deps = {
         cdp,
         tabsApi: {

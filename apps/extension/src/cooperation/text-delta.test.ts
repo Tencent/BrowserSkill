@@ -200,4 +200,55 @@ describe("textDelta", () => {
     });
     expect(delta(after(grown), { ...held, maxTokens: 120 }, 120)).toBe("token_budget_shift");
   });
+
+  it("uses structured VomLineMetadata so placeholder attributes and landmark names containing 'canvas ' are classified accurately", () => {
+    const trickyVom = [
+      "@vom 1",
+      "@view 1280x720",
+      "@layers 1 focus=L1",
+      "L1 page",
+      '  RootWebArea "Studio"',
+      '    @e1 textbox placeholder="Version: rev-0"',
+      '    banner "Paint on canvas Version: rev-0"',
+      '      StaticText "Paint on canvas Version: rev-0"',
+    ].join("\n");
+    const trickyHeld: HeldText = { text: trickyVom, truncated: false };
+
+    // A landmark whose label happens to contain `canvas ` is NOT a `[visual:screenshot]` canvas line;
+    // structured VOM metadata patches both the landmark's derived name and its StaticText cleanly.
+    const res = delta(
+      after([text(1, "Paint on canvas Version: rev-0", "Paint on canvas Version: rev-1")]),
+      trickyHeld,
+    );
+    expect(res).toMatchObject({
+      lines: [
+        {
+          line: 7,
+          previous: '    banner "Paint on canvas Version: rev-0"',
+          text: '    banner "Paint on canvas Version: rev-1"',
+        },
+        {
+          line: 8,
+          previous: '      StaticText "Paint on canvas Version: rev-0"',
+          text: '      StaticText "Paint on canvas Version: rev-1"',
+        },
+      ],
+    });
+
+    // Meanwhile, an unnamed textbox with `placeholder="Version: rev-0"` has no quoted node name
+    // or StaticText line, so changing `"Version: rev-0"` refuses rather than mutating placeholder attributes.
+    expect(
+      delta(after([text(1, "Version: rev-0", "Version: rev-1")]), {
+        text: [
+          "@vom 1",
+          "@view 1280x720",
+          "@layers 1 focus=L1",
+          "L1 page",
+          '  RootWebArea "Studio"',
+          '    @e1 textbox placeholder="Version: rev-0"',
+        ].join("\n"),
+        truncated: false,
+      }),
+    ).toBe("text_ambiguous");
+  });
 });

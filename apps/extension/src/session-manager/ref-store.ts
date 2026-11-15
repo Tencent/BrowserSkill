@@ -1,4 +1,4 @@
-import type { FrameNodeHandle } from "@/browser-driver/frame-graph";
+import type { FrameNodeHandle } from "@/browser-driver/frame-handles";
 import type { VisualCandidate } from "@/tools/vom/visual-discovery";
 
 export type BackendNodeId = number;

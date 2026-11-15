@@ -47,40 +47,26 @@ export class RecordingObservationRuntime {
     // the original CDP connection, so cancellation cannot prevent detaching.
     this.#cdp = input.isTabAllowed
       ? delegateCdpRunner(input.cdp, {
-          send: async (tabId, method, params) => {
+          send: async (tabId, method, params, signal) => {
             check(tabId);
-            return input.cdp.send(tabId, method, params);
+            return input.cdp.send(tabId, method, params, signal);
           },
-          sendToTarget: input.cdp.sendToTarget
-            ? async (target, method, params) => {
-                check(target.tabId);
-                return input.cdp.sendToTarget!(target, method, params);
-              }
-            : undefined,
-          sendToFrame: input.cdp.sendToFrame
-            ? async (handle, method, params, options) => {
-                check(handle.tabId);
-                return input.cdp.sendToFrame!(handle, method, params, options);
-              }
-            : undefined,
-          getFrameGraph: input.cdp.getFrameGraph
-            ? async (tabId) => {
-                check(tabId);
-                return input.cdp.getFrameGraph!(tabId);
-              }
-            : undefined,
-          getMainFrameHandle: input.cdp.getMainFrameHandle
-            ? async (tabId) => {
-                check(tabId);
-                return input.cdp.getMainFrameHandle!(tabId);
-              }
-            : undefined,
-          ensureAttachedToUrl: input.cdp.ensureAttachedToUrl
-            ? async (tabId, url) => {
-                check(tabId);
-                return input.cdp.ensureAttachedToUrl!(tabId, url);
-              }
-            : undefined,
+          sendToFrame: async (handle, method, params, options) => {
+            check(handle.tabId);
+            return input.cdp.sendToFrame(handle, method, params, options);
+          },
+          getFrameDocuments: async (tabId, signal) => {
+            check(tabId);
+            return input.cdp.getFrameDocuments(tabId, signal);
+          },
+          getMainFrameHandle: async (tabId, signal) => {
+            check(tabId);
+            return input.cdp.getMainFrameHandle(tabId, signal);
+          },
+          ensureAttachedToUrl: async (tabId, url) => {
+            check(tabId);
+            return input.cdp.ensureAttachedToUrl(tabId, url);
+          },
         })
       : input.cdp;
     this.#tabsApi = input.tabsApi;

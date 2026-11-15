@@ -1,4 +1,4 @@
-import type { CdpDebuggee } from "@/browser-driver/chromium-cdp";
+import { rootEventSource, type TabEventSource } from "@/browser-driver/frame-handles";
 import {
   editRequest,
   type LiveRequest,
@@ -22,7 +22,7 @@ import type {
   DebugRuleSpec,
 } from "./types";
 
-type Target = CdpDebuggee & { tabId: number };
+type Target = TabEventSource;
 interface Rule {
   spec?: DebugRuleSpec;
   public: DebugRule;
@@ -153,14 +153,14 @@ export class DebugNetworkControl {
   }
   async target(target: Target): Promise<void> {
     if (!this.alive) return;
-    this.targets.set(target.sessionId ?? "root", target);
+    this.targets.set(target.targetKey, target);
     if (this.rules.size) await this.refresh();
   }
-  detach(sessionId: string): void {
-    this.targets.delete(sessionId);
-    this.configured.delete(sessionId);
+  detach(targetKey: string): void {
+    this.targets.delete(targetKey);
+    this.configured.delete(targetKey);
     for (const item of this.pending.values())
-      if (item.target.sessionId === sessionId) item.abort.abort();
+      if (item.target.targetKey === targetKey) item.abort.abort();
   }
   async add(input: DebugRuleSpec, signal?: AbortSignal): Promise<void> {
     this.assertActive();
@@ -274,7 +274,7 @@ export class DebugNetworkControl {
               if (patterns.length && this.alive && this.allowed()) {
                 this.configured.add(key);
                 await bounded(
-                  this.cdp.sendAttached(target, "Fetch.enable", {
+                  this.cdp.sendToEventSource(target, "Fetch.enable", {
                     patterns,
                     handleAuthRequests: false,
                   }),
@@ -283,10 +283,10 @@ export class DebugNetworkControl {
                 // Drain already-paused requests before disabling the domain.
                 await Promise.allSettled(
                   [...this.pending.values()]
-                    .filter((item) => (item.target.sessionId ?? "root") === key)
+                    .filter((item) => item.target.targetKey === key)
                     .map((item) => item.done),
                 );
-                await bounded(this.cdp.sendAttached(target, "Fetch.disable"));
+                await bounded(this.cdp.sendToEventSource(target, "Fetch.disable"));
                 this.configured.delete(key);
               }
             } catch (error) {
@@ -301,7 +301,7 @@ export class DebugNetworkControl {
     return work;
   }
   onEvent(source: Target, method: string, raw: unknown): void {
-    if (source.tabId !== this.tabId || !this.targets.has(source.sessionId ?? "root")) return;
+    if (source.tabId !== this.tabId || !this.targets.has(source.targetKey)) return;
     if (method === "Network.requestWillBeSent") {
       const event = raw as {
         requestId?: string;
@@ -327,11 +327,11 @@ export class DebugNetworkControl {
     if (method !== "Fetch.requestPaused") return;
     const event = raw as Paused;
     if (!event?.requestId || !event.request) return;
-    const key = `${source.sessionId ?? "root"}:${event.requestId}`;
+    const key = `${source.targetKey}:${event.requestId}`;
     if (this.pending.has(key)) return;
     if (!this.alive || !this.allowed()) {
       void bounded(
-        this.cdp.sendAttached(source, "Fetch.failRequest", {
+        this.cdp.sendToEventSource(source, "Fetch.failRequest", {
           requestId: event.requestId,
           errorReason: "Aborted",
         }),
@@ -350,10 +350,10 @@ export class DebugNetworkControl {
     );
     if (!rule?.spec) {
       void bounded(
-        this.cdp.sendAttached(source, "Fetch.continueRequest", { requestId: event.requestId }),
+        this.cdp.sendToEventSource(source, "Fetch.continueRequest", { requestId: event.requestId }),
       ).catch(() =>
         bounded(
-          this.cdp.sendAttached(source, "Fetch.failRequest", {
+          this.cdp.sendToEventSource(source, "Fetch.failRequest", {
             requestId: event.requestId,
             errorReason: "Aborted",
           }),
@@ -402,7 +402,7 @@ export class DebugNetworkControl {
       if (effect.type === "block") {
         annotate();
         await bounded(
-          this.cdp.sendAttached(target, "Fetch.failRequest", {
+          this.cdp.sendToEventSource(target, "Fetch.failRequest", {
             requestId: event.requestId,
             errorReason: "BlockedByClient",
           }),
@@ -422,7 +422,7 @@ export class DebugNetworkControl {
           .map((value) => redactText(value, 160));
         annotate({ effective });
         await bounded(
-          this.cdp.sendAttached(target, "Fetch.continueRequest", {
+          this.cdp.sendToEventSource(target, "Fetch.continueRequest", {
             requestId: event.requestId,
             ...(effect.url === undefined ? {} : { url: effective.url }),
             ...(effect.method === undefined ? {} : { method: effective.method }),
@@ -449,7 +449,7 @@ export class DebugNetworkControl {
         const responseBody = event.request.method === "HEAD" ? "" : effect.body;
         annotate({ mock: { status: effect.status, headers, body: responseBody } });
         await bounded(
-          this.cdp.sendAttached(target, "Fetch.fulfillRequest", {
+          this.cdp.sendToEventSource(target, "Fetch.fulfillRequest", {
             requestId: event.requestId,
             responseCode: effect.status,
             responseHeaders: Object.entries(headers).map(([name, value]) => ({ name, value })),
@@ -468,7 +468,7 @@ export class DebugNetworkControl {
       rule.public.last_error = mark.error;
       annotate();
       await bounded(
-        this.cdp.sendAttached(target, "Fetch.failRequest", {
+        this.cdp.sendToEventSource(target, "Fetch.failRequest", {
           requestId: event.requestId,
           errorReason: "Aborted",
         }),
@@ -513,7 +513,7 @@ export class DebugNetworkControl {
       result.error = "replay cancelled; the request may have been sent";
       if (record.context !== undefined)
         void bounded(
-          this.cdp.sendAttached({ tabId: this.tabId }, "Runtime.evaluate", {
+          this.cdp.sendToEventSource(rootEventSource(this.tabId), "Runtime.evaluate", {
             contextId: record.context,
             expression: `globalThis[${JSON.stringify(result.id)}]?.abort()`,
           }),
@@ -528,15 +528,15 @@ export class DebugNetworkControl {
     record.promise = (async () => {
       try {
         const { frameTree } = await bounded(
-          this.cdp.sendAttached<{ frameTree: { frame: { id: string } } }>(
-            { tabId: this.tabId },
+          this.cdp.sendToEventSource<{ frameTree: { frame: { id: string } } }>(
+            rootEventSource(this.tabId),
             "Page.getFrameTree",
           ),
         );
         check();
         const { executionContextId } = await bounded(
-          this.cdp.sendAttached<{ executionContextId: number }>(
-            { tabId: this.tabId },
+          this.cdp.sendToEventSource<{ executionContextId: number }>(
+            rootEventSource(this.tabId),
             "Page.createIsolatedWorld",
             { frameId: frameTree.frame.id, worldName: `bsk-network-${this.runId}` },
           ),
@@ -555,8 +555,8 @@ export class DebugNetworkControl {
         // origin check executes in that same context, closing a navigation race.
         const expression = `(${replayInPage.toString()})(${JSON.stringify({ origin: new URL(pageUrl).origin, id: result.id, url: request.url, options })})\n//# sourceURL=bsk-replay://${result.id}`;
         const response = await bounded(
-          this.cdp.sendAttached<{ exceptionDetails?: unknown }>(
-            { tabId: this.tabId },
+          this.cdp.sendToEventSource<{ exceptionDetails?: unknown }>(
+            rootEventSource(this.tabId),
             "Runtime.evaluate",
             { expression, contextId: executionContextId, awaitPromise: true, returnByValue: true },
           ),
@@ -596,7 +596,7 @@ export class DebugNetworkControl {
       if (context !== undefined)
         aborts.push(
           bounded(
-            this.cdp.sendAttached({ tabId: this.tabId }, "Runtime.evaluate", {
+            this.cdp.sendToEventSource(rootEventSource(this.tabId), "Runtime.evaluate", {
               contextId: context,
               expression: `globalThis[${JSON.stringify(result.id)}]?.abort()`,
             }),
@@ -611,7 +611,7 @@ export class DebugNetworkControl {
       } catch (error) {
         // A broken Fetch domain must not outlive the capture and freeze the tab.
         // Detach only as a cleanup fallback; normal stop preserves shared domains.
-        if (this.cdp.detach) await bounded(this.cdp.detach(this.tabId)).catch(() => {});
+        await bounded(this.cdp.detach(this.tabId)).catch(() => {});
         throw error;
       }
     })();

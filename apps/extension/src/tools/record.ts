@@ -58,6 +58,9 @@ import {
 
 interface ActiveRecording {
   requestId: string;
+  deps: RecordDeps;
+  armedTabIds: Set<number>;
+  bypassedTabIds: Set<number>;
   tabs: RecordingTabCoordinator;
   agentWindowId: number;
   isTabAllowed: (tabId: number) => boolean;
@@ -500,6 +503,9 @@ async function clearRearmTimersForRecording(
   deps: RecordDeps,
 ): Promise<void> {
   clearRearmTimer(recording.tabs.currentTabId);
+  for (const tabId of recording.armedTabIds) {
+    clearRearmTimer(tabId);
+  }
   try {
     const tabs = await deps.tabsApi.query({ windowId: recording.agentWindowId });
     for (const tab of tabs) {
@@ -518,21 +524,22 @@ async function stopRecordingOnAllAgentTabs(
     throw new Error("one or more recording documents did not confirm their final steps");
   }
   const stopMsg: RecordStopMessage = { type: RECORD_STOP, requestId: recording.requestId };
-  let tabIds = [recording.tabs.currentTabId];
+  let tabIds = [...new Set([recording.tabs.currentTabId, ...recording.armedTabIds])];
   try {
     const tabs = await deps.tabsApi.query({ windowId: recording.agentWindowId });
     tabIds = [
       ...new Set([
-        recording.tabs.currentTabId,
+        ...tabIds,
         ...tabs.flatMap((tab) => (typeof tab.id === "number" ? [tab.id] : [])),
       ]),
     ];
   } catch {
-    // Fall back to the current recording tab.
+    // Fall back to the known recording tabs.
   }
 
   for (const tabId of tabIds) {
-    if (!recording.isTabAllowed(tabId)) continue;
+    const wasArmed = recording.armedTabIds.delete(tabId);
+    if (!wasArmed && !recording.isTabAllowed(tabId)) continue;
     // RECORD_STOP only clears the tab's record overlay; captured steps are
     // flushed by the frame coordinator above. Tabs the overlay script cannot
     // enter (blob:, the PDF viewer, browser pages) have nothing to clear.
@@ -541,7 +548,19 @@ async function stopRecordingOnAllAgentTabs(
     } catch {
       // Best-effort cleanup.
     }
-    if (deps.bypassOverlay) {
+    if (deps.bypassOverlay && recording.bypassedTabIds.delete(tabId)) {
+      try {
+        await deps.bypassOverlay(tabId, false);
+      } catch {
+        // Best-effort cleanup.
+      }
+    }
+  }
+
+  if (deps.bypassOverlay && recording.bypassedTabIds.size > 0) {
+    const remainingBypassed = [...recording.bypassedTabIds];
+    recording.bypassedTabIds.clear();
+    for (const tabId of remainingBypassed) {
       try {
         await deps.bypassOverlay(tabId, false);
       } catch {
@@ -574,6 +593,7 @@ async function rearmRecording(
         const frameStarted = await deps.frameCoordinator.armTab(recording.requestId, targetTabId);
         if (!frameStarted) throw new Error("recording document did not start");
       }
+      recording.armedTabIds.add(targetTabId);
       await sendRecordStartWithAck(targetTabId, startMsg, deps.sendToTab, isFinishing);
       if (isFinishing()) return false;
       if (activation) {
@@ -899,8 +919,14 @@ export async function handleRecordStart(
   const sessionCdp = deps.cdp
     ? sessionCdpRunner(deps.cdp, params.session_id, () => manager.get(ctx.sessionId) === ctx)
     : undefined;
+  const recordingDeps: RecordDeps = { ...deps, signal: undefined };
+  const armedTabIds = new Set<number>();
+  const bypassedTabIds = new Set<number>();
   recordings.set(params.session_id, {
     requestId,
+    deps: recordingDeps,
+    armedTabIds,
+    bypassedTabIds,
     tabs: new RecordingTabCoordinator(target.tabId, navigateUrl),
     agentWindowId: ctx.agentWindowId,
     isTabAllowed,
@@ -957,6 +983,7 @@ export async function handleRecordStart(
     releaseBrowserObservationListenersIfIdle();
     await notifyActiveRecordingsChanged();
     if (notifyContent) {
+      armedTabIds.delete(target.tabId);
       try {
         await deps.sendToTab(target.tabId, {
           type: RECORD_CANCEL,
@@ -966,7 +993,7 @@ export async function handleRecordStart(
         // Content may never have received RECORD_START.
       }
     }
-    if (deps.bypassOverlay) {
+    if (deps.bypassOverlay && bypassedTabIds.delete(target.tabId)) {
       try {
         await deps.bypassOverlay(target.tabId, false);
       } catch {
@@ -1053,11 +1080,13 @@ export async function handleRecordStart(
   }
 
   if (deps.bypassOverlay) {
+    bypassedTabIds.add(target.tabId);
     try {
       // Single ref for the initial race before RecordOverlay mounts; rearm must
       // not stack additional refs (see rearmRecording). Cleared on stop.
       await deps.bypassOverlay(target.tabId, true);
     } catch {
+      bypassedTabIds.delete(target.tabId);
       // Best-effort; activeRecord also hides the control overlay.
     }
   }
@@ -1074,6 +1103,7 @@ export async function handleRecordStart(
       const frameStarted = await deps.frameCoordinator.armTab(requestId, target.tabId);
       if (!frameStarted) throw new Error("top recording document did not start");
     }
+    armedTabIds.add(target.tabId);
     await sendRecordStartWithAck(target.tabId, startMsg, deps.sendToTab);
   } catch {
     await abortPending(true);
@@ -1185,16 +1215,25 @@ export async function handleRecordAwait(
   return "trace" in outcome ? { trace: outcome.trace } : outcome.error;
 }
 
-export function clearRecordingForSession(sessionId: string): void {
+export function clearRecordingForSession(
+  sessionId: string,
+  overrideDeps?: Partial<RecordDeps>,
+): void {
   const recording = recordings.get(sessionId);
   if (!recording) {
     recordings.delete(sessionId);
     releaseBrowserObservationListenersIfIdle();
     return;
   }
-  void clearRearmTimersForRecording(recording, getDefaultDeps());
+  const effectiveDeps: RecordDeps = overrideDeps
+    ? { ...recording.deps, ...overrideDeps }
+    : recording.deps;
+  clearRearmTimer(recording.tabs.currentTabId);
+  for (const tabId of recording.armedTabIds) {
+    clearRearmTimer(tabId);
+  }
   if (!recording.settled) {
-    getDefaultDeps().frameCoordinator?.cancel(recording.requestId);
+    effectiveDeps.frameCoordinator?.cancel(recording.requestId);
     recording.observation?.cancel();
     recording.settled = true;
     recording.rejectFinish(new Error("recording cleared"));
@@ -1202,6 +1241,42 @@ export function clearRecordingForSession(sessionId: string): void {
   recordings.delete(sessionId);
   releaseBrowserObservationListenersIfIdle();
   void notifyActiveRecordingsChanged();
+
+  const cancelMsg: RecordCancelMessage = {
+    type: RECORD_CANCEL,
+    requestId: recording.requestId,
+  };
+  const immediateCancelTabs = new Set<number>([
+    recording.tabs.currentTabId,
+    ...recording.armedTabIds,
+  ]);
+  recording.armedTabIds.clear();
+  for (const tabId of immediateCancelTabs) {
+    void effectiveDeps.sendToTab(tabId, cancelMsg).catch(() => {});
+  }
+
+  if (effectiveDeps.bypassOverlay && recording.bypassedTabIds.size > 0) {
+    const bypassed = [...recording.bypassedTabIds];
+    recording.bypassedTabIds.clear();
+    for (const tabId of bypassed) {
+      void effectiveDeps.bypassOverlay(tabId, false).catch(() => {});
+    }
+  }
+
+  void (async () => {
+    try {
+      const tabs = await effectiveDeps.tabsApi.query({ windowId: recording.agentWindowId });
+      for (const tab of tabs) {
+        if (typeof tab.id !== "number") continue;
+        clearRearmTimer(tab.id);
+        if (!immediateCancelTabs.has(tab.id) && recording.isTabAllowed(tab.id)) {
+          void effectiveDeps.sendToTab(tab.id, cancelMsg).catch(() => {});
+        }
+      }
+    } catch {
+      // Best-effort cleanup.
+    }
+  })();
 }
 
 export type { RecordFinishMessage };

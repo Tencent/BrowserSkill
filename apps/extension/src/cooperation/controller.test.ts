@@ -1,16 +1,22 @@
 import type { VomNode, VomScene } from "@browser-skill/vom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
-  type CdpDebuggee,
   type CdpDebuggerApi,
   ChromiumCdp,
   DEFAULT_IDLE_DETACH_MS,
 } from "@/browser-driver/chromium-cdp";
+import { toRootFrameHandle } from "@/browser-driver/frame-handles";
 import { SessionManager } from "@/session-manager/manager";
 import { handleEmulate } from "@/tools/emulate";
 import { resolveActionTarget } from "@/tools/interaction";
 import { captureVomObservation, handleSnapshot } from "@/tools/observation";
-import { type CdpRunner, sessionCdpRunner } from "@/tools/shared";
+import {
+  type CdpRunner,
+  createStubCdpRunner,
+  sessionCdpRunner,
+  withObjectGroup,
+  withRemoteObject,
+} from "@/tools/shared";
 import { handleTabBorrow, handleTabCreate, handleTabReturn, handleTabSelect } from "@/tools/tabs";
 import { validateToolResult } from "@/transport/protocol";
 import { CooperationController } from "./controller";
@@ -72,16 +78,16 @@ async function fixture(options: { url?: string; sync?: boolean } = {}) {
     pendingUrl: undefined as string | undefined,
   };
   vi.stubGlobal("chrome", { tabs: { get: async () => tab, query: async () => [tab] } });
-  const native = vi.fn(async () => ({}));
+  const native = vi.fn(async (): Promise<any> => ({}));
   let beforeDispatch: (() => Promise<void>) | undefined;
-  const cdp = {
-    send: native,
-    sendGuarded: async (_target, _method, _params, guard) => {
+  const cdp: CdpRunner = createStubCdpRunner({
+    send: native as CdpRunner["send"],
+    sendToFrame: async (_handle, _method, _params, guard) => {
       await beforeDispatch?.();
-      guard.onDispatch?.();
+      guard?.onDispatch?.();
       return native();
     },
-  } as CdpRunner;
+  });
   const readFrames = vi.fn(
     async (): Promise<CooperationFrames> => ({
       frames: new Map([[0, structuredClone(frame)]]),
@@ -3752,14 +3758,13 @@ describe("tool.record_start cooperation guard", () => {
 
   it("remaps unchanged OOPIF @eN sessions across idle soft-detach and refreshes sync snapshot when an OOPIF changes or disappears", async () => {
     vi.useFakeTimers();
-    const listeners = new Set<(source: CdpDebuggee, method: string, params: unknown) => void>();
+    type DebuggeeEvent = Parameters<CdpDebuggerApi["onEvent"]["addListener"]>[0];
+    const listeners = new Set<DebuggeeEvent>();
     const onEvent = {
-      addListener: (cb: (source: CdpDebuggee, method: string, params: unknown) => void) =>
-        listeners.add(cb),
-      removeListener: (cb: (source: CdpDebuggee, method: string, params: unknown) => void) =>
-        listeners.delete(cb),
-      fire: (source: CdpDebuggee, method: string, params: unknown) => {
-        for (const cb of listeners) cb(source, method, params);
+      addListener: (cb: DebuggeeEvent) => listeners.add(cb),
+      removeListener: (cb: DebuggeeEvent) => listeners.delete(cb),
+      fire: (...args: Parameters<DebuggeeEvent>) => {
+        for (const cb of listeners) cb(...args);
       },
     };
     const detachListeners = new Set<(source: chrome.debugger.Debuggee, reason: string) => void>();
@@ -3950,7 +3955,7 @@ describe("tool.record_start cooperation guard", () => {
       truncated: false,
     }));
 
-    // 1. Strict policy: `fixture()` syncs under `strict` policy; fail AFTER `beginDomMutation` / `sendGuarded`.
+    // 1. Strict policy: `fixture()` syncs under `strict` policy; fail AFTER `beginDomMutation` / guarded `sendToFrame`.
     const f = await fixture();
     expect(f.first.control_policy).toBe("strict");
 
@@ -3970,8 +3975,8 @@ describe("tool.record_start cooperation guard", () => {
         f.cdp,
         f.abort.signal,
         async (runner) => {
-          await runner.sendGuarded?.(
-            { tabId: 7 },
+          await runner.sendToFrame(
+            toRootFrameHandle(7),
             "Input.insertText",
             { text: "secret" },
             { signal: f.abort.signal },
@@ -4107,5 +4112,37 @@ describe("tool.record_start cooperation guard", () => {
       message: "Shared-tab control has ended",
       data: { effect_state: "none" },
     });
+  });
+
+  it("preserves pre-dispatch cooperation rejections inside withObjectGroup and withRemoteObject when no tab resources were owned yet", async () => {
+    const f = await fixture();
+    f.change({ human: 1, lastInput: 10000 });
+    const groupOutcome = await f.act(f.first.context_id, async (cdp) =>
+      withObjectGroup(cdp, toRootFrameHandle(7), "pre-dispatch", async (objectGroup) =>
+        cdp.send(7, "Runtime.callFunctionOn", {
+          objectId: "never-dispatched",
+          objectGroup,
+          functionDeclaration: "function() {}",
+        }),
+      ),
+    );
+    expect(groupOutcome).toMatchObject({
+      code: "permission_denied",
+      data: { reason: "cooperation_sync_required", effect_state: "none" },
+    });
+
+    const remoteOutcome = await f.act(f.first.context_id, async (cdp) =>
+      withRemoteObject(cdp, toRootFrameHandle(7), "never-owned-obj", async (objectId) =>
+        cdp.send(7, "Runtime.callFunctionOn", {
+          objectId,
+          functionDeclaration: "function() {}",
+        }),
+      ),
+    );
+    expect(remoteOutcome).toMatchObject({
+      code: "permission_denied",
+      data: { reason: "cooperation_sync_required", effect_state: "none" },
+    });
+    expect(f.native).not.toHaveBeenCalled();
   });
 });

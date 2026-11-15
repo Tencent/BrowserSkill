@@ -4,7 +4,7 @@
 import { writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { describe, expect, it, vi } from "vitest";
-import { type CdpDebuggee, type CdpDebuggerApi, ChromiumCdp } from "@/browser-driver/chromium-cdp";
+import { type CdpDebuggerApi, ChromiumCdp } from "@/browser-driver/chromium-cdp";
 import { SessionManager } from "@/session-manager/manager";
 import { DebugManager } from "../manager";
 import type { DebugRuleSpec } from "../types";
@@ -15,7 +15,7 @@ type Send = <T = Record<string, unknown>>(
   sessionId?: string,
 ) => Promise<T>;
 type Event = { sessionId?: string; method: string; params?: Record<string, unknown> };
-type Listener = (source: CdpDebuggee, method: string, params: unknown) => void;
+type Listener = Parameters<CdpDebuggerApi["onEvent"]["addListener"]>[0];
 describe.skipIf(!process.env.BSK_TEST_CHROME)("real browser network controls", () => {
   it("modifies actual traffic, mocks/blocks without server hits, links replay once and cleans up pending rules", async () => {
     const hits: { url: string; body: string; header?: string }[] = [];

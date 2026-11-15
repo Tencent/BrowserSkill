@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { rootEventSource, type TabEventSource } from "@/browser-driver/frame-handles";
 import { SessionManager } from "@/session-manager/manager";
-import type { CdpRunner } from "@/tools/shared";
+import { type CdpRunner, createStubCdpRunner } from "@/tools/shared";
 import { handleWaitForElement, handleWaitForNavigation, satisfiesState } from "../waits";
 
 function fakeAgentWindow(ids: number[]) {
@@ -17,7 +18,7 @@ function fakeAgentWindow(ids: number[]) {
 }
 
 interface EventListener {
-  (source: chrome.debugger.Debuggee, method: string, params: unknown): void;
+  (source: TabEventSource, method: string, params: unknown): void;
 }
 
 function makeFakeCdp(
@@ -57,7 +58,7 @@ function makeFakeCdp(
     throw new Error(`unexpected CDP call ${method}`);
   };
   const send = vi.fn(sendImpl);
-  const cdp: CdpRunner = {
+  const cdp: CdpRunner = createStubCdpRunner({
     send: send as unknown as <T = unknown>(
       tabId: number,
       method: string,
@@ -73,7 +74,7 @@ function makeFakeCdp(
         },
       };
     }),
-  };
+  });
   const windowId = opts.windowId ?? 100;
   const tabsApi = {
     get: vi.fn(async (tabId: number) => ({ id: tabId, windowId, active: true }) as chrome.tabs.Tab),
@@ -90,10 +91,11 @@ function makeFakeCdp(
       loaderId = "loader-1",
     ) {
       const payload = { name, frameId, loaderId };
-      for (const listener of [...events]) listener({ tabId }, "Page.lifecycleEvent", payload);
+      for (const listener of [...events])
+        listener(rootEventSource(tabId), "Page.lifecycleEvent", payload);
     },
     fire(method: string, params: unknown, tabId = 4) {
-      for (const listener of [...events]) listener({ tabId }, method, params);
+      for (const listener of [...events]) listener(rootEventSource(tabId), method, params);
     },
     /** Simulate the browser committing a new main document. */
     commit(loaderId: string, readyState: string, type = "Navigation") {
@@ -101,7 +103,7 @@ function makeFakeCdp(
       opts.readyState = readyState;
       const frame = { id: opts.mainFrameId ?? "frame-1", loaderId };
       for (const listener of [...events])
-        listener({ tabId: 4 }, "Page.frameNavigated", { frame, type });
+        listener(rootEventSource(4), "Page.frameNavigated", { frame, type });
     },
     listeners: events,
   };
@@ -995,9 +997,9 @@ describe("wait-for-element regression coverage", () => {
     const manager = await sessionWithRef();
     const fake = makeFakeCdp();
     const dispatched = vi.fn();
-    fake.cdp.sendGuarded = async (_target, _method, _params, guard) => {
+    fake.cdp.sendToFrame = async (_handle, _method, _params, guard) => {
       await new Promise((resolve) => setTimeout(resolve, 500));
-      guard.onDispatch?.();
+      guard?.onDispatch?.();
       dispatched();
       return {} as never;
     };

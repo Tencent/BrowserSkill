@@ -3,7 +3,7 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { SessionManager } from "@/session-manager/manager";
 import { handleSelect } from "../interaction";
-import type { CdpRunner } from "../shared";
+import { type CdpRunner, createStubCdpRunner } from "../shared";
 
 type Send = <T = Record<string, unknown>>(
   method: string,
@@ -105,9 +105,9 @@ describe.skipIf(!process.env.BSK_TEST_CHROME)("select disabled state in Chrome",
         },
       });
       await manager.start("aa11");
-      const cdp: CdpRunner = {
+      const cdp: CdpRunner = createStubCdpRunner({
         send: async (_tabId, method, params) => send(method, params, sessionId) as never,
-      };
+      });
       const result = await handleSelect(
         manager,
         {

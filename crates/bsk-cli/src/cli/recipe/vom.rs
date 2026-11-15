@@ -331,9 +331,20 @@ mod tests {
 
     #[test]
     fn a_menu_is_the_same_control_whether_or_not_it_is_open() {
-        let closed = parse("@vom 1\n  @e1 combobox \"Region [has-submenu]\"");
-        let open = parse("@vom 1\n  @e1 combobox \"Region [expanded]\"");
-        for page in [closed, open] {
+        let closed = parse("@vom 1\n  @e1 combobox \"Region\" [has-submenu]");
+        let open = parse("@vom 1\n  @e1 combobox \"Region\" [expanded]");
+        let custom_closed = parse("@vom 1\n  @e1 combobox \"Region\" [custom-dropdown: click to open]");
+        let custom_open = parse("@vom 1\n  @e1 combobox \"Region\" [custom-dropdown: expanded]");
+        let legacy_closed = parse("@vom 1\n  @e1 combobox \"Region [has-submenu]\"");
+        let legacy_open = parse("@vom 1\n  @e1 combobox \"Region [expanded]\"");
+        for page in [
+            closed,
+            open,
+            custom_closed,
+            custom_open,
+            legacy_closed,
+            legacy_open,
+        ] {
             assert_eq!(
                 page.candidates(&target("combobox", "Region", None)).len(),
                 1

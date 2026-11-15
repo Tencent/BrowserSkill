@@ -2528,5 +2528,121 @@ describe("selection evidence", () => {
         { ref: "e2", backendNodeId: 399 },
       ]);
     });
+
+    it("budgets the L2 occlusion footer line in renderDoubleLayer, preserves generic Chinese headings, and renders popup tags without duplication", () => {
+      // 1. Two-layer modal scene: maxTokens budget includes the `L2 page — occluded by L1` footer.
+      const modalNodes: VomNode[] = [
+        node({ id: 1, tag: "main", role: "main", rect: { x: 0, y: 0, w: 1280, h: 720 } }),
+        ...Array.from({ length: 12 }, (_, idx) =>
+          node({
+            id: 10 + idx,
+            parentId: 1,
+            backendNodeId: 100 + idx,
+            tag: "button",
+            role: "button",
+            name: `Background action item ${idx + 1}`,
+            rect: { x: 10, y: idx * 40, w: 200, h: 32 },
+          }),
+        ),
+        node({
+          id: 50,
+          tag: "div",
+          role: "dialog",
+          name: "Confirm action",
+          modal: true,
+          position: "fixed",
+          paintOrder: 10,
+          rect: { x: 200, y: 100, w: 600, h: 400 },
+        }),
+        ...Array.from({ length: 8 }, (_, idx) =>
+          node({
+            id: 60 + idx,
+            parentId: 50,
+            backendNodeId: 200 + idx,
+            tag: "button",
+            role: "button",
+            name: `Modal option button ${idx + 1} with detailed description`,
+            paintOrder: 10,
+            rect: { x: 220, y: 120 + idx * 36, w: 300, h: 30 },
+          }),
+        ),
+      ];
+      for (const budget of [45, 65, 90, 120]) {
+        const out = renderVom(scene(modalNodes), { maxTokens: budget });
+        // Estimate matches render.ts estimateVomTokens (~chars / 3.5 per line); ensure L2 footer never pushes output unboundedly past budget.
+        const bodyLines = out.text.split("\n").filter((line) => !line.startsWith("[truncated:"));
+        const approxTokens = bodyLines.reduce(
+          (sum, line) => sum + Math.max(1, Math.ceil((line.length + 1) / 3.5)),
+          0,
+        );
+        expect(approxTokens).toBeLessThanOrEqual(budget);
+      }
+
+      // 2. Generic Chinese headings ("欢迎", "联系方式") are preserved as section context rather than suppressed by benchmark filters.
+      const headingScene = scene([
+        node({ id: 1, tag: "section", role: "region" }),
+        node({ id: 2, parentId: 1, tag: "h2", role: "heading", name: "欢迎" }),
+        node({
+          id: 3,
+          parentId: 1,
+          backendNodeId: 11,
+          tag: "button",
+          role: "button",
+          name: "详情",
+        }),
+        node({ id: 4, tag: "section", role: "region" }),
+        node({ id: 5, parentId: 4, tag: "h2", role: "heading", name: "联系方式" }),
+        node({
+          id: 6,
+          parentId: 4,
+          backendNodeId: 12,
+          tag: "button",
+          role: "button",
+          name: "详情",
+        }),
+      ]);
+      const headingOut = renderVom(headingScene);
+      expect(headingOut.text).toContain("[ctx: 欢迎]");
+      expect(headingOut.text).toContain("[ctx: 联系方式]");
+
+      // 3. Popup state tags: custom combobox gets `[custom-dropdown: expanded]` without `[expanded]` inside quotes;
+      //    popup buttons/menuitems emit post-quote `[expanded]` / `[has-submenu]`.
+      const popupOut = renderVom(
+        scene([
+          node({
+            id: 1,
+            backendNodeId: 21,
+            tag: "div",
+            role: "combobox",
+            name: "Filter",
+            expanded: true,
+            hasPopup: "listbox",
+            attrs: { "aria-expanded": "true", "aria-haspopup": "listbox" },
+          }),
+          node({
+            id: 2,
+            backendNodeId: 22,
+            tag: "button",
+            role: "button",
+            name: "Products",
+            expanded: true,
+            hasPopup: "menu",
+          }),
+          node({
+            id: 3,
+            backendNodeId: 23,
+            tag: "div",
+            role: "menuitem",
+            name: "Export",
+            expanded: false,
+            hasPopup: "menu",
+          }),
+        ]),
+      );
+      expect(popupOut.text).toContain('@e1 combobox "Filter" [custom-dropdown: expanded]');
+      expect(popupOut.text).not.toContain('"Filter [expanded]"');
+      expect(popupOut.text).toContain('@e2 button "Products" [expanded]');
+      expect(popupOut.text).toContain('@e3 menuitem "Export" [has-submenu]');
+    });
   });
 });

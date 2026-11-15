@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { RECORD_PASSWORD_ATTRIBUTE } from "@/lib/sensitive-autocomplete";
 import { SessionManager } from "@/session-manager/manager";
-import type { CdpRunner } from "@/tools/shared";
+import { type CdpRunner, createStubCdpRunner } from "@/tools/shared";
 import { handleFill } from "../interaction";
 
 interface ScriptParams {
@@ -135,7 +135,7 @@ async function setup(markup = '<input value="old">') {
         manager,
         { session_id: "aa11", ref: "e1", value, clear_before: clearBefore },
         {
-          cdp: { send: send as CdpRunner["send"] },
+          cdp: createStubCdpRunner({ send: send as CdpRunner["send"] }),
           tabsApi: {
             get: async (id) => ({ id, windowId: 100, active: true }) as chrome.tabs.Tab,
             query: async () => [{ id: 4, windowId: 100, active: true } as chrome.tabs.Tab],
@@ -421,7 +421,7 @@ describe("fill result verification", () => {
       manager,
       { session_id: "aa11", ref: "e1", value: "2026-10-14", clear_before: true },
       {
-        cdp: { send: send as CdpRunner["send"] },
+        cdp: createStubCdpRunner({ send: send as CdpRunner["send"] }),
         tabsApi: {
           get: async (id) => ({ id, windowId: 100, active: true }) as chrome.tabs.Tab,
           query: async () => [{ id: 4, windowId: 100, active: true } as chrome.tabs.Tab],

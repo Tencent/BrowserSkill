@@ -1,5 +1,9 @@
-import type { VomNode, VomSelectOption } from "@browser-skill/vom";
-import { RECORD_PASSWORD_ATTRIBUTE, sensitiveAutocomplete } from "@/lib/sensitive-autocomplete";
+import { VOM_DERIVED_NAME_CAP, type VomNode, type VomSelectOption } from "@browser-skill/vom";
+import {
+  INTERACTIVE_ARIA_ROLES,
+  RECORD_PASSWORD_ATTRIBUTE,
+  sensitiveAutocomplete,
+} from "@/lib/dom-predicates";
 import type { NodeFacts } from "../facts";
 import {
   MAX_ROW_ANCHOR_CHARS,
@@ -27,25 +31,7 @@ import { frameBackendKey } from "./types";
 const FORM_TAGS = new Set(["input", "textarea", "select"]);
 const NATIVE_CONTROL_TAGS = new Set(["button", "input", "select", "textarea"]);
 const TEXT_AX_ROLES = new Set(["statictext", "inlinetextbox", "labeltext", "text"]);
-const INTERACTIVE_ROLES = new Set([
-  "button",
-  "checkbox",
-  "combobox",
-  "link",
-  "listbox",
-  "menuitem",
-  "menuitemcheckbox",
-  "menuitemradio",
-  "option",
-  "radio",
-  "searchbox",
-  "slider",
-  "spinbutton",
-  "switch",
-  "tab",
-  "textbox",
-  "treeitem",
-]);
+const INTERACTIVE_ROLES = INTERACTIVE_ARIA_ROLES;
 const SENSITIVE_INPUT_TYPES = new Set([
   "password",
   "credit-card",
@@ -354,10 +340,11 @@ function buildIndexes(graph: SemanticGraph): ResolveIndexes {
         joinedLength += (parts.length > 0 ? 1 : 0) + childText.length;
         parts.push(childText);
       }
-      if (joinedLength >= 240) break;
+      if (joinedLength >= VOM_DERIVED_NAME_CAP) break;
     }
     resolvingText.delete(nodeId);
-    const result = parts.length === 0 ? undefined : clean(parts.join(" ").slice(0, 240));
+    const result =
+      parts.length === 0 ? undefined : clean(parts.join(" ").slice(0, VOM_DERIVED_NAME_CAP));
     textMemo.set(nodeId, result);
     return result;
   };
@@ -395,9 +382,11 @@ function buildIndexes(graph: SemanticGraph): ResolveIndexes {
         joinedLength += (parts.length > 0 ? 1 : 0) + childText.length;
         parts.push(childText);
       }
-      if (joinedLength >= 240) break;
+      if (joinedLength >= VOM_DERIVED_NAME_CAP) break;
     }
-    return complete(parts.length === 0 ? undefined : clean(parts.join(" ").slice(0, 240)));
+    return complete(
+      parts.length === 0 ? undefined : clean(parts.join(" ").slice(0, VOM_DERIVED_NAME_CAP)),
+    );
   };
 
   const excludedAxSubtreeMemo = new Map<SemanticNodeId, boolean>();
@@ -607,7 +596,6 @@ function resolvedName(
   node: SemanticGraphNode,
   role: string | undefined,
   tag: string,
-  axProps: ExtractedAxProps | undefined,
   graph: SemanticGraph,
   indexes: ResolveIndexes,
   supplementalNames: ReadonlyMap<string, string>,
@@ -649,10 +637,6 @@ function resolvedName(
         name = stableIdentifierName(attrs);
       }
     }
-  }
-  const hasPopup = axProps?.hasPopup;
-  if (name && hasPopup && hasPopup !== "false") {
-    name = axProps?.expanded === "true" ? `${name} [expanded]` : `${name} [has-submenu]`;
   }
   if (!name && role?.toLowerCase() === "iframe") return clean(attrs.id);
   return name;
@@ -1009,7 +993,6 @@ export function resolveSemanticGraph(
       node,
       role,
       tag,
-      axProps,
       graph,
       indexes,
       supplementalNames,
@@ -1084,7 +1067,31 @@ export function resolveSemanticGraph(
     };
     const selected = axIgnored ? undefined : axProps?.selected;
     const expanded = axIgnored ? undefined : axProps?.expanded;
+    const hasPopup = axIgnored ? undefined : axProps?.hasPopup;
     const controls = axIgnored ? undefined : axProps?.controls;
+    const ariaHasPopup = clean(attrs["aria-haspopup"])?.toLowerCase();
+    const ariaExpanded = clean(attrs["aria-expanded"])?.toLowerCase();
+    if (
+      (hasPopup !== undefined && hasPopup !== "false") ||
+      (hasPopup === undefined && ariaHasPopup !== undefined && ariaHasPopup !== "false")
+    ) {
+      vom.hasPopup = true;
+    }
+    const expandedBool =
+      expanded === "true"
+        ? true
+        : expanded === "false"
+          ? false
+          : expanded === undefined
+            ? ariaExpanded === "true"
+              ? true
+              : ariaExpanded === "false"
+                ? false
+                : undefined
+            : undefined;
+    if (expandedBool !== undefined) {
+      vom.expanded = expandedBool;
+    }
     if ((selected === "true" || selected === "false") && !vom.attrs?.["aria-selected"]) {
       vom.attrs = { ...(vom.attrs ?? {}), "aria-selected": selected };
     }

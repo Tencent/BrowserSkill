@@ -4,7 +4,7 @@ import { describe, expect, it } from "vitest";
 import { type CdpDebuggerApi, ChromiumCdp } from "@/browser-driver/chromium-cdp";
 import { SessionManager } from "@/session-manager/manager";
 import { handleDownload } from "../download";
-import type { CdpRunner } from "../shared";
+import { type CdpRunner, delegateCdpRunner } from "../shared";
 
 type Send = <T = Record<string, unknown>>(
   method: string,
@@ -87,7 +87,7 @@ describe.skipIf(!process.env.BSK_TEST_CHROME)("download effect metadata", () => 
       `,
       });
       const ac = new AbortController();
-      const wrapped: CdpRunner = {
+      const wrapped: CdpRunner = delegateCdpRunner(cdp, {
         send: (async (tabId: number, method: string, params?: object) => {
           const reply = await cdp.send(tabId, method, params);
           if (
@@ -98,7 +98,7 @@ describe.skipIf(!process.env.BSK_TEST_CHROME)("download effect metadata", () => 
           return reply;
         }) as CdpRunner["send"],
         onEvent: () => ({ dispose() {} }),
-      };
+      });
       const event = () => ({ addListener() {}, removeListener() {} });
       const downloads = {
         onCreated: event(),

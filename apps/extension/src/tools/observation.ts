@@ -8,6 +8,7 @@ import {
   type ObservationOutput,
   prepareVisualObservation,
   publishObservationPage,
+  renderObservationOutput,
 } from "./vom/visual-observation";
 
 export { parsePngDimensions } from "./png";
@@ -22,15 +23,13 @@ import {
   type ActiveScopeBlock,
   applyVomInteractionRecovery,
   type CondSurface,
-  estimateLineTokens,
   isVomReferenceNode,
-  renderVom,
   type VomNode,
   type VomOptions,
   type VomScene,
 } from "@browser-skill/vom";
 import { readTimeoutDetails } from "@/browser-driver/command-deadline";
-import { type FrameNodeHandle, isStaleFrameHandleError } from "@/browser-driver/frame-graph";
+import { type FrameNodeHandle, isStaleFrameHandleError } from "@/browser-driver/frame-handles";
 import {
   type CaptureSuppressSendToTab,
   withExtensionOverlayHidden,
@@ -756,6 +755,7 @@ export interface SnapshotDeps {
   /** A first policy negotiation publishes refs only after its sync succeeds. */
   refStore?: RefStore;
   accessibilityLease?: AccessibilityLease;
+  includeVisualFacts?: boolean;
   cdp: CdpRunner;
   tabsApi: {
     get(tabId: number): Promise<chrome.tabs.Tab>;
@@ -944,6 +944,7 @@ export interface CaptureVomObservationOptions extends VomOptions {
   accessibilityLease?: AccessibilityLease;
   onScene?: (scene: VomScene) => void;
   includeVisualFacts?: boolean;
+  deferPagePublish?: boolean;
   skipRender?: boolean;
   conditionalSurfaceProbe?: boolean;
   hoverProbeBypassOverlay?: (tabId: number, enabled: boolean) => Promise<void>;
@@ -1060,23 +1061,45 @@ async function buildVomObservation(
       doc.identity ? [[doc.frame.frameId, doc.identity] as const] : [],
     ),
   );
-  if (options.includeVisualFacts) {
-    const discovery = await deduplicateVisualCandidates(
-      await discoverVisualCandidates(facts, options.signal),
-      options.signal,
-    );
-    const visualOutput = prepareVisualObservation(
-      decoratedScene,
-      structured,
-      discovery,
+  const rootKey = captured.rootFrameId ?? normalizedDocuments[0]?.frameId ?? "root";
+  if (options.skipRender) {
+    throwIfAborted(options.signal, "observation");
+    return projectRecordSafeObservation({
+      rootFrameId: rootKey,
+      frameDocuments: normalizedDocuments,
       identities,
-      captured.rootFrameId ?? "root",
-      notices,
-      renderOptions,
-    );
+      rendered: { text: "", refs: [], truncated: false },
+      surfaceProbes: hoverProbes.surfaceProbes,
+      hoverProbe: {
+        performed: hoverProbes.performed,
+        revealedContent: hoverProbes.revealedContent,
+      },
+    });
+  }
+  const discovery = options.includeVisualFacts
+    ? await deduplicateVisualCandidates(
+        await discoverVisualCandidates(facts, options.signal),
+        options.signal,
+      )
+    : {
+        candidates: [],
+        complete: true,
+        issues: [],
+        captureIssues: facts.issues,
+      };
+  const visualOutput = prepareVisualObservation(
+    decoratedScene,
+    structured,
+    discovery,
+    identities,
+    rootKey,
+    notices,
+    renderOptions,
+  );
+  if (options.deferPagePublish) {
     return {
       ...projectRecordSafeObservation({
-        rootFrameId: captured.rootFrameId ?? "root",
+        rootFrameId: rootKey,
         frameDocuments: normalizedDocuments,
         identities,
         rendered: { text: "", refs: [], truncated: false },
@@ -1089,23 +1112,10 @@ async function buildVomObservation(
       visualOutput,
     };
   }
-  const captureNotice = notices.join("\n");
-  const rendered = options.skipRender
-    ? { text: "", refs: [], truncated: false }
-    : renderVom(decoratedScene, {
-        allocateRef: renderOptions.allocateRef,
-        maxDepth: options.maxDepth,
-        maxTokens:
-          !captureNotice || options.maxTokens === undefined
-            ? options.maxTokens
-            : Math.max(0, options.maxTokens - estimateLineTokens(captureNotice)),
-        redactValues: options.redactValues,
-        activeRegionPolicy: options.activeRegionPolicy,
-      });
-  if (!options.skipRender && captureNotice) rendered.text += `\n${captureNotice}`;
+  const rendered = renderObservationOutput(visualOutput, { maxTokens: options.maxTokens });
   throwIfAborted(options.signal, "observation");
   return projectRecordSafeObservation({
-    rootFrameId: captured.rootFrameId ?? normalizedDocuments[0]?.frameId ?? "root",
+    rootFrameId: rootKey,
     frameDocuments: normalizedDocuments,
     identities,
     rendered,
@@ -1144,6 +1154,20 @@ export const OBSERVE_IDENTITY_LOOP_FAILURES = 3;
 /** Identity-failure bookkeeping key for one session's tab. */
 function observeIdentityKey(sessionId: string, tabId: number): string {
   return `${sessionId}:${tabId}`;
+}
+
+export function clearObserveIdentityStreaksForSession(sessionId: string): void {
+  const prefix = `${sessionId}:`;
+  for (const key of observeIdentityStreaks.keys()) {
+    if (key.startsWith(prefix)) observeIdentityStreaks.delete(key);
+  }
+}
+
+export function clearObserveIdentityStreaksForTab(tabId: number): void {
+  const suffix = `:${tabId}`;
+  for (const key of observeIdentityStreaks.keys()) {
+    if (key.endsWith(suffix)) observeIdentityStreaks.delete(key);
+  }
 }
 
 /**
@@ -1279,7 +1303,8 @@ async function handleVomObservation(
       refStore,
       accessibilityLease: deps.accessibilityLease,
       onScene: deps.onScene,
-      includeVisualFacts: toolName === "observe",
+      includeVisualFacts: deps.includeVisualFacts ?? toolName === "observe",
+      deferPagePublish: true,
       maxDepth: params.max_depth,
       maxTokens: params.max_tokens,
       activeRegionPolicy: true,
@@ -1301,71 +1326,20 @@ async function handleVomObservation(
         data: { reason: "ref_not_found" },
       };
     }
-    if (observation.visualOutput) {
-      const page = await publishObservationPage(
-        refStore,
-        deps.cdp,
-        target.tabId,
-        { output: observation.visualOutput },
-        signal,
-      );
-      if (isRpcError(page)) return page;
-      readSucceeded = true;
-      return attachDialogs(deps.cdp, target.tabId, dialogCursor, {
-        ...page,
-        ...(observation.hoverProbe?.performed
-          ? {
-              hover_probe: {
-                performed: true,
-                revealed_content: observation.hoverProbe.revealedContent,
-              },
-            }
-          : {}),
-        ...((params as ObserveParams).debug_surfaces
-          ? {
-              debug: {
-                surface_probes: (observation.surfaceProbes ?? []).map((probe) => ({
-                  trigger_backend_node_id: probe.triggerBackendNodeId,
-                  trigger_action: probe.triggerAction,
-                  sub_items: probe.subItems,
-                  ...(probe.triggerPoint ? { trigger_point: probe.triggerPoint } : {}),
-                  ...(probe.confidence ? { confidence: probe.confidence } : {}),
-                })),
-              },
-            }
-          : {}),
-      });
-    }
-    const handleByFrameId = new Map(
-      observation.frames.map((frame) => [frame.frameId, frame.handle]),
+    const page = await publishObservationPage(
+      refStore,
+      deps.cdp,
+      target.tabId,
+      {
+        output: observation.visualOutput!,
+        allowContinuation: toolName === "observe",
+      },
+      signal,
     );
-    refStore.replace(
-      observation.refs.map((ref) => {
-        const frameId = ref.frameId || observation.rootFrameId;
-        const frameHandle = frameId ? handleByFrameId.get(frameId) : undefined;
-        return [
-          ref.ref,
-          {
-            ...(ref.name ? { name: ref.name } : {}),
-            ...(ref.rowAnchor ? { rowAnchor: ref.rowAnchor } : {}),
-            backendNodeId: ref.backendNodeId,
-            tabId: target.tabId,
-            ...(frameId ? { frameId } : {}),
-            ...(frameHandle?.loaderId ? { loaderId: frameHandle.loaderId } : {}),
-            ...(frameHandle?.documentElementBackendNodeId !== undefined
-              ? { documentElementBackendNodeId: frameHandle.documentElementBackendNodeId }
-              : {}),
-          },
-        ] as const;
-      }),
-    );
+    if (isRpcError(page)) return page;
     readSucceeded = true;
     return attachDialogs(deps.cdp, target.tabId, dialogCursor, {
-      observation_id: refStore.observationId,
-      text: observation.text,
-      ref_count: observation.refs.length,
-      tab_id: target.tabId,
-      truncated: observation.truncated,
+      ...page,
       ...(toolName === "observe" && observation.hoverProbe?.performed
         ? {
             hover_probe: {
@@ -1379,9 +1353,9 @@ async function handleVomObservation(
             debug: {
               surface_probes: (observation.surfaceProbes ?? []).map((probe) => ({
                 trigger_backend_node_id: probe.triggerBackendNodeId,
-                ...(probe.triggerPoint ? { trigger_point: probe.triggerPoint } : {}),
                 trigger_action: probe.triggerAction,
                 sub_items: probe.subItems,
+                ...(probe.triggerPoint ? { trigger_point: probe.triggerPoint } : {}),
                 ...(probe.confidence ? { confidence: probe.confidence } : {}),
               })),
             },

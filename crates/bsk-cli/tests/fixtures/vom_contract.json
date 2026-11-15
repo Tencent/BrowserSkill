@@ -24,9 +24,10 @@
           {
             "id": 3,
             "parentId": 1,
-            "tag": "select",
+            "tag": "input",
             "role": "combobox",
-            "name": "Region [has-submenu]"
+            "name": "Region",
+            "hasPopup": true
           },
           {
             "id": 4,
@@ -166,7 +167,7 @@
           }
         ]
       },
-      "text": "@vom 1\n@view 1280x720\n@layers 1 focus=L1\nL1 page\n  main\n    heading \"Sales report\"\n    @e1 combobox \"Region [has-submenu]\"\n    @e2 textbox \"Note\" [filled] placeholder=\"a ] =\\\"b\\\"\" =\"hello \\\"x\\\"\"\n    @e3 textbox \"Password\" [filled] =\"•••\"\n    @e4 textbox \"Empty\" [empty]\n    @e5 checkbox \"Agree\" [checked]\n    @e6 link \"Docs\" [→ https://x.test/a]b?c=[1]]\n    @e7 button \"Search\" [disabled]\n    @e8 button \"Say \\\"hi\\\" \\\\ now\"\n    @e9 button\n    @e10 listitem [draggable] \"Card\"\n    row \"ORD-1\"\n      @e11 button \"Approve\" [ctx: ORD-1]\n    row \"ORD-2\"\n      @e12 button \"Approve\" [ctx: ORD-2]\n    status \"Total $42\"\n    @e13 button \"Menu\"\n      [§ active: Menu]\n        @e9 button \"Pay\"\n        button \"Pay\"\n    StaticText \"Plain text\"",
+      "text": "@vom 1\n@view 1280x720\n@layers 1 focus=L1\nL1 page\n  main\n    heading \"Sales report\"\n    @e1 combobox \"Region\" [has-submenu]\n    @e2 textbox \"Note\" [filled] placeholder=\"a ] =\\\"b\\\"\" =\"hello \\\"x\\\"\"\n    @e3 textbox \"Password\" [filled] =\"•••\"\n    @e4 textbox \"Empty\" [empty]\n    @e5 checkbox \"Agree\" [checked]\n    @e6 link \"Docs\" [→ https://x.test/a]b?c=[1]]\n    @e7 button \"Search\" [disabled]\n    @e8 button \"Say \\\"hi\\\" \\\\ now\"\n    @e9 button\n    @e10 listitem [draggable] \"Card\"\n    row \"ORD-1\"\n      @e11 button \"Approve\" [ctx: ORD-1]\n    row \"ORD-2\"\n      @e12 button \"Approve\" [ctx: ORD-2]\n    status \"Total $42\"\n    @e13 button \"Menu\"\n      [§ active: Menu]\n        @e9 button \"Pay\"\n        button \"Pay\"\n    StaticText \"Plain text\"",
       "lines": [
         {
           "ref": null,

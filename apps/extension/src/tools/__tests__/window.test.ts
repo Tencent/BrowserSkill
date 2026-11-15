@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { INTERACTION_STORAGE_KEY, InteractionPreferenceStore } from "@/lib/interaction-preferences";
 import { SessionManager } from "@/session-manager/manager";
 import { handleSessionStart } from "../session";
-import type { CdpRunner, ChromeTabsApi } from "../shared";
+import { type CdpRunner, type ChromeTabsApi, createStubCdpRunner } from "../shared";
 import { handleWindowResize, type WindowResizeDeps } from "../window";
 
 function fakeAgentWindow(ids: number[]) {
@@ -56,12 +56,12 @@ function resizeFixture(
         state.viewport = { width: state.bounds.width, height: state.bounds.height - 143 };
     }),
   };
-  const cdp: CdpRunner = {
+  const cdp: CdpRunner = createStubCdpRunner({
     send: vi.fn(async () => ({
       cssLayoutViewport: { clientWidth: state.viewport.width, clientHeight: state.viewport.height },
       cssVisualViewport: { zoom: opts.zoom ?? 1 },
     })) as CdpRunner["send"],
-  };
+  });
   const wait = vi.fn(async () => {
     state.waits++;
     if (opts.delayViewport && state.waits === 2)

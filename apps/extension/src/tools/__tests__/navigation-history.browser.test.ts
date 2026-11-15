@@ -2,9 +2,10 @@
 // Opt in with BSK_TEST_CHROME. The shared harness owns its browser and profile.
 import { createServer } from "node:http";
 import { describe, expect, it } from "vitest";
+import { rootEventSource } from "@/browser-driver/frame-handles";
 import { SessionManager } from "@/session-manager/manager";
 import { handleNavigate, handleNavigateBack, handleNavigateForward } from "../navigation";
-import type { CdpRunner } from "../shared";
+import { type CdpRunner, createStubCdpRunner } from "../shared";
 
 type Send = <T = Record<string, unknown>>(
   method: string,
@@ -49,7 +50,7 @@ describe.skipIf(!process.env.BSK_TEST_CHROME)("real browser history navigation",
             if (event.method === "Page.frameNavigated" && params.type === "BackForwardCacheRestore")
               restores.push(new URL(params.frame?.url ?? origin).pathname);
             for (const listener of [...listeners])
-              listener({ tabId: 4 }, event.method, event.params);
+              listener(rootEventSource(4), event.method, event.params);
           },
         },
         async (send: Send) => {
@@ -76,14 +77,14 @@ describe.skipIf(!process.env.BSK_TEST_CHROME)("real browser history navigation",
             },
           });
           await manager.start("history");
-          const cdp: CdpRunner = {
+          const cdp: CdpRunner = createStubCdpRunner({
             send: <T>(_tabId: number, method: string, params?: object) =>
               send<T>(method, params, sessionId),
             onEvent: (_tabId, listener) => {
               listeners.add(listener);
               return { dispose: () => void listeners.delete(listener) };
             },
-          };
+          });
           const tab = async () =>
             ({
               id: 4,

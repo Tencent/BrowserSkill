@@ -4,7 +4,7 @@ import { describe, expect, it } from "vitest";
 import { type CdpDebuggerApi, ChromiumCdp } from "@/browser-driver/chromium-cdp";
 import { SessionManager } from "@/session-manager/manager";
 import { handleDownload } from "../download";
-import type { CdpRunner } from "../shared";
+import { type CdpRunner, delegateCdpRunner } from "../shared";
 
 type Send = <T = Record<string, unknown>>(
   method: string,
@@ -119,15 +119,13 @@ describe.skipIf(!process.env.BSK_TEST_CHROME)("download trigger retirement", () 
         }
         return value;
       };
-      const wrapped: CdpRunner = {
-        send: async (tabId, method, params) =>
-          holdReply(method, params, await cdp.send(tabId, method, params)),
-        sendGuarded: async (target, method, params, guard) =>
-          holdReply(method, params, await cdp.sendGuarded(target, method, params, guard)),
-        detach: cdp.detach.bind(cdp),
-        getAttachmentId: cdp.getAttachmentId.bind(cdp),
+      const wrapped: CdpRunner = delegateCdpRunner(cdp, {
+        send: async (tabId, method, params, signal) =>
+          holdReply(method, params, await cdp.send(tabId, method, params, signal)),
+        sendToFrame: async (handle, method, params, guard) =>
+          holdReply(method, params, await cdp.sendToFrame(handle, method, params, guard)),
         onEvent: () => ({ dispose() {} }),
-      };
+      });
       const event = () => ({ addListener() {}, removeListener() {} });
       const downloads = {
         onCreated: event(),
@@ -218,9 +216,8 @@ describe.skipIf(!process.env.BSK_TEST_CHROME)("download trigger retirement", () 
         return sendCommand(target, method, params);
       };
       let interceptMove = true;
-      const wrapped: CdpRunner = {
-        send: cdp.send.bind(cdp),
-        sendGuarded: async (target, method, params, guard) => {
+      const wrapped: CdpRunner = delegateCdpRunner(cdp, {
+        sendToFrame: async (handle, method, params, guard) => {
           if (method === "Input.dispatchMouseEvent" && interceptMove) {
             interceptMove = false;
             await cdp.detach(7);
@@ -230,17 +227,15 @@ describe.skipIf(!process.env.BSK_TEST_CHROME)("download trigger retirement", () 
               await held;
             };
             try {
-              return await cdp.sendGuarded(target, method, params, guard);
+              return await cdp.sendToFrame(handle, method, params, guard);
             } finally {
               settled();
             }
           }
-          return cdp.sendGuarded(target, method, params, guard);
+          return cdp.sendToFrame(handle, method, params, guard);
         },
-        detach: cdp.detach.bind(cdp),
-        getAttachmentId: cdp.getAttachmentId.bind(cdp),
         onEvent: () => ({ dispose() {} }),
-      };
+      });
       const event = () => ({ addListener() {}, removeListener() {} });
       const pending = handleDownload(
         sessions,

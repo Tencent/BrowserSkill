@@ -25,7 +25,10 @@ export function collectExtractDom(this: Element, options: CollectorOptions): Raw
   const tableSelector = 'table,[role="table"],[role="grid"],[role="treegrid"]';
   const listSelector = 'ul,ol,[role="list"]';
   const sensitiveInputSelector =
+    options.sensitive ??
     'input[type="password"],input[type="hidden"],[data-bsk-record-password],[autocomplete~="current-password" i],[autocomplete~="new-password" i],[autocomplete~="one-time-code" i],[autocomplete^="cc-" i],[autocomplete*=" cc-" i]';
+  const overlaySelector =
+    options.overlaySelector ?? "[data-bsk-overlay],[data-bsk-overlay-host],browser-skill-overlay";
   const hiddenSubtrees = new WeakMap<Element, boolean>();
   const styles = new WeakMap<Element, CSSStyleDeclaration>();
   const styleOf = (element: Element) => {
@@ -354,6 +357,37 @@ export function collectExtractDom(this: Element, options: CollectorOptions): Raw
       return fail("extract_selector_invalid", `Invalid CSS selector: ${selector}`);
     }
   };
+  const isOverlayElement = (element: Element): boolean =>
+    element.hasAttribute("data-bsk-overlay") ||
+    element.hasAttribute("data-bsk-overlay-host") ||
+    element.tagName.toLowerCase() === "browser-skill-overlay" ||
+    Boolean(element.closest(overlaySelector));
+  const selectAcrossOpenShadowRoots = (root: ParentNode, selector: string): Element[] => {
+    const matches: Element[] = [];
+    for (const node of select(root, selector)) {
+      if (!isOverlayElement(node)) matches.push(node);
+    }
+    const roots: ParentNode[] = [root];
+    while (roots.length) {
+      const currentRoot = roots.pop()!;
+      const walker = document.createTreeWalker(currentRoot, NodeFilter.SHOW_ELEMENT);
+      for (
+        let el = walker.nextNode() as Element | null;
+        el;
+        el = walker.nextNode() as Element | null
+      ) {
+        tick();
+        if (isOverlayElement(el)) continue;
+        if (el.shadowRoot) {
+          for (const node of select(el.shadowRoot, selector)) {
+            if (!isOverlayElement(node)) matches.push(node);
+          }
+          roots.push(el.shadowRoot);
+        }
+      }
+    }
+    return matches;
+  };
   // Invalid ARIA positions fall back to DOM order with a warning, like spans
   // and counts; only conflicting cells remain structural errors.
   const ariaIndex = (
@@ -413,7 +447,7 @@ export function collectExtractDom(this: Element, options: CollectorOptions): Raw
       fail("extract_target_stale", "The extraction target no longer belongs to this document");
     let root = options.anchored ? this : document.documentElement;
     if (options.selector) {
-      const matches = select(document, options.selector);
+      const matches = selectAcrossOpenShadowRoots(document, options.selector);
       if (matches.length === 0)
         fail("selector_not_found", "No extraction target matches the selector");
       if (matches.length !== 1)
@@ -484,7 +518,10 @@ export function collectExtractDom(this: Element, options: CollectorOptions): Raw
       return result;
     }
     if (!options.anchored && !options.selector) {
-      const matches = select(root, options.action === "table" ? tableSelector : listSelector);
+      const matches = selectAcrossOpenShadowRoots(
+        root,
+        options.action === "table" ? tableSelector : listSelector,
+      );
       let selected: Element | undefined;
       for (const node of matches) {
         tick();

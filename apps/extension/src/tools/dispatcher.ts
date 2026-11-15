@@ -36,13 +36,14 @@ import { prepareBackgroundExecution } from "./background-execution";
 import { handleConsole } from "./console";
 import { handleDebug } from "./debug";
 import { handleDialog } from "./dialog-control";
-import { handleDownload } from "./download";
+import { DownloadConcurrencyGate, handleDownload } from "./download";
 import { handleDrag } from "./drag";
 import { type EmulateCdpRunner, handleEmulate } from "./emulate";
 import { classifyCdpError, rpcError } from "./errors";
 import { handleEvaluate } from "./evaluate";
 import { handleExtract } from "./extract";
 import { handleRequestHelp } from "./human-loop";
+import type { InputWindowsApi } from "./input-readiness";
 import {
   handleBlur,
   handleClick,
@@ -62,6 +63,8 @@ import { handleNetwork, type NetworkCdpRunner } from "./network";
 import {
   type CdpRunner,
   chromeTabsCaptureApi,
+  clearObserveIdentityStreaksForSession,
+  clearObserveIdentityStreaksForTab,
   handleGetHtml,
   handleObserve,
   handleScreenshot,
@@ -127,6 +130,11 @@ interface HoverLatchScope {
   tab_id?: number;
 }
 
+export interface TabRemovedEvent {
+  addListener(callback: (tabId: number) => void): void;
+  removeListener(callback: (tabId: number) => void): void;
+}
+
 export interface DispatcherDeps {
   cooperation?: CooperationController;
   video?: VideoManager;
@@ -135,6 +143,8 @@ export interface DispatcherDeps {
   sessions: SessionManager;
   cdp?: DispatcherCdpRunner;
   recording?: RecordRuntimeDeps;
+  tabsOnRemoved?: TabRemovedEvent;
+  windowsApi?: InputWindowsApi;
   /**
    * Invoked whenever a dispatched RPC may have changed the live
    * session set (currently `tool.session_start` and
@@ -188,9 +198,13 @@ export class ToolDispatcher {
   private readonly approveBorrow?: BorrowConfirmationApprover;
   private readonly interactionPreferences?: InteractionPreferenceStore;
   private readonly helpNotificationCopy?: () => { title: string; body: string };
+  private readonly tabsOnRemoved?: TabRemovedEvent;
+  private readonly windowsApi?: InputWindowsApi;
   private subscription: { dispose(): void } | null = null;
+  private tabRemovedSubscription: { dispose(): void } | null = null;
   private readonly hoverBypassTabs = new Map<number, string>();
   private readonly hoverLatches = new Map<number, HoverLatch>();
+  private readonly downloadGate = new DownloadConcurrencyGate();
   private readonly activeDialogOperations = new Map<
     string,
     { request: RequestFrame; operationId: string }
@@ -222,10 +236,22 @@ export class ToolDispatcher {
     this.approveBorrow = deps.approveBorrow;
     this.interactionPreferences = deps.interactionPreferences;
     this.helpNotificationCopy = deps.helpNotificationCopy;
+    this.tabsOnRemoved =
+      deps.tabsOnRemoved ?? (typeof chrome === "undefined" ? undefined : chrome.tabs?.onRemoved);
+    this.windowsApi = deps.windowsApi;
   }
 
   start(): void {
     if (this.subscription) return;
+    if (this.tabsOnRemoved && !this.tabRemovedSubscription) {
+      const onTabRemoved = (tabId: number) => {
+        this.forgetClosedTab(tabId);
+      };
+      this.tabsOnRemoved.addListener(onTabRemoved);
+      this.tabRemovedSubscription = {
+        dispose: () => this.tabsOnRemoved?.removeListener(onTabRemoved),
+      };
+    }
     this.dialogSubscription =
       this.cdp?.onDialogChanged?.((tabId, dialog, reason) => {
         const sessionId = this.sessions.findControllingSession(tabId);
@@ -285,6 +311,8 @@ export class ToolDispatcher {
 
   stop(): void {
     this.debug?.dispose();
+    this.tabRemovedSubscription?.dispose();
+    this.tabRemovedSubscription = null;
     this.subscription?.dispose();
     this.subscription = null;
     // Trip every outstanding controller so dependent waits unblock
@@ -306,6 +334,13 @@ export class ToolDispatcher {
     const exports = this.screenshotExports;
     this.screenshotExports = new ScreenshotExports((id) => this.sessions.has(id));
     void exports.dispose();
+  }
+
+  /** Drop per-tab hover latches, overlay-bypass bookkeeping, and observe streaks for a closed tab. */
+  forgetClosedTab(tabId: number): void {
+    this.hoverBypassTabs.delete(tabId);
+    this.hoverLatches.delete(tabId);
+    clearObserveIdentityStreaksForTab(tabId);
   }
 
   /** Revoke in-flight work locally; do not wait for the daemon's round trip. */
@@ -675,12 +710,16 @@ export class ToolDispatcher {
       await this.releaseHoverLatch(params.session_id);
       const result = await handleSessionStop(this.sessions, params, {
         cdp,
+        ...(this.recording ? { recording: this.recording } : {}),
         ...(typeof chrome === "undefined"
           ? {}
           : { tabManagement: { tabs: chromeTabMutationApi }, tabsQuery: chromeTabsApi }),
         signal,
       });
-      if (!this.sessions.has(params.session_id)) this.cooperation?.release(params.session_id);
+      if (!this.sessions.has(params.session_id)) {
+        this.cooperation?.release(params.session_id);
+        clearObserveIdentityStreaksForSession(params.session_id);
+      }
       return result;
     },
     "tool.tab_list": async (params, { signal }) => {
@@ -723,7 +762,7 @@ export class ToolDispatcher {
         cdp,
         beforeReturn: async (sessionId, tabId) => {
           this.debug?.stopTab(tabId);
-          clearRecordingForSession(sessionId);
+          clearRecordingForSession(sessionId, this.recording);
           await this.releaseHoverLatch(sessionId, tabId);
         },
       });
@@ -925,6 +964,7 @@ export class ToolDispatcher {
           handleWheel(this.sessions, params, {
             cdp,
             tabsApi: chromeTabsApi,
+            ...(this.windowsApi ? { windowsApi: this.windowsApi } : {}),
             signal,
             bypassOverlay,
           }),
@@ -1015,6 +1055,7 @@ export class ToolDispatcher {
                 signal,
                 completionSignal,
                 bypassOverlay,
+                downloadGate: this.downloadGate,
               })
             : Promise.resolve({
                 code: "unsupported",

@@ -1,12 +1,19 @@
+import { toRootFrameHandle } from "@/browser-driver/frame-handles";
 import { AGENT_WINDOW_HOME } from "@/session-manager/agent-window";
 import type { SessionContext } from "@/session-manager/manager";
 import { beginTabCreation } from "@/session-manager/tab-creation";
 import type { RpcError } from "@/transport/types";
-import { type CdpRunner, isRpcError } from "./shared";
+import { type CdpRunner, type ChromeTabsApi, isRpcError } from "./shared";
 import { isAbortError } from "./vom/capture-abort";
+
+export interface InputWindowsApi {
+  get(windowId: number): Promise<Pick<chrome.windows.Window, "id" | "focused" | "state">>;
+}
 
 export interface InputReadinessDeps {
   cdp: CdpRunner;
+  tabsApi?: Pick<ChromeTabsApi, "get">;
+  windowsApi?: InputWindowsApi;
   signal?: AbortSignal;
   deadline?: number;
   /** Keep native pointer input from activating an unfocused Agent Window on Linux. */
@@ -172,6 +179,21 @@ async function restoreLeasedInput(
   }
 }
 
+async function lacksForegroundPresentation(
+  ctx: SessionContext,
+  tabId: number,
+  deps: InputReadinessDeps,
+): Promise<boolean> {
+  const tabsApi = deps.tabsApi ?? globalThis.chrome?.tabs;
+  const windowsApi = deps.windowsApi ?? globalThis.chrome?.windows;
+  const tab = await tabsApi?.get?.(tabId).catch(() => undefined);
+  if (tab && tab.active === false) return true;
+  const windowId = typeof tab?.windowId === "number" ? tab.windowId : ctx.agentWindowId;
+  const win = await windowsApi?.get?.(windowId).catch(() => undefined);
+  if (!win) return false;
+  return win.state === "minimized" || win.focused === false;
+}
+
 async function needsInactiveInputTab(ctx: SessionContext, tabId: number): Promise<boolean> {
   // Headless Chrome reports windows as unfocused without a desktop activation path.
   if (globalThis.navigator?.userAgent.includes("HeadlessChrome/")) return false;
@@ -310,6 +332,7 @@ export async function withInputReady<T extends object>(
   if (aborted) return aborted;
   const documentRevision = ctx.refStore.documentRevision(tabId);
   let restoreFocus = false;
+  let hiddenSurface = false;
   let releaseTab: (() => Promise<void>) | undefined;
   let attachmentId: string | undefined;
   let inputSent = false;
@@ -371,6 +394,13 @@ export async function withInputReady<T extends object>(
       } else if (visibility !== "visible") {
         throw new Error("Could not determine input target visibility");
       }
+      hiddenSurface =
+        unselect ||
+        visibility === "hidden" ||
+        (await lacksForegroundPresentation(ctx, tabId, deps));
+      const cancelledAfterSurface = abortError(deps.signal);
+      if (cancelledAfterSurface) return cancelledAfterSurface;
+      checkActive();
     } else {
       const visibility = await sampleVisibility(tabId, deps);
       const cancelledAfterSample = abortError(deps.signal);
@@ -383,16 +413,15 @@ export async function withInputReady<T extends object>(
         attachmentId = deps.cdp.getAttachmentId?.(tabId);
         // Mark ownership before awaiting: a failed reply may still have enabled it.
         restoreFocus = true;
+        hiddenSurface = true;
         deps.registerCleanup?.(cleanupFocus);
         await waitForInputReply(
-          deps.cdp.sendGuarded
-            ? deps.cdp.sendGuarded(
-                { tabId },
-                "Emulation.setFocusEmulationEnabled",
-                { enabled: true },
-                { signal: deps.signal, onDispatch: checkActive },
-              )
-            : deps.cdp.send(tabId, "Emulation.setFocusEmulationEnabled", { enabled: true }),
+          deps.cdp.sendToFrame(
+            toRootFrameHandle(tabId),
+            "Emulation.setFocusEmulationEnabled",
+            { enabled: true },
+            { signal: deps.signal, onDispatch: checkActive },
+          ),
           deps.signal,
           5000,
           deps.deadline,
@@ -435,7 +464,7 @@ export async function withInputReady<T extends object>(
         // Recompute geometry after waking: the background viewport may have changed.
         ready = true;
         result = await action({
-          hidden: restoreFocus,
+          hidden: hiddenSurface,
           markSent: () => {
             checkActive();
             inputSent = true;

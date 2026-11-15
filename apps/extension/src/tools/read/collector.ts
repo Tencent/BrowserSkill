@@ -53,13 +53,10 @@ export function collectDomRead(this: Element, options: ReadOptions): RawRead {
           const sensitive =
             element.matches(options.sensitive) ||
             (field.read === "text" && !!element.querySelector(options.sensitive));
-          if (
-            sensitive ||
-            element.closest(
-              "script,style,template,noscript,[data-bsk-overlay],[data-bsk-overlay-host],browser-skill-overlay",
-            )
-          )
-            redacted.push(field.key);
+          const excludedAncestors =
+            options.excludedAncestors ??
+            "script,style,template,noscript,[data-bsk-overlay],[data-bsk-overlay-host],browser-skill-overlay";
+          if (sensitive || element.closest(excludedAncestors)) redacted.push(field.key);
           else if (field.read === "text") value = element.textContent;
           else if (field.read === "attribute") value = element.getAttribute(field.attribute!);
           else if (field.read === "checked")

@@ -30,6 +30,7 @@ import type {
   RpcError,
 } from "@/transport/types";
 import { resolveNodeGeometry } from "./frame-geometry";
+import { selectorExistsInMainDocument } from "./selector-resolution";
 import {
   type CdpRunner,
   type ChromeTabsApi,
@@ -200,23 +201,6 @@ async function sendHelpRequestWithAck(
   throw lastError ?? new Error("failed to show help overlay");
 }
 
-async function selectorExists(
-  cdp: CdpRunner,
-  tabId: number,
-  rootNodeId: number,
-  selector: string,
-): Promise<boolean> {
-  try {
-    const res = await cdp.send<{ nodeId?: number }>(tabId, "DOM.querySelector", {
-      nodeId: rootNodeId,
-      selector,
-    });
-    return typeof res.nodeId === "number" && res.nodeId !== 0;
-  } catch {
-    return false;
-  }
-}
-
 async function resolveHelpTargets(
   ctx: ReturnType<SessionManager["get"]>,
   tabId: number,
@@ -249,7 +233,7 @@ async function resolveHelpTargets(
       selectors.push(tgt.selector);
       const matched =
         deps.cdp && rootNodeId !== undefined
-          ? await selectorExists(deps.cdp, tabId, rootNodeId, tgt.selector)
+          ? await selectorExistsInMainDocument(deps.cdp, tabId, tgt.selector, rootNodeId)
           : deps.cdp
             ? false
             : true;

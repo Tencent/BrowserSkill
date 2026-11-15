@@ -9,7 +9,7 @@ import {
   type FrameState,
   type InputExpectation,
 } from "@/cooperation/types";
-import type { CdpRunner } from "@/tools/shared";
+import { createStubCdpRunner } from "@/tools/shared";
 import { attachCooperationCapture } from "../cooperation-capture";
 
 let dispose: (() => void) | undefined;
@@ -627,7 +627,7 @@ it("clears text attribution when preparation fails before native dispatch", asyn
   const target = document.querySelector("input")!;
   target.focus();
   const native = vi.fn();
-  const runner = guardedRunner({ send: native } as CdpRunner, {
+  const runner = guardedRunner(createStubCdpRunner({ send: native }), {
     prepare: async (input) => {
       read(COOPERATION_ARM, "first", input);
       throw new Error("target changed");
@@ -747,13 +747,13 @@ it("attributes a keyless caret command to the Agent while preserving subsequent 
     });
     completeInput(document.querySelector("input")!, event);
   };
-  const cdp = {
-    send: vi.fn(async (_tabId, _method, params) => {
+  const cdp = createStubCdpRunner({
+    send: vi.fn(async (_tabId, _method, params: any) => {
       // Chromium emits an empty key for native editor commands without a key descriptor.
-      press(params.key ?? "", params.timestamp * 1000);
-      return {};
+      press(params?.key ?? "", (params?.timestamp ?? 0) * 1000);
+      return {} as never;
     }),
-  } as CdpRunner;
+  });
   const runner = guardedRunner(cdp, {
     prepare: async (input) => {
       read(COOPERATION_ARM, "first", input);

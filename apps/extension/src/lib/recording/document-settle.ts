@@ -1,4 +1,4 @@
-import type { FrameDocumentHandle } from "@/browser-driver/frame-graph";
+import type { FrameDocumentHandle } from "@/browser-driver/frame-handles";
 import { type CdpRunner, sendToFrameHandle } from "@/tools/shared";
 
 const SETTLE_MIN_MS = 150;
