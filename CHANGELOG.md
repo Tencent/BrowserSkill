@@ -42,6 +42,7 @@ determines which versions can connect.
 
 ### Fixed
 
+- Preserved phased `tool.upload` failure receipts when control is revoked during the transaction, including the original error code, reason, phase, sanitized frame diagnostics, and `effect_state: "unknown"`, while keeping the revoked context unusable under both `strict` and `target` policies (#756).
 - Ignored internal `data-bsk-*` attributes and `<browser-skill-overlay>` (`[data-bsk-overlay]`) ShadowHost mutations in `cooperation-capture.ts` so active recording and sensitive-field markers no longer advance `FrameState.structure`, excluded extension ShadowRoot UI controls (`HelpRequestOverlay`, `RecordOverlay`, `BorrowConfirmationOverlay`) across `record-capture.ts`, `record-hover-surface.ts`, and `cooperation-capture.ts` so overlay interactions and hover surfaces are never mis-recorded as webpage steps, and re-evaluated tab control ownership after awaiting `ensureOverlayInjected` so mid-injection tab detachments never flash stale `control` state.
 - VOM token estimation now handles unpaired UTF-16 surrogates without combining them with the following symbol or throwing a `RangeError`; valid emoji pairs retain their existing estimates.
 

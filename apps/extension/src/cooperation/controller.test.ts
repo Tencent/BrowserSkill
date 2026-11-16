@@ -2280,6 +2280,72 @@ describe("legacy capabilities under default cooperation", () => {
     expect(f.native).toHaveBeenCalledTimes(3);
   });
 
+  it.each([
+    "strict",
+    "target",
+  ] as const)("preserves a phased upload failure when control is revoked (%s)", async (policy) => {
+    const f = await fixture({ sync: false });
+    const first = (await f.controller.command(
+      {
+        session_id: "shared",
+        tab_id: 7,
+        action: "sync",
+        timeout_ms: 0,
+        control_policy: policy,
+      },
+      f.cdp,
+      f.abort.signal,
+    )) as Record<string, any>;
+    const result = await f.controller.run(
+      {
+        id: "action",
+        method: "tool.upload",
+        params: {
+          session_id: "shared",
+          tab_id: 7,
+          context_id: first.context_id,
+          observation_id: first.observation_id,
+        },
+      },
+      f.cdp,
+      f.abort.signal,
+      async (cdp) => {
+        await cdp.send(7, "Page.setInterceptFileChooserDialog", { enabled: true });
+        f.controller.invalidate(7);
+        await expect(
+          cdp.send(7, "DOM.setFileInputFiles", { files: ["/staged/example.txt"] }),
+        ).rejects.toThrow("Page interaction coverage changed; wait and synchronize");
+        return {
+          code: "cdp_failed",
+          message: "Page interaction coverage changed; wait and synchronize",
+          data: {
+            reason: "set_file_input_failed",
+            effect_state: "unknown",
+            phase: "set_files",
+            frames: [{ frame_id: 2, url: "about:blank" }],
+          },
+        };
+      },
+    );
+    expect(result).toMatchObject({
+      code: "cdp_failed",
+      message: "Page interaction coverage changed; wait and synchronize",
+      data: {
+        reason: "set_file_input_failed",
+        effect_state: "unknown",
+        phase: "set_files",
+        frames: [{ frame_id: 2, url: "about:blank" }],
+      },
+    });
+    // The original receipt must not revive the invalidated control context.
+    expect(await f.act(first.context_id)).toMatchObject({
+      data: {
+        reason: policy === "target" ? "control_context_invalid" : "cooperation_sync_required",
+        effect_state: "none",
+      },
+    });
+  });
+
   it("allows explicit hover observation with fresh context, and blocks stale probes", async () => {
     const f = await fixture();
     const run = (context: string) =>

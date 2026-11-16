@@ -2519,7 +2519,11 @@ export class CooperationController implements ControlAuthority {
         (!completed && !isRpcError(result) && detachedByHandler
           ? "The observed page or control state changed; synchronize"
           : undefined);
-      if (checkFailure || reason)
+      // Upload transactions already convert guard and CDP failures into phased
+      // receipts. Do not replace that diagnosis with a second, generic control
+      // error; the revoked context remains invalid for the next action.
+      const preserveUploadFailure = req.method === "tool.upload" && isRpcError(result);
+      if (!preserveUploadFailure && (checkFailure || reason))
         return reportFailure(checkFailure?.message ?? reason!, sent ? "unknown" : "none");
       if (isRpcError(result)) {
         const effect = result.data?.effect_state ?? (sent ? "unknown" : "none");

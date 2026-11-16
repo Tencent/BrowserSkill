@@ -29,6 +29,7 @@ CLI 和扩展可以分别发布，能否连接由协议兼容性决定。更新�
 
 ### 修复
 
+- 修复上传事务期间控制权被撤销时 `tool.upload` 分阶段失败回执被通用控制错误覆盖的问题，保留原始错误码、原因、阶段、脱敏帧诊断及 `effect_state: "unknown"`，同时确保已撤销上下文在 `strict` 与 `target` 策略下均不可复用（#756）。
 - 在 `cooperation-capture.ts` 中忽略扩展内部私有 `data-bsk-*` 属性与 `<browser-skill-overlay>`（`[data-bsk-overlay]`）ShadowHost 变更以消除录制/敏感字段标记对 `FrameState.structure` 的自污染，在 `record-capture.ts`、`record-hover-surface.ts` 与 `cooperation-capture.ts` 中统一过滤扩展自身 ShadowRoot 浮层控件（`HelpRequestOverlay`、`RecordOverlay`、`BorrowConfirmationOverlay`）防止浮层内点击/输入或悬停面被误录为网页操作，并在 `ensureOverlayInjected` 异步注入完成后二次校验标签页受控归属以杜绝注入途中断开控制导致的陈旧浮层闪现。
 - VOM Token 估算现在能处理未配对的 UTF-16 代理字符，不会再误合并后续符号或抛出 `RangeError`；有效 emoji 代理对的估算保持不变。
 
