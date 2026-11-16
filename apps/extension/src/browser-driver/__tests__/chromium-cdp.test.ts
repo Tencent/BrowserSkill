@@ -10,6 +10,8 @@ import {
   type CdpDebuggee,
   type CdpDebuggerApi,
   ChromiumCdp,
+  DEBUGGER_ATTACH_FENCE_WAIT_MS,
+  DEBUGGER_ATTACH_TIMEOUT_MS,
   DEFAULT_IDLE_DETACH_MS,
 } from "../chromium-cdp";
 import { CdpReadTimeoutError, READ_TIMEOUT_MS } from "../command-deadline";
@@ -1981,6 +1983,45 @@ it("detaches on failed policy release even when a passive reader remains", async
 });
 
 describe("bounded debugger cleanup", () => {
+  it("bounds a stuck attach and rolls back a late success before retrying", async () => {
+    vi.useFakeTimers();
+    try {
+      const { api } = fakeApi();
+      let finishAttach!: () => void;
+      vi.mocked(api.attach).mockImplementationOnce(
+        () =>
+          new Promise<void>((resolve) => {
+            finishAttach = resolve;
+          }),
+      );
+      const cdp = new ChromiumCdp(api);
+
+      const first = cdp.ensureAttached(5);
+      const firstRejected = expect(first).rejects.toThrow(/debugger\.attach.*10000ms/i);
+      await vi.advanceTimersByTimeAsync(DEBUGGER_ATTACH_TIMEOUT_MS);
+      await firstRejected;
+      expect(cdp.isAttached(5)).toBe(false);
+
+      const retryWhilePending = cdp.ensureAttached(5);
+      const retryRejected = expect(retryWhilePending).rejects.toThrow(/still settling/);
+      await vi.advanceTimersByTimeAsync(DEBUGGER_ATTACH_FENCE_WAIT_MS);
+      await retryRejected;
+      expect(api.attach).toHaveBeenCalledTimes(1);
+
+      finishAttach();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(api.detach).toHaveBeenCalledWith({ tabId: 5 });
+
+      await cdp.ensureAttached(5);
+      expect(api.attach).toHaveBeenCalledTimes(2);
+      expect(cdp.isAttached(5)).toBe(true);
+      await cdp.detachAll();
+      cdp.dispose();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("fences a late attach through rollback, including Chrome's detach event", async () => {
     vi.useFakeTimers();
     try {
