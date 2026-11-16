@@ -133,10 +133,9 @@ nothing is merged: apply the line patch yourself or sync again for a baseline.
 Anything the extension cannot express as such a patch returns a fresh `baseline` with
 a `baseline_reason`, for example `structure_changed`, `refs_replaced`, `frame_replaced`,
 `focus_changed`, `human_activity`, `text_log_gap`, `text_outside_observation`,
-`text_ambiguous`, `token_budget_changed` or `token_budget_shift`. Keep the same
-`--max-tokens` across syncs you want patched. Pages with child frames, and text inside
-controls, headings, labels, form fields, table rows or list items, always take the
-baseline path.
+`text_ambiguous`, `token_budget_changed` or `token_budget_shift`. Pass the same
+`--max-tokens` on `step` and `plan` as well as `sync` across calls you want patched.
+Pages with child frames, and text inside controls, headings, labels, form fields, table rows or list items, always take the baseline path.
 
 For readonly date pickers, click to open the picker instead of filling it. If VOM
 exposes only a containing control, inspect that observed ref with `get-html --ref`
